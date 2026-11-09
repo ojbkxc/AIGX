@@ -2539,10 +2539,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::update::handle_get_update_settings)
                 .put(api::admin::update::handle_put_update_settings),
         )
-        // legacy /api/keys 系列路由已删除（07 D 章-3 收敛重复端点）：前端已
-        // 全量收敛到 /api/tokens（能力全：分组/额度/轮换/双角色）。三个
-        // handle_*_key 处理函数保留——运维 Agent 的工具面（agent/registry）
-        // 仍以库函数形式复用它们。
+        // legacy /api/keys 系列路由已于 1.0.x 删除（07 D 章-3 收敛重复端点）：前端已
+        // 全量收敛到 /api/tokens（能力全：分组/额度/轮换/双角色）。此处曾注记「三个
+        // handle_*_key 保留、供运维 Agent 复用」——该说法不实：工具面从未引用它们
+        // （aigx_key_add/aigx_key_delete 调 handle_add_token/handle_delete_token，
+        // aigx_list_keys 已无）。三个死 handler 已于批3（B3-3）清理。
         .route(
             "/api/tokens/:id/rotate",
             post(api::admin::handle_rotate_token),

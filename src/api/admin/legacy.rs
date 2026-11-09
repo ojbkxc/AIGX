@@ -19,7 +19,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::account::CfAccount;
-use crate::api::auth::CreateApiKeyOptions;
 use crate::bridge::Bridge;
 use crate::channel::ChannelType;
 use crate::config::AppConfig;
@@ -38,7 +37,6 @@ use super::common::{
 use super::channels::mask_channel;
 use super::dashboard::{resolve_window, DashboardQuery};
 use super::pricing::PriceRequest;
-use super::tokens::KeyRequest;
 use super::users::mask_user;
 
 /// 账号请求（add/update 共用）
@@ -346,102 +344,6 @@ pub async fn handle_delete_account(
         }))),
         Err(e) => Err(error_response(
             &format!("Failed to delete account: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
-}
-
-// ============================================================
-// API 密钥管理
-// ============================================================
-
-/// GET /api/keys - 列出 API 密钥
-pub async fn handle_list_keys(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-
-    let keys = state.api_key_store.list();
-    let masked: Vec<Value> = keys
-        .into_iter()
-        .map(|k| {
-            let masked_key = if k.key.chars().count() > 8 {
-                mask_with(&k.key, 4, 4, "...")
-            } else {
-                "****".to_string()
-            };
-
-            serde_json::json!({
-                "id": k.id,
-                "key": masked_key,
-                "name": k.name,
-                "is_active": k.is_active,
-                "created_at": k.created_at,
-                "last_used_at": k.last_used_at,
-            })
-        })
-        .collect();
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "data": masked
-    })))
-}
-
-/// POST /api/keys - 生成 API 密钥
-pub async fn handle_add_key(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<KeyRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-
-    // 透传 custom_key（cf-ai-gw 同款语义）：非空用用户值，空则随机生成
-    match state
-        .api_key_store
-        .generate_with_options(CreateApiKeyOptions {
-            name: body.name,
-            user_id: None,
-            group: "default".to_string(),
-            allowed_models: None,
-            allowed_providers: None,
-            expires_at: None,
-            quota_limit: None,
-            ip_limit: None,
-            custom_key: body.custom_key,
-        }) {
-        Ok(key) => Ok(Json(serde_json::json!({
-            "success": true,
-            "data": {
-                "id": key.id,
-                "key": key.key,
-                "name": key.name,
-                "created_at": key.created_at
-            }
-        }))),
-        Err(e) => Err(error_response(
-            &format!("Failed to generate key: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
-}
-
-/// DELETE /api/keys/:id - 删除 API 密钥
-pub async fn handle_delete_key(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-
-    match state.api_key_store.delete(&id) {
-        Ok(_) => Ok(Json(serde_json::json!({
-            "success": true,
-            "data": null
-        }))),
-        Err(e) => Err(error_response(
-            &format!("Failed to delete key: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
         )),
     }

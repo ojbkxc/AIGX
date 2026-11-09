@@ -191,14 +191,13 @@ pub use prompts::{handle_prompt_fetch, handle_prompt_sources, handle_prompt_tran
 pub mod legacy;
 
 pub use legacy::{
-    handle_add_account, handle_add_ip_blacklist, handle_add_ip_whitelist, handle_add_key,
-    handle_alert_resolve, handle_alert_rules_list, handle_alert_rules_update, handle_alert_test,
-    handle_alerts_active, handle_alerts_history, handle_channel_chat_test, handle_channel_health,
-    handle_delete_account, handle_delete_group, handle_delete_key, handle_delete_price,
-    handle_epay_notify, handle_epay_return, handle_fetch_channel_models,
-    handle_get_channel_balance, handle_get_exchange_rates, handle_get_ip_filter,
-    handle_get_price_sync_config, handle_get_ratelimit_config, handle_list_accounts,
-    handle_list_groups, handle_list_keys, handle_list_prices, handle_openapi_json,
+    handle_add_account, handle_add_ip_blacklist, handle_add_ip_whitelist, handle_alert_resolve,
+    handle_alert_rules_list, handle_alert_rules_update, handle_alert_test, handle_alerts_active,
+    handle_alerts_history, handle_channel_chat_test, handle_channel_health, handle_delete_account,
+    handle_delete_group, handle_delete_price, handle_epay_notify, handle_epay_return,
+    handle_fetch_channel_models, handle_get_channel_balance, handle_get_exchange_rates,
+    handle_get_ip_filter, handle_get_price_sync_config, handle_get_ratelimit_config,
+    handle_list_accounts, handle_list_groups, handle_list_prices, handle_openapi_json,
     handle_patch_channel, handle_realtime, handle_refresh_usage, handle_remove_ip_blacklist,
     handle_remove_ip_whitelist, handle_reset_channel_circuit, handle_rotate_token,
     handle_stripe_topup, handle_stripe_webhook, handle_swagger_ui, handle_test_account,
