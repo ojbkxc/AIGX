@@ -238,10 +238,7 @@ fn is_sk_key_byte(b: u8) -> bool {
 ///
 /// 上游报错体可能回显其收到的认证凭据（如 "Invalid api key sk-xxx"、
 /// "Bearer xxx"），原样透传给付费客户端会泄露渠道侧密钥。本函数只拦
-/// "发给用户"的错误出口。按本仓惯例，**日志侧不受本函数约束**（排障原文
-/// 由调用点自行落日志，如 failover 的 `tracing::warn!`）；但**落库 / 熔断侧
-/// 自 `#42` 起也走本函数**——`mark_cooldown` / `mark_unhealthy` 写入的
-/// `last_error` 库内不留原文，排障时别指望从库里取回改写前的字节。
+/// "发给用户"的错误出口；日志/熔断侧保留原始消息以利排查。
 ///
 /// 处理（参照 rust-tunnel `sanitize_error_message` 的手动字节匹配实现，
 /// 不引入 regex 依赖）：
