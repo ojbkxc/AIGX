@@ -42,8 +42,9 @@ fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: b
                     obj.remove("candidate_channels");
                     obj.remove("filtered_channels");
                     obj.remove("selected_channel");
-                    // 上游实际模型名（`model` = 映射后的上游真实名）遮罩：
-                    // 与 JSON/CSV 导出共用同一口径，避免列表与导出权限边界不一致。
+                    // 上游实际模型名（`model` = 映射后的上游真实名）与渠道归属遮罩：
+                    // 统一收在 `redact_model_for_non_admin` 里，列表 / JSON 导出 /
+                    // CSV 导出三处共用同一口径，避免权限边界不一致。
                     crate::log::redact_model_for_non_admin(obj);
                 }
                 if let Some(uid) = obj.get("user_id").and_then(|v| v.as_str()) {

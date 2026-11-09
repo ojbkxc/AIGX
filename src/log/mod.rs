@@ -1271,11 +1271,23 @@ impl RequestLogStore {
             .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
         {
             // 非 admin：`model` 列 = 请求侧原名（未映射时就是 `model`），
-            // `origin_model` 列置空（避免请求名在 CSV 里出现两次）。
-            let (model_col, origin_col): (&str, &str) = if admin {
-                (l.model.as_str(), l.origin_model.as_deref().unwrap_or(""))
+            // `origin_model` 列置空（避免请求名在 CSV 里出现两次）；
+            // 渠道归属同属上游拓扑（结构体注释「admin 排查用，用户不展示」），
+            // 非 admin 两列一并置空，与列表/JSON 导出同一权限边界。
+            let (model_col, origin_col, channel_id_col, channel_name_col): (
+                &str,
+                &str,
+                &str,
+                &str,
+            ) = if admin {
+                (
+                    l.model.as_str(),
+                    l.origin_model.as_deref().unwrap_or(""),
+                    l.channel_id.as_deref().unwrap_or(""),
+                    l.channel_name.as_deref().unwrap_or(""),
+                )
             } else {
-                (l.origin_model.as_deref().unwrap_or(&l.model), "")
+                (l.origin_model.as_deref().unwrap_or(&l.model), "", "", "")
             };
             buf.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
@@ -1283,8 +1295,8 @@ impl RequestLogStore {
                 csv_escape(&l.created_at.to_string()),
                 csv_escape(l.user_id.as_deref().unwrap_or("")),
                 csv_escape(l.key_id.as_deref().unwrap_or("")),
-                csv_escape(l.channel_id.as_deref().unwrap_or("")),
-                csv_escape(l.channel_name.as_deref().unwrap_or("")),
+                csv_escape(channel_id_col),
+                csv_escape(channel_name_col),
                 csv_escape(model_col),
                 csv_escape(origin_col),
                 l.input_tokens,
@@ -1339,6 +1351,12 @@ pub(crate) fn redact_model_for_non_admin(obj: &mut serde_json::Map<String, Value
         obj.insert("model".into(), Value::String(origin));
     }
     obj.remove("origin_model");
+    // 渠道归属同样属于上游拓扑：`channel_id`/`channel_name` 的结构体注释写明
+    // 「admin 排查用，用户不展示」，但此前三个读出口都只删了路由回放字段、
+    // 漏了这两个，普通用户仍能看穿请求被路由到哪个上游渠道。
+    // 收进本函数，保证 列表 / JSON 导出 / CSV 导出 三处口径一致。
+    obj.remove("channel_id");
+    obj.remove("channel_name");
 }
 
 /// 标准 CSV 字段转义（RFC 4180）。
@@ -2621,22 +2639,37 @@ mod tests {
     #[test]
     fn redact_model_rewrites_only_when_mapped() {
         // 映射改名：model=上游、origin_model=请求名 ⇒ 重写 + 移除
-        let mut mapped = serde_json::json!({ "model": "glm-4", "origin_model": "gpt-4o" });
+        // 渠道归属（结构体注释「admin 排查用，用户不展示」）一并移除。
+        let mut mapped = serde_json::json!({
+            "model": "glm-4",
+            "origin_model": "gpt-4o",
+            "channel_id": "ch-abc",
+            "channel_name": "天翼云"
+        });
         redact_model_for_non_admin(mapped.as_object_mut().unwrap());
         let got = mapped.as_object().unwrap();
         assert_eq!(got.get("model").and_then(|v| v.as_str()), Some("gpt-4o"));
         assert!(!got.contains_key("origin_model"));
+        assert!(!got.contains_key("channel_id"), "非 admin 不得看渠道 ID");
+        assert!(!got.contains_key("channel_name"), "非 admin 不得看渠道名");
 
         // 未映射：origin_model=null ⇒ model 原样（本就是请求名），origin_model 移除
-        let mut unmapped = serde_json::json!({ "model": "gpt-4o", "origin_model": null });
+        let mut unmapped = serde_json::json!({
+            "model": "gpt-4o",
+            "origin_model": null,
+            "channel_id": "ch-abc",
+            "channel_name": "天翼云"
+        });
         redact_model_for_non_admin(unmapped.as_object_mut().unwrap());
         let got2 = unmapped.as_object().unwrap();
         assert_eq!(got2.get("model").and_then(|v| v.as_str()), Some("gpt-4o"));
         assert!(!got2.contains_key("origin_model"));
+        assert!(!got2.contains_key("channel_id"));
+        assert!(!got2.contains_key("channel_name"));
     }
 
     /// 需求6：CSV 导出同口径 —— 非 admin 的 `model` 列 = 请求名、`origin_model`
-    /// 列置空；admin 两列原样。
+    /// 行置空；admin 两列原样。
     #[test]
     fn export_csv_hides_upstream_model_for_non_admin() {
         let s = store();
@@ -2644,6 +2677,8 @@ mod tests {
         log.user_id = Some("u1".to_string());
         log.model = "glm-4".to_string();
         log.origin_model = Some("gpt-4o".to_string());
+        log.channel_id = Some("ch-abc".to_string());
+        log.channel_name = Some("天翼云".to_string());
         s.requests.add(log).unwrap();
 
         let csv = s
@@ -2656,6 +2691,11 @@ mod tests {
             !csv.contains("glm-4"),
             "非 admin CSV 不得含上游实际模型：{csv}"
         );
+        // 渠道归属同为上游拓扑：非 admin 两列置空
+        assert!(
+            !csv.contains("ch-abc") && !csv.contains("天翼云"),
+            "非 admin CSV 不得含渠道归属：{csv}"
+        );
 
         let admin_csv = s
             .requests
@@ -2667,6 +2707,10 @@ mod tests {
         assert!(
             admin_csv.contains("gpt-4o"),
             "管理员 CSV 应含请求原名：{admin_csv}"
+        );
+        assert!(
+            admin_csv.contains("ch-abc") && admin_csv.contains("天翼云"),
+            "管理员 CSV 应含渠道归属：{admin_csv}"
         );
     }
 }
