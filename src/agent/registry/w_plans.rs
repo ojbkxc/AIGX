@@ -14,6 +14,7 @@
 //! 执行体复用 `super::*`；assembler 在 [`super::build_tools`]，本文件 owner 不回改 `mod.rs`。
 
 use super::*;
+use crate::api::admin::tokens::mask_key_str;
 use RiskLevel::HighRisk;
 
 pub(super) fn tools() -> Vec<ToolDef> {
@@ -224,7 +225,7 @@ fn mask_walk(v: &mut Value) {
             for (k, child) in map.iter_mut() {
                 if CREDENTIAL_FIELDS.contains(&k.as_str()) {
                     if let Some(s) = child.as_str() {
-                        *child = Value::String(admin::tokens::mask_key_str(s));
+                        *child = Value::String(mask_key_str(s));
                     }
                 } else {
                     mask_walk(child);
@@ -244,23 +245,18 @@ fn mask_walk(v: &mut Value) {
 mod tests {
     use super::*;
 
+    const PLAN_COVERS: &[&str] = &["/api/plans", "/api/plans/{id}", "/api/plans/{id}/issue"];
+    const REDEMPTION_COVERS: &[&str] = &["/api/redemptions/batch", "/api/redemptions/{id}"];
+    const TOKEN_COVERS: &[&str] = &["/api/tokens/{id}/reset_used", "/api/tokens/{id}/rotate"];
+
     /// 「列」侧：三条工具声明台账——名称/risk/target_key/covers 逐条钉死，
     /// 且高危不得进 MCP 面。
     #[test]
     fn uf_tools_declared_high_risk_with_covers() {
-        let cases: Vec<(&str, Vec<&str>)> = vec![
-            (
-                "aigx_plan_manage",
-                vec!["/api/plans", "/api/plans/{id}", "/api/plans/{id}/issue"],
-            ),
-            (
-                "aigx_redemption_manage",
-                vec!["/api/redemptions/batch", "/api/redemptions/{id}"],
-            ),
-            (
-                "aigx_token_ops",
-                vec!["/api/tokens/{id}/reset_used", "/api/tokens/{id}/rotate"],
-            ),
+        let cases: [(&str, &[&str]); 3] = [
+            ("aigx_plan_manage", PLAN_COVERS),
+            ("aigx_redemption_manage", REDEMPTION_COVERS),
+            ("aigx_token_ops", TOKEN_COVERS),
         ];
         for (name, covers) in cases {
             let t = find_tool(name).unwrap_or_else(|| panic!("{name} 未注册"));
@@ -270,7 +266,7 @@ mod tests {
                 "{name} 必须 HighRisk（进审批）"
             );
             assert_eq!(t.target_key, "id", "{name} target_key");
-            for c in &covers {
+            for c in covers {
                 assert!(t.covers.contains(c), "{name} 缺 covers {c}");
             }
             assert!(
@@ -309,7 +305,7 @@ mod tests {
         assert_eq!(masked["data"]["name"], json!("keep-me"));
         assert_eq!(masked["data"]["quota"], json!(100));
         assert_eq!(masked["data"]["id"], json!("t1"));
-        assert_eq!(masked["success"], json!(true));
+        assert_eq!(masked["success"].as_bool(), Some(true));
     }
 
     /// 数组内的凭据也脱敏（create-batch 返回 `Vec<Redemption>`，`code` 在数组元素里）。
@@ -346,13 +342,16 @@ mod tests {
     }
 
     /// 双侧同时钉住：工具输出边界脱敏（上面两条）＋ 人类管理端 handler 仍返回明文。
-    /// 静态锚定：脱敏只出现在工具层；三个 handler 源里既有明文出口、又不得引用脱敏函数。
+    /// 静态锚定：三个凭据出口（plain_key / key / code）**逐个正向锚住**，脱敏只出现在
+    /// 工具层；三个 handler 源里既有明文出口、又不得引用脱敏函数
+    /// （只锚两个出口＝只锚一半，本仓复发形态）。
     #[test]
     fn uf_mask_only_at_tool_boundary_not_in_handlers() {
         let plans = include_str!("../../api/admin/plans.rs");
         let legacy = include_str!("../../api/admin/legacy.rs");
         let redemptions = include_str!("../../api/admin/redemptions.rs");
-        // 人类出口仍是明文（未被打码）：
+        let redemption_mod = include_str!("../../redemption/mod.rs");
+        // 人类出口仍是明文（未被打码）——三个字段逐个锚：
         assert!(
             plans.contains("\"plain_key\": k.key"),
             "plan issue 人类出口应保持明文"
@@ -360,6 +359,14 @@ mod tests {
         assert!(
             legacy.contains("\"key\": k.key"),
             "rotate 人类出口应保持明文"
+        );
+        assert!(
+            redemption_mod.contains("pub code: String"),
+            "兑换码字段应明文序列化（人类出口，redemption/mod.rs）"
+        );
+        assert!(
+            redemptions.contains("\"data\": codes"),
+            "redemption create-batch 人类出口应保持明文（返回未打码的兑换码）"
         );
         // handler 层不得引用工具层脱敏（掩码只在工具输出边界）：
         for (tag, src) in [
