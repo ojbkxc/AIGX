@@ -132,11 +132,16 @@ impl ApiKey {
         normalize_model_list(self.allowed_providers.clone())
     }
 
-    /// 是否允许来自指定 IP
+    /// 是否允许来自指定 IP。
+    ///
+    /// `None` 与 `Some(vec![])` 均表示不限（与 allows_model/allows_provider
+    /// 同语义：空=全部放行）。历史数据里存在 `"ip_limit":[]`（创建路径未归一
+    /// 化时写入），若把空列表当白名单则 any() 恒 false → 拒绝所有 IP，
+    /// 表现为经反代的请求全部 403 而本机直连正常。
     pub fn allows_ip(&self, ip: &str) -> bool {
         match &self.ip_limit {
             None => true,
-            Some(list) => list.iter().any(|allowed| allowed == ip),
+            Some(list) => list.is_empty() || list.iter().any(|allowed| allowed == ip),
         }
     }
 
@@ -308,7 +313,7 @@ impl ApiKeyStore {
             next_reservation_token: 0,
             overdraft_quota: 0,
             version: 0,
-            ip_limit: opts.ip_limit,
+            ip_limit: normalize_model_list(opts.ip_limit),
             status: "active".to_string(),
             updated_at: now,
         };
@@ -338,6 +343,9 @@ impl ApiKeyStore {
         mutator(&mut api_key);
         api_key.allowed_models = normalize_model_list(api_key.allowed_models.take());
         api_key.allowed_providers = normalize_model_list(api_key.allowed_providers.take());
+        // ip_limit 同口径归一化：`Some(vec![])` 会被 allows_ip 判为「拒绝所有 IP」
+        // （空迭代器 any() 恒 false），必须与 None 统一为「不限」。
+        api_key.ip_limit = normalize_model_list(api_key.ip_limit.take());
         api_key.updated_at = chrono::Utc::now().timestamp();
         api_key.is_active = api_key.status == "active";
         api_key.bump_version();
@@ -1053,6 +1061,53 @@ mod session_registry_tests {
         let k = s.generate_with_options(opts).unwrap();
         assert!(k.allowed_models.is_none());
         assert!(s.validate(&k.key).unwrap().allows_model("any-model"));
+    }
+
+    /// ip_limit 与 allowed_models 同口径：Some([]) 归一化为 None（不限）。
+    ///
+    /// 回归：空数组落到 `allows_ip` 的空迭代器 `any()` 恒 false，会被判成
+    /// 「拒绝所有 IP」——生产上表现为经反代（带 X-Forwarded-For）的请求
+    /// 全部 403「IP ... is not allowed for this API key」，而本机直连
+    /// （无代理头 → ip=None）却正常，故站内测试难以发现。
+    #[test]
+    fn ip_limit_empty_array_normalized_to_unrestricted() {
+        let s = key_store();
+        // 历史脏数据形态：直接构造 Some(vec![])（绕过写入侧归一化）也必须放行
+        let legacy = ApiKey {
+            ip_limit: Some(vec![]),
+            ..s.generate("ip-legacy").unwrap()
+        };
+        assert!(legacy.allows_ip("1.2.3.4"));
+        // 创建时空数组 → None（不限），任意 IP 放行
+        let opts = CreateApiKeyOptions {
+            name: "ip0".to_string(),
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: None,
+            allowed_providers: None,
+            expires_at: None,
+            quota_limit: None,
+            ip_limit: Some(vec![]),
+            custom_key: None,
+        };
+        let k = s.generate_with_options(opts).unwrap();
+        assert!(k.ip_limit.is_none());
+        assert!(k.allows_ip("1.2.3.4"));
+        // 非空白名单照常生效
+        s.update(&k.id, |key| {
+            key.ip_limit = Some(vec!["9.9.9.9".to_string()]);
+        })
+        .unwrap();
+        assert!(!s.validate(&k.key).unwrap().allows_ip("1.2.3.4"));
+        assert!(s.validate(&k.key).unwrap().allows_ip("9.9.9.9"));
+        // 更新侧空数组同样归一为 None（handle_update_token 同规则）
+        s.update(&k.id, |key| {
+            key.ip_limit = Some(vec![]);
+        })
+        .unwrap();
+        let after = s.validate(&k.key).unwrap();
+        assert!(after.ip_limit.is_none());
+        assert!(after.allows_ip("1.2.3.4"));
     }
 
     /// update 后空列表归一化为 None（防写入双语义）。

@@ -420,6 +420,8 @@ export default function Keys(): JSX.Element {
         || ipLimit.length > 0
         || JSON.stringify(origIps.slice().sort()) !== JSON.stringify(ipLimit.slice().sort())
       ) {
+        // 留空=显式清除；后端 update/generate 均把 [] 归一化为 None（不限）。
+        // 注意历史坑：未归一化的版本会把 [] 判成「拒绝所有 IP」。
         payload.ip_limit = ipLimit;
       }
       const expiresTs = localInputToTs(form.expires_at);
