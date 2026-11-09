@@ -486,7 +486,7 @@ mod tests {
             .to_string();
         for needle in [
             ["先清空全部", "自定义模型映射"].concat(),
-            ["缺 mappings", "即等于清空"].concat(),
+            ["缺 mappings", " 即等于清空"].concat(),
             ["config_id ", "**必填但当前被 handler 忽略**"].concat(),
             ["enabled=false ", "会停全站数据面"].concat(),
             ["并非同一端点", ""].concat(),
