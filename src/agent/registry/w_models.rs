@@ -677,11 +677,12 @@ mod tests {
         ] {
             assert!(count(a, b) >= 1, "{label} 执行体没接到预期 handler 符号");
         }
-        // chat-test 那条 handler 返回 Response，必须走 response_to_outcome 适配
+        // chat-test 那条 handler 返回 Response，必须走 response_to_outcome 适配。
+        // needle 含 `Ok(` 与 `.await)` 边界：只命中 chat-test 执行体那一处
+        // （本测试自身对 response_to_outcome 的两次调用不匹配此形状）。
         assert_eq!(
-            count("response_to", "_outcome("),
-            // 1 处定义 + 1 处调用
-            2,
+            count("Ok(response_to", "_outcome(resp).await)"),
+            1,
             "chat-test 必须经 response_to_outcome 适配 Response→ToolOutcome"
         );
     }
