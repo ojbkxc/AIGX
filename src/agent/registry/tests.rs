@@ -506,9 +506,16 @@ const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
         (
             "批 2·运维动作族（清理/重算：删日志、清流量缓冲、刷新汇总——可逆性差，逐条论证）",
             &[
-                "/api/logs/audits",
-                "/api/logs/requests",
                 "/api/usage/summary",
+            ],
+        ),
+        (
+            "不给 AI 面·证据销毁族（按显式 ids 定向销毁证据＝可挑着删对自己不利的几条 ⇒ 不给 AI 面、不补工具；只允许 before 时间窗 + 单次限量的 clear 语义）",
+            &[
+                // 判据：DELETE 按 ids 选择性删 = 定向销毁审计证据；clear 变体走时间窗 + 限量
+                "/api/logs/audits",
+                // 判据：同上，定向删除请求日志
+                "/api/logs/requests",
             ],
         ),
         (
