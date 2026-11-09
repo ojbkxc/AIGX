@@ -3,6 +3,11 @@
 // 为什么不用 `vite preview`：E2E 要验证的是**入库的构建产物**（线上跑的就是
 // static/），而不是 dev server 的即时编译。同时这里要拦截 /api/*，让测试不
 // 依赖真实后端与数据库，可离线、可并发、无副作用。
+//
+// ── 桩分支可达性判据（#46）——改本文件前必读 ──
+// R1 直打桩：每个写端点/新臂须有一条不经 page.route 的 page.request 直打用例钉它（被测 spec 自己 page.route 了同名端点 ⇒ 该桩臂未被覆盖、断的是副本）。
+// R2 变异取证：把桩/实现还原成 buggy 版 ⇒ 对应用例必须变红，没变红即装饰。
+// R3 不许桩自证：断契约形状/状态机语义，不断桩自己造的数字。
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
