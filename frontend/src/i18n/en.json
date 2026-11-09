@@ -2387,6 +2387,9 @@
   "添加模型": "Add model",
   "添加模型覆盖": "Add model override",
   "添加映射：对外名 → 本模型": "Add mapping: public name → this model",
+  "原样透传": "Pass through unchanged",
+  "未配置改名：请求按模型原样透传（自身名可直接调用）": "No rename configured: requests pass the model name through unchanged (the model is callable by its own name)",
+  "隐藏这条原样透传提示（不改动任何映射）": "Hide this pass-through hint (does not change any mapping)",
   "添加中…": "Adding…",
   "添加自定义模型": "Add custom model",
   "填上对外名与目标模型后，这里会显示实际转发链路": "Once the public name and target model are filled, the actual forwarding chain shows here",
@@ -3281,5 +3284,12 @@
   "未改动（口径已一致，幂等短路）": "Unchanged (offsets already match, idempotent short-circuit)",
   "窗口外另有 {{count}} 行被 shrink 守卫拦住，需人工核对明细是否已被 retention 裁剪。": "{{count}} additional rows outside the window were blocked by the shrink guard; manually verify whether their details were already trimmed by retention.",
   "本次操作的边界提示（后端文案原样展示）": "Boundary notes for this operation (backend text shown verbatim)",
-  "报表": "Reports"
+  "报表": "Reports",
+  "该模型当前没有可用渠道或账号（可能均被禁用或正在冷却中）。请稍后重试，或在「渠道管理」检查该模型的渠道/账号状态，或更换其他模型。": "No available channel or account for this model (all may be disabled or cooling down). Try again later, check the channel/account status for this model under Channel Management, or switch to another model.",
+  "该模型的可用账号均不可用（账号可能都在冷却中或需要重新登录）。请稍后重试，或到账号管理检查账号状态，或更换其他模型。": "All accounts for this model are unavailable (they may be cooling down or need to sign in again). Try again later, check account status under Account Management, or switch to another model.",
+  "该模型在上游不存在，请检查模型映射或更换其他模型。": "This model does not exist upstream. Check the model mapping or switch to another model.",
+  "上游请求超时，请稍后重试。": "Upstream request timed out. Please try again later.",
+  "上游渠道鉴权失败（渠道密钥可能已失效）。请联系管理员检查该渠道的密钥配置。": "Upstream channel authentication failed (its key may have expired). Please contact the administrator to check the channel credential.",
+  "上游渠道网络不可达（可能正在维护或存在网络异常）。请稍后重试，或更换其他模型。": "Upstream channel is unreachable (it may be under maintenance or there is a network issue). Try again later, or switch to another model.",
+  "上游渠道限流，请稍后重试。": "Upstream channel is rate limiting. Please try again later."
 }

@@ -29,7 +29,9 @@ export function RequestLogDetail({ log, admin, onClose }: {
     { label: t('时间'), value: log.created_at ? new Date(log.created_at * 1000).toLocaleString() : '—' },
     ...(admin ? [{ label: t('用户'), value: log.user_email || log.user_id || '—' }] : []),
     ...(admin && src ? [{ label: t('来源'), value: src }] : []),
-    { label: t('模型（映射后）'), value: log.model || '—', mono: true },
+    // 非 admin 下 `log.model` 已是后端重写后的「请求侧模型名」（上游实际模型
+    // 已剥离），故标签用「模型」而不再写「模型（映射后）」，避免误导。
+    { label: admin ? t('模型（映射后）') : t('模型'), value: log.model || '—', mono: true },
     ...(admin ? [{ label: t('原始模型名'), value: log.origin_model || '—', mono: true }] : []),
     ...(admin ? [{ label: t('渠道'), value: log.channel_name ? `${log.channel_name}${log.channel_id ? ` (#${log.channel_id})` : ''}` : (log.channel_id ? `#${log.channel_id}` : '—') }] : []),
     { label: t('输入 Tokens'), value: String(log.input_tokens ?? 0) },

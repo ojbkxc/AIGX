@@ -17,7 +17,7 @@ import {
 } from '../lib/tableColumns';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
-import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import { TablePaginationFooter, useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 
 const LS_PSZ = 'aigx-tbl-pagesize.tickets';
 const LS_TCOLS = 'aigx-tbl-cols.tickets';
@@ -92,9 +92,14 @@ export default function Tickets(): JSX.Element {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [replyFilter, setReplyFilter] = useState<string>('');
   const [query, setQuery] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
-  const size = typeof pageSize === 'number' ? pageSize : 20;
+  // 分页（管理员服务端真分页）：公共 hook 统一承担越界钳位 / size 变更回第 1 页 /
+  // 筛选（状态/回复状态）与关键词变化回第 1 页。
+  const { page, setPage, pageSize, size, setSize, total, setTotal, totalPages } = useServerPaging({
+    key: LS_PSZ,
+    sizes: SERVER_PAGE_SIZES,
+    fallback: 20,
+    resetDeps: [statusFilter, replyFilter, query],
+  });
   // 列设置已迁公共层（tableColumns v2；admin 形态进 defs）
   const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, ticketsColDefs(admin)));
   useEffect(() => {
@@ -134,7 +139,6 @@ export default function Tickets(): JSX.Element {
     lockedKeys: new Set(activeDefs.filter((d) => d.locked).map((d) => d.key)),
     onCommit: () => { /* 落盘已在 setWidths 内做 */ },
   });
-  const [total, setTotal] = useState(0);
 
   const loadList = async () => {
     setLoading(true);
@@ -165,7 +169,7 @@ export default function Tickets(): JSX.Element {
   useEffect(() => {
     void loadList();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [admin, page, statusFilter, replyFilter]);
+  }, [admin, page, size, statusFilter, replyFilter]);
 
   const openDetail = async (id: string) => {
     setError('');
@@ -509,10 +513,10 @@ export default function Tickets(): JSX.Element {
           <TablePaginationFooter
             total={total}
             page={page}
-            totalPages={Math.max(1, Math.ceil(total / size))}
+            totalPages={totalPages}
             size={pageSize}
             sizes={SERVER_PAGE_SIZES}
-            onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+            onSizeChange={setSize}
             onPageChange={setPage}
           />
         )}

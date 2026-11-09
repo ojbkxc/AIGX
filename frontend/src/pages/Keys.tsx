@@ -180,11 +180,12 @@ export default function Keys(): JSX.Element {
   // ── 批量选择 / 搜索 / 分页 / 行操作菜单（对齐渠道页） ──
   const [selected, setSelected] = useState<Set<string | number>>(new Set());
   const [search, setSearch] = useState('');
-  // 管理员视角切换：默认所有人（含管理员）只看自己的令牌；
-  // 管理员可显式切换查看全系统（对齐 new-api 筛选语义）
-  const [viewAll, setViewAll] = useState(false);
+  // 管理员视角切换（需求 4）：管理员进入本页**默认**查看全系统令牌，
+  // 可显式切回「只看自己的」；普通用户恒 false（后端对普通用户无视 all=1
+  // 只返回本人，且下方切换按钮仅管理员可见）。
+  const [viewAll, setViewAll] = useState(isAdmin());
   // 防止 load() 依赖 viewAll 造成初始双请求：仅由切换控件显式触发重新拉取
-  const viewAllRef = useRef(false);
+  const viewAllRef = useRef(isAdmin());
   // 客户端分页：搜索过滤变化时回第 1 页；每页条数公共 usePageSize（CLIENT 档位含 'all'）
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = usePageSize(LS_PSZ, CLIENT_PAGE_SIZES, DEFAULT_PAGE_SIZE);
@@ -254,7 +255,9 @@ export default function Keys(): JSX.Element {
   };
 
   useEffect(() => {
-    void load();
+    // 管理员默认全量加载（与 viewAll 初值一致）；普通用户 isAdmin() 为 false，
+    // 与改动前行为完全一致（只拉自己的令牌）
+    void load(isAdmin());
   }, []);
 
   // 模型白名单候选：与聊天页 / AI 运维页同源（网关聚合的可用模型）。
@@ -316,11 +319,19 @@ export default function Keys(): JSX.Element {
       || (tk.key || '').toLowerCase().includes(q));
   }, [tokens, q]);
 
-  // 客户端分页：页码越界时钳到最后一页（删除/过滤收缩后不落空页）
+  // 客户端分页：'all' 档恒 1 页；其余按每页条数取整（空集也至少 1 页，避免 0 页）。
+  // 原实现 'all' 档把总页数算成 filtered.length，会渲染出 N 个页码按钮——一并修正。
   const pageSizeNum = pageSize === 'all' ? Math.max(1, filtered.length) : pageSize;
-  const totalPages = Math.max(1, Math.ceil((pageSize === 'all' ? filtered.length : filtered.length / pageSizeNum) || 1));
+  const totalPages = pageSize === 'all' ? 1 : Math.max(1, Math.ceil(filtered.length / pageSize));
+  // 渲染用钳位页：page 越界时按末页渲染（显示层兜底）
   const safePage = Math.min(page, totalPages);
   const pageItems = pageSize === 'all' ? filtered : filtered.slice((safePage - 1) * pageSizeNum, safePage * pageSizeNum);
+
+  // 页码真复位：删除/筛选收缩令总页数减少后，把 page state 夹回末页。
+  // 原先只有 safePage 渲染钳位（page 本身仍停在旧值），再次增删会跳到意外页。
+  useEffect(() => {
+    setPage((p) => (p > totalPages ? totalPages : p));
+  }, [totalPages]);
 
   // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦搜索、↑↓/j k 行高亮、Enter 打开编辑
   const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(
@@ -460,7 +471,7 @@ export default function Keys(): JSX.Element {
         }
         addToast(t('令牌创建成功'));
       }
-      await load();
+      await load(viewAllRef.current);
       // 编辑保存后关闭弹窗；创建路径保持弹窗以展示一次性密钥
       if (editing) closeModal();
     } catch (err) {
@@ -481,7 +492,7 @@ export default function Keys(): JSX.Element {
         try {
           await api.deleteToken(id);
           addToast(t('令牌已删除'));
-          await load();
+          await load(viewAllRef.current);
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err));
         }
@@ -514,7 +525,7 @@ export default function Keys(): JSX.Element {
           addToast(t('已删除 {{count}} 个令牌', { count: ids.length }));
         }
         setSelected(new Set());
-        await load();
+        await load(viewAllRef.current);
       },
     });
   };
@@ -547,7 +558,7 @@ export default function Keys(): JSX.Element {
         );
       }
       setSelected(new Set());
-      await load();
+      await load(viewAllRef.current);
     };
     if (disabling) {
       setConfirmState({
@@ -577,7 +588,7 @@ export default function Keys(): JSX.Element {
           try {
             await api.updateToken(tk.id, { status: newStatus });
             addToast(t('已禁用'));
-            await load();
+            await load(viewAllRef.current);
           } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
           }
@@ -590,7 +601,7 @@ export default function Keys(): JSX.Element {
       try {
         await api.updateToken(tk.id, { status: newStatus });
         addToast(t('已启用'));
-        await load();
+        await load(viewAllRef.current);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -608,7 +619,7 @@ export default function Keys(): JSX.Element {
         try {
           await api.resetTokenUsed(id);
           addToast(t('已重置已用额度'));
-          await load();
+          await load(viewAllRef.current);
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err));
         }
@@ -634,7 +645,7 @@ export default function Keys(): JSX.Element {
             setRotatedKey({ name: tk.name, key: String(newKey) });
           }
           addToast(t('令牌已轮换，请立即保存新密钥'));
-          await load();
+          await load(viewAllRef.current);
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err));
         }
@@ -887,9 +898,12 @@ export default function Keys(): JSX.Element {
                           <div className="tk-name" title={tk.name}>{tk.name}</div>
                         </td>
                         )}
+{/* 归属列在「只看自己」模式下恒为本人邮箱，是纯噪声——此处仍保持渲染
+    以维持表头/单元格列数对齐（表头由 appliedCols 驱动，不受 viewAll 影响）；
+    仅在空值时用 — 占位，视觉上不引入新信息。 */}
 {visibleKeySet.has('user') && (
                         <td className="col-user">
-                          {tk.user_email
+                          {viewAll && tk.user_email
                             ? <span className="tk-user-email" title={tk.user_email}>{tk.user_email}</span>
                             : <span className="tk-user-none">—</span>}
                         </td>

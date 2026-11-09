@@ -15,7 +15,7 @@ import {
 } from '../lib/tableColumns';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
-import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import { TablePaginationFooter, useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 import { Tooltip } from '../components/ui';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
 import { fmtQuota } from '../lib/utils';
@@ -100,11 +100,14 @@ export default function Users(): JSX.Element {
   // 搜索关键字（邮箱/昵称/备注，走后端 keyword 过滤以覆盖全量数据）
   const [query, setQuery] = useState('');
   const [keyword, setKeyword] = useState('');
-  // 分页（服务端真分页：page/size 发后端，total 由响应回带；每页条数公共 usePageSize）
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
-  const size = typeof pageSize === 'number' ? pageSize : 20;
-  const [total, setTotal] = useState(0);
+  // 分页（服务端真分页）：公共 hook 统一承担越界钳位 / size 变更回第 1 页 /
+  // 关键词变化回第 1 页；page/size 发后端，total 由响应回带。
+  const { page, setPage, pageSize, size, setSize, total, setTotal, totalPages } = useServerPaging({
+    key: LS_PSZ,
+    sizes: SERVER_PAGE_SIZES,
+    fallback: 20,
+    resetDeps: [keyword],
+  });
 
   // 列设置已迁公共层（tableColumns v2）
   const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, USER_COL_DEFS));
@@ -177,13 +180,13 @@ export default function Users(): JSX.Element {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, keyword]);
+  }, [page, size, keyword]);
 
   // 搜索输入防抖：本地 query 立即响应，停顿 300ms 后触发后端 keyword 查询
+  // （回第 1 页由 useServerPaging 的 resetDeps:[keyword] 统一处理，无需手动 reset）
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setKeyword(query.trim());
-      setPage(1);
     }, 300);
     return () => window.clearTimeout(timer);
   }, [query]);
@@ -596,20 +599,15 @@ export default function Users(): JSX.Element {
         );
       })()}
 
-      {(() => {
-        const totalPages = Math.ceil(total / size);
-        return (
-          <TablePaginationFooter
-            total={total}
-            page={page}
-            totalPages={totalPages}
-            size={pageSize}
-            sizes={SERVER_PAGE_SIZES}
-            onSizeChange={(n) => { setPageSize(n); setPage(1); }}
-            onPageChange={setPage}
-          />
-        );
-      })()}
+      <TablePaginationFooter
+        total={total}
+        page={page}
+        totalPages={totalPages}
+        size={pageSize}
+        sizes={SERVER_PAGE_SIZES}
+        onSizeChange={setSize}
+        onPageChange={setPage}
+      />
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 

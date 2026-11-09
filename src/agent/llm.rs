@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use crate::api::openai::{resolve_bridges_with_affinity, resolve_upstream_model, AppState};
+use crate::api::openai::{
+    model_declared_by_channel, resolve_bridges_with_affinity, resolve_upstream_model, AppState,
+};
 use crate::bridge::{BridgeContext, ChatFormat, ChatMessage, ChatResponse, Role};
 use crate::channel::ChannelStore;
 use crate::config::AgentConfig;
@@ -22,6 +24,13 @@ pub enum AgentLlmError {
     /// 该模型没有任何可用渠道（或全部被熔断）。
     #[error("no bridge available for agent model")]
     NoBridge,
+    /// 该模型由某启用渠道声明，但当前没有任何可用渠道/账号（禁用或均在冷却中）。
+    /// 此时不退回「不会服务该模型」的 Hub 兜底桥，以免把「无可用渠道」发成一条
+    /// 注定失败、且会误导用户（看似鉴权问题）的上游请求。
+    #[error(
+        "no available channel for agent model {model}（该模型暂无可用渠道或账号：可能均被禁用或正在冷却中，请稍后重试或更换模型）"
+    )]
+    NoChannelAvailable { model: String },
     /// 所有渠道均失败。
     #[error("all channels failed: {0}")]
     AllChannelsFailed(String),
@@ -76,8 +85,26 @@ fn resolve_candidates(
     }
     // 运维 Agent 的 LLM 调用无用户 Key（管理面自用），provider 白名单不适用
     let candidates = resolve_bridges_with_affinity(state, model, None, None, None);
+    // 全局调度在「真实渠道全不可用」时会把 Hub 专用桥（channel_id = None）作为
+    // 兜底候选塞进来。若该模型确由某启用渠道声明，说明它本该由真实渠道服务、
+    // Hub 兜底不会服务它——保留只会发出一个注定失败的请求，并把真实的
+    // 「无可用渠道/账号」掩盖成误导性的上游鉴权错误（如 channel None 的 401）。
+    // 故此时剔除兜底候选，并在落空时给出可读、可操作的 NoChannelAvailable。
+    // 模型仅经全局映射暴露（可能确由 Hub 服务）时 `declared=false`，兜底候选
+    // 照常保留，语义与改造前一致。
+    let declared = model_declared_by_channel(state, model);
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|(_, cid, _)| keep_global_candidate(cid.is_some(), declared))
+        .collect();
     if candidates.is_empty() {
-        return Err(AgentLlmError::NoBridge);
+        return Err(if declared {
+            AgentLlmError::NoChannelAvailable {
+                model: model.to_string(),
+            }
+        } else {
+            AgentLlmError::NoBridge
+        });
     }
     Ok(candidates
         .into_iter()
@@ -87,6 +114,15 @@ fn resolve_candidates(
             channel,
         })
         .collect())
+}
+
+/// 全局调度下的候选保留规则（纯函数，便于单测）。
+///
+/// 模型由渠道声明时，只保留真实渠道候选（`has_channel=true`），剔除 Hub 兜底
+/// 候选（无渠道）；模型未由任何渠道声明时（仅全局映射，可能确由 Hub 服务），
+/// 兜底候选照常保留。
+fn keep_global_candidate(has_channel: bool, declared_by_channel: bool) -> bool {
+    !declared_by_channel || has_channel
 }
 
 /// 按渠道类型构造 bridge（与 `resolve_bridges` 中的分支一致）。
@@ -395,7 +431,7 @@ pub fn system_message(content: String) -> ChatMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::effort_level;
+    use super::{effort_level, keep_global_candidate, AgentLlmError};
 
     #[test]
     fn effort_level_only_accepts_known_levels() {
@@ -404,5 +440,33 @@ mod tests {
         assert_eq!(effort_level(Some("off")), None);
         assert_eq!(effort_level(Some("")), None);
         assert_eq!(effort_level(None), None);
+    }
+
+    /// 渠道声明的模型：Hub 兜底候选（无 channel_id）必须被剔除，真实渠道保留。
+    #[test]
+    fn declared_model_drops_hub_fallback_candidate() {
+        assert!(keep_global_candidate(true, true), "真实渠道候选应保留");
+        assert!(!keep_global_candidate(false, true), "Hub 兜底候选应剔除");
+    }
+
+    /// 仅全局映射暴露的模型（可能确由 Hub 服务）：兜底候选照常保留，语义不变。
+    #[test]
+    fn mapped_only_model_keeps_hub_fallback_candidate() {
+        assert!(keep_global_candidate(false, false), "兜底候选应保留");
+        assert!(keep_global_candidate(true, false));
+    }
+
+    /// 无可用渠道时的错误文案必须点名模型且给出可操作提示（供前端映射展示）。
+    #[test]
+    fn no_channel_available_message_is_actionable() {
+        let e = AgentLlmError::NoChannelAvailable {
+            model: "deepseek-v4.1-flash".to_string(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("deepseek-v4.1-flash"), "应点名模型: {msg}");
+        assert!(
+            msg.contains("暂无可用渠道") && msg.contains("冷却"),
+            "应说明原因与建议动作: {msg}"
+        );
     }
 }

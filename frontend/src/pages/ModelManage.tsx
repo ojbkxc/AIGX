@@ -302,6 +302,27 @@ function reasoningLevelCandidates(overrides: Record<string, ModelMetaOverride>, 
   return [...FALLBACK_REASONING_LEVELS];
 }
 
+/**
+ * 「映射」列里被隐藏的「模型名→自己（原样透传）」identity 提示。
+ *
+ * 该提示是前端派生的只读项：后端 `alias_entries` 只收 `target == 本模型` 的映射，
+ * 模型自身名永不出现；而没配映射时 `resolve()` 原样透传，所以「模型名→自己」在
+ * 行为上等价于「没有映射」。删它不落库、不动 `model_custom_map` 契约 —— 只把模型
+ * id 记进 localStorage，让这一行不再显示该提示。写入失败（隐私模式/配额）仅当次会话生效。
+ */
+const HIDE_IDENTITY_KEY = 'aigx-mm-hide-identity';
+
+function loadHiddenIdentity(): Set<string> {
+  try {
+    const raw = localStorage.getItem(HIDE_IDENTITY_KEY);
+    if (!raw) return new Set();
+    const arr: unknown = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
 // ── 主组件 ───────────────────────────────────────────────────────────
 
 export default function ModelManage(): JSX.Element {
@@ -431,6 +452,22 @@ export default function ModelManage(): JSX.Element {
   const [aliasError, setAliasError] = useState('');
   const [savingAlias, setSavingAlias] = useState(false);
   const [pendingAlias, setPendingAlias] = useState<string | null>(null);
+  // 「模型名→自己」identity 提示的隐藏记忆（纯前端展示偏好，见 loadHiddenIdentity）
+  const [hiddenIdentity, setHiddenIdentity] = useState<Set<string>>(loadHiddenIdentity);
+
+  const hideIdentity = (id: string): void => {
+    setHiddenIdentity((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      try {
+        localStorage.setItem(HIDE_IDENTITY_KEY, JSON.stringify([...next]));
+      } catch {
+        /* 写入失败（隐私模式等）仅当次会话生效 */
+      }
+      return next;
+    });
+  };
 
   const [testTarget, setTestTarget] = useState<ManagedModel | null>(null);
 
@@ -1482,14 +1519,17 @@ export default function ModelManage(): JSX.Element {
             </button>
           </td>
         );
-      case 'alias':
+      case 'alias': {
+        const aliasEntries: AliasEntry[] = row.alias_entries?.length
+          ? row.alias_entries
+          : row.aliases.map((a): AliasEntry => ({ alias: a, target: row.id, enabled: true, reasoning_effort: undefined }));
+        // 纯前端派生的「模型名→自己（原样透传）」只读提示：后端 alias_entries 只收
+        // target==本模型的映射，自身名不出现；已有同名显式映射时不重复展示。
+        const showIdentity = !hiddenIdentity.has(row.id) && !aliasEntries.some((e) => e.alias === row.id);
         return (
           <td key={col} className={`mm-c-alias ta-${colAlign.alias}`}>
             <div className="mm-alias-cell">
-              {(row.alias_entries?.length
-                ? row.alias_entries
-                : row.aliases.map((a): AliasEntry => ({ alias: a, target: row.id, enabled: true, reasoning_effort: undefined }))
-              ).map((entry) => (
+              {aliasEntries.map((entry) => (
                 <span
                   key={entry.alias}
                   className={`mm-alias${entry.enabled ? '' : ' is-off'}`}
@@ -1534,6 +1574,24 @@ export default function ModelManage(): JSX.Element {
                   </button>
                 </span>
               ))}
+              {showIdentity && (
+                <span
+                  key={`${row.id}\u0001identity`}
+                  className="mm-alias mm-alias-identity"
+                  title={t('未配置改名：请求按模型原样透传（自身名可直接调用）')}
+                >
+                  <span className="mm-alias-text">{row.id}</span>
+                  <span className="mm-alias-identity-tag">{t('原样透传')}</span>
+                  <button
+                    type="button"
+                    className="mm-alias-x"
+                    title={t('隐藏这条原样透传提示（不改动任何映射）')}
+                    onClick={() => hideIdentity(row.id)}
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
               <button
                 type="button"
                 className="mm-alias-add"
@@ -1545,6 +1603,7 @@ export default function ModelManage(): JSX.Element {
             </div>
           </td>
         );
+      }
       case 'act':
         return (
           <td key={col} className={`mm-c-act ta-${colAlign.act}`}>
@@ -2183,8 +2242,9 @@ export default function ModelManage(): JSX.Element {
                         value={pageSize}
                         onChange={(e) => {
                           const n = Number(e.target.value);
+                          // 落盘由公共 usePageSize 统一处理（统一键 + 旧 aigx-mm-pagesize 搬迁）；
+                          // 曾在此额外写旧键属历史双写，已移除避免旧键复活。
                           setPageSize(n);
-                          localStorage.setItem(LS_PAGE_SIZE, String(n));
                           setPage(1);
                         }}
                         aria-label={t('每页条数')}

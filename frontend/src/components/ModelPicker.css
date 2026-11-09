@@ -1,8 +1,12 @@
 /* ── ModelPicker — 全局模型选择器（Open WebUI 顶部 pill 形态）── */
 
+/* 固定最小宽度：按常见模型名 deepseek-v4.1-flash（19 字符）在 13px
+ * 字号下的自然宽度估算——19 × ~7.2px ≈ 137px，加 Bot 图标 14px、
+ * gap 8px、左右 padding 共 28px ≈ 187px，留余量取 200px。
+ * 目的：模型名长短变化时 pill 宽度不再跳动（用户反馈）。 */
 .model-picker {
   position: relative;
-  min-width: 180px;
+  min-width: 200px;
   max-width: 300px;
   flex: 0 1 auto;
 }
@@ -38,10 +42,12 @@
   text-align: left;
 }
 
-/* 紧凑形态：顶栏小 pill */
+/* 紧凑形态：顶栏/输入区小 pill。
+ * min-width 与基础形态同取 200px（依据见 .model-picker 注释：
+ * deepseek-v4.1-flash 19 字符），否则宽度随模型名长短跳动。 */
 .model-picker-compact {
-  min-width: 0;
-  max-width: 220px;
+  min-width: 200px;
+  max-width: 240px;
 }
 
 .model-picker-compact .model-picker-btn {

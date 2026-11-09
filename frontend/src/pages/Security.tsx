@@ -14,7 +14,7 @@ import {
 } from '../lib/tableColumns';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
-import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import { TablePaginationFooter, useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 import { Tooltip } from '../components/ui';
 import { Columns3 } from 'lucide-react';
 
@@ -87,10 +87,6 @@ export default function Security(): JSX.Element {
 
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
   const [events, setEvents] = useState<SecurityEvent[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
-  const size = typeof pageSize === 'number' ? pageSize : 20;
   const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, SEC_COL_DEFS));
   const [colPanelOpen, setColPanelOpen] = useState(false);
   const colPanelRef = useRef<HTMLDivElement | null>(null);
@@ -131,17 +127,26 @@ export default function Security(): JSX.Element {
   const [timeRange, setTimeRange] = useState('24h');
   const [eventType, setEventType] = useState('');
 
+  // 分页（服务端真分页）：公共 hook 统一承担越界钳位 / size 变更回第 1 页 /
+  // 筛选变化回第 1 页（timeRange / eventType 变化即回第 1 页，不再依赖「查询」按钮）。
+  const { page, setPage, pageSize, size, setSize, total, setTotal, totalPages } = useServerPaging({
+    key: LS_PSZ,
+    sizes: SERVER_PAGE_SIZES,
+    fallback: 20,
+    resetDeps: [timeRange, eventType],
+  });
+
   // 概览加载（独立于事件列表，避免分页触发概览重复请求）
   useEffect(() => {
     void loadOverview();
   }, []);
 
-  // 事件列表：分页/筛选条件变化自动加载
+  // 事件列表：分页/每页条数/筛选条件变化自动加载
   useEffect(() => {
     void loadEvents();
     // loadEvents 随分页/筛选参数变化，禁用 exhaustive-deps 以保留显式触发语义
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, timeRange, eventType]);
+  }, [page, size, timeRange, eventType]);
 
   const loadOverview = async () => {
     try {
@@ -191,8 +196,6 @@ export default function Security(): JSX.Element {
     const ms = ts > 1e12 ? ts : ts * 1000;
     return new Date(ms).toLocaleString();
   };
-
-  const totalPages = Math.ceil(total / size);
 
   // 严重程度 → 中文标签 + 语义色徽章（critical/high 危险、medium 警告、low/warning/info 提示、其余中性原样）
   const severityLabel = (sv: string): string => {
@@ -386,7 +389,7 @@ export default function Security(): JSX.Element {
           totalPages={totalPages}
           size={pageSize}
           sizes={SERVER_PAGE_SIZES}
-          onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+          onSizeChange={setSize}
           onPageChange={setPage}
         />
       </Card>

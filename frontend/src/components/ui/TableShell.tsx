@@ -123,6 +123,104 @@ export function useClientPaging<T>(
 }
 
 /**
+ * 服务端分页统一 hook —— 收敛全站服务端分页页（Users/Redemptions/Security/
+ * Tickets/CheckinCenter）此前各自手写、且普遍存在缺口的四处共性逻辑：
+ *
+ * 1) 越界自愈：数据返回后 total 变小（如删空末页最后一条 / 筛选后命中变少），
+ *    当前页超出总页数 → render 期收敛到最后一页，绝不落到空白页；
+ * 2) 每页条数变更：setSize 落盘（复用 usePageSize 的档位校验 + 旧键搬迁）并回第 1 页；
+ * 3) 筛选变化：resetDeps 任一变化 → 自动回第 1 页；
+ * 4) 统一暴露 page/totalPages/size/setPage/setSize/total/setTotal。
+ *
+ * 钳位与筛选复位都在 render 期用「同帧 setState」做（React 官方 derived-state
+ * 模式）：状态在提交该次渲染前已收敛，故下游加载 effect 只跑一次，不产生
+ * 「先按旧页码请求、再按新页码请求」的抖动请求。
+ *
+ * 接入范式（用例见 users/redemptions/security/tickets/checkin）：
+ *   const pg = useServerPaging({ key: LS_PSZ, resetDeps: [keyword] });
+ *   useEffect(() => { void load(); }, [pg.page, pg.size, ...filters]); // 加载 effect
+ *   // load 内：pg.setTotal(res.total)
+ *   // 页脚：<TablePaginationFooter total={pg.total} page={pg.page}
+ *   //          totalPages={pg.totalPages} size={pg.pageSize}
+ *   //          onSizeChange={pg.setSize} onPageChange={pg.setPage} />
+ */
+export interface UseServerPagingOptions {
+  /** 每页条数存储键（透传 usePageSize） */
+  key: string;
+  /** 档位表（服务端通常 SERVER_PAGE_SIZES，无 'all' 档） */
+  sizes?: readonly PageSize[];
+  /** 存储缺失/脏值时的兜底档位（默认 20） */
+  fallback?: PageSize;
+  /** 旧分页键列表（一次性搬迁，透传 usePageSize） */
+  legacyKeys?: string[];
+  /** 筛选依赖：任一变化 → 自动回第 1 页 */
+  resetDeps?: readonly unknown[];
+}
+
+export interface ServerPaging {
+  /** 当前页（1-based，已越界钳位） */
+  page: number;
+  setPage: (p: number) => void;
+  /** 显式回第 1 页（供「查询」按钮等复用；等价于 setPage(1)） */
+  resetPage: () => void;
+  /** 数值化后的每页条数（服务端无 'all'，恒为 number） */
+  size: number;
+  /** 原始每页条数（可能为 'all'，仅用于页脚 select 回显） */
+  pageSize: PageSize;
+  /** 变更每页条数：落盘 + 回第 1 页 */
+  setSize: (n: PageSize) => void;
+  total: number;
+  setTotal: (n: number) => void;
+  /** 总页数（至少 1） */
+  totalPages: number;
+}
+
+export function useServerPaging({
+  key,
+  sizes = SERVER_PAGE_SIZES,
+  fallback = 20,
+  legacyKeys = [],
+  resetDeps = [],
+}: UseServerPagingOptions): ServerPaging {
+  const [pageSize, setSizePersist] = usePageSize(key, sizes, fallback, legacyKeys);
+  // 服务端分页无 'all' 档；脏值兜底为数值（类型窄化 + 防御）
+  const size = typeof pageSize === 'number' ? pageSize : (typeof fallback === 'number' ? fallback : 20);
+  const [rawPage, setRawPage] = useState(1);
+  const [total, setTotal] = useState(0);
+
+  const totalPages = Math.max(1, Math.ceil(total / Math.max(1, size)));
+  // 越界钳位：render 期收敛（rawPage 恒落在 [1, totalPages]）
+  const page = Math.min(Math.max(1, rawPage), totalPages);
+  if (rawPage !== page) setRawPage(page);
+
+  // 筛选变化 → 回第 1 页：render 期调整，与下游加载 effect 同帧收敛
+  const resetKey = JSON.stringify(resetDeps);
+  const [prevResetKey, setPrevResetKey] = useState(resetKey);
+  if (prevResetKey !== resetKey) {
+    setPrevResetKey(resetKey);
+    if (rawPage !== 1) setRawPage(1);
+  }
+
+  const setSize = (n: PageSize): void => {
+    setSizePersist(n);
+    setRawPage(1);
+  };
+  const resetPage = (): void => setRawPage(1);
+
+  return {
+    page,
+    setPage: setRawPage,
+    resetPage,
+    size,
+    pageSize,
+    setSize,
+    total,
+    setTotal,
+    totalPages,
+  };
+}
+
+/**
  * 表格页脚：总数/区间 + 每页档位 + 数字分页 + 跳页框（常驻，一页时禁用）。
  * 对齐上游 table-shell.tsx 页脚功能集；样式挂 `.tbl-foot` 体系（见 AccountSessions.css 同款类）。
  */

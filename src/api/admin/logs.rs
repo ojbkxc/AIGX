@@ -23,7 +23,9 @@ use super::common::{default_page, default_size, error_response, verify_admin, ve
 /// 把请求日志条目序列化为 JSON，并附加 user_email（user_id → 邮箱解析）。
 ///
 /// 前端用户列展示邮箱而非 UUID；解析失败（用户已删）回退原 user_id。
-/// 普通用户响应剥离 `debug`（请求/响应快照仅 admin 可见，对齐 new-api admin_info 剥离语义）。
+/// 普通用户响应剥离 `debug`（请求/响应快照仅 admin 可见，对齐 new-api admin_info 剥离语义），
+/// 并遮掉上游实际模型名（`redact_model_for_non_admin`：`model` 重写为请求侧原名、
+/// 移除 `origin_model`）——普通用户不得看穿自己实际被哪个上游模型服务。
 fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: bool) -> Vec<Value> {
     logs.into_iter()
         .map(|mut l| {
@@ -40,6 +42,9 @@ fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: b
                     obj.remove("candidate_channels");
                     obj.remove("filtered_channels");
                     obj.remove("selected_channel");
+                    // 上游实际模型名（`model` = 映射后的上游真实名）遮罩：
+                    // 与 JSON/CSV 导出共用同一口径，避免列表与导出权限边界不一致。
+                    crate::log::redact_model_for_non_admin(obj);
                 }
                 if let Some(uid) = obj.get("user_id").and_then(|v| v.as_str()) {
                     if let Some(u) = state.user_store.get_by_id(uid) {
@@ -263,7 +268,7 @@ pub async fn handle_export_request_logs(
             let csv = state
                 .log_store
                 .requests
-                .export_csv_filtered(u, m, c, q.start, q.end);
+                .export_csv_filtered(u, m, c, q.start, q.end, admin);
             (
                 StatusCode::OK,
                 [

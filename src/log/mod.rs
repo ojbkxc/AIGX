@@ -1162,8 +1162,9 @@ impl RequestLogStore {
     ///
     /// `admin` = false 时按非管理员视角剥离 `debug` / `conversation` /
     /// `candidate_channels` / `filtered_channels` / `selected_channel`，
-    /// 与 `logs.rs::logs_with_user_email` 的剥离口径一致 —— 导出与列表页
-    /// 不应给出不同权限边界。
+    /// 并把上游实际模型名遮掉（`redact_model_for_non_admin`：`model` 重写为
+    /// 请求侧原名、移除 `origin_model`），与 `logs.rs::logs_with_user_email`
+    /// 的剥离口径一致 —— 导出与列表页不应给出不同权限边界。
     #[allow(clippy::too_many_arguments)]
     pub fn export_json_filtered(
         &self,
@@ -1187,6 +1188,9 @@ impl RequestLogStore {
                         obj.remove("candidate_channels");
                         obj.remove("filtered_channels");
                         obj.remove("selected_channel");
+                        // 上游实际模型名遮罩（`model` → 请求名 + 移除
+                        // `origin_model`），口径与列表页共用同一函数。
+                        redact_model_for_non_admin(obj);
                     }
                 }
                 v
@@ -1233,17 +1237,21 @@ impl RequestLogStore {
         true
     }
 
-    /// 导出为 CSV 字符串
+    /// 导出为 CSV 字符串（无 user 过滤 ⇒ 全量，管理员视角）
     pub fn export_csv(&self) -> String {
-        self.export_csv_filtered(None, None, None, None, None)
+        self.export_csv_filtered(None, None, None, None, None, true)
     }
 
     /// 导出按 user_id 过滤后的 CSV（普通用户导出自己的记录）
     pub fn export_csv_for_user(&self, user_id: &str) -> String {
-        self.export_csv_filtered(Some(user_id), None, None, None, None)
+        self.export_csv_filtered(Some(user_id), None, None, None, None, false)
     }
 
-    /// 导出按完整筛选条件过滤后的 CSV（与列表页筛选语义一致）
+    /// 导出按完整筛选条件过滤后的 CSV（与列表页筛选语义一致）。
+    ///
+    /// `admin` = false 时 `model` 列换成请求侧原名（有映射时）、`origin_model`
+    /// 列置空 —— 口径与 JSON 列表/导出（`redact_model_for_non_admin`）一致，
+    /// 不让普通用户看穿上游实际模型（CSV 是列式输出，无法复用 Map 版遮罩函数）。
     #[allow(clippy::too_many_arguments)]
     pub fn export_csv_filtered(
         &self,
@@ -1252,6 +1260,7 @@ impl RequestLogStore {
         channel_id: Option<&str>,
         start: Option<i64>,
         end: Option<i64>,
+        admin: bool,
     ) -> String {
         let all = self.list_all();
         let mut buf = String::from(
@@ -1261,6 +1270,13 @@ impl RequestLogStore {
             .iter()
             .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
         {
+            // 非 admin：`model` 列 = 请求侧原名（未映射时就是 `model`），
+            // `origin_model` 列置空（避免请求名在 CSV 里出现两次）。
+            let (model_col, origin_col): (&str, &str) = if admin {
+                (l.model.as_str(), l.origin_model.as_deref().unwrap_or(""))
+            } else {
+                (l.origin_model.as_deref().unwrap_or(&l.model), "")
+            };
             buf.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_escape(&l.id),
@@ -1269,8 +1285,8 @@ impl RequestLogStore {
                 csv_escape(l.key_id.as_deref().unwrap_or("")),
                 csv_escape(l.channel_id.as_deref().unwrap_or("")),
                 csv_escape(l.channel_name.as_deref().unwrap_or("")),
-                csv_escape(&l.model),
-                csv_escape(l.origin_model.as_deref().unwrap_or("")),
+                csv_escape(model_col),
+                csv_escape(origin_col),
                 l.input_tokens,
                 l.output_tokens,
                 l.cost,
@@ -1292,6 +1308,37 @@ impl RequestLogStore {
         all.sort_by_key(|a| a.created_at);
         all
     }
+}
+
+/// 非管理员视角：把序列化后的请求日志里的「上游实际模型名」遮掉。
+///
+/// 字段语义（见 `RequestLog` 注释与 `api/openai/chat.rs`）：`model` 存的是
+/// **映射后的上游真实模型名**（`log.model = used_upstream`），`origin_model`
+/// 才是用户**请求侧的原始模型名**（仅发生映射改名时才有值，否则为 `null`）。
+/// 普通用户不应看穿自己实际被哪家/哪个上游模型服务，故：
+///
+/// - 把 `model` **重写**成 `origin_model`（有值即映射改名场景）；
+/// - **删除** `origin_model`，避免同一个请求名在响应里出现两次。
+///
+/// 为什么是「重写」而不是「删除」`model`：`model` 是前端列表 / 详情的必展示
+/// 字段，直接删会让前端显示 `undefined`；重写后字段形状不变、值换成用户自己
+/// 请求的名字。未发生映射（`origin_model` 为 `null`）时 `model` 本就是请求名，
+/// 无需重写，但 `origin_model` 仍移除（值为 `null`，移除以免留下痕迹）。
+///
+/// 列表（`api/admin/logs.rs::logs_with_user_email`）与 JSON 导出
+/// （`export_json_filtered`）共用本函数，保证两处权限边界一致；CSV 导出
+/// （`export_csv_filtered`）是另一套列式输出，口径对齐但就地处理。
+pub(crate) fn redact_model_for_non_admin(obj: &mut serde_json::Map<String, Value>) {
+    // 先取 owned 副本，避免 if-let 试探式里对 obj 的不可变借用与下面 insert 的
+    // 可变借用冲突（if-let 临时量存活期坑）。
+    let origin = obj
+        .get("origin_model")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if let Some(origin) = origin {
+        obj.insert("model".into(), Value::String(origin));
+    }
+    obj.remove("origin_model");
 }
 
 /// 标准 CSV 字段转义（RFC 4180）。
@@ -2523,6 +2570,104 @@ mod tests {
         assert!(admin.contains("conversation"));
         assert!(admin.contains("candidate_channels"));
         assert!(admin.contains("秘密对话"));
+    }
+
+    /// 需求6：非 admin 导出必须把 `model`（上游实际模型名）重写为请求侧原名，
+    /// 且不残留 `origin_model`；admin 两个字段都保留（排障用）。
+    #[test]
+    fn export_json_hides_upstream_model_for_non_admin() {
+        let s = store();
+        let mut log = RequestLog::new();
+        log.user_id = Some("u1".to_string());
+        log.model = "glm-4".to_string(); // 映射后的上游实际模型
+        log.origin_model = Some("gpt-4o".to_string()); // 用户请求名
+        s.requests.add(log).unwrap();
+
+        let non_admin = s
+            .requests
+            .export_json_filtered(Some("u1"), None, None, None, None, false);
+        assert!(
+            non_admin.contains("\"model\": \"gpt-4o\""),
+            "非 admin 应看到请求侧模型名：{non_admin}"
+        );
+        assert!(
+            !non_admin.contains("glm-4"),
+            "非 admin 不得看到上游实际模型名：{non_admin}"
+        );
+        assert!(
+            !non_admin.contains("origin_model"),
+            "非 admin 响应不应残留 origin_model：{non_admin}"
+        );
+
+        let admin = s
+            .requests
+            .export_json_filtered(Some("u1"), None, None, None, None, true);
+        assert!(
+            admin.contains("\"model\": \"glm-4\""),
+            "管理员应看到上游实际模型：{admin}"
+        );
+        assert!(
+            admin.contains("\"origin_model\": \"gpt-4o\""),
+            "管理员应看到请求原名：{admin}"
+        );
+    }
+
+    /// 需求6：`redact_model_for_non_admin` 是列表（`logs.rs::logs_with_user_email`）
+    /// 与导出共用的遮罩核心。断言：映射改名时重写 `model` + 移除 `origin_model`；
+    /// 未映射（`origin_model` 为 null）时 `model` 原样保留，`origin_model` 一并移除。
+    ///
+    /// 注：列表用的 `logs_with_user_email` 依赖 `AppState`（40+ Arc 字段，无测试
+    /// 构造器），故其遮罩逻辑由本纯函数单测覆盖，导出路径另在下面端到端断言。
+    #[test]
+    fn redact_model_rewrites_only_when_mapped() {
+        // 映射改名：model=上游、origin_model=请求名 ⇒ 重写 + 移除
+        let mut mapped = serde_json::json!({ "model": "glm-4", "origin_model": "gpt-4o" });
+        redact_model_for_non_admin(mapped.as_object_mut().unwrap());
+        let got = mapped.as_object().unwrap();
+        assert_eq!(got.get("model").and_then(|v| v.as_str()), Some("gpt-4o"));
+        assert!(!got.contains_key("origin_model"));
+
+        // 未映射：origin_model=null ⇒ model 原样（本就是请求名），origin_model 移除
+        let mut unmapped = serde_json::json!({ "model": "gpt-4o", "origin_model": null });
+        redact_model_for_non_admin(unmapped.as_object_mut().unwrap());
+        let got2 = unmapped.as_object().unwrap();
+        assert_eq!(got2.get("model").and_then(|v| v.as_str()), Some("gpt-4o"));
+        assert!(!got2.contains_key("origin_model"));
+    }
+
+    /// 需求6：CSV 导出同口径 —— 非 admin 的 `model` 列 = 请求名、`origin_model`
+    /// 列置空；admin 两列原样。
+    #[test]
+    fn export_csv_hides_upstream_model_for_non_admin() {
+        let s = store();
+        let mut log = RequestLog::new();
+        log.user_id = Some("u1".to_string());
+        log.model = "glm-4".to_string();
+        log.origin_model = Some("gpt-4o".to_string());
+        s.requests.add(log).unwrap();
+
+        let csv = s
+            .requests
+            .export_csv_filtered(Some("u1"), None, None, None, None, false);
+        // 列头形状不变（脚本仍可解析），只是 model 列值换成请求名
+        assert!(csv.contains("model,origin_model"), "列头应保持：{csv}");
+        assert!(csv.contains("gpt-4o"), "非 admin CSV 应含请求名：{csv}");
+        assert!(
+            !csv.contains("glm-4"),
+            "非 admin CSV 不得含上游实际模型：{csv}"
+        );
+
+        let admin_csv = s
+            .requests
+            .export_csv_filtered(Some("u1"), None, None, None, None, true);
+        assert!(
+            admin_csv.contains("glm-4"),
+            "管理员 CSV 应含上游实际模型：{admin_csv}"
+        );
+        assert!(
+            admin_csv.contains("gpt-4o"),
+            "管理员 CSV 应含请求原名：{admin_csv}"
+        );
     }
 }
 

@@ -49,7 +49,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
       api.listChannels().then((res) => setChannels(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
       api.listUsers().then((res) => setUsers(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
     }
-    api.listTokens().then((res) => setTokens(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
+    api.listTokens(isAdmin()).then((res) => setTokens(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
     api.listModels().then((res) => setModels(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
     return () => {
       window.clearTimeout(id);

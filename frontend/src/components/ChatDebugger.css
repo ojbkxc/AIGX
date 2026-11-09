@@ -915,7 +915,9 @@
     height: 26px;
   }
 
-  .chat-debugger-input-left {
+  /* 非游乐园形态（渠道调试紧凑场景）才缩小；游乐园形态与 AI 运维页
+     保持一致，发送按钮始终保持 36px */
+  .chat-debugger:not(.chat-debugger-playground) .chat-debugger-input-left {
     gap: 4px;
   }
 
@@ -923,7 +925,7 @@
     display: none;
   }
 
-  .chat-debugger-send-fab {
+  .chat-debugger:not(.chat-debugger-playground) .chat-debugger-send-fab {
     width: 32px;
     height: 32px;
   }

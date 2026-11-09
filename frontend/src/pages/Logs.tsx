@@ -952,7 +952,10 @@ export default function Logs(): JSX.Element {
                       {visibleKeySet.has('model') && (
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.model || ''}>
                         {l.model || '—'}
-                        {l.origin_model && l.origin_model !== l.model && (
+                        {/* 上游实际模型名（origin_model）仅 admin 可见：后端已对普通用户
+                            把 model 重写为请求侧原名并剥离 origin_model，这里再兜一层，
+                            避免普通用户看穿实际被哪个上游模型服务。 */}
+                        {admin && l.origin_model && l.origin_model !== l.model && (
                           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>← {l.origin_model}</div>
                         )}
                       </td>

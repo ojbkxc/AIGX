@@ -29,14 +29,14 @@
   max-height: calc(100vh - 120px);
 }
 
-/* 游乐园形态：消息流居中 max-w-4xl，与输入区同宽对齐 */
+/* 游乐园形态：消息流与输入区同宽，宽度对齐 AI 运维页（58rem）。 */
 .chat-debugger-playground .chat-debugger-messages {
-  max-width: 56rem; /* new-api max-w-4xl */
+  max-width: 58rem;
   padding: 24px 16px 8px;
 }
 
 .chat-debugger-playground .chat-debugger-input-row {
-  max-width: 56rem;
+  max-width: 58rem;
   /* 内容流形态下输入区下缘留白（原 24px：全高钉底时代的视觉缓冲，
      现在输入条随消息上移，24px 会在短对话下方拖出大片空档） */
   padding-bottom: 12px;
@@ -51,26 +51,6 @@
   gap: 18px;
   justify-items: center;
   text-align: center;
-}
-
-/* 空状态模型选择位（居中大 pill）：此前 playground 首屏没有任何模型入口，
-   只能从输入区右下角切——「模型列表看不见」。放在问候语上方，
-   复用非 playground 空状态 chat-debugger-empty-model 的布局意图。 */
-.pg-empty .chat-debugger-empty-model {
-  margin: 0;
-}
-
-.pg-empty .chat-debugger-empty-model .model-picker {
-  min-width: 240px;
-  max-width: 300px;
-}
-
-.pg-empty .chat-debugger-empty-model .model-picker .model-picker-btn {
-  min-height: 38px;
-  padding: 8px 18px;
-  font-size: 13.5px;
-  background: var(--card-bg);
-  box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.28);
 }
 
 .pg-empty-icon {
@@ -469,16 +449,24 @@
   color: #fff;
 }
 
-/* ── 游乐园形态移动端适配 ── */
-@media (max-width: 640px) {
+/* ── 游乐园形态移动端适配（间距/折行对齐 AI 运维页 .agent-input-*）── */
+@media (max-width: 720px) {
+  /* 窄屏工具行折行，右侧模型 + 发送组整体靠右 */
+  .chat-debugger-playground .chat-debugger-input-meta {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .chat-debugger-playground .chat-debugger-input-actions {
+    margin-left: auto;
+  }
+
   .chat-debugger-playground .chat-debugger-input-actions .model-picker {
     min-width: 120px;
   }
+}
 
-  .chat-debugger-playground .chat-debugger-input-left {
-    gap: 4px;
-  }
-
+@media (max-width: 640px) {
   .pg-param-pop-anchor {
     left: auto;
     right: 0;

@@ -17,7 +17,7 @@ import {
 } from '../lib/tableColumns';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
-import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import { TablePaginationFooter, useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 
 const LS_PSZ = 'aigx-tbl-pagesize.redemptions';
 const LS_TCOLS = 'aigx-tbl-cols.redemptions';
@@ -55,10 +55,12 @@ interface RedemptionItem {
 
 export default function Redemptions({ embedded = false }: { embedded?: boolean } = {}): JSX.Element {
   const [items, setItems] = useState<RedemptionItem[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
-  const size = typeof pageSize === 'number' ? pageSize : 20;
+  // 分页（服务端真分页）：公共 hook 统一承担越界钳位 / size 变更回第 1 页。
+  const { page, setPage, pageSize, size, setSize, total, setTotal, totalPages } = useServerPaging({
+    key: LS_PSZ,
+    sizes: SERVER_PAGE_SIZES,
+    fallback: 20,
+  });
   const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, RED_COL_DEFS));
   const [colPanelOpen, setColPanelOpen] = useState(false);
   const colPanelRef = useRef<HTMLDivElement | null>(null);
@@ -111,7 +113,7 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
+  }, [page, size]);
 
   const load = async () => {
     setLoading(true);
@@ -230,8 +232,6 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
       <span className={`badge badge-${tone}`}>{text}</span>
     );
   };
-
-  const totalPages = Math.ceil(total / size);
 
   return (
     <div>
@@ -397,10 +397,10 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
         <TablePaginationFooter
           total={total}
           page={page}
-          totalPages={Math.max(1, totalPages)}
+          totalPages={totalPages}
           size={pageSize}
           sizes={SERVER_PAGE_SIZES}
-          onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+          onSizeChange={setSize}
           onPageChange={setPage}
         />
 

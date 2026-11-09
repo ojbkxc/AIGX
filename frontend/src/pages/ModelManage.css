@@ -660,6 +660,29 @@
   text-decoration: line-through;
 }
 
+/* 派生的「模型名→自己（原样透传）」只读提示：虚线边 + 弱化色，与真实映射区分 */
+.mm-alias-identity {
+  border: 1px dashed var(--line-strong, rgba(128, 128, 128, 0.4));
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.mm-alias-identity .mm-alias-text {
+  font-weight: 500;
+}
+
+.mm-alias-identity-tag {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.16);
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* 药丸内的小号开关：标准 36×20 会把行高撑起来，缩到 22×12 */
 .mm-alias .mm-alias-switch.glass-switch {
   width: 22px;

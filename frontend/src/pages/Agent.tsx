@@ -263,6 +263,37 @@ export default function Agent(): JSX.Element {
     }
   }, [sessionId]);
 
+  /**
+   * 把后端自环 LLM failover 的原始失败串翻译成用户可读的「原因 + 建议动作」。
+   * 后端失败来自 `agent llm failover`（channel None / all accounts failed /
+   * transport error 等），原始串是英文且不指向可操作项——这里按已知征状归一。
+   */
+  const describeAgentError = useCallback((raw: string): string => {
+    const s = raw.toLowerCase();
+    if (s.includes('no available channel') || s.includes('no bridge available')) {
+      return t('该模型当前没有可用渠道或账号（可能均被禁用或正在冷却中）。请稍后重试，或在「渠道管理」检查该模型的渠道/账号状态，或更换其他模型。');
+    }
+    if (s.includes('all accounts failed')) {
+      return t('该模型的可用账号均不可用（账号可能都在冷却中或需要重新登录）。请稍后重试，或到账号管理检查账号状态，或更换其他模型。');
+    }
+    if (s.includes('transport error') || s.includes('error sending request')) {
+      return t('上游渠道网络不可达（可能正在维护或存在网络异常）。请稍后重试，或更换其他模型。');
+    }
+    if (s.includes('authentication error') || s.includes('auth failed') || s.includes(' 401')) {
+      return t('上游渠道鉴权失败（渠道密钥可能已失效）。请联系管理员检查该渠道的密钥配置。');
+    }
+    if (s.includes('rate limited') || s.includes(' 429')) {
+      return t('上游渠道限流，请稍后重试。');
+    }
+    if (s.includes('timed out')) {
+      return t('上游请求超时，请稍后重试。');
+    }
+    if (s.includes('model not found') || s.includes('模型不存在')) {
+      return t('该模型在上游不存在，请检查模型映射或更换其他模型。');
+    }
+    return raw;
+  }, [t]);
+
   const send = useCallback(async (override?: string) => {
     const text = (override ?? input).trim();
     if (!text || busy) return;
@@ -326,7 +357,7 @@ export default function Agent(): JSX.Element {
               return { ...m, content: m.content + ev.content };
             }
             if (ev.type === 'error' && typeof ev.message === 'string') {
-              return { ...m, content: m.content + `\n⚠️ ${ev.message}` };
+              return { ...m, content: m.content + `\n⚠️ ${describeAgentError(ev.message)}` };
             }
             if (ev.type === 'tool_call' && typeof ev.name === 'string') {
               return pushStep({ kind: 'call', name: ev.name, args: ev.arguments, ok: true });
@@ -345,13 +376,13 @@ export default function Agent(): JSX.Element {
       void loadSessions();
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(describeAgentError(e instanceof Error ? e.message : String(e)));
       }
     } finally {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [input, busy, sessionId, model, role, effort, t, loadSessions]);
+  }, [input, busy, sessionId, model, role, effort, t, loadSessions, describeAgentError]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();

@@ -18,6 +18,7 @@ import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { Tooltip } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import BenefitsPanel from '../components/BenefitsPanel';
+import { useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 import type { CheckinCenterData, CheckinRecord, CheckinRunResult, CheckinSchedule } from '../types';
 import './CheckinCenter.css';
 
@@ -191,7 +192,6 @@ export default function CheckinCenter(): JSX.Element {
 
   // 记录
   const [records, setRecords] = useState<CheckinRecord[]>([]);
-  const [recordsTotal, setRecordsTotal] = useState(0);
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [recordDays, setRecordDays] = useState(7);
   const [recordOutcome, setRecordOutcome] = useState('');
@@ -199,8 +199,14 @@ export default function CheckinCenter(): JSX.Element {
   const [keyword, setKeyword] = useState('');
   // 关键词走后端过滤（与分页同口径）；kwApplied 是「已提交」的关键词
   const [kwApplied, setKwApplied] = useState('');
-  const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState(50);
+  // 分页（服务端真分页，0-based 后端口径由 hook 的 1-based 页码换算）：
+  // 公共 hook 统一承担越界钳位 / size 变更回第 1 页 / 筛选变化回第 1 页 + 档位记忆。
+  const { page, setPage, pageSize, size, setSize, total, setTotal, totalPages } = useServerPaging({
+    key: 'aigx-tbl-pagesize.checkin',
+    sizes: SERVER_PAGE_SIZES,
+    fallback: 50,
+    resetDeps: [recordDays, recordProvider, recordOutcome, kwApplied],
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -237,22 +243,17 @@ export default function CheckinCenter(): JSX.Element {
         provider: recordProvider || undefined,
         outcome: recordOutcome || undefined,
         keyword: kwApplied || undefined,
-        offset: page * pageSize,
-        limit: pageSize,
+        offset: (page - 1) * size,
+        limit: size,
       });
       setRecords(res?.data?.records ?? []);
-      setRecordsTotal(res?.data?.total ?? 0);
+      setTotal(res?.data?.total ?? 0);
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
       setRecordsLoading(false);
     }
-  }, [recordDays, recordProvider, recordOutcome, kwApplied, page, pageSize, addToast]);
-
-  // 筛选条件变化时回到第一页
-  useEffect(() => {
-    setPage(0);
-  }, [recordDays, recordProvider, recordOutcome, kwApplied]);
+  }, [recordDays, recordProvider, recordOutcome, kwApplied, page, size, setTotal, addToast]);
 
   useEffect(() => {
     if (tab === 'records') void loadRecords();
@@ -1582,9 +1583,9 @@ export default function CheckinCenter(): JSX.Element {
               <div className="ck-pager">
                 <span className="ck-pager-info">
                   {t('共 {{n}} 条 · 第 {{page}}/{{pages}} 页', {
-                    n: recordsTotal,
-                    page: page + 1,
-                    pages: Math.max(1, Math.ceil(recordsTotal / pageSize)),
+                    n: total,
+                    page,
+                    pages: totalPages,
                   })}
                 </span>
                 <div className="ck-pager-tools">
@@ -1592,12 +1593,9 @@ export default function CheckinCenter(): JSX.Element {
                     className="form-input"
                     style={{ maxWidth: 90 }}
                     value={pageSize}
-                    onChange={(e) => {
-                      setPageSize(Number(e.target.value));
-                      setPage(0);
-                    }}
+                    onChange={(e) => setSize(Number(e.target.value))}
                   >
-                    {[20, 50, 100, 200].map((size) => (
+                    {SERVER_PAGE_SIZES.map((size) => (
                       <option key={size} value={size}>
                         {size} / 页
                       </option>
@@ -1605,15 +1603,15 @@ export default function CheckinCenter(): JSX.Element {
                   </select>
                   <button
                     className="btn btn-outline btn-sm"
-                    disabled={page === 0}
-                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                    disabled={page <= 1}
+                    onClick={() => setPage(Math.max(1, page - 1))}
                   >
                     {t('上一页')}
                   </button>
                   <button
                     className="btn btn-outline btn-sm"
-                    disabled={(page + 1) * pageSize >= recordsTotal}
-                    onClick={() => setPage((p) => p + 1)}
+                    disabled={page >= totalPages}
+                    onClick={() => setPage(page + 1)}
                   >
                     {t('下一页')}
                   </button>
