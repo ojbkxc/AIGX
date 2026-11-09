@@ -380,6 +380,162 @@ pub struct DeleteLogsBody {
     pub ids: Vec<String>,
 }
 
+// ── aigx_logs_purge 执行体（#35 批2 G5；registry 未落地前先在 handler 层落地）──
+//
+// 约束（lead 裁定 A + 三条硬规则）：删日志＝销毁证据 ⇒ 工具**只允许**「带 `before`
+// 时间窗 + 单次限量」的定量清理，**永不 `clear_all()`**；且在删**之前**先写一条
+// audit —— 因为调用方保证 `before <= now`，这条新 audit 的 created_at(=`now`)
+// **永远落在删除窗口 `created_at < before` 之外**，因此它必然在本次清理后存活，
+// 这是「证据链自洽」的机制核心（对应单测 `purge_pre_audit_survives_*`）。
+//
+// 裁定 A：**不暴露**按显式 `ids` 的选择性删除（`handle_delete_*_logs`）——按 id 挑
+// 着删 = 可定向抹除对自己不利的几条。`DELETE /api/logs/{requests,audits}` 不进本工具
+// covers，其台账行移交 #24 移入「不给 AI 面·证据销毁族」。
+
+/// 清理目标（进 audit payload 与工具结果，字符串口径稳定勿改）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurgeTarget {
+    /// 请求日志
+    Requests,
+    /// 审计日志
+    Audits,
+}
+
+impl PurgeTarget {
+    /// 稳定字符串口径。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PurgeTarget::Requests => "requests",
+            PurgeTarget::Audits => "audits",
+        }
+    }
+}
+
+/// 单次清理缺省条数（`aigx_logs_purge` 未传 `max` 时）。
+pub const PURGE_DEFAULT_MAX: usize = 1_000;
+/// 单次清理硬上限（调用方传更大值也截断，「单次限量」约束的机器化落点）。
+pub const PURGE_MAX_PER_CALL: usize = 10_000;
+/// 清理审计的动作名（进 audit 台账；单测断言「留痕」的锚）。
+pub const PURGE_AUDIT_ACTION: &str = "logs.purge";
+
+/// 纯选择逻辑：从 `(created_at, id)` 列表挑出「`created_at < before`」的**最旧** `max` 条。
+///
+/// 抽成纯函数以便单测直接钉死 before 边界与 max 截断（不构造 `AppState`）。
+/// 先按时间升序（最旧优先）再截断——限额内优先清最老的，避免「清了半天没清到最该清的」。
+pub fn select_purge_ids(rows: &[(i64, String)], before: i64, max: usize) -> Vec<String> {
+    let mut eligible: Vec<&(i64, String)> = rows.iter().filter(|(ts, _)| *ts < before).collect();
+    eligible.sort_by_key(|(ts, _)| *ts);
+    eligible
+        .into_iter()
+        .take(max)
+        .map(|(_, id)| id.clone())
+        .collect()
+}
+
+/// 清理结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeOutcome {
+    /// 命中窗口（`created_at < before`）且被本次限额选中的条数。
+    pub matched: usize,
+    /// 实际删除条数。
+    pub removed: usize,
+}
+
+/// `aigx_logs_purge` 的核心执行体：对 `log_store` 做 before+max 的定量清理。
+///
+/// 入参是 `&LogStore` 而非 `&AppState`——单测可直接构造 `LogStore` 验证
+/// 「**pre-audit 存活**」（本约束的机制核心），无需构造整套 `AppState`。
+///
+/// 顺序**必须**是「先写 audit → 再删」：`record_audit` 落的这条记录 created_at
+/// 取当前时刻，而删除窗口是 `created_at < before`（调用方保证 `before <= now`）
+/// ⇒ 本记录不可能被本次清理选中。
+pub fn purge_logs_before_core(
+    log_store: &crate::log::LogStore,
+    admin_id: &str,
+    target: PurgeTarget,
+    before: i64,
+    max: usize,
+) -> PurgeOutcome {
+    let rows: Vec<(i64, String)> = match target {
+        PurgeTarget::Requests => log_store
+            .requests
+            .all_sorted_asc()
+            .into_iter()
+            .map(|l| (l.created_at, l.id))
+            .collect(),
+        PurgeTarget::Audits => log_store
+            .audits
+            .list()
+            .into_iter()
+            .map(|l| (l.created_at, l.id))
+            .collect(),
+    };
+    let ids = select_purge_ids(&rows, before, max);
+    // 先写 audit（工具身份 + 参数 + target 全部入 payload ⇒ 留痕可核）。
+    log_store.record_audit(
+        admin_id,
+        PURGE_AUDIT_ACTION,
+        target.as_str(),
+        Some(serde_json::json!({
+            "tool": "aigx_logs_purge",
+            "action": target.as_str(),
+            "before": before,
+            "max": max,
+            "matched": ids.len(),
+        })),
+        None,
+    );
+    let removed = match target {
+        PurgeTarget::Requests => log_store.requests.delete_many(&ids),
+        PurgeTarget::Audits => log_store.audits.delete_many(&ids),
+    };
+    PurgeOutcome {
+        matched: ids.len(),
+        removed,
+    }
+}
+
+/// `aigx_logs_purge` 的鉴权 + 执行包装（工具执行体直调；**无独立 HTTP 路由**）。
+///
+/// 校验：`before` 必填且 `<= now`（防「清空未来窗」）；`max` 截断到硬上限。
+pub async fn purge_logs_before(
+    state: &AppState,
+    headers: &HeaderMap,
+    target: PurgeTarget,
+    before: i64,
+    max: usize,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    verify_admin(state, headers).await?;
+    let now = chrono::Utc::now().timestamp();
+    if before > now {
+        return Err(error_response(
+            "before 不得晚于当前时间（拒绝清空未来窗口）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let max = max.clamp(1, PURGE_MAX_PER_CALL);
+    let admin_id = super::common::admin_id_from_session(state, headers).await;
+    let outcome = purge_logs_before_core(&state.log_store, &admin_id, target, before, max);
+    tracing::info!(
+        "logs purge: target={} before={} max={} matched={} removed={}",
+        target.as_str(),
+        before,
+        max,
+        outcome.matched,
+        outcome.removed
+    );
+    Ok(serde_json::json!({
+        "success": true,
+        "data": {
+            "target": target.as_str(),
+            "before": before,
+            "max": max,
+            "matched": outcome.matched,
+            "removed": outcome.removed,
+        }
+    }))
+}
+
 /// ── 日志保留配置（运维设置：保留天数 / 容量上限 / 手动清理）──────────
 
 #[derive(Debug, Deserialize)]
@@ -889,5 +1045,138 @@ mod tests {
         );
         // 空体＝"把存量行追平到我刚保存的口径"，是正常用法
         assert_eq!(parse("{}"), (None, None));
+    }
+
+    // ── aigx_logs_purge：before 边界 + 单次限量 + pre-audit 存活 ──────────────
+
+    /// 每用例独占一个干净目录（先清后建，避免复用进程内残留的 aigx.db）。
+    fn test_log_store(tag: &str) -> crate::log::LogStore {
+        let dir =
+            std::env::temp_dir().join(format!("aigx-logs-purge-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        crate::log::LogStore::new(std::sync::Arc::new(crate::storage::FileStore::new(dir)))
+    }
+
+    /// 纯选择逻辑：严格 `created_at < before`（等号不选）、最旧优先、`max` 截断。
+    #[test]
+    fn select_purge_ids_is_before_bounded_and_oldest_first() {
+        let rows = vec![
+            (100i64, "a".to_string()),
+            (200, "b".to_string()),
+            (300, "c".to_string()),
+        ];
+        assert_eq!(
+            select_purge_ids(&rows, 250, 10),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // 严格小于：created_at == before 不选（before 边界不可越）
+        assert!(select_purge_ids(&rows, 100, 10).is_empty());
+        // max 截断，且优先取最旧
+        assert_eq!(
+            select_purge_ids(&rows, 999, 2),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // 乱序输入也按时间升序
+        let shuffled = vec![
+            (300i64, "c".to_string()),
+            (100, "a".to_string()),
+            (200, "b".to_string()),
+        ];
+        assert_eq!(
+            select_purge_ids(&shuffled, 999, 3),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    /// ★机制核心：清理审计日志后，那条 **`logs.purge` 前置 audit 必须仍在**，
+    /// 且窗口内的旧审计被删、窗口外的保留。
+    ///
+    /// **变异取证**：删掉 `purge_logs_before_core` 里的 `log_store.record_audit(...)`
+    /// 调用，`purge_logs.len() == 1` 这条断言立刻变红（= 机制未被破坏的可验证证据）。
+    #[test]
+    fn purge_pre_audit_survives_and_window_is_bounded() {
+        let store = test_log_store("survival");
+        let now = chrono::Utc::now().timestamp();
+        for (id, ts) in [
+            ("old-1", now - 300),
+            ("old-2", now - 200),
+            ("new-1", now - 10),
+        ] {
+            let mut a = crate::log::AuditLog::new("admin-x", "seed", id);
+            a.id = id.to_string();
+            a.created_at = ts;
+            store.audits.add(a).expect("add audit");
+        }
+        // 只清 created_at < now-100 ⇒ 命中 old-1/old-2；new-1 与 pre-audit 都在窗外
+        let before = now - 100;
+        let outcome = purge_logs_before_core(&store, "admin-1", PurgeTarget::Audits, before, 1000);
+        assert_eq!(outcome.matched, 2, "仅应命中两条旧审计");
+        assert_eq!(outcome.removed, 2);
+
+        let remaining = store.audits.list();
+        let ids: Vec<&str> = remaining.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&"new-1"), "窗口外审计必须保留：{ids:?}");
+        assert!(
+            !ids.contains(&"old-1") && !ids.contains(&"old-2"),
+            "窗口内旧审计应被删：{ids:?}"
+        );
+
+        // ★ pre-audit 存活：实现里 record_audit 一被删，此处即红
+        let purge_logs: Vec<_> = remaining
+            .iter()
+            .filter(|a| a.action == PURGE_AUDIT_ACTION)
+            .collect();
+        assert_eq!(
+            purge_logs.len(),
+            1,
+            "必须恰好留一条 logs.purge 审计：{ids:?}"
+        );
+        let entry = purge_logs[0];
+        assert_eq!(entry.target, "audits", "audit target 必须是目标口径");
+        let payload = entry.before.as_deref().unwrap_or_default();
+        for needle in [
+            "\"tool\":\"aigx_logs_purge\"",
+            "\"action\":\"audits\"",
+            "\"before\":",
+            "\"max\":1000",
+        ] {
+            assert!(
+                payload.contains(needle),
+                "audit payload 缺 {needle}（留痕不可核）：{payload}"
+            );
+        }
+    }
+
+    /// 清请求日志**绝不**触碰审计存储（证据隔离）；审计里的 logs.purge 留痕照旧落。
+    #[test]
+    fn purge_requests_never_touches_audit_store() {
+        let store = test_log_store("isolation");
+        let now = chrono::Utc::now().timestamp();
+        let mut a = crate::log::AuditLog::new("admin-x", "seed", "t");
+        a.id = "aud-keep".to_string();
+        a.created_at = now - 9999;
+        store.audits.add(a).expect("add audit");
+        let rl = crate::log::RequestLog {
+            id: "req-old".to_string(),
+            created_at: now - 9999,
+            ..Default::default()
+        };
+        store.requests.add(rl).expect("add reqlog");
+
+        purge_logs_before_core(&store, "admin-1", PurgeTarget::Requests, now - 100, 1000);
+
+        assert!(
+            store
+                .requests
+                .all_sorted_asc()
+                .iter()
+                .all(|l| l.id != "req-old"),
+            "窗口内旧请求日志应被删"
+        );
+        assert!(
+            store.audits.list().iter().any(|a| a.id == "aud-keep"),
+            "清请求日志不得动审计证据"
+        );
     }
 }
