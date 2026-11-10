@@ -18,7 +18,6 @@ use super::super::openai::AppState;
 use super::common::{
     admin_id_from_session, error_response, record_audit, verify_admin, verify_user,
 };
-use super::legacy::fetch_upstream_models;
 
 // 这里需要引用主 crate 的 Channel 和相关类型
 use crate::channel::{Channel, ChannelType};
@@ -403,10 +402,16 @@ pub async fn handle_list_channels(
 
 /// 列出可用模型（登录用户即可，对齐 new-api `GET /api/user/models`）
 ///
-/// 聚合所有启用渠道声明的模型，供 Playground 模型下拉使用。
-/// 不返回渠道明细/密钥，普通用户与管理员共用同一份可用模型清单。
-/// P1：附带元信息（owned_by/context_length/capabilities）。
-/// 按用户分组 allowed_models 白名单过滤（None/空=不限，对齐 UserGroup::allows_model）。
+/// 控制台模型下拉（聊天页 / AI 运维 / 密钥白名单共用）。
+///
+/// **数据源与客户端 API 的 `/v1/models` 完全同源**：两者都调
+/// [`crate::api::openai::collect_available_models`]，所以「客户端调得通的模型，
+/// 下拉里一定选得到」以及反过来都成立。
+///
+/// 本端点在此之上只多做两件事：
+/// 1. 按用户分组 `allowed_models` 白名单收窄（None/空 = 不限）；
+/// 2. 附加价格字段（`price_input` / `price_output` / `price_type`），
+///    供控制台展示 —— 客户端清单不含价格。
 pub async fn handle_available_models(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -423,145 +428,12 @@ pub async fn handle_available_models(
     };
     let allow_set = group_allow.unwrap_or_default();
 
-    // 先把已有 models/discovered_models 聚合出来；若结果为空，对"留空=全部"
-    // 的启用渠道做一次懒加载：调上游 /models 发现并写回 discovered_models，
-    // 下次请求即可命中缓存，本次也立即用上。
-    // 与 /v1/models 口径一致：冷却/断路器打开的渠道不参与聚合与懒加载。
-    let collect_models = |channels: &[Channel],
-                          store: &crate::channel::ChannelStore,
-                          rules: &crate::model::manage::ModelRules,
-                          sessions: &crate::account_session::AccountSessionStore|
-     -> Vec<(String, Option<&'static str>)> {
-        let mut seen = std::collections::HashSet::new();
-        let mut out: Vec<(String, Option<&'static str>)> = Vec::new();
-        for c in channels {
-            if !c.is_enabled() {
-                continue;
-            }
-            if store.is_in_cooldown(&c.id) || !store.circuit_breaker().allows_read_only(&c.id) {
-                continue;
-            }
-            // 账号型渠道：模型来自账号（账号白名单非空以账号为准，否则用渠道声明）。
-            // 与统一模型管理页同一口径，避免「管理页看得到、客户端拉不到」。
-            if c.channel_type == crate::channel::ChannelType::Account {
-                for session in sessions.for_channel(&c.id) {
-                    if session.status != "enabled" {
-                        continue;
-                    }
-                    let models: Vec<String> = if session.models.is_empty() {
-                        c.effective_models().to_vec()
-                    } else {
-                        session.models.clone()
-                    };
-                    for m in models {
-                        if m.is_empty()
-                            || rules.is_disabled(&session.provider, &m)
-                            || !seen.insert(m.clone())
-                        {
-                            continue;
-                        }
-                        out.push((m, None));
-                    }
-                }
-                continue;
-            }
-            let owned_by =
-                crate::model::metadata::owned_by_for_channel_type(c.channel_type.as_str());
-            // models 非空 = 白名单（只暴露声明部分）；空 = 全部（用发现快照兜底）
-            for m in c.effective_models() {
-                if m.is_empty() {
-                    continue;
-                }
-                // 统一模型管理里按 (provider, model) 关停的模型不对外暴露
-                if rules.is_disabled(c.channel_type.as_str(), m) {
-                    continue;
-                }
-                if !seen.insert(m.clone()) {
-                    continue;
-                }
-                out.push((m.clone(), owned_by));
-            }
-        }
-        out
-    };
+    // 聚合 = 与 /v1/models 同一实现（渠道/账号模型 + 懒发现 + 全局别名 + 自定义模型）
+    let models = super::super::openai::collect_available_models(&state).await;
 
-    let channels = state.channel_store.list();
-    let mut models = collect_models(
-        &channels,
-        &state.channel_store,
-        &state.model_rules,
-        &state.account_sessions,
-    );
-
-    if models.is_empty() {
-        let empty_channels: Vec<Channel> = channels
-            .iter()
-            .filter(|c| {
-                c.is_enabled()
-                    && c.models.is_empty()
-                    && c.discovered_models.is_empty()
-                    && !state.channel_store.is_in_cooldown(&c.id)
-                    && state
-                        .channel_store
-                        .circuit_breaker()
-                        .allows_read_only(&c.id)
-            })
-            .cloned()
-            .collect();
-        for ch in &empty_channels {
-            // 账号型渠道无渠道级凭证，模型发现按账号走管理面账号测试
-            if ch.channel_type == crate::channel::ChannelType::Account {
-                continue;
-            }
-            let key = ch.decode_api_key();
-            // CF/Zai 无需 base_url 也能拉；其余要求非空 base_url
-            if ch.base_url.trim().is_empty()
-                && ch.channel_type != crate::channel::ChannelType::Cloudflare
-                && ch.channel_type != crate::channel::ChannelType::Gemini
-                && ch.channel_type != crate::channel::ChannelType::Zai
-            {
-                continue;
-            }
-            // 5 秒内同渠道不重复拉上游，避免并发首启放大请求
-            if !state.channel_store.try_mark_lazy_discover(&ch.id) {
-                continue;
-            }
-            match fetch_upstream_models(&state, ch.channel_type, &ch.base_url, &key, &ch.quirks)
-                .await
-            {
-                Ok((_url, discovered)) => {
-                    if !discovered.is_empty() {
-                        if let Err(e) = state
-                            .channel_store
-                            .save_discovered_models(&ch.id, discovered.clone())
-                        {
-                            tracing::error!("lazy discover save failed for {}: {e}", ch.id);
-                        }
-                        let owned_by = crate::model::metadata::owned_by_for_channel_type(
-                            ch.channel_type.as_str(),
-                        );
-                        for m in &discovered {
-                            if m.is_empty() {
-                                continue;
-                            }
-                            models.push((m.clone(), owned_by));
-                        }
-                    }
-                }
-                Err(e) => tracing::warn!("lazy discover failed for channel {}: {:?}", ch.id, e),
-            }
-        }
-    }
-
-    // 去重 + 组白名单过滤
-    let mut seen = std::collections::HashSet::new();
     let data: Vec<Value> = models
         .into_iter()
-        .filter(|(m, _)| {
-            !m.is_empty()
-                && seen.insert(m.clone())
-                && (unrestricted || allow_set.iter().any(|a| a == m))
-        })
+        .filter(|(m, _)| unrestricted || allow_set.iter().any(|a| a == m))
         .map(|(m, owned_by)| {
             let meta = state.model_metadata.get(&m, owned_by);
             let price = state.pricing_store.get_price(&m);

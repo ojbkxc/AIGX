@@ -7,35 +7,28 @@ use axum::{
 use super::*;
 use serde_json::Value;
 
-/// GET /v1/models - 模型列表
-pub(crate) async fn handle_list_models(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // 完整校验（状态/过期/额度/IP/用户余额），但跳过模型白名单：
-    // 列举请求没有具体 model。原来用 verify_api_key 只查存在性，
-    // 过期/禁用的 Key 也能读到模型清单。
-    verify_api_key_listing(&state, &headers)?;
-
-    // 通用网关语义：模型列表 = 所有启用渠道声明/发现的模型 ∪ 别名映射的 key。
-    // 渠道 models 是主数据源（管理员在渠道上配置），映射只是可选别名。
-    // P1 模型元信息：owned_by 由渠道类型/名字推断 + 管理员覆盖，
-    // 附带 context_length 与能力标签（非标准扩展字段，客户端可忽略）。
-    let now = chrono::Utc::now().timestamp();
+/// 模型清单的**唯一聚合实现**（`/v1/models` 与控制台两个模型下拉共用）。
+///
+/// 为什么必须共用：客户端通过 `/v1/models` 看到的清单，与控制台里「聊天」/
+/// 「AI 运维」两个下拉能选的模型必须是同一份 —— 否则会出现「客户端调得通、
+/// 下拉里选不到」（或反过来「下拉能选、调用报 model 不存在」）的错位。
+/// 此前 `/api/models/available` 是第二份实现，缺了别名与自定义模型登记，
+/// 这个函数就是把两份收敛成一份。
+///
+/// 聚合口径（顺序即去重优先级）：
+/// 1. 启用且未冷却/未熔断的渠道：`models` 非空 = 白名单，空 = 用发现快照；
+///    账号型渠道按账号的 `models`（空则回落到渠道声明）；
+/// 2. 聚合为空时对「留空=全部」的渠道做一次懒发现（写回 `discovered_models`）；
+/// 3. 全局别名映射的**对外名**（关掉的别名不算 —— 列出来会让客户端看得到调不通）；
+/// 4. 管理员登记的自定义模型。
+///
+/// 返回 `(模型名, owned_by)`；去重已在内部完成，调用方可直接二次过滤
+/// （例如按用户分组白名单收窄、附加价格字段）。
+pub(crate) async fn collect_available_models(
+    state: &AppState,
+) -> Vec<(String, Option<&'static str>)> {
     let mut seen = std::collections::HashSet::new();
-    let mut model_list: Vec<Value> = Vec::new();
-
-    let build_entry = |name: &str, channel_owned_by: Option<&str>| {
-        let meta = state.model_metadata.get(name, channel_owned_by);
-        serde_json::json!({
-            "id": name,
-            "object": "model",
-            "created": now,
-            "owned_by": meta.owned_by,
-            "context_length": meta.context_length,
-            "capabilities": meta.capabilities,
-        })
-    };
+    let mut model_list: Vec<(String, Option<&'static str>)> = Vec::new();
 
     let channels = state.channel_store.list();
     for ch in &channels {
@@ -43,7 +36,7 @@ pub(crate) async fn handle_list_models(
             continue;
         }
         // 与调度口径一致：冷却/断路器打开的故障渠道不参与模型列表聚合，
-        // 避免上游故障把模型从 /v1/models 吞掉导致客户端误判模型下线
+        // 避免上游故障把模型从列表里吞掉导致客户端误判模型下线
         if state.channel_store.is_in_cooldown(&ch.id)
             || !state
                 .channel_store
@@ -52,7 +45,7 @@ pub(crate) async fn handle_list_models(
         {
             continue;
         }
-        // 账号型渠道：模型来自账号（与统一模型管理页 / /api/models/available 同口径）
+        // 账号型渠道：模型来自账号（与统一模型管理页同口径）
         if ch.channel_type == crate::channel::ChannelType::Account {
             for session in state.account_sessions.for_channel(&ch.id) {
                 if session.status != "enabled" {
@@ -70,7 +63,7 @@ pub(crate) async fn handle_list_models(
                     {
                         continue;
                     }
-                    model_list.push(build_entry(&m, None));
+                    model_list.push((m, None));
                 }
             }
             continue;
@@ -90,12 +83,12 @@ pub(crate) async fn handle_list_models(
             if !seen.insert(m.clone()) {
                 continue;
             }
-            model_list.push(build_entry(m, channel_owned_by));
+            model_list.push((m.clone(), channel_owned_by));
         }
     }
 
-    // 与 /api/models/available 口径一致：聚合为空时对"留空=全部"的启用且
-    // 非冷却渠道做一次懒加载，调上游 /models 发现并写回 discovered_models。
+    // 聚合为空时对"留空=全部"的启用且非冷却渠道做一次懒加载，
+    // 调上游 /models 发现并写回 discovered_models。
     if model_list.is_empty() {
         let empty_channels: Vec<crate::channel::Channel> = channels
             .iter()
@@ -129,7 +122,7 @@ pub(crate) async fn handle_list_models(
                 continue;
             }
             match crate::api::admin::fetch_upstream_models(
-                &state,
+                state,
                 ch.channel_type,
                 &ch.base_url,
                 &key,
@@ -152,7 +145,7 @@ pub(crate) async fn handle_list_models(
                             if m.is_empty() || !seen.insert(m.clone()) {
                                 continue;
                             }
-                            model_list.push(build_entry(m, channel_owned_by));
+                            model_list.push((m.clone(), channel_owned_by));
                         }
                     }
                 }
@@ -164,7 +157,7 @@ pub(crate) async fn handle_list_models(
     // 用 active_mappings：关掉的别名不参与改名，列出来会让客户端「看得到调不通」。
     for name in state.model_mapper.active_mappings().keys() {
         if seen.insert(name.clone()) {
-            model_list.push(build_entry(name, None));
+            model_list.push((name.clone(), None));
         }
     }
     for entry in state.model_mapper.custom_models() {
@@ -172,14 +165,46 @@ pub(crate) async fn handle_list_models(
             continue;
         }
         let owned_by = crate::model::metadata::owned_by_for_channel_type(&entry.provider);
-        model_list.push(build_entry(&entry.id, owned_by));
+        model_list.push((entry.id, owned_by));
     }
+    model_list
+}
+
+/// GET /v1/models - 模型列表（客户端可见的对外清单）
+pub(crate) async fn handle_list_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // 完整校验（状态/过期/额度/IP/用户余额），但跳过模型白名单：
+    // 列举请求没有具体 model。原来用 verify_api_key 只查存在性，
+    // 过期/禁用的 Key 也能读到模型清单。
+    verify_api_key_listing(&state, &headers)?;
+
+    // 聚合走与控制台下拉同一个函数（见 collect_available_models 的说明）：
+    // 客户端能调到的模型，控制台就能选到，反之亦然。
+    let now = chrono::Utc::now().timestamp();
+    let data: Vec<Value> = collect_available_models(&state)
+        .await
+        .into_iter()
+        .map(|(name, channel_owned_by)| {
+            let meta = state.model_metadata.get(&name, channel_owned_by);
+            serde_json::json!({
+                "id": name,
+                "object": "model",
+                "created": now,
+                "owned_by": meta.owned_by,
+                "context_length": meta.context_length,
+                "capabilities": meta.capabilities,
+            })
+        })
+        .collect();
 
     Ok(Json(serde_json::json!({
         "object": "list",
-        "data": model_list
+        "data": data
     })))
 }
+
 /// GET /v1/models/{model} - 模型详情
 pub(crate) async fn handle_get_model(
     State(state): State<AppState>,
@@ -217,5 +242,62 @@ pub(crate) async fn handle_get_model(
             &format!("Model '{model}' not found"),
             StatusCode::NOT_FOUND,
         ))
+    }
+}
+
+#[cfg(test)]
+mod shared_catalog_tests {
+    //! 钉住「客户 API 与控制台下拉同源」这个不变量。
+    //!
+    //! 两边历史上是**两份独立实现**，`/api/models/available` 少聚合了全局别名
+    //! 与自定义模型登记，导致「客户端调得通、控制台下拉里选不到」。现在两边都
+    //! 调 [`collect_available_models`]；本测试断言的是**结构不变量**——两个
+    //! handler 的源文件里都必须出现对该函数的调用，且不再各自内联聚合逻辑。
+    //!
+    //! 纯文本断言（不构造 AppState）：构造完整 AppState 需要 DB/渠道/密钥等
+    //! 一大票依赖，成本远高于它要防的那个回归。
+
+    const MODELS_SRC: &str = include_str!("models.rs");
+    const CHANNELS_SRC: &str = include_str!("../admin/channels.rs");
+
+    /// `/v1/models` 走共享聚合函数（而不是自己内联一份）。
+    #[test]
+    fn list_models_uses_shared_collector() {
+        assert!(
+            MODELS_SRC.contains("collect_available_models(&state)"),
+            "/v1/models 必须调用 collect_available_models，不得内联聚合逻辑"
+        );
+    }
+
+    /// 控制台下拉走同一个共享聚合函数。
+    #[test]
+    fn available_models_uses_shared_collector() {
+        assert!(
+            CHANNELS_SRC.contains("collect_available_models(&state)"),
+            "/api/models/available 必须调用 collect_available_models，不得内联聚合逻辑"
+        );
+    }
+
+    /// 反向断言：`/api/models/available` 里不该再出现「自己遍历渠道聚合」的特征代码。
+    /// 出现即说明有人把第二份实现又抄回来了。
+    #[test]
+    fn available_models_has_no_second_aggregation() {
+        for marker in [
+            "effective_models()",
+            "for_channel(&c.id)",
+            "try_mark_lazy_discover",
+        ] {
+            assert!(
+                !CHANNELS_SRC.contains(marker),
+                "channels.rs 出现了内联聚合特征 `{marker}`：模型聚合必须只有一份实现"
+            );
+        }
+    }
+
+    /// 共享聚合函数必须同时覆盖别名与自定义模型（这两项正是当年漏掉的）。
+    #[test]
+    fn collector_covers_aliases_and_custom_models() {
+        assert!(MODELS_SRC.contains("active_mappings()"));
+        assert!(MODELS_SRC.contains("custom_models()"));
     }
 }
