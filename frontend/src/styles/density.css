@@ -26,12 +26,30 @@
   color: var(--text-muted);
   text-align: left;
   white-space: nowrap;
+  /* 纵向 sticky 表头（需配合 .table-wrapper-scroll 的有界滚动容器） */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--table-header-bg);
+}
+/* 与全局表一致的行下划线，避免 .dense-table 的「无框感」 */
+.dense-table td {
+  border-bottom: 1px solid var(--border-color);
 }
 .dense-table tbody tr {
   transition: background-color var(--transition-fast);
 }
 .dense-table tbody tr:hover {
   background: var(--hover-bg);
+}
+
+/* 有界滚动容器：让 .dense-table 的 sticky 表头真正生效（SPEC §3.2）。
+   仅桌面生效——移动端 ≤767px 走 .table-wrapper 的卡片化布局，不应被套进定高滚动区。 */
+@media (min-width: 768px) {
+  .table-wrapper-scroll {
+    max-height: calc(100vh - 250px);
+    overflow: auto;
+  }
 }
 
 /* 三档对齐工具类（列设置面板 / 表头复用；晚于 .dense-table th 声明，同特异度可覆盖其 text-align） */

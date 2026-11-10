@@ -320,8 +320,8 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
         ) : items.length === 0 ? (
           <EmptyState message={t('暂无兑换码')} />
         ) : (
-          <div className="table-wrapper">
-            <table>
+          <div className="table-wrapper table-wrapper-scroll">
+            <table className="dense-table">
               <colgroup>
                 {appliedCols.map((c) => (
                   <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />

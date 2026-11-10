@@ -616,8 +616,8 @@ export default function Wallet(): JSX.Element {
 
           {/* 我的订阅列表 */}
           {mySubs.length > 0 && (
-            <div className="table-wrapper">
-              <table>
+            <div className="table-wrapper table-wrapper-scroll">
+              <table className="dense-table">
                 <thead>
                   <tr>
                     <th>{t('套餐')}</th>
@@ -748,8 +748,8 @@ export default function Wallet(): JSX.Element {
         {orders.length === 0 ? (
           <EmptyState message={t('暂无订单')} icon="🧾" />
         ) : (
-          <div className="table-wrapper">
-            <table>
+          <div className="table-wrapper table-wrapper-scroll">
+            <table className="dense-table">
               <colgroup>
                 {orderCols.map((c) => (
                   <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />

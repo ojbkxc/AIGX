@@ -482,6 +482,18 @@
   color: var(--text-muted);
 }
 
+/* 定价列内联（§5）：整格可点，点击/回车/Space 打开定价弹窗 */
+.mm-c-price {
+  cursor: pointer;
+}
+.mm-c-price:hover {
+  background: var(--hover-bg);
+}
+.mm-c-price:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
 /* ── 来源列：只读小徽标（账号琥珀 / 渠道中性） ── */
 .mm-sources {
   display: flex;

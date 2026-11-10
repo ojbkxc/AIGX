@@ -1358,6 +1358,20 @@ export interface AccountSessionItem {
    * limiters 双读；非空时条件组优先生效。
    */
   limiter_groups?: LimiterGroup[];
+  /** 出口代理当前可用性（后端 proxy_state_of；列表行内下拉的状态点） */
+  proxy_state?: {
+    mode: 'direct' | 'url' | 'pool' | 'rotate';
+    ok: boolean;
+    error?: string | null;
+  };
+  /** 限制器当前拦截快照（后端 limiter_state_of；「限额」筛选与状态徽章的唯一判据） */
+  limiter_state?: {
+    account_skip: boolean;
+    skip_models: string[];
+    disable: boolean;
+  };
+  /** 登录态推算的「需要重新登录」提醒时刻（unix 秒；仅登录态型账号有，后端 relogin_due_at） */
+  relogin_due_at?: number | null;
   created_at?: number;
   updated_at?: number;
 }

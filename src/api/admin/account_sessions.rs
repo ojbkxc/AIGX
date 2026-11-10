@@ -197,8 +197,9 @@ fn default_true() -> bool {
 
 /// 账号部分更新请求（PATCH）：只应用显式给出的字段。
 ///
-/// 与 PUT（整表单替换）区分：PATCH 不触碰 base_url / models / 代理 / 凭证 /
-/// 到期时间，供控制台开关与 AI 工具做「启停 / 调优先级」这类小操作。
+/// 与 PUT（整表单替换）区分：PATCH 不触碰 base_url / models / 凭证 /
+/// 到期时间，供控制台开关与 AI 工具做「启停 / 调优先级 / 换出口代理」
+/// 这类小操作。
 #[derive(Debug, Default, Deserialize)]
 pub struct AccountSessionPatch {
     #[serde(default)]
@@ -219,6 +220,12 @@ pub struct AccountSessionPatch {
     /// limiters：缺省 = 保持原值；空数组 = 清空回落扁平双读。校验失败 400。
     #[serde(default)]
     pub limiter_groups: Option<Vec<crate::account_session::limiter::LimiterGroup>>,
+    /// 账号级出口代理（字符串）。**三态**：缺省 = 保持原值；空串 = 清空回落
+    /// 直连；非空 = 设置为该值（`pool:<id>` / `rotate` / 直填 URL，语义见
+    /// `proxy_pool::resolve_proxy`）。列表页行内下拉「选中即存」用它，避免
+    /// 为改一个代理拉整份表单走 PUT。
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 impl AccountSessionPatch {
@@ -549,13 +556,75 @@ fn cooldowns_json(session: &AccountSession, now: i64) -> Value {
 }
 
 /// 代理串脱敏：`http://user:pass@host` → `http://***@host`（无 userinfo 原样返回）。
+///
+/// `pool:<id>` / `rotate` 这类**引用形态**必须原样透出——前端行内下拉要拿它
+/// 回选当前项；套上 `***@` 规则会把 id 吞掉（引用串里没有 `@`，但一旦池条目
+/// 是带认证的 URL 就会被误判）。引用解析失败的告警由 `proxy_state` 单独给。
 fn mask_proxy(proxy: &str) -> String {
+    if proxy.starts_with("pool:") || proxy.starts_with("rotate") {
+        return proxy.to_string();
+    }
     let Some((userinfo, host)) = proxy.rsplit_once('@') else {
         return proxy.to_string();
     };
     let scheme_end = userinfo.find("://").map(|index| index + 3).unwrap_or(0);
     let scheme = &userinfo[..scheme_end];
     format!("{scheme}***@{host}")
+}
+
+/// 出口代理**当前可用性**（列表行内下拉的状态点）。
+///
+/// 口径与 `AccountSessionStore::client_for`（`src/account_session/store.rs:559`）
+/// 完全一致：走同一个 `resolve_proxy`，因此「列表里显示绿色」与「转发真的能用」
+/// 不会各算各的。返回 `{ "mode": ..., "ok": bool, "error": Option<String> }`：
+/// - `mode = "direct"`：未配置代理（这不是错误，`ok = true`）；
+/// - `mode = "url"`：直填的代理 URL（合法性由建连时把关，这里只报配置层 ok）；
+/// - `mode = "pool"` / `mode = "rotate"`：池引用（条目被删 / 被禁用时 `ok = false`
+///   并给出原因——这正是「代理异常」徽章的判据）。
+fn proxy_state_of(session: &AccountSession) -> Value {
+    let Some(raw) = session
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    else {
+        return json!({ "mode": "direct", "ok": true, "error": null });
+    };
+    let mode = if raw.starts_with("pool:") {
+        "pool"
+    } else if raw.starts_with("rotate") {
+        "rotate"
+    } else {
+        "url"
+    };
+    // account_key 传空串：这里只要「能不能解析」，不推进 rotate 轮询游标。
+    match crate::proxy_pool::resolve_proxy(Some(raw), "") {
+        Ok(_) => json!({ "mode": mode, "ok": true, "error": null }),
+        Err(reason) => json!({ "mode": mode, "ok": false, "error": reason }),
+    }
+}
+
+/// 限制器**当前拦截快照**（列表「限额」筛选 / 状态列徽标的唯一判据）。
+///
+/// 双读语义与选号阶段一致：
+/// - **条件组**（`limiter_groups` 非空）→ `limiter_group_verdict()`；
+/// - **存量扁平规则**（`limiters`）→ `should_skip_by_balance()` 的余额 skip。
+///
+/// 二者合并成 `{ account_skip, skip_models, disable }`。前端拿它在本地做
+/// 「正常 / 已限流」分段与双级计数，不再自己按 limiters 重算一套阈值——
+/// 那样一旦后端求值口径变化（例如 unknown 条件宁放勿误伤），列表就会先红。
+fn limiter_state_of(session: &AccountSession) -> Value {
+    let verdict = session.limiter_group_verdict();
+    let flat_balance_skip = if session.limiter_groups.is_empty() {
+        session.should_skip_by_balance()
+    } else {
+        false
+    };
+    json!({
+        "account_skip": verdict.account_skip || flat_balance_skip,
+        "skip_models": verdict.skip_models,
+        "disable": verdict.disable,
+    })
 }
 
 /// 渠道展示名（找不到返回空串）。
@@ -581,6 +650,9 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "chat_path": session.chat_path,
         "api_key": mask_secret(&session.credential.secret_plain()),
         "proxy": session.proxy.as_deref().map(mask_proxy),
+        // 出口代理**当前可用性**（列表行内下拉的状态点）。与 `proxy` 分开：
+        // `proxy` 是配置（脱敏），`proxy_state` 是「这条引用现在解析得出来吗」。
+        "proxy_state": proxy_state_of(session),
         "status": session.runtime_status(now),
         "configured_status": session.status,
         "priority": session.priority,
@@ -594,6 +666,11 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         // 缺省 None → 序列化为 null → 前端 ?? [] 容忍；体积成本与 limiters
         // 同量级（条件组用户存量极少），不做编辑弹窗专用回填端点。
         "limiter_groups": session.limiter_groups,
+        // 限制器**当前拦截快照**（列表「限额」筛选与状态列徽标的判据）。
+        // 与 `limiter_group_verdict` 同口径：条件组 + 存量扁平规则双读，
+        // 拿不到读数（没查过余额）时条件不命中——宁放勿误伤，前端也就
+        // 不会因为「查不出」把账号归到「已限流」。
+        "limiter_state": limiter_state_of(session),
         // 续期令牌只暴露「有没有」与脱敏形态，不回明文
         "has_refresh_token": !session.refresh_secret.is_empty(),
         "refresh_token": if session.refresh_secret.is_empty() {
@@ -980,6 +1057,21 @@ pub async fn handle_patch_account_session(
         crate::account_session::limiter::validate_groups(&mut groups)
             .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
         next.limiter_groups = groups;
+    }
+    // 代理三态：缺省保持、空串清空、非空设置。赋值前先试解析一次——
+    // 引用了不存在/已禁用的池条目要在写入口就拒绝，而不是等下一次转发
+    // 才在选号阶段报配置错误（那时用户已经以为改成功了）。
+    if let Some(raw) = body.proxy.as_deref() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            next.proxy = None;
+        } else {
+            // account_key 传空串：校验只判断「这条引用现在能不能解析」，
+            // 不该顺手推进 rotate 的轮询游标（那是请求时 client_for 的事）。
+            crate::proxy_pool::resolve_proxy(Some(trimmed), "")
+                .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+            next.proxy = Some(trimmed.to_string());
+        }
     }
     let saved = state.account_sessions.upsert(next).map_err(|e| {
         error_response(
@@ -2834,4 +2926,82 @@ pub struct UsageQueryBody {
     /// 单账号查询（账号页每行的「余额」按钮）；空/缺省 = 批量
     #[serde(default)]
     pub id: Option<String>,
+}
+
+#[cfg(test)]
+mod proxy_state_tests {
+    use super::*;
+
+    /// 未配置代理：direct + ok（不是错误状态）。
+    #[test]
+    fn proxy_state_direct_when_unset() {
+        let mut s = AccountSession::new("ch-1", "a1");
+        s.proxy = None;
+        let v = proxy_state_of(&s);
+        assert_eq!(v["mode"], "direct");
+        assert_eq!(v["ok"], true);
+        assert!(v["error"].is_null());
+    }
+
+    /// 直填 URL：mode=url，配置层恒 ok（连通性由建连时把关，不在列表判）。
+    #[test]
+    fn proxy_state_url_is_config_ok() {
+        let mut s = AccountSession::new("ch-1", "a1");
+        s.proxy = Some("http://127.0.0.1:7890".to_string());
+        let v = proxy_state_of(&s);
+        assert_eq!(v["mode"], "url");
+        assert_eq!(v["ok"], true);
+    }
+
+    /// 引用不存在 / 为空的池条目：ok=false 且带原因（「代理异常」徽章判据）。
+    #[test]
+    fn proxy_state_pool_reference_reports_error() {
+        let mut s = AccountSession::new("ch-1", "a1");
+        s.proxy = Some("pool:".to_string());
+        let v = proxy_state_of(&s);
+        assert_eq!(v["mode"], "pool");
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap_or("").contains("id"));
+    }
+
+    /// 脱敏：引用形态原样透出（前端行内下拉要回选），URL 形态才打码。
+    #[test]
+    fn mask_proxy_keeps_reference_forms() {
+        assert_eq!(mask_proxy("pool:abc-123"), "pool:abc-123");
+        assert_eq!(mask_proxy("rotate"), "rotate");
+        assert_eq!(mask_proxy("rotate:a,b"), "rotate:a,b");
+        assert_eq!(
+            mask_proxy("http://user:pass@1.2.3.4:8080"),
+            "http://***@1.2.3.4:8080"
+        );
+    }
+
+    /// 限流快照：未配置任何限制器 → 三项全空（前端据此归入「正常」）。
+    #[test]
+    fn limiter_state_empty_when_unconfigured() {
+        let s = AccountSession::new("ch-1", "a1");
+        let v = limiter_state_of(&s);
+        assert_eq!(v["account_skip"], false);
+        assert_eq!(v["disable"], false);
+        assert_eq!(v["skip_models"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// 限流快照：余额低于扁平规则阈值 → account_skip=true
+    ///（与选号阶段 `should_skip_by_balance` 同口径）。
+    #[test]
+    fn limiter_state_flat_balance_skip() {
+        let mut s = AccountSession::new("ch-1", "a1");
+        s.limiters = vec![crate::account_session::model::AccountLimiterRule {
+            kind: "balance".to_string(),
+            action: "skip".to_string(),
+            threshold: 5.0,
+            reset: None,
+            period: None,
+            enabled: true,
+        }];
+        s.last_balance = Some(json!({ "available": 1.0 }));
+        let v = limiter_state_of(&s);
+        assert_eq!(v["account_skip"], true);
+        assert_eq!(v["disable"], false);
+    }
 }

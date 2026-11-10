@@ -654,8 +654,8 @@ export default function NetworkLayer(): JSX.Element {
               {accounts.length === 0 ? (
                 <p className="text-gray-500 text-sm py-4">{t('暂无账号（CF 账号池为空）')}</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
+                <div className="overflow-x-auto table-wrapper-scroll">
+                  <table className="w-full text-sm dense-table">
                     <colgroup>
                       {nlCols.filter((c) => ['name','id','status','last_used','act'].includes(c.key)).map((c) => (
                         <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
@@ -725,8 +725,8 @@ export default function NetworkLayer(): JSX.Element {
         {!scheduler || !Array.isArray(scheduler.channels) || scheduler.channels.length === 0 ? (
           <p className="text-gray-500 text-sm py-4">{t('暂无调度数据')}</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+          <div className="overflow-x-auto table-wrapper-scroll">
+            <table className="w-full text-sm dense-table">
               <colgroup>
                 {nlCols.filter((c) => ['channel','breaker','health','aimd','success','trips'].includes(c.key)).map((c) => (
                   <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />

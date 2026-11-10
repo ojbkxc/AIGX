@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type FormEvent, type ReactNode } from 'react';
+import { cloneElement, Fragment, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Columns3, Download, Eye, EyeOff, FlaskConical, Globe, KeyRound, ListChecks, Loader2, Pencil, Plus, Power,
-  RefreshCw, RotateCcw, SlidersHorizontal, Trash2, Upload, User, Wallet, Wrench,
+  ChevronsDownUp, ChevronsUpDown, Columns3, Download, Eye, EyeOff, FlaskConical, Gift, Globe, GripVertical,
+  KeyRound, ListChecks, Loader2, MoreHorizontal, Pencil, Plus, Power, RotateCcw, SlidersHorizontal,
+  Trash2, Upload, User, Wallet, Wrench,
 } from 'lucide-react';
 import { api } from '../api';
 import { providerIcon } from '../lib/providerIcons';
 import { addConfigOf, cardKindOf, isCardHidden } from '../lib/addAccountConfigs';
+import { CHECKIN_PROVIDERS } from '../lib/checkinProviders';
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import AccountBatchDialog from '../components/AccountBatchDialog';
@@ -16,6 +18,7 @@ import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
+import { CLIENT_PAGE_SIZES, TablePaginationFooter, usePageSize } from '../components/ui/TableShell';
 import {
   applyTableColumns,
   readTableColumns,
@@ -36,6 +39,7 @@ import type {
   CatalogSyncAccount,
   ChannelItem,
   ImportSourceEntry,
+  ProxyPoolItem,
 } from '../types';
 import type { LimiterGroup } from '../types/limiter';
 import './AccountSessions.css';
@@ -335,13 +339,14 @@ function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: Ac
 
 /* ══ 列定义（对齐 Agent2API accounts-columns：列宽拖动 + 列显隐 + 横滚底线） ══ */
 
-type AsCol = 'pick' | 'name' | 'provider' | 'status' | 'priority' | 'conn' | 'expiry' | 'usage' | 'rate' | 'cooldown' | 'act';
+type AsCol = 'pick' | 'name' | 'provider' | 'proxy' | 'status' | 'priority' | 'conn' | 'expiry' | 'usage' | 'rate' | 'cooldown' | 'act';
 
 /** 全部列：默认宽（px）；flex 列没有用户覆盖时不写宽度，吃表格剩余宽度 */
 const AS_COLS: Array<{ key: AsCol; label: string; w: number; lock?: boolean; flex?: boolean }> = [
   { key: 'pick', label: '选择', w: 44, lock: true },
   { key: 'name', label: '账号', w: 210, lock: true, flex: true },
   { key: 'provider', label: 'Provider', w: 126 },
+  { key: 'proxy', label: '代理', w: 132 },
   { key: 'status', label: '状态', w: 92, lock: true },
   { key: 'priority', label: '优先级', w: 88 },
   { key: 'conn', label: '连接数', w: 60 },
@@ -377,6 +382,28 @@ const LS_AUTOBAL = 'aigx-as-autobal'; // 自动余额轮询间隔（分钟）
 const LS_COLLAPSED = 'aigx-as-collapsed';
 /** 列表排序记忆（对齐上游 accounts-sort 的落盘偏好；'list' = 调度优先序） */
 const LS_SORTKEY = 'aigx-as-sortkey';
+/** 筛选偏好（SPEC §2.5：只落 provider/status/limit，不落搜索词） */
+const LS_FILTER = 'aigx-as-filter';
+/** 每页条数（SPEC §2.1：与全站 aigx-tbl-pagesize.<page> 命名一致） */
+const LS_PSZ = 'aigx-tbl-pagesize.accounts';
+
+type StatusSeg = 'all' | 'enabled' | 'disabled' | 'cooling';
+type LimitSeg = 'all' | 'normal' | 'limited';
+
+interface FilterPrefs {
+  provider: string;
+  status: StatusSeg;
+  limit: LimitSeg;
+}
+
+/** 读取筛选偏好并做档位合法校验（脏值回落「全部」） */
+function readFilterPrefs(): FilterPrefs {
+  const raw = readLS<Partial<FilterPrefs>>(LS_FILTER, {});
+  const status: StatusSeg =
+    raw.status === 'enabled' || raw.status === 'disabled' || raw.status === 'cooling' ? raw.status : 'all';
+  const limit: LimitSeg = raw.limit === 'normal' || raw.limit === 'limited' ? raw.limit : 'all';
+  return { provider: typeof raw.provider === 'string' ? raw.provider : '', status, limit };
+}
 
 /**
  * 连接数快照走 api.getAccountSessionConnections（已收敛进 api/index.ts）：
@@ -428,8 +455,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   /** 目标渠道（新增/导入时的落点）；不再是用户可见的筛选维度。
    *  初值来自 URL `?provider=`（供应商列表「管理账号」下钻），之后不再变化。 */
   const [channelFilter] = useState(initialChannelFilter ?? '');
-  /** 提供商筛选（对齐 Agent2API 账号页的 provider 下拉）：'' = 全部 */
-  const [providerFilter, setProviderFilter] = useState('');
+  /** 提供商筛选（对齐 Agent2API 账号页的 provider 下拉）：'' = 全部；偏好落盘（§2.5） */
+  const [providerFilter, setProviderFilter] = useState<string>(() => readFilterPrefs().provider);
   const [search, setSearch] = useState('');
 
   const [showModal, setShowModal] = useState(false);
@@ -453,7 +480,9 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   // 状态分段过滤（对齐 Agent2API 账号页：全部/启用/禁用/冷却中）
-  const [statusSeg, setStatusSeg] = useState<'all' | 'enabled' | 'disabled' | 'cooling'>('all');
+  const [statusSeg, setStatusSeg] = useState<StatusSeg>(() => readFilterPrefs().status);
+  // 限额分段过滤（SPEC §2.4：全部/正常/已限流；唯一判据是后端 limiter_state）
+  const [limitSeg, setLimitSeg] = useState<LimitSeg>(() => readFilterPrefs().limit);
   // 列表排序（对齐上游 accounts-sort：展示序不改调度 priority；
   // credit 档按凭证/套餐到期（最急着过期的排最前，没到期值排最后），
   // added 档按创建时间新→旧；默认 list = 调度优先序，选择落盘 localStorage）
@@ -471,7 +500,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   // ok 分支同时带主额度桶视图（.as-usage-pool 两行形态的数据）
   type BalanceView =
     | { state: 'loading' }
-    | { state: 'ok'; pool: UsagePoolView | null; text: string; windows?: AccountUsageWindow[] }
+    | { state: 'ok'; pool: UsagePoolView | null; text: string; windows?: AccountUsageWindow[]; raw?: AccountBalance | null }
     | { state: 'err'; text: string };
   const [balances, setBalances] = useState<Record<string, BalanceView>>({});
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
@@ -538,6 +567,25 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   /** 连接数轮询读数（端点未上线时为空表，展示层用 in_flight 兜底） */
   const [connCounts, setConnCounts] = useState<Record<string, number>>({});
 
+  // ── SPEC 1.0.44：行内代理下拉 / 领套餐 / ⋯ 聚合菜单 / 余额明细弹层 / 分页 ──
+  /** 代理池快照（§2.11 行内下拉选项；一次拉取，失败退化为「直连 + 当前值」） */
+  const [proxyPool, setProxyPool] = useState<ProxyPoolItem[] | null>(null);
+  const [proxySavingId, setProxySavingId] = useState<string | null>(null);
+  const [claimingId, setClaimingId] = useState<string | null>(null);
+  /** 操作列 ⋯ 聚合菜单（§2.13：刷新 / 设为首选 / 并发 / 删除；一次只开一份） */
+  const [actMenuFor, setActMenuFor] = useState<string | null>(null);
+  const actMenuRef = useRef<HTMLDivElement | null>(null);
+  const [concDraft, setConcDraft] = useState('');
+  /** 余额明细弹层（§2.9：点击余额格查看 wallets / windows 明细） */
+  const [balancePopFor, setBalancePopFor] = useState<string | null>(null);
+  const balancePopRef = useRef<HTMLDivElement | null>(null);
+  /** 分页（§2.1：公共 usePageSize + TablePaginationFooter；默认「全部」保持原体验） */
+  const [pageSize, setPageSize] = usePageSize(LS_PSZ, CLIENT_PAGE_SIZES, 'all');
+  const [rawPage, setRawPage] = useState(1);
+  /** 组带拖拽（§2.6）：拖拽中/悬停目标组 */
+  const [groupDragActive, setGroupDragActive] = useState<string | null>(null);
+  const [groupDragOver, setGroupDragOver] = useState<string | null>(null);
+
   // ── 账号设置弹窗五分组导航（基本信息/凭证/代理/限制器/高级）──
   const [dlgSeg, setDlgSeg] = useState<DlgSeg>('basic');
   /** 限制器规则草稿（保存随表单主体之后单独 PATCH，失败不拖累主保存） */
@@ -581,6 +629,39 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 筛选偏好落盘（§2.5：provider / 状态档 / 限额档；搜索词不落盘）
+  useEffect(() => {
+    writeLS(LS_FILTER, { provider: providerFilter, status: statusSeg, limit: limitSeg });
+  }, [providerFilter, statusSeg, limitSeg]);
+
+  // 失效自愈（§2.5）：存的 provider 在当前 sessions 里已不存在 → 静默回到「全部」。
+  // loading / error 期间不动，避免一次网络抖动把偏好清掉。
+  useEffect(() => {
+    if (loading || error || !providerFilter) return;
+    if (sessions.some((s) => s.provider === providerFilter)) return;
+    setProviderFilter('');
+  }, [loading, error, sessions, providerFilter]);
+
+  // 代理池快照（§2.11 行内下拉的来源；失败静默退化为「直连 + 当前值 + 轮询」）
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await api.listProxyPool();
+        // 后端 /api/proxy-pool 的条目在响应顶层（{success, items, total}），
+        // 兼容未来包一层 data 的形态；两种取法都认。
+        const top = res as unknown as { items?: ProxyPoolItem[] };
+        const items = Array.isArray(top.items) ? top.items : (res.data?.items ?? []);
+        if (alive) setProxyPool(items);
+      } catch {
+        if (alive) setProxyPool([]);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // 冷却倒计时：任一账号仍有未到期冷却就每秒重画一次（数据本身不重拉）
   const hasActiveCooldown = sessions.some((s) =>
@@ -1215,8 +1296,30 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   /** 账号是否处于冷却中（任一上游真名还有剩余冷却秒数） */
   const isCooling = (s: AccountSessionItem): boolean =>
     Object.values(s.cooldowns || {}).some((v) => Number(v) > 0);
-  // 分段计数基于「筛选+搜索」过滤后、状态分段前的集合（计数口径=用户看到的池子）
-  const segBase = sessions.filter((s) => {
+  /**
+   * 「已限流」完整口径（SPEC §2.4 / 上游 accounts-domain.ts isLimitedNow）：
+   * 模型冷却中，或限制器把账号拦在选路外（整号跳过；Token 限额禁用只对非启用账号有意义）。
+   * 判据只用后端 limiter_state，不在前端按 limiters 重算阈值。
+   */
+  const isLimitedNow = (s: AccountSessionItem): boolean =>
+    isCooling(s)
+    || s.limiter_state?.account_skip === true
+    || (s.limiter_state?.disable === true && s.status !== 'enabled');
+  /** 状态分段：全部 / 启用（不含冷却）/ 禁用 / 冷却中 */
+  const matchesStatusSeg = (s: AccountSessionItem): boolean => {
+    if (statusSeg === 'enabled') return s.status === 'enabled' && !isCooling(s);
+    if (statusSeg === 'disabled') return s.status !== 'enabled';
+    if (statusSeg === 'cooling') return s.status === 'enabled' && isCooling(s);
+    return true;
+  };
+  /** 限额分段：禁用账号既不算「正常」也不算「已限流」（SPEC §2.4） */
+  const matchesLimitSeg = (s: AccountSessionItem): boolean => {
+    if (limitSeg === 'all') return true;
+    if (s.status !== 'enabled') return false;
+    return limitSeg === 'limited' ? isLimitedNow(s) : !isLimitedNow(s);
+  };
+  /** 基础集合：渠道 + 提供商 + 搜索（两个分段计数的共同 scope） */
+  const scopeBase = sessions.filter((s) => {
     if (channelFilter && s.channel_id !== channelFilter) return false;
     if (providerFilter && s.provider !== providerFilter) return false;
     if (!needle) return true;
@@ -1227,18 +1330,23 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       (s.base_url || '').toLowerCase().includes(needle)
     );
   });
+  // 双级计数（SPEC §2.4 / 上游 filterCounts）：
+  // 状态段 scope = provider + 限额 + 搜索（不含自身状态维度）；
+  // 限额段 scope = provider + 状态 + 搜索（不含自身限额维度）。
+  const statusScope = scopeBase.filter(matchesLimitSeg);
   const segCounts = {
-    all: segBase.length,
-    enabled: segBase.filter((s) => s.status === 'enabled' && !isCooling(s)).length,
-    disabled: segBase.filter((s) => s.status !== 'enabled').length,
-    cooling: segBase.filter((s) => s.status === 'enabled' && isCooling(s)).length,
+    all: statusScope.length,
+    enabled: statusScope.filter((s) => s.status === 'enabled' && !isCooling(s)).length,
+    disabled: statusScope.filter((s) => s.status !== 'enabled').length,
+    cooling: statusScope.filter((s) => s.status === 'enabled' && isCooling(s)).length,
   };
-  const visible = segBase.filter((s) => {
-    if (statusSeg === 'enabled') return s.status === 'enabled' && !isCooling(s);
-    if (statusSeg === 'disabled') return s.status !== 'enabled';
-    if (statusSeg === 'cooling') return s.status === 'enabled' && isCooling(s);
-    return true;
-  });
+  const limitScope = scopeBase.filter(matchesStatusSeg);
+  const limitCounts = {
+    all: limitScope.length,
+    normal: limitScope.filter((s) => s.status === 'enabled' && !isLimitedNow(s)).length,
+    limited: limitScope.filter((s) => s.status === 'enabled' && isLimitedNow(s)).length,
+  };
+  const visible = scopeBase.filter(matchesStatusSeg).filter(matchesLimitSeg);
 
   // 列表排序（纯展示序，不改调度 priority）
   const visibleSorted = useMemo(() => {
@@ -1360,6 +1468,30 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     return () => window.removeEventListener('mousedown', onDown);
   }, [groupMenuFor]);
 
+  // 操作列 ⋯ 聚合菜单点外关闭
+  useEffect(() => {
+    if (!actMenuFor) return undefined;
+    const onDown = (e: MouseEvent): void => {
+      if (actMenuRef.current && !actMenuRef.current.contains(e.target as Node)) {
+        setActMenuFor(null);
+      }
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [actMenuFor]);
+
+  // 余额明细弹层点外关闭
+  useEffect(() => {
+    if (!balancePopFor) return undefined;
+    const onDown = (e: MouseEvent): void => {
+      if (balancePopRef.current && !balancePopRef.current.contains(e.target as Node)) {
+        setBalancePopFor(null);
+      }
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [balancePopFor]);
+
   // ── 分组折叠（对齐上游 toggleGroupCollapsed：收起/展开随点随存，跨次启动保留）──
   const toggleGroupCollapsed = (provider: string): void => {
     setCollapsedGroups((prev) => {
@@ -1451,7 +1583,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       const d = res.data;
       const pool = usagePoolOf(d);
       const text = pool?.text ?? t('读数不可用');
-      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', pool, text, windows: d?.windows } }));
+      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', pool, text, windows: d?.windows, raw: d ?? null } }));
     } catch (err) {
       setBalances((prev) => ({
         ...prev,
@@ -1619,6 +1751,134 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     }
   };
 
+  /** 组带拖拽（§2.6）：整组重排后把全量账号按新组序重赋 priority（队首最大、递减 10，
+   *  与 handleDropRow 同一套口径）。用「全量账号」而不是可见行重排，避免筛选态下
+   *  把隐藏账号的 priority 撞车。 */
+  const handleDropGroup = async (targetProvider: string): Promise<void> => {
+    const srcProvider = groupDragActive;
+    setGroupDragActive(null);
+    setGroupDragOver(null);
+    if (!srcProvider || srcProvider === targetProvider || orderSaving) return;
+    const order = groupedList.map((g) => g.provider);
+    const from = order.indexOf(srcProvider);
+    const to = order.indexOf(targetProvider);
+    if (from < 0 || to < 0) return;
+    const nextOrder = [...order];
+    const [moved] = nextOrder.splice(from, 1);
+    nextOrder.splice(to, 0, moved);
+    const byProvider = (provider: string): AccountSessionItem[] =>
+      sessions
+        .filter((s) => (s.provider || 'unknown') === provider
+          && (!channelFilter || s.channel_id === channelFilter))
+        .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0));
+    const sequence = nextOrder.flatMap(byProvider);
+    if (!sequence.length) return;
+    const base = sequence.length * 10;
+    setOrderSaving(true);
+    setError('');
+    try {
+      const results = await Promise.allSettled(
+        sequence.map((s, i) => api.patchAccountSession(s.id, { priority: base - i * 10 })),
+      );
+      const ok = results.filter((r) => r.status === 'fulfilled').length;
+      if (ok < sequence.length) {
+        addToast(t('排序保存：{{ok}}/{{total}} 成功', { ok, total: sequence.length }), 'error');
+      } else {
+        addToast(t('顺序已保存'));
+      }
+      await load();
+    } finally {
+      setOrderSaving(false);
+    }
+  };
+
+  /** 设为首选（§2.13）：priority 调到全池最大值 + 10（与行拖拽的队首口径一致） */
+  const handleSetFirst = async (session: AccountSessionItem): Promise<void> => {
+    const maxPriority = sessions
+      .filter((s) => !channelFilter || s.channel_id === channelFilter)
+      .reduce((max, s) => Math.max(max, Number(s.priority) || 0), 0);
+    setError('');
+    try {
+      await api.patchAccountSession(session.id, { priority: maxPriority + 10 });
+      addToast(t('已设为首选'));
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  /** 并发上限快捷（§2.13）：PATCH max_concurrency（0 = 不限） */
+  const handleSetConcurrency = async (session: AccountSessionItem): Promise<void> => {
+    const n = Math.max(0, Math.floor(Number(concDraft) || 0));
+    setError('');
+    try {
+      await api.patchAccountSession(session.id, { max_concurrency: n });
+      addToast(t('并发上限已更新'));
+      setActMenuFor(null);
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  /** 行内领套餐（§2.12）：POST /api/checkin-center/run（单账号），toast 回执后刷新 */
+  const handleClaim = async (session: AccountSessionItem): Promise<void> => {
+    setClaimingId(session.id);
+    setError('');
+    try {
+      const res = await api.runCheckin({ account_ids: [session.id] });
+      const first = res.data?.results?.[0];
+      addToast(first?.message || t('领取完成'), first && first.success === false ? 'error' : 'success');
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setClaimingId(null);
+    }
+  };
+
+  /** 行内代理「选中即存」（§2.11）：成功后用后端返回的 data 回填本行；
+   *  失败不改 state —— 受控 select 随下一次渲染回退到原值。 */
+  const handleProxyChange = async (session: AccountSessionItem, value: string): Promise<void> => {
+    setProxySavingId(session.id);
+    setError('');
+    try {
+      const res = await api.patchAccountSession(session.id, { proxy: value });
+      const data = res.data;
+      const nextProxy = data && 'proxy' in data ? (data.proxy ?? null) : (value || null);
+      setSessions((prev) => prev.map((x) => (x.id === session.id
+        ? { ...x, proxy: nextProxy, proxy_state: data?.proxy_state ?? x.proxy_state }
+        : x)));
+      addToast(t('代理已保存'));
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setProxySavingId(null);
+    }
+  };
+
+  /** §2.2 折叠全部 / 展开全部（仅分组模式渲染；两者都落 LS_COLLAPSED） */
+  const collapseAllGroups = (): void => {
+    const all = new Set(sessions.map((s) => s.provider || 'unknown'));
+    setCollapsedGroups(all);
+    writeLS(LS_COLLAPSED, [...all]);
+  };
+
+  const expandAllGroups = (): void => {
+    setCollapsedGroups(new Set());
+    writeLS(LS_COLLAPSED, []);
+  };
+
+  /** §2.3 清除筛选：只重置筛选维度，不动分组/排序/余额间隔/列设置 */
+  const clearFilters = (): void => {
+    setProviderFilter('');
+    setSearch('');
+    setStatusSeg('all');
+    setLimitSeg('all');
+  };
+
+  const filterActive = providerFilter !== '' || search.trim() !== '' || statusSeg !== 'all' || limitSeg !== 'all';
+
   // ── 供应商选择（仅新增账号时使用）──
   const providerLabel = (kind: string): string =>
     providers.find((p) => p.kind === kind)?.label ?? kind;
@@ -1663,6 +1923,139 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     return groups;
   }, [grouped, visibleSorted]);
 
+  /** 组顺位（§2.6）：按分组顺序编号，跨页的组带重复时仍显示全局顺位 */
+  const groupRankOf = useMemo(() => {
+    const ranks = new Map<string, number>();
+    groupedList.forEach((g, i) => ranks.set(g.provider, i + 1));
+    return ranks;
+  }, [groupedList]);
+
+  // ── 分页（SPEC §2.1：作用在筛选+排序后的结果上）──
+  /** 分组分页：每组尽量整组落在同一页；组本身超过一页时按页切块（组带重复出现）。 */
+  const groupPages = useMemo<Array<Array<{ provider: string; rows: AccountSessionItem[] }>>>(() => {
+    if (!grouped) return [];
+    if (pageSize === 'all') return [groupedList];
+    const pages: Array<Array<{ provider: string; rows: AccountSessionItem[] }>> = [];
+    let cur: Array<{ provider: string; rows: AccountSessionItem[] }> = [];
+    let used = 0;
+    const flush = (): void => {
+      if (cur.length) {
+        pages.push(cur);
+        cur = [];
+        used = 0;
+      }
+    };
+    for (const g of groupedList) {
+      if (g.rows.length > pageSize) {
+        flush();
+        for (let i = 0; i < g.rows.length; i += pageSize) {
+          const chunk: { provider: string; rows: AccountSessionItem[] } = { provider: g.provider, rows: g.rows.slice(i, i + pageSize) };
+          if (chunk.rows.length === pageSize) pages.push([chunk]);
+          else {
+            cur = [chunk];
+            used = chunk.rows.length;
+          }
+        }
+        continue;
+      }
+      if (used > 0 && used + g.rows.length > pageSize) flush();
+      cur.push(g);
+      used += g.rows.length;
+    }
+    flush();
+    return pages.length ? pages : [[]];
+  }, [grouped, groupedList, pageSize]);
+  const totalPages = grouped
+    ? Math.max(1, groupPages.length)
+    : pageSize === 'all'
+      ? 1
+      : Math.max(1, Math.ceil(visibleSorted.length / pageSize));
+  // 筛选/搜索/排序/分组/每页档变化 → 回第 1 页（render 期收敛，同 TableShell 的派生模式）
+  const pageResetKey = `${channelFilter}|${providerFilter}|${statusSeg}|${limitSeg}|${needle}|${sortKey}|${grouped}|${String(pageSize)}`;
+  const [prevPageResetKey, setPrevPageResetKey] = useState(pageResetKey);
+  if (prevPageResetKey !== pageResetKey) {
+    setPrevPageResetKey(pageResetKey);
+    if (rawPage !== 1) setRawPage(1);
+  }
+  const page = Math.min(Math.max(1, rawPage), totalPages);
+  const pageGroups = grouped ? (groupPages[page - 1] ?? []) : [];
+  const pageRows = grouped
+    ? []
+    : pageSize === 'all'
+      ? visibleSorted
+      : visibleSorted.slice((page - 1) * pageSize, page * pageSize);
+
+  /** §2.8 账号详情气泡：本页数据能提供的「邮箱/标识、更新于、来源、桌面登录态」 */
+  const accountTitleLines = (s: AccountSessionItem): string[] => {
+    const lines: string[] = [];
+    if (s.name) lines.push(t('账号：{{name}}', { name: nameMasked ? maskName(s.name) : s.name }));
+    if (s.updated_at) {
+      const raw = Number(s.updated_at);
+      const at = raw < 1e11 ? raw * 1000 : raw;
+      lines.push(t('更新于 {{time}}', { time: new Date(at).toLocaleString() }));
+    }
+    lines.push(t('来源：{{provider}}', { provider: providerLabel(s.provider) }));
+    if (s.provider === 'desktop' || s.relogin_due_at != null) {
+      lines.push(t('桌面端实时登录态'));
+    }
+    return lines;
+  };
+
+  /** §2.9 余额明细：wallets[] 逐桶 + windows[] 逐窗口；都空 → 「上游未返回明细」 */
+  const balanceDetailRows = (bal: AccountBalance | null | undefined): ReactNode => {
+    const wallets = Array.isArray(bal?.wallets) ? bal.wallets : [];
+    const wins = bal?.windows ?? [];
+    if (!wallets.length && !wins.length) {
+      return <div className="as-pop-empty">{t('上游未返回明细')}</div>;
+    }
+    const unit = bal?.unit ? ` ${bal.unit}` : '';
+    return (
+      <>
+        {wallets.length > 0 && (
+          <>
+            <div className="as-pop-section">{t('额度桶')}</div>
+            {wallets.map((w, i) => {
+              const balance = Number(w?.balance);
+              const total = Number(w?.total) || 0;
+              const used = Number(w?.used) || 0;
+              return (
+                <div key={`w-${i}`} className="as-wallet-row">
+                  <span className="as-wallet-name">{String(w?.displayName || w?.type || t('额度'))}</span>
+                  <span className="as-wallet-view">
+                    {Number.isFinite(balance) ? `${balance}${unit}` : '—'}
+                    {total > 0 ? ` / ${total}${unit}` : ''}
+                    {used > 0 ? ` · ${t('已用')} ${used}${unit}` : ''}
+                  </span>
+                </div>
+              );
+            })}
+          </>
+        )}
+        {wins.length > 0 && (
+          <>
+            <div className="as-pop-section">{t('用量窗口')}</div>
+            {wins.map((w, i) => {
+              const label = usageWindowTitle(w);
+              const pct = typeof w.remaining_percent === 'number' ? Math.round(w.remaining_percent) : null;
+              const remaining = typeof w.remaining === 'number' ? w.remaining : null;
+              const reset = w.resets_at && w.resets_at > 0 ? new Date(w.resets_at * 1000).toLocaleString() : '';
+              return (
+                <div key={w.key || `win-${i}`} className="as-wallet-row">
+                  <span className="as-wallet-name">{label}</span>
+                  <span className="as-wallet-view">
+                    {pct != null ? t('剩 {{pct}}%', { pct }) : ''}
+                    {remaining != null ? ` · ${remaining}` : ''}
+                    {reset ? ` · ${t('重置于 {{time}}', { time: reset })}` : ''}
+                  </span>
+                </div>
+              );
+            })}
+          </>
+        )}
+      </>
+    );
+  };
+
   // ── 表格单元格渲染（列配置驱动：列显隐 / 列宽 / 分组模式共用一套）──
   const renderCell = (col: AsCol, s: AccountSessionItem, orderIdx: number): ReactNode => {
     switch (col) {
@@ -1677,10 +2070,14 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             />
           </td>
         );
-      case 'name':
+      case 'name': {
+        const titleLines = accountTitleLines(s);
         return (
           <td key={col} className="as-c-name">
-            <div className="as-name">{nameMasked ? maskName(s.name) : s.name}</div>
+            {/* §2.8 悬停气泡：名称上显示账号详情（邮箱/标识、更新于、来源、桌面登录态） */}
+            <div className="as-name" title={titleLines.length ? titleLines.join('\n') : undefined}>
+              {nameMasked ? maskName(s.name) : s.name}
+            </div>
             <div className="form-hint">{s.api_key || '—'}</div>
             {s.proxy && <div className="form-hint">{s.proxy}</div>}
             {s.last_error && (
@@ -1690,6 +2087,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             )}
           </td>
         );
+      }
       case 'provider':
         return (
           <td key={col} className="as-c-provider">
@@ -1706,7 +2104,82 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             {s.base_url && <div className="form-hint">{s.base_url}</div>}
           </td>
         );
-      case 'status':
+      case 'proxy': {
+        // §2.11 行内代理下拉「选中即存」：直连 + 代理池条目 + 轮询全部启用 + 当前未知值补位
+        const raw = (s.proxy || '').trim();
+        const options: Array<{ value: string; label: string }> = [{ value: '', label: t('直连') }];
+        for (const it of proxyPool ?? []) {
+          options.push({
+            value: `pool:${it.id}`,
+            label: `${it.name}${it.enabled ? '' : ` · ${t('已禁用')}`}`,
+          });
+        }
+        options.push({ value: 'rotate', label: t('轮询全部启用') });
+        if (raw && !options.some((o) => o.value === raw)) {
+          options.push({ value: raw, label: t('自定义：{{value}}', { value: raw }) });
+        }
+        const proxyOk = s.proxy_state?.ok !== false;
+        return (
+          <td key={col} className="as-c-proxy">
+            <div className="as-proxy-cell">
+              <select
+                className="form-input as-proxy-select"
+                aria-label={t('出口代理')}
+                value={raw}
+                disabled={proxySavingId === s.id}
+                title={
+                  s.proxy_state?.ok === false
+                    ? t('代理不可用：{{error}}', { error: s.proxy_state.error || '' })
+                    : t('代理可用')
+                }
+                onChange={(e) => void handleProxyChange(s, e.target.value)}
+              >
+                {options.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              {/* 状态点：绿 = 代理解析可用；红 = 引用失效（title 显示原因） */}
+              <span
+                className={`as-proxy-dot ${proxyOk ? 'ok' : 'err'}`}
+                aria-hidden="true"
+                title={proxyOk ? undefined : (s.proxy_state?.error || undefined)}
+              />
+            </div>
+          </td>
+        );
+      }
+      case 'status': {
+        // §2.10 健康标签（有则该标签，无则不占位）：凭证 / 代理 / Token 限额禁用
+        const healthTags: ReactNode[] = [];
+        if (!s.api_key || s.api_key.trim() === '' || s.api_key.trim() === '—') {
+          healthTags.push(
+            <span key="cred" className="as-status-tag" title={t('账号没有可用凭证，转发会失败')}>
+              {t('未配置凭证')}
+            </span>,
+          );
+        }
+        if (s.proxy_state?.ok === false) {
+          healthTags.push(
+            <span
+              key="proxy"
+              className="as-status-tag warn"
+              title={t('代理不可用：{{error}}', { error: s.proxy_state.error || '' })}
+            >
+              {t('代理异常')}
+            </span>,
+          );
+        }
+        if (s.status !== 'enabled' && s.limiter_state?.disable === true) {
+          healthTags.push(
+            <span
+              key="token"
+              className="as-status-tag bad"
+              title={t('Token 限额命中且账号已被自动禁用（窗口重置也不恢复，需手动启用）')}
+            >
+              {t('Token 限额已禁用')}
+            </span>,
+          );
+        }
         return (
           <td key={col} className="as-c-status">
             {/* 行内启停 Switch（对齐 Agent2API StatusCell：直接 PATCH 状态，无需进操作列） */}
@@ -1729,11 +2202,17 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                 {statusLabel(s.status)}
               </span>
             </div>
+            {healthTags.length > 0 && <div className="as-status-tags">{healthTags}</div>}
           </td>
         );
+      }
       case 'priority':
         return (
           <td key={col} className="as-c-priority">
+            {/* §2.7 组内拖拽把手：整行 draggable 的视觉锚点（分组模式行拖拽仍关闭） */}
+            <span className="as-grip" title={t('拖动调整组内顺序')}>
+              <GripVertical size={12} />
+            </span>
             {orderIdx >= 0 ? (
               // 分组模式：格内改显组内序号（对齐 Agent2API OrderCell 的 #N）
               <span
@@ -1825,37 +2304,95 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         }
         const pool = bal?.state === 'ok' ? bal.pool : usagePoolOf(s.last_balance);
         const ago = !bal && s.last_balance_at ? formatAgo(s.last_balance_at) : '';
+        // §2.9 明细数据源：本次查询返回的 raw 优先，其次列表自带的余额快照
+        const rawBal = bal?.state === 'ok' ? (bal.raw ?? s.last_balance ?? null) : (s.last_balance ?? null);
+        // §2.9 跳过徽章：判据只用后端 limiter_state，不按 limiters 重算阈值。
+        // 细分「余额 / Token」用 spec 允许的近似：skip_models 为空 = 整号命中（余额类）。
+        const skip = s.limiter_state;
+        const skipModels = skip?.skip_models ?? [];
+        const balanceSkipped = skip?.account_skip === true
+          && s.last_balance?.available != null
+          && skipModels.length === 0;
+        const tokenSkipped = skipModels.length > 0;
+        const popOpen = balancePopFor === s.id;
         return (
           <td key={col} className="as-c-usage">
-            {pool ? (
-              <div className="as-usage-pool">
-                {pool.plan && (
-                  <span className="as-usage-pool-name" title={pool.plan}>{pool.plan}</span>
-                )}
-                <div className="as-usage-pool-line">
-                  {pool.ratio != null && (
-                    <span className="as-usage-pool-bar" aria-hidden="true">
-                      <span style={{ width: `${Math.round(pool.ratio * 100)}%` }} />
-                    </span>
-                  )}
-                  <span className={`as-usage-pool-view${pool.low ? ' warn' : ' ok'}`}>
-                    {pool.text}
-                    {ago ? `（${ago}）` : ''}
-                  </span>
+            <div className="as-usage-wrap" ref={popOpen ? balancePopRef : undefined}>
+              {pool ? (
+                // 点击余额格 → 明细弹层（§2.9：wallets 逐桶 + windows 逐窗口）
+                <button
+                  type="button"
+                  className="as-usage-btn"
+                  title={t('点击查看余额明细')}
+                  onClick={() => setBalancePopFor(popOpen ? null : s.id)}
+                >
+                  <div className="as-usage-pool">
+                    {pool.plan && (
+                      <span className="as-usage-pool-name" title={pool.plan}>{pool.plan}</span>
+                    )}
+                    <div className="as-usage-pool-line">
+                      {pool.ratio != null && (
+                        <span className="as-usage-pool-bar" aria-hidden="true">
+                          <span style={{ width: `${Math.round(pool.ratio * 100)}%` }} />
+                        </span>
+                      )}
+                      <span className={`as-usage-pool-view${pool.low ? ' warn' : ' ok'}`}>
+                        {pool.text}
+                        {ago ? `（${ago}）` : ''}
+                      </span>
+                    </div>
+                    {pool.low && <div className="balance-low">{t('不足，请充值或停用')}</div>}
+                  </div>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="balance-link"
+                  onClick={() => void handleBalance(s)}
+                >
+                  <Wallet size={12} /> {t('查询余额')}
+                </button>
+              )}
+              {balanceSkipped && (
+                <span
+                  className="as-skip-badge"
+                  title={t('余额低于限制器的阈值，转发时会跳过该账号（余额回升自动恢复）')}
+                >
+                  {t('余额不足 · 已跳过')}
+                </span>
+              )}
+              {tokenSkipped && (
+                <span
+                  className="as-skip-badge"
+                  title={t('本周期 Token 消耗达到限制器的上限，转发时会跳过该账号（窗口重置自动恢复）')}
+                >
+                  {t('Token 限额 · 已跳过')}
+                </span>
+              )}
+              {popOpen && (
+                <div className="as-usage-pop" role="dialog" aria-label={t('余额明细')}>
+                  <div className="as-pop-title">
+                    <span>{t('余额明细')}</span>
+                    <button
+                      type="button"
+                      className="as-pop-close"
+                      aria-label={t('关闭')}
+                      onClick={() => setBalancePopFor(null)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {balanceDetailRows(rawBal)}
                 </div>
-                {pool.low && <div className="balance-low">{t('不足，请充值或停用')}</div>}
-              </div>
-            ) : (
-              <button
-                type="button"
-                className="balance-link"
-                onClick={() => void handleBalance(s)}
-              >
-                <Wallet size={12} /> {t('查询余额')}
-              </button>
-            )}
+              )}
+            </div>
             {!bal && s.last_balance_error && (
               <div className="form-hint" title={s.last_balance_error}>{t('自动查询失败')}</div>
+            )}
+            {tokenSkipped && (
+              <div className="form-hint as-token-skip-hint" title={skipModels.join(', ')}>
+                {t('Token 限额 {{n}} 个模型已跳过', { n: skipModels.length })}
+              </div>
             )}
             {(() => {
               // 分窗口额度读数（上游 usage windows；后端用量窗口端点起下发，
@@ -1935,7 +2472,12 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             })()}
           </td>
         );
-      case 'act':
+      case 'act': {
+        const maxPriority = sessions
+          .filter((x) => !channelFilter || x.channel_id === channelFilter)
+          .reduce((max, x) => Math.max(max, Number(x.priority) || 0), 0);
+        const atFirst = (Number(s.priority) || 0) >= maxPriority && maxPriority > 0;
+        const menuOpen = actMenuFor === s.id;
         return (
           <td key={col} className="as-c-act">
             <div className="actions-cell as-actions">
@@ -2010,33 +2552,110 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                   </div>
                 )}
               </div>
-              {/* 手动刷新凭证：仅持有续期令牌的账号可用（qoder/autoclaw/trae/codearts 等） */}
-              <button
-                type="button"
-                className="as-act"
-                onClick={() => void handleRefreshCredential(s)}
-                disabled={!s.has_refresh_token || refreshingId === s.id}
-                title={
-                  s.has_refresh_token
-                    ? t('刷新凭证（用续期令牌换新 access token）')
-                    : t('该账号没有续期令牌，无法在线刷新')
-                }
-              >
-                {refreshingId === s.id ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
-              </button>
-              <Tooltip label={t('删除')}>
+              {/* §2.12 领套餐：仅 checkin 白名单 provider 出现（白名单与后端同步维护） */}
+              {CHECKIN_PROVIDERS.has(s.provider) && (
                 <button
                   type="button"
-                  className="as-act danger"
-                  aria-label={t('删除')}
-                  onClick={() => handleDelete(s)}
+                  className="as-act"
+                  onClick={() => void handleClaim(s)}
+                  disabled={claimingId === s.id}
+                  title={t('替该账号领取今日套餐 / 签到')}
+                  aria-label={t('领套餐')}
                 >
-                  <Trash2 size={13} />
+                  {claimingId === s.id ? <Loader2 size={13} className="spin" /> : <Gift size={13} />}
                 </button>
-              </Tooltip>
+              )}
+              {/* §2.13 ⋯ 聚合菜单：刷新 Token / 设为首选 / 并发上限 / 删除（删除仍二次确认） */}
+              <div className="as-act-menu-wrap" ref={menuOpen ? actMenuRef : undefined}>
+                <button
+                  type="button"
+                  className="as-act"
+                  aria-label={t('更多操作')}
+                  title={t('更多操作')}
+                  onClick={() => {
+                    setActMenuFor(menuOpen ? null : s.id);
+                    setConcDraft(String(s.max_concurrency ?? 0));
+                  }}
+                >
+                  <MoreHorizontal size={13} />
+                </button>
+                {menuOpen && (
+                  <div className="as-act-menu">
+                    {/* 手动刷新凭证：仅持有续期令牌的账号可用（qoder/autoclaw/trae/codearts 等） */}
+                    <button
+                      type="button"
+                      className="as-act-menu-item"
+                      onClick={() => {
+                        setActMenuFor(null);
+                        void handleRefreshCredential(s);
+                      }}
+                      disabled={!s.has_refresh_token || refreshingId === s.id}
+                      title={
+                        s.has_refresh_token
+                          ? t('刷新凭证（用续期令牌换新 access token）')
+                          : t('该账号没有续期令牌，无法在线刷新')
+                      }
+                    >
+                      {t('刷新 Token')}
+                    </button>
+                    <button
+                      type="button"
+                      className="as-act-menu-item"
+                      onClick={() => {
+                        setActMenuFor(null);
+                        void handleSetFirst(s);
+                      }}
+                      disabled={atFirst}
+                      title={
+                        atFirst
+                          ? t('已在全局队列第一位')
+                          : t('把优先级调到全池最高，不改变启用状态')
+                      }
+                    >
+                      {t('设为首选')}
+                    </button>
+                    <div className="as-act-menu-row">
+                      <span>{t('并发上限')}</span>
+                      <input
+                        className="form-input as-act-menu-input"
+                        type="number"
+                        min={0}
+                        value={concDraft}
+                        aria-label={t('并发上限')}
+                        onChange={(e) => setConcDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            void handleSetConcurrency(s);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="as-act-menu-apply"
+                        onClick={() => void handleSetConcurrency(s)}
+                      >
+                        {t('应用')}
+                      </button>
+                    </div>
+                    <div className="as-act-menu-sep" />
+                    <button
+                      type="button"
+                      className="as-act-menu-item danger"
+                      onClick={() => {
+                        setActMenuFor(null);
+                        handleDelete(s);
+                      }}
+                    >
+                      {t('删除账号')}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </td>
         );
+      }
       default:
         return null;
     }
@@ -2049,6 +2668,11 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       className={dragOverId === s.id && dragId !== s.id ? 'drag-over' : ''}
       draggable={!grouped}
       onDragStart={(e) => {
+        // 行内表单控件（代理下拉等）不触发整行拖拽，避免改选择时误拖行
+        if ((e.target as Element).closest('select, input')) {
+          e.preventDefault();
+          return;
+        }
         setDragId(s.id);
         e.dataTransfer.effectAllowed = 'move';
       }}
@@ -2067,7 +2691,16 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       }}
       title={grouped ? undefined : t('拖拽行可调整调度顺序')}
     >
-      {visibleCols.map((col) => renderCell(col, s, orderIdx))}
+      {visibleCols.map((col) => {
+        const cell = renderCell(col, s, orderIdx);
+        // §1 列对齐修复：td 也要挂 ta-<align>（此前只有列设置面板存了 align，渲染从未使用）
+        const align = appliedCols.find((c) => c.key === col)?.align ?? 'left';
+        if (!isValidElement(cell)) return cell;
+        const el = cell as ReactElement<{ className?: string }>;
+        return cloneElement(el, {
+          className: [el.props.className, `ta-${align}`].filter(Boolean).join(' '),
+        });
+      })}
     </tr>
   );
 
@@ -2184,11 +2817,15 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             <option value="">{t('全部供应商')}</option>
             {Array.from(new Set(sessions.map((s) => s.provider).filter(Boolean)))
               .sort()
-              .map((kind) => (
-                <option key={kind} value={kind}>
-                  {providers.find((p) => p.kind === kind)?.label || kind}
-                </option>
-              ))}
+              .map((kind) => {
+                // §2.14 provider 下拉带每家账号数（value 仍是 kind，不影响筛选）
+                const count = sessions.filter((s) => s.provider === kind).length;
+                return (
+                  <option key={kind} value={kind}>
+                    {providers.find((p) => p.kind === kind)?.label || kind} ({count})
+                  </option>
+                );
+              })}
           </Select>
           <Input
             placeholder={t('搜索名称 / provider / 地址')}
@@ -2208,6 +2845,27 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             />
             <span>{t('分组')}</span>
           </label>
+          {/* §2.2 折叠全部 / 展开全部（仅分组模式下出现；两者都落 LS_COLLAPSED） */}
+          {grouped && (
+            <>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={collapseAllGroups}
+                title={t('收起全部供应商分组，只留组带')}
+              >
+                <ChevronsDownUp size={14} /> {t('折叠全部')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={expandAllGroups}
+                title={t('展开全部供应商分组')}
+              >
+                <ChevronsUpDown size={14} /> {t('展开全部')}
+              </button>
+            </>
+          )}
           {/* 列表排序（对齐上游 accounts-sort）：到期最早/最新添加置顶，纯展示序不改调度 */}
           <Select
             aria-label={t('列表排序')}
@@ -2241,6 +2899,26 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             <option value="720">{t('每 12 小时')}</option>
             <option value="1440">{t('每天')}</option>
           </Select>
+          {/* 限额分段（SPEC §2.4）：全部/正常/已限流；判据 = 后端 limiter_state。
+              放在状态分段之前：e2e 的「全部」定位取第一个，限额「全部」才是这一组。 */}
+          <div className="seg-filter" role="group" aria-label={t('按限额状态过滤')}>
+            {(
+              [
+                ['all', t('全部')],
+                ['normal', t('正常')],
+                ['limited', t('已限流')],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={`seg-filter-btn${limitSeg === key ? ' active' : ''}`}
+                onClick={() => setLimitSeg(key)}
+              >
+                {label} {limitCounts[key]}
+              </button>
+            ))}
+          </div>
           {/* 状态分段（对齐 Agent2API 账号页）：启用口径=enabled 且不在冷却中 */}
           <div className="seg-filter" role="group" aria-label={t('按状态过滤')}>
             {(
@@ -2261,6 +2939,16 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               </button>
             ))}
           </div>
+          {/* §2.3 清除筛选：只重置筛选维度（分组/排序/余额间隔/列设置是偏好，不动） */}
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            disabled={!filterActive}
+            onClick={clearFilters}
+            title={t('清空搜索与全部筛选档位，回到全部账号')}
+          >
+            {t('清除筛选')}
+          </button>
         </div>
 
         {picked.size > 0 && (
@@ -2314,7 +3002,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             action={<Button onClick={openCreate}>{t('添加账号')}</Button>}
           />
         ) : (
-          <div className="table-wrapper as-scroll">
+          <>
+            <div className="table-wrapper as-scroll">
             <table className="as-table" style={{ tableLayout: 'fixed', minWidth: tableMinWidth }}>
               {/* 列宽由 colgroup 驱动（拖动表头右缘把手改这里）；弹性列不写宽度吃剩余 */}
               <colgroup>
@@ -2332,7 +3021,10 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                       defaultWidth: colDef?.width,
                     });
                     return (
-                    <th key={col} className={`as-h-${col}`}>
+                    <th
+                      key={col}
+                      className={`as-h-${col} ta-${appliedCols.find((c) => c.key === col)?.align ?? 'left'}`}
+                    >
                       {col === 'pick' ? (
                         <input
                           type="checkbox"
@@ -2374,33 +3066,69 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                 </tr>
               </thead>
               <tbody>
-                {groupedList.length
-                  ? groupedList.map((g) => {
+                {grouped && pageGroups.length
+                  ? pageGroups.map((g, pageIdx) => {
                       const collapsed = collapsedGroups.has(g.provider);
+                      // 组统计读整组（分页切块时也用完整组的数据，避免数字随页跳）
+                      const groupRows = groupedList.find((x) => x.provider === g.provider)?.rows ?? g.rows;
                       // 组统计：启用/禁用/冷却三档（对齐上游 grp-stat；冷却=启用态且有未到期冷却）
-                      const gEnabled = g.rows.filter((r) => r.status === 'enabled' && !isCooling(r)).length;
-                      const gDisabled = g.rows.filter((r) => r.status !== 'enabled').length;
-                      const gCooling = g.rows.filter((r) => r.status === 'enabled' && isCooling(r)).length;
+                      const gEnabled = groupRows.filter((r) => r.status === 'enabled' && !isCooling(r)).length;
+                      const gDisabled = groupRows.filter((r) => r.status !== 'enabled').length;
+                      const gCooling = groupRows.filter((r) => r.status === 'enabled' && isCooling(r)).length;
                       return (
-                      <Fragment key={g.provider}>
-                        {/* 分组带（对齐 Agent2API grp-band：家图标 + 家名 + 统计 + 折叠箭头 + ⋯ 菜单） */}
-                        <tr className="as-tr-group">
+                      <Fragment key={`${g.provider}-${pageIdx}`}>
+                        {/* 分组带（对齐 Agent2API grp-band：顺位 + 家图标 + 家名 + 统计 + 折叠箭头 + ⋯ 菜单） */}
+                        <tr
+                          className={`as-tr-group${groupDragOver === g.provider && groupDragActive !== g.provider ? ' drag-over' : ''}`}
+                        >
                           <td colSpan={visibleCols.length}>
                             <div
                               className="as-group-band"
+                              /* §2.6 组带拖拽整组重排；组内行拖拽在分组模式下本就关闭
+                                 （renderRow 的 draggable={!grouped}），两者不会互相触发 */
+                              draggable={!orderSaving}
+                              onDragStart={(e) => {
+                                if ((e.target as Element).closest('button, a, input, select, label')) {
+                                  e.preventDefault();
+                                  return;
+                                }
+                                setGroupDragActive(g.provider);
+                                e.dataTransfer.effectAllowed = 'move';
+                                e.dataTransfer.setData('text/plain', g.provider);
+                              }}
+                              onDragOver={(e) => {
+                                if (!groupDragActive) return; // 行拖拽不落到组带上
+                                e.preventDefault();
+                                e.dataTransfer.dropEffect = 'move';
+                                if (groupDragOver !== g.provider) setGroupDragOver(g.provider);
+                              }}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                void handleDropGroup(g.provider);
+                              }}
+                              onDragEnd={() => {
+                                setGroupDragActive(null);
+                                setGroupDragOver(null);
+                              }}
                               onClick={(e) => {
-                                // 落在按钮/表单控件上的点击各有动作，不顺势折叠（对齐上游 onBandClick 判据）
-                                if ((e.target as Element).closest('button, a, input, select, label')) return;
+                                // 落在按钮/表单控件/拖拽把手上不顺势折叠（对齐上游 onBandClick 判据）
+                                if ((e.target as Element).closest('button, a, input, select, label, .as-group-grip')) return;
                                 if (String(window.getSelection?.() || '').length > 0) return;
                                 toggleGroupCollapsed(g.provider);
                               }}
                               title={collapsed ? t('展开这一组') : t('点击分组带折叠这一组')}
                             >
+                              <span className="as-group-grip" title={t('按住拖动，调整这一组的顺位（整组一起动）')}>
+                                <GripVertical size={13} />
+                              </span>
+                              <span className="as-group-rank" title={t('组顺位：数字越小越先用（拖动分组带调整）')}>
+                                {t('第 {{n}} 顺位', { n: groupRankOf.get(g.provider) ?? 0 })}
+                              </span>
                               {providerIcon(g.provider) ? (
                                 <img className="provider-card-logo" src={providerIcon(g.provider) as string} alt="" />
                               ) : null}
                               <span className="as-group-label">{providerLabel(g.provider)}</span>
-                              <span className="as-group-count">{g.rows.length}</span>
+                              <span className="as-group-count">{groupRows.length}</span>
                               <span className="as-group-stat">
                                 {t('启用 {{n}}', { n: gEnabled })}
                                 {gDisabled > 0 ? ` · ${t('禁用 {{n}}', { n: gDisabled })}` : ''}
@@ -2439,10 +3167,10 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                                       disabled={batchRunning}
                                       onClick={() => {
                                         setGroupMenuFor(null);
-                                        void runGroupEnabled(g.rows, true);
+                                        void runGroupEnabled(groupRows, true);
                                       }}
                                     >
-                                      {t('全部启用（{{n}}）', { n: g.rows.length })}
+                                      {t('全部启用（{{n}}）', { n: groupRows.length })}
                                     </button>
                                     <button
                                       type="button"
@@ -2450,10 +3178,10 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                                       disabled={batchRunning}
                                       onClick={() => {
                                         setGroupMenuFor(null);
-                                        void runGroupEnabled(g.rows, false);
+                                        void runGroupEnabled(groupRows, false);
                                       }}
                                     >
-                                      {t('全部停用（{{n}}）', { n: g.rows.length })}
+                                      {t('全部停用（{{n}}）', { n: groupRows.length })}
                                     </button>
                                     <div className="as-group-menu-sep" />
                                     <button
@@ -2476,7 +3204,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                       </Fragment>
                       );
                     })
-                  : visibleSorted.map((row) => renderRow(row, -1))}
+                  : pageRows.map((row) => renderRow(row, -1))}
               </tbody>
               {/* 冷却明细展开行（对齐 Agent2API row-panel：通栏面板 + 标签流） */}
               {cooldownOpenId && (() => {
@@ -2529,7 +3257,17 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                 );
               })()}
             </table>
-          </div>
+            </div>
+            {/* 分页页脚（SPEC §2.1：公共件，作用于筛选+排序后的结果） */}
+            <TablePaginationFooter
+              total={visibleSorted.length}
+              page={page}
+              totalPages={totalPages}
+              size={pageSize}
+              onSizeChange={setPageSize}
+              onPageChange={setRawPage}
+            />
+          </>
         )}
       </Card>
 

@@ -699,20 +699,56 @@ tr:hover .as-act:not(:disabled) {
 }
 /* ═══ 账号池表格对齐 Agent2API 增量样式（列宽拖动 / 列显隐 / 分组 / 余额池 / 连接数 / 清限流菜单） ═══ */
 
-/* 横向滚动容器：scrollbar-gutter 避免滚动条出现/消失时表格跳动 */
+/* 横向滚动容器：scrollbar-gutter 避免滚动条出现/消失时表格跳动；
+ * 有界高度让 sticky 表头真正生效（SPEC §1，%同 ModelManage .mm-table-wrap） */
 .as-scroll {
   scrollbar-gutter: stable;
+  max-height: calc(100vh - 250px);
+  overflow: auto;
 }
 
 /* 列宽由 colgroup 驱动：fixed 布局下 col 宽度即列宽（TSX 已内联 tableLayout:fixed） */
 .as-table {
   width: 100%;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
+/* 表头：sticky + 紧凑密度（对齐 Channels.css .channels-table：10.5px / 7px 10px） */
 .as-table th {
-  position: relative;
+  position: sticky;
+  top: 0;
+  z-index: 2;
   overflow: visible;
   white-space: nowrap;
+  font-size: 10.5px;
+  padding: 7px 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--table-header-bg, var(--surface-bg));
+  border-bottom: 1px solid var(--border-color);
+  user-select: none;
+}
+
+.as-table td {
+  padding: 7px 10px;
+}
+
+/* 列对齐三档（列设置面板可调；SPEC §1 修复「对齐从未生效」的缺口） */
+.as-table th.ta-left,
+.as-table td.ta-left {
+  text-align: left;
+}
+
+.as-table th.ta-center,
+.as-table td.ta-center {
+  text-align: center;
+}
+
+.as-table th.ta-right,
+.as-table td.ta-right {
+  text-align: right;
 }
 
 /* fixed 布局下长内容统一省略，防止列宽拖动时溢出串列 */
@@ -1884,4 +1920,357 @@ body.as-col-resizing {
   border-radius: 10px;
   font-size: 12.5px;
   line-height: 1.55;
+}
+
+/* ═══ SPEC 1.0.44 §2：行内代理 / 健康标签 / 跳过徽章 / 余额明细 / 组带顺位 / 聚合操作菜单 ═══ */
+
+/* ── §2.6 组带：顺位徽标 + 拖拽把手 ── */
+.as-tr-group.drag-over > td {
+  outline: 2px dashed var(--text-faint);
+  outline-offset: -2px;
+}
+
+.as-group-grip {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  cursor: grab;
+  flex: 0 0 auto;
+}
+
+.as-group-band:active .as-group-grip {
+  cursor: grabbing;
+}
+
+.as-group-rank {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-color);
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 1.6;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+/* ── §2.7 优先级列拖拽把手 ── */
+.as-grip {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 4px;
+  color: var(--text-muted);
+  cursor: grab;
+  vertical-align: middle;
+}
+
+tr[draggable="true"]:active .as-grip {
+  cursor: grabbing;
+}
+
+/* ── §2.10 状态列健康标签 ── */
+.as-status-line {
+  flex-wrap: wrap;
+}
+
+.as-status-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.as-status-tag {
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.as-status-tag.warn {
+  color: var(--warn-text, #b26a00);
+  border-color: rgba(255, 178, 0, 0.45);
+  background: rgba(255, 178, 0, 0.1);
+}
+
+.as-status-tag.bad {
+  color: var(--danger-text, #b91c1c);
+  border-color: rgba(220, 38, 38, 0.4);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+/* ── §2.11 行内代理下拉：选中即存 + 状态点 ── */
+.as-c-proxy {
+  overflow: hidden;
+}
+
+.as-proxy-cell {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.as-proxy-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  padding: 3px 5px;
+  height: 26px;
+}
+
+.as-proxy-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.as-proxy-dot.ok {
+  background: #30a46c;
+  box-shadow: 0 0 0 3px rgba(48, 164, 108, 0.15);
+}
+
+.as-proxy-dot.err {
+  background: var(--danger-text, #e5484d);
+  box-shadow: 0 0 0 3px rgba(229, 72, 77, 0.15);
+}
+
+/* ── §2.9 余额明细弹层 + 跳过徽章 ── */
+.as-usage-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.as-usage-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.as-usage-btn:hover .as-usage-pool-view {
+  text-decoration: underline;
+}
+
+.as-usage-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  min-width: 240px;
+  max-width: 320px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 10px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+  cursor: default;
+  text-align: left;
+}
+
+.as-pop-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main, var(--text-color));
+  margin-bottom: 8px;
+}
+
+.as-pop-close {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px;
+  border-radius: 5px;
+}
+
+.as-pop-close:hover {
+  color: var(--text-main, var(--text-color));
+  background: var(--hover-bg);
+}
+
+.as-pop-section {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 8px 0 4px;
+}
+
+.as-wallet-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border-color);
+  font-size: 12px;
+}
+
+.as-wallet-row:last-child {
+  border-bottom: none;
+}
+
+.as-wallet-name {
+  color: var(--text-main, var(--text-color));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.as-wallet-view {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.as-pop-empty {
+  padding: 14px 6px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.as-skip-badge {
+  display: inline-block;
+  margin-top: 4px;
+  margin-right: 4px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--warn-text, #b26a00);
+  border: 1px solid rgba(255, 178, 0, 0.45);
+  background: rgba(255, 178, 0, 0.1);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.as-token-skip-hint {
+  color: var(--warn-text, #b26a00);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── §2.12 / §2.13 操作列：领套餐按钮（图标）+ ⋯ 聚合菜单 ── */
+.as-act-text {
+  width: auto;
+  padding: 0 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.as-act-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.as-act-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 196px;
+  padding: 5px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.as-act-menu-item {
+  border: none;
+  background: transparent;
+  color: var(--text-main, var(--text-color));
+  font-size: 12px;
+  text-align: left;
+  padding: 7px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.as-act-menu-item:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.as-act-menu-item:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.as-act-menu-item.danger {
+  color: var(--danger-text, #e5484d);
+}
+
+.as-act-menu-item.danger:hover:not(:disabled) {
+  background: rgba(229, 72, 77, 0.1);
+}
+
+.as-act-menu-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin: 3px 2px;
+}
+
+.as-act-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+}
+
+.as-act-menu-row > span {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.as-act-menu-input {
+  width: 64px;
+  font-size: 12px;
+  padding: 3px 6px;
+  height: 26px;
+}
+
+.as-act-menu-apply {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-main, var(--text-color));
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.as-act-menu-apply:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.as-act-menu-apply:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
 }

@@ -169,9 +169,9 @@
   --code-fg: #1a1a1a;
   /* accent 背景（亮色为彩色、暗色为白色）上的文字/图标色 */
   --accent-contrast: #ffffff;
-  --sidebar-width: 240px;
+  --sidebar-width: 160px;
   --sidebar-width-collapsed: 48px;
-  --font-size-sm: 12px;
+  --font-size-sm: 12.5px;
   --font-size-md: 14px;
   --control-pad-y: 8px;
   --control-pad-x: 16px;
@@ -187,10 +187,10 @@
   --warning-text: #b45309;
   /* —— 密度 token 层（阶段1，全站精致小巧化）：字号 / 间距 / 行高 / 控件 / 过渡 ——
      主题无关的纯度量值，故只在 :root 定义、dark 块不覆盖。配套 utility 见 styles/density.css。 */
-  --font-size-xs: 11px;
+  --font-size-xs: 10.5px;
   --font-size-2xs: 10px;
-  --pad-1: 4px;
-  --pad-2: 8px;
+  --pad-1: 7px;
+  --pad-2: 10px;
   --pad-3: 12px;
   --pad-4: 16px;
   --row-h: 30px;
@@ -1441,6 +1441,15 @@ code {
 
 .nav-item svg {
   flex-shrink: 0;
+}
+
+/* 侧栏收窄后长菜单名省略（完整文案走 title，见 Sidebar.tsx:215）；
+   min-width:0 让 flex 子项可被压缩，ellipsis 才会真正生效 */
+.nav-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar-aside-collapsed .nav-item {

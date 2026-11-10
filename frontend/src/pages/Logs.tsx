@@ -685,8 +685,8 @@ export default function Logs(): JSX.Element {
           {inflight.length === 0 ? (
             <EmptyState icon="🕊️" message={t('当前没有在途请求')} />
           ) : (
-            <div className="table-wrapper">
-              <table>
+            <div className="table-wrapper table-wrapper-scroll">
+              <table className="dense-table">
                 <thead>
                   <tr>
                     <th>{t('请求 ID')}</th>
@@ -833,8 +833,8 @@ export default function Logs(): JSX.Element {
         ) : logs.length === 0 ? (
           <EmptyState message={t('暂无日志')} />
         ) : (
-          <div className="table-wrapper">
-            <table>
+          <div className="table-wrapper table-wrapper-scroll">
+            <table className="dense-table">
               <colgroup>
                 {appliedCols.map((c) => (
                   <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />

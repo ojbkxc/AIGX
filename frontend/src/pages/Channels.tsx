@@ -2051,7 +2051,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                       {t('自定义供应商（跳过预置）')}
                     </Button>
                     <span className="ch-preset-skip-hint">
-                      {t('账号池型供应商（凭证放账号池）也走自定义，类型选 account')}
+                      {t('账号池型供应商请到「账号池」Tab 添加账号时自动创建，这里只建 API Key 型')}
                     </span>
                   </div>
                 </div>

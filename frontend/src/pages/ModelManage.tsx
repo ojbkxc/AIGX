@@ -1426,17 +1426,27 @@ export default function ModelManage(): JSX.Element {
         );
       case 'price':
         return (
-          <td key={col} className={`mm-c-price ta-${colAlign.price}`}>
+          <td
+            key={col}
+            className={`mm-c-price ta-${colAlign.price}`}
+            role="button"
+            tabIndex={0}
+            title={`${t('点击编辑定价')} · ${t('单位：美元。按量价为每 1k tokens 输入/输出价；按次价为每次调用价。')}`}
+            onClick={() => openPrice(row)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                openPrice(row);
+              }
+            }}
+          >
             {row.price ? (
               isFreePrice(row.price) ? (
                 <span className="mm-price-free" title={t('价格已配置为 0，调用不计费')}>
                   {t('免费')}
                 </span>
               ) : (
-                <span
-                  className="mm-price"
-                  title={t('单位：美元。按量价为每 1k tokens 输入/输出价；按次价为每次调用价。')}
-                >
+                <span className="mm-price">
                   {row.price.price_type === 'count'
                     ? `$${fmtPrice(row.price.input_price)}/${t('次')}`
                     : `$${fmtPrice(row.price.input_price)}/$${fmtPrice(row.price.output_price)}`}
