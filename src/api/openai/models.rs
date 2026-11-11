@@ -328,11 +328,16 @@ mod shared_catalog_tests {
             "build_view 必须用同一口径回落账号目录缓存（cached_model_ids）"
         );
         // 反向断言：目录缓存键格式只应存在于 catalog.rs（唯一实现），调用点
-        // 不得内联 `model_catalog:` —— 否则又是一份影子实现。
+        // 不得内联该键 —— 否则又是一份影子实现。
+        //
+        // 注意：断言目标用 `concat!` 拆成两半拼接。若在此直接写完整字面量，
+        // `include_str!("models.rs")` 会把**本测试自身**读进来，反向断言立刻
+        // 自指失败（2026-11-11 CI 真实踩过）。拆开后源文件里不含完整键。
+        let cache_key = concat!("model_", "catalog:");
         for (name, src) in [("models.rs", MODELS_SRC), ("model/manage.rs", MANAGE_SRC)] {
             assert!(
-                !src.contains("model_catalog:"),
-                "{name} 内联了目录缓存键 `model_catalog:`：回落必须走 catalog::cached_model_ids"
+                !src.contains(cache_key),
+                "{name} 内联了目录缓存键：回落必须走 catalog::cached_model_ids"
             );
         }
     }
