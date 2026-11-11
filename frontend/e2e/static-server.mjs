@@ -130,6 +130,9 @@ const MANAGE_VIEW = {
       provider_label: 'OpenAI 兼容',
       id: 'glm-4.7-flash',
       enabled: true,
+      // SPEC-1.0.46 §2.1：default_enabled = 默认绑定（id→id）那颗开关；
+      // enabled = default_enabled OR 任一条别名开着（后端 build_view 派生）。
+      default_enabled: true,
       sources: [{ kind: 'channel', channel_id: 'ch-1', name: 'lxchat-glm' }],
       owned_by: 'zhipu',
       context_length: 128000,
@@ -142,7 +145,9 @@ const MANAGE_VIEW = {
       provider: 'openai_compatible',
       provider_label: 'OpenAI 兼容',
       id: 'unpriced-model',
-      enabled: false,
+      // 默认绑定开着，且 alias-free 也开着 ⇒ 即便关掉默认绑定，行仍不压淡（A2A 口径）
+      enabled: true,
+      default_enabled: true,
       sources: [{ kind: 'channel', channel_id: 'ch-2', name: 'backup-channel' }],
       owned_by: 'aigx',
       context_length: null,
@@ -161,6 +166,7 @@ const MANAGE_VIEW = {
       provider_label: 'WorkBuddy 国内版',
       id: 'wb-coder',
       enabled: true,
+      default_enabled: true,
       sources: [{ kind: 'account', channel_id: 'ch-3', name: 'workbuddy-1', account_id: 'acc-1' }],
       owned_by: 'workbuddy',
       context_length: 64000,

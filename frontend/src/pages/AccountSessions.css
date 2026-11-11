@@ -2002,6 +2002,59 @@ tr[draggable="true"]:active .as-grip {
   background: rgba(220, 38, 38, 0.08);
 }
 
+/* ── §2.2 模型可见性状态（SPEC-1.0.46）：账号行内 models_status 四态 ── */
+/* 紧凑形态：容器 flex，文本可省略，字形与重试按钮 flex:0 0 auto —— 长 error 永不会
+   把重试按钮挤出 220px 的账号名单元格（T4 红 2 回归）。 */
+.as-model-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.as-model-glyph {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.as-model-glyph.ok {
+  color: #30a46c;
+}
+
+.as-model-glyph.info,
+.as-model-glyph.muted {
+  color: var(--text-muted);
+}
+
+.as-model-glyph.err {
+  color: var(--danger-text, #b91c1c);
+}
+
+.as-model-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.as-model-status-err {
+  color: var(--danger-text, #b91c1c);
+}
+
+.as-model-retry {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  width: 18px;
+  height: 18px;
+  line-height: 1;
+}
+
 /* ── §2.11 行内代理下拉：选中即存 + 状态点 ── */
 .as-c-proxy {
   overflow: hidden;

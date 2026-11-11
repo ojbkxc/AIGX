@@ -75,26 +75,29 @@ type SourceFilter = 'all' | 'channel' | 'account';
 type SortMode = 'default' | 'ratio-asc' | 'ratio-desc';
 
 /** 可显隐的列（check / model / act 锁定不可关，但可拖动排序） */
-type ColKey = 'enable' | 'price' | 'source' | 'caps' | 'alias';
-/** 全部表格列（含锁定列）——默认渲染顺序与默认宽度 */
+type ColKey = 'price' | 'source' | 'caps' | 'alias';
+/** 全部表格列（含锁定列）——默认渲染顺序与默认宽度（对齐 Agent2API：无「启用」列） */
 type AnyCol = 'check' | ColKey | 'model' | 'act';
-const COL_ORDER: AnyCol[] = ['check', 'enable', 'model', 'price', 'source', 'caps', 'alias', 'act'];
+const COL_ORDER: AnyCol[] = ['check', 'model', 'price', 'source', 'caps', 'alias', 'act'];
+/** 列宽：弹性列对齐 Agent2API page-gateway.css（`.c-*`），**操作列回到 px 定宽**。
+ *  A2A 的 act=11% 放得下是因为它操作列按钮更少更小；AIGX 是三颗按钮（测试/定价/删除），
+ *  11%≈90px 装不下 ~145px 内容 → 「测试」向左溢出进映射列、真人点不到（verify 实测）。
+ *  act=170px 定宽（td 内宽 150px ≥ 按钮 ~145px）；% 列之和 ≈ (表宽−act)/表宽
+ *  （822px 视口下 act 170 → % 之和 79%），余量给唯一的弹性富余列 alias。见 §9。 */
 const COL_DEFAULT_W: Record<AnyCol, string> = {
-  check: '34px',
-  enable: '46px',
-  model: '21%',
-  price: '15%',
-  source: '16%',
-  caps: '10%',
-  alias: '33%',
-  act: '132px',
+  check: '3.5%',
+  model: '19%',
+  price: '8%',
+  source: '6.5%',
+  caps: '11.5%',
+  alias: '30.5%',
+  act: '170px',
 };
 /** 锁定列：恒显示（表不能没有勾选框 / 模型名 / 操作），但可参与拖序 */
 const LOCKED_COLS: AnyCol[] = ['check', 'model', 'act'];
 /** 列设置面板显示的列名（锁定列也要有名字） */
 const COL_PANEL_LABEL: Record<AnyCol, string> = {
   check: '选择',
-  enable: '启用',
   model: '模型',
   price: '定价',
   source: '来源',
@@ -105,10 +108,9 @@ const COL_PANEL_LABEL: Record<AnyCol, string> = {
 
 /** 列对齐三档（对齐 Agent2API table-col-settings 的 ALIGNS） */
 type Align = 'left' | 'center' | 'right';
-/** 各列的默认对齐 = 现有 CSS 的观感（勾/启用居中，其余左对齐），视觉不突变 */
+/** 各列的默认对齐 = 现有 CSS 的观感（勾居中，其余左对齐），视觉不突变 */
 const COL_DEFAULT_ALIGN: Record<AnyCol, Align> = {
   check: 'center',
-  enable: 'center',
   model: 'left',
   price: 'left',
   source: 'left',
@@ -303,27 +305,6 @@ function reasoningLevelCandidates(overrides: Record<string, ModelMetaOverride>, 
   return [...FALLBACK_REASONING_LEVELS];
 }
 
-/**
- * 「映射」列里被隐藏的「模型名→自己（原样透传）」identity 提示。
- *
- * 该提示是前端派生的只读项：后端 `alias_entries` 只收 `target == 本模型` 的映射，
- * 模型自身名永不出现；而没配映射时 `resolve()` 原样透传，所以「模型名→自己」在
- * 行为上等价于「没有映射」。删它不落库、不动 `model_custom_map` 契约 —— 只把模型
- * id 记进 localStorage，让这一行不再显示该提示。写入失败（隐私模式/配额）仅当次会话生效。
- */
-const HIDE_IDENTITY_KEY = 'aigx-mm-hide-identity';
-
-function loadHiddenIdentity(): Set<string> {
-  try {
-    const raw = localStorage.getItem(HIDE_IDENTITY_KEY);
-    if (!raw) return new Set();
-    const arr: unknown = JSON.parse(raw);
-    return new Set(Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : []);
-  } catch {
-    return new Set();
-  }
-}
-
 // ── 主组件 ───────────────────────────────────────────────────────────
 
 export default function ModelManage(): JSX.Element {
@@ -388,7 +369,9 @@ export default function ModelManage(): JSX.Element {
         const v1 = {
           columns: legacyCfg
             .filter((e): e is { key: string; visible?: unknown; align?: unknown } =>
-              Boolean(e) && typeof e === 'object' && typeof (e as { key?: unknown }).key === 'string')
+              Boolean(e) && typeof e === 'object' && typeof (e as { key?: unknown }).key === 'string'
+              // 已删列（如旧「启用」列）的残留键丢在迁移前，别喂给公共层造成幽灵列
+              && MM_COL_DEFS.some((d) => d.key === (e as { key: string }).key))
             .map((e) => ({
               key: e.key,
               visible: e.visible !== false,
@@ -452,22 +435,6 @@ export default function ModelManage(): JSX.Element {
   const [aliasError, setAliasError] = useState('');
   const [savingAlias, setSavingAlias] = useState(false);
   const [pendingAlias, setPendingAlias] = useState<string | null>(null);
-  // 「模型名→自己」identity 提示的隐藏记忆（纯前端展示偏好，见 loadHiddenIdentity）
-  const [hiddenIdentity, setHiddenIdentity] = useState<Set<string>>(loadHiddenIdentity);
-
-  const hideIdentity = (id: string): void => {
-    setHiddenIdentity((prev) => {
-      if (prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.add(id);
-      try {
-        localStorage.setItem(HIDE_IDENTITY_KEY, JSON.stringify([...next]));
-      } catch {
-        /* 写入失败（隐私模式等）仅当次会话生效 */
-      }
-      return next;
-    });
-  };
 
   const [testTarget, setTestTarget] = useState<ManagedModel | null>(null);
 
@@ -533,7 +500,11 @@ export default function ModelManage(): JSX.Element {
     if (next) setView(next);
   }, []);
 
-  const handleToggle = async (row: ManagedModel, enabled: boolean) => {
+  /**
+   * 「默认绑定」（id→id 自映射）开关：写入仍走 `POST /api/models/state`（SPEC §2.1）。
+   * 这就是 A2A 里模型自身的 `enabled`——行级启用 = 默认绑定开着或任一条别名开着。
+   */
+  const toggleDefaultBinding = async (row: ManagedModel, enabled: boolean) => {
     const key = `${row.provider}|${row.id}`;
     if (pendingRow) return;
     setPendingRow(key);
@@ -1391,18 +1362,6 @@ export default function ModelManage(): JSX.Element {
             />
           </td>
         );
-      case 'enable':
-        return (
-          <td key={col} className={`mm-c-enable ta-${colAlign.enable}`}>
-            <Switch
-              checked={row.enabled}
-              onChange={(next) => void handleToggle(row, next)}
-              disabled={pendingRow === key}
-              ariaLabel={`${row.id} ${t('启停')}`}
-              className="mm-row-switch"
-            />
-          </td>
-        );
       case 'model':
         return (
           <td key={col} className={`mm-c-model ta-${colAlign.model}`}>
@@ -1530,12 +1489,33 @@ export default function ModelManage(): JSX.Element {
         const aliasEntries: AliasEntry[] = row.alias_entries?.length
           ? row.alias_entries
           : row.aliases.map((a): AliasEntry => ({ alias: a, target: row.id, enabled: true, reasoning_effort: undefined }));
-        // 纯前端派生的「模型名→自己（原样透传）」只读提示：后端 alias_entries 只收
-        // target==本模型的映射，自身名不出现；已有同名显式映射时不重复展示。
-        const showIdentity = !hiddenIdentity.has(row.id) && !aliasEntries.some((e) => e.alias === row.id);
+        // 默认绑定（id→id 自映射）那颗开关 = 行级启用（model_rules，SPEC §2.1）。
+        // A2A 里它就是「模型自身的 enabled」，常驻在映射列首颗；关掉它且无可生效别名时整行压淡。
+        // 后端未落地新字段时回落到旧的 row.enabled，避免整列被误判为关闭。
+        const defaultOn = row.default_enabled ?? row.enabled;
+        const defaultBusy = pendingRow === key;
         return (
           <td key={col} className={`mm-c-alias ta-${colAlign.alias}`}>
             <div className="mm-alias-cell">
+              {/* 默认绑定 chip：开关 + `<id> → <id>` + 「默认」小标（对标 A2A .binding-default） */}
+              <span
+                className={`mm-alias mm-binding-default${defaultOn ? '' : ' is-off'}`}
+                title={defaultOn ? `${row.id} → ${row.id}` : `${row.id} → ${row.id}（${t('已关闭，请求原样透传')}）`}
+              >
+                <Switch
+                  checked={defaultOn}
+                  onChange={(next) => void toggleDefaultBinding(row, next)}
+                  disabled={defaultBusy}
+                  ariaLabel={`${t('默认绑定')} ${row.id}`}
+                  className="mm-alias-switch"
+                />
+                <span className="mm-alias-name mm-binding-name" role="presentation">
+                  <span className="mm-alias-text">{row.id}</span>
+                  <span className="mm-alias-arrow" aria-hidden="true">→</span>
+                  <span className="mm-alias-target">{row.id}</span>
+                </span>
+                <span className="mm-binding-default-tag">{t('默认')}</span>
+              </span>
               {aliasEntries.map((entry) => (
                 <span
                   key={entry.alias}
@@ -1584,26 +1564,6 @@ export default function ModelManage(): JSX.Element {
                   </button>
                 </span>
               ))}
-              {showIdentity && (
-                <span
-                  key={`${row.id}\u0001identity`}
-                  className="mm-alias mm-alias-identity"
-                  title={t('未配置改名：请求按模型原样透传（自身名可直接调用）')}
-                >
-                  <span className="mm-alias-text">{row.id}</span>
-                  <span className="mm-alias-arrow" aria-hidden="true">→</span>
-                  <span className="mm-alias-target">{row.id}</span>
-                  <span className="mm-alias-identity-tag">{t('原样')}</span>
-                  <button
-                    type="button"
-                    className="mm-alias-x"
-                    title={t('隐藏这条原样透传提示（不改动任何映射）')}
-                    onClick={() => hideIdentity(row.id)}
-                  >
-                    ×
-                  </button>
-                </span>
-              )}
               <button
                 type="button"
                 className="mm-alias-add"
@@ -1672,7 +1632,6 @@ export default function ModelManage(): JSX.Element {
 
   const COL_HEAD: Record<AnyCol, { label: string; tip?: string }> = {
     check: { label: '' },
-    enable: { label: t('启用') },
     model: { label: t('模型') },
     price: { label: t('定价'), tip: t('单位：美元（USD），按量价为每 1k tokens') },
     source: { label: t('来源') },

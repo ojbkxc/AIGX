@@ -112,25 +112,33 @@ test.describe('模型管理', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('启停开关可用，请求打到 /api/models/state', async ({ page, pageErrors }) => {
+  test('无「启用」列；「映射」列首颗是默认绑定开关，切换打到 /api/models/state', async ({ page, pageErrors }) => {
     const stateCalls: string[] = [];
     page.on('request', (r) => {
       if (r.url().includes('/api/models/state')) stateCalls.push(r.method());
     });
 
-    const row = dataRows(page).filter({ hasText: 'unpriced-model' });
-    // 行内第一个复选框是「批量选择」，启停是 role=switch 的独立控件。
-    // 映射列里也有 role=switch（映射开关），所以按列定位——第 2 个 td 是启停列。
-    const toggle = row.locator('td').nth(1).getByRole('switch');
-    await expect(toggle).toBeVisible();
-    await toggle.click();
+    // SPEC-1.0.46 §4.1 / §6.1：启用列已删（表头与单元格都不该有）
+    await expect(page.locator('.mm-h-enable')).toHaveCount(0);
+    await expect(page.locator('.mm-c-enable')).toHaveCount(0);
+    await expect(page.locator('.mm-table thead')).not.toContainText('启用');
+
+    const row = dataRows(page).filter({ hasText: 'glm-4.7-flash' });
+    const cell = row.locator('.mm-alias-cell');
+    // 映射列首颗 = 默认绑定 chip（id→id 自映射），带独立开关
+    const binding = cell.locator('.mm-alias').first();
+    await expect(binding).toHaveClass(/mm-binding-default/);
+    await expect(binding).toContainText(/glm-4\.7-flash\s*→\s*glm-4\.7-flash/);
+    await expect(binding.locator('.mm-alias-switch')).toBeVisible();
+
+    await binding.locator('.mm-alias-switch').click();
 
     await expect.poll(() => stateCalls.length, { timeout: 5000 }).toBeGreaterThan(0);
     expect(stateCalls[0]).toBe('POST');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('映射列：映射 chips —— 开关可切、关闭态划线、行内 + 映射入口', async ({ page, pageErrors }) => {
+  test('映射列：默认绑定 chip 常驻 + 真别名 chips（开关可切、关闭态划线、行内 + 映射入口）', async ({ page, pageErrors }) => {
     const aliasCalls: string[] = [];
     page.on('request', (r) => {
       if (r.url().includes('/api/models/alias')) aliasCalls.push(r.url());
@@ -140,24 +148,20 @@ test.describe('模型管理', () => {
     const cell = row.locator('.mm-alias-cell');
     await expect(cell).toBeVisible();
 
-    // 真两条映射（alias-free 启用 / alias-off 关闭）+ 一条派生的
-    // 「模型名→自己（原样透传）」identity 提示 chip（需求3：映射字段要包含
-    // 模型名本身）。identity chip 无开关、可 × 隐藏，故单独断言。
+    // 映射列 = 首颗默认绑定 chip（mm-binding-default，常驻）+ 两条真别名。
+    // identity 提示 chip 已随默认绑定上线移除（SPEC §4.2），不再单独断言。
     const chips = cell.locator('.mm-alias');
     await expect(chips).toHaveCount(3);
+    const binding = chips.first();
+    await expect(binding).toHaveClass(/mm-binding-default/);
+    await expect(binding).toContainText(/unpriced-model\s*→\s*unpriced-model/);
+    await expect(binding.locator('.mm-binding-default-tag')).toContainText('默认');
+
+    // 关闭态划线只命中 alias-off（默认绑定开着，不算 is-off）
     await expect(cell.locator('.mm-alias.is-off')).toHaveCount(1);
     await expect(cell.locator('.mm-alias.is-off')).toContainText('alias-off');
 
-    // identity chip：显示「模型名 → 同名」（具体模型名 + 方向），右侧「原样」标签，
-    // 且**不带**开关。箭头/目标名的 class 只用于定位，内容断言用语义正则。
-    const identity = cell.locator('.mm-alias-identity');
-    await expect(identity).toHaveCount(1);
-    await expect(identity).toContainText(/unpriced-model\s*→\s*unpriced-model/);
-    await expect(identity).toContainText('原样');
-    await expect(identity.getByRole('switch')).toHaveCount(0);
-
-    // 真实映射 chip 都有开关（identity 排除在外），且目标模型名可见（不再只在 tooltip 里）
-    await expect(cell.locator('.mm-alias:not(.mm-alias-identity)').first().getByRole('switch')).toBeVisible();
+    // 真别名 chip 都有开关，且目标模型名可见（不再只在 tooltip 里）
     const freeChip = cell.locator('.mm-alias', { hasText: 'alias-free' });
     await expect(freeChip).toContainText(/alias-free\s*→\s*unpriced-model/);
     await expect(cell.locator('.mm-alias.is-off', { hasText: 'alias-off' })).toContainText(
@@ -167,8 +171,8 @@ test.describe('模型管理', () => {
     // 行内「+ 映射」入口存在
     await expect(cell.locator('.mm-alias-add')).toBeVisible();
 
-    // 切开关：请求打到 /api/models/alias/state
-    await cell.locator('.mm-alias').first().getByRole('switch').click();
+    // 切真别名开关（第二颗 = alias-free）→ 打到 /api/models/alias/state
+    await chips.nth(1).getByRole('switch').click();
     await expect
       .poll(() => aliasCalls.filter((u) => u.includes('/alias/state')).length, { timeout: 5000 })
       .toBeGreaterThan(0);
@@ -187,6 +191,142 @@ test.describe('模型管理', () => {
     await expect(preview).toContainText('unpriced-model');
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('默认绑定关掉 → 行压淡；行还有别名开着时**不**压淡（A2A 口径）', async ({ page, pageErrors }) => {
+    // 自建视图：solo-model 无别名（关默认绑定即整行失活）；
+    // mapped-model 默认绑定 + keep-alias 开着（关默认绑定后行仍生效）。
+    const view = {
+      providers: [{ id: 'openai_compatible', label: 'OpenAI 兼容', total: 2, enabled: 2, account: false }],
+      models: [
+        {
+          provider: 'openai_compatible', provider_label: 'OpenAI 兼容', id: 'solo-model',
+          enabled: true, default_enabled: true,
+          sources: [{ kind: 'channel', channel_id: 'ch-1', name: 'lxchat-glm' }],
+          owned_by: 'aigx', context_length: null, capabilities: [], price: null, model_ratio: 1,
+          aliases: [], alias_entries: [],
+        },
+        {
+          provider: 'openai_compatible', provider_label: 'OpenAI 兼容', id: 'mapped-model',
+          enabled: true, default_enabled: true,
+          sources: [{ kind: 'channel', channel_id: 'ch-1', name: 'lxchat-glm' }],
+          owned_by: 'aigx', context_length: null, capabilities: [], price: null, model_ratio: 1,
+          aliases: ['keep-alias'],
+          alias_entries: [{ alias: 'keep-alias', target: 'mapped-model', enabled: true }],
+        },
+      ],
+      mappings: { 'keep-alias': 'mapped-model' },
+      unpriced: 2,
+    };
+    const recompute = () => {
+      for (const p of view.providers) {
+        p.enabled = view.models.filter((m) => m.provider === p.id && m.enabled).length;
+      }
+    };
+    await page.route('**/api/models/manage', (r) =>
+      r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: view }) }),
+    );
+    // 回写：POST /api/models/state 改 default_enabled，并按 §2.1 重算派生 enabled
+    await page.route('**/api/models/state', (r) => {
+      const b = r.request().postDataJSON() as { provider?: string; id?: string; enabled?: boolean };
+      const m = view.models.find((x) => x.provider === b.provider && x.id === b.id);
+      if (m) {
+        m.default_enabled = !!b.enabled;
+        m.enabled = m.default_enabled || (m.alias_entries ?? []).some((e) => e.enabled);
+        recompute();
+      }
+      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: view }) });
+    });
+
+    await page.goto('/model-manage');
+    await expect(page.locator('h1')).toContainText('模型管理');
+
+    const solo = dataRows(page).filter({ hasText: 'solo-model' });
+    const mapped = dataRows(page).filter({ hasText: 'mapped-model' });
+    await expect(solo).toHaveCount(1);
+    await expect(mapped).toHaveCount(1);
+    // 初始都生效（默认绑定开着）
+    await expect(solo).not.toHaveClass(/mm-off/);
+    await expect(mapped).not.toHaveClass(/mm-off/);
+
+    // 关掉 solo-model 的默认绑定 → 无别名兜底 → 整行压淡
+    await solo.locator('.mm-binding-default .mm-alias-switch').click();
+    await expect(solo).toHaveClass(/mm-off/);
+
+    // 关掉 mapped-model 的默认绑定 → keep-alias 仍开着 → **不**压淡
+    await mapped.locator('.mm-binding-default .mm-alias-switch').click();
+    await expect(mapped).not.toHaveClass(/mm-off/);
+    // 默认绑定 chip 自身进入 is-off 态
+    await expect(mapped.locator('.mm-binding-default')).toHaveClass(/is-off/);
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('「获取模型」：请求体只带 channel_id（§2.3 裁决），成功渲染发现列表 / 失败显示失败态', async ({
+    page,
+    pageErrors,
+  }) => {
+    // SPEC-1.0.46 §2.3（lead 裁决）：弹窗里全是**已保存**渠道，前端只发 channel_id；
+    // channel_type/base_url 的兜底在后端做（body 参数语义是「未保存草稿」，前端快照
+    // 可能是过期的，发过去会静默打错上游）。故本用例正向锁住「只带 channel_id」。
+    const bodies: Array<Record<string, unknown>> = [];
+    await page.route('**/api/channels/fetch_models', (r) => {
+      bodies.push(r.request().postDataJSON() as Record<string, unknown>);
+      return r.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: { models: ['glm-4.7-flash', 'glm-4-plus'], removed_mappings: 0 } }),
+      });
+    });
+
+    await page.getByRole('button', { name: '获取模型' }).click();
+    const modal = page.locator('.modal-overlay .modal').first();
+    await expect(modal).toBeVisible();
+    await expect(modal.locator('h3')).toContainText('获取模型');
+
+    // ch-4 legacy-zero-interval（启用 + 唯一名）→ 点它的「拉取」
+    const fetchRow = modal.locator('.mm-fetch-row', { hasText: 'legacy-zero-interval' });
+    await expect(fetchRow).toBeVisible();
+    await fetchRow.getByRole('button', { name: '拉取' }).click();
+
+    await expect.poll(() => bodies.length, { timeout: 5000 }).toBeGreaterThan(0);
+    const body = bodies[bodies.length - 1];
+    // 正向：只发 channel_id（不带 channel_type/base_url —— 回归护栏，防回退到错误设计）
+    expect(body.channel_id).toBe('ch-4');
+    expect(body).not.toHaveProperty('channel_type');
+    expect(body).not.toHaveProperty('base_url');
+    // 成功路径：出现「已拉取」徽标
+    await expect(fetchRow.locator('.mm-badge-ok')).toContainText('已拉取');
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('「获取模型」失败路径：4xx → 弹窗显示失败态（不静默）', async ({ page, pageErrors }) => {
+    await page.route('**/api/channels/fetch_models', (r) =>
+      r.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        // 形状照本次事故：后端把上游 403 包成 400 JSON
+        body: JSON.stringify({ success: false, error: 'Auth failed: HTTP 403 (invalid api key?)' }),
+      }),
+    );
+
+    await page.getByRole('button', { name: '获取模型' }).click();
+    const modal = page.locator('.modal-overlay .modal').first();
+    await expect(modal).toBeVisible();
+
+    const fetchRow = modal.locator('.mm-fetch-row', { hasText: 'legacy-zero-interval' });
+    await fetchRow.getByRole('button', { name: '拉取' }).click();
+
+    // 失败不静默：行内渲染失败文案 + 按钮回到可重试的「重试」
+    await expect(fetchRow.locator('.mm-fetch-err')).toBeVisible();
+    await expect(fetchRow.locator('.mm-fetch-err')).toContainText('403');
+    await expect(fetchRow.getByRole('button', { name: '重试' })).toBeVisible();
+
+    // 本次是**故意**打一个 400：浏览器必然在 console 记一条 resource-load 错误，
+    // 属预期噪声；过滤掉它再断言「没有其它未捕获异常」。
+    const unexpected = pageErrors.filter((e) => !/status of 400/.test(e));
+    expect(unexpected, unexpected.join('\n')).toEqual([]);
   });
 
   test('操作列「测试」打开模型测试弹窗，按来源并发并渲染结论', async ({ page, pageErrors }) => {
@@ -243,6 +383,79 @@ test.describe('模型管理', () => {
     // 恢复默认，避免 localStorage 影响后续用例
     await panel.locator('.tbl-colset-reset').click();
     await expect(page.locator('.mm-h-price')).toHaveCount(1);
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('旧 localStorage 带已删「启用」列残留 → 不崩、无幽灵列（新键 + 旧键两条路径）', async ({ page, pageErrors }) => {
+    // 两条路径都要覆盖（fe-table §9 双保险）：
+    //   A) 新键 aigx-tbl-cols.models 里混入 {key:'enable'} → 公共层 sanitizeItems 丢弃未声明键；
+    //   B) 只有旧键 aigx-mm-colcfg（含 enable）→ 一次性迁移过滤器按 MM_COL_DEFS 挡掉。
+    // 用 addInitScript 在页面脚本之前写入，才能被列状态初始化读到。
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        'aigx-tbl-cols.models',
+        JSON.stringify({
+          v: 2,
+          defaults: [],
+          items: [
+            { key: 'enable', visible: true, align: 'left' },
+            { key: 'model', visible: true, align: 'left' },
+            { key: 'alias', visible: true, align: 'left' },
+          ],
+        }),
+      );
+    });
+
+    await page.goto('/model-manage');
+    await expect(page.locator('h1')).toContainText('模型管理');
+    await expect(page.locator('.mm-table')).toBeVisible();
+
+    // 无幽灵列：表头/单元格都不出现 enable
+    await expect(page.locator('.mm-h-enable')).toHaveCount(0);
+    await expect(page.locator('.mm-c-enable')).toHaveCount(0);
+
+    // 列设置面板不崩：7 列（选择/模型/定价/来源/能力/映射/操作），无「启用」
+    await page.locator('.mm-colset > button').click();
+    const panel = page.locator('.tbl-colset');
+    await expect(panel).toBeVisible();
+    await expect(panel.locator('.tbl-colset-row', { hasText: '启用' })).toHaveCount(0);
+    await expect(panel.locator('.tbl-colset-row')).toHaveCount(7);
+    // 面板仍可用：改一次对齐 → 触发回写；清洗后的存储不再残留 enable
+    await panel.locator('.tbl-colset-row', { hasText: '定价' })
+      .locator('.tbl-colset-align button', { hasText: '中' }).click();
+    await expect(page.locator('.mm-h-price')).toHaveClass(/ta-center/);
+    const persisted = await page.evaluate(() => localStorage.getItem('aigx-tbl-cols.models'));
+    expect(persisted ?? '').not.toContain('"enable"');
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('仅旧键 aigx-mm-colcfg（含 enable）→ 一次性迁移过滤，不产生幽灵列', async ({ page, pageErrors }) => {
+    await page.addInitScript(() => {
+      localStorage.removeItem('aigx-tbl-cols.models');
+      localStorage.setItem(
+        'aigx-mm-colcfg',
+        JSON.stringify([
+          { key: 'enable', visible: true, align: 'left' },
+          { key: 'model', visible: true, align: 'left' },
+          { key: 'alias', visible: true, align: 'left' },
+        ]),
+      );
+    });
+
+    await page.goto('/model-manage');
+    await expect(page.locator('h1')).toContainText('模型管理');
+    await expect(page.locator('.mm-table')).toBeVisible();
+
+    await expect(page.locator('.mm-h-enable')).toHaveCount(0);
+    await expect(page.locator('.mm-c-enable')).toHaveCount(0);
+    await page.locator('.mm-colset > button').click();
+    const panel = page.locator('.tbl-colset');
+    await expect(panel).toBeVisible();
+    await expect(panel.locator('.tbl-colset-row', { hasText: '启用' })).toHaveCount(0);
+    // 旧键里的 model / alias 顺序偏好仍被迁移保留（列仍按声明集合齐全）
+    await expect(panel.locator('.tbl-colset-row')).toHaveCount(7);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

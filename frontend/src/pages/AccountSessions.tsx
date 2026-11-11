@@ -2001,6 +2001,74 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     return lines;
   };
 
+  /**
+   * §2.2 模型可见性状态（SPEC-1.0.46）：账号行内展示后端 `models_status`。
+   * 契约先写、后端未落地时不下发该字段 → 返回 null（不占位、不崩）。
+   *
+   * 紧凑形态：账号名单元格仅 220px，长中文句子 + 按钮会被 nowrap/overflow 裁出格
+   * （T4 红 2：failed 态重试按钮 real desktop 点不到）。故行内只留「短标签 + 状态字形」，
+   * 完整解释（含后端合成的长 error）搬到 title；failed 的重试做成图标按钮，
+   * flex 布局下 `flex:0 0 auto` 保证永不被文本挤出。
+   */
+  const modelStatusNode = (s: AccountSessionItem): ReactNode => {
+    const ms = s.models_status;
+    if (!ms) return null;
+    switch (ms.state) {
+      case 'whitelist':
+        return (
+          <div
+            className="form-hint as-model-status"
+            title={t('模型清单：白名单 {{n}} 个', { n: ms.count })}
+          >
+            <span className="as-model-glyph ok" aria-hidden="true">✓</span>
+            <span className="as-model-text">{t('白名单 {{n}}', { n: ms.count })}</span>
+          </div>
+        );
+      case 'catalog':
+        return (
+          <div
+            className="form-hint as-model-status"
+            title={`${t('模型清单：目录发现 {{n}} 个', { n: ms.count })} · ${t('模型由上游目录自动发现；可在编辑弹窗写入白名单固化')}`}
+          >
+            <span className="as-model-glyph info" aria-hidden="true">⌛</span>
+            <span className="as-model-text">{t('目录 {{n}}', { n: ms.count })}</span>
+          </div>
+        );
+      case 'none':
+        return (
+          <div
+            className="form-hint as-model-status"
+            title={t('模型清单：无（该供应商不支持自动发现，请手填）')}
+          >
+            <span className="as-model-glyph muted" aria-hidden="true">⚠</span>
+            <span className="as-model-text">{t('无模型')}</span>
+          </div>
+        );
+      case 'failed':
+        return (
+          <div
+            className="form-hint as-model-status as-model-status-err"
+            title={t('模型同步失败：{{error}}', { error: ms.error || t('未知原因') })}
+          >
+            <span className="as-model-glyph err" aria-hidden="true">✗</span>
+            <span className="as-model-text">{t('同步失败')}</span>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm as-model-retry"
+              aria-label={t('重试')}
+              title={t('重试')}
+              onClick={() => void handleSyncCatalog(s)}
+              disabled={syncingId === s.id}
+            >
+              {syncingId === s.id ? <Loader2 size={11} className="spin" /> : <RotateCcw size={11} />}
+            </button>
+          </div>
+        );
+      default:
+        return null;
+    }
+  };
+
   /** §2.9 余额明细：wallets[] 逐桶 + windows[] 逐窗口；都空 → 「上游未返回明细」 */
   const balanceDetailRows = (bal: AccountBalance | null | undefined): ReactNode => {
     const wallets = Array.isArray(bal?.wallets) ? bal.wallets : [];
@@ -2085,6 +2153,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                 {shortError(s.last_error)}
               </div>
             )}
+            {modelStatusNode(s)}
           </td>
         );
       }

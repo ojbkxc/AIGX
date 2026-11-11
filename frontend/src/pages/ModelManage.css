@@ -306,7 +306,6 @@
   text-align: left;
   font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.05em;
   color: var(--text-muted);
   background: var(--table-header-bg, var(--surface-bg));
   padding: 8px 10px;
@@ -315,8 +314,10 @@
   user-select: none;
 }
 
+/* 单元格上下 8px、横向 10px（对齐 Agent2API page-gateway.css：td padding 8px，
+   横向给到 10px 便于扫读，同时不把七列挤到换行） */
 .mm-table td {
-  padding: 7px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border-color);
   vertical-align: middle;
   overflow: hidden;
@@ -342,9 +343,7 @@
 
 /* 列宽把手：表头右缘，拖动改宽 / 双击还原（sticky 表头即把手的定位父级） */
 .mm-h-check,
-.mm-h-enable,
-.mm-c-check,
-.mm-c-enable {
+.mm-c-check {
   text-align: center;
 }
 
@@ -456,7 +455,7 @@
 /* ── 定价列 ── */
 .mm-price {
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 11.5px;
   font-family: var(--font-mono, ui-monospace, Menlo, monospace);
   white-space: nowrap;
 }
@@ -506,7 +505,7 @@
   align-items: center;
   padding: 1px 7px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: 11.5px;
   line-height: 16px;
   background: rgba(245, 158, 11, 0.13);
   color: var(--warning-text, #b45309);
@@ -672,27 +671,31 @@
   text-decoration: line-through;
 }
 
-/* 派生的「模型名→自己（原样透传）」只读提示：虚线边 + 弱化色，与真实映射区分 */
-.mm-alias-identity {
-  border: 1px dashed var(--line-strong, rgba(128, 128, 128, 0.4));
-  background: transparent;
-  color: var(--text-muted);
-}
-
-.mm-alias-identity .mm-alias-text {
+/* 默认绑定 chip（id→id 自映射，常驻映射列首颗）：「默认」小标对标 A2A .binding-default
+   （font-size:10px、细边框、小圆角）；chip 外壳复用 .mm-alias，关闭态走 .is-off 压淡。 */
+.mm-binding-default .mm-binding-default-tag {
+  font-size: 10px;
   font-weight: 500;
-}
-
-.mm-alias-identity-tag {
-  font-size: 9px;
-  font-weight: 600;
-  padding: 1px 4px;
-  border-radius: 6px;
-  background: rgba(128, 128, 128, 0.16);
+  padding: 0 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--surface-bg);
   color: var(--text-muted);
-  letter-spacing: 0.02em;
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+/* 默认绑定 chip 的名字不可点（开关在 chip 里）：撤掉 .mm-alias-name 的指针/悬停下划线 */
+.mm-binding-name {
+  cursor: default;
+}
+
+.mm-binding-name:hover {
+  color: inherit;
+}
+
+.mm-binding-name:hover .mm-alias-text {
+  text-decoration: none;
 }
 
 /* 药丸内的小号开关：标准 36×20 会把行高撑起来，缩到 22×12 */
@@ -754,7 +757,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 

@@ -283,14 +283,53 @@ pub models_status: ModelsStatus,
   title 提示 + `未知原因`），zh/en 同步补齐。
 - **容错**：`models_status?` 可选，后端未落地（当前 `session_json` 尚未下发）时
   `modelStatusNode` 返回 `null`，不渲染、不占位、不崩。
+- **T4 红 2 回归修复（长文案把重试按钮裁出单元格）→ 改为紧凑形态**：原先行内直接铺
+  长中文（`模型清单：白名单 N 个` / `模型同步失败：<长 error>`），账号名单元格仅 220px，
+  `nowrap + overflow:hidden` 把 `failed` 态的行内重试按钮排到 td 右缘之外（实测按钮
+  x=520 > td 右缘 467），`overflow:hidden` 裁掉按钮 → real desktop 也点不到。
+  修法：
+  - 行内只留 **短标签 + 状态字形**（`✓ 白名单 N` / `⌛ 目录 N` / `⚠ 无模型` /
+    `✗ 同步失败`）；完整长句（含后端合成的长 error）整体搬到 `title`（tooltip），
+    一个字没丢。短标签键为新增 `白名单 {{n}}` / `目录 {{n}}` / `无模型` /
+    `同步失败`（后者复用既有键），长句键保留供 tooltip 用。
+  - 容器改 **flex**：`.as-model-text` 负责 `text-overflow:ellipsis`，字形与重试按钮
+    `flex:0 0 auto` —— 文本先省略，按钮永不被挤出。重试改 **18px 图标按钮**
+    （`RotateCcw` / 同步中 `Loader2`，复用既有 import）。
+  - 选择器保留 `.as-model-status` / `.as-model-status-err` / `.as-model-retry`
+    （verify 的 e2e 断言可继续用；**仅行内文案与 tooltip 承载方式变更**）。
+- **自测实测量（`E2E_PORT=4174`，真实构建产物 static/ + API 桩，超长账号名 + 超长 error 最坏情况）**：
+  - desktop vw=1280：name td `257→477`，内容盒 `267→467`(w200)，重试按钮 `332→350`(w18)
+    —— 右缘 350 ≪ 467，落在格内 117px，click 成功；
+  - mobile vw=390：name td `48→334`，内容盒 `58→324`(w266)，重试按钮 `123→141`(w18)
+    —— 右缘 141 ≪ 324，落在格内 183px，click 成功。
+  （回归前同场景按钮右缘 520 > 467，超出 53px 被裁。）
+- **本地门禁（修复后）**：`tsc --noEmit` 0、`vitest run` 128/128、`npm run i18n:check`
+  ✓（zh/en 3330 一致，含新增 3 短键）、`i18n-interpolation-check` PASS、eslint 改动文件 0。
+  **`account-model-status.spec.ts` 的行内文案断言需 verify 同步**：新行内文本为
+  `白名单 N` / `目录 N` / `无模型` / `同步失败`（长句现仅在 `title`）；
+  类选择器 `.as-model-status` / `.as-model-status-err` / `.as-model-retry` 不变。
+  **长句断言是「迁移到 `title`，不是删除」**（lead 硬要求）：verify 复跑须**两条都断**
+  —— 短标签 textContent **且** 长句 `title`，例：
+  `await expect(status).toContainText('同步失败')` **且**
+  `await expect(status).toHaveAttribute('title', /模型同步失败：.*HTTP 500/)`。
+  `title` 由 `modelStatusNode` 用完整 `t('模型同步失败：{{error}}', { error: ms.error })`
+  生成（error 为后端合成的长文本），故长句可原样断言；禁止只留短标签断言（等于用改测试
+  掩盖信息丢失）。
 
 ### fe-table（模型管理表格改造）
 
-- **列宽定值（§4.4 授权"按实际观感定值"）**：`check 3.5% / model 20% / price 8% /
-  source 6.5% / caps 11.5% / alias 39.5% / act 11%`（合计 100%）。SPEC 建议值合计 92.5%，
-  余量 7.5% 按 §4.4「给 model 或 alias」分给 model +1%（20%）、alias +6.5%（39.5%）。
-  `check`/`act` 由原 `34px`/`132px` 改为百分比，与 A2A 一致；副作用是公共列宽层
-  （`tableColumns`）不再有 px 默认列参与拖拽记忆，拖拽/双击还原行为不变。
+- **列宽定值（§4.4 授权"按实际观感定值"）+ T4 红 1 回归修复**：最终为
+  `check 3.5% / model 19% / price 8% / source 6.5% / caps 11.5% / alias 30.5% / act 170px`。
+  **操作列回到 px 定宽**：初版照搬 A2A 的 `act 11%`，在 822px 表宽下只有 ~90px，装不下
+  AIGX 的三颗按钮（测试/定价/删除 ≈145px），`.mm-actions` 不换行 → 「测试」向左溢出进映射列
+  （实测按钮 x=1096 < act td 左缘 1157），被 `.mm-alias-cell` 拦截 pointer events，真人点不到。
+  A2A 的 11% 放得下是因为它操作列按钮更少更小 —— 抄了比例没抄内容尺寸。
+  act=170px 时 td 内宽 150px ≥ 内容 ~145px；`% 列之和 79% ≈ (表宽−act)/表宽`（822px 下
+  act 170 → 余 652px），余量全给唯一弹性富余列 alias。修复后实测（1440 视口，表宽 822px）：
+  列宽 check29/model156/price66/source53/caps95/alias251/act173（含 border）；
+  「测试」按钮 x=[1096,1150] 落在 act td x=[1074,1247] 内（`btn_inside_td=true`，按钮左缘距
+  td 左缘 +22px）。act 为 px 列 → 公共列宽层仍有 1 个 px 默认列参与拖拽记忆；check 转百分比
+  不参与，拖拽/双击还原行为不变。
 - **`td` padding**：`7px 10px` → `8px 10px`（§4.4 建议 8px；横向保 10px 防列挤）。
   表头去掉 `letter-spacing: 0.05em`。
 - **非列宽字号档**：`.mm-price` 11→11.5px、`.mm-src-tag` 10.5→11.5px、
@@ -403,3 +442,17 @@ pub models_status: ModelsStatus,
     不必追新追全。另：3.0.8 副本是当前**唯一**含该种子清单的权威源（3.4.2 已把
     provider 目录挪进闭源插件仓；`core/providers/catalog_legacy.rs` 只是旧缓存
     scope→provider 映射表，无模型数据），不用再找更新的源。
+
+12. **`mod shared_catalog_tests` 的「自指恒真」断言一并修复（既有缺陷，非本次引入，
+    本次顺手修）**：该模块用 `include_str!` 把被检查文件读进来做纯文本断言，而
+    `MODELS_SRC = include_str!("models.rs")` 会把**测试自身**也读入。凡在 models.rs
+    里写出完整针尖（断言字面量、错误文案、甚至函数名）的**正向**断言都会自指恒真
+    ——删掉实现也照样过。本次把三处改为 `concat!` 拆写的模块常量（`SHARED_CALL` /
+    `ALIAS_CALL` / `CUSTOM_CALL` / `CATALOG_CALL`，均带锚点且避开函数名碰撞）：
+    - `list_models_uses_shared_collector`（v1.0.45 既有）；
+    - `collector_covers_aliases_and_custom_models`（v1.0.45 既有 —— 旧针尖 `custom_models()`
+      本身就被**函数名** `..._and_custom_models()` 满足）；
+    - `account_catalog_fallback_is_shared_and_unique` 的正向半边（本次新增，与负向
+      半边同理，对称修正）。
+    负向那处（`model_catalog:` 键）已由 lead 于 `c973fa00` 用 `concat!` 修好（CI 首轮
+    曾因此失败）。**所有针对“本文件必须/不得含 X”的针尖，今后一律 `concat!` 拆写。**

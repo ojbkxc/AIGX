@@ -739,8 +739,16 @@ export interface ManagedModel {
   provider: string;
   provider_label: string;
   id: string;
-  /** 管理员启停状态（false = 已禁用） */
+  /**
+   * 派生启用态（对齐 Agent2API rowEnabled）：默认绑定开着 **或** 任一条别名开着即为 true。
+   * 存储仍是 model_rules.disabled（零迁移），此值由后端 `build_view` 收尾时派生。
+   */
   enabled: boolean;
+  /**
+   * 默认绑定（id→id 自映射）那颗开关 = `!model_rules.is_disabled(provider, id)`。
+   * 「映射」列首颗 chip 用它，写入仍走 `POST /api/models/state`（SPEC §2.1）。
+   */
+  default_enabled: boolean;
   sources: ManagedModelSource[];
   owned_by: string;
   context_length?: number | null;
@@ -1325,6 +1333,17 @@ export interface AccountSessionItem {
   weight?: number;
   max_concurrency?: number;
   models?: string[];
+  /**
+   * 模型可见性状态（SPEC-1.0.46 §2.2；后端 snake_case 序列化 `models_status`）。
+   * 契约先写、后端未落地时不下发此字段 → 调用方按可选容错、不渲染。
+   */
+  models_status?: {
+    state: 'whitelist' | 'catalog' | 'none' | 'failed';
+    /** 当前可调度模型数（白名单优先；空则目录缓存计数；否则 0） */
+    count: number;
+    /** state==='failed' 时的失败原因（人类可读，中文） */
+    error?: string | null;
+  };
   /** 账号级额外请求头（登录态型供应商补专用头） */
   extra_headers?: Record<string, string>;
   /** 是否已保存续期令牌（refreshToken / Coding Plan JWT 等） */

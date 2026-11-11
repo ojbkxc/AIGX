@@ -273,12 +273,27 @@ mod shared_catalog_tests {
     const CHANNELS_SRC: &str = include_str!("../admin/channels.rs");
     const MANAGE_SRC: &str = include_str!("../../model/manage.rs");
 
+    // ── 本模块所有「针对某文件不得/必须含 X」的针尖都走 `concat!` 拆写 ────────
+    //
+    // 原因：`MODELS_SRC = include_str!("models.rs")` 会把**本测试源码整段**读入。
+    // 只要哪怕**一处**（含别的测试、错误文案、甚至函数名）写出完整针尖，就永远
+    // 命中自己、断言恒真 —— 2026-11-11 CI 真实踩过（负向那处直接测试失败，正向的
+    // 更隐蔽：删掉实现也照样过）。故针尖一律拼接，且带足够锚点避免与函数名碰撞。
+    /// 共享聚合调用点（`/v1/models` 与 `/api/models/available` 都必须出现）。
+    const SHARED_CALL: &str = concat!("collect_available_models(&st", "ate)");
+    /// 别名映射调用点（前导 `.` 避开本模块函数名 `..._and_custom_models`）。
+    const ALIAS_CALL: &str = concat!(".active_mapping", "s()");
+    /// 自定义模型登记调用点（前导 `.`，同上）。
+    const CUSTOM_CALL: &str = concat!(".custom_model", "s()");
+    /// 账号目录缓存回落调用点（`catalog::` 前缀 + `(`，只命中真实实现）。
+    const CATALOG_CALL: &str = concat!("catalog::cached_model_", "ids(");
+
     /// `/v1/models` 走共享聚合函数（而不是自己内联一份）。
     #[test]
     fn list_models_uses_shared_collector() {
         assert!(
-            MODELS_SRC.contains("collect_available_models(&state)"),
-            "/v1/models 必须调用 collect_available_models，不得内联聚合逻辑"
+            MODELS_SRC.contains(SHARED_CALL),
+            "/v1/models 必须调用共享聚合函数，不得内联聚合逻辑"
         );
     }
 
@@ -286,8 +301,8 @@ mod shared_catalog_tests {
     #[test]
     fn available_models_uses_shared_collector() {
         assert!(
-            CHANNELS_SRC.contains("collect_available_models(&state)"),
-            "/api/models/available 必须调用 collect_available_models，不得内联聚合逻辑"
+            CHANNELS_SRC.contains(SHARED_CALL),
+            "/api/models/available 必须调用共享聚合函数，不得内联聚合逻辑"
         );
     }
 
@@ -308,10 +323,13 @@ mod shared_catalog_tests {
     }
 
     /// 共享聚合函数必须同时覆盖别名与自定义模型（这两项正是当年漏掉的）。
+    ///
+    /// 针尖走 `concat!` 拆写的模块常量（v1.0.45 起的**既有缺陷**，本次一并修复：
+    /// 原写法删掉实现也恒真 —— 函数名 `..._and_custom_models` 自己就满足了旧针尖）。
     #[test]
     fn collector_covers_aliases_and_custom_models() {
-        assert!(MODELS_SRC.contains("active_mappings()"));
-        assert!(MODELS_SRC.contains("custom_models()"));
+        assert!(MODELS_SRC.contains(ALIAS_CALL));
+        assert!(MODELS_SRC.contains(CUSTOM_CALL));
     }
 
     /// 「账号模型可见性回落」两处**同口径**（SPEC §3.3）：`build_view` 与
@@ -320,25 +338,18 @@ mod shared_catalog_tests {
     #[test]
     fn account_catalog_fallback_is_shared_and_unique() {
         assert!(
-            MODELS_SRC.contains("cached_model_ids"),
-            "collect_available_models 必须回落账号目录缓存（cached_model_ids）"
+            MODELS_SRC.contains(CATALOG_CALL),
+            "collect_available_models 必须在白名单为空时回落账号目录缓存"
         );
         assert!(
-            MANAGE_SRC.contains("cached_model_ids"),
-            "build_view 必须用同一口径回落账号目录缓存（cached_model_ids）"
+            MANAGE_SRC.contains(CATALOG_CALL),
+            "build_view 必须用同一口径回落账号目录缓存"
         );
         // 反向断言：目录缓存键格式只应存在于 catalog.rs（唯一实现），调用点
-        // 不得内联该键 —— 否则又是一份影子实现。
-        //
-        // 注意：断言目标用 `concat!` 拆成两半拼接。若在此直接写完整字面量，
-        // `include_str!("models.rs")` 会把**本测试自身**读进来，反向断言立刻
-        // 自指失败（2026-11-11 CI 真实踩过）。拆开后源文件里不含完整键。
+        // 不得内联该键 —— 否则又是一份影子实现。（针尖 `concat!` 拆写理由见模块头）
         let cache_key = concat!("model_", "catalog:");
         for (name, src) in [("models.rs", MODELS_SRC), ("model/manage.rs", MANAGE_SRC)] {
-            assert!(
-                !src.contains(cache_key),
-                "{name} 内联了目录缓存键：回落必须走 catalog::cached_model_ids"
-            );
+            assert!(!src.contains(cache_key), "{name} 内联了账号目录缓存键");
         }
     }
 }
