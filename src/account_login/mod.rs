@@ -590,6 +590,9 @@ fn persist_account(
     let saved = sessions
         .upsert(session)
         .map_err(|error| format!("保存账号失败：{error}"))?;
+    // 登录型建号同样要补一次目录发现（与直连建号共用 spawn_catalog_probe，
+    // 唯一实现）：新账号的模型白名单为空，不补的话模型管理里一行都看不到。
+    crate::account_session::catalog::spawn_catalog_probe(sessions.clone(), saved.id.clone());
     Ok(saved.id)
 }
 

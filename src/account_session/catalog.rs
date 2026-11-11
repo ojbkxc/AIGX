@@ -631,6 +631,21 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             body: None,
             parser: None,
         }),
+        // WorkBuddy 国内版 / 国际版：两个地区**共用同一份内置静态目录**
+        // （`/v3/config` 远程清单在 Agent2API 插件仓里，主仓只留种子兜底 ——
+        // 见 `models/mod.rs::initial_state`，两地兜底共用一份）。`path` 留空 =
+        // 没有可拉取的远程目录端点，只下发静态兜底，与 autoclaw / orcaterm /
+        // zcode 同一形态。典据：Agent2API `core/models/mod.rs` 的
+        // `builtin_models()`（种子清单）。
+        "workbuddy" | "workbuddy-intl" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: WORKBUDDY_FALLBACK,
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
         _ => None,
     }
 }
@@ -1211,6 +1226,218 @@ const CLINE_FALLBACK: &[FallbackModel] = &[
     },
 ];
 
+/// WorkBuddy（国内版 / 国际版）静态兜底表。
+///
+/// 移植自 Agent2API `core/models/mod.rs` 的 `builtin_models()`（**WorkBuddy
+/// 内置种子目录**；两个地区共用同一份种子，差异只在 `/v3/config` 的远程刷新，
+/// 见该文件的 `initial_state`）。WorkBuddy 没有可拉取的 `/models` 目录端点，
+/// 故 `spec_for` 的 `path` 留空、只下发本表。
+///
+/// 字段映射（逐项对齐种子清单）：
+/// - `id` ← 种子的 `id`（WorkBuddy 侧即可路由的模型名）；
+/// - `upstream_key` 一律空串 —— WorkBuddy 的 id 就是上游真名，路由原样透传；
+/// - `reasoning` ← `supportsReasoning`；`vision` ← `supportsImages`；
+///   `tool` ← `supportsToolCall`；
+/// - `context_window` ← `maxInputTokens`。AIGX 的 [`FallbackModel`] 没有
+///   `maxOutputTokens` 字段，本期**不承载输出上限**（见 SPEC §9 的窄口径记录）。
+///
+/// ## 为什么是 23 条而不是种子的 27 条
+///
+/// 移植时**按数据裁掉**了被 Agent2API `is_chat_model`（`models/mod.rs:164-186`）
+/// 过滤掉的 4 条 —— AIGX 不做运行时过滤（`FallbackModel` 无 `maxOutputTokens`，
+/// 硬做只能造假判据）：
+/// - `kimi-k2-instruct-taiji` —— 命中前缀黑名单 `kimi-k2-instruct`；
+/// - `hunyuan-chat` —— `maxOutputTokens = 8192 < 16000`（网关只服务对话模型）；
+/// - `default-1.1` / `default-1.2` —— 命中前缀黑名单 `default-1.`（Claude 内部 id）。
+///
+/// 这 4 条**不是遗漏**：将来「补全目录」时不要加回来。完整理由见 SPEC §9。
+const WORKBUDDY_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "auto",
+        upstream_key: "",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 168_000,
+    },
+    FallbackModel {
+        id: "default",
+        upstream_key: "",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "deepseek-v4-pro",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 1_000_000,
+    },
+    FallbackModel {
+        id: "deepseek-v4-flash",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 1_000_000,
+    },
+    FallbackModel {
+        id: "deepseek-v4.1-flash",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 1_000_000,
+    },
+    FallbackModel {
+        id: "deepseek-v3-2-volc",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 96_000,
+    },
+    FallbackModel {
+        id: "glm-5.1",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "glm-5.0",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "glm-5.0-turbo",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "glm-5v-turbo",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "glm-4.7",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "glm-4.6",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 168_000,
+    },
+    FallbackModel {
+        id: "glm-4.6v",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 128_000,
+    },
+    FallbackModel {
+        id: "minimax-m2.5",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "minimax-m2.7",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "minimax-m3-play",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 512_000,
+    },
+    FallbackModel {
+        id: "kimi-k2.6",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 256_000,
+    },
+    FallbackModel {
+        id: "kimi-k2.5",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 256_000,
+    },
+    FallbackModel {
+        id: "kimi-k2-thinking",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 256_000,
+    },
+    FallbackModel {
+        id: "hy3-preview",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 192_000,
+    },
+    FallbackModel {
+        id: "hy3-preview-agent",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 192_000,
+    },
+    FallbackModel {
+        id: "hunyuan-2.0-instruct",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 128_000,
+    },
+    FallbackModel {
+        id: "hunyuan-2.0-thinking",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 128_000,
+    },
+];
+
 /// 该供应商是否支持目录发现（管理面据此决定是否显示「同步模型」）。
 pub fn supports(provider: &str) -> bool {
     spec_for(provider).is_some()
@@ -1352,6 +1579,8 @@ pub fn supported_providers() -> Vec<&'static str> {
         "qoder",
         "qoder-intl",
         "trae",
+        "workbuddy",
+        "workbuddy-intl",
         "xiaohuanxiong",
         "zcode",
         "zcode-intl",
@@ -2144,6 +2373,165 @@ pub fn apply_catalog_to_session(
     Ok(())
 }
 
+/// 账号模型清单的可见性状态（SPEC §2.2 冻结契约）。
+///
+/// 四态：`whitelist`（白名单非空）/ `catalog`（白名单空但目录缓存有内容）/
+/// `none`（两者都空且该家**不支持**目录发现）/ `failed`（支持发现却拿不到目录，
+/// `error` 是人类可读原因）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsStatus {
+    pub state: String,
+    pub count: usize,
+    pub error: Option<String>,
+}
+
+/// 计算某账号的模型清单可见性状态（管理面账号池展示用）。
+///
+/// 口径与 `build_view` / `collect_available_models` 的模型回落**一致**：
+/// 白名单优先；空则看目录缓存；再空且该家不支持发现 = `none`；支持发现却
+/// 拿不到目录 = `failed`。缓存按**存在性**读（不看 TTL）——它是展示兜底，
+/// 不是新鲜度判据（新鲜度由 `sync_account_catalog` 自己把关）。
+pub fn models_status(
+    sessions: &AccountSessionStore,
+    provider: &str,
+    account_id: &str,
+    whitelist_count: usize,
+) -> ModelsStatus {
+    if whitelist_count > 0 {
+        return ModelsStatus {
+            state: "whitelist".to_string(),
+            count: whitelist_count,
+            error: None,
+        };
+    }
+    let cached = cached_model_ids(sessions, provider, account_id);
+    if !cached.is_empty() {
+        return ModelsStatus {
+            state: "catalog".to_string(),
+            count: cached.len(),
+            error: None,
+        };
+    }
+    if !supports(provider) {
+        return ModelsStatus {
+            state: "none".to_string(),
+            count: 0,
+            error: None,
+        };
+    }
+    // 支持发现却两者皆空：最近一次探测失败，或还没探测过。
+    let error = last_catalog_error(sessions, provider, account_id)
+        .unwrap_or_else(|| "尚未同步模型目录（可点「同步模型」重试）".to_string());
+    ModelsStatus {
+        state: "failed".to_string(),
+        count: 0,
+        error: Some(error),
+    }
+}
+
+/// 读某账号目录缓存里的模型 id 列表（按**存在性**读，不看 TTL）。
+///
+/// 供 `build_view` / `collect_available_models` 在白名单为空时回落 —— 两处
+/// **同一口径**（SPEC §3.3），否则客户 API 与控制台的模型清单又会分叉。
+pub fn cached_model_ids(
+    sessions: &AccountSessionStore,
+    provider: &str,
+    account_id: &str,
+) -> Vec<String> {
+    sessions
+        .store()
+        .get::<CatalogSnapshot>(&cache_key(provider, account_id))
+        .ok()
+        .flatten()
+        .map(|snapshot| snapshot.models.into_iter().map(|model| model.id).collect())
+        .unwrap_or_default()
+}
+
+/// 记录 / 清除某账号最近一次目录探测的失败原因。
+///
+/// 落盘键 `model_catalog_error:{provider}:{account_id}`（SPEC §3.2 的建议键）。
+/// 成功时传 `None` 清除，失败时传原因。写失败不影响主流程（纯展示数据）。
+pub fn record_catalog_error(
+    sessions: &AccountSessionStore,
+    provider: &str,
+    account_id: &str,
+    error: Option<&str>,
+) {
+    let store = sessions.store();
+    match error {
+        Some(message) if !message.trim().is_empty() => {
+            let _ = store.put(&error_key(provider, account_id), &message.to_string());
+        }
+        _ => {
+            let _ = store.delete(&error_key(provider, account_id));
+        }
+    }
+}
+
+/// 读某账号最近一次目录探测的失败原因（无记录返回 `None`）。
+pub fn last_catalog_error(
+    sessions: &AccountSessionStore,
+    provider: &str,
+    account_id: &str,
+) -> Option<String> {
+    sessions
+        .store()
+        .get::<String>(&error_key(provider, account_id))
+        .ok()
+        .flatten()
+        .filter(|message| !message.trim().is_empty())
+}
+
+/// 最近一次目录探测失败原因的落盘键。
+fn error_key(provider: &str, account_id: &str) -> String {
+    format!("model_catalog_error:{provider}:{account_id}")
+}
+
+/// 建号后异步补一次目录发现（**直连建号与登录型建号共用**，唯一实现）。
+///
+/// 白名单为空的新账号若不做这一步，模型管理里一行都看不到（账号型渠道的模型
+/// 只来自 `session.models`，落回 `channel.effective_models()` 也是空）。
+/// `sync_account_catalog` 覆盖登录态供应商（含静态兜底）；它不认的 API-Key 型
+/// 供应商再退回通用 [`discover_models_plain`]。
+///
+/// 失败**不再静默**：写 `tracing::warn!`，并把原因落到 `failed` 态
+/// （落盘键见 [`error_key`]，由 [`models_status`] 读回）。
+pub fn spawn_catalog_probe(sessions: AccountSessionStore, account_id: String) {
+    tokio::spawn(async move {
+        run_catalog_probe(&sessions, &account_id).await;
+    });
+}
+
+/// [`spawn_catalog_probe`] 的实际逻辑体。
+async fn run_catalog_probe(sessions: &AccountSessionStore, account_id: &str) {
+    let Some(session) = sessions.get(account_id) else {
+        return;
+    };
+    let provider = session.provider.clone();
+    let found = match sync_account_catalog(sessions, &session, true).await {
+        Ok(snapshot) => Ok(snapshot
+            .models
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>()),
+        Err(_) => discover_models_plain(sessions, &session).await,
+    };
+    match found {
+        Ok(models) if !models.is_empty() => {
+            record_catalog_error(sessions, &provider, account_id, None);
+            if let Err(e) = apply_catalog_to_session(sessions, account_id, &models, false) {
+                tracing::warn!("账号 {account_id} 写入模型清单失败：{e}");
+            }
+        }
+        // 上游确实没有可见模型：不写白名单，也不标失败
+        Ok(_) => {}
+        Err(e) => {
+            record_catalog_error(sessions, &provider, account_id, Some(&e));
+            tracing::warn!("账号 {account_id} 自动模型发现失败：{e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2405,11 +2793,67 @@ mod tests {
 
     #[test]
     fn static_only_providers_have_no_remote_path() {
-        // 上游没有可拉的目录接口的三家：path 为空 → 走静态兜底
-        for kind in ["autoclaw", "orcaterm", "zcode"] {
+        // 上游没有可拉的目录接口的家：path 为空 → 走静态兜底
+        for kind in [
+            "autoclaw",
+            "orcaterm",
+            "zcode",
+            "workbuddy",
+            "workbuddy-intl",
+        ] {
             let spec = spec_for(kind).expect("应有目录描述");
             assert!(spec.path.is_empty(), "{kind} 不该有远程端点");
             assert!(!spec.fallback.is_empty(), "{kind} 应有静态兜底表");
+        }
+    }
+
+    #[test]
+    fn workbuddy_static_catalog_registered_for_both_regions() {
+        for kind in ["workbuddy", "workbuddy-intl"] {
+            assert!(supports(kind), "{kind} 应支持目录发现（种子兜底）");
+        }
+        // 两个地区**共用同一份**内置种子（远程 /v3/config 才按地区分）
+        let cn = spec_for("workbuddy").expect("workbuddy 应有目录描述");
+        let intl = spec_for("workbuddy-intl").expect("workbuddy-intl 应有目录描述");
+        assert_eq!(cn.fallback.len(), intl.fallback.len());
+    }
+
+    #[test]
+    fn workbuddy_fallback_carries_capabilities_and_context() {
+        let spec = spec_for("workbuddy").expect("workbuddy 应有目录描述");
+        let pro = spec
+            .fallback
+            .iter()
+            .find(|m| m.id == "deepseek-v4-pro")
+            .expect("种子清单应含 deepseek-v4-pro");
+        assert!(pro.reasoning && pro.vision && pro.tool);
+        assert_eq!(pro.context_window, 1_000_000);
+        // 兜底快照把能力位与上下文（取 maxInputTokens）翻出来
+        let snapshot = fallback_catalog(&spec);
+        assert!(snapshot.models.iter().any(|e| e.id == "hy3-preview"
+            && e.context_length == Some(192_000)
+            && e.capabilities.iter().any(|c| c == "reasoning")));
+    }
+
+    #[test]
+    fn workbuddy_fallback_excludes_non_chat_seed_entries() {
+        // 种子清单 27 条里 4 条被 A2A 的 `is_chat_model` 过滤（见 const 文档与
+        // SPEC §9），移植时按数据裁掉 —— 此处把「别补全」钉成断言：
+        //   kimi-k2-instruct-taiji（命中前缀 kimi-k2-instruct）
+        //   hunyuan-chat（maxOutputTokens 8192 < 16000）
+        //   default-1.1 / default-1.2（命中前缀 default-1.）
+        let spec = spec_for("workbuddy").expect("workbuddy 应有目录描述");
+        assert_eq!(spec.fallback.len(), 23);
+        for excluded in [
+            "kimi-k2-instruct-taiji",
+            "hunyuan-chat",
+            "default-1.1",
+            "default-1.2",
+        ] {
+            assert!(
+                !spec.fallback.iter().any(|m| m.id == excluded),
+                "{excluded} 属 A2A is_chat_model 过滤项，不该出现在兜底表"
+            );
         }
     }
 

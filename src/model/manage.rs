@@ -154,8 +154,11 @@ pub struct ManageModel {
     pub provider: String,
     pub provider_label: String,
     pub id: String,
-    /// 管理员启停状态（false = 已禁用）
+    /// 行启用状态（**派生值**，SPEC §2.1）：默认绑定开着，**或**任一条别名开着。
     pub enabled: bool,
+    /// 默认绑定（`id → id` 自映射）那颗开关 = `!rules.is_disabled(provider, id)`。
+    /// 写入仍走既有 `POST /api/models/state` → `model_rules`（**存储零迁移**）。
+    pub default_enabled: bool,
     pub sources: Vec<ModelSource>,
     pub owned_by: String,
     pub context_length: Option<u32>,
@@ -290,7 +293,18 @@ pub fn build_view(
                 };
                 account_providers.insert(provider.to_string());
                 let models: Vec<String> = if session.models.is_empty() {
-                    channel.effective_models().to_vec()
+                    // 白名单为空：先回落该账号的目录缓存（SPEC §3.3，与
+                    // collect_available_models **同口径**），仍空才回落渠道声明。
+                    let cached = crate::account_session::catalog::cached_model_ids(
+                        sessions,
+                        &session.provider,
+                        &session.id,
+                    );
+                    if cached.is_empty() {
+                        channel.effective_models().to_vec()
+                    } else {
+                        cached
+                    }
                 } else {
                     session.models.clone()
                 };
@@ -353,7 +367,12 @@ pub fn build_view(
     let mut unpriced = 0usize;
 
     for ((provider, _id), mut row) in rows {
-        row.enabled = !rules.is_disabled(&provider, &row.id);
+        // 行启用 = 默认绑定开着，**或**任一条别名开着（SPEC §2.1 派生语义，
+        // 对齐 Agent2API 的 `rowEnabled = bindingsOf(m).some(b => b.enabled)`）。
+        let default_enabled = !rules.is_disabled(&provider, &row.id);
+        let alias_enabled = row.alias_entries.iter().any(|entry| entry.enabled);
+        row.default_enabled = default_enabled;
+        row.enabled = default_enabled || alias_enabled;
         if row.price.is_none() {
             unpriced += 1;
         }
@@ -422,6 +441,7 @@ fn new_row(
         provider_label: provider_label(provider),
         id: model.to_string(),
         enabled: true,
+        default_enabled: true,
         sources: Vec::new(),
         owned_by: meta.owned_by,
         context_length: meta.context_length,

@@ -638,8 +638,21 @@ fn channel_name_for(channels: &[Channel], channel_id: &str) -> String {
 }
 
 /// 账号 JSON 视图（凭证脱敏）。
-fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Value {
+fn session_json(
+    sessions: &crate::account_session::AccountSessionStore,
+    channels: &[Channel],
+    session: &AccountSession,
+    now: i64,
+) -> Value {
     let channel_name = channel_name_for(channels, &session.channel_id);
+    // 模型清单可见性状态（SPEC §2.2）：白名单 / 目录缓存 / 不支持 / 探测失败
+    // 四态。口径与 build_view / collect_available_models 的模型回落一致。
+    let models_status = crate::account_session::catalog::models_status(
+        sessions,
+        &session.provider,
+        &session.id,
+        session.models.len(),
+    );
     json!({
         "id": session.id,
         "channel_id": session.channel_id,
@@ -659,6 +672,7 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "weight": session.weight,
         "max_concurrency": session.max_concurrency,
         "models": session.models,
+        "models_status": models_status,
         "extra_headers": crate::channel::mask_sensitive_headers(&session.extra_headers),
         // 账号限制规则（余额 / Token 两类）；编辑弹窗读它回填规则列表
         "limiters": session.limiters,
@@ -778,7 +792,12 @@ pub async fn handle_list_account_sessions(
                 continue;
             }
         }
-        data.push(session_json(&channels, session, now));
+        data.push(session_json(
+            &state.account_sessions,
+            &channels,
+            session,
+            now,
+        ));
     }
     let total = data.len();
     Ok(Json(
@@ -869,57 +888,21 @@ pub async fn handle_create_account_session(
     // 新账号没填模型白名单时，模型管理里就一行都看不到（账号型渠道的模型
     // 只来自 `session.models`，落回 `channel.effective_models()` 也是空）。
     // 这里异步补一次目录，让「加完账号就能在模型管理右栏筛出来」成立；
-    // 后台跑 + 失败静默：探测失败不该让建号请求失败（离线/限流都可能）。
+    // 后台跑：探测失败只记 `failed` 态、不让建号请求失败（离线/限流都可能）。
+    // 与登录型建号共用同一个 `spawn_catalog_probe`（唯一实现）。
     if created.models.is_empty() {
-        let probe_state = state.clone();
-        let probe_id = created.id.clone();
-        tokio::spawn(async move {
-            let Some(session) = probe_state.account_sessions.get(&probe_id) else {
-                return;
-            };
-            let models = match crate::account_session::catalog::sync_account_catalog(
-                &probe_state.account_sessions,
-                &session,
-                true,
-            )
-            .await
-            {
-                Ok(snapshot) => snapshot
-                    .models
-                    .into_iter()
-                    .map(|m| m.id)
-                    .collect::<Vec<_>>(),
-                Err(_) => {
-                    // 登录态供应商没有目录描述时走通用探测；两者都失败就放弃
-                    match crate::account_session::catalog::discover_models_plain(
-                        &probe_state.account_sessions,
-                        &session,
-                    )
-                    .await
-                    {
-                        Ok(models) => models,
-                        Err(e) => {
-                            tracing::debug!("账号 {probe_id} 自动模型发现失败：{e}");
-                            return;
-                        }
-                    }
-                }
-            };
-            if models.is_empty() {
-                return;
-            }
-            if let Err(e) = crate::account_session::catalog::apply_catalog_to_session(
-                &probe_state.account_sessions,
-                &probe_id,
-                &models,
-                false,
-            ) {
-                tracing::debug!("账号 {probe_id} 写入模型清单失败：{e}");
-            }
-        });
+        crate::account_session::catalog::spawn_catalog_probe(
+            state.account_sessions.clone(),
+            created.id.clone(),
+        );
     }
     let now = chrono::Utc::now().timestamp();
-    let view = session_json(&state.channel_store.list(), &created, now);
+    let view = session_json(
+        &state.account_sessions,
+        &state.channel_store.list(),
+        &created,
+        now,
+    );
     Ok(Json(json!({ "success": true, "data": view })))
 }
 
@@ -991,7 +974,12 @@ pub async fn handle_update_account_session(
         Some(json!({ "name": saved.name, "status": saved.status })),
     );
     let now = chrono::Utc::now().timestamp();
-    let view = session_json(&state.channel_store.list(), &saved, now);
+    let view = session_json(
+        &state.account_sessions,
+        &state.channel_store.list(),
+        &saved,
+        now,
+    );
     Ok(Json(json!({ "success": true, "data": view })))
 }
 
@@ -1089,7 +1077,12 @@ pub async fn handle_patch_account_session(
         Some(json!({ "status": saved.status, "priority": saved.priority })),
     );
     let now = chrono::Utc::now().timestamp();
-    let view = session_json(&state.channel_store.list(), &saved, now);
+    let view = session_json(
+        &state.account_sessions,
+        &state.channel_store.list(),
+        &saved,
+        now,
+    );
     Ok(Json(json!({ "success": true, "data": view })))
 }
 

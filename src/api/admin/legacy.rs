@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::account::CfAccount;
 use crate::bridge::Bridge;
-use crate::channel::ChannelType;
+use crate::channel::{Channel, ChannelType};
 use crate::config::AppConfig;
 use crate::graphql;
 use crate::pricing::RatioConfig;
@@ -1407,54 +1407,87 @@ pub async fn handle_get_channel_balance(
     }
 }
 
+/// 「获取模型」的目标解析（**纯函数**，SPEC §6.4）。
+///
+/// body 显式值优先；空则回落存储渠道；两者都给不出 `channel_type` 时拒绝 ——
+/// 不让空串流进 [`ChannelType::from_str_lossy`] 的 `_ => Cloudflare` 兜底（那正是
+/// 线上「获取模型」400/68 字节事故的放大器）。`Err` 文案直接作为 400 的 message。
+///
+/// 抽成纯函数是为了能在单测里钉住根因回归（axum handler 不好测，见 SPEC §6.4）。
+fn resolve_fetch_target(
+    body_channel_type: &str,
+    body_base_url: &str,
+    stored: Option<&Channel>,
+) -> Result<(ChannelType, String), &'static str> {
+    let channel_type = if !body_channel_type.trim().is_empty() {
+        ChannelType::from_str_lossy(body_channel_type)
+    } else if let Some(channel) = stored {
+        channel.channel_type
+    } else {
+        return Err("channel_type is required");
+    };
+    let base_url = if !body_base_url.trim().is_empty() {
+        body_base_url.to_string()
+    } else {
+        stored
+            .map(|channel| channel.base_url.clone())
+            .unwrap_or_default()
+    };
+    Ok((channel_type, base_url))
+}
+
 pub async fn handle_fetch_channel_models(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<FetchModelsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = verify_admin(&state, &headers).await?;
-    // SSRF 防护（#17-① 收口）：本端点接受 body 任意 base_url 且会真实发起
-    // 上游请求——是六面里最后一个没盖住的入口（渠道 save 时校验过，但这里
-    // 的 body.base_url 可绕过渠道存储直连任意内网地址）。与新增/更新渠道
-    // 同口径：默认拒绝内网/环回/元数据，allow_internal_upstream 显式放行。
-    if !body.base_url.trim().is_empty() {
-        if let Err(rej) = crate::net_guard::validate_outbound_url(
-            &body.base_url,
-            config.usage.allow_internal_upstream,
-        ) {
-            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
-        }
-    }
 
-    // 密钥优先级：body 明文 > 已存渠道解码 > 空
-    let api_key = if !body.api_key.is_empty() {
-        body.api_key.clone()
-    } else if !body.channel_id.is_empty() {
-        state
-            .channel_store
-            .get(&body.channel_id)
-            .map(|ch| ch.decode_api_key())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    let channel_type = crate::channel::ChannelType::from_str_lossy(&body.channel_type);
-    let channel_id_for_save = body.channel_id.clone();
     // 支持逗号分隔的多渠道 ID（批量拉取）；逐个 trim 后再查/写，
     // 否则 `"ch1, ch2"` 里带空格的 ID 会静默查不到。
-    let ids: Vec<&str> = channel_id_for_save
+    let ids: Vec<&str> = body
+        .channel_id
         .split(',')
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .collect();
-    let quirks = ids
-        .first()
-        .and_then(|cid| state.channel_store.get(cid))
+    // 存储渠道兜底源（批量拉取取首个 id）：body 里空着的字段从这里补齐。
+    let stored_channel = ids.first().and_then(|cid| state.channel_store.get(cid));
+
+    // 密钥：body 明文优先，空则从存储渠道解码。
+    let api_key = if !body.api_key.is_empty() {
+        body.api_key.clone()
+    } else {
+        stored_channel
+            .as_ref()
+            .map(|ch| ch.decode_api_key())
+            .unwrap_or_default()
+    };
+    // 类型 / 地址：body 显式值优先，空则从存储渠道兜底；两者都给不出类型则 400
+    // （`resolve_fetch_target` 的单测是本事故的根因回归护栏，见 SPEC §6.4）。
+    let (channel_type, base_url) =
+        resolve_fetch_target(&body.channel_type, &body.base_url, stored_channel.as_ref())
+            .map_err(|message| error_response(message, StatusCode::BAD_REQUEST))?;
+
+    // SSRF 防护（#17-① 收口）：本端点接受 body 任意 base_url 且会真实发起
+    // 上游请求——是六面里最后一个没盖住的入口（渠道 save 时校验过，但这里
+    // 的 body.base_url 可绕过渠道存储直连任意内网地址）。与新增/更新渠道
+    // 同口径：默认拒绝内网/环回/元数据，allow_internal_upstream 显式放行。
+    // **兜底后的地址同样要过守卫**（不能因从存储渠道兜底就绕过 SSRF 防护）。
+    if !base_url.trim().is_empty() {
+        if let Err(rej) =
+            crate::net_guard::validate_outbound_url(&base_url, config.usage.allow_internal_upstream)
+        {
+            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+        }
+    }
+
+    let quirks = stored_channel
+        .as_ref()
         .map(|ch| ch.quirks)
         .unwrap_or_default();
     let (url, models) =
-        fetch_upstream_models(&state, channel_type, &body.base_url, &api_key, &quirks).await?;
+        fetch_upstream_models(&state, channel_type, &base_url, &api_key, &quirks).await?;
 
     for cid in &ids {
         if state.channel_store.get(cid).is_some() {
@@ -4699,6 +4732,77 @@ pub async fn handle_test_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一个最小可用的 `Channel`（只为 `resolve_fetch_target` 单测）。
+    fn test_channel(channel_type: ChannelType, base_url: &str) -> Channel {
+        Channel {
+            id: "ch-test".to_string(),
+            name: "测试渠道".to_string(),
+            channel_type,
+            base_url: base_url.to_string(),
+            api_key: String::new(),
+            priority: 0,
+            weight: 1,
+            status: "enabled".to_string(),
+            models: Vec::new(),
+            model_mapping: HashMap::new(),
+            cost_pricing: HashMap::new(),
+            account_id: String::new(),
+            response_time: None,
+            test_time: None,
+            balance: None,
+            credit: None,
+            quirks: Default::default(),
+            balance_scheme: String::new(),
+            balance_unit: String::new(),
+            balance_query_interval_secs: None,
+            balance_last_query_at: None,
+            balance_last_error: None,
+            last_error: None,
+            last_used_at: None,
+            discovered_models: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    /// SPEC §6.4 护栏①：body 的 type/base_url 都空 + stored 存在 → 取存储值。
+    /// **这条就是「获取模型」400 事故的根因回归护栏。**
+    #[test]
+    fn resolve_fetch_target_falls_back_to_stored_channel() {
+        let stored = test_channel(ChannelType::Anthropic, "https://stored.example.com");
+        let (channel_type, base_url) =
+            resolve_fetch_target("", "", Some(&stored)).expect("应从存储渠道兜底");
+        assert_eq!(channel_type, ChannelType::Anthropic);
+        assert_eq!(base_url, "https://stored.example.com");
+    }
+
+    /// SPEC §6.4 护栏②：都空 + stored 为 None → Err（边界闸，不再落 Cloudflare）。
+    #[test]
+    fn resolve_fetch_target_rejects_missing_channel_type() {
+        assert_eq!(
+            resolve_fetch_target("", "", None).err(),
+            Some("channel_type is required")
+        );
+        // 空 body 类型、给了 base_url，但无 stored 类型来源 → 仍拒绝
+        assert!(resolve_fetch_target("", "https://x.example.com", None).is_err());
+    }
+
+    /// SPEC §6.4 护栏③（**方向性**）：body 显式给值 → body 优先，不得被存储值
+    /// 覆盖。body 与 stored 用**不同**的 type/url，写反了这两条断言就会失败。
+    #[test]
+    fn resolve_fetch_target_prefers_body_over_stored() {
+        let stored = test_channel(ChannelType::Anthropic, "https://stored.example.com");
+        let (channel_type, base_url) = resolve_fetch_target(
+            "openai_compatible",
+            "https://body.example.com",
+            Some(&stored),
+        )
+        .expect("body 显式值应被采纳");
+        // 若实现改成“存储优先”，这里会变成 Anthropic / stored.example.com
+        assert_eq!(channel_type, ChannelType::OpenaiCompatible);
+        assert_eq!(base_url, "https://body.example.com");
+    }
 
     fn one_message() -> Vec<Value> {
         vec![serde_json::json!({ "role": "user", "content": "你好" })]

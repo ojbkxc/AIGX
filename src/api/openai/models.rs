@@ -52,7 +52,19 @@ pub(crate) async fn collect_available_models(
                     continue;
                 }
                 let models: Vec<String> = if session.models.is_empty() {
-                    ch.effective_models().to_vec()
+                    // 白名单为空：先回落该账号的目录缓存（SPEC §3.3），与
+                    // `model::manage::build_view` **同口径** —— 否则客户 API 与
+                    // 控制台的模型清单会分叉。仍空才回落渠道声明。
+                    let cached = crate::account_session::catalog::cached_model_ids(
+                        &state.account_sessions,
+                        &session.provider,
+                        &session.id,
+                    );
+                    if cached.is_empty() {
+                        ch.effective_models().to_vec()
+                    } else {
+                        cached
+                    }
                 } else {
                     session.models.clone()
                 };
@@ -259,6 +271,7 @@ mod shared_catalog_tests {
 
     const MODELS_SRC: &str = include_str!("models.rs");
     const CHANNELS_SRC: &str = include_str!("../admin/channels.rs");
+    const MANAGE_SRC: &str = include_str!("../../model/manage.rs");
 
     /// `/v1/models` 走共享聚合函数（而不是自己内联一份）。
     #[test]
@@ -299,5 +312,28 @@ mod shared_catalog_tests {
     fn collector_covers_aliases_and_custom_models() {
         assert!(MODELS_SRC.contains("active_mappings()"));
         assert!(MODELS_SRC.contains("custom_models()"));
+    }
+
+    /// 「账号模型可见性回落」两处**同口径**（SPEC §3.3）：`build_view` 与
+    /// `collect_available_models` 都必须在白名单为空时回落账号的目录缓存，
+    /// 否则客户 API 与控制台又会分叉（v1.0.45 修过同源不变量，这是它的延伸）。
+    #[test]
+    fn account_catalog_fallback_is_shared_and_unique() {
+        assert!(
+            MODELS_SRC.contains("cached_model_ids"),
+            "collect_available_models 必须回落账号目录缓存（cached_model_ids）"
+        );
+        assert!(
+            MANAGE_SRC.contains("cached_model_ids"),
+            "build_view 必须用同一口径回落账号目录缓存（cached_model_ids）"
+        );
+        // 反向断言：目录缓存键格式只应存在于 catalog.rs（唯一实现），调用点
+        // 不得内联 `model_catalog:` —— 否则又是一份影子实现。
+        for (name, src) in [("models.rs", MODELS_SRC), ("model/manage.rs", MANAGE_SRC)] {
+            assert!(
+                !src.contains("model_catalog:"),
+                "{name} 内联了目录缓存键 `model_catalog:`：回落必须走 catalog::cached_model_ids"
+            );
+        }
     }
 }
