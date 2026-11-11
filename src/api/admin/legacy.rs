@@ -1484,7 +1484,7 @@ pub async fn handle_fetch_channel_models(
 
     let quirks = stored_channel
         .as_ref()
-        .map(|ch| ch.quirks)
+        .map(|ch| ch.quirks.clone())
         .unwrap_or_default();
     let (url, models) =
         fetch_upstream_models(&state, channel_type, &base_url, &api_key, &quirks).await?;
