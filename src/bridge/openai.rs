@@ -97,15 +97,28 @@ impl OpenaiCompatibleBridge {
             .into_iter()
             .map(|(name, value)| (name, value.replace("{credential}", &credential)))
             .collect();
+        let chat_path = chat_path
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
+        // 归一化 base_url 只在**未显式给出对话路径**时进行：此时按 OpenAI SDK
+        // 约定给裸 host 补 `/v1`（`https://host` → `https://host/v1`）。
+        //
+        // 一旦显式给了 `chat_path`（workbuddy 的 `/v2/chat/completions`、
+        // modelscope 的 `/api/v1/chat/completions` 等），**路径才是权威** ——
+        // 再补 `/v1` 会拼出 `https://copilot.tencent.com/v1/v2/chat/completions`，
+        // 上游直接 404（实测 `{"error_msg":"404 Route Not Found"}`）。
+        let base_url = if chat_path.is_some() {
+            base_url.into().trim().trim_end_matches('/').to_string()
+        } else {
+            normalize_base_url(base_url.into())
+        };
         Self {
-            base_url: normalize_base_url(base_url.into()),
+            base_url,
             api_key: credential,
             client,
             auth_mode,
             session_headers: params,
-            chat_path: chat_path
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty()),
+            chat_path,
             quirks: crate::channel::ChannelQuirks::default(),
         }
     }
@@ -1215,6 +1228,53 @@ pub fn make_bridge_with_quirks(
 mod tests {
     use super::normalize_base_url;
     use crate::bridge::{RerankDocument, RerankRequest, RerankResult};
+
+    /// 登录态供应商显式给了 `chat_path` 时，base_url 必须**原样使用**：
+    /// 补 `/v1` 会拼出 `/v1/v2/chat/completions` 这类不存在的路由（实测
+    /// workbuddy `copilot.tencent.com` 上游 404）。这是 v1.0.46 的生产缺陷。
+    #[test]
+    fn session_auth_keeps_base_when_chat_path_explicit() {
+        let bridge = super::OpenaiCompatibleBridge::with_session_auth(
+            "https://copilot.tencent.com",
+            "tok",
+            reqwest::Client::new(),
+            super::AuthMode::Bearer,
+            Vec::new(),
+            Some("/v2/chat/completions".to_string()),
+        );
+        assert_eq!(bridge.base_url, "https://copilot.tencent.com");
+        assert_eq!(
+            bridge.chat_url(),
+            "https://copilot.tencent.com/v2/chat/completions"
+        );
+    }
+
+    /// 未给 `chat_path` 时保留既有行为：裸 host 仍按 OpenAI 约定补 `/v1`
+    /// （atomcode / chatglm 这类 API-Key 型登录态供应商依赖它）。
+    #[test]
+    fn session_auth_normalizes_when_chat_path_absent() {
+        let bridge = super::OpenaiCompatibleBridge::with_session_auth(
+            "https://atomgit.com",
+            "tok",
+            reqwest::Client::new(),
+            super::AuthMode::Bearer,
+            Vec::new(),
+            None,
+        );
+        assert_eq!(bridge.base_url, "https://atomgit.com/v1");
+        assert_eq!(bridge.chat_url(), "https://atomgit.com/v1/chat/completions");
+
+        // 空白 chat_path（provider 默认也是空串）等同「未给」
+        let blank = super::OpenaiCompatibleBridge::with_session_auth(
+            "https://atomgit.com",
+            "tok",
+            reqwest::Client::new(),
+            super::AuthMode::Bearer,
+            Vec::new(),
+            Some("   ".to_string()),
+        );
+        assert_eq!(blank.base_url, "https://atomgit.com/v1");
+    }
 
     #[test]
     fn normalizes_host_only_base_url() {

@@ -1105,10 +1105,22 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         setCatalogModal(ok);
         // 清理反馈：后端同步后自动清掉的失效全局映射条数（0 条不显示）
         const removed = Number(data?.removed_mapping_count ?? 0);
-        addToast(
-          t('已同步模型目录') + ` · ${ok[0].count} ${t('个模型')}`
-          + (removed > 0 ? ` · ${t('已清理失效映射 {{n}} 条', { n: removed })}` : ''),
-        );
+        const first = ok[0];
+        if (first.applied === false) {
+          // 目录拉到了但**没能写回白名单**（账号未启用/凭证过期等）。此处
+          // 必须报错而不是报「已同步」，否则用户以为同步成功、模型管理里却
+          // 一行都没有（2026-11-11 生产实测：停用账号点拉取模型就是这样）。
+          addToast(
+            `${t('已拉取模型目录')} · ${first.count} ${t('个模型')} · ${t('未写入')}: `
+              + (first.apply_error || t('账号未处于启用状态')),
+            'error',
+          );
+        } else {
+          addToast(
+            t('已同步模型目录') + ` · ${first.count} ${t('个模型')}`
+            + (removed > 0 ? ` · ${t('已清理失效映射 {{n}} 条', { n: removed })}` : ''),
+          );
+        }
         await load();
       }
       if (failed.length > 0) {

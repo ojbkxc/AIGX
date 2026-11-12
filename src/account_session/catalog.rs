@@ -1730,14 +1730,35 @@ fn parse_response(value: &Value, openai_shape: bool) -> Vec<CatalogEntry> {
 /// `registry::SessionMeta.headers` 模板（`{credential}` 已替换）与
 /// `extra_headers` 合并。**不做逐家签名**：需要签名的目录端点（如 Qoder 的
 /// COSY 签名）不在本表内 —— 宁可报失败也不发一个必然被拒的请求。
+/// 目录回源用的生效地址：账号级地址优先，空则回落 provider 目录默认值。
+///
+/// 与对话链路 [`super::adapter::effective_base_url`] **同口径**（同一函数）。
+/// 为什么必须走生效地址：登录型账号在控制台里通常留空 `base_url`（默认地址
+/// 由 provider 隐含）。若直接读 `session.base_url` 会得到空串 → 回源永远
+/// 失败 → 「拉取模型」永远只下发静态兜底，而 UI 却报「已同步」（2026-11-11
+/// 生产实测的缺陷）。
+fn catalog_base_url(session: &AccountSession) -> Result<String, String> {
+    let base =
+        super::adapter::effective_base_url(session).map_err(|e| format!("上游地址不可用：{e}"))?;
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("账号未配置上游地址".to_string());
+    }
+    Ok(base.to_string())
+}
+
 async fn fetch_remote(
     sessions: &AccountSessionStore,
     session: &AccountSession,
     spec: &CatalogSpec,
 ) -> Result<Vec<CatalogEntry>, String> {
-    let base = session.base_url.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Err("账号未配置上游地址".to_string());
+    let base = catalog_base_url(session)?;
+    let base = base.as_str();
+    // `path` 为空 = 该家只有静态兜底（workbuddy / autoclaw / orcaterm / zcode
+    // 这类没有可拉取远程目录的）。不去 GET 站点根：那是无意义的请求，还可能把
+    // SPA 的 HTML 当目录解析，直接失败让调用方走 `fallback`。
+    if spec.path.is_empty() {
+        return Err(format!("供应商 {} 无远程目录端点", session.provider));
     }
     // KukuAI 的目录路径要带 STOKEN 三件套 —— 得先取 token 才能拼出完整 URL，
     // 所以这里不是简单的 `base + path`。
@@ -2535,6 +2556,26 @@ async fn run_catalog_probe(sessions: &AccountSessionStore, account_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「拉取模型」的回源地址必须走 **provider 默认值回落**。
+    ///
+    /// 回归护栏（2026-11-11 生产缺陷）：登录型账号在控制台里 base_url 留空，
+    /// 若回源直接读 `session.base_url` 就会拿到空串 —— 回源永远失败、只下发
+    /// 静态兜底，而 UI 仍报「已同步」。把 `catalog_base_url` 里的
+    /// `effective_base_url` 换回 `session.base_url`，本测必红。
+    #[test]
+    fn catalog_base_url_falls_back_to_provider_default() {
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "workbuddy".to_string();
+        assert_eq!(
+            catalog_base_url(&session).unwrap(),
+            "https://copilot.tencent.com"
+        );
+
+        // 账号级地址优先，且去掉末尾斜杠（拼路径靠它）
+        session.base_url = "https://my.proxy/v1/".to_string();
+        assert_eq!(catalog_base_url(&session).unwrap(), "https://my.proxy/v1");
+    }
 
     #[test]
     fn pick_id_variants() {
