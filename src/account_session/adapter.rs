@@ -124,7 +124,9 @@ pub fn build_bridge(
                         auth_mode,
                         session_headers(session, meta),
                         chat_path,
-                    ),
+                    )
+                    // 只收流式的家（workbuddy）：非流式入口改发流式再聚合
+                    .with_force_stream_aggregate(registry::requires_stream(spec.kind)),
                 )
             } else {
                 crate::bridge::openai::make_bridge(&base, &secret, &client)

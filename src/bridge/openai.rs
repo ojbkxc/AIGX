@@ -49,6 +49,9 @@ pub struct OpenaiCompatibleBridge {
     session_headers: Vec<(String, String)>,
     /// 对话路径覆盖（登录态型供应商的私有接口路径）；空 = `/chat/completions`
     chat_path: Option<String>,
+    /// 上游**只接受流式**对话请求（会话供应商如 workbuddy）：非流式入口
+    /// `chat()` 改发流式再本地聚合成一个响应，见 [`Self::chat_via_stream_aggregation`]。
+    force_stream_aggregate: bool,
     /// 渠道级上游特判（预置供应商写入；缺省 = 无特判）
     quirks: crate::channel::ChannelQuirks,
 }
@@ -70,6 +73,7 @@ impl OpenaiCompatibleBridge {
             auth_mode: AuthMode::Bearer,
             session_headers: Vec::new(),
             chat_path: None,
+            force_stream_aggregate: false,
             quirks: crate::channel::ChannelQuirks::default(),
         }
     }
@@ -77,6 +81,13 @@ impl OpenaiCompatibleBridge {
     /// 挂上渠道级特判（urlSuffix / 静态头 / OpenCode 客户端伪装）。
     pub fn with_quirks(mut self, quirks: crate::channel::ChannelQuirks) -> Self {
         self.quirks = quirks;
+        self
+    }
+
+    /// 标记「该上游只接受流式对话请求」：`chat()`（非流式入口）改发流式并在
+    /// 本地聚合成一个非流式响应，对下游语义不变。
+    pub fn with_force_stream_aggregate(mut self, on: bool) -> Self {
+        self.force_stream_aggregate = on;
         self
     }
 
@@ -119,6 +130,7 @@ impl OpenaiCompatibleBridge {
             auth_mode,
             session_headers: params,
             chat_path,
+            force_stream_aggregate: false,
             quirks: crate::channel::ChannelQuirks::default(),
         }
     }
@@ -429,10 +441,12 @@ impl Bridge for OpenaiCompatibleBridge {
         let mut body = self.build_body(req);
         body["stream"] = serde_json::json!(false);
 
-        // OpenCode 免费档只接受流式请求（见 channel::emulation）：此时改发
-        // 流式再在本地聚合成一个响应，对下游仍是「非流式」语义。
-        if self.quirks.emulates_opencode()
-            && !crate::channel::emulation::is_opencode_go_endpoint(&self.base_url)
+        // OpenCode 免费档只接受流式请求（见 channel::emulation）；会话供应商
+        // 里也有只收流式的家（workbuddy，见 registry::requires_stream）——
+        // 两者都改发流式再在本地聚合成一个响应，对下游仍是「非流式」语义。
+        if self.force_stream_aggregate
+            || (self.quirks.emulates_opencode()
+                && !crate::channel::emulation::is_opencode_go_endpoint(&self.base_url))
         {
             return self.chat_via_stream_aggregation(req).await;
         }
@@ -1656,5 +1670,105 @@ mod tests {
             resp.message.content_str(),
             "cookie=sessionid=abc;token=sessionid=abc"
         );
+    }
+
+    /// 只收流式的上游（workbuddy）：非流式入口 `chat()` 真的改发了流式请求，
+    /// 并把它聚合成一个非流式响应返回。
+    ///
+    /// 起一个本地假上游：只有收到 `"stream":true` 才回 SSE 帧，否则回 400
+    /// 「Non-stream ... not supported」（复刻 WorkBuddy 的真实拒法）。这样断言
+    /// 的不只是「聚合函数能跑」，而是**非流式调用确实变成了流式请求**。
+    #[tokio::test]
+    async fn force_stream_aggregate_sends_stream_upstream_and_aggregates() {
+        use crate::bridge::{Bridge, BridgeContext, ChatFormat, ChatMessage, Role};
+        use axum::{routing::post, Json, Router};
+
+        async fn upstream(Json(body): Json<serde_json::Value>) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            if body.get("stream").and_then(|v| v.as_bool()) != Some(true) {
+                // 非流式一律拒绝（WorkBuddy copilot.tencent.com 的真实行为）
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "code": 11101,
+                        "msg": "Non-stream chat request is currently not supported"
+                    })),
+                )
+                    .into_response();
+            }
+            let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"}}]}\n\n\
+data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n\
+data: [DONE]\n\n";
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                sse,
+            )
+                .into_response()
+        }
+
+        let app = Router::new().route("/v2/chat/completions", post(upstream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let bridge = super::OpenaiCompatibleBridge::with_session_auth(
+            format!("http://{addr}"),
+            "tok",
+            reqwest::Client::new(),
+            super::AuthMode::Bearer,
+            Vec::new(),
+            Some("/v2/chat/completions".to_string()),
+        )
+        .with_force_stream_aggregate(true);
+
+        let req = ChatFormat {
+            model: "auto".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: Some("你好".to_string()),
+                content_blocks: None,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning: None,
+            }],
+            tools: None,
+            max_tokens: Some(1),
+            temperature: None,
+            top_p: None,
+            stream: false, // 下游要的是非流式
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
+        };
+        let resp = bridge
+            .chat(&req, &BridgeContext::new("test-req", "auto"))
+            .await
+            .expect("强制流式聚合后应当成功");
+        assert_eq!(resp.message.content_str(), "hello");
+        assert_eq!(resp.usage.total_tokens, 3);
+
+        // 对照：未开该标记时同样调用必须失败（证明开关真的在起作用，
+        // 而不是「上游本来就不拒」）
+        let plain = super::OpenaiCompatibleBridge::with_session_auth(
+            format!("http://{addr}"),
+            "tok",
+            reqwest::Client::new(),
+            super::AuthMode::Bearer,
+            Vec::new(),
+            Some("/v2/chat/completions".to_string()),
+        );
+        let err = plain
+            .chat(&req, &BridgeContext::new("test-req", "auto"))
+            .await
+            .expect_err("未开开关时必须被上游 400 拒掉");
+        assert!(format!("{err}").contains("11101") || format!("{err}").contains("400"));
     }
 }

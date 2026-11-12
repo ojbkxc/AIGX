@@ -1040,6 +1040,22 @@ pub fn session_meta(kind: &str) -> Option<&'static SessionMeta> {
         .map(|(_, meta)| meta)
 }
 
+/// 该供应商的上游是否**只接受流式**对话请求（非流式会被上游拒）。
+///
+/// 命中的家：非流式请求在 Bridge 层改发流式、再在本地聚合成一个非流式响应
+/// （与 OpenCode 免费档同一条 `chat_via_stream_aggregation` 机制，对下游仍是
+/// 非流式语义）。
+///
+/// WorkBuddy：2026-11-11 生产实测 `POST https://copilot.tencent.com/v2/chat/completions`
+/// 带 `stream:false` 返回 `400 {"code":11101,"msg":"Non-stream chat request is currently
+/// not supported"}`（国际版同一套协议）。
+pub fn requires_stream(kind: &str) -> bool {
+    matches!(
+        kind.trim().to_ascii_lowercase().as_str(),
+        "workbuddy" | "workbuddy-intl"
+    )
+}
+
 /// 全部 provider（管理面下拉用）。
 pub fn all() -> &'static [ProviderSpec] {
     PROVIDERS
@@ -1482,6 +1498,24 @@ mod tests {
                 "{kind} 的默认地址要与 PROVIDERS 一致"
             );
         }
+    }
+
+    /// 「只接受流式」的家 = exactly workbuddy 双区，且两者都在会话供应商表里。
+    ///
+    /// 反向自证：provider id 拼错 → 命中集合为空 → 本测红（不会静默失效）；
+    /// 将来新增只收流式的家也必须同步改这里与 `requires_stream`。
+    #[test]
+    fn requires_stream_only_for_workbuddy_family() {
+        let hits: Vec<&str> = SESSION_PROVIDERS
+            .iter()
+            .map(|(kind, _)| *kind)
+            .filter(|kind| requires_stream(kind))
+            .collect();
+        assert_eq!(hits, vec!["workbuddy", "workbuddy-intl"]);
+        // 大小写/空白归一
+        assert!(requires_stream("  WorkBuddy  "));
+        assert!(!requires_stream("modelscope"));
+        assert!(!requires_stream(""));
     }
 
     #[test]
