@@ -35,6 +35,7 @@
 | F 加密备份 UI | `backup-ui` | `frontend/src/components/DataManagement.tsx` |
 | G 脱敏规则可配置 | `sanitize-config` | `src/sanitize/mod.rs`、`src/api/admin/settings.rs`（仅 sanitize 段） |
 | H 账号排序/置顶 | `account-order` | `src/account_session/store.rs`（仅排序段）、`src/account_session/rotate.rs`、`src/api/admin/account_sessions.rs`（仅排序段） |
+| I 账号池列表 UI | `account-table-ui` | `frontend/src/pages/AccountSessions.tsx`、`frontend/src/pages/AccountSessions.css` |
 
 > `src/api/admin/settings.rs` 与 `src/api/admin/account_sessions.rs` 是大文件：只许在**本流语义段**内 Edit，不得顺手重构。
 
@@ -240,6 +241,95 @@ retry_limit=0 不排重试；makeup 只挑非 ok 账号；`unsupported_providers
 5. **不动**现有多账号轮转/冷却/限流语义。
 
 **测试**：promote 后组内名次第一；PUT order 幂等；未知 id 被跳过；跨 priority 不串组（正向对照）。
+
+---
+
+## 9b. 流 I：账号池列表 UI 对齐（用户 2026-11-12 追加）
+
+用户原话：「账号池那块跟 A2A 的账号那块对齐下列名，跟上下 UI 的宽度跟高度，按供应商那块的显示来，但是字段按 A2A 的账号那块对齐下」
+
+拆成三条独立要求，**逐条**落实：
+
+### I-1 列名（列集合与文案）→ 按 **A2A 账号表**
+基准：`D:/GitHub/Agent2API-upstream-main/desktop-tauri/ui-islands/src/islands/accounts-columns.ts:49-94`（`ACCOUNT_COLUMNS`）。
+A2A 顺序：`选择 / 顺序 / 账号 / 代理 / 连接数 / 状态 / 限流 / 有效期 / 余额 / 操作`（共 10 列；
+**A2A 在「分组模式」下已删掉「优先级」与「提供商」两列**——provider 家名在分组带上，行内重复是噪音）。
+
+AIGX 现状 12 列：`选择 / 账号 / Provider / 代理 / 状态 / 优先级 / 连接数 / 有效期 / 余额 / 成功率 / 冷却 / 操作`。
+
+**冻结目标列集（12 列，在 A2A 基础上补 AIGX 既有且 A2A 无的两列）**：
+`选择(pick) / 顺序(order) / 账号(name) / Provider(provider) / 代理(proxy) / 连接数(conn) / 状态(status) / 限流(limiter) / 有效期(expiry) / 余额(usage) / 成功率(rate) / 冷却(cooldown) / 操作(act)`
+
+> 与 A2A 的差异及理由（写进代码注释）：
+> - **保留 Provider 列**：AIGX 默认是**列表模式**（`LS_GROUPED` 默认 false），不像 A2A 默认分组；不分组时行内必须有家名，否则看不出账号属于哪家。分组模式下该列可关。
+> - **保留 成功率 / 冷却**：AIGX 有这两个后端字段（`success_count`/`error_count`、`cooldowns`），A2A 把它们收进操作列/徽章；AIGX 既有实现已暴露，删掉是倒退。
+> - **新增 `顺序(order)` 列**：A2A 有、AIGX 无；数据源 = 流 H 的 `sort_order`。**本列依赖流 H**（若流 H 未落地则显示 `—` 并且不提供拖拽，不得编造）。
+> - **`冷却(cooldown)` 与 `限流(limiter)` 合并语义**：AIGX 现名「冷却」，A2A 叫「限流」且内容是该账号当前限流中的模型。**改名为「限流」**（`label: '限流'`），内容口径保持 AIGX 现有「冷却明细」（`cooldowns` + `limiter_state.skip_models` 合并在同一徽章里展开）。**这是「字段按 A2A 对齐」+「不丢 AIGX 既有信息」的折中，必须在注释里写清。**
+> - **状态列**：A2A 的 `status` = 启用/禁用；AIGX 的 `status` 是 `runtime_status`（enabled/disabled/expired/cooling）。保持 AIGX 口径（更细），但徽章文案对齐 A2A 的「启用/停用」措辞。
+
+**列名文案**：`选择`/`顺序`/`账号`/`代理`/`连接数`/`状态`/`限流`/`有效期`/`余额`/`成功率`/`冷却`→见上（限流）/`操作`。
+`Provider` 保持英文不译（AIGX 既有约定，`AccountSessions.tsx:346` 处 label 就是 `'Provider'`）。
+
+### I-2 宽度与高度 → 按 **供应商页（Channels）**
+基准：`frontend/src/pages/Channels.css:25-64` 与 `frontend/src/pages/Channels.tsx:303-318`。
+
+**高度（行高密度）必须与供应商页完全一致**：
+| 项 | 供应商页（基准） | 账号池现状 | 动作 |
+|---|---|---|---|
+| 表体字号 | `12.5px` | `12.5px` | 已一致，保持 |
+| 表头字号 | `10.5px` | `10.5px` | 已一致，保持 |
+| th 纵向 padding | `8px` | `7px` | **改为 8px** |
+| th/td 横向 padding | `10px` | `10px` | 已一致 |
+| td 纵向 padding | `7px` | `7px` | 已一致 |
+| 表头 `font-weight` | `600` | 未声明 | **补 `600`** |
+| 表头 `letter-spacing` | `0.05em` | `0.05em` | 已一致 |
+| 表头 `text-transform` | 无 | **`uppercase`** | **删除 `uppercase`**（供应商页没有，中文表头大写无效果但英文 Provider 会变 PROVIDER） |
+| 数字字形 | `tabular-nums` | `tabular-nums` | 已一致 |
+
+**宽度**：
+1. `min-width` 用供应商页同一档：`min-width: 980px`（现由 TSX `tableMinWidth` 动态算，保留动态能力，但**下限**不得低于 980）。
+2. 列默认宽按 A2A `accounts-columns.ts:113-127` 的预算口径重算，但**总宽收敛到与供应商页同量级**：
+   | 列 | 现值 | 新值 | 依据 |
+   |---|---|---|---|
+   | pick | 44 | **47** | A2A `pick: 47` |
+   | order | —（新增） | **84** | A2A `order: 84`（把手 20 + 序号 ~30 + 间隔） |
+   | name | 210(flex) | **flex（不写默认宽）** | A2A 唯一弹性列，吃剩余宽度 |
+   | provider | 126 | **126** | 保留 AIGX 现状（A2A 无此列） |
+   | proxy | 132 | **186** | A2A `proxy: 186`（节点:端口 + 选择器开销） |
+   | conn | 60 | **56** | A2A `connections: 56` |
+   | status | 92 | **80** | A2A `status: 80` |
+   | limiter | 128 | **148** | A2A `limits: 148` |
+   | expiry | 96 | **132** | A2A `expiry: 132`（双凭证同排最小宽） |
+   | usage | 132 | **308** | A2A `usage: 308`（模型组/三额度窗口并排） |
+   | rate | 64 | **64** | 保留 AIGX 现状 |
+   | act | 150 | **200** | A2A `actions: 200` |
+   | **合计（定宽列）** | ~967 | **1531** | — |
+
+   > 合计 1531 + 弹性 name ≥ 220 → `min-width` 约 **1751**，比供应商页 980 宽。**这是 A2A 的预算口径与「按供应商页显示」的冲突点**。
+   > **裁决（写进 §12 偏离记录）**：`min-width` 取值 **`max(980, 定宽列合计 + AS_FLEX_MIN)`**，实际约 1751；
+   > 容器窄于此值 → 横向滚动（AIGX 既有行为，`as-scroll`）。**不压缩列宽去凑 980**——压窄会让 A2A 那几列（余额 308/操作 200）内容截断，比横向滚动更糟。
+   > 用户若要「视觉上跟供应商页一样整齐」，靠的是**行高密度与表头样式一致**（I-2 上半表），不是总宽数字。
+
+3. 表头 sticky、`--table-header-bg`、`border-bottom` 等 token 与供应商页一致（现状已一致，逐项核对即可）。
+
+### I-3 「按供应商那块的显示来」= 视觉密度/交互一致
+除 I-2 的像素项外，**必须一致**的交互项（供应商页有的，账号池也要有）：
+1. 表头**列宽拖动把手**（供应商页 `.ch-col-grip`）→ 账号池已有 `.as-col-grip`，保留并**统一 hover 反馈**（供应商页有 `:hover` 变色，账号池若无则补）。
+2. 表头**三档对齐**（`.ta-left/.ta-center/.ta-right`）→ 两边都有，账号池的默认对齐**改为与 A2A 一致**：除「操作」居右外**全部居中**（A2A `accounts-columns.ts:44-47` 的论证：格子里是徽章/开关/序号/读数，居中更好扫读）。供应商页默认全左——**这里按 A2A 而非供应商页**，因为用户明确说「字段按 A2A 对齐」。
+3. 行 hover 淡底、选中淡底、`border-bottom` 分隔线 token 一致。
+4. 横向滚动容器（`.as-scroll` / `.channels-table-wrap`）行为一致：`scrollbar-gutter: stable`。
+
+### 交付与验收
+1. 只改 `AccountSessions.tsx` + `AccountSessions.css`。**不得改后端**（`order` 列数据依赖流 H；流 H 未落地则该列显示 `—`）。
+2. `npx tsc --noEmit` 通过；`npx eslint <两文件>` 通过。
+3. 自检（必须贴结果）：
+   - `grep -n "AS_COLS" AccountSessions.tsx` 的 13 项 key 集合与 §9b 冻结列集逐字一致；
+   - `grep -n "uppercase" AccountSessions.css` **零命中**；
+   - `grep -n "8px" AccountSessions.css` 能命中 th 纵向 padding；
+   - `.as-table th` 块内含 `font-weight: 600`。
+4. **视觉自证**：本地 `npm run dev` 起服务，用 playwright（`--trace=off`）截两张图（账号池 / 供应商页）对比行高，报告里给出两侧行高实测像素值（`getBoundingClientRect().height`），误差 ≤1px。
+   > 依据 memory pitfalls 第 2 条：「像素对齐」不能只抄比例，必须实测 boundingBox。
+5. 若 A2A 列宽预算与「与供应商页同宽」冲突，按 I-2 第 2 条的裁决执行并在 §12 记录。
 
 ---
 
