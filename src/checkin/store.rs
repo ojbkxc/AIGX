@@ -35,6 +35,9 @@ pub enum CheckinOutcome {
     Pending,
     /// 失败（登录态失效 / 上游报错）
     Failed,
+    /// 需要人机验证（验证码令牌缺失，或被上游拒绝需重新求解）—— 不是账号
+    /// 失效，前端据此提示管理员去求解验证码（见 `checkin-frontend`）。
+    Captcha,
 }
 
 impl CheckinOutcome {
@@ -44,6 +47,7 @@ impl CheckinOutcome {
             Self::Already => "already",
             Self::Pending => "pending",
             Self::Failed => "failed",
+            Self::Captcha => "captcha",
         }
     }
 
@@ -65,12 +69,19 @@ pub struct CheckinRecord {
     pub provider: String,
     /// 触发来源：schedule / manual
     pub source: String,
+    /// 记录类型：manual | schedule | makeup | retry —— 与 `source` **同值双写**
+    /// （旧读端只认 `source`，新读端用 `kind`），存量记录缺省为空串。
+    #[serde(default)]
+    pub kind: String,
     pub outcome: CheckinOutcome,
     pub ok: bool,
     /// 本次执行链是否附带保活动作（签到后自动链对国际版账号顺带保活时置真）
     #[serde(default)]
     pub kept_active: bool,
     pub message: String,
+    /// 失败原文（成功 / 今日已领时为空）—— 供台账「失败原因」列直读。
+    #[serde(default)]
+    pub error: String,
 }
 
 /// 一个定时签到条目。
@@ -81,6 +92,24 @@ pub struct CheckinSchedule {
     pub enabled: bool,
     /// 每天执行的时刻（HH:MM，按配置时区）
     pub time: String,
+    /// 窗口结束时刻（HH:MM）；空 = 无窗口，仅按 `time` 触发。
+    /// `randomize=true` 时，每个账号在 `[time, time_end]` 内取确定性随机时刻。
+    #[serde(default)]
+    pub time_end: String,
+    /// true = 每个账号在 `[time, time_end]` 内取**确定性**随机时刻
+    /// （`hash(account_id) % 窗口分钟数`，同账号同日同刻、重启不漂）。
+    #[serde(default)]
+    pub randomize: bool,
+    /// 每账号每天重试次数上限（0 = 关闭重试；缺省 3，与旧 `RETRY_LIMIT` 一致）。
+    #[serde(default = "default_retry_limit")]
+    pub retry_limit: u32,
+    /// 重试间隔（分钟，缺省 5；<=0 时回落全局 `retry_gap_ms`）。
+    #[serde(default = "default_retry_gap_minutes")]
+    pub retry_gap_minutes: u32,
+    /// 补签轮时刻（HH:MM）；空 = 不跑补签轮。到点时挑当天该条目下未签上的
+    /// 账号再跑一次（`kind="makeup"`），每天至多一轮。
+    #[serde(default)]
+    pub makeup_time: String,
     /// 参与签到的 provider（空 = 全部支持的）
     #[serde(default)]
     pub providers: Vec<String>,
@@ -148,6 +177,16 @@ fn default_gap_ms() -> u64 {
 
 fn default_retry_gap_ms() -> u64 {
     10 * 60 * 1000
+}
+
+/// 条目缺省重试上限（与旧调度常量 `RETRY_LIMIT` 一致）。
+fn default_retry_limit() -> u32 {
+    3
+}
+
+/// 条目缺省重试间隔（分钟）。
+fn default_retry_gap_minutes() -> u32 {
+    5
 }
 
 impl Default for CheckinSettings {
@@ -548,6 +587,11 @@ mod tests {
                 label: "每日".into(),
                 enabled: true,
                 time: "09:00".into(),
+                time_end: String::new(),
+                randomize: false,
+                retry_limit: default_retry_limit(),
+                retry_gap_minutes: default_retry_gap_minutes(),
+                makeup_time: String::new(),
                 providers: vec!["loomy".into()],
                 provider_times: HashMap::new(),
                 last_fired_date: String::new(),
@@ -586,6 +630,7 @@ mod tests {
                     account_name: "账号 1".into(),
                     provider: provider.into(),
                     source: "manual".into(),
+                    kind: "manual".into(),
                     outcome: if ok {
                         CheckinOutcome::Success
                     } else {
@@ -594,6 +639,7 @@ mod tests {
                     ok,
                     kept_active: false,
                     message: String::new(),
+                    error: String::new(),
                 })
                 .unwrap();
         }
@@ -643,5 +689,46 @@ mod tests {
         assert!(CheckinOutcome::Already.is_ok());
         assert!(!CheckinOutcome::Pending.is_ok());
         assert!(!CheckinOutcome::Failed.is_ok());
+        // Captcha 不是「今天完成了」——前端要提示去求解验证码
+        assert!(!CheckinOutcome::Captcha.is_ok());
+        assert_eq!(CheckinOutcome::Captcha.as_str(), "captcha");
+    }
+
+    #[test]
+    fn captcha_outcome_serde_roundtrip() {
+        // 台账持久化：写 "captcha" → 读回仍是 Captcha（别落成 Failed）
+        let json = serde_json::to_string(&CheckinOutcome::Captcha).unwrap();
+        assert_eq!(json, "\"captcha\"");
+        let back: CheckinOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, CheckinOutcome::Captcha);
+    }
+
+    #[test]
+    fn record_kind_and_error_serde_default_and_double_write() {
+        // 存量记录没有 kind/error 两个键 → 反序列化回落空串（零迁移）
+        let legacy: CheckinRecord = serde_json::from_str(
+            r#"{"ts":1,"date":"2026-01-01","account_id":"a","account_name":"n",
+                "provider":"loomy","source":"schedule","outcome":"success","ok":true,
+                "message":"ok"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.kind, "");
+        assert_eq!(legacy.error, "");
+        // 新写：kind 与 source 同值双写，error 记失败原文
+        let rec = CheckinRecord {
+            ts: 1,
+            date: "2026-01-01".into(),
+            account_id: "a".into(),
+            account_name: "n".into(),
+            provider: "loomy".into(),
+            source: "makeup".into(),
+            kind: "makeup".into(),
+            outcome: CheckinOutcome::Captcha,
+            ok: false,
+            kept_active: false,
+            message: "需要验证码".into(),
+            error: "需要验证码".into(),
+        };
+        assert_eq!(rec.kind, rec.source);
     }
 }

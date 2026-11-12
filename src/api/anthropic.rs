@@ -122,9 +122,63 @@ fn to_anthropic_stop_reason(fr: &FinishReason) -> &'static str {
     }
 }
 
+/// Anthropic `image` 块 → 内部 content_blocks 的 OpenAI `image_url` 形态。
+///
+/// - `source.type == "base64"` → 拼成 `data:<media_type>;base64,<data>` URI
+/// - `source.type == "url"` → 原样 `<url>`
+/// - 其它 source 形态（Files API 的 `file` 源等）→ 返回 `None`，调用方记 debug
+///   后丢弃，绝不编造 URL。
+fn anthropic_image_to_openai_block(part: &Value) -> Option<Value> {
+    let source = part.get("source")?;
+    match source.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "base64" => {
+            let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
+            if data.is_empty() {
+                return None;
+            }
+            let media_type = source
+                .get("media_type")
+                .and_then(|m| m.as_str())
+                .filter(|m| !m.is_empty())
+                .unwrap_or("image/png");
+            Some(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{media_type};base64,{data}") },
+            }))
+        }
+        "url" => {
+            let url = source.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if url.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": url },
+            }))
+        }
+        other => {
+            tracing::debug!(
+                "anthropic image block: unsupported source.type '{other}' dropped (no Chat equivalent)"
+            );
+            None
+        }
+    }
+}
+
 /// 解析 Anthropic 消息列表为内部 ChatMessage 列表。
 ///
 /// `developer_to_system` = developer 角色兼容开关（网关提示词设置）。
+///
+/// 保真升级（SPEC-1.0.49 §2）：除 text/tool_use/tool_result 字符串外，还识别
+/// - `image` 块 → content_blocks 的 `image_url` 形态（不再静默丢图）；
+/// - `thinking` / `redacted_thinking` → `reasoning`；
+/// - 带 `cache_control` 的 `text` 块 → 强制块形态（断点透传）；
+/// - `tool_result.content` 数组内的图片 → 本条全部 tool 消息之后补一条
+///   `role=user` 的 content_blocks 消息（同序参照 A2A core/protocol/anthropic.rs）。
+///
+/// **已知不修**（本轮不引入新字段，避免全仓字面量断裂）：
+/// - `tool_result.is_error`：OpenAI 形出口无对应表达，丢弃；
+/// - `document` / `search_result` 块：无 Chat 等价形态，丢弃并记 debug。
 fn parse_anthropic_messages(messages: &[Value], developer_to_system: bool) -> Vec<ChatMessage> {
     let mut result = Vec::new();
     for msg in messages {
@@ -138,14 +192,38 @@ fn parse_anthropic_messages(messages: &[Value], developer_to_system: bool) -> Ve
         let mut text_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<crate::bridge::ToolCall> = Vec::new();
         let mut tool_results: Vec<(String, String)> = Vec::new();
+        // 本条消息内 tool_result 数组里的图片：延后成本条全部 tool 消息之后的一条
+        // user content_blocks 消息（Chat 侧 tool 消息不许带图，上游会 400）。
+        let mut tool_result_images: Vec<Value> = Vec::new();
+        // thinking 文本（累积进 reasoning）
+        let mut reasoning_parts: Vec<String> = Vec::new();
+        // 是否含 image 块 / 带 cache_control 的块——决定是否走 content_blocks 形态
+        let mut has_image = false;
+        let mut has_cache_control = false;
+        // 块形态数组（仅当 has_image || has_cache_control 时启用）
+        let mut blocks: Vec<Value> = Vec::new();
         match content {
             Some(Value::String(s)) => text_parts.push(s.clone()),
             Some(Value::Array(parts)) => {
                 for p in parts {
                     match p.get("type").and_then(|t| t.as_str()) {
                         Some("text") => {
-                            if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
-                                text_parts.push(t.to_string());
+                            let t = p.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                            text_parts.push(t.to_string());
+                            let cache_control = p.get("cache_control").filter(|c| c.is_object());
+                            has_cache_control |= cache_control.is_some();
+                            let mut block = serde_json::json!({"type": "text", "text": t});
+                            if let Some(cc) = cache_control {
+                                if let Value::Object(map) = &mut block {
+                                    map.insert("cache_control".to_string(), cc.clone());
+                                }
+                            }
+                            blocks.push(block);
+                        }
+                        Some("image") => {
+                            has_image = true;
+                            if let Some(b) = anthropic_image_to_openai_block(p) {
+                                blocks.push(b);
                             }
                         }
                         Some("tool_use") => {
@@ -175,14 +253,70 @@ fn parse_anthropic_messages(messages: &[Value], developer_to_system: bool) -> Ve
                                 .and_then(|i| i.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let t = p
-                                .get("content")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tool_results.push((tid, t));
+                            match p.get("content") {
+                                // 数组形态：文本 join 进 tool 消息，图片延后收集
+                                Some(Value::Array(rs)) => {
+                                    let mut texts: Vec<&str> = Vec::new();
+                                    for r in rs {
+                                        match r.get("type").and_then(|t| t.as_str()) {
+                                            Some("text") => {
+                                                if let Some(t) =
+                                                    r.get("text").and_then(|t| t.as_str())
+                                                {
+                                                    texts.push(t);
+                                                }
+                                            }
+                                            Some("image") => {
+                                                if let Some(b) = anthropic_image_to_openai_block(r)
+                                                {
+                                                    tool_result_images.push(b);
+                                                }
+                                            }
+                                            Some(kind @ ("document" | "search_result")) => {
+                                                tracing::debug!(
+                                                    "anthropic tool_result block '{kind}' dropped (no Chat equivalent)"
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    tool_results.push((tid, texts.join("\n")));
+                                }
+                                // 字符串（或缺省）形态：维持现状
+                                _ => {
+                                    let t = p
+                                        .get("content")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    tool_results.push((tid, t));
+                                }
+                            }
                         }
-                        _ => {}
+                        Some("thinking") => {
+                            if let Some(t) = p
+                                .get("thinking")
+                                .and_then(|t| t.as_str())
+                                .filter(|t| !t.is_empty())
+                            {
+                                reasoning_parts.push(t.to_string());
+                            }
+                        }
+                        // redacted_thinking 无明文：只记 data 存在与否，不塞密文
+                        Some("redacted_thinking") => {
+                            if p.get("data").is_some() {
+                                tracing::debug!(
+                                    "anthropic redacted_thinking block present; ciphertext not carried"
+                                );
+                            }
+                        }
+                        Some(kind @ ("document" | "search_result")) => {
+                            tracing::debug!(
+                                "anthropic block '{kind}' dropped (no Chat equivalent)"
+                            );
+                        }
+                        // 其它未知块：原样保留（仅在已启用块形态时有意义）
+                        _ => blocks.push(p.clone()),
                     }
                 }
             }
@@ -202,10 +336,30 @@ fn parse_anthropic_messages(messages: &[Value], developer_to_system: bool) -> Ve
                     reasoning: None,
                 });
             }
+            // tool_result 数组内的图片：在本条全部 tool 消息之后补一条 user 消息
+            // （Chat 的 tool 消息不许带图；Anthropic 也要求结果紧跟发起调用的 assistant）
+            if !tool_result_images.is_empty() {
+                result.push(ChatMessage {
+                    role: Role::User,
+                    content: None,
+                    content_blocks: Some(tool_result_images),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    reasoning: None,
+                });
+            }
             continue;
         }
 
         let text = text_parts.join("\n");
+        // 仅当含 image 块或带 cache_control 的块时才走块形态；否则维持 bare-string，
+        // 不给上游换形状（无图消息 content_blocks 仍为 None）。
+        let content_blocks = if has_image || has_cache_control {
+            Some(blocks)
+        } else {
+            None
+        };
         result.push(ChatMessage {
             role,
             content: if text.is_empty() && tool_calls.is_empty() {
@@ -213,7 +367,7 @@ fn parse_anthropic_messages(messages: &[Value], developer_to_system: bool) -> Ve
             } else {
                 Some(text)
             },
-            content_blocks: None,
+            content_blocks,
             name: None,
             tool_call_id: None,
             tool_calls: if tool_calls.is_empty() {
@@ -221,7 +375,11 @@ fn parse_anthropic_messages(messages: &[Value], developer_to_system: bool) -> Ve
             } else {
                 Some(tool_calls)
             },
-            reasoning: None,
+            reasoning: if reasoning_parts.is_empty() {
+                None
+            } else {
+                Some(reasoning_parts.join("\n"))
+            },
         });
     }
     result
@@ -1655,4 +1813,134 @@ pub async fn handle_count_tokens(
         "estimated": true
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_anthropic_messages;
+    use crate::bridge::Role;
+    use serde_json::json;
+
+    #[test]
+    fn anthropic_image_block_becomes_image_url() {
+        // base64 + url 两形态
+        let msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "看图"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/a.jpg"}},
+            ]
+        })];
+        let out = parse_anthropic_messages(&msgs, false);
+        assert_eq!(out.len(), 1);
+        let blocks = out[0]
+            .content_blocks
+            .as_ref()
+            .expect("含 image 块应触发 content_blocks");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "看图");
+        assert_eq!(blocks[1]["type"], "image_url");
+        assert_eq!(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(blocks[2]["type"], "image_url");
+        assert_eq!(blocks[2]["image_url"]["url"], "https://example.com/a.jpg");
+        // content 仍为拼接纯文本
+        assert_eq!(out[0].content_str(), "看图");
+    }
+
+    #[test]
+    fn anthropic_text_only_message_keeps_bare_content() {
+        // 正向对照：无图、无 cache_control 的文本消息仍走 bare-string，
+        // 不得误加 content_blocks（否则负向断言恒真）。
+        let msgs = vec![
+            json!({"role": "user", "content": [{"type": "text", "text": "你好"}]}),
+            json!({"role": "assistant", "content": "直接字符串"}),
+        ];
+        let out = parse_anthropic_messages(&msgs, false);
+        assert_eq!(out.len(), 2);
+        assert!(
+            out[0].content_blocks.is_none(),
+            "纯文本数组不应触发 content_blocks"
+        );
+        assert_eq!(out[0].content_str(), "你好");
+        assert!(
+            out[1].content_blocks.is_none(),
+            "字符串 content 不应触发 blocks"
+        );
+        assert_eq!(out[1].content_str(), "直接字符串");
+    }
+
+    #[test]
+    fn anthropic_thinking_accumulates_into_reasoning() {
+        let msgs = vec![json!({
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "让我想想"},
+                {"type": "redacted_thinking", "data": "ciphertext"},
+                {"type": "text", "text": "答案"},
+            ]
+        })];
+        let out = parse_anthropic_messages(&msgs, false);
+        assert_eq!(out.len(), 1);
+        // redacted_thinking 的密文不入 reasoning
+        assert_eq!(out[0].reasoning.as_deref(), Some("让我想想"));
+        assert_eq!(out[0].content_str(), "答案");
+        assert!(
+            out[0].content_blocks.is_none(),
+            "thinking 不应触发 content_blocks"
+        );
+    }
+
+    #[test]
+    fn anthropic_tool_result_array_images_appended_after_tool_messages() {
+        let msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "结果1"}
+                ]},
+                {"type": "tool_result", "tool_use_id": "t2", "content": [
+                    {"type": "text", "text": "结果2"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBBB"}},
+                ]},
+            ]
+        })];
+        let out = parse_anthropic_messages(&msgs, false);
+        assert_eq!(out.len(), 3, "两条 tool 消息 + 一条图片 user 消息");
+        // 顺序：tool 消息在前
+        assert_eq!(out[0].role, Role::Tool);
+        assert_eq!(out[0].tool_call_id.as_deref(), Some("t1"));
+        assert_eq!(out[0].content_str(), "结果1");
+        assert_eq!(out[1].role, Role::Tool);
+        assert_eq!(out[1].tool_call_id.as_deref(), Some("t2"));
+        assert_eq!(out[1].content_str(), "结果2");
+        // 图片 user 消息在后
+        assert_eq!(out[2].role, Role::User);
+        let blocks = out[2]
+            .content_blocks
+            .as_ref()
+            .expect("tool_result 数组内的图片应落成 user content_blocks");
+        assert_eq!(blocks[0]["type"], "image_url");
+        assert_eq!(blocks[0]["image_url"]["url"], "data:image/png;base64,BBBB");
+    }
+
+    #[test]
+    fn anthropic_cache_control_forces_block_form() {
+        let msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "缓存前缀", "cache_control": {"type": "ephemeral"}}
+            ]
+        })];
+        let out = parse_anthropic_messages(&msgs, false);
+        assert_eq!(out.len(), 1);
+        let blocks = out[0]
+            .content_blocks
+            .as_ref()
+            .expect("带 cache_control 的 text 块应走块形态");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "缓存前缀");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(out[0].content_str(), "缓存前缀");
+    }
 }

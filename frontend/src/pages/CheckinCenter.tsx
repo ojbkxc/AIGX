@@ -31,6 +31,7 @@ const OUTCOME_TONE: Record<string, 'success' | 'info' | 'warning' | 'danger'> = 
   already: 'info',
   pending: 'warning',
   failed: 'danger',
+  captcha: 'warning',
 };
 
 const OUTCOME_LABEL: Record<string, string> = {
@@ -38,6 +39,16 @@ const OUTCOME_LABEL: Record<string, string> = {
   already: '今日已领',
   pending: '待重试',
   failed: '失败',
+  // 1.0.49 契约新增：上游要求人机验证（is_ok=false，需管理员介入）
+  captcha: '需人机验证',
+};
+
+/** 台账「类型」列（与 source 同值双写：manual | schedule | makeup | retry） */
+const KIND_LABEL: Record<string, string> = {
+  manual: '手动',
+  schedule: '定时',
+  makeup: '补签',
+  retry: '重试',
 };
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -54,6 +65,19 @@ const SOURCE_LABEL: Record<string, string> = {
 const TZ_OFFSETS = [-12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
 
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** 起止日期（<input type="date"> 的 "YYYY-MM-DD"）→ unix 秒。
+ *  起始取当日 00:00:00、结束取当日 23:59:59（含当天，与后端闭区间 [start,end] 对齐）。 */
+const dateToStartSec = (d: string): number | undefined => {
+  if (!d) return undefined;
+  const ms = new Date(`${d}T00:00:00`).getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+};
+const dateToEndSec = (d: string): number | undefined => {
+  if (!d) return undefined;
+  const ms = new Date(`${d}T23:59:59`).getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+};
 
 /**
  * 各家上游的签到链路说明（对齐 Agent2API 提供商行的一句话说明）。
@@ -95,15 +119,17 @@ interface ScheduleForm {
   providers: string[];
   /** 逐家时刻覆盖（仅非空项提交；空 = 回落内置专属/条目时刻） */
   providerTimes: Record<string, string>;
-  /* ── be-fix #16-B 契约字段：后端下发对应字段才在编辑器里渲染/提交 ── */
-  /** 随机签到区间结束（缺省 = time 固定时刻） */
+  /* ── 1.0.49 契约字段（GET/POST schedules 均带同名 5 字段）── */
+  /** 随机签到区间结束 HH:MM（空 = 无窗口，仅按 time 固定执行） */
   timeEnd: string;
-  /** 定时补签时刻（空 = 关闭） */
-  retryTime: string;
-  /** 补签/重试共用间隔（分钟） */
-  retryGapMinutes: string;
-  /** 活动重试：每账号每天最多重试次数 */
+  /** true = 每个账号在 [time, timeEnd] 内取确定性随机时刻 */
+  randomize: boolean;
+  /** 每账号每天重试上限（0 = 关闭重试；缺省 3，与后端 default_retry_limit 一致） */
   retryLimit: string;
+  /** 重试间隔（分钟；<=0 回落全局 retry_gap_ms；缺省 5） */
+  retryGapMinutes: string;
+  /** 补签轮时刻 HH:MM（空 = 不跑补签轮） */
+  makeupTime: string;
 }
 
 const EMPTY_SCHEDULE: ScheduleForm = {
@@ -114,9 +140,10 @@ const EMPTY_SCHEDULE: ScheduleForm = {
   providers: [],
   providerTimes: {},
   timeEnd: '',
-  retryTime: '',
-  retryGapMinutes: '10',
+  randomize: false,
   retryLimit: '3',
+  retryGapMinutes: '5',
+  makeupTime: '',
 };
 
 /* 「下次执行 / 今日已执行」的时区口径已抽到 src/lib/checkinTz.ts（纯函数 +
@@ -133,8 +160,12 @@ const CK_REC_COL_DEFS: TableColumnDef[] = [
   { key: 'account', label: '账号', width: 180 },
   { key: 'provider', label: '上游', width: 110 },
   { key: 'source', label: '来源', width: 90 },
+  // 1.0.49 契约：kind 与 source 同值双写，单列展示记录类型
+  { key: 'kind', label: '类型', width: 80 },
   { key: 'result', label: '结果', width: 100 },
   { key: 'note', label: '说明', width: 260 },
+  // 1.0.49 契约：失败原文（成功 / 今日已领时为空）
+  { key: 'error', label: '失败原因', width: 260 },
 ];
 
 interface CheckinCenterProps {
@@ -201,6 +232,10 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
   const [recordDays, setRecordDays] = useState(7);
   const [recordOutcome, setRecordOutcome] = useState('');
   const [recordProvider, setRecordProvider] = useState('');
+  // 1.0.49 契约：类型（kind）与起止日期（→ unix 秒 start/end）
+  const [recordKind, setRecordKind] = useState('');
+  const [recordStart, setRecordStart] = useState('');
+  const [recordEnd, setRecordEnd] = useState('');
   const [keyword, setKeyword] = useState('');
   // 关键词走后端过滤（与分页同口径）；kwApplied 是「已提交」的关键词
   const [kwApplied, setKwApplied] = useState('');
@@ -210,7 +245,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     key: 'aigx-tbl-pagesize.checkin',
     sizes: SERVER_PAGE_SIZES,
     fallback: 50,
-    resetDeps: [recordDays, recordProvider, recordOutcome, kwApplied],
+    resetDeps: [recordDays, recordProvider, recordOutcome, recordKind, recordStart, recordEnd, kwApplied],
   });
 
   const load = useCallback(async () => {
@@ -242,11 +277,19 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
 
   const loadRecords = useCallback(async () => {
     setRecordsLoading(true);
+    // 日期字符串 → unix 秒（闭区间：起 00:00:00 / 止 23:59:59）
+    const dateStart = dateToStartSec(recordStart);
+    const dateEnd = dateToEndSec(recordEnd);
     try {
       const res = await api.getCheckinRecords({
-        days: recordDays,
+        // 起止日期生效时把 days 放开到「全部」以区间为准——否则 days 的默认 7 天
+        // 会与区间取交集，选 30 天前~10 天前也会被裁成 7 天内
+        days: dateStart != null || dateEnd != null ? 3650 : recordDays,
         provider: recordProvider || undefined,
         outcome: recordOutcome || undefined,
+        kind: recordKind || undefined,
+        start: dateStart,
+        end: dateEnd,
         keyword: kwApplied || undefined,
         offset: (page - 1) * size,
         limit: size,
@@ -258,7 +301,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     } finally {
       setRecordsLoading(false);
     }
-  }, [recordDays, recordProvider, recordOutcome, kwApplied, page, size, setTotal, addToast]);
+  }, [recordDays, recordProvider, recordOutcome, recordKind, recordStart, recordEnd, kwApplied, page, size, setTotal, addToast]);
 
   useEffect(() => {
     if (tab === 'records') void loadRecords();
@@ -478,9 +521,10 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
       providers: schedule.providers,
       providerTimes: { ...(schedule.provider_times ?? {}) },
       timeEnd: schedule.time_end ?? '',
-      retryTime: schedule.retry_time ?? '',
-      retryGapMinutes: String(schedule.retry_gap_minutes ?? 10),
+      randomize: schedule.randomize ?? false,
+      retryGapMinutes: String(schedule.retry_gap_minutes ?? 5),
       retryLimit: String(schedule.retry_limit ?? 3),
+      makeupTime: schedule.makeup_time ?? '',
     });
     setEditingId(schedule.id);
   };
@@ -493,10 +537,24 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
         return;
       }
     }
-    // 契约字段 feature-detect：后端下发过对应字段才提交（旧后端忽略未知字段，
-    // 但发了也存不下来、编辑回显会丢——宁可不发，等 be-fix #16-B 就绪自动生效）
-    const schedHasTimeEnd = (data?.schedules ?? []).some((s) => 'time_end' in s);
-    const schedHasRetry = (data?.schedules ?? []).some((s) => 'retry_time' in s);
+    // 校验：区间结束 / 补签时刻须为合法 HH:MM；开区间随机时结束须晚于开始（后端 400 前置拦截）
+    if (scheduleForm.timeEnd && !HHMM_RE.test(scheduleForm.timeEnd)) {
+      addToast(t('区间结束时刻格式应为 HH:MM'), 'error');
+      return;
+    }
+    if (scheduleForm.makeupTime && !HHMM_RE.test(scheduleForm.makeupTime)) {
+      addToast(t('补签时刻格式应为 HH:MM'), 'error');
+      return;
+    }
+    if (
+      scheduleForm.randomize &&
+      (!scheduleForm.timeEnd || scheduleForm.timeEnd <= scheduleForm.time)
+    ) {
+      addToast(t('开启区间随机时，结束时刻须晚于开始时刻'), 'error');
+      return;
+    }
+    // 契约已冻结（1.0.49）：5 字段一律提交；旧后端虽有 serde(default) 会忽略未知字段，
+    // 但前后端同版本发布，不再做 feature-detect（否则「零条目」时新建表单会缺控件）。
     const providerTimes = Object.fromEntries(
       Object.entries(scheduleForm.providerTimes).filter(([, v]) => v),
     );
@@ -509,14 +567,11 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
         time: scheduleForm.time,
         providers: scheduleForm.providers,
         provider_times: providerTimes,
-        ...(schedHasTimeEnd ? { time_end: scheduleForm.timeEnd || scheduleForm.time } : {}),
-        ...(schedHasRetry
-          ? {
-              retry_time: scheduleForm.retryTime,
-              retry_gap_minutes: Number(scheduleForm.retryGapMinutes) || 0,
-              retry_limit: Number(scheduleForm.retryLimit) || 0,
-            }
-          : {}),
+        time_end: scheduleForm.timeEnd,
+        randomize: scheduleForm.randomize,
+        retry_limit: Number(scheduleForm.retryLimit) || 0,
+        retry_gap_minutes: Number(scheduleForm.retryGapMinutes) || 0,
+        makeup_time: scheduleForm.makeupTime,
       });
       addToast(t('计划已保存'));
       setEditingId(null);
@@ -578,6 +633,9 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
 
   const providers = useMemo(() => data?.providers ?? [], [data?.providers]);
   const supported = useMemo(() => data?.supported_providers ?? [], [data?.supported_providers]);
+  /** 1.0.49 契约：实现未进主仓的三家（置灰 + 「插件仓」标注）；旧后端无此字段则为空集 */
+  const unsupported = useMemo(() => data?.unsupported_providers ?? [], [data?.unsupported_providers]);
+  const unsupportedSet = useMemo(() => new Set(unsupported), [unsupported]);
 
   const totals = useMemo(() => {
     let done = 0;
@@ -589,17 +647,9 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     return { done, total, accounts: providers.reduce((n, p) => n + p.accounts.length, 0) };
   }, [providers]);
 
-  const hasRecordFilter = !!kwApplied || !!recordOutcome || !!recordProvider;
+  const hasRecordFilter = !!kwApplied || !!recordOutcome || !!recordProvider || !!recordKind || !!recordStart || !!recordEnd;
 
-  /* ── 契约字段 feature-detect：后端（be-fix #16-B）下发过才渲染对应编辑项 ── */
-  const schedHasTimeEnd = useMemo(
-    () => (data?.schedules ?? []).some((s) => 'time_end' in s),
-    [data?.schedules],
-  );
-  const schedHasRetry = useMemo(
-    () => (data?.schedules ?? []).some((s) => 'retry_time' in s),
-    [data?.schedules],
-  );
+  /* 1.0.49 契约字段已冻结：编辑器控件无条件渲染（旧后端 serde(default) 忽略未知字段） */
   const builtinTimes = data?.builtin_times;
 
   /** 生效时刻三档回落：逐家覆盖 > 内置专属 > 条目时刻（对齐上游 effectiveScheduleTime） */
@@ -697,7 +747,16 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
         <div className="ck-scope-head">
           <span className="ck-editor-label">{t('签到范围（可逐家覆盖时刻）')}</span>
           <span className="ck-scope-tools">
-            <button type="button" onClick={() => setScheduleForm({ ...scheduleForm, providers: [...supported] })}>
+            <button
+              type="button"
+              onClick={() =>
+                setScheduleForm({
+                  ...scheduleForm,
+                  // 全选跳过未接入主仓的家（置灰项不可选）
+                  providers: supported.filter((p) => !unsupportedSet.has(p)),
+                })
+              }
+            >
               {t('全选')}
             </button>
             <button
@@ -714,12 +773,18 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
             const override = scheduleForm.providerTimes[provider] ?? '';
             const eff = effectiveTime(provider, scheduleForm);
             const isBuiltin = !override && Boolean(builtinTimes?.[provider]);
+            // 1.0.49 契约：实现随上游搬进闭源插件仓的三家 → 置灰 + 说明，不可选
+            const unsupported = unsupportedSet.has(provider);
             return (
-              <div key={provider} className={`ck-provider-pick ck-provider-pick-row${checked ? ' is-checked' : ''}`}>
+              <div
+                key={provider}
+                className={`ck-provider-pick ck-provider-pick-row${checked ? ' is-checked' : ''}${unsupported ? ' is-unsupported' : ''}`}
+              >
                 <label className="ck-provider-pick-name">
                   <input
                     type="checkbox"
                     checked={checked}
+                    disabled={unsupported}
                     onChange={(e) => {
                       const next = e.target.checked
                         ? [...scheduleForm.providers, provider]
@@ -731,8 +796,15 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                   />
                   {provider}
                   {isBuiltin && <span className="ck-pick-tag">{t('平台专属')}</span>}
+                  {unsupported && (
+                    <Tooltip label={t('实现随上游进入插件仓，主仓未接入')}>
+                      <span className="ck-pick-tag ck-pick-tag-unsupported">
+                        {t('插件仓')}
+                      </span>
+                    </Tooltip>
+                  )}
                 </label>
-                {checked && (
+                {checked && !unsupported && (
                   <span className="ck-pick-time">
                     <input
                       type="time"
@@ -795,67 +867,116 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
         </div>
       )}
 
-      {/* 随机签到区间：be-fix #16-B 下发 time_end 后出现 */}
-      {schedHasTimeEnd && (
-        <div className="form-group">
-          <span className="ck-editor-label">{t('随机签到区间（可选）')}</span>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      {/* 随机签到区间：time_end + randomize（1.0.49 契约字段） */}
+      <div className="form-group">
+        <span className="ck-editor-label">{t('随机签到区间（可选）')}</span>
+        <div className="ck-editor-grid">
+          <label className="form-group">
+            <span className="ck-editor-label ck-label-with-tip">
+              {t('区间结束时刻')}
+              <Tooltip
+                label={t(
+                  '窗口结束时刻（HH:MM）。开启随机后，每个账号在 [开始, 结束] 内取确定性随机时刻（同账号同日同刻、重启不漂）；留空 = 仅按开始时刻执行。内置专属时刻（如 qoder 10:01）与逐家覆盖的家不参与随机。',
+                )}
+              >
+                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
+              </Tooltip>
+            </span>
             <input
               type="time"
               className="form-input ck-time-input"
-              aria-label={t('区间结束')}
+              aria-label={t('区间结束时刻')}
               value={scheduleForm.timeEnd}
               onChange={(e) => setScheduleForm({ ...scheduleForm, timeEnd: e.target.value })}
             />
-            <span className="form-hint" style={{ margin: 0 }}>
-              {t('结束时刻晚于开始时，每账号在区间内随机执行一次；留空 = 固定时刻执行。')}
+          </label>
+          <label className="ck-editor-enabled ck-random-toggle">
+            <Switch
+              checked={scheduleForm.randomize}
+              onChange={(next) => setScheduleForm({ ...scheduleForm, randomize: next })}
+              ariaLabel={t('区间内随机')}
+            />
+            <span className="ck-label-with-tip">
+              {t('区间内随机')}
+              <Tooltip
+                label={t(
+                  '开启后每个账号在 [开始, 结束] 区间内随机取一个时刻执行，避免同刻集中触发上游风控；关闭 = 所有账号按开始时刻执行。',
+                )}
+              >
+                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
+              </Tooltip>
             </span>
-          </div>
+          </label>
         </div>
-      )}
+        <span className="form-hint">
+          {t('开启随机时结束时刻必须晚于开始时刻；留空结束时刻 = 固定时刻执行。')}
+        </span>
+      </div>
 
-      {/* 定时补签 + 活动窗口重试：be-fix #16-B 下发 retry_time 后出现（对齐上游 makeup-editor） */}
-      {schedHasRetry && (
-        <div className="form-group ck-retry-block">
-          <span className="ck-editor-label">{t('补签与重试')}</span>
-          <div className="ck-editor-grid">
-            <label className="form-group">
-              <span className="ck-editor-label">{t('定时补签时刻（留空 = 关闭）')}</span>
-              <input
-                type="time"
-                className="form-input ck-time-input"
-                value={scheduleForm.retryTime}
-                onChange={(e) => setScheduleForm({ ...scheduleForm, retryTime: e.target.value })}
-              />
-            </label>
-            <label className="form-group">
-              <span className="ck-editor-label">{t('补签/重试间隔（分钟）')}</span>
-              <input
-                type="number"
-                min={0}
-                max={120}
-                className="form-input"
-                value={scheduleForm.retryGapMinutes}
-                onChange={(e) => setScheduleForm({ ...scheduleForm, retryGapMinutes: e.target.value })}
-              />
-            </label>
-            <label className="form-group">
-              <span className="ck-editor-label">{t('每账号每天最多重试（次，0 = 关）')}</span>
-              <input
-                type="number"
-                min={0}
-                max={20}
-                className="form-input"
-                value={scheduleForm.retryLimit}
-                onChange={(e) => setScheduleForm({ ...scheduleForm, retryLimit: e.target.value })}
-              />
-            </label>
-          </div>
-          <span className="form-hint">
-            {t('补签取「区间结束 + 间隔」与「补签时刻」中较晚者，只处理当天未签到的账号；次数按账号每天单独计算、次日重置。')}
-          </span>
+      {/* 逐条目重试 + 补签轮：retry_limit / retry_gap_minutes / makeup_time（1.0.49 契约字段） */}
+      <div className="form-group ck-retry-block">
+        <span className="ck-editor-label">{t('补签与重试')}</span>
+        <div className="ck-editor-grid">
+          <label className="form-group">
+            <span className="ck-editor-label ck-label-with-tip">
+              {t('每账号每天最多重试（次）')}
+              <Tooltip
+                label={t('当天未签上时最多重试几次；0 = 关闭本条目重试，仅靠补签轮兜底。次数按账号每天单独计算、次日重置。')}
+              >
+                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
+              </Tooltip>
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={20}
+              className="form-input"
+              value={scheduleForm.retryLimit}
+              onChange={(e) => setScheduleForm({ ...scheduleForm, retryLimit: e.target.value })}
+            />
+          </label>
+          <label className="form-group">
+            <span className="ck-editor-label ck-label-with-tip">
+              {t('重试间隔（分钟）')}
+              <Tooltip
+                label={t('每次失败重试之间等待多少分钟；填 0 = 回落全局「失败/窗口重试间隔」设置。')}
+              >
+                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
+              </Tooltip>
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={120}
+              className="form-input"
+              value={scheduleForm.retryGapMinutes}
+              onChange={(e) => setScheduleForm({ ...scheduleForm, retryGapMinutes: e.target.value })}
+            />
+          </label>
+          <label className="form-group">
+            <span className="ck-editor-label ck-label-with-tip">
+              {t('补签时刻（留空 = 关闭）')}
+              <Tooltip
+                label={t(
+                  '到该时刻挑当天本条目下仍未签上的账号再跑一次（类型记为「补签」），每天至多一轮；留空 = 不跑补签轮。',
+                )}
+              >
+                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
+              </Tooltip>
+            </span>
+            <input
+              type="time"
+              className="form-input ck-time-input"
+              aria-label={t('补签时刻')}
+              value={scheduleForm.makeupTime}
+              onChange={(e) => setScheduleForm({ ...scheduleForm, makeupTime: e.target.value })}
+            />
+          </label>
         </div>
-      )}
+        <span className="form-hint">
+          {t('重试与补签只处理当天未签上的账号；补签轮在指定时刻兜底一次。')}
+        </span>
+      </div>
 
       <div className="ck-form-actions">
         <button type="button" className="btn btn-outline btn-sm" onClick={() => setEditingId(null)}>
@@ -1464,6 +1585,8 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                     type="button"
                     className={`ck-seg-item${recordDays === item.v ? ' is-active' : ''}`}
                     onClick={() => setRecordDays(item.v)}
+                    // 起止日期生效时以区间为准（避免「7 天」与区间取交集导致查不到）
+                    title={recordStart || recordEnd ? t('起止日期生效时，此快选不参与过滤') : undefined}
                   >
                     {item.label}
                   </button>
@@ -1493,7 +1616,42 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                 <option value="already">{t('今日已领')}</option>
                 <option value="pending">{t('待重试')}</option>
                 <option value="failed">{t('失败')}</option>
+                {/* 1.0.49 契约：上游要求人机验证（is_ok=false） */}
+                <option value="captcha">{t('需人机验证')}</option>
               </select>
+              <select
+                className="form-input"
+                style={{ maxWidth: 100 }}
+                value={recordKind}
+                onChange={(e) => setRecordKind(e.target.value)}
+                aria-label={t('全部类型')}
+              >
+                <option value="">{t('全部类型')}</option>
+                <option value="manual">{t('手动')}</option>
+                <option value="schedule">{t('定时')}</option>
+                <option value="makeup">{t('补签')}</option>
+                <option value="retry">{t('重试')}</option>
+              </select>
+              {/* 1.0.49 契约：起止日期（本地时区走当日 00:00:00–23:59:59，后端闭区间） */}
+              <input
+                type="date"
+                className="form-input ck-date-input"
+                style={{ maxWidth: 140 }}
+                value={recordStart}
+                onChange={(e) => setRecordStart(e.target.value)}
+                aria-label={t('起始日期')}
+                title={t('起始日期')}
+              />
+              <span className="ck-date-sep">–</span>
+              <input
+                type="date"
+                className="form-input ck-date-input"
+                style={{ maxWidth: 140 }}
+                value={recordEnd}
+                onChange={(e) => setRecordEnd(e.target.value)}
+                aria-label={t('结束日期')}
+                title={t('结束日期')}
+              />
               <input
                 className="form-input"
                 style={{ maxWidth: 150 }}
@@ -1571,6 +1729,15 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                         {t(SOURCE_LABEL[record.source] ?? record.source)}
                       </td>
                       )}
+                      {recKeySet.has('kind') && (
+                      <td className="ck-record-kind">
+                        {/* 存量记录 kind 为空串 → 回退按 source 展示 */}
+                        {(() => {
+                          const kindKey = record.kind || record.source || '';
+                          return kindKey ? t(KIND_LABEL[kindKey] ?? kindKey) : '—';
+                        })()}
+                      </td>
+                      )}
                       {recKeySet.has('result') && (
                       <td>
                         <Badge tone={OUTCOME_TONE[record.outcome] ?? 'neutral'}>
@@ -1579,8 +1746,13 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                       </td>
                       )}
                       {recKeySet.has('note') && (
-                      <td className={record.outcome === 'failed' ? 'ck-message ck-record-detail-fail' : 'ck-message'}>
+                      <td className={record.outcome === 'failed' || record.outcome === 'captcha' ? 'ck-message ck-record-detail-fail' : 'ck-message'}>
                         {record.message || '—'}
+                      </td>
+                      )}
+                      {recKeySet.has('error') && (
+                      <td className={record.error ? 'ck-message ck-record-detail-fail' : 'ck-message'}>
+                        {record.error || '—'}
                       </td>
                       )}
                     </tr>

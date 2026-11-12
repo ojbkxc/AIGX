@@ -513,8 +513,8 @@ tr:hover .as-act:not(:disabled) {
   background: rgba(229, 72, 77, 0.1);
 }
 
-/* ── 冷却列（对齐 Agent2API LimitsCell：黄徽章「n 个模型 ▾」+ 最早恢复倒计时；
-      无冷却给绿点「正常」而不是光杆「—」） ── */
+/* ── 限流列（key 仍为 cooldown；对齐 Agent2API LimitsCell 的视觉语言：
+      黄徽章「n 个模型 ▾」+ 最早恢复倒计时；无任何限流/跳过给绿点「正常」） ── */
 .as-ok {
   display: inline-flex;
   align-items: center;
@@ -714,7 +714,11 @@ tr:hover .as-act:not(:disabled) {
   font-variant-numeric: tabular-nums;
 }
 
-/* 表头：sticky + 紧凑密度（对齐 Channels.css .channels-table：10.5px / 7px 10px） */
+/* 表头：sticky + 紧凑密度（SPEC-1.0.49 §9b I-2：与 Channels.css .channels-table
+ * 逐项一致 —— 10.5px / font-weight 600 / 纵向 8px 横向 10px / 不做字母全大写）。
+ * 早前这里是 7px + 字母全大写。这里必须显式写 text-transform: none 而不是只删声明：
+ * App.css 的全局 `table th` 规则会给表头字母全大写，英文 Provider 依旧渲染成
+ * PROVIDER（实测 computed style 复现过）。 */
 .as-table th {
   position: sticky;
   top: 0;
@@ -722,8 +726,9 @@ tr:hover .as-act:not(:disabled) {
   overflow: visible;
   white-space: nowrap;
   font-size: 10.5px;
-  padding: 7px 10px;
-  text-transform: uppercase;
+  font-weight: 600;
+  padding: 8px 10px;
+  text-transform: none;
   letter-spacing: 0.05em;
   color: var(--text-muted);
   background: var(--table-header-bg, var(--surface-bg));
@@ -733,6 +738,16 @@ tr:hover .as-act:not(:disabled) {
 
 .as-table td {
   padding: 7px 10px;
+}
+
+/* 行 hover / 选中淡底：与供应商页（Channels.css）同 token（SPEC-1.0.49 §9b I-3）。
+   只作用于数据行——分组带 / 通栏面板行有自己的底色 token，勿被 hover 覆盖。 */
+.as-table tbody tr:not(.as-tr-group):not(.as-panel-row):hover td {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.05));
+}
+
+.as-table tr.selected td {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.07));
 }
 
 /* 列对齐三档（列设置面板可调；SPEC §1 修复「对齐从未生效」的缺口） */
@@ -755,7 +770,8 @@ tr:hover .as-act:not(:disabled) {
 .as-c-channel,
 .as-c-provider,
 .as-c-rate,
-.as-c-priority,
+.as-c-order,
+.as-c-limiter,
 .as-c-cooldown,
 .as-c-conn {
   overflow: hidden;
@@ -791,6 +807,12 @@ tr:hover .as-act:not(:disabled) {
 .as-col-grip:hover::after,
 body.as-col-resizing .as-col-grip::after {
   background: var(--primary-color);
+}
+
+/* hover 反馈与供应商页 .ch-col-grip:hover 统一：直给把手本体的 8~9px 热区淡色底 */
+.as-col-grip:hover {
+  background: var(--accent-color, #6366f1);
+  opacity: 0.5;
 }
 
 /* 拖动中：全局禁选中 + 统一光标，避免文字闪烁 */
@@ -1131,7 +1153,7 @@ body.as-col-resizing {
   line-height: 1.5;
 }
 
-/* 组内序号（分组模式替代优先级数字：#N 即调度顺序） */
+/* 组内序号徽标（分组带顺位 / 保留给未来的行内序号视觉） */
 .as-order {
   display: inline-flex;
   align-items: center;
@@ -1953,7 +1975,8 @@ body.as-col-resizing {
   flex: 0 0 auto;
 }
 
-/* ── §2.7 优先级列拖拽把手 ── */
+/* ── §2.7 行拖拽把手（旧「优先级」列；列集已按 SPEC-1.0.49 §9b 换成「顺序」列，
+   整行仍可拖拽，把手样式保留备用） ── */
 .as-grip {
   display: inline-flex;
   align-items: center;
@@ -1965,6 +1988,16 @@ body.as-col-resizing {
 
 tr[draggable="true"]:active .as-grip {
   cursor: grabbing;
+}
+
+/* ── 限制器列：拦截形态徽章并排（与「限流」列的黄徽章区分） ── */
+.as-limiter-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
 }
 
 /* ── §2.10 状态列健康标签 ── */

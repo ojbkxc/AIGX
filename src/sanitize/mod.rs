@@ -5,10 +5,13 @@
 //! 审核按**逐字精确匹配**拦截（非语义审核），一字改动即可绕过。策略：
 //! 表头键值型指纹整段剥离；承载语义的模板句最小改写（换/插一个词，语义不变）。
 //!
-//! ── 规则集（静态数组驱动，无词表端点）───────────────────────
-//! 与 Agent2API 同一取舍：规则是硬编码的，用户没有可维护的词表；开关
-//! （`usage.sanitize_fingerprints`，默认开）在转发层逐请求读取，本模块
-//! 无状态、无锁、无 IO。
+//! ── 规则集（内置硬编码 + 可配置用户词表）────────────────────
+//! 内置规则是硬编码的静态数组（现行为，零变化）；在此之上支持管理员
+//! 经 `/api/sanitize` 下发 `sanitize_rules` 用户词表（SPEC-1.0.49 §8），
+//! 语义：`None`（缺省）= 内置规则；`Some([])` = 关闭全部脱敏；
+//! `Some([...])` = 只用用户规则（内置不再生效）。用户词表走进程级快照
+//! （[`set_rules`] / [`rules`]），转发层逐请求读取；开关
+//! （`usage.sanitize_fingerprints`，默认开）同样在转发层读取。
 //!
 //! ── 与参考实现的差异（workaround 留痕）──────────────────────
 //! 参考仓库的 `SANITIZE_REWRITES` 源码本身已被污染：「改写前」串（from）被
@@ -29,9 +32,10 @@
 //!   缩写 header→hdr"）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::bridge::ChatMessage;
 
@@ -133,14 +137,20 @@ fn bare_hdr_re() -> &'static Regex {
 /// 裸键名缩写目标（参考注释"最小缩写 header→hdr"）。
 const BARE_HDR_REPLACEMENT: &str = "x-anthropic-billing-hdr";
 
-/// 单段文本净化。预检不中 → 原串返回（零分配）。
+/// 单段文本净化（保留原签名）。provider / role 缺省为空 → 仅无作用域的用户
+/// 规则会生效；缺省（未配置用户词表）时走内置规则，行为与改造前完全一致。
+pub fn sanitize_text(text: &str) -> String {
+    sanitize_text_scoped("", "", text)
+}
+
+/// 内置规则净化。预检不中 → 原串返回（零分配）。
 ///
 /// 顺序照抄参考实现：改写层 → 表头剥离层 → cc_ 键值循环清理 →
 /// 裸键名缩写兜底。**顺序不能换**：改写在前是因为它要求原串完整（表头
 /// 剥离会动到同一段文本的其它位置）；cc_ 循环在裸键名缩写之前，是因为
 /// 缩写会把键名改掉、再清 cc_ 就认不出来了。
 /// 与参考的差异：结尾不做 `trim()`（最小改写原则，不触碰未命中段的首尾空白）。
-pub fn sanitize_text(text: &str) -> String {
+fn sanitize_text_builtin(text: &str) -> String {
     if !has_fingerprint(text) {
         return text.to_string();
     }
@@ -189,12 +199,17 @@ fn has_fingerprint(text: &str) -> bool {
         || bare_hdr_re().is_match(text)
 }
 
+/// 净化一段多模态 content（保留原签名，provider/role 缺省为空）。
+fn sanitize_content(value: &mut serde_json::Value) {
+    sanitize_content_scoped("", "", value);
+}
+
 /// 净化一段多模态 content：字符串，或数组（只动带 `text` 字符串字段的分片）。
 /// 与参考一致，**不判 `type`**：任何带 `text` 字符串的分片都过一遍。
-fn sanitize_content(value: &mut serde_json::Value) {
+fn sanitize_content_scoped(provider: &str, role: &str, value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(text) => {
-            let next = sanitize_text(text);
+            let next = sanitize_text_scoped(provider, role, text);
             if next != *text {
                 *text = next;
             }
@@ -205,7 +220,7 @@ fn sanitize_content(value: &mut serde_json::Value) {
                     continue;
                 };
                 if let Some(serde_json::Value::String(text)) = object.get_mut("text") {
-                    let next = sanitize_text(text);
+                    let next = sanitize_text_scoped(provider, role, text);
                     if next != *text {
                         *text = next;
                     }
@@ -216,13 +231,18 @@ fn sanitize_content(value: &mut serde_json::Value) {
     }
 }
 
+/// 净化整个请求体（保留原签名；provider 缺省为空）。
+pub fn strip(body: &mut serde_json::Value) {
+    strip_for_provider("", body);
+}
+
 /// 净化整个请求体（serde_json 形态，供 Responses/Completions 等直接持有
-/// `Value` 的转发路径使用；`strip(body)` 签名对齐任务契约）。
+/// `Value` 的转发路径使用，带 provider 作用域）。
 ///
 /// 覆盖 `messages[]` 的 content / reasoning_content / tool_calls 参数
 /// （arguments 是字符串化的 JSON，按文本净化即可）——与参考实现的作用面
 /// 一致：顶层 `system`、`input` 等不在规则集的作用面。
-pub fn strip(body: &mut serde_json::Value) {
+pub fn strip_for_provider(provider: &str, body: &mut serde_json::Value) {
     let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
         return;
     };
@@ -230,14 +250,20 @@ pub fn strip(body: &mut serde_json::Value) {
         let Some(object) = message.as_object_mut() else {
             continue;
         };
+        // 消息角色（用于按角色作用域的用户规则）；缺省空串 = 不匹配任何角色列表。
+        let role = object
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .to_string();
         // content 与 tool_calls 各自独立判断：content 可为 null（工具调用轮），
         // 不能因 content 缺失跳过整条消息。
         if let Some(content) = object.get_mut("content") {
-            sanitize_content(content);
+            sanitize_content_scoped(provider, &role, content);
         }
         // reasoning_content（思维链回填字段）实测同样携带指纹，同等净化。
         if let Some(serde_json::Value::String(reasoning)) = object.get_mut("reasoning_content") {
-            let next = sanitize_text(reasoning);
+            let next = sanitize_text_scoped(provider, &role, reasoning);
             if next != *reasoning {
                 *reasoning = next;
             }
@@ -248,7 +274,7 @@ pub fn strip(body: &mut serde_json::Value) {
                     .get_mut("function")
                     .and_then(|f| f.get_mut("arguments"))
                 {
-                    let next = sanitize_text(arguments);
+                    let next = sanitize_text_scoped(provider, &role, arguments);
                     if next != *arguments {
                         *arguments = next;
                     }
@@ -258,15 +284,22 @@ pub fn strip(body: &mut serde_json::Value) {
     }
 }
 
-/// 净化归一化消息列表（`ChatFormat` 无 serde 派生，桥接路径直接遍历）。
+/// 净化归一化消息列表（保留原签名；provider 缺省为空）。
+pub fn strip_chat_messages(messages: &mut [ChatMessage]) {
+    sanitize_messages_for_provider("", messages);
+}
+
+/// 净化归一化消息列表（`ChatFormat` 无 serde 派生，桥接路径直接遍历，带
+/// provider 作用域）。
 ///
 /// 覆盖 content / 多模态 content_blocks 分片的 text / reasoning /
-/// tool_calls 参数——与 [`strip`] 的作用面对齐。openai `chat_completions`
-/// 与 anthropic `messages` 两个主力端点共用本入口。
-pub fn strip_chat_messages(messages: &mut [ChatMessage]) {
+/// tool_calls 参数——与 [`strip_for_provider`] 的作用面对齐。openai
+/// `chat_completions` 与 anthropic `messages` 两个主力端点共用本入口。
+pub fn sanitize_messages_for_provider(provider: &str, messages: &mut [ChatMessage]) {
     for message in messages.iter_mut() {
+        let role = role_str(message.role);
         if let Some(content) = message.content.as_deref() {
-            let next = sanitize_text(content);
+            let next = sanitize_text_scoped(provider, role, content);
             if next != content {
                 message.content = Some(next);
             }
@@ -274,7 +307,7 @@ pub fn strip_chat_messages(messages: &mut [ChatMessage]) {
         if let Some(blocks) = message.content_blocks.as_deref_mut() {
             for block in blocks.iter_mut() {
                 if let Some(serde_json::Value::String(text)) = block.get_mut("text") {
-                    let next = sanitize_text(text);
+                    let next = sanitize_text_scoped(provider, role, text);
                     if next != *text {
                         *text = next;
                     }
@@ -282,14 +315,14 @@ pub fn strip_chat_messages(messages: &mut [ChatMessage]) {
             }
         }
         if let Some(reasoning) = message.reasoning.as_deref() {
-            let next = sanitize_text(reasoning);
+            let next = sanitize_text_scoped(provider, role, reasoning);
             if next != reasoning {
                 message.reasoning = Some(next);
             }
         }
         if let Some(calls) = message.tool_calls.as_deref_mut() {
             for call in calls.iter_mut() {
-                let next = sanitize_text(&call.arguments);
+                let next = sanitize_text_scoped(provider, role, &call.arguments);
                 if next != call.arguments {
                     call.arguments = next;
                 }
@@ -306,10 +339,365 @@ pub fn snapshot() -> serde_json::Value {
     })
 }
 
+// ─── 用户可配置词表（SPEC-1.0.49 §8）─────────────────────────
+//
+// 对照 Agent2API `core/sanitize/rules.rs`（≤200 条、字面/regex、按角色与
+// provider 作用域）。AIGX 侧只保留契约要求的字段（去掉参考实现的
+// id/name/enabled/match_type 枚举，用 `is_regex` 布尔表达匹配类型）。
+//
+// 语义（配置项 `sanitize_rules`）：
+// - `None`（缺省）= 用内置硬编码规则（现行为，零变化）；
+// - `Some([])`     = 关闭全部脱敏；
+// - `Some([...])`  = 只用用户规则（内置不再生效）。
+
+/// 用户可配置脱敏词表的最大条数（对齐 Agent2API `MAX_RULES`）。超限必须报错，
+/// 不静默截断。
+pub const MAX_SANITIZE_RULES: usize = 200;
+
+/// 单条用户脱敏规则。
+///
+/// `roles` / `providers` 为空表示「全部角色 / 全部 provider」；非空时规则
+/// 只作用于命中列表的消息 / 渠道类型。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SanitizeRule {
+    /// 匹配内容（字面串或正则源码）。
+    #[serde(default)]
+    pub pattern: String,
+    /// 命中后替换成的文本。正则规则支持 `$1` 等捕获组引用（regex crate 语义）。
+    #[serde(default)]
+    pub replacement: String,
+    /// `pattern` 按正则解释（true）还是按字面匹配（false）。
+    #[serde(default)]
+    pub is_regex: bool,
+    /// 作用角色（`system` / `user` / `assistant` / `tool`）；空 = 全部。
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// 作用 provider（渠道类型名）；空 = 全部。
+    #[serde(default)]
+    pub providers: Vec<String>,
+}
+
+/// 编译后的匹配器：字面替换走 `str::replace`，正则替换走 `Regex`。
+enum Matcher {
+    Literal,
+    Regex(Regex),
+}
+
+/// 一条编译完成的规则（坏正则的条目已在 [`compile_rules`] 里被跳过）。
+struct CompiledRule {
+    pattern: String,
+    matcher: Matcher,
+    replacement: String,
+    roles: Vec<String>,
+    providers: Vec<String>,
+}
+
+impl CompiledRule {
+    /// 该规则是否作用于 `(provider, role)`：两个作用域列表都为空 = 全部命中。
+    fn applies(&self, provider: &str, role: &str) -> bool {
+        (self.providers.is_empty() || self.providers.iter().any(|p| p == provider))
+            && (self.roles.is_empty() || self.roles.iter().any(|r| r == role))
+    }
+
+    /// 命中则返回替换后的文本；未命中返回 `None`（调用方据此保守原串）。
+    fn apply(&self, text: &str) -> Option<String> {
+        match &self.matcher {
+            Matcher::Literal => {
+                if text.contains(&self.pattern) {
+                    Some(text.replace(&self.pattern, &self.replacement))
+                } else {
+                    None
+                }
+            }
+            Matcher::Regex(re) => {
+                if re.is_match(text) {
+                    Some(re.replace_all(text, self.replacement.as_str()).into_owned())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// 一份用户词表：`entries` 为原始规则（GET 回显/落盘往返），`compiled` 为
+/// 编译产物（坏正则条目已被剔除，仅用于匹配）。
+struct CompiledRules {
+    entries: Vec<SanitizeRule>,
+    compiled: Vec<CompiledRule>,
+}
+
+/// 用户词表进程级快照。外层 `None` = 未配置（走内置）；`Some` = 用户词表
+/// （其 `compiled` 为空即「关闭脱敏」）。写少读多：读路径拷 `Arc` 后释放锁。
+static USER_RULES: parking_lot::RwLock<Option<Arc<CompiledRules>>> = parking_lot::RwLock::new(None);
+
+/// 编译用户词表：空 pattern 与编译失败的正则跳过并 `tracing::warn!`，不影响
+/// 其它规则（SPEC §8 第 5 条）。
+fn compile_rules(entries: &[SanitizeRule]) -> Vec<CompiledRule> {
+    let mut compiled = Vec::with_capacity(entries.len());
+    for (index, rule) in entries.iter().enumerate() {
+        if rule.pattern.is_empty() {
+            tracing::warn!("脱敏规则第 {} 条 pattern 为空，已跳过", index + 1);
+            continue;
+        }
+        let matcher = if rule.is_regex {
+            match Regex::new(&rule.pattern) {
+                Ok(re) => Matcher::Regex(re),
+                Err(error) => {
+                    tracing::warn!("脱敏规则第 {} 条正则编译失败，已跳过：{error}", index + 1);
+                    continue;
+                }
+            }
+        } else {
+            Matcher::Literal
+        };
+        compiled.push(CompiledRule {
+            pattern: rule.pattern.clone(),
+            matcher,
+            replacement: rule.replacement.clone(),
+            roles: rule.roles.clone(),
+            providers: rule.providers.clone(),
+        });
+    }
+    compiled
+}
+
+/// 写入用户词表快照。`None` = 恢复内置；`Some([])` = 关闭脱敏；`Some(非空)`
+/// = 只用用户规则。超过 [`MAX_SANITIZE_RULES`] 条返回 `Err`（不静默截断）。
+pub fn set_rules(rules: Option<Vec<SanitizeRule>>) -> Result<(), String> {
+    let next = match rules {
+        None => None,
+        Some(entries) => {
+            if entries.len() > MAX_SANITIZE_RULES {
+                return Err(format!("脱敏词表最多 {MAX_SANITIZE_RULES} 条规则"));
+            }
+            let compiled = compile_rules(&entries);
+            Some(Arc::new(CompiledRules { entries, compiled }))
+        }
+    };
+    *USER_RULES.write() = next;
+    Ok(())
+}
+
+/// 读取当前用户词表（`None` = 未配置 = 走内置；`Some([])` = 关闭）。
+pub fn rules() -> Option<Vec<SanitizeRule>> {
+    USER_RULES.read().as_ref().map(|set| set.entries.clone())
+}
+
+/// 取当前生效的用户词表（读锁内拷 `Arc` 即释放，匹配过程不持锁）。
+fn active_rules() -> Option<Arc<CompiledRules>> {
+    USER_RULES.read().as_ref().map(Arc::clone)
+}
+
+/// 角色枚举 → 小写角色名（与 [`SanitizeRule::roles`] 的取值口径一致）。
+fn role_str(role: crate::bridge::Role) -> &'static str {
+    use crate::bridge::Role;
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+/// 净化分派：未配置用户词表 → 内置规则（现行为）；已配置 → 只用用户规则。
+fn sanitize_text_scoped(provider: &str, role: &str, text: &str) -> String {
+    match active_rules() {
+        None => sanitize_text_builtin(text),
+        Some(set) => sanitize_text_with_rules(&set, provider, role, text),
+    }
+}
+
+/// 按用户规则净化一段文本；无规则命中时原串返回（零改写）。
+fn sanitize_text_with_rules(set: &CompiledRules, provider: &str, role: &str, text: &str) -> String {
+    let mut out: Option<String> = None;
+    for rule in &set.compiled {
+        if !rule.applies(provider, role) {
+            continue;
+        }
+        let current = out.as_deref().unwrap_or(text);
+        if let Some(next) = rule.apply(current) {
+            tracing::debug!("用户脱敏规则命中: {:?}", rule.pattern);
+            STATS_REWRITES.fetch_add(1, Ordering::Relaxed);
+            out = Some(next);
+        }
+    }
+    match out {
+        Some(next) => {
+            STATS_HITS.fetch_add(1, Ordering::Relaxed);
+            next
+        }
+        None => text.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bridge::{ChatMessage, Role, ToolCall};
+
+    // ── 用户可配置词表（SPEC-1.0.49 §8）────────────────────────
+    //
+    // 这些用例只走**纯核心**（`sanitize_text_with_rules` / `compile_rules`）与
+    // `set_rules` 的「报错/复位」路径，绝不把全局快照置为 `Some`：`USER_RULES`
+    // 是全进程共享的，置位会与并行执行的既有内置用例互相污染（内置分派依赖
+    // 快照为 `None`）。全局接线正确性由「分派函数只多一层 match」保证。
+
+    fn rule(pattern: &str, replacement: &str, is_regex: bool) -> SanitizeRule {
+        SanitizeRule {
+            pattern: pattern.to_string(),
+            replacement: replacement.to_string(),
+            is_regex,
+            roles: Vec::new(),
+            providers: Vec::new(),
+        }
+    }
+
+    fn compiled(rules: &[SanitizeRule]) -> CompiledRules {
+        CompiledRules {
+            entries: rules.to_vec(),
+            compiled: compile_rules(rules),
+        }
+    }
+
+    #[test]
+    fn user_literal_rule_rewrites_positive_control() {
+        // 正向对照：证明「替换确实生效」，避免后续「不变」断言是假绿。
+        let set = compiled(&[rule("SECRET", "[redacted]", false)]);
+        let out = sanitize_text_with_rules(&set, "", "system", "value SECRET here");
+        assert_eq!(out, "value [redacted] here");
+    }
+
+    #[test]
+    fn empty_user_rules_disable_sanitize() {
+        // Given 一段会被某条用户规则命中的文本
+        let text = "token sk-abc here";
+        // 正向对照：非空用户词表确实改写同一文本
+        let hit = compiled(&[rule("sk-abc", "<key>", false)]);
+        assert_eq!(
+            sanitize_text_with_rules(&hit, "", "", text),
+            "token <key> here"
+        );
+        // When 用户词表为空（= 关闭全部脱敏）
+        let empty = compiled(&[]);
+        // Then 同一文本原样返回，不再被改写
+        assert_eq!(sanitize_text_with_rules(&empty, "", "", text), text);
+    }
+
+    #[test]
+    fn regex_user_rule_rewrites() {
+        // Given 一条正则用户规则（带量词）
+        let set = compiled(&[rule(r"secret-\d+", "***", true)]);
+        // Then 正则命中并替换
+        assert_eq!(
+            sanitize_text_with_rules(&set, "", "", "token secret-12345 here"),
+            "token *** here"
+        );
+    }
+
+    #[test]
+    fn provider_scope_isolates_rules() {
+        // Given 一条只作用于 openai 的规则
+        let mut only_openai = rule("sk-abc", "<key>", false);
+        only_openai.providers = vec!["openai".to_string()];
+        let set = compiled(&[only_openai]);
+        // Then 命中 provider 才改写
+        assert_eq!(
+            sanitize_text_with_rules(&set, "openai", "", "key sk-abc"),
+            "key <key>"
+        );
+        // 非命中 provider 原样（作用域隔离）
+        assert_eq!(
+            sanitize_text_with_rules(&set, "anthropic", "", "key sk-abc"),
+            "key sk-abc"
+        );
+    }
+
+    #[test]
+    fn role_scope_isolates_rules() {
+        // Given 一条只作用于 system 的规则
+        let mut system_only = rule("internal-token", "<redacted>", false);
+        system_only.roles = vec!["system".to_string()];
+        let set = compiled(&[system_only]);
+        // Then system 命中改写、user 不动
+        assert_eq!(
+            sanitize_text_with_rules(&set, "", "system", "internal-token"),
+            "<redacted>"
+        );
+        assert_eq!(
+            sanitize_text_with_rules(&set, "", "user", "internal-token"),
+            "internal-token"
+        );
+    }
+
+    #[test]
+    fn too_many_rules_is_rejected_not_truncated() {
+        // Given 201 条（超上限 1 条）
+        let too_many: Vec<SanitizeRule> = (0..=MAX_SANITIZE_RULES)
+            .map(|i| rule(&format!("p{i}"), "x", false))
+            .collect();
+        assert_eq!(too_many.len(), MAX_SANITIZE_RULES + 1);
+        // Then 超限报错，而不是静默截断（写入口返回 Err，未落快照）
+        assert!(set_rules(Some(too_many)).is_err());
+        // 正好 200 条可编译（不报错、不截断）
+        let just_right: Vec<SanitizeRule> = (0..MAX_SANITIZE_RULES)
+            .map(|i| rule(&format!("q{i}"), "x", false))
+            .collect();
+        assert_eq!(compile_rules(&just_right).len(), MAX_SANITIZE_RULES);
+        // 复位为「内置」：值与缺省相同，不影响并行用例
+        set_rules(None).expect("复位内置必须成功");
+    }
+
+    #[test]
+    fn bad_regex_skipped_good_rule_still_applies() {
+        // Given 一条非法正则 + 一条好字面规则
+        let set = compiled(&[
+            rule("(", "x", true),       // 非法正则：应跳过
+            rule("hello", "hi", false), // 好规则：应生效
+        ]);
+        // Then 坏正则被剔除（只剩 1 条编译产物），未影响好规则
+        assert_eq!(set.compiled.len(), 1);
+        // 且好规则照常生效（正向对照）
+        assert_eq!(
+            sanitize_text_with_rules(&set, "", "", "hello world"),
+            "hi world"
+        );
+    }
+
+    #[test]
+    fn builtin_default_unchanged_for_scoped_entry() {
+        // 内置缺省不变（正向对照）：provider 缺省的分派结果与旧入口逐字节一致。
+        // 文本含纯 ASCII 的内置特征（表头键名），内置预检必命中。
+        let text = "see x-anthropic-billing-header here";
+        let mut legacy = [msg(Role::System, Some(text))];
+        let mut scoped = [msg(Role::System, Some(text))];
+        strip_chat_messages(&mut legacy);
+        sanitize_messages_for_provider("", &mut scoped);
+        assert_eq!(
+            legacy[0].content, scoped[0].content,
+            "provider 缺省两入口结果必须一致"
+        );
+        assert_ne!(
+            legacy[0].content.as_deref(),
+            Some(text),
+            "内置必须命中并改写该文本"
+        );
+    }
+
+    #[test]
+    fn rule_serde_defaults_and_roundtrip() {
+        // 契约：缺省字段可全部省略（is_regex 缺省 false，roles/providers 空 = 全部）
+        let parsed: SanitizeRule =
+            serde_json::from_value(serde_json::json!({"pattern": "a", "replacement": "b"}))
+                .expect("缺省字段必须可解析");
+        assert_eq!(parsed, rule("a", "b", false));
+        // 序列化往返稳定（settings GET/PUT 依赖）
+        let back = serde_json::to_value(&parsed).expect("规则必须可序列化");
+        assert_eq!(back["pattern"], "a");
+        assert_eq!(back["is_regex"], false);
+        assert_eq!(back["roles"], serde_json::json!([]));
+        assert_eq!(back["providers"], serde_json::json!([]));
+    }
 
     /// 构造一条带文本的桥接消息，减少测试样板。
     fn msg(role: Role, content: Option<&str>) -> ChatMessage {

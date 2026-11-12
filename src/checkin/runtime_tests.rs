@@ -158,6 +158,7 @@ fn account(provider: &str, base_url: &str) -> AccountSession {
         status: "enabled".to_string(),
         priority: 0,
         weight: 1,
+        sort_order: 0,
         max_concurrency: 0,
         models: Vec::new(),
         extra_headers: HashMap::new(),
@@ -1002,4 +1003,103 @@ fn schedule_env() -> (
     let sessions = crate::account_session::AccountSessionStore::new(temp_store());
     let egress = Arc::new(crate::egress::EgressCache::new());
     (store, sessions, egress)
+}
+
+/// `record()` 把 `source` 同值写进 `kind`，并在失败时把原文写进 `error`
+/// （成功 / 今日已领时 `error` 为空）。
+#[test]
+fn record_writes_kind_and_error() {
+    let (store, _sessions, _egress) = schedule_env();
+    let acct = account("loomy", "http://127.0.0.1:1");
+    super::scheduler::record(
+        &store,
+        &acct,
+        "makeup",
+        CheckinOutcome::Success,
+        "今日已领",
+        false,
+    );
+    super::scheduler::record(
+        &store,
+        &acct,
+        "makeup",
+        CheckinOutcome::Captcha,
+        "需要验证码",
+        false,
+    );
+    let records = store
+        .recent_records(1, Some("loomy"), None, None, None)
+        .unwrap();
+    assert_eq!(records.len(), 2);
+    // 两条的 ts 可能同秒（排序稳定）—— 按结果定位，不靠下标
+    let captcha = records
+        .iter()
+        .find(|r| r.outcome == CheckinOutcome::Captcha)
+        .unwrap();
+    assert_eq!(captcha.source, "makeup");
+    assert_eq!(captcha.kind, "makeup", "kind 与 source 同值双写");
+    assert_eq!(captcha.error, "需要验证码", "失败原文进 error");
+    let ok_one = records
+        .iter()
+        .find(|r| r.outcome == CheckinOutcome::Success)
+        .unwrap();
+    assert_eq!(ok_one.kind, "makeup");
+    assert_eq!(ok_one.error, "", "成功时 error 为空");
+}
+
+/// 补签只挑「今天还没签上」的账号：已 ok 的账号不再补签。
+#[test]
+fn makeup_targets_only_picks_unsucceeded_accounts() {
+    let (store, sessions, _egress) = schedule_env();
+    let mut ok_acct = account("loomy", "http://127.0.0.1:1");
+    ok_acct.id = "acct-ok".into();
+    let mut fail_acct = account("loomy", "http://127.0.0.1:1");
+    fail_acct.id = "acct-fail".into();
+    // 一个已 ok、一个失败（都落在今天的台账里）
+    super::scheduler::record(
+        &store,
+        &ok_acct,
+        "schedule",
+        CheckinOutcome::Success,
+        "今日已领",
+        false,
+    );
+    super::scheduler::record(
+        &store,
+        &fail_acct,
+        "schedule",
+        CheckinOutcome::Failed,
+        "boom",
+        false,
+    );
+    sessions.upsert(ok_acct).unwrap();
+    sessions.upsert(fail_acct).unwrap();
+
+    let schedule = super::store::CheckinSchedule {
+        id: "s1".into(),
+        label: "每日".into(),
+        enabled: true,
+        time: "09:00".into(),
+        time_end: String::new(),
+        randomize: false,
+        retry_limit: 3,
+        retry_gap_minutes: 5,
+        makeup_time: "23:00".into(),
+        providers: vec!["loomy".into()],
+        provider_times: HashMap::new(),
+        last_fired_date: String::new(),
+        last_fired_providers: HashMap::new(),
+        last_result: String::new(),
+        last_ok: 0,
+        last_keepalive: 0,
+        last_failed: 0,
+    };
+
+    let picks = super::scheduler::makeup_targets(&store, &sessions, &schedule);
+    let ids: Vec<String> = picks.into_iter().map(|s| s.id).collect();
+    assert_eq!(
+        ids,
+        vec!["acct-fail".to_string()],
+        "只有未签上的账号进补签轮"
+    );
 }

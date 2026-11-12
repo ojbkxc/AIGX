@@ -339,22 +339,40 @@ function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: Ac
 
 /* ══ 列定义（对齐 Agent2API accounts-columns：列宽拖动 + 列显隐 + 横滚底线） ══ */
 
-type AsCol = 'pick' | 'name' | 'provider' | 'proxy' | 'status' | 'priority' | 'conn' | 'expiry' | 'usage' | 'rate' | 'cooldown' | 'act';
+/**
+ * 列集（SPEC-1.0.49 §9b 冻结，13 项，顺序逐字固定）：
+ * pick / order / name / provider / proxy / conn / status / limiter / expiry / usage / rate / cooldown / act。
+ *
+ * 与 A2A 账号表（accounts-columns.ts ACCOUNT_COLUMNS）的差异及理由：
+ * - **保留 provider**：AIGX 默认是列表模式（LS_GROUPED 默认 false），不像 A2A 默认分组；
+ *   不分组时行内必须有家名，否则看不出账号属于哪家。分组模式下该列可关。
+ * - **保留 rate（成功率）**：AIGX 有该后端字段（success_count/error_count），A2A 无此列；
+ *   既有实现已暴露，删掉是倒退（§9b 裁决）。
+ * - **新增 order（顺序）**：数据源 = 流 H 的 sort_order；字段未下发时渲染「—」占位。
+ * - **cooldown（原「冷却」）改名「限流」**：A2A 叫「限流」且内容是当前限流中的模型；
+ *   内容口径保持 AIGX 现有冷却明细（cooldowns + limiter_state.skip_models 合并在同一
+ *   徽章展开）——这是「A2A 列名 + AIGX 内容」的折中，不丢既有信息。
+ * - **limiter（限流）**：A2A limits 的列位次（状态之后），承载账号级限制器拦截状态
+ *   （limiter_state 的 account_skip / skip_models / disable，后端唯一判据）。
+ */
+type AsCol = 'pick' | 'order' | 'name' | 'provider' | 'proxy' | 'conn' | 'status' | 'limiter' | 'expiry' | 'usage' | 'rate' | 'cooldown' | 'act';
 
-/** 全部列：默认宽（px）；flex 列没有用户覆盖时不写宽度，吃表格剩余宽度 */
-const AS_COLS: Array<{ key: AsCol; label: string; w: number; lock?: boolean; flex?: boolean }> = [
-  { key: 'pick', label: '选择', w: 44, lock: true },
-  { key: 'name', label: '账号', w: 210, lock: true, flex: true },
+/** 全部列：默认宽（px，§9b I-2 表逐项）；flex 列没有用户覆盖时不写宽度，吃表格剩余宽度 */
+const AS_COLS: Array<{ key: AsCol; label: string; w?: number; lock?: boolean; flex?: boolean }> = [
+  { key: 'pick', label: '选择', w: 47, lock: true },
+  { key: 'order', label: '顺序', w: 84 },
+  // 唯一的弹性列：账号名长度不可控，不写默认宽、吃表格剩余宽度（A2A FLEX_COLUMNS 同式）
+  { key: 'name', label: '账号', lock: true, flex: true },
   { key: 'provider', label: 'Provider', w: 126 },
-  { key: 'proxy', label: '代理', w: 132 },
-  { key: 'status', label: '状态', w: 92, lock: true },
-  { key: 'priority', label: '优先级', w: 88 },
-  { key: 'conn', label: '连接数', w: 60 },
-  { key: 'expiry', label: '有效期', w: 96 },
-  { key: 'usage', label: '余额', w: 132 },
+  { key: 'proxy', label: '代理', w: 186 },
+  { key: 'conn', label: '连接数', w: 56 },
+  { key: 'status', label: '状态', w: 80, lock: true },
+  { key: 'limiter', label: '限制器', w: 148 },
+  { key: 'expiry', label: '有效期', w: 132 },
+  { key: 'usage', label: '余额', w: 308 },
   { key: 'rate', label: '成功率', w: 64 },
-  { key: 'cooldown', label: '冷却', w: 128 },
-  { key: 'act', label: '操作', w: 150, lock: true },
+  { key: 'cooldown', label: '限流', w: 128 },
+  { key: 'act', label: '操作', w: 200, lock: true },
 ];
 
 /** 弹性列的下限：容器窄于「定宽列合计 + 它」时交给横向滚动，而不是继续压列 */
@@ -367,11 +385,20 @@ const LS_COLW = 'aigx-as-colw'; // 旧列宽覆盖（init 时一次性并进 v2 
 /** 公共列设置键（tableColumns v2：顺序/显隐/对齐/列宽 + defaults 快照） */
 const LS_TCOLS = 'aigx-tbl-cols.accounts';
 
-/** 公共列声明的锁定/弹性标注映射（w: px 默认宽；flex 列不写默认宽吃剩余空间） */
+/**
+ * 公共列声明的锁定/弹性标注映射（w: px 默认宽；flex 列不写默认宽吃剩余空间）。
+ *
+ * 默认对齐（A2A accounts-columns.ts:44-47 口径）：**除「操作」居右外全部居中** ——
+ * 格子里装的是徽章/开关/序号/读数这类等宽或很短的内容，居中后同一列各行对齐到
+ * 一条中轴，比左对齐更好扫读（用户「字段按 A2A 对齐」）。
+ *
+ * 存量的用户对齐选择由公共层 evolveTableColumns 用 defaults 快照保护：
+ * item 值 == 旧默认快照才跟随新默认，用户挑过的档保留 —— 无需另写迁移。
+ */
 const AS_COL_DEFS: TableColumnDef[] = AS_COLS.map((c) => ({
   key: c.key,
   label: c.label,
-  align: c.key === 'pick' || c.key === 'status' ? 'center' : 'left',
+  align: c.key === 'act' ? 'right' : 'center',
   ...(c.flex ? {} : { width: c.w }),
   ...(c.lock ? { locked: true } : {}),
 }));
@@ -531,7 +558,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         columns: AS_COLS.map((c) => ({
           key: c.key,
           visible: !legacyHidden.includes(c.key),
-          align: c.key === 'pick' || c.key === 'status' ? 'center' : 'left',
+          // v1 只记得显隐；对齐取新默认（除「操作」居右外全部居中，SPEC-1.0.49 §9b I-3）
+          align: c.key === 'act' ? 'right' : 'center',
         })),
       };
       try {
@@ -1391,14 +1419,16 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     return def?.flex ? applied?.width : applied?.width ?? def?.w;
   };
 
-  /** 表格横滚底线：∑可见列宽（弹性列按下限），窄容器宁可横滚不压列 */
+  /** 表格横滚底线：∑可见列宽（弹性列按下限），窄容器宁可横滚不压列。
+   *  SPEC-1.0.49 §9b I-2 裁决：下限不低于供应商页同档 980px；A2A 列宽预算
+   *  （定宽列合计约 1531 + 弹性 name ≥ 220 ≈ 1751）优先，**不压窄列去凑 980**。 */
   const tableMinWidth = useMemo(
-    () => visibleCols.reduce((sum, key) => {
+    () => Math.max(980, visibleCols.reduce((sum, key) => {
       const override = widthOf(key);
       if (override != null) return sum + override;
       const def = AS_COLS.find((c) => c.key === key);
       return sum + (def?.flex ? AS_FLEX_MIN : def?.w ?? AS_MIN_COLW);
-    }, 0),
+    }, 0)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [visibleCols, colState],
   );
@@ -2137,7 +2167,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   };
 
   // ── 表格单元格渲染（列配置驱动：列显隐 / 列宽 / 分组模式共用一套）──
-  const renderCell = (col: AsCol, s: AccountSessionItem, orderIdx: number): ReactNode => {
+  const renderCell = (col: AsCol, s: AccountSessionItem): ReactNode => {
     switch (col) {
       case 'pick':
         return (
@@ -2150,6 +2180,16 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             />
           </td>
         );
+      case 'order': {
+        // 数据源 = 流 H 的 sort_order（后端 AccountSessionItem.sort_order，已下发）。
+        // 旧后端不下发时渲染「—」占位：不编造读数、不按前端本地顺序顶替。
+        const sortOrder = s.sort_order;
+        return (
+          <td key={col} className="as-c-order">
+            {typeof sortOrder === 'number' ? sortOrder : '—'}
+          </td>
+        );
+      }
       case 'name': {
         const titleLines = accountTitleLines(s);
         return (
@@ -2287,26 +2327,48 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
           </td>
         );
       }
-      case 'priority':
+      case 'limiter': {
+        /* 「限制器」列（A2A limits 的位次：状态之后 / 有效期之前）——§9b 只冻结了列位与
+         * 依赖字段，未写死内容。这里取 AIGX 既有术语「限制器」，只展示**账号级**拦截
+         * 形态，判据唯一是后端 limiter_state（本页「已限流」分段同口径，不在前端按
+         * limiters 重算阈值）；逐模型的 skip_models 明细不在这里重复——它已并入
+         * 「限流」列（cooldown）的徽章展开面板。
+         *   · Token 限额自动禁用（disable 且非 enabled）→ 红色标签；
+         *   · 整号跳过（account_skip）→ 黄色徽章；
+         *   · 都没命中 → 灰「—」。 */
+        const st = s.limiter_state;
+        const accountSkip = st?.account_skip === true;
+        const disabledHit = st?.disable === true && s.status !== 'enabled';
+        if (!accountSkip && !disabledHit) {
+          return (
+            <td key={col} className="as-c-limiter">
+              <span className="form-hint" title={t('当前没有被限制器拦截')}>—</span>
+            </td>
+          );
+        }
         return (
-          <td key={col} className="as-c-priority">
-            {/* §2.7 组内拖拽把手：整行 draggable 的视觉锚点（分组模式行拖拽仍关闭） */}
-            <span className="as-grip" title={t('拖动调整组内顺序')}>
-              <GripVertical size={12} />
-            </span>
-            {orderIdx >= 0 ? (
-              // 分组模式：格内改显组内序号（对齐 Agent2API OrderCell 的 #N）
-              <span
-                className="as-order"
-                title={t('组内顺序 · 优先级 {{p}} / 权重 {{w}}', { p: s.priority ?? 0, w: s.weight ?? 1 })}
-              >
-                #{orderIdx + 1}
-              </span>
-            ) : (
-              <span>{s.priority ?? 0} / w{s.weight ?? 1}</span>
-            )}
+          <td key={col} className="as-c-limiter">
+            <div className="as-limiter-tags">
+              {accountSkip && (
+                <span
+                  className="as-skip-badge"
+                  title={t('该账号被限制器整号跳过，转发时不会选中它（余额回升 / 窗口重置自动恢复）')}
+                >
+                  {t('整号跳过')}
+                </span>
+              )}
+              {disabledHit && (
+                <span
+                  className="as-status-tag bad"
+                  title={t('Token 限额命中且账号已被自动禁用（窗口重置也不恢复，需手动启用）')}
+                >
+                  {t('Token 限额已禁用')}
+                </span>
+              )}
+            </div>
           </td>
         );
+      }
       case 'conn':
         return (
           <td
@@ -2516,43 +2578,59 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       }
       case 'rate':
         return <td key={col} className="as-c-rate">{successRate(s)}</td>;
-      case 'cooldown':
+      case 'cooldown': {
+        // A2A 列名 + AIGX 内容的折中（SPEC-1.0.49 §9b I-1 裁决）：
+        // A2A 把这一列叫「限流」，内容是「该账号当前限流中的模型」；AIGX 既有实现叫
+        // 「冷却」，展示 429/限额失败产生的冷却明细（activeCooldowns / as-limits-badge）。
+        // 这里**label 改为「限流」（key 保持 cooldown，避免破坏用户已存的列设置）**，
+        // 内容口径保持 AIGX 冷却明细，并把 limiter_state.skip_models（限制器跳过的
+        // 模型）合并进同一枚徽章的展开面板 —— 不丢 AIGX 既有信息。
+        const active = activeCooldowns(s);
+        const skipModels = s.limiter_state?.skip_models ?? [];
+        // 合并去重（同一模型可能既在冷却又被限制器跳过）：冷却剩余时间优先
+        const coolByModel = new Map(active);
+        const merged = [
+          ...active.map(([model, rem]) => ({ model, rem, kind: 'cool' as const })),
+          ...skipModels
+            .filter((m) => !coolByModel.has(m))
+            .map((model) => ({ model, rem: null as number | null, kind: 'skip' as const })),
+        ];
+        if (merged.length === 0) {
+          return (
+            <td key={col} className="as-c-cooldown">
+              <span className="as-ok">
+                <span className="as-ok-dot" aria-hidden="true" />
+                {t('正常')}
+              </span>
+            </td>
+          );
+        }
+        const whole = active.some(([model]) => model === '*');
+        const open = cooldownOpenId === s.id;
         return (
           <td key={col} className="as-c-cooldown">
-            {(() => {
-              const active = activeCooldowns(s);
-              if (active.length === 0) {
-                return (
-                  <span className="as-ok">
-                    <span className="as-ok-dot" aria-hidden="true" />
-                    {t('正常')}
-                  </span>
-                );
-              }
-              const whole = active.some(([model]) => model === '*');
-              const open = cooldownOpenId === s.id;
-              return (
-              <Tooltip label={t('点击展开完整冷却明细')}>
-                <button
-                  type="button"
-                  className={`as-limits-badge${open ? ' is-open' : ''}`}
-                  onClick={() => setCooldownOpenId(open ? null : s.id)}
-                >
-                  <span className="as-limits-main">
-                    {whole
-                      ? t('整号冷却')
-                      : t('{{n}} 个模型', { n: active.length })}
-                    <span className="as-limits-caret">{open ? '▴' : '▾'}</span>
-                  </span>
-                  <span className="as-limits-sub">
-                    {t('最早 {{time}} 恢复', { time: fmtDuration(active[0][1]) })}
-                  </span>
-                </button>
-              </Tooltip>
-              );
-            })()}
+            <Tooltip label={t('点击展开完整限流明细')}>
+              <button
+                type="button"
+                className={`as-limits-badge${open ? ' is-open' : ''}`}
+                onClick={() => setCooldownOpenId(open ? null : s.id)}
+              >
+                <span className="as-limits-main">
+                  {whole
+                    ? t('整号冷却')
+                    : t('{{n}} 个模型', { n: merged.length })}
+                  <span className="as-limits-caret">{open ? '▴' : '▾'}</span>
+                </span>
+                <span className="as-limits-sub">
+                  {active.length > 0
+                    ? t('最早 {{time}} 恢复', { time: fmtDuration(active[0][1]) })
+                    : t('限制器跳过 · 自动恢复')}
+                </span>
+              </button>
+            </Tooltip>
           </td>
         );
+      }
       case 'act': {
         const maxPriority = sessions
           .filter((x) => !channelFilter || x.channel_id === channelFilter)
@@ -2743,7 +2821,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   };
 
   /** 行渲染：分组模式下禁用整行拖拽（组间顺序由分组带表达，组内拖拽语义另做） */
-  const renderRow = (s: AccountSessionItem, orderIdx: number): JSX.Element => (
+  const renderRow = (s: AccountSessionItem): JSX.Element => (
     <tr
       key={s.id}
       className={dragOverId === s.id && dragId !== s.id ? 'drag-over' : ''}
@@ -2773,7 +2851,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       title={grouped ? undefined : t('拖拽行可调整调度顺序')}
     >
       {visibleCols.map((col) => {
-        const cell = renderCell(col, s, orderIdx);
+        const cell = renderCell(col, s);
         // §1 列对齐修复：td 也要挂 ta-<align>（此前只有列设置面板存了 align，渲染从未使用）
         const align = appliedCols.find((c) => c.key === col)?.align ?? 'left';
         if (!isValidElement(cell)) return cell;
@@ -3281,17 +3359,20 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                             </div>
                           </td>
                         </tr>
-                        {!collapsed && g.rows.map((row, idx) => renderRow(row, idx))}
+                        {!collapsed && g.rows.map((row) => renderRow(row))}
                       </Fragment>
                       );
                     })
-                  : pageRows.map((row) => renderRow(row, -1))}
+                  : pageRows.map((row) => renderRow(row))}
               </tbody>
-              {/* 冷却明细展开行（对齐 Agent2API row-panel：通栏面板 + 标签流） */}
+              {/* 限流明细展开行（对齐 Agent2API row-panel：通栏面板 + 标签流）。
+                  A2A 列名 + AIGX 内容：冷却明细（429/限额）与限制器跳过模型合并展示。 */}
               {cooldownOpenId && (() => {
                 const open = sessions.find((s) => s.id === cooldownOpenId);
                 if (!open) return null;
                 const entries = activeCooldowns(open);
+                const skipModels = (open.limiter_state?.skip_models ?? [])
+                  .filter((m) => !entries.some(([model]) => model === m));
                 return (
                   <tbody className="as-panel-tbody">
                     <tr className="as-panel-row">
@@ -3299,7 +3380,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                         <div className="as-panel-head">
                           <strong>{nameMasked ? maskName(open.name) : open.name}</strong>
                           <span className="form-hint">
-                            {t('冷却来自上游 429/限额失败，到期自动解除；手动清除后若仍限流会再次标记')}
+                            {t('限流来自上游 429/限额失败与限制器跳过，到期或窗口重置自动解除；手动清除后若仍限流会再次标记')}
                           </span>
                           <button
                             type="button"
@@ -3312,8 +3393,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                             ✕
                           </button>
                         </div>
-                        {entries.length === 0 ? (
-                          <div className="as-panel-body">{t('当前没有冷却中的模型。')}</div>
+                        {entries.length === 0 && skipModels.length === 0 ? (
+                          <div className="as-panel-body">{t('当前没有限流中的模型。')}</div>
                         ) : (
                           <div className="as-panel-list">
                             {entries.map(([model, rem]) => (
@@ -3328,6 +3409,15 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                                 >
                                   {t('清除标记')}
                                 </button>
+                              </div>
+                            ))}
+                            {skipModels.map((model) => (
+                              <div key={`skip-${model}`} className="as-limit-row">
+                                <code className="as-limit-model">{model}</code>
+                                <span className="as-skip-badge">{t('限制器跳过')}</span>
+                                <span className="form-hint">
+                                  {t('窗口重置或余额回升后自动恢复')}
+                                </span>
                               </div>
                             ))}
                           </div>

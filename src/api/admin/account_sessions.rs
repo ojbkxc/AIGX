@@ -669,6 +669,8 @@ fn session_json(
         "status": session.runtime_status(now),
         "configured_status": session.status,
         "priority": session.priority,
+        // SPEC 1.0.49 §9：同 priority 组内手动置顶/整队名次（升序先试）。
+        "sort_order": session.sort_order,
         "weight": session.weight,
         "max_concurrency": session.max_concurrency,
         "models": session.models,
@@ -775,11 +777,7 @@ pub async fn handle_list_account_sessions(
         .unwrap_or_default();
     let channels = state.channel_store.list();
     let mut sessions = state.account_sessions.all();
-    sessions.sort_by(|a, b| {
-        b.priority
-            .cmp(&a.priority)
-            .then(a.created_at.cmp(&b.created_at))
-    });
+    sort_sessions_for_list(&mut sessions);
     let now = chrono::Utc::now().timestamp();
     let mut data: Vec<Value> = Vec::with_capacity(sessions.len());
     for session in &sessions {
@@ -803,6 +801,112 @@ pub async fn handle_list_account_sessions(
     Ok(Json(
         json!({ "success": true, "data": data, "total": total }),
     ))
+}
+
+// ── 排序 / 置顶（SPEC 1.0.49 §9）────────────────────────────────────
+
+/// 列表排序（`GET /api/account-sessions`）：`(channel_id, priority 降序,
+/// sort_order 升序)` 稳定排序，前端不再重排。
+///
+/// priority 降序与选路口径一致（数值越大越优先）；组内 `sort_order` 升序
+/// = 实际先试次序（负数置顶，0 = 存量中位）。末尾用 `created_at` + `id`
+/// 兜底，保证全序稳定（同键账号不会随 HashMap 迭代次序漂移）。
+fn sort_sessions_for_list(sessions: &mut [AccountSession]) {
+    sessions.sort_by(|a, b| {
+        a.channel_id
+            .cmp(&b.channel_id)
+            .then(b.priority.cmp(&a.priority))
+            .then(a.sort_order.cmp(&b.sort_order))
+            .then(a.created_at.cmp(&b.created_at))
+            .then(a.id.cmp(&b.id))
+    });
+}
+
+/// POST /api/account-sessions/:id/promote —— 组内置顶。
+///
+/// 该账号 `sort_order = 同渠道同 priority 组内最小 - 1`，返回最新排序
+///（`{data: {id, sort_order, order: [组内 id 升序]}}`）。同组内重复置顶会
+/// 持续前移（每次比当前最小再 -1）。
+pub async fn handle_promote_account_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let Some(saved) = state.account_sessions.promote(&id) else {
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    // 「最新排序」= 该账号所在 priority 组的完整先试次序（前端直接渲染，
+    // 不用再拿一次列表）。
+    let mut group: Vec<AccountSession> = state
+        .account_sessions
+        .for_channel(&saved.channel_id)
+        .into_iter()
+        .filter(|s| s.priority == saved.priority)
+        .collect();
+    group.sort_by(|a, b| {
+        a.sort_order
+            .cmp(&b.sort_order)
+            .then(a.created_at.cmp(&b.created_at))
+            .then(a.id.cmp(&b.id))
+    });
+    let order: Vec<&str> = group.iter().map(|s| s.id.as_str()).collect();
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "promote_account_session",
+        &format!("id={id}"),
+        None,
+        Some(json!({ "sort_order": saved.sort_order })),
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": { "id": saved.id, "sort_order": saved.sort_order, "order": order },
+    })))
+}
+
+/// PUT /api/account-sessions/order 请求体（SPEC 1.0.49 §9）。
+#[derive(Debug, Deserialize)]
+pub struct AccountOrderRequest {
+    /// 目标队列（从队首到队尾的账号 id）。
+    #[serde(default)]
+    pub order: Vec<String>,
+}
+
+/// PUT /api/account-sessions/order —— 整队重排（按数组顺序写 `sort_order = index + 1`）。
+///
+/// 未知 / 重复 id 忽略并计入 `skipped`；幂等：同一数组重复提交不产生写盘。
+/// 返回 `{data: {updated, skipped}}`。
+pub async fn handle_reorder_account_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AccountOrderRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let outcome = state.account_sessions.reorder(&body.order);
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "reorder_account_sessions",
+        &format!("entries={}", body.order.len()),
+        None,
+        Some(json!({
+            "updated": outcome.updated,
+            "skipped": outcome.skipped,
+        })),
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "updated": outcome.updated,
+            "skipped": outcome.skipped,
+        },
+    })))
 }
 
 // ── 新增 ────────────────────────────────────────────────────────────
@@ -2834,6 +2938,73 @@ mod security_tests {
             result.is_ok(),
             "temp-dir file should be allowed: {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn acct(
+        id: &str,
+        channel: &str,
+        priority: i64,
+        sort_order: i64,
+        created_at: i64,
+    ) -> AccountSession {
+        let mut s = AccountSession::new(channel, id);
+        s.id = id.to_string();
+        s.priority = priority;
+        s.sort_order = sort_order;
+        s.created_at = created_at;
+        s
+    }
+
+    /// 列表排序：(channel_id, priority 降序, sort_order 升序) —— 跨 priority
+    /// 不串组（正向对照：低优先级组的负数 sort_order 排在高优先级组之后）。
+    #[test]
+    fn list_sort_groups_by_channel_priority_then_sort_order() {
+        let mut sessions = vec![
+            acct("b-low-prio-top", "ch-1", 1, -9, 1),
+            acct("a-high-prio-2", "ch-1", 9, 2, 2),
+            acct("a-high-prio-1", "ch-1", 9, 1, 3),
+            acct("other-channel", "ch-2", 9, -9, 4),
+        ];
+        sort_sessions_for_list(&mut sessions);
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "a-high-prio-1",
+                "a-high-prio-2",
+                "b-low-prio-top",
+                "other-channel",
+            ]
+        );
+    }
+
+    /// 排序稳定：同 channel / priority / sort_order 时按 created_at、id 兜底，
+    /// 两次排序结果一致（不随输入次序漂移）。
+    #[test]
+    fn list_sort_is_stable_for_equal_keys() {
+        let mut first = vec![acct("z", "ch", 0, 0, 10), acct("a", "ch", 0, 0, 10)];
+        sort_sessions_for_list(&mut first);
+        let ids: Vec<String> = first.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids, vec!["a", "z"]);
+        first.reverse();
+        sort_sessions_for_list(&mut first);
+        let again: Vec<String> = first.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids, again);
+    }
+
+    /// PUT /order 请求体：缺省 / 空数组都可反序列化（不 400）。
+    #[test]
+    fn order_request_tolerates_missing_field() {
+        let body: AccountOrderRequest = serde_json::from_value(json!({})).unwrap();
+        assert!(body.order.is_empty());
+        let body: AccountOrderRequest =
+            serde_json::from_value(json!({ "order": ["a", "b"] })).unwrap();
+        assert_eq!(body.order, vec!["a".to_string(), "b".to_string()]);
     }
 }
 

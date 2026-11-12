@@ -487,6 +487,12 @@ export const api = {
     provider?: string;
     account_id?: string;
     outcome?: string;
+    /** 1.0.49：记录类型 manual | schedule | makeup | retry（缺省不过滤；后端对存量记录回退按 source 匹配） */
+    kind?: string;
+    /** 1.0.49：起始 unix 秒（闭区间；缺省不限） */
+    start?: number;
+    /** 1.0.49：结束 unix 秒（闭区间；缺省不限） */
+    end?: number;
     keyword?: string;
     offset?: number;
     limit?: number;
@@ -496,6 +502,9 @@ export const api = {
     if (params.provider) query.set('provider', params.provider);
     if (params.account_id) query.set('account_id', params.account_id);
     if (params.outcome) query.set('outcome', params.outcome);
+    if (params.kind) query.set('kind', params.kind);
+    if (params.start != null) query.set('start', String(params.start));
+    if (params.end != null) query.set('end', String(params.end));
     if (params.keyword) query.set('keyword', params.keyword);
     if (params.offset != null) query.set('offset', String(params.offset));
     if (params.limit != null) query.set('limit', String(params.limit));
@@ -519,11 +528,17 @@ export const api = {
     providers: string[];
     /** 逐家时刻覆盖（非空项才提交；空 = 回落内置/条目时刻） */
     provider_times?: Record<string, string>;
-    /* ── be-fix #16-B 契约字段：后端未支持时不要发送（前端 feature-detect 门控）── */
+    /* ── 1.0.49 契约字段（POST 全部可选：未传 = 继承存量；前端 feature-detect 门控）── */
+    /** 窗口结束 HH:MM（空 = 无窗口）；randomize=true 时须晚于 time，否则后端 400 */
     time_end?: string;
-    retry_time?: string;
-    retry_gap_minutes?: number;
+    /** true = 每账号在 [time, time_end] 内取确定性随机时刻 */
+    randomize?: boolean;
+    /** 每账号每天重试上限（0 = 关闭；缺省 3） */
     retry_limit?: number;
+    /** 重试间隔分钟（缺省 5；<=0 回落全局 retry_gap_ms） */
+    retry_gap_minutes?: number;
+    /** 补签轮时刻 HH:MM（空 = 不跑补签轮） */
+    makeup_time?: string;
   }): Promise<ApiResponse<CheckinSchedule[]>> =>
     request('POST', `${API_BASE}/checkin-center/schedules`, schedule),
   removeCheckinSchedule: (id: string): Promise<ApiResponse<CheckinSchedule[]>> =>
@@ -981,11 +996,64 @@ export const api = {
     data: Partial<Pick<ZcodeCaptchaPoolSettings, 'target' | 'pollMs' | 'maxPerRound'>>,
   ): Promise<ApiResponse<ZcodeCaptchaPoolSettings>> =>
     request<ApiResponse<ZcodeCaptchaPoolSettings>>('PUT', `${API_BASE}/zcode/captcha-pool`, data),
-  // 数据管理（对照 Agent2API「设置 → 数据」：存储概览 + 全量备份/恢复）
+  // 数据管理（对照 Agent2API「设置 → 数据」：存储概览 + 加密备份/恢复）
   getStorageOverview: (): Promise<ApiResponse<StorageOverviewItem>> =>
     request<ApiResponse<StorageOverviewItem>>('GET', `${API_BASE}/storage`),
-  exportBackup: (includeLogs: boolean): Promise<unknown> =>
-    request<unknown>('GET', `${API_BASE}/backup/export?include_logs=${includeLogs}`),
+  /** 生成口令加密备份包（服务端写 backups/ 文件）。口令只经请求体，不落盘不进日志 */
+  exportEncryptedBackup: (
+    password: string,
+    includeLogs: boolean,
+  ): Promise<ApiResponse<{ file: string; records: number; bytes: number }>> =>
+    request<ApiResponse<{ file: string; records: number; bytes: number }>>(
+      'POST',
+      `${API_BASE}/backup/export-encrypted`,
+      { password, include_logs: includeLogs },
+    ),
+  /** 下载加密备份包（GET /api/backup/download?file=export-….aigxbak）→ blob */
+  downloadBackup: async (file: string): Promise<Blob> => {
+    const res = await fetch(
+      `${API_BASE}/backup/download?file=${encodeURIComponent(file)}`,
+      { headers: authHeaders() },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let msg = text;
+      try {
+        const parsed = JSON.parse(text) as { error?: string; message?: string };
+        msg = parsed.error || parsed.message || text;
+      } catch {
+        // 非 JSON 错误体，直接抛原文
+      }
+      throw new Error(msg || `下载失败 (HTTP ${res.status})`);
+    }
+    return res.blob();
+  },
+  /** 导入加密备份（multipart：file + password）；后端解密全量校验先行再写回 */
+  importEncryptedBackup: async (
+    file: File,
+    password: string,
+  ): Promise<ApiResponse<BackupImportResult>> => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('password', password);
+    const res = await fetch(`${API_BASE}/backup/import-encrypted`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+    const j = (await res.json().catch(() => null)) as
+      | {
+          success?: boolean;
+          data?: BackupImportResult;
+          error?: string;
+          message?: string;
+        }
+      | null;
+    if (!res.ok || !j?.success) {
+      throw new Error(j?.error || j?.message || `导入失败 (HTTP ${res.status})`);
+    }
+    return { success: true, data: j.data };
+  },
   importBackup: (doc: Record<string, unknown>): Promise<ApiResponse<BackupImportResult>> =>
     request<ApiResponse<BackupImportResult>>('POST', `${API_BASE}/backup/import`, doc),
   // 渠道对话调试：流式（text/event-stream）返回 { stream: [{ content }] }，

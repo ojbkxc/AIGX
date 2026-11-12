@@ -358,3 +358,18 @@ zcode version/claim-verification、growth travel/school、**自定义供应商�
 ## 12. 实施偏离记录
 
 （成员在此追加；格式：`流X | 项 | 原计划 | 实际 | 原因`）
+
+流E | 核对时机 | 照 A2A「刷新成功落盘后重新读取账号比对」（credential_maintenance.rs:99-120） | 在 CAS 落盘**前**比对（明确未推进则直接 `Failed`、不落盘） | AIGX 的落盘由本模块自己调 `update_tokens_cas` 完成（A2A 是适配器内部落盘、壳侧只能后读）；「未推进不改写凭据」要求比对发生在写之前才成立，前置比对语义等价。
+流E | updated_at 判据 | 比对 `expires_at` / `updated_at` / token 明文 | 不用 `updated_at`；改比对 `expires_at` / access 明文 / refresh 明文 | `update_tokens_cas` 每次落盘都会把 `updated_at` 推到当前时刻，用「updated_at 变大」当判据会恒真、使核对失效；只有内容字段能反映上游到底换没换东西。
+流E | Failed 文案 | 「上游未推进凭证（expires_at/updated_at 未变化），账号可能已失效」 | 原样照抄契约字符串 | 保契约一致（供集成时 grep / 用户可见口径统一）；文案里的 `updated_at` 仅为沿用措辞，实际判据见上行。
+流E | `maintenance.rs` | 所有权含该文件 | 未改动 | AIGX 的 `maintenance.rs` 只做「需人工重登」站内提醒（#35 C1/C2），与凭证刷新核对无关；假成功已由 `refresh.rs` 判 `Failed`，巡检 `refresh_expiring` 自动计入 `summary.failed`。
+流A | tool_result 仅图片（无文本）时 tool 消息 content | （未规定） | 置空串 `""` | 参照实现用占位文案；AIGX 无该常量、且本轮不新增依赖，空串与既有「content 缺失」口径一致，避免自造文案。契约其余各项（image/thinking/cache_control/tool_result 图片补 user 消息）均按 §2 落地。
+流G | 配置快照位置 | 放在 `src/config.rs`（沿用 EXTRA_SENSITIVE_HEADERS 同款进程快照） | 放在 `src/sanitize/mod.rs` 的 `USER_RULES` 进程级快照（`set_rules`/`rules` 读写） | 用户词表需缓存已编译正则，与 sanitize 既有状态（STATS / 惰性正则）同址最简；持久化仍走既有设置端点的 `alert_store` + 调用 `sanitize::set_rules`，未新造持久层，仅动本流两文件。
+流G | 入口命名 | 新增 `sanitize_messages_for_provider(provider, msgs)`，保留 `sanitize_messages` 原签名 | 新增 `sanitize_messages_for_provider` / `strip_for_provider`，保留 `strip_chat_messages` / `strip` / `sanitize_text` 原签名转调（provider="") | 既有函数实名为 `strip_chat_messages`（无 `sanitize_messages`）；保留原名 + 新增 provider 作用域变体即可零改动既有调用点。
+流G | 角色作用于范围 | 照参考实现「roles 只作用于消息正文（content）」 | roles 校验作用于该消息的全部文本字段（content / content_blocks / reasoning / tool_calls） | 契约 §8 只要求「按角色作用域」，未要求「仅正文」；整条消息按角色门控更直观，实现更简。
+流G | 启动恢复 | 沿用 config 段注入 | settings.rs 用 `SANITIZE_RULES_KEY="sanitize_rules"` 落盘；**启动恢复需 lead 在 main.rs 加一行** `store.get::<Option<Vec<SanitizeRule>>>("sanitize_rules")` → `sanitize::set_rules(...)`（main.rs 属 lead） | 见交付报告「集成点」。
+流H | `AccountSession` 结构体位置 | 文件所有权矩阵把 `sort_order` 落在 §9，但字段定义在 `src/account_session/model.rs`（不在流 H 的独占文件列表里） | 由流 H 改 `model.rs`（加字段 + `AccountSession::new` 默认 0），并请 checkin-backend 在其两处测试字面量补 `sort_order: 0` | 字段定义是 §9 的必要前提，`model.rs` 不在任何流的独占列表，最小改动点；跨流字面量经 owner 本人补丁（已确认落盘）。
+流H | 选路分档实现 | 契约写「priority 升序 → sort_order 升序 → weight 轮转」 | `priority` 实际是**降序优先**（数值越大越优先，既有语义），sort_order 档内保留既有 `pick_by_rules` / `pick_weighted` 链；`sort_order` 按契约升序取最小档 | 不能推翻生产数据面的 priority 语义；§9 明确「只影响同 priority 组内顺序」。
+流H | `sort_order` 档与规则排序/加权随机的互斥 | 契约未规定 sort_order 档内如何分配 | sort_order 最小档独占进入既有 `pick_by_rules` → `pick_weighted` | 与 priority 同构（最优先档独占），存量全 0 时整组同档、行为逐字节等价。
+流D | 排程 5 控件的 feature-detect | §5 未提门控；旧实现按「后端是否下发某字段」决定渲染/提交 | **去掉 feature-detect，5 控件无条件渲染且一律提交**（time_end/randomize/retry_limit/retry_gap_minutes/makeup_time） | 后端 §4 已冻结并全部实现（store.rs serde(default) + upsert 的 Option<> 继承语义）；遗留门控会在「零条目」时隐藏控件——恰恰是新建第一条计划最需要的场景。旧后端遇未知字段会忽略（无 deny_unknown_fields），无兼容风险。
+流D | 起止日期与「今天/7天/30天/全部」快选的关系 | §5 只要求加起止日期 | 起止日期任一非空时 `days` 自动放开为 3650（全部），以区间为准；快选置灰视觉不变但加 title 提示 | 后端 days 预过滤与 [start,end] 过滤是两层串行；保留 days=7 会让「选 30 天前~10 天前」被裁成空集，属用户可感知的错误结果。无日期时行为完全不变。

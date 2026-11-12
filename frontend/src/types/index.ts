@@ -857,15 +857,18 @@ export interface CheckinSchedule {
   provider_times?: Record<string, string>;
   /** 逐家已跑标记（{provider: date}）——同一条目可在多个窗口各跑一批 */
   last_fired_providers?: Record<string, string>;
-  /* ── 以下为 be-fix #16-B 契约字段：后端未下发时前端 feature-detect 隐藏 ── */
-  /** 随机签到区间结束 HH:MM（缺省 = time 固定时刻执行） */
+  /* ── 以下为 1.0.49 契约字段（store::CheckinSchedule，serde(default) 全部下发；
+   *    旧后端缺字段时保持可选，前端 feature-detect 门控渲染/提交）── */
+  /** 随机签到区间结束 HH:MM（空 = 无窗口，仅按 time 固定时刻执行） */
   time_end?: string;
-  /** 定时补签时刻 HH:MM（空 = 关闭补签） */
-  retry_time?: string;
-  /** 补签/活动重试共用间隔（分钟） */
-  retry_gap_minutes?: number;
-  /** 活动窗口重试：每账号每天最多重试次数（0 = 关闭） */
+  /** true = 每个账号在 [time, time_end] 内取确定性随机时刻（hash(account_id)，重启不漂） */
+  randomize?: boolean;
+  /** 每账号每天重试次数上限（0 = 关闭重试；后端缺省 3） */
   retry_limit?: number;
+  /** 重试间隔（分钟；<=0 回落全局 retry_gap_ms；后端缺省 5） */
+  retry_gap_minutes?: number;
+  /** 补签轮时刻 HH:MM（空 = 不跑补签轮；到点挑当天未签上账号再跑，kind="makeup"） */
+  makeup_time?: string;
 }
 
 export interface CheckinAccountRow {
@@ -897,6 +900,9 @@ export interface CheckinCenterData {
   /** 各家内置签到时刻（{provider: "HH:MM"}，如 qoder 10:01）；后端未下发时
    *  编辑器不显示「平台专属」标注，预览按覆盖/默认时刻分组 */
   builtin_times?: Record<string, string>;
+  /** 1.0.49：实现未进主仓（随上游搬进闭源插件仓）的家 —— 前端置灰入口。
+   *  旧后端不下发（undefined = 空集，不置灰） */
+  unsupported_providers?: string[];
   /** 旅行/成长巡检状态（be-fix #16-B 落地后随 center 下发；缺省 = 不渲染巡检卡） */
   travel?: CheckinTravelState;
 }
@@ -967,6 +973,11 @@ export interface CheckinRecord {
   /** 本次执行链是否附带保活动作 */
   kept_active: boolean;
   message: string;
+  /* ── 1.0.49 契约新增（serde(default)，存量记录可能为空串）── */
+  /** 记录类型：manual | schedule | makeup | retry —— 与 source 同值双写 */
+  kind?: string;
+  /** 失败原文（成功 / 今日已领时为空串）—— 台账「失败原因」列直读 */
+  error?: string;
 }
 
 export interface TotpSetupResult {
@@ -1331,6 +1342,11 @@ export interface AccountSessionItem {
   configured_status?: string;
   priority?: number;
   weight?: number;
+  /**
+   * 组内顺序（SPEC-1.0.49 §9 流 H）：同 channels+priority 组内升序，0 = 中位，
+   * 负数置顶。列表「顺序」列直接展示它；旧后端不下发时该列渲染「—」。
+   */
+  sort_order?: number;
   max_concurrency?: number;
   models?: string[];
   /**

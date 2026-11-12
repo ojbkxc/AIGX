@@ -1187,10 +1187,15 @@ pub async fn handle_update_gateway_prompt(
 /// 脱敏请求头名单的持久化键。
 pub const SANITIZE_HEADERS_KEY: &str = "sanitize_header_blacklist";
 
-/// GET /api/sanitize —— 读取「额外脱敏请求头」名单（对照 Agent2API 设置 → 网关 → 指纹脱敏）。
+/// 用户脱敏词表的持久化键（SPEC-1.0.49 §8）。
+pub const SANITIZE_RULES_KEY: &str = "sanitize_rules";
+
+/// GET /api/sanitize —— 读取「额外脱敏请求头」名单 + 用户脱敏词表
+/// （对照 Agent2API 设置 → 网关 → 指纹脱敏）。
 ///
 /// 只返回管理员额外补充的部分；内置名单（authorization/cookie/x-*-token 等）
-/// 由前端固定展示为只读默认项。
+/// 由前端固定展示为只读默认项。`rules` 语义（SPEC-1.0.49 §8）：`null` = 未配置
+/// （走内置硬编码规则）；`[]` = 关闭全部脱敏；非空数组 = 只用用户规则。
 pub async fn handle_get_sanitize(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1200,12 +1205,18 @@ pub async fn handle_get_sanitize(
         "success": true,
         "data": {
             "extra_headers": crate::config::extra_sensitive_headers(),
+            "rules": crate::sanitize::rules(),
             "stats": crate::sanitize::snapshot(),
         }
     })))
 }
 
-/// PUT /api/sanitize —— 保存额外脱敏头名单（热生效：下一请求即按新名单脱敏）。
+/// PUT /api/sanitize —— 保存额外脱敏头名单 + 用户脱敏词表（热生效：下一请求即按
+/// 新配置脱敏）。
+///
+/// `rules` 字段语义（SPEC-1.0.49 §8）：**键缺省** = 不改动现有词表（兼容只发
+/// `extra_headers` 的旧前端）；`null` = 恢复内置；`[]` = 关闭脱敏；数组 = 用户
+/// 词表（上限 200 条，超限报错而不静默截断）。
 pub async fn handle_update_sanitize(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1258,11 +1269,56 @@ pub async fn handle_update_sanitize(
     crate::config::set_extra_sensitive_headers(list.clone());
     tracing::info!("脱敏请求头名单已更新: {} 条", list.len());
 
+    // 用户脱敏词表（SPEC-1.0.49 §8）：键缺省 = 不动；null = 内置；数组 = 用户词表。
+    if let Some(rules_value) = body.get("rules") {
+        let rules: Option<Vec<crate::sanitize::SanitizeRule>> = match rules_value {
+            Value::Null => None,
+            Value::Array(_) => {
+                let parsed = serde_json::from_value::<Vec<crate::sanitize::SanitizeRule>>(
+                    rules_value.clone(),
+                )
+                .map_err(|e| {
+                    error_response(&format!("脱敏规则格式非法：{e}"), StatusCode::BAD_REQUEST)
+                })?;
+                Some(parsed)
+            }
+            _ => {
+                return Err(error_response(
+                    "rules 必须是数组或 null",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+        };
+        // 校验 + 落快照：超 200 条在此返回 Err（400），不会静默截断。
+        crate::sanitize::set_rules(rules.clone())
+            .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+        state
+            .alert_store
+            .put(SANITIZE_RULES_KEY, &rules)
+            .map_err(|e| {
+                error_response(
+                    &format!("Failed to save sanitize rules: {e}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?;
+        tracing::info!(
+            "脱敏词表已更新: {}",
+            rules
+                .as_ref()
+                .map(|r| format!("{} 条", r.len()))
+                .unwrap_or_else(|| "内置".to_string())
+        );
+    }
+
     Ok(Json(json!({
         "success": true,
         // 保存回显带上 stats：前端保存后会拿本次响应覆盖整个面板状态，
         // 这里不返回的话命中计数会在保存后凭空消失（下一次刷新才回来）。
-        "data": { "extra_headers": list, "stats": crate::sanitize::snapshot() }
+        "data": {
+            "extra_headers": list,
+            "rules": crate::sanitize::rules(),
+            "stats": crate::sanitize::snapshot()
+        }
     })))
 }
 

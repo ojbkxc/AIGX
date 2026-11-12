@@ -191,6 +191,21 @@
   border-color: var(--primary, #2563eb);
   background: var(--primary-bg, rgba(59, 130, 246, 0.05));
 }
+/* 1.0.49：实现随上游进入插件仓、主仓未接入的家 → 置灰不可选 */
+.ck-provider-pick-row.is-unsupported {
+  opacity: 0.55;
+  background: var(--bg-subtle, #fafafa);
+  border-style: dashed;
+}
+.ck-provider-pick-row.is-unsupported .ck-provider-pick-name,
+.ck-provider-pick-row.is-unsupported input[type='checkbox'] {
+  cursor: not-allowed;
+}
+.ck-pick-tag-unsupported {
+  background: var(--border, #ececec);
+  color: var(--text-muted, #888);
+  cursor: help;
+}
 .ck-provider-pick-name {
   display: inline-flex;
   align-items: center;
@@ -543,6 +558,31 @@
   margin-bottom: 4px;
 }
 
+/* 标签内 tooltip 圆点（1.0.49：五个排程控件都带说明） */
+.ck-label-with-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.ck-tip-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border, #d0d0d0);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted, #888);
+  cursor: help;
+  user-select: none;
+}
+.ck-random-toggle {
+  align-items: center;
+  padding-bottom: 4px;
+}
+
 .ck-time-input {
   font-family: var(--font-mono, ui-monospace, monospace);
   max-width: 110px;
@@ -622,6 +662,23 @@
 .ck-record-source {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* 台账「类型」列（1.0.49：kind 与 source 同值双写） */
+.ck-record-kind {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* 台账筛选区的起止日期（1.0.49） */
+.ck-date-sep {
+  color: var(--text-muted, #999);
+  font-size: 12px;
+  padding: 0 2px;
+}
+.ck-date-input {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
 }
 
 .ck-record-detail-fail {

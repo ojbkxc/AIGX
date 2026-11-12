@@ -82,6 +82,14 @@ pub fn supports_checkin(provider: &str) -> bool {
     CHECKIN_PROVIDERS.contains(&provider)
 }
 
+/// 实现随上游搬进**闭源插件仓**、主仓只有机制文档的三家。
+///
+/// 它们在 `CHECKIN_PROVIDERS` 白名单里（签到范围与上游对齐），但 claim 分支
+/// 只能如实报错。管理面把这份清单下发给前端（`GET /api/checkin-center` 的
+/// `unsupported_providers`），前端据此把这三家置灰并提示「实现随上游进入
+/// 插件仓，主仓未接入」—— 避免用户以为「勾了却没签」是 bug。
+pub const UNSUPPORTED_PROVIDERS: &[&str] = &["chatglm", "atomcode", "lobsterai"];
+
 /// 一家供应商的签到端点契约。
 ///
 /// **为什么要这张表**：签到执行器此前把端点内联在各家的 `async fn` 里，
@@ -326,6 +334,16 @@ fn already(msg: &str) -> ClaimResult {
         success: false,
         msg: msg.to_string(),
         outcome: CheckinOutcome::Already,
+    }
+}
+
+/// 「需要人机验证」——不是账号失效，而是验证码令牌缺失或被上游拒绝。前端
+/// 据此提示管理员去求解验证码（而非重新登录账号）。
+fn captcha(msg: &str) -> ClaimResult {
+    ClaimResult {
+        success: false,
+        msg: msg.to_string(),
+        outcome: CheckinOutcome::Captcha,
     }
 }
 
@@ -1824,7 +1842,7 @@ fn zcode_claim_code_outcome(code: i64, plan_id: &str) -> ClaimResult {
         3007 => {
             // 上游拒了这枚令牌：池子里剩下的同样不可信了，让前端立刻补货
             crate::zcode_captcha::note_challenge();
-            failed("ZCode 验证码校验未通过，请重新求解后重试")
+            captcha("ZCode 验证码校验未通过，请重新求解后重试")
         }
         3001 => failed("ZCode 领取请求被拒（设备指纹或 plan_id 不对）"),
         other => failed(&format!("ZCode 领取失败（code={other}）")),
@@ -1883,9 +1901,9 @@ async fn zcode(client: &Client, session: &AccountSession, secret: &str) -> Claim
         return pending("ZCode 当前没有可领的限时套餐（每日 19:00 开放，窗口未开时属正常）");
     };
 
-    // ③ 领取（要验证码令牌：无令牌如实失败，不记已领取）
+    // ③ 领取（要验证码令牌：无令牌 → 需人机验证，不记已领取）
     let Some((verify_param, verify_region)) = crate::zcode_captcha::take() else {
-        return failed(
+        return captcha(
             "ZCode 领取需要一枚阿里云验证码令牌，而令牌池此刻是空的：\
              请在网关设置里保持管理页面打开（它会在后台铸造），\
              或直接点本行的「领套餐」按钮当场求解",
@@ -2202,7 +2220,8 @@ mod tests {
         );
         assert_eq!(
             zcode_claim_code_outcome(3007, plan).outcome,
-            CheckinOutcome::Failed
+            CheckinOutcome::Captcha,
+            "3007 是验证码被拒 → 应判 Captcha（需重新求解），不是普通 Failed"
         );
         assert_eq!(
             zcode_claim_code_outcome(9999, plan).outcome,
@@ -2231,6 +2250,7 @@ mod tests {
                 status: "enabled".to_string(),
                 priority: 0,
                 weight: 1,
+                sort_order: 0,
                 max_concurrency: 0,
                 models: Vec::new(),
                 extra_headers: std::collections::HashMap::new(),
@@ -2262,6 +2282,28 @@ mod tests {
             assert!(!result.success, "{provider} 不该假装成功");
             assert_eq!(result.outcome, CheckinOutcome::Failed);
             assert!(!result.msg.is_empty(), "{provider} 应有明确错误文案");
+        }
+    }
+
+    #[test]
+    fn captcha_helper_is_not_ok_and_tagged() {
+        let r = captcha("需要验证码");
+        assert!(!r.success);
+        assert_eq!(r.outcome, CheckinOutcome::Captcha);
+        assert!(!r.outcome.is_ok());
+        assert_eq!(r.outcome.as_str(), "captcha");
+    }
+
+    #[test]
+    fn unsupported_providers_exactly_three_and_all_whitelisted() {
+        // 正向对照：三家必须都真的在 CHECKIN_PROVIDERS 里 —— 防拼错导致
+        // 下发给前端的集合为空而「恒绿」。
+        assert_eq!(UNSUPPORTED_PROVIDERS.len(), 3);
+        for provider in UNSUPPORTED_PROVIDERS {
+            assert!(
+                CHECKIN_PROVIDERS.contains(provider),
+                "{provider} 应仍在签到白名单里（只是实现未接入）"
+            );
         }
     }
 }

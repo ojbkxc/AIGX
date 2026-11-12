@@ -2395,6 +2395,17 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/:id/refresh",
             post(api::admin::account_sessions::handle_account_refresh),
         )
+        // SPEC-1.0.49 §9（流 H）：组内置顶 + 整队重排（sort_order）。
+        // `/order` 是固定段（单段），`:id/promote` 是两段；axum 按段数与静态
+        // 优先级匹配，两者与既有 `:id` 家族不冲突。
+        .route(
+            "/api/account-sessions/:id/promote",
+            post(api::admin::account_sessions::handle_promote_account_session),
+        )
+        .route(
+            "/api/account-sessions/order",
+            put(api::admin::account_sessions::handle_reorder_account_sessions),
+        )
         // 用量窗口（Phase1-A3，对齐上游 accounts_usage.rs）：快照轮询 +
         // 手动批量/单账号查询（写回快照；有界并发 3，温路径）
         .route(

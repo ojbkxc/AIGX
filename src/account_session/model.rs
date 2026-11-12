@@ -314,6 +314,14 @@ pub struct AccountSession {
     pub priority: i64,
     #[serde(default = "default_weight")]
     pub weight: u32,
+    /// 手动排序（同 `priority` 组内**升序先试**；0 = 存量中位，负数置顶）。
+    ///
+    /// 由管理面「置顶 / 整队重排」写入（SPEC 1.0.49 §9）：`promote` 写
+    /// 组内最小 - 1，`PUT /order` 按数组顺序写 index + 1。只影响同
+    /// `priority` 组内的选号次序，**不改变** `priority` 语义；存量数据
+    /// 全为 0（`serde(default)`），整组同档 → 选路行为与改造前一致。
+    #[serde(default)]
+    pub sort_order: i64,
     /// 单账号并发上限（0 = 不限制）。
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: u32,
@@ -452,6 +460,7 @@ impl AccountSession {
             status: default_status(),
             priority: 0,
             weight: default_weight(),
+            sort_order: 0,
             max_concurrency: default_max_concurrency(),
             models: Vec::new(),
             extra_headers: HashMap::new(),

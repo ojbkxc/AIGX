@@ -26,6 +26,9 @@ mod rerank;
 // 的再导出，不用 `resolve::` 模块路径 —— 那要求 mod 至少 pub(crate)。
 mod resolve;
 mod responses;
+// SPEC-1.0.49 §3（流 B）：Responses ↔ Chat 纯转换层。只在 `responses_passthrough`
+// 返回 `Err(Config)`（该上游不支持 Responses）时被 responses.rs 用作降级路径。
+mod responses_convert;
 mod state;
 
 #[allow(unused_imports)]

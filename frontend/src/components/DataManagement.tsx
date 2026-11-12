@@ -10,9 +10,12 @@ import type { StorageOverviewItem } from '../types';
  *
  * 对照 Agent2API「设置 → 数据」：
  * - 存储概览：KV 总键数、按业务分组的键数、库文件大小
- * - 备份导出：全量 KV 键值导出为 JSON（可选含请求/审计日志）
- * - 备份导入：上传备份 JSON 恢复；后端会先把当前全量快照到 backups/
- *   再写回，导入坏了还能回滚
+ * - 加密备份导出：口令加密包（AIGXBAK1）。明文导出端点因安全整改已移除
+ *   （生产实测 404，不要恢复），本页走 export-encrypted → download
+ *   三段式；口令只经请求体，不落盘、不写日志、不进 localStorage
+ * - 备份导入：明文 JSON 旧包走 /api/backup/import；加密包走
+ *   /api/backup/import-encrypted（multipart：file + password）。后端都会先把
+ *   当前全量快照到 backups/ 再写回，导入坏了还能回滚
  */
 
 function fmtBytes(bytes: number | null | undefined): string {
@@ -31,10 +34,16 @@ export default function DataManagement(): JSX.Element {
   const [overview, setOverview] = useState<StorageOverviewItem | null>(null);
   const [includeLogs, setIncludeLogs] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportPassword, setExportPassword] = useState('');
+  const [exportPasswordConfirm, setExportPasswordConfirm] = useState('');
+  const [importPassword, setImportPassword] = useState('');
   const [importing, setImporting] = useState(false);
+  const [encryptedImporting, setEncryptedImporting] = useState(false);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const pendingImport = useRef<Record<string, unknown> | null>(null);
+  const pendingEncrypted = useRef<{ file: File; password: string } | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const encryptedFileInput = useRef<HTMLInputElement | null>(null);
 
   const load = async (): Promise<void> => {
     try {
@@ -51,25 +60,46 @@ export default function DataManagement(): JSX.Element {
     void load();
   }, []);
 
-  const exportBackup = async (): Promise<void> => {
+  // 字符数口径与后端 `password.chars().count()` 对齐（.length 数 UTF-16 单元，emoji 会多算）
+  const pwChars = (s: string): number => [...s].length;
+
+  // 加密导出三段式：POST export-encrypted（生成服务端包）→ 取 data.file →
+  // GET download?file=…（带认证头取 blob）→ a.download 触发浏览器下载。
+  // 口令只活在本函数栈与请求体里：不打日志、不进 localStorage、成功后清空。
+  const exportEncrypted = async (): Promise<void> => {
+    if (pwChars(exportPassword) < 8) {
+      setError(t('备份口令至少 8 个字符（丢失口令=备份不可解）'));
+      return;
+    }
+    if (exportPassword !== exportPasswordConfirm) {
+      setError(t('两次输入的口令不一致'));
+      return;
+    }
     setExporting(true);
     setError('');
     try {
-      const doc = await api.exportBackup(includeLogs);
-      const blob = new Blob([JSON.stringify(doc, null, 2)], {
-        type: 'application/json',
-      });
+      const res = await api.exportEncryptedBackup(exportPassword, includeLogs);
+      const info = res?.data;
+      if (!info?.file) {
+        throw new Error(res?.error?.message || t('导出失败：服务端未返回备份文件名'));
+      }
+      const blob = await api.downloadBackup(info.file);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
       a.href = url;
-      a.download = `aigx-backup-${ts}${includeLogs ? '-with-logs' : ''}.json`;
+      a.download = info.file;
       a.click();
-      URL.revokeObjectURL(url);
-      const count = (doc as { kv?: Record<string, unknown> })?.kv
-        ? Object.keys((doc as { kv: Record<string, unknown> }).kv).length
-        : 0;
-      addToast(t('备份已导出（{{count}} 键）', { count }));
+      // Safari/Firefox 同帧 revoke 会取消下载，延迟释放
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      addToast(
+        t('加密备份已导出（{{count}} 键，{{size}}）', {
+          count: info.records ?? 0,
+          size: fmtBytes(info.bytes),
+        }),
+      );
+      // 口令用完即弃：清空输入框，不在页面状态里留痕
+      setExportPassword('');
+      setExportPasswordConfirm('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -128,6 +158,51 @@ export default function DataManagement(): JSX.Element {
     }
   };
 
+  // 加密备份导入：multipart（file + password）→ 后端先解密全量校验再写回。
+  // 口令只进本次 FormData；成功后清空，不留页面状态。
+  const onEncryptedFilePicked = async (file: File): Promise<void> => {
+    setError('');
+    if (pwChars(importPassword) < 8) {
+      setError(t('备份口令至少 8 个字符'));
+      if (encryptedFileInput.current) encryptedFileInput.current.value = '';
+      return;
+    }
+    pendingEncrypted.current = { file, password: importPassword };
+    setConfirmState({
+      title: t('导入加密备份'),
+      message: t(
+        '将恢复加密包 {{name}} 中的全部键（合并覆盖同名键）。导入前会自动把当前数据快照到服务器 backups/ 目录；口令错误或包被篡改会在写回之前失败。继续？',
+        { name: file.name },
+      ),
+      confirmText: t('开始导入'),
+      danger: true,
+      onConfirm: async () => {
+        setEncryptedImporting(true);
+        try {
+          const pending = pendingEncrypted.current;
+          if (!pending) return;
+          const res = await api.importEncryptedBackup(pending.file, pending.password);
+          const d = res?.data as { written?: number; skipped?: number } | undefined;
+          addToast(
+            t('加密备份导入完成：写入 {{written}} 键，跳过 {{skipped}}', {
+              written: d?.written ?? 0,
+              skipped: d?.skipped ?? 0,
+            }),
+          );
+          setImportPassword('');
+          await load();
+        } catch (err) {
+          addToast(err instanceof Error ? err.message : String(err), 'error');
+        } finally {
+          setEncryptedImporting(false);
+          setConfirmState(null);
+          pendingEncrypted.current = null;
+          if (encryptedFileInput.current) encryptedFileInput.current.value = '';
+        }
+      },
+    });
+  };
+
   if (loading) {
     return <div className="loading">{t('加载中')}</div>;
   }
@@ -139,7 +214,7 @@ export default function DataManagement(): JSX.Element {
       <div className="card-header">
         <h2>{t('数据管理')}</h2>
         <p className="card-subtitle">
-          {t('存储概览与全量备份/恢复；备份=全部业务键值的一份 JSON 快照，导入前自动快照当前数据。')}
+          {t('存储概览与加密备份/恢复；加密包=AIGXBAK1 口令加密的全量键值快照，明文导出已下线，导入前自动快照当前数据。')}
         </p>
       </div>
       <div className="card-body">
@@ -174,6 +249,32 @@ export default function DataManagement(): JSX.Element {
         </div>
 
         <div className="form-group">
+          <label>{t('导出加密备份')}</label>
+          <input
+            className="form-input"
+            type="password"
+            autoComplete="new-password"
+            placeholder={t('设置备份口令（至少 8 个字符，丢失后备份不可解）')}
+            value={exportPassword}
+            disabled={exporting}
+            onChange={(e) => setExportPassword(e.target.value)}
+          />
+          <input
+            className="form-input"
+            type="password"
+            autoComplete="new-password"
+            placeholder={t('再次输入备份口令')}
+            value={exportPasswordConfirm}
+            disabled={exporting}
+            onChange={(e) => setExportPasswordConfirm(e.target.value)}
+            style={{ marginTop: 8 }}
+          />
+          <span className="form-hint" style={{ marginTop: 6 }}>
+            {t('口令只随本次请求发往后端，不写日志、不存浏览器；请自行妥善保管，丢失无法恢复。')}
+          </span>
+        </div>
+
+        <div className="form-group">
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               type="checkbox"
@@ -187,10 +288,12 @@ export default function DataManagement(): JSX.Element {
         <div className="settings-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button
             className="btn btn-primary"
-            onClick={() => void exportBackup()}
-            disabled={exporting}
+            onClick={() => void exportEncrypted()}
+            disabled={
+              exporting || pwChars(exportPassword) < 8 || exportPassword !== exportPasswordConfirm
+            }
           >
-            {exporting ? t('导出中...') : t('导出备份')}
+            {exporting ? t('导出中...') : t('导出加密备份')}
           </button>
           <button
             className="btn btn-secondary"
@@ -209,6 +312,41 @@ export default function DataManagement(): JSX.Element {
               if (f) void onFilePicked(f);
             }}
           />
+        </div>
+
+        <div className="form-group" style={{ marginTop: 16 }}>
+          <label>{t('导入加密备份')}</label>
+          <input
+            className="form-input"
+            type="password"
+            autoComplete="current-password"
+            placeholder={t('输入加密包口令')}
+            value={importPassword}
+            disabled={encryptedImporting}
+            onChange={(e) => setImportPassword(e.target.value)}
+          />
+          <span className="form-hint" style={{ marginTop: 6 }}>
+            {t('选择 .aigxbak 加密包后，用该包导出时设置的口令解密恢复。')}
+          </span>
+          <div style={{ marginTop: 8 }}>
+            <button
+              className="btn btn-secondary"
+              onClick={() => encryptedFileInput.current?.click()}
+              disabled={encryptedImporting || pwChars(importPassword) < 8}
+            >
+              {encryptedImporting ? t('读取中...') : t('选择加密包并导入')}
+            </button>
+            <input
+              ref={encryptedFileInput}
+              type="file"
+              accept=".aigxbak,application/octet-stream"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void onEncryptedFilePicked(f);
+              }}
+            />
+          </div>
         </div>
       </div>
 

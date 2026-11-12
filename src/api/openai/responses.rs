@@ -5,23 +5,43 @@ use axum::{
     Json,
 };
 
+use super::responses_convert;
 use super::*;
 use crate::api::common::extract_client_ip;
-use crate::bridge::{BridgeContext, ResponsesPassthrough};
+use crate::bridge::{BridgeContext, BridgeError, ResponsesPassthrough};
 use crate::channel::ChannelStore;
 use futures::StreamExt;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// POST /v1/responses - OpenAI Responses API 透传
+/// `/v1/responses` failover 单次尝试的结果。
 ///
-/// 与 handle_chat_completions 不同，本端点不做协议转换（不构建
+/// 透传（上游原生 Responses）与降级转换（Responses → Chat，session 型渠道）
+/// 共用同一套 failover / 熔断 / 计费骨架，只在最终回包时分支。
+enum ResponsesAttempt {
+    /// 上游原生 Responses 透传（既有路径，零行为变化）
+    Passthrough(ResponsesPassthrough),
+    /// 降级：Chat 非流式响应（待转换为 Responses 形状）
+    ConvertedJson(crate::bridge::ChatResponse),
+    /// 降级：Chat 流式 chunk 流（待转换为 Responses SSE 事件）
+    ConvertedStream(crate::bridge::ChatChunkStream),
+}
+
+/// POST /v1/responses - OpenAI Responses API 透传（并支持降级转换）
+///
+/// 与 handle_chat_completions 不同，本端点默认不做协议转换（不构建
 /// ChatFormat / 不走 Bridge::chat），而是把请求 body 原样转发给上游
 /// 的 /v1/responses 端点（参考 aisix 的 responses_to_target 透传方案）：
 /// 1. 认证 → 2. 限流 → 3. 分组权限 → 4. 定价校验 → 5. resolve_bridges
 /// 6. failover 循环调用 Bridge::responses_passthrough
 /// 7. 计费从 Responses 格式 usage（input_tokens/output_tokens）提取，
 ///    流式缺 usage 时回退 token 估算
+///
+/// **降级**：session 型渠道（qoder/trae/cmdcode…）的 responses_passthrough
+/// 默认实现返回 `BridgeError::Config`；此时改为「Responses → Chat 转换 +
+/// Bridge::chat/chat_stream」（见 `responses_convert`）。仅 `Config` 降级，
+/// 其它 `BridgeError`（Transport/Upstream*）维持既有 failover 语义。
 pub(crate) async fn handle_responses(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -168,14 +188,46 @@ pub(crate) async fn handle_responses(
         let attempt_start = std::time::Instant::now();
         // T2：SSE 首事件守卫——流式分支等第一个事件（30s 上限），上游挂起/
         // 立刻断流按失败处理（熔断 + failover）；非流式 Json 直接放行
-        let attempt = match bridge
+        let attempt: Result<ResponsesAttempt, BridgeError> = match bridge
             .responses_passthrough(&attempt_body, is_stream, &ctx)
             .await
         {
             Ok(ResponsesPassthrough::Stream(s)) => crate::bridge::first_event_or_timeout(s)
                 .await
-                .map(ResponsesPassthrough::Stream),
-            Ok(r) => Ok(r),
+                .map(ResponsesPassthrough::Stream)
+                .map(ResponsesAttempt::Passthrough),
+            Ok(r) => Ok(ResponsesAttempt::Passthrough(r)),
+            // 渠道不支持 Responses 透传（session 型桥的默认实现）：降级为
+            // 「Responses → Chat 转换 + chat/chat_stream」。只对 Config 降级；
+            // Transport / Upstream* 维持既有 failover 语义。
+            Err(BridgeError::Config(reason)) => {
+                tracing::debug!(
+                    "responses passthrough unsupported on channel {cid:?} ({reason}), \
+                     falling back to responses->chat conversion"
+                );
+                match responses_convert::request_to_chat(&attempt_body) {
+                    Ok(converted) => {
+                        let mut chat_req = converted.chat;
+                        chat_req.model = upstream.clone();
+                        if is_stream {
+                            match bridge.chat_stream(&chat_req, &ctx).await {
+                                Ok(s) => crate::bridge::first_event_or_timeout(s)
+                                    .await
+                                    .map(ResponsesAttempt::ConvertedStream),
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            bridge
+                                .chat(&chat_req, &ctx)
+                                .await
+                                .map(ResponsesAttempt::ConvertedJson)
+                        }
+                    }
+                    Err(msg) => Err(BridgeError::Config(format!(
+                        "responses request cannot be converted to chat: {msg}"
+                    ))),
+                }
+            }
             Err(e) => Err(e),
         };
         match attempt {
@@ -224,7 +276,7 @@ pub(crate) async fn handle_responses(
             }
         }
     }
-    let passthrough = match result_opt {
+    let attempt = match result_opt {
         Some(r) => r,
         None => {
             let e = last_error.unwrap_or_else(|| {
@@ -284,8 +336,8 @@ pub(crate) async fn handle_responses(
         }
     };
 
-    match passthrough {
-        ResponsesPassthrough::Json(json) => {
+    match attempt {
+        ResponsesAttempt::Passthrough(ResponsesPassthrough::Json(json)) => {
             // 非流式：上游 JSON body 原样转回客户端，
             // usage 为 Responses 格式（input_tokens/output_tokens）
             let latency_ms = request_start.elapsed().as_millis() as u64;
@@ -392,7 +444,7 @@ pub(crate) async fn handle_responses(
 
             Json(json).into_response()
         }
-        ResponsesPassthrough::Stream(byte_stream) => {
+        ResponsesAttempt::Passthrough(ResponsesPassthrough::Stream(byte_stream)) => {
             // 流式：上游 SSE 字节流原样透传给客户端，旁路解析 SSE
             // 提取 usage / 累积输出文本，流 drop 时由守卫计费
             let billing = Arc::new(ResponsesBillingState {
@@ -445,6 +497,228 @@ pub(crate) async fn handle_responses(
                 inner: Box::pin(keepalive_stream),
                 _guard: ResponsesStreamGuard { billing },
                 // Responses 透传路径未登记在途请求，不参与取消
+                cancel: None,
+                _inflight: None,
+            };
+
+            let mut response = Response::new(axum::body::Body::from_stream(guarded));
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            response
+        }
+        // 降级路径（Responses → Chat）：非流式。计费口径与 chat 非流式一致：
+        // usage 归一口径复用 UsageStats::billing_tokens（缓存分量进 prompt）。
+        ResponsesAttempt::ConvertedJson(response) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let json = responses_convert::chat_to_response(&response, &model);
+
+            state.usage_tracker.accumulate(
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                0,
+                0,
+                0,
+                0.0,
+            );
+
+            let billing_model = used_upstream.as_deref().unwrap_or(&model);
+            let (billing_prompt, billing_cached) = response.usage.billing_tokens();
+            let cost = charge_usage(
+                &state,
+                &api_key,
+                &model,
+                billing_model,
+                &billing_group,
+                billing_prompt,
+                response.usage.completion_tokens,
+                billing_cached,
+            );
+
+            // 事后限流记账（TPM）
+            let total_tokens = billing_prompt + response.usage.completion_tokens;
+            rate_bundle.commit_tokens(total_tokens).await;
+
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = used_channel_id.clone();
+            log.channel_name = used_channel_id
+                .as_ref()
+                .and_then(|cid| state.channel_store.get(cid))
+                .map(|c| c.name.clone());
+            log.model = billing_model.to_string();
+            log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
+                None
+            } else {
+                Some(model.clone())
+            };
+            log.channel_cost = compute_channel_cost(
+                &state,
+                used_channel_id.as_deref(),
+                &model,
+                billing_model,
+                &billing_group,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                cost,
+            );
+            log.input_tokens = response.usage.prompt_tokens;
+            log.output_tokens = response.usage.completion_tokens;
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id.clone());
+            if debug_request_body.is_some() {
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(json.to_string()),
+                    None,
+                );
+            }
+            log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
+            state.log_store.record_request(log);
+
+            crate::metrics::global().record_request(
+                billing_model,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "ok",
+                latency_ms,
+            );
+            crate::metrics::global().record_tokens(
+                billing_model,
+                "prompt",
+                response.usage.prompt_tokens,
+            );
+            crate::metrics::global().record_tokens(
+                billing_model,
+                "completion",
+                response.usage.completion_tokens,
+            );
+
+            Json(json).into_response()
+        }
+        // 降级路径（Responses → Chat）：流式。把 Chat chunk 流翻成 Responses
+        // SSE 事件，计费仍走 ResponsesStreamGuard（usage 从 chunk 的权威
+        // UsageStats 取，缺失时回退 token 估算）。
+        ResponsesAttempt::ConvertedStream(chat_stream) => {
+            let billing = Arc::new(ResponsesBillingState {
+                state: state.clone(),
+                api_key: api_key.clone(),
+                model: used_upstream.clone().unwrap_or_else(|| model.clone()),
+                origin_model: if used_upstream.as_deref() == Some(model.as_str()) {
+                    None
+                } else {
+                    Some(model.clone())
+                },
+                group: billing_group.clone(),
+                input_text: responses_input_text(&body),
+                usage: Arc::new(parking_lot::Mutex::new(None)),
+                acc: Arc::new(parking_lot::Mutex::new(String::new())),
+                rate_bundle: Some(rate_bundle.clone()),
+                request_start,
+                client_ip: client_ip.clone(),
+                request_id: request_id.clone(),
+                channel_id: used_channel_id.clone(),
+                channel_name: used_channel_id
+                    .as_ref()
+                    .and_then(|cid| state.channel_store.get(cid))
+                    .map(|c| c.name.clone()),
+                debug_request_body,
+            });
+
+            let billing_for_map = billing.clone();
+            // 流中途出错标志：置位后终帧不再补 [DONE]（与 chat 流式约定一致）
+            let errored = Arc::new(AtomicBool::new(false));
+            let errored_for_map = errored.clone();
+            let errored_for_terminal = errored.clone();
+            let client_model = model.clone();
+            let mut seq: u64 = 0;
+            let sse_stream = chat_stream.flat_map(move |item| {
+                let mut out: Vec<Result<bytes::Bytes, BridgeError>> = Vec::new();
+                match item {
+                    Ok(chunk) => {
+                        // 累积输出文本（content + reasoning + 工具名/参数）用于
+                        // 上游未上报 usage 时的 completion token 估算
+                        {
+                            let mut buf = billing_for_map.acc.lock();
+                            if let Some(text) = &chunk.delta.content {
+                                crate::token_estimate::push_capped(&mut buf, text);
+                            }
+                            if let Some(reasoning) = &chunk.delta.reasoning {
+                                crate::token_estimate::push_capped(&mut buf, reasoning);
+                            }
+                            if let Some(calls) = &chunk.delta.tool_calls {
+                                for tc in calls {
+                                    if let Some(name) = &tc.function_name {
+                                        crate::token_estimate::push_capped(&mut buf, name);
+                                    }
+                                    if let Some(args) = &tc.arguments {
+                                        crate::token_estimate::push_capped(&mut buf, args);
+                                    }
+                                }
+                            }
+                        }
+                        // 上游权威 usage（流式终帧携带）
+                        if let Some(usage) = chunk.usage {
+                            let (prompt, _cached) = usage.billing_tokens();
+                            *billing_for_map.usage.lock() = Some((prompt, usage.completion_tokens));
+                        }
+                        for mut event in
+                            responses_convert::chat_chunk_to_response_events(&chunk, &mut seq)
+                        {
+                            // 终态 response 由 chunk.model（上游名）构造；对客户端
+                            // 回显原始请求模型名，与透传路径的可见行为一致
+                            if event.get("type").and_then(Value::as_str)
+                                == Some("response.completed")
+                            {
+                                if let Some(obj) =
+                                    event.get_mut("response").and_then(|r| r.as_object_mut())
+                                {
+                                    obj.insert(
+                                        "model".to_string(),
+                                        Value::String(client_model.clone()),
+                                    );
+                                }
+                            }
+                            out.push(Ok(bytes::Bytes::from(responses_convert::sse_frame(&event))));
+                        }
+                    }
+                    Err(e) => {
+                        errored_for_map.store(true, Ordering::SeqCst);
+                        tracing::warn!("responses converted stream aborted: {e}");
+                        let event = serde_json::json!({
+                            "type": "error",
+                            "error": {
+                                "message": crate::error_translate::sanitize_error_message(
+                                    &e.to_string(),
+                                ),
+                                "type": e.error_type(),
+                            },
+                        });
+                        out.push(Ok(bytes::Bytes::from(responses_convert::sse_frame(&event))));
+                    }
+                }
+                futures::stream::iter(out)
+            });
+            let terminal = futures::stream::once(async move {
+                if errored_for_terminal.load(Ordering::SeqCst) {
+                    // 已发 error 事件：不再补 [DONE]
+                    Ok::<bytes::Bytes, BridgeError>(bytes::Bytes::new())
+                } else {
+                    Ok::<bytes::Bytes, BridgeError>(bytes::Bytes::from_static(b"data: [DONE]\n\n"))
+                }
+            });
+            let sse_stream = sse_stream.chain(terminal);
+
+            let keepalive_stream =
+                crate::sse::KeepaliveStream::new(sse_stream, crate::bridge::SSE_KEEPALIVE_INTERVAL);
+            let guarded = GuardedStream {
+                inner: Box::pin(keepalive_stream),
+                _guard: ResponsesStreamGuard { billing },
+                // 转换路径未登记在途请求，不参与取消
                 cancel: None,
                 _inflight: None,
             };

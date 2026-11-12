@@ -27,7 +27,7 @@ use super::super::openai::AppState;
 use super::common::{error_response, verify_admin};
 use crate::checkin::claim::{self, supports_checkin};
 use crate::checkin::scheduler;
-use crate::checkin::store::{CheckinOutcome, CheckinSchedule, CheckinSettings};
+use crate::checkin::store::{CheckinOutcome, CheckinRecord, CheckinSchedule, CheckinSettings};
 
 /// GET /api/checkin-center —— 总览快照（零上游请求）。
 pub async fn handle_checkin_center(
@@ -84,6 +84,8 @@ pub async fn handle_checkin_center(
         "data": {
             "settings": settings,
             "supported_providers": claim::supported_providers(),
+            // 实现随上游进入闭源插件仓、主仓未接入的三家（前端据此置灰入口）：
+            "unsupported_providers": claim::UNSUPPORTED_PROVIDERS,
             "providers": providers,
             "schedules": state.upstream_checkin.schedules(),
             "records_total": records_total,
@@ -204,6 +206,16 @@ pub struct RecordsQuery {
     pub account_id: Option<String>,
     #[serde(default)]
     pub outcome: Option<String>,
+    /// 记录类型筛选：manual | schedule | makeup | retry（空/缺省 = 不过滤）。
+    /// 存量记录 `kind` 为空 —— 回退按 `source` 匹配，保证旧台账也能被筛到。
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// 起始 unix 秒（闭区间；缺省 = 不限）
+    #[serde(default)]
+    pub start: Option<i64>,
+    /// 结束 unix 秒（闭区间；缺省 = 不限）
+    #[serde(default)]
+    pub end: Option<i64>,
     /// 关键词（账号名 / 账号 id / 上游 / 说明，大小写不敏感包含）
     #[serde(default)]
     pub keyword: Option<String>,
@@ -223,6 +235,25 @@ fn default_page_size() -> usize {
     50
 }
 
+/// 台账在内存里的二次筛选：`kind`（空 = 不过滤，存量记录 `kind` 为空时回退按
+/// `source` 匹配）与 `[start, end]` 闭区间时间过滤。抽成纯函数便于单测边界。
+pub(crate) fn filter_records(
+    records: Vec<CheckinRecord>,
+    kind: Option<&str>,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Vec<CheckinRecord> {
+    let kind = kind.filter(|s| !s.is_empty());
+    records
+        .into_iter()
+        .filter(|r| {
+            kind.is_none_or(|k| r.kind == k || r.source == k)
+                && start.is_none_or(|s| r.ts >= s)
+                && end.is_none_or(|e| r.ts <= e)
+        })
+        .collect()
+}
+
 /// GET /api/checkin-center/records —— 台账（分页 + 关键词）。
 pub async fn handle_checkin_records(
     State(state): State<AppState>,
@@ -235,6 +266,7 @@ pub async fn handle_checkin_records(
         Some("already") => Some(CheckinOutcome::Already),
         Some("pending") => Some(CheckinOutcome::Pending),
         Some("failed") => Some(CheckinOutcome::Failed),
+        Some("captcha") => Some(CheckinOutcome::Captcha),
         _ => None,
     };
     let records = state
@@ -252,6 +284,9 @@ pub async fn handle_checkin_records(
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
         })?;
+    // kind / 时间区间（闭区间）在内存里再筛一遍：`recent_records` 的签名不动，
+    // 分页与 `total` 语义保持不变（total = 筛选后的总数）。
+    let records = filter_records(records, q.kind.as_deref(), q.start, q.end);
     // 过滤后总数（供分页控件），再截取当前页
     let total = records.len();
     let page = if q.limit > 0 {
@@ -305,6 +340,7 @@ pub async fn handle_clear_checkin_records(
             Some("already") => Some(CheckinOutcome::Already),
             Some("pending") => Some(CheckinOutcome::Pending),
             Some("failed") => Some(CheckinOutcome::Failed),
+            Some("captcha") => Some(CheckinOutcome::Captcha),
             _ => None,
         };
         let removed = state
@@ -402,10 +438,39 @@ pub struct ScheduleBody {
     /// 保持存量值（编辑别家字段不该把覆盖清掉）。
     #[serde(default)]
     pub provider_times: Option<HashMap<String, String>>,
+    /// 窗口结束时刻（HH:MM）；空 = 无窗口。未传时继承存量。
+    #[serde(default)]
+    pub time_end: Option<String>,
+    /// true = 每个账号在 `[time, time_end]` 内取确定性随机时刻。未传时继承存量。
+    #[serde(default)]
+    pub randomize: Option<bool>,
+    /// 每账号每天重试次数上限（0 = 关闭重试）。未传时继承存量（缺省 3）。
+    #[serde(default)]
+    pub retry_limit: Option<u32>,
+    /// 重试间隔（分钟，<=0 回落全局）。未传时继承存量（缺省 5）。
+    #[serde(default)]
+    pub retry_gap_minutes: Option<u32>,
+    /// 补签轮时刻（HH:MM）；空 = 不跑补签轮。未传时继承存量。
+    #[serde(default)]
+    pub makeup_time: Option<String>,
 }
+
+/// 条目缺省重试上限 / 间隔（与 `store` 的 `default_retry_limit/_minutes` 一致）。
+const DEFAULT_RETRY_LIMIT: u32 = 3;
+const DEFAULT_RETRY_GAP_MINUTES: u32 = 5;
 
 fn default_true() -> bool {
     true
+}
+
+/// 归一一个「HH:MM」输入：空串 → 空；合法 → 原值；非法 → Err（调用方转 400）。
+fn normalize_hhmm(value: &str, field: &str) -> Result<String, String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() || scheduler::is_hhmm(&trimmed) {
+        Ok(trimmed)
+    } else {
+        Err(format!("{field} 格式必须是 HH:MM（如 11:00）"))
+    }
 }
 
 /// POST /api/checkin-center/schedules —— 新增或更新。
@@ -434,23 +499,65 @@ pub async fn handle_upsert_checkin_schedule(
     } else {
         body.label.trim().to_string()
     };
+    // 现状计划（按 id 匹配）：运行状态与「未传字段」都从它继承 —— 编辑别家
+    // 字段不该把上次执行结果/覆盖/窗口设置清掉。
+    let existing = state
+        .upstream_checkin
+        .schedules()
+        .into_iter()
+        .find(|s| s.id == body.id);
+    // 区间窗两个时刻：未传 → 继承存量；传了 → 归一（空 = 清空，非法 → 400）
+    let time_end = match body.time_end.as_deref() {
+        None => existing
+            .as_ref()
+            .map(|s| s.time_end.clone())
+            .unwrap_or_default(),
+        Some(raw) => normalize_hhmm(raw, "窗口结束时刻")
+            .map_err(|m| error_response(&m, StatusCode::BAD_REQUEST))?,
+    };
+    let makeup_time = match body.makeup_time.as_deref() {
+        None => existing
+            .as_ref()
+            .map(|s| s.makeup_time.clone())
+            .unwrap_or_default(),
+        Some(raw) => normalize_hhmm(raw, "补签时刻")
+            .map_err(|m| error_response(&m, StatusCode::BAD_REQUEST))?,
+    };
+    let randomize = body
+        .randomize
+        .unwrap_or_else(|| existing.as_ref().map(|s| s.randomize).unwrap_or(false));
+    if randomize && !time_end.is_empty() && time_end.as_str() <= body.time.as_str() {
+        return Err(error_response(
+            "开启区间随机时，窗口结束时刻必须晚于开始时刻",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let retry_limit = body.retry_limit.unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|s| s.retry_limit)
+            .unwrap_or(DEFAULT_RETRY_LIMIT)
+    });
+    let retry_gap_minutes = body.retry_gap_minutes.unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|s| s.retry_gap_minutes)
+            .unwrap_or(DEFAULT_RETRY_GAP_MINUTES)
+    });
     // 保存计划只改配置：运行状态（上次触发/结果/成功·保活·失败计数）必须从现有
     // 计划继承，否则编辑一次就把界面「上次执行」清空，且空 last_fired_date 会让
     // 调度器当天重复触发签到（浪费上游日配额）。
     let (last_fired_date, last_result, last_ok, last_keepalive, last_failed, last_fired_providers) =
-        state
-            .upstream_checkin
-            .schedules()
-            .into_iter()
-            .find(|s| s.id == body.id)
+        existing
+            .as_ref()
             .map(|s| {
                 (
-                    s.last_fired_date,
-                    s.last_result,
+                    s.last_fired_date.clone(),
+                    s.last_result.clone(),
                     s.last_ok,
                     s.last_keepalive,
                     s.last_failed,
-                    s.last_fired_providers,
+                    s.last_fired_providers.clone(),
                 )
             })
             .unwrap_or_default();
@@ -473,12 +580,9 @@ pub async fn handle_upsert_checkin_schedule(
             }
             cleaned
         }
-        None => state
-            .upstream_checkin
-            .schedules()
-            .into_iter()
-            .find(|s| s.id == body.id)
-            .map(|s| s.provider_times)
+        None => existing
+            .as_ref()
+            .map(|s| s.provider_times.clone())
             .unwrap_or_default(),
     };
     let list = state
@@ -488,6 +592,11 @@ pub async fn handle_upsert_checkin_schedule(
             label,
             enabled: body.enabled,
             time: body.time,
+            time_end,
+            randomize,
+            retry_limit,
+            retry_gap_minutes,
+            makeup_time,
             providers: body.providers,
             provider_times,
             last_fired_date,
@@ -730,4 +839,74 @@ pub async fn handle_put_keepalive(
             )
         })?;
     Ok(Json(json!({ "success": true, "data": view })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(ts: i64, source: &str, kind: &str) -> CheckinRecord {
+        CheckinRecord {
+            ts,
+            date: "2026-01-01".into(),
+            account_id: "a".into(),
+            account_name: "n".into(),
+            provider: "loomy".into(),
+            source: source.into(),
+            kind: kind.into(),
+            outcome: CheckinOutcome::Success,
+            ok: true,
+            kept_active: false,
+            message: String::new(),
+            error: String::new(),
+        }
+    }
+
+    #[test]
+    fn filter_records_kind_and_time_range_boundaries() {
+        let records = vec![
+            rec(100, "manual", "manual"),
+            rec(200, "schedule", "schedule"),
+            rec(300, "makeup", "makeup"),
+            rec(400, "", "schedule"), // 存量记录：kind 空、source 有值
+        ];
+        // kind 精确筛选；存量 kind 为空时回退 source
+        let ids = |v: Vec<CheckinRecord>| v.into_iter().map(|r| r.ts).collect::<Vec<_>>();
+        assert_eq!(
+            ids(filter_records(
+                records.clone(),
+                Some("schedule"),
+                None,
+                None
+            )),
+            vec![200, 400]
+        );
+        assert_eq!(
+            ids(filter_records(records.clone(), Some("makeup"), None, None)),
+            vec![300]
+        );
+        // 空串 = 不过滤
+        assert_eq!(
+            filter_records(records.clone(), Some(""), None, None).len(),
+            4
+        );
+        // 时间区间为**闭区间**：端点都包含
+        assert_eq!(
+            ids(filter_records(records.clone(), None, Some(200), Some(300))),
+            vec![200, 300]
+        );
+        assert_eq!(
+            ids(filter_records(records.clone(), None, Some(201), None)),
+            vec![300, 400]
+        );
+        assert_eq!(
+            ids(filter_records(records.clone(), None, None, Some(199))),
+            vec![100]
+        );
+        // 组合：kind + 区间
+        assert_eq!(
+            ids(filter_records(records, Some("schedule"), Some(300), None)),
+            vec![400]
+        );
+    }
 }

@@ -11,7 +11,7 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -175,6 +175,16 @@ struct Inner {
 #[derive(Clone)]
 pub struct AccountSessionStore {
     inner: Arc<Inner>,
+}
+
+/// 整队重排结果（SPEC 1.0.49 §9）。
+///
+/// - `updated`：`sort_order` **实际变化**并落盘的账号数（幂等重复提交为 0）
+/// - `skipped`：未被应用的条目数（未知 id 或重复 id；不报错）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReorderOutcome {
+    pub updated: usize,
+    pub skipped: usize,
 }
 
 /// 条件组限制裁决门（A2）：对单个账号求值，返回 `Some(原因码)` 表示跳过该账号。
@@ -785,6 +795,11 @@ impl AccountSessionStore {
             .into_iter()
             .filter(|index| sessions[*index].priority == max_priority)
             .collect();
+        // SPEC 1.0.49 §9：同 priority 组内再按 `sort_order` 升序先试
+        //（0 = 存量中位，负数置顶）。只保留**最小档**进入下一级——规则排序
+        // 与加权轮转仍在同档内生效。存量全 0 → 整组同档，行为与改造前一致；
+        // priority 组已在上面切好，sort_order 不会跨组串动。
+        let group = narrow_to_top_sort_order(&sessions, group);
         let order = scope.map(|s| s.account_order.as_slice()).unwrap_or(&[]);
         let pick = pick_by_rules(&sessions, &group, order, sort_rules)
             .unwrap_or_else(|| pick_weighted(&sessions, &group, now));
@@ -997,6 +1012,111 @@ impl AccountSessionStore {
         true
     }
 
+    /// SPEC 1.0.49 §9：直接写某账号的 `sort_order`（管理面整队重排用）。
+    ///
+    /// 只改排序键，不碰 `priority` / 运行态；返回是否命中账号（值未变算命中、
+    /// 不重复写盘）。写盘失败只 warn —— 与既有运行态写入同口径。
+    pub fn set_sort_order(&self, id: &str, sort_order: i64) -> bool {
+        if self.get(id).is_none() {
+            return false;
+        }
+        self.update_sort_orders(&[(id.to_string(), sort_order)]);
+        true
+    }
+
+    /// SPEC 1.0.49 §9 置顶：该账号 `sort_order = 同渠道同 priority 组内最小 - 1`。
+    ///
+    /// 「组」= 与目标账号 `channel_id` 与 `priority` 都相同的账号（选路分档
+    /// 边界，见 [`narrow_to_top_sort_order`]）。组内已无其它账号（或空组）时
+    /// 以 `0` 为基线 → `-1`，保证置顶仍然生效且可重复按序置顶。
+    ///
+    /// 返回更新后的账号快照；账号不存在返回 `None`。
+    pub fn promote(&self, id: &str) -> Option<AccountSession> {
+        let snapshot = {
+            let mut sessions = self.inner.sessions.write();
+            let Some(slot) = sessions.iter().position(|s| s.id == id) else {
+                return None;
+            };
+            let priority = sessions[slot].priority;
+            let channel_id = sessions[slot].channel_id.clone();
+            // 组内最小（**含自己**：重复置顶时每次都比当前最小再 -1，名次持续前移）
+            let group_min = sessions
+                .iter()
+                .filter(|s| s.channel_id == channel_id && s.priority == priority)
+                .map(|s| s.sort_order)
+                .min()
+                .unwrap_or(0);
+            sessions[slot].sort_order = group_min.saturating_sub(1);
+            sessions[slot].updated_at = chrono::Utc::now().timestamp();
+            sessions[slot].clone()
+        };
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::warn!("persist account session {} sort order: {e}", snapshot.id);
+        }
+        Some(snapshot)
+    }
+
+    /// SPEC 1.0.49 §9 整队重排：按数组顺序写 `sort_order = index + 1`。
+    ///
+    /// 未知 id **忽略**并计入 `skipped`（不报错：客户端可能拿到过期列表）；
+    /// 重复 id 只按**首次**出现定名次，后续重复同样计入 `skipped` —— 幂等：
+    /// 同一数组重复提交 `updated = 0`，不产生写盘。
+    pub fn reorder(&self, ids: &[String]) -> ReorderOutcome {
+        // 未知 id 判定走一次快照（避免逐条自旋 get 的多次读锁）；
+        // 重复判定用 HashSet（O(1)，列表规模与账号池同量级）。
+        let known: HashSet<String> = self
+            .inner
+            .sessions
+            .read()
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        let mut updates: Vec<(String, i64)> = Vec::with_capacity(ids.len());
+        let mut seen: HashSet<&str> = HashSet::with_capacity(ids.len());
+        let mut skipped = 0usize;
+        for (index, id) in ids.iter().enumerate() {
+            if !known.contains(id) || !seen.insert(id.as_str()) {
+                skipped += 1;
+                continue;
+            }
+            updates.push((id.clone(), index as i64 + 1));
+        }
+        ReorderOutcome {
+            updated: self.update_sort_orders(&updates),
+            skipped,
+        }
+    }
+
+    /// 批量写 `sort_order`（一次上锁、逐条落盘）。返回命中账号数。
+    fn update_sort_orders(&self, updates: &[(String, i64)]) -> usize {
+        if updates.is_empty() {
+            return 0;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut touched: Vec<AccountSession> = Vec::with_capacity(updates.len());
+        {
+            let mut sessions = self.inner.sessions.write();
+            for (id, sort_order) in updates {
+                let Some(session) = sessions.iter_mut().find(|s| s.id == *id) else {
+                    continue;
+                };
+                if session.sort_order == *sort_order {
+                    // 幂等：值未变不写盘（PUT /order 重复提交不该产生写风暴）
+                    continue;
+                }
+                session.sort_order = *sort_order;
+                session.updated_at = now;
+                touched.push(session.clone());
+            }
+        }
+        for session in &touched {
+            if let Err(e) = self.persist(session) {
+                tracing::warn!("persist account session {} sort order: {e}", session.id);
+            }
+        }
+        touched.len()
+    }
+
     /// 上游拒了这枚凭据（401/403），且该家**不可自动续期**（#35 C1）。
     ///
     /// 按账号累计连续拒绝次数，达到
@@ -1207,6 +1327,25 @@ impl AccountSessionStore {
         }
         touched.len() as u64
     }
+}
+
+/// SPEC 1.0.49 §9：同 `priority` 组内按 `sort_order` 分档，只保留最小档。
+///
+/// `sort_order` 升序（负数置顶、0 = 存量中位）。与 `priority` 同构：**最小档
+/// 独占**组内选号，落败档在下一档账号全部冷却/占满后才有机会（那些账号届时
+/// 才回到候选）。空组原样返回（调用方零分支）。存量全 0 → 整组同档，
+/// 选路与改造前逐字节等价。
+fn narrow_to_top_sort_order(sessions: &[AccountSession], group: Vec<usize>) -> Vec<usize> {
+    // 先取值再解构：`.min()` 的临时借用在本语句结束时即释放，let-else 分支
+    // 无需移动仍被借用的 `group`（let-else 的临时作用域规则易踩借用检查）。
+    let top = group.iter().map(|index| sessions[*index].sort_order).min();
+    let Some(top) = top else {
+        return group;
+    };
+    group
+        .into_iter()
+        .filter(|index| sessions[*index].sort_order == top)
+        .collect()
 }
 
 /// 组内加权随机：空闲最久的账号获得额外权重（避免热点账号被持续打满）。
@@ -1580,6 +1719,11 @@ mod tests {
             pool.upsert(session("ch", "high", 9)).unwrap();
             let lease = pool.acquire("ch", "m", None).expect("应有可用账号");
             assert_eq!(lease.session().name, "high");
+            assert_eq!(
+                pool.get(lease.id()).unwrap().sort_order,
+                0,
+                "存量账号缺省 sort_order = 0"
+            );
         });
     }
 
@@ -2443,6 +2587,165 @@ mod tests {
             pool.upsert(session("ch-b", "b", 0)).unwrap();
             assert_eq!(pool.remove_for_channel("ch-a").unwrap(), 1);
             assert_eq!(pool.len(), 1);
+        });
+    }
+
+    // ── SPEC 1.0.49 §9：sort_order 选路 / 置顶 / 整队重排 ──────────────
+
+    /// 分档纯函数（确定性，不依赖随机）：只留最小 `sort_order` 档；
+    /// 空组原样返回；全同档原样返回（存量形态，选路不变）。
+    #[test]
+    fn narrow_to_top_sort_order_keeps_only_minimum_tier() {
+        let mk = |name: &str, sort_order: i64| {
+            let mut s = AccountSession::new("ch", name);
+            s.sort_order = sort_order;
+            s
+        };
+        let sessions = vec![mk("a", 0), mk("top", -3), mk("b", 0), mk("c", 5)];
+        assert_eq!(
+            narrow_to_top_sort_order(&sessions, vec![0, 1, 2, 3]),
+            vec![1],
+            "负数置顶档独占"
+        );
+        assert!(
+            narrow_to_top_sort_order(&sessions, vec![]).is_empty(),
+            "空组原样返回"
+        );
+        let legacy = vec![mk("a", 0), mk("b", 0)];
+        assert_eq!(
+            narrow_to_top_sort_order(&legacy, vec![0, 1]),
+            vec![0, 1],
+            "存量全 0 同档：整组保留，加权轮转不被裁"
+        );
+    }
+
+    /// 置顶后组内名次第一：sort_order 最小档独占候选（负数为置顶）。
+    #[test]
+    fn promote_makes_account_first_in_its_priority_group() {
+        with_secret_dir("sort-promote", || {
+            let pool = pool();
+            let a = pool.upsert(session("ch", "a", 0)).unwrap();
+            pool.upsert(session("ch", "b", 0)).unwrap();
+            assert_eq!(a.sort_order, 0, "存量账号缺省 sort_order = 0");
+            let promoted = pool.promote(&a.id).expect("账号应存在");
+            assert_eq!(promoted.sort_order, -1, "组内最小 0 → 置顶写成 -1");
+            for _ in 0..5 {
+                let lease = pool.acquire("ch", "m", None).expect("应有可用账号");
+                assert_eq!(lease.session().name, "a", "置顶后组内名次第一");
+            }
+            // 重复置顶继续前移（-1 的组内最小 → -2）
+            let again = pool.promote(&a.id).expect("账号应存在");
+            assert_eq!(again.sort_order, -2);
+            assert!(pool.promote("missing-id").is_none());
+        });
+    }
+
+    /// PUT order 幂等：同一数组重复提交，第二次无实际写入（updated_at 不变）。
+    #[test]
+    fn reorder_is_idempotent() {
+        with_secret_dir("sort-reorder", || {
+            let pool = pool();
+            let a = pool.upsert(session("ch", "a", 0)).unwrap();
+            let b = pool.upsert(session("ch", "b", 0)).unwrap();
+            let order = vec![b.id.clone(), a.id.clone()];
+            assert_eq!(
+                pool.reorder(&order),
+                ReorderOutcome {
+                    updated: 2,
+                    skipped: 0
+                }
+            );
+            let loaded = pool.all();
+            let at_of = |id: &str| loaded.iter().find(|s| s.id == id).unwrap().clone();
+            assert_eq!(at_of(&b.id).sort_order, 1);
+            assert_eq!(at_of(&a.id).sort_order, 2);
+            let before = at_of(&a.id).updated_at;
+            assert_eq!(
+                pool.reorder(&order),
+                ReorderOutcome {
+                    updated: 0,
+                    skipped: 0
+                },
+                "值未变不重复写盘"
+            );
+            assert_eq!(pool.get(&a.id).unwrap().updated_at, before);
+        });
+    }
+
+    /// 未知 id 被跳过、重复 id 只按首次定名次（不 panic、不越位）。
+    #[test]
+    fn reorder_skips_unknown_and_duplicate_ids() {
+        with_secret_dir("sort-reorder-unknown", || {
+            let pool = pool();
+            let a = pool.upsert(session("ch", "a", 0)).unwrap();
+            assert_eq!(
+                pool.reorder(&["ghost".to_string(), a.id.clone()]),
+                ReorderOutcome {
+                    updated: 1,
+                    skipped: 1
+                }
+            );
+            assert_eq!(pool.get(&a.id).unwrap().sort_order, 2, "名次取数组下标 + 1");
+            // 重复 id：首现 index=0 定 1；第二次忽略
+            assert_eq!(
+                pool.reorder(&[a.id.clone(), a.id.clone(), "ghost".to_string()]),
+                ReorderOutcome {
+                    updated: 1,
+                    skipped: 2
+                }
+            );
+            assert_eq!(pool.get(&a.id).unwrap().sort_order, 1);
+        });
+    }
+
+    /// 正向对照：跨 priority 不串组 —— 低优先级组置顶不影响高优先级组选号；
+    /// 反向对照：同组内 sort_order 才生效。
+    #[test]
+    fn sort_order_does_not_cross_priority_groups() {
+        with_secret_dir("sort-cross-priority", || {
+            let pool = pool();
+            let high = pool.upsert(session("ch", "high", 9)).unwrap();
+            let low = pool.upsert(session("ch", "low", 1)).unwrap();
+            // 给低优先级组置顶（sort_order = -5）：高优先级组仍然必胜
+            pool.set_sort_order(&low.id, -5);
+            for _ in 0..5 {
+                let lease = pool.acquire("ch", "m", None).expect("应有可用账号");
+                assert_eq!(
+                    lease.session().name,
+                    "high",
+                    "priority 是硬约束，不被 sort_order 推翻"
+                );
+            }
+            // 同组内 sort_order 生效：高优先级组里再置顶另一个账号
+            let high2 = pool.upsert(session("ch", "high2", 9)).unwrap();
+            assert_eq!(high2.sort_order, 0);
+            pool.set_sort_order(&high.id, 3);
+            pool.set_sort_order(&high2.id, 1);
+            for _ in 0..5 {
+                let lease = pool.acquire("ch", "m", None).expect("应有可用账号");
+                assert_eq!(
+                    lease.session().name,
+                    "high2",
+                    "同 priority 组内 sort_order 升序先试"
+                );
+            }
+        });
+    }
+
+    /// 存量对照：sort_order 全 0（升级前的数据形态）→ 选路行为不变（同组内
+    /// 仍走权重轮转，两个账号都会被选到）。
+    #[test]
+    fn legacy_zero_sort_order_keeps_weighted_rotation() {
+        with_secret_dir("sort-legacy", || {
+            let pool = pool();
+            pool.upsert(session("ch", "a", 0)).unwrap();
+            pool.upsert(session("ch", "b", 0)).unwrap();
+            let mut names = std::collections::HashSet::new();
+            for _ in 0..40 {
+                let lease = pool.acquire("ch", "m", None).expect("应有可用账号");
+                names.insert(lease.session().name.clone());
+            }
+            assert_eq!(names.len(), 2, "同档账号仍参与加权轮转，不被分档裁掉");
         });
     }
 }
