@@ -1034,9 +1034,7 @@ impl AccountSessionStore {
     pub fn promote(&self, id: &str) -> Option<AccountSession> {
         let snapshot = {
             let mut sessions = self.inner.sessions.write();
-            let Some(slot) = sessions.iter().position(|s| s.id == id) else {
-                return None;
-            };
+            let slot = sessions.iter().position(|s| s.id == id)?;
             let priority = sessions[slot].priority;
             let channel_id = sessions[slot].channel_id.clone();
             // 组内最小（**含自己**：重复置顶时每次都比当前最小再 -1，名次持续前移）

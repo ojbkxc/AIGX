@@ -1169,6 +1169,12 @@ fn paths_accounts_network() -> Value {
         "/api/account-sessions/{id}/refresh": {
             "post": op_params("账号池", "刷新账号 token（force 可选；失败不改写凭据）", &[path_param("id")])
         },
+        "/api/account-sessions/{id}/promote": {
+            "post": op_params("账号池", "账号置顶（提到同渠道同优先级队首，sort_order = 组内最小 - 1）", &[path_param("id")])
+        },
+        "/api/account-sessions/order": {
+            "put": op_body("账号池", "账号整队重排（按给定 id 数组顺序重写 sort_order，未知/重复 id 计入 skipped）", "order: 从队首到队尾的账号 id 数组")
+        },
         "/api/update/status": {
             "get": op("更新", "服务器更新状态（版本/下载进度/待重启/可原地更新）")
         },
@@ -1389,6 +1395,9 @@ mod tests {
         add("/api/account-sessions/{id}/balance", &["get"]);
         add("/api/account-sessions/{id}/refresh", &["post"]);
         add("/api/account-sessions/{id}/test", &["post"]);
+        // SPEC-1.0.49 §9（流 H）：组内置顶 + 整队重排（sort_order）
+        add("/api/account-sessions/{id}/promote", &["post"]);
+        add("/api/account-sessions/order", &["put"]);
         add("/api/update/apply", &["post"]);
         add("/api/update/check", &["post"]);
         add("/api/update/restart", &["post"]);

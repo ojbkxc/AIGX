@@ -102,8 +102,11 @@ test.describe('账号池 1.0.44 · §7 验收面', () => {
     await loginAsAdmin(page, { sessions: [] });
   });
 
-  // 1 §1 表头 sticky + 12.5px 字号（断言 computed style）
-  test('1 · 账号池表头 sticky 且字号 12.5px/10.5px、内边距 7px 10px', async ({ page, pageErrors }) => {
+  // 1 §1 表头 sticky + 密度与供应商页（Channels）逐项一致
+  //   SPEC-1.0.49 §9b I-2：用户要求「宽高按供应商那块（Channels.css .channels-table）来」，
+  //   故表头由 1.0.44 的 padding-top 7px 改为 8px（横向仍 10px），字号 10.5px 不变，
+  //   并显式 text-transform: none（App.css 全局 `table th` 会上大写）。数据行仍是 7px 10px。
+  test('1 · 账号池表头 sticky 且与供应商页同密度（th 8px 10px / td 7px 10px）', async ({ page, pageErrors }) => {
     await gotoAccounts(page);
 
     // 滚动容器：.as-scroll 可滚动 + 有 max-height（= 表头 sticky 生效的前提）
@@ -114,16 +117,21 @@ test.describe('账号池 1.0.44 · §7 验收面', () => {
     expect(scroll.overflowY).toBe('auto');
     expect(scroll.maxHeight).not.toBe('none');
 
-    // 表头 th：sticky + 10.5px + padding 7px 10px
+    // 表头 th：sticky + 10.5px/600 + padding 8px 10px + 不做字母全大写
     const thStyle = await page.locator('.as-table thead th').first().evaluate((el) => {
       const s = getComputedStyle(el);
-      return { position: s.position, top: s.top, fontSize: s.fontSize, paddingTop: s.paddingTop, paddingLeft: s.paddingLeft };
+      return {
+        position: s.position, top: s.top, fontSize: s.fontSize, fontWeight: s.fontWeight,
+        paddingTop: s.paddingTop, paddingLeft: s.paddingLeft, textTransform: s.textTransform,
+      };
     });
     expect(thStyle.position).toBe('sticky');
     expect(thStyle.top).toBe('0px');
     expect(thStyle.fontSize).toBe('10.5px');
-    expect(thStyle.paddingTop).toBe('7px');
+    expect(thStyle.fontWeight).toBe('600');
+    expect(thStyle.paddingTop).toBe('8px');
     expect(thStyle.paddingLeft).toBe('10px');
+    expect(thStyle.textTransform).toBe('none');
 
     // 数据格 td：继承 12.5px + padding 7px 10px
     const tdStyle = await page.locator('td.as-c-name').first().evaluate((el) => {

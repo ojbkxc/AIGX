@@ -160,6 +160,59 @@ pub(super) fn tools() -> Vec<ToolDef> {
             },
         ),
         td(
+            "aigx_account_promote",
+            "账号置顶",
+            "写操作（可回滚）：把账号提到同渠道同优先级的队首（sort_order = 组内最小 - 1）",
+            LowRisk,
+            "account_id",
+            &["/api/account-sessions/{id}/promote"],
+            account_id_args,
+            |s, h, a| {
+                Box::pin(async move {
+                    let id = require_arg(a, "account_id")?;
+                    out(admin::account_sessions::handle_promote_account_session(
+                        State(s.clone()),
+                        h.clone(),
+                        Path(id),
+                    )
+                    .await)
+                })
+            },
+        ),
+        td(
+            "aigx_account_reorder",
+            "账号整队重排",
+            "写操作（可回滚）：按给定 id 数组顺序重写账号 sort_order（未知/重复 id 计入 skipped）",
+            LowRisk,
+            "",
+            &["/api/account-sessions/order"],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "order": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "从队首到队尾的账号 id 数组"
+                        }
+                    },
+                    "required": ["order"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let body: admin::account_sessions::AccountOrderRequest =
+                        parse_tool_args("aigx_account_reorder", a)?;
+                    out(admin::account_sessions::handle_reorder_account_sessions(
+                        State(s.clone()),
+                        h.clone(),
+                        Json(body),
+                    )
+                    .await)
+                })
+            },
+        ),
+        td(
             "aigx_account_providers",
             "账号供应商清单",
             "只读：账号池支持的供应商清单（57 家）",

@@ -19,6 +19,10 @@ use std::sync::Arc;
 ///
 /// 透传（上游原生 Responses）与降级转换（Responses → Chat，session 型渠道）
 /// 共用同一套 failover / 熔断 / 计费骨架，只在最终回包时分支。
+//
+// `ConvertedJson` 比 `Passthrough` 大约 224 字节：本枚举只在单次上游尝试内
+// 短暂存活（failover 循环的局部量），不在热路径上堆叠，故不 box。
+#[allow(clippy::large_enum_variant)]
 enum ResponsesAttempt {
     /// 上游原生 Responses 透传（既有路径，零行为变化）
     Passthrough(ResponsesPassthrough),

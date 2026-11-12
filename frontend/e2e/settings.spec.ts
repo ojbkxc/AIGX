@@ -78,6 +78,10 @@ test.describe('系统设置分类', () => {
     // 「数据」在导航里唯一，但「数据」二字也会命中侧边栏分组名，
     // 用 exact 精确匹配导航项自身的文本
     await nav(page).getByRole('button', { name: '数据', exact: true }).click();
+    // 数据面板首屏有 loading 态（<div class="loading">加载中</div>）——不等它落定
+    // 就读 innerText 会抓到 3 个字的加载文案（mobile 上偶发，desktop 时序更宽）。
+    // 等真实内容出现再断言，才符合本用例「分类各自渲染内容」的意图。
+    await expect(page.locator('.settings-pane')).toContainText('数据管理');
     await expect(page.locator('.settings-pane')).not.toContainText('请求体大小上限');
     const text = await page.locator('.settings-pane').innerText();
     expect(text.length).toBeGreaterThan(10);

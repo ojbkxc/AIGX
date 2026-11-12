@@ -200,6 +200,10 @@ fn has_fingerprint(text: &str) -> bool {
 }
 
 /// 净化一段多模态 content（保留原签名，provider/role 缺省为空）。
+///
+/// 仅测试使用（生产路径一律走带 provider/role 作用域的
+/// [`sanitize_content_scoped`]）——因此 `cfg(test)` 标注，避免 dead_code 警告。
+#[cfg(test)]
 fn sanitize_content(value: &mut serde_json::Value) {
     sanitize_content_scoped("", "", value);
 }

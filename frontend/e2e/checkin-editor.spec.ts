@@ -4,13 +4,13 @@ import { test, expect, loginAsAdmin } from './fixtures';
  * 签到计划编辑器契约字段（#16 前端 + be-fix #16-B）。
  *
  * 逐家时刻覆盖（provider_times/builtin_times）后端已就绪 → 直接渲染；
- * 随机区间（time_end）/补签与重试（retry_time/retry_gap_minutes/retry_limit）
- * 按 feature-detect 门控：后端 schedules 响应含该字段才渲染与提交，
- * 旧后端不误发（发也存不下，编辑回显会丢）。
+ * 随机区间（time_end/randomize）/补签与重试（makeup_time/retry_gap_minutes/retry_limit）
+ * ——契约已于 1.0.49 冻结（SPEC-1.0.49 §4 后端 + §12 流D 偏离记录：去掉 feature-detect，
+ * 5 控件无条件渲染且一律提交；旧后端 serde(default) 忽略未知字段，无兼容风险）。
  * 全部用 page.route 覆盖 GET /api/checkin-center，不动 static-server 桩
  * （桩文件属 fe-lists-fix 域）。
  */
-test.describe('签到计划编辑器（契约字段门控）', () => {
+test.describe('签到计划编辑器（契约字段）', () => {
   /** 供编辑流程用的完整 center 数据：契约字段齐全 */
   const CENTER_WITH_CONTRACT = {
     settings: { enabled: true, gap_ms: 500, timezone_offset: 8, retry_gap_ms: 600_000, keep_days: 30 },
@@ -22,7 +22,8 @@ test.describe('签到计划编辑器（契约字段门控）', () => {
         providers: ['workbuddy'],
         provider_times: { workbuddy: '10:05' },
         time_end: '09:30',
-        retry_time: '12:00',
+        randomize: false,
+        makeup_time: '12:00',
         retry_gap_minutes: 15,
         retry_limit: 5,
         last_fired_date: '', last_result: '', last_ok: 0, last_keepalive: 0, last_failed: 0,
@@ -103,13 +104,16 @@ test.describe('签到计划编辑器（契约字段门控）', () => {
     await expect(page.locator('.ck-preview-group code')).toHaveText('10:05');
     await expect(page.locator('.ck-preview-group')).toContainText('workbuddy');
 
-    // 契约字段门控块可见且带回显：随机区间 09:30 / 补签 12:00 / 间隔 15 / 次数 5
-    await expect(page.locator('.ck-editor').getByText('随机签到区间（可选）')).toBeVisible();
-    await expect(page.getByLabel('区间结束')).toHaveValue('09:30');
-    await expect(page.locator('.ck-editor').getByText('补签与重试')).toBeVisible();
-    await expect(page.getByLabel('定时补签时刻（留空 = 关闭）')).toHaveValue('12:00');
-    await expect(page.getByLabel('补签/重试间隔（分钟）')).toHaveValue('15');
-    await expect(page.getByLabel('每账号每天最多重试（次，0 = 关）')).toHaveValue('5');
+    // 契约字段块可见且带回显：随机区间 09:30 / 补签 12:00 / 间隔 15 / 次数 5
+    // （作用域限定 .ck-editor：设置卡里还有个「失败/窗口重试间隔（分钟）」，
+    //   getByLabel 是子串匹配，不限定会命中两个 input）
+    const editor = page.locator('.ck-editor');
+    await expect(editor.getByText('随机签到区间（可选）')).toBeVisible();
+    await expect(editor.getByLabel('区间结束时刻')).toHaveValue('09:30');
+    await expect(editor.getByText('补签与重试')).toBeVisible();
+    await expect(editor.getByLabel('补签时刻')).toHaveValue('12:00');
+    await expect(editor.getByLabel('重试间隔（分钟）')).toHaveValue('15');
+    await expect(editor.getByLabel('每账号每天最多重试（次）')).toHaveValue('5');
 
     // 保存：POST body 带全部契约字段
     let saved: Record<string, unknown> | null = null;
@@ -125,23 +129,26 @@ test.describe('签到计划编辑器（契约字段门控）', () => {
     const body = saved as Record<string, unknown>;
     expect(body.provider_times).toEqual({ workbuddy: '10:05' });
     expect(body.time_end).toBe('09:30');
-    expect(body.retry_time).toBe('12:00');
+    expect(body.randomize).toBe(false);
+    expect(body.makeup_time).toBe('12:00');
     expect(body.retry_gap_minutes).toBe(15);
     expect(body.retry_limit).toBe(5);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('旧后端形状：门控块不渲染，保存不携带契约字段', async ({ page, pageErrors }) => {
+  test('契约冻结：桩无契约字段时控件照样渲染，新建条目保存一律携带 5 契约字段', async ({ page, pageErrors }) => {
     test.skip((page.viewportSize()?.width ?? 0) < 900, '桌面编辑器形态');
-    // 不覆盖 GET center：桩数据无 time_end/retry_time（旧后端形状）
+    // 不覆盖 GET center：桩数据无 time_end/randomize/makeup_time（旧后端形状的载荷）。
+    // SPEC-1.0.49 §12 流D：门控已去掉——「零条目」正是新建第一条计划最需要控件的场景，
+    // 旧后端 serde(default) 忽略未知字段，前后端同版本发布，故一律渲染 + 一律提交。
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/checkin');
     await page.locator('.sub-tab', { hasText: '定时签到' }).click();
     await page.getByRole('button', { name: '添加条目' }).click();
 
-    await expect(page.locator('.ck-editor').getByText('随机签到区间（可选）')).toHaveCount(0);
-    await expect(page.locator('.ck-editor').getByText('补签与重试')).toHaveCount(0);
+    await expect(page.locator('.ck-editor').getByText('随机签到区间（可选）')).toBeVisible();
+    await expect(page.locator('.ck-editor').getByText('补签与重试')).toBeVisible();
 
     let saved: Record<string, unknown> | null = null;
     await page.route('**/api/checkin-center/schedules', async (route) => {
@@ -155,10 +162,12 @@ test.describe('签到计划编辑器（契约字段门控）', () => {
     await page.locator('.ck-form-actions').getByRole('button', { name: '保存' }).click();
     await expect.poll(() => saved).not.toBeNull();
     const body = saved as Record<string, unknown>;
-    expect(body.time_end).toBeUndefined();
-    expect(body.retry_time).toBeUndefined();
-    expect(body.retry_gap_minutes).toBeUndefined();
-    expect(body.retry_limit).toBeUndefined();
+    // 全新表单：契约字段取空/缺省（EMPTY_SCHEDULE），而非省略
+    expect(body.time_end).toBe('');
+    expect(body.randomize).toBe(false);
+    expect(body.makeup_time).toBe('');
+    expect(body.retry_gap_minutes).toBe(5);
+    expect(body.retry_limit).toBe(3);
     expect(body.provider_times).toEqual({});
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
