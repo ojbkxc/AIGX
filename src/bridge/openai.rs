@@ -1276,6 +1276,50 @@ mod tests {
         assert_eq!(blank.base_url, "https://atomgit.com/v1");
     }
 
+    /// **全量扫描**登录态供应商的对话 URL 拼接：用真实构造函数
+    /// `with_session_auth` 把 `SESSION_PROVIDERS` 每家跑一遍，钉住
+    /// 「chat_path 非空 → URL = provider 默认 base + chat_path（不得多插 /v1）」
+    /// 与「chat_path 为空 → 默认补 /v1」。
+    ///
+    /// 这是「其他家也不要出同族问题」的通用护栏：registry 表里任何一家把
+    /// base 或 chat_path 写错（例如新增家抄了 `.../v1` 的 base 又给 `/v1/...`
+    /// 的 chat_path），本测直接点名是哪一家。
+    #[test]
+    fn session_providers_resolve_urls_without_double_prefix() {
+        use crate::account_session::registry::SESSION_PROVIDERS;
+        let mut checked = 0usize;
+        for (kind, meta) in SESSION_PROVIDERS {
+            // 默认地址为空的（officeace 等「必须显式填地址」的家）没有可断言的 base
+            if meta.base_url.trim().is_empty() {
+                continue;
+            }
+            let bridge = super::OpenaiCompatibleBridge::with_session_auth(
+                meta.base_url,
+                "tok",
+                reqwest::Client::new(),
+                super::AuthMode::Bearer,
+                Vec::new(),
+                Some(meta.chat_path.to_string()),
+            );
+            let expected = if meta.chat_path.trim().is_empty() {
+                format!(
+                    "{}/chat/completions",
+                    normalize_base_url(meta.base_url.to_string())
+                )
+            } else {
+                format!("{}{}", meta.base_url.trim_end_matches('/'), meta.chat_path)
+            };
+            assert_eq!(
+                bridge.chat_url(),
+                expected,
+                "provider `{kind}` 对话 URL 拼接错误"
+            );
+            checked += 1;
+        }
+        // 扫描面自证：表非空且覆盖面足够，防「表被改空 / 迭代失效」→ 本测恒绿
+        assert!(checked >= 25, "只覆盖了 {checked} 家，扫描面疑似失效");
+    }
+
     #[test]
     fn normalizes_host_only_base_url() {
         assert_eq!(
