@@ -629,6 +629,7 @@ fn ensure_channel(
         model_mapping: HashMap::new(),
         cost_pricing: HashMap::new(),
         account_id: String::new(),
+        plugin_provider: String::new(),
         last_error: None,
         last_used_at: None,
         discovered_models: Vec::new(),

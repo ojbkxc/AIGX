@@ -75,6 +75,10 @@ pub enum ChannelType {
     /// 账号型渠道：渠道只是一组上游账号的容器，凭证与调度由
     /// `account_session` 池负责（`base_url`/`api_key` 通常留空）。
     Account,
+    /// 插件接管的 provider：请求由插件子进程构造并发出（网关不做协议
+    /// 转换、不实现上游伪装头/签名）；渠道需配置 `plugin_provider`
+    /// 指明用插件里的哪一家。
+    Plugin,
 }
 
 impl ChannelType {
@@ -86,6 +90,7 @@ impl ChannelType {
             "gemini" | "google" | "google_gemini" => Self::Gemini,
             "zai" | "z_ai" | "zhipu" | "glm" => Self::Zai,
             "account" | "accounts" | "account_pool" | "account_session" => Self::Account,
+            "plugin" => Self::Plugin,
             _ => Self::Cloudflare,
         }
     }
@@ -99,6 +104,7 @@ impl ChannelType {
             Self::Gemini => "gemini",
             Self::Zai => "zai",
             Self::Account => "account",
+            Self::Plugin => "plugin",
         }
     }
 }
@@ -279,6 +285,10 @@ pub struct Channel {
     /// Cloudflare account_id（仅 channel_type=cloudflare 时使用）
     #[serde(default)]
     pub account_id: String,
+    /// 插件渠道指明的 provider id（插件声明的 provider 名单里的家；
+    /// channel_type=plugin 时必填，留空则渠道被跳过）。
+    #[serde(default)]
+    pub plugin_provider: String,
     /// 最近错误信息（健康检查用）
     #[serde(default)]
     pub last_error: Option<String>,
@@ -1447,6 +1457,15 @@ impl ChannelStore {
                     }
                 }
             }
+            ChannelType::Plugin => {
+                // 插件渠道的上游由插件进程持有，渠道级直连测试不适用：
+                // 连通性以插件进程运行状态为准（管理面插件页可见）
+                return ChannelTestResult {
+                    success: false,
+                    message: "Plugin channels are tested via the plugin process".to_string(),
+                    latency_ms: start.elapsed().as_millis() as u64,
+                };
+            }
         };
 
         ChannelTestResult {
@@ -1966,6 +1985,7 @@ mod tests {
             model_mapping: HashMap::new(),
             cost_pricing: HashMap::new(),
             account_id: String::new(),
+            plugin_provider: String::new(),
             response_time: None,
             test_time: None,
             balance: None,

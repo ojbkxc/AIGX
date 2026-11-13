@@ -362,6 +362,7 @@ fn resolve_or_create_auto_channel(
         status: "enabled".to_string(),
         models: Vec::new(),
         account_id: String::new(),
+        plugin_provider: String::new(),
         model_mapping: spec.model_mapping.clone(),
         cost_pricing: spec.cost_pricing.clone(),
         last_error: None,

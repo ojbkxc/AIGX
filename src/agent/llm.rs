@@ -185,6 +185,8 @@ fn make_bridge_for_channel(
         )),
         // Cloudflare 渠道走 Hub 专用桥
         ChannelType::Cloudflare => state.hub.get_specialized("cloudflare"),
+        // 插件渠道暂不在 agent 内部 LLM 选路中（M3 仅接线数据面）
+        ChannelType::Plugin => None,
     }
 }
 

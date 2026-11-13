@@ -716,6 +716,12 @@ fn make_channel_bridge(
                 StatusCode::BAD_REQUEST,
             ));
         }
+        ChannelType::Plugin => {
+            return Err(error_response(
+                "插件渠道暂不支持聊天助手（插件 provider 请走数据面 /v1 端点）",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
     };
     Ok(bridge)
 }

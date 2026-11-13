@@ -161,6 +161,7 @@ impl ChannelRequest {
             status: self.status.clone(),
             models: self.models.clone(),
             account_id: self.account_id.clone(),
+            plugin_provider: String::new(),
             model_mapping: self.model_mapping.clone(),
             cost_pricing: self.cost_pricing.clone(),
             last_error: None,

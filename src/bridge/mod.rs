@@ -24,6 +24,8 @@ pub mod cf;
 /// Google Gemini 原生 bridge（`/v1beta/models/{model}:generateContent`）
 pub mod gemini;
 pub mod openai;
+/// 插件渠道 Bridge（请求由插件子进程构造并发出，网关只解析/聚合帧）
+pub mod plugin;
 /// 登录态供应商的私有协议 Bridge（Qoder / Trae / CodeArts 等）
 pub mod session;
 /// 工具调用健壮解析（借鉴 ds-free-api tool_parser 的归一化/修复思路，独立实现）

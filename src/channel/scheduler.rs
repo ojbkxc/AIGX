@@ -684,6 +684,7 @@ mod scheduler_trait_tests {
                 status: "enabled".to_string(),
                 models: vec![],
                 account_id: String::new(),
+                plugin_provider: String::new(),
                 model_mapping: std::collections::HashMap::new(),
                 cost_pricing: std::collections::HashMap::new(),
                 last_error: None,

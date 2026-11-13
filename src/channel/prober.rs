@@ -103,6 +103,8 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
             // 账号型渠道没有渠道级凭证，探活由账号池逐号探测
             crate::channel::ChannelType::Account => continue,
             crate::channel::ChannelType::Cloudflare => continue, // CF 走 quota_monitor
+            // 插件渠道的上游由插件进程持有，渠道级探活无意义（跳过）
+            crate::channel::ChannelType::Plugin => continue,
         };
 
         // 渠道级模型映射：探测用的上游模型名 = 该渠道映射后的真实模型名

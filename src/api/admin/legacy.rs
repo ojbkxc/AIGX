@@ -1889,6 +1889,14 @@ pub async fn fetch_upstream_models(
                 StatusCode::BAD_REQUEST,
             ));
         }
+        crate::channel::ChannelType::Plugin => {
+            // 插件渠道的模型发现经插件 RPC（models.list），渠道级直拉不适用：
+            // 模型需管理员显式声明
+            return Err(error_response(
+                "plugin channel has no channel-level model discovery; declare models instead",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
     };
     Ok((url, models))
 }
@@ -4819,6 +4827,7 @@ mod tests {
             model_mapping: HashMap::new(),
             cost_pricing: HashMap::new(),
             account_id: String::new(),
+            plugin_provider: String::new(),
             response_time: None,
             test_time: None,
             balance: None,
