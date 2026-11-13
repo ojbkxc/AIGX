@@ -1436,6 +1436,73 @@ fn resolve_fetch_target(
     Ok((channel_type, base_url))
 }
 
+/// 账号池型渠道的模型发现（「模型管理 → 获取模型」对 `channel_type = account`）。
+///
+/// 账号型渠道没有渠道级凭证（`base_url` / `api_key` 留空，凭证在账号上），
+/// 目录端点也按家特判（[`crate::account_session::catalog::spec_for`]）——
+/// 因此不能走 [`fetch_upstream_models`]。这里逐账号跑账号池那条链
+/// （回源 → 旧缓存 → 静态兜底；与「账号池 → 拉取模型」**同一条**），
+/// 把并集作为本次发现结果返回，由调用方写进渠道的「上游发现」快照。
+///
+/// **不写账号白名单**：与上游 Agent2API 对齐 —— A2A 的账号没有模型字段
+/// （账号设置里写明「模型清单与映射在『模型管理』中维护」），刷新只更新目录；
+/// AIGX 的账号白名单是本地扩展，写回只由「账号池 → 拉取模型」里显式勾选触发。
+///
+/// 修的是「模型管理 → 获取模型」对账号池渠道**恒 400** 的缺陷：修复前账号型
+/// 渠道落到 `fetch_upstream_models` 的 Account 分支，直接报
+/// "account channel has no channel-level credential"（生产实测 WorkBuddy /
+/// Z.ai Coding 两条账号池渠道都如此）。
+async fn fetch_account_channel_models(
+    state: &AppState,
+    ids: &[&str],
+) -> Result<(String, Vec<String>), (StatusCode, Json<Value>)> {
+    let sessions = &state.account_sessions;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut models: Vec<String> = Vec::new();
+    let mut enabled_accounts = 0usize;
+    let mut last_error: Option<String> = None;
+
+    for &cid in ids {
+        for account in sessions.for_channel(cid) {
+            if account.status != "enabled" {
+                continue;
+            }
+            enabled_accounts += 1;
+            match crate::account_session::catalog::sync_account_catalog(sessions, &account, true)
+                .await
+            {
+                Ok(snapshot) => {
+                    for entry in snapshot.models {
+                        if seen.insert(entry.id.clone()) {
+                            models.push(entry.id);
+                        }
+                    }
+                }
+                Err(err) => last_error = Some(err),
+            }
+        }
+    }
+
+    if enabled_accounts == 0 {
+        return Err(error_response(
+            "账号池型渠道暂无启用账号：请先到「账号池」为该供应商添加或启用账号",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if models.is_empty() {
+        return Err(error_response(
+            &format!(
+                "账号池目录拉取未取到模型：{}",
+                last_error.unwrap_or_else(|| "该供应商没有可用的目录端点".to_string())
+            ),
+            StatusCode::BAD_GATEWAY,
+        ));
+    }
+    // 并集按字典序返回：多账号/多渠道时结果稳定，避免每次刷新顺序抖动。
+    models.sort();
+    Ok((String::new(), models))
+}
+
 pub async fn handle_fetch_channel_models(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1486,8 +1553,12 @@ pub async fn handle_fetch_channel_models(
         .as_ref()
         .map(|ch| ch.quirks.clone())
         .unwrap_or_default();
-    let (url, models) =
-        fetch_upstream_models(&state, channel_type, &base_url, &api_key, &quirks).await?;
+    // 账号池型渠道：凭证与目录端点都在账号上，走账号池那条链（见下函数文档）。
+    let (url, models) = if matches!(channel_type, crate::channel::ChannelType::Account) {
+        fetch_account_channel_models(&state, &ids).await?
+    } else {
+        fetch_upstream_models(&state, channel_type, &base_url, &api_key, &quirks).await?
+    };
 
     for cid in &ids {
         if state.channel_store.get(cid).is_some() {

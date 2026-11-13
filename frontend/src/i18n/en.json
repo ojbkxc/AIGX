@@ -3380,5 +3380,6 @@
   "再次输入备份口令": "Re-enter the backup password",
   "整号跳过": "Whole account skipped",
   "重试间隔（分钟）": "Retry interval (minutes)",
-  "重试与补签只处理当天未签上的账号；补签轮在指定时刻兜底一次。": "Retry and makeup only handle accounts that have not checked in today; the makeup round is a single fallback at the configured time."
+  "重试与补签只处理当天未签上的账号；补签轮在指定时刻兜底一次。": "Retry and makeup only handle accounts that have not checked in today; the makeup round is a single fallback at the configured time.",
+  "从上游拉取模型清单（写入供应商的「上游发现」快照）。账号池型供应商按其账号逐号拉取目录（只更新目录与缓存，模型白名单仍在账号池维护）。": "Fetch the model list from upstream (saved to the provider's \"upstream discovery\" snapshot). Account-pool providers are fetched account by account (this only refreshes the catalog and its cache; the model allowlist is still maintained in the account pool)."
 }

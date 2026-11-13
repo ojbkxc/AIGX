@@ -2717,7 +2717,7 @@ export default function ModelManage(): JSX.Element {
             </div>
             <div className="modal-body">
               <p className="mm-dialog-note">
-                {t('从上游 /models 接口拉取模型清单（写入供应商的「上游发现」快照）。账号池型供应商请在账号池里维护模型白名单。')}
+                {t('从上游拉取模型清单（写入供应商的「上游发现」快照）。账号池型供应商按其账号逐号拉取目录（只更新目录与缓存，模型白名单仍在账号池维护）。')}
               </p>
               {fetchChannels.length === 0 ? (
                 <EmptyState icon="📡" message={t('暂无启用的可拉取供应商')} />
@@ -2755,7 +2755,7 @@ export default function ModelManage(): JSX.Element {
                           <div className="mm-fetch-info">
                             <strong>{ch.name}</strong>
                             <span className="mm-model-sub">
-                              {ch.channel_type} · {t('已发现')} {(ch.discovered_models ?? []).length}
+                              {ch.channel_type === 'account' ? t('账号池') : ch.channel_type} · {t('已发现')} {(ch.discovered_models ?? []).length}
                             </span>
                             {fetchFailed[cid] && (
                               <span className="mm-fetch-err" title={fetchFailed[cid]}>
