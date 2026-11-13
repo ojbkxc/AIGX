@@ -552,6 +552,49 @@ pub(crate) fn ensure_model_priced(
     }
     Ok(())
 }
+
+/// 脱敏规则的 provider 作用域标识（对齐 Agent2API `sanitize.applies_to(provider_id)`）。
+///
+/// A2A 的 `provider_id` 是「家」的 id（workbuddy / qoder …）。AIGX 的渠道有两种形态：
+/// - **账号型渠道**（`channel_type = account`）：真正干活的是绑定账号，取该渠道下
+///   首个非空 `provider` —— 用户在脱敏作用域里写的正是这个家名；
+/// - 其余渠道：没有「家」的概念，退化为渠道类型名（`openai_compatible` / `anthropic` …）。
+///
+/// 取不到渠道（例如候选渠道已失效）时返回空串：空串只有在作用域列表为空（= 全部）
+/// 时才命中，与「拿不准就按全部处理」的保守方向一致。
+pub(crate) fn sanitize_provider_id(
+    state: &AppState,
+    channel: Option<&crate::channel::Channel>,
+) -> String {
+    let Some(channel) = channel else {
+        return String::new();
+    };
+    if channel.channel_type == crate::channel::ChannelType::Account {
+        // 账号型渠道的「家」在账号上；取不到（无账号 / provider 为空）→ 空串。
+        return state
+            .account_sessions
+            .provider_for_channel(&channel.id)
+            .unwrap_or_default();
+    }
+    channel.channel_type.as_str().to_string()
+}
+
+/// 转发点脱敏（归一化消息列表）：主开关 + provider 作用域，就地改写 `messages`。
+///
+/// 调用点必须是「这一家即将发送之前」（A2A `send_body` 的时机）。每次尝试的
+/// 请求都是从同一份原始 `chat_req` 克隆出来的，所以在循环里逐次调用不会叠加改写。
+pub(crate) fn sanitize_attempt_messages(
+    state: &AppState,
+    channel: Option<&crate::channel::Channel>,
+    messages: &mut [crate::bridge::ChatMessage],
+) {
+    if !crate::config::sanitize_fingerprints_enabled() {
+        return;
+    }
+    let provider = sanitize_provider_id(state, channel);
+    crate::sanitize::sanitize_messages_for_provider(&provider, messages);
+}
+
 /// 模型是否由任一启用渠道声明或发现（models 非空 = 白名单；空 = 全部，用发现快照）。
 ///
 /// 账号型渠道的模型声明在账号上（`AccountSession.models`），渠道级 models 通常

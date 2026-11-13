@@ -345,14 +345,19 @@ pub fn snapshot() -> serde_json::Value {
 
 // ─── 用户可配置词表（SPEC-1.0.49 §8）─────────────────────────
 //
-// 对照 Agent2API `core/sanitize/rules.rs`（≤200 条、字面/regex、按角色与
-// provider 作用域）。AIGX 侧只保留契约要求的字段（去掉参考实现的
-// id/name/enabled/match_type 枚举，用 `is_regex` 布尔表达匹配类型）。
+// 对照 Agent2API `core/sanitize/rules.rs`（≤200 条、字面/regex、按角色作用域）
+// 与 `config/sanitize_config.rs`（provider 作用域是**顶层列表**，不是逐条字段）。
+// AIGX 侧只保留契约要求的字段（去掉参考实现的 id/name/enabled/match_type 枚举，
+// 用 `is_regex` 布尔表达匹配类型）。
 //
 // 语义（配置项 `sanitize_rules`）：
 // - `None`（缺省）= 用内置硬编码规则（现行为，零变化）；
 // - `Some([])`     = 关闭全部脱敏；
 // - `Some([...])`  = 只用用户规则（内置不再生效）。
+//
+// provider 作用域由 [`set_providers`] / [`providers`] 这对顶层开关承载
+// （空列表 = 全部）；判定见 [`provider_in_scope`]，在数据面按「即将发送的那一家」
+// 生效 —— 与 A2A `send_body` 里 `sanitize.applies_to(provider_id)` 同口径。
 
 /// 用户可配置脱敏词表的最大条数（对齐 Agent2API `MAX_RULES`）。超限必须报错，
 /// 不静默截断。
@@ -360,8 +365,8 @@ pub const MAX_SANITIZE_RULES: usize = 200;
 
 /// 单条用户脱敏规则。
 ///
-/// `roles` / `providers` 为空表示「全部角色 / 全部 provider」；非空时规则
-/// 只作用于命中列表的消息 / 渠道类型。
+/// `roles` 为空表示「全部角色」；非空时规则只作用于命中角色的消息正文。
+/// （provider 作用域**不在规则上**，见模块内 [`set_providers`]。）
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SanitizeRule {
     /// 匹配内容（字面串或正则源码）。
@@ -376,9 +381,6 @@ pub struct SanitizeRule {
     /// 作用角色（`system` / `user` / `assistant` / `tool`）；空 = 全部。
     #[serde(default)]
     pub roles: Vec<String>,
-    /// 作用 provider（渠道类型名）；空 = 全部。
-    #[serde(default)]
-    pub providers: Vec<String>,
 }
 
 /// 编译后的匹配器：字面替换走 `str::replace`，正则替换走 `Regex`。
@@ -393,14 +395,12 @@ struct CompiledRule {
     matcher: Matcher,
     replacement: String,
     roles: Vec<String>,
-    providers: Vec<String>,
 }
 
 impl CompiledRule {
-    /// 该规则是否作用于 `(provider, role)`：两个作用域列表都为空 = 全部命中。
-    fn applies(&self, provider: &str, role: &str) -> bool {
-        (self.providers.is_empty() || self.providers.iter().any(|p| p == provider))
-            && (self.roles.is_empty() || self.roles.iter().any(|r| r == role))
+    /// 该规则是否作用于 `role`：角色列表为空 = 全部命中。
+    fn applies(&self, role: &str) -> bool {
+        self.roles.is_empty() || self.roles.iter().any(|r| r == role)
     }
 
     /// 命中则返回替换后的文本；未命中返回 `None`（调用方据此保守原串）。
@@ -460,7 +460,6 @@ fn compile_rules(entries: &[SanitizeRule]) -> Vec<CompiledRule> {
             matcher,
             replacement: rule.replacement.clone(),
             roles: rule.roles.clone(),
-            providers: rule.providers.clone(),
         });
     }
     compiled
@@ -493,6 +492,35 @@ fn active_rules() -> Option<Arc<CompiledRules>> {
     USER_RULES.read().as_ref().map(Arc::clone)
 }
 
+/// provider 作用域进程级快照（空列表 = 全部 provider 生效，含之后新增的家）。
+///
+/// 与 A2A `SanitizeSettings::providers` 同构：作用域是**顶层开关**，
+/// 不是逐条规则字段；判定时机是数据面「某一家即将发送之前」。
+static PROVIDERS: parking_lot::RwLock<Vec<String>> = parking_lot::RwLock::new(Vec::new());
+
+/// 判定某 provider 是否在作用域内（**纯函数**，便于单测且不碰全局状态）。
+///
+/// 空列表 = 全部命中；比较大小写不敏感（逐字对齐 A2A
+/// `SanitizeSettings::applies_to` 的 `eq_ignore_ascii_case`）。
+pub fn provider_in_scope(providers: &[String], provider: &str) -> bool {
+    providers.is_empty() || providers.iter().any(|p| p.eq_ignore_ascii_case(provider))
+}
+
+/// 写入 provider 作用域快照（空列表 = 全部）。
+pub fn set_providers(providers: Vec<String>) {
+    *PROVIDERS.write() = providers;
+}
+
+/// 读取 provider 作用域快照（空列表 = 全部）。
+pub fn providers() -> Vec<String> {
+    PROVIDERS.read().clone()
+}
+
+/// 作用域判定（热路径版）：读锁内直接比，**不 clone 列表**。
+fn applies_to(provider: &str) -> bool {
+    provider_in_scope(&PROVIDERS.read(), provider)
+}
+
 /// 角色枚举 → 小写角色名（与 [`SanitizeRule::roles`] 的取值口径一致）。
 fn role_str(role: crate::bridge::Role) -> &'static str {
     use crate::bridge::Role;
@@ -505,18 +533,25 @@ fn role_str(role: crate::bridge::Role) -> &'static str {
 }
 
 /// 净化分派：未配置用户词表 → 内置规则（现行为）；已配置 → 只用用户规则。
+///
+/// provider 不在 [`providers`] 作用域内时**整段不脱敏**（与 A2A 在转发点
+/// `if sanitize.applies_to(provider_id)` 的短路同语义）——注意内置规则同样被
+/// 这个开关挡住：作用域是「这家要不要脱敏」的总闸，不是「哪几条规则生效」。
 fn sanitize_text_scoped(provider: &str, role: &str, text: &str) -> String {
+    if !applies_to(provider) {
+        return text.to_string();
+    }
     match active_rules() {
         None => sanitize_text_builtin(text),
-        Some(set) => sanitize_text_with_rules(&set, provider, role, text),
+        Some(set) => sanitize_text_with_rules(&set, role, text),
     }
 }
 
 /// 按用户规则净化一段文本；无规则命中时原串返回（零改写）。
-fn sanitize_text_with_rules(set: &CompiledRules, provider: &str, role: &str, text: &str) -> String {
+fn sanitize_text_with_rules(set: &CompiledRules, role: &str, text: &str) -> String {
     let mut out: Option<String> = None;
     for rule in &set.compiled {
-        if !rule.applies(provider, role) {
+        if !rule.applies(role) {
             continue;
         }
         let current = out.as_deref().unwrap_or(text);
@@ -553,7 +588,6 @@ mod tests {
             replacement: replacement.to_string(),
             is_regex,
             roles: Vec::new(),
-            providers: Vec::new(),
         }
     }
 
@@ -568,7 +602,7 @@ mod tests {
     fn user_literal_rule_rewrites_positive_control() {
         // 正向对照：证明「替换确实生效」，避免后续「不变」断言是假绿。
         let set = compiled(&[rule("SECRET", "[redacted]", false)]);
-        let out = sanitize_text_with_rules(&set, "", "system", "value SECRET here");
+        let out = sanitize_text_with_rules(&set, "system", "value SECRET here");
         assert_eq!(out, "value [redacted] here");
     }
 
@@ -578,14 +612,11 @@ mod tests {
         let text = "token sk-abc here";
         // 正向对照：非空用户词表确实改写同一文本
         let hit = compiled(&[rule("sk-abc", "<key>", false)]);
-        assert_eq!(
-            sanitize_text_with_rules(&hit, "", "", text),
-            "token <key> here"
-        );
+        assert_eq!(sanitize_text_with_rules(&hit, "", text), "token <key> here");
         // When 用户词表为空（= 关闭全部脱敏）
         let empty = compiled(&[]);
         // Then 同一文本原样返回，不再被改写
-        assert_eq!(sanitize_text_with_rules(&empty, "", "", text), text);
+        assert_eq!(sanitize_text_with_rules(&empty, "", text), text);
     }
 
     #[test]
@@ -594,27 +625,33 @@ mod tests {
         let set = compiled(&[rule(r"secret-\d+", "***", true)]);
         // Then 正则命中并替换
         assert_eq!(
-            sanitize_text_with_rules(&set, "", "", "token secret-12345 here"),
+            sanitize_text_with_rules(&set, "", "token secret-12345 here"),
             "token *** here"
         );
     }
 
     #[test]
-    fn provider_scope_isolates_rules() {
-        // Given 一条只作用于 openai 的规则
-        let mut only_openai = rule("sk-abc", "<key>", false);
-        only_openai.providers = vec!["openai".to_string()];
-        let set = compiled(&[only_openai]);
-        // Then 命中 provider 才改写
-        assert_eq!(
-            sanitize_text_with_rules(&set, "openai", "", "key sk-abc"),
-            "key <key>"
-        );
-        // 非命中 provider 原样（作用域隔离）
-        assert_eq!(
-            sanitize_text_with_rules(&set, "anthropic", "", "key sk-abc"),
-            "key sk-abc"
-        );
+    fn provider_in_scope_empty_list_covers_everything() {
+        // 空列表 = 全部 provider 生效（含之后新增的家）——契约缺省态。
+        assert!(provider_in_scope(&[], "workbuddy"));
+        assert!(provider_in_scope(&[], ""));
+    }
+
+    #[test]
+    fn provider_in_scope_matches_listed_case_insensitively() {
+        // 逐字对齐 A2A `applies_to` 的 eq_ignore_ascii_case
+        let list = vec!["workbuddy".to_string(), "Qoder".to_string()];
+        assert!(provider_in_scope(&list, "workbuddy"));
+        assert!(provider_in_scope(&list, "WORKBUDDY"));
+        assert!(provider_in_scope(&list, "qoder"));
+    }
+
+    #[test]
+    fn provider_in_scope_rejects_unlisted_provider() {
+        // 反向对照：不在列表里的家整段不脱敏（与「空列表全命中」互为反面）
+        let list = vec!["workbuddy".to_string()];
+        assert!(!provider_in_scope(&list, "anthropic"));
+        assert!(!provider_in_scope(&list, ""), "空 provider 也不在名单内");
     }
 
     #[test]
@@ -625,11 +662,11 @@ mod tests {
         let set = compiled(&[system_only]);
         // Then system 命中改写、user 不动
         assert_eq!(
-            sanitize_text_with_rules(&set, "", "system", "internal-token"),
+            sanitize_text_with_rules(&set, "system", "internal-token"),
             "<redacted>"
         );
         assert_eq!(
-            sanitize_text_with_rules(&set, "", "user", "internal-token"),
+            sanitize_text_with_rules(&set, "user", "internal-token"),
             "internal-token"
         );
     }
@@ -663,7 +700,7 @@ mod tests {
         assert_eq!(set.compiled.len(), 1);
         // 且好规则照常生效（正向对照）
         assert_eq!(
-            sanitize_text_with_rules(&set, "", "", "hello world"),
+            sanitize_text_with_rules(&set, "", "hello world"),
             "hi world"
         );
     }
@@ -690,7 +727,7 @@ mod tests {
 
     #[test]
     fn rule_serde_defaults_and_roundtrip() {
-        // 契约：缺省字段可全部省略（is_regex 缺省 false，roles/providers 空 = 全部）
+        // 契约：缺省字段可全部省略（is_regex 缺省 false，roles 空 = 全部）
         let parsed: SanitizeRule =
             serde_json::from_value(serde_json::json!({"pattern": "a", "replacement": "b"}))
                 .expect("缺省字段必须可解析");
@@ -700,7 +737,14 @@ mod tests {
         assert_eq!(back["pattern"], "a");
         assert_eq!(back["is_regex"], false);
         assert_eq!(back["roles"], serde_json::json!([]));
-        assert_eq!(back["providers"], serde_json::json!([]));
+        // provider 作用域已挪到顶层开关：规则里**不应**再有 providers 字段
+        assert!(back.get("providers").is_none(), "provider 作用域不在规则上");
+        // 存量数据里的 providers 字段被静默忽略（无 deny_unknown_fields，不报错）
+        let legacy: SanitizeRule = serde_json::from_value(serde_json::json!({
+            "pattern": "a", "replacement": "b", "providers": ["workbuddy"]
+        }))
+        .expect("带旧 providers 字段的存量规则必须仍可解析");
+        assert_eq!(legacy, rule("a", "b", false));
     }
 
     /// 构造一条带文本的桥接消息，减少测试样板。

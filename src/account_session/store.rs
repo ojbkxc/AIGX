@@ -386,6 +386,20 @@ impl AccountSessionStore {
             .collect()
     }
 
+    /// 指定渠道的**供应商名**（取首个非空 `provider`）。
+    ///
+    /// 只读锁内取一个字符串就返回，**不 clone 账号表** —— `for_channel` 会连凭证
+    /// 一起 clone，热路径（每请求每尝试一次）不能那么用。用途：脱敏规则的 provider
+    /// 作用域标识（见 `api::openai::sanitize_provider_id`）。
+    pub fn provider_for_channel(&self, channel_id: &str) -> Option<String> {
+        self.inner
+            .sessions
+            .read()
+            .iter()
+            .find(|s| s.channel_id == channel_id && !s.provider.is_empty())
+            .map(|s| s.provider.clone())
+    }
+
     /// 按 id 取账号（id 全局唯一）。
     pub fn get(&self, id: &str) -> Option<AccountSession> {
         self.inner

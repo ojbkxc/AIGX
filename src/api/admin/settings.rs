@@ -1190,6 +1190,12 @@ pub const SANITIZE_HEADERS_KEY: &str = "sanitize_header_blacklist";
 /// 用户脱敏词表的持久化键（SPEC-1.0.49 §8）。
 pub const SANITIZE_RULES_KEY: &str = "sanitize_rules";
 
+/// 脱敏 provider 作用域的持久化键（SPEC-1.0.49 §8）。
+///
+/// 与 A2A 的 `sanitizeFingerprintRules` / `sanitizeFingerprintProviders` 同构：
+/// 词表与作用域是**两个键**，作用域是顶层开关而不是逐条规则字段。
+pub const SANITIZE_PROVIDERS_KEY: &str = "sanitize_providers";
+
 /// GET /api/sanitize —— 读取「额外脱敏请求头」名单 + 用户脱敏词表
 /// （对照 Agent2API 设置 → 网关 → 指纹脱敏）。
 ///
@@ -1206,6 +1212,7 @@ pub async fn handle_get_sanitize(
         "data": {
             "extra_headers": crate::config::extra_sensitive_headers(),
             "rules": crate::sanitize::rules(),
+            "providers": crate::sanitize::providers(),
             "stats": crate::sanitize::snapshot(),
         }
     })))
@@ -1310,6 +1317,54 @@ pub async fn handle_update_sanitize(
         );
     }
 
+    // 脱敏 provider 作用域（SPEC-1.0.49 §8）：键缺省 = 不动；`[]` = 全部 provider；
+    // 数组 = 只对这些家脱敏（判定在数据面「即将发送的那一家」处生效）。
+    if let Some(providers_value) = body.get("providers") {
+        let providers: Vec<String> = match providers_value {
+            Value::Array(arr) => {
+                let mut out: Vec<String> = Vec::new();
+                for item in arr {
+                    let Some(raw) = item.as_str() else {
+                        return Err(error_response(
+                            "providers 必须是字符串数组",
+                            StatusCode::BAD_REQUEST,
+                        ));
+                    };
+                    let name = raw.trim();
+                    // 去空串 + 去重：空串永远不可能匹配任何家，留着只会误导。
+                    if !name.is_empty() && !out.iter().any(|p| p.eq_ignore_ascii_case(name)) {
+                        out.push(name.to_string());
+                    }
+                }
+                out
+            }
+            _ => {
+                return Err(error_response(
+                    "providers 必须是数组",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+        };
+        crate::sanitize::set_providers(providers.clone());
+        state
+            .alert_store
+            .put(SANITIZE_PROVIDERS_KEY, &providers)
+            .map_err(|e| {
+                error_response(
+                    &format!("Failed to save sanitize providers: {e}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?;
+        tracing::info!(
+            "脱敏 provider 作用域已更新: {}",
+            if providers.is_empty() {
+                "全部".to_string()
+            } else {
+                providers.join(" / ")
+            }
+        );
+    }
+
     Ok(Json(json!({
         "success": true,
         // 保存回显带上 stats：前端保存后会拿本次响应覆盖整个面板状态，
@@ -1317,6 +1372,7 @@ pub async fn handle_update_sanitize(
         "data": {
             "extra_headers": list,
             "rules": crate::sanitize::rules(),
+            "providers": crate::sanitize::providers(),
             "stats": crate::sanitize::snapshot()
         }
     })))

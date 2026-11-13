@@ -118,8 +118,12 @@ pub(crate) async fn handle_completions(
         }
         // 按上游模型名改写请求 body（bridges 从 body["model"] 构造上游请求）
         let mut attempt_body = body.clone();
-        // P2-10：指纹脱敏挂载（Completions 路径）
-        crate::sanitize::strip(&mut attempt_body);
+        // P2-10：指纹脱敏挂载（Completions 路径）——在这一家即将发送之前判定
+        // provider 作用域（A2A `send_body` 同口径）
+        if crate::config::sanitize_fingerprints_enabled() {
+            let provider = super::sanitize_provider_id(&state, ch_ref.as_ref());
+            crate::sanitize::strip_for_provider(&provider, &mut attempt_body);
+        }
         attempt_body["model"] = Value::String(upstream.clone());
         match bridge.complete(&attempt_body, &ctx).await {
             Ok(result) => {

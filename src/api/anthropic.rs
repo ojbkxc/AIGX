@@ -546,12 +546,9 @@ pub async fn handle_messages(
         }
     }
 
-    // 出站指纹脱敏（对照 Agent2API sanitizeBlacklistFingerprints）：发送上游前
-    // 剥离客户端注入的审核黑名单指纹。放在网关提示词注入之前——
-    // apply_prompt 注入的是网关自身文案，不该被触碰。
-    if crate::config::sanitize_fingerprints_enabled() {
-        crate::sanitize::strip_chat_messages(&mut all_messages);
-    }
+    // 出站指纹脱敏（对照 Agent2API sanitizeBlacklistFingerprints）**不在这里做**：
+    // provider 作用域要按「即将发送的那一家」判定（A2A `send_body` 同口径），而此处
+    // 选渠道尚未发生 —— 见两处 failover 循环里的 `sanitize_attempt_messages`。
 
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // 客户端 system 已折进消息列表头，再统一走网关策略（custom 会替换它）
@@ -686,6 +683,12 @@ pub async fn handle_messages(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
+            crate::api::openai::sanitize_attempt_messages(
+                &state,
+                ch_ref.as_ref(),
+                &mut attempt_req.messages,
+            );
             attempt_counter += 1;
 
             // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
@@ -1380,6 +1383,12 @@ pub async fn handle_messages(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
+            crate::api::openai::sanitize_attempt_messages(
+                &state,
+                ch_ref.as_ref(),
+                &mut attempt_req.messages,
+            );
             attempt_counter += 1;
 
             // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）

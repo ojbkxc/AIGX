@@ -209,21 +209,32 @@ retry_limit=0 不排重试；makeup 只挑非 ok 账号；`unsupported_providers
 
 ## 8. 流 G：脱敏规则可配置
 
-对齐 A2A `core/sanitize/rules.rs`（≤200 条，支持字面/regex、作用域）。
+对齐 A2A `core/sanitize/rules.rs`（≤200 条，字面/regex、角色作用域）+
+`config/sanitize_config.rs`（provider 作用域 = **顶层开关**）。
 
-**契约**：
+**契约**（2026-11-13 按用户拍板「A2A 怎么弄我们就怎么弄」修正过一次，见 §12）：
 1. 配置项（沿用项目既有配置注入方式，读 `src/config.rs` 现状后接入，不新造持久层）：
    `sanitize_rules: Option<Vec<SanitizeRule>>`，语义：
    - `None`（缺省）= 用内置硬编码规则（现行为，零变化）
    - `Some([])` = **关闭**全部脱敏
    - `Some([...])` = 只用用户规则（内置不再生效）
-2. `SanitizeRule { pattern: String, replacement: String, is_regex: bool, roles: Vec<String> /*空=全部*/, providers: Vec<String> /*空=全部*/ }`
+2. `SanitizeRule { pattern: String, replacement: String, is_regex: bool, roles: Vec<String> /*空=全部*/ }`
    上限 200 条；超限 → 配置校验报错（不静默截断）。
-3. `sanitize::sanitize_messages` 增加 `provider: &str` 入参（调用点由 lead 在集成时接）；默认行为不变。
-4. 现有 `/api/sanitize` 端点（管「额外脱敏头名单」）**不改语义**，只增字段 `rules` 用于读写上述配置；`null`/`[]` 语义按第 1 条。
+3. **provider 作用域是顶层列表，不在规则上**：`sanitize_providers: Vec<String>`
+   （空 = 全部 provider，含之后新增的家），判定口径 = A2A
+   `SanitizeSettings::applies_to`（`eq_ignore_ascii_case`）；**判定时机 = 数据面
+   「某一家即将发送之前」**（A2A `core/upstream/payload.rs::send_body` 同口径），
+   不在作用域内的家**整段不脱敏**（内置规则同样被这个总闸挡住）。
+4. 现有 `/api/sanitize` 端点（管「额外脱敏头名单」）**不改语义**，只增字段 `rules`
+   与 `providers` 用于读写上述两份配置；`null`/`[]` 语义按第 1 条（`providers`
+   只有「缺省 = 不动 / 数组（空 = 全部）」两态）。
 5. 正则编译失败 → 该条规则跳过并 `tracing::warn!`，不影响其它规则。
+6. 启动恢复：`sanitize_rules` 与 `sanitize_providers` 两个 KV 键都要在 `main.rs`
+   回填进程快照（漏一个就会出现「GET 看着已保存、运行期不生效」的假成功）。
 
-**测试**：内置缺省不变（正向对照）；`[]` 清空后原本命中的文本不再改写；regex 规则生效；provider 作用域隔离；超 200 条报错；坏正则被跳过但好规则仍生效。
+**测试**：内置缺省不变（正向对照）；`[]` 清空后原本命中的文本不再改写；regex 规则生效；
+`provider_in_scope` 三态（空列表全命中 / 大小写不敏感命中 / 不在名单不命中）；角色作用域隔离；
+超 200 条报错；坏正则被跳过但好规则仍生效；存量规则里遗留的 `providers` 字段被静默忽略。
 
 ---
 
@@ -378,3 +389,8 @@ zcode version/claim-verification、growth travel/school、**自定义供应商�
 流I | cooldown 列宽 | I-2 表写「128（原值）」 | 保持 128 | limiter=148（A2A limits）已给新列；cooldown 是 AIGX 自定义列，无 A2A 基准可照。
 流I | 状态列文案 | §9b 提「启用/停用」 | 保持现有「启用/禁用/凭证已过期」 | 现状文案已被 e2e 与筛选器（「禁用」档）引用，强改会连带改筛选与 toast，超出本流文件范围。
 流I | 删「优先级」列后的整行拖拽 | （未规定） | 保留 `handleDropRow`（改 priority）未动 | 行拖拽是既有调度功能（Title 已写明语义），不属本流（列表观感对齐）的改动范围。
+流G | provider 作用域承载位置 | §8 原写「逐条 `SanitizeRule.providers`」 | 改为**顶层列表** `sanitize_providers`（规则只剩 `roles`），判定点挪到数据面「某一家即将发送之前」 | 2026-11-13 用户拍板「A2A 怎么弄我们就怎么弄」：A2A 的 provider 作用域是 `SanitizeSettings.providers`（`config/sanitize_config.rs`），逐条规则只有 `roles`；且原实现把脱敏放在**选渠道之前**，provider 根本未知 → 逐条作用域永远不匹配（写明却不生效，属假支持）。
+流G | 脱敏时机 | 原「网关提示词注入**之前**」（注释理由：不碰网关自身文案） | 改为注入**之后** | 与 A2A `send_body` 的层序一致（① 提示词注入 → ② 脱敏）。后果：用户规则也能匹配网关注入的提示词文本；内置规则只针对客户端注入的指纹模板，不受影响。
+流G | 命中计数口径 | 每请求一次 | 每 attempt 一次（同一请求换家时 hits/rewrites 累加） | A2A 按 provider 去重（`send_cache`）；AIGX 每次尝试的请求都是原始 `chat_req` 的克隆，逐次脱敏才能让「这一家」的作用域真实生效。只影响 `sanitize::snapshot()` 的展示计数，不影响转发结果。
+流G | provider 标识口径 | §8 原写「渠道类型名」 | 账号型渠道取绑定账号的 `provider`（家名，如 workbuddy）；其余取 `channel_type` | A2A 的 `provider_id` 是「家」的 id；AIGX 只有账号型渠道有「家」，其余渠道退化为类型名（取不到渠道 → 空串，仅在作用域为「全部」时命中，保守方向）。
+流G | 启动恢复 | （§8 未写） | 补 `main.rs` 回填 `sanitize_rules` + `sanitize_providers` 两个键 | 流 G 只写了 PUT 侧热更新，漏了启动恢复 → 重启后 GET（读快照）报「未配置」而 KV 仍有旧词表，脱敏静默回落内置（假成功）。见 commit f84b2f22 与此后的 providers 补齐。

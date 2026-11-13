@@ -141,16 +141,9 @@ pub(crate) async fn handle_chat_completions(
         .into_response();
     }
 
-    // 出站指纹脱敏（对照 Agent2API sanitizeBlacklistFingerprints）：发送上游前
-    // 剥离客户端注入的审核黑名单指纹（模板句最小改写 + 表头键值整段删除）。
-    // 放在网关提示词注入之前——apply_prompt 注入的是网关自身文案，不该被触碰。
-    let messages = {
-        let mut msgs = messages;
-        if crate::config::sanitize_fingerprints_enabled() {
-            crate::sanitize::strip_chat_messages(&mut msgs);
-        }
-        msgs
-    };
+    // 出站指纹脱敏（对照 Agent2API sanitizeBlacklistFingerprints）**不在这里做**：
+    // provider 作用域要按「即将发送的那一家」判定（A2A `send_body` 同口径），而此处
+    // 选渠道尚未发生 —— 见两处 failover 循环里的 `sanitize_messages_for_provider`。
 
     // 构建 ChatFormat
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
@@ -336,6 +329,8 @@ pub(crate) async fn handle_chat_completions(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
+            sanitize_attempt_messages(&state, ch_ref.as_ref(), &mut attempt_req.messages);
             attempt_counter += 1;
             let attempt_index = attempt_counter;
             let attempt_start = std::time::Instant::now();
@@ -1002,6 +997,8 @@ pub(crate) async fn handle_chat_completions(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
+            sanitize_attempt_messages(&state, ch_ref.as_ref(), &mut attempt_req.messages);
             attempt_counter += 1;
             let attempt_index = attempt_counter;
             let attempt_started_at = chrono::Utc::now().timestamp();

@@ -355,6 +355,13 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!("读取脱敏词表失败，沿用内置规则：{e}"),
     }
 
+    // 脱敏 provider 作用域（SPEC-1.0.49 §8）：同款启动恢复；缺省 / 空数组 = 全部。
+    match store.get::<Vec<String>>(crate::api::admin::settings::SANITIZE_PROVIDERS_KEY) {
+        Ok(Some(list)) => crate::sanitize::set_providers(list),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("读取脱敏 provider 作用域失败，按「全部」处理：{e}"),
+    }
+
     // 初始化账号型渠道账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
     let account_sessions = crate::account_session::AccountSessionStore::with_egress(
         store.clone(),
