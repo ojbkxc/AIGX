@@ -123,6 +123,10 @@ pub struct ChannelRequest {
     /// 余额查询方案（见 `channel::balance::SCHEMES`）；空 = OpenAI 计费端点
     #[serde(default)]
     pub balance_scheme: Option<String>,
+    /// 插件渠道指明的 provider id（`channel_type=plugin` 时必填，
+    /// 留空则该渠道在数据面被跳过）。表单可编辑：加进来 `to_channel` 才带上。
+    #[serde(default)]
+    pub plugin_provider: String,
 }
 
 fn default_weight() -> u32 {
@@ -161,7 +165,7 @@ impl ChannelRequest {
             status: self.status.clone(),
             models: self.models.clone(),
             account_id: self.account_id.clone(),
-            plugin_provider: String::new(),
+            plugin_provider: self.plugin_provider.clone(),
             model_mapping: self.model_mapping.clone(),
             cost_pricing: self.cost_pricing.clone(),
             last_error: None,
@@ -469,6 +473,16 @@ pub async fn handle_add_channel(
             return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
         }
     }
+    // 插件渠道必须指明接管哪家 provider（数据面 PluginBridge 按它路由；
+    // 留空的插件渠道会被 resolve 跳过，等于白建）
+    if ChannelType::from_str_lossy(&body.channel_type) == ChannelType::Plugin
+        && body.plugin_provider.trim().is_empty()
+    {
+        return Err(error_response(
+            "插件渠道必须指定 plugin_provider（插件声明的 provider id）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
     let ch = body.to_channel(String::new());
     match state.channel_store.add(ch) {
         Ok(c) => {
@@ -541,6 +555,16 @@ pub async fn handle_update_channel(
         ) {
             return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
         }
+    }
+    // 插件渠道必须指明接管哪家 provider（同新增口径；表单未带该字段的
+    // 更新请求会在这里被拦下，前端需回填当前值）
+    if ChannelType::from_str_lossy(&body.channel_type) == ChannelType::Plugin
+        && body.plugin_provider.trim().is_empty()
+    {
+        return Err(error_response(
+            "插件渠道必须指定 plugin_provider（插件声明的 provider id）",
+            StatusCode::BAD_REQUEST,
+        ));
     }
     let mut ch = body.to_channel(id.clone());
     // 保留运维字段（test_time/response_time/balance/credit/discovered_models/
