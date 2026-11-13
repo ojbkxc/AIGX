@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, RefreshCw, Trash2 } from 'lucide-react';
+import { Download, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -94,8 +94,9 @@ function InstalledPackCard({
             <Badge tone={pack.enabled ? 'info' : 'neutral'}>
               {pack.enabled ? t('已启用') : t('已停用')}
             </Badge>
-            <Badge tone={pack.signed ? 'success' : 'warning'}>
-              {pack.signed ? t('已签名') : t('未签名')}
+            {/* AIGX 不做签名验签（对齐 M2 安装链路口径）：两种形态都不声称「可信」 */}
+            <Badge tone="warning">
+              {pack.signed ? t('带签名（未校验）') : t('未校验签名')}
             </Badge>
             {pack.version.includes('-') ? <Badge tone="warning">{t('beta 版')}</Badge> : null}
             {pack.updateRequired ? <Badge tone="danger">{t('需要补齐插件')}</Badge> : null}
@@ -116,6 +117,9 @@ function InstalledPackCard({
       ) : null}
       {!pack.entryPresent ? (
         <p className="pl-card-err">{t('插件包的可执行文件不在磁盘上（可能被手工删除或移动），请重新安装。')}</p>
+      ) : null}
+      {pack.host?.lastError ? (
+        <p className="pl-card-err" title={pack.host.lastError}>{pack.host.lastError}</p>
       ) : null}
       {operation?.error ? <p className="pl-card-err" title={operation.error}>{operation.error}</p> : null}
       {operation?.active ? (
@@ -163,10 +167,26 @@ function InstalledPackCard({
   );
 }
 
-/** 商店（发布目录）条目的卡片（在线安装暂未开放——AIGX 无插件商店分发渠道） */
-function StorePackCard({ item, target }: { item: StorePlugin; target: string }): JSX.Element {
+/** 商店（发布目录）条目的卡片：从当前平台包直接下载安装（POST /api/plugins/install） */
+function StorePackCard({
+  item,
+  target,
+  catalogAvailable,
+  catalogReason,
+  busy,
+  onInstall,
+}: {
+  item: StorePlugin;
+  target: string;
+  catalogAvailable: boolean;
+  catalogReason?: string | null;
+  busy: boolean;
+  onInstall: (item: StorePlugin) => void;
+}): JSX.Element {
   const { t } = useTranslation();
   const platform = item.platforms.find((p) => p.target === target);
+  // 目录不可用 = 无分发渠道/拉取失败，下载无从谈起（原因 title 提示）
+  const installable = catalogAvailable && !!platform;
   return (
     <div className="pl-card is-store">
       <div className="pl-card-head">
@@ -191,9 +211,23 @@ function StorePackCard({ item, target }: { item: StorePlugin; target: string }):
         <span>{platform ? fmtSize(platform.size) : t('当前平台暂无包')}</span>
       </div>
       <div className="pl-card-actions">
-        <span className="pl-store-hint" title={t('AIGX 暂未接入插件商店分发渠道；本地安装与后端管理面就绪后开放')}>
-          {t('暂不支持在线安装')}
-        </span>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!installable || busy}
+          title={!catalogAvailable && catalogReason ? catalogReason : undefined}
+          onClick={() => onInstall(item)}
+        >
+          <Download size={13} /> {t('下载')}
+        </Button>
+        {!installable && (
+          <span
+            className="pl-store-hint"
+            title={catalogAvailable ? t('当前平台暂无包') : (catalogReason || t('目录暂不可用'))}
+          >
+            {platform ? (catalogReason || t('目录暂不可用')) : t('当前平台暂无包')}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -310,6 +344,16 @@ export default function Plugins(): JSX.Element {
     });
   };
 
+  /** 商店卡「下载」：取当前平台 url 调安装端点；失败 toast 由 runMutation 统一处理，成功/失败都会回读刷新 */
+  const handleInstall = (item: StorePlugin): void => {
+    const platform = item.platforms.find((p) => p.target === (payload?.target || ''));
+    if (!platform) return;
+    void runMutation(`install:${item.id}`, async () => {
+      await api.installPlugin(platform.url);
+      addToast(t('插件已下载'));
+    });
+  };
+
   const handleCheckUpdates = async (): Promise<void> => {
     if (busy) return;
     setBusyId('check');
@@ -406,7 +450,15 @@ export default function Plugins(): JSX.Element {
                 />
               ))}
               {storePlugins.map((item) => (
-                <StorePackCard key={item.id} item={item} target={payload?.target || ''} />
+                <StorePackCard
+                  key={item.id}
+                  item={item}
+                  target={payload?.target || ''}
+                  catalogAvailable={catalog?.available !== false}
+                  catalogReason={catalog?.reason}
+                  busy={busy}
+                  onInstall={handleInstall}
+                />
               ))}
             </div>
           )}

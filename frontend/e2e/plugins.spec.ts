@@ -6,7 +6,8 @@ import { test, expect, loginAsAdmin } from './fixtures';
  * 桩（static-server.mjs /api/plugins）：一个已装包（两家提供商，一加载一未加载）
  * + 目录商店两条（其中一条是已装包自己的版本，只显示未装的另一条）。
  * 覆盖：已装卡渲染（徽章/提供商计数/宿主态）、提供商设置展开、整包启停开关
- * 打到 /api/plugins/enable、卸载二次确认、商店卡「暂不支持在线安装」、诊断折叠区。
+ * 打到 /api/plugins/enable、卸载二次确认、商店卡「下载」（目录不可用态禁用）、
+ * 诊断折叠区。
  */
 
 test.describe('插件管理页', () => {
@@ -24,7 +25,8 @@ test.describe('插件管理页', () => {
     await expect(card).toContainText('提供商增强包');
     await expect(card).toContainText('v1.2.0');
     await expect(card.locator('.pl-card-badges', { hasText: '已启用' })).toBeVisible();
-    await expect(card.locator('.pl-card-badges', { hasText: '已签名' })).toBeVisible();
+    // 签名徽章：AIGX 不做验签，带签名的包也只标「带签名（未校验）」（warning 口径）
+    await expect(card.locator('.pl-card-badges', { hasText: '带签名（未校验）' })).toBeVisible();
     await expect(card).toContainText('2 家提供商');
     // 宿主运行态 + 已加载 1 家
     await expect(card.locator('.pl-card-state')).toContainText('运行中');
@@ -76,12 +78,22 @@ test.describe('插件管理页', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('商店条目：未装的包显示卡片并标注暂不支持在线安装', async ({ page, pageErrors }) => {
+  test('商店条目：未装的包显示下载按钮，点击打到 /api/plugins/install', async ({ page, pageErrors }) => {
     // 桩目录两条，其中 aigx-provider-pack 已装 → 只显示 aigx-web-pack
+    const installCalls: string[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/api/plugins/install')) installCalls.push(r.method());
+    });
     const storeCard = page.locator('.pl-card.is-store');
     await expect(storeCard).toHaveCount(1);
     await expect(storeCard).toContainText('网页提供商包');
-    await expect(storeCard.locator('.pl-store-hint')).toContainText('暂不支持在线安装');
+    // 桩给了当前平台的包 → 按钮可用
+    const dl = storeCard.locator('button', { hasText: '下载' });
+    await expect(dl).toBeEnabled();
+    await dl.click();
+    await expect.poll(() => installCalls.length, { timeout: 5000 }).toBe(1);
+    expect(installCalls[0]).toBe('POST');
+    await expect(page.locator('.toast-success')).toContainText('插件已下载', { timeout: 5000 });
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 

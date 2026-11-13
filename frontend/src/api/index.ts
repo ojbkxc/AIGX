@@ -43,6 +43,7 @@ import type {
   DiagnosticsSummary,
   DiagnosticsChannelProbes,
   DiagnosticsBreakers,
+  PluginPackSummary,
   PluginsPayload,
   PricingSyncConfigItem,
   ExchangeRatesItem,
@@ -1292,6 +1293,9 @@ export const api = {
   /** 卸载插件包（账号数据保留，重装可续用） */
   uninstallPlugin: (id: string): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/uninstall`, { id }),
+  /** 在线安装（下载）商店里的插件包：body {url, sha256?} → data:{pack} */
+  installPlugin: (url: string, sha256?: string): Promise<ApiResponse<{ pack: PluginPackSummary }>> =>
+    request<ApiResponse<{ pack: PluginPackSummary }>>('POST', `${API_BASE}/plugins/install`, { url, ...(sha256 ? { sha256 } : {}) }),
   /** 检查插件更新（返回 updates 快照） */
   checkPluginUpdates: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/update`),

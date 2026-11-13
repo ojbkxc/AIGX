@@ -299,7 +299,7 @@ const PLUGINS_PAYLOAD = {
       {
         id: 'aigx-web-pack', name: '网页提供商包', description: '网页形态提供商扩展（智谱清言等）。',
         official: true, version: null, page: null, prerelease: true,
-        platforms: [],
+        platforms: [{ target: 'x86_64-unknown-linux-gnu', size: 1048576, url: 'https://example.com/web-pack.zip', current: true }],
       },
     ],
   },
@@ -1224,12 +1224,13 @@ function handle(req, res, p, bodyText) {
       return sendJson(res, { success: true, items: proxyPool });
     }
 
-    // E2E 状态复位：恢复插件桩预置态（启停/卸载写操作会改内存态）
+    // E2E 状态复位：恢复插件桩预置态（启停/卸载/安装写操作会改内存态）
     if (p === '/api/__e2e/reset-plugins' && req.method === 'POST') {
       PLUGINS_PAYLOAD.packs = JSON.parse(JSON.stringify(PLUGINS_SEED.packs));
       PLUGINS_PAYLOAD.host = JSON.parse(JSON.stringify(PLUGINS_SEED.host));
       PLUGINS_PAYLOAD.catalog = JSON.parse(JSON.stringify(PLUGINS_SEED.catalog));
       PLUGINS_PAYLOAD.updates = JSON.parse(JSON.stringify(PLUGINS_SEED.updates));
+      PLUGINS_PAYLOAD.operations = JSON.parse(JSON.stringify(PLUGINS_SEED.operations));
       return sendJson(res, { success: true, data: null });
     }
 
@@ -1353,6 +1354,24 @@ function handle(req, res, p, bodyText) {
         if (idx >= 0) PLUGINS_PAYLOAD.packs.splice(idx, 1);
       }
       return sendJson(res, { success: true, data: { packs: PLUGINS_PAYLOAD.packs, host: PLUGINS_PAYLOAD.host } });
+    }
+    // 在线安装（下载）：把商店条目装进 packs 并从目录里摘掉（模拟真实安装链路）
+    if (p === '/api/plugins/install' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
+      const entry = PLUGINS_PAYLOAD.catalog.plugins.find((it) =>
+        it.platforms.some((pf) => pf.url === body.url));
+      if (!entry) return sendJson(res, { success: false, error: '未知安装地址' }, 400);
+      const installedPack = {
+        id: entry.id, name: entry.name, description: entry.description,
+        version: entry.version || '0.0.0', requiredVersion: null, updateRequired: false,
+        compatibilityError: null, enabled: true, signed: false,
+        installedAt: Math.floor(Date.now() / 1000), entryPresent: true, protocol: 3,
+        homepage: entry.homepage ?? null, icon: entry.icon ?? null,
+        providers: [], host: { running: false, providers: [], crashes: 0, disabled: false, lastError: null },
+      };
+      PLUGINS_PAYLOAD.packs.push(installedPack);
+      PLUGINS_PAYLOAD.catalog.plugins = PLUGINS_PAYLOAD.catalog.plugins.filter((it) => it.id !== entry.id);
+      return sendJson(res, { success: true, data: { pack: installedPack } });
     }
     if (p === '/api/plugins/update' || p === '/api/plugins/release') {
       return sendJson(res, { success: true, data: { error: false, reason: null } });
