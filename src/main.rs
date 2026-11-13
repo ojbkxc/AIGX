@@ -339,6 +339,22 @@ async fn main() -> anyhow::Result<()> {
         crate::config::set_extra_sensitive_headers(list);
     }
 
+    // 用户脱敏词表（SPEC-1.0.49 §8）：与上面同一模式 —— 词表落 KV，进程内快照
+    // （`sanitize::USER_RULES`）不在这里回填的话，重启后 `GET /api/sanitize` 会
+    // 报「未配置」（它读快照）而 KV 里其实还留着旧词表，脱敏也静默回落内置规则
+    // —— 管理端看着已保存、实际不生效，属假成功。缺省 / `null` = 沿用内置，不动。
+    match store.get::<Option<Vec<crate::sanitize::SanitizeRule>>>(
+        crate::api::admin::settings::SANITIZE_RULES_KEY,
+    ) {
+        Ok(Some(rules)) => {
+            if let Err(e) = crate::sanitize::set_rules(rules) {
+                tracing::warn!("恢复脱敏词表失败，沿用内置规则：{e}");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("读取脱敏词表失败，沿用内置规则：{e}"),
+    }
+
     // 初始化账号型渠道账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
     let account_sessions = crate::account_session::AccountSessionStore::with_egress(
         store.clone(),
