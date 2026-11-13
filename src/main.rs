@@ -39,6 +39,7 @@ mod notify;
 mod oauth;
 mod payment;
 mod plan;
+mod plugin_host;
 mod pricing;
 mod prompt;
 mod proxy;

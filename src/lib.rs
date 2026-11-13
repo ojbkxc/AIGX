@@ -35,6 +35,7 @@ pub mod notify;
 pub mod oauth;
 pub mod payment;
 pub mod plan;
+pub mod plugin_host;
 pub mod pricing;
 pub mod prompt;
 pub mod proxy;
