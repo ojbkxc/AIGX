@@ -373,3 +373,8 @@ zcode version/claim-verification、growth travel/school、**自定义供应商�
 流H | `sort_order` 档与规则排序/加权随机的互斥 | 契约未规定 sort_order 档内如何分配 | sort_order 最小档独占进入既有 `pick_by_rules` → `pick_weighted` | 与 priority 同构（最优先档独占），存量全 0 时整组同档、行为逐字节等价。
 流D | 排程 5 控件的 feature-detect | §5 未提门控；旧实现按「后端是否下发某字段」决定渲染/提交 | **去掉 feature-detect，5 控件无条件渲染且一律提交**（time_end/randomize/retry_limit/retry_gap_minutes/makeup_time） | 后端 §4 已冻结并全部实现（store.rs serde(default) + upsert 的 Option<> 继承语义）；遗留门控会在「零条目」时隐藏控件——恰恰是新建第一条计划最需要的场景。旧后端遇未知字段会忽略（无 deny_unknown_fields），无兼容风险。
 流D | 起止日期与「今天/7天/30天/全部」快选的关系 | §5 只要求加起止日期 | 起止日期任一非空时 `days` 自动放开为 3650（全部），以区间为准；快选置灰视觉不变但加 title 提示 | 后端 days 预过滤与 [start,end] 过滤是两层串行；保留 days=7 会让「选 30 天前~10 天前」被裁成空集，属用户可感知的错误结果。无日期时行为完全不变。
+流I | limiter 列 label | §9b 未写死 label | 用「限制器」 | 目标列集中 `显流(limiter)` 与「cooldown 改名为限流」并存，若 limiter 也叫「限流」会出现两个同名列；取 AIGX 既有术语「限制器」（侧栏同名分组）。
+流I | limiter 列内容 | §9b 只冻结列位/依赖字段 | 账号级拦截徽章（整号跳过 / Token 限额已禁用）；逐模型 `skip_models` 并入「限流」列展开面板 | 避免两列重复同一信息。
+流I | cooldown 列宽 | I-2 表写「128（原值）」 | 保持 128 | limiter=148（A2A limits）已给新列；cooldown 是 AIGX 自定义列，无 A2A 基准可照。
+流I | 状态列文案 | §9b 提「启用/停用」 | 保持现有「启用/禁用/凭证已过期」 | 现状文案已被 e2e 与筛选器（「禁用」档）引用，强改会连带改筛选与 toast，超出本流文件范围。
+流I | 删「优先级」列后的整行拖拽 | （未规定） | 保留 `handleDropRow`（改 priority）未动 | 行拖拽是既有调度功能（Title 已写明语义），不属本流（列表观感对齐）的改动范围。
