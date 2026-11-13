@@ -333,6 +333,8 @@ export interface ChannelItem {
   account_id?: string;
   /// 上游特判（预置供应商卡片写入；手工新建 = 空对象）
   quirks?: ChannelQuirks | null;
+  /// 插件渠道接管的 provider id（channel_type=plugin 时必填；serde(default)，老渠道空串）
+  plugin_provider?: string;
   /// 余额查询方案（空 = 只试 OpenAI 计费端点）
   balance_scheme?: string;
   /// 最近一次余额查询的展示单位（USD / CNY / % / quota …）

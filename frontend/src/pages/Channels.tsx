@@ -5,7 +5,7 @@ import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
   DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Settings2, Plus,
-  Timer, AlertTriangle, Users, KeyRound,
+  Timer, AlertTriangle, Users, KeyRound, Puzzle,
 } from 'lucide-react';
 import { api } from '../api';
 import { useListKeyboard } from '../hooks/useListKeyboard';
@@ -66,6 +66,8 @@ interface ChannelItem {
   tags?: string[];
   /** 上游特判（预置供应商写入） */
   quirks?: ChannelQuirks | null;
+  /** 插件渠道接管的 provider id（channel_type=plugin 时必填；serde(default)，老渠道空串） */
+  plugin_provider?: string;
   /** 余额查询方案（空 = OpenAI 计费端点） */
   balance_scheme?: string;
   /** 余额展示单位（USD / CNY / % / quota …；随余额查询响应回填） */
@@ -156,6 +158,8 @@ interface ChannelFormState {
   balance_query_interval_secs: string;
   /** 余额查询额外凭证（按 header 名存，提交时并入 quirks.headers） */
   balance_fields: Record<string, string>;
+  /** 插件渠道接管的 provider id（channel_type=plugin 时必填） */
+  plugin_provider: string;
 }
 
 /** quirks 的表单形态（与后端 snake_case 字段对齐） */
@@ -176,6 +180,7 @@ const CHANNEL_TYPES = [
   { value: 'anthropic', labelKey: 'Anthropic 兼容' },
   { value: 'gemini', labelKey: 'Gemini (Google AI)', isRaw: true },
   { value: 'zai', labelKey: 'Zai (智谱AI)', isRaw: true },
+  { value: 'plugin', labelKey: '插件渠道' },
 ];
 
 // 各渠道类型的默认 Base URL（创建时自动填充，减少用户手动输入）
@@ -197,6 +202,7 @@ const TYPE_ICONS: Record<string, typeof Cloud> = {
   anthropic: BrainCircuit,
   gemini: Gem,
   zai: Sparkles,
+  plugin: Puzzle,
 };
 
 // 模型名 → 稳定颜色（new-api autoColor 同思路：字符串 hash → HSL 色相）
@@ -245,7 +251,7 @@ function readLs<T>(key: string, fallback: T): T {
 // writeLs 已随列设置迁移公共层（writeTableColumns）；readLs 仍被旧筛选读取用
 
 type ChStateFilter = 'all' | 'on' | 'off';
-type ChTypeFilter = 'all' | 'cloudflare' | 'openai_compatible' | 'anthropic' | 'gemini' | 'zai';
+type ChTypeFilter = 'all' | 'cloudflare' | 'openai_compatible' | 'anthropic' | 'gemini' | 'zai' | 'plugin';
 /** 形态筛选（供应商列表新增维度：API Key 型 / 账号池型） */
 type ChKindFilter = 'all' | 'key' | 'account';
 /** 排序档位（方向即档位语义，同 ModelManage 倍率升/降分开的做法取常用向） */
@@ -270,6 +276,7 @@ const CH_TYPE_OPTIONS: Array<[ChTypeFilter, string]> = [
   ['gemini', 'Gemini'],
   ['zai', 'Z.ai'],
   ['cloudflare', 'CF'],
+  ['plugin', '插件'],
 ];
 const CH_SORT_OPTIONS: Array<[ChSortMode, string]> = [
   ['default', '默认'],
@@ -505,6 +512,8 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   const [sortMode, setSortMode] = useState<ChSortMode>(chFilters.sort as ChSortMode);
   /** 账号池型供应商的账号数（enabled/total），页面加载时并发拉一次；失败静默显示「—」 */
   const [accountStats, setAccountStats] = useState<Record<string, AccountSessionStatsItem>>({});
+  /** 插件渠道下拉选项：已安装且启用的插件包声明的 provider（GET /api/plugins，不新开端点） */
+  const [pluginProviders, setPluginProviders] = useState<Array<{ id: string; label: string }>>([]);
   // 列配置已迁公共层（tableColumns v2：顺序/显隐/对齐/列宽统一记忆）。
   // 旧键一次性搬迁：ch-colcfg（数组：顺序+对齐）与 ch-cols（显隐表）合成 v1 形态
   // 喂公共层；ch-colw 列宽覆盖并进 v2；搬完删旧键。
@@ -580,6 +589,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       balance_scheme: '',
       balance_query_interval_secs: '0',
       balance_fields: {},
+      plugin_provider: '',
     };
   }
 
@@ -976,6 +986,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
         balance: ch.balance ?? undefined,
         credit: ch.credit ?? undefined,
         quirks: ch.quirks ?? null,
+        plugin_provider: ch.plugin_provider || '',
         balance_scheme: ch.balance_scheme || '',
         balance_unit: ch.balance_unit || '',
         created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
@@ -1002,6 +1013,24 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       firstLoadRef.current = false;
     }
   };
+
+  /**
+  /**
+   * 插件渠道可选的 provider 名单（表单 plugin_provider 下拉的数据源）。
+   * 复用插件管理页的 GET /api/plugins：已安装且**启用**的包 → providers[]。
+   * 接口不可用（插件后端未就绪/未安装任何插件）时静默降级为空列表，
+   * 下拉空态提示由渲染层兜底，不阻塞渠道表单其他功能。
+   */
+  useEffect(() => {
+    api.listPlugins()
+      .then((res) => {
+        const enabled = (res?.data?.packs ?? []).filter((p) => p.enabled);
+        setPluginProviders(
+          enabled.flatMap((p) => p.providers.map((pr) => ({ id: pr.id, label: pr.label || pr.id }))),
+        );
+      })
+      .catch(() => { /* 静默：插件后端未就绪 = provider 名单为空 */ });
+  }, []);
 
   /**
    * 账号池型的账号数（账号数列）：`api.accountSessionStats()` 按渠道聚合。
@@ -1049,6 +1078,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       cost_pricing: ch.cost_pricing || {},
       quirks: quirksToForm(ch.quirks),
       balance_scheme: ch.balance_scheme || '',
+      plugin_provider: ch.plugin_provider || '',
       // #32 PR3 巡检间隔回填：三态（null / undefined / 0）已在 loadChannels
       // 收成 null，这里统一落 '0' = 关闭档。后端 mask_channel 恒显式序列化，
       // 「这条渠道从没这字段」与「用户亲手关掉」是同一个值，回填只有一种落点。
@@ -1094,6 +1124,9 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       // 编辑时也总是提交，用户清空表单即等于「清掉特判」
       quirks: formToQuirks(form.quirks, form.balance_fields) ?? {},
       balance_scheme: form.balance_scheme,
+      // 插件渠道：plugin_provider 是 ChannelRequest 的 serde(default) 字段，
+      // 直接透传（后端 add/update 校验 plugin 类型时必填，空串会被 400 拦下）
+      plugin_provider: form.plugin_provider,
       // #32 PR3：巡检间隔**刻意不放进 PUT/POST body**——后端 `ChannelRequest` 没有
       // 这个字段，带上只会被 serde 静默吞掉，看起来「提交了」其实什么都没发生。
       // 写在 payload 里更是个陷阱：下一个人会以为 PUT 能改它。唯一写路径是 PATCH，
@@ -1131,7 +1164,11 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
 
   const handleSave = async (): Promise<void> => {
     if (!form.name) { setError(t('名称为必填项')); return; }
-    if (
+    // 插件渠道不走 base_url（后端 SSRF 校验对空地址合法，转发由插件包接管），
+    // 但 plugin_provider 必填（后端 add/update 会 400，数据面按它路由）
+    if (form.channel_type === 'plugin') {
+      if (!form.plugin_provider) { setError(t('插件渠道必须选择接管的提供商')); return; }
+    } else if (
       form.channel_type !== 'cloudflare' &&
       !form.base_url
     ) {
@@ -2102,7 +2139,21 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                   {t(AUTH_HINT[form.channel_type as keyof typeof AUTH_HINT]!)}
                 </div>
               )}
-                            {form.channel_type === 'cloudflare' ? (
+              {/* 插件渠道：只选 provider（插件包接管转发，无 base_url/鉴权可言）；
+                  选项 = 已安装且启用的插件包声明的提供商（GET /api/plugins） */}
+              {form.channel_type === 'plugin' ? (
+                <Select
+                  label={t('插件提供商')}
+                  value={form.plugin_provider}
+                  onChange={(e) => setForm({ ...form, plugin_provider: e.target.value })}
+                  hint={pluginProviders.length === 0 ? t('暂无可用的插件提供商：请先在插件管理页安装并启用插件包') : undefined}
+                >
+                  <option value="">{t('请选择插件提供商')}</option>
+                  {pluginProviders.map((pr) => (
+                    <option key={pr.id} value={pr.id}>{pr.label}</option>
+                  ))}
+                </Select>
+              ) : form.channel_type === 'cloudflare' ? (
                 <Input
                   label={t('Cloudflare 账号 ID')}
                   placeholder={t('Cloudflare 账号 ID')}
@@ -2118,7 +2169,8 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                   hint={t('未带 /v1 时会自动补齐')}
                 />
               )}
-              <div className="form-group">
+              {form.channel_type !== 'plugin' && (
+                <div className="form-group">
                 <label>API Key {editChannel && !form.no_key && t('（留空则保持不变）')}</label>
                 <label className="no-key-row" title={t('勾选后转发请求不带鉴权头，适用于免鉴权上游或网关侧 IP 白名单')}>
                   <input
@@ -2150,6 +2202,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                   </button>
                 </div>
               </div>
+              )}
               {/* 模型清单（白名单）统一收敛到「模型管理」页（/model-manage），
                   这里不再提供逗号输入框与拉取按钮。渠道级「模型映射」与
                   「成本价」是渠道自身配置，仍在此维护（与全局别名区分）。 */}
