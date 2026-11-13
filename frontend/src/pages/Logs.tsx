@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
+import { Trash2, Eraser, EyeOff, Eye, Search } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin, fmtCompact } from '../lib/utils';
 import { fmtCost } from '../lib/format';
@@ -24,6 +24,7 @@ import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { RequestLogDetail, AuditLogDetail } from '../components/LogDetailDialogs';
 import { Button, Card, Loading, EmptyState, Tooltip } from '../components/ui';
+import './Logs.css';
 
 export type LogTab = 'requests' | 'audits';
 type LogView = 'table' | 'timeline';
@@ -590,7 +591,7 @@ export default function Logs(): JSX.Element {
       {error && <div className="error-message">{error}</div>}
 
       <Card bodyClassName="">
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <Button variant={tab === 'requests' ? 'primary' : 'outline'} onClick={() => { setTab('requests'); setPage(1); setView('table'); }}>
             {t('请求日志')}
           </Button>
@@ -720,109 +721,134 @@ export default function Logs(): JSX.Element {
       )}
 
       {tab === 'requests' && (
-        <Card title={t('筛选')} className="" bodyClassName="">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
-            {admin && (
-              <div className="form-group">
-                <label>{t('用户')}</label>
-                <input ref={searchRef} className="form-input" value={filters.user} onChange={(e) => setFilters({ ...filters, user: e.target.value })} placeholder={t('按用户 ID 或邮箱过滤')} />
-              </div>
-            )}
-            {!admin && (
-              <div className="form-group">
-                <label>{t('模型')}</label>
-                <input ref={searchRef} className="form-input" value={filters.model} onChange={(e) => setFilters({ ...filters, model: e.target.value })} placeholder={t('按模型过滤')} />
-              </div>
-            )}
-            {admin && (
-              <div className="form-group">
-                <label>{t('模型')}</label>
-                <input className="form-input" value={filters.model} onChange={(e) => setFilters({ ...filters, model: e.target.value })} placeholder={t('按模型过滤')} />
-              </div>
-            )}
-            {admin && (
-              <div className="form-group">
-                <label>{t('供应商 ID')}</label>
-                <input className="form-input" value={filters.channel} onChange={(e) => setFilters({ ...filters, channel: e.target.value })} placeholder={t('按供应商过滤')} />
-              </div>
-            )}
-            <div className="form-group">
-              <label>{t('关键词')}</label>
-              <input
-                className="form-input"
-                value={filters.keyword}
-                onChange={(e) => setFilters({ ...filters, keyword: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    if (page === 1) void load();
-                    else setPage(1);
-                  }
-                }}
-                placeholder={t('模型 / 供应商 / 错误信息')}
-              />
-            </div>
-            <div className="form-group">
-              <label>{t('状态')}</label>
-              <select
-                className="form-input"
-                value={filters.status}
-                onChange={(e) => setFilters({ ...filters, status: e.target.value })}
+        <div className="lg-filters">
+          {/* 状态：分段控件（对齐模型管理 / 供应商页） */}
+          <div className="lg-seg" role="tablist" aria-label={t('状态筛选')}>
+            {(
+              [
+                ['', t('全部')],
+                ['ok', t('成功')],
+                ['error', t('失败')],
+              ] as Array<[string, string]>
+            ).map(([v, label]) => (
+              <button
+                key={v || 'all'}
+                type="button"
+                className={`lg-seg-btn${filters.status === v ? ' active' : ''}`}
+                onClick={() => setFilters({ ...filters, status: v })}
               >
-                <option value="">{t('全部')}</option>
-                <option value="ok">{t('成功')}</option>
-                <option value="error">{t('失败')}</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label>{t('开始时间')}</label>
-              <input
-                type="datetime-local"
-                className="form-input"
-                value={filters.start}
-                onChange={(e) => setFilters({ ...filters, start: e.target.value })}
-              />
-            </div>
-            <div className="form-group">
-              <label>{t('结束时间')}</label>
-              <input
-                type="datetime-local"
-                className="form-input"
-                value={filters.end}
-                onChange={(e) => setFilters({ ...filters, end: e.target.value })}
-              />
-            </div>
+                {label}
+              </button>
+            ))}
           </div>
-          {!admin && (
-            <div className="form-hint" style={{ marginTop: 4 }}>
-              {t('仅显示你自己的请求记录')}
+          {admin ? (
+            <>
+              <div className="lg-search">
+                <Search size={13} className="lg-search-icon" />
+                <input
+                  ref={searchRef}
+                  className="form-input"
+                  value={filters.user}
+                  onChange={(e) => setFilters({ ...filters, user: e.target.value })}
+                  placeholder={t('按用户 ID 或邮箱过滤')}
+                  title={t('用户')}
+                  aria-label={t('用户')}
+                />
+              </div>
+              <div className="lg-search">
+                <Search size={13} className="lg-search-icon" />
+                <input
+                  className="form-input"
+                  value={filters.model}
+                  onChange={(e) => setFilters({ ...filters, model: e.target.value })}
+                  placeholder={t('按模型过滤')}
+                  title={t('模型')}
+                  aria-label={t('模型')}
+                />
+              </div>
+              <div className="lg-search">
+                <input
+                  className="form-input"
+                  value={filters.channel}
+                  onChange={(e) => setFilters({ ...filters, channel: e.target.value })}
+                  placeholder={t('按供应商过滤')}
+                  title={t('供应商 ID')}
+                  aria-label={t('供应商 ID')}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="lg-search">
+              <Search size={13} className="lg-search-icon" />
+              <input
+                ref={searchRef}
+                className="form-input"
+                value={filters.model}
+                onChange={(e) => setFilters({ ...filters, model: e.target.value })}
+                placeholder={t('按模型过滤')}
+                title={t('模型')}
+                aria-label={t('模型')}
+              />
             </div>
           )}
-          <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Button size="sm" onClick={handleSearch}>{t('查询')}</Button>
-            {admin && (
-              <>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={handleBatchDelete}
-                  disabled={selected.size === 0 || batchDeleting}
-                >
-                  <Trash2 size={14} style={{ marginRight: 4 }} />
-                  {t('删除选中')} {selected.size > 0 ? `(${selected.size})` : ''}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void handleClearAll()}
-                  disabled={batchDeleting || total === 0}
-                >
-                  <Eraser size={14} style={{ marginRight: 4 }} />
-                  {t('清空全部')}
-                </Button>
-              </>
-            )}
+          {/* 关键词：Enter 即查询（与「查询」按钮同口径） */}
+          <div className="lg-search">
+            <input
+              className="form-input"
+              value={filters.keyword}
+              onChange={(e) => setFilters({ ...filters, keyword: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  if (page === 1) void load();
+                  else setPage(1);
+                }
+              }}
+              placeholder={t('模型 / 供应商 / 错误信息')}
+              title={t('关键词')}
+              aria-label={t('关键词')}
+            />
           </div>
-        </Card>
+          <input
+            type="datetime-local"
+            className="form-input lg-time"
+            value={filters.start}
+            onChange={(e) => setFilters({ ...filters, start: e.target.value })}
+            aria-label={t('开始时间')}
+          />
+          <span className="lg-range-sep">~</span>
+          <input
+            type="datetime-local"
+            className="form-input lg-time"
+            value={filters.end}
+            onChange={(e) => setFilters({ ...filters, end: e.target.value })}
+            aria-label={t('结束时间')}
+          />
+          <Button size="sm" onClick={handleSearch}>{t('查询')}</Button>
+          {admin && (
+            <>
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={handleBatchDelete}
+                disabled={selected.size === 0 || batchDeleting}
+              >
+                <Trash2 size={14} style={{ marginRight: 4 }} />
+                {t('删除选中')} {selected.size > 0 ? `(${selected.size})` : ''}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleClearAll()}
+                disabled={batchDeleting || total === 0}
+              >
+                <Eraser size={14} style={{ marginRight: 4 }} />
+                {t('清空全部')}
+              </Button>
+            </>
+          )}
+          {!admin && <span className="lg-hint">{t('仅显示你自己的请求记录')}</span>}
+          <span className="lg-filters-count">{t('共 {{count}} 条', { count: total })}</span>
+        </div>
       )}
 
       <Card title={`${tab === 'requests' ? t('请求日志') : t('审计日志')} (${total})`}>

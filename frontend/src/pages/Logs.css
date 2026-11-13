@@ -1,0 +1,114 @@
+/* Logs 页筛选工具条（LG-filters）。
+   形态与数值逐项对齐 ModelManage.css 的 .mm-filters / Channels.css 的 .ch-filters：
+   单行 flex + 高 30px 控件 + 分段控件 + 右对齐计数 + 底部分隔线。
+   （原先这里是 `Card title="筛选"` 里的 auto-fill 网格：每个控件 40px 高、
+    datetime-local 与 select 自带高度还各不相同，按钮另起一行 —— 观感参差。） */
+
+.lg-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 12px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 12px;
+}
+
+/* 分段控件（全部 / 成功 / 失败） */
+.lg-seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 1px;
+  border-radius: 8px;
+  background: var(--surface-bg);
+  border: 1px solid var(--border-color);
+}
+
+.lg-seg-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.lg-seg-btn:hover {
+  color: var(--text-main);
+}
+
+.lg-seg-btn.active {
+  background: var(--card-bg);
+  color: var(--text-main);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* 输入框：统一 30px / 12px（覆盖全局 .form-input 的 40px / 14px） */
+.lg-filters .form-input {
+  height: 30px;
+  font-size: 12px;
+}
+
+.lg-search {
+  position: relative;
+  width: 180px;
+  flex-shrink: 0;
+}
+
+.lg-search .form-input {
+  width: 100%;
+}
+
+.lg-search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.lg-search .lg-search-icon + .form-input {
+  padding-left: 28px;
+}
+
+/* 时间范围：datetime-local 需要更宽（含日历/时钟图标） */
+.lg-time {
+  width: 178px;
+  flex-shrink: 0;
+}
+
+.lg-range-sep {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+/* 右侧计数 / 只读提示 */
+.lg-filters-count {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lg-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+  .lg-filters {
+    padding: 6px 10px 10px;
+  }
+
+  .lg-search,
+  .lg-time {
+    width: 100%;
+  }
+}

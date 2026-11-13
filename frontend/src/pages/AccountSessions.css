@@ -383,36 +383,82 @@
   gap: 4px;
 }
 
-/* ── 状态分段过滤（对齐 Agent2API 账号页） ── */
+/* ── 筛选工具条（对齐 ModelManage.css .mm-filters / Channels.css .ch-filters：
+      单行 flex + 30px 控件 + 分段控件 + 底部分隔线） ──
+   原先这里是内联 flex + gap:12 的混排：Select/Input 经 .form-group 带 16px
+   底边距、.form-input 高 40px，而 .seg-filter 只有 ~33px —— 垂直不居中、高度参差。 */
+.as-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 12px;
+  margin-bottom: 12px;
+}
+
+/* 消除 .form-group 的 16px 底边距（高度不齐的主因），并给筛选控件统一宽度 */
+.as-filters .form-group {
+  margin-bottom: 0;
+  width: 180px;
+}
+
+/* 输入/下拉统一 30px / 12px（覆盖全局 .form-input 的 40px / 14px） */
+.as-filters .form-input {
+  height: 30px;
+  font-size: 12px;
+  width: 100%;
+}
+
+/* 余额轮询下拉自带 width:auto / min-width:128px，压回列宽内 */
+.as-filters .as-autobal-select {
+  width: 100%;
+  min-width: 0;
+}
+
+/* 分组开关行高对齐控件 */
+.as-filters .as-toggle {
+  min-height: 30px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+@media (max-width: 767px) {
+  .as-filters {
+    padding: 6px 8px 10px;
+  }
+}
+
+/* ── 状态 / 限额分段过滤（逐项对齐 .mm-seg / .ch-seg） ── */
 .seg-filter {
   display: inline-flex;
+  padding: 2px;
+  gap: 1px;
+  border-radius: 8px;
+  background: var(--surface-bg);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
-  overflow: hidden;
 }
 
 .seg-filter-btn {
-  border: none;
+  border: 0;
   background: transparent;
   color: var(--text-muted);
-  font-size: 13px;
-  padding: 7px 12px;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
-}
-
-.seg-filter-btn + .seg-filter-btn {
-  border-left: 1px solid var(--border-color);
+  transition: background 0.12s, color 0.12s;
 }
 
 .seg-filter-btn:hover {
-  background: var(--hover-bg);
+  color: var(--text-main);
 }
 
 .seg-filter-btn.active {
-  background: var(--btn-secondary-bg);
+  background: var(--card-bg);
   color: var(--text-main);
   font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 /* ── 批量操作条 ── */

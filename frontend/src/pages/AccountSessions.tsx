@@ -2965,7 +2965,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
           </div>
         }
       >
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+        <div className="as-filters">
           {/* 提供商筛选：对齐 Agent2API 账号页的左栏 provider 下拉。
               渠道是内部容器，不该出现在筛选器里（用户心智里只有供应商）。 */}
           <Select
