@@ -41,6 +41,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
             HighRisk,
             "provider",
             &[
+                "/api/plugins/install",
                 "/api/plugins/enable",
                 "/api/plugins/provider",
                 "/api/plugins/uninstall",
@@ -58,11 +59,15 @@ pub(super) fn tools() -> Vec<ToolDef> {
                     match action.as_str() {
                         // 包级启停：内置包编译在二进制里，handler 恒返回降级说明
                         // （整包停用会让网关无上游可用）。enable/disable 走同一条路由
-                        // （前端也只调这一条，`enabled` 由前端提示、后端不解）。
+                        // （前端也只调这一条）。enabled 缺省 None：外置包场景 handler
+                        // 返回 400 要求显式传（本工具面向内置包，行为不变）。
                         "enable" | "disable" => out(admin::plugins::handle_set_plugin_enabled(
                             State(s.clone()),
                             h.clone(),
-                            Json(admin::plugins::PackIdBody { id: pack_id }),
+                            Json(admin::plugins::PackIdBody {
+                                id: pack_id,
+                                enabled: None,
+                            }),
                         )
                         .await),
                         "provider-enable" => {
@@ -90,7 +95,10 @@ pub(super) fn tools() -> Vec<ToolDef> {
                         "uninstall" => out(admin::plugins::handle_uninstall_plugin(
                             State(s.clone()),
                             h.clone(),
-                            Json(admin::plugins::PackIdBody { id: pack_id }),
+                            Json(admin::plugins::PackIdBody {
+                                id: pack_id,
+                                enabled: None,
+                            }),
                         )
                         .await),
                         other => Err((
@@ -321,6 +329,7 @@ mod tests {
     use super::*;
 
     const PLUGIN_COVERS: &[&str] = &[
+        "/api/plugins/install",
         "/api/plugins/enable",
         "/api/plugins/provider",
         "/api/plugins/uninstall",

@@ -1097,25 +1097,36 @@ fn paths_accounts_network() -> Value {
             "post": op_body("网络代理", "编辑代理池条目（密码留空=保留旧值）", "")
         },
         "/api/plugins": {
-            "get": op("插件", "插件列表（内置 provider 目录包 + 启停态）")
+            "get": op("插件", "插件列表（内置 provider 目录包 + 外置插件包 + 发布目录）")
+        },
+        "/api/plugins/install": {
+            "post": op_body(
+                "插件",
+                "从 URL 安装外置插件包（zip；可选 sha256 校验，装完默认停用）",
+                "{ url, sha256? }",
+            )
         },
         "/api/plugins/enable": {
-            "post": op_body("插件", "包级启停（内置包不支持整包停用）", "{ id, enabled }")
+            "post": op_body(
+                "插件",
+                "包级启停（外置包：启用/停用子进程；内置包不支持整包停用）",
+                "{ id, enabled }",
+            )
         },
         "/api/plugins/provider": {
             "post": op_body("插件", "provider 级启停（数据面选号即时生效）", "{ id, provider, enabled }")
         },
         "/api/plugins/uninstall": {
-            "post": op_body("插件", "卸载插件包（内置包不支持）", "{ id }")
+            "post": op_body("插件", "卸载外置插件包（停进程 + 删包；内置包不支持）", "{ id }")
         },
         "/api/plugins/update": {
             "get": op("插件", "插件更新检查（内置目录随网关版本发布）")
         },
         "/api/plugins/release": {
-            "get": op("插件", "发布目录（内置实现暂不适用）")
+            "get": op("插件", "发布目录（从 [plugins] source_url 实时拉取）")
         },
         "/api/plugins/progress": {
-            "get": op("插件", "在途安装/更新操作（内置实现恒空）")
+            "get": op("插件", "在途安装/更新操作（当前恒空）")
         },
         "/api/public/geo-lang": {
             "get": op("公开", "按 IP 推断语言")
@@ -1376,6 +1387,7 @@ mod tests {
         add("/api/proxy-pool/sync-clash", &["post"]);
         add("/api/proxy-pool/update", &["post"]);
         add("/api/plugins", &["get"]);
+        add("/api/plugins/install", &["post"]);
         add("/api/plugins/enable", &["post"]);
         add("/api/plugins/provider", &["post"]);
         add("/api/plugins/uninstall", &["post"]);

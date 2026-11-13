@@ -480,6 +480,37 @@ async fn main() -> anyhow::Result<()> {
         config.usage.headers_timeout_secs.max(1),
     ));
 
+    // 插件宿主（外置插件包的安装/启停/崩溃退避，对齐 Agent2API provider-protocol）：
+    // - 包注册表落 KV（`plugin:packs`），启动时 load 一次；
+    // - 根目录：config.toml [plugins] plugins_dir 非空则用之，否则 {data_dir}/plugins；
+    // - 插件环境：网关版本 / 目标平台（TARGET 三元组）/ 空代理；
+    // - [plugins] enabled=true 时启动恢复已启用的包（见下方后台任务）。
+    let plugins_root = if config.plugins.plugins_dir.trim().is_empty() {
+        data_dir.join("plugins")
+    } else {
+        std::path::PathBuf::from(config.plugins.plugins_dir.trim())
+    };
+    let pack_registry = Arc::new(crate::plugin_host::registry::PackRegistry::new(
+        store.clone(),
+    ));
+    if let Err(e) = pack_registry.load() {
+        tracing::warn!("[PluginHost] 读取插件包注册表失败（按空注册表启动）: {e}");
+    }
+    let host_env = crate::plugin_host::process::HostEnv {
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        host_version: env!("CARGO_PKG_VERSION").to_string(),
+        target: option_env!("TARGET").unwrap_or("unknown").to_string(),
+        proxy: String::new(),
+    };
+    let plugin_host = Arc::new(crate::plugin_host::PluginHostManager::new(
+        pack_registry,
+        plugins_root,
+        http_client.as_ref().clone(),
+        host_env,
+        Arc::new(account_sessions.clone()),
+        store.clone(),
+    ));
+
     // 初始化公开注册速率限制器（per-IP，60s 窗口，最多 10000 个 IP 条目）
     // 使用基于 dashmap 的 AsyncCache 替代 moka（离线环境 moka 不可得，行为等效）
     let register_limiter = Arc::new(
@@ -695,6 +726,7 @@ async fn main() -> anyhow::Result<()> {
             }
             gates
         },
+        plugin_host: plugin_host.clone(),
     };
 
     tracing::info!(
@@ -713,6 +745,15 @@ async fn main() -> anyhow::Result<()> {
     // （渠道增删 / 健康变化不经由 metrics 模块调用点，故不能只写一次）。
     refresh_metrics_snapshot(&state.channel_store, &state.health_tracker);
     spawn_metrics_refresh_task(state.channel_store.clone(), state.health_tracker.clone());
+
+    // 插件宿主启动恢复：[plugins] enabled=true 时把「已启用」的外置包重新
+    // 拉起（后台任务；单个包起不来只记错误、按退避表重试，不拖网关启动）。
+    if config.plugins.enabled {
+        let ph = plugin_host.clone();
+        tokio::spawn(async move {
+            ph.restore_enabled().await;
+        });
+    }
 
     // 构建路由
     // Start CF quota monitoring background task
@@ -1089,6 +1130,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 关停时要 flush 日志队列，故先取出 Arc（state 随后被 build_router 消费）。
     let log_store = state.log_store.clone();
+    // 插件宿主也要在 state 被消费前取出（关停序列里优雅关闭子进程）。
+    let plugin_host = state.plugin_host.clone();
     let app = build_router(state, &config);
 
     // 启动服务器
@@ -1142,6 +1185,10 @@ async fn main() -> anyhow::Result<()> {
             DRAIN_TIMEOUT.as_secs()
         ),
     }
+
+    // 插件宿主：优雅关闭全部插件子进程（先 RPC shutdown 等 5s，超时 kill，
+    // 不留孤儿进程；崩溃退避监督循环见到 shutdown_requested 标记即退出）。
+    plugin_host.shutdown_all().await;
 
     // 关闭序列最后一步：把日志异步写队列刷干净（内部自带 10s 超时兜底）。
     log_store.flush();
@@ -2515,10 +2562,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/proxy-pool/sync-clash",
             post(api::admin::proxy_pool_api::handle_pool_sync_clash),
         )
-        // 插件管理面（对照 Agent2API /api/plugins*；契约化不进程化）
+        // 插件管理面（对照 Agent2API /api/plugins*；内置目录 + 外置插件包）
         .route(
             "/api/plugins",
             get(api::admin::plugins::handle_list_plugins),
+        )
+        .route(
+            "/api/plugins/install",
+            post(api::admin::plugins::handle_install_plugin),
         )
         .route(
             "/api/plugins/enable",

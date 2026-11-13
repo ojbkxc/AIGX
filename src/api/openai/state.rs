@@ -185,6 +185,10 @@ pub struct AppState {
     pub scheduled_task_store: Arc<crate::storage::FileStore>,
     /// 插件面的 provider 启停闸门（管理面写、数据面选号过滤读；KV 持久化）。
     pub provider_gates: crate::api::admin::plugins::ProviderGates,
+    /// 插件宿主管理器（外置插件包的安装/启停/崩溃退避；
+    /// `[plugins] enabled=true` 时参与启动恢复，数据面经
+    /// `process_for_provider` 路由到插件进程）。
+    pub plugin_host: Arc<crate::plugin_host::PluginHostManager>,
 }
 impl AppState {
     /// 返回是否启用了 SeaORM 后端。
