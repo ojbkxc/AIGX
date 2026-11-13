@@ -27,11 +27,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 /// 协议版本。握手时双方比对，不一致一律拒绝加载。
@@ -54,6 +56,10 @@ pub const DEFAULT_WINDOW_BYTES: usize = 512 << 10;
 
 /// 一帧的计费开销（字节）。帧的 JSON 包装、base64 膨胀、字段名都占内存。
 pub const FRAME_OVERHEAD_BYTES: usize = 2048;
+
+/// 流式调用等首帧 `head` 的超时。插件必须在 30s 内回 head，否则
+/// [`RpcChannel::call_stream`] 直接失败——网关不能挂着一条不知死活的流。
+const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 读缓冲区大小（同时用作测试里 duplex 通道的容量）。
 const READ_BUF_SIZE: usize = 1 << 16;
@@ -226,12 +232,195 @@ impl CallbackHandler for NoopCallbacks {
     }
 }
 
+/// 流式调用的事件（`head` → `chunk`×N → `End`，出错则 `Err` 终结）。
+#[derive(Clone, Debug)]
+pub enum StreamEvent {
+    /// 上游响应头（流的第一帧）。
+    Head {
+        status: u16,
+        headers: BTreeMap<String, String>,
+        /// 这份响应用哪套上游协议（插件自报，网关不校验）。
+        upstream: Option<String>,
+    },
+    /// 一段上游字节（`chunk` 帧的 base64 已解码）。
+    Chunk(Vec<u8>),
+    /// 流正常收尾（`end` 事件帧或 `{"id":X,"result":null}` 应答帧）。
+    End,
+}
+
+/// 一条流式调用在网关侧的句柄（[`RpcChannel::call_stream`] 的产出）。
+///
+/// `head` 已由 call_stream 等好（30s 超时），消费方用 [`StreamCall::next`]
+/// 逐个取 `Chunk` / `End`。背压在这里闭环：每消费一个 chunk 按插件侧**同
+/// 口径**计费（载荷 + [`FRAME_OVERHEAD_BYTES`]，差一个常量窗口就会缓慢
+/// 泄漏），未归还量攒满 `DEFAULT_WINDOW_BYTES / 2` 就向插件发一帧
+/// `credit`——客户端读得慢就不归还，插件发送窗口耗尽后自然停住。
+///
+/// Drop 时把流从登记表摘除（消费方中途放弃不再泄漏表项）。
+pub struct StreamCall {
+    /// 本次调用的 RPC id（插件按 `params.id` 指认被补充的流）。
+    id: i64,
+    /// 共享状态：写 credit 帧 + 摘除登记。
+    shared: Arc<Shared>,
+    /// 事件接收端（读循环按 id 路由进来的原始帧）。
+    rx: mpsc::UnboundedReceiver<Frame>,
+    /// call_stream 已等出的 head，第一次 `next()` 先交出它。
+    head: Option<StreamEvent>,
+    /// 已消费字节（载荷 + 帧开销，与插件侧计费口径一致）。
+    consumed: usize,
+    /// 已归还额度。
+    credited: usize,
+    /// 流已终态（end / 出错 / 截断）——此后 `next()` 一律返回 `None`。
+    finished: bool,
+}
+
+impl StreamCall {
+    /// 取下一个流事件。
+    ///
+    /// - `Some(Ok(..))` —— 一个事件（head / chunk / end）
+    /// - `Some(Err(..))` —— 插件中途报错或流被截断（进程退出、通道关闭）
+    /// - `None` —— 流已终态，不会再有事件
+    pub async fn next(&mut self) -> Option<Result<StreamEvent, RpcError>> {
+        if self.finished {
+            return None;
+        }
+        if let Some(head) = self.head.take() {
+            return Some(Ok(head));
+        }
+        loop {
+            let frame = match self.rx.recv().await {
+                Some(frame) => frame,
+                None => {
+                    // 读循环退出且没等到收尾帧：把截断当错误上报，不能让
+                    // 消费方把不完整的流当成正常结束（与上游同处置）
+                    self.mark_finished();
+                    return Some(Err(RpcError::new(
+                        "stream interrupted before end frame",
+                        "eof",
+                    )));
+                }
+            };
+            match frame.event.as_deref() {
+                Some("head") => {
+                    // 首帧 head 已由 call_stream 取出缓冲；循环里再见的 head
+                    // 都是插件重复发的协议违规——丢弃，多余的控制帧不该
+                    // 毁掉正文（与上游消费侧同处置）
+                }
+                Some("chunk") => {
+                    let data = frame.data.unwrap_or_default();
+                    let bytes = match STANDARD.decode(data.as_bytes()) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            self.mark_finished();
+                            // base64 坏了 = 后续字节边界不可信，与坏帧同等
+                            // 处置：流以错误终结
+                            return Some(Err(RpcError::new(
+                                format!("chunk base64 decode failed: {e}"),
+                                "decode",
+                            )));
+                        }
+                    };
+                    if bytes.len() > MAX_CHUNK_BYTES {
+                        // 超限仅告警不中断：切分是插件侧的约定，网关不替它
+                        // 执行，但要让运维看得见
+                        tracing::warn!(
+                            "plugin stream {} chunk {} bytes > MAX_CHUNK_BYTES ({MAX_CHUNK_BYTES})",
+                            self.id,
+                            bytes.len()
+                        );
+                    }
+                    self.charge_and_credit(bytes.len()).await;
+                    return Some(Ok(StreamEvent::Chunk(bytes)));
+                }
+                Some("end") => {
+                    self.mark_finished();
+                    return Some(Ok(StreamEvent::End));
+                }
+                // 未知事件名：忽略（向前兼容，旧网关对新事件不报错）
+                Some(_) => {}
+                None => {
+                    // 应答形状的收尾帧（`{"id":X,"result":null}` / error）。
+                    // 收尾优先认 error：先 `error` 后 `result` 的判定与
+                    // `Frame::kind` 同序
+                    self.mark_finished();
+                    return match frame.error {
+                        Some(err) => Some(Err(err)),
+                        None => Some(Ok(StreamEvent::End)),
+                    };
+                }
+            }
+        }
+    }
+
+    /// 本次调用的 RPC id。
+    pub fn id(&self) -> i64 {
+        self.id
+    }
+
+    /// 计费 + 攒满半个窗口就归还额度。
+    ///
+    /// 归还量 `n` 是**实际未归还的消费量**，不是固定的半个窗口：一块
+    /// chunk 跨过阈值时多出的部分一并归还，否则窗口随流缓慢泄漏（插件
+    /// 最终在客户端正常读取的情况下停摆，背压形同虚设）。
+    async fn charge_and_credit(&mut self, payload_len: usize) {
+        self.consumed += payload_len + FRAME_OVERHEAD_BYTES;
+        let uncredited = self.consumed - self.credited;
+        if uncredited < DEFAULT_WINDOW_BYTES / 2 {
+            return;
+        }
+        let frame = Frame {
+            // credit 的外层 id 必须是**新分配的请求 id**，不能复用流 id：
+            // 插件 SDK 对 credit 应答 `{"id":<请求id>,"result":null}`
+            // （provider-sdk serve.rs 的 `host.reply(id, …)`），复用流 id 会让
+            // 这份应答被读循环当成流的收尾帧投进流通道，把活流提前判死。
+            // 流的归属由 `params.id` 指认（与上游 Host::credit 同形状）。
+            id: self.shared.next_id.fetch_add(2, Ordering::Relaxed),
+            method: Some("credit".to_string()),
+            params: Some(serde_json::json!({ "id": self.id, "n": uncredited })),
+            ..Default::default()
+        };
+        if let Err(e) = self.shared.write_frame(&frame).await {
+            tracing::warn!("plugin stream {} credit write failed: {e}", self.id);
+            return;
+        }
+        self.credited += uncredited;
+    }
+
+    /// 终态标记 + 从登记表摘除自己（读循环不再往这条通道投递）。
+    fn mark_finished(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let shared = self.shared.clone();
+            let id = self.id;
+            handle.spawn(async move {
+                shared.streams.write().await.remove(&id);
+            });
+        }
+    }
+}
+
+impl Drop for StreamCall {
+    fn drop(&mut self) {
+        // 消费方中途放弃（没读到收尾就丢句柄）：摘除登记，避免表项泄漏
+        self.mark_finished();
+    }
+}
+
 /// 内部共享状态。
 struct Shared {
     /// 出站写句柄（锁内写一行 JSON）。
     writer: Mutex<BoxWriter>,
     /// 在途请求的应答通道。
     pending: RwLock<HashMap<i64, oneshot::Sender<Frame>>>,
+    /// 在途流式调用的帧通道（head/chunk/end 按调用 id 路由进来）。
+    ///
+    /// 通道是**无界**的：有界通道满了要么丢帧（正文损坏）要么把读循环
+    /// 卡死（殃及其它在途请求）。内存有界性由 credit 窗口保证——插件
+    /// 发满一个窗口就停，等网关归还额度；网关侧最多积压约一个窗口的字节。
+    streams: RwLock<HashMap<i64, mpsc::UnboundedSender<Frame>>>,
     /// 回调处理器。
     callbacks: Arc<dyn CallbackHandler>,
     /// 我方分配的下一个奇数 id。
@@ -263,6 +452,7 @@ impl RpcChannel {
         let shared = Arc::new(Shared {
             writer: Mutex::new(writer),
             pending: RwLock::new(HashMap::new()),
+            streams: RwLock::new(HashMap::new()),
             callbacks,
             next_id: AtomicI64::new(1),
         });
@@ -304,6 +494,75 @@ impl RpcChannel {
                 Ok(frame.result.unwrap_or(Value::Null))
             }
             Err(_) => Err(RpcError::new("channel closed before response", "closed")),
+        }
+    }
+
+    /// 发起一次流式调用（`conversation` 形态：head → chunk×N → 收尾）。
+    ///
+    /// 分配奇数 id、把流登记进 [`Shared::streams`]、写出请求帧，然后等首帧
+    /// `head`（[`HEAD_TIMEOUT`] 30s）。head 到手后返回 [`StreamCall`]，
+    /// 消费方用 [`StreamCall::next`] 逐帧取。
+    ///
+    /// 插件拒绝（error 应答）、head 超时、首帧不是 head、写出失败——都在
+    /// 这里直接报错，不返回半条流。
+    pub async fn call_stream(&self, method: &str, params: Value) -> Result<StreamCall, RpcError> {
+        let id = self.shared.next_id.fetch_add(2, Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        {
+            let mut streams = self.shared.streams.write().await;
+            streams.insert(id, tx);
+        }
+        let frame = Frame {
+            id,
+            method: Some(method.to_string()),
+            params: Some(params),
+            ..Default::default()
+        };
+        if let Err(e) = self.shared.write_frame(&frame).await {
+            self.shared.streams.write().await.remove(&id);
+            return Err(e);
+        }
+        let first = match tokio::time::timeout(HEAD_TIMEOUT, rx.recv()).await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                // 读循环退出（进程没了）且没等到 head
+                self.shared.streams.write().await.remove(&id);
+                return Err(RpcError::new("stream closed before head frame", "eof"));
+            }
+            Err(_) => {
+                self.shared.streams.write().await.remove(&id);
+                return Err(RpcError::new("stream head frame timeout (30s)", "timeout"));
+            }
+        };
+        match first.event.as_deref() {
+            // 正常：head 到手，装进 StreamCall 让第一次 next() 先交出它
+            Some("head") => Ok(StreamCall {
+                id,
+                shared: self.shared.clone(),
+                rx,
+                head: Some(StreamEvent::Head {
+                    status: first.status.unwrap_or(200),
+                    headers: first.headers.unwrap_or_default(),
+                    upstream: first.upstream,
+                }),
+                consumed: 0,
+                credited: 0,
+                finished: false,
+            }),
+            // 插件拒绝（error 应答）：透传插件的错误
+            None if first.error.is_some() => {
+                self.shared.streams.write().await.remove(&id);
+                Err(first.error.unwrap())
+            }
+            // 其余（chunk 先来 / end 先来 / result:null 收尾）都是协议违规：
+            // 宁可失败，也不能让消费方拿一条没有 head 的流
+            other => {
+                self.shared.streams.write().await.remove(&id);
+                Err(RpcError::new(
+                    format!("stream did not start with head frame (got {other:?})"),
+                    "protocol",
+                ))
+            }
         }
     }
 
@@ -459,17 +718,33 @@ async fn read_loop(mut reader: BufReader<BoxReader>, shared: Arc<Shared>) {
                 let id = frame.id;
                 if let Some(tx) = shared.pending.write().await.remove(&id) {
                     let _ = tx.send(frame);
+                } else {
+                    // 不在 pending：可能是流式调用的收尾帧（`{"id":X,
+                    // "result":null}` / error）——按 id 投进流通道保持帧序
+                    //（与上游 settle 先查流式表同构）；也不是流（如 credit
+                    // 应答）就丢弃——网关对 credit 不等应答
+                    let tx = shared.streams.read().await.get(&id).cloned();
+                    if let Some(tx) = tx {
+                        let _ = tx.send(frame);
+                    } else {
+                        tracing::debug!("plugin RPC unmatched response for id={id}");
+                    }
                 }
             }
             FrameKind::Event => {
-                // 流式帧：M1 只记日志
-                if frame.event.as_deref() == Some("chunk") {
+                // 流式帧：按 id 路由到对应流
+                let id = frame.id;
+                let tx = shared.streams.read().await.get(&id).cloned();
+                if let Some(tx) = tx {
+                    let _ = tx.send(frame);
+                } else if frame.event.as_deref() == Some("log") {
+                    // id=0 的日志通知（无主 → 直接记日志）
+                    tracing::info!("[plugin] {}", frame.message.as_deref().unwrap_or(""));
+                } else {
                     tracing::debug!(
-                        "[plugin stream] chunk {} bytes",
-                        frame.data.as_ref().map(|d| d.len()).unwrap_or(0)
+                        "[plugin event] unclaimed id={id} event={}",
+                        frame.event.as_deref().unwrap_or("")
                     );
-                } else if let Some(ev) = frame.event.as_deref() {
-                    tracing::debug!("[plugin event] {ev}");
                 }
             }
             FrameKind::Unknown => {
@@ -477,7 +752,8 @@ async fn read_loop(mut reader: BufReader<BoxReader>, shared: Arc<Shared>) {
             }
         }
     }
-    // EOF：所有在途请求失败
+    // EOF：所有在途请求失败；所有活流摘除——接收端收到 None 后由
+    // `StreamCall::next` 把截断上报为错误（不当正常结束）
     {
         let failed: Vec<_> = shared
             .pending
@@ -496,6 +772,10 @@ async fn read_loop(mut reader: BufReader<BoxReader>, shared: Arc<Shared>) {
                 "plugin RPC channel closed, {} pending requests failed",
                 failed.len()
             );
+        }
+        let dropped = shared.streams.write().await.drain().count();
+        if dropped > 0 {
+            tracing::warn!("plugin RPC channel closed, {dropped} active streams dropped");
         }
     }
 }
@@ -807,5 +1087,364 @@ mod tests {
         assert!(!line.contains("result"), "None 字段应跳过");
         assert!(!line.contains("error"), "None 字段应跳过");
         assert!(!line.contains("event"), "None 字段应跳过");
+    }
+
+    // ── 流式调用（call_stream / StreamCall）──────────────────────────
+
+    /// 组一帧并写出（mock 插件侧用）。
+    async fn write_frame_line<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) {
+        w.write_all(encode_frame(frame).unwrap().as_bytes())
+            .await
+            .unwrap();
+        w.write_all(b"\n").await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_head_chunk_end_via_duplex() {
+        let (client_read, client_write, plugin_read, mut plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        let mock = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let req = read_one_frame(&mut reader).await;
+            assert_eq!(req.method.as_deref(), Some("conversation"));
+            let id = req.id;
+            let head = Frame {
+                id,
+                event: Some("head".into()),
+                status: Some(200),
+                headers: Some(BTreeMap::from([(
+                    "content-type".to_string(),
+                    "text/event-stream".to_string(),
+                )])),
+                ..Default::default()
+            };
+            let chunk1 = Frame {
+                id,
+                event: Some("chunk".into()),
+                data: Some(STANDARD.encode("hello ")),
+                ..Default::default()
+            };
+            let chunk2 = Frame {
+                id,
+                event: Some("chunk".into()),
+                data: Some(STANDARD.encode("world")),
+                ..Default::default()
+            };
+            let end = Frame {
+                id,
+                event: Some("end".into()),
+                ..Default::default()
+            };
+            for f in [&head, &chunk1, &chunk2, &end] {
+                write_frame_line(&mut plugin_write, f).await;
+            }
+        });
+
+        let mut call = client
+            .call_stream("conversation", Value::Null)
+            .await
+            .unwrap();
+        match call.next().await.unwrap().unwrap() {
+            StreamEvent::Head {
+                status,
+                headers,
+                upstream,
+            } => {
+                assert_eq!(status, 200);
+                assert_eq!(
+                    headers.get("content-type").map(String::as_str),
+                    Some("text/event-stream")
+                );
+                assert_eq!(upstream, None);
+            }
+            other => panic!("expected head, got {other:?}"),
+        }
+        match call.next().await.unwrap().unwrap() {
+            StreamEvent::Chunk(bytes) => assert_eq!(bytes.as_slice(), b"hello ".as_slice()),
+            other => panic!("expected chunk, got {other:?}"),
+        }
+        match call.next().await.unwrap().unwrap() {
+            StreamEvent::Chunk(bytes) => assert_eq!(bytes.as_slice(), b"world".as_slice()),
+            other => panic!("expected chunk, got {other:?}"),
+        }
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::End
+        ));
+        // 收尾之后 next() 恒为 None
+        assert!(call.next().await.is_none(), "终态后不应再有事件");
+        drop(call);
+        mock.await.unwrap();
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stream_ends_with_result_null_response() {
+        // 上游形态：插件不发 `event:"end"`，而是用 `{"id":X,"result":null}`
+        // 收尾——同样要把流判成正常结束
+        let (client_read, client_write, plugin_read, mut plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        let mock = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let req = read_one_frame(&mut reader).await;
+            let id = req.id;
+            let head = Frame {
+                id,
+                event: Some("head".into()),
+                status: Some(200),
+                ..Default::default()
+            };
+            let chunk = Frame {
+                id,
+                event: Some("chunk".into()),
+                data: Some(STANDARD.encode("payload")),
+                ..Default::default()
+            };
+            let close = Frame {
+                id,
+                result: Some(Value::Null),
+                ..Default::default()
+            };
+            for f in [&head, &chunk, &close] {
+                write_frame_line(&mut plugin_write, f).await;
+            }
+        });
+
+        let mut call = client
+            .call_stream("conversation", Value::Null)
+            .await
+            .unwrap();
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::Head { .. }
+        ));
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::Chunk(_)
+        ));
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::End
+        ));
+        drop(call);
+        mock.await.unwrap();
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stream_plugin_error_response_propagates() {
+        // 插件直接拒了这次调用（error 应答）：call_stream 报错，不返回半条流
+        let (client_read, client_write, plugin_read, mut plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        let mock = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let req = read_one_frame(&mut reader).await;
+            let close = Frame {
+                id: req.id,
+                error: Some(RpcError::new("no such model", "model")),
+                ..Default::default()
+            };
+            write_frame_line(&mut plugin_write, &close).await;
+        });
+
+        let err = client
+            .call_stream("conversation", Value::Null)
+            .await
+            .err()
+            .expect("插件 error 应答时 call_stream 应失败");
+        assert_eq!(err.message, "no such model");
+        assert_eq!(err.code.as_deref(), Some("model"));
+        mock.await.unwrap();
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stream_interrupted_on_eof() {
+        // 插件发完 head 就退出：流被截断，next() 必须报错而不是静默结束
+        let (client_read, client_write, plugin_read, plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let req = read_one_frame(&mut reader).await;
+            let head = Frame {
+                id: req.id,
+                event: Some("head".into()),
+                status: Some(200),
+                ..Default::default()
+            };
+            let mut w = plugin_write;
+            write_frame_line(&mut w, &head).await;
+            // 直接退出（两个端口都丢）→ 网关读循环 EOF
+            drop(w);
+            drop(reader);
+        });
+
+        let mut call = client
+            .call_stream("conversation", Value::Null)
+            .await
+            .unwrap();
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::Head { .. }
+        ));
+        let err = call.next().await.unwrap().unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("eof"), "截断应报 eof: {err:?}");
+        drop(call);
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stream_unknown_event_frames_are_ignored() {
+        // 未知事件名（向前兼容）：不影响正文流
+        let (client_read, client_write, plugin_read, mut plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        let mock = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let req = read_one_frame(&mut reader).await;
+            let id = req.id;
+            let head = Frame {
+                id,
+                event: Some("head".into()),
+                status: Some(200),
+                ..Default::default()
+            };
+            let progress = Frame {
+                id,
+                event: Some("progress".into()),
+                message: Some("42%".into()),
+                ..Default::default()
+            };
+            let chunk = Frame {
+                id,
+                event: Some("chunk".into()),
+                data: Some(STANDARD.encode("data")),
+                ..Default::default()
+            };
+            let end = Frame {
+                id,
+                event: Some("end".into()),
+                ..Default::default()
+            };
+            for f in [&head, &progress, &chunk, &end] {
+                write_frame_line(&mut plugin_write, f).await;
+            }
+        });
+
+        let mut call = client
+            .call_stream("conversation", Value::Null)
+            .await
+            .unwrap();
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::Head { .. }
+        ));
+        match call.next().await.unwrap().unwrap() {
+            StreamEvent::Chunk(bytes) => assert_eq!(bytes.as_slice(), b"data".as_slice()),
+            other => panic!("expected chunk after unknown event, got {other:?}"),
+        }
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::End
+        ));
+        drop(call);
+        mock.await.unwrap();
+        client.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stream_credit_frames_after_window() {
+        // 背压：消费超过半个窗口（DEFAULT_WINDOW_BYTES/2 = 256 KiB）就该
+        // 收到 credit 帧；计费口径 = 载荷 + FRAME_OVERHEAD_BYTES（与插件侧
+        // 逐字一致）。10 × 64 KiB：第 4、8 块各触发一次归还（270 336 字节/次）。
+        let (client_read, client_write, plugin_read, mut plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        const CHUNK_PAYLOAD: usize = 64 << 10;
+        const CHUNKS: usize = 10;
+
+        let mock = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let req = read_one_frame(&mut reader).await;
+            assert_eq!(req.method.as_deref(), Some("conversation"));
+            let id = req.id;
+            let head = Frame {
+                id,
+                event: Some("head".into()),
+                status: Some(200),
+                ..Default::default()
+            };
+            write_frame_line(&mut plugin_write, &head).await;
+            let data = STANDARD.encode(vec![b'x'; CHUNK_PAYLOAD]);
+            for _ in 0..CHUNKS {
+                let chunk = Frame {
+                    id,
+                    event: Some("chunk".into()),
+                    data: Some(data.clone()),
+                    ..Default::default()
+                };
+                write_frame_line(&mut plugin_write, &chunk).await;
+            }
+            let end = Frame {
+                id,
+                event: Some("end".into()),
+                ..Default::default()
+            };
+            write_frame_line(&mut plugin_write, &end).await;
+            // 读 credit 直到 EOF（主任务收完流、关掉通道后这里自然退出）
+            let mut credits = Vec::new();
+            loop {
+                let mut buf = Vec::new();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let frame: Frame =
+                    decode_frame(String::from_utf8_lossy(&buf).trim()).expect("decode");
+                if frame.method.as_deref() == Some("credit") {
+                    credits.push(frame);
+                }
+            }
+            (id, credits)
+        });
+
+        let mut call = client
+            .call_stream("conversation", Value::Null)
+            .await
+            .unwrap();
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::Head { .. }
+        ));
+        let mut total = 0usize;
+        loop {
+            match call.next().await.unwrap().unwrap() {
+                StreamEvent::Chunk(bytes) => total += bytes.len(),
+                StreamEvent::End => break,
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        assert_eq!(total, CHUNK_PAYLOAD * CHUNKS);
+        drop(call);
+        client.shutdown();
+        drop(client);
+
+        let (id, credits) = mock.await.unwrap();
+        let charge = CHUNK_PAYLOAD + FRAME_OVERHEAD_BYTES;
+        let expected = (charge * CHUNKS) / (DEFAULT_WINDOW_BYTES / 2);
+        assert_eq!(credits.len(), expected, "credit 帧数应与窗口计费一致");
+        for credit in &credits {
+            assert_eq!(credit.method.as_deref(), Some("credit"));
+            let params = credit.params.as_ref().unwrap();
+            assert_eq!(params["id"], id, "params.id 应指认被补充的流");
+            let n = params["n"].as_u64().unwrap() as usize;
+            assert!(n >= DEFAULT_WINDOW_BYTES / 2, "每次归还应攒满半个窗口: {n}");
+            assert!(n <= charge * CHUNKS, "归还量不应超过总消费");
+        }
     }
 }

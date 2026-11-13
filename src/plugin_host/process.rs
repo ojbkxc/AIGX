@@ -24,7 +24,9 @@ use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, RwLock};
 
-use super::rpc::{NoopCallbacks, RpcChannel, RpcError, PROTOCOL_VERSION};
+#[cfg(test)]
+use super::rpc::NoopCallbacks;
+use super::rpc::{CallbackHandler, RpcChannel, RpcError, PROTOCOL_VERSION};
 
 /// 握手超时。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -108,13 +110,15 @@ impl PluginProcess {
 
 /// 起一个插件子进程。
 ///
-/// `entry` 是插件二进制路径，`host_env` 是传给插件的宿主环境。
+/// `entry` 是插件二进制路径，`host_env` 是传给插件的宿主环境，
+/// `callbacks` 处理插件 → 网关的回调（读账号 / settings / ledger / 日志）。
 /// 返回的 `PluginProcess` 已完成 spawn 但**尚未握手**——调用方需调
 /// [`handshake`] 完成 init。
 pub fn spawn(
     pack_id: &str,
     entry: &Path,
     host_env: &HostEnv,
+    callbacks: Arc<dyn CallbackHandler>,
 ) -> Result<Arc<PluginProcess>, SpawnError> {
     let mut cmd = Command::new(entry);
     cmd.stdin(Stdio::piped())
@@ -161,7 +165,7 @@ pub fn spawn(
         }
     });
 
-    let rpc = RpcChannel::new(Box::new(stdout), Box::new(stdin), Arc::new(NoopCallbacks));
+    let rpc = RpcChannel::new(Box::new(stdout), Box::new(stdin), callbacks);
 
     Ok(Arc::new(PluginProcess {
         pack_id: pack_id.to_string(),
