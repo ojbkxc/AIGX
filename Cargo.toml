@@ -117,6 +117,8 @@ arc-swap = "1"
 dashmap = "6"
 futures = "0.3"
 tokio-stream = "0.1"
+# 插件宿主：解压插件包（zip），并做 zip-slip 防护
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Async
 async-trait = "0.1"

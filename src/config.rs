@@ -735,6 +735,28 @@ pub struct AppConfig {
     /// 安全策略配置（`[security]` 段）：登录失败锁定与登录限流的可配参数。
     #[serde(default)]
     pub security: SecurityPolicyConfig,
+    /// 插件宿主配置（`[plugins]` 段）：运维「选择下载或不下载」插件的开关与源。
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+}
+
+/// 插件宿主（`[plugins]` 段）。
+///
+/// ── 为什么是「运维配置源 URL」而不是内置源 ──────────────────
+/// 上游插件是 AGPL-3.0，AIGX 是 Source Available / 非商业。二者不兼容，
+/// 所以 AIGX **不打包分发插件**，只做宿主：由运维配置自己的插件发布目录，
+/// 运行期按需拉取。`enabled = false`（默认）即「不下载、不加载」。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginsConfig {
+    /// 插件宿主总开关。false = 完全不动用外置插件（只显示内置目录）。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 插件发布目录 URL（指向一个返回包清单的 JSON）。空 = 未配置。
+    #[serde(default)]
+    pub source_url: String,
+    /// 插件安装目录。空 = `{data_dir}/plugins`。
+    #[serde(default)]
+    pub plugins_dir: String,
 }
 
 /// 安全策略（`[security]` 段）。

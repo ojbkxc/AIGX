@@ -7,7 +7,9 @@
 //! 实现网关侧的宿主设施：
 //!
 //! - `rpc` —— 帧编解码 + 双向路由内核
-//! - `process` —— 子进程 spawn / 握手 / 崩溃重启 / 优雅关闭
+//! - `process` —— 子进程 spawn / 握手 / 崩溃观察 / 优雅关闭
+//! - `registry` —— 包元数据 + provider 归属路由
+//! - `install` —— 下载 / 解压 / 校验
 //!
 //! ## 硬约束
 //!
@@ -16,10 +18,16 @@
 //! - 不写 provider 伪装实现（规避上游检测类，既有立场）
 //! - 插件只接管「插件声明了、且 AIGX 无原生实现」的 provider
 
+pub mod install;
+pub mod manager;
 pub mod process;
+pub mod registry;
 pub mod rpc;
 
+pub use install::{install_from_zip, InstallError, PackManifest};
+pub use manager::{PackRuntime, PluginHostManager};
 pub use process::{PluginProcess, ProcessState, SpawnError};
+pub use registry::{is_native_provider, PackMeta, PackProvider, PackRegistry};
 pub use rpc::{
     CallbackHandler, Frame, FrameKind, NoopCallbacks, RpcChannel, RpcError, MAX_CHUNK_BYTES,
     MAX_LINE_BYTES, PROTOCOL_VERSION,
