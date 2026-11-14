@@ -38,12 +38,44 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const STDERR_LINE_LIMIT: usize = 1 << 16;
 
 /// 传给插件的宿主环境。
+///
+/// 字段名与上游 `agent2api-provider-protocol` 的 [`HostEnv`] 逐字一致
+/// （serde 无 rename，JSON 键 = Rust 字段名的 snake_case）。握手时以
+/// `"env"` 字段发出（不是 `hostEnv`）—— 字段名对不上会直接
+/// 「init 的 env 无法解析: invalid type: null」。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct HostEnv {
     pub data_dir: String,
     pub host_version: String,
     pub target: String,
     pub proxy: String,
+    /// 是否允许插件写调试报文（网关的调试模式开关）。上游为必填项。
+    pub debug_traffic: bool,
+    /// 网关监听的 HTTP 端口（`0` = 未知）。上游可选（`#[serde(default)]`）。
+    pub loopback_port: u16,
+}
+
+/// 宿主的目标三元组（与上游 `hostEnv.target` 同口径）。
+///
+/// 优先用编译期 `TARGET`（`cargo --target` 会设），否则从 `(OS, ARCH)` 推导
+/// —— 现有构建流程**并不导出** `TARGET`，只靠它会让目标恒为 `"unknown"`。
+///
+/// 同一口径也用于安装时挑 `pack.json` 的 `entry`：上游把它写成
+/// `{目标三元组: 入口路径}` 的映射（AIGX 自建包仍写字符串，两种都收）。
+pub fn host_target_triple() -> String {
+    if let Some(t) = option_env!("TARGET") {
+        if !t.is_empty() && t != "unknown" {
+            return t.to_string();
+        }
+    }
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu".to_string(),
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu".to_string(),
+        ("macos", "x86_64") => "x86_64-apple-darwin".to_string(),
+        ("macos", "aarch64") => "aarch64-apple-darwin".to_string(),
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc".to_string(),
+        (os, arch) => format!("{arch}-{os}"),
+    }
 }
 
 /// 宿主的目标三元组（与上游 `hostEnv.target` 同口径）。
@@ -201,20 +233,23 @@ pub fn spawn(
 
 /// `init` 握手。
 ///
-/// 发 `{"protocol":1,"hostEnv":{...}}`，插件回 `{providers:[{id,label}]}`。
+/// 发 `{"protocol":1,"env":{...}}`，插件回 `{providers:[{id,label}]}`。
 /// 10s 超时判失败。
+///
+/// `env` 字段名与上游 SDK 一致（`sdk_serve.rs` 里 `params.get("env")`）；
+/// HostEnv 的 JSON 键是 snake_case（`data_dir`/`host_version`/…），与上游
+/// serde 结构逐字对应——直接序列化 `HostEnv` 即可，不要手写 camelCase 键。
 pub async fn handshake(
     rpc: &RpcChannel,
     host_env: &HostEnv,
 ) -> Result<Vec<ProviderInfo>, RpcError> {
+    let env = serde_json::to_value(host_env).map_err(|e| RpcError {
+        message: format!("序列化 HostEnv 失败: {e}"),
+        code: Some("serde".into()),
+    })?;
     let params = serde_json::json!({
         "protocol": PROTOCOL_VERSION,
-        "hostEnv": {
-            "dataDir": host_env.data_dir,
-            "hostVersion": host_env.host_version,
-            "target": host_env.target,
-            "proxy": host_env.proxy,
-        }
+        "env": env,
     });
     let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, rpc.call("init", params))
         .await
@@ -358,6 +393,8 @@ mod tests {
             host_version: "1.0.52".into(),
             target: "x86_64-unknown-linux-gnu".into(),
             proxy: "".into(),
+            debug_traffic: false,
+            loopback_port: 0,
         };
         let providers = handshake(&rpc, &env).await.unwrap();
         assert_eq!(providers.len(), 2);
