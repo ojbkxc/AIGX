@@ -188,28 +188,12 @@ pub(crate) async fn handle_chat_completions(
 
     // 响应缓存键（仅非流式）：必须在 chat_req 构建前算好——chat_req 会把
     // tools/tool_choice/extra 等透传字段 take 出 body，键投影必须看到原始
-    // 请求体。键内容与原实现（下方 else 分支原位计算）逐字段一致，仅位置前移。
+    // 请求体。P1 性能：64 位哈希替代整棵请求子树字符串做 key
+    // （见 response_cache_key 注释）。
     let cache_key = if is_stream {
         None
     } else {
-        Some(
-            serde_json::to_string(&serde_json::json!({
-                "key_id": &api_key.id,
-                "model": &model,
-                "messages": body.get("messages").cloned().unwrap_or(Value::Null),
-                "temperature": body.get("temperature").cloned().unwrap_or(Value::Null),
-                "max_tokens": body.get("max_tokens").cloned().unwrap_or(Value::Null),
-                "tools": body.get("tools").cloned().unwrap_or(Value::Null),
-                "tool_choice": body.get("tool_choice").cloned().unwrap_or(Value::Null),
-                "stop": body.get("stop").cloned().unwrap_or(Value::Null),
-                "top_p": body.get("top_p").cloned().unwrap_or(Value::Null),
-                "presence_penalty": body.get("presence_penalty").cloned().unwrap_or(Value::Null),
-                "frequency_penalty": body.get("frequency_penalty").cloned().unwrap_or(Value::Null),
-                "seed": body.get("seed").cloned().unwrap_or(Value::Null),
-                "response_format": body.get("response_format").cloned().unwrap_or(Value::Null),
-            }))
-            .unwrap_or_default(),
-        )
+        Some(response_cache_key(&api_key.id, &model, &body))
     };
 
     // 解析消息列表
@@ -1672,6 +1656,55 @@ struct SseGoogleSig<'a> {
     thought_signature: &'a str,
 }
 
+// ── 响应缓存键（P1 性能）：
+// 旧实现把整棵请求子树（messages/tools/…）序列化成 JSON 字符串做 key——
+// 1MiB 请求体的缓存键就是 1MiB 常驻内存（DashMap cap 1000 条时约 GB 级
+// 内存上限）。此处把每个字段直接序列化进帧缓冲（零克隆）后哈希为固定
+// 16 字符十六进制串：
+// - 值经 serde_json::Value（BTreeMap 键序确定）序列化，字节输出确定；
+// - 哈希用进程级固定 RandomState（OnceLock 单例）：RandomState::new
+//   每次调用随机播种，必须全进程共享一个实例，相同请求体在进程内才能
+//   得到相同键；
+// - 64 位哈希 + key_id 入键：无跨用户泄漏面，碰撞概率 ≈ cap²/2^65。
+static CACHE_KEY_HASHER: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+    std::sync::OnceLock::new();
+
+/// 计算响应缓存键（64 位哈希，十六进制串）。
+///
+/// 字段清单与旧键投影逐字段一致：逐字段直写缓冲（`to_writer` 序列化
+/// Value 本身，无 json! 建树 + cloned 的两份深拷贝），键内容对
+/// 「缺失字段」与「显式 null」同形（旧键 `cloned().unwrap_or(Value::Null)`
+/// 口径），键长度恒定 16 字符。
+fn response_cache_key(key_id: &str, model: &str, body: &Value) -> String {
+    let mut buf: Vec<u8> = Vec::with_capacity(512);
+    for key in [
+        "messages",
+        "temperature",
+        "max_tokens",
+        "tools",
+        "tool_choice",
+        "stop",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "seed",
+        "response_format",
+    ] {
+        let v = body.get(key).unwrap_or(&Value::Null);
+        buf.push(b',');
+        // to_writer 写 Vec<u8> 不会失败
+        serde_json::to_writer(&mut buf, v).expect("serde_json to_writer 写 Vec<u8> 不失败");
+    }
+    let mut hasher = CACHE_KEY_HASHER
+        .get_or_init(std::collections::hash_map::RandomState::new)
+        .build_hasher();
+    std::hash::Hash::hash(key_id.as_bytes(), &mut hasher);
+    std::hash::Hash::hash(b',', &mut hasher);
+    std::hash::Hash::hash(model.as_bytes(), &mut hasher);
+    std::hash::Hash::hash(&buf, &mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 #[cfg(test)]
 mod tests {
     // 连接稳定性：流式/非流式 failover 循环接入的预算口径自检。
@@ -1713,6 +1746,52 @@ mod tests {
     /// - 推理增量出现 reasoning_content；tool_call 的 id/name 缺失序列化为
     ///   null（键恒存在，与 json! 对 Option 的序列化一致）；
     /// - 无签名时 extra_content 不出现；finish_reason 缺失为 null。
+    /// 响应缓存键（P1 性能）：确定性、固定 16 字符、任一投影字段变化换键、
+    /// 缺失字段与显式 null 同形、key_id/model 隔离维度入键。
+    #[test]
+    fn response_cache_key_hash_properties() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "你好"}],
+            "temperature": 0.7,
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+        });
+        let k1 = super::response_cache_key("key-1", "gpt-4", &body);
+        let k2 = super::response_cache_key("key-1", "gpt-4", &body.clone());
+        assert_eq!(k1, k2, "相同请求体必须得到相同键");
+        assert_eq!(k1.len(), 16, "键必须是固定 16 字符十六进制串");
+
+        // 键投影维度：任一字段变化都必须换键（与旧键同口径）
+        let mut b = body.clone();
+        b["temperature"] = serde_json::json!(0.8);
+        assert_ne!(k1, super::response_cache_key("key-1", "gpt-4", &b));
+        let mut b = body.clone();
+        b["messages"] = serde_json::json!([{"role": "user", "content": "你好吧"}]);
+        assert_ne!(k1, super::response_cache_key("key-1", "gpt-4", &b));
+        assert_ne!(
+            k1,
+            super::response_cache_key("key-2", "gpt-4", &body),
+            "key_id 隔离维度必须入键"
+        );
+        assert_ne!(k1, super::response_cache_key("key-1", "gpt-4o", &body));
+
+        // 缺失字段 = 显式 null 投影（旧键 unwrap_or(Value::Null) 口径）
+        let partial = serde_json::json!({
+            "messages": body["messages"].clone()
+        });
+        let explicit_null = serde_json::json!({
+            "messages": body["messages"].clone(),
+            "temperature": null, "max_tokens": null, "tools": null,
+            "tool_choice": null, "stop": null, "top_p": null,
+            "presence_penalty": null, "frequency_penalty": null,
+            "seed": null, "response_format": null
+        });
+        assert_eq!(
+            super::response_cache_key("key-1", "gpt-4", &partial),
+            super::response_cache_key("key-1", "gpt-4", &explicit_null),
+            "缺失字段与显式 null 必须同键"
+        );
+    }
+
     #[test]
     fn sse_chunk_frame_wire_shape() {
         let frame = SseChunkFrame {
