@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Upload all workflow files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: github-workflows
           path: .github/workflows/

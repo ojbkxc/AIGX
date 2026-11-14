@@ -76,7 +76,7 @@ jobs:
           cp UPDATE.txt build/2024-Linux-x86_64/UPDATE.txt
 
       - name: Upload AMD64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aigx-linux-amd64
           path: build/2024-Linux-x86_64/
@@ -129,7 +129,7 @@ jobs:
           cp UPDATE.txt build/2024-Linux-arm64/UPDATE.txt
 
       - name: Upload ARM64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aigx-linux-arm64
           path: build/2024-Linux-arm64/
@@ -172,7 +172,7 @@ jobs:
           copy UPDATE.txt build\2024-Windows-x86_64\UPDATE.txt
 
       - name: Upload Windows AMD64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aigx-windows-amd64
           path: build/2024-Windows-x86_64/
@@ -213,7 +213,7 @@ jobs:
           cp UPDATE.txt build/2024-macOS-x86_64/UPDATE.txt
 
       - name: Upload macOS Intel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aigx-macos-x86_64
           path: build/2024-macOS-x86_64/
@@ -254,7 +254,7 @@ jobs:
           cp UPDATE.txt build/2024-macOS-arm64/UPDATE.txt
 
       - name: Upload macOS ARM64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aigx-macos-arm64
           path: build/2024-macOS-arm64/
