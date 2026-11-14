@@ -211,7 +211,7 @@ pub async fn handle_channel_stats(
         "data": rows,
         "stats": json!({
             "total_channels": channels.len(),
-            "active_channels": channels.iter().filter(|c| c["status"] == "enabled").count(),
+            "active_channels": channels.iter().filter(|c| c.status == "enabled").count(),
             "cooling_channels": cooling_channels,
         })
     })))

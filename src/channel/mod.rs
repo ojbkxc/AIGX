@@ -1093,7 +1093,7 @@ impl ChannelStore {
         // 指数退避：连续失败次数 +1，冷却时长翻倍（上限 600s）。
         // 若为半开试探失败，清除在途标记，重新进入完整冷却。
         let streak = {
-            let entry = self.cooldown_failures.entry(id.to_string()).or_insert(0);
+            let mut entry = self.cooldown_failures.entry(id.to_string()).or_insert(0);
             *entry += 1;
             *entry
         };
