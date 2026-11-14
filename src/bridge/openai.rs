@@ -353,77 +353,97 @@ impl OpenaiCompatibleBridge {
                 // 优先转发 content_blocks（vision/多模态 typed-block 数组），
                 // 否则用 content（含 None → null，保留 OpenAI assistant
                 // with tool_calls 的 content:null 历史回放形状）。
-                let mut msg = match &m.content_blocks {
-                    Some(blocks) => serde_json::json!({
-                        "role": role,
-                        "content": Value::Array(blocks.clone()),
-                    }),
-                    None => serde_json::json!({
-                        "role": role,
-                        "content": m.content.clone(),
-                    }),
-                };
+                // Map 直建：替代每条消息 json! 建树的逐字段 Map 分配
+                let mut msg = serde_json::Map::with_capacity(4);
+                msg.insert("role".to_string(), Value::String(role.to_string()));
+                msg.insert(
+                    "content".to_string(),
+                    match &m.content_blocks {
+                        Some(blocks) => Value::Array(blocks.clone()),
+                        None => m.content.clone().map(Value::String).unwrap_or(Value::Null),
+                    },
+                );
                 if let Some(tid) = &m.tool_call_id {
-                    msg["tool_call_id"] = Value::String(tid.clone());
+                    msg.insert("tool_call_id".to_string(), Value::String(tid.clone()));
                 }
                 if let Some(tool_calls) = &m.tool_calls {
-                    msg["tool_calls"] = Value::Array(
-                        tool_calls
-                            .iter()
-                            .map(|tc| {
-                                serde_json::json!({
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.function_name,
-                                        "arguments": tc.arguments,
-                                    }
+                    msg.insert(
+                        "tool_calls".to_string(),
+                        Value::Array(
+                            tool_calls
+                                .iter()
+                                .map(|tc| {
+                                    let mut f = serde_json::Map::with_capacity(2);
+                                    f.insert(
+                                        "name".to_string(),
+                                        Value::String(tc.function_name.clone()),
+                                    );
+                                    f.insert(
+                                        "arguments".to_string(),
+                                        Value::String(tc.arguments.clone()),
+                                    );
+                                    let mut item = serde_json::Map::with_capacity(3);
+                                    item.insert("id".to_string(), Value::String(tc.id.clone()));
+                                    item.insert(
+                                        "type".to_string(),
+                                        Value::String("function".into()),
+                                    );
+                                    item.insert("function".to_string(), Value::Object(f));
+                                    Value::Object(item)
                                 })
-                            })
-                            .collect(),
+                                .collect(),
+                        ),
                     );
                 }
-                msg
+                Value::Object(msg)
             })
             .collect();
 
-        let mut body = serde_json::json!({
-            "model": req.model,
-            "messages": messages,
-            "stream": req.stream,
-        });
+        // Map 直建 + 预分配：旧路径每个 json!() 条件插入都新建一棵 Map
+        // （每请求 ~12 次），此处按已知字段数一次分配；字段形状与 json!
+        // 逐字段一致（含透传 extra 覆盖写）。
+        let mut body = serde_json::Map::with_capacity(16);
+        body.insert("model".to_string(), Value::String(req.model.clone()));
+        body.insert("messages".to_string(), Value::Array(messages));
+        body.insert("stream".to_string(), Value::Bool(req.stream));
         if let Some(tools) = &req.tools {
-            body["tools"] = serde_json::json!(tools);
+            body.insert("tools".to_string(), Value::Array(tools.clone()));
         }
         if let Some(tool_choice) = &req.tool_choice {
-            body["tool_choice"] = serde_json::json!(tool_choice);
+            body.insert("tool_choice".to_string(), tool_choice.clone());
         }
         if let Some(effort) = &req.reasoning_effort {
-            body["reasoning_effort"] = serde_json::json!(effort);
+            body.insert(
+                "reasoning_effort".to_string(),
+                Value::String(effort.clone()),
+            );
         }
         if let Some(web) = &req.web_search_options {
-            body["web_search_options"] = serde_json::json!(web);
+            body.insert("web_search_options".to_string(), web.clone());
         }
         if let Some(mt) = req.max_tokens {
-            body["max_tokens"] = serde_json::json!(mt);
+            body.insert("max_tokens".to_string(), Value::Number(mt.into()));
         }
         if let Some(t) = req.temperature {
-            body["temperature"] = serde_json::json!(t);
+            body.insert("temperature".to_string(), Value::from(t));
         }
         if let Some(p) = req.top_p {
-            body["top_p"] = serde_json::json!(p);
+            body.insert("top_p".to_string(), Value::from(p));
         }
         if let Some(stop) = &req.stop {
-            body["stop"] = serde_json::json!(stop);
+            body.insert(
+                "stop".to_string(),
+                Value::Array(stop.iter().map(|s| Value::String(s.clone())).collect()),
+            );
         }
         if let Some(extra) = &req.extra {
             if let Some(obj) = extra.as_object() {
                 for (k, v) in obj {
-                    body[k] = v.clone();
+                    body.insert(k.clone(), v.clone());
                 }
             }
         }
-        body
+        Value::Object(body)
     }
 }
 
@@ -1491,6 +1511,90 @@ mod tests {
             normalize_base_url("https://api.deepseek.com".into()),
             "https://api.deepseek.com/v1"
         );
+    }
+
+    /// Map 直建的 build_body 与旧 json! 建树序列化逐字段等价（P1 性能项
+    /// 行为等价自检）：含 tools/tool_choice/extra 透传、content:null
+    /// 工具消息、content_blocks 多模态形态、标量字段。
+    #[test]
+    fn build_body_matches_json_tree_shape() {
+        use crate::bridge::{ChatFormat, ToolCall};
+        let req = ChatFormat {
+            model: "gpt-4".into(),
+            messages: vec![
+                crate::bridge::ChatMessage {
+                    role: crate::bridge::Role::User,
+                    content: Some("hi".into()),
+                    content_blocks: None,
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    reasoning: None,
+                },
+                crate::bridge::ChatMessage {
+                    role: crate::bridge::Role::Assistant,
+                    content: None,
+                    content_blocks: None,
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_1".into(),
+                        function_name: "f".into(),
+                        arguments: "{}".into(),
+                    }]),
+                    reasoning: None,
+                },
+                crate::bridge::ChatMessage {
+                    role: crate::bridge::Role::Tool,
+                    content: None,
+                    content_blocks: Some(vec![
+                        serde_json::json!({"type": "text", "text": "block"}),
+                    ]),
+                    name: None,
+                    tool_call_id: Some("call_1".into()),
+                    tool_calls: None,
+                    reasoning: None,
+                },
+            ],
+            tools: Some(vec![serde_json::json!({
+                "type": "function",
+                "function": {"name": "f", "parameters": {}}
+            })]),
+            max_tokens: Some(100),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            stream: true,
+            top_k: None,
+            stop: Some(vec!["END".into()]),
+            tool_choice: Some(serde_json::json!({"type": "function", "function": {"name": "f"}})),
+            reasoning_effort: Some("high".into()),
+            web_search_options: None,
+            extra: Some(serde_json::json!({"seed": 42, "presence_penalty": 0.5})),
+        };
+        let bridge =
+            super::OpenaiCompatibleBridge::with_client("https://x", "k", reqwest::Client::new());
+        let body = bridge.build_body(&req);
+
+        // 期望形状 = 旧 json! 建树口径手工构造
+        let expected = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+                {"role": "tool", "content": [{"type": "text", "text": "block"}], "tool_call_id": "call_1"}
+            ],
+            "stream": true,
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": {"type": "function", "function": {"name": "f"}},
+            "reasoning_effort": "high",
+            "max_tokens": 100,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "stop": ["END"],
+            "seed": 42,
+            "presence_penalty": 0.5,
+        });
+        assert_eq!(body, expected, "build_body 输出必须与 json! 建树逐字段一致");
     }
 
     // ── rerank 请求/响应形状（纯序列化与解析逻辑，不发网络请求）──────────

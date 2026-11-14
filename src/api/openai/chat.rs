@@ -79,7 +79,7 @@ pub(crate) fn build_attempt_plan<'a>(
 pub(crate) async fn handle_chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Response {
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
@@ -186,6 +186,32 @@ pub(crate) async fn handle_chat_completions(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
 
+    // 响应缓存键（仅非流式）：必须在 chat_req 构建前算好——chat_req 会把
+    // tools/tool_choice/extra 等透传字段 take 出 body，键投影必须看到原始
+    // 请求体。键内容与原实现（下方 else 分支原位计算）逐字段一致，仅位置前移。
+    let cache_key = if is_stream {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&serde_json::json!({
+                "key_id": &api_key.id,
+                "model": &model,
+                "messages": body.get("messages").cloned().unwrap_or(Value::Null),
+                "temperature": body.get("temperature").cloned().unwrap_or(Value::Null),
+                "max_tokens": body.get("max_tokens").cloned().unwrap_or(Value::Null),
+                "tools": body.get("tools").cloned().unwrap_or(Value::Null),
+                "tool_choice": body.get("tool_choice").cloned().unwrap_or(Value::Null),
+                "stop": body.get("stop").cloned().unwrap_or(Value::Null),
+                "top_p": body.get("top_p").cloned().unwrap_or(Value::Null),
+                "presence_penalty": body.get("presence_penalty").cloned().unwrap_or(Value::Null),
+                "frequency_penalty": body.get("frequency_penalty").cloned().unwrap_or(Value::Null),
+                "seed": body.get("seed").cloned().unwrap_or(Value::Null),
+                "response_format": body.get("response_format").cloned().unwrap_or(Value::Null),
+            }))
+            .unwrap_or_default(),
+        )
+    };
+
     // 解析消息列表
     let messages = parse_messages_with_dev(
         body.get("messages"),
@@ -236,10 +262,15 @@ pub(crate) async fn handle_chat_completions(
     let chat_req = ChatFormat {
         model: model.clone(),
         messages,
-        tools: body
-            .get("tools")
-            .and_then(|t| t.as_array())
-            .map(|arr| arr.to_vec()),
+        // 透传字段 take 接管：tools 原本 `arr.to_vec()` 深拷贝整棵 schema
+        // 树（工具定义可达数百 KB），tool_choice/web_search_options 原本
+        // `.cloned()` 再深拷贝——body 在此之后不再被读取（缓存键已在
+        // is_stream 下方按原口径提前算好），take 把所有权零拷贝移交
+        // ChatFormat，build_body 侧仅剩最后一跳序列化。
+        tools: match body.get_mut("tools").map(std::mem::take) {
+            Some(Value::Array(arr)) => Some(arr),
+            _ => None,
+        },
         max_tokens: body
             .get("max_tokens")
             .and_then(|v| v.as_u64())
@@ -253,7 +284,7 @@ pub(crate) async fn handle_chat_completions(
                 .filter_map(|s| s.as_str().map(String::from))
                 .collect()
         }),
-        tool_choice: body.get("tool_choice").cloned(),
+        tool_choice: body.get_mut("tool_choice").map(std::mem::take),
         reasoning_effort: crate::purge::clamp_reasoning(
             body.get("reasoning_effort")
                 .and_then(|v| v.as_str())
@@ -261,7 +292,7 @@ pub(crate) async fn handle_chat_completions(
                 .or_else(|| state.model_mapper.reasoning_for(&model)),
             &purge_cfg,
         ),
-        web_search_options: body.get("web_search_options").cloned(),
+        web_search_options: body.get_mut("web_search_options").map(std::mem::take),
         // 透传白名单字段：这些是 OpenAI 协议标准参数，缓存键已认识它们
         // （presence_penalty/frequency_penalty/seed/response_format），但此前
         // extra: None 恒丢弃，导致不同 seed/response_format 的请求命中同一缓存
@@ -280,16 +311,18 @@ pub(crate) async fn handle_chat_completions(
                 "max_completion_tokens",
                 "service_tier",
             ] {
-                if let Some(v) = body.get(k) {
+                if let Some(v) = body.get_mut(k) {
+                    let v = std::mem::take(v);
                     if !v.is_null() {
-                        obj.insert(k.to_string(), v.clone());
+                        obj.insert(k.to_string(), v);
                     }
                 }
             }
             if is_stream {
-                if let Some(v) = body.get("stream_options") {
+                if let Some(v) = body.get_mut("stream_options") {
+                    let v = std::mem::take(v);
                     if !v.is_null() {
-                        obj.insert("stream_options".to_string(), v.clone());
+                        obj.insert("stream_options".to_string(), v);
                     }
                 }
             }
@@ -1005,22 +1038,8 @@ pub(crate) async fn handle_chat_completions(
         // 原先仅 model/messages/temperature/max_tokens，导致
         // (a) 跨用户响应泄漏（他人相同 prompt 可命中你的缓存）
         // (b) tools/tool_choice/stop/top_p 不同的请求命中同一条目，返回错误结果
-        let cache_key = serde_json::to_string(&serde_json::json!({
-            "key_id": &api_key.id,
-            "model": &model,
-            "messages": body.get("messages").cloned().unwrap_or(Value::Null),
-            "temperature": body.get("temperature").cloned().unwrap_or(Value::Null),
-            "max_tokens": body.get("max_tokens").cloned().unwrap_or(Value::Null),
-            "tools": body.get("tools").cloned().unwrap_or(Value::Null),
-            "tool_choice": body.get("tool_choice").cloned().unwrap_or(Value::Null),
-            "stop": body.get("stop").cloned().unwrap_or(Value::Null),
-            "top_p": body.get("top_p").cloned().unwrap_or(Value::Null),
-            "presence_penalty": body.get("presence_penalty").cloned().unwrap_or(Value::Null),
-            "frequency_penalty": body.get("frequency_penalty").cloned().unwrap_or(Value::Null),
-            "seed": body.get("seed").cloned().unwrap_or(Value::Null),
-            "response_format": body.get("response_format").cloned().unwrap_or(Value::Null),
-        }))
-        .unwrap_or_default();
+        // （键在函数前段已按原口径算好，见 is_stream 下方的 cache_key）
+        let cache_key = cache_key.expect("非流式路径必有缓存键");
         if let Some(cached) = state.response_cache.get(&cache_key).await {
             tracing::debug!("response cache hit for model {}", model);
             let prompt_tokens = cached
