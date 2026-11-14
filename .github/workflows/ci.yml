@@ -241,6 +241,12 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # 时区固定为中国（UTC+8）：`tz_migrate` 测试断言「20:00Z 在 +8 归次日」
+      # 依赖系统本地口径 = UTC+8（`report_tz_of(0)` 读 `Local::now().offset()`）。
+      # runner 默认 UTC 会让该断言假红（old_b 留当日、new_a 提前一日）。固定
+      # 中国时区后断言成立，测试时区无关地稳定绿。
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust toolchain
