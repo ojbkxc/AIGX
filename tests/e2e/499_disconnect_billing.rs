@@ -203,6 +203,8 @@ fn server_log_tail(log_path: &std::path::Path) -> String {
 /// ensure_default_admin），不落库不写配置。新建实例上历史固定密码必被拒。
 /// 不引 regex 依赖（Cargo.toml 不在本测试可改范围），手动扫描：
 /// 逐个定位 `Aigx-`，其后取连续 base64url 字符，恰 24 位即为密码。
+/// **返回值必须含 `Aigx-` 前缀**（登录提交的是完整密码 29 字符，裸 24 位
+/// base64url 会被服务端判「账号或密码错误」——曾因漏拼前缀全链路红）。
 fn initial_password_from_log(log_path: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(log_path).ok()?;
     const B64URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -211,7 +213,7 @@ fn initial_password_from_log(log_path: &std::path::Path) -> Option<String> {
         let s = &rest[i + 5..];
         let n = s.bytes().take_while(|b| B64URL.contains(b)).count();
         if n == 24 {
-            return Some(s[..24].to_string());
+            return Some(format!("Aigx-{}", &s[..24]));
         }
         rest = &rest[i + 5..];
     }
@@ -361,12 +363,6 @@ async fn login_once(c: &reqwest::Client, base: &str, password: &str) -> Option<S
             let body = resp.text().await.unwrap_or_default();
             if body.contains("账号或密码错误") || body.contains("请先完成机器人校验")
             {
-                // 取证：被拒时打印密码前缀与完整响应体（CI 日志可查）
-                eprintln!(
-                    "[499-debug] login 拒绝（密码前 8 位 {:?}）: {}",
-                    password.get(..8),
-                    body
-                );
                 None
             } else {
                 panic!("login 异常响应：{body}");
@@ -380,14 +376,6 @@ async fn admin_token(c: &reqwest::Client, base: &str, log_path: &std::path::Path
     // 登录序列：优先用 server.log 提取的首启一次性密码（随机化后的新实例），
     // 失败回落历史固定密码（兼容随机化之前创建的旧库）。
     let initial = initial_password_from_log(log_path);
-    // 取证：提取结果与（失败时）日志尾部一并进 CI 日志
-    match initial.as_deref() {
-        Some(pw) => eprintln!("[499-debug] 提取到初始密码: {}...", pw.get(..8).unwrap_or("?")),
-        None => eprintln!(
-            "[499-debug] 未提取到初始密码，server.log 尾部:\n{}",
-            server_log_tail(log_path)
-        ),
-    }
     let mut tok = None;
     if let Some(pw) = initial.as_deref() {
         tok = login_once(c, base, pw).await;
