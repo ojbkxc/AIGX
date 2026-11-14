@@ -1916,11 +1916,17 @@ mod tests {
         assert_eq!(chunk.finish_reason, Some(FinishReason::Stop));
         assert_eq!(chunk.delta.content, None);
 
-        // 缺字段宽容：空 choices / 缺 delta 都产出空 chunk（不 panic、不丢帧）
+        // 缺字段宽容：空 choices / 缺 delta 都产出空 chunk（不 panic、不丢帧）。
+        // ChatDelta 未实现 PartialEq（bridge/mod.rs 不在本轮改动范围），
+        // 逐字段断言。
         let chunk = super::parse_sse_event("data: {\"choices\":[]}", "id", "m").unwrap();
-        assert_eq!(chunk.delta, crate::bridge::ChatDelta::default());
+        assert!(chunk.delta.content.is_none());
+        assert!(chunk.delta.tool_calls.is_none());
+        assert!(chunk.delta.reasoning.is_none());
         let chunk = super::parse_sse_event("data: {\"choices\":[{}]}", "id", "m").unwrap();
-        assert_eq!(chunk.delta, crate::bridge::ChatDelta::default());
+        assert!(chunk.delta.content.is_none());
+        assert!(chunk.delta.tool_calls.is_none());
+        assert!(chunk.delta.reasoning.is_none());
         // 非对象 JSON 帧：新路径整帧跳过（旧路径会产出空 chunk 噪音帧）
         assert!(super::parse_sse_event("data: 42", "id", "m").is_none());
         assert!(super::parse_sse_event("data: \"hello\"", "id", "m").is_none());

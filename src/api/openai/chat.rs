@@ -14,6 +14,7 @@ use axum::{
 use futures::StreamExt;
 use serde_json::Value;
 use std::convert::Infallible;
+use std::hash::BuildHasher;
 use std::sync::Arc;
 
 /// 构建本次请求的尝试计划：主模型候选在前，异源模型候选在后。
@@ -834,10 +835,10 @@ pub(crate) async fn handle_chat_completions(
                                 .into_iter()
                                 .map(|(idx, id, name, args)| SseToolCallFrame {
                                     index: idx,
-                                    id: id.as_deref(),
+                                    id,
                                     kind: "function",
                                     function: SseFunctionFrame {
-                                        name: name.as_deref(),
+                                        name,
                                         arguments: args,
                                     },
                                     extra_content: signature.map(|sig| SseExtraContent {
@@ -1682,8 +1683,9 @@ pub(crate) async fn handle_chat_completions(
 // - content 恒存在（None 占位为空串，旧 `unwrap_or_default` 同口径）；
 // - reasoning_content / tool_calls 仅在有时出现（skip_serializing_if）；
 // - tool_call 的 id / function.name 经 json! 序列化 Option → 缺失即 null
-//   （字段恒存在），这里同样恒存在（Option<&str> 序列化为 null）；
-// - extra_content 仅在有签名时出现。
+//   （字段恒存在），这里同样恒存在（Option<String> 序列化为 null）；
+//   来源是 tool_repair 的 repaired 元组（闭包局部），无法借用，故 owned；
+// - extra_content 仅在有签名时出现（签名借用自 chunk，零拷贝）。
 
 #[derive(serde::Serialize)]
 struct SseChunkFrame<'a> {
@@ -1713,18 +1715,18 @@ struct SseDeltaFrame<'a> {
 #[derive(serde::Serialize)]
 struct SseToolCallFrame<'a> {
     index: usize,
-    id: Option<&'a str>,
+    id: Option<String>,
     #[serde(rename = "type")]
     kind: &'static str,
-    function: SseFunctionFrame<'a>,
+    function: SseFunctionFrame,
     #[serde(skip_serializing_if = "Option::is_none")]
     extra_content: Option<SseExtraContent<'a>>,
 }
 
 #[derive(serde::Serialize)]
-struct SseFunctionFrame<'a> {
-    name: Option<&'a str>,
-    arguments: &'a str,
+struct SseFunctionFrame {
+    name: Option<String>,
+    arguments: String,
 }
 
 #[derive(serde::Serialize)]
@@ -1780,7 +1782,7 @@ fn response_cache_key(key_id: &str, model: &str, body: &Value) -> String {
         .get_or_init(std::collections::hash_map::RandomState::new)
         .build_hasher();
     std::hash::Hash::hash(key_id.as_bytes(), &mut hasher);
-    std::hash::Hash::hash(b',', &mut hasher);
+    std::hash::Hash::hash(&b',', &mut hasher);
     std::hash::Hash::hash(model.as_bytes(), &mut hasher);
     std::hash::Hash::hash(&buf, &mut hasher);
     format!("{:016x}", hasher.finish())
@@ -1939,11 +1941,11 @@ mod tests {
                     reasoning_content: Some("think"),
                     tool_calls: Some(vec![SseToolCallFrame {
                         index: 0,
-                        id: Some("call_1"),
+                        id: Some("call_1".into()),
                         kind: "function",
                         function: SseFunctionFrame {
-                            name: Some("get_weather"),
-                            arguments: "{}",
+                            name: Some("get_weather".into()),
+                            arguments: "{}".into(),
                         },
                         extra_content: Some(SseExtraContent {
                             google: SseGoogleSig {
@@ -1983,7 +1985,7 @@ mod tests {
                         kind: "function",
                         function: SseFunctionFrame {
                             name: None,
-                            arguments: "",
+                            arguments: String::new(),
                         },
                         extra_content: None,
                     }]),
