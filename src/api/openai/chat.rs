@@ -14,7 +14,7 @@ use axum::{
 use futures::StreamExt;
 use serde_json::Value;
 use std::convert::Infallible;
-use std::hash::BuildHasher;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::Arc;
 
 /// 构建本次请求的尝试计划：主模型候选在前，异源模型候选在后。
