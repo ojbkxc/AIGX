@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 
