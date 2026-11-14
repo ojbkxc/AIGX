@@ -474,7 +474,7 @@ jobs:
           ls -la
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: release-package/*
           body: ${{ steps.release_notes.outputs.notes }}
