@@ -2,7 +2,6 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::HashMap;
-#[cfg(feature = "sqlite-kv")]
 use std::path::Path;
 use std::path::PathBuf;
 
