@@ -25,7 +25,7 @@ import {
 import { api } from '../api';
 
 import { useToast } from '../components/Toast';
-import { Loading, EmptyState, Switch, Tabs, Combobox, Tooltip } from '../components/ui';
+import { Button, Loading, EmptyState, Switch, Tabs, Combobox, Tooltip } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ModelTestDialog from '../components/ModelTestDialog';
 import RatioPanel from '../components/RatioPanel';
@@ -1719,10 +1719,10 @@ export default function ModelManage(): JSX.Element {
           <h1>{t('模型管理')}</h1>
           <p>{t('供应商与账号池的模型统一在此管理：测试、启停、定价、映射。')}</p>
         </div>
-        <button className="btn btn-outline btn-sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
+        <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
           <RefreshCw size={13} />
           {loading ? t('加载中...') : t('刷新')}
-        </button>
+        </Button>
       </div>
 
       {error && <div className="error-message">{error}</div>}
@@ -1856,48 +1856,49 @@ export default function ModelManage(): JSX.Element {
                 </span>
               </div>
               <div className="mm-head-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
+                <Button
+                  variant="primary"
+                  size="sm"
                   onClick={() => void openFetchModal()}
                   style={{ gap: 6 }}
                   title={t('从上游拉取模型列表')}
                 >
                   <Download size={13} />
                   {t('获取模型')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => setAddModelOpen(true)}
                   style={{ gap: 6 }}
                   title={t('手动登记自定义模型')}
                 >
                   <Plus size={13} />
                   {t('添加模型')}
-                </button>
+                </Button>
                 {/* 原「元信息覆盖」Tab 的列表 + 新增入口收进这个弹窗（Tab 已并入目录） */}
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => setOverridesModal(true)}
                   style={{ gap: 6 }}
                   title={t('查看 / 新增 / 删除元信息覆盖（归属方、上下文长度、能力声明）')}
                 >
                   <SlidersHorizontal size={13} />
                   {t('覆盖管理')}
-                </button>
+                </Button>
                 <div className="mm-colset" ref={colPanelRef}>
-                  <button
-                    type="button"
-                    className={`btn btn-outline btn-sm${colPanelOpen ? ' mm-colset-open' : ''}`}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className={colPanelOpen ? 'mm-colset-open' : undefined}
                     onClick={() => setColPanelOpen((v) => !v)}
                     style={{ gap: 6 }}
                     title={t('列显示设置')}
                   >
                     <Settings2 size={13} />
                     {t('列设置')}
-                  </button>
+                  </Button>
                   {colPanelOpen && (
                     <TableColumnSettings
                       open
@@ -2063,13 +2064,13 @@ export default function ModelManage(): JSX.Element {
                 <span>
                   {t('已选')} <strong>{selected.size}</strong> {t('个')}
                 </span>
-                <button type="button" className="btn btn-outline btn-sm" onClick={() => { setBatchReport(''); setBatchOpen(true); }}>
+                <Button variant="outline" size="sm" onClick={() => { setBatchReport(''); setBatchOpen(true); }}>
                   {t('批量操作')}
-                </button>
+                </Button>
                 {/* 批量映射前缀：给选中模型统一加「前缀+sep+原ID」的对外名 */}
-                <button type="button" className="btn btn-outline btn-sm" onClick={openPrefixBatch}>
+                <Button variant="outline" size="sm" onClick={openPrefixBatch}>
                   {t('批量映射前缀')}
-                </button>
+                </Button>
                 <button type="button" className="mm-batch-clear" title={t('清除选择')} onClick={() => setSelected(new Set())}>
                   ×
                 </button>
@@ -2208,10 +2209,10 @@ export default function ModelManage(): JSX.Element {
                 {t('覆盖内置推断的归属方 / 上下文长度 / 能力声明')}
               </p>
               <div className="mm-overrides-toolbar">
-                <button className="btn btn-primary btn-sm" onClick={openMetaCreate} style={{ gap: 6 }}>
+                <Button variant="primary" size="sm" onClick={openMetaCreate} style={{ gap: 6 }}>
                   <Plus size={13} />
                   {t('新增覆盖')}
-                </button>
+                </Button>
               </div>
               {Object.keys(overrides).length === 0 ? (
                 <EmptyState
@@ -2267,9 +2268,9 @@ export default function ModelManage(): JSX.Element {
               )}
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setOverridesModal(false)}>
+              <Button variant="outline" onClick={() => setOverridesModal(false)}>
                 {t('关闭')}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2393,12 +2394,12 @@ export default function ModelManage(): JSX.Element {
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setMetaModal(false)} disabled={savingMeta}>
+              <Button variant="outline" onClick={() => setMetaModal(false)} disabled={savingMeta}>
                 {t('取消')}
-              </button>
-              <button className="btn btn-primary" onClick={() => void saveMeta()} disabled={savingMeta}>
+              </Button>
+              <Button variant="primary" onClick={() => void saveMeta()} disabled={savingMeta}>
                 {savingMeta ? t('保存中...') : t('保存')}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2480,12 +2481,12 @@ export default function ModelManage(): JSX.Element {
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setPriceTarget(null)} disabled={savingPrice}>
+              <Button variant="outline" onClick={() => setPriceTarget(null)} disabled={savingPrice}>
                 {t('取消')}
-              </button>
-              <button className="btn btn-primary" onClick={() => void savePrice()} disabled={savingPrice}>
+              </Button>
+              <Button variant="primary" onClick={() => void savePrice()} disabled={savingPrice}>
                 {savingPrice ? t('保存中...') : t('保存')}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2598,12 +2599,12 @@ export default function ModelManage(): JSX.Element {
               </p>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setAliasTarget(null)} disabled={savingAlias}>
+              <Button variant="outline" onClick={() => setAliasTarget(null)} disabled={savingAlias}>
                 {t('取消')}
-              </button>
-              <button className="btn btn-primary" onClick={() => void saveAlias()} disabled={savingAlias}>
+              </Button>
+              <Button variant="primary" onClick={() => void saveAlias()} disabled={savingAlias}>
                 {savingAlias ? t('保存中...') : t('保存')}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2657,12 +2658,12 @@ export default function ModelManage(): JSX.Element {
               </p>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setCustomModal(false)} disabled={savingCustom}>
+              <Button variant="outline" onClick={() => setCustomModal(false)} disabled={savingCustom}>
                 {t('取消')}
-              </button>
-              <button className="btn btn-primary" onClick={() => void saveCustom()} disabled={savingCustom}>
+              </Button>
+              <Button variant="primary" onClick={() => void saveCustom()} disabled={savingCustom}>
                 {savingCustom ? t('保存中...') : t('保存')}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2730,12 +2731,12 @@ export default function ModelManage(): JSX.Element {
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setPrefixModal(false)} disabled={savingPrefix}>
+              <Button variant="outline" onClick={() => setPrefixModal(false)} disabled={savingPrefix}>
                 {t('取消')}
-              </button>
-              <button className="btn btn-primary" onClick={() => void savePrefixBatch()} disabled={savingPrefix}>
+              </Button>
+              <Button variant="primary" onClick={() => void savePrefixBatch()} disabled={savingPrefix}>
                 {savingPrefix ? t('执行中…') : t('执行')}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2767,9 +2768,9 @@ export default function ModelManage(): JSX.Element {
                       {Object.keys(fetchFailed).length > 0 &&
                         ` · ${t('失败')} ${Object.keys(fetchFailed).length}`}
                     </span>
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-sm"
+                    <Button
+                      variant="outline"
+                      size="sm"
                       disabled={fetchingId !== null || fetchAllRunning}
                       onClick={() => void fetchAll()}
                     >
@@ -2780,7 +2781,7 @@ export default function ModelManage(): JSX.Element {
                       ) : (
                         Object.keys(fetchDone).length > 0 ? t('重新获取全部') : t('全部拉取')
                       )}
-                    </button>
+                    </Button>
                   </div>
                   <div className="mm-fetch-list">
                     {fetchChannels.map((ch) => {
@@ -2807,9 +2808,9 @@ export default function ModelManage(): JSX.Element {
                                 : ''}
                             </span>
                           ) : (
-                            <button
-                              type="button"
-                              className="btn btn-outline btn-sm"
+                            <Button
+                              variant="outline"
+                              size="sm"
                               disabled={fetchingId !== null || fetchAllRunning}
                               onClick={() => void fetchOneClick(ch)}
                             >
@@ -2822,7 +2823,7 @@ export default function ModelManage(): JSX.Element {
                               ) : (
                                 t('拉取')
                               )}
-                            </button>
+                            </Button>
                           )}
                         </div>
                       );
@@ -2832,9 +2833,9 @@ export default function ModelManage(): JSX.Element {
               )}
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setFetchModal(false)}>
+              <Button variant="outline" onClick={() => setFetchModal(false)}>
                 {t('关闭')}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2892,12 +2893,12 @@ export default function ModelManage(): JSX.Element {
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setAddModelOpen(false)} disabled={addingModel}>
+              <Button variant="outline" onClick={() => setAddModelOpen(false)} disabled={addingModel}>
                 {t('取消')}
-              </button>
-              <button className="btn btn-primary" onClick={() => void saveAddModel()} disabled={addingModel}>
+              </Button>
+              <Button variant="primary" onClick={() => void saveAddModel()} disabled={addingModel}>
                 {addingModel ? t('添加中...') : t('添加')}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2964,16 +2965,16 @@ export default function ModelManage(): JSX.Element {
               {batchReport && <div className="error-message">{batchReport}</div>}
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setBatchOpen(false)} disabled={batchRunning}>
+              <Button variant="outline" onClick={() => setBatchOpen(false)} disabled={batchRunning}>
                 {t('取消')}
-              </button>
-              <button
-                className={`btn ${batchAction === 'remove-price' ? 'btn-danger' : 'btn-primary'}`}
+              </Button>
+              <Button
+                variant={batchAction === 'remove-price' ? 'danger' : 'primary'}
                 onClick={() => void runBatch()}
                 disabled={batchRunning || selectedRows.length === 0}
               >
                 {batchRunning ? t('执行中…') : `${t('执行')}${t(batchAction === 'enable' ? '启用' : batchAction === 'disable' ? '禁用' : batchAction === 'set-reasoning' ? '设思考等级' : '删除定价')}`}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
