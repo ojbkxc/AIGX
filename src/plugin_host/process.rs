@@ -234,9 +234,13 @@ pub async fn handshake(
             message: "handshake timeout".into(),
             code: Some("timeout".into()),
         })??;
-    let providers = result
-        .get("providers")
-        .and_then(|p| p.as_array())
+    // 插件 SDK 把 `Vec<ProviderInfo>` 直接序列化为 result（JSON 数组），
+    // 不是 `{"providers":[...]}` 对象。两种形状都收（数组为主，对象兜底）。
+    let arr = result
+        .as_array()
+        .cloned()
+        .or_else(|| result.get("providers").and_then(|p| p.as_array()).cloned());
+    let providers = arr
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| serde_json::from_value::<ProviderInfo>(v.clone()).ok())
@@ -355,12 +359,10 @@ mod tests {
             answer_init(
                 &mut plugin_write,
                 frame.id,
-                serde_json::json!({
-                    "providers": [
-                        {"id": "kiro", "label": "Kiro"},
-                        {"id": "astudio", "label": "AStudio"}
-                    ]
-                }),
+                serde_json::json!([
+                    {"id": "kiro", "label": "Kiro"},
+                    {"id": "astudio", "label": "AStudio"}
+                ]),
             )
             .await;
         });
