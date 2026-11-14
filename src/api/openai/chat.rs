@@ -16,6 +16,62 @@ use serde_json::Value;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+/// 构建本次请求的尝试计划：主模型候选在前，异源模型候选在后。
+///
+/// 破甲总开关或异源开关关闭时，计划与既有候选列表逐字相同（零行为变化，
+/// 且零额外分配——候选标签借用调用方的 model/cfg，不逐候选克隆 String）。
+/// 异源候选按 (模型名, 渠道 id) 去重：fallback 与主模型同名、或 fallback
+/// 列表自身重复时，不重复追加同一渠道（防配置笔误导致同渠道重复尝试）。
+///
+/// `pub(crate)`：anthropic `/v1/messages` 端点复用同一计划构建（两协议同口径，
+/// 避免两份 fallback 逻辑漂移）。
+pub(crate) fn build_attempt_plan<'a>(
+    state: &AppState,
+    model: &'a str,
+    candidates: Vec<BridgeCandidate>,
+    provider_filter: Option<&[String]>,
+    needs: crate::channel::routing_policy::RequestNeeds,
+    cfg: &'a crate::purge::PurgeSettings,
+) -> Vec<(&'a str, BridgeCandidate)> {
+    let mut plan: Vec<(&'a str, BridgeCandidate)> = candidates
+        .into_iter()
+        .map(|candidate| (model, candidate))
+        .collect();
+    if cfg.enabled && cfg.cross_source_fallback {
+        for fallback in &cfg.fallback_models {
+            // 与主模型同口径：未定价的异源模型不进入候选（B09 防免费用量）
+            if ensure_model_priced(state, fallback).is_err() {
+                continue;
+            }
+            let extra = resolve_bridges_with_affinity_needs(
+                state,
+                fallback,
+                None,
+                provider_filter,
+                None,
+                needs,
+            );
+            for candidate in extra {
+                let cid = candidate.1.as_deref();
+                let duplicate = plan
+                    .iter()
+                    .any(|(label, (_, pc, _))| *label == fallback.as_str() && pc.as_deref() == cid);
+                if duplicate {
+                    continue;
+                }
+                plan.push((fallback.as_str(), candidate));
+            }
+        }
+    }
+    // 重试上限：单请求最多尝试多少个候选（含首轮）。只在破甲总开关打开时
+    // 截断——关闭时保持既有「候选列表全跑」（零行为变化）。
+    if cfg.enabled {
+        let cap = cfg.retry_limit.max(1) as usize;
+        plan.truncate(cap);
+    }
+    plan
+}
+
 /// POST /v1/chat/completions - 聊天补全
 ///
 /// 使用 Bridge/Hub 模式分发请求，参考 aisix 的 chat_completions 处理流程：
@@ -85,6 +141,8 @@ pub(crate) async fn handle_chat_completions(
     if let Err(e) = ensure_model_priced(&state, &model) {
         return e.into_response();
     }
+    // 破甲控制台：进入转发链路的请求计入响应总数（进程内计数）
+    crate::purge::record_response();
 
     // 阶段2：亲和性 session 标识——优先 body.user 字段（OpenAI SDK 常见透传），
     // 否则用 api_key 所属 user_id，保证同用户会话粘到同一渠道（保留上游 KV 缓存）
@@ -104,13 +162,15 @@ pub(crate) async fn handle_chat_completions(
     };
     // #40 §1 接缝（会话型端点）：从请求体推出能力需求（tools/images/video）
     // 供选路能力过滤——chat 侧 messages 列表 + 顶层 tools/tool_choice
+    let body_needs = super::needs::from_chat_body(&body);
+    let provider_filter = api_key.provider_filter();
     let candidates = resolve_bridges_with_affinity_needs(
         &state,
         &model,
         session_id.as_deref(),
-        api_key.provider_filter().as_deref(),
+        provider_filter.as_deref(),
         route_capture.as_mut(),
-        super::needs::from_chat_body(&body),
+        body_needs,
     );
     if candidates.is_empty() {
         return openai_error_response(
@@ -149,7 +209,7 @@ pub(crate) async fn handle_chat_completions(
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // passthrough 不动（零开销）；custom 替换 / append 追加网关提示词；
     // 按模型覆盖优先于全局设置（AIGX 入口只有模型名，故按模型挂）
-    let messages = match crate::prompt::apply_prompt_for(
+    let mut messages = match crate::prompt::apply_prompt_for(
         &model,
         &messages,
         &state.gateway_prompt.snapshot(),
@@ -157,6 +217,21 @@ pub(crate) async fn handle_chat_completions(
         Some(injected) => injected,
         None => messages,
     };
+
+    // 破甲控制台：请求治理（system 归一化 / 死区词改写 / 结构化提示 / 技能注入）
+    let purge_cfg = state.purge.snapshot();
+    let purge_applied = crate::purge::apply_messages(&mut messages, &purge_cfg);
+    if purge_applied.skill_hit {
+        crate::purge::record_skill_hit();
+    }
+    if messages.is_empty() {
+        return openai_error_response(
+            "invalid_messages",
+            "No valid messages after purge normalization",
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response();
+    }
 
     let chat_req = ChatFormat {
         model: model.clone(),
@@ -179,11 +254,13 @@ pub(crate) async fn handle_chat_completions(
                 .collect()
         }),
         tool_choice: body.get("tool_choice").cloned(),
-        reasoning_effort: body
-            .get("reasoning_effort")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| state.model_mapper.reasoning_for(&model)),
+        reasoning_effort: crate::purge::clamp_reasoning(
+            body.get("reasoning_effort")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| state.model_mapper.reasoning_for(&model)),
+            &purge_cfg,
+        ),
         web_search_options: body.get("web_search_options").cloned(),
         // 透传白名单字段：这些是 OpenAI 协议标准参数，缓存键已认识它们
         // （presence_penalty/frequency_penalty/seed/response_format），但此前
@@ -280,6 +357,8 @@ pub(crate) async fn handle_chat_completions(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 连接稳定性：failover 预算（候选数 + 总时间上限），与 anthropic 面同口径
+        let mut failover_budget = crate::api::failover::FailoverBudget::new();
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         // auto-continue：留住成功轮的桥与（映射后）请求，续写轮复用同一渠道
         let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
@@ -308,18 +387,34 @@ pub(crate) async fn handle_chat_completions(
             user_id: api_key.user_id.clone(),
             handled: false,
         };
-        for (bridge, cid, ch_ref) in candidates {
+        // 破甲异源递进：主模型候选在前，配置了 fallback_models 时追加异源候选
+        let attempt_plan = build_attempt_plan(
+            &state,
+            &model,
+            candidates,
+            provider_filter.as_deref(),
+            body_needs,
+            &purge_cfg,
+        );
+        for (plan_model, (bridge, cid, ch_ref)) in attempt_plan {
+            if !failover_budget.can_attempt() {
+                // 连接稳定性：预算耗尽（候选数或总时间达上限）停止 failover
+                last_error = Some(crate::bridge::BridgeError::Config(
+                    failover_budget.exhausted_reason(),
+                ));
+                break;
+            }
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
             // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）。
             // 每个渠道都需单独解析——同原始名在不同渠道可能映射到不同上游。
-            let upstream = resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
+            let upstream = resolve_upstream_model(plan_model, ch_ref.as_ref(), &state.model_mapper);
             // 防"映射指向未定价模型 → 免费用量"漏洞：仅当映射后名字变化时补查一次
-            if upstream != model && ensure_model_priced(&state, &upstream).is_err() {
+            if upstream.as_str() != plan_model && ensure_model_priced(&state, &upstream).is_err() {
                 // 该渠道映射的上游无定价，跳过此渠道（failover 下一候选）
                 tracing::warn!(
-                    "chat_stream mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                    "chat_stream mapping: {plan_model} -> {upstream} unpriced, skip channel {cid:?}"
                 );
                 last_error = Some(crate::bridge::BridgeError::Config(format!(
                     "mapped upstream '{upstream}' has no price configured"
@@ -333,9 +428,13 @@ pub(crate) async fn handle_chat_completions(
             sanitize_attempt_messages(&state, ch_ref.as_ref(), &mut attempt_req.messages);
             attempt_counter += 1;
             let attempt_index = attempt_counter;
+            if attempt_index > 1 {
+                crate::purge::record_retry();
+            }
             let attempt_start = std::time::Instant::now();
             let attempt_started_at = chrono::Utc::now().timestamp();
-            let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
+            let sticky_hit =
+                plan_model == model.as_str() && affinity_hit_id.as_deref() == cid.as_deref();
             // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
             attempt_guard.channel_id = cid.clone().unwrap_or_default();
             attempt_guard.channel_name =
@@ -350,9 +449,64 @@ pub(crate) async fn handle_chat_completions(
             };
             match attempt {
                 Ok(s) => {
+                    // 破甲异源递进（流式侧）：建流成功不等于没有拒答——在把流交给
+                    // 客户端之前先读少量前缀做拒答判定。命中则丢弃本轮流、按可重试
+                    // 失败处理（客户端尚未收到任何字节），继续下一候选（通常是异源模型）。
+                    // 只在「异源递进已开启 + 主模型 + 已达触发轮次 + 配了异源模型」
+                    // 时探测：其余情形走零改动路径（原流逐字下发）。
+                    let s = if purge_cfg.enabled
+                        && purge_cfg.cross_source_fallback
+                        && plan_model == model.as_str()
+                        && attempt_index >= purge_cfg.fallback_trigger_attempt
+                        && !purge_cfg.fallback_models.is_empty()
+                    {
+                        match peek_for_refusal(s).await {
+                            Peek::Refused => {
+                                // 拒答不是渠道不健康：与非流式路径同口径，不记
+                                // 渠道失败/熔断，只计拒绝样本并换下一候选。
+                                crate::purge::record_refusal();
+                                if let Some(capture) = route_capture.as_mut() {
+                                    capture.push_attempt(crate::log::AttemptDetail {
+                                        index: attempt_index,
+                                        channel_id: cid.clone().unwrap_or_default(),
+                                        channel_name: ch_ref
+                                            .as_ref()
+                                            .map(|c| c.name.clone())
+                                            .unwrap_or_default(),
+                                        provider: ch_ref
+                                            .as_ref()
+                                            .map(|c| c.channel_type.as_str().to_string())
+                                            .unwrap_or_default(),
+                                        account: String::new(),
+                                        model: upstream.clone(),
+                                        sticky_hit,
+                                        started_at: attempt_started_at,
+                                        finished_at: Some(chrono::Utc::now().timestamp()),
+                                        status: Some(200),
+                                        error: Some("refusal detected".into()),
+                                        notice: Some("refusal detected in stream prefix".into()),
+                                    });
+                                }
+                                tracing::warn!(
+                                    "chat_stream refusal detected (prefix), switching model: {plan_model} -> next candidate"
+                                );
+                                last_error = Some(crate::bridge::BridgeError::Config(
+                                    "refusal detected; switching to fallback model".into(),
+                                ));
+                                continue;
+                            }
+                            Peek::Pass(s) => s,
+                        }
+                    } else {
+                        s
+                    };
                     // #47：首事件已到 → 计费接管点（StreamUsageGuard 稍后构造，
                     // 流中断开由其 Drop 兜底，本守卫退出不再记账）
                     attempt_guard.handoff();
+                    if attempt_index > 1 {
+                        // 提前收效：重试后成功
+                        crate::purge::record_early_success();
+                    }
                     // #32 路由回放：建流成功轮明细（流式终态在计费守卫，此处
                     // 记「建流成功」结论；phase 由终态字段承载）
                     if let Some(capture) = route_capture.as_mut() {
@@ -454,6 +608,8 @@ pub(crate) async fn handle_chat_completions(
                     last_error = Some(e);
                 }
             }
+            // 连接稳定性：记录本轮候选尝试（达上限后下轮入口停止）
+            failover_budget.record_attempt();
         }
         let stream = match stream_opt {
             Some(s) => s,
@@ -465,6 +621,7 @@ pub(crate) async fn handle_chat_completions(
                         "all channels failed for streaming request".into(),
                     )
                 });
+                crate::purge::record_failure(crate::purge::classify_failure(&e.to_string()));
                 let latency_ms = request_start.elapsed().as_millis() as u64;
                 let status_code = StatusCode::from_u16(e.http_status())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -953,6 +1110,8 @@ pub(crate) async fn handle_chat_completions(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 连接稳定性：failover 预算（候选数 + 总时间上限），与 anthropic 面同口径
+        let mut failover_budget = crate::api::failover::FailoverBudget::new();
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         // auto-continue：留住成功轮的桥与（映射后）请求，续写轮复用同一渠道
         let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
@@ -979,15 +1138,31 @@ pub(crate) async fn handle_chat_completions(
             user_id: api_key.user_id.clone(),
             handled: false,
         };
-        for (bridge, cid, ch_ref) in candidates {
+        // 破甲异源递进：主模型候选在前，配置了 fallback_models 时追加异源候选
+        let attempt_plan = build_attempt_plan(
+            &state,
+            &model,
+            candidates,
+            provider_filter.as_deref(),
+            body_needs,
+            &purge_cfg,
+        );
+        for (plan_model, (bridge, cid, ch_ref)) in attempt_plan {
+            if !failover_budget.can_attempt() {
+                // 连接稳定性：预算耗尽（候选数或总时间达上限）停止 failover
+                last_error = Some(crate::bridge::BridgeError::Config(
+                    failover_budget.exhausted_reason(),
+                ));
+                break;
+            }
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
             // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
-            let upstream = resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
-            if upstream != model && ensure_model_priced(&state, &upstream).is_err() {
+            let upstream = resolve_upstream_model(plan_model, ch_ref.as_ref(), &state.model_mapper);
+            if upstream.as_str() != plan_model && ensure_model_priced(&state, &upstream).is_err() {
                 tracing::warn!(
-                    "chat mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                    "chat mapping: {plan_model} -> {upstream} unpriced, skip channel {cid:?}"
                 );
                 last_error = Some(crate::bridge::BridgeError::Config(format!(
                     "mapped upstream '{upstream}' has no price configured"
@@ -1001,8 +1176,12 @@ pub(crate) async fn handle_chat_completions(
             sanitize_attempt_messages(&state, ch_ref.as_ref(), &mut attempt_req.messages);
             attempt_counter += 1;
             let attempt_index = attempt_counter;
+            if attempt_index > 1 {
+                crate::purge::record_retry();
+            }
             let attempt_started_at = chrono::Utc::now().timestamp();
-            let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
+            let sticky_hit =
+                plan_model == model.as_str() && affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
             // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
             attempt_guard.channel_id = cid.clone().unwrap_or_default();
@@ -1014,6 +1193,28 @@ pub(crate) async fn handle_chat_completions(
                 Ok(resp) => {
                     // #47：响应已收 → 计费接管点（下方 settle_usage 记账）
                     attempt_guard.handoff();
+                    // 破甲异源递进：到达触发轮次后，非流式响应若判定为拒绝，
+                    // 不结算本轮，直接尝试后续候选（通常是异源模型）。
+                    if purge_cfg.enabled
+                        && purge_cfg.cross_source_fallback
+                        && plan_model == model.as_str()
+                        && attempt_index >= purge_cfg.fallback_trigger_attempt
+                        && !purge_cfg.fallback_models.is_empty()
+                    {
+                        // 非流式拒答判定走 ChatResponse 正文（与非流式 anthropic
+                        // 路径同口径：`message.content_str()`）。
+                        if crate::purge::looks_refusal(resp.message.content_str()) {
+                            crate::purge::record_refusal();
+                            last_error = Some(crate::bridge::BridgeError::Config(
+                                "refusal detected; switching to fallback model".into(),
+                            ));
+                            continue;
+                        }
+                    }
+                    if attempt_index > 1 {
+                        // 提前收效：重试后成功（拒绝跳过轮未成功，故在其后计数）
+                        crate::purge::record_early_success();
+                    }
                     // 阶段2：成功——记入断路器/健康追踪/亲和性/空响应计数
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_success_with_sticky(
@@ -1111,6 +1312,8 @@ pub(crate) async fn handle_chat_completions(
                     last_error = Some(e);
                 }
             }
+            // 连接稳定性：记录本轮候选尝试（达上限后下轮入口停止）
+            failover_budget.record_attempt();
         }
         let response = match response_opt {
             Some(r) => r,
@@ -1122,6 +1325,7 @@ pub(crate) async fn handle_chat_completions(
                         "all channels failed for non-streaming request".into(),
                     )
                 });
+                crate::purge::record_failure(crate::purge::classify_failure(&e.to_string()));
                 let latency_ms = request_start.elapsed().as_millis() as u64;
                 let status_code = StatusCode::from_u16(e.http_status())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1371,5 +1575,42 @@ pub(crate) async fn handle_chat_completions(
                 .insert("x-aigx-cache", "miss".parse().unwrap());
             resp
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // 连接稳定性：流式/非流式 failover 循环接入的预算口径自检。
+    // 循环内逻辑为「入口 can_attempt() 判定 → 失败记 last_error → 末尾
+    // record_attempt()」，这里直接驱动 FailoverBudget 复现该时序，验证
+    // 达上限后入口判定即停、且 exhausted_reason 能作为 Config 错误串。
+
+    #[test]
+    fn failover_budget_stops_after_max_attempts() {
+        let mut budget = crate::api::failover::FailoverBudget::with_limits(
+            crate::api::failover::FAILOVER_MAX_ATTEMPTS,
+            std::time::Duration::from_secs(3600),
+        );
+        // 模拟循环：每个候选尝试一次，入口先判、末尾记
+        for _ in 0..crate::api::failover::FAILOVER_MAX_ATTEMPTS {
+            assert!(budget.can_attempt(), "达到上限前必须允许尝试");
+            budget.record_attempt();
+        }
+        assert!(
+            !budget.can_attempt(),
+            "达候选上限后入口判定必须停止 failover"
+        );
+        let reason = budget.exhausted_reason();
+        // 与循环内一致：耗尽时作为 BridgeError::Config 的串
+        let err = crate::bridge::BridgeError::Config(reason.clone());
+        assert!(err.to_string().contains(reason.as_str()));
+    }
+
+    #[test]
+    fn failover_budget_default_allows_first_attempt() {
+        // 循环首个候选进入前预算必须放行（否则正常首轮就被拦下）
+        let budget = crate::api::failover::FailoverBudget::new();
+        assert!(budget.can_attempt());
+        assert_eq!(budget.attempts(), 0);
     }
 }

@@ -1,0 +1,195 @@
+/* 破甲控制台：统计卡 + 开关行 + 只读参数 + 词表编辑
+   颜色全部走 App.css 主题令牌（--text-muted / --border-color 等），暗亮色自动适配 */
+
+.purge-console {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.purge-console .page-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+}
+
+/* 运行信息（PID · 运行时长 · 上游）：弱化文字、可换行，窄屏不与标题互挤 */
+.purge-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.purge-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* 6 张统计卡：≥1200 一行 6 张，641–1199 两行 3 张，≤640 两列 3 行——行行对齐，不留空轨道 */
+.purge-stats {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 1199px) {
+  .purge-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .purge-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
+/* 开关行：标题加粗 + 描述弱化，行间 1px 分隔线（对齐参考图 7 行开关） */
+.purge-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.purge-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.purge-switch-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.purge-switch-row:first-child {
+  padding-top: 0;
+}
+
+.purge-switch-text {
+  min-width: 0;
+}
+
+.purge-row-title {
+  font-weight: 600;
+  font-size: var(--font-size-md, 14px);
+  overflow-wrap: anywhere;
+}
+
+.purge-row-desc {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm, 12.5px);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+/* 只读参数：键左值右、基线对齐，虚线分隔；minmax(min(240px,100%),1fr) 保证 375px 不溢出 */
+.purge-param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  gap: 10px 24px;
+}
+
+.purge-param {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border-color);
+  font-size: 13px;
+  min-width: 0;
+}
+
+.purge-param span {
+  color: var(--text-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.purge-param strong {
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* 词表编辑：原文 → 改写为 → 删除；minmax(0,1fr) 防长词撑破列 */
+.purge-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.purge-rule-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.purge-rule-row .form-group {
+  margin: 0;
+}
+
+.purge-arrow {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* 参数区表单：与只读参数同宽节奏 */
+.purge-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.purge-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.purge-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+/* 首屏骨架：参数区骨架与真实网格同节奏，减少加载完成时的跳动 */
+.purge-skeleton-params {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  gap: 14px 24px;
+}
+
+/* 窄屏（≤768）：词表行纵向堆叠，箭头隐藏（上下两个输入靠 placeholder 辨识） */
+@media (max-width: 768px) {
+  .purge-rule-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .purge-arrow {
+    display: none;
+  }
+}
+
+/* 手机（≤480）：保存按钮通栏，拇指易触达 */
+@media (max-width: 480px) {
+  .purge-actions .btn {
+    width: 100%;
+  }
+}
+
+/* 动画敏感用户：本页无自有动画，骨架微光由 App.css 全局关闭；这里兜底关掉控件过渡 */
+@media (prefers-reduced-motion: reduce) {
+  .purge-console * {
+    transition: none !important;
+  }
+}

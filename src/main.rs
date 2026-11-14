@@ -44,6 +44,7 @@ mod pricing;
 mod prompt;
 mod proxy;
 mod proxy_pool;
+mod purge;
 mod quota_monitor;
 mod ratelimit;
 mod redemption;
@@ -333,6 +334,9 @@ async fn main() -> anyhow::Result<()> {
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // passthrough/custom/append 三模式，保存即生效
     let gateway_prompt = Arc::new(crate::prompt::GatewayPromptStore::with_store(store.clone()));
+    // 破甲控制台：配置热更新；启动时刻只用于页面展示运行时长
+    let purge = Arc::new(crate::purge::PurgeStore::with_store(store.clone()));
+    crate::purge::init_started_at();
 
     // 额外脱敏请求头名单（对照 Agent2API「设置 → 网关 → 指纹脱敏」）：
     // 启动时从盘恢复进程级快照；保存设置时热更新
@@ -472,6 +476,12 @@ async fn main() -> anyhow::Result<()> {
                 config.usage.connect_timeout_secs.max(1),
             ))
             .read_timeout(Duration::from_secs(config.usage.stream_idle_secs.max(1)))
+            // 连接池/TCP 调优：空闲连接 30s 回收，单 host 保留至多 16 条复用连接；
+            // TCP keepalive 60s 探活挂连接，nodelay 关闭 Nagle 合并降低小包时延。
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_max_idle_per_host(16)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_nodelay(true)
             .build()
             .expect("failed to build shared reqwest::Client"),
     );
@@ -679,6 +689,7 @@ async fn main() -> anyhow::Result<()> {
         routing_policy,
         user_tool_policy,
         gateway_prompt,
+        purge,
         account_sessions,
         pricing_store,
         user_group_store,
@@ -2057,6 +2068,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/sanitize",
             get(api::admin::handle_get_sanitize).put(api::admin::handle_update_sanitize),
+        )
+        // 破甲控制台（请求治理总控：归一化/改写/降档/异源/技能注入）
+        .route(
+            "/api/purge",
+            get(api::admin::handle_get_purge).put(api::admin::handle_update_purge),
         )
         // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
         .route(

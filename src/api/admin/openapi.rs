@@ -839,6 +839,10 @@ fn paths_settings_ops() -> Value {
             "get": op("网关", "查询额外脱敏请求头名单（指纹脱敏）"),
             "put": op_body("网关", "更新额外脱敏请求头名单（热生效）", "headers: string[]")
         },
+        "/api/purge": {
+            "get": op("网关", "查询破甲控制台配置 / 进程统计 / 运行信息"),
+            "put": op_body("网关", "全量更新破甲控制台配置（热生效）", "enabled/system_normalize/dead_zone_rewrite/reduce_reasoning/cross_source_fallback/skill_inject/structured_prompt 等")
+        },
         "/api/cline-headers": {
             "get": op("网关", "查询 Cline 伪装头覆盖表"),
             "put": op_body("网关", "更新 Cline 伪装头覆盖表（热生效）", "headers: object")
@@ -1531,6 +1535,7 @@ mod tests {
         add("/api/gateway/prompt", &["get", "put"]);
         // #46 补登：网关指纹/排队 + 安全策略 + 定时任务 + 数据升级
         add("/api/sanitize", &["get", "put"]);
+        add("/api/purge", &["get", "put"]);
         add("/api/cline-headers", &["get", "put"]);
         add("/api/queue", &["get", "put"]);
         add("/api/security/policy", &["get", "put"]);

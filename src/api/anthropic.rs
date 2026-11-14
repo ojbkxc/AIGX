@@ -455,6 +455,8 @@ pub async fn handle_messages(
     if let Err(e) = super::openai::ensure_model_priced(&state, &model) {
         return e.into_response();
     }
+    // 破甲控制台：进入转发链路的请求计入响应总数（进程内计数）
+    crate::purge::record_response();
 
     // 阶段2：亲和性 session 标识——优先 body.metadata.user_id（Anthropic SDK 标准透传），
     // 否则用 api_key 所属 user_id，保证同用户会话粘到同一渠道
@@ -552,7 +554,7 @@ pub async fn handle_messages(
 
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // 客户端 system 已折进消息列表头，再统一走网关策略（custom 会替换它）
-    let all_messages = match crate::prompt::apply_prompt_for(
+    let mut all_messages = match crate::prompt::apply_prompt_for(
         &model,
         &all_messages,
         &state.gateway_prompt.snapshot(),
@@ -560,6 +562,22 @@ pub async fn handle_messages(
         Some(injected) => injected,
         None => all_messages,
     };
+
+    // 破甲控制台：请求治理（归一化/改写/结构化/技能注入）；异源 fallback 在
+    // 下方与 chat 端点共用同一 `build_attempt_plan`（两协议同口径）。
+    let purge_cfg = state.purge.snapshot();
+    let purge_applied = crate::purge::apply_messages(&mut all_messages, &purge_cfg);
+    if purge_applied.skill_hit {
+        crate::purge::record_skill_hit();
+    }
+    if all_messages.is_empty() {
+        return anthropic_error(
+            "invalid_request_error",
+            "No valid messages after purge normalization",
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response();
+    }
 
     let chat_req = ChatFormat {
         model: model.clone(),
@@ -604,7 +622,10 @@ pub async fn handle_messages(
         // Anthropic `tool_choice` 原样透传（上游 Anthropic bridge 在 build_body
         // 里已识别 Anthropic 形状的 tool_choice）。同时兼容 OpenAI 形状。
         tool_choice: body.get("tool_choice").cloned(),
-        reasoning_effort: state.model_mapper.reasoning_for(&model),
+        reasoning_effort: crate::purge::clamp_reasoning(
+            state.model_mapper.reasoning_for(&model),
+            &purge_cfg,
+        ),
         web_search_options: None,
         extra: body.get("metadata").cloned(),
     };
@@ -630,12 +651,27 @@ pub async fn handle_messages(
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
+    // P3 在途登记：管理员可在日志页看到这条请求并终止它。
+    // guard 在流式路径移进 GuardedStream（流存活期间才算「在途」，函数返回
+    // 响应后不立刻 drop），非流式路径随函数作用域在请求结束时自动注销。
+    // `cancel_signal` 挂到流式响应流上：管理员点「终止」时置位，
+    // GuardedStream::poll_next 立刻返回 None 收尾，上游连接随流 drop 断开。
+    let (_inflight_id, inflight_guard) = state.inflight.begin(
+        model.clone(),
+        is_stream,
+        api_key.user_id.clone(),
+        Some(api_key.id.clone()),
+    );
+    let cancel_signal = inflight_guard.cancel_signal();
+
     if is_stream {
         // B06：failover 循环——依次尝试候选渠道建立流，仅对上游可重试错误切换
         let mut stream_opt = None;
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 连接稳定性：failover 总预算（候选上限 + 总时长），与 openai 面同口径
+        let mut failover_budget = crate::api::failover::FailoverBudget::new();
         // P1-7：调度决策回放——记录候选渠道与被过滤渠道（与 openai 流式路径对齐）
         let candidate_channel_ids: Vec<String> = candidates
             .iter()
@@ -664,16 +700,38 @@ pub async fn handle_messages(
         let affinity_hit_id = session_id
             .as_deref()
             .and_then(|sid| state.channel_store.affinity_cache().lookup(sid, &model));
-        for (bridge, cid, ch_ref) in candidates {
+        // 破甲异源递进：与 chat 端点共用同一计划构建（主模型候选在前，
+        // fallback_models 候选在后；未定价的异源模型不进候选）。
+        let attempt_plan = super::openai::build_attempt_plan(
+            &state,
+            &model,
+            candidates,
+            api_key.provider_filter().as_deref(),
+            crate::api::openai::from_chat_body(&body),
+            &purge_cfg,
+        );
+        for (plan_model, (bridge, cid, ch_ref)) in attempt_plan {
+            // 连接稳定性：候选上限/总时长耗尽即停止 failover，按既有失败路径返回
+            if !failover_budget.can_attempt() {
+                last_error = Some(crate::bridge::BridgeError::Config(
+                    failover_budget.exhausted_reason(),
+                ));
+                break;
+            }
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
             // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
-            let upstream =
-                super::openai::resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
-            if upstream != model && super::openai::ensure_model_priced(&state, &upstream).is_err() {
+            let upstream = super::openai::resolve_upstream_model(
+                plan_model,
+                ch_ref.as_ref(),
+                &state.model_mapper,
+            );
+            if upstream.as_str() != plan_model
+                && super::openai::ensure_model_priced(&state, &upstream).is_err()
+            {
                 tracing::warn!(
-                    "messages stream mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                    "messages stream mapping: {plan_model} -> {upstream} unpriced, skip channel {cid:?}"
                 );
                 last_error = Some(crate::bridge::BridgeError::Config(format!(
                     "mapped upstream '{upstream}' has no price configured"
@@ -690,6 +748,8 @@ pub async fn handle_messages(
                 &mut attempt_req.messages,
             );
             attempt_counter += 1;
+            // 连接稳定性：与 attempt_counter 同步记账一次候选尝试（上限/总时长收敛）
+            failover_budget.record_attempt();
 
             // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
             attempt_guard.channel_id = cid.clone().unwrap_or_default();
@@ -698,6 +758,9 @@ pub async fn handle_messages(
             attempt_guard.model = upstream.clone();
             attempt_guard.chat_req = attempt_req.clone();
             let attempt_index = attempt_counter;
+            if attempt_index > 1 {
+                crate::purge::record_retry();
+            }
             let attempt_started_at = chrono::Utc::now().timestamp();
             let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
@@ -709,8 +772,58 @@ pub async fn handle_messages(
             };
             match attempt {
                 Ok(s) => {
+                    // 破甲异源递进（流式侧）：与非流式同口径——建流成功不代表没拒答。
+                    // 仅在「异源已开 + 主模型 + 已达触发轮次 + 配了异源模型」时
+                    // 先读前缀判定；其余情形原流逐字下发（零改动）。
+                    let s = if purge_cfg.enabled
+                        && purge_cfg.cross_source_fallback
+                        && plan_model == model.as_str()
+                        && attempt_index >= purge_cfg.fallback_trigger_attempt
+                        && !purge_cfg.fallback_models.is_empty()
+                    {
+                        match super::openai::peek_for_refusal(s).await {
+                            super::openai::Peek::Refused => {
+                                crate::purge::record_refusal();
+                                if let Some(capture) = route_capture.as_mut() {
+                                    capture.push_attempt(crate::log::AttemptDetail {
+                                        index: attempt_index,
+                                        channel_id: cid.clone().unwrap_or_default(),
+                                        channel_name: ch_ref
+                                            .as_ref()
+                                            .map(|c| c.name.clone())
+                                            .unwrap_or_default(),
+                                        provider: ch_ref
+                                            .as_ref()
+                                            .map(|c| c.channel_type.as_str().to_string())
+                                            .unwrap_or_default(),
+                                        account: String::new(),
+                                        model: upstream.clone(),
+                                        sticky_hit,
+                                        started_at: attempt_started_at,
+                                        finished_at: Some(chrono::Utc::now().timestamp()),
+                                        status: Some(200),
+                                        error: Some("refusal detected".into()),
+                                        notice: Some("refusal detected in stream prefix".into()),
+                                    });
+                                }
+                                tracing::warn!(
+                                    "messages stream refusal detected (prefix), switching model: {plan_model} -> next candidate"
+                                );
+                                last_error = Some(crate::bridge::BridgeError::Config(
+                                    "refusal detected; switching to fallback model".into(),
+                                ));
+                                continue;
+                            }
+                            super::openai::Peek::Pass(s) => s,
+                        }
+                    } else {
+                        s
+                    };
                     // #47：计费接管点/记账点（见各分支语义）
                     attempt_guard.handoff();
+                    if attempt_index > 1 {
+                        crate::purge::record_early_success();
+                    }
                     // 阶段2：流建立成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_success_with_sticky(
@@ -814,6 +927,7 @@ pub async fn handle_messages(
                         "all channels failed for streaming request".into(),
                     )
                 });
+                crate::purge::record_failure(crate::purge::classify_failure(&e.to_string()));
                 // #47：计费接管点/记账点（见各分支语义）
                 attempt_guard.handoff();
                 let latency_ms = request_start.elapsed().as_millis() as u64;
@@ -1314,9 +1428,11 @@ pub async fn handle_messages(
             let guarded = super::openai::GuardedStream {
                 inner: Box::pin(combined),
                 _guard: super::openai::StreamUsageGuard::new(billing),
-                // Anthropic 数据面暂未登记在途请求，不参与「终止」
-                cancel: None,
-                _inflight: None,
+                // P3：管理员「终止在途请求」时立刻收尾下游流
+                cancel: Some(cancel_signal),
+                // guard 移进流：流存活期间才算是「在途」。函数返回响应后
+                // guard 不能立刻 drop，否则列表里会立刻消失。
+                _inflight: Some(inflight_guard),
             };
             Sse::new(guarded)
                 // Anthropic 上游自带 `event: ping`，但那是**上游**的心跳，
@@ -1336,6 +1452,8 @@ pub async fn handle_messages(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 连接稳定性：failover 总预算（候选上限 + 总时长），与流式/openai 面同口径
+        let mut failover_budget = crate::api::failover::FailoverBudget::new();
         // P1-7：调度决策回放——记录候选渠道与被过滤渠道（与 openai 非流式路径对齐）
         let candidate_channel_ids: Vec<String> = candidates
             .iter()
@@ -1364,16 +1482,37 @@ pub async fn handle_messages(
         let affinity_hit_id = session_id
             .as_deref()
             .and_then(|sid| state.channel_store.affinity_cache().lookup(sid, &model));
-        for (bridge, cid, ch_ref) in candidates {
+        // 破甲异源递进：与流式/chat 端点共用同一计划构建。
+        let attempt_plan = super::openai::build_attempt_plan(
+            &state,
+            &model,
+            candidates,
+            api_key.provider_filter().as_deref(),
+            crate::api::openai::from_chat_body(&body),
+            &purge_cfg,
+        );
+        for (plan_model, (bridge, cid, ch_ref)) in attempt_plan {
+            // 连接稳定性：候选上限/总时长耗尽即停止 failover，按既有失败路径返回
+            if !failover_budget.can_attempt() {
+                last_error = Some(crate::bridge::BridgeError::Config(
+                    failover_budget.exhausted_reason(),
+                ));
+                break;
+            }
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
             // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
-            let upstream =
-                super::openai::resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
-            if upstream != model && super::openai::ensure_model_priced(&state, &upstream).is_err() {
+            let upstream = super::openai::resolve_upstream_model(
+                plan_model,
+                ch_ref.as_ref(),
+                &state.model_mapper,
+            );
+            if upstream.as_str() != plan_model
+                && super::openai::ensure_model_priced(&state, &upstream).is_err()
+            {
                 tracing::warn!(
-                    "messages mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                    "messages mapping: {plan_model} -> {upstream} unpriced, skip channel {cid:?}"
                 );
                 last_error = Some(crate::bridge::BridgeError::Config(format!(
                     "mapped upstream '{upstream}' has no price configured"
@@ -1390,6 +1529,8 @@ pub async fn handle_messages(
                 &mut attempt_req.messages,
             );
             attempt_counter += 1;
+            // 连接稳定性：与 attempt_counter 同步记账一次候选尝试（上限/总时长收敛）
+            failover_budget.record_attempt();
 
             // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
             attempt_guard.channel_id = cid.clone().unwrap_or_default();
@@ -1398,6 +1539,9 @@ pub async fn handle_messages(
             attempt_guard.model = upstream.clone();
             attempt_guard.chat_req = attempt_req.clone();
             let attempt_index = attempt_counter;
+            if attempt_index > 1 {
+                crate::purge::record_retry();
+            }
             let attempt_started_at = chrono::Utc::now().timestamp();
             let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
@@ -1405,6 +1549,25 @@ pub async fn handle_messages(
                 Ok(resp) => {
                     // #47：计费接管点/记账点（见各分支语义）
                     attempt_guard.handoff();
+                    // 破甲异源递进（非流式侧）：到达触发轮次后，主模型响应若判定
+                    // 为拒答则不结算本轮，直接尝试后续候选（通常是异源模型）。
+                    // 与 chat 端点同口径；拒答不是渠道不健康，不记渠道失败。
+                    if purge_cfg.enabled
+                        && purge_cfg.cross_source_fallback
+                        && plan_model == model.as_str()
+                        && attempt_index >= purge_cfg.fallback_trigger_attempt
+                        && !purge_cfg.fallback_models.is_empty()
+                        && crate::purge::looks_refusal(resp.message.content_str())
+                    {
+                        crate::purge::record_refusal();
+                        last_error = Some(crate::bridge::BridgeError::Config(
+                            "refusal detected; switching to fallback model".into(),
+                        ));
+                        continue;
+                    }
+                    if attempt_index > 1 {
+                        crate::purge::record_early_success();
+                    }
                     // 阶段2：成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_success_with_sticky(
@@ -1510,6 +1673,7 @@ pub async fn handle_messages(
                         "all channels failed for non-streaming request".into(),
                     )
                 });
+                crate::purge::record_failure(crate::purge::classify_failure(&e.to_string()));
                 // #47：计费接管点/记账点（见各分支语义）
                 attempt_guard.handoff();
                 let latency_ms = request_start.elapsed().as_millis() as u64;
@@ -1951,5 +2115,62 @@ mod tests {
         assert_eq!(blocks[0]["text"], "缓存前缀");
         assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(out[0].content_str(), "缓存前缀");
+    }
+
+    /// 连接稳定性：Anthropic failover 循环依赖的预算语义——进入每次候选尝试前
+    /// `can_attempt()` 把关，末尾 `record_attempt()` 记账，达到候选上限后必须停止。
+    #[test]
+    fn failover_budget_gate_stops_after_max_attempts() {
+        use crate::api::failover::FailoverBudget;
+        use std::time::Duration;
+
+        let mut budget = FailoverBudget::with_limits(2, Duration::from_secs(3600));
+        // 第 1 次：允许进入
+        assert!(budget.can_attempt());
+        budget.record_attempt();
+        // 第 2 次：允许进入
+        assert!(budget.can_attempt());
+        budget.record_attempt();
+        // 达到候选上限：循环入口的 can_attempt 必须拒绝，停止 failover
+        assert!(!budget.can_attempt());
+        let reason = budget.exhausted_reason();
+        assert!(reason.contains("max 2"), "{reason}");
+    }
+
+    /// P3：GuardedStream 挂上 cancel 信号后，poll_next 必须立刻收尾（返回 None），
+    /// 上游连接随流 drop 断开——这是 Anthropic 数据面「终止在途请求」的接线核心。
+    /// 用本地最小守卫（GuardedStream 仅要求 G: Unpin，真实守卫只含 Arc）验证真实
+    /// 的 Stream 实现行为，而非仅编译期接线。
+    #[tokio::test]
+    async fn guarded_stream_cancel_signal_ends_stream() {
+        use crate::api::openai::GuardedStream;
+        use crate::log::inflight::CancelSignal;
+        use futures::StreamExt;
+
+        struct NoopGuard;
+
+        // 对照：未取消时正常消费到产物（防止「恒收尾」的假绿）
+        let mut live = GuardedStream {
+            inner: Box::pin(futures::stream::once(async { 1 })),
+            _guard: NoopGuard,
+            cancel: Some(CancelSignal::new()),
+            _inflight: None,
+        };
+        assert_eq!(live.next().await, Some(1), "未取消时必须正常下发事件");
+
+        // 取消置位后：第一次 poll 直接返回 None，不下发任何事件
+        let cancelled = CancelSignal::new();
+        cancelled.cancel();
+        let mut ended = GuardedStream {
+            inner: Box::pin(futures::stream::once(async { 1 })),
+            _guard: NoopGuard,
+            cancel: Some(cancelled),
+            _inflight: None,
+        };
+        assert_eq!(
+            ended.next().await,
+            None,
+            "cancel 置位后 GuardedStream 必须立刻收尾"
+        );
     }
 }

@@ -60,6 +60,8 @@ pub struct AppState {
     pub user_tool_policy: Arc<crate::agent::user_tool_policy::UserToolPolicyStore>,
     /// 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）
     pub gateway_prompt: Arc<crate::prompt::GatewayPromptStore>,
+    /// 破甲控制台（请求治理总控：归一化/改写/降档/异源/技能注入）
+    pub purge: Arc<crate::purge::PurgeStore>,
     /// 账号型渠道的账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
     pub account_sessions: crate::account_session::AccountSessionStore,
     /// 模型定价目录
@@ -185,8 +187,8 @@ pub struct AppState {
     pub scheduled_task_store: Arc<crate::storage::FileStore>,
     /// 插件面的 provider 启停闸门（管理面写、数据面选号过滤读；KV 持久化）。
     pub provider_gates: crate::api::admin::plugins::ProviderGates,
-    /// 插件宿主管理器（外置插件包的安装/启停/崩溃退避；
-    /// `[plugins] enabled=true` 时参与启动恢复，数据面经
+    /// 插件宿主管理器（外置插件包的安装/启停/崩溃退避；宿主常开，
+    /// 启动时恢复已启用包，数据面经
     /// `process_for_provider` 路由到插件进程）。
     pub plugin_host: Arc<crate::plugin_host::PluginHostManager>,
 }

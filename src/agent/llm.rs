@@ -295,18 +295,42 @@ pub async fn chat_once_as(
 /// 暂时性重试的最大轮次上限（防止配置写大导致一次对话卡很久）。
 const MAX_TRANSIENT_RETRY_ROUNDS: u32 = 5;
 
+/// 抖动幅度：±20%。
+const RETRY_JITTER_PERCENT: u64 = 20;
+
+/// 抖动源：进程内单调原子计数器（每次调用自增）。
+///
+/// 用计数器而非 rand 伪随机：不引新依赖、无锁原子、天然线程安全；且不同
+/// 调用（尤其并发重试）计数不同，产生的抖动值错开，正是抖动要解决的
+/// 「多请求同步重试打爆上游」问题。计数器周期性取模，回绕不影响均匀性。
+static RETRY_JITTER_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 第 `round` 轮失败后的等待时长（毫秒）。
 ///
 /// 按轮次线性退避：`retry_interval_ms`（默认 0 → 兜底 1000ms）× 轮次，
 /// 上限 15s。运维场景上游抖动通常秒级恢复，线性退避够用且比指数退避更
 /// 早重试、体感更好。
+///
+/// 退避上叠加 **±20% 抖动**：基础值 × (0.8..=1.2)。抖动打破多请求在相
+/// 同时刻齐步重试的同步节拍（惊群），降低对刚恢复的上游造成二次冲击。
+/// 抖动后仍截断到 15s 硬上限，保证「一次对话等待不超 15s」的既有契约。
 fn retry_backoff(config: &AgentConfig, round: u32) -> u64 {
     let base = if config.retry_interval_ms > 0 {
         config.retry_interval_ms
     } else {
         1000
     };
-    (base * u64::from(round)).min(15_000)
+    let base = (base * u64::from(round)).min(15_000);
+    // 抖动系数（千分比）等距覆盖 [1000-P*10, 1000+P*10]：P=20 → [800,1200]，
+    // 即 ±20%。101 档、步长 = 跨度/100。全程整数运算避免浮点，saturating_mul
+    // 防大基数溢出。计数器 0..=100 映射到该区间，实现 ±20% 抖动。
+    let span = RETRY_JITTER_PERCENT * 10;
+    let lower = 1_000 - span;
+    let upper = 1_000 + span;
+    let seq = RETRY_JITTER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 101;
+    let coeff = lower + seq * (upper - lower) / 100;
+    let jittered = base.saturating_mul(coeff).saturating_div(1000);
+    jittered.min(15_000)
 }
 
 /// 单轮候选遍历的结果：失败时附带「是否值得再试一轮」的判定。
@@ -592,28 +616,67 @@ mod tests {
         );
     }
 
-    /// 退避时长：线性递增、有上限，且 `retry_interval_ms=0` 时用 1s 兜底。
+    /// 退避时长：线性递增、有上限、带 ±20% 抖动，且 `retry_interval_ms=0`
+    /// 时用 1s 兜底。
     ///
-    /// 钉住三条边界：①配置 0 不能退化成「无等待连续猛打上游」；②轮次越高等
-    /// 待越长（给上游恢复时间）；③有 15s 硬上限（避免一次对话卡太久）。
+    /// 钉住四条边界：①配置 0 不能退化成「无等待连续猛打上游」；②轮次越高等
+    /// 待越长（给上游恢复时间）；③抖动幅度 ±20%（基础值 × [0.8, 1.2]）；
+    /// ④有 15s 硬上限（避免一次对话卡太久）。
+    ///
+    /// 断言用**范围**而非精确值：抖动是随机的（进程内原子计数器每次自增），
+    /// 同一输入在不同调用下产生不同等待，精确值契约被打破——这是设计意图，
+    /// 抖动本就要打破多请求同步重试的节拍。故以 [基础×0.8, 基础×1.2] 为界。
     #[test]
-    fn retry_backoff_is_linear_capped_and_never_zero() {
+    fn retry_backoff_is_linear_capped_jittered_and_never_zero() {
         let cfg = AgentConfig {
             retry_interval_ms: 0,
             ..Default::default()
         };
-        assert_eq!(super::retry_backoff(&cfg, 1), 1000, "0 配置须兜底 1s");
-        assert_eq!(super::retry_backoff(&cfg, 2), 2000);
+        // 兜底基数 1000ms × 轮次 1 → 基础 1000，抖动范围 800..=1200
+        assert!(
+            (800..=1200).contains(&super::retry_backoff(&cfg, 1)),
+            "0 配置须兜底 1s 基础，抖动 ±20%"
+        );
+        assert!(
+            (1600..=2400).contains(&super::retry_backoff(&cfg, 2)),
+            "2 轮基础 2000，抖动 ±20%"
+        );
         let mut cfg = AgentConfig {
             retry_interval_ms: 500,
             ..Default::default()
         };
-        assert_eq!(super::retry_backoff(&cfg, 3), 1500);
-        assert_eq!(super::retry_backoff(&cfg, 4), 2000);
-        // 上限：基数再大也不超过 15s
+        assert!(
+            (1200..=1800).contains(&super::retry_backoff(&cfg, 3)),
+            "3 轮基础 1500，抖动 ±20%"
+        );
+        assert!(
+            (1600..=2400).contains(&super::retry_backoff(&cfg, 4)),
+            "4 轮基础 2000，抖动 ±20%"
+        );
+        // 上限：基数再大也不超过 15s；且因抖动可能下探，但不得超上限
         cfg.retry_interval_ms = 10_000;
-        assert_eq!(super::retry_backoff(&cfg, 5), 15_000, "须有上限");
+        assert!(
+            super::retry_backoff(&cfg, 5) <= 15_000,
+            "须有上限，抖动后仍不超 15s"
+        );
         assert!(super::retry_backoff(&cfg, 99) <= 15_000);
+    }
+
+    /// 抖动须产生非确定值：同一输入多次调用不应恒定（否则等于没抖动）。
+    #[test]
+    fn retry_backoff_jitter_varies_across_calls() {
+        let cfg = AgentConfig {
+            retry_interval_ms: 1000,
+            ..Default::default()
+        };
+        // 基础 = 1000 × 1 = 1000；抖动范围 800..=1200。跑多次应至少出现
+        // 两个不同的值（计数器自增保证逐步变化）。
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..50 {
+            seen.insert(super::retry_backoff(&cfg, 1));
+        }
+        assert!(seen.len() > 1, "抖动须使等待非恒定，实际集合 {seen:?}");
+        assert!(seen.iter().all(|&v| (800..=1200).contains(&v)));
     }
 
     /// 暂时性耗尽与确定性失败的文案必须可区分：前者要让用户「稍后再试」，

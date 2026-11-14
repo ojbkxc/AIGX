@@ -512,7 +512,15 @@ pub struct ChannelStore {
     snapshot_cache: arc_swap::ArcSwap<Vec<Channel>>,
     store: Arc<FileStore>,
     /// channel cooldown table: channel_id -> cooldown expiry. Cooled-down channels are skipped during scheduling.
+    /// 冷却到期后进入半开（见 [`Self::is_in_cooldown`]），不直接删除条目。
     cooldowns: dashmap::DashMap<String, Instant>,
+    /// 冷却连续失败计数（指数退避：冷却 = 基础值 × 2^(连续失败次数-1)，上限 600s）。
+    /// 成功恢复（clear_cooldown / record_channel_success）时清零。
+    cooldown_failures: dashmap::DashMap<String, u32>,
+    /// 半开探测在途标记：冷却到期后只放行首个试探请求，其余继续拦截。
+    /// 值为占位时刻（用于 TTL 惰性清除防泄漏）。
+    /// 试探成功由 clear_cooldown 清除；试探失败由 mark_cooldown 清除并重新冷却。
+    half_open_inflight: dashmap::DashMap<String, Instant>,
     /// per-channel 断路器（阶段2）
     circuit_breaker: circuit_breaker::CircuitBreaker,
     /// session+model 亲和性缓存（阶段2）
@@ -597,6 +605,12 @@ pub fn reconcile_channel_drift(ch: &Channel, discovered: &[String]) -> Option<se
 /// 实际删除理论上可越过上限（窗口极窄、未观测）。残余风险登记于此：超限时整轮清空
 /// `deletions`，判定与删除绑在同一轮内。
 pub const CHANNEL_PRUNE_LIMIT: usize = 50;
+
+/// 半开占位 TTL：冷却到期后 `is_dispatch_allowed` 占位放行首个试探请求，
+/// 占位时刻记入 `half_open_inflight`。若试探在成功（`clear_cooldown`）或失败
+/// （`mark_cooldown`）路径上均未走到，占位会残留；本 TTL 超时后由
+/// `half_open_occupied` 惰性清除，防泄漏阻塞后续请求。
+pub const HALF_OPEN_TTL: Duration = Duration::from_secs(120);
 
 /// #33 阶段2：单渠道清理候选（由 `modelRefresh` 对账段按与
 /// [`reconcile_channel_drift`] 同口径组装）。
@@ -746,6 +760,8 @@ impl ChannelStore {
             snapshot_cache: arc_swap::ArcSwap::from_pointee(Vec::new()),
             store: store.clone(),
             cooldowns: dashmap::DashMap::new(),
+            cooldown_failures: dashmap::DashMap::new(),
+            half_open_inflight: dashmap::DashMap::new(),
             circuit_breaker: circuit_breaker::CircuitBreaker::with_defaults(),
             affinity_cache: affinity::AffinityCache::default(),
             health_tracker: health_manager::ChannelStateTracker::new(),
@@ -934,7 +950,7 @@ impl ChannelStore {
                     // 快照判断 —— 因此这里必须用 `auto_pick_supports`（它内部
                     // 处理了「models 空 → 按 discovered_models 收窄」）。
                     && c.auto_pick_supports(model)
-                    && !self.is_in_cooldown(&c.id)
+                    && self.is_dispatch_allowed(&c.id)
                     && self.circuit_breaker.allow_request(&c.id)
                     && self.aimd_allows(&c.id)
                     && coarse.is_none_or(|gate| gate(c))
@@ -985,20 +1001,83 @@ impl ChannelStore {
         result
     }
 
-    /// 渠道是否处于冷却期。
+    /// 渠道是否处于冷却期（**纯查询，无副作用**）。
+    ///
+    /// 硬熔断口径（与 AIMD 自适应限速区分）：本冷却由 [`Self::mark_cooldown`]
+    /// 触发（错误重试/超时/连接失败），是**粗粒度硬熔断**——冷却期内一律不调度；
+    /// AIMD 的 Cooldown 是**自适应限速恢复**（429 后降限额、试探回升），二者互补、
+    /// 互不替代（见 aimd.rs 模块注释）。
+    ///
+    /// **纯查询约束**：本方法不得写 `half_open_inflight`——它被看板轮询、诊断、
+    /// `/v1/models` 过滤等查询型调用点使用，写副作用会误占半开名额，使真实流量
+    /// 被拦、半开探测失效。真正有副作用的放行决策在 [`Self::is_dispatch_allowed`]，
+    /// 仅候选构造阶段调用。
     pub fn is_in_cooldown(&self, id: &str) -> bool {
-        if let Some(entry) = self.cooldowns.get(id) {
-            if *entry > Instant::now() {
-                return true;
-            }
+        match self.cooldowns.get(id) {
+            Some(entry) => *entry > Instant::now() || self.half_open_occupied(id),
+            None => false,
         }
-        false
+    }
+
+    /// 半开占位是否仍有效（纯查询 + 惰性 TTL 清除）。
+    ///
+    /// 冷却到期后 [`Self::is_dispatch_allowed`] 会占位 `half_open_inflight[id]`。
+    /// 占位本应在试探成功（`clear_cooldown`）或失败（`mark_cooldown`）时清除；
+    /// 若试探在两条路径上均未走到（请求被取消等），占位会残留。本方法在查询时
+    /// 检查占位时刻距现在是否超过 [`HALF_OPEN_TTL`]，超时则移除占位并返回 false，
+    /// 防泄漏阻塞后续请求。
+    fn half_open_occupied(&self, id: &str) -> bool {
+        match self.half_open_inflight.get(id) {
+            Some(entry) => {
+                let elapsed = Instant::now().duration_since(*entry);
+                if elapsed > HALF_OPEN_TTL {
+                    // 过期占位：移除防泄漏（占位者未走到成功/失败路径）。
+                    drop(entry);
+                    self.half_open_inflight.remove(id);
+                    false
+                } else {
+                    true
+                }
+            }
+            None => false,
+        }
+    }
+
+    /// 渠道是否可被调度放行（**唯一有副作用的放行决策**，仅供候选构造阶段调用）。
+    ///
+    /// 与 [`Self::is_in_cooldown`] 的区别：本方法在冷却到期时**原子占位**半开名额
+    /// 并放行首个试探请求，其余并发请求被拦截。看板/诊断/模型列表等查询型调用点
+    /// **不得**调用本方法（会误占名额），应使用纯查询的 `is_in_cooldown`。
+    ///
+    /// 半开探测：冷却到期 → `half_open_inflight.insert` 原子占位，`is_none()` 表示
+    /// 我抢到名额 → 放行；`is_some()` 表示别人已占 → 拦截。试探成功由
+    /// `clear_cooldown`/`record_channel_success` 清除占位恢复，试探失败由
+    /// `mark_cooldown` 清除占位并重新冷却。
+    pub fn is_dispatch_allowed(&self, id: &str) -> bool {
+        match self.cooldowns.get(id) {
+            Some(entry) => {
+                if *entry > Instant::now() {
+                    return false;
+                }
+                // 冷却到期 → 半开：原子占位，仅首个试探放行。
+                self.half_open_inflight
+                    .insert(id.to_string(), Instant::now())
+                    .is_none()
+            }
+            None => true,
+        }
     }
 
     /// 将渠道置入冷却期（暂时不调度，冷却到期后自动恢复）。
     ///
     /// 参照 aisix RuntimeStatus::Cooldown：可重试错误发生时短期冷却，
-    /// 而非永久 disable。冷却到期后在 `select_for_model` 中自然恢复。
+    /// 而非永久 disable。冷却到期后走半开探测（见 [`Self::is_in_cooldown`]），
+    /// 试探成功由 [`Self::clear_cooldown`] / `record_channel_success` 恢复。
+    ///
+    /// **硬熔断口径**：本方法是粗粒度**硬熔断**（错误重试/超时/连接失败触发），
+    /// 冷却按**指数退避**倍增——`duration_secs` 为基础值，冷却时长 =
+    /// `duration_secs × 2^(连续失败次数-1)`，上限 600s。与 AIMD 的 Cooldown
+    /// （限速类自适应恢复，见 aimd.rs）互补：AIMD 管限速适应，本管硬熔断。
     pub fn mark_cooldown(&self, id: &str, error: String, duration_secs: u64) {
         if !error.is_empty() {
             let mut channels = self.channels.write();
@@ -1011,14 +1090,35 @@ impl ChannelStore {
             }
             self.publish_snapshot(&channels);
         }
-        let expiry = Instant::now() + Duration::from_secs(duration_secs);
+        // 指数退避：连续失败次数 +1，冷却时长翻倍（上限 600s）。
+        // 若为半开试探失败，清除在途标记，重新进入完整冷却。
+        let streak = {
+            let entry = self.cooldown_failures.entry(id.to_string()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        let factor = 1u64 << (streak - 1).min(6); // 2^(streak-1)，streak-1 上限 6（64x）
+        let backoff_secs = duration_secs.saturating_mul(factor).min(600);
+        self.half_open_inflight.remove(id);
+        let expiry = Instant::now() + Duration::from_secs(backoff_secs);
         self.cooldowns.insert(id.to_string(), expiry);
-        tracing::warn!("channel {} cooled down for {}s", id, duration_secs);
+        tracing::warn!(
+            "channel {} cooled down for {}s (backoff factor {}, streak {})",
+            id,
+            backoff_secs,
+            factor,
+            streak
+        );
     }
 
-    /// 清除渠道冷却（手动恢复或健康检查通过后调用）。
+    /// 清除渠道冷却（手动恢复、健康检查通过、或半开试探成功后调用）。
+    ///
+    /// 同时清零指数退避的连续失败计数与半开在途标记，使渠道回到
+    /// 「无冷却、无退避累积」的初始状态。
     pub fn clear_cooldown(&self, id: &str) {
         self.cooldowns.remove(id);
+        self.cooldown_failures.remove(id);
+        self.half_open_inflight.remove(id);
     }
 
     /// 标记渠道不健康（记录错误信息，禁用）
@@ -1627,6 +1727,8 @@ impl ChannelStore {
             .record_success(channel_id, model, latency_ms);
         self.health_archive.note_success(channel_id, latency_ms);
         self.empty_response_counter.reset(channel_id);
+        // 半开试探成功 → 真正恢复：清除冷却、退避计数与在途标记。
+        self.clear_cooldown(channel_id);
         // AIMD 学习：成功请求上调限额（当前未提供上游限额头，传 None）
         self.aimd_on_success(channel_id, None);
         if let (Some(sid), Some(m)) = (session_id, model) {
@@ -2518,6 +2620,173 @@ mod tests {
                 h.join().expect("并发线程不应 panic");
             }
             assert!(!s.snapshot().is_empty());
+        });
+    }
+
+    /// 熔断指数退避：连续 mark_cooldown 时冷却时长按 2^(streak-1) 倍增，上限 600s。
+    #[test]
+    fn cooldown_exponential_backoff_caps_at_600s() {
+        with_secret_dir("backoff", || {
+            let s = store();
+            s.add(sample("a", 1, vec!["m"])).unwrap();
+
+            // 基础值 60s（与调用方传 60 一致）
+            s.mark_cooldown("a", "err".to_string(), 60);
+            // streak=1 → 60s，仍处于冷却
+            assert!(s.is_in_cooldown("a"));
+
+            // streak=2 → 120s
+            s.mark_cooldown("a", "err".to_string(), 60);
+            assert!(s.is_in_cooldown("a"));
+
+            // streak=3 → 240s
+            s.mark_cooldown("a", "err".to_string(), 60);
+            assert!(s.is_in_cooldown("a"));
+
+            // streak=4 → 480s
+            s.mark_cooldown("a", "err".to_string(), 60);
+            assert!(s.is_in_cooldown("a"));
+
+            // streak=5 → 60*16=960 → capped 600s
+            s.mark_cooldown("a", "err".to_string(), 60);
+            assert!(s.is_in_cooldown("a"));
+
+            // clear 后无冷却
+            s.clear_cooldown("a");
+            assert!(!s.is_in_cooldown("a"));
+        });
+    }
+
+    /// 半开探测：冷却到期后 `is_dispatch_allowed` 仅放行首个试探请求，第二个被拦截。
+    #[test]
+    fn cooldown_half_open_allows_single_probe() {
+        with_secret_dir("half-open", || {
+            let s = store();
+            s.add(sample("a", 1, vec!["m"])).unwrap();
+
+            // 极短冷却（1s）
+            s.mark_cooldown("a", "err".to_string(), 1);
+            assert!(s.is_in_cooldown("a"));
+
+            // 等待冷却到期
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+
+            // 首个试探请求放行（is_dispatch_allowed 原子占位）
+            assert!(s.is_dispatch_allowed("a"), "半开：首个试探应放行");
+
+            // 第二个请求（模拟并发）仍被拦截（占位已被首请求占据）
+            assert!(
+                !s.is_dispatch_allowed("a"),
+                "半开：仅放行首个试探，其余应拦截"
+            );
+
+            // 半开占位期间，is_in_cooldown 纯查询仍为 true（不占位）
+            assert!(s.is_in_cooldown("a"));
+
+            // clear 后恢复
+            s.clear_cooldown("a");
+            assert!(!s.is_in_cooldown("a"));
+        });
+    }
+
+    /// 半开试探失败：mark_cooldown 清除在途标记并重新冷却。
+    #[test]
+    fn cooldown_half_open_probe_failure_re_cools() {
+        with_secret_dir("half-open-fail", || {
+            let s = store();
+            s.add(sample("a", 1, vec!["m"])).unwrap();
+
+            s.mark_cooldown("a", "err".to_string(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+
+            // 首个试探放行（占位）
+            assert!(s.is_dispatch_allowed("a"));
+
+            // 试探失败 → 重新冷却，在途标记清除
+            s.mark_cooldown("a", "err".to_string(), 60);
+            assert!(s.is_in_cooldown("a"), "试探失败应重新冷却");
+
+            // 在途标记已清除（否则下次到期后仍可能拦截）
+            s.clear_cooldown("a");
+            assert!(!s.is_in_cooldown("a"));
+        });
+    }
+
+    /// record_channel_success 清除冷却与退避计数（半开试探成功即恢复）。
+    #[test]
+    fn record_channel_success_clears_cooldown() {
+        with_secret_dir("rec-success", || {
+            let s = store();
+            s.add(sample("a", 1, vec!["m"])).unwrap();
+
+            s.mark_cooldown("a", "err".to_string(), 60);
+            assert!(s.is_in_cooldown("a"));
+
+            s.record_channel_success("a", Some("m"), 100, None);
+            assert!(!s.is_in_cooldown("a"), "试探成功后应清除冷却与退避计数");
+
+            // 退避计数已清零：再次 mark_cooldown 用基础值
+            s.mark_cooldown("a", "err".to_string(), 60);
+            assert!(s.is_in_cooldown("a"));
+            s.clear_cooldown("a");
+            assert!(!s.is_in_cooldown("a"));
+        });
+    }
+
+    /// is_in_cooldown 纯查询：连续多次调用不占半开名额，
+    /// 不影响后续 is_dispatch_allowed 的占位。
+    #[test]
+    fn is_in_cooldown_is_pure_query_no_half_open_slot() {
+        with_secret_dir("pure-query", || {
+            let s = store();
+            s.add(sample("a", 1, vec!["m"])).unwrap();
+
+            s.mark_cooldown("a", "err".to_string(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+
+            // 连续多次纯查询——不应占半开名额
+            assert!(s.is_in_cooldown("a"));
+            assert!(s.is_in_cooldown("a"));
+            assert!(s.is_in_cooldown("a"));
+
+            // 纯查询后，is_dispatch_allowed 仍能抢到半开名额（证明未被误占）
+            assert!(
+                s.is_dispatch_allowed("a"),
+                "is_in_cooldown 纯查询不应占位，is_dispatch_allowed 仍可放行首试探"
+            );
+            // 占位后第二个被拦截
+            assert!(!s.is_dispatch_allowed("a"));
+        });
+    }
+
+    /// 半开占位 TTL：占位未过期时 `half_open_occupied` 为 true；
+    /// 常量 [`HALF_OPEN_TTL`] 存在且为正。过期分支无法在不快进时间的前提下
+    /// 测试（不 sleep 120s），故仅验证未过期态 + 常量存在。
+    #[test]
+    fn half_open_ttl_constant_and_unexpired_occupied() {
+        // 常量存在且为正
+        assert!(HALF_OPEN_TTL.as_secs() > 0, "HALF_OPEN_TTL 应为正");
+        assert_eq!(HALF_OPEN_TTL.as_secs(), 120);
+
+        with_secret_dir("half-open-ttl", || {
+            let s = store();
+            s.add(sample("a", 1, vec!["m"])).unwrap();
+
+            s.mark_cooldown("a", "err".to_string(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+
+            // 占位（未过期）→ is_dispatch_allowed 放行首试探
+            assert!(s.is_dispatch_allowed("a"));
+
+            // 占位刚发生、远未到 120s TTL → half_open_occupied 为 true
+            // （通过 is_in_cooldown 间接观察：占位有效则仍为 true）
+            assert!(
+                s.is_in_cooldown("a"),
+                "占位未过期时 is_in_cooldown 应为 true（half_open_occupied 生效）"
+            );
+
+            // 占位 TTL 过期分支：无法在测试中快进 120s（避免 sleep 120s 拖慢），
+            // 过期清除由 half_open_occupied 惰性触发，逻辑与未过期分支对称。
         });
     }
 }

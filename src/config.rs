@@ -735,7 +735,7 @@ pub struct AppConfig {
     /// 安全策略配置（`[security]` 段）：登录失败锁定与登录限流的可配参数。
     #[serde(default)]
     pub security: SecurityPolicyConfig,
-    /// 插件宿主配置（`[plugins]` 段）：运维「选择下载或不下载」插件的开关与源。
+    /// 插件宿主配置（`[plugins]` 段）：运维的插件发布源与安装目录（宿主恒开，无总开关）。
     #[serde(default)]
     pub plugins: PluginsConfig,
 }
