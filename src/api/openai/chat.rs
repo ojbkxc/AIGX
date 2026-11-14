@@ -357,6 +357,8 @@ pub(crate) async fn handle_chat_completions(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 连接稳定性：failover 预算（候选数 + 总时间上限），与 anthropic 面同口径
+        let mut failover_budget = crate::api::failover::FailoverBudget::new();
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         // auto-continue：留住成功轮的桥与（映射后）请求，续写轮复用同一渠道
         let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
@@ -395,6 +397,13 @@ pub(crate) async fn handle_chat_completions(
             &purge_cfg,
         );
         for (plan_model, (bridge, cid, ch_ref)) in attempt_plan {
+            if !failover_budget.can_attempt() {
+                // 连接稳定性：预算耗尽（候选数或总时间达上限）停止 failover
+                last_error = Some(crate::bridge::BridgeError::Config(
+                    failover_budget.exhausted_reason(),
+                ));
+                break;
+            }
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
@@ -599,6 +608,8 @@ pub(crate) async fn handle_chat_completions(
                     last_error = Some(e);
                 }
             }
+            // 连接稳定性：记录本轮候选尝试（达上限后下轮入口停止）
+            failover_budget.record_attempt();
         }
         let stream = match stream_opt {
             Some(s) => s,
@@ -1099,6 +1110,8 @@ pub(crate) async fn handle_chat_completions(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 连接稳定性：failover 预算（候选数 + 总时间上限），与 anthropic 面同口径
+        let mut failover_budget = crate::api::failover::FailoverBudget::new();
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         // auto-continue：留住成功轮的桥与（映射后）请求，续写轮复用同一渠道
         let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
@@ -1135,6 +1148,13 @@ pub(crate) async fn handle_chat_completions(
             &purge_cfg,
         );
         for (plan_model, (bridge, cid, ch_ref)) in attempt_plan {
+            if !failover_budget.can_attempt() {
+                // 连接稳定性：预算耗尽（候选数或总时间达上限）停止 failover
+                last_error = Some(crate::bridge::BridgeError::Config(
+                    failover_budget.exhausted_reason(),
+                ));
+                break;
+            }
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
@@ -1292,6 +1312,8 @@ pub(crate) async fn handle_chat_completions(
                     last_error = Some(e);
                 }
             }
+            // 连接稳定性：记录本轮候选尝试（达上限后下轮入口停止）
+            failover_budget.record_attempt();
         }
         let response = match response_opt {
             Some(r) => r,
@@ -1553,5 +1575,42 @@ pub(crate) async fn handle_chat_completions(
                 .insert("x-aigx-cache", "miss".parse().unwrap());
             resp
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // 连接稳定性：流式/非流式 failover 循环接入的预算口径自检。
+    // 循环内逻辑为「入口 can_attempt() 判定 → 失败记 last_error → 末尾
+    // record_attempt()」，这里直接驱动 FailoverBudget 复现该时序，验证
+    // 达上限后入口判定即停、且 exhausted_reason 能作为 Config 错误串。
+
+    #[test]
+    fn failover_budget_stops_after_max_attempts() {
+        let mut budget = crate::api::failover::FailoverBudget::with_limits(
+            crate::api::failover::FAILOVER_MAX_ATTEMPTS,
+            std::time::Duration::from_secs(3600),
+        );
+        // 模拟循环：每个候选尝试一次，入口先判、末尾记
+        for _ in 0..crate::api::failover::FAILOVER_MAX_ATTEMPTS {
+            assert!(budget.can_attempt(), "达到上限前必须允许尝试");
+            budget.record_attempt();
+        }
+        assert!(
+            !budget.can_attempt(),
+            "达候选上限后入口判定必须停止 failover"
+        );
+        let reason = budget.exhausted_reason();
+        // 与循环内一致：耗尽时作为 BridgeError::Config 的串
+        let err = crate::bridge::BridgeError::Config(reason.clone());
+        assert!(err.to_string().contains(reason.as_str()));
+    }
+
+    #[test]
+    fn failover_budget_default_allows_first_attempt() {
+        // 循环首个候选进入前预算必须放行（否则正常首轮就被拦下）
+        let budget = crate::api::failover::FailoverBudget::new();
+        assert!(budget.can_attempt());
+        assert_eq!(budget.attempts(), 0);
     }
 }

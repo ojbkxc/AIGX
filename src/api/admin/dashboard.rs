@@ -182,24 +182,38 @@ fn channel_stats_row(c: &crate::channel::Channel) -> Value {
     })
 }
 
+/// 连接稳定性：冷却中渠道数（纯聚合，便于单测）。
+///
+/// 口径与调度过滤同源：渠道进入冷却期后 `select_for_model` 会跳过它，
+/// 看板用同样的 `ChannelStore::is_in_cooldown` 判定计数，让运营直接看到
+/// 「此刻有多少渠道在冷却、可用调度面有多窄」。只读、无副作用。
+fn count_cooling_channels<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    is_in_cooldown: impl Fn(&str) -> bool,
+) -> usize {
+    ids.filter(|id| is_in_cooldown(id)).count()
+}
+
 /// 渠道统计
 pub async fn handle_channel_stats(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let channels: Vec<Value> = state
-        .channel_store
-        .list()
-        .iter()
-        .map(channel_stats_row)
-        .collect();
+    let channels = state.channel_store.list();
+    let rows: Vec<Value> = channels.iter().map(channel_stats_row).collect();
+    // 连接稳定性指标：冷却中渠道数（与调度过滤同源判定）。
+    let cooling_channels = count_cooling_channels(
+        channels.iter().map(|c| c.id.as_str()),
+        |id| state.channel_store.is_in_cooldown(id),
+    );
     Ok(Json(json!({
         "success": true,
-        "data": channels,
+        "data": rows,
         "stats": json!({
             "total_channels": channels.len(),
             "active_channels": channels.iter().filter(|c| c["status"] == "enabled").count(),
+            "cooling_channels": cooling_channels,
         })
     })))
 }
@@ -1763,6 +1777,32 @@ mod tests {
         assert!(
             channel_stats_row(&clean)["last_error"].is_null(),
             "None 不该被写成空串"
+        );
+    }
+
+    /// 连接稳定性指标：只数冷却中的渠道，未冷却/空集不计。
+    ///
+    /// 判定闭包由调用方注入（生产里是 `ChannelStore::is_in_cooldown`），
+    /// 与调度过滤同源；这里用闭包固定「a、c 冷却，b、d 正常」的语义，
+    /// 钉住计数口径而不依赖真实时间窗口。
+    #[test]
+    fn count_cooling_channels_counts_only_cooling_ids() {
+        let ids = ["a", "b", "c", "d"];
+        let cooling = |id: &str| matches!(id, "a" | "c");
+        assert_eq!(count_cooling_channels(ids.iter().copied(), cooling), 2);
+
+        // 全部正常：冷却数为 0
+        let none = |_id: &str| false;
+        assert_eq!(count_cooling_channels(ids.iter().copied(), none), 0);
+
+        // 全部冷却：等于总数
+        let all = |_id: &str| true;
+        assert_eq!(count_cooling_channels(ids.iter().copied(), all), 4);
+
+        // 空渠道集：恒为 0（空分母不产生假计数）
+        assert_eq!(
+            count_cooling_channels(std::iter::empty::<&str>(), all),
+            0
         );
     }
 }

@@ -169,7 +169,16 @@ pub(crate) async fn handle_responses(
     let mut used_channel_id: Option<String> = None;
     let mut used_upstream: Option<String> = None;
     let mut last_error: Option<crate::bridge::BridgeError> = None;
+    // 连接稳定性：failover 预算（候选数 + 总时间上限），与 chat 面同口径
+    let mut failover_budget = crate::api::failover::FailoverBudget::new();
     for (bridge, cid, ch_ref) in candidates {
+        if !failover_budget.can_attempt() {
+            // 连接稳定性：预算耗尽（候选数或总时间达上限）停止 failover
+            last_error = Some(crate::bridge::BridgeError::Config(
+                failover_budget.exhausted_reason(),
+            ));
+            break;
+        }
         if let Some(c) = &cid {
             state.channel_store.mark_used(c);
         }
@@ -283,6 +292,8 @@ pub(crate) async fn handle_responses(
                 last_error = Some(e);
             }
         }
+        // 连接稳定性：记录本轮候选尝试（达上限后下轮入口停止）
+        failover_budget.record_attempt();
     }
     let attempt = match result_opt {
         Some(r) => r,

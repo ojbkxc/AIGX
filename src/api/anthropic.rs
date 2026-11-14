@@ -651,12 +651,27 @@ pub async fn handle_messages(
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
+    // P3 在途登记：管理员可在日志页看到这条请求并终止它。
+    // guard 在流式路径移进 GuardedStream（流存活期间才算「在途」，函数返回
+    // 响应后不立刻 drop），非流式路径随函数作用域在请求结束时自动注销。
+    // `cancel_signal` 挂到流式响应流上：管理员点「终止」时置位，
+    // GuardedStream::poll_next 立刻返回 None 收尾，上游连接随流 drop 断开。
+    let (_inflight_id, inflight_guard) = state.inflight.begin(
+        model.clone(),
+        is_stream,
+        api_key.user_id.clone(),
+        Some(api_key.id.clone()),
+    );
+    let cancel_signal = inflight_guard.cancel_signal();
+
     if is_stream {
         // B06：failover 循环——依次尝试候选渠道建立流，仅对上游可重试错误切换
         let mut stream_opt = None;
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 连接稳定性：failover 总预算（候选上限 + 总时长），与 openai 面同口径
+        let mut failover_budget = crate::api::failover::FailoverBudget::new();
         // P1-7：调度决策回放——记录候选渠道与被过滤渠道（与 openai 流式路径对齐）
         let candidate_channel_ids: Vec<String> = candidates
             .iter()
@@ -696,6 +711,13 @@ pub async fn handle_messages(
             &purge_cfg,
         );
         for (plan_model, (bridge, cid, ch_ref)) in attempt_plan {
+            // 连接稳定性：候选上限/总时长耗尽即停止 failover，按既有失败路径返回
+            if !failover_budget.can_attempt() {
+                last_error = Some(crate::bridge::BridgeError::Config(
+                    failover_budget.exhausted_reason(),
+                ));
+                break;
+            }
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
@@ -726,6 +748,8 @@ pub async fn handle_messages(
                 &mut attempt_req.messages,
             );
             attempt_counter += 1;
+            // 连接稳定性：与 attempt_counter 同步记账一次候选尝试（上限/总时长收敛）
+            failover_budget.record_attempt();
 
             // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
             attempt_guard.channel_id = cid.clone().unwrap_or_default();
@@ -1404,9 +1428,11 @@ pub async fn handle_messages(
             let guarded = super::openai::GuardedStream {
                 inner: Box::pin(combined),
                 _guard: super::openai::StreamUsageGuard::new(billing),
-                // Anthropic 数据面暂未登记在途请求，不参与「终止」
-                cancel: None,
-                _inflight: None,
+                // P3：管理员「终止在途请求」时立刻收尾下游流
+                cancel: Some(cancel_signal),
+                // guard 移进流：流存活期间才算是「在途」。函数返回响应后
+                // guard 不能立刻 drop，否则列表里会立刻消失。
+                _inflight: Some(inflight_guard),
             };
             Sse::new(guarded)
                 // Anthropic 上游自带 `event: ping`，但那是**上游**的心跳，
@@ -1426,6 +1452,8 @@ pub async fn handle_messages(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 连接稳定性：failover 总预算（候选上限 + 总时长），与流式/openai 面同口径
+        let mut failover_budget = crate::api::failover::FailoverBudget::new();
         // P1-7：调度决策回放——记录候选渠道与被过滤渠道（与 openai 非流式路径对齐）
         let candidate_channel_ids: Vec<String> = candidates
             .iter()
@@ -1464,6 +1492,13 @@ pub async fn handle_messages(
             &purge_cfg,
         );
         for (plan_model, (bridge, cid, ch_ref)) in attempt_plan {
+            // 连接稳定性：候选上限/总时长耗尽即停止 failover，按既有失败路径返回
+            if !failover_budget.can_attempt() {
+                last_error = Some(crate::bridge::BridgeError::Config(
+                    failover_budget.exhausted_reason(),
+                ));
+                break;
+            }
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
@@ -1494,6 +1529,8 @@ pub async fn handle_messages(
                 &mut attempt_req.messages,
             );
             attempt_counter += 1;
+            // 连接稳定性：与 attempt_counter 同步记账一次候选尝试（上限/总时长收敛）
+            failover_budget.record_attempt();
 
             // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
             attempt_guard.channel_id = cid.clone().unwrap_or_default();
@@ -2078,5 +2115,62 @@ mod tests {
         assert_eq!(blocks[0]["text"], "缓存前缀");
         assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(out[0].content_str(), "缓存前缀");
+    }
+
+    /// 连接稳定性：Anthropic failover 循环依赖的预算语义——进入每次候选尝试前
+    /// `can_attempt()` 把关，末尾 `record_attempt()` 记账，达到候选上限后必须停止。
+    #[test]
+    fn failover_budget_gate_stops_after_max_attempts() {
+        use crate::api::failover::FailoverBudget;
+        use std::time::Duration;
+
+        let mut budget = FailoverBudget::with_limits(2, Duration::from_secs(3600));
+        // 第 1 次：允许进入
+        assert!(budget.can_attempt());
+        budget.record_attempt();
+        // 第 2 次：允许进入
+        assert!(budget.can_attempt());
+        budget.record_attempt();
+        // 达到候选上限：循环入口的 can_attempt 必须拒绝，停止 failover
+        assert!(!budget.can_attempt());
+        let reason = budget.exhausted_reason();
+        assert!(reason.contains("max 2"), "{reason}");
+    }
+
+    /// P3：GuardedStream 挂上 cancel 信号后，poll_next 必须立刻收尾（返回 None），
+    /// 上游连接随流 drop 断开——这是 Anthropic 数据面「终止在途请求」的接线核心。
+    /// 用本地最小守卫（GuardedStream 仅要求 G: Unpin，真实守卫只含 Arc）验证真实
+    /// 的 Stream 实现行为，而非仅编译期接线。
+    #[tokio::test]
+    async fn guarded_stream_cancel_signal_ends_stream() {
+        use crate::api::openai::GuardedStream;
+        use crate::log::inflight::CancelSignal;
+        use futures::StreamExt;
+
+        struct NoopGuard;
+
+        // 对照：未取消时正常消费到产物（防止「恒收尾」的假绿）
+        let mut live = GuardedStream {
+            inner: Box::pin(futures::stream::once(async { 1 })),
+            _guard: NoopGuard,
+            cancel: Some(CancelSignal::new()),
+            _inflight: None,
+        };
+        assert_eq!(live.next().await, Some(1), "未取消时必须正常下发事件");
+
+        // 取消置位后：第一次 poll 直接返回 None，不下发任何事件
+        let cancelled = CancelSignal::new();
+        cancelled.cancel();
+        let mut ended = GuardedStream {
+            inner: Box::pin(futures::stream::once(async { 1 })),
+            _guard: NoopGuard,
+            cancel: Some(cancelled),
+            _inflight: None,
+        };
+        assert_eq!(
+            ended.next().await,
+            None,
+            "cancel 置位后 GuardedStream 必须立刻收尾"
+        );
     }
 }
