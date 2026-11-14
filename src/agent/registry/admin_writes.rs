@@ -99,7 +99,8 @@ pub(super) fn tools() -> Vec<ToolDef> {
                         "name": { "type": "string", "description": "渠道名" },
                         "base_url": { "type": "string", "description": "上游 base URL" },
                         "api_key": { "type": "string", "description": "上游 API key" },
-                        "channel_type": { "type": "string", "description": "openai_compatible/anthropic/gemini/zai/cloudflare/account（account = 账号型渠道，凭证在账号池里加）" }
+                        "channel_type": { "type": "string", "description": "openai_compatible/anthropic/gemini/zai/cloudflare/account/plugin（account = 账号型渠道，凭证在账号池里加；plugin = 插件渠道，需同时给 plugin_provider，base_url/api_key 留空）" },
+                        "plugin_provider": { "type": "string", "description": "插件渠道要接管的 provider id（channel_type=plugin 时必填；取自已安装且已启用插件包声明的 providers[]）" }
                     },
                     "required": ["name", "base_url", "api_key"]
                 })
