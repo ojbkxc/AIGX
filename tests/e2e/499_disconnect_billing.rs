@@ -361,6 +361,12 @@ async fn login_once(c: &reqwest::Client, base: &str, password: &str) -> Option<S
             let body = resp.text().await.unwrap_or_default();
             if body.contains("账号或密码错误") || body.contains("请先完成机器人校验")
             {
+                // 取证：被拒时打印密码前缀与完整响应体（CI 日志可查）
+                eprintln!(
+                    "[499-debug] login 拒绝（密码前 8 位 {:?}）: {}",
+                    password.get(..8),
+                    body
+                );
                 None
             } else {
                 panic!("login 异常响应：{body}");
@@ -374,6 +380,14 @@ async fn admin_token(c: &reqwest::Client, base: &str, log_path: &std::path::Path
     // 登录序列：优先用 server.log 提取的首启一次性密码（随机化后的新实例），
     // 失败回落历史固定密码（兼容随机化之前创建的旧库）。
     let initial = initial_password_from_log(log_path);
+    // 取证：提取结果与（失败时）日志尾部一并进 CI 日志
+    match initial.as_deref() {
+        Some(pw) => eprintln!("[499-debug] 提取到初始密码: {}...", pw.get(..8).unwrap_or("?")),
+        None => eprintln!(
+            "[499-debug] 未提取到初始密码，server.log 尾部:\n{}",
+            server_log_tail(log_path)
+        ),
+    }
     let mut tok = None;
     if let Some(pw) = initial.as_deref() {
         tok = login_once(c, base, pw).await;
