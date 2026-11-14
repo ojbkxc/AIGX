@@ -633,8 +633,10 @@ pub async fn handle_messages(
     // P1 两段式计费：请求前预留配额，流式/非流式结算时多退少补。
     // 此前 Anthropic 分支未接两段式（reservation: None），余额耗尽用户可在
     // 单请求内超额消费。与 chat.rs 同口径。
+    // P1 性能：BPE 估算移到阻塞线程池（纯 CPU，每 64KB 切片一次正则编码）。
     let estimated_prompt_tokens =
-        crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+        crate::token_estimate::count_chat_prompt_blocking(model.clone(), chat_req.clone()).await
+            as u64;
     let estimated_completion_tokens = chat_req.max_tokens.unwrap_or(256).clamp(256, 4096) as u64;
     let reservation = match super::openai::reserve_usage(
         &state,
@@ -1022,8 +1024,11 @@ pub async fn handle_messages(
             // 参照 aisix AnthropicSseEncoder：文本块在首个文本增量到达时才开块，
             // 避免 thinking/文本/tool 块 index 冲突）
             let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+            // P1 性能：估算移到阻塞线程池（纯 CPU；message_start 前缀
+            // 需要回显 input_tokens，此处必须 await 后才能建流）
             let input_tokens_est =
-                crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+                crate::token_estimate::count_chat_prompt_blocking(model.clone(), chat_req.clone())
+                    .await as u64;
             // message_start 回显映射后的上游模型名（与计费/日志口径一致）
             let model_for_prefix = used_upstream.clone().unwrap_or_else(|| model.clone());
             let prefix = futures::stream::once(async move {
@@ -1296,7 +1301,9 @@ pub async fn handle_messages(
                     Some(model.clone())
                 },
                 group: billing_group.clone(),
-                chat_req: chat_req.clone(),
+                // Arc 共享请求快照：suffix 的 spawn_blocking 预估算可廉价
+                // clone（P1 性能——BPE 估算移出 tokio worker）
+                chat_req: Arc::new(chat_req.clone()),
                 tool_calls: tool_calls.clone(),
                 acc: acc.clone(),
                 charged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1329,10 +1336,21 @@ pub async fn handle_messages(
             let has_any_block_fin = has_any_block.clone();
             let stop_emitted_fin = stop_emitted.clone();
             let suffix = futures::stream::once(async move {
-                // completion tokens 需在 message_delta 事件中回显，先估算
-                let completion_tokens = {
+                // P1 性能：完成侧估算（prompt + completion）在阻塞线程池
+                // 预估算一次（message_delta 回显与计费两分支共用），避免
+                // async 上下文内同步 BPE 编码阻塞 tokio worker。
+                let (est_prompt, est_completion) = {
                     let output_text = billing_fin.acc.lock().clone();
-                    crate::token_estimate::count_text(&billing_fin.model, &output_text) as u64
+                    let model = billing_fin.model.clone();
+                    let chat_req = billing_fin.chat_req.clone();
+                    let (pt, ct) = tokio::join!(
+                        crate::token_estimate::count_chat_prompt_blocking_arc(
+                            model.clone(),
+                            chat_req,
+                        ),
+                        crate::token_estimate::count_text_blocking(model, output_text),
+                    );
+                    (pt as u64, ct as u64)
                 };
 
                 // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
@@ -1341,18 +1359,18 @@ pub async fn handle_messages(
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
                     let errored = stream_errored.load(std::sync::atomic::Ordering::SeqCst);
-                    let (pt, ct) = billing_fin.finalize(errored);
+                    let (pt, ct) = billing_fin.finalize_with_token_estimates(
+                        errored,
+                        est_prompt,
+                        est_completion,
+                    );
                     // 事后限流记账
                     rate_bundle.commit_tokens(pt + ct).await;
                     (pt, ct)
                 } else {
                     // 守卫已兜底计费：此处仅取估算值供 message_delta 回显
                     // 与 Prometheus 指标上报，不再重复扣费
-                    let prompt_tokens = crate::token_estimate::count_chat_prompt(
-                        &billing_fin.model,
-                        &billing_fin.chat_req,
-                    ) as u64;
-                    (prompt_tokens, completion_tokens)
+                    (est_prompt, est_completion)
                 };
 
                 // Prometheus 指标

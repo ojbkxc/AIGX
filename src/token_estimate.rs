@@ -9,6 +9,8 @@
 //! - `gpt-4`/`gpt-3.5` → `cl100k_base`
 //! - 未知/非 OpenAI 模型回退到 `cl100k_base`
 
+use std::sync::Arc;
+
 use tiktoken_rs::tokenizer::{get_tokenizer, Tokenizer};
 use tiktoken_rs::CoreBPE;
 
@@ -116,6 +118,38 @@ pub fn count_chat_prompt(model: &str, req: &ChatFormat) -> u32 {
     n.saturating_add(REPLY_PRIMING)
 }
 
+/// 在阻塞线程池执行聊天 prompt 估算，避免 BPE 编码占用 tokio worker。
+///
+/// `count_chat_prompt` 是纯 CPU（每 64KB 切片一次正则编码，1MiB 提示
+/// ≈ 16 切片）：在 async 上下文同步调用会阻塞当前 worker 数毫秒到数十
+/// 毫秒。输入按值传入（调用方克隆为一次 O(n) memcpy，远廉价于 BPE 编码
+/// 本身）。join 失败（运行时关闭边缘）回退 0，与 `enc` 内部 catch_unwind
+/// 的防御口径一致。持有 Arc<ChatFormat> 的调用方走
+/// [`count_chat_prompt_blocking_arc`] 只 clone Arc。
+pub async fn count_chat_prompt_blocking(model: String, req: ChatFormat) -> u32 {
+    match tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req)).await {
+        Ok(n) => n,
+        Err(_) => 0,
+    }
+}
+
+/// Arc 版本：请求快照为 Arc<ChatFormat> 时用（spawn_blocking 输入只
+/// clone Arc，不深拷贝消息树）。
+pub async fn count_chat_prompt_blocking_arc(model: String, req: Arc<ChatFormat>) -> u32 {
+    match tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req)).await {
+        Ok(n) => n,
+        Err(_) => 0,
+    }
+}
+
+/// 在阻塞线程池执行纯文本估算（同 [`count_chat_prompt_blocking`]）。
+pub async fn count_text_blocking(model: String, text: String) -> u32 {
+    match tokio::task::spawn_blocking(move || count_text(&model, &text)).await {
+        Ok(n) => n,
+        Err(_) => 0,
+    }
+}
+
 /// 逐字段 or 填充：上游值非零时优先，零值用本地计数替换。
 /// `output_text: None` 禁用完成侧（无交付内容或未累积）。
 pub fn fill_missing(
@@ -207,5 +241,46 @@ mod tests {
         // Unknown / non-OpenAI models fall back to cl100k_base.
         assert_eq!(count_text("claude-sonnet-4-5", "Hello world"), 2);
         assert_eq!(count_text("", "Hello world"), 2);
+    }
+
+    /// spawn_blocking 包装与同步计数逐字一致（P1 性能项硬约束：计数结果不变）。
+    #[tokio::test]
+    async fn blocking_wrappers_match_sync_counts() {
+        use crate::bridge::ChatFormat;
+        let req = ChatFormat {
+            model: "gpt-4".into(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: Some("Hello".into()),
+                content_blocks: None,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning: None,
+            }],
+            tools: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
+        };
+        let sync_n = count_chat_prompt("gpt-4", &req);
+        let blocking_n = count_chat_prompt_blocking("gpt-4".into(), req.clone()).await;
+        assert_eq!(sync_n, blocking_n, "prompt 估算必须逐字一致");
+        // Arc 变体同样逐字一致（finalize 路径的输入形态）
+        let blocking_arc = count_chat_prompt_blocking_arc("gpt-4".into(), Arc::new(req)).await;
+        assert_eq!(sync_n, blocking_arc, "Arc 变体估算必须逐字一致");
+
+        // 长文本（跨多个 64KB 切片）也必须一致——切片边界不改变计数
+        let long = "hello world 你好 ".repeat(20_000); // ~320KB，跨 5 个切片
+        let sync_t = count_text("gpt-4", &long);
+        let blocking_t = count_text_blocking("gpt-4".into(), long).await;
+        assert_eq!(sync_t, blocking_t, "文本估算必须逐字一致");
     }
 }

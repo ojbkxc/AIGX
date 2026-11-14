@@ -355,8 +355,12 @@ pub(crate) async fn handle_chat_completions(
     // 请求完成后按实际 token 结算，多预留的部分归还。
     // 估算：prompt 用 token 计数器精确估算；completion 跟随请求 max_tokens
     // （未指定时保守默认 256，上限 4096 防止恶意超大 max_tokens 占满配额）。
+    // P1 性能：BPE 估算（纯 CPU，每 64KB 切片一次正则编码）移到阻塞线程
+    // 池执行，避免每请求阻塞 tokio worker 数毫秒到数十毫秒；
+    // chat_req.clone() 是一次 O(n) memcpy，远廉价于编码本身。
     let estimated_prompt_tokens =
-        crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+        crate::token_estimate::count_chat_prompt_blocking(model.clone(), chat_req.clone()).await
+            as u64;
     let estimated_completion_tokens = chat_req.max_tokens.unwrap_or(256).clamp(256, 4096) as u64;
     let reservation = match reserve_usage(
         &state,
@@ -925,7 +929,9 @@ pub(crate) async fn handle_chat_completions(
                     Some(model.clone())
                 },
                 group: billing_group.clone(),
-                chat_req: chat_req.clone(),
+                // Arc 共享请求快照：final_event 的 spawn_blocking 预估算可
+                // 廉价 clone（P1 性能——BPE 估算移出 tokio worker）
+                chat_req: Arc::new(chat_req.clone()),
                 tool_calls: tool_calls.clone(),
                 acc: acc.clone(),
                 charged: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -950,13 +956,35 @@ pub(crate) async fn handle_chat_completions(
             });
             let billing_fin = billing.clone();
             let final_event = async move {
+                // P1 性能：完成侧估算（prompt + completion）在阻塞线程池
+                // 预估算一次，两分支共用——async 上下文内同步 BPE 编码
+                // （每 64KB 切片一次正则编码）会阻塞 tokio worker。
+                // 估算输入在此时刻读取（acc 已不再变更），与同步路径
+                // 逐字一致（见 token_estimate::count_*_blocking 的一致性测试）。
+                let (est_prompt, est_completion) = {
+                    let output_text = billing_fin.acc.lock().clone();
+                    let model = billing_fin.model.clone();
+                    let chat_req = billing_fin.chat_req.clone();
+                    let (pt, ct) = tokio::join!(
+                        crate::token_estimate::count_chat_prompt_blocking_arc(
+                            model.clone(),
+                            chat_req,
+                        ),
+                        crate::token_estimate::count_text_blocking(model, output_text),
+                    );
+                    (pt as u64, ct as u64)
+                };
                 // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
                 let (prompt_tokens, completion_tokens) = if !billing_fin
                     .charged
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
                     let errored = stream_errored.load(std::sync::atomic::Ordering::SeqCst);
-                    let (pt, ct) = billing_fin.finalize(errored);
+                    let (pt, ct) = billing_fin.finalize_with_token_estimates(
+                        errored,
+                        est_prompt,
+                        est_completion,
+                    );
                     // C1 健康档案：流正常完成，按真实总时延补记延迟样本。
                     // 建流时已 note_success（清零断路器）；此处只补延迟，
                     // 不重复计成功次数（见 health_archive::note_latency）。
@@ -975,14 +1003,7 @@ pub(crate) async fn handle_chat_completions(
                     (pt, ct)
                 } else {
                     // 守卫已兜底计费：这里只取估算值供指标上报，不再重复扣费
-                    let output_text = billing_fin.acc.lock().clone();
-                    (
-                        crate::token_estimate::count_chat_prompt(
-                            &billing_fin.model,
-                            &billing_fin.chat_req,
-                        ) as u64,
-                        crate::token_estimate::count_text(&billing_fin.model, &output_text) as u64,
-                    )
+                    (est_prompt, est_completion)
                 };
 
                 // Prometheus 指标（流中途出错记 error，不再恒 ok）

@@ -731,8 +731,9 @@ pub(crate) struct StreamBillingState {
     /// 用户原始请求模型名（admin 排查用，无映射时 None）
     pub(crate) origin_model: Option<String>,
     pub(crate) group: String,
-    /// 请求快照（用于估算 prompt tokens）
-    pub(crate) chat_req: ChatFormat,
+    /// 请求快照（用于估算 prompt tokens；Arc 共享——async 路径可廉价
+    /// clone 交给 spawn_blocking，避免每请求一次深拷贝 ChatFormat）
+    pub(crate) chat_req: Arc<ChatFormat>,
     /// 工具按次调用计数表（流式过程中统计 tool_use 起始块）
     pub(crate) tool_calls: Arc<parking_lot::Mutex<crate::pricing::ToolCallCounts>>,
     /// 输出文本累积器（用于估算 completion tokens）
@@ -773,12 +774,31 @@ impl StreamBillingState {
     /// `errored` = 流中途出错：请求日志 status_code 记 500 而非 200，
     /// 失败率统计不失真（此前流式出错仍按 200 记录）。
     /// 返回 (prompt_tokens, completion_tokens) 供调用方提交限流记账。
-    pub(crate) fn finalize(&self, errored: bool) -> (u64, u64) {
+    /// 同步估算 token（Drop 兜底路径用；async 路径走
+    /// [`Self::finalize_with_token_estimates`] 的 spawn_blocking 预估算）
+    fn estimate_tokens(&self) -> (u64, u64) {
         let output_text = self.acc.lock().clone();
         let completion_tokens = crate::token_estimate::count_text(&self.model, &output_text) as u64;
         let prompt_tokens =
             crate::token_estimate::count_chat_prompt(&self.model, &self.chat_req) as u64;
+        (prompt_tokens, completion_tokens)
+    }
 
+    pub(crate) fn finalize(&self, errored: bool) -> (u64, u64) {
+        let (prompt_tokens, completion_tokens) = self.estimate_tokens();
+        self.finalize_with_token_estimates(errored, prompt_tokens, completion_tokens)
+    }
+
+    /// 计数注入版 finalize（P1 性能）：调用方在 async 上下文已用
+    /// spawn_blocking 预估算（token_estimate::count_*_blocking，与同步
+    /// 路径逐字一致），此处不再做同步 BPE 编码——估算是纯 CPU，
+    /// 每请求阻塞 tokio worker 数毫秒到数十毫秒。
+    pub(crate) fn finalize_with_token_estimates(
+        &self,
+        errored: bool,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    ) -> (u64, u64) {
         // 累计用量
         self.state
             .usage_tracker
