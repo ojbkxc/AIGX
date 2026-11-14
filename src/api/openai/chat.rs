@@ -72,17 +72,6 @@ pub(crate) fn build_attempt_plan<'a>(
     plan
 }
 
-/// 非流式响应文本（用于拒绝检测）；结构不符返回 None。
-fn response_text(response: &Value) -> Option<&str> {
-    response
-        .get("choices")?
-        .as_array()?
-        .first()?
-        .get("message")?
-        .get("content")?
-        .as_str()
-}
-
 /// POST /v1/chat/completions - 聊天补全
 ///
 /// 使用 Bridge/Hub 模式分发请求，参考 aisix 的 chat_completions 处理流程：
@@ -1192,14 +1181,14 @@ pub(crate) async fn handle_chat_completions(
                         && attempt_index >= purge_cfg.fallback_trigger_attempt
                         && !purge_cfg.fallback_models.is_empty()
                     {
-                        if let Some(text) = response_text(&resp) {
-                            if crate::purge::looks_refusal(text) {
-                                crate::purge::record_refusal();
-                                last_error = Some(crate::bridge::BridgeError::Config(
-                                    "refusal detected; switching to fallback model".into(),
-                                ));
-                                continue;
-                            }
+                        // 非流式拒答判定走 ChatResponse 正文（与非流式 anthropic
+                        // 路径同口径：`message.content_str()`）。
+                        if crate::purge::looks_refusal(resp.message.content_str()) {
+                            crate::purge::record_refusal();
+                            last_error = Some(crate::bridge::BridgeError::Config(
+                                "refusal detected; switching to fallback model".into(),
+                            ));
+                            continue;
                         }
                     }
                     if attempt_index > 1 {

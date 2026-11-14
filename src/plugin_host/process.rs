@@ -78,28 +78,6 @@ pub fn host_target_triple() -> String {
     }
 }
 
-/// 宿主的目标三元组（与上游 `hostEnv.target` 同口径）。
-///
-/// 优先用编译期 `TARGET`（`cargo --target` 会设），否则从 `(OS, ARCH)` 推导
-/// —— 现有构建流程**并不导出** `TARGET`，只靠它会让目标恒为 `"unknown"`。
-///
-/// 同一口径也用于安装时挑 `pack.json` 的 `entry`：上游把它写成
-/// `{目标三元组: 入口路径}` 的映射（AIGX 自建包仍写字符串，两种都收）。
-pub fn host_target_triple() -> String {
-    if let Some(t) = option_env!("TARGET") {
-        if !t.is_empty() && t != "unknown" {
-            return t.to_string();
-        }
-    }
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "x86_64-unknown-linux-gnu".to_string(),
-        ("linux", "aarch64") => "aarch64-unknown-linux-gnu".to_string(),
-        ("macos", "x86_64") => "x86_64-apple-darwin".to_string(),
-        ("macos", "aarch64") => "aarch64-apple-darwin".to_string(),
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc".to_string(),
-        (os, arch) => format!("{arch}-{os}"),
-    }
-}
 
 /// 插件申报的一家 provider。
 ///

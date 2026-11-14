@@ -689,7 +689,7 @@ fn inject_skills(messages: &mut [ChatMessage], cfg: &PurgeSettings) -> bool {
     let limit = cfg.skill_inject_limit.max(1);
     let mut used = 0usize;
     let mut block = String::new();
-    for entry in &entries {
+    for entry in entries.iter() {
         if !entry
             .keywords
             .iter()
