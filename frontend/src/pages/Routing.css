@@ -133,7 +133,7 @@
 }
 .rt-seg-btn.is-on {
   background: var(--primary-color);
-  color: #fff;
+  color: var(--accent-contrast);
   font-weight: 600;
 }
 

@@ -92,7 +92,7 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
               alignItems: 'center',
               justifyContent: 'center',
               fontSize: '28px',
-              color: 'white',
+              color: 'var(--accent-contrast, white)',
               boxShadow: '0 8px 24px rgba(168,85,247,0.35)',
             }}
             aria-hidden="true"
@@ -152,7 +152,7 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
                 cursor: 'pointer',
                 fontWeight: 600,
                 fontSize: '14px',
-                color: 'white',
+                color: 'var(--accent-contrast, white)',
                 background: 'var(--accent-color, #2f6fed)',
                 boxShadow: '0 6px 18px rgba(99,102,241,0.3)',
               }}

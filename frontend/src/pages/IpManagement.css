@@ -74,7 +74,7 @@
 }
 
 .ipm-toggle input:checked + .ipm-toggle-slider::before {
-  background: white;
+  background: var(--accent-contrast);
   left: 27px;
 }
 

@@ -200,7 +200,7 @@
 
 .range-switcher-btn.is-active {
   background: var(--accent-color);
-  color: #fff;
+  color: var(--accent-contrast);
   font-weight: 600;
 }
 

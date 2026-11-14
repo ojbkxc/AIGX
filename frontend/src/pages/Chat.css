@@ -351,6 +351,8 @@
 
 .pg-switch input:checked + span::after {
   transform: translateX(14px);
+  /* 开启态轨道为 --accent-color（暗色为白色），thumb 用 --accent-contrast 才能在两种主题下可见 */
+  background: var(--accent-contrast);
 }
 
 .pg-switch input:disabled {

@@ -651,7 +651,7 @@
 
 .ck-seg-item.is-active {
   background: var(--accent-color);
-  color: #fff;
+  color: var(--accent-contrast);
 }
 
 .ck-time-subtle {
