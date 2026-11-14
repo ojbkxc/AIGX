@@ -127,27 +127,24 @@ pub fn count_chat_prompt(model: &str, req: &ChatFormat) -> u32 {
 /// 的防御口径一致。持有 Arc<ChatFormat> 的调用方走
 /// [`count_chat_prompt_blocking_arc`] 只 clone Arc。
 pub async fn count_chat_prompt_blocking(model: String, req: ChatFormat) -> u32 {
-    match tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req)).await {
-        Ok(n) => n,
-        Err(_) => 0,
-    }
+    tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req))
+        .await
+        .unwrap_or_default()
 }
 
 /// Arc 版本：请求快照为 Arc<ChatFormat> 时用（spawn_blocking 输入只
 /// clone Arc，不深拷贝消息树）。
 pub async fn count_chat_prompt_blocking_arc(model: String, req: Arc<ChatFormat>) -> u32 {
-    match tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req)).await {
-        Ok(n) => n,
-        Err(_) => 0,
-    }
+    tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req))
+        .await
+        .unwrap_or_default()
 }
 
 /// 在阻塞线程池执行纯文本估算（同 [`count_chat_prompt_blocking`]）。
 pub async fn count_text_blocking(model: String, text: String) -> u32 {
-    match tokio::task::spawn_blocking(move || count_text(&model, &text)).await {
-        Ok(n) => n,
-        Err(_) => 0,
-    }
+    tokio::task::spawn_blocking(move || count_text(&model, &text))
+        .await
+        .unwrap_or_default()
 }
 
 /// 逐字段 or 填充：上游值非零时优先，零值用本地计数替换。

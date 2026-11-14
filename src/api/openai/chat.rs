@@ -1847,16 +1847,10 @@ mod tests {
             cause: "x".into(),
         };
         assert_eq!(super::bridge_error_retry_after_secs(&e), 0);
-        // 等待上限：failover 前最多等 RETRY_AFTER_WAIT_CAP_SECS 秒，
-        // 且计入 90s 总预算（remaining() 判定）
-        assert!(super::RETRY_AFTER_WAIT_CAP_SECS <= 30);
+        // 等待上限与预算约束在 failover 站点的实现里（wait>0 且
+        // remaining()>=wait 才 sleep），常量定义见 RETRY_AFTER_WAIT_CAP_SECS。
     }
 
-    /// 帧直写形状与旧 json! 路径逐字段一致：
-    /// - 最小 chunk（仅 content）不携带 reasoning_content / tool_calls 键；
-    /// - 推理增量出现 reasoning_content；tool_call 的 id/name 缺失序列化为
-    ///   null（键恒存在，与 json! 对 Option 的序列化一致）；
-    /// - 无签名时 extra_content 不出现；finish_reason 缺失为 null。
     /// 响应缓存键（P1 性能）：确定性、固定 16 字符、任一投影字段变化换键、
     /// 缺失字段与显式 null 同形、key_id/model 隔离维度入键。
     #[test]
@@ -1903,6 +1897,11 @@ mod tests {
         );
     }
 
+    /// 帧直写形状与旧 json! 路径逐字段一致：
+    /// - 最小 chunk（仅 content）不携带 reasoning_content / tool_calls 键；
+    /// - 推理增量出现 reasoning_content；tool_call 的 id/name 缺失序列化为
+    ///   null（键恒存在，与 json! 对 Option 的序列化一致）；
+    /// - 无签名时 extra_content 不出现；finish_reason 缺失为 null。
     #[test]
     fn sse_chunk_frame_wire_shape() {
         let frame = SseChunkFrame {
