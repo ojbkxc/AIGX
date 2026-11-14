@@ -104,10 +104,10 @@ try {
     check('对话调试入口可见', false, '渠道行无对话按钮');
   }
 
-  // 6. Settings 改密表单（五分区后位于「账户」Tabs）
+  // 6. Settings 改密表单（设置页五分区重构后位于「安全」分类 Tab）
   await page.goto(`${BASE}/settings`, { waitUntil: 'networkidle' });
   await page.screenshot({ path: 'tests/e2e/screenshots/08-settings.png' });
-  await page.getByRole('tab', { name: '账户' }).click();
+  await page.getByRole('tab', { name: '安全' }).click();
   await page.waitForTimeout(300);
   const hasPwCard = (await page.getByText('当前密码').count()) > 0 || (await page.getByText('旧密码').count()) > 0;
   check('改密表单（账户安全卡片）', hasPwCard);
@@ -142,6 +142,9 @@ try {
   check('登出后旧 token 立即失效', revokedStatus === 401, 'status=' + revokedStatus + ', token=' + String(tokenBefore && tokenBefore.slice(0, 12)) + '...');
 } catch (e) {
   console.error('E2E 异常:', e.message);
+  // 异常 = 用例未跑完 = 失败（防假绿：catch 吞异常后只按已执行断言
+  // 判 exit 0 会让闸门放行未跑完的用例）
+  results.push({ name: `流程完整性（异常中断：${e.message.split('\n')[0]}）`, ok: false });
   await page.screenshot({ path: 'tests/e2e/screenshots/99-error.png' }).catch(() => {});
 } finally {
   await browser.close();
