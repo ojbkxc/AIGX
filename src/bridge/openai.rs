@@ -1291,11 +1291,28 @@ where
 /// usage 字段反序列化：「存在即 Some」——null/畸形形状回退全零
 /// UsageWire，与旧 `v.get("usage").map(parse_usage_from_value)` 对
 /// Null/字符串/数组的宽容口径（.get() 得 None → 全零）逐形一致。
+///
+/// 守卫：serde 派生结构体反序列化会接受 seq 形状（按字段序元组解析，
+/// `[1,2]` 会解析成 prompt=1/completion=2），与旧口径不符——仅接受
+/// JSON 对象，非对象形状经 `deserialize_map` 报错后回退 Default（全零）。
 fn de_usage_always_some<'de, D>(d: D) -> Result<Option<UsageWire>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(Some(UsageWire::deserialize(d).unwrap_or_default()))
+    struct MapOnlyVisitor;
+    impl<'de> serde::de::Visitor<'de> for MapOnlyVisitor {
+        type Value = UsageWire;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("usage 必须是 JSON 对象")
+        }
+        fn visit_map<A>(self, map: A) -> Result<UsageWire, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            UsageWire::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+    Ok(Some(d.deserialize_map(MapOnlyVisitor).unwrap_or_default()))
 }
 
 /// 解析单个 SSE 事件为 ChatChunk
@@ -1897,9 +1914,11 @@ mod tests {
         let usage = chunk.usage.expect("usage 终帧必须产出");
         assert_eq!((usage.prompt_tokens, usage.completion_tokens), (7, 3));
 
-        // tool_calls 分片（id/name 首帧 + arguments 分片）
+        // tool_calls 分片（id/name 首帧 + arguments 分片）。
+        // raw string 写死 JSON 文本：arguments 值内含转义引号，
+        // 普通字面量手打转义易错（`\":\"` 段会把转义引号打成裸引号）。
         let chunk = super::parse_sse_event(
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\"}}]}}]}",
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"city\":\""}}]}}]}"#,
             "id",
             "m",
         )
