@@ -5,8 +5,8 @@
 // （复用 PanelWrap 的错误重试交互），不再静默显示 0 值——fmtInt/fmtTokens 对
 // undefined 会回退 0 /「—」，错误时看起来像「真实零」会误导运维。
 import { useTranslation } from 'react-i18next';
-import { BarChart3, CalendarClock, Coins, Gauge, Server, Users, Zap } from 'lucide-react';
-import { fmtInt, fmtTokens } from '../../lib/format';
+import { AlertTriangle, BarChart3, CalendarClock, Coins, Gauge, Server, Users, Zap } from 'lucide-react';
+import { fmtInt, fmtPct, fmtTokens } from '../../lib/format';
 import type { RealtimeData, TodayTokens, UsageSummary } from '../../hooks/useDashboard';
 
 /** 图标徽标：lucide 统一图标体系 + 语义色 token（暗色主题由 App.css 令牌兜底） */
@@ -106,6 +106,17 @@ export default function LiveCards({
             </div>
             <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.avg_latency_ms ?? 0, lang)}ms</div>
             <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟平均')}</div>
+          </div>
+          {/* 错误率：/api/dashboard/realtime 真实返回 error_rate/errors（近 5 分钟窗口，handle_realtime 现算） */}
+          <div className="stat-card">
+            <div className="stat-card-top">
+              <div className="stat-title">{t('错误率')}</div>
+              <IconBadge icon={<AlertTriangle size={14} />} token="var(--danger-color)" />
+            </div>
+            <div className="stat-value" style={{ fontSize: '24px' }}>{fmtPct(rt?.error_rate)}</div>
+            <div className="stat-desc" style={{ fontSize: '11px' }}>
+              {t('近 5 分钟')} · {fmtInt(rt?.errors ?? 0, lang)} {t('错误')}
+            </div>
           </div>
         </div>
       )}

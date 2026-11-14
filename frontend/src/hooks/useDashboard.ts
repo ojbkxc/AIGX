@@ -170,6 +170,12 @@ export interface RealtimeData {
   qps?: number;
   rps?: number;
   avg_latency_ms?: number;
+  /** 近 5 分钟窗口错误率（%，handle_realtime 真实返回；#22 接线） */
+  error_rate?: number;
+  /** 近 5 分钟窗口错误请求数 */
+  errors?: number;
+  /** 近 5 分钟窗口总请求数 */
+  total_requests?: number;
   active_users?: number;
   active_channels?: number;
 }

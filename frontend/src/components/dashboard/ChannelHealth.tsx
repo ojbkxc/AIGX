@@ -5,13 +5,19 @@
 // 实时错误率折叠到详情行）+ 数据新鲜度（updatedAt 相对时间）。
 // 状态口径全部前端计算，不写死到后端：成功率 >=95 健康 / >=80 警告 / <80 异常，
 // circuit_breaker=open 视为熔断（卡片徽章优先于成功率分级），halfopen 徽章显示半开。
+// P95（#22 接线）：取 /api/dashboard/scheduler_status 的 archive.p95_ms
+// （health_archive 当日落库快照），按渠道 id join；调度状态不可用时整列隐藏，
+// 不造假数据。注意口径差异：P95 是「当日档案」，其余列是所选窗口的日志回放。
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
+import { getSchedulerStatus } from '../../api';
 import { fmtInt } from '../../lib/format';
 import type { ChannelHealthRow } from '../../hooks/useDashboard';
+import type { SchedulerStatusItem } from '../../types';
 
 type Cat = 'circuit' | 'halfopen' | 'abnormal' | 'warning' | 'healthy';
-type SortKey = 'default' | 'error' | 'requests' | 'latency' | 'success';
+type SortKey = 'default' | 'error' | 'requests' | 'latency' | 'success' | 'p95';
 type SortDir = 'desc' | 'asc';
 
 /** 成功率（%）：优先后端 success_rate，缺失时按 success_count/total_requests 兜底 */
@@ -85,6 +91,31 @@ export default function ChannelHealth({
     return () => clearInterval(timer);
   }, [updatedAt]);
 
+  // P95 数据源：调度实时状态的当日健康档案（health_archive 落库快照，
+  // dashboard.rs handle_scheduler_status 逐渠道返回 archive.p95_ms）。
+  // 拉取失败（非管理员/旧后端）时 map 为空 → P95 列整体隐藏，不造假数据。
+  const schedulerQ = useQuery({
+    queryKey: ['scheduler_status', 'channel_health_join'],
+    queryFn: async () => {
+      const res = await getSchedulerStatus();
+      return (res.data ?? null) as SchedulerStatusItem | null;
+    },
+    staleTime: 45_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+    retry: false,
+  });
+  const p95ById = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const ch of schedulerQ.data?.channels ?? []) {
+      const p95 = ch?.archive?.p95_ms;
+      if (typeof p95 === 'number' && p95 >= 0) map.set(ch.id, p95);
+    }
+    return map;
+  }, [schedulerQ.data]);
+  const showP95 = p95ById.size > 0;
+  const p95Of = (c: ChannelHealthRow): number => p95ById.get(String(c.id)) ?? -1;
+
   // 只统计/展示状态为「启用」的供应商（后端 status 取值 enabled/disabled，见
   // legacy.rs handle_channel_health，每条渠道恒带该字段）。非 enabled 一律隐藏，
   // 不参与汇总/筛选/排序。
@@ -140,9 +171,10 @@ export default function ChannelHealth({
         case 'requests': return ((a.total_requests ?? 0) - (b.total_requests ?? 0)) * dir;
         case 'latency': return ((a.avg_latency_ms ?? 0) - (b.avg_latency_ms ?? 0)) * dir;
         case 'success': return (rateOf(a) - rateOf(b)) * dir;
+        case 'p95': return (p95Of(a) - p95Of(b)) * dir;
       }
     });
-  }, [enabledRows, filter, search, sort]);
+  }, [enabledRows, filter, search, sort, p95ById]);
 
   // 数据新鲜度：「N 秒前更新」，跨档位用分钟/小时文案
   const elapsed = updatedAt != null ? Math.max(0, Math.floor((now - updatedAt) / 1000)) : null;
@@ -162,11 +194,12 @@ export default function ChannelHealth({
     { key: 'abnormal', label: t(CAT_LABEL.abnormal), count: counts.abnormal, color: CAT_STYLE.abnormal.dot },
     { key: 'circuit', label: t(CAT_LABEL.circuit), count: counts.circuit, color: CAT_STYLE.circuit.dot },
   ];
-  // 表头可排序的列（默认严重度由 sort.key==='default' 提供）
+  // 表头可排序的列（默认严重度由 sort.key==='default' 提供；P95 仅在调度档案可用时出现）
   const sortCols: Array<{ key: SortKey; label: string }> = [
     { key: 'success', label: t('成功率') },
     { key: 'error', label: t('错误率') },
     { key: 'latency', label: t('平均延迟') },
+    ...(showP95 ? [{ key: 'p95' as SortKey, label: 'P95' }] : []),
     { key: 'requests', label: t('请求数') },
   ];
   const toggleSort = (key: SortKey): void => {
@@ -267,6 +300,11 @@ export default function ChannelHealth({
                       {errorRate.toFixed(1)}%
                     </td>
                     <td className="num">{fmtInt(c.avg_latency_ms || 0, lang)}ms</td>
+                    {showP95 && (
+                      <td className="num">
+                        {p95ById.has(String(c.id)) ? `${fmtInt(p95ById.get(String(c.id)), lang)}ms` : '—'}
+                      </td>
+                    )}
                     <td className="num">{fmtInt(c.total_requests ?? c.requests ?? 0, lang)}</td>
                     <td className="ch-err" title={lastError ?? undefined}>{lastError || '—'}</td>
                   </tr>
