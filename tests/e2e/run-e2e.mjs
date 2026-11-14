@@ -55,7 +55,9 @@ try {
   check('渠道列表加载', rows > 0, `rows=${rows}`);
 
   // 5. 对话调试
-  const chatBtn = page.locator('button', { hasText: '对话' }).first();
+  // 渠道行的对话按钮是图标按钮（无可见文本，title 承载文字），选择器用
+  // button.ch-icon-btn[title="对话调试"]（重构后 MessageSquare 图标按钮）
+  const chatBtn = page.locator('button.ch-icon-btn[title="对话调试"]').first();
   const hasChat = await chatBtn.isVisible({ timeout: 5000 }).catch(() => false);
   if (hasChat) {
     await chatBtn.click();
@@ -63,18 +65,19 @@ try {
     await page.screenshot({ path: 'tests/e2e/screenshots/04-chat-open.png' });
     check('对话调试弹窗打开', await page.locator('.chat-debugger').isVisible().catch(() => false));
 
-    // 模型搜索
-    const pickerBtn = page.locator('.chat-debugger-model-btn');
+    // 模型搜索（ModelPicker 统一组件：.model-picker-btn 打开弹层，
+    // .model-picker-search input 过滤，.model-picker-item 为选项）
+    const pickerBtn = page.locator('.model-picker-btn').first();
     if (await pickerBtn.isVisible().catch(() => false)) {
       await pickerBtn.click();
-      const search = page.locator('.chat-debugger-search input');
+      const search = page.locator('.model-picker-search input');
       if (await search.isVisible().catch(() => false)) {
         check('模型选择器搜索框', true);
         // 搜索第一个渠道的模型片段（DeepSeek官网 → deepseek-*），
         // 断言过滤生效而非固定搜 glm（该渠道不含 glm 模型）
         await search.fill('deepseek');
         await page.waitForTimeout(400);
-        const filtered = await page.locator('.chat-debugger-picker-item').count();
+        const filtered = await page.locator('.model-picker-item').count();
         check('搜索过滤生效', filtered > 0, `deepseek 匹配=${filtered}`);
         await page.screenshot({ path: 'tests/e2e/screenshots/05-model-search.png' });
         await page.keyboard.press('Escape');
@@ -83,11 +86,11 @@ try {
       }
     }
 
-    // 发送
-    const ta = page.locator('.chat-input, textarea').last();
+    // 发送（chat-debugger-input 输入框 + chat-debugger-send-fab 发送按钮）
+    const ta = page.locator('.chat-debugger-input').last();
     await ta.fill('你好，一句话介绍你自己');
     await page.screenshot({ path: 'tests/e2e/screenshots/06-before-send.png' });
-    const sendBtn = page.locator('.chat-debugger button').filter({ hasText: /发送|Send/ }).first();
+    const sendBtn = page.locator('.chat-debugger-send-fab').first();
     if (await sendBtn.isVisible().catch(() => false)) await sendBtn.click();
     else await ta.press('Enter');
     await page.waitForTimeout(9000);
@@ -106,13 +109,14 @@ try {
   const hasPwCard = (await page.getByText('当前密码').count()) > 0 || (await page.getByText('旧密码').count()) > 0;
   check('改密表单（账户安全卡片）', hasPwCard);
 
-  // 7. 模型预设（Models workspace）— SPA 内导航
-  await page.locator('a[href="/model-presets"]').first().click();
+  // 7. 模型管理（原 /model-presets 目录页已并入 /model-manage，App.tsx 里
+  //    /model-presets 是重定向路由——导航锚点用 a[href="/model-manage"]）
+  await page.locator('a[href="/model-manage"]').first().click();
   await page.waitForTimeout(1500);
   await page.screenshot({ path: 'tests/e2e/screenshots/09-models.png' });
-  const modelCards = await page.locator('.model-card').count();
-  const modelSearchVisible = await page.locator('.models-search input').isVisible();
-  check('模型预设页面渲染', modelCards > 0 || modelSearchVisible, 'cards=' + modelCards);
+  const modelHeading = await page.getByRole('heading', { name: /模型管理/ }).count();
+  const modelSearchVisible = await page.locator('.models-search input').isVisible().catch(() => false);
+  check('模型管理页面渲染', modelHeading > 0 || modelSearchVisible, 'heading=' + modelHeading);
 
   // 8. 提示词库（Prompts workspace）— SPA 内导航
   await page.locator('a[href="/prompts"]').first().click();
