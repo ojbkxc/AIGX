@@ -2454,6 +2454,7 @@ pub async fn handle_run_import(
             cost_pricing: Default::default(),
             quirks: None,
             balance_scheme: None,
+            plugin_provider: String::new(),
         };
         let channel = request.to_channel(uuid::Uuid::new_v4().to_string());
         match state.channel_store.add(channel) {
