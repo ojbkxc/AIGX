@@ -1,6 +1,9 @@
 // 用量环形图（A2A donutView 移植）：内 62%/外 88% 环、中心总量读数、
 // 右侧图例「tokens + 占比」、扇区 ≥3% 才画百分比标注、色映射由调用方
 // 传入（与 tooltip 色点共用一份，杜绝两处各自按下标取色的串位问题）。
+// tooltip：跟随鼠标的自定义浮层（纯 React state + CSS 定位，无第三方依赖），
+// 替代原生 <title>（1s 延迟且不可样式化）；图例 hover 联动高亮对应扇区。
+// 尺寸：容器 max-width 100% 按比例缩放，窄屏不再溢出（原固定 220px）。
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -38,6 +41,8 @@ export default function DonutChart({
 }: Props): JSX.Element | null {
   const { t, i18n } = useTranslation();
   const [hover, setHover] = useState<number | null>(null);
+  /** 自定义 tooltip 的相对定位（跟随鼠标，仅 wrapper 内坐标） */
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
   const rows = data.filter((d) => d.value > 0);
   if (!rows.length) return null;
 
@@ -80,9 +85,19 @@ export default function DonutChart({
 
   const lang = i18n.language;
   const isZh = (lang ?? 'zh').startsWith('zh');
+  // 图例行下标 → 扇区下标：尾部折叠进「其他」后，图例后半段都指向最后一个扇区
+  const sliceIdxOf = (rowIdx: number): number => (rowIdx < maxSlices ? rowIdx : slicesData.length - 1);
   return (
-    <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
-      <svg viewBox={`0 0 ${size} ${size}`} style={{ width: size, height: size, flexShrink: 0 }}>
+    <div
+      style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center', position: 'relative' }}
+      onMouseMove={(e) => {
+        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        setTip({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      }}
+      onMouseLeave={() => { setHover(null); setTip(null); }}
+    >
+      <div style={{ width: size, maxWidth: '100%', flexShrink: 0 }}>
+        <svg viewBox={`0 0 ${size} ${size}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
         {slices.map((s, i) =>
           s.visible ? (
             <path
@@ -97,7 +112,6 @@ export default function DonutChart({
               onMouseEnter={() => setHover(i)}
               onMouseLeave={() => setHover(null)}
             >
-              <title>{`${s.d.name} · ${s.d.labelValue ?? s.d.value} · ${fmtPct(s.percent * 100)}`}</title>
             </path>
           ) : null,
         )}
@@ -127,15 +141,41 @@ export default function DonutChart({
             ? (slices[hover].d.name.length > 12 ? slices[hover].d.name.slice(0, 12) + '…' : slices[hover].d.name)
             : (isZh ? totalSub : t('总量'))}
         </text>
-      </svg>
+        </svg>
+      </div>
+      {/* 跟随式 tooltip：扇区与图例 hover 共用（原生 <title> 有 ~1s 延迟且不可样式化） */}
+      {hover != null && tip && (
+        <div
+          className="donut-tip"
+          style={{
+            position: 'absolute',
+            left: Math.min(tip.x + 12, 320),
+            top: tip.y + 12,
+            background: 'var(--card-bg)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 8,
+            padding: '6px 10px',
+            fontSize: 12,
+            color: 'var(--text-main)',
+            boxShadow: 'var(--shadow)',
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap',
+            zIndex: 20,
+          }}
+        >
+          <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: colors.get(slices[hover].d.name), marginRight: 6, verticalAlign: -1 }} />
+          {slices[hover].d.name} · {slices[hover].d.labelValue ?? slices[hover].d.value} · {fmtPct(slices[hover].percent * 100)}
+        </div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minWidth: 200 }}>
         {rows.map((d, i) => {
           const percent = (d.value / total) * 100;
           return (
             <div
               key={`${i}-${d.name}`}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}
-              title={`${d.name} · ${d.labelValue ?? d.value} · ${percent.toFixed(1)}%`}
+              className="donut-legend-row"
+              style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer', borderRadius: 4, padding: '2px 4px' }}
+              onMouseEnter={() => { setHover(sliceIdxOf(i)); setTip(null); }}
             >
               <span style={{ width: 12, height: 12, borderRadius: 3, background: colors.get(d.name) ?? '#9aa0a6', flexShrink: 0 }} />
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>

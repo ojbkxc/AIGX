@@ -5,8 +5,21 @@
 // （复用 PanelWrap 的错误重试交互），不再静默显示 0 值——fmtInt/fmtTokens 对
 // undefined 会回退 0 /「—」，错误时看起来像「真实零」会误导运维。
 import { useTranslation } from 'react-i18next';
+import { BarChart3, CalendarClock, Coins, Gauge, Server, Users, Zap } from 'lucide-react';
 import { fmtInt, fmtTokens } from '../../lib/format';
 import type { RealtimeData, TodayTokens, UsageSummary } from '../../hooks/useDashboard';
+
+/** 图标徽标：lucide 统一图标体系 + 语义色 token（暗色主题由 App.css 令牌兜底） */
+function IconBadge({ icon, token }: { icon: JSX.Element; token: string }): JSX.Element {
+  return (
+    <div
+      className="stat-icon-badge"
+      style={{ background: `color-mix(in srgb, ${token} 15%, transparent)`, color: token, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+    >
+      {icon}
+    </div>
+  );
+}
 
 interface Props {
   realtime?: RealtimeData | null;
@@ -65,7 +78,7 @@ export default function LiveCards({
           <div className="stat-card">
             <div className="stat-card-top">
               <div className="stat-title">{t('实时 RPS')}</div>
-              <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>⚡</div>
+              <IconBadge icon={<Zap size={14} />} token="var(--amber)" />
             </div>
             <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.qps ?? rt?.rps ?? 0, lang)}</div>
             <div className="stat-desc" style={{ fontSize: '11px' }}>{t('每秒请求数')}</div>
@@ -73,7 +86,7 @@ export default function LiveCards({
           <div className="stat-card">
             <div className="stat-card-top">
               <div className="stat-title">{t('活跃用户')}</div>
-              <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>👥</div>
+              <IconBadge icon={<Users size={14} />} token="var(--cyan)" />
             </div>
             <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.active_users ?? activeUsersFallback, lang)}</div>
             <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
@@ -81,7 +94,7 @@ export default function LiveCards({
           <div className="stat-card">
             <div className="stat-card-top">
               <div className="stat-title">{t('活跃供应商')}</div>
-              <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔗</div>
+              <IconBadge icon={<Server size={14} />} token="var(--violet)" />
             </div>
             <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.active_channels ?? activeChannelsFallback, lang)}</div>
             <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
@@ -89,7 +102,7 @@ export default function LiveCards({
           <div className="stat-card">
             <div className="stat-card-top">
               <div className="stat-title">{t('平均延迟')}</div>
-              <div className="stat-icon-badge" style={{ background: 'rgba(251, 146, 60, 0.15)', color: '#fb923c' }}>⏱️</div>
+              <IconBadge icon={<Gauge size={14} />} token="var(--coral)" />
             </div>
             <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.avg_latency_ms ?? 0, lang)}ms</div>
             <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟平均')}</div>
@@ -102,7 +115,7 @@ export default function LiveCards({
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('今日用量')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>📊</div>
+            <IconBadge icon={<BarChart3 size={14} />} token="var(--cyan)" />
           </div>
           {todayError ? (
             errorBlock(t('今日用量加载失败'), todayRefetch)
@@ -122,7 +135,7 @@ export default function LiveCards({
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('Token 统计')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔤</div>
+            <IconBadge icon={<Coins size={14} />} token="var(--violet)" />
           </div>
           {usageError ? (
             errorBlock(t('Token 统计加载失败'), usageRefetch)
@@ -139,7 +152,7 @@ export default function LiveCards({
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('本月用量限额')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}>📅</div>
+            <IconBadge icon={<CalendarClock size={14} />} token="var(--mint)" />
           </div>
           {limitsError ? (
             errorBlock(t('本月用量限额加载失败'), limitsRefetch)

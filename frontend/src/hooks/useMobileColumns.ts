@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 
 /**
  * 移动端列名注入 hook（对照 Agent2API `mobile-columns.js`）。
@@ -8,11 +8,13 @@ import { useEffect, useRef } from 'react';
  * 显示列名标签。桌面端不碰 DOM。
  *
  * 用法：在表格所在页面的根组件里调用 `useMobileColumns()`。
- * hook 内部用 MutationObserver 监听表格变化，60ms 合并后重跑。
+ * #18 锦上添花：原来 document.body 全子树监听 + 60ms 合并后重绘全部表格，
+ * 任何无关 DOM 变动（弹窗/toast/tooltip）都会触发全量重绘。现改为按需绑定：
+ * - MutationObserver 从变更记录里只圈出受影响的 .table-wrapper 表格重绘；
+ * - ResizeObserver 绑定每个表格，列宽/尺寸变化按需重绘；
+ * - 断点跨越（≤767px ↔ 桌面）用 matchMedia 事件整体重绘一次。
  */
 export function useMobileColumns(): void {
-  const observerRef = useRef<MutationObserver | null>(null);
-
   useEffect(() => {
     const MAX_WIDTH = 767;
 
@@ -59,37 +61,68 @@ export function useMobileColumns(): void {
       });
     }
 
-    function paintAll() {
-      if (window.innerWidth > MAX_WIDTH) return;
-      document.querySelectorAll('.table-wrapper table').forEach((t) => {
-        paintTable(t as HTMLTableElement);
-      });
+    const mq = window.matchMedia(`(max-width: ${MAX_WIDTH}px)`);
+
+    /** 列宽/尺寸变化按需重绘（观察每个表格本体） */
+    const resizeObserver = new ResizeObserver((entries) => {
+      if (!mq.matches) return;
+      entries.forEach((entry) => paintTable(entry.target as HTMLTableElement));
+    });
+    const observedTables = new WeakSet<HTMLTableElement>();
+
+    /** 给表格挂上 ResizeObserver（已挂的跳过） */
+    function trackTable(table: HTMLTableElement): void {
+      if (observedTables.has(table)) return;
+      observedTables.add(table);
+      resizeObserver.observe(table);
     }
 
     function run() {
-      paintAll();
+      if (!mq.matches) return;
+      document.querySelectorAll('.table-wrapper table').forEach((t) => {
+        const table = t as HTMLTableElement;
+        paintTable(table);
+        trackTable(table);
+      });
+    }
+
+    /** 只重绘受影响的表格（变更记录里圈出来的），不再是全量重绘 */
+    function runDirty(dirty: Set<HTMLTableElement>): void {
+      if (!mq.matches) return;
+      dirty.forEach((table) => {
+        paintTable(table);
+        trackTable(table);
+      });
     }
 
     // 首次执行
     run();
 
-    // 窗口尺寸跨过断点时重跑
-    window.addEventListener('resize', run);
+    // 窗口尺寸跨过断点时整体重绘一次
+    const onBreakpoint = (): void => run();
+    mq.addEventListener('change', onBreakpoint);
 
     // React 重渲染后 tbody 里的行会重建（data-col 属性被清掉）
-    // 用 MutationObserver 监听 document.body 子树变化，60ms 合并后重跑
+    // 用 MutationObserver 圈出受影响的表格，60ms 合并后只重绘这些表
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const schedule = () => {
+    const observer = new MutationObserver((records) => {
+      const dirty = new Set<HTMLTableElement>();
+      for (const record of records) {
+        const target = record.target as Element | null;
+        if (!target || target.nodeType !== Node.ELEMENT_NODE) continue;
+        const table = target.tagName === 'TABLE' ? target : target.closest?.('table');
+        if (table && table.closest('.table-wrapper')) dirty.add(table as HTMLTableElement);
+      }
+      if (!dirty.size) return;
       if (timer) clearTimeout(timer);
-      timer = setTimeout(run, 60);
-    };
-
-    observerRef.current = new MutationObserver(schedule);
-    observerRef.current.observe(document.body, { childList: true, subtree: true });
+      timer = setTimeout(() => runDirty(dirty), 60);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
 
     return () => {
-      window.removeEventListener('resize', run);
-      observerRef.current?.disconnect();
+      mq.removeEventListener('change', onBreakpoint);
+      observer.disconnect();
+      resizeObserver.disconnect();
       if (timer) clearTimeout(timer);
     };
   }, []);

@@ -37,15 +37,18 @@ export default function Heatmap({ data, lang }: { data: HeatmapCell[]; lang?: st
     const gridW = labelW + cols * step - gap;
     const offsetX = Math.max(0, Math.round((boxWidth - gridW) / 2));
     // 分档看 token，「有没有用过」看请求数（全失败的日子 token=0 但不该画成空白）
+    // ——token=0 但 count>0 的日子给最低「有活动」档（#12 锦上添花）
     const thresholds = heatLevelsFor(Math.max(...data.map((d) => d.tokens ?? 0), 0));
-    const levelOf = (tokens: number): number =>
-      thresholds.findIndex((limit) => tokens <= limit);
+    const levelOf = (cell: HeatmapCell): number => {
+      if ((cell.tokens ?? 0) <= 0) return (cell.count ?? 0) > 0 ? 1 : 0;
+      return Math.max(0, thresholds.findIndex((limit) => cell.tokens! <= limit));
+    };
     const out: Array<HeatmapCell & { x: number; y: number; level: number }> = [];
     for (let c = 0; c < cols; c += 1) {
       for (let r = 0; r < 7; r += 1) {
         const day = cells[c * 7 + r];
         if (!day) continue;
-        out.push({ ...day, x: offsetX + labelW + c * step, y: topH + r * step, level: Math.max(0, levelOf(day.tokens ?? 0)) });
+        out.push({ ...day, x: offsetX + labelW + c * step, y: topH + r * step, level: levelOf(day) });
       }
     }
     // 月份标签落在「该列最早一天所属月份」变化的列（<3 列间距时跳过）

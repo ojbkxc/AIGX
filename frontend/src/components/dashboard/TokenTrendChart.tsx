@@ -58,12 +58,12 @@ export default function TokenTrendChart({ data, lang }: { data: TokenTrendPoint[
             <text x={pad.left - 8} y={g.y + 3} textAnchor="end" fill="var(--text-muted)" fontSize="9">{g.text}</text>
           </g>
         ))}
-        <path d={line((d) => d.input_tokens ?? 0)} fill="none" stroke="#7ca4f5" strokeWidth="2" />
-        <path d={line((d) => d.output_tokens ?? 0)} fill="none" stroke="#34d399" strokeWidth="2" />
+        <path d={line((d) => d.input_tokens ?? 0)} fill="none" stroke="var(--cyan)" strokeWidth="2" />
+        <path d={line((d) => d.output_tokens ?? 0)} fill="none" stroke="var(--mint)" strokeWidth="2" />
         {data.map((d, i) => (
           <g key={`p${i}`}>
-            <circle cx={x(i)} cy={y(d.input_tokens ?? 0)} r={hoverIdx === i ? 4 : 2.4} fill="#7ca4f5" />
-            <circle cx={x(i)} cy={y(d.output_tokens ?? 0)} r={hoverIdx === i ? 4 : 2.4} fill="#34d399" />
+            <circle cx={x(i)} cy={y(d.input_tokens ?? 0)} r={hoverIdx === i ? 4 : 2.4} fill="var(--cyan)" />
+            <circle cx={x(i)} cy={y(d.output_tokens ?? 0)} r={hoverIdx === i ? 4 : 2.4} fill="var(--mint)" />
           </g>
         ))}
         {marks.map((mi) => {
@@ -110,9 +110,9 @@ export default function TokenTrendChart({ data, lang }: { data: TokenTrendPoint[
         )}
         {/* 图例 + 区间合计 */}
         <g fontSize="10" fill="var(--text-muted)">
-          <rect x={w - 186} y={pad.top - 16} width="10" height="3" fill="#7ca4f5" />
+          <rect x={w - 186} y={pad.top - 16} width="10" height="3" fill="var(--cyan)" />
           <text x={w - 172} y={pad.top - 12}>{t('输入')}</text>
-          <rect x={w - 126} y={pad.top - 16} width="10" height="3" fill="#34d399" />
+          <rect x={w - 126} y={pad.top - 16} width="10" height="3" fill="var(--mint)" />
           <text x={w - 112} y={pad.top - 12}>{t('输出')}</text>
           <text x={w - 16} y={pad.top - 12} textAnchor="end">
             {t('合计')} {fmtInt(data.reduce((s, d) => s + (d.input_tokens ?? 0) + (d.output_tokens ?? 0), 0), lang)}
