@@ -1,7 +1,7 @@
 //! 健康检查与优雅关闭 — 借鉴 aisix-proxy/src/health.rs
 //!
 //! 提供 Kubernetes 标准的 /livez 和 /readyz 端点：
-//! - `/livez` — 进程存活检查（ping + shutdown 状态）
+//! - `/livez` — 进程存活检查（ping；draining 不摘存活探针，摘流归 /readyz）
 //! - `/readyz` — 就绪检查（shutdown 状态 + 配置可用性 + 存储可访问性）
 //!
 //! 状态机：
@@ -54,32 +54,26 @@ impl LivezState {
 }
 
 /// 响应 /livez 请求
+///
+/// K8s 语义：`/livez` 只回答「进程还活着吗」。draining 期间进程仍存活、
+/// 只是不再接新流量——若把 draining 判为失败（503），livenessProbe 会
+/// 触发立即 SIGKILL，drain 窗口永远跑不完。因此 draining **不**是
+/// livez 的失败项；摘流（503）是 `/readyz` 的职责。verbose 模式下如实
+/// 标注 draining 状态供人工排查。
 pub fn livez_response(livez: &LivezState, verbose: bool) -> Response {
     let mut body = String::new();
-    let mut failed = false;
 
     body.push_str("[+]ping ok\n");
-    match livez.shutdown_check() {
-        Ok(()) => body.push_str("[+]shutdown ok\n"),
-        Err(_) => {
-            failed = true;
-            body.push_str("[-]shutdown failed: draining\n");
-        }
+    if livez.is_shutting_down() {
+        body.push_str("[+]shutdown ok (draining)\n");
+    } else {
+        body.push_str("[+]shutdown ok\n");
     }
 
     let headers = [
         (CONTENT_TYPE, TEXT_PLAIN_UTF8.clone()),
         (X_CONTENT_TYPE_OPTIONS.clone(), NOSNIFF.clone()),
     ];
-
-    if failed {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            headers,
-            format!("{body}livez check failed"),
-        )
-            .into_response();
-    }
 
     if !verbose {
         return (StatusCode::OK, headers, "ok").into_response();
@@ -305,6 +299,26 @@ mod tests {
         state.mark_shutting_down();
         assert!(state.is_shutting_down());
         assert!(state.shutdown_check().is_err());
+    }
+
+    /// K8s 探针语义：draining 期间 /livez 必须保持 200——返回 503 会让
+    /// livenessProbe 立即 SIGKILL，20s drain 窗口永远跑不完；摘流是
+    /// /readyz 的职责，draining 时 /readyz 必须 503。
+    #[test]
+    fn livez_stays_ok_during_draining() {
+        let state = LivezState::new();
+        assert_eq!(livez_response(&state, false).status(), StatusCode::OK);
+        assert_eq!(livez_response(&state, true).status(), StatusCode::OK);
+
+        state.mark_shutting_down();
+        // 存活探针不摘：非 verbose 与 verbose 都保持 200
+        assert_eq!(livez_response(&state, false).status(), StatusCode::OK);
+        assert_eq!(livez_response(&state, true).status(), StatusCode::OK);
+        // 摘流探针：draining 时 /readyz 503
+        assert_eq!(
+            readyz_response(&state, true, true, false).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[test]

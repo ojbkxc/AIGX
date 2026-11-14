@@ -555,11 +555,137 @@ impl BridgeError {
     }
 }
 
-/// 解析 `Retry-After` 响应头为 Duration（RFC 9110 §10.2.3 的秒数形式）
+/// 解析 `Retry-After` 响应头为 Duration（RFC 9110 §10.2.3）。
+///
+/// 支持两种形式：
+/// - delta-seconds：`120`
+/// - HTTP-date：RFC 1123（IMF-fixdate）、RFC 850（obsolete）、asctime（obsolete）
+///
+/// HTTP-date 解析为「自当前时刻到该时刻的秒数」；时刻已过（客户端可立即
+/// 重试）按 0 处理。头缺失/畸形返回 `None`，由下游用默认冷却值兜底。
 pub fn parse_retry_after(headers: &http::HeaderMap) -> Option<Duration> {
     let raw = headers.get(http::header::RETRY_AFTER)?.to_str().ok()?;
-    let seconds: u64 = raw.trim().parse().ok()?;
-    Some(Duration::from_secs(seconds))
+    parse_retry_after_str(raw)
+}
+
+/// `parse_retry_after` 的字符串版（纯函数，便于单测直接注入头值）。
+fn parse_retry_after_str(raw: &str) -> Option<Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let when = parse_http_date(raw)?;
+    let now = chrono::Utc::now();
+    let secs = (when - now).num_seconds().max(0) as u64;
+    Some(Duration::from_secs(secs))
+}
+
+/// 解析 HTTP-date 的三种历史格式（RFC 9110 §5.6.7 / RFC 7231 §7.1.1.1）：
+///
+/// - RFC 1123 IMF-fixdate：`Wed, 21 Oct 2015 07:28:00 GMT`
+/// - RFC 850（obsolete）：`Sunday, 02-Oct-97 20:00:00 GMT`
+/// - asctime（obsolete）：`Sun Oct  2 07:28:00 1997`
+///
+/// 首选 chrono 的 RFC 2822 解析器（其句法即 IMF-fixdate）；obsolete 形态
+/// （长星期名/横杠日期/无逗号/年份在尾）chrono 不认，退回手工解析。
+/// obsolete 形态不校验星期名与日期的对应关系（宽松解析：Retry-After 是
+/// 「再等多久」的指令，误判方向取宽松——宁可少等也不多等）。
+fn parse_http_date(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    let mut rest = s.trim();
+    // obsolete 形态的时区标注：RFC 850 以 GMT 结尾；asctime 无时区
+    if rest.ends_with("GMT") {
+        rest = rest[..rest.len() - 3].trim_end();
+    }
+    // RFC 850：`Sunday, 02-Oct-97 20:00:00`
+    if let Some((_, tail)) = rest.split_once(',') {
+        let tail = tail.trim();
+        let (date, time) = tail.split_once(' ')?;
+        let mut parts = date.split('-');
+        let day: u32 = parts.next()?.parse().ok()?;
+        let month = month_from_short(parts.next()?)?;
+        let year = expand_two_digit_year(parts.next()?)?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let (h, m, sec) = parse_hms(time)?;
+        return naive_utc(year, month, day, h, m, sec);
+    }
+    // asctime：`Sun Oct  2 07:28:00 1997`（split_whitespace 吞掉日字段的双空格）
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    if fields.len() != 5 {
+        return None;
+    }
+    let month = month_from_short(fields[1])?;
+    let day: u32 = fields[2].parse().ok()?;
+    let (h, m, sec) = parse_hms(fields[3])?;
+    let year: i32 = fields[4].parse().ok()?;
+    naive_utc(year, month, day, h, m, sec)
+}
+
+/// 英文月份短名 → 数字（1..=12）。
+fn month_from_short(name: &str) -> Option<u32> {
+    match name {
+        "Jan" => Some(1),
+        "Feb" => Some(2),
+        "Mar" => Some(3),
+        "Apr" => Some(4),
+        "May" => Some(5),
+        "Jun" => Some(6),
+        "Jul" => Some(7),
+        "Aug" => Some(8),
+        "Sep" => Some(9),
+        "Oct" => Some(10),
+        "Nov" => Some(11),
+        "Dec" => Some(12),
+        _ => None,
+    }
+}
+
+/// 年份映射：1-2 位年份按 chrono RFC 2822 的 obsolete 年份规则
+/// （<50 → 2000+年，>=50 → 1900+年）——与 `DateTime::parse_from_rfc2822`
+/// 的口径一致，保证同一输入走两条路径映射出同一年份；>=100 原样使用。
+fn expand_two_digit_year(s: &str) -> Option<i32> {
+    let y: u32 = s.parse().ok()?;
+    if y < 100 {
+        Some(if y < 50 {
+            y as i32 + 2000
+        } else {
+            y as i32 + 1900
+        })
+    } else {
+        Some(y as i32)
+    }
+}
+
+/// "HH:MM:SS" → (时, 分, 秒)。
+fn parse_hms(s: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let h: u32 = parts[0].parse().ok()?;
+    let m: u32 = parts[1].parse().ok()?;
+    let sec: u32 = parts[2].parse().ok()?;
+    Some((h, m, sec))
+}
+
+/// 组装 UTC 时刻；日期/时间字段越界（如 2 月 30 日、25 时）返回 None。
+fn naive_utc(
+    year: i32,
+    month: u32,
+    day: u32,
+    h: u32,
+    m: u32,
+    sec: u32,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let naive = chrono::NaiveDateTime::from_ymd_opt(year, month, day)?.and_hms_opt(h, m, sec)?;
+    Some(naive.and_utc())
 }
 
 /// 空密钥不发送鉴权头（免鉴权上游 / 网关侧 IP 白名单场景）。
@@ -882,6 +1008,105 @@ mod tests {
             stream_timeout >= Duration::from_secs(6 * 3600),
             "流式总超时应远大于 300s 的 api_timeout，实际 {stream_timeout:?}"
         );
+    }
+
+    /// 构造仅含 `Retry-After` 头的 HeaderMap。
+    fn retry_after_headers(value: &str) -> http::HeaderMap {
+        let mut map = http::HeaderMap::new();
+        map.insert(
+            http::header::RETRY_AFTER,
+            value.parse().expect("测试头值须为合法 HeaderValue"),
+        );
+        map
+    }
+
+    /// delta-seconds 形式（既有行为不回归）+ 畸形值兜底。
+    #[test]
+    fn retry_after_delta_seconds() {
+        assert_eq!(
+            parse_retry_after_str("120").unwrap(),
+            Duration::from_secs(120)
+        );
+        // 首尾空白容忍
+        assert_eq!(
+            parse_retry_after_str("  30 ").unwrap(),
+            Duration::from_secs(30)
+        );
+        // 非数字/空/负数 → None（行为与既往一致）
+        assert!(parse_retry_after_str("abc").is_none());
+        assert!(parse_retry_after_str("").is_none());
+        assert!(parse_retry_after_str("-5").is_none());
+    }
+
+    /// RFC 1123 IMF-fixdate（RFC 9110 首选形式）解析为「距该时刻的秒数」。
+    #[test]
+    fn retry_after_http_date_rfc1123() {
+        // 未来时刻：≈ 7200s（容差 60s，覆盖测试运行时刻漂移）
+        let future = chrono::Utc::now() + chrono::TimeDelta::seconds(7200);
+        let raw = future.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let d = parse_retry_after(&retry_after_headers(&raw)).expect("RFC 1123 应解析成功");
+        assert!(
+            (7200i64 - d.as_secs() as i64).abs() <= 60,
+            "期望≈7200s，实际 {d:?}"
+        );
+        // 已过时刻 → 0（客户端可立即重试）
+        let past = chrono::Utc::now() - chrono::TimeDelta::hours(1);
+        let raw = past.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        assert_eq!(
+            parse_retry_after(&retry_after_headers(&raw)),
+            Some(Duration::from_secs(0))
+        );
+    }
+
+    /// RFC 850 obsolete 形式（长星期名 + 横杠日期 + 两位年）。
+    #[test]
+    fn retry_after_http_date_rfc850() {
+        // RFC 7231 §7.1.1.1 的 obsolete 示例：1997-10-02 07:28:00 GMT → 已过 → 0
+        let d = parse_retry_after(&retry_after_headers("Sunday, 02-Oct-97 07:28:00 GMT"))
+            .expect("RFC 850 应解析成功");
+        assert_eq!(d, Duration::from_secs(0));
+        // 两位年 49 → 2049（chrono 规则 <50 → 2000+）：未来时刻
+        let when = chrono::NaiveDate::from_ymd_opt(2049, 1, 2)
+            .expect("valid date")
+            .and_hms_opt(20, 0, 0)
+            .expect("valid time")
+            .and_utc();
+        let raw = format!("{}, 02-Jan-49 20:00:00 GMT", when.format("%A"));
+        let expected = (when - chrono::Utc::now()).num_seconds();
+        let d = parse_retry_after(&retry_after_headers(&raw)).expect("RFC 850 两位年应解析成功");
+        assert!(
+            (d.as_secs() as i64 - expected).abs() <= 60,
+            "期望≈{expected}s，实际 {d:?}"
+        );
+    }
+
+    /// asctime obsolete 形式（无逗号、年份在尾、日字段可双空格）。
+    #[test]
+    fn retry_after_http_date_asctime() {
+        // RFC 7231 §7.1.1.1 的 obsolete 示例：1997-10-02 07:28:00 GMT → 已过 → 0
+        let d = parse_retry_after(&retry_after_headers("Sun Oct  2 07:28:00 1997"))
+            .expect("asctime 应解析成功");
+        assert_eq!(d, Duration::from_secs(0));
+        // 4 位年份在尾：未来时刻
+        let when = chrono::NaiveDate::from_ymd_opt(2097, 10, 2)
+            .expect("valid date")
+            .and_hms_opt(7, 28, 0)
+            .expect("valid time")
+            .and_utc();
+        let expected = (when - chrono::Utc::now()).num_seconds();
+        let d = parse_retry_after(&retry_after_headers("Sun Oct  2 07:28:00 2097"))
+            .expect("asctime 应解析成功");
+        assert!(
+            (d.as_secs() as i64 - expected).abs() <= 60,
+            "期望≈{expected}s，实际 {d:?}"
+        );
+    }
+
+    /// 越界日期字段（2 月 30 日）不 panic、按畸形返回 None。
+    #[test]
+    fn retry_after_http_date_invalid_fields() {
+        // 2023-02-30 不存在 → None
+        assert!(parse_retry_after_str("Wed, 30 Feb 2023 07:28:00 GMT").is_none());
     }
 
     fn boxed<T: Send + 'static>(

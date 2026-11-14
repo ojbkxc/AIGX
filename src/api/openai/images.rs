@@ -11,6 +11,32 @@ use crate::bridge::{BridgeContext, ImageEditFormPart};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
 
+/// images 生成型请求的换渠道重发安全判定（重复计费防线）。
+///
+/// 生成型 POST 上游计费发生在「出图成功」时；超时/传输中断/流式中断/
+/// 响应解码失败意味着在途响应丢失——上游**可能已出图已计费**，此时换
+/// 渠道重发会造成重复出图、重复计费。这类错误不重发：原样返回给客户端，
+/// 由客户端决定是否重试（客户端重试是生成型请求唯一安全的重试路径）。
+///
+/// 仅对上游**明确未完成生成**的错误换渠道（上游回了错误响应 / 限流 /
+/// 鉴权拒绝——请求必然未计费）：`is_retryable_bridge_error` 的其余集合。
+/// `AllAccountsFailed` 是账号池聚合错误（逐账号明细已丢）：保守同归
+/// 不重发——聚合里只要有一路是在途丢失，重发即有重复计费风险。
+fn images_failover_safe(e: &crate::bridge::BridgeError) -> bool {
+    use crate::bridge::BridgeError;
+    if matches!(
+        e,
+        BridgeError::Timeout { .. }
+            | BridgeError::Transport(_)
+            | BridgeError::StreamAborted
+            | BridgeError::UpstreamDecode(_)
+            | BridgeError::AllAccountsFailed(_)
+    ) {
+        return false;
+    }
+    is_retryable_bridge_error(e)
+}
+
 /// POST /v1/images/generations - 图片生成
 ///
 /// 通过 Bridge::generate_image 委托给 Bridge 处理
@@ -99,7 +125,9 @@ pub(crate) async fn handle_images_generations(
 
     let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
 
-    // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
+    // B06：failover 循环——依次尝试候选渠道。换渠道仅限「上游明确未
+    // 完成生成」的错误（见 `images_failover_safe`：在途丢失类错误
+    // 可能已计费，不重发，原样返回客户端防重复计费）
     let mut result_opt = None;
     let mut used_channel_id: Option<String> = None;
     let mut used_upstream: Option<String> = None;
@@ -131,8 +159,10 @@ pub(crate) async fn handle_images_generations(
                 break;
             }
             Err(e) => {
-                if !is_retryable_bridge_error(&e) {
-                    // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
+                if !images_failover_safe(&e) {
+                    // 客户端错误（与请求本身相关，换渠道大概率同样失败）
+                    // 或在途丢失类错误（上游可能已出图已计费）：不换渠道
+                    // 重发，原样返回给客户端（重试与否由客户端决定）。
                     last_error = Some(e);
                     used_channel_id = cid;
                     break;
@@ -504,7 +534,9 @@ pub(crate) async fn handle_images_edits(
                 break;
             }
             Err(e) => {
-                if !is_retryable_bridge_error(&e) {
+                if !images_failover_safe(&e) {
+                    // 客户端错误或在途丢失类错误：不换渠道重发（同
+                    // generations——防上游已出图已计费的重复计费）
                     last_error = Some(e);
                     used_channel_id = cid;
                     break;
