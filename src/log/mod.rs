@@ -1480,6 +1480,10 @@ impl AuditLogStore {
     /// 自己抹掉；后续删除/清空仍可再抹它，但每一次定向抹除都会留下新的
     /// 删除留痕（哈希链未实现的已知取舍，先做删除审计）。
     ///
+    /// 链式证据：被删的若本身是删除/清空留痕，新留痕**继承其原始目标**——
+    /// 否则「删原记录 + 删留痕」两步即可把删除事件的主体洗掉；继承后反复
+    /// 抹留痕只会不断产生指向同一原始删除对象的留痕，抹不尽。
+    ///
     /// 「仅管理员可操作」由 API 层 `verify_admin` 保证
     /// （`handle_delete_audit_logs` / `handle_clear_audit_logs`），存储层
     /// 无操作者上下文、不重复鉴权。
@@ -1487,10 +1491,18 @@ impl AuditLogStore {
         let keys = self.store.list("auditlog:")?;
         let target = keys.into_iter().find(|k| k.ends_with(&format!(":{id}")));
         if let Some(k) = target {
+            // 链式证据：被删的若本身是留痕记录，新留痕继承其 target
+            let chained = self
+                .store
+                .get::<AuditLog>(&k)
+                .ok()
+                .flatten()
+                .filter(|p| p.action == "audit_log.delete" || p.action == "audit_log.clear")
+                .map(|p| p.target);
             self.store.delete(&k)?;
             self.record_deletion(
                 "audit_log.delete",
-                &format!("id:{id}"),
+                &chained.unwrap_or_else(|| format!("id:{id}")),
                 serde_json::json!({ "deleted_id": id }),
             );
         }
@@ -2514,26 +2526,32 @@ mod tests {
     #[test]
     fn audit_delete_records_self_audit() {
         let s = store();
-        for id in ["keep-1", "doom-1"] {
-            s.audits.add(AuditLog::new("admin-x", "seed", id)).unwrap();
-        }
-        s.audits.delete_by_id("doom-1").unwrap();
+        // AuditLog::new 第三参是 target，id 由 add() 生成——必须按返回值断言
+        let keep = s
+            .audits
+            .add(AuditLog::new("admin-x", "seed", "keep-1"))
+            .unwrap();
+        let doom = s
+            .audits
+            .add(AuditLog::new("admin-x", "seed", "doom-1"))
+            .unwrap();
+        s.audits.delete_by_id(&doom.id).unwrap();
 
         let all = s.audits.list();
         let ids: Vec<&str> = all.iter().map(|a| a.id.as_str()).collect();
-        assert!(ids.contains(&"keep-1"), "未删目标保留：{ids:?}");
-        assert!(!ids.contains(&"doom-1"), "被删目标消失：{ids:?}");
+        assert!(ids.contains(&keep.id.as_str()), "未删目标保留：{ids:?}");
+        assert!(!ids.contains(&doom.id.as_str()), "被删目标消失：{ids:?}");
         let self_audit = all
             .iter()
             .find(|a| a.action == "audit_log.delete")
             .expect("删除必须留自审计");
-        assert_eq!(self_audit.target, "id:doom-1");
+        assert_eq!(self_audit.target, format!("id:{}", doom.id));
         assert!(
             self_audit
                 .before
                 .as_deref()
                 .unwrap_or_default()
-                .contains("doom-1"),
+                .contains(doom.id.as_str()),
             "自审计需记被删 ID"
         );
     }
@@ -2582,17 +2600,18 @@ mod tests {
     #[test]
     fn audit_self_audit_deletion_spawns_new_evidence() {
         let s = store();
-        s.audits
+        let victim = s
+            .audits
             .add(AuditLog::new("admin-x", "seed", "victim"))
             .unwrap();
-        s.audits.delete_by_id("victim").unwrap();
+        s.audits.delete_by_id(&victim.id).unwrap();
         let first_self = s
             .audits
             .list()
             .into_iter()
             .find(|a| a.action == "audit_log.delete")
             .unwrap();
-        // 抹掉这条自审计 ⇒ 又产生一条新自审计
+        // 抹掉这条自审计 ⇒ 又产生一条新自审计，且仍指向原始删除目标
         s.audits.delete_by_id(&first_self.id).unwrap();
         let selfs: Vec<_> = s
             .audits
@@ -2602,7 +2621,11 @@ mod tests {
             .collect();
         assert_eq!(selfs.len(), 1, "抹掉留痕必留新留痕");
         assert_ne!(selfs[0].id, first_self.id);
-        assert_eq!(selfs[0].target, "id:victim", "新留痕仍记原始删除目标");
+        assert_eq!(
+            selfs[0].target,
+            format!("id:{}", victim.id),
+            "新留痕仍记原始删除目标"
+        );
     }
 
     #[test]
