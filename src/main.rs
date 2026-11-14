@@ -499,7 +499,7 @@ async fn main() -> anyhow::Result<()> {
     let host_env = crate::plugin_host::process::HostEnv {
         data_dir: data_dir.to_string_lossy().into_owned(),
         host_version: env!("CARGO_PKG_VERSION").to_string(),
-        target: option_env!("TARGET").unwrap_or("unknown").to_string(),
+        target: crate::plugin_host::host_target_triple(),
         proxy: String::new(),
     };
     let plugin_host = Arc::new(crate::plugin_host::PluginHostManager::new(

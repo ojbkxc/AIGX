@@ -29,7 +29,7 @@ pub mod rpc;
 pub use callbacks::PluginCallbacks;
 pub use install::{install_from_zip, InstallError, PackManifest};
 pub use manager::{PackRuntime, PluginHostManager};
-pub use process::{PluginProcess, ProcessState, SpawnError};
+pub use process::{host_target_triple, PluginProcess, ProcessState, SpawnError};
 pub use registry::{is_native_provider, PackMeta, PackProvider, PackRegistry};
 pub use rpc::{
     CallbackHandler, Frame, FrameKind, NoopCallbacks, RpcChannel, RpcError, StreamCall,
