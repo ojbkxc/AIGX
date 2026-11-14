@@ -134,7 +134,7 @@ pub fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), InstallError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = ensure_tree_executable(dest, |p| {
+        ensure_tree_executable(dest, |p| {
             let meta = std::fs::metadata(p).ok()?;
             let mode = meta.permissions().mode();
             if mode & 0o100 == 0 {
