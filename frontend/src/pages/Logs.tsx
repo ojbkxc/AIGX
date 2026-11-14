@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Trash2, Eraser, EyeOff, Eye, Search } from 'lucide-react';
+import { Trash2, Eraser, EyeOff, Eye, Search, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin, fmtCompact } from '../lib/utils';
 import { fmtCost } from '../lib/format';
@@ -854,6 +854,17 @@ export default function Logs(): JSX.Element {
       <Card title={`${tab === 'requests' ? t('请求日志') : t('审计日志')} (${total})`}>
         {loading ? (
           <Loading text={t('加载中')} />
+        ) : error && logs.length === 0 ? (
+          /* 接口失败与「没数据」不可区分的修复：加载失败且无数据时，卡片区
+             明确进入错误态并给重试入口（页级 error-message 已展示完整报错，
+             此处不重复文案）。有陈旧数据时保留表格 + 页级横幅。 */
+          <div style={{ textAlign: 'center', padding: '32px 16px' }}>
+            <div className="error-message">{t('日志加载失败，请重试')}</div>
+            <Button size="sm" variant="outline" style={{ marginTop: 12 }} onClick={() => void load()}>
+              <RefreshCw size={13} style={{ marginRight: 4 }} />
+              {t('重试')}
+            </Button>
+          </div>
         ) : view === 'timeline' && tab === 'requests' ? (
           renderTimeline()
         ) : logs.length === 0 ? (

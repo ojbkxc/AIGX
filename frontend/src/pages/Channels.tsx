@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -365,6 +365,417 @@ function readLsRaw<T>(key: string): T | null {
   }
 }
 
+/** 行渲染窗口上限：单页行数超过此值只渲染前 N 行（表格容器已有界滚动 + sticky 表头）。
+ *  当前 PAGE_SIZES 最大 100，正常路径不会触发；此为上限防护，防未来放开 'all' 档。 */
+const MAX_RENDER_ROWS = 200;
+/** 非编辑行传入的稳定空值（避免 editValue 变化波及全部行 memo） */
+const EMPTY_EDIT_VALUE = '';
+
+/**
+ * 显示名 / 时间格式化工具（模块级）：行组件 ChannelRow 与组件内 describeBalanceRefresh
+ * 共用，`t` 显式传入——从组件体内联函数提升至此。
+ */
+function typeLabel(val: string, t: (key: string) => string): string {
+  const found = CHANNEL_TYPES.find((x) => x.value === val);
+  if (!found) return val;
+  return found.isRaw ? found.labelKey : t(found.labelKey);
+}
+
+function formatRelativeTime(timestamp: number, t: (key: string) => string): string {
+  const now = Date.now();
+  const diff = now - timestamp;
+  const seconds = Math.floor(diff / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (seconds < 60) return t('刚刚');
+  if (minutes < 60) return `${minutes}${t('分钟前')}`;
+  if (hours < 24) return `${hours}${t('小时前')}`;
+  if (days < 7) return `${days}${t('天前')}`;
+  return new Date(timestamp).toLocaleDateString();
+}
+
+/** 余额双徽章（new-api BalanceCell：Used 红 / Remaining 绿） */
+function getBalanceVariant(v: number | undefined, unit?: string): string {
+  if (v === undefined) return 'neutral';
+  if (v < 0) return 'danger';
+  // 百分比余额（OpenCode / 商汤）：<20% 告警；金额：<$5 告警
+  const warn = (unit || '').toUpperCase() === '%' ? 20 : 5;
+  return v < warn ? 'warning' : 'success';
+}
+
+/** 行内交互回调面（经 ref 透传，身份恒定，见组件内 rowCallbacks） */
+interface ChannelRowCallbacks {
+  copyText: (text: string) => void;
+  toggleOne: (id: string | number) => void;
+  handleInlineUpdate: (id: string | number, field: 'priority' | 'weight', value: number) => Promise<void>;
+  handleUpdateBalance: (id: string | number) => Promise<void>;
+  handleTest: (id: string | number) => Promise<void>;
+  handleToggle: (ch: ChannelItem) => void;
+  handleDelete: (id: string | number) => void;
+  openChat: (ch: ChannelItem) => void;
+  openRowMenu: (e: React.MouseEvent<HTMLButtonElement>, id: string | number) => void;
+  goManageAccounts: (ch: ChannelItem) => void;
+  describeBalanceRefresh: (ch: ChannelItem) => { state: 'off' | 'ok' | 'error'; title: string };
+  setActiveIndex: (i: number) => void;
+  setEditingField: (f: { id: string | number; field: 'priority' | 'weight' } | null) => void;
+  setEditValue: (v: string) => void;
+}
+
+interface ChannelRowProps {
+  ch: ChannelItem;
+  index: number;
+  t: (key: string) => string;
+  colVisible: Record<ChColKey, boolean>;
+  colAlign: Record<ChColKey, ChAlign>;
+  isSelected: boolean;
+  isActive: boolean;
+  editingPriority: boolean;
+  editingWeight: boolean;
+  editValue: string;
+  acctEnabled: number | null;
+  acctTotal: number | null;
+  balanceUpdating: boolean;
+  testing: boolean;
+  callbacks: React.MutableRefObject<ChannelRowCallbacks>;
+  registerRow: (index: number) => (el: HTMLTableRowElement | null) => void;
+}
+
+/**
+ * 渠道表行（memo 行级隔离）：筛选/多选/hover 高亮只重渲染相关行。
+ * 交互全部经 callbacks ref 透传（每次父渲染刷新内容、引用恒定），
+ * 行级 props 除 t/colVisible/colAlign 外全部 primitive——任一行状态变化
+ * 不波及其余行；pageRows 切片保持 ch 对象身份，筛选后未变行 memo 命中跳过。
+ */
+const ChannelRow = memo(function ChannelRow({
+  ch,
+  index,
+  t,
+  colVisible,
+  colAlign,
+  isSelected,
+  isActive,
+  editingPriority,
+  editingWeight,
+  editValue,
+  acctEnabled,
+  acctTotal,
+  balanceUpdating,
+  testing,
+  callbacks,
+  registerRow,
+}: ChannelRowProps): JSX.Element {
+  const colCls = (key: ChColKey): string => (colVisible[key] ? '' : ' ch-hidden');
+  const mappingEntries = Object.entries(ch.model_mapping || {});
+  const TypeIcon = TYPE_ICONS[ch.channel_type] || Sparkles;
+  const models = ch.models || [];
+
+  return (
+    <tr
+      ref={registerRow(index)}
+      className={`${isSelected ? 'selected' : ''} ${isActive ? 'kbd-active' : ''} ${ch.status === 'enabled' ? '' : 'ch-off'}`}
+      onMouseEnter={() => callbacks.current.setActiveIndex(index)}
+    >
+      <td className="col-select">
+        <input
+          type="checkbox"
+          checked={isSelected}
+          onChange={() => callbacks.current.toggleOne(ch.id)}
+          aria-label={t('选择')}
+        />
+      </td>
+      <td className={`col-id${colCls('id')} ta-${colAlign.id}`} title={String(ch.id)}>
+        {ch.seq ?? String(ch.id).slice(0, 8)}
+      </td>
+      <td className={`col-name${colCls('name')} ta-${colAlign.name}`}>
+        <div className="ch-name ch-copy" title={t('点击复制名称')} onClick={() => callbacks.current.copyText(ch.name)}>{ch.name}</div>
+        {(ch.base_url || ch.account_id) && (
+          <div
+            className="ch-sub ch-copy"
+            title={t('点击复制地址')}
+            onClick={() => callbacks.current.copyText(ch.base_url || ch.account_id || '')}
+          >
+            {ch.base_url || ch.account_id}
+          </div>
+        )}
+      </td>
+      {/* 形态（API Key / 账号池）：账号池型是登录态账号的凭证容器 */}
+      <td className={`col-kind${colCls('kind')} ta-${colAlign.kind}`}>
+        <span className={`ch-kind-badge ${ch.channel_type === 'account' ? 'is-account' : 'is-key'}`}>
+          {ch.channel_type === 'account' ? <Users size={12} /> : <KeyRound size={12} />}
+          {ch.channel_type === 'account' ? t('账号池') : t('API Key')}
+        </span>
+      </td>
+      {/* 账号数（仅账号池型有值：enabled/total，来自 stats；失败降级 —） */}
+      <td className={`col-accounts${colCls('accounts')} ta-${colAlign.accounts}`}>
+        {(() => {
+          if (ch.channel_type !== 'account') return '—';
+          if (acctEnabled === null || acctTotal === null) return '—';
+          return `${acctEnabled}/${acctTotal}`;
+        })()}
+      </td>
+      <td className={`col-type${colCls('type')} ta-${colAlign.type}`}>
+        <span className="ch-type-badge">
+          <TypeIcon size={12} />
+          {typeLabel(ch.channel_type, t)}
+        </span>
+      </td>
+      <td className={`col-status${colCls('status')} ta-${colAlign.status}`}>
+        <span
+          className={`ch-status-badge ${ch.status === 'enabled' ? 'ok' : 'bad'}`}
+          title={ch.last_error || undefined}
+        >
+          {ch.status === 'enabled' ? t('启用') : t('禁用')}
+        </span>
+      </td>
+      <td className={`col-models${colCls('models')} ta-${colAlign.models}`}>
+        {models.length === 0
+          ? <span className="ch-models-all">{t('全部')}</span>
+          : (
+            <div className="ch-models">
+              {models.slice(0, 3).map((m) => (
+                <span
+                  key={m}
+                  className="ch-model-badge ch-copy"
+                  style={{ color: modelBadgeColor(m), borderColor: modelBadgeColor(m) }}
+                  title={t('点击复制模型名')}
+                  onClick={() => callbacks.current.copyText(m)}
+                >
+                  {m}
+                </span>
+              ))}
+              {models.length > 3 && (
+                <span
+                  className="ch-model-badge ch-models-more"
+                  title={models.slice(3).join(', ')}
+                >
+                  +{models.length - 3}
+                </span>
+              )}
+            </div>
+          )}
+        {mappingEntries.length > 0 && (
+          <div
+            className="ch-mapping"
+            title={mappingEntries.map(([k, v]) => `${k} → ${v}`).join('\n')}
+          >
+            <ArrowLeftRight size={11} />
+            {t('映射')} {mappingEntries.length}
+          </div>
+        )}
+      </td>
+      <td className={`col-priority${colCls('priority')} ta-${colAlign.priority}`}>
+        {editingPriority ? (
+          <input
+            type="number"
+            value={editValue}
+            onChange={(e) => callbacks.current.setEditValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                void callbacks.current.handleInlineUpdate(ch.id, 'priority', parseInt(editValue, 10));
+              } else if (e.key === 'Escape') {
+                callbacks.current.setEditingField(null);
+              }
+            }}
+            className="ch-num-input"
+            autoFocus
+          />
+        ) : (
+          <span
+            className="inline-editable"
+            onClick={() => {
+              callbacks.current.setEditingField({ id: ch.id, field: 'priority' });
+              callbacks.current.setEditValue(String(ch.priority));
+            }}
+            title={t('点击编辑')}
+          >
+            {ch.priority}
+          </span>
+        )}
+      </td>
+      <td className={`col-weight${colCls('weight')} ta-${colAlign.weight}`}>
+        {editingWeight ? (
+          <input
+            type="number"
+            value={editValue}
+            onChange={(e) => callbacks.current.setEditValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                void callbacks.current.handleInlineUpdate(ch.id, 'weight', parseInt(editValue, 10));
+              } else if (e.key === 'Escape') {
+                callbacks.current.setEditingField(null);
+              }
+            }}
+            className="ch-num-input"
+            autoFocus
+          />
+        ) : (
+          <span
+            className="inline-editable"
+            onClick={() => {
+              callbacks.current.setEditingField({ id: ch.id, field: 'weight' });
+              callbacks.current.setEditValue(String(ch.weight));
+            }}
+            title={t('点击编辑')}
+          >
+            {ch.weight}
+          </span>
+        )}
+      </td>
+      <td className={`col-balance${colCls('balance')} ta-${colAlign.balance}`}>
+        <button
+          className="balance-cell"
+          onClick={() => void callbacks.current.handleUpdateBalance(ch.id)}
+          disabled={balanceUpdating}
+          title={t('点击更新余额')}
+        >
+          {balanceUpdating ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : (
+            <>
+              <span
+                className={`ch-balance-badge v-${getBalanceVariant(ch.balance, ch.balance_unit)}`}
+                title={ch.balance_scheme ? `${BALANCE_SCHEME_LABELS[ch.balance_scheme] || ch.balance_scheme}${ch.balance_unit ? ` · ${ch.balance_unit}` : ''}` : undefined}
+              >
+                {ch.balance !== undefined
+                  ? formatBalance(ch.balance, ch.balance_unit)
+                  : '—'}
+              </span>
+              {ch.credit !== undefined && (
+                <span className={`ch-balance-badge v-neutral ch-balance-credit`}>
+                  {formatBalance(ch.credit, ch.balance_unit)}
+                </span>
+              )}
+            </>
+          )}
+        </button>
+        {/* #32 PR3 周期余额巡检徽标：关闭态也画（默认态更需要看得见）。
+            独立于上面那个「点击更新余额」的 button —— 塞进按钮里
+            会把 tooltip 抢成按钮的「点击更新余额」，两种口径就混了。 */}
+        {(() => {
+          const refresh = callbacks.current.describeBalanceRefresh(ch);
+          return (
+            <span
+              className={`ch-balance-refresh s-${refresh.state}`}
+              data-testid="balance-refresh"
+              data-state={refresh.state}
+              data-interval={normalizeIntervalSecs(ch.balance_query_interval_secs) ?? 0}
+              title={refresh.title}
+              aria-label={refresh.title}
+            >
+              {refresh.state === 'error'
+                ? <AlertTriangle size={11} />
+                : <Timer size={11} />}
+            </span>
+          );
+        })()}
+      </td>
+      <td className={`col-response${colCls('response')} ta-${colAlign.response}`}>
+        {ch.response_time !== undefined ? (
+          <span className={`response-time-badge ${ch.response_time < 500 ? 'fast' : ch.response_time < 2000 ? 'medium' : 'slow'}`}>
+            {ch.response_time}ms
+          </span>
+        ) : '—'}
+      </td>
+      <td className={`col-testtime${colCls('testtime')} ta-${colAlign.testtime}`}>
+        {ch.test_time ? (
+          <span title={new Date(ch.test_time * 1000).toLocaleString()}>
+            {formatRelativeTime(ch.test_time * 1000, t)}
+          </span>
+        ) : '—'}
+      </td>
+      <td className="col-actions">
+        <div className="ch-actions">
+          {ch.channel_type === 'account' ? (
+            <>
+              {/* 账号池型：凭证在账号池页管理（管理账号下钻），
+                  这里不提供「编辑 Key / 测试连通性」 */}
+              <button
+                type="button"
+                className="ch-icon-btn"
+                title={t('管理账号')}
+                onClick={() => callbacks.current.goManageAccounts(ch)}
+              >
+                <Users size={15} />
+              </button>
+              <button
+                type="button"
+                className="ch-icon-btn"
+                title={t('查询余额')}
+                onClick={() => void callbacks.current.handleUpdateBalance(ch.id)}
+                disabled={balanceUpdating}
+              >
+                {balanceUpdating
+                  ? <Loader2 size={15} className="animate-spin" />
+                  : <DollarSign size={15} />}
+              </button>
+              <button
+                type="button"
+                className={`ch-icon-btn ${ch.status === 'enabled' ? 'ch-danger-hover' : ''}`}
+                title={ch.status === 'enabled' ? t('停用') : t('启用')}
+                onClick={() => callbacks.current.handleToggle(ch)}
+              >
+                {ch.status === 'enabled' ? <Power size={15} /> : <PowerOff size={15} />}
+              </button>
+              <div className="ch-row-menu">
+                <button
+                  type="button"
+                  className="ch-icon-btn ch-danger-hover"
+                  title={t('删除供应商')}
+                  onClick={() => callbacks.current.handleDelete(ch.id)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="ch-icon-btn"
+                title={t('对话调试')}
+                onClick={() => callbacks.current.openChat(ch)}
+              >
+                <MessageSquare size={15} />
+              </button>
+              <button
+                type="button"
+                className="ch-icon-btn"
+                title={t('测试连通性')}
+                onClick={() => void callbacks.current.handleTest(ch.id)}
+                disabled={testing}
+              >
+                {testing
+                  ? <Loader2 size={15} className="animate-spin" />
+                  : <Gauge size={15} />}
+              </button>
+              <button
+                type="button"
+                className={`ch-icon-btn ${ch.status === 'enabled' ? 'ch-danger-hover' : ''}`}
+                title={ch.status === 'enabled' ? t('停用') : t('启用')}
+                onClick={() => callbacks.current.handleToggle(ch)}
+              >
+                {ch.status === 'enabled' ? <Power size={15} /> : <PowerOff size={15} />}
+              </button>
+              <div className="ch-row-menu">
+                <button
+                  type="button"
+                  className="ch-icon-btn"
+                  title={t('更多操作')}
+                  onClick={(e) => callbacks.current.openRowMenu(e, ch.id)}
+                >
+                  <MoreHorizontal size={15} />
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+});
+
 interface ChannelsProps {
   /** 作为「供应商」页的子页内嵌时隐藏自身标题区 */
   embedded?: boolean;
@@ -722,6 +1133,11 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     [filtered, page, pageSizeNum],
   );
 
+  // 渲染窗口截断：单页行数超过 MAX_RENDER_ROWS 只渲染前 N 行（表格容器已有界滚动 + sticky 表头）
+  const renderRows = pageRows.length > MAX_RENDER_ROWS
+    ? pageRows.slice(0, MAX_RENDER_ROWS)
+    : pageRows;
+
   // 档位变化时收敛页码（删渠道后当前页可能越界）
   useEffect(() => {
     setPage((prev) => Math.min(prev, totalPages));
@@ -749,8 +1165,6 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     for (const item of colState.items) map[item.key as ChColKey] = item.align;
     return map;
   }, [colState]);
-
-  const colCls = (key: ChColKey): string => (colVisible[key] ? '' : ' ch-hidden');
 
   /** 列设置变更（面板回调；persist=true 才落盘） */
   const commitColItems = useCallback((next: TableColumnItem[], persist: boolean): void => {
@@ -1313,12 +1727,6 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     });
   };
 
-  const typeLabel = (val: string): string => {
-    const found = CHANNEL_TYPES.find((x) => x.value === val);
-    if (!found) return val;
-    return found.isRaw ? found.labelKey : t(found.labelKey);
-  };
-
   // ── 内联编辑处理 ──
   // PATCH 部分更新：PUT 端点要求全量字段（name 必填），单字段提交会 422
   const handleInlineUpdate = async (id: string | number, field: 'priority' | 'weight', value: number): Promise<void> => {
@@ -1367,31 +1775,6 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     }
   };
 
-  // ── 相对时间格式化 ──
-  const formatRelativeTime = (timestamp: number): string => {
-    const now = Date.now();
-    const diff = now - timestamp;
-    const seconds = Math.floor(diff / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-    const days = Math.floor(hours / 24);
-
-    if (seconds < 60) return t('刚刚');
-    if (minutes < 60) return `${minutes}${t('分钟前')}`;
-    if (hours < 24) return `${hours}${t('小时前')}`;
-    if (days < 7) return `${days}${t('天前')}`;
-    return new Date(timestamp).toLocaleDateString();
-  };
-
-  // 余额双徽章（new-api BalanceCell：Used 红 / Remaining 绿）
-  const getBalanceVariant = (v: number | undefined, unit?: string): string => {
-    if (v === undefined) return 'neutral';
-    if (v < 0) return 'danger';
-    // 百分比余额（OpenCode / 商汤）：<20% 告警；金额：<$5 告警
-    const warn = (unit || '').toUpperCase() === '%' ? 20 : 5;
-    return v < warn ? 'warning' : 'success';
-  };
-
   /**
    * #32 PR3 周期余额巡检徽章（余额格右侧那条）。
    *
@@ -1417,7 +1800,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     const intervalText = preset ? t(preset.labelKey) : `${secs}${t('秒')}`;
     const at =
       typeof ch.balance_last_query_at === 'number' && ch.balance_last_query_at > 0
-        ? formatRelativeTime(ch.balance_last_query_at * 1000)
+        ? formatRelativeTime(ch.balance_last_query_at * 1000, t)
         : t('从未查询');
     // 秒 → 毫秒：后端这三条是 unix **秒**（`chrono::Utc::now().timestamp()`），
     // 而 formatRelativeTime 收毫秒。直接把秒喂进去会得到「56 年前」。
@@ -1425,6 +1808,38 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     if (!ch.balance_last_error) return { state: 'ok', title: base };
     return { state: 'error', title: `${base} · ${t('自动查询失败')}: ${ch.balance_last_error}` };
   };
+
+  // 行级 memo 交互面：ref 对象身份恒定（内容每次渲染刷新），
+  // 直接传 ref 本体给 ChannelRow —— 传 .current 会拿到逐渲染新对象，memo 全失效
+  const rowCallbacks = useRef<ChannelRowCallbacks>({} as ChannelRowCallbacks);
+  rowCallbacks.current = {
+    copyText,
+    toggleOne,
+    handleInlineUpdate,
+    handleUpdateBalance,
+    handleTest,
+    handleToggle,
+    handleDelete,
+    openChat,
+    openRowMenu,
+    goManageAccounts,
+    describeBalanceRefresh,
+    setActiveIndex,
+    setEditingField,
+    setEditValue,
+  };
+
+  // 行 ref 回调按索引缓存（身份稳定，避免每次渲染 detach/attach 丢焦点）
+  const rowRefCallbacks = useRef<Map<number, (el: HTMLTableRowElement | null) => void> | null>(null);
+  const registerRow = useCallback((i: number): ((el: HTMLTableRowElement | null) => void) => {
+    if (rowRefCallbacks.current === null) rowRefCallbacks.current = new Map();
+    let cb = rowRefCallbacks.current.get(i);
+    if (!cb) {
+      cb = (el: HTMLTableRowElement | null): void => { rowRefs.current[i] = el; };
+      rowRefCallbacks.current.set(i, cb);
+    }
+    return cb;
+  }, [rowRefs]);
 
   // 仅首次加载显示整页骨架：搜索/翻页时若也早退，搜索框与工具栏会被卸载，
   // 用户输入到一半焦点就丢了。首屏之后改为表格区局部 loading。
@@ -1647,318 +2062,37 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                   </tr>
                 </thead>
                 <tbody>
-                  {pageRows.map((ch, i) => {
-                    const isEditingPriority = editingField?.id === ch.id && editingField?.field === 'priority';
-                    const isEditingWeight = editingField?.id === ch.id && editingField?.field === 'weight';
-                    const mappingEntries = Object.entries(ch.model_mapping || {});
-                    const TypeIcon = TYPE_ICONS[ch.channel_type] || Sparkles;
-                    const models = ch.models || [];
-
-                    return (
-                      <tr
-                        key={ch.id}
-                        ref={(el) => { rowRefs.current[i] = el; }}
-                        className={`${selected.has(ch.id) ? 'selected' : ''} ${activeIndex === i ? 'kbd-active' : ''} ${ch.status === 'enabled' ? '' : 'ch-off'}`}
-                        onMouseEnter={() => setActiveIndex(i)}
+                  {renderRows.map((ch, i) => (
+                    <ChannelRow
+                      key={ch.id}
+                      ch={ch}
+                      index={i}
+                      t={t}
+                      colVisible={colVisible}
+                      colAlign={colAlign}
+                      isSelected={selected.has(ch.id)}
+                      isActive={activeIndex === i}
+                      editingPriority={editingField?.id === ch.id && editingField?.field === 'priority'}
+                      editingWeight={editingField?.id === ch.id && editingField?.field === 'weight'}
+                      editValue={editingField?.id === ch.id ? editValue : EMPTY_EDIT_VALUE}
+                      acctEnabled={accountStats[String(ch.id)]?.enabled ?? null}
+                      acctTotal={accountStats[String(ch.id)]?.total ?? null}
+                      balanceUpdating={updatingBalance.has(ch.id)}
+                      testing={testingId === ch.id}
+                      callbacks={rowCallbacks}
+                      registerRow={registerRow}
+                    />
+                  ))}
+                  {pageRows.length > MAX_RENDER_ROWS && (
+                    <tr>
+                      <td
+                        colSpan={visibleColKeys.length + 2}
+                        style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: 12, padding: '8px 0' }}
                       >
-                        <td className="col-select">
-                          <input
-                            type="checkbox"
-                            checked={selected.has(ch.id)}
-                            onChange={() => toggleOne(ch.id)}
-                            aria-label={t('选择')}
-                          />
-                        </td>
-                        <td className={`col-id${colCls('id')} ta-${colAlign.id}`} title={String(ch.id)}>
-                          {ch.seq ?? String(ch.id).slice(0, 8)}
-                        </td>
-                        <td className={`col-name${colCls('name')} ta-${colAlign.name}`}>
-                          <div className="ch-name ch-copy" title={t('点击复制名称')} onClick={() => copyText(ch.name)}>{ch.name}</div>
-                          {(ch.base_url || ch.account_id) && (
-                            <div
-                              className="ch-sub ch-copy"
-                              title={t('点击复制地址')}
-                              onClick={() => copyText(ch.base_url || ch.account_id || '')}
-                            >
-                              {ch.base_url || ch.account_id}
-                            </div>
-                          )}
-                        </td>
-                        {/* 形态（API Key / 账号池）：账号池型是登录态账号的凭证容器 */}
-                        <td className={`col-kind${colCls('kind')} ta-${colAlign.kind}`}>
-                          <span className={`ch-kind-badge ${ch.channel_type === 'account' ? 'is-account' : 'is-key'}`}>
-                            {ch.channel_type === 'account' ? <Users size={12} /> : <KeyRound size={12} />}
-                            {ch.channel_type === 'account' ? t('账号池') : t('API Key')}
-                          </span>
-                        </td>
-                        {/* 账号数（仅账号池型有值：enabled/total，来自 stats；失败降级 —） */}
-                        <td className={`col-accounts${colCls('accounts')} ta-${colAlign.accounts}`}>
-                          {(() => {
-                            if (ch.channel_type !== 'account') return '—';
-                            const s = accountStats[String(ch.id)];
-                            return s ? `${s.enabled}/${s.total}` : '—';
-                          })()}
-                        </td>
-                        <td className={`col-type${colCls('type')} ta-${colAlign.type}`}>
-                          <span className="ch-type-badge">
-                            <TypeIcon size={12} />
-                            {typeLabel(ch.channel_type)}
-                          </span>
-                        </td>
-                        <td className={`col-status${colCls('status')} ta-${colAlign.status}`}>
-                          <span
-                            className={`ch-status-badge ${ch.status === 'enabled' ? 'ok' : 'bad'}`}
-                            title={ch.last_error || undefined}
-                          >
-                            {ch.status === 'enabled' ? t('启用') : t('禁用')}
-                          </span>
-                        </td>
-                        <td className={`col-models${colCls('models')} ta-${colAlign.models}`}>
-                          {models.length === 0
-                            ? <span className="ch-models-all">{t('全部')}</span>
-                            : (
-                              <div className="ch-models">
-                                {models.slice(0, 3).map((m) => (
-                                  <span
-                                    key={m}
-                                    className="ch-model-badge ch-copy"
-                                    style={{ color: modelBadgeColor(m), borderColor: modelBadgeColor(m) }}
-                                    title={t('点击复制模型名')}
-                                    onClick={() => copyText(m)}
-                                  >
-                                    {m}
-                                  </span>
-                                ))}
-                                {models.length > 3 && (
-                                  <span
-                                    className="ch-model-badge ch-models-more"
-                                    title={models.slice(3).join(', ')}
-                                  >
-                                    +{models.length - 3}
-                                  </span>
-                                )}
-                              </div>
-                            )}
-                          {mappingEntries.length > 0 && (
-                            <div
-                              className="ch-mapping"
-                              title={mappingEntries.map(([k, v]) => `${k} → ${v}`).join('\n')}
-                            >
-                              <ArrowLeftRight size={11} />
-                              {t('映射')} {mappingEntries.length}
-                            </div>
-                          )}
-                        </td>
-                        <td className={`col-priority${colCls('priority')} ta-${colAlign.priority}`}>
-                          {isEditingPriority ? (
-                            <input
-                              type="number"
-                              value={editValue}
-                              onChange={(e) => setEditValue(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  void handleInlineUpdate(ch.id, 'priority', parseInt(editValue, 10));
-                                } else if (e.key === 'Escape') {
-                                  setEditingField(null);
-                                }
-                              }}
-                              className="ch-num-input"
-                              autoFocus
-                            />
-                          ) : (
-                            <span
-                              className="inline-editable"
-                              onClick={() => {
-                                setEditingField({ id: ch.id, field: 'priority' });
-                                setEditValue(String(ch.priority));
-                              }}
-                              title={t('点击编辑')}
-                            >
-                              {ch.priority}
-                            </span>
-                          )}
-                        </td>
-                        <td className={`col-weight${colCls('weight')} ta-${colAlign.weight}`}>
-                          {isEditingWeight ? (
-                            <input
-                              type="number"
-                              value={editValue}
-                              onChange={(e) => setEditValue(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  void handleInlineUpdate(ch.id, 'weight', parseInt(editValue, 10));
-                                } else if (e.key === 'Escape') {
-                                  setEditingField(null);
-                                }
-                              }}
-                              className="ch-num-input"
-                              autoFocus
-                            />
-                          ) : (
-                            <span
-                              className="inline-editable"
-                              onClick={() => {
-                                setEditingField({ id: ch.id, field: 'weight' });
-                                setEditValue(String(ch.weight));
-                              }}
-                              title={t('点击编辑')}
-                            >
-                              {ch.weight}
-                            </span>
-                          )}
-                        </td>
-                        <td className={`col-balance${colCls('balance')} ta-${colAlign.balance}`}>
-                          <button
-                            className="balance-cell"
-                            onClick={() => handleUpdateBalance(ch.id)}
-                            disabled={updatingBalance.has(ch.id)}
-                            title={t('点击更新余额')}
-                          >
-                            {updatingBalance.has(ch.id) ? (
-                              <Loader2 size={13} className="animate-spin" />
-                            ) : (
-                              <>
-                                <span
-                                  className={`ch-balance-badge v-${getBalanceVariant(ch.balance, ch.balance_unit)}`}
-                                  title={ch.balance_scheme ? `${BALANCE_SCHEME_LABELS[ch.balance_scheme] || ch.balance_scheme}${ch.balance_unit ? ` · ${ch.balance_unit}` : ''}` : undefined}
-                                >
-                                  {ch.balance !== undefined
-                                    ? formatBalance(ch.balance, ch.balance_unit)
-                                    : '—'}
-                                </span>
-                                {ch.credit !== undefined && (
-                                  <span className={`ch-balance-badge v-neutral ch-balance-credit`}>
-                                    {formatBalance(ch.credit, ch.balance_unit)}
-                                  </span>
-                                )}
-                              </>
-                            )}
-                          </button>
-                          {/* #32 PR3 周期余额巡检徽标：关闭态也画（默认态更需要看得见）。
-                              独立于上面那个「点击更新余额」的 button —— 塞进按钮里
-                              会把 tooltip 抢成按钮的「点击更新余额」，两种口径就混了。 */}
-                          {(() => {
-                            const refresh = describeBalanceRefresh(ch);
-                            return (
-                              <span
-                                className={`ch-balance-refresh s-${refresh.state}`}
-                                data-testid="balance-refresh"
-                                data-state={refresh.state}
-                                data-interval={normalizeIntervalSecs(ch.balance_query_interval_secs) ?? 0}
-                                title={refresh.title}
-                                aria-label={refresh.title}
-                              >
-                                {refresh.state === 'error'
-                                  ? <AlertTriangle size={11} />
-                                  : <Timer size={11} />}
-                              </span>
-                            );
-                          })()}
-                        </td>
-                        <td className={`col-response${colCls('response')} ta-${colAlign.response}`}>
-                          {ch.response_time !== undefined ? (
-                            <span className={`response-time-badge ${ch.response_time < 500 ? 'fast' : ch.response_time < 2000 ? 'medium' : 'slow'}`}>
-                              {ch.response_time}ms
-                            </span>
-                          ) : '—'}
-                        </td>
-                        <td className={`col-testtime${colCls('testtime')} ta-${colAlign.testtime}`}>
-                          {ch.test_time ? (
-                            <span title={new Date(ch.test_time * 1000).toLocaleString()}>
-                              {formatRelativeTime(ch.test_time * 1000)}
-                            </span>
-                          ) : '—'}
-                        </td>
-                        <td className="col-actions">
-                          <div className="ch-actions">
-                            {ch.channel_type === 'account' ? (
-                              <>
-                                {/* 账号池型：凭证在账号池页管理（管理账号下钻），
-                                    这里不提供「编辑 Key / 测试连通性」 */}
-                                <button
-                                  type="button"
-                                  className="ch-icon-btn"
-                                  title={t('管理账号')}
-                                  onClick={() => goManageAccounts(ch)}
-                                >
-                                  <Users size={15} />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ch-icon-btn"
-                                  title={t('查询余额')}
-                                  onClick={() => handleUpdateBalance(ch.id)}
-                                  disabled={updatingBalance.has(ch.id)}
-                                >
-                                  {updatingBalance.has(ch.id)
-                                    ? <Loader2 size={15} className="animate-spin" />
-                                    : <DollarSign size={15} />}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={`ch-icon-btn ${ch.status === 'enabled' ? 'ch-danger-hover' : ''}`}
-                                  title={ch.status === 'enabled' ? t('停用') : t('启用')}
-                                  onClick={() => handleToggle(ch)}
-                                >
-                                  {ch.status === 'enabled' ? <Power size={15} /> : <PowerOff size={15} />}
-                                </button>
-                                <div className="ch-row-menu">
-                                  <button
-                                    type="button"
-                                    className="ch-icon-btn ch-danger-hover"
-                                    title={t('删除供应商')}
-                                    onClick={() => handleDelete(ch.id)}
-                                  >
-                                    <Trash2 size={15} />
-                                  </button>
-                                </div>
-                              </>
-                            ) : (
-                              <>
-                                <button
-                                  type="button"
-                                  className="ch-icon-btn"
-                                  title={t('对话调试')}
-                                  onClick={() => openChat(ch)}
-                                >
-                                  <MessageSquare size={15} />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ch-icon-btn"
-                                  title={t('测试连通性')}
-                                  onClick={() => handleTest(ch.id)}
-                                  disabled={testingId === ch.id}
-                                >
-                                  {testingId === ch.id
-                                    ? <Loader2 size={15} className="animate-spin" />
-                                    : <Gauge size={15} />}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={`ch-icon-btn ${ch.status === 'enabled' ? 'ch-danger-hover' : ''}`}
-                                  title={ch.status === 'enabled' ? t('停用') : t('启用')}
-                                  onClick={() => handleToggle(ch)}
-                                >
-                                  {ch.status === 'enabled' ? <Power size={15} /> : <PowerOff size={15} />}
-                                </button>
-                                <div className="ch-row-menu">
-                                  <button
-                                    type="button"
-                                    className="ch-icon-btn"
-                                    title={t('更多操作')}
-                                    onClick={(e) => openRowMenu(e, ch.id)}
-                                  >
-                                    <MoreHorizontal size={15} />
-                                  </button>
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                        {t('当前页行数超过渲染上限，仅渲染前 200 行，请调整每页条数后翻页查看剩余数据')}
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

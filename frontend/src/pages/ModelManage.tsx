@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -306,6 +306,30 @@ function reasoningLevelCandidates(overrides: Record<string, ModelMetaOverride>, 
 }
 
 // ── 主组件 ───────────────────────────────────────────────────────────
+
+/**
+ * 模型管理表行（memo 行级隔离）：筛选/多选只重渲染相关行。
+ * 单元格渲染经 rowCallbacks ref 透传（内容逐渲染刷新、ref 身份恒定），
+ * row/visibleCols/isSelected 为行级 primitive prop——任一行状态变化不波及其余行。
+ */
+interface MmRowCallbacks {
+  renderCell: (col: AnyCol, row: ManagedModel) => JSX.Element | null;
+}
+
+interface MmRowProps {
+  row: ManagedModel;
+  visibleCols: AnyCol[];
+  isSelected: boolean;
+  callbacks: React.MutableRefObject<MmRowCallbacks>;
+}
+
+const MmRow = memo(function MmRow({ row, visibleCols, isSelected, callbacks }: MmRowProps): JSX.Element {
+  return (
+    <tr className={`${row.enabled ? '' : 'mm-off'}${isSelected ? ' mm-sel' : ''}`}>
+      {visibleCols.map((col) => callbacks.current.renderCell(col, row))}
+    </tr>
+  );
+});
 
 export default function ModelManage(): JSX.Element {
   const { t } = useTranslation();
@@ -1630,6 +1654,11 @@ export default function ModelManage(): JSX.Element {
     }
   };
 
+  // 行级 memo 交互面：ref 对象身份恒定（内容逐渲染刷新），
+  // 传 ref 本体给 MmRow —— 传 .current 会拿到逐渲染新对象，memo 全失效
+  const rowCallbacks = useRef<MmRowCallbacks>({} as MmRowCallbacks);
+  rowCallbacks.current = { renderCell };
+
   const COL_HEAD: Record<AnyCol, { label: string; tip?: string }> = {
     check: { label: '' },
     model: { label: t('模型') },
@@ -1679,15 +1708,6 @@ export default function ModelManage(): JSX.Element {
           );
         })()}
       </th>
-    );
-  };
-
-  const renderRow = (row: ManagedModel): JSX.Element => {
-    const key = rowKey(row);
-    return (
-      <tr key={key} className={`${row.enabled ? '' : 'mm-off'}${selected.has(key) ? ' mm-sel' : ''}`}>
-        {visibleCols.map((col) => renderCell(col, row))}
-      </tr>
     );
   };
 
@@ -2112,7 +2132,15 @@ export default function ModelManage(): JSX.Element {
                                     <span className="mm-group-count">{g.rows.length}</span>
                                   </td>
                                 </tr>
-                                {shown.map(renderRow)}
+                                {shown.map((row) => (
+                                  <MmRow
+                                    key={rowKey(row)}
+                                    row={row}
+                                    visibleCols={visibleCols}
+                                    isSelected={selected.has(rowKey(row))}
+                                    callbacks={rowCallbacks}
+                                  />
+                                ))}
                                 {hidden > 0 && (
                                   <tr className="mm-tr-more">
                                     <td colSpan={visibleCols.length}>
@@ -2134,7 +2162,15 @@ export default function ModelManage(): JSX.Element {
                               </FragmentGroup>
                             );
                           })
-                        : pageRows.map(renderRow)}
+                        : pageRows.map((row) => (
+                            <MmRow
+                              key={rowKey(row)}
+                              row={row}
+                              visibleCols={visibleCols}
+                              isSelected={selected.has(rowKey(row))}
+                              callbacks={rowCallbacks}
+                            />
+                          ))}
                     </tbody>
                   </table>
                 </div>

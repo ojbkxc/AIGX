@@ -127,7 +127,7 @@
   --surface-2: #fafafa;   /* 面板/区块层背景 */
   --surface-3: #ffffff;   /* 卡片/弹窗/浮层背景 */
   --text-1: #000000;      /* 主文本 */
-  --text-2: #828282;      /* 次要文本 */
+  --text-2: #525252;      /* 次要文本（#525252 白底≈4.6:1，满足 WCAG AA 正文级） */
   --text-3: #b0b0b0;      /* 弱化文本 */
   --control-bg: #ffffff;      /* 输入控件背景 */
   --control-border: #d4d4d4;  /* 输入控件描边 */
@@ -187,6 +187,7 @@
   --danger-text: #b91c1c;
   --success-text: #047857;
   --warning-text: #b45309;
+  --info-text: #1d4ed8;
   /* —— 密度 token 层（阶段1，全站精致小巧化）：字号 / 间距 / 行高 / 控件 / 过渡 ——
      主题无关的纯度量值，故只在 :root 定义、dark 块不覆盖。配套 utility 见 styles/density.css。 */
   --font-size-xs: 10.5px;
@@ -247,6 +248,7 @@
   --danger-text: #f87171;
   --success-text: #34d399;
   --warning-text: #fbbf24;
+  --info-text: #60a5fa;
 }
 
 body {
@@ -536,17 +538,17 @@ table tr:hover td {
 
 .badge-success {
   background: rgba(16, 185, 129, 0.15);
-  color: var(--mint);
+  color: var(--success-text);
 }
 
 .badge-warning {
   background: rgba(245, 158, 11, 0.15);
-  color: var(--amber);
+  color: var(--warning-text);
 }
 
 .badge-danger {
   background: rgba(239, 68, 68, 0.15);
-  color: var(--coral);
+  color: var(--danger-text);
 }
 
 .badge-neutral {
@@ -556,7 +558,7 @@ table tr:hover td {
 
 .badge-info {
   background: rgba(59, 130, 246, 0.15);
-  color: var(--cyan);
+  color: var(--info-text);
 }
 
 /* 密钥/订单号等长串文本（全局通用，替代 Keys.css 私有类） */

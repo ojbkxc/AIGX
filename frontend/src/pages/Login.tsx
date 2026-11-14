@@ -445,6 +445,7 @@ export default function Login(): JSX.Element {
             transition: 'border-color 0.2s ease',
           }}
           title={t('切换主题')}
+          aria-label={t('切换主题')}
         >
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '20px', height: '20px' }}>
             <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
@@ -764,7 +765,7 @@ export default function Login(): JSX.Element {
           <div className="modal" style={{ maxWidth: 380, width: '90%' }}>
             <div className="modal-header">
               <h3>{t('忘记密码')}</h3>
-              <button className="modal-close" onClick={() => setShowForgot(false)}>&times;</button>
+              <button className="modal-close" onClick={() => setShowForgot(false)} aria-label={t('关闭')}>&times;</button>
             </div>
             <div className="modal-body">
               {forgotStep === 'email' ? (

@@ -955,12 +955,59 @@ export default function AddAccountDialog({
   // 当前档搜不到而别档有时：给「看全部匹配」提示（对齐上游跨分类命中提示）
   const otherHitCount = needle && !grouped && currentCount === 0 ? allHitCount : 0;
 
+  // 弹窗焦点管理三件套（对齐 ConfirmDialog）：Escape 关闭、Tab 陷阱循环、
+  // 打开时记录并移入焦点、关闭时还原。pick/form 两弹窗互斥，共用一个 ref。
+  const modalRef = useRef<HTMLDivElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    restoreFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      // 焦点陷阱：Tab 在弹窗内循环，避免焦点跑到背景页
+      if (e.key === 'Tab' && modalRef.current) {
+        const focusable = modalRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    const raf = requestAnimationFrame(() => {
+      const focusable = modalRef.current?.querySelector<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      );
+      (focusable ?? modalRef.current)?.focus();
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      document.removeEventListener('keydown', onKey);
+      restoreFocusRef.current?.focus?.();
+      restoreFocusRef.current = null;
+    };
+  }, [step]);
+
   return (
     <div className="add-account-root">
       {/* 第 1 步：选供应商 */}
       {step === 'pick' ? (
-        <div className="modal-overlay">
-          <div className="modal add-modal-wide">
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={t('添加账号')}>
+          <div className="modal add-modal-wide" ref={modalRef}>
             <div className="modal-header">
               <h3>{t('添加账号')}</h3>
               <button type="button" className="modal-close" onClick={onClose}>
@@ -1042,8 +1089,8 @@ export default function AddAccountDialog({
 
       {/* 第 2 步：选方式 + 填凭证 */}
       {step === 'form' ? (
-        <div className="modal-overlay">
-          <div className="modal add-modal-form">
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={t('添加账号')}>
+          <div className="modal add-modal-form" ref={modalRef}>
             <div className="modal-header">
               <h3>
                 {poolName
