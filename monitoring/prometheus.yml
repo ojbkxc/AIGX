@@ -17,50 +17,49 @@ alerting:
         - targets:
             - 'alertmanager:9093'
 
-# 原始采集目标
+# 采集目标
 scrape_configs:
-  # AIGX 后端节点
+  # AIGX 后端 /metrics —— 业务指标唯一来源（见 src/metrics.rs render()）。
+  #
+  # 鉴权对齐（src/main.rs handle_metrics / metrics_bearer_authorized，
+  # 2964-3016 行）：后端只接受 `Authorization: Bearer <AIGX_METRICS_TOKEN>`
+  # （常量时间比较；未配置 token 且无管理员会话即 401）。因此：
+  #   - 必须用 bearer_token 机制，不能 basic_auth（后者发送
+  #     `Authorization: Basic ...` scheme，被后端直接拒）；
+  #   - 凭据走 bearer_token_file 挂载，文件内容必须与后端进程的
+  #     AIGX_METRICS_TOKEN 环境变量完全一致。
+  #
+  # 注意：Prometheus 不会对 scrape_config 做 ${VAR} 展开（仅 global
+  # external_labels 的值支持），所以不要写
+  # `bearer_token: '${AIGX_METRICS_TOKEN}'`——会把字面量当作 token 发出，
+  # 采集必 401。部署时把 token 写入该文件（无尾随换行）。
   - job_name: 'aigx-backend'
+    scrape_interval: 15s
+    metrics_path: '/metrics'
+    bearer_token_file: /etc/prometheus/secrets/aigx-metrics-token
     static_configs:
       - targets: ['aigx-backend:9527']
         labels:
           service: 'aigx-backend'
           instance: 'aigx-backend-1'
 
-  # AIGX 前端节点
-  - job_name: 'aigx-frontend'
-    static_configs:
-      - targets: ['aigx-frontend:80']
-        labels:
-          service: 'aigx-frontend'
-          instance: 'aigx-frontend-1'
-
-  # PostgreSQL 数据库
-  - job_name: 'postgres'
-    static_configs:
-      - targets: ['postgres:5432']
-
-  # Redis 缓存
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['redis:6379']
+  # 已移除的无效/重复采集（六路企业级审计修复，2026-11）：
+  # - aigx-frontend:80 /metrics：前端是 SPA，/metrics 返回 HTML 而非指标
+  #   文本，采集必败 → up=0 → 误报轰炸。
+  # - postgres:5432 / redis:6379：裸端口不提供 Prometheus 文本指标，采集
+  #   必败 → up=0。如需数据库/缓存监控，先部署 postgres_exporter /
+  #   redis_exporter，再新增对应 job（如 postgres_exporter:9187、
+  #   redis_exporter:9121）。
+  # - aigx-network job：与 aigx-backend 抓同一目标 aigx-backend:9527，
+  #   属重复采集，已合并。
 
   # Prometheus 自监控
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  # Node Exporter 系统指标
+  # Node Exporter 系统指标（CPU/内存/磁盘等主机级指标由此提供；
+  # AIGX /metrics 不输出主机资源指标）
   - job_name: 'node_exporter'
     static_configs:
       - targets: ['node-exporter:9100']
-
-  # AIGX 网络层自定义指标
-  - job_name: 'aigx-network'
-    scrape_interval: 10s
-    metrics_path: '/metrics'
-    static_configs:
-      - targets: ['aigx-backend:9527']
-        labels:
-          service: 'aigx-network'
-          instance: 'network-node-1'

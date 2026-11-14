@@ -1,0 +1,23 @@
+name: alerts-lint
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: lint (alerts.yml / prometheus.yml 静态校验)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装 PyYAML
+        run: pip install pyyaml
+      - name: alerts/prometheus 静态校验（yaml 重复键 + 指标存在性 + 交叉一致性）
+        run: python .github/workflows/monitoring_lint.py

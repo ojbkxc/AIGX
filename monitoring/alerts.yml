@@ -1,194 +1,138 @@
+# AIGX 告警规则
+#
+# 指标事实来源：src/metrics.rs::Metrics::render() 实际输出的 /metrics 指标集
+# （aigx_requests_total / aigx_tokens_total / aigx_latency_ms_sum+count /
+#  aigx_request_latency_bucket+sum+count / aigx_health_level /
+#  aigx_requests_inflight / aigx_channels_enabled+disabled /
+#  aigx_cost_usd_total / aigx_cost_cny_total）。
+#
+# 规则约束：
+#   - expr 只允许引用上述已导出指标，不得引用 /metrics 中不存在的指标
+#     （历史版本引用 aigx_cpu_usage_percent / aigx_error_rate_percent 等
+#     幽灵指标，且混入非法 YAML 残片与重复顶层 groups 键，导致规则文件
+#     整体加载失败、告警体系全灭）。
+#   - 本文件的 YAML 合法性与指标存在性由 CI 闸门校验，见
+#     .github/workflows/alerts-lint.yml（重复键严格加载 + 指标存在性比对）。
+
 groups:
-  - name: aigx_alerts
+  # ------------------------------------------------------------------
+  # 可用性
+  # ------------------------------------------------------------------
+  - name: aigx_availability
     interval: 30s
     rules:
-      # 系统资源告警
-      - alert: HighCPUUsage
-        expr: aigx_cpu_usage_percent > 80
-        for: 5m
-        labels:
-          severity: critical
-          component: system
-        annotations:
-          summary: "CPU使用率过高"
-          description: "{{ $labels.instance }} 当前CPU使用率 {{ $value }}%"
-          runbook: "https://runbooks.aigx.io/cpu-high"
-
-      - alert: HighMemoryUsage
-        expr: aigx_memory_usage_percent > 80
-        for: 5m
-        labels:
-          severity: warning
-          component: system
-        annotations:
-          summary: "内存使用率过高"
-          description: "{{ $labels.instance }} 当前内存使用率 {{ $value }}%"
-
-      - alert: HighDiskUsage
-        expr: aigx_disk_usage_percent > 85
-        for: 5m
-        labels:
-          severity: warning
-          component: system
-        annotations:
-          summary: "磁盘使用率过高"
-          description: "{{ $labels.instance }} 当前磁盘使用率 {{ $value }}%"
-
-      # 应用指标告警
-      - alert: HighLatency
-        expr: aigx_avg_latency_ms > 500
-        for: 10m
-        labels:
-          severity: warning
-          component: performance
-        annotations:
-          summary: "请求延迟过高"
-          description: "{{ $labels.instance }} 平均延迟 {{ $value }}ms"
-
-      - alert: HighErrorRate
-        expr: aigx_error_rate_percent > 5
+      # 错误率：5m 窗口内 error 占比 > 5%（无流量时 rate 为 NaN，比较不成立，
+      # 不会误报）
+      - alert: AigxHighErrorRate
+        expr: |
+          sum(rate(aigx_requests_total{status="error"}[5m]))
+          /
+          sum(rate(aigx_requests_total[5m]))
+          > 0.05
         for: 10m
         labels:
           severity: critical
-          component: performance
+          component: availability
         annotations:
-          summary: "错误率过高"
-          description: "{{ $labels.instance }} 错误率 {{ $value }}%"
-          runbook: "https://runbooks.aigx.io/error-high"
+          summary: "AIGX 请求错误率过高"
+          description: "近 5 分钟错误请求占比 {{ $value | humanizePercentage }}，阈值 5%"
 
-      - alert: LowResponsiveNodes
-        expr: count(aigx_node_status{node=~"aigx-node.*"} == 1) < 2
+      # 后端实例不可达（采集层 up=0；job 名与 monitoring/prometheus.yml 的
+      # aigx-backend scrape job 对应，由 CI 校验交叉一致）
+      - alert: AigxBackendUnreachable
+        expr: up{job="aigx-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: availability
+        annotations:
+          summary: "AIGX 后端 /metrics 不可采集"
+          description: "Prometheus 连续 2 分钟无法采集 aigx-backend:9527/metrics（检查服务存活与 AIGX_METRICS_TOKEN 凭据）"
+
+      # 无任何可用渠道：网关无法路由任何请求（业务可用性）
+      - alert: AigxNoChannelsEnabled
+        expr: aigx_channels_enabled == 0
         for: 5m
         labels:
           severity: critical
-          component: distributed
+          component: availability
         annotations:
-          summary: "分布式节点响应不足"
-          description: "仅 {{ $value }} 节点响应，需要至少 2 个"
+          summary: "AIGX 无可用渠道"
+          description: "渠道启用数为 0，持续 5 分钟；请检查渠道管理页是否全部禁用"
 
-      - alert: replica_failed
-        expr: aigx_replication_failed_total > 0
-        for: 1m
-        labels:
-          severity: warning
-          component: distributed
-        annotations:
-          summary: "复制失败"
-          description: "{{ $labels.instance }} 复制失败计数: {{ $value }}"
-          runbook: "https://runbooks.aigx.io/replication-failed"
-      - target_metric(my_urls, lambda-> 未来明确命名)
-        系列: [alización]
-        指标: (RAT_)
-        事件: GOTO_specific
-        冷却: 300
-        等待: 300
-        placement:
-
-      # 存储告警
-      - alert: DiskAvailableCritical
-        expr: aigx_disk_available_bytes < 10 * 1024 * 1024 * 1024  # < 10GB
-        for: 5m
-        labels:
-          severity: critical
-          component: storage
-        annotations:
-          summary: "磁盘空间不足"
-          description: "{{ $labels.instance }} 可用空间仅剩 {{ $value }}"
-
-      # 数据库告警
-      - alert: PostgreSQLDown
-        expr: up{job="postgres"} == 0
-        for: 1m
-        labels:
-          severity: critical
-          component: database
-        annotations:
-          summary: "PostgreSQL 不可用"
-          description: "{{ $labels.instance }} 数据库不可用"
-
-      # Redis 告警
-      - alert: RedisDown
-        expr: up{job="redis"} == 0
-        for: 1m
-        labels:
-          severity: critical
-          component: cache
-        annotations:
-          summary: "Redis 不可用"
-          description: "{{ $labels.instance }} 缓存服务不可用"
-
-      # 容量告警
-      - alert: QueueLengthCritical
-        expr: aigx_queue_length > 1000
-        for: 5m
-        labels:
-          severity: warning
-          component: capacity
-        annotations:
-          summary: "队列长度严重"
-          description: "{{ $labels.instance }} 队列长度: {{ $value }}"
-
-  - name: aigx_business_alerts
-    interval: 1m
+  # ------------------------------------------------------------------
+  # 延迟
+  # ------------------------------------------------------------------
+  - name: aigx_latency
+    interval: 30s
     rules:
-      # 业务指标告警
-      - alert: LowAccountBytes
-        expr: aigx_requests_per_minute < 10
-        for: 20m
+      # p95 延迟：直方图分桶（le 边界 10ms~60s，src/metrics.rs
+      # LATENCY_BUCKETS_MS）按 le 聚合后取 95 分位，阈值 2000ms
+      - alert: AigxHighP95Latency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(aigx_request_latency_bucket[5m])) by (le)
+          ) > 2000
+        for: 10m
         labels:
           severity: warning
-          component: business
+          component: latency
         annotations:
-          summary: "业务请求量过低"
-          description: "每分钟请求量: {{ $value }}"
+          summary: "AIGX p95 请求延迟过高"
+          description: "近 5 分钟 p95 延迟 {{ $value }}ms，阈值 2000ms"
 
-  - name: aigx_node_alerts
-    interval: 15s
+  # ------------------------------------------------------------------
+  # 容量
+  # ------------------------------------------------------------------
+  - name: aigx_capacity
+    interval: 30s
     rules:
-      # 节点特定的告警
-      - alert: NodeTemperatureHigh
-        expr: aigx_system_temp_celsius > 85
-        for: 5m
-        labels:
-          severity: warning
-          component: node
-        annotations:
-          summary: "节点温度过高"
-          description: "节点 {{ $labels.node }} 温度: {{ $value }}°C"
-
-      # 扩容告警
-      - alert: RequestThroughputHigh
-        expr: aigx_request_throughput_per_hour > 1000000
+      # 在途请求积压：inflight 持续高于阈值说明下游处理能力不足
+      - alert: AigxHighInflight
+        expr: aigx_requests_inflight > 50
         for: 10m
         labels:
           severity: warning
           component: capacity
         annotations:
-          summary: "吞吐量持续高涨"
-          description: "{{ $labels.instance }} 达到 {{ $value }} 请求/小时"
-        # 添加扩容建议
-        on_resolve: send_alert_manager_payload(data={"action":"scaling_up","reason":"throughput_high"})
+          summary: "AIGX 在途请求数过高"
+          description: "当前在途请求 {{ $value }}，持续 10 分钟高于阈值 50"
 
-      - alert: WaitForMoreData
-        expr: count(rate(aigx_request_count{instance=~".+"}[5m])) < 5
-        for: 0s
-        annotations:
-          summary: "等待更多数据"
-          description: "请求量不足"
-        on_resolve: 跳过告警
-
-# 可以导入其他告警文件
-# rule_files:
-#   - 'local-alerts.yml'
-#   - 'specific-alerts.yml'
-
-# 告警分组配置
-groups:
-  - name: aigx_system_alerts
-    interval: 5m
+  # ------------------------------------------------------------------
+  # 模型健康
+  # ------------------------------------------------------------------
+  - name: aigx_health
+    interval: 30s
     rules:
-      - alert: SystemAlerts
-        expr: alertstatus{}
-        for: 356
+      # 健康等级 0=healthy 1=degraded 2=down（与 health::HealthLevel 对齐）
+      - alert: AigxModelDown
+        expr: aigx_health_level == 2
+        for: 5m
+        labels:
+          severity: critical
+          component: health
+        annotations:
+          summary: "模型 {{ $labels.model }} 已宕机"
+          description: "模型 {{ $labels.model }} 健康等级为 down（2），持续 5 分钟"
+
+      - alert: AigxModelDegraded
+        expr: aigx_health_level == 1
+        for: 10m
         labels:
           severity: warning
+          component: health
+        annotations:
+          summary: "模型 {{ $labels.model }} 降级运行"
+          description: "模型 {{ $labels.model }} 健康等级为 degraded（1），持续 10 分钟"
+
+  # ------------------------------------------------------------------
+  # TODO(metrics)：以下指标 src/metrics.rs 尚未导出，接入后才能启用对应告警。
+  # 启用前必须先在 src/metrics.rs render() 中导出同名指标（CI 指标存在性
+  # 闸门会拦截未导出指标的引用）。
+  #
+  # - alert: AigxQueueBacklog            # expr: aigx_queue_length > 1000
+  # - alert: AigxHighCpuUsage            # expr: aigx_cpu_usage_percent > 80
+  # - alert: AigxHighMemoryUsage         # expr: aigx_memory_usage_percent > 80
+  # - alert: AigxHighDiskUsage           # expr: aigx_disk_usage_percent > 85
+  # - alert: AigxHighSystemTemp          # expr: aigx_system_temp_celsius > 85
+  # - alert: AigxLowRequestVolume        # expr: sum(rate(aigx_requests_total[15m])) < 10
