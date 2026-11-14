@@ -221,9 +221,12 @@ try {
     die('server.log 中未找到 Aigx- 一次性初始密码（673a9a67 随机化后必须从日志取）');
   }
   log(`提取到首启初始密码: ${initial.slice(0, 5)}...（已脱敏）`);
-  const captcha = solveAltcha((await api(base, 'GET', '/api/auth/captcha')).body);
-  const login = async (password) =>
-    api(base, 'POST', '/api/auth/login', { email: 'admin@gmail.com', password, captcha });
+  // ALTCHA challenge 一次性消费（tools/bench/bootstrap.mjs 同口径注释）：
+  // 每次登录都要重新 GET /api/auth/captcha + 现解 PoW，不能跨登录复用。
+  const login = async (password) => {
+    const captcha = solveAltcha((await api(base, 'GET', '/api/auth/captcha')).body);
+    return api(base, 'POST', '/api/auth/login', { email: 'admin@gmail.com', password, captcha });
+  };
   let loginRes = await login(initial);
   if (!loginRes.body?.data?.token && !loginRes.body?.token) {
     console.error(tail(serverLog));
