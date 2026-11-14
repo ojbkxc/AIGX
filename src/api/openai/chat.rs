@@ -84,7 +84,7 @@ pub(crate) const RETRY_AFTER_WAIT_CAP_SECS: u64 = 10;
 pub(crate) fn bridge_error_retry_after_secs(e: &crate::bridge::BridgeError) -> u64 {
     match e {
         crate::bridge::BridgeError::UpstreamStatus { retry_after, .. } => {
-            retry_after.map(std::time::Duration::as_secs).unwrap_or(0)
+            retry_after.map(|d| d.as_secs()).unwrap_or(0)
         }
         _ => 0,
     }
@@ -1788,6 +1788,8 @@ fn response_cache_key(key_id: &str, model: &str, body: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // 连接稳定性：流式/非流式 failover 循环接入的预算口径自检。
     // 循环内逻辑为「入口 can_attempt() 判定 → 失败记 last_error → 末尾
     // record_attempt()」，这里直接驱动 FailoverBudget 复现该时序，验证

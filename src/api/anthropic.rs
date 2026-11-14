@@ -1323,7 +1323,7 @@ pub async fn handle_messages(
                 group: billing_group.clone(),
                 // Arc 共享请求快照：suffix 的 spawn_blocking 预估算可廉价
                 // clone（P1 性能——BPE 估算移出 tokio worker）
-                chat_req: Arc::new(chat_req.clone()),
+                chat_req: std::sync::Arc::new(chat_req.clone()),
                 tool_calls: tool_calls.clone(),
                 acc: acc.clone(),
                 charged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

@@ -165,12 +165,11 @@ impl Metrics {
             channel.to_string()
         };
         let status = status.to_string();
+        let key = (model.clone(), channel, status);
         {
             let mut map = self.requests.lock();
-            if map.len() < MAX_LABEL_SERIES || map.contains_key(&(model.clone(), channel, status)) {
-                map.entry((model.clone(), channel, status))
-                    .or_default()
-                    .fetch_add(1, Ordering::Relaxed);
+            if map.len() < MAX_LABEL_SERIES || map.contains_key(&key) {
+                map.entry(key).or_default().fetch_add(1, Ordering::Relaxed);
             } else {
                 self.warn_series_overflow();
             }
@@ -266,9 +265,10 @@ impl Metrics {
 
     /// 记录 token 用量。`ty` 取 `"prompt"` / `"completion"`。
     pub fn record_tokens(&self, model: &str, ty: &str, tokens: u64) {
+        let key = (model.to_string(), ty.to_string());
         let mut map = self.tokens.lock();
-        if map.len() < MAX_LABEL_SERIES || map.contains_key(&(model.to_string(), ty.to_string())) {
-            map.entry((model.to_string(), ty.to_string()))
+        if map.len() < MAX_LABEL_SERIES || map.contains_key(&key) {
+            map.entry(key)
                 .or_default()
                 .fetch_add(tokens, Ordering::Relaxed);
         } else {

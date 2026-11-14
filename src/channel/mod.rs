@@ -1130,10 +1130,11 @@ impl ChannelStore {
     /// （清扫会改变 is_dispatch_allowed 对半开占位的判定，见其注释）。
     fn refresh_cooldown_gauge(&self) {
         let now = Instant::now();
+        // DashMap 迭代产出 RefMulti 守卫（非元组），按 .value() 取条目
         let n = self
             .cooldowns
             .iter()
-            .filter(|(_, expiry)| *expiry > now)
+            .filter(|entry| *entry.value() > now)
             .count() as u64;
         crate::metrics::global().set_channels_cooldown(n);
     }
