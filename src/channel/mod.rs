@@ -1102,6 +1102,9 @@ impl ChannelStore {
         self.half_open_inflight.remove(id);
         let expiry = Instant::now() + Duration::from_secs(backoff_secs);
         self.cooldowns.insert(id.to_string(), expiry);
+        // P1 指标：冷却中渠道数（冷却事件是低频路径，重算成本可接受；
+        // 只读不清扫——清扫过期条目会改 is_dispatch_allowed 的半开判定）
+        self.refresh_cooldown_gauge();
         tracing::warn!(
             "channel {} cooled down for {}s (backoff factor {}, streak {})",
             id,
@@ -1119,6 +1122,20 @@ impl ChannelStore {
         self.cooldowns.remove(id);
         self.cooldown_failures.remove(id);
         self.half_open_inflight.remove(id);
+        // P1 指标：冷却中渠道数（冷却事件是低频路径，重算成本可接受）
+        self.refresh_cooldown_gauge();
+    }
+
+    /// 刷新「冷却中渠道数」指标（P1）：只读统计未过期条目，不清扫
+    /// （清扫会改变 is_dispatch_allowed 对半开占位的判定，见其注释）。
+    fn refresh_cooldown_gauge(&self) {
+        let now = Instant::now();
+        let n = self
+            .cooldowns
+            .iter()
+            .filter(|(_, expiry)| *expiry > now)
+            .count() as u64;
+        crate::metrics::global().set_channels_cooldown(n);
     }
 
     /// 标记渠道不健康（记录错误信息，禁用）
@@ -1727,6 +1744,8 @@ impl ChannelStore {
             .record_success(channel_id, model, latency_ms);
         self.health_archive.note_success(channel_id, latency_ms);
         self.empty_response_counter.reset(channel_id);
+        // P1 指标：渠道级成功率/p95 数据源（成功样本计延迟分桶）
+        crate::metrics::global().record_channel_result(channel_id, true, latency_ms);
         // 半开试探成功 → 真正恢复：清除冷却、退避计数与在途标记。
         self.clear_cooldown(channel_id);
         // AIMD 学习：成功请求上调限额（当前未提供上游限额头，传 None）
@@ -1751,6 +1770,9 @@ impl ChannelStore {
         error_message: &str,
         session_id: Option<&str>,
     ) {
+        // P1 指标：渠道级成功率计数（客户端错误同样计失败——渠道确实
+        // 交付了错误响应；失败样本不计延迟分桶，见 record_channel_result）
+        crate::metrics::global().record_channel_result(channel_id, false, 0);
         // 客户端请求错误（400/413/422…）：只留排障信息，**不影响渠道健康、
         // 不记失败归档、不打开断路器、不清亲和性**。渠道本身是健康的。
         if matches!(failure_type, circuit_breaker::FailureType::ClientError) {

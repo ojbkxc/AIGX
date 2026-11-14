@@ -984,6 +984,12 @@ pub async fn handle_messages(
                     "error",
                     latency_ms,
                 );
+                // P1 指标：错误类型标签（区分 429/5xx/超时等终态错误）
+                crate::metrics::global().record_request_error(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    e.error_type(),
+                );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
                     state
@@ -1335,6 +1341,8 @@ pub async fn handle_messages(
             let has_tool_fin = has_tool.clone();
             let has_any_block_fin = has_any_block.clone();
             let stop_emitted_fin = stop_emitted.clone();
+            // P1 指标：TTFT 的共享句柄（与日志 first_response_ms 同源）
+            let ttft_arc = ctx.first_response_ms.clone();
             let suffix = futures::stream::once(async move {
                 // P1 性能：完成侧估算（prompt + completion）在阻塞线程池
                 // 预估算一次（message_delta 回显与计费两分支共用），避免
@@ -1353,12 +1361,12 @@ pub async fn handle_messages(
                     (pt as u64, ct as u64)
                 };
 
+                let errored = stream_errored.load(std::sync::atomic::Ordering::SeqCst);
                 // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
                 let (prompt_tokens, completion_tokens) = if !billing_fin
                     .charged
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
-                    let errored = stream_errored.load(std::sync::atomic::Ordering::SeqCst);
                     let (pt, ct) = billing_fin.finalize_with_token_estimates(
                         errored,
                         est_prompt,
@@ -1373,13 +1381,25 @@ pub async fn handle_messages(
                     (est_prompt, est_completion)
                 };
 
-                // Prometheus 指标
+                // Prometheus 指标（流中途出错记 error——此前 anthropic 面
+                // 恒记 ok，错误率失真；与 chat.rs 面同口径）
                 crate::metrics::global().record_request(
                     &billing_fin.model,
                     billing_fin.channel_id.as_deref().unwrap_or("unknown"),
-                    "ok",
+                    if errored { "error" } else { "ok" },
                     billing_fin.request_start.elapsed().as_millis() as u64,
                 );
+                if errored {
+                    crate::metrics::global().record_request_error(
+                        &billing_fin.model,
+                        billing_fin.channel_id.as_deref().unwrap_or("unknown"),
+                        "stream_error",
+                    );
+                }
+                // P1 指标：TTFT（首字节延迟）
+                if let Some(ttft) = ttft_arc.lock().ok().and_then(|g| *g) {
+                    crate::metrics::global().record_ttft(&billing_fin.model, ttft);
+                }
                 crate::metrics::global().record_tokens(&billing_fin.model, "prompt", prompt_tokens);
                 crate::metrics::global().record_tokens(
                     &billing_fin.model,
@@ -1739,6 +1759,12 @@ pub async fn handle_messages(
                     "error",
                     latency_ms,
                 );
+                // P1 指标：错误类型标签（区分 429/5xx/超时等终态错误）
+                crate::metrics::global().record_request_error(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    e.error_type(),
+                );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
                     state
@@ -1882,6 +1908,10 @@ pub async fn handle_messages(
                 "ok",
                 latency_ms,
             );
+            // P1 指标：TTFT（首字节延迟）
+            if let Some(ttft) = ctx.first_response_ms.lock().ok().and_then(|g| *g) {
+                crate::metrics::global().record_ttft(billing_model, ttft);
+            }
             crate::metrics::global().record_tokens(
                 billing_model,
                 "prompt",

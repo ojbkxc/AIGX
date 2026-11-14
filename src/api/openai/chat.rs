@@ -700,6 +700,12 @@ pub(crate) async fn handle_chat_completions(
                     "error",
                     latency_ms,
                 );
+                // P1 指标：错误类型标签（区分 429/5xx/超时等终态错误）
+                crate::metrics::global().record_request_error(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    e.error_type(),
+                );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
                     state
@@ -939,6 +945,9 @@ pub(crate) async fn handle_chat_completions(
                 debug_request_body,
             });
             let billing_fin = billing.clone();
+            // P1 指标：TTFT 的共享句柄（BridgeContext.first_response_ms 由
+            // debug_traffic 在上游响应到达时写入，与日志同源）
+            let ttft_arc = ctx.first_response_ms.clone();
             let final_event = async move {
                 // P1 性能：完成侧估算（prompt + completion）在阻塞线程池
                 // 预估算一次，两分支共用——async 上下文内同步 BPE 编码
@@ -998,6 +1007,19 @@ pub(crate) async fn handle_chat_completions(
                     if errored { "error" } else { "ok" },
                     billing_fin.request_start.elapsed().as_millis() as u64,
                 );
+                if errored {
+                    // 流中途出错：错误类型为流级类别（具体错误已在 error
+                    // 事件里发给客户端，此处只分桶）
+                    crate::metrics::global().record_request_error(
+                        &billing_fin.model,
+                        billing_fin.channel_id.as_deref().unwrap_or("unknown"),
+                        "stream_error",
+                    );
+                }
+                // P1 指标：TTFT（首字节延迟）
+                if let Some(ttft) = ttft_arc.lock().ok().and_then(|g| *g) {
+                    crate::metrics::global().record_ttft(&billing_fin.model, ttft);
+                }
                 crate::metrics::global().record_tokens(&billing_fin.model, "prompt", prompt_tokens);
                 crate::metrics::global().record_tokens(
                     &billing_fin.model,
@@ -1400,6 +1422,12 @@ pub(crate) async fn handle_chat_completions(
                     "error",
                     latency_ms,
                 );
+                // P1 指标：错误类型标签（区分 429/5xx/超时等终态错误）
+                crate::metrics::global().record_request_error(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    e.error_type(),
+                );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
                     state
@@ -1534,6 +1562,10 @@ pub(crate) async fn handle_chat_completions(
                 "ok",
                 latency_ms,
             );
+            // P1 指标：TTFT（首字节延迟）
+            if let Some(ttft) = ctx.first_response_ms.lock().ok().and_then(|g| *g) {
+                crate::metrics::global().record_ttft(billing_model, ttft);
+            }
             crate::metrics::global().record_tokens(
                 billing_model,
                 "prompt",

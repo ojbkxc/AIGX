@@ -6,19 +6,31 @@
 //!
 //! 指标清单：
 //! - `aigx_requests_total{model,channel,status}` 请求计数（含流式/非流式）
+//! - `aigx_request_errors_total{model,channel,error_type}` 错误类型计数
+//!   （timeout/upstream_error/rate_limit_error…，区分 429/5xx/超时）
 //! - `aigx_tokens_total{model,type}` token 用量（prompt/completion）
 //! - `aigx_latency_ms_sum{model}` 延迟毫秒累计（供 rate 计算）
 //! - `aigx_latency_ms_count{model}` 延迟采样数
-//! - `aigx_requests_inflight` 当前在途请求数
+//! - `aigx_request_latency_bucket{model,le}` 延迟直方图分桶（p95 数据源）
+//! - `aigx_channel_requests_total{channel,result}` 渠道级结果计数
+//!   （成功率 = ok/(ok+error)）
+//! - `aigx_channel_latency_bucket{channel,le}` 渠道级延迟直方图（渠道 p95）
+//! - `aigx_ttft_ms_bucket{model,le}` 首字节延迟直方图（TTFT）
+//! - `aigx_requests_inflight` 当前在途请求数（队列深度代理指标）
 //! - `aigx_health_level{model}` 模型健康等级（0/1/2）
 //! - `aigx_channels{status}` 渠道数量（enabled/disabled）
+//! - `aigx_channels_cooldown` 冷却中渠道数
 //! - `aigx_cost_usd_total` / `aigx_cost_cny_total` 累计请求成本（美元/人民币）
 //!
 //! 全部线程安全、无锁读取。`Metrics::record_request` 由请求处理路径在
 //! 收尾处调用（见 main.rs 挂载的 tower middleware）。
+//!
+//! P1 性能：延迟三件套（sum/count/hist）合并为一把锁（record_request 从
+//! 4 把全局锁降到 2 把）；所有标签组合 map 加序列上限防无界增长（超限的
+//! 新组合跳过并告警一次，存量序列不受影响）。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 /// 模型健康等级说明（与 health::HealthLevel 对齐，仅文档用途）。
 #[allow(dead_code)]
@@ -29,6 +41,11 @@ const HEALTH_LEVELS: [&str; 3] = ["healthy", "degraded", "down"];
 const LATENCY_BUCKETS_MS: [u64; 12] = [
     10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 20_000, 40_000, 60_000,
 ];
+
+/// 单指标序列上限（防标签组合无界增长：模型×渠道×状态理论上可随渠道
+/// 增删无限膨胀）。超限的**新**组合跳过记录（存量序列不受影响），
+/// 损失的是个别新组合的计数精度，换取内存上界。
+const MAX_LABEL_SERIES: usize = 4096;
 
 /// 全局指标注册表（进程级单例）。
 static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
@@ -41,20 +58,73 @@ pub fn global() -> &'static Metrics {
 /// 用 BTreeMap 保证输出顺序稳定，且无需并发锁读（写入在锁内）。
 type ReqKey = (String, String, String);
 
+/// 延迟聚合条目：sum/count/直方图分桶合并为一把锁的存储单元。
+struct LatencyEntry {
+    sum: AtomicU64,
+    count: AtomicU64,
+    buckets: Vec<AtomicU64>,
+}
+
+impl LatencyEntry {
+    fn new() -> Self {
+        Self {
+            sum: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+            buckets: LATENCY_BUCKETS_MS
+                .iter()
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+        }
+    }
+}
+
+/// 渠道级延迟聚合（成功率 + p95 数据源）。
+struct ChannelLatencyEntry {
+    success: AtomicU64,
+    count: AtomicU64,
+    sum: AtomicU64,
+    buckets: Vec<AtomicU64>,
+}
+
+impl ChannelLatencyEntry {
+    fn new() -> Self {
+        Self {
+            success: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+            sum: AtomicU64::new(0),
+            buckets: LATENCY_BUCKETS_MS
+                .iter()
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+        }
+    }
+}
+
 /// 指标聚合器。
 pub struct Metrics {
     requests: parking_lot::Mutex<BTreeMap<ReqKey, AtomicU64>>,
     tokens: parking_lot::Mutex<BTreeMap<(String, String), AtomicU64>>,
-    latency_sum_ms: parking_lot::Mutex<BTreeMap<String, AtomicU64>>,
-    latency_count: parking_lot::Mutex<BTreeMap<String, AtomicU64>>,
-    /// 延迟直方图（批次6）：model → 每桶累计计数（+Inf 在 render 时由 count 补）
-    latency_hist: parking_lot::Mutex<BTreeMap<String, Vec<AtomicU64>>>,
+    /// 延迟聚合（sum/count/直方图分桶合并为一把锁）：record_request 原本
+    /// 每请求 4 把全局锁（requests/sum/count/hist），合并后 2 把。
+    latency: parking_lot::Mutex<BTreeMap<String, LatencyEntry>>,
+    /// 渠道级结果（成功率/p95 数据源）：成功样本计延迟分桶；失败样本只计
+    /// 次数（record_channel_failure 无延迟参数，避免改签名波及其他调用方；
+    /// 成功率指标不受影响）。
+    channel_results: parking_lot::Mutex<BTreeMap<String, ChannelLatencyEntry>>,
+    /// 错误类型计数（error_type 标签：timeout/upstream_error/rate_limit_error…）
+    errors: parking_lot::Mutex<BTreeMap<(String, String, String), AtomicU64>>,
+    /// TTFT 分桶（model → 分桶聚合）
+    ttft: parking_lot::Mutex<BTreeMap<String, LatencyEntry>>,
     health: parking_lot::Mutex<BTreeMap<String, u8>>,
     inflight: AtomicI64,
     channels_enabled: AtomicU64,
     channels_disabled: AtomicU64,
+    /// 冷却中渠道数（push 式快照，由 channel/mod.rs 的冷却事件刷新）
+    channels_cooldown: AtomicU64,
     cost_usd: AtomicU64,
     cost_cny: AtomicU64,
+    /// 标签组合超限告警（每进程一次，防刷屏）
+    series_overflow_warned: AtomicBool,
 }
 
 impl Metrics {
@@ -62,15 +132,27 @@ impl Metrics {
         Self {
             requests: parking_lot::Mutex::new(BTreeMap::new()),
             tokens: parking_lot::Mutex::new(BTreeMap::new()),
-            latency_sum_ms: parking_lot::Mutex::new(BTreeMap::new()),
-            latency_count: parking_lot::Mutex::new(BTreeMap::new()),
+            latency: parking_lot::Mutex::new(BTreeMap::new()),
+            channel_results: parking_lot::Mutex::new(BTreeMap::new()),
+            errors: parking_lot::Mutex::new(BTreeMap::new()),
+            ttft: parking_lot::Mutex::new(BTreeMap::new()),
             health: parking_lot::Mutex::new(BTreeMap::new()),
             inflight: AtomicI64::new(0),
             channels_enabled: AtomicU64::new(0),
             channels_disabled: AtomicU64::new(0),
+            channels_cooldown: AtomicU64::new(0),
             cost_usd: AtomicU64::new(0),
             cost_cny: AtomicU64::new(0),
-            latency_hist: parking_lot::Mutex::new(BTreeMap::new()),
+            series_overflow_warned: AtomicBool::new(false),
+        }
+    }
+
+    /// 标签组合超限告警（每进程一次）。
+    fn warn_series_overflow(&self) {
+        if !self.series_overflow_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "metrics label series overflow: new combinations beyond MAX_LABEL_SERIES are skipped"
+            );
         }
     }
 
@@ -85,36 +167,91 @@ impl Metrics {
         let status = status.to_string();
         {
             let mut map = self.requests.lock();
-            map.entry((model.clone(), channel, status))
-                .or_default()
-                .fetch_add(1, Ordering::Relaxed);
+            if map.len() < MAX_LABEL_SERIES || map.contains_key(&(model.clone(), channel, status)) {
+                map.entry((model.clone(), channel, status))
+                    .or_default()
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.warn_series_overflow();
+            }
         }
         {
-            let mut sum = self.latency_sum_ms.lock();
-            sum.entry(model.clone())
-                .or_default()
-                .fetch_add(latency_ms, Ordering::Relaxed);
-            let mut count = self.latency_count.lock();
-            count
-                .entry(model.clone())
-                .or_default()
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        // 批次6：延迟直方图分桶（cumulative 计数，render 时按 Prometheus 习惯输出）
-        {
-            let mut hist = self.latency_hist.lock();
-            let buckets = hist.entry(model).or_insert_with(|| {
-                LATENCY_BUCKETS_MS
-                    .iter()
-                    .map(|_| AtomicU64::new(0))
-                    .collect()
-            });
+            let mut map = self.latency.lock();
+            let entry = map.entry(model).or_insert_with(LatencyEntry::new);
+            entry.sum.fetch_add(latency_ms, Ordering::Relaxed);
+            entry.count.fetch_add(1, Ordering::Relaxed);
             for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
                 if latency_ms <= *bound {
-                    buckets[i].fetch_add(1, Ordering::Relaxed);
+                    entry.buckets[i].fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
+    }
+
+    /// 记录错误类型计数（error_type 标签）。由请求处理路径的失败分支调用，
+    /// `error_type` 取 `BridgeError::error_type()`（timeout/upstream_error/
+    /// rate_limit_error/transport_error…）。
+    pub fn record_request_error(&self, model: &str, channel: &str, error_type: &str) {
+        let mut map = self.errors.lock();
+        if map.len() < MAX_LABEL_SERIES {
+            map.entry((
+                model.to_string(),
+                channel.to_string(),
+                error_type.to_string(),
+            ))
+            .or_default()
+            .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.warn_series_overflow();
+        }
+    }
+
+    /// 记录渠道级结果（成功率/p95 数据源）：`success=true` 计 ok 并计延迟
+    /// 分桶，`false` 只计次数（不计延迟——失败路径无延迟参数）。
+    /// 由 channel/mod.rs 的渠道成功/失败记录点调用。
+    pub fn record_channel_result(&self, channel: &str, success: bool, latency_ms: u64) {
+        let mut map = self.channel_results.lock();
+        if map.len() >= MAX_LABEL_SERIES && !map.contains_key(channel) {
+            self.warn_series_overflow();
+            return;
+        }
+        let entry = map
+            .entry(channel.to_string())
+            .or_insert_with(ChannelLatencyEntry::new);
+        entry.count.fetch_add(1, Ordering::Relaxed);
+        if success {
+            entry.success.fetch_add(1, Ordering::Relaxed);
+            entry.sum.fetch_add(latency_ms, Ordering::Relaxed);
+            for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+                if latency_ms <= *bound {
+                    entry.buckets[i].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// 记录 TTFT（首字节延迟毫秒）。
+    pub fn record_ttft(&self, model: &str, ttft_ms: u64) {
+        let mut map = self.ttft.lock();
+        if map.len() >= MAX_LABEL_SERIES && !map.contains_key(model) {
+            self.warn_series_overflow();
+            return;
+        }
+        let entry = map
+            .entry(model.to_string())
+            .or_insert_with(LatencyEntry::new);
+        entry.sum.fetch_add(ttft_ms, Ordering::Relaxed);
+        entry.count.fetch_add(1, Ordering::Relaxed);
+        for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+            if ttft_ms <= *bound {
+                entry.buckets[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// 冷却中渠道数快照（push 式：由 channel/mod.rs 的冷却事件刷新）。
+    pub fn set_channels_cooldown(&self, n: u64) {
+        self.channels_cooldown.store(n, Ordering::Relaxed);
     }
 
     /// 记录一次请求开始（in-flight 计数 +1）。
@@ -130,9 +267,13 @@ impl Metrics {
     /// 记录 token 用量。`ty` 取 `"prompt"` / `"completion"`。
     pub fn record_tokens(&self, model: &str, ty: &str, tokens: u64) {
         let mut map = self.tokens.lock();
-        map.entry((model.to_string(), ty.to_string()))
-            .or_default()
-            .fetch_add(tokens, Ordering::Relaxed);
+        if map.len() < MAX_LABEL_SERIES || map.contains_key(&(model.to_string(), ty.to_string())) {
+            map.entry((model.to_string(), ty.to_string()))
+                .or_default()
+                .fetch_add(tokens, Ordering::Relaxed);
+        } else {
+            self.warn_series_overflow();
+        }
     }
 
     /// 记录一次请求成本（微单位）。`currency` 取 `"usd"` / `"cny"`。
@@ -188,6 +329,20 @@ impl Metrics {
                 ));
             }
         }
+        out.push_str("# HELP aigx_request_errors_total Requests by error type.\n");
+        out.push_str("# TYPE aigx_request_errors_total counter\n");
+        {
+            let map = self.errors.lock();
+            for ((model, channel, error_type), v) in map.iter() {
+                out.push_str(&format!(
+                    "aigx_request_errors_total{{model=\"{}\",channel=\"{}\",error_type=\"{}\"}} {}\n",
+                    escape(model),
+                    escape(channel),
+                    escape(error_type),
+                    v.load(Ordering::Relaxed)
+                ));
+            }
+        }
         out.push_str("# HELP aigx_tokens_total Total tokens used.\n");
         out.push_str("# TYPE aigx_tokens_total counter\n");
         {
@@ -203,44 +358,29 @@ impl Metrics {
         }
         out.push_str("# HELP aigx_latency_ms Request latency in milliseconds.\n");
         out.push_str("# TYPE aigx_latency_ms summary\n");
+        out.push_str("# HELP aigx_request_latency_bucket Cumulative latency buckets.\n");
+        out.push_str("# TYPE aigx_request_latency histogram\n");
         {
-            let sum = self.latency_sum_ms.lock();
-            for (model, v) in sum.iter() {
-                let count = self
-                    .latency_count
-                    .lock()
-                    .get(model)
-                    .map(|c| c.load(Ordering::Relaxed))
-                    .unwrap_or(0);
+            let latency = self.latency.lock();
+            for (model, entry) in latency.iter() {
+                let sum = entry.sum.load(Ordering::Relaxed);
+                let count = entry.count.load(Ordering::Relaxed);
                 out.push_str(&format!(
                     "aigx_latency_ms_sum{{model=\"{}\"}} {}\n",
                     escape(model),
-                    v.load(Ordering::Relaxed)
+                    sum
                 ));
                 out.push_str(&format!(
                     "aigx_latency_ms_count{{model=\"{}\"}} {}\n",
                     escape(model),
                     count
                 ));
-            }
-        }
-        out.push_str("# HELP aigx_request_latency_bucket Cumulative latency buckets.\n");
-        out.push_str("# TYPE aigx_request_latency histogram\n");
-        {
-            let hist = self.latency_hist.lock();
-            for (model, buckets) in hist.iter() {
-                let count = self
-                    .latency_count
-                    .lock()
-                    .get(model)
-                    .map(|c| c.load(Ordering::Relaxed))
-                    .unwrap_or(0);
                 for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
                     out.push_str(&format!(
                         "aigx_request_latency_bucket{{model=\"{}\",le=\"{}\"}} {}\n",
                         escape(model),
                         bound,
-                        buckets[i].load(Ordering::Relaxed)
+                        entry.buckets[i].load(Ordering::Relaxed)
                     ));
                 }
                 out.push_str(&format!(
@@ -251,14 +391,88 @@ impl Metrics {
                 out.push_str(&format!(
                     "aigx_request_latency_sum{{model=\"{}\"}} {}\n",
                     escape(model),
-                    self.latency_sum_ms
-                        .lock()
-                        .get(model)
-                        .map(|v| v.load(Ordering::Relaxed))
-                        .unwrap_or(0)
+                    sum
                 ));
                 out.push_str(&format!(
                     "aigx_request_latency_count{{model=\"{}\"}} {}\n",
+                    escape(model),
+                    count
+                ));
+            }
+        }
+        out.push_str(
+            "# HELP aigx_channel_requests_total Channel-level request results (success rate derivable).\n",
+        );
+        out.push_str("# TYPE aigx_channel_requests_total counter\n");
+        out.push_str("# HELP aigx_channel_latency Channel latency histogram (p95 via buckets).\n");
+        out.push_str("# TYPE aigx_channel_latency histogram\n");
+        {
+            let map = self.channel_results.lock();
+            for (channel, e) in map.iter() {
+                let ok = e.success.load(Ordering::Relaxed);
+                let total = e.count.load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "aigx_channel_requests_total{{channel=\"{}\",result=\"ok\"}} {}\n",
+                    escape(channel),
+                    ok
+                ));
+                out.push_str(&format!(
+                    "aigx_channel_requests_total{{channel=\"{}\",result=\"error\"}} {}\n",
+                    escape(channel),
+                    total.saturating_sub(ok)
+                ));
+                for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+                    out.push_str(&format!(
+                        "aigx_channel_latency_bucket{{channel=\"{}\",le=\"{}\"}} {}\n",
+                        escape(channel),
+                        bound,
+                        e.buckets[i].load(Ordering::Relaxed)
+                    ));
+                }
+                out.push_str(&format!(
+                    "aigx_channel_latency_bucket{{channel=\"{}\",le=\"+Inf\"}} {}\n",
+                    escape(channel),
+                    total
+                ));
+                out.push_str(&format!(
+                    "aigx_channel_latency_sum{{channel=\"{}\"}} {}\n",
+                    escape(channel),
+                    e.sum.load(Ordering::Relaxed)
+                ));
+                out.push_str(&format!(
+                    "aigx_channel_latency_count{{channel=\"{}\"}} {}\n",
+                    escape(channel),
+                    total
+                ));
+            }
+        }
+        out.push_str("# HELP aigx_ttft_ms Time to first byte in milliseconds.\n");
+        out.push_str("# TYPE aigx_ttft_ms histogram\n");
+        {
+            let map = self.ttft.lock();
+            for (model, entry) in map.iter() {
+                let sum = entry.sum.load(Ordering::Relaxed);
+                let count = entry.count.load(Ordering::Relaxed);
+                for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+                    out.push_str(&format!(
+                        "aigx_ttft_ms_bucket{{model=\"{}\",le=\"{}\"}} {}\n",
+                        escape(model),
+                        bound,
+                        entry.buckets[i].load(Ordering::Relaxed)
+                    ));
+                }
+                out.push_str(&format!(
+                    "aigx_ttft_ms_bucket{{model=\"{}\",le=\"+Inf\"}} {}\n",
+                    escape(model),
+                    count
+                ));
+                out.push_str(&format!(
+                    "aigx_ttft_ms_sum{{model=\"{}\"}} {}\n",
+                    escape(model),
+                    sum
+                ));
+                out.push_str(&format!(
+                    "aigx_ttft_ms_count{{model=\"{}\"}} {}\n",
                     escape(model),
                     count
                 ));
@@ -289,6 +503,10 @@ impl Metrics {
         out.push_str(&format!(
             "# TYPE aigx_channels_disabled gauge\naigx_channels_disabled {}\n",
             self.channels_disabled.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# TYPE aigx_channels_cooldown gauge\naigx_channels_cooldown {}\n",
+            self.channels_cooldown.load(Ordering::Relaxed)
         ));
         let usd = self.cost_usd.load(Ordering::Relaxed) as f64 / 1e6;
         let cny = self.cost_cny.load(Ordering::Relaxed) as f64 / 1e6;
@@ -377,5 +595,42 @@ mod tests {
         assert!(out.contains("aigx_request_latency_bucket{model=\"gpt-4\",le=\"+Inf\"} 2"));
         assert!(out.contains("aigx_request_latency_count{model=\"gpt-4\"} 2"));
         assert!(out.contains("aigx_request_latency_sum{model=\"gpt-4\"} 125"));
+    }
+
+    #[test]
+    fn channel_result_metrics_and_cooldown_gauge() {
+        let m = Metrics::new();
+        m.record_channel_result("ch1", true, 120);
+        m.record_channel_result("ch1", true, 80);
+        m.record_channel_result("ch1", false, 0);
+        m.record_channel_result("ch2", false, 0);
+        m.set_channels_cooldown(2);
+        let out = m.render();
+        assert!(out.contains("aigx_channel_requests_total{channel=\"ch1\",result=\"ok\"} 2"));
+        assert!(out.contains("aigx_channel_requests_total{channel=\"ch1\",result=\"error\"} 1"));
+        assert!(out.contains("aigx_channel_requests_total{channel=\"ch2\",result=\"error\"} 1"));
+        assert!(out.contains("aigx_channel_latency_bucket{channel=\"ch1\",le=\"250\"} 2"));
+        assert!(out.contains("aigx_channel_latency_count{channel=\"ch1\"} 3"));
+        assert!(out.contains("aigx_channels_cooldown 2"));
+    }
+
+    #[test]
+    fn error_type_and_ttft_metrics() {
+        let m = Metrics::new();
+        m.record_request_error("gpt-4", "ch1", "rate_limit_error");
+        m.record_request_error("gpt-4", "ch1", "upstream_error");
+        m.record_ttft("gpt-4", 150);
+        m.record_ttft("gpt-4", 5);
+        let out = m.render();
+        assert!(out.contains(
+            "aigx_request_errors_total{model=\"gpt-4\",channel=\"ch1\",error_type=\"rate_limit_error\"} 1"
+        ));
+        assert!(out.contains(
+            "aigx_request_errors_total{model=\"gpt-4\",channel=\"ch1\",error_type=\"upstream_error\"} 1"
+        ));
+        assert!(out.contains("aigx_ttft_ms_bucket{model=\"gpt-4\",le=\"250\"} 2"));
+        assert!(out.contains("aigx_ttft_ms_bucket{model=\"gpt-4\",le=\"10\"} 1"));
+        assert!(out.contains("aigx_ttft_ms_count{model=\"gpt-4\"} 2"));
+        assert!(out.contains("aigx_ttft_ms_sum{model=\"gpt-4\"} 155"));
     }
 }
