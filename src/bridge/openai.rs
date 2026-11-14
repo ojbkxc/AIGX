@@ -1864,7 +1864,7 @@ mod tests {
             r#"{"usage": [1,2]}"#,
         ] {
             let chunk = super::parse_sse_event(&format!("data: {data}"), "id", "m")
-                .expect("usage 各形状都必须产出 chunk");
+                .unwrap_or_else(|| panic!("usage 各形状都必须产出 chunk：{data}"));
             assert!(chunk.usage.is_some(), "usage 字段存在即 Some：{data}");
             assert_eq!(chunk.usage.as_ref().unwrap().total_tokens, 0, "{data}");
         }
