@@ -32,7 +32,7 @@ jobs:
   # 依赖漏洞扫描：cargo-audit 对照 RustSec advisory DB 检查 Cargo.lock
   # 里的全部依赖（含传递依赖）。这是依赖面唯一的主动防线——dependabot
   # 只管「升级到新版本」，不管「现有版本有没有已知漏洞」。
-  # 默认策略：高危/严重漏洞即红。
+  # 默认策略：高危/严重漏洞即红；豁免必须走下方显式 --ignore + 注释理由。
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
@@ -43,7 +43,39 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit dependencies
-        run: cargo audit
+        # 显式豁免清单（#23 triage 2026-11-15）：9 个安全 bump（aef57612）
+        # 已解 15 条，余 22 条豁免如下。组1–3 被父依赖大版本约束卡死，
+        # 随 #24 波次（reqwest 0.13 / rusqlite 0.41 / sqlx 0.9+sea-orm）
+        # 落地后必须移除对应 --ignore；组4–5 为有缓解依据的恒久豁免。
+        run: |
+          ignores=(
+            # 组1 ×14：hickory-resolver/proto 0.25.2 修复线 0.26.2 被
+            #   reqwest ^0.12（要求 hickory ^0.25）锁死，需 reqwest 0.13.4+
+            RUSTSEC-2026-0512 RUSTSEC-2026-0490 RUSTSEC-2026-0504
+            RUSTSEC-2026-0119 RUSTSEC-2026-0530 RUSTSEC-2026-0531
+            RUSTSEC-2026-0505 RUSTSEC-2026-0511 RUSTSEC-2026-0489
+            RUSTSEC-2026-0118 RUSTSEC-2026-0487 RUSTSEC-2026-0532
+            RUSTSEC-2026-0491 RUSTSEC-2026-0514
+            # 组2 ×1：libsqlite3-sys 0.28 修复线 0.39 需 rusqlite 0.41
+            #   （0.31 需跳 10 个 minor，API 面变化大）
+            RUSTSEC-2026-0459
+            # 组3 ×2：rsa 0.9 / crypto-bigint 0.5 修复线 rsa 0.10 /
+            #   crypto-bigint 0.7 被 sqlx-mysql ^0.9 锁死，需 sqlx 0.9 +
+            #   sea-orm 连带升级
+            RUSTSEC-2023-0071 RUSTSEC-2026-0387
+            # 组4 ×4：zip 2.6 恒久豁免——4 条触发路径全在 ZipArchive::
+            #   extract 等便捷 API；本仓 plugin_host/install.rs 手工逐条
+            #   解压（by_index + safe_join 防 zip-slip），从不调用漏洞 API
+            RUSTSEC-2026-0429 RUSTSEC-2026-0367 RUSTSEC-2026-0369
+            RUSTSEC-2026-0368
+            # 组5 ×1：unsafe-libyaml（serde_yaml 0.9 已废弃/unmaintained）；
+            #   唯一使用点 proxy_pool/clash.rs 仅 Value+from_str 纯数据
+            #   反序列化，迁移超本窗口，暂豁免待依赖清理波次
+            RUSTSEC-2024-0449
+          )
+          args=()
+          for i in "${ignores[@]}"; do args+=(--ignore "$i"); done
+          cargo audit "${args[@]}"
 
   route-inventory:
     name: route inventory gate
