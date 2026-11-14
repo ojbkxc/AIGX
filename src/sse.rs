@@ -148,7 +148,14 @@ fn decode_message(message: &str, events: &mut Vec<SseEvent>) {
         // 忽略其他 SSE 字段（event:, id:, retry:）
     }
     if !data_parts.is_empty() {
-        events.push(SseEvent::Data(data_parts.join("\n")));
+        // 绝大多数事件只有一行 data：直接转移所有权，免去 join 的二次拼接分配；
+        // 多行（罕见）才按规范 \n 连接。
+        let payload = if data_parts.len() == 1 {
+            data_parts.pop().unwrap_or_default()
+        } else {
+            data_parts.join("\n")
+        };
+        events.push(SseEvent::Data(payload));
     }
     if saw_done {
         events.push(SseEvent::Done);

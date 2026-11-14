@@ -621,15 +621,27 @@ impl Bridge for OpenaiCompatibleBridge {
                     // 以字节方式缓冲，多字节 UTF-8 字符跨 chunk 边界不会被截断损坏。
                     // 事件分隔符兼容 \n\n / \r\n\r\n / \r\r（部分上游输出 CRLF 行尾）
                     if let Some(end) = crate::sse::find_event_end_bytes(&buf) {
-                        let event = String::from_utf8_lossy(&buf[..end]).to_string();
-                        buf.drain(..end);
+                        // 零拷贝事件切片：缓冲字节来自逐事件产出的合法 UTF-8 流，
+                        // 直接借用切片解析，省去每事件一次 String 分配；仅在遇到
+                        // 非法字节（损坏流）时回退 lossy 重建。
+                        let lossy;
+                        let event: &str = match std::str::from_utf8(&buf[..end]) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                lossy = String::from_utf8_lossy(&buf[..end]).into_owned();
+                                &lossy
+                            }
+                        };
                         // 换行保活帧：开关开启时直接丢（关掉时不做任何解析）
-                        if crate::config::strip_newline_keepalive()
-                            && is_newline_keepalive_event(&event)
-                        {
-                            continue;
-                        }
-                        if let Some(chunk) = parse_sse_event(&event, &id, &model) {
+                        let keepalive = crate::config::strip_newline_keepalive()
+                            && is_newline_keepalive_event(event);
+                        let chunk = if keepalive {
+                            None
+                        } else {
+                            parse_sse_event(event, &id, &model)
+                        };
+                        buf.drain(..end);
+                        if let Some(chunk) = chunk {
                             return Some((Ok(chunk), (byte_stream, buf, id, model)));
                         }
                         continue;
@@ -650,14 +662,23 @@ impl Bridge for OpenaiCompatibleBridge {
                             // （部分上游省略最后的 `\n\n`）。直接丢弃会丢掉终帧
                             // 的 usage / finish_reason，因此这里补解析一次。
                             if !buf.is_empty() {
-                                let tail = String::from_utf8_lossy(&buf).to_string();
-                                buf.clear();
-                                if crate::config::strip_newline_keepalive()
-                                    && is_newline_keepalive_event(&tail)
+                                let lossy;
+                                let tail: &str = match std::str::from_utf8(&buf) {
+                                    Ok(s) => s,
+                                    Err(_) => {
+                                        lossy = String::from_utf8_lossy(&buf).into_owned();
+                                        &lossy
+                                    }
+                                };
+                                let chunk = if crate::config::strip_newline_keepalive()
+                                    && is_newline_keepalive_event(tail)
                                 {
-                                    return None;
-                                }
-                                if let Some(chunk) = parse_sse_event(&tail, &id, &model) {
+                                    None
+                                } else {
+                                    parse_sse_event(tail, &id, &model)
+                                };
+                                buf.clear();
+                                if let Some(chunk) = chunk {
                                     return Some((Ok(chunk), (byte_stream, buf, id, model)));
                                 }
                             }
@@ -1081,25 +1102,6 @@ fn parse_usage(json: &Value) -> UsageStats {
     }
 }
 
-/// 从 usage 子对象解析（流式 include_usage 终帧用）
-fn parse_usage_from_value(u: &Value) -> UsageStats {
-    let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let completion = u
-        .get("completion_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    // T4：与 parse_usage 同口径的兜底链 + 恒等式收敛（见其注释）
-    let cached_prompt_tokens = extract_cache_hit(Some(u)).clamp(0, prompt);
-    UsageStats {
-        prompt_tokens: prompt,
-        completion_tokens: completion,
-        total_tokens: prompt + completion,
-        cached_prompt_tokens,
-        cache_creation_tokens: 0,
-        cache_read_tokens: 0,
-    }
-}
-
 fn parse_openai_error(body: &[u8]) -> Option<super::UpstreamErrorView> {
     let v: Value = serde_json::from_slice(body).ok()?;
     let err = v.get("error")?;
@@ -1132,6 +1134,149 @@ fn is_newline_keepalive_event(event: &str) -> bool {
     false
 }
 
+/// OpenAI 流式 chunk 的轻量线格式。
+///
+/// 逐事件 `serde_json::from_str::<Value>` 会把整帧建成 Value 树（每事件
+/// 十几次分配）；改用结构体一次解析，字段宽容口径与旧 Value 路径逐字段对齐：
+/// - 缺字段 = 默认值 / None（旧 `.get().unwrap_or()` 口径）；
+/// - 标量字段类型不合法（null/数值/对象当字符串用等）按旧 `.as_str()` /
+///   `.as_u64()` 口径回退 None 或 0，单个畸形字段不拖垮整帧（见各 lenient
+///   反序列化器）；
+/// - 容器字段类型不合法（如 choices 是字符串）时旧路径整帧退化为「空 chunk」，
+///   新路径整帧跳过——上游真实流量不会出现该形态（B17 级畸形已在行解析处理）。
+///
+/// 注意 `usage` 的反序列化保留「字段存在即 Some」语义：旧路径
+/// `v.get("usage").map(parse_usage_from_value)` 对 `"usage": null` / `{}` /
+/// 畸形形状都产出 Some(全零)，新路径必须逐形一致，否则流式终帧形状漂移。
+#[derive(serde::Deserialize)]
+struct ChunkWire {
+    #[serde(default)]
+    choices: Option<Vec<ChoiceWire>>,
+    #[serde(default, deserialize_with = "de_usage_always_some")]
+    usage: Option<UsageWire>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ChoiceWire {
+    #[serde(default)]
+    delta: DeltaWire,
+    #[serde(default, deserialize_with = "de_opt_lenient_str")]
+    finish_reason: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct DeltaWire {
+    #[serde(default, deserialize_with = "de_opt_lenient_str")]
+    content: Option<String>,
+    // DeepSeek 系 reasoning_content / OpenAI o 系列 reasoning，两取一
+    #[serde(default, deserialize_with = "de_opt_lenient_str")]
+    reasoning_content: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_lenient_str")]
+    reasoning: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCallWire>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ToolCallWire {
+    #[serde(default, deserialize_with = "de_lenient_u64")]
+    index: u64,
+    #[serde(default, deserialize_with = "de_opt_lenient_str")]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<FunctionWire>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct FunctionWire {
+    #[serde(default, deserialize_with = "de_opt_lenient_str")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_lenient_str")]
+    arguments: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct UsageWire {
+    #[serde(default, deserialize_with = "de_lenient_u64")]
+    prompt_tokens: u64,
+    #[serde(default, deserialize_with = "de_lenient_u64")]
+    completion_tokens: u64,
+    // T4 缓存命中兜底链字段：Option 区分「缺失/非法」与「0」——链式回退只在
+    // 字段缺失或非法时继续，`0` 视为有效命中值（与旧 extract_cache_hit 同口径）
+    #[serde(default, deserialize_with = "de_opt_lenient_u64")]
+    prompt_cache_hit_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "de_opt_lenient_u64")]
+    cached_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<CacheDetailsWire>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CacheDetailsWire {
+    #[serde(default, deserialize_with = "de_opt_lenient_u64")]
+    cached_tokens: Option<u64>,
+}
+
+impl UsageWire {
+    /// 转 UsageStats：缓存命中兜底链（DeepSeek 旧字段 → OpenAI details →
+    /// Kimi 顶层）+ 恒等式收敛（`min(prompt)`，保证 hit ∈ [0, prompt]），
+    /// 与 `parse_usage_from_value` 逐字段同口径。
+    fn into_stats(self) -> UsageStats {
+        let prompt = self.prompt_tokens;
+        let completion = self.completion_tokens;
+        let cached_prompt_tokens = self
+            .prompt_cache_hit_tokens
+            .or_else(|| self.prompt_tokens_details.and_then(|d| d.cached_tokens))
+            .or(self.cached_tokens)
+            .unwrap_or(0)
+            .min(prompt);
+        UsageStats {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+            cached_prompt_tokens,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        }
+    }
+}
+
+/// 整型字段的宽容解析：数值原样；null/浮点/字符串等旧 `.as_u64()` 口径
+/// 回退 0 —— 单个畸形字段不拖垮整个 usage 对象。
+fn de_lenient_u64<'de, D>(d: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u64::deserialize(d).unwrap_or(0))
+}
+
+/// Option 整型：缺失/非法 → None（兜底链继续下一位）；数值原样。
+fn de_opt_lenient_u64<'de, D>(d: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u64::deserialize(d).ok())
+}
+
+/// Option 字符串：字符串原样；其余（null/数值/布尔/对象）旧 `.as_str()`
+/// 口径回退 None。
+fn de_opt_lenient_str<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(String::deserialize(d).ok())
+}
+
+/// usage 字段反序列化：「存在即 Some」——null/畸形形状回退全零
+/// UsageWire，与旧 `v.get("usage").map(parse_usage_from_value)` 对
+/// Null/字符串/数组的宽容口径（.get() 得 None → 全零）逐形一致。
+fn de_usage_always_some<'de, D>(d: D) -> Result<Option<UsageWire>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(UsageWire::deserialize(d).unwrap_or_default()))
+}
+
 /// 解析单个 SSE 事件为 ChatChunk
 fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
     for line in event.lines() {
@@ -1147,68 +1292,54 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                     usage: None,
                 });
             }
-            if let Ok(v) = serde_json::from_str::<Value>(data) {
-                let content = v
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
-                    .and_then(|d| d.get("content"))
-                    .and_then(|c| c.as_str())
-                    .map(String::from);
-                let tool_calls = v
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
-                    .and_then(|d| d.get("tool_calls"))
-                    .and_then(|tc| tc.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .map(|t| super::ToolCallDelta {
-                                index: t.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
-                                    as usize,
-                                id: t.get("id").and_then(|i| i.as_str()).map(String::from),
-                                function_name: t
-                                    .get("function")
-                                    .and_then(|f| f.get("name"))
-                                    .and_then(|n| n.as_str())
-                                    .map(String::from),
-                                arguments: t
-                                    .get("function")
-                                    .and_then(|f| f.get("arguments"))
-                                    .and_then(|a| a.as_str())
-                                    .map(String::from),
-                                signature: None,
-                            })
-                            .collect()
-                    });
-                // 流式推理增量：DeepSeek 系用 reasoning_content，OpenAI o 系列用 reasoning
-                let reasoning = v
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
-                    .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
-                    .and_then(|r| r.as_str())
-                    .map(String::from);
-                let finish = v
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("finish_reason"))
-                    .and_then(|f| f.as_str())
-                    .map(parse_finish_reason);
-                // stream_options.include_usage 终帧：usage 出现在顶层
-                let usage = v.get("usage").map(parse_usage_from_value);
-                return Some(ChatChunk {
-                    id: id.to_string(),
-                    model: model.to_string(),
-                    delta: super::ChatDelta {
-                        content,
-                        tool_calls,
-                        reasoning,
-                    },
-                    finish_reason: finish,
-                    usage,
-                });
-            }
+            let Ok(wire) = serde_json::from_str::<ChunkWire>(data) else {
+                continue;
+            };
+            let (delta_wire, finish_wire) = match wire.choices {
+                Some(mut cs) => {
+                    let c = if cs.is_empty() {
+                        ChoiceWire::default()
+                    } else {
+                        cs.remove(0)
+                    };
+                    (c.delta, c.finish_reason)
+                }
+                None => (DeltaWire::default(), None),
+            };
+            let reasoning = delta_wire.reasoning_content.or(delta_wire.reasoning);
+            let tool_calls = delta_wire.tool_calls.map(|arr| {
+                arr.into_iter()
+                    .map(|t| {
+                        let ToolCallWire {
+                            index,
+                            id,
+                            function,
+                        } = t;
+                        let (name, arguments) = match function {
+                            Some(f) => (f.name, f.arguments),
+                            None => (None, None),
+                        };
+                        super::ToolCallDelta {
+                            index: index as usize,
+                            id,
+                            function_name: name,
+                            arguments,
+                            signature: None,
+                        }
+                    })
+                    .collect()
+            });
+            return Some(ChatChunk {
+                id: id.to_string(),
+                model: model.to_string(),
+                delta: super::ChatDelta {
+                    content: delta_wire.content,
+                    tool_calls,
+                    reasoning,
+                },
+                finish_reason: finish_wire.as_deref().map(parse_finish_reason),
+                usage: wire.usage.map(|u| u.into_stats()),
+            });
         }
     }
     None
@@ -1573,24 +1704,123 @@ mod tests {
         assert_eq!(stats.prompt_tokens, 50, "prompt_tokens 原样保留");
     }
 
-    /// 流式终帧（parse_usage_from_value）与非流式同口径。
+    /// 流式终帧 usage 兜底链（UsageWire::into_stats）与非流式同口径。
     #[test]
-    fn usage_from_value_uses_same_fallback_chain() {
-        let u = serde_json::json!({
-            "prompt_tokens": 100,
-            "completion_tokens": 10,
-            "cached_tokens": 70
-        });
-        let stats = super::parse_usage_from_value(&u);
+    fn usage_wire_uses_same_fallback_chain() {
+        let u: super::UsageWire = serde_json::from_str(
+            r#"{"prompt_tokens":100,"completion_tokens":10,"cached_tokens":70}"#,
+        )
+        .unwrap();
+        let stats = u.into_stats();
         assert_eq!(stats.cached_prompt_tokens, 70);
 
-        let u = serde_json::json!({
-            "prompt_tokens": 20,
-            "completion_tokens": 5,
-            "prompt_cache_hit_tokens": 99
-        });
-        let stats = super::parse_usage_from_value(&u);
+        let u: super::UsageWire = serde_json::from_str(
+            r#"{"prompt_tokens":20,"completion_tokens":5,"prompt_cache_hit_tokens":99}"#,
+        )
+        .unwrap();
+        let stats = u.into_stats();
         assert_eq!(stats.cached_prompt_tokens, 20, "流式路径同样 clamp 收敛");
+
+        // 缓存命中字段缺失/为 0 时的行为：0 是有效命中值，链不回退
+        let u: super::UsageWire = serde_json::from_str(
+            r#"{"prompt_tokens":10,"prompt_cache_hit_tokens":0,"cached_tokens":5}"#,
+        )
+        .unwrap();
+        let stats = u.into_stats();
+        assert_eq!(stats.cached_prompt_tokens, 0, "0 命中值不应回退到次位字段");
+    }
+
+    /// 「usage 存在即 Some」语义：`"usage": null` / `{}` / 畸形形状都产出
+    /// Some(全零)（旧 Value 路径 v.get("usage").map(parse_usage_from_value)
+    /// 的逐形行为），不得因结构体解析退化为 None。
+    #[test]
+    fn usage_presence_shapes_all_yield_some() {
+        for data in [
+            r#"{"usage": null}"#,
+            r#"{"usage": {}}"#,
+            r#"{"usage": "oops"}"#,
+            r#"{"usage": [1,2]}"#,
+        ] {
+            let chunk = super::parse_sse_event(&format!("data: {data}"), "id", "m")
+                .expect("usage 各形状都必须产出 chunk");
+            assert!(chunk.usage.is_some(), "usage 字段存在即 Some：{data}");
+            assert_eq!(chunk.usage.as_ref().unwrap().total_tokens, 0, "{data}");
+        }
+    }
+
+    /// 流式 chunk 轻量结构体解析与旧 Value 路径逐字段等价：
+    /// 文本增量 / 推理增量 / finish_reason / tool_calls 分片 / [DONE]。
+    #[test]
+    fn parse_sse_event_matches_value_path() {
+        use crate::bridge::FinishReason;
+        // 常规文本增量
+        let chunk = super::parse_sse_event(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"he\"}}]}",
+            "chatcmpl-1",
+            "m1",
+        )
+        .unwrap();
+        assert_eq!(chunk.id, "chatcmpl-1");
+        assert_eq!(chunk.model, "m1");
+        assert_eq!(chunk.delta.content.as_deref(), Some("he"));
+        assert_eq!(chunk.finish_reason, None);
+
+        // reasoning_content 与 reasoning 两取一（DeepSeek 系 / o 系列）
+        let chunk = super::parse_sse_event(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"r1\"}}]}",
+            "id",
+            "m",
+        )
+        .unwrap();
+        assert_eq!(chunk.delta.reasoning.as_deref(), Some("r1"));
+        let chunk = super::parse_sse_event(
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"r2\"}}]}",
+            "id",
+            "m",
+        )
+        .unwrap();
+        assert_eq!(chunk.delta.reasoning.as_deref(), Some("r2"));
+
+        // finish_reason + include_usage 终帧
+        let chunk = super::parse_sse_event(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}",
+            "id",
+            "m",
+        )
+        .unwrap();
+        assert_eq!(chunk.finish_reason, Some(FinishReason::Length));
+        let usage = chunk.usage.expect("usage 终帧必须产出");
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (7, 3));
+
+        // tool_calls 分片（id/name 首帧 + arguments 分片）
+        let chunk = super::parse_sse_event(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\"}}]}}]}",
+            "id",
+            "m",
+        )
+        .unwrap();
+        let tcs = chunk.delta.tool_calls.expect("tool_calls 必须产出");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].index, 0);
+        assert_eq!(tcs[0].id.as_deref(), Some("call_1"));
+        assert_eq!(tcs[0].function_name.as_deref(), Some("get_weather"));
+        assert_eq!(tcs[0].arguments.as_deref(), Some("{\"city\":\""));
+
+        // [DONE]
+        let chunk = super::parse_sse_event("data: [DONE]", "id", "m").unwrap();
+        assert_eq!(chunk.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(chunk.delta.content, None);
+
+        // 缺字段宽容：空 choices / 缺 delta 都产出空 chunk（不 panic、不丢帧）
+        let chunk = super::parse_sse_event("data: {\"choices\":[]}", "id", "m").unwrap();
+        assert_eq!(chunk.delta, crate::bridge::ChatDelta::default());
+        let chunk = super::parse_sse_event("data: {\"choices\":[{}]}", "id", "m").unwrap();
+        assert_eq!(chunk.delta, crate::bridge::ChatDelta::default());
+        // 非对象 JSON 帧：新路径整帧跳过（旧路径会产出空 chunk 噪音帧）
+        assert!(super::parse_sse_event("data: 42", "id", "m").is_none());
+        assert!(super::parse_sse_event("data: \"hello\"", "id", "m").is_none());
+        // 非 data 行不产出
+        assert!(super::parse_sse_event("event: message", "id", "m").is_none());
     }
 
     /// 登录态型供应商：Cookie 与 `{credential}` 请求头模板真的到达上游。

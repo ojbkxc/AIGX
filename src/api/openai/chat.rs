@@ -719,143 +719,135 @@ pub(crate) async fn handle_chat_completions(
             let stream_errored_for_map = stream_errored.clone();
 
             let sse_stream = stream.flat_map(move |chunk_result| match chunk_result {
-                    Ok(chunk) => {
-                        // 累积内容文本用于事后估算 completion tokens
-                        // （含 thinking 推理内容与工具调用参数，与 cf-ai-gw 的
-                        //   reasoningTokens/output 计量口径对齐）
-                        let mut buf = acc_for_map.lock();
-                        if let Some(text) = &chunk.delta.content {
-                            crate::token_estimate::push_capped(&mut buf, text);
-                        }
-                        if let Some(reasoning) = &chunk.delta.reasoning {
-                            crate::token_estimate::push_capped(&mut buf, reasoning);
-                        }
-                        if let Some(tool_calls) = &chunk.delta.tool_calls {
-                            for tc in tool_calls {
+                Ok(chunk) => {
+                    // 累积内容文本用于事后估算 completion tokens
+                    // （含 thinking 推理内容与工具调用参数，与 cf-ai-gw 的
+                    //   reasoningTokens/output 计量口径对齐）
+                    let mut buf = acc_for_map.lock();
+                    if let Some(text) = &chunk.delta.content {
+                        crate::token_estimate::push_capped(&mut buf, text);
+                    }
+                    if let Some(reasoning) = &chunk.delta.reasoning {
+                        crate::token_estimate::push_capped(&mut buf, reasoning);
+                    }
+                    if let Some(tool_calls) = &chunk.delta.tool_calls {
+                        for tc in tool_calls {
+                            if let Some(name) = &tc.function_name {
+                                crate::token_estimate::push_capped(&mut buf, name);
+                            }
+                            if let Some(args) = &tc.arguments {
+                                crate::token_estimate::push_capped(&mut buf, args);
+                            }
+                            // 仅统计 tool_use 起始帧（带 id/name 的首帧），
+                            // 避免对参数分片帧重复计数（与 new-api
+                            // `content_block_start tool_use` 的计数口径一致）。
+                            if tc.function_name.is_some() && tc.id.is_some() {
                                 if let Some(name) = &tc.function_name {
-                                    crate::token_estimate::push_capped(&mut buf, name);
-                                }
-                                if let Some(args) = &tc.arguments {
-                                    crate::token_estimate::push_capped(&mut buf, args);
-                                }
-                                // 仅统计 tool_use 起始帧（带 id/name 的首帧），
-                                // 避免对参数分片帧重复计数（与 new-api
-                                // `content_block_start tool_use` 的计数口径一致）。
-                                if tc.function_name.is_some() && tc.id.is_some() {
-                                    if let Some(name) = &tc.function_name {
-                                        *tool_calls_for_map
-                                            .lock()
-                                            .entry(name.clone())
-                                            .or_insert(0) += 1;
-                                    }
+                                    *tool_calls_for_map.lock().entry(name.clone()).or_insert(0) +=
+                                        1;
                                 }
                             }
                         }
-                        drop(buf);
-                        let mut delta = serde_json::json!({
-                            "content": chunk.delta.content.unwrap_or_default(),
-                        });
+                    }
+                    drop(buf);
+                    // 帧直写：serde 结构体 + to_writer 一次序列化进帧缓冲，
+                    // 零中间 Value 树（旧路径每 chunk 建 delta 树 + 外层树
+                    // 两棵再 to_string，此处只剩帧缓冲本身的一次分配）。
+                    let delta = SseDeltaFrame {
+                        content: chunk.delta.content.as_deref().unwrap_or_default(),
                         // 流式推理内容增量透传给 OpenAI 客户端（OpenAI 协议字段）
-                        if let Some(reasoning) = &chunk.delta.reasoning {
-                            delta["reasoning_content"] = Value::String(reasoning.clone());
-                        }
-                        if let Some(tool_calls) = &chunk.delta.tool_calls {
+                        reasoning_content: chunk.delta.reasoning.as_deref(),
+                        tool_calls: chunk.delta.tool_calls.as_ref().map(|tool_calls| {
                             // 按 index 聚合流式参数分片，并对完整 arguments 做三层自修复
                             // （同一次 chunk 内的多个 index 并行聚合，修复彼此独立）
-                            let repaired =
-                                tool_repair::accumulate_tool_call_arguments(tool_calls);
+                            let repaired = tool_repair::accumulate_tool_call_arguments(tool_calls);
                             // Antigravity 思考签名随 tool_call 带出：位置取 Google
                             // 自家 OpenAI 兼容端点的官方非标字段
                             // extra_content.google.thought_signature。多数客户端会
                             // 丢弃该字段 —— 那时请求侧按服务端缓存回填
                             // （antigravity_signature_cache）。
-                            let signature = tool_calls
-                                .iter()
-                                .find_map(|tc| tc.signature.clone());
-                            delta["tool_calls"] = Value::Array(
-                                repaired
-                                    .iter()
-                                    .map(|(idx, id, name, args)| {
-                                        let mut item = serde_json::json!({
-                                            "index": idx,
-                                            "id": id,
-                                            "type": "function",
-                                            "function": {
-                                                "name": name,
-                                                "arguments": args,
-                                            }
-                                        });
-                                        if let Some(sig) = &signature {
-                                            item["extra_content"] = serde_json::json!({
-                                                "google": { "thought_signature": sig }
-                                            });
-                                        }
-                                        item
-                                    })
-                                    .collect(),
-                            );
-                        }
-                        let sse_data = serde_json::json!({
+                            let signature =
+                                tool_calls.iter().find_map(|tc| tc.signature.as_deref());
+                            repaired
+                                .into_iter()
+                                .map(|(idx, id, name, args)| SseToolCallFrame {
+                                    index: idx,
+                                    id: id.as_deref(),
+                                    kind: "function",
+                                    function: SseFunctionFrame {
+                                        name: name.as_deref(),
+                                        arguments: args,
+                                    },
+                                    extra_content: signature.map(|sig| SseExtraContent {
+                                        google: SseGoogleSig {
+                                            thought_signature: sig,
+                                        },
+                                    }),
+                                })
+                                .collect()
+                        }),
+                    };
+                    let frame = SseChunkFrame {
+                        id: &chunk.id,
+                        object: "chat.completion.chunk",
+                        created: chrono::Utc::now().timestamp(),
+                        model: &chunk.model,
+                        choices: [SseChoiceFrame {
+                            index: 0,
+                            delta,
+                            finish_reason: chunk.finish_reason.as_ref().map(finish_reason_str),
+                        }],
+                    };
+                    // to_writer 写 Vec<u8> 不会失败；序列化输出必为合法 UTF-8
+                    let mut buf = Vec::with_capacity(256);
+                    serde_json::to_writer(&mut buf, &frame)
+                        .expect("serde_json to_writer 写 Vec<u8> 不失败");
+                    let sse_data = String::from_utf8(buf).expect("serde_json 序列化输出必为 UTF-8");
+                    let mut evs = vec![Ok::<_, Infallible>(Event::default().data(sse_data))];
+                    // 流式 usage 终帧：客户端请求 stream_options.include_usage=true 时
+                    // 回传 usage 帧（choices 空数组，OpenAI 官方契约）。此前
+                    // chat.rs 忽略 chunk.usage，客户端收不到 usage 帧。
+                    if let Some(usage) = &chunk.usage {
+                        let usage_data = serde_json::json!({
                             "id": chunk.id,
                             "object": "chat.completion.chunk",
                             "created": chrono::Utc::now().timestamp(),
                             "model": chunk.model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": delta,
-                                "finish_reason": chunk.finish_reason.as_ref().map(|fr| finish_reason_str(fr)),
-                            }]
-                        })
-                        .to_string();
-                        let mut evs = vec![Ok::<_, Infallible>(Event::default().data(sse_data))];
-                        // 流式 usage 终帧：客户端请求 stream_options.include_usage=true 时
-                        // 回传 usage 帧（choices 空数组，OpenAI 官方契约）。此前
-                        // chat.rs 忽略 chunk.usage，客户端收不到 usage 帧。
-                        if let Some(usage) = &chunk.usage {
-                            let usage_data = serde_json::json!({
-                                "id": chunk.id,
-                                "object": "chat.completion.chunk",
-                                "created": chrono::Utc::now().timestamp(),
-                                "model": chunk.model,
-                                "choices": [],
-                                "usage": {
-                                    "prompt_tokens": usage.prompt_tokens,
-                                    "completion_tokens": usage.completion_tokens,
-                                    "total_tokens": usage.total_tokens,
-                                }
-                            })
-                            .to_string();
-                            evs.push(Ok::<_, Infallible>(Event::default().data(usage_data)));
-                        }
-                        futures::stream::iter(evs)
-                    }
-                    Err(e) => {
-                        tracing::error!("Stream chunk error: {e}");
-                        // 标记流中途出错：final_event 据此不发 [DONE]、
-                        // metrics 记 error、日志记 500
-                        stream_errored_for_map.store(
-                            true,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        // 标准 SSE error 事件格式（与 OpenAI API 错误结构一致）：
-                        //   event: error
-                        //   data: {"error":{"message":"...","type":"...","code":"..."}}
-                        // T3：发给客户端的错误消息先脱敏（日志侧保留原始消息）
-                        let safe_msg =
-                            crate::error_translate::sanitize_error_message(&e.to_string());
-                        let err_data = serde_json::json!({
-                            "error": {
-                                "message": safe_msg,
-                                "type": e.error_type(),
-                                "code": e.error_type(),
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": usage.prompt_tokens,
+                                "completion_tokens": usage.completion_tokens,
+                                "total_tokens": usage.total_tokens,
                             }
                         })
                         .to_string();
-                        futures::stream::iter(vec![Ok::<_, Infallible>(
-                            Event::default().event("error").data(err_data),
-                        )])
+                        evs.push(Ok::<_, Infallible>(Event::default().data(usage_data)));
                     }
-                });
+                    futures::stream::iter(evs)
+                }
+                Err(e) => {
+                    tracing::error!("Stream chunk error: {e}");
+                    // 标记流中途出错：final_event 据此不发 [DONE]、
+                    // metrics 记 error、日志记 500
+                    stream_errored_for_map.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // 标准 SSE error 事件格式（与 OpenAI API 错误结构一致）：
+                    //   event: error
+                    //   data: {"error":{"message":"...","type":"...","code":"..."}}
+                    // T3：发给客户端的错误消息先脱敏（日志侧保留原始消息）
+                    let safe_msg = crate::error_translate::sanitize_error_message(&e.to_string());
+                    let err_data = serde_json::json!({
+                        "error": {
+                            "message": safe_msg,
+                            "type": e.error_type(),
+                            "code": e.error_type(),
+                        }
+                    })
+                    .to_string();
+                    futures::stream::iter(vec![Ok::<_, Infallible>(
+                        Event::default().event("error").data(err_data),
+                    )])
+                }
+            });
 
             // 流结束：估算 token、扣费、commit_tokens、记录日志（问题 3）
             // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
@@ -1578,6 +1570,68 @@ pub(crate) async fn handle_chat_completions(
     }
 }
 
+// ── SSE 输出帧直写（P1 性能）：
+// 每 chunk 用 serde 结构体 + to_writer 一次序列化进帧缓冲，替代旧路径
+// 「json! 建 delta 树 → 外层 json! 再建树 → to_string」的两步 Value 树
+// 构造。字段形状与旧路径逐字段一致：
+// - content 恒存在（None 占位为空串，旧 `unwrap_or_default` 同口径）；
+// - reasoning_content / tool_calls 仅在有时出现（skip_serializing_if）；
+// - tool_call 的 id / function.name 经 json! 序列化 Option → 缺失即 null
+//   （字段恒存在），这里同样恒存在（Option<&str> 序列化为 null）；
+// - extra_content 仅在有签名时出现。
+
+#[derive(serde::Serialize)]
+struct SseChunkFrame<'a> {
+    id: &'a str,
+    object: &'static str,
+    created: i64,
+    model: &'a str,
+    choices: [SseChoiceFrame<'a>; 1],
+}
+
+#[derive(serde::Serialize)]
+struct SseChoiceFrame<'a> {
+    index: usize,
+    delta: SseDeltaFrame<'a>,
+    finish_reason: Option<&'a str>,
+}
+
+#[derive(serde::Serialize)]
+struct SseDeltaFrame<'a> {
+    content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<SseToolCallFrame<'a>>>,
+}
+
+#[derive(serde::Serialize)]
+struct SseToolCallFrame<'a> {
+    index: usize,
+    id: Option<&'a str>,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: SseFunctionFrame<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra_content: Option<SseExtraContent<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct SseFunctionFrame<'a> {
+    name: Option<&'a str>,
+    arguments: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct SseExtraContent<'a> {
+    google: SseGoogleSig<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct SseGoogleSig<'a> {
+    thought_signature: &'a str,
+}
+
 #[cfg(test)]
 mod tests {
     // 连接稳定性：流式/非流式 failover 循环接入的预算口径自检。
@@ -1612,5 +1666,114 @@ mod tests {
         let budget = crate::api::failover::FailoverBudget::new();
         assert!(budget.can_attempt());
         assert_eq!(budget.attempts(), 0);
+    }
+
+    /// 帧直写形状与旧 json! 路径逐字段一致：
+    /// - 最小 chunk（仅 content）不携带 reasoning_content / tool_calls 键；
+    /// - 推理增量出现 reasoning_content；tool_call 的 id/name 缺失序列化为
+    ///   null（键恒存在，与 json! 对 Option 的序列化一致）；
+    /// - 无签名时 extra_content 不出现；finish_reason 缺失为 null。
+    #[test]
+    fn sse_chunk_frame_wire_shape() {
+        let frame = SseChunkFrame {
+            id: "c1",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "m",
+            choices: [SseChoiceFrame {
+                index: 0,
+                delta: SseDeltaFrame {
+                    content: "hi",
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+        };
+        let v: Value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(v["id"], "c1");
+        assert_eq!(v["object"], "chat.completion.chunk");
+        assert_eq!(v["choices"][0]["delta"]["content"], "hi");
+        assert!(v["choices"][0]["delta"].get("reasoning_content").is_none());
+        assert!(v["choices"][0]["delta"].get("tool_calls").is_none());
+        assert_eq!(v["choices"][0]["finish_reason"], Value::Null);
+
+        // 推理 + tool_calls + finish_reason + extra_content 完整形状
+        let frame = SseChunkFrame {
+            id: "c1",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "m",
+            choices: [SseChoiceFrame {
+                index: 0,
+                delta: SseDeltaFrame {
+                    content: "",
+                    reasoning_content: Some("think"),
+                    tool_calls: Some(vec![SseToolCallFrame {
+                        index: 0,
+                        id: Some("call_1"),
+                        kind: "function",
+                        function: SseFunctionFrame {
+                            name: Some("get_weather"),
+                            arguments: "{}",
+                        },
+                        extra_content: Some(SseExtraContent {
+                            google: SseGoogleSig {
+                                thought_signature: "sig1",
+                            },
+                        }),
+                    }]),
+                },
+                finish_reason: Some("stop"),
+            }],
+        };
+        let v: Value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(v["choices"][0]["delta"]["reasoning_content"], "think");
+        let tc = &v["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(tc["index"], 0);
+        assert_eq!(tc["id"], "call_1");
+        assert_eq!(tc["type"], "function");
+        assert_eq!(tc["function"]["name"], "get_weather");
+        assert_eq!(tc["function"]["arguments"], "{}");
+        assert_eq!(tc["extra_content"]["google"]["thought_signature"], "sig1");
+        assert_eq!(v["choices"][0]["finish_reason"], "stop");
+
+        // id/name 缺失 → null 键恒存在（与旧 json! Option 序列化一致）
+        let frame = SseChunkFrame {
+            id: "c1",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "m",
+            choices: [SseChoiceFrame {
+                index: 0,
+                delta: SseDeltaFrame {
+                    content: "",
+                    reasoning_content: None,
+                    tool_calls: Some(vec![SseToolCallFrame {
+                        index: 0,
+                        id: None,
+                        kind: "function",
+                        function: SseFunctionFrame {
+                            name: None,
+                            arguments: "",
+                        },
+                        extra_content: None,
+                    }]),
+                },
+                finish_reason: None,
+            }],
+        };
+        let v: Value = serde_json::to_value(&frame).unwrap();
+        let tc = &v["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(tc["id"], Value::Null, "id 键必须恒存在（null）");
+        assert_eq!(
+            tc["function"]["name"],
+            Value::Null,
+            "name 键必须恒存在（null）"
+        );
+        assert!(
+            tc.get("extra_content").is_none(),
+            "无签名时 extra_content 不出现"
+        );
     }
 }
