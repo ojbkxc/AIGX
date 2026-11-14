@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::storage::FileStore;
@@ -42,6 +43,37 @@ pub struct TestResult {
 pub struct AccountPool {
     accounts: RwLock<Vec<CfAccount>>,
     store: Arc<FileStore>,
+    /// SSRF 逃生阀快照（`config.usage.allow_internal_upstream`，启动时由
+    /// main 注入）。false（默认）时账号 Worker 地址不得指向内网/环回/
+    /// 云元数据地址——账号 `account_id` 由管理员填写、网关会主动外发请求。
+    allow_internal_upstream: AtomicBool,
+}
+
+/// 解析账号 Worker 地址（补 scheme）并做 SSRF 出站校验。
+///
+/// `account_id` 即 cf-ai-gw Worker 地址；兼容裸域名/本地地址：
+/// 127.0.0.1 / localhost / ::1 视为 http://，其余裸域名默认补 https://。
+///
+/// 校验策略与渠道 `base_url` 同口径（`net_guard::validate_outbound_url`）：
+/// 拒绝内网/环回/链路本地/云元数据等保留地址；`allow_internal=true`
+/// （逃生阀）时跳过内网检查但仍校验协议与可解析性。
+pub(crate) fn resolve_worker_url(
+    account_id: &str,
+    allow_internal: bool,
+) -> Result<String, crate::net_guard::UrlRejection> {
+    let mut base_url = account_id.trim().trim_end_matches('/').to_string();
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        let is_localhost = base_url.starts_with("127.0.0.1")
+            || base_url.starts_with("localhost")
+            || base_url.starts_with("::1");
+        base_url = if is_localhost {
+            format!("http://{base_url}")
+        } else {
+            format!("https://{base_url}")
+        };
+    }
+    crate::net_guard::validate_outbound_url(&base_url, allow_internal)?;
+    Ok(base_url)
 }
 
 impl AccountPool {
@@ -49,9 +81,21 @@ impl AccountPool {
         let pool = Self {
             accounts: RwLock::new(Vec::new()),
             store,
+            allow_internal_upstream: AtomicBool::new(false),
         };
         let _ = pool.load();
         pool
+    }
+
+    /// 注入 SSRF 逃生阀快照（启动时由 main 按
+    /// `config.usage.allow_internal_upstream` 调用一次）。
+    pub fn set_allow_internal_upstream(&self, allow: bool) {
+        self.allow_internal_upstream.store(allow, Ordering::Relaxed);
+    }
+
+    /// 当前 SSRF 逃生阀状态（false = 拒绝内网/环回/元数据地址）。
+    pub fn allow_internal_upstream(&self) -> bool {
+        self.allow_internal_upstream.load(Ordering::Relaxed)
     }
 
     /// 从存储加载账号
@@ -186,18 +230,10 @@ impl AccountPool {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        // account_id 即 cf-ai-gw Worker 地址；兼容裸域名/本地地址
-        let mut base_url = account.account_id.trim().trim_end_matches('/').to_string();
-        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-            let is_localhost = base_url.starts_with("127.0.0.1")
-                || base_url.starts_with("localhost")
-                || base_url.starts_with("::1");
-            base_url = if is_localhost {
-                format!("http://{base_url}")
-            } else {
-                format!("https://{base_url}")
-            };
-        }
+        // account_id 即 cf-ai-gw Worker 地址；兼容裸域名/本地地址。
+        // P0 SSRF：发送前经 net_guard 校验（逃生阀随账号池快照）。
+        let base_url = resolve_worker_url(&account.account_id, self.allow_internal_upstream())
+            .map_err(|rej| rej.message())?;
 
         let build_req = |client: &reqwest::Client, url: &str| {
             let mut req = client.get(url);
@@ -425,5 +461,62 @@ mod tests {
 
         let accounts = pool.list();
         assert_eq!(accounts[0].name, "Updated Name");
+    }
+
+    // ── P0 SSRF 接线（resolve_worker_url）────────────────────────────
+
+    /// 默认（逃生阀关闭）：内网/环回/元数据地址一律拒绝。
+    #[test]
+    fn resolve_worker_url_rejects_internal_by_default() {
+        for account_id in [
+            "127.0.0.1:11434/v1",
+            "localhost:3000",
+            "169.254.169.254/latest/meta-data/",
+            "10.0.0.5",
+            "192.168.1.10:8000",
+        ] {
+            assert!(
+                resolve_worker_url(account_id, false).is_err(),
+                "{account_id} 应被 SSRF 校验拒绝"
+            );
+        }
+    }
+
+    /// 逃生阀打开（allow_internal_upstream=true）：内网地址放行。
+    #[test]
+    fn resolve_worker_url_escape_hatch() {
+        assert_eq!(
+            resolve_worker_url("127.0.0.1:11434/v1", true).unwrap(),
+            "http://127.0.0.1:11434/v1"
+        );
+        assert_eq!(
+            resolve_worker_url("localhost:3000", true).unwrap(),
+            "http://localhost:3000"
+        );
+    }
+
+    /// 裸域名/公网字面量：补 scheme 且通过校验（字面量 IP 不做 DNS 查询）。
+    #[test]
+    fn resolve_worker_url_bare_domain_gets_https() {
+        assert_eq!(
+            resolve_worker_url("1.1.1.1/v1", false).unwrap(),
+            "https://1.1.1.1/v1"
+        );
+        // 已带 scheme 的原样保留（仅去尾斜杠）
+        assert_eq!(
+            resolve_worker_url("https://8.8.8.8:8080/", false).unwrap(),
+            "https://8.8.8.8:8080"
+        );
+    }
+
+    /// 账号池逃生阀快照：setter/getter 往返。
+    #[test]
+    fn pool_allow_internal_flag_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+        let pool = AccountPool::new(store);
+        assert!(!pool.allow_internal_upstream(), "默认必须拒绝内网");
+        pool.set_allow_internal_upstream(true);
+        assert!(pool.allow_internal_upstream());
     }
 }

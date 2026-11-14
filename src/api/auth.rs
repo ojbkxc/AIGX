@@ -2,6 +2,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::storage::FileStore;
@@ -189,6 +190,9 @@ pub enum ApiKeyError {
 /// API 密钥存储
 pub struct ApiKeyStore {
     store: Arc<FileStore>,
+    /// enc1: 信封加密的数据目录（`account.key` 密钥文件所在目录，与 FileStore
+    /// 同目录；main 启动时在 `set_data_dir` 之后传入）。
+    data_dir: PathBuf,
     keys: Arc<RwLock<HashMap<String, ApiKey>>>,
     key_hash_map: Arc<RwLock<HashMap<String, String>>>, // hash -> id
     /// 用户存储（余额预检用；None 时跳过用户级检查）
@@ -196,13 +200,29 @@ pub struct ApiKeyStore {
 }
 
 impl ApiKeyStore {
-    pub fn new(store: Arc<FileStore>) -> Self {
+    pub fn new(store: Arc<FileStore>, data_dir: PathBuf) -> Self {
         Self {
             store,
+            data_dir,
             keys: Arc::new(RwLock::new(HashMap::new())),
             key_hash_map: Arc::new(RwLock::new(HashMap::new())),
             user_store: None,
         }
+    }
+
+    /// 落盘形态：`key` 字段用 enc1: AES-GCM 信封加密（复用
+    /// `account_session::secret` 的密钥文件与信封格式）。
+    ///
+    /// 内存中始终保留明文（鉴权哈希比对、管理端展示、update 重算哈希都
+    /// 依赖它），磁盘上绝不落明文。已是 `enc1:` 信封的原样返回（幂等）；
+    /// 加密失败时退化为旧 `enc:` 可逆混淆（`seal_or_keep` 语义），绝不
+    /// 把明文写回存储。
+    fn for_storage(&self, api_key: &ApiKey) -> ApiKey {
+        let mut k = api_key.clone();
+        if !k.key.is_empty() && !k.key.starts_with("enc1:") {
+            k.key = crate::account_session::secret::seal_or_keep(&k.key, &self.data_dir);
+        }
+        k
     }
 
     /// 注入用户存储（启动时由 main 调用，供余额预检）。
@@ -217,10 +237,27 @@ impl ApiKeyStore {
         // 历史死锁同类结构）；持写锁仅做内存 map 插入（快路径）。
         let mut loaded: Vec<(String, ApiKey, String)> = Vec::with_capacity(keys.len());
         for key in &keys {
-            if let Some(api_key) = self.store.get::<ApiKey>(key)? {
+            if let Some(mut api_key) = self.store.get::<ApiKey>(key)? {
                 let id = key.strip_prefix("apikey_").unwrap_or(key).to_string();
-                // 与 validate()/generate_with_options() 保持同一口径：
-                // 对去掉 "sk-" 前缀的 key 计算哈希，否则重启加载后鉴权全部失配
+                // 磁盘值可能是 `enc1:` 信封（新写入）、旧 `enc:` 混淆或明文
+                // （存量）。统一解密出明文再算哈希——与 validate()/
+                // generate_with_options() 保持同一口径（对去掉 "sk-" 前缀的
+                // 明文计算哈希，否则重启加载后鉴权全部失配）。
+                let disk_value = api_key.key.clone();
+                let plaintext =
+                    crate::account_session::secret::open_secret(&disk_value, &self.data_dir);
+                if disk_value.starts_with("enc1:") && plaintext.is_empty() {
+                    tracing::warn!("API key {id} 信封解密失败（密钥文件与库是否同源？），已跳过");
+                    continue;
+                }
+                api_key.key = plaintext;
+                // 向后兼容迁移：磁盘是明文/旧形态 → 立即回写 enc1: 信封
+                // （内存保持明文；迁移失败仅告警，下次 load 再试）
+                if !disk_value.starts_with("enc1:") && !plaintext.is_empty() {
+                    if let Err(e) = self.store.put(key, &self.for_storage(&api_key)) {
+                        tracing::warn!("API key {id} 加密迁移回写失败：{e}");
+                    }
+                }
                 let hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
                 loaded.push((id, api_key, hash));
             }
@@ -284,6 +321,13 @@ impl ApiKeyStore {
         let key = match opts.custom_key.as_deref() {
             Some(k) if !k.trim().is_empty() => {
                 let k = k.trim();
+                // `enc1:` 是加密信封前缀：自定义值以它开头会在重启 load 时被
+                // 当作信封解密（失败即跳过丢失）——直接拒绝，避免语义冲突。
+                if k.starts_with("enc1:") {
+                    return Err(anyhow::anyhow!(
+                        "自定义密钥值不能以 enc1: 开头（与加密信封前缀冲突）"
+                    ));
+                }
                 // 查重：与现有密钥撞值会导致 validate 命中错误对象
                 let hash = hash_api_key(k.strip_prefix("sk-").unwrap_or(k));
                 if self.key_hash_map.read().contains_key(&hash) {
@@ -320,7 +364,9 @@ impl ApiKeyStore {
 
         let hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
 
-        self.store.put(&format!("apikey_{id}"), &api_key)?;
+        // P0：落盘前加密 key 字段（内存保持明文供鉴权哈希比对）
+        self.store
+            .put(&format!("apikey_{id}"), &self.for_storage(&api_key))?;
         self.keys.write().insert(id.clone(), api_key.clone());
         self.key_hash_map.write().insert(hash, id);
 
@@ -351,7 +397,9 @@ impl ApiKeyStore {
         api_key.bump_version();
         let new_hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
 
-        self.store.put(&format!("apikey_{id}"), &api_key)?;
+        // P0：落盘前加密 key 字段（内存保持明文供鉴权哈希比对）
+        self.store
+            .put(&format!("apikey_{id}"), &self.for_storage(&api_key))?;
         self.keys.write().insert(id.to_string(), api_key.clone());
         let mut hm = self.key_hash_map.write();
         if old_hash != new_hash {
@@ -458,7 +506,7 @@ impl ApiKeyStore {
                 return;
             }
         }
-        self.store.put_async(key, api_key.clone());
+        self.store.put_async(key, self.for_storage(api_key));
     }
 
     /// 扣减令牌已用额度（配额不足返回 false）
@@ -891,7 +939,6 @@ fn hash_api_key(key: &str) -> String {
 #[cfg(test)]
 mod session_registry_tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn register_and_revoke_single() {
@@ -913,9 +960,108 @@ mod session_registry_tests {
     // ── 预留/结算/释放语义测试（P0-2 逐笔 token 化，2026-11-04）──
 
     fn key_store() -> ApiKeyStore {
-        ApiKeyStore::new(Arc::new(FileStore::new(
-            TempDir::new().unwrap().path().to_path_buf(),
-        )))
+        let dir = temp_data_dir("keystore");
+        let store = Arc::new(FileStore::new(dir.clone()));
+        ApiKeyStore::new(store, dir)
+    }
+
+    /// 独立临时数据目录（account.key 密钥文件与库同目录，测试用独立目录
+    /// 避免污染全局 `secret::data_dir`——后者是进程级全局态，并行测试下
+    /// 会被其他模块的 set_data_dir 换掉）。
+    fn temp_data_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aigx-apikey-{tag}-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// P0：API Key 落盘必须是 enc1: 信封——磁盘原文不得含明文。
+    #[test]
+    fn apikey_encrypted_at_rest() {
+        let s = key_store();
+        let k = s.generate("enc").unwrap();
+        // 绕过内存缓存直接读磁盘存储值
+        let stored = s
+            .store
+            .get::<ApiKey>(&format!("apikey_{}", k.id))
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored.key.starts_with("enc1:"),
+            "磁盘原文必须是 enc1: 信封：{}",
+            stored.key
+        );
+        assert!(
+            !stored.key.contains(&k.key),
+            "磁盘原文不得含明文：{}",
+            stored.key
+        );
+        // 内存视图仍是明文（鉴权哈希比对/管理端展示依赖）
+        let in_mem = s.list().into_iter().find(|x| x.id == k.id).unwrap();
+        assert_eq!(in_mem.key, k.key);
+    }
+
+    /// 信封 key 重启后可解密鉴权（load → validate 命中）。
+    #[test]
+    fn apikey_sealed_roundtrip_across_restart() {
+        let dir = temp_data_dir("restart");
+        let store = Arc::new(FileStore::new(dir.clone()));
+        let s1 = ApiKeyStore::new(store.clone(), dir.clone());
+        let k = s1.generate("t").unwrap();
+        // 重启：全新实例从同一目录 load（密钥文件已落盘，信封可解）
+        let s2 = ApiKeyStore::new(store, dir);
+        s2.load().unwrap();
+        let validated = s2.validate(&k.key).expect("重启后信封 key 必须可鉴权");
+        assert_eq!(validated.id, k.id);
+    }
+
+    /// 存量明文 key：load 时自动解密算哈希 + 回写加密迁移。
+    #[test]
+    fn apikey_legacy_plaintext_migrated_on_load() {
+        let dir = temp_data_dir("legacy-migrate");
+        let store = Arc::new(FileStore::new(dir.clone()));
+        // 全字段形态蓝本（其目录无关紧要，仅借字段）
+        let mut legacy = key_store().generate("blueprint").unwrap();
+        legacy.id = "legacy-1".to_string();
+        legacy.key = "sk-legacy-plain".to_string();
+        store.put("apikey_legacy-1", &legacy).unwrap();
+
+        // 首次 load：解密算哈希 + 回写 enc1: 迁移
+        let s = ApiKeyStore::new(store.clone(), dir.clone());
+        s.load().unwrap();
+        assert!(
+            s.validate("sk-legacy-plain").is_some(),
+            "迁移后鉴权必须命中（哈希按明文计算）"
+        );
+        let stored = store.get::<ApiKey>("apikey_legacy-1").unwrap().unwrap();
+        assert!(
+            stored.key.starts_with("enc1:"),
+            "磁盘应迁移为信封：{}",
+            stored.key
+        );
+        assert!(!stored.key.contains("legacy-plain"));
+    }
+
+    /// 自定义密钥值不得以 enc1: 开头（与加密信封前缀冲突，否则重启后
+    /// 被当作信封解密失败而丢失）。
+    #[test]
+    fn apikey_custom_key_enc1_prefix_rejected() {
+        let s = key_store();
+        let opts = CreateApiKeyOptions {
+            name: "bad".to_string(),
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: None,
+            allowed_providers: None,
+            expires_at: None,
+            quota_limit: None,
+            ip_limit: None,
+            custom_key: Some("enc1:evil".to_string()),
+        };
+        assert!(s.generate_with_options(opts).is_err());
     }
 
     /// 预留 → 结算：按 token 摘除预留，used 增加实际消费。

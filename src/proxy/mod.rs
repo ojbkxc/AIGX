@@ -42,6 +42,31 @@ pub struct CfApiClient {
     fallback_key: String,
 }
 
+/// 解析账号 → (worker_url, api_key) 的桥接目标，含 SSRF 出站校验。
+///
+/// `account_id` 即 cf-ai-gw Worker 部署地址（含 scheme 的 URL 或裸域名）。
+/// 兼容 wrangler dev 本地调试地址：127.0.0.1 / localhost 视为 http://，
+/// 其余裸域名默认补 https://。
+///
+/// 返回 `None` 表示 URL 被 [`crate::net_guard`] 拒绝（内网/环回/元数据
+/// 地址）。账号 `account_id` 虽在保存时经管理端校验过，但保存与发请求
+/// 之间 DNS 仍可能变化（rebinding）——发送前再校验一次是纵深防御；
+/// 被拒账号跳过，不影响其余账号故障转移。
+fn resolve_target_checked(account: &CfAccount, allow_internal: bool) -> Option<(String, String)> {
+    let mut url = account.account_id.trim().trim_end_matches('/').to_string();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        let is_localhost =
+            url.starts_with("127.0.0.1") || url.starts_with("localhost") || url.starts_with("::1");
+        url = if is_localhost {
+            format!("http://{url}")
+        } else {
+            format!("https://{url}")
+        };
+    }
+    crate::net_guard::validate_outbound_url(&url, allow_internal).ok()?;
+    Some((url, account.api_token.trim().to_string()))
+}
+
 impl CfApiClient {
     pub fn new(account_pool: Arc<AccountPool>, model_mapper: Arc<ModelMapper>) -> Self {
         let http = Client::builder()
@@ -67,23 +92,18 @@ impl CfApiClient {
     }
 
     /// 解析账号 → (worker_url, api_key) 的桥接目标。
-    fn resolve_target(&self, account: &CfAccount) -> (String, String) {
-        // account_id 即 cf-ai-gw Worker 部署地址（含 scheme 的 URL 或裸域名）。
-        // 兼容 wrangler dev 本地调试地址：127.0.0.1 / localhost 视为 http://，
-        // 其余裸域名默认补 https://。
-        let mut url = account.account_id.trim().trim_end_matches('/').to_string();
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            let is_localhost = url.starts_with("127.0.0.1")
-                || url.starts_with("localhost")
-                || url.starts_with("::1");
-            url = if is_localhost {
-                format!("http://{url}")
-            } else {
-                format!("https://{url}")
-            };
-        }
-        let key = account.api_token.trim().to_string();
-        (url, key)
+    ///
+    /// 返回 `None` 表示 URL 被 SSRF 校验拒绝（内网/环回/云元数据地址等）——
+    /// 调用方必须跳过该账号，不得用被拒 URL 发请求。
+    fn resolve_target(&self, account: &CfAccount) -> Option<(String, String)> {
+        resolve_target_checked(account, self.account_pool.allow_internal_upstream())
+    }
+
+    /// 发送前的 SSRF 校验（兜底地址用）：拒绝内网/环回/元数据地址，
+    /// 逃生阀随账号池快照（`config.usage.allow_internal_upstream`）。
+    fn guard_url(&self, url: &str) -> std::result::Result<(), CfError> {
+        crate::net_guard::validate_outbound_url(url, self.account_pool.allow_internal_upstream())
+            .map_err(|rej| CfError::NetworkError(format!("SSRF guard: {}", rej.message())))
     }
 
     /// 调用 cf-ai-gw Worker（AI Binding），带多账号故障转移。
@@ -105,6 +125,8 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
+            // P0 SSRF：兜底地址同样经 net_guard 校验（配置来源同为管理员）
+            self.guard_url(&self.fallback_url)?;
             return self
                 .call_worker(
                     &self.fallback_url,
@@ -119,6 +141,16 @@ impl CfApiClient {
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
 
         for account in &active_accounts {
+            // P0 SSRF：账号 URL 被拒（内网/环回/元数据地址）→ 跳过该账号，
+            // 不影响其余账号故障转移（解析在重试循环外做，避免每次重试重复校验）
+            let Some((url, key)) = self.resolve_target(account) else {
+                tracing::warn!(
+                    "cf-ai-gw worker {} skipped: SSRF guard rejected upstream url",
+                    account.name
+                );
+                last_error = CfError::AllAccountsFailed("SSRF guard rejected upstream url".into());
+                continue;
+            };
             for attempt in 0..2 {
                 if attempt > 0 {
                     tracing::warn!(
@@ -130,7 +162,6 @@ impl CfApiClient {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
-                let (url, key) = self.resolve_target(account);
                 let result = self
                     .call_worker(&url, &key, &cf_model, body.clone(), endpoint)
                     .await;
@@ -262,6 +293,8 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
+            // P0 SSRF：兜底地址同样经 net_guard 校验
+            self.guard_url(&self.fallback_url)?;
             return self
                 .list_models_from_worker(&self.fallback_url, &self.fallback_key)
                 .await;
@@ -271,7 +304,15 @@ impl CfApiClient {
             CfError::AllAccountsFailed("Failed to list models from all workers".into());
 
         for account in &active_accounts {
-            let (url, key) = self.resolve_target(account);
+            // P0 SSRF：账号 URL 被拒 → 跳过该账号
+            let Some((url, key)) = self.resolve_target(account) else {
+                tracing::warn!(
+                    "cf-ai-gw worker {} skipped: SSRF guard rejected upstream url",
+                    account.name
+                );
+                last_error = CfError::AllAccountsFailed("SSRF guard rejected upstream url".into());
+                continue;
+            };
             match self.list_models_from_worker(&url, &key).await {
                 Ok(models) => return Ok(models),
                 Err(e) => {
@@ -372,6 +413,8 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
+            // P0 SSRF：兜底地址同样经 net_guard 校验
+            self.guard_url(&self.fallback_url)?;
             return self
                 .stream_from_worker(&self.fallback_url, &self.fallback_key, &cf_model, body)
                 .await;
@@ -379,7 +422,15 @@ impl CfApiClient {
 
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
         for account in &active_accounts {
-            let (url, key) = self.resolve_target(account);
+            // P0 SSRF：账号 URL 被拒 → 跳过该账号
+            let Some((url, key)) = self.resolve_target(account) else {
+                tracing::warn!(
+                    "cf-ai-gw worker {} skipped: SSRF guard rejected upstream url",
+                    account.name
+                );
+                last_error = CfError::AllAccountsFailed("SSRF guard rejected upstream url".into());
+                continue;
+            };
             match self
                 .stream_from_worker(&url, &key, &cf_model, body.clone())
                 .await
@@ -492,6 +543,8 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
+            // P0 SSRF：兜底地址同样经 net_guard 校验
+            self.guard_url(&self.fallback_url)?;
             return self
                 .audio_from_worker(
                     &self.fallback_url,
@@ -506,6 +559,15 @@ impl CfApiClient {
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
 
         for account in &active_accounts {
+            // P0 SSRF：账号 URL 被拒 → 跳过该账号
+            let Some((url, key)) = self.resolve_target(account) else {
+                tracing::warn!(
+                    "cf-ai-gw worker {} skipped: SSRF guard rejected upstream url",
+                    account.name
+                );
+                last_error = CfError::AllAccountsFailed("SSRF guard rejected upstream url".into());
+                continue;
+            };
             for attempt in 0..2 {
                 if attempt > 0 {
                     tracing::warn!(
@@ -517,7 +579,6 @@ impl CfApiClient {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
-                let (url, key) = self.resolve_target(account);
                 match self
                     .audio_from_worker(&url, &key, &cf_model, data.clone(), endpoint)
                     .await
@@ -640,6 +701,8 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
+            // P0 SSRF：兜底地址同样经 net_guard 校验
+            self.guard_url(&self.fallback_url)?;
             return self
                 .speech_from_worker(&self.fallback_url, &self.fallback_key, body)
                 .await;
@@ -648,6 +711,15 @@ impl CfApiClient {
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
 
         for account in &active_accounts {
+            // P0 SSRF：账号 URL 被拒 → 跳过该账号
+            let Some((url, key)) = self.resolve_target(account) else {
+                tracing::warn!(
+                    "cf-ai-gw worker {} skipped: SSRF guard rejected upstream url",
+                    account.name
+                );
+                last_error = CfError::AllAccountsFailed("SSRF guard rejected upstream url".into());
+                continue;
+            };
             for attempt in 0..2 {
                 if attempt > 0 {
                     tracing::warn!(
@@ -659,7 +731,6 @@ impl CfApiClient {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
-                let (url, key) = self.resolve_target(account);
                 match self.speech_from_worker(&url, &key, body.clone()).await {
                     Ok(audio) => {
                         self.account_pool.mark_used(&account.id);
@@ -775,6 +846,8 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
+            // P0 SSRF：兜底地址同样经 net_guard 校验
+            self.guard_url(&self.fallback_url)?;
             return self
                 .responses_from_worker(&self.fallback_url, &self.fallback_key, model, body, stream)
                 .await;
@@ -782,7 +855,15 @@ impl CfApiClient {
 
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
         for account in &active_accounts {
-            let (url, key) = self.resolve_target(account);
+            // P0 SSRF：账号 URL 被拒 → 跳过该账号
+            let Some((url, key)) = self.resolve_target(account) else {
+                tracing::warn!(
+                    "cf-ai-gw worker {} skipped: SSRF guard rejected upstream url",
+                    account.name
+                );
+                last_error = CfError::AllAccountsFailed("SSRF guard rejected upstream url".into());
+                continue;
+            };
             match self
                 .responses_from_worker(&url, &key, model, body.clone(), stream)
                 .await
@@ -1055,4 +1136,56 @@ pub fn get_model_owned_by(cf_model: &str) -> &str {
         }
     }
     "system"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cf_account(account_id: &str) -> CfAccount {
+        CfAccount {
+            id: "acc-1".to_string(),
+            name: "test".to_string(),
+            account_id: account_id.to_string(),
+            api_token: "tok".to_string(),
+            status: "active".to_string(),
+            last_error: None,
+            last_used_at: None,
+            created_at: 1_000_000,
+        }
+    }
+
+    /// 默认（逃生阀关闭）：内网/环回/元数据地址被拒（返回 None）。
+    #[test]
+    fn resolve_target_rejects_internal_by_default() {
+        for account_id in [
+            "127.0.0.1:11434/v1",
+            "localhost:3000",
+            "169.254.169.254/latest/meta-data/",
+            "10.0.0.5",
+        ] {
+            assert!(
+                resolve_target_checked(&cf_account(account_id), false).is_none(),
+                "{account_id} 应被 SSRF 校验拒绝"
+            );
+        }
+    }
+
+    /// 逃生阀打开：内网地址放行（wrangler dev 本地调试场景）。
+    #[test]
+    fn resolve_target_escape_hatch() {
+        let (url, key) = resolve_target_checked(&cf_account("127.0.0.1:11434/v1"), true).unwrap();
+        assert_eq!(url, "http://127.0.0.1:11434/v1");
+        assert_eq!(key, "tok");
+    }
+
+    /// 公网字面量：补 scheme + 通过校验（字面量 IP 不做 DNS 查询）。
+    #[test]
+    fn resolve_target_public_literal_ok() {
+        let (url, _) = resolve_target_checked(&cf_account("1.1.1.1/v1"), false).unwrap();
+        assert_eq!(url, "https://1.1.1.1/v1");
+        // 已带 scheme 的去尾斜杠原样保留
+        let (url, _) = resolve_target_checked(&cf_account("https://8.8.8.8:8080/"), false).unwrap();
+        assert_eq!(url, "https://8.8.8.8:8080");
+    }
 }

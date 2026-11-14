@@ -211,6 +211,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化账号池
     let account_pool = Arc::new(AccountPool::new(store.clone()));
+    // SSRF 逃生阀快照：账号 Worker 地址发送前校验用（false = 拒绝内网/环回/元数据）
+    account_pool.set_allow_internal_upstream(config.usage.allow_internal_upstream);
 
     // 调试报文持久化：注入 FileStore + 从上次运行恢复最近报文
     crate::debug_traffic::set_store(store.clone());
@@ -243,8 +245,8 @@ async fn main() -> anyhow::Result<()> {
     // 初始化用量追踪
     let usage_tracker = Arc::new(UsageTracker::new(store.clone(), account_pool.clone()));
 
-    // 初始化 API 密钥存储
-    let mut api_key_store = ApiKeyStore::new(store.clone());
+    // 初始化 API 密钥存储（数据目录与库同目录：enc1: 信封密钥文件落在这里）
+    let mut api_key_store = ApiKeyStore::new(store.clone(), data_dir.clone());
     if let Err(e) = api_key_store.load() {
         tracing::error!("Failed to load API key store: {e}");
     }
@@ -1381,16 +1383,28 @@ async fn ensure_session_secret(config_manager: &ConfigManager) {
 
 /// 确保默认管理员账户存在（仅首次启动时创建）
 ///
-/// 首次启动（系统中尚不存在任何 Admin 角色用户）时自动创建写死的内置管理员账户：
+/// 首次启动（系统中尚不存在任何 Admin 角色用户）时自动创建内置管理员账户：
 /// - 邮箱：`admin@gmail.com`
 /// - 用户名：`admin`
-/// - 密码：`123456`（写死，用户明确要求内置固定密码）
+/// - 密码：**首次启动随机生成**（18 字节随机数 → base64url 24 字符，
+///   `Aigx-` 前缀），仅一次性打印到 stdout/日志，不写入配置文件、不落库。
 ///
-/// 已存在 Admin 用户时直接跳过，绝不删除或重建已存在的管理员。
+/// 此前密码写死 `123456`：写死的弱口令一旦泄露（仓库/文档/截图）即等于
+/// 管理员账号泄露，首登强制改密只是兜底。已存在 Admin 用户时直接跳过，
+/// 绝不删除或重建已存在的管理员。
 ///
 /// 邮箱常量在 `crate::user::DEFAULT_ADMIN_EMAIL`（users.rs 锁定逻辑共用）。
 const DEFAULT_ADMIN_USERNAME: &str = "admin";
-const DEFAULT_ADMIN_PASSWORD: &str = "123456";
+
+/// 生成一次性默认管理员密码：18 字节随机数 → base64url（24 字符），
+/// `Aigx-` 前缀便于肉眼识别。每次调用结果不同。
+fn generate_default_admin_password() -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let mut bytes = [0u8; 18];
+    getrandom::getrandom(&mut bytes).expect("系统随机源不可用，无法生成默认管理员密码");
+    format!("Aigx-{}", URL_SAFE_NO_PAD.encode(bytes))
+}
 
 fn ensure_default_admin(user_store: &UserStore) {
     // 检查是否已存在任意 Admin 角色用户；若已存在则跳过，绝不删除/重建
@@ -1400,16 +1414,19 @@ fn ensure_default_admin(user_store: &UserStore) {
         return;
     }
 
-    // 创建写死凭据的内置管理员账户
+    // 随机一次性密码：不写配置文件、不落库，仅本次启动打印一次
+    let password = generate_default_admin_password();
+
+    // 创建内置管理员账户
     match user_store.create_with_username(
         crate::user::DEFAULT_ADMIN_EMAIL,
         DEFAULT_ADMIN_USERNAME,
-        DEFAULT_ADMIN_PASSWORD,
+        &password,
         Role::Admin,
         0,
     ) {
         Ok(user) => {
-            // 标记「首次登录必须改密」：内置密码是公开的弱口令，
+            // 标记「首次登录必须改密」：一次性密码同样不应长期使用，
             // 前端登录后据此强制跳转改密页。
             if let Err(e) = user_store.update(&user.id, |u| {
                 u.must_change_password = true;
@@ -1417,12 +1434,13 @@ fn ensure_default_admin(user_store: &UserStore) {
                 tracing::warn!("Failed to set must_change_password for default admin: {e}");
             }
             tracing::warn!(
-                "First-time setup: built-in admin account created. \
+                "First-time setup: built-in admin account created with a RANDOM one-time password. \
                  email={} | username={} | password={} \
-                 — PLEASE LOGIN AND CHANGE THE PASSWORD IMMEDIATELY.",
+                 — PLEASE LOGIN AND CHANGE THE PASSWORD IMMEDIATELY. \
+                 This password is not stored anywhere and will not be shown again.",
                 crate::user::DEFAULT_ADMIN_EMAIL,
                 DEFAULT_ADMIN_USERNAME,
-                DEFAULT_ADMIN_PASSWORD,
+                password,
             );
         }
         Err(e) => {
@@ -3065,4 +3083,60 @@ async fn handle_health(State(state): State<AppState>) -> axum::Json<serde_json::
         result.insert(model, serde_json::json!(u8::from(level)));
     }
     axum::Json(serde_json::Value::Object(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P0：一次性随机密码——格式（前缀 + 长度 + base64url 字符集）与唯一性。
+    #[test]
+    fn default_admin_password_is_random_and_wellformed() {
+        let p1 = generate_default_admin_password();
+        let p2 = generate_default_admin_password();
+        assert!(p1.starts_with("Aigx-"), "格式：{p1}");
+        assert_eq!(
+            p1.len(),
+            "Aigx-".len() + 24,
+            "18 字节随机数 base64url = 24 字符：{p1}"
+        );
+        assert!(
+            p1.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "仅 base64url 字符集：{p1}"
+        );
+        assert_ne!(p1, p2, "两次生成必须不同（随机）");
+        assert_ne!(p1, "123456", "不得再是写死的弱口令");
+    }
+
+    /// P0：首次启动建号——随机密码可登录、强制首登改密；二次调用不重复建号。
+    #[test]
+    fn ensure_default_admin_creates_random_password_admin_once() {
+        let dir = std::env::temp_dir().join(format!("aigx-main-admin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(FileStore::new(dir.join("data")));
+        let user_store = UserStore::new(store);
+
+        ensure_default_admin(&user_store);
+        let users = user_store.list();
+        assert_eq!(users.len(), 1, "首次启动建一个管理员");
+        let admin = &users[0];
+        assert_eq!(admin.role, Role::Admin);
+        assert_eq!(admin.email, crate::user::DEFAULT_ADMIN_EMAIL);
+        assert!(admin.must_change_password, "一次性密码必须强制首登改密");
+        // 旧写死口令不得再可登录
+        assert!(
+            user_store
+                .authenticate(crate::user::DEFAULT_ADMIN_EMAIL, "123456")
+                .is_none(),
+            "写死的 123456 不得再可登录"
+        );
+
+        // 二次调用跳过（不重复建号、不覆盖已有管理员）
+        ensure_default_admin(&user_store);
+        assert_eq!(user_store.list().len(), 1, "已有管理员时跳过");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

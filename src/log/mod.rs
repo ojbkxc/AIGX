@@ -693,6 +693,13 @@ pub struct AuditLog {
     /// 操作后状态（JSON 字符串，可选）
     #[serde(default)]
     pub after: Option<String>,
+    /// 客户端 IP（可选；经反代时需 `trust_proxy_headers=true` 才可信）。
+    ///
+    /// 历史记录此字段恒空（`record_audit` 无 IP 入参）——P0 安全加固补上
+    /// 带 IP 的 [`LogStore::record_audit_with_ip`] 入口；旧数据 serde
+    /// default 兼容（None）。
+    #[serde(default)]
+    pub ip: Option<String>,
     /// 创建时间
     pub created_at: i64,
 }
@@ -1465,14 +1472,40 @@ impl AuditLogStore {
         logs
     }
 
-    /// 按 ID 删除单条审计日志
+    /// 按 ID 删除单条审计日志。
+    ///
+    /// 防篡改最简方案（P0 安全加固）：删除动作本身追加一条**自审计**，
+    /// 记「删了哪条、何时删的」。自审计写在删除**之后**——本次留痕不被
+    /// 自己抹掉；后续删除/清空仍可再抹它，但每一次定向抹除都会留下新的
+    /// 删除留痕（哈希链未实现的已知取舍，先做删除审计）。
+    ///
+    /// 「仅管理员可操作」由 API 层 `verify_admin` 保证
+    /// （`handle_delete_audit_logs` / `handle_clear_audit_logs`），存储层
+    /// 无操作者上下文、不重复鉴权。
     pub fn delete_by_id(&self, id: &str) -> anyhow::Result<()> {
         let keys = self.store.list("auditlog:")?;
         let target = keys.into_iter().find(|k| k.ends_with(&format!(":{id}")));
         if let Some(k) = target {
             self.store.delete(&k)?;
+            self.record_deletion(
+                "audit_log.delete",
+                &format!("id:{id}"),
+                serde_json::json!({ "deleted_id": id }),
+            );
         }
         Ok(())
+    }
+
+    /// 删除动作留痕：追加一条自审计。
+    ///
+    /// 吞错仅告警——留痕失败不改变删除结果本身（存储层尽力而为；
+    /// API 层的 purge 前置审计是 fail-closed 的，与此处语义不同）。
+    fn record_deletion(&self, action: &str, target: &str, detail: serde_json::Value) {
+        let mut entry = AuditLog::new("system", action, target);
+        entry.before = Some(serde_json::to_string(&detail).unwrap_or_default());
+        if let Err(e) = self.add(entry) {
+            tracing::warn!("Failed to record audit deletion self-audit: {e}");
+        }
     }
 
     /// 清理早于 `before_ts` 的审计日志（与请求日志同保留策略）。
@@ -1499,7 +1532,7 @@ impl AuditLogStore {
         Ok(n)
     }
 
-    /// 批量删除审计日志
+    /// 批量删除审计日志（每条删除各自留一条自审计，见 [`Self::delete_by_id`]）
     pub fn delete_many(&self, ids: &[String]) -> usize {
         let mut removed = 0;
         for id in ids {
@@ -1510,7 +1543,11 @@ impl AuditLogStore {
         removed
     }
 
-    /// 清空全部审计日志
+    /// 清空全部审计日志。
+    ///
+    /// 防篡改：清空动作本身追加一条自审计，写在清空**之后** ⇒ 本次留痕
+    /// 存活到下一次清空（每次清空替换上一条清空留痕；窗口内的删除留痕
+    /// 随清空一并消失——哈希链未实现的已知取舍）。
     pub fn clear_all(&self) -> anyhow::Result<usize> {
         let keys = self.store.list("auditlog:")?;
         let n = keys.len();
@@ -1519,6 +1556,11 @@ impl AuditLogStore {
                 tracing::warn!("clear audit log failed for {k}: {e}");
             }
         }
+        self.record_deletion(
+            "audit_log.clear",
+            "count",
+            serde_json::json!({ "removed": n }),
+        );
         Ok(n)
     }
 
@@ -1806,7 +1848,26 @@ impl LogStore {
         before: Option<serde_json::Value>,
         after: Option<serde_json::Value>,
     ) {
+        self.record_audit_with_ip(admin_id, action, target, None, before, after);
+    }
+
+    /// 便捷方法：记录审计日志（**带客户端 IP**，忽略错误，仅 tracing）
+    ///
+    /// P0 安全加固：历史审计记录 IP 恒空（`record_audit` 无 IP 入参，且
+    /// `api::admin::common::record_audit` 包装层签名已定型、不宜扩散改动），
+    /// 故新增本入口供能拿到请求头的新代码使用；IP 经反代时需
+    /// `trust_proxy_headers=true` 才可信（`api::common::extract_client_ip`）。
+    pub fn record_audit_with_ip(
+        &self,
+        admin_id: impl Into<String>,
+        action: impl Into<String>,
+        target: impl Into<String>,
+        ip: Option<String>,
+        before: Option<serde_json::Value>,
+        after: Option<serde_json::Value>,
+    ) {
         let mut entry = AuditLog::new(admin_id, action, target);
+        entry.ip = ip;
         entry.before = before.map(|v| serde_json::to_string(&v).unwrap_or_default());
         entry.after = after.map(|v| serde_json::to_string(&v).unwrap_or_default());
         if let Err(e) = self.audits.add(entry) {
@@ -2422,6 +2483,125 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].action, "create");
         assert!(all[0].after.is_some());
+    }
+
+    /// P0：带 IP 的审计入口必须把 IP 写进记录；不带 IP 的旧入口保持 None。
+    #[test]
+    fn record_audit_with_ip_sets_ip_field() {
+        let s = store();
+        s.record_audit_with_ip(
+            "admin-id",
+            "notify.webhook_ssrf_rejected",
+            "notify:webhook_url",
+            Some("203.0.113.9".to_string()),
+            None,
+            None,
+        );
+        s.record_audit("admin-id", "create", "user:abc", None, None);
+        let all = s.audits.list();
+        assert_eq!(all.len(), 2);
+        let with_ip = all
+            .iter()
+            .find(|a| a.action == "notify.webhook_ssrf_rejected")
+            .expect("SSRF 拒绝审计应存在");
+        assert_eq!(with_ip.ip.as_deref(), Some("203.0.113.9"));
+        let without = all.iter().find(|a| a.action == "create").unwrap();
+        assert_eq!(without.ip, None, "旧入口不带 IP");
+    }
+
+    /// P0 防篡改：删除动作本身必须留一条自审计，且被删目标确实消失。
+    #[test]
+    fn audit_delete_records_self_audit() {
+        let s = store();
+        for id in ["keep-1", "doom-1"] {
+            s.audits.add(AuditLog::new("admin-x", "seed", id)).unwrap();
+        }
+        s.audits.delete_by_id("doom-1").unwrap();
+
+        let all = s.audits.list();
+        let ids: Vec<&str> = all.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&"keep-1"), "未删目标保留：{ids:?}");
+        assert!(!ids.contains(&"doom-1"), "被删目标消失：{ids:?}");
+        let self_audit = all
+            .iter()
+            .find(|a| a.action == "audit_log.delete")
+            .expect("删除必须留自审计");
+        assert_eq!(self_audit.target, "id:doom-1");
+        assert!(
+            self_audit
+                .before
+                .as_deref()
+                .unwrap_or_default()
+                .contains("doom-1"),
+            "自审计需记被删 ID"
+        );
+    }
+
+    /// 删除不存在的 ID 不产生自审计（没有删除动作就没有留痕）。
+    #[test]
+    fn audit_delete_missing_id_no_self_audit() {
+        let s = store();
+        s.audits
+            .add(AuditLog::new("admin-x", "seed", "keep-1"))
+            .unwrap();
+        s.audits.delete_by_id("nope").unwrap();
+        let all = s.audits.list();
+        assert_eq!(all.len(), 1, "空删除不留痕");
+        assert!(all.iter().all(|a| a.action != "audit_log.delete"));
+    }
+
+    /// P0 防篡改：清空后必须存活恰好一条「清空留痕」，且记录被清条数。
+    #[test]
+    fn audit_clear_records_self_audit_surviving_wipe() {
+        let s = store();
+        for id in ["a-1", "a-2", "a-3"] {
+            s.audits.add(AuditLog::new("admin-x", "seed", id)).unwrap();
+        }
+        let removed = s.audits.clear_all().unwrap();
+        assert_eq!(removed, 3);
+
+        let all = s.audits.list();
+        assert_eq!(
+            all.len(),
+            1,
+            "清空后应只剩清空留痕（写在清空之后 ⇒ 不被自己抹掉）：{all:?}"
+        );
+        assert_eq!(all[0].action, "audit_log.clear");
+        assert!(
+            all[0]
+                .before
+                .as_deref()
+                .unwrap_or_default()
+                .contains("\"removed\":3"),
+            "清空留痕需记条数"
+        );
+    }
+
+    /// 自审计记录本身也可被删除，但删除它又会留下新的删除留痕（链式证据）。
+    #[test]
+    fn audit_self_audit_deletion_spawns_new_evidence() {
+        let s = store();
+        s.audits
+            .add(AuditLog::new("admin-x", "seed", "victim"))
+            .unwrap();
+        s.audits.delete_by_id("victim").unwrap();
+        let first_self = s
+            .audits
+            .list()
+            .into_iter()
+            .find(|a| a.action == "audit_log.delete")
+            .unwrap();
+        // 抹掉这条自审计 ⇒ 又产生一条新自审计
+        s.audits.delete_by_id(&first_self.id).unwrap();
+        let selfs: Vec<_> = s
+            .audits
+            .list()
+            .into_iter()
+            .filter(|a| a.action == "audit_log.delete")
+            .collect();
+        assert_eq!(selfs.len(), 1, "抹掉留痕必留新留痕");
+        assert_ne!(selfs[0].id, first_self.id);
+        assert_eq!(selfs[0].target, "id:victim", "新留痕仍记原始删除目标");
     }
 
     #[test]
