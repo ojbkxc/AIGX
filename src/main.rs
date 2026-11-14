@@ -501,6 +501,8 @@ async fn main() -> anyhow::Result<()> {
         host_version: env!("CARGO_PKG_VERSION").to_string(),
         target: crate::plugin_host::host_target_triple(),
         proxy: String::new(),
+        debug_traffic: config.usage.debug_traffic,
+        loopback_port: config.server.port,
     };
     let plugin_host = Arc::new(crate::plugin_host::PluginHostManager::new(
         pack_registry,
