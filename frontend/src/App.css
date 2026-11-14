@@ -1130,12 +1130,44 @@ code {
   }
 }
 
+/* 动效与对比度偏好（#16）：
+   - prefers-reduced-motion：在原 4 选择器上补齐滑入/位移类动画与 transform 过渡
+     的禁用（toast 滑入、弹层淡入、开关滑块、侧栏折叠宽度、主内容位移）；
+     加载 spinner 保留——它是活动指示不是位移；图表为自绘 SVG，无 CSS 动画可关
+     （图表容器内的宽度过渡在 Dashboard.css，不在本文件）。
+   - prefers-contrast: more：抬亮分隔线/控件描边/弱化文本 token，两种主题都覆盖；
+     既有 outline 型焦点环在此模式下自然更醒目，无需叠加。 */
 @media (prefers-reduced-motion: reduce) {
   .page-fade-enter,
   .skeleton::after,
   .mobile-drawer,
   .glass-tooltip {
     animation: none;
+  }
+  .mobile-drawer-overlay,
+  .modal-overlay,
+  .toast.show,
+  .glass-switch-thumb,
+  .main-content,
+  .sidebar-aside,
+  .sub-tab {
+    animation: none;
+    transition: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --border-color: #8c8c8c;
+    --control-border: #8c8c8c;
+    --line-strong: #595959;
+    --text-3: #737373;
+  }
+  :root[data-theme="dark"] {
+    --border-color: #8c8c8c;
+    --control-border: #8c8c8c;
+    --line-strong: #a6a6a6;
+    --text-3: #a6a6a6;
   }
 }
 

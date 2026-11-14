@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
 import { isAdmin } from '../lib/utils';
+import type { ReportWindow } from '../api';
 import { SkeletonCards } from '../components/ui';
 import { fmtInt, fmtTokens, nameColorMap, toCsv, downloadText } from '../lib/format';
 import PanelWrap from '../components/dashboard/PanelWrap';
@@ -63,9 +64,42 @@ export default function Dashboard(): JSX.Element {
   const win = useMemo(() => windowOf(range, custom), [range, custom]);
   const rLabel = rangeLabelOf(range, custom);
 
+  // 环比上期窗口：与当前窗口等长、紧贴其前一段（StatCards prev 用，#11 趋势接线）。
+  // {days:N} 视为「含今天的 N 天」，上期 = [today-2N+1, today-N]；custom 档整段
+  // 前移一个窗长。算不出（窗口非法）返回 null → prev 查询禁用，delta 自动缺省。
+  const prevWin = useMemo<ReportWindow | null>(() => {
+    const pad2 = (n: number): string => (n < 10 ? `0${n}` : String(n));
+    if (typeof win.days === 'number' && win.days > 0) {
+      const n = win.days;
+      const keyOf = (d: Date): string =>
+        `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+      const end = new Date();
+      end.setDate(end.getDate() - n);
+      const start = new Date();
+      start.setDate(start.getDate() - (2 * n - 1));
+      return { start: keyOf(start), end: keyOf(end) };
+    }
+    if (win.start && win.end) {
+      const utcMs = (s: string): number => {
+        const [y, m, d] = s.split('-').map(Number);
+        return Date.UTC(y, m - 1, d);
+      };
+      const len = Math.round((utcMs(win.end) - utcMs(win.start)) / 86400000) + 1;
+      if (len <= 0) return null;
+      const shift = (s: string): string => {
+        const d = new Date(utcMs(s) - len * 86400000);
+        return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+      };
+      return { start: shift(win.start), end: shift(win.end) };
+    }
+    return null;
+  }, [win]);
+
   // 全部 hooks 无条件调用（enabled 控制是否发请求，避免 admin 端点在个人视图 403）。
   // scope 维度随 admin 角色走：admin='all' / user='personal'，queryKey 自动隔离。
   const overviewQ = useOverview(win, { scope });
+  // 上期概览（环比 delta 数据源）：窗口紧跟当前段之前，取不到时禁用不发请求
+  const prevOverviewQ = useOverview(prevWin ?? win, { enabled: prevWin != null, scope });
   const savingsQ = useCacheSavings(win, { scope });
   const dailyQ = useDailyTrend(win, { scope });
   const tokenTrendQ = useTokenTrend(win, { scope });
@@ -91,6 +125,8 @@ export default function Dashboard(): JSX.Element {
   const ov = overviewQ.data;
   const savings = savingsQ.data;
   const daily = useMemo(() => dailyQ.data ?? [], [dailyQ.data]);
+  // 总请求 sparkline 序列（StatCards series）：直接用每日请求数
+  const reqSeries = useMemo(() => daily.map((d) => d.count ?? 0), [daily]);
   const models = useMemo(() => modelsQ.data ?? [], [modelsQ.data]);
   const health = healthQ.data ?? [];
   const rt = realtimeQ.data;
@@ -189,6 +225,8 @@ export default function Dashboard(): JSX.Element {
           overview={ov ?? null}
           lang={lang}
           rangeLabel={rLabel}
+          prev={prevOverviewQ.data ?? null}
+          series={reqSeries}
         />
       )}
     </div>
