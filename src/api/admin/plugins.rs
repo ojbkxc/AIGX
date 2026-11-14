@@ -453,6 +453,13 @@ const UPSTREAM_ASSETS: &[(&str, &str, u64, &str)] = &[
 
 const UPSTREAM_RELEASE_REPO: &str = "Agent2Builder/agent2api-providers-releases";
 
+/// 上游插件索引仓库（对齐 A2A `INDEX_REPO`）。未配置 `[plugins] source_url`
+/// 时，运行时从这里的 `index.json` **动态拉取**插件清单，让上游新增插件自动出现，
+/// 而非每次改 AIGX 代码里的内置快照。拉取失败回落到 [`builtin_catalog`]。
+const UPSTREAM_INDEX_REPO: &str = "Agent2plugin/Agent2plugin";
+const UPSTREAM_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/Agent2plugin/Agent2plugin/main/index.json";
+
 /// AIGX 当前 `(OS, ARCH)` 对应的上游目标三元组；不认识的平台返回 `None`
 /// （该条目会以空 `platforms` 呈现，前端显示「当前平台暂无包」）。
 fn current_target_triple() -> Option<&'static str> {
@@ -524,6 +531,118 @@ fn builtin_catalog() -> Value {
     })
 }
 
+/// 从上游 `index.json` 动态拉取插件清单（对齐 A2A `read_index` + `read_detail`）。
+///
+/// 链路：拉 `index.json` → 逐包拉 `manifest`（拿 `version` / `release` 模板）
+/// → 按 `{id}-{version}-{target}.zip` 模板拼当前平台的下载 URL。`sha256`/`size`
+/// 优先用内置 [`UPSTREAM_ASSETS`] 表（已知三包逐字节对账）；上游新增的包查不到
+/// 表 → 留 `null`（`install` 侧 sha256 本就是可选校验，不阻断下载）。
+///
+/// **任何一步失败都返回 `Ok(None)**，由调用方回落到 [`builtin_catalog`]——
+/// 动态拉取是增强，不是硬依赖：断网/限流时运维仍能看到内置快照。
+/// 只读清单元数据、不分发插件二进制（AGPL 边界，见文件头）。
+async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
+    let resp = state
+        .http_client
+        .get(UPSTREAM_INDEX_URL)
+        .timeout(CATALOG_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let index: Value = resp.json().await.ok()?;
+    let entries = index.get("plugins").and_then(Value::as_array)?;
+
+    let triple = current_target_triple();
+    let mut items: Vec<Value> = Vec::new();
+    for entry in entries {
+        let id = entry.get("id").and_then(Value::as_str)?;
+        let manifest_path = entry.get("manifest").and_then(Value::as_str)?;
+        // 拼 manifest 的 raw URL（index.json 里的 `manifest` 是仓内相对路径）
+        let manifest_url =
+            format!("https://raw.githubusercontent.com/{UPSTREAM_INDEX_REPO}/main/{manifest_path}");
+        let mresp = state
+            .http_client
+            .get(&manifest_url)
+            .timeout(CATALOG_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        if !mresp.status().is_success() {
+            continue;
+        }
+        let manifest: Value = match mresp.json().await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let version = manifest
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let release = manifest.get("release");
+        let repo = release
+            .and_then(|r| r.get("repo"))
+            .and_then(Value::as_str)
+            .unwrap_or(UPSTREAM_RELEASE_REPO);
+        let tag = release
+            .and_then(|r| r.get("tag"))
+            .and_then(Value::as_str)
+            .unwrap_or("v{version}")
+            .replace("{version}", version);
+        // 组装成 `normalize_store_plugin` 能识别的源格式：当前平台一条 platforms
+        let platforms: Vec<Value> = match triple {
+            Some(t) => {
+                let asset = format!("{id}-{version}-{t}.zip");
+                let url = format!("https://github.com/{repo}/releases/download/{tag}/{asset}");
+                let (size, sha) = upstream_asset_meta(id, t);
+                vec![json!({
+                    "target": std::env::consts::OS,
+                    "size": size,
+                    "url": url,
+                    "current": false,
+                    "sha256": sha,
+                })]
+            }
+            // 无对应平台（如 wasm 三元组匹配不到常规平台）→ 空 platforms，
+            // 前端渲染「当前平台暂无包」，与内置快照口径一致。
+            None => Vec::new(),
+        };
+        let item = json!({
+            "id": id,
+            "name": entry.get("name").and_then(Value::as_str).unwrap_or(id),
+            "description": entry.get("description").and_then(Value::as_str).unwrap_or(""),
+            "official": entry.get("official").and_then(Value::as_bool).unwrap_or(false),
+            "version": version,
+            "page": manifest.get("homepage").and_then(Value::as_str),
+            "homepage": manifest.get("homepage").and_then(Value::as_str),
+            "icon": entry.get("icon").and_then(Value::as_str),
+            "platforms": platforms,
+        });
+        items.push(item);
+    }
+    if items.is_empty() {
+        return None;
+    }
+    // 复用现有规整，保证与内置快照 / source_url 两条路径输出形状逐字段一致
+    normalize_catalog(
+        &json!({ "current": "", "plugins": items }),
+        std::env::consts::OS,
+    )
+}
+
+/// 内置资产表里查 `(size, sha256)`；查不到返回 `(0, null)`（上游新增包）。
+fn upstream_asset_meta(id: &str, triple: &str) -> (u64, Value) {
+    match UPSTREAM_ASSETS
+        .iter()
+        .find(|(pid, tr, _, _)| *pid == id && *tr == triple)
+    {
+        Some((_, _, size, sha)) => (*size, json!(sha)),
+        None => (0, Value::Null),
+    }
+}
+
 /// 发布目录：从 `config.toml [plugins] source_url` 拉取（10s 超时）。
 ///
 /// 未配置 / 拉取失败 / 返回内容无法识别 → `available:false` + 中文
@@ -538,8 +657,12 @@ async fn fetch_catalog(state: &AppState) -> Value {
         .trim()
         .to_string();
     if source_url.is_empty() {
-        // 未配置源 → 用内置的上游 A2A 插件快照（运维开箱可见、自行选择是否下载）。
-        // 配了 source_url 就以运维自己的目录为准，内置快照不再参与。
+        // 未配置源 → 优先从上游 index.json **动态拉取**（运维看到上游实际有哪些包、
+        // 上游新增自动出现）；动态拉取失败（断网/限流）→ 回落内置快照（开箱可见）。
+        // 配了 source_url 就以运维自己的目录为准，两条动态路径都不参与。
+        if let Some(dynamic) = fetch_upstream_catalog(state).await {
+            return dynamic;
+        }
         return builtin_catalog();
     }
     let resp = match state
