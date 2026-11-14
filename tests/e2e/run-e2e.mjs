@@ -23,7 +23,10 @@ const check = (name, ok, detail = '') => {
 };
 
 const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined });
-const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+// locale 必须显式 zh-CN：前端 i18n 按 navigator.language 推断（frontend/src/i18n/index.ts:23），
+// CI runner 浏览器默认 en-US → 英文 UI → 所有中文文本/title 断言（对话调试按钮、账户 Tab、
+// 新建提示词等）全部失配。zh-CN → startsWith('zh') → 中文 UI。
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' });
 
 try {
   // 1. 登录页渲染
