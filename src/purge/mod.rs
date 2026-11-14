@@ -348,9 +348,7 @@ pub fn clamp_reasoning(effort: Option<String>, cfg: &PurgeSettings) -> Option<St
     if !cfg.enabled || !cfg.reduce_reasoning {
         return effort;
     }
-    let Some(value) = effort else {
-        return None;
-    };
+    let value = effort?;
     let floor = cfg.reasoning_floor.trim().to_ascii_lowercase();
     let floor = if floor.is_empty() {
         "low".to_string()

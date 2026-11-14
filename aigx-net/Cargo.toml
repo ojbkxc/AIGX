@@ -18,9 +18,7 @@ auto-scaling = []
 [dependencies]
 tokio = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
