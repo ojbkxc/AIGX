@@ -303,8 +303,7 @@ const RETRY_JITTER_PERCENT: u64 = 20;
 /// 用计数器而非 rand 伪随机：不引新依赖、无锁原子、天然线程安全；且不同
 /// 调用（尤其并发重试）计数不同，产生的抖动值错开，正是抖动要解决的
 /// 「多请求同步重试打爆上游」问题。计数器周期性取模，回绕不影响均匀性。
-static RETRY_JITTER_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static RETRY_JITTER_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 第 `round` 轮失败后的等待时长（毫秒）。
 ///
@@ -328,9 +327,7 @@ fn retry_backoff(config: &AgentConfig, round: u32) -> u64 {
     let span = RETRY_JITTER_PERCENT * 10;
     let lower = 1_000 - span;
     let upper = 1_000 + span;
-    let seq = RETRY_JITTER_COUNTER
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        % 101;
+    let seq = RETRY_JITTER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 101;
     let coeff = lower + seq * (upper - lower) / 100;
     let jittered = base.saturating_mul(coeff).saturating_div(1000);
     jittered.min(15_000)

@@ -203,10 +203,9 @@ pub async fn handle_channel_stats(
     let channels = state.channel_store.list();
     let rows: Vec<Value> = channels.iter().map(channel_stats_row).collect();
     // 连接稳定性指标：冷却中渠道数（与调度过滤同源判定）。
-    let cooling_channels = count_cooling_channels(
-        channels.iter().map(|c| c.id.as_str()),
-        |id| state.channel_store.is_in_cooldown(id),
-    );
+    let cooling_channels = count_cooling_channels(channels.iter().map(|c| c.id.as_str()), |id| {
+        state.channel_store.is_in_cooldown(id)
+    });
     Ok(Json(json!({
         "success": true,
         "data": rows,
@@ -1800,9 +1799,6 @@ mod tests {
         assert_eq!(count_cooling_channels(ids.iter().copied(), all), 4);
 
         // 空渠道集：恒为 0（空分母不产生假计数）
-        assert_eq!(
-            count_cooling_channels(std::iter::empty::<&str>(), all),
-            0
-        );
+        assert_eq!(count_cooling_channels(std::iter::empty::<&str>(), all), 0);
     }
 }
