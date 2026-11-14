@@ -1292,27 +1292,23 @@ where
 /// UsageWire，与旧 `v.get("usage").map(parse_usage_from_value)` 对
 /// Null/字符串/数组的宽容口径（.get() 得 None → 全零）逐形一致。
 ///
-/// 守卫：serde 派生结构体反序列化会接受 seq 形状（按字段序元组解析，
-/// `[1,2]` 会解析成 prompt=1/completion=2），与旧口径不符——仅接受
-/// JSON 对象，非对象形状经 `deserialize_map` 报错后回退 Default（全零）。
+/// 先解析成 `Value` 再判形状：只有**对象**才转 `UsageWire`；数组/字符串/
+/// 数字等非对象形状（含 `[1,2]`）直接 `Some(default)`。否则 serde 派生结构体
+/// 的 struct-from-seq 会把数组元素**位置化**消费成 prompt/completion tokens
+/// （`[1,2]` → prompt=1/completion=2/total=3），与旧口径相悖；而直接让非对象
+/// 形状报错又会让整帧 `ChunkWire` 反序列化失败、`parse_sse_event` 返回 None，
+/// 丢掉「存在即 Some → 必产出 chunk」的契约。故此处必须回退 default 而非报错。
 fn de_usage_always_some<'de, D>(d: D) -> Result<Option<UsageWire>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    struct MapOnlyVisitor;
-    impl<'de> serde::de::Visitor<'de> for MapOnlyVisitor {
-        type Value = UsageWire;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("usage 必须是 JSON 对象")
-        }
-        fn visit_map<A>(self, map: A) -> Result<UsageWire, A::Error>
-        where
-            A: serde::de::MapAccess<'de>,
-        {
-            UsageWire::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-        }
-    }
-    Ok(Some(d.deserialize_map(MapOnlyVisitor).unwrap_or_default()))
+    let value: serde_json::Value = serde::Deserialize::deserialize(d)?;
+    let Some(object) = value.as_object() else {
+        return Ok(Some(UsageWire::default()));
+    };
+    let wire = serde_json::from_value::<UsageWire>(serde_json::Value::Object(object.clone()))
+        .unwrap_or_default();
+    Ok(Some(wire))
 }
 
 /// 解析单个 SSE 事件为 ChatChunk
