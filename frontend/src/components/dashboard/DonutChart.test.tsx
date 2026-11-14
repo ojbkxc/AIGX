@@ -1,7 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
+import i18n from 'i18next';
 import DonutChart from './DonutChart';
 import '../../i18n';
+
+// 全量套件里别的测试文件会把 localStorage 的 i18n_lang 污染成 en（jsdom 共享环境），
+// 断言依赖中文文案 → 每个用例前钉回 zh
+beforeEach(async () => {
+  localStorage.setItem('i18n_lang', 'zh');
+  await i18n.changeLanguage('zh');
+});
 
 const data = [
   { name: 'gpt-4o', value: 60, labelValue: '6.0万' },
@@ -29,10 +37,10 @@ describe('DonutChart — 跟随式 tooltip + 图例联动（#8/#9）', () => {
     const { container } = render(<DonutChart {...baseProps} />);
     const paths = Array.from(container.querySelectorAll('path')) as SVGPathElement[];
     fireEvent.mouseEnter(container.querySelectorAll('.donut-legend-row')[1]);
-    // 非目标扇区降透明度，目标扇区保持 1
-    expect(paths[0].getAttribute('style')).toContain('opacity: 0.35');
-    expect(paths[1].getAttribute('style')).not.toContain('opacity: 0.35');
-    expect(paths[2].getAttribute('style')).toContain('opacity: 0.35');
+    // 非目标扇区降透明度（opacity 是 SVG 属性，非 style 内联样式）
+    expect(paths[0].getAttribute('opacity')).toBe('0.35');
+    expect(paths[1].getAttribute('opacity')).toBe('1');
+    expect(paths[2].getAttribute('opacity')).toBe('0.35');
     // 中心读数切到 claude 的 30.0%
     const texts = Array.from(container.querySelectorAll('svg text')).map((t) => t.textContent);
     expect(texts).toContain('30.0%');
@@ -46,8 +54,8 @@ describe('DonutChart — 跟随式 tooltip + 图例联动（#8/#9）', () => {
     const rows = Array.from(container.querySelectorAll('.donut-legend-row'));
     expect(rows).toHaveLength(12); // 图例列全量
     fireEvent.mouseEnter(rows[11]); // 第 12 行 → 其他（最后扇区）
-    expect(paths[4].getAttribute('style')).not.toContain('opacity: 0.35');
-    expect(paths[0].getAttribute('style')).toContain('opacity: 0.35');
+    expect(paths[4].getAttribute('opacity')).toBe('1');
+    expect(paths[0].getAttribute('opacity')).toBe('0.35');
   });
 
   it('响应式：svg 按容器宽缩放，不再固定 220px', () => {

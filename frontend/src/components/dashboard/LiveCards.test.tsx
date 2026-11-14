@@ -1,7 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach } from 'vitest';
 import { render } from '@testing-library/react';
+import i18n from 'i18next';
 import LiveCards from './LiveCards';
 import '../../i18n';
+
+// 全量套件里别的测试文件会把 localStorage 的 i18n_lang 污染成 en（jsdom 共享环境），
+// 断言依赖中文文案 → 每个用例前钉回 zh
+beforeEach(async () => {
+  localStorage.setItem('i18n_lang', 'zh');
+  await i18n.changeLanguage('zh');
+});
 
 const rt = {
   qps: 1.2,
