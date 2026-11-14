@@ -104,10 +104,11 @@ try {
     check('对话调试入口可见', false, '渠道行无对话按钮');
   }
 
-  // 6. Settings 改密表单（设置页五分区重构后位于「安全」分类 Tab）
+  // 6. Settings 改密表单（设置页左栏分类导航 button.settings-nav-item，
+  //    改密表单在「安全」分类——原「账户」分类已迁入反馈需求）
   await page.goto(`${BASE}/settings`, { waitUntil: 'networkidle' });
   await page.screenshot({ path: 'tests/e2e/screenshots/08-settings.png' });
-  await page.getByRole('tab', { name: '安全' }).click();
+  await page.locator('.settings-nav-item', { hasText: '安全' }).click();
   await page.waitForTimeout(300);
   const hasPwCard = (await page.getByText('当前密码').count()) > 0 || (await page.getByText('旧密码').count()) > 0;
   check('改密表单（账户安全卡片）', hasPwCard);
