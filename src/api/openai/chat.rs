@@ -72,6 +72,24 @@ pub(crate) fn build_attempt_plan<'a>(
     plan
 }
 
+/// failover 前 Retry-After 等待上限（秒）：上游告知的等待时间超过此值时
+/// 不再等待——failover 总预算只有 90s，且给请求凭空增加几十秒延迟不如
+/// 立即切换下一个候选（失败渠道已被冷却 max(60, retry_after) 秒，不会
+/// 被本轮或近期请求再次选中）。
+pub(crate) const RETRY_AFTER_WAIT_CAP_SECS: u64 = 10;
+
+/// 从桥接错误提取 Retry-After 秒数（P1）：上游 429/503 常带 `Retry-After`
+/// 头（`capture_upstream_error_http` 已解析进 BridgeError::UpstreamStatus
+/// .retry_after，见 bridge/mod.rs 的 parse_retry_after）。无该字段返回 0。
+pub(crate) fn bridge_error_retry_after_secs(e: &crate::bridge::BridgeError) -> u64 {
+    match e {
+        crate::bridge::BridgeError::UpstreamStatus { retry_after, .. } => {
+            retry_after.map(std::time::Duration::as_secs).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
 /// POST /v1/chat/completions - 聊天补全
 ///
 /// 使用 Bridge/Hub 模式分发请求，参考 aisix 的 chat_completions 处理流程：
@@ -620,8 +638,25 @@ pub(crate) async fn handle_chat_completions(
                         used_channel_id = cid;
                         break;
                     }
+                    // P1：冷却时长 = max(60, Retry-After 解析值)——上游显式
+                    // 告知的恢复时间优先于固定 60s 基础值（指数退避在此基础上倍增）；
+                    // failover 前按解析值等待（计入预算）：仅当上游明确要求
+                    // 等待时才等，且上限 RETRY_AFTER_WAIT_CAP_SECS 并受
+                    // failover 总预算剩余时间约束。
+                    let retry_after = bridge_error_retry_after_secs(&e);
                     if let Some(cid) = &cid {
-                        state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                        state
+                            .channel_store
+                            .mark_cooldown(cid, e.to_string(), retry_after.max(60));
+                    }
+                    let wait = retry_after.min(RETRY_AFTER_WAIT_CAP_SECS);
+                    if wait > 0
+                        && failover_budget.remaining() >= std::time::Duration::from_secs(wait)
+                    {
+                        tracing::info!(
+                            "chat_stream failover: waiting {wait}s for Retry-After before switching channel"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                     }
                     tracing::warn!(
                         "chat_stream failover: channel {cid:?} failed: {e}, trying next channel"
@@ -1341,8 +1376,22 @@ pub(crate) async fn handle_chat_completions(
                         used_channel_id = cid;
                         break;
                     }
+                    // P1：冷却时长 = max(60, Retry-After 解析值)；failover
+                    // 前按解析值等待（计入预算），同流式侧口径。
+                    let retry_after = bridge_error_retry_after_secs(&e);
                     if let Some(cid) = &cid {
-                        state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                        state
+                            .channel_store
+                            .mark_cooldown(cid, e.to_string(), retry_after.max(60));
+                    }
+                    let wait = retry_after.min(RETRY_AFTER_WAIT_CAP_SECS);
+                    if wait > 0
+                        && failover_budget.remaining() >= std::time::Duration::from_secs(wait)
+                    {
+                        tracing::info!(
+                            "chat failover: waiting {wait}s for Retry-After before switching channel"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                     }
                     tracing::warn!(
                         "chat failover: channel {cid:?} failed: {e}, trying next channel"
@@ -1771,6 +1820,32 @@ mod tests {
         let budget = crate::api::failover::FailoverBudget::new();
         assert!(budget.can_attempt());
         assert_eq!(budget.attempts(), 0);
+    }
+
+    /// P1：Retry-After 提取与等待上限（retry-after 等待项自检）。
+    #[test]
+    fn retry_after_extraction_and_cap() {
+        use crate::bridge::BridgeError;
+        use std::time::Duration;
+        // 上游 429 带 Retry-After: 30 → 提取 30
+        let e = BridgeError::upstream_status_with_retry_after(
+            429,
+            "slow down",
+            Some(Duration::from_secs(30)),
+        );
+        assert_eq!(super::bridge_error_retry_after_secs(&e), 30);
+        // 无 Retry-After → 0（固定 60s 基础冷却，不等待）
+        let e = BridgeError::upstream_status(503, "unavailable");
+        assert_eq!(super::bridge_error_retry_after_secs(&e), 0);
+        // 非 UpstreamStatus 错误（超时/传输）→ 0
+        let e = BridgeError::Timeout {
+            elapsed_ms: 1000,
+            cause: "x".into(),
+        };
+        assert_eq!(super::bridge_error_retry_after_secs(&e), 0);
+        // 等待上限：failover 前最多等 RETRY_AFTER_WAIT_CAP_SECS 秒，
+        // 且计入 90s 总预算（remaining() 判定）
+        assert!(super::RETRY_AFTER_WAIT_CAP_SECS <= 30);
     }
 
     /// 帧直写形状与旧 json! 路径逐字段一致：

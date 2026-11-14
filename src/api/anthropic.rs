@@ -911,8 +911,22 @@ pub async fn handle_messages(
                         used_channel_id = cid;
                         break;
                     }
+                    // P1：冷却时长 = max(60, Retry-After 解析值)；failover
+                    // 前按解析值等待（计入预算），与 chat.rs 面同口径。
+                    let retry_after = super::openai::bridge_error_retry_after_secs(&e);
                     if let Some(cid) = &cid {
-                        state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                        state
+                            .channel_store
+                            .mark_cooldown(cid, e.to_string(), retry_after.max(60));
+                    }
+                    let wait = retry_after.min(super::openai::RETRY_AFTER_WAIT_CAP_SECS);
+                    if wait > 0
+                        && failover_budget.remaining() >= std::time::Duration::from_secs(wait)
+                    {
+                        tracing::info!(
+                            "messages stream failover: waiting {wait}s for Retry-After before switching channel"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                     }
                     tracing::warn!("messages stream failover: channel {cid:?} failed: {e}, trying next channel");
                     // #47：计费接管点/记账点（见各分支语义）
@@ -1691,8 +1705,22 @@ pub async fn handle_messages(
                         used_channel_id = cid;
                         break;
                     }
+                    // P1：冷却时长 = max(60, Retry-After 解析值)；failover
+                    // 前按解析值等待（计入预算），与 chat.rs 面同口径。
+                    let retry_after = super::openai::bridge_error_retry_after_secs(&e);
                     if let Some(cid) = &cid {
-                        state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                        state
+                            .channel_store
+                            .mark_cooldown(cid, e.to_string(), retry_after.max(60));
+                    }
+                    let wait = retry_after.min(super::openai::RETRY_AFTER_WAIT_CAP_SECS);
+                    if wait > 0
+                        && failover_budget.remaining() >= std::time::Duration::from_secs(wait)
+                    {
+                        tracing::info!(
+                            "messages failover: waiting {wait}s for Retry-After before switching channel"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                     }
                     tracing::warn!(
                         "messages failover: channel {cid:?} failed: {e}, trying next channel"
