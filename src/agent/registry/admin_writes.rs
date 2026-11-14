@@ -126,6 +126,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
                         "channel_id": { "type": "string", "description": "渠道 ID" },
                         "name": { "type": "string" },
                         "base_url": { "type": "string" },
+                        "plugin_provider": { "type": "string", "description": "插件渠道要接管的 provider id（仅 channel_type=plugin 时有意义）" },
                         "priority": { "type": "integer" },
                         "weight": { "type": "integer" },
                         "models": { "type": "array", "items": { "type": "string" } },

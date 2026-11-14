@@ -1230,6 +1230,11 @@ pub async fn handle_patch_channel(
     if let Some(channel_type) = body.get("channel_type").and_then(|v| v.as_str()) {
         ch.channel_type = ChannelType::from_str_lossy(channel_type);
     }
+    // 插件渠道接管的 provider（plugin_provider 分支缺失时 PATCH 传它会静默忽略）：
+    // 出现即更新（空串 = 清空，渠道会被数据面跳过）
+    if let Some(pp) = body.get("plugin_provider").and_then(|v| v.as_str()) {
+        ch.plugin_provider = pp.to_string();
+    }
     if let Some(base_url) = body.get("base_url").and_then(|v| v.as_str()) {
         // SSRF 防护：PATCH 只改 URL 的路径同样要校验（与 PUT/新增同口径）
         if !base_url.trim().is_empty() {
