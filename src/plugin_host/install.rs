@@ -38,11 +38,89 @@ pub struct PackManifest {
     pub name: String,
     pub version: String,
     pub protocol: u32,
-    /// 入口二进制的相对路径。空 = 自动探测 `bin/` 下的第一个文件。
-    pub entry: String,
+    /// 入口二进制。**两种上游形态都收**，见 [`PackEntry`]。
+    pub entry: PackEntry,
     pub providers: Vec<PackProvider>,
     /// 包自带的签名（原样保留，AIGX 不校验）。
     pub signature: Option<serde_json::Value>,
+}
+
+/// `pack.json` 的 `entry` 字段。
+///
+/// - **字符串**：单平台包的入口相对路径（AIGX 自建包 / 早期约定）；
+/// - **对象**：`{目标三元组: 入口相对路径}`（上游 Agent2API 3.5.x 起）。
+///   一个 zip 的 `pack.json` 会列出全部平台，但**只随包附一个二进制** ——
+///   所以必须按当前宿主的三元组挑，不能照单全收。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PackEntry {
+    /// 字符串形态（原样保留）
+    pub single: String,
+    /// 对象形态：目标三元组 → 入口路径
+    pub per_target: std::collections::HashMap<String, String>,
+}
+
+impl PackEntry {
+    /// 当前宿主的入口相对路径；无法确定返回 `None`（交给 `bin/` 自动探测）。
+    pub fn for_host(&self) -> Option<&str> {
+        if !self.single.is_empty() {
+            return Some(self.single.as_str());
+        }
+        if self.per_target.is_empty() {
+            return None;
+        }
+        let triple = crate::plugin_host::process::host_target_triple();
+        if let Some(p) = self.per_target.get(&triple) {
+            return Some(p.as_str());
+        }
+        // 未精确命中（上游三元组命名与宿主不同，或单平台包只列了一项）：
+        // 只有唯一一项时用它，否则放弃——宁可让 `bin/` 自动探测，也不猜错平台。
+        if self.per_target.len() == 1 {
+            return self.per_target.values().next().map(|s| s.as_str());
+        }
+        None
+    }
+
+    /// 清单是否完全没声明入口。
+    pub fn is_unset(&self) -> bool {
+        self.single.is_empty() && self.per_target.is_empty()
+    }
+}
+
+impl<'de> Deserialize<'de> for PackEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let v = serde_json::Value::deserialize(deserializer)?;
+        match v {
+            serde_json::Value::Null => Ok(PackEntry::default()),
+            serde_json::Value::String(s) => Ok(PackEntry {
+                single: s,
+                per_target: Default::default(),
+            }),
+            serde_json::Value::Object(map) => {
+                let mut per_target = std::collections::HashMap::new();
+                for (k, val) in map {
+                    match val {
+                        serde_json::Value::String(p) => {
+                            per_target.insert(k, p);
+                        }
+                        _ => {
+                            return Err(D::Error::custom(format!("entry.\"{k}\" 必须是字符串路径")))
+                        }
+                    }
+                }
+                Ok(PackEntry {
+                    single: String::new(),
+                    per_target,
+                })
+            }
+            other => Err(D::Error::custom(format!(
+                "entry 必须是字符串或 {{目标三元组: 路径}} 对象，实际是 {other}"
+            ))),
+        }
+    }
 }
 
 /// 安装错误。
@@ -174,16 +252,16 @@ pub fn parse_manifest(dir: &Path) -> Result<PackManifest, InstallError> {
         .map_err(|e| InstallError::Manifest(format!("pack.json 解析失败: {e}")))
 }
 
-/// 探测入口二进制：`pack.json` 的 `entry`，或 `bin/` 下的第一个文件。
+/// 探测入口二进制：`pack.json` 的 `entry`（取当前平台那条），或 `bin/` 下的第一个文件。
 fn resolve_entry(dir: &Path, manifest: &PackManifest) -> Result<String, InstallError> {
-    if !manifest.entry.is_empty() {
-        let p = safe_join(dir, &manifest.entry)?;
+    if let Some(entry) = manifest.entry.for_host() {
+        let entry = entry.to_string();
+        let p = safe_join(dir, &entry)?;
         if p.is_file() {
-            return Ok(manifest.entry.clone());
+            return Ok(entry);
         }
         return Err(InstallError::Manifest(format!(
-            "清单声明的入口不存在: {}",
-            manifest.entry
+            "清单声明的入口不存在: {entry}（包内没有当前平台的二进制？）"
         )));
     }
     let bin = dir.join("bin");
@@ -501,5 +579,58 @@ mod tests {
         assert!(safe_join(root, "/etc/passwd").is_ok()); // 前导 / 被去掉，落在 root 内
         assert!(safe_join(root, "C:/win").is_err());
         assert!(safe_join(root, "a\\..\\b").is_err());
+    }
+
+    /// 上游形态：`entry` 是「全平台三元组 → 路径」映射，包里只附当前平台那个二进制。
+    /// 必须按宿主三元组挑，否则会拿到别的平台的路径 → 入口不存在。
+    #[test]
+    fn install_upstream_entry_map_resolves_for_host() {
+        let root = temp_root();
+        let triple = crate::plugin_host::host_target_triple();
+        let manifest = r#"{"id":"p","name":"p","version":"3.5.0-beta.1","protocol":1,"entry":{"x86_64-pc-windows-msvc":"bin/p.exe","__TRIPLE__":"bin/p"},"providers":[{"id":"kiro","label":"Kiro"}]}"#
+            .replace("__TRIPLE__", &triple);
+        let bytes = make_zip(&[("pack.json", manifest.as_bytes()), ("bin/p", b"x")]);
+        let meta = install_from_zip(&bytes, &root, None).unwrap();
+        assert_eq!(meta.entry, "bin/p");
+    }
+
+    /// 映射里没有当前平台且有多项 → 不猜，退回 `bin/` 自动探测。
+    #[test]
+    fn install_entry_map_unknown_platform_falls_back_to_probe() {
+        let root = temp_root();
+        let manifest = r#"{"id":"p","name":"p","version":"1.0.0","protocol":1,"entry":{"triple-a":"bin/x","triple-b":"bin/y"},"providers":[]}"#;
+        let bytes = make_zip(&[("pack.json", manifest.as_bytes()), ("bin/p", b"x")]);
+        let meta = install_from_zip(&bytes, &root, None).unwrap();
+        assert_eq!(meta.entry, "bin/p", "多平台未命中时应自动探测 bin/");
+    }
+
+    /// 映射只有一项时不认得也用（单平台包）。
+    #[test]
+    fn install_entry_map_single_unknown_platform_uses_it() {
+        let root = temp_root();
+        let manifest = r#"{"id":"p","name":"p","version":"1.0.0","protocol":1,"entry":{"totally-unknown-triple":"bin/only"},"providers":[]}"#;
+        let bytes = make_zip(&[("pack.json", manifest.as_bytes()), ("bin/only", b"x")]);
+        let meta = install_from_zip(&bytes, &root, None).unwrap();
+        assert_eq!(meta.entry, "bin/only");
+    }
+
+    /// 映射值不是字符串 → 清单无效（不要静默当成空）。
+    #[test]
+    fn install_entry_map_bad_value_type_rejected() {
+        let root = temp_root();
+        let manifest = r#"{"id":"p","name":"p","version":"1.0.0","protocol":1,"entry":{"triple":123},"providers":[]}"#;
+        let bytes = make_zip(&[("pack.json", manifest.as_bytes()), ("bin/p", b"x")]);
+        let err = install_from_zip(&bytes, &root, None).unwrap_err();
+        assert!(matches!(err, InstallError::Manifest(_)), "{err:?}");
+    }
+
+    /// 回归：`entry` 写成字符串（AIGX 自建包）仍按原样解析。
+    #[test]
+    fn install_entry_string_still_works() {
+        let root = temp_root();
+        let manifest = pack_json("p", "1.0.0", 1, "bin/plugin", &["kiro"]);
+        let bytes = make_zip(&[("pack.json", manifest.as_bytes()), ("bin/plugin", b"x")]);
+        let meta = install_from_zip(&bytes, &root, None).unwrap();
+        assert_eq!(meta.entry, "bin/plugin");
     }
 }

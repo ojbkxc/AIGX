@@ -11,7 +11,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, Globe,
-  Puzzle, Route as RouteIcon,
+  Puzzle, Route as RouteIcon, Flame,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -46,6 +46,8 @@ const navItems: NavItem[] = [
   { path: '/products', labelKey: '套餐与兑换码', icon: Package, adminOnly: true },
   // 路由域（#40）：分层档案 / 基础策略 / 预演 / 回放 / 粘滞单页多模式
   { path: '/routing', labelKey: '路由', icon: RouteIcon, adminOnly: true },
+  // 破甲控制台：请求治理总控（归一化/改写/降档/异源/技能注入）
+  { path: '/purge', labelKey: '破甲控制台', icon: Flame, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
@@ -100,6 +102,7 @@ const navGroups: NavGroup[] = [
       navItemOf('/users'),           // 用户管理（含「工具权限」Tab）
       navItemOf('/products'),        // 套餐与兑换码（双 Tab）
       navItemOf('/routing'),         // 路由（分层档案 / 预演 / 回放 / 粘滞）
+      navItemOf('/purge'),           // 破甲控制台（请求治理总控）
       // 签到中心 → 并入「供应商」页「签到」Tab（每日额度领取与账号池强耦合），顶级菜单下线
       // 用户工具权限 → 并入「用户管理」页「工具权限」Tab，顶级菜单下线
       // 定时任务 → 并入「系统设置」分类（scheduled），顶级菜单下线

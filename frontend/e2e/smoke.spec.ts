@@ -22,6 +22,7 @@ const ADMIN_PAGES: Array<[path: string, marker: string]> = [
   ['/products?tab=redemptions', '兑换'],
   ['/proxy-pool', '代理'],
   ['/scheduled-tasks', '定时'],
+  ['/purge', '破甲'],
 ];
 
 /** 普通登录即可访问的页面 */

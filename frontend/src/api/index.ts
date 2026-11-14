@@ -97,6 +97,8 @@ import type {
   ClineHeadersItem,
   GatewayPromptItem,
   SanitizeHeadersItem,
+  PurgeData,
+  PurgeSettings,
   ZcodeCaptchaConfig,
   ZcodeCaptchaPoolStats,
   ZcodeCaptchaPushResult,
@@ -973,6 +975,11 @@ export const api = {
     request<ApiResponse<SanitizeHeadersItem>>('GET', `${API_BASE}/sanitize`),
   saveSanitize: (data: Record<string, unknown>): Promise<ApiResponse<SanitizeHeadersItem>> =>
     request<ApiResponse<SanitizeHeadersItem>>('PUT', `${API_BASE}/sanitize`, data),
+  // 破甲控制台（请求治理总控：归一化/改写/降档/异源/技能注入；热生效）
+  getPurge: (): Promise<ApiResponse<PurgeData>> =>
+    request<ApiResponse<PurgeData>>('GET', `${API_BASE}/purge`),
+  savePurge: (data: PurgeSettings): Promise<ApiResponse<PurgeData>> =>
+    request<ApiResponse<PurgeData>>('PUT', `${API_BASE}/purge`, data),
   // ZCode 验证码令牌池（对照 Agent2API「网关 → 验证码令牌池」）
   getZcodeCaptcha: (): Promise<ApiResponse<ZcodeCaptchaPoolStats>> =>
     request<ApiResponse<ZcodeCaptchaPoolStats>>('GET', `${API_BASE}/zcode/captcha`),

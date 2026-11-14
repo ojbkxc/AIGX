@@ -333,6 +333,9 @@ async fn main() -> anyhow::Result<()> {
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // passthrough/custom/append 三模式，保存即生效
     let gateway_prompt = Arc::new(crate::prompt::GatewayPromptStore::with_store(store.clone()));
+    // 破甲控制台：配置热更新；启动时刻只用于页面展示运行时长
+    let purge = Arc::new(crate::purge::PurgeStore::with_store(store.clone()));
+    crate::purge::init_started_at();
 
     // 额外脱敏请求头名单（对照 Agent2API「设置 → 网关 → 指纹脱敏」）：
     // 启动时从盘恢复进程级快照；保存设置时热更新
@@ -472,6 +475,12 @@ async fn main() -> anyhow::Result<()> {
                 config.usage.connect_timeout_secs.max(1),
             ))
             .read_timeout(Duration::from_secs(config.usage.stream_idle_secs.max(1)))
+            // 连接池/TCP 调优：空闲连接 30s 回收，单 host 保留至多 16 条复用连接；
+            // TCP keepalive 60s 探活挂连接，nodelay 关闭 Nagle 合并降低小包时延。
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_max_idle_per_host(16)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_nodelay(true)
             .build()
             .expect("failed to build shared reqwest::Client"),
     );
@@ -499,7 +508,7 @@ async fn main() -> anyhow::Result<()> {
     let host_env = crate::plugin_host::process::HostEnv {
         data_dir: data_dir.to_string_lossy().into_owned(),
         host_version: env!("CARGO_PKG_VERSION").to_string(),
-        target: option_env!("TARGET").unwrap_or("unknown").to_string(),
+        target: crate::plugin_host::host_target_triple(),
         proxy: String::new(),
     };
     let plugin_host = Arc::new(crate::plugin_host::PluginHostManager::new(
@@ -677,6 +686,7 @@ async fn main() -> anyhow::Result<()> {
         routing_policy,
         user_tool_policy,
         gateway_prompt,
+        purge,
         account_sessions,
         pricing_store,
         user_group_store,
@@ -746,14 +756,13 @@ async fn main() -> anyhow::Result<()> {
     refresh_metrics_snapshot(&state.channel_store, &state.health_tracker);
     spawn_metrics_refresh_task(state.channel_store.clone(), state.health_tracker.clone());
 
-    // 插件宿主启动恢复：[plugins] enabled=true 时把「已启用」的外置包重新
-    // 拉起（后台任务；单个包起不来只记错误、按退避表重试，不拖网关启动）。
-    if config.plugins.enabled {
-        let ph = plugin_host.clone();
-        tokio::spawn(async move {
-            ph.restore_enabled().await;
-        });
-    }
+    // 插件宿主启动恢复：把「已启用」的外置包重新拉起（后台任务；单个包起
+    // 不来只记错误、按退避表重试，不拖网关启动）。宿主**恒开**（无总开关），
+    // 运维的控制面在包级 / provider 级开关上。
+    let ph = plugin_host.clone();
+    tokio::spawn(async move {
+        ph.restore_enabled().await;
+    });
 
     // 构建路由
     // Start CF quota monitoring background task
@@ -2056,6 +2065,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/sanitize",
             get(api::admin::handle_get_sanitize).put(api::admin::handle_update_sanitize),
+        )
+        // 破甲控制台（请求治理总控：归一化/改写/降档/异源/技能注入）
+        .route(
+            "/api/purge",
+            get(api::admin::handle_get_purge).put(api::admin::handle_update_purge),
         )
         // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
         .route(

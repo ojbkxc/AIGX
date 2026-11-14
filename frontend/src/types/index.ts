@@ -2256,3 +2256,59 @@ export interface UserToolCatalogItem {
   /** 当前策略命中状态（端点回带；缺省 = 未计算） */
   policy_hit?: boolean;
 }
+
+/** 破甲控制台 · 单条改写规则（GET/PUT /api/purge） */
+export interface PurgeRewriteRule {
+  from: string;
+  to: string;
+}
+
+/** 破甲控制台配置 */
+export interface PurgeSettings {
+  enabled: boolean;
+  system_normalize: boolean;
+  dead_zone_rewrite: boolean;
+  reduce_reasoning: boolean;
+  cross_source_fallback: boolean;
+  skill_inject: boolean;
+  structured_prompt: boolean;
+  reasoning_floor: string;
+  retry_limit: number;
+  fallback_trigger_attempt: number;
+  fallback_models: string[];
+  rewrite_rules: PurgeRewriteRule[];
+  normalize_strip_prefixes: string[];
+  skill_dir: string;
+  skill_inject_limit: number;
+  structured_suffix: string;
+  upstream_label: string;
+}
+
+/** 破甲控制台统计（进程内计数，重启归零） */
+export interface PurgeStats {
+  responses: number;
+  retries: number;
+  early_success: number;
+  skill_hits: number;
+  refusals: number;
+  failure_refusal: number;
+  failure_empty: number;
+  failure_filter: number;
+  failure_other: number;
+}
+
+/** 破甲控制台运行信息 */
+export interface PurgeRuntime {
+  pid: number;
+  uptime_secs: number;
+  upstream: string;
+  /** 当前在途请求数（进程内即时值，非累计；旧版后端可能不返回） */
+  inflight?: number;
+}
+
+/** GET/PUT /api/purge 的 data 结构 */
+export interface PurgeData {
+  settings: PurgeSettings;
+  stats: PurgeStats;
+  runtime: PurgeRuntime;
+}

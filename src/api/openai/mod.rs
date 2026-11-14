@@ -30,6 +30,8 @@ mod responses;
 // 返回 `Err(Config)`（该上游不支持 Responses）时被 responses.rs 用作降级路径。
 mod responses_convert;
 mod state;
+// 流式拒答前缀探测（破甲「异源递进」的流式侧补全；chat / anthropic 共用）
+mod stream_refusal;
 
 #[allow(unused_imports)]
 pub use audio::*;
@@ -57,3 +59,5 @@ pub use resolve::*;
 pub use responses::*;
 #[allow(unused_imports)]
 pub use state::*;
+#[allow(unused_imports)]
+pub use stream_refusal::*;

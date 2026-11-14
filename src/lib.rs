@@ -40,6 +40,7 @@ pub mod pricing;
 pub mod prompt;
 pub mod proxy;
 pub mod proxy_pool;
+pub mod purge;
 pub mod quota_monitor;
 pub mod ratelimit;
 pub mod redemption;

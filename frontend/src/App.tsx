@@ -47,6 +47,7 @@ const Chat = lazyPage(() => import('./pages/Chat'));
 const ModelManage = lazyPage(() => import('./pages/ModelManage'));
 // 路由域独立成页（#40）：分层档案 + 预演 + 回放 + 粘滞需要同屏上下文
 const Routing = lazyPage(() => import('./pages/Routing'));
+const PurgeConsole = lazyPage(() => import('./pages/PurgeConsole'));
 const Prompts = lazyPage(() => import('./pages/Prompts'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
@@ -237,6 +238,8 @@ export default function App(): JSX.Element {
           {/* 路由域（#40）：配置（分层档案/基础策略/预演）+ 回放 + 粘滞单页多模式；
               原先挂在 /settings?tab=routing，独立成页后旧入口已下线 */}
           <Route path="/routing" element={<AdminRoute><Routing /></AdminRoute>} />
+          {/* 破甲控制台：请求治理总控（只对管理员开放） */}
+          <Route path="/purge" element={<AdminRoute><PurgeConsole /></AdminRoute>} />
           <Route path="/settings" element={<SettingsRoute />} />
           <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
           {/* 签到中心已并入供应商页「签到」Tab（旧路由重定向防书签失效） */}

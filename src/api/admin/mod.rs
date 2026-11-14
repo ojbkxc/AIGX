@@ -29,6 +29,7 @@ pub mod plugins; // 插件管理面（对照 Agent2API /api/plugins*，契约化
 pub mod pricing;
 pub mod prompts;
 pub mod proxy_pool_api;
+pub mod purge;
 pub mod queue_api;
 pub mod redemptions;
 pub mod routing;
@@ -146,6 +147,9 @@ pub use backup::{handle_backup_import, handle_storage_overview};
 pub use notify::{handle_get_notify_config, handle_update_notify_config};
 
 pub use security::{handle_security_events, handle_security_summary};
+
+// 破甲控制台（请求治理总控：GET/PUT 配置 + 进程统计）
+pub use purge::{handle_get_purge, handle_update_purge};
 
 // 调试模式：上游原始报文查看/清空（对照 Agent2API `/api/debug/traffic`）
 pub use debug::{
