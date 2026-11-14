@@ -22,12 +22,12 @@ use super::*;
 use serde::de::DeserializeOwned;
 use RiskLevel::HighRisk;
 
-/// 全部可写 key（与读侧 `aigx_config_view` 同名；顺序 = 读侧 enum 顺序 + 本批新补 4 个）。
+/// 全部可写 key（与读侧 `aigx_config_view` 同名；顺序 = 读侧 enum 顺序 + 本批新补 4 个 + purge）。
 /// 本批对读侧 enum 新增 4 key：`zcodeCaptchaConfig`（G8）、`chatSettings`、`zcodeCaptchaPool`、
-/// `networkConfig`；`logsRetention` 读侧本就有（写侧沿用同名）。`userToolsPolicy` **不在**本表
+/// `networkConfig`；`purge`=破甲控制台（读侧同 key，本批后补）；`logsRetention` 读侧本就有（写侧沿用同名）。`userToolsPolicy` **不在**本表
 /// ——它改的是 AI 自身可执行面，已按 lead 裁定移出 AI 面。
 /// 本文件的 `uc_every_key_has_dispatch_arm` 逐个锚住「key 不落空」。
-const CONFIG_SET_KEYS: [&str; 26] = [
+const CONFIG_SET_KEYS: [&str; 27] = [
     "settings",
     "limits",
     "securityPolicy",
@@ -53,6 +53,7 @@ const CONFIG_SET_KEYS: [&str; 26] = [
     "checkinKeepalive",
     "chatSettings",
     "zcodeCaptchaPool",
+    "purge",
     "networkConfig",
 ];
 
@@ -107,6 +108,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
             // ── checkin / zcode ──
             "/api/checkin-center/benefits/keepalive",
             "/api/zcode/captcha-pool",
+            "/api/purge",
             // ── 网络层配置（单对象；handler 已 pub）──
             "/api/network/config/{config_id}",
         ],
@@ -217,6 +219,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
                     "zcodeCaptchaPool" => {
                         out(admin::handle_update_zcode_captcha_pool(State(s.clone()), h.clone(), Json(value)).await)
                     }
+                    "purge" => out(admin::handle_update_purge(State(s.clone()), h.clone(), Json(value)).await),
                     "networkConfig" => {
                         let config_id = require_value_str(&value, "config_id")?;
                         let body: admin::network::NetworkConfigRequest = body_of("aigx_config_set", &value)?;
@@ -404,7 +407,7 @@ fn config_set_schema() -> Value {
 mod tests {
     use super::*;
 
-    const EXPECTED_COVERS: [&str; 31] = [
+    const EXPECTED_COVERS: [&str; 32] = [
         "/api/settings",
         "/api/limits",
         "/api/security/policy",
@@ -435,6 +438,7 @@ mod tests {
         "/api/debug",
         "/api/checkin-center/benefits/keepalive",
         "/api/zcode/captcha-pool",
+        "/api/purge",
         "/api/network/config/{config_id}",
     ];
 
@@ -544,7 +548,7 @@ mod tests {
             .map(|v| v.as_str().unwrap_or_default())
             .collect();
         assert_eq!(listed, CONFIG_SET_KEYS.to_vec(), "schema enum 与常量漂移");
-        assert_eq!(CONFIG_SET_KEYS.len(), 26, "key 数变化需同步台账删行");
+        assert_eq!(CONFIG_SET_KEYS.len(), 27, "key 数变化需同步台账删行");
     }
 
     /// 「调」侧：破坏性效果摘要必须真的挂进结果（纯函数，免 AppState）。

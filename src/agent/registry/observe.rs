@@ -510,7 +510,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
         td(
             "aigx_config_view",
             "配置现状视图",
-            "只读：按 key 读一份配置/现状视图（全局热生效配置的读取面；写侧另有一批工具，本工具不改任何东西）。key 取值：settings=模型映射、chatSettings=对话设置、limits=限额、securityPolicy=安全策略、sanitize=脱敏规则、gatewaySettings/gatewayPrompt=网关设置与系统提示词、updateSettings=更新设置、logsRetention=日志保留、queue=队列、ratelimit=限流、ratios=倍率、ipFilter=IP 黑白名单、notify=通知配置（凭据字段已脱敏）、clineHeaders=转发头、userToolsPolicy/userToolsCatalog=终端用户工具面、routing/routingDefaults/routingProfiles=路由策略、alertsRules=告警规则、pricingSyncConfig/exchangeRates=定价同步与汇率、modelMetadata=模型元数据、debug/debugTraffic=调试开关与在途抓包、reportSettings=报表时区偏移与存量口径、checkinKeepalive/checkinBenefits=签到保活与权益、zcodeCaptchaPool/zcodeCaptchaConfig=ZCode 验证码令牌池与配置、networkConfig=网络层**生效**配置（取 data.config；写侧另有 aigx_config_set.networkConfig 落**持久化**配置于 PUT /api/network/config/{config_id}，两者非同一端点）",
+            "只读：按 key 读一份配置/现状视图（全局热生效配置的读取面；写侧另有一批工具，本工具不改任何东西）。key 取值：settings=模型映射、chatSettings=对话设置、limits=限额、securityPolicy=安全策略、sanitize=脱敏规则、gatewaySettings/gatewayPrompt=网关设置与系统提示词、updateSettings=更新设置、logsRetention=日志保留、queue=队列、ratelimit=限流、ratios=倍率、ipFilter=IP 黑白名单、notify=通知配置（凭据字段已脱敏）、clineHeaders=转发头、userToolsPolicy/userToolsCatalog=终端用户工具面、routing/routingDefaults/routingProfiles=路由策略、alertsRules=告警规则、pricingSyncConfig/exchangeRates=定价同步与汇率、modelMetadata=模型元数据、debug/debugTraffic=调试开关与在途抓包、reportSettings=报表时区偏移与存量口径、checkinKeepalive/checkinBenefits=签到保活与权益、zcodeCaptchaPool/zcodeCaptchaConfig=ZCode 验证码令牌池与配置、purge=破甲控制台（请求治理策略：归一化/改写/降档/异源/技能注入）、networkConfig=网络层**生效**配置（取 data.config；写侧另有 aigx_config_set.networkConfig 落**持久化**配置于 PUT /api/network/config/{config_id}，两者非同一端点）",
             ReadOnly,
             "key",
             &[
@@ -545,6 +545,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
                 "/api/checkin-center/benefits",
                 "/api/zcode/captcha-pool",
                 "/api/zcode/captcha/config",
+                "/api/purge",
                 "/api/network/status",
             ],
             || {
@@ -557,7 +558,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
                             "clineHeaders","userToolsPolicy","userToolsCatalog","routing","routingDefaults",
                             "routingProfiles","alertsRules","pricingSyncConfig","exchangeRates","modelMetadata",
                             "debug","debugTraffic","reportSettings","checkinKeepalive","checkinBenefits",
-                            "zcodeCaptchaPool","zcodeCaptchaConfig","networkConfig"
+                            "zcodeCaptchaPool","zcodeCaptchaConfig","purge","networkConfig"
                         ], "description": "配置视图 key" }
                     },
                     "required": ["key"]
@@ -624,6 +625,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
                             )
                             .await
                         }
+                        "purge" => admin::handle_get_purge(State(s.clone()), h.clone()).await,
                         "networkConfig" => admin::health_check(State(s.clone()), h.clone()).await,
                         _ => return Err((-32602, format!("Invalid params: unknown config key {key}"))),
                     })
