@@ -746,14 +746,13 @@ async fn main() -> anyhow::Result<()> {
     refresh_metrics_snapshot(&state.channel_store, &state.health_tracker);
     spawn_metrics_refresh_task(state.channel_store.clone(), state.health_tracker.clone());
 
-    // 插件宿主启动恢复：[plugins] enabled=true 时把「已启用」的外置包重新
-    // 拉起（后台任务；单个包起不来只记错误、按退避表重试，不拖网关启动）。
-    if config.plugins.enabled {
-        let ph = plugin_host.clone();
-        tokio::spawn(async move {
-            ph.restore_enabled().await;
-        });
-    }
+    // 插件宿主启动恢复：把「已启用」的外置包重新拉起（后台任务；单个包起
+    // 不来只记错误、按退避表重试，不拖网关启动）。宿主**恒开**（无总开关），
+    // 运维的控制面在包级 / provider 级开关上。
+    let ph = plugin_host.clone();
+    tokio::spawn(async move {
+        ph.restore_enabled().await;
+    });
 
     // 构建路由
     // Start CF quota monitoring background task

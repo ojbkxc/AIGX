@@ -742,21 +742,22 @@ pub struct AppConfig {
 
 /// 插件宿主（`[plugins]` 段）。
 ///
+/// ── 没有「宿主开关」 ────────────────────────────────────────
+/// 插件宿主**恒开**。运维对插件的控制体现在**包级 / provider 级**开关，
+/// 不是这个总开关：
+/// - 包级：`POST /api/plugins/enable` / `uninstall`（**装完默认停用**，
+///   运维确认后再启用）；
+/// - provider 级：`/api/plugins/provider/enabled`（数据面选号过滤，启停即时生效）。
+///
+/// 启动时恒恢复「已启用」的外置包。
+///
 /// ── 为什么是「运维配置源 URL」而不是内置源 ──────────────────
 /// 上游插件是 AGPL-3.0，AIGX 是 Source Available / 非商业。二者不兼容，
 /// 所以 AIGX **不打包分发插件**，只做宿主：由运维配置自己的插件发布目录，
 /// 运行期按需拉取。未配 `source_url` 时目录页列出 AIGX **内置的上游
 /// Agent2API 插件快照**（只记录元数据与上游下载地址，不携带二进制）。
-///
-/// ── 默认开启 ────────────────────────────────────────────
-/// `enabled = true`（默认）= 宿主可用：运维可以直接下载/启用插件。
-/// **下载 ≠ 启用** —— 装好的包一律 `enabled=false`，要跑起来还得显式启用。
-/// 关成 `false` 则完全不碰外置插件（也不在启动时恢复已启用的包）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginsConfig {
-    /// 插件宿主总开关。默认 **true**。
-    #[serde(default = "plugins_enabled_default")]
-    pub enabled: bool,
     /// 插件发布目录 URL（指向一个返回包清单的 JSON）。空 = 用 AIGX 内置的
     /// 上游 Agent2API 插件快照（见 `api::admin::plugins::builtin_catalog`）。
     #[serde(default)]
@@ -764,20 +765,6 @@ pub struct PluginsConfig {
     /// 插件安装目录。空 = `{data_dir}/plugins`。
     #[serde(default)]
     pub plugins_dir: String,
-}
-
-fn plugins_enabled_default() -> bool {
-    true
-}
-
-impl Default for PluginsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            source_url: String::new(),
-            plugins_dir: String::new(),
-        }
-    }
 }
 
 /// 安全策略（`[security]` 段）。
