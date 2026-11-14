@@ -37,6 +37,11 @@ function breakerOf(c: ChannelHealthRow): string {
   return String(c.circuit_breaker || 'closed').toLowerCase();
 }
 
+/** P95 延迟（ms）：取当日健康档案 map（scheduler_status archive）；无记录返回 -1（排序落尾） */
+function p95Of(map: Map<string, number>, c: ChannelHealthRow): number {
+  return map.get(String(c.id)) ?? -1;
+}
+
 /** 综合状态：熔断/半开优先，其次按成功率阈值分级 */
 function categoryOf(c: ChannelHealthRow): Cat {
   const b = breakerOf(c);
@@ -114,7 +119,6 @@ export default function ChannelHealth({
     return map;
   }, [schedulerQ.data]);
   const showP95 = p95ById.size > 0;
-  const p95Of = (c: ChannelHealthRow): number => p95ById.get(String(c.id)) ?? -1;
 
   // 只统计/展示状态为「启用」的供应商（后端 status 取值 enabled/disabled，见
   // legacy.rs handle_channel_health，每条渠道恒带该字段）。非 enabled 一律隐藏，
@@ -171,7 +175,7 @@ export default function ChannelHealth({
         case 'requests': return ((a.total_requests ?? 0) - (b.total_requests ?? 0)) * dir;
         case 'latency': return ((a.avg_latency_ms ?? 0) - (b.avg_latency_ms ?? 0)) * dir;
         case 'success': return (rateOf(a) - rateOf(b)) * dir;
-        case 'p95': return (p95Of(a) - p95Of(b)) * dir;
+        case 'p95': return (p95Of(p95ById, a) - p95Of(p95ById, b)) * dir;
       }
     });
   }, [enabledRows, filter, search, sort, p95ById]);
