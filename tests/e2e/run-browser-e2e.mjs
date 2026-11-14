@@ -183,7 +183,11 @@ try {
     AIGX_SERVER__HOST: '127.0.0.1',
   });
   const aigx = spawn(AIGX_BIN, [], {
-    cwd: workdir,
+    // cwd 必须 = REPO：find_static_dir()（src/web/mod.rs）的候选全是
+    // cwd 相对或 exe 目录相对（./static、./frontend/dist…），tempdir
+    // cwd 下找不到任何 static ⇒ SPA 页面全 404 ⇒ 登录页无表单。
+    // REPO/static 即本 job 里 npm run build 刚产出的产物（与被测口径一致）。
+    cwd: REPO,
     env: aigxEnv,
     stdio: ['ignore', logStream, logStream],
     detached: process.platform !== 'win32',
