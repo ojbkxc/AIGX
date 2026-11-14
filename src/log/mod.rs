@@ -717,6 +717,7 @@ impl AuditLog {
             target: target.into(),
             before: None,
             after: None,
+            ip: None,
             created_at: chrono::Utc::now().timestamp(),
         }
     }

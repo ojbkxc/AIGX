@@ -250,10 +250,13 @@ impl ApiKeyStore {
                     tracing::warn!("API key {id} 信封解密失败（密钥文件与库是否同源？），已跳过");
                     continue;
                 }
-                api_key.key = plaintext;
                 // 向后兼容迁移：磁盘是明文/旧形态 → 立即回写 enc1: 信封
                 // （内存保持明文；迁移失败仅告警，下次 load 再试）
-                if !disk_value.starts_with("enc1:") && !plaintext.is_empty() {
+                // 注意：needs_migration 必须在 move 之前判定（plaintext 会被
+                // `api_key.key = plaintext` 移走，之后不可再借用）
+                let needs_migration = !disk_value.starts_with("enc1:") && !plaintext.is_empty();
+                api_key.key = plaintext;
+                if needs_migration {
                     if let Err(e) = self.store.put(key, &self.for_storage(&api_key)) {
                         tracing::warn!("API key {id} 加密迁移回写失败：{e}");
                     }

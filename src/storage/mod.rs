@@ -99,9 +99,10 @@ fn write_secret_file(path: &Path, content: &str) -> std::io::Result<()> {
 fn harden_file_perms(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     if let Ok(meta) = std::fs::metadata(path) {
-        let perms = meta.permissions();
+        let mut perms = meta.permissions();
         if perms.mode() & 0o777 != 0o600 {
-            if let Err(e) = std::fs::set_permissions(path, perms.set_mode(0o600)) {
+            perms.set_mode(0o600);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
                 tracing::warn!("failed to harden {} to 0600: {e}", path.display());
             }
         }
