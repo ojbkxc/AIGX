@@ -11,6 +11,7 @@
 - [Kubernetes 部署](#kubernetes-部署)
 - [性能优化](#性能优化)
 - [监控告警](#监控告警)
+- [备份与恢复](#备份与恢复)
 - [故障排查](#故障排查)
 
 ## 系统要求
@@ -627,6 +628,93 @@ scrape_configs:
 }
 ```
 
+## 备份与恢复
+
+### 备份机制总览
+
+| 数据 | 位置 | 备份方式 |
+|------|------|----------|
+| 业务数据（kv 表：渠道/定价/API Key/用户/告警规则等） | PostgreSQL（生产：127.0.0.1:5434 库 `aigx`） | `pg_dump`（脚本 / 面板） |
+| SQLite 降级库 | `~/.aigx/data/aigx.db` | `sqlite3 .backup`（脚本） |
+
+- **脚本**：[docs/backup/aigx-backup.sh](docs/backup/aigx-backup.sh)（仓库分发；`scripts/` 被 .gitignore 忽略故放 `docs/`）。三种模式：`backup`（默认）/ `list` / `restore <文件>`。
+- **管理面板**：设置 → 数据 → 加密导出（`POST /api/backup/export-encrypted` 口令 AEAD 打包，`GET /api/backup/download` 下载），适合人工搬运与小批量异地。
+- 凭据一律走环境变量（PG* 标准 libpq 变量），脚本与文档不含任何真实凭据。
+
+### cron 定时备份
+
+```bash
+crontab -e   # root 的 crontab
+```
+
+PG 主库（每天 3:00，保留 7 天，异地走 rsync）：
+
+```cron
+0 3 * * *  PGHOST=127.0.0.1 PGPORT=5434 PGUSER=aigx PGPASSWORD='***' PGDATABASE=aigx \
+            AIGX_BACKUP_DIR=/root/aigx-pg-backups AIGX_BACKUP_RETENTION=7 \
+            AIGX_BACKUP_OFF_SITE='root@tianyi:/root/aigx-pg-backups' \
+            bash /path/to/docs/backup/aigx-backup.sh backup >> /var/log/aigx-backup.log 2>&1
+```
+
+关键环境变量：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE` | libpq 默认 | PG 连接参数（pg_dump/psql 直接读取） |
+| `AIGX_BACKUP_DIR` | `/var/lib/aigx/backups` | 备份目录 |
+| `AIGX_BACKUP_RETENTION` | `7` | 保留天数 |
+| `AIGX_BACKUP_MODE` | `auto` | `auto`：有 pg_dump 且配了 PG 环境变量走 PG，否则降级 SQLite；可显式 `pg`/`sqlite` |
+| `AIGX_DB_PATH` | 自动探测 | SQLite 库路径（探测 `~/.aigx/data/aigx.db` 等候选） |
+| `AIGX_BACKUP_OFF_SITE` | 空 | 异地 rsync 目标（`user@host:/path`），留空不同步 |
+| `AIGX_BACKUP_RSYNC_OPTS` | 空 | rsync 附加选项（隧道场景 `-e "ssh -p 10122"`） |
+
+PG 不可用时脚本自动降级 SQLite（无 pg_dump 或未配 PG 环境变量）：
+
+```cron
+# 仅 SQLite 的实例（天翼云/甲骨文等）
+0 3 * * *  bash /path/to/docs/backup/aigx-backup.sh backup >> /var/log/aigx-backup.log 2>&1
+```
+
+异地容灾示例（orbien 隧道 + rsync，生产接线）：
+
+```bash
+# 天翼云 22 被墙，经 orbien 穿透：美国机 10122 映射天翼云 22
+AIGX_BACKUP_OFF_SITE='root@127.0.0.1:/root/aigx-pg-backups' \
+AIGX_BACKUP_RSYNC_OPTS='-e ssh -p 10122' \
+bash docs/backup/aigx-backup.sh backup
+```
+
+### 恢复演练
+
+PG 演练（在临时库上验证，不碰生产库）：
+
+```bash
+# 1. 建临时库
+sudo -u postgres createdb aigx_drill
+# 2. 恢复到临时库（PG* 指向临时库）
+PGHOST=127.0.0.1 PGPORT=5434 PGUSER=aigx PGPASSWORD='***' PGDATABASE=aigx_drill \
+  bash docs/backup/aigx-backup.sh restore /root/aigx-pg-backups/aigx-backup-20261114-030000.sql.gz
+# 3. 校验数据
+sudo -u postgres psql -d aigx_drill -c "SELECT count(*) FROM kv;"
+# 4. 演练完成删除
+sudo -u postgres dropdb aigx_drill
+```
+
+真实故障恢复：停应用 → 恢复目标库 → 重启应用 → `GET /api/storage` 看存储概览；`SELECT count(*) FROM kv` 应与备份时一致。
+
+SQLite 恢复（aigx.db 降级路径，**必须先停服**）：
+
+```bash
+systemctl stop aigx   # 避免写中途覆盖
+bash docs/backup/aigx-backup.sh restore ~/.aigx/backups/aigx-backup-20261114-030000.db.gz
+sqlite3 ~/.aigx/data/aigx.db "PRAGMA integrity_check;"   # 应输出 ok
+systemctl start aigx
+```
+
+建议每月随机挑一份备份做恢复演练并记录结果——备份没演练过等于没有备份。
+
+生产更新与回滚见「故障排查 → 回滚到旧版本」。
+
 ## 故障排查
 
 ### 常见问题
@@ -677,17 +765,40 @@ dmesg -w | grep -E aigx|network
 
 ### 回滚到旧版本
 
-```bash
-# Docker 回滚
-docker pull aigx/aigx:1.0.0
-docker stop aigx
-docker rm aigx
-docker run -d -p 9527:9527 aigx/aigx:1.0.0
+更新链路自带回滚：应用更新时自动把当前二进制备份为 `aigx.bak`、static 目录备份为 `static.bak`（仅保留最近一代），一键回滚即恢复这两份备份。
 
-# 二进制版本管理
-./aigx-backup
-./aigx-rollback 2024-01-01
+#### 应用内一键回滚（推荐）
+
+管理员登录获取 token（`POST /api/auth/login`，body `{"email":"admin","password":"<密码>"}`，返回 `data.token`）：
+
+```bash
+# 查看当前更新状态（含备份可用性 backupAvailable）
+curl -s -H "Authorization: Bearer <token>" http://<host>:9527/api/update/status
+
+# 一键回滚上一版本（Linux 立即恢复并重启；Windows 下次启动生效）
+curl -s -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  http://<host>:9527/api/update/rollback
+# → {"success":true,"data":{"restored":true,"needRestart":true}}
 ```
+
+前置条件：`aigx.bak` / `static.bak` 存在（最近一次更新自动生成）；更新只保留一代备份，跨多版本回滚需先逐版部署。
+
+#### 手动回滚（备份已被覆盖时）
+
+1. 从 [GitHub Releases](https://github.com/ojbkxc/AIGX/releases) 下载上一版本的二进制（`AIGX-<ver>-linux-<arch>`）与前端包（`AIGX-<ver>-server-linux-static.tar.gz`）——**二进制与 static 必须一起换**，只换其一会导致前后端版本错位（页面显示"修复前端"）；
+2. 停服后替换二进制与 static 目录（`systemctl stop aigx` → 覆盖文件 → `systemctl start aigx`）；
+3. `GET /api/update/status` 确认 `versionMismatch=false`。
+
+#### Docker 部署回滚
+
+镜像发布在 `docker.io/ojbkxc/ds2api`，tag 即版本号（`v1.0.57`），拉取上一版本重新部署：
+
+```bash
+docker pull docker.io/ojbkxc/ds2api:<上一版本>
+docker compose up -d   # 或等价的 docker run 命令
+```
+
+> 旧版文档引用的 `./aigx-backup` / `./aigx-rollback` 脚本不存在，已移除；数据备份见上文「备份与恢复」。
 
 ### 性能分析
 
