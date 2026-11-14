@@ -44,6 +44,7 @@ mod pricing;
 mod prompt;
 mod proxy;
 mod proxy_pool;
+mod purge;
 mod quota_monitor;
 mod ratelimit;
 mod redemption;
