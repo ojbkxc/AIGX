@@ -139,7 +139,7 @@ pub async fn handle_update_notify_config(
     }
     if let Some(v) = body.telegram_bot_token {
         let t = v.trim();
-        if !t.is_empty() && !is_masked(t) {
+        if !t.is_empty() && !is_masked_value(t) {
             cfg.telegram_bot_token = t.to_string();
         }
     }
@@ -157,7 +157,7 @@ pub async fn handle_update_notify_config(
     }
     if let Some(v) = body.smtp_password {
         let t = v.trim();
-        if !t.is_empty() && !is_masked(t) {
+        if !t.is_empty() && !is_masked_value(t) {
             cfg.smtp_password = t.to_string();
         }
     }
