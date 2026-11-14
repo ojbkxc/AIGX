@@ -104,13 +104,12 @@ try {
     check('对话调试入口可见', false, '渠道行无对话按钮');
   }
 
-  // 6. Settings 改密表单（设置页左栏分类导航 button.settings-nav-item，
-  //    改密表单在「安全」分类——原「账户」分类已迁入反馈需求）
-  await page.goto(`${BASE}/settings`, { waitUntil: 'networkidle' });
-  await page.screenshot({ path: 'tests/e2e/screenshots/08-settings.png' });
-  await page.locator('.settings-nav-item', { hasText: '安全' }).click();
-  await page.waitForTimeout(300);
-  const hasPwCard = (await page.getByText('当前密码').count()) > 0 || (await page.getByText('旧密码').count()) > 0;
+  // 6. 改密表单（账户安全卡片重构后在个人中心 /profile 页——Settings
+  //    的「安全」分类只有安全策略/监控/IP 管理；Profile 的「修改密码」
+  //    Card 无条件渲染，内含「当前密码」label）
+  await page.goto(`${BASE}/profile`, { waitUntil: 'networkidle' });
+  await page.screenshot({ path: 'tests/e2e/screenshots/08-profile.png' });
+  const hasPwCard = (await page.getByText('当前密码').count()) > 0;
   check('改密表单（账户安全卡片）', hasPwCard);
 
   // 7. 模型管理（原 /model-presets 目录页已并入 /model-manage，App.tsx 里
