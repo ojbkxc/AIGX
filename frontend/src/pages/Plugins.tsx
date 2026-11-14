@@ -349,7 +349,8 @@ export default function Plugins(): JSX.Element {
     const platform = item.platforms.find((p) => p.target === (payload?.target || ''));
     if (!platform) return;
     void runMutation(`install:${item.id}`, async () => {
-      await api.installPlugin(platform.url);
+      // 目录声明了 sha256 就传给后端复核（挡传输损坏 / 上游资产被换）
+      await api.installPlugin(platform.url, platform.sha256 || undefined);
       addToast(t('插件已下载'));
     });
   };

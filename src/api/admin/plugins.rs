@@ -323,6 +323,207 @@ pub async fn handle_install_plugin(
     })))
 }
 
+/// ── 内置发布目录：上游 Agent2API 插件索引快照 ──────────────────────────
+///
+/// 来源：<https://github.com/Agent2plugin/Agent2plugin> 的 `index.json` 与
+/// `plugins/*.json` 清单；发布资产在
+/// <https://github.com/Agent2Builder/agent2api-providers-releases>。
+///
+/// **AIGX 只记录元数据与上游下载地址，不打包、不分发插件二进制**：
+/// 下载由运维在插件页点「下载」触发，文件直接从上游 GitHub Release 拉取。
+/// 上游三个包均为 AGPL-3.0；AIGX 是 Source Available / 非商业，不复制其代码，
+/// 也不在发行物里携带它们。
+///
+/// 未配置 `[plugins] source_url` 时用这份快照（运维开箱可见、自行选择下载）；
+/// 配了 `source_url` 就以运维自己的目录为准，本快照不参与。
+struct BuiltinRelease {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    version: &'static str,
+    homepage: &'static str,
+    /// 上游 Release tag（各包前缀不同：`v…` / `web-v…` / `wasm-atomcode-v…`）
+    tag: &'static str,
+    published_at: &'static str,
+}
+
+const BUILTIN_RELEASES: &[BuiltinRelease] = &[
+    BuiltinRelease {
+        id: "agent2api-providers",
+        name: "提供商增强",
+        description: "上游 Agent2API 的 35 家 AI 提供商（模型调用 / 登录导入 / 凭证续期 / 模型目录 / 余额 / 签到）。AGPL-3.0，AIGX 只提供下载入口，不打包分发。",
+        version: "3.5.0-beta.1",
+        homepage: "https://github.com/ProvidersPlugin/Agent2Providers",
+        tag: "v3.5.0-beta.1",
+        published_at: "2026-11-09",
+    },
+    BuiltinRelease {
+        id: "agent2api-web-providers",
+        name: "网页提供商",
+        description: "上游 Agent2API 的 4 家网页登录型提供商（智谱清言 / DeepSeek 网页 / Tabbit 国内版·国际版）。AGPL-3.0，AIGX 只提供下载入口。",
+        version: "3.5.0-beta.1",
+        homepage: "https://github.com/ProvidersPlugin/Agent2WebProviders",
+        tag: "web-v3.5.0-beta.1",
+        published_at: "2026-11-09",
+    },
+    BuiltinRelease {
+        id: "agent2api-wasm-atomcode",
+        name: "AtomCode · Wasm",
+        description: "AtomCode 的 Wasm 形态（beta）。AIGX 当前没有 Wasm 运行时，可下载但无法启动——需要 AtomCode 请用「提供商增强」里的原生实现。",
+        version: "0.1.0-beta.1",
+        homepage: "https://github.com/ProvidersPlugin/Agent2Providers/tree/beta/wasm/atomcode",
+        tag: "wasm-atomcode-v0.1.0-beta.1",
+        published_at: "2026-11-09",
+    },
+];
+
+/// 上游资产表：`(pack_id, 目标三元组, 字节数, sha256)`。
+///
+/// 三元组 → AIGX 前端的 `target`（`std::env::consts::OS`）由
+/// [`current_target_triple`] 解析；前端只比 OS 名，所以这里按
+/// `(OS, ARCH)` 挑唯一一条，避免把 aarch64 包发给 x86_64 机器。
+const UPSTREAM_ASSETS: &[(&str, &str, u64, &str)] = &[
+    (
+        "agent2api-providers",
+        "x86_64-unknown-linux-gnu",
+        13_480_581,
+        "e9be54ca633bbd01be0a69418f6269dea92afa6b0364ca6ccb6492f79726555b",
+    ),
+    (
+        "agent2api-providers",
+        "aarch64-unknown-linux-gnu",
+        11_971_662,
+        "2fca19deca43ddba6d43f446bdae7bb7a5ac16486938ba6878fb4374b3105664",
+    ),
+    (
+        "agent2api-providers",
+        "x86_64-apple-darwin",
+        13_169_552,
+        "ee1c6bfa9e3c2cfac793043ee062dd5b62dae1b66efe7b51b859d87dd897405a",
+    ),
+    (
+        "agent2api-providers",
+        "aarch64-apple-darwin",
+        11_839_993,
+        "70e734210eb18ac53197337b4b1f62ae0ee80ed7dc8406214c44bca023cc308c",
+    ),
+    (
+        "agent2api-providers",
+        "x86_64-pc-windows-msvc",
+        17_673_616,
+        "46fe91fb3f20820c578b831d395b9d77c89aab6d4be4fede00a7e7c9634d530a",
+    ),
+    (
+        "agent2api-web-providers",
+        "x86_64-unknown-linux-gnu",
+        3_731_284,
+        "85271f190641c9da15317bb5e95703e8e4a0fe1ed8b2a4d67cae400eec0fa653",
+    ),
+    (
+        "agent2api-web-providers",
+        "aarch64-unknown-linux-gnu",
+        3_352_389,
+        "c39f7bc3542816096242ee1479206065ae9e34cceab97cf1a24a48e64f950c24",
+    ),
+    (
+        "agent2api-web-providers",
+        "x86_64-apple-darwin",
+        3_547_263,
+        "0d04f17ee094af930776e808ac19a87e2e975cde2941cfc1443a17a99559c7c6",
+    ),
+    (
+        "agent2api-web-providers",
+        "aarch64-apple-darwin",
+        3_348_088,
+        "ad5a251aa6a24fc2a9dbde19287707182f798b5acf4a87be2283edcc5901e2c3",
+    ),
+    (
+        "agent2api-web-providers",
+        "x86_64-pc-windows-msvc",
+        5_427_879,
+        "c5a1a4a4f60698cd9c99ac205b947a22868a02f41f5289359f7bb33bec66957c",
+    ),
+    (
+        "agent2api-wasm-atomcode",
+        "wasm32-unknown-unknown",
+        346_895,
+        "af71de432ceb9adac0d3d83d5a3be8900b4211b195aa6e113183fdba8d514a47",
+    ),
+];
+
+const UPSTREAM_RELEASE_REPO: &str = "Agent2Builder/agent2api-providers-releases";
+
+/// AIGX 当前 `(OS, ARCH)` 对应的上游目标三元组；不认识的平台返回 `None`
+/// （该条目会以空 `platforms` 呈现，前端显示「当前平台暂无包」）。
+fn current_target_triple() -> Option<&'static str> {
+    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        _ => return None,
+    })
+}
+
+/// 上游 Release 资产下载地址（`{id}-{version}-{triple}.zip`）。
+fn upstream_asset_url(tag: &str, id: &str, version: &str, triple: &str) -> String {
+    format!(
+        "https://github.com/{UPSTREAM_RELEASE_REPO}/releases/download/{tag}/{id}-{version}-{triple}.zip"
+    )
+}
+
+/// 内置发布目录（未配置 `[plugins] source_url` 时的默认目录）。
+///
+/// 形状与 [`normalize_catalog`] 的输出一致（前端 `PluginReleaseState`）。
+fn builtin_catalog() -> Value {
+    let triple = current_target_triple();
+    let plugins: Vec<Value> = BUILTIN_RELEASES
+        .iter()
+        .map(|rel| {
+            let platforms: Vec<Value> = triple
+                .and_then(|t| {
+                    UPSTREAM_ASSETS
+                        .iter()
+                        .find(|(id, tr, _, _)| *id == rel.id && *tr == t)
+                        .map(|(_, _, size, sha)| {
+                            json!({
+                                "target": std::env::consts::OS,
+                                "size": size,
+                                "url": upstream_asset_url(rel.tag, rel.id, rel.version, t),
+                                "current": false,
+                                "sha256": sha,
+                            })
+                        })
+                })
+                .into_iter()
+                .collect();
+            json!({
+                "id": rel.id,
+                "name": rel.name,
+                "description": rel.description,
+                // 上游是社区包，不是 AIGX 官方实现 → 不打「官方」徽标
+                "official": false,
+                "version": rel.version,
+                "page": rel.homepage,
+                "notes": null,
+                "publishedAt": rel.published_at,
+                "prerelease": true,
+                "platforms": platforms,
+                "homepage": rel.homepage,
+                "icon": null,
+            })
+        })
+        .collect();
+    json!({
+        "available": true,
+        "current": "",
+        "plugins": plugins,
+        "reason": null,
+        "error": false,
+    })
+}
+
 /// 发布目录：从 `config.toml [plugins] source_url` 拉取（10s 超时）。
 ///
 /// 未配置 / 拉取失败 / 返回内容无法识别 → `available:false` + 中文
@@ -337,7 +538,9 @@ async fn fetch_catalog(state: &AppState) -> Value {
         .trim()
         .to_string();
     if source_url.is_empty() {
-        return catalog_unavailable("未配置插件源（config.toml [plugins] source_url）");
+        // 未配置源 → 用内置的上游 A2A 插件快照（运维开箱可见、自行选择是否下载）。
+        // 配了 source_url 就以运维自己的目录为准，内置快照不再参与。
+        return builtin_catalog();
     }
     let resp = match state
         .http_client
@@ -847,5 +1050,78 @@ mod tests {
         );
         assert!(v["plugins"].as_array().unwrap().is_empty());
         assert_eq!(v["current"], "");
+    }
+
+    /// 内置发布目录：三个上游包都要在列；两个原生包在当前平台能解析出一条
+    /// 下载记录（含 size/sha256）；Wasm 包不产生可下载条目（AIGX 无 Wasm 运行时）。
+    #[test]
+    fn builtin_catalog_shape() {
+        let v = builtin_catalog();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["error"], false);
+        let plugins = v["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 3, "内置目录应列出上游三个插件");
+
+        for id in ["agent2api-providers", "agent2api-web-providers"] {
+            let p = plugins
+                .iter()
+                .find(|p| p["id"] == id)
+                .expect("内置目录缺条目");
+            assert_eq!(p["official"], false, "上游社区包不打官方徽标");
+            assert_eq!(p["prerelease"], true);
+            let plats = p["platforms"].as_array().unwrap();
+            if current_target_triple().is_some() {
+                assert_eq!(plats.len(), 1, "{id} 当前平台应恰好一条");
+                assert_eq!(plats[0]["target"], std::env::consts::OS);
+                assert!(plats[0]["size"].as_u64().unwrap() > 0);
+                let url = plats[0]["url"].as_str().unwrap();
+                assert!(
+                    url.starts_with("https://github.com/Agent2Builder/"),
+                    "下载地址应指向上游 Release: {url}"
+                );
+                assert!(url.ends_with(".zip"), "{url}");
+                assert_eq!(plats[0]["sha256"].as_str().unwrap().len(), 64);
+            }
+        }
+
+        // Wasm 包：任何常规平台的 `current_target_triple` 都不会等于
+        // `wasm32-unknown-unknown`，因此不可下载。
+        let wasm = plugins
+            .iter()
+            .find(|p| p["id"] == "agent2api-wasm-atomcode")
+            .expect("内置目录缺 Wasm 条目");
+        assert!(wasm["platforms"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn upstream_asset_url_shape() {
+        assert_eq!(
+            upstream_asset_url(
+                "v3.5.0-beta.1",
+                "agent2api-providers",
+                "3.5.0-beta.1",
+                "x86_64-unknown-linux-gnu"
+            ),
+            "https://github.com/Agent2Builder/agent2api-providers-releases/releases/download/\
+             v3.5.0-beta.1/agent2api-providers-3.5.0-beta.1-x86_64-unknown-linux-gnu.zip"
+        );
+    }
+
+    /// 发布条目与资产表必须双向对齐：改名后遗留的单边条目会让某平台永远空目录。
+    #[test]
+    fn builtin_releases_and_assets_stay_in_sync() {
+        for rel in BUILTIN_RELEASES {
+            assert!(
+                UPSTREAM_ASSETS.iter().any(|(id, _, _, _)| *id == rel.id),
+                "{} 在 UPSTREAM_ASSETS 里没有任何资产行",
+                rel.id
+            );
+        }
+        for (id, _, _, _) in UPSTREAM_ASSETS {
+            assert!(
+                BUILTIN_RELEASES.iter().any(|r| r.id == *id),
+                "UPSTREAM_ASSETS 有未声明的包 {id}"
+            );
+        }
     }
 }

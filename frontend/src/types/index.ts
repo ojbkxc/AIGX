@@ -2144,7 +2144,7 @@ export interface StorePlugin {
   prerelease?: boolean;
   error?: boolean;
   reason?: string | null;
-  platforms: Array<{ target: string; size: number; url: string; current: boolean }>;
+  platforms: Array<{ target: string; size: number; url: string; current: boolean; sha256?: string | null }>;
   homepage?: string | null;
   icon?: string | null;
 }
