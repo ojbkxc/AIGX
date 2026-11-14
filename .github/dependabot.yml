@@ -1,0 +1,26 @@
+# Dependabot：依赖版本更新 PR（cargo / npm / GitHub Actions 三个生态）。
+#
+# 与 CI 的 cargo-audit job 互补：dependabot 管「升级到新版本」，
+# cargo-audit 管「现有 Cargo.lock 版本有没有已知漏洞」。
+#
+# 节奏：每周一次（依赖面大，日更噪音高；安全漏洞由 cargo-audit 兜底，
+# 不依赖 dependabot 的更新频率）。
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10

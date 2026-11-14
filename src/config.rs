@@ -1498,6 +1498,25 @@ impl ConfigManager {
 
     /// [`load`](Self::load) 的可注入变体（同 [`new_with`](Self::new_with)，为单测而设）。
     async fn load_with(&self, var: fn(&str) -> Option<String>) -> AppConfig {
+        // 权限体检（只告警不阻断）：配置文件含 session_secret、SMTP/
+        // Telegram 令牌、支付密钥等敏感数据，若被设成组/全可读（0644 等），
+        // 同机其他账户即可读到。不 fail 是兼容考量——存量部署的 0644
+        // 配置文件必须继续可用（save 已改为 0600 落盘，新写入的文件不会再出问题）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if let Ok(meta) = std::fs::metadata(&self.path) {
+                let mode = meta.permissions().mode() & 0o077;
+                if mode != 0 {
+                    tracing::warn!(
+                        "config file {} is group/world readable (mode {:o}); \
+                         it contains secrets (session_secret etc.) — chmod 0600",
+                        self.path.display(),
+                        meta.permissions().mode() & 0o777
+                    );
+                }
+            }
+        }
         let content = tokio::fs::read_to_string(&self.path)
             .await
             .unwrap_or_default();
@@ -1508,14 +1527,34 @@ impl ConfigManager {
         cfg
     }
 
-    /// 保存配置到磁盘（tmp+rename 原子写，避免断电/崩溃留下半截 TOML）
+    /// 保存配置到磁盘（tmp+rename 原子写，避免断电/崩溃留下半截 TOML）。
+    ///
+    /// 配置文件含 session_secret、SMTP/Telegram 令牌、支付密钥等敏感
+    /// 数据 ⇒ tmp 文件先以 0600 落盘再 rename（rename 保留权限位）。
+    /// Windows 无 POSIX 权限位，忽略。
     pub async fn save(&self) -> anyhow::Result<()> {
         let content = {
             let config = self.config.read().await;
             toml::to_string_pretty(&*config)?
         };
         let tmp = self.path.with_extension("toml.tmp");
-        tokio::fs::write(&tmp, content).await?;
+        #[cfg(unix)]
+        {
+            use tokio::io::AsyncWriteExt as _;
+            let mut f = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+                .await?;
+            f.write_all(content.as_bytes()).await?;
+            f.flush().await?;
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::fs::write(&tmp, content).await?;
+        }
         tokio::fs::rename(&tmp, &self.path).await?;
         Ok(())
     }
@@ -1813,6 +1852,20 @@ mod tests {
             config.report.timezone_offset,
             super::REPORT_TZ_DEFAULT_OFFSET
         );
+    }
+
+    /// P0：配置文件含 session_secret 等敏感数据——首启生成与 update
+    /// 落盘都必须是 0600（tmp 先 0600 再 rename，权限位随 rename 保留）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn config_file_persisted_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let manager = super::ConfigManager::new_with(Some(path.clone()), |_| None).await;
+        manager.update(super::AppConfig::default()).await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "配置文件（含凭据）必须是 0600");
     }
 
     /// 另一条分支不能退化：文件值打底、env 覆盖，且**不重写**已有文件。

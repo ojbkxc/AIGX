@@ -62,6 +62,52 @@ pub struct JsonFileStore {
     cache: RwLock<HashMap<String, String>>,
 }
 
+/// 敏感数据落盘：0600 权限写文件（Unix）。
+///
+/// `JsonFileStore` 存储里含敏感数据（渠道凭证、API Key 信封、用户密码
+/// 哈希、SMTP/Telegram 令牌）——默认 umask（022）下 `fs::write` 产出的
+/// 0644 会让同机其他账户读到。`OpenOptions::mode` 仅在**创建**时生效：
+/// 已存在的文件不覆盖其权限（运维手工设的权限不会被每次写入冲掉）。
+///
+/// Windows 无 POSIX 权限位，忽略（NTFS ACL 由系统策略管理）。
+#[cfg(unix)]
+fn write_secret_file(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(content.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_secret_file(path: &Path, content: &str) -> std::io::Result<()> {
+    std::fs::write(path, content)
+}
+
+/// SQLite 数据库文件收紧到 0600（Unix）。
+///
+/// db 本体由 rusqlite 创建（不受本模块 write 路径控制，umask 默认值
+/// 可能是 0644）；WAL/SHM 副档同理，且 WAL 含同样的明文页——只收紧
+/// 本体等于留后门，三个档一起收。失败仅告警：权限收紧是加固不是功能，
+/// 不能因 chmod 失败阻断启动。已存在文件显式 set_permissions（不同于
+/// write_secret_file 的「仅创建时生效」——这里就是要改存量权限）。
+#[cfg(unix)]
+fn harden_file_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let perms = meta.permissions();
+        if perms.mode() & 0o777 != 0o600 {
+            if let Err(e) = std::fs::set_permissions(path, perms.set_mode(0o600)) {
+                tracing::warn!("failed to harden {} to 0600: {e}", path.display());
+            }
+        }
+    }
+}
+
 impl JsonFileStore {
     /// 创建一个新的 JSON 文件存储，数据存储在 `dir` 目录下。
     pub fn new(dir: PathBuf) -> Self {
@@ -101,7 +147,7 @@ impl JsonFileStore {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(value)?;
-        std::fs::write(&path, &content)?;
+        write_secret_file(&path, &content)?;
         self.cache.write().insert(key.to_string(), content);
         Ok(())
     }
@@ -175,7 +221,7 @@ impl JsonFileStore {
             return Ok(false);
         }
         let content = serde_json::to_string_pretty(value)?;
-        std::fs::write(&path, &content)?;
+        write_secret_file(&path, &content)?;
         cache.insert(key.to_string(), content);
         Ok(true)
     }
@@ -247,6 +293,11 @@ impl FileStore {
         let db_path = dir.join("aigx.db");
         let inner = sqlite::SqliteStore::open(db_path)?;
         migrate_legacy_json(&dir, &inner)?;
+        // P0：db 本体 + WAL/SHM 副档收紧到 0600（含敏感数据的主存储）
+        #[cfg(unix)]
+        for suffix in ["", "-wal", "-shm"] {
+            harden_file_perms(&dir.join(format!("aigx.db{suffix}")));
+        }
         Ok(Self {
             inner: FileStoreInner::Sqlite(inner),
         })
@@ -631,5 +682,51 @@ mod tests {
         assert_eq!(v1, Some("legacy-data".to_string()));
         let v2: Option<u64> = store.get("user:old2").unwrap();
         assert_eq!(v2, Some(42));
+    }
+
+    /// P0：JSON 后端落盘文件必须是 0600（存储含渠道凭证/API Key 信封等敏感数据）。
+    #[cfg(unix)]
+    #[test]
+    fn json_store_writes_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new().unwrap();
+        let store = JsonFileStore::new(dir.path().to_path_buf());
+        store.put("user:secret", &"sensitive").unwrap();
+        let meta = std::fs::metadata(store.path_of("user:secret")).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "敏感数据落盘必须是 0600"
+        );
+        // put_if_absent 同口径
+        store.put_if_absent("channel:token", &"tok").unwrap();
+        let meta2 = std::fs::metadata(store.path_of("channel:token")).unwrap();
+        assert_eq!(meta2.permissions().mode() & 0o777, 0o600);
+    }
+
+    /// P0：SQLite 主库文件（含 WAL/SHM 副档，含同样的明文页）必须是 0600。
+    #[cfg(all(unix, feature = "sqlite-kv"))]
+    #[test]
+    fn sqlite_db_files_are_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path().to_path_buf());
+        store.put("user:secret", &"sensitive").unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.path().join("aigx.db"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "aigx.db 必须是 0600"
+        );
+        for name in ["aigx.db-wal", "aigx.db-shm"] {
+            let p = dir.path().join(name);
+            if p.exists() {
+                let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{name} 必须是 0600");
+            }
+        }
     }
 }
