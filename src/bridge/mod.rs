@@ -289,7 +289,7 @@ pub struct ChatChunk {
 }
 
 /// 聊天增量
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChatDelta {
     pub content: Option<String>,
     /// 流式工具调用增量（OpenAI delta.tool_calls）
@@ -684,7 +684,7 @@ fn naive_utc(
     m: u32,
     sec: u32,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    let naive = chrono::NaiveDateTime::from_ymd_opt(year, month, day)?.and_hms_opt(h, m, sec)?;
+    let naive = chrono::NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(h, m, sec)?;
     Some(naive.and_utc())
 }
 
