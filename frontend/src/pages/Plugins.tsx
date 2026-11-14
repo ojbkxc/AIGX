@@ -292,6 +292,9 @@ export default function Plugins(): JSX.Element {
 
   const packs = useMemo(() => payload?.packs ?? [], [payload]);
   const host = payload?.host ?? null;
+  // 排除内置包（编译进二进制，无宿主进程）——只看外置包的宿主状态
+  const externalPacks = packs.filter((p) => p.id !== 'builtin');
+  const anyHostRunning = externalPacks.some((p) => p.host?.running);
   const catalog = payload?.catalog;
   const installedIds = useMemo(() => new Set(packs.map((p) => p.id)), [packs]);
   const storePlugins = useMemo(() => {
@@ -418,8 +421,8 @@ export default function Plugins(): JSX.Element {
           title={`${t('已安装插件')} (${packs.length})`}
           actions={
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <Badge tone={host?.running ? 'success' : 'neutral'}>
-                {host?.running ? t('宿主运行中') : packs.length ? t('宿主未运行') : t('未安装')}
+              <Badge tone={anyHostRunning ? 'success' : 'neutral'}>
+                {anyHostRunning ? t('宿主运行中') : externalPacks.length ? t('宿主未运行') : t('内置实现')}
               </Badge>
               <Button variant="outline" size="sm" onClick={() => void handleRefreshStore()} disabled={busy}>
                 {busyId === 'refresh' ? <Loader2 size={13} className="spin" /> : null}

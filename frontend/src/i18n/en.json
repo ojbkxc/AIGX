@@ -2738,6 +2738,7 @@
   "刷新目录": "Refresh Catalog",
   "宿主未运行": "Host not running",
   "宿主运行中": "Host running",
+  "内置实现": "Built-in implementation",
   "提供商已启用": "Provider enabled",
   "提供商已停用": "Provider disabled",
   "未安装": "Not installed",
