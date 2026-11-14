@@ -196,6 +196,28 @@ fn server_log_tail(log_path: &std::path::Path) -> String {
         .join("\n")
 }
 
+/// 从 server.log 提取首启一次性管理员密码。
+///
+/// P0 安全加固（673a9a67）后初始密码随机化：`Aigx-` 前缀 + 24 位 base64url
+/// 字符，仅一次性打印到 stdout/日志（src/main.rs generate_default_admin_password /
+/// ensure_default_admin），不落库不写配置。新建实例上历史固定密码必被拒。
+/// 不引 regex 依赖（Cargo.toml 不在本测试可改范围），手动扫描：
+/// 逐个定位 `Aigx-`，其后取连续 base64url 字符，恰 24 位即为密码。
+fn initial_password_from_log(log_path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(log_path).ok()?;
+    const B64URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut rest: &str = &text;
+    while let Some(i) = rest.find("Aigx-") {
+        let s = &rest[i + 5..];
+        let n = s.bytes().take_while(|b| B64URL.contains(b)).count();
+        if n == 24 {
+            return Some(s[..24].to_string());
+        }
+        rest = &rest[i + 5..];
+    }
+    None
+}
+
 /// 起真实 aigx 二进制 + 就绪轮询。返回 (RAII 守卫, base URL)：
 /// 守卫在调用方作用域内存活，正常结束/panic 均 kill+wait（无僵尸）。
 ///
@@ -348,23 +370,38 @@ async fn login_once(c: &reqwest::Client, base: &str, password: &str) -> Option<S
     }
 }
 
-async fn admin_token(c: &reqwest::Client, base: &str) -> String {
-    let tok = match login_once(c, base, "123456").await {
+async fn admin_token(c: &reqwest::Client, base: &str, log_path: &std::path::Path) -> String {
+    // 登录序列：优先用 server.log 提取的首启一次性密码（随机化后的新实例），
+    // 失败回落历史固定密码（兼容随机化之前创建的旧库）。
+    let initial = initial_password_from_log(log_path);
+    let mut tok = None;
+    if let Some(pw) = initial.as_deref() {
+        tok = login_once(c, base, pw).await;
+    }
+    let tok = match tok {
         Some(t) => t,
-        None => login_once(c, base, PASSWORD).await.expect("两个密码均被拒"),
+        None => match login_once(c, base, "123456").await {
+            Some(t) => t,
+            None => login_once(c, base, PASSWORD)
+                .await
+                .expect("日志初始密码与历史固定密码均被拒"),
+        },
     };
-    // 新库默认 must_change_password：先改密再重登（旧库改密会「旧密码不正确」，忽略）
-    if let Ok(resp) = c
-        .post(format!("{base}/api/auth/change-password"))
-        .bearer_auth(&tok)
-        .json(&json!({"old_password": "123456", "new_password": PASSWORD}))
-        .send()
-        .await
-    {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() && !body.contains("旧密码不正确") {
-            panic!("change-password 失败：{body}");
+    // 新库默认 must_change_password：先改密再重登（old_password 用实际初始密码；
+    // 旧库改密会「旧密码不正确」，忽略）
+    if let Some(pw) = initial.as_deref() {
+        if let Ok(resp) = c
+            .post(format!("{base}/api/auth/change-password"))
+            .bearer_auth(&tok)
+            .json(&json!({"old_password": pw, "new_password": PASSWORD}))
+            .send()
+            .await
+        {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if !status.is_success() && !body.contains("旧密码不正确") {
+                panic!("change-password 失败：{body}");
+            }
         }
     }
     login_once(c, base, PASSWORD).await.expect("改密后重登失败")
@@ -717,7 +754,7 @@ async fn disconnect_499_billing_dual_surface() {
     let c = client();
 
     // 3) 管理面 bootstrap
-    let admin = admin_token(&c, &base).await;
+    let admin = admin_token(&c, &base, &log_path).await;
     ensure_channel(
         &c,
         &base,

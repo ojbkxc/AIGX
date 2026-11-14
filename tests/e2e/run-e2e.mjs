@@ -1,9 +1,20 @@
 // 真实浏览器 E2E 执行器（node 直跑，不依赖 vitest 环境）
+//
+// 目标与凭据一律 env 注入（AIGX_E2E_BASE / AIGX_E2E_USER / AIGX_E2E_PASS），
+// 缺任一即 fail-fast——历史默认值（生产 IP 104.223.65.202:9527 + 出厂口令
+// admin/123456）已移除：默认直连生产属于凭据入库 + 生产误击风险，CI 由
+// run-browser-e2e.mjs 起本地真后端 + mock 上游后注入 env。
 import { chromium } from '../../frontend/node_modules/playwright-core/index.mjs';
 
-const BASE = process.env.AIGX_E2E_BASE || 'http://104.223.65.202:9527';
-const USER = process.env.AIGX_E2E_USER || 'admin';
-const PASS = process.env.AIGX_E2E_PASS || '123456';
+const BASE = process.env.AIGX_E2E_BASE;
+const USER = process.env.AIGX_E2E_USER;
+const PASS = process.env.AIGX_E2E_PASS;
+if (!BASE || !USER || !PASS) {
+  console.error(
+    '[e2e] 缺 AIGX_E2E_BASE / AIGX_E2E_USER / AIGX_E2E_PASS env —— 本脚本不再内嵌默认目标与凭据；本地可用 `node tests/e2e/run-browser-e2e.mjs` 一键起真后端+mock 上游',
+  );
+  process.exit(2);
+}
 
 const results = [];
 const check = (name, ok, detail = '') => {

@@ -2,7 +2,16 @@
 const crypto = require('crypto');
 
 const BASE = 'http://127.0.0.1:8080';
-const NEW_PW = 'Aigx#2026verify';
+// 凭据一律 env 注入，拒绝内置默认口令：
+// - AIGX_E2E_NEW_PASSWORD：改密后的目标口令（必填）
+// - AIGX_E2E_INIT_PASSWORD：实例首启一次性口令（Aigx- 前缀，启动日志取）；
+//   已改过密的实例可省略（幂等：直接用新口令登录）
+const NEW_PW = process.env.AIGX_E2E_NEW_PASSWORD;
+const INIT_PW = process.env.AIGX_E2E_INIT_PASSWORD || '';
+if (!NEW_PW) {
+  console.error('[e2e-verify] 缺 env AIGX_E2E_NEW_PASSWORD —— 拒绝内置默认口令（历史 Aigx#2026verify / 123456 已移除）');
+  process.exit(2);
+}
 
 function solveCaptcha(cap) {
   for (let n = 0; n <= cap.maxnumber; n++) {
@@ -33,20 +42,20 @@ async function login(password) {
 }
 
 async function main() {
-  // 登录：密码可能是上次运行改过的 NEW_PW，也可能是初始 123456
+  // 登录：密码可能是上次运行改过的 NEW_PW，也可能是首启一次性口令（env 提供）
   let loginRes = await login(NEW_PW);
-  if (!loginRes.body?.data?.token) loginRes = await login('123456');
+  if (!loginRes.body?.data?.token && INIT_PW) loginRes = await login(INIT_PW);
   console.log('login:', loginRes.status, 'success:', loginRes.body.success);
   const token = loginRes.body?.data?.token;
   if (!token) { console.error('no token', JSON.stringify(loginRes.body)); process.exit(1); }
   let auth = { Authorization: `Bearer ${token}` };
 
-  // 首登（用初始密码）返回 PASSWORD_CHANGE_REQUIRED 时，改密后重登
-  if (loginRes.body.error === 'Password change required') {
+  // 首登（用初始口令）返回 PASSWORD_CHANGE_REQUIRED 时，改密后重登
+  if (loginRes.body.error === 'Password change required' && INIT_PW) {
     const cp = await fetch(`${BASE}/api/auth/change-password`, {
       method: 'POST',
       headers: { ...auth, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ old_password: '123456', new_password: NEW_PW }),
+      body: JSON.stringify({ old_password: INIT_PW, new_password: NEW_PW }),
     });
     console.log('change-password:', cp.status);
     const lr = await login(NEW_PW);

@@ -5,7 +5,16 @@ import crypto from 'node:crypto';
 const BASE = 'http://127.0.0.1:18800';
 const GUA = process.env.UPSTREAM_HOST || '';
 const MOCK = `http://[${GUA}]:18900`;
-const PASSWORD = 'Bench#20261108';
+// 凭据一律 env 注入，拒绝内置默认口令：
+// - AIGX_BENCH_PASSWORD：bench 管理员密码（改密后的目标口令）
+// - AIGX_BENCH_INIT_PASSWORD：实例首启一次性口令（Aigx- 前缀，启动日志取）；
+//   已改过密的实例可省略（幂等：直接用 AIGX_BENCH_PASSWORD 登录）
+const PASSWORD = process.env.AIGX_BENCH_PASSWORD;
+const INIT_PASSWORD = process.env.AIGX_BENCH_INIT_PASSWORD || '';
+if (!PASSWORD) {
+  console.error('[bench] 缺 env AIGX_BENCH_PASSWORD —— 拒绝内置默认口令（历史 Bench#20261108 已移除）');
+  process.exit(2);
+}
 
 const j = async (method, path, body, token) => {
   const res = await fetch(BASE + path, {
@@ -49,19 +58,27 @@ const tryLogin = async (password) => {
 };
 const fresh = process.env.FRESH !== '0';
 let loginRes = null;
-if (fresh) loginRes = await tryLogin('123456');
+let usedInit = false;
+if (fresh && INIT_PASSWORD) {
+  loginRes = await tryLogin(INIT_PASSWORD);
+  usedInit = !!loginRes;
+}
 if (!loginRes) loginRes = await tryLogin(PASSWORD);
 if (!loginRes) throw new Error('both passwords rejected');
 const token = loginRes?.data?.token ?? loginRes?.token;
 if (!token) throw new Error('no token: ' + JSON.stringify(loginRes).slice(0, 300));
 console.log('login ok');
 
-// 3. 改密（幂等：已改过则忽略「旧密码不正确」）
-try {
-  await j('POST', '/api/auth/change-password', { old_password: '123456', new_password: PASSWORD }, token);
-  console.log('password changed ->', PASSWORD);
-} catch (e) {
-  if (!String(e).includes('旧密码不正确')) throw e;
+// 3. 改密（幂等：已改过则忽略「旧密码不正确」）；旧密码 = 首启一次性口令
+if (usedInit && INIT_PASSWORD) {
+  try {
+    await j('POST', '/api/auth/change-password', { old_password: INIT_PASSWORD, new_password: PASSWORD }, token);
+    console.log('password changed ->', PASSWORD);
+  } catch (e) {
+    if (!String(e).includes('旧密码不正确')) throw e;
+    console.log('password already changed');
+  }
+} else {
   console.log('password already changed');
 }
 const re = await j('POST', '/api/auth/login', { email: 'admin@gmail.com', password: PASSWORD, captcha: await solveCaptcha() });

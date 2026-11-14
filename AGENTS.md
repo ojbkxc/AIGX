@@ -12,7 +12,10 @@ Rust(axum 0.7 + Tokio)后端 + React 18 + TypeScript + Vite 前端,默认 SQLite
 - **仓库**:https://github.com/ojbkxc/AIGX(main 分支,直接 push,不走 PR)
 - **生产**:http://104.223.65.202:9527(systemd 服务 `aigx`,二进制 `/opt/aigx/aigx`,
   数据 `~/.aigx/`)。SSH 凭据见用户私有记录,**勿写入任何入库文件**。
-- **测试账号**:`admin / 123456`(username 或 `admin@aigx.local` 均可)
+- **测试账号**:`admin`(username 或 `admin@aigx.local` 均可)。首启密码**随机生成**
+  (`Aigx-` 前缀一次性口令,仅在启动日志打印一次,不落库),首登强制改密;测试用
+  初始口令从启动日志取,或由测试脚本自身改密(参照 tests/e2e/499_disconnect_billing.rs
+  的 initial_password_from_log)。历史默认口令 `123456` 已移除(673a9a67),勿再引用。
 - **工作区**:Cargo workspace = 主 crate `aigx` + `aigx-net`(网络层)
 - **后端主要模块**(`src/`):`api`(openai/anthropic/admin)、`channel`(调度/熔断/AIMD/健康)、
   `auth`(JWT/TOTP)、`user`、`payment`、`pricing`、`usage`、`quota_monitor`、`db`(SeaORM

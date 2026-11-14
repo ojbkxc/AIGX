@@ -1,0 +1,59 @@
+name: e2e-browser
+
+# 浏览器 E2E 闸门（tests/e2e/run-e2e.mjs）：真后端 + loopback mock 上游，
+# 不再直连生产。姿势对齐 tests/e2e/499_disconnect_billing.rs（cargo build 出
+# 二进制 → tempdir HOME 起服务 → healthz 探针 → 日志提取首启一次性密码 →
+# 改密 → 注册 loopback mock 渠道 → env 注入驱动 run-e2e.mjs）。
+#
+# 与 ci.yml 的 e2e (playwright) job 互补：那套跑 frontend/e2e/（纯静态+API 桩），
+# 本 job 跑 tests/e2e/（真实登录/渠道/token 吊销/对话收发等后端状态机行为）。
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  e2e-browser:
+    name: e2e (browser, real backend + mock upstream)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build (debug, 供 runner spawn)
+        run: cargo build --locked
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: Install Playwright chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      # run-e2e.mjs 断言的是入库构建产物（与 ci.yml frontend job 同口径）
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Run browser E2E (spawn aigx + mock upstream)
+        env:
+          AIGX_E2E_ARTIFACT_DIR: ${{ github.workspace }}/tests/e2e/e2e-run
+        run: node tests/e2e/run-browser-e2e.mjs
+      - name: Upload E2E artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-browser-artifacts
+          path: |
+            tests/e2e/e2e-run/
+            tests/e2e/screenshots/
+          retention-days: 7
+          if-no-files-found: ignore

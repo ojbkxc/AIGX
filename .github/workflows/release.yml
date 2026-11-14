@@ -1,41 +1,151 @@
-# AIGX 发布和部署 Workflow
-# 验证发布完整性（注释性步骤已移除，保持 CI 稳定）
-
 name: Release & Deploy
+
+# 发布闸门：tag 推送后
+#   1) 六处版本号一致性 + tag==VERSION（与 build.yml 共用 verify-version.py）
+#   2) 生成 changelog（上一 tag..HEAD 的 conventional commits 分组）
+#   3) 等 build.yml 的 create-release 完成并核对全部 15 个附件存在
+#   4) .upd 的 sha256 校验（服务器自更新包，发布前必须完整可用）
+#   5) changelog 作为附件上传到 Release
+#
+# 生产部署不走本 workflow：服务器端应用内更新器自动拉取 GitHub Releases
+# 的 .upd 完成替换（见 DEPLOYMENT.md「回滚到旧版本」），无需 CI SSH。
+# 构建与附件上传由 build.yml 在 tag push 时承担，本闸门与其分工互补、
+# 不重复构建。
 
 on:
   push:
-    branches: [ main ]
     tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  verify-completion:
-    name: Verify Release Completion
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check all builds succeeded
-        run: |
-          echo "✅ All build jobs completed successfully!"
-          echo "发布: ${{ github.event.repository.name }} v${{ github.ref_name }}"
-
-  deploy-production:
-    name: Deploy to Production
+  release-gate:
+    name: 发布闸门（版本 → changelog → 附件完整性）
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'ojbkxc/AIGX'
 
-    environment:
-      name: production
-      url: https://api.your-domain.com
-
     steps:
-      - name: Get latest tag
-        run: |
-          echo "deploy_env=production" >> $GITHUB_ENV
-          echo "deploy_version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+      - name: Checkout（全历史，供 changelog 对比上一 tag）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
-      - name: Deploy configuration
+      - name: 版本一致性（六处 + tag==VERSION）
         run: |
-          echo "🎬 部署到生产环境..."
-          echo "版本: ${{ env.deploy_version }}"
-          echo "环境: ${{ env.deploy_env }}"
+          python3 .github/workflows/verify-version.py
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          test "$TAG_VER" = "$(cat VERSION)" || {
+            echo "::error::tag ${GITHUB_REF_NAME} 与 VERSION=$(cat VERSION) 不一致"
+            exit 1
+          }
+
+      - name: 生成 changelog
+        run: |
+          VER="$(cat VERSION)"
+          PREV="$(git tag --sort=-v:refname --merged HEAD | grep -vx "v$VER" | head -n1 || true)"
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..HEAD"
+            RANGE_DESC="$PREV → v$VER"
+          else
+            RANGE="--max-count=50"
+            RANGE_DESC="（无先前 tag，取最近 50 个提交）→ v$VER"
+          fi
+          COUNT=$(git log --no-merges --format=%s $RANGE | wc -l)
+
+          OUT="CHANGELOG-$VER.md"
+          {
+            echo "# AIGX $VER Changelog"
+            echo
+            echo "发布范围: $RANGE_DESC"
+            echo "合计 $COUNT 个提交（不含合并）。"
+            echo
+            for entry in "feat:✨ 新特性" "fix:🐛 缺陷修复" "perf:⚡ 性能优化" \
+              "refactor:♻️ 重构" "docs:📝 文档" "test:✅ 测试" "build:📦 构建" \
+              "ci:🔧 CI" "revert:↩️ 回退" "style:💄 样式" "chore:🧹 杂项"; do
+              type="${entry%%:*}"
+              label="${entry#*:}"
+              lines="$(git log --no-merges --format=%s $RANGE | grep -E "^$type(\(|:|$)" || true)"
+              [ -z "$lines" ] && continue
+              n=$(echo "$lines" | grep -c .)
+              echo "## $label（$type，$n）"
+              echo "$lines" | sed 's/^/- /'
+              echo
+             done
+            others="$(git log --no-merges --format=%s $RANGE | grep -vE '^(feat|fix|perf|refactor|docs|test|build|ci|revert|style|chore)(\(|:|$)' || true)"
+            if [ -n "$others" ]; then
+              echo "## 📋 其他"
+              echo "$others" | sed 's/^/- /'
+              echo
+            fi
+          } > "$OUT"
+          cat "$OUT"
+
+      - name: 等待 build.yml 完成发布产物并核对附件清单
+        run: |
+          VER="$(cat VERSION)"
+          TAG="v$VER"
+          EXPECTED=(
+            "AIGX-$VER-linux-amd64" "AIGX-$VER-linux-amd64.tar.gz"
+            "AIGX-$VER-linux-arm64" "AIGX-$VER-linux-arm64.tar.gz"
+            "AIGX-$VER-macos-x86_64" "AIGX-$VER-macos-x86_64.tar.gz"
+            "AIGX-$VER-macos-arm64" "AIGX-$VER-macos-arm64.tar.gz"
+            "AIGX-$VER-windows-amd64.exe" "AIGX-$VER-windows-amd64.zip"
+            "AIGX-$VER-server-linux-static.tar.gz"
+            "AIGX-$VER-server-linux-amd64.upd" "AIGX-$VER-server-linux-amd64.upd.sha256"
+            "AIGX-$VER-server-linux-arm64.upd" "AIGX-$VER-server-linux-arm64.upd.sha256"
+          )
+          have_all() {
+            local assets
+            assets="$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            for f in "${EXPECTED[@]}"; do
+              echo "$assets" | grep -qx "$f" || return 1
+            done
+            return 0
+          }
+          # build.yml 构建矩阵通常 5-10 分钟；最多等 30 分钟，超时即红
+          for i in $(seq 1 60); do
+            if have_all; then
+              echo "Release $TAG 附件完整（${#EXPECTED[@]} 个）"
+              break
+            fi
+            echo "等待 build.yml 完成发布产物（第 $i/60 次检查）..."
+            sleep 30
+          done
+          have_all || {
+            missing=""
+            assets="$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            for f in "${EXPECTED[@]}"; do
+              echo "$assets" | grep -qx "$f" || missing="$missing $f"
+            done
+            echo "::error::30 分钟等待后 Release 附件仍不完整（缺失:$missing）——构建/发布失败，请查 build.yml"
+            exit 1
+          }
+
+      - name: 校验 .upd 自更新包 sha256
+        run: |
+          VER="$(cat VERSION)"
+          for arch in amd64 arm64; do
+            name="AIGX-$VER-server-linux-$arch.upd"
+            echo "校验 $name"
+            curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VER/$name.sha256" -o "/tmp/$name.sha256"
+            curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VER/$name" -o "/tmp/$name"
+            (cd /tmp && sha256sum -c "$name.sha256")
+          done
+
+      - name: 上传 changelog 附件并汇总
+        run: |
+          VER="$(cat VERSION)"
+          gh release upload "v$VER" "CHANGELOG-$VER.md" --clobber
+          {
+            echo "## ✅ Release v$VER 发布闸门通过"
+            echo
+            echo "- 版本一致性：六处 + tag ✓（verify-version.py）"
+            echo "- 附件完整性：15 个资产 ✓"
+            echo "- .upd sha256：amd64/arm64 ✓"
+            echo "- changelog：CHANGELOG-$VER.md 已上传"
+            echo
+            echo "> 生产部署：服务器端应用内更新器自动拉取 .upd（DEPLOYMENT.md「回滚到旧版本」）"
+          } >> "$GITHUB_STEP_SUMMARY"
