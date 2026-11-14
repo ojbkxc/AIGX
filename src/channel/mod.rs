@@ -2744,17 +2744,16 @@ mod tests {
             s.mark_cooldown("a", "err".to_string(), 1);
             std::thread::sleep(std::time::Duration::from_millis(1100));
 
-            // 连续多次纯查询——不应占半开名额
-            assert!(s.is_in_cooldown("a"));
-            assert!(s.is_in_cooldown("a"));
-            assert!(s.is_in_cooldown("a"));
+            // 冷却过期且未占位：is_in_cooldown 为 false，连续查询不占位
+            assert!(!s.is_in_cooldown("a"), "冷却过期且未占位时应为 false");
+            assert!(!s.is_in_cooldown("a"));
+            assert!(!s.is_in_cooldown("a"));
 
-            // 纯查询后，is_dispatch_allowed 仍能抢到半开名额（证明未被误占）
-            assert!(
-                s.is_dispatch_allowed("a"),
-                "is_in_cooldown 纯查询不应占位，is_dispatch_allowed 仍可放行首试探"
-            );
-            // 占位后第二个被拦截
+            // 纯查询未占位：dispatch 仍能抢到半开名额（证明查询未误占）
+            assert!(s.is_dispatch_allowed("a"), "is_in_cooldown 纯查询不应占位");
+            // 占位后 is_in_cooldown 为 true（半开）
+            assert!(s.is_in_cooldown("a"), "占位后应处于半开");
+            // 第二个被拦截
             assert!(!s.is_dispatch_allowed("a"));
         });
     }

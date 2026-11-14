@@ -278,6 +278,7 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "用户私域聊天记录，不给运维 Agent（旧裸前缀 `/api/chat` 太宽，本批收窄；`/api/chat/settings` 是欠债，已进 KNOWN_GAPS）",
         ),
         ("/api/epay", "支付回调（上游签名校验），不是运维动作"),
+        ("/api/purge", "破甲控制台（purge 控制台）：管理面请求治理专用路由，AI 运维 Agent 不直接操作"),
         ("/api/stripe", "支付回调（同上）"),
         ("/api/topup", "充值下单/跳转页"),
         ("/api/user/epay", "用户侧支付发起（钱 + 人在环）"),

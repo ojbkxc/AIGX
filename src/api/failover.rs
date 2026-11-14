@@ -104,8 +104,9 @@ mod tests {
     fn stops_after_max_attempts() {
         let mut budget = FailoverBudget::with_limits(2, Duration::from_secs(3600));
         assert!(budget.can_attempt());
-        assert!(budget.record_attempt());
-        assert!(budget.record_attempt());
+        assert!(budget.record_attempt(), "第 1 次尝试后仍可继续");
+        assert!(budget.can_attempt(), "第 2 次尝试前仍可");
+        assert!(!budget.record_attempt(), "第 2 次后达到上限");
         assert!(!budget.can_attempt(), "达到候选上限后不得再尝试");
         assert_eq!(budget.attempts(), 2);
     }
