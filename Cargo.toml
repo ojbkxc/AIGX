@@ -48,7 +48,6 @@ mysql = ["sea-orm/sqlx-mysql", "sea-orm-migration/sqlx-mysql"]
 [dependencies]
 # HTTP
 axum = { version = "0.7", features = ["macros", "multipart"] }
-axum-extra = "0.9"
 tokio = { workspace = true }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -96,7 +95,6 @@ chrono = { workspace = true }
 # Logging
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
-tracing-appender = "0.2"
 
 # Config
 toml = "0.8"
