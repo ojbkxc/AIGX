@@ -26,9 +26,11 @@ license-file = "LICENSE"
 # 多数据库支持：默认使用 FileStore + rusqlite KV 存储，零配置零依赖。
 # 启用 sea-orm 后可通过 [database] url 切换 PostgreSQL/MySQL 后端。
 #
-# 注意：rusqlite（libsqlite3-sys 0.39）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
-# 存在原生库 links 冲突，不能同时出现在依赖图中。因此不提供 sea-orm 的 sqlite 驱动——
-# SQLite 场景已由默认的 FileStore/rusqlite 覆盖，SeaORM 后端仅支持 PostgreSQL/MySQL。
+# 注意：rusqlite 0.39（libsqlite3-sys 0.37）与 sea-orm 2.0 的 sqlx-sqlite 0.9
+# （libsqlite3-sys 0.37）原生库版本一致，无 links 冲突。但 AIGX 仍不提供
+# sea-orm 的 sqlite 驱动——SQLite 场景已由默认的 FileStore/rusqlite 覆盖，
+# SeaORM 后端仅支持 PostgreSQL/MySQL（rusqlite 0.41 的 libsqlite3-sys 0.39
+# 会与 sqlx-sqlite 0.9 的 <0.38 约束冲突，故 rusqlite 锁 0.39）。
 #
 # 用法示例：
 # - 默认构建（FileStore + rusqlite）：cargo build
@@ -133,16 +135,21 @@ async-trait = "0.1"
 # 注意：rusqlite（libsqlite3-sys 0.39）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
 # 存在原生库 links 冲突。当启用 sea-orm + sqlite 时需用 --no-default-features 禁用 sqlite-kv。
 # FileStore（storage/mod.rs）不依赖 rusqlite，始终可用。
-rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 
-# SeaORM — 多数据库 ORM（SQLite/PostgreSQL/MySQL），可选后端。
-# 仅当启用 `sea-orm` feature 时编译；通过 `sqlite`/`postgres`/`mysql` feature 选择驱动。
-# 参照 VFaka crates/aff-entity/Cargo.toml 的 sea-orm 依赖配置模式。
+# SeaORM 2.0 — 多数据库 ORM（PostgreSQL/MySQL），可选后端。
+# 仅当启用 `sea-orm` feature 时编译；通过 `postgres`/`mysql` feature 选择驱动。
+#
+# 2.0 breaking 要点：DatabaseConnection enum→struct（.inner 访问，新枚举 DatabaseConnectionType）；
+# execute/query_all/query_one 改收 SeaQuery 语句（原始 SQL 用 execute_raw/query_all_raw）；
+# DeleteOne/UpdateOne 需 .validate()?；移除 DeriveCustomColumn/default_as_str。
+# AIGX 只用 DeriveEntityModel + DeriveRelation + Database::connect + MigratorTrait，
+# 不使用 sea-orm query builder，适配面极小。
 #
 # 使用 default-features = false 避免默认引入 sqlx-sqlite（与 rusqlite 的 libsqlite3-sys 产生 links 冲突）。
-# 驱动通过本 crate 的 sqlite/postgres/mysql feature 显式启用。
-sea-orm = { version = "1", default-features = false, features = ["runtime-tokio-rustls", "macros"], optional = true }
-sea-orm-migration = { version = "1", default-features = false, features = ["runtime-tokio-rustls"], optional = true }
+# 驱动通过本 crate 的 postgres/mysql feature 显式启用。
+sea-orm = { version = "2.0.4", default-features = false, features = ["runtime-tokio-rustls", "macros"], optional = true }
+sea-orm-migration = { version = "2.0.2", default-features = false, features = ["runtime-tokio-rustls"], optional = true }
 
 # Token estimation (BPE-based, same as aisix)
 tiktoken-rs = "0.12"
