@@ -51,6 +51,7 @@ pub mod scheduled_tasks;
 pub mod semantic;
 pub mod sse;
 pub mod storage;
+pub mod sync;
 pub mod ticket;
 pub mod token_estimate;
 pub mod update;

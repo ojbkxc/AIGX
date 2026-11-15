@@ -1174,6 +1174,11 @@ async fn main() -> anyhow::Result<()> {
         "scheduled task loop started (credential maintenance / model refresh / update check)"
     );
 
+    // 云同步调度循环（WebDAV / S3）：开关与间隔在 SyncConfig（KV）里，排期状态
+    // 复用 scheduled_tasks::task_state（键 cloudSync），失败退避跨重启保留。
+    crate::sync::spawn(state.clone());
+    tracing::info!("cloud sync loop started (WebDAV / S3)");
+
     // 关停时要 flush 日志队列，故先取出 Arc（state 随后被 build_router 消费）。
     let log_store = state.log_store.clone();
     // 插件宿主也要在 state 被消费前取出（关停序列里优雅关闭子进程）。
@@ -2168,6 +2173,29 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/backup/import-encrypted",
             post(api::admin::backup_crypto::handle_backup_import_encrypted),
+        )
+        // 云同步（WebDAV / S3 兼容；对照 Agent2API「数据 → 云同步」）：
+        // 设置 / 状态 / 连通性测试 / 立即同步 / 拉取恢复。
+        .route(
+            "/api/admin/sync/config",
+            get(api::admin::sync::handle_get_sync_config)
+                .put(api::admin::sync::handle_put_sync_config),
+        )
+        .route(
+            "/api/admin/sync/status",
+            get(api::admin::sync::handle_get_sync_status),
+        )
+        .route(
+            "/api/admin/sync/test",
+            post(api::admin::sync::handle_sync_test),
+        )
+        .route(
+            "/api/admin/sync/now",
+            post(api::admin::sync::handle_sync_now),
+        )
+        .route(
+            "/api/admin/sync/pull",
+            post(api::admin::sync::handle_sync_pull),
         )
         // 数据升级（对照 Agent2API /api/upgrade + /api/upgrade/run；AIGX 原生 SQLite 无旧数据，端点保留对齐 API 面）
         .route("/api/upgrade", get(api::admin::handle_get_upgrade))
