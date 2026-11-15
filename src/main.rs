@@ -80,7 +80,6 @@ mod semantic;
 mod server_planes;
 mod sse;
 mod storage;
-mod sync;
 mod ticket;
 mod token_estimate;
 mod update;
@@ -473,6 +472,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化日志与审计存储（功能 1）
     let log_store = Arc::new(LogStore::new(store.clone()));
+    // 客户端识别规则（KV 持久化 + 进程级快照；数据面逐请求只读快照）
+    crate::api::client_id::install(store.clone());
     // 在途请求登记表（进程内）：配合日志页「查看并终止正在进行的请求」
     let inflight = Arc::new(crate::log::inflight::InflightRegistry::new());
 
@@ -2668,6 +2669,30 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/admin/client-configs/:id/restore",
             post(api::admin::client_config::handle_restore),
+        )
+        // 客户端识别（对照 Agent2API core/client 非插件段）：规则 CRUD +
+        // 样例预览 + Top 客户端报表。识别只读请求头，不改转发行为；
+        // 规则写库后原子替换进程快照，下一个请求立即生效。
+        .route(
+            "/api/client-id",
+            get(api::admin::client_id::handle_get_client_id),
+        )
+        .route(
+            "/api/client-id/rules",
+            post(api::admin::client_id::handle_create_client_rule),
+        )
+        .route(
+            "/api/client-id/rules/:id",
+            put(api::admin::client_id::handle_update_client_rule)
+                .delete(api::admin::client_id::handle_delete_client_rule),
+        )
+        .route(
+            "/api/client-id/preview",
+            post(api::admin::client_id::handle_preview_client_id),
+        )
+        .route(
+            "/api/dashboard/report/top_clients",
+            get(api::admin::client_id::handle_report_top_clients),
         )
         // 聊天助手工具回路（#34）：工具目录 + 多轮 tool-call 循环
         //（计费走 playground 同链；tools 限管理员，开关默认关）
