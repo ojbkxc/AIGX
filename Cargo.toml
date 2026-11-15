@@ -26,7 +26,7 @@ license-file = "LICENSE"
 # 多数据库支持：默认使用 FileStore + rusqlite KV 存储，零配置零依赖。
 # 启用 sea-orm 后可通过 [database] url 切换 PostgreSQL/MySQL 后端。
 #
-# 注意：rusqlite（libsqlite3-sys 0.28）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
+# 注意：rusqlite（libsqlite3-sys 0.39）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
 # 存在原生库 links 冲突，不能同时出现在依赖图中。因此不提供 sea-orm 的 sqlite 驱动——
 # SQLite 场景已由默认的 FileStore/rusqlite 覆盖，SeaORM 后端仅支持 PostgreSQL/MySQL。
 #
@@ -70,7 +70,7 @@ bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Clash Verge 配置读取（proxy-pool sync-clash 解析 verge.yaml）
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 
 # Crypto
 sha2 = "0.10"
@@ -122,10 +122,10 @@ async-trait = "0.1"
 # Database (SQLite via rusqlite with bundled SQLite)
 # rusqlite KV 存储（SqliteStore）— 可选后端，通过 sqlite-kv feature 启用（默认启用）。
 #
-# 注意：rusqlite（libsqlite3-sys 0.28）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
+# 注意：rusqlite（libsqlite3-sys 0.39）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
 # 存在原生库 links 冲突。当启用 sea-orm + sqlite 时需用 --no-default-features 禁用 sqlite-kv。
 # FileStore（storage/mod.rs）不依赖 rusqlite，始终可用。
-rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
 
 # SeaORM — 多数据库 ORM（SQLite/PostgreSQL/MySQL），可选后端。
 # 仅当启用 `sea-orm` feature 时编译；通过 `sqlite`/`postgres`/`mysql` feature 选择驱动。

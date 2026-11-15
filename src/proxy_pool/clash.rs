@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_yaml::Value as Yaml;
+use serde_yaml_ng::Value as Yaml;
 
 /// Clash Verge 全局混合端口在池条目里的保留 uid（与真实节点名不会冲突）
 pub const CLASH_MIXED_UID: &str = "__mixed__";
@@ -94,7 +94,7 @@ fn read_yaml(path: &Path) -> Option<Yaml> {
         return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
-    let parsed: Yaml = serde_yaml::from_str(&text).ok()?;
+    let parsed: Yaml = serde_yaml_ng::from_str(&text).ok()?;
     match parsed {
         Yaml::Mapping(_) => Some(parsed),
         _ => None,
