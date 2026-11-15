@@ -108,10 +108,14 @@ test.describe('系统设置分类', () => {
     await pane.locator('label', { hasText: '启用会话自动标题' }).locator('input[type=checkbox]').check();
     await truncateGroup.locator('input[type=number]').fill('800');
 
+    // #7 图片兼容面板同挂聊天分区且自带 settings-actions 保存钮——
+    // 点击收窄到 ChatSettingsPanel 的 actions（截断输入所在 .form-group
+    // 之后的第一个 .settings-actions，即该面板自己那颗）。
+    const saveBtn = truncateGroup.locator('xpath=following-sibling::div[contains(@class,"settings-actions")]').locator('.btn-primary');
     const [req, resp] = await Promise.all([
       page.waitForRequest((r) => r.url().includes('/api/chat/settings') && r.method() === 'PUT'),
       page.waitForResponse((r) => r.url().includes('/api/chat/settings') && r.request().method() === 'PUT'),
-      pane.locator('.settings-actions .btn-primary').click(),
+      saveBtn.click(),
     ]);
     // 冻结契约：PUT body snake_case；GET 响应 camelCase（含回显）
     expect(JSON.parse(req.postData() || '{}')).toMatchObject({

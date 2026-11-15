@@ -228,9 +228,12 @@ pub async fn handle_delete_client_rule(
 }
 
 /// 预览请求体：`{ userAgent?, headers?: {name: value} }`
+///
+/// pub(crate)：handle_preview_client_id 是 pub handler（bin/lib 双 target
+/// 经 main.rs 路由引用），私有类型出现在 pub 签名会 E0445/E0446。
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PreviewBody {
+pub(crate) struct PreviewBody {
     #[serde(default)]
     user_agent: Option<String>,
     #[serde(default)]
