@@ -475,7 +475,12 @@ fn encode_image(
             use image::ImageEncoder as _;
             let rgba = source.to_rgba8();
             image::codecs::png::PngEncoder::new(&mut output)
-                .write_image(rgba.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+                .write_image(
+                    rgba.as_raw(),
+                    width,
+                    height,
+                    image::ExtendedColorType::Rgba8,
+                )
                 .ok()?;
         }
         ImageKind::Webp => {
@@ -483,7 +488,12 @@ fn encode_image(
             // 重编码通常已显著变小；若反而更大，调用方保留原图。
             let rgba = source.to_rgba8();
             image::codecs::webp::WebPEncoder::new_lossless(&mut output)
-                .encode(rgba.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+                .encode(
+                    rgba.as_raw(),
+                    width,
+                    height,
+                    image::ExtendedColorType::Rgba8,
+                )
                 .ok()?;
         }
     }
