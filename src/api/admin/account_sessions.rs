@@ -2445,6 +2445,8 @@ pub async fn handle_run_import(
             name: entry.name.clone(),
             channel_type: channel_type.to_string(),
             base_url: base_url.to_string(),
+            // 导入的条目不带备用入口（导入源是端点清单，无该语义）
+            backup_base_urls: None,
             api_key: Some(api_key.to_string()),
             priority: 0,
             weight: 1,

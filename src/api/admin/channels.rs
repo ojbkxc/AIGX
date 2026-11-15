@@ -101,9 +101,13 @@ pub struct ChannelRequest {
     #[serde(default)]
     pub base_url: String,
     /// 备用入口（同一上游的备用 base_url 列表，仅可信 HTTPS；按顺序尝试）。
-    /// 空 = 不启用。服务端会归一化（去空白/去重/排除主入口）并校验。
+    ///
+    /// **三态**（与 `api_key` 同口径，防止旧前端/脚本的整表单 PUT 静默清空）：
+    /// - 缺省（`None`）= 更新时保持原值；新增时为空列表；
+    /// - `[]` / `null` = 显式清空；
+    /// - 有值 = 覆盖（服务端归一化：去空白 / 去重 / 排除主入口 / 校验可信 HTTPS）。
     #[serde(default)]
-    pub backup_base_urls: Vec<String>,
+    pub backup_base_urls: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -161,9 +165,9 @@ impl ChannelRequest {
             name: self.name.clone(),
             channel_type: ChannelType::from_str_lossy(&self.channel_type),
             base_url: self.base_url.clone(),
-            // 归一化在 handler 里做（需要主入口 base_url 去重 + 逐条校验）；
-            // 这里先原样带上，避免构造器里藏错误分支（新建测试也走这条路径）。
-            backup_base_urls: self.backup_base_urls.clone(),
+            // 见字段文档的三态：None 只代表「本次请求不涉及」，调用方
+            // （新增 / 更新 handler）决定落 `[]` 还是沿用 prev。
+            backup_base_urls: self.backup_base_urls.clone().unwrap_or_default(),
             // 三态归一：None/Some("") → 空密钥；Some(key) → 密钥
             // （新增时 None = 空密钥渠道；更新时 handler 先按 prev 保持原值再应用 Some）
             api_key: self.api_key.clone().unwrap_or_default(),
@@ -228,24 +232,31 @@ fn validate_channel_endpoints(
         crate::net_guard::validate_outbound_url(&body.base_url, allow_internal_upstream)
             .map_err(|rej| rej.message())?;
     }
-    let normalized =
-        crate::channel::normalize_backup_base_urls(&body.backup_base_urls, &body.base_url)?;
-    if !normalized.is_empty() {
-        let channel_type = ChannelType::from_str_lossy(&body.channel_type);
-        if !matches!(
-            channel_type,
-            ChannelType::OpenaiCompatible
-                | ChannelType::Anthropic
-                | ChannelType::Gemini
-                | ChannelType::Zai
-        ) {
-            return Err(
-                "备用入口仅适用于渠道级 base_url 的类型（openai_compatible / anthropic / gemini / zai）；账号型渠道请在账号上配置地址".to_string(),
-            );
-        }
-        for url in &normalized {
-            crate::net_guard::validate_outbound_url(url, allow_internal_upstream)
-                .map_err(|rej| format!("备用入口 {url}：{}", rej.message()))?;
+    let normalized = match &body.backup_base_urls {
+        Some(raw) => Some(crate::channel::normalize_backup_base_urls(
+            raw,
+            &body.base_url,
+        )?),
+        None => None,
+    };
+    if let Some(normalized) = normalized.as_ref() {
+        if !normalized.is_empty() {
+            let channel_type = ChannelType::from_str_lossy(&body.channel_type);
+            if !matches!(
+                channel_type,
+                ChannelType::OpenaiCompatible
+                    | ChannelType::Anthropic
+                    | ChannelType::Gemini
+                    | ChannelType::Zai
+            ) {
+                return Err(
+                    "备用入口仅适用于渠道级 base_url 的类型（openai_compatible / anthropic / gemini / zai）；账号型渠道请在账号上配置地址".to_string(),
+                );
+            }
+            for url in normalized {
+                crate::net_guard::validate_outbound_url(url, allow_internal_upstream)
+                    .map_err(|rej| format!("备用入口 {url}：{}", rej.message()))?;
+            }
         }
     }
     body.backup_base_urls = normalized;
@@ -630,6 +641,11 @@ pub async fn handle_update_channel(
         match body.api_key {
             None => ch.api_key = prev.api_key,
             Some(ref k) => ch.api_key = k.clone(),
+        }
+        // 备用入口三态：None（前端未提交该字段）→ 保持原值；Some([]/null) → 清空；
+        // 有值 → 覆盖（validate_channel_endpoints 已归一化 + 逐条校验）。
+        if body.backup_base_urls.is_none() {
+            ch.backup_base_urls = prev.backup_base_urls.clone();
         }
     }
     match state.channel_store.update(&id, ch) {

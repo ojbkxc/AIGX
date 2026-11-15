@@ -350,53 +350,16 @@ pub(crate) fn resolve_bridges_needs(
         }
         match ch.channel_type {
             // 空密钥渠道合法（免鉴权上游 / 网关侧 IP 白名单）：
-            // bridge 内部对空 key 不发送鉴权头
-            crate::channel::ChannelType::OpenaiCompatible => {
-                let key = ch.decode_api_key();
-                result.push((
-                    crate::bridge::openai::make_bridge_with_quirks(
-                        &ch.base_url,
-                        &key,
-                        &state.http_client,
-                        ch.quirks.clone(),
-                    ),
-                    Some(ch.id.clone()),
-                    Some(ch.clone()),
-                ));
-            }
-            crate::channel::ChannelType::Anthropic => {
-                let key = ch.decode_api_key();
-                result.push((
-                    crate::bridge::anthropic::make_bridge_with_quirks(
-                        &ch.base_url,
-                        &key,
-                        &state.http_client,
-                        ch.quirks.clone(),
-                    ),
-                    Some(ch.id.clone()),
-                    Some(ch.clone()),
-                ));
-            }
-            crate::channel::ChannelType::Gemini => {
-                let key = ch.decode_api_key();
-                result.push((
-                    crate::bridge::gemini::make_bridge(&ch.base_url, &key, &state.http_client),
-                    Some(ch.id.clone()),
-                    Some(ch.clone()),
-                ));
-            }
-            crate::channel::ChannelType::Zai => {
-                let key = ch.decode_api_key();
-                result.push((
-                    crate::bridge::zai::make_bridge_with_quirks(
-                        &ch.base_url,
-                        &key,
-                        &state.http_client,
-                        ch.quirks.clone(),
-                    ),
-                    Some(ch.id.clone()),
-                    Some(ch.clone()),
-                ));
+            // bridge 内部对空 key 不发送鉴权头。
+            // 四种渠道级 base_url 类型统一走 [`build_channel_bridge_at`]（主入口与
+            // 备用入口共用同一构造口径，见 `backup_base_urls` 的落点）。
+            crate::channel::ChannelType::OpenaiCompatible
+            | crate::channel::ChannelType::Anthropic
+            | crate::channel::ChannelType::Gemini
+            | crate::channel::ChannelType::Zai => {
+                if let Some(bridge) = build_channel_bridge_at(state, ch, &ch.base_url) {
+                    result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
+                }
             }
             crate::channel::ChannelType::Account => {
                 // 账号型渠道：凭证不进 Channel，bridge 在调用时按账号池选号
@@ -636,6 +599,137 @@ pub(crate) fn model_declared_by_channel(state: &AppState, model: &str) -> bool {
             .is_disabled(c.channel_type.as_str(), model)
             && c.effective_models().iter().any(|m| m == model)
     })
+}
+
+/// 渠道级 `base_url` 的 bridge 构造（**主入口与备用入口共用同一口径**）。
+///
+/// 只覆盖有渠道级地址的四种类型；账号型渠道的上游地址由账号的 `base_url`
+/// 决定（`AccountBridge` 内部按账号构造），插件/CF 没有渠道级地址 —— 一律
+/// 返回 `None`，备用入口对它们不生效（管理面写入口也已拒绝配置）。
+///
+/// 备用入口复用同一个 `state.http_client`（同一代理出口），只替换地址 ——
+/// 「不改变账号选择、代理出口与选路结果」在构造层就成立。
+pub(crate) fn build_channel_bridge_at(
+    state: &AppState,
+    ch: &crate::channel::Channel,
+    base_url: &str,
+) -> Option<Arc<dyn Bridge>> {
+    let key = ch.decode_api_key();
+    let client = &state.http_client;
+    match ch.channel_type {
+        crate::channel::ChannelType::OpenaiCompatible => {
+            Some(crate::bridge::openai::make_bridge_with_quirks(
+                base_url,
+                &key,
+                client,
+                ch.quirks.clone(),
+            ))
+        }
+        crate::channel::ChannelType::Anthropic => {
+            Some(crate::bridge::anthropic::make_bridge_with_quirks(
+                base_url,
+                &key,
+                client,
+                ch.quirks.clone(),
+            ))
+        }
+        crate::channel::ChannelType::Gemini => {
+            Some(crate::bridge::gemini::make_bridge(base_url, &key, client))
+        }
+        crate::channel::ChannelType::Zai => Some(crate::bridge::zai::make_bridge_with_quirks(
+            base_url,
+            &key,
+            client,
+            ch.quirks.clone(),
+        )),
+        _ => None,
+    }
+}
+
+/// 第 `tried` 个备用入口（从 0 开始）的地址与 bridge；没有更多返回 `None`。
+///
+/// 列表来自 [`crate::channel::Channel::trusted_backup_base_urls`]（运行期再过滤
+/// 一次：仅可信 HTTPS、去重、排除主入口），顺序即配置顺序。
+pub(crate) fn next_backup_bridge(
+    state: &AppState,
+    ch: &crate::channel::Channel,
+    tried: usize,
+) -> Option<(String, Arc<dyn Bridge>)> {
+    let entry = ch.trusted_backup_base_urls().into_iter().nth(tried)?;
+    let bridge = build_channel_bridge_at(state, ch, &entry)?;
+    Some((entry, bridge))
+}
+
+/// 非流式聊天 + 备用入口：主入口 **DNS 解析失败 / 连接建立失败** 时按序改试
+/// 备用入口；其余错误（上游 5xx/429、超时、解析失败、请求已受理后的传输错误）
+/// 原样返回，交给外层 failover。
+///
+/// 返回 `(结果, 最终使用的 bridge)`：自动续写复用成功轮的 bridge（可能是备用
+/// 入口那一个）。每次换入口记一条 warn（排障可见「为什么这次走了备用」）。
+pub(crate) async fn chat_with_backup_entries(
+    state: &AppState,
+    ch: Option<&crate::channel::Channel>,
+    mut bridge: Arc<dyn Bridge>,
+    req: &crate::bridge::ChatFormat,
+    ctx: &crate::bridge::BridgeContext,
+) -> (
+    Result<crate::bridge::ChatResponse, crate::bridge::BridgeError>,
+    Arc<dyn Bridge>,
+) {
+    let mut tried = 0usize;
+    loop {
+        match bridge.chat(req, ctx).await {
+            Err(error) if crate::bridge::reachability::is_connect_failure(&error) => {
+                match ch.and_then(|ch| next_backup_bridge(state, ch, tried)) {
+                    Some((entry, next)) => {
+                        tried += 1;
+                        tracing::warn!(
+                            "channel {:?} 主/上一个入口连接失败（{error}），改试备用入口 #{tried} {entry}",
+                            ch.map(|c| c.id.as_str()).unwrap_or_default()
+                        );
+                        bridge = next;
+                    }
+                    None => return (Err(error), bridge),
+                }
+            }
+            other => return (other, bridge),
+        }
+    }
+}
+
+/// 流式聊天 + 备用入口（语义同 [`chat_with_backup_entries`]）。
+///
+/// 只重试 `chat_stream` **建流阶段**的连接失败；建流成功后的流内错误由既有
+/// 首事件守卫/failover 处理，不在这里换入口（避免重复计费）。
+pub(crate) async fn chat_stream_with_backup_entries(
+    state: &AppState,
+    ch: Option<&crate::channel::Channel>,
+    mut bridge: Arc<dyn Bridge>,
+    req: &crate::bridge::ChatFormat,
+    ctx: &crate::bridge::BridgeContext,
+) -> (
+    Result<crate::bridge::ChatChunkStream, crate::bridge::BridgeError>,
+    Arc<dyn Bridge>,
+) {
+    let mut tried = 0usize;
+    loop {
+        match bridge.chat_stream(req, ctx).await {
+            Err(error) if crate::bridge::reachability::is_connect_failure(&error) => {
+                match ch.and_then(|ch| next_backup_bridge(state, ch, tried)) {
+                    Some((entry, next)) => {
+                        tried += 1;
+                        tracing::warn!(
+                            "channel {:?} 主/上一个入口连接失败（{error}），改试备用入口 #{tried} {entry}",
+                            ch.map(|c| c.id.as_str()).unwrap_or_default()
+                        );
+                        bridge = next;
+                    }
+                    None => return (Err(error), bridge),
+                }
+            }
+            other => return (other, bridge),
+        }
+    }
 }
 
 /// 渠道候选元组：bridge + 渠道 id + 渠道快照（映射/成本价解析用）。
