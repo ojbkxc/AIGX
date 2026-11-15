@@ -660,6 +660,14 @@ export const api = {
   saveUpdateSettings: (data: Record<string, unknown>): Promise<ApiResponse<UpdateSettingsItem>> =>
     request<ApiResponse<UpdateSettingsItem>>('PUT', `${API_BASE}/update/settings`, data),
 
+  // 内容护栏（输入/输出黑名单 + 200 假答复门控；GET/PUT 配置 + POST 解除降级）
+  getGuardrail: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/guardrail`),
+  saveGuardrail: (settings: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/guardrail`, { settings }),
+  clearGuardrailDegrade: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/guardrail/degrade/clear`),
+
   // Users
   listUsers: (params: Record<string, string | number> = {}): Promise<ApiList<User>> =>
     request<ApiList<User>>('GET', `${API_BASE}/users?${buildQuery(params)}`),

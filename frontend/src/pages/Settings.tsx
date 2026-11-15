@@ -29,6 +29,7 @@ import GatewayPanel from '../components/GatewayPanel';
 import SanitizePanel from '../components/SanitizePanel';
 import ClineHeadersPanel from '../components/ClineHeadersPanel';
 import ClientIdPanel from '../components/ClientIdPanel';
+import GuardrailPanel from '../components/GuardrailPanel';
 import ZcodeCaptchaPanel from '../components/ZcodeCaptchaPanel';
 import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
@@ -1180,6 +1181,10 @@ export default function Settings() {
           <div style={{ marginTop: 16 }}>
             {/* 客户端识别（对照 Agent2API；规则保存后下一个请求生效） */}
             <ClientIdPanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            {/* 内容护栏（输入/输出黑名单 + 200 假答复门控；保存即热生效） */}
+            <GuardrailPanel />
           </div>
           <div style={{ marginTop: 16 }}>
             {/* ZCode 验证码令牌池（对照 Agent2API；令牌由管理页后台铸造） */}
