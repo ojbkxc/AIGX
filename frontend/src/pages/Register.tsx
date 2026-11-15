@@ -389,7 +389,7 @@ export default function Register() {
               placeholder={t('设置一个昵称（选填）')}
               value={username}
               onChange={handleUsernameChange}
-              disabled={loading}
+              disabled={loading || registerClosed}
             />
             {renderUsernameHint()}
           </div>
@@ -404,7 +404,7 @@ export default function Register() {
                 autoComplete="new-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                disabled={loading}
+                disabled={loading || registerClosed}
               />
               <button
                 type="button"
@@ -428,7 +428,7 @@ export default function Register() {
               autoComplete="new-password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
-              disabled={loading}
+              disabled={loading || registerClosed}
             />
           </div>
           <div className="form-group">
@@ -440,7 +440,7 @@ export default function Register() {
               placeholder={t('填写邀请码，双方均可获得奖励')}
               value={affCode}
               onChange={(e) => setAffCode(e.target.value.trim())}
-              disabled={loading}
+              disabled={loading || registerClosed}
               style={{ fontFamily: 'monospace', letterSpacing: 1 }}
             />
           </div>
