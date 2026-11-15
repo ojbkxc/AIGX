@@ -195,6 +195,9 @@ async fn main() -> anyhow::Result<()> {
     );
     // 按次计费固定额度快照（数据面同步路径读取，见 config::billing_flat_quota）
     crate::config::set_billing_flat_quota(config.usage.billing_flat_quota);
+    // 会话图片压缩与图片兼容设置快照（数据面每请求读快照；压缩默认开、
+    // 视觉兼容默认关，未配置段时快照回落内置默认值）
+    crate::image_compat::set_settings(config.image_compat.clone());
 
     // 初始化存储（默认 SQLite 后端；--no-default-features 构建降级为 JSON 文件）
     let data_dir = crate::config::expand_path(&config.server.data_dir);
@@ -2179,6 +2182,13 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/guardrail/degrade/clear",
             post(api::admin::handle_clear_guardrail_degrade),
+        )
+        // 图片压缩与视觉兼容（对照 Agent2API /api/image-compat/settings；
+        // 压缩默认开、视觉兼容默认关，保存即热生效）
+        .route(
+            "/api/image-compat/settings",
+            get(api::admin::handle_get_image_compat_settings)
+                .put(api::admin::handle_update_image_compat_settings),
         )
         // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
         .route(
