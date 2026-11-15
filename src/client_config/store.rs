@@ -209,7 +209,12 @@ pub struct Update<'a> {
     pub note: Option<&'a str>,
 }
 
-pub fn update(store: &FileStore, target: Target, id: &str, change: Update<'_>) -> Result<Record, String> {
+pub fn update(
+    store: &FileStore,
+    target: Target,
+    id: &str,
+    change: Update<'_>,
+) -> Result<Record, String> {
     let now = super::now_ms();
     let mut saved = None;
     mutate_all(store, |targets| {
@@ -272,7 +277,12 @@ pub fn update(store: &FileStore, target: Target, id: &str, change: Update<'_>) -
 }
 
 /// 切换启用（同一目标同一时刻只启用一份；传 `None` 只是停用）。
-pub fn set_enabled(store: &FileStore, target: Target, id: &str, enabled: bool) -> Result<Record, String> {
+pub fn set_enabled(
+    store: &FileStore,
+    target: Target,
+    id: &str,
+    enabled: bool,
+) -> Result<Record, String> {
     update(
         store,
         target,

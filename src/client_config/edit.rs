@@ -126,8 +126,10 @@ fn patch(
         if before.get(key) == Some(value) {
             continue;
         }
-        if let (Some(old), Some(new)) = (before.get(key).and_then(Value::as_object), value.as_object())
-        {
+        if let (Some(old), Some(new)) = (
+            before.get(key).and_then(Value::as_object),
+            value.as_object(),
+        ) {
             let child = table
                 .get_mut(key)
                 .and_then(toml_edit::Item::as_table_like_mut)
@@ -303,7 +305,10 @@ base_url = "https://old.example.com"
             .insert("model_provider".into(), json!("aigx"));
         let rendered = render(ConfigFormat::Toml, original, &desired).unwrap();
         assert!(rendered.contains("# 顶部注释"), "顶部注释丢失: {rendered}");
-        assert!(rendered.contains("# 老段落注释"), "段内注释丢失: {rendered}");
+        assert!(
+            rendered.contains("# 老段落注释"),
+            "段内注释丢失: {rendered}"
+        );
         assert!(rendered.contains("# 行尾注释"), "行尾注释丢失: {rendered}");
         // 无关的老段落保留
         assert!(rendered.contains("[model_providers.old]"));
@@ -316,12 +321,16 @@ base_url = "https://old.example.com"
     fn toml_roundtrip_no_change_is_byte_identical() {
         let original = "# 注释\r\nmodel = \"x\"\r\n";
         let desired = parse(ConfigFormat::Toml, original).unwrap();
-        assert_eq!(render(ConfigFormat::Toml, original, &desired).unwrap(), original);
+        assert_eq!(
+            render(ConfigFormat::Toml, original, &desired).unwrap(),
+            original
+        );
     }
 
     #[test]
     fn json_keeps_unrelated_fields() {
-        let original = r#"{"mcpServers":{"fs":{"command":"npx"}},"env":{"ANTHROPIC_BASE_URL":"https://old"}}"#;
+        let original =
+            r#"{"mcpServers":{"fs":{"command":"npx"}},"env":{"ANTHROPIC_BASE_URL":"https://old"}}"#;
         let mut desired = parse(ConfigFormat::Json, original).unwrap();
         desired["env"]["ANTHROPIC_BASE_URL"] = json!("https://new");
         desired["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("sk-test");
@@ -342,7 +351,8 @@ base_url = "https://old.example.com"
 
     #[test]
     fn redacts_secret_values_in_all_formats() {
-        let json_text = r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-live","ANTHROPIC_BASE_URL":"https://x"}}"#;
+        let json_text =
+            r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-live","ANTHROPIC_BASE_URL":"https://x"}}"#;
         let masked = redact(json_text, &["sk-live"]);
         assert!(!masked.contains("sk-live"));
         assert!(masked.contains("https://x"));

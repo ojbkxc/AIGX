@@ -622,7 +622,9 @@ fn compose_codex(
     let route = route_of(record)?;
     let base = record.base_url.trim().trim_end_matches('/').to_string();
     let model = effective_model(record);
-    let wire_api = option_str(record, "wireApi").unwrap_or("responses").to_string();
+    let wire_api = option_str(record, "wireApi")
+        .unwrap_or("responses")
+        .to_string();
     let requires_auth = option_bool(record, "requiresOpenaiAuth").unwrap_or(false);
     let env_key = option_str(record, "envKey").map(str::to_string);
     let effort = option_str(record, "effort").map(str::to_string);
@@ -675,9 +677,8 @@ fn compose_codex(
         None => {}
     }
 
-    let mut warnings = vec![
-        "使用 toml_edit 原位修改 config.toml：注释、键顺序与空白保留。".to_string(),
-    ];
+    let mut warnings =
+        vec!["使用 toml_edit 原位修改 config.toml：注释、键顺序与空白保留。".to_string()];
     if let Some(profile) = profile {
         let mut mirrored = false;
         // 只在 profiles 表已存在时镜像；缺席时凭空创建一个空 [profiles]
@@ -732,11 +733,7 @@ fn child_object<'a>(
 const DSH_NAMESPACE: &str = "llm-pi-ai";
 const DSH_DEFAULT_MODEL: &str = "agent-default-model";
 
-fn compose_dsh(
-    record: &Record,
-    api_key: &str,
-    current: &CurrentFiles,
-) -> Result<Composed, String> {
+fn compose_dsh(record: &Record, api_key: &str, current: &CurrentFiles) -> Result<Composed, String> {
     let mut value = edit::parse(ConfigFormat::Yaml, &current.config)?;
     if !value.is_object() {
         return Err("现有 settings.yaml 根不是映射，拒绝覆盖".into());
@@ -799,7 +796,9 @@ fn compose_dsh(
         )?)
     };
     if api_key.is_empty() {
-        warnings.push("本次未提供 API Key：settings.yaml 沿用已有 apiKeyEnv 引用，凭据文件未改动。".into());
+        warnings.push(
+            "本次未提供 API Key：settings.yaml 沿用已有 apiKeyEnv 引用，凭据文件未改动。".into(),
+        );
     }
     Ok(Composed {
         config,
@@ -857,9 +856,7 @@ fn compose_dsh_credentials(current: &str, route: &str, api_key: &str) -> Result<
 }
 
 fn validate_dsh_credentials_value(value: &Value) -> Result<(), String> {
-    let object = value
-        .as_object()
-        .ok_or("DSH 凭据文件根必须是映射")?;
+    let object = value.as_object().ok_or("DSH 凭据文件根必须是映射")?;
     if object.is_empty() {
         return Ok(());
     }
@@ -870,12 +867,10 @@ fn validate_dsh_credentials_value(value: &Value) -> Result<(), String> {
                 "DSH 凭据文件的 version 是 {version}，本页只认 version 1 布局"
             ))
         }
-        None => {
-            return Err(
-                "DSH 凭据文件缺少 version（旧扁平布局）：先启动一次 DSH 让它自行迁移，再回到本页接入"
-                    .into(),
-            )
-        }
+        None => return Err(
+            "DSH 凭据文件缺少 version（旧扁平布局）：先启动一次 DSH 让它自行迁移，再回到本页接入"
+                .into(),
+        ),
     }
     for key in object.keys() {
         if !matches!(key.as_str(), "version" | "refs" | "records") {
@@ -921,10 +916,14 @@ mod tests {
             config: r#"{"hooks":{"Stop":[]},"env":{"OLD":"1"}}"#.into(),
             credentials: String::new(),
         };
-        let composed = compose(Target::ClaudeCode, &record("claude-code"), "sk-1", &current).unwrap();
+        let composed =
+            compose(Target::ClaudeCode, &record("claude-code"), "sk-1", &current).unwrap();
         let value: Value = serde_json::from_str(&composed.config).unwrap();
         assert_eq!(value["hooks"]["Stop"], json!([]));
-        assert_eq!(value["env"]["ANTHROPIC_BASE_URL"], json!("https://gateway.example.com"));
+        assert_eq!(
+            value["env"]["ANTHROPIC_BASE_URL"],
+            json!("https://gateway.example.com")
+        );
         assert_eq!(value["env"]["ANTHROPIC_AUTH_TOKEN"], json!("sk-1"));
         assert_eq!(value["env"]["ANTHROPIC_MODEL"], json!("claude-sonnet-4-6"));
         assert!(composed.credentials.is_none());
@@ -939,7 +938,9 @@ mod tests {
         let composed = compose(Target::Codex, &record("codex"), "sk-2", &current).unwrap();
         assert!(composed.config.contains("# 我的注释"));
         assert!(composed.config.contains("[model_providers.aigx]"));
-        assert!(composed.config.contains("experimental_bearer_token = \"sk-2\""));
+        assert!(composed
+            .config
+            .contains("experimental_bearer_token = \"sk-2\""));
         assert!(composed.config.contains("model_provider = \"aigx\""));
     }
 
@@ -950,7 +951,10 @@ mod tests {
             credentials: "version: 1\nrefs: {}\n".into(),
         };
         let composed = compose(Target::Dsh, &record("dsh"), "sk-dsh", &current).unwrap();
-        assert!(!composed.config.contains("sk-dsh"), "settings.yaml 泄漏密钥");
+        assert!(
+            !composed.config.contains("sk-dsh"),
+            "settings.yaml 泄漏密钥"
+        );
         assert!(!composed.config.contains("experimental"));
         assert!(composed.config.contains("apiKeyEnv: AIGX_API_KEY"));
         let credentials = composed.credentials.expect("凭据文件应被写入");

@@ -72,7 +72,8 @@ fn read_text(path: &Path) -> Result<String, String> {
                     meta.len()
                 ));
             }
-            let bytes = std::fs::read(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+            let bytes =
+                std::fs::read(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
             String::from_utf8(bytes).map_err(|_| format!("{} 不是 UTF-8 文本", path.display()))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -281,7 +282,9 @@ pub fn line_diff(before: &str, after: &str) -> Vec<Value> {
             out.push(json!({"kind":"same","text":b[j],"oldLine":i+1,"newLine":j+1}));
             i += 1;
             j += 1;
-        } else if j < b.len() && (i == a.len() || lcs[i * width + j + 1] >= lcs[(i + 1) * width + j]) {
+        } else if j < b.len()
+            && (i == a.len() || lcs[i * width + j + 1] >= lcs[(i + 1) * width + j])
+        {
             out.push(json!({"kind":"added","text":b[j],"newLine":j+1}));
             j += 1;
         } else {
@@ -318,9 +321,8 @@ pub fn verify_token(
     plan: &Plan,
     token: &str,
 ) -> Result<(), String> {
-    let saved = store::take_token(store, plan.target)?.ok_or_else(|| {
-        "没有可用的预览确认：请先调用预览接口，确认后再应用".to_string()
-    })?;
+    let saved = store::take_token(store, plan.target)?
+        .ok_or_else(|| "没有可用的预览确认：请先调用预览接口，确认后再应用".to_string())?;
     // 令牌一次性：校验后无论成败都清掉，避免「重复点应用」打出重复写入
     let _ = store::clear_token(store, plan.target);
     if saved.target != plan.target.id()
@@ -430,21 +432,21 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     let Some(parent) = path.parent() else {
         return Err(format!("{} 没有父目录", path.display()));
     };
-    std::fs::create_dir_all(parent).map_err(|e| format!("创建目录 {} 失败：{e}", parent.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("创建目录 {} 失败：{e}", parent.display()))?;
     let temp = parent.join(format!(
         ".aigx-client-config-{}-{}.tmp",
         std::process::id(),
         now_ms()
     ));
-    let result = std::fs::write(&temp, text.as_bytes())
-        .and_then(|_| {
-            // 保留原文件权限（Unix）；Windows 无 POSIX 位，忽略。
-            #[cfg(unix)]
-            if let Ok(meta) = std::fs::metadata(path) {
-                let _ = std::fs::set_permissions(&temp, meta.permissions());
-            }
-            std::fs::rename(&temp, path)
-        });
+    let result = std::fs::write(&temp, text.as_bytes()).and_then(|_| {
+        // 保留原文件权限（Unix）；Windows 无 POSIX 位，忽略。
+        #[cfg(unix)]
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = std::fs::set_permissions(&temp, meta.permissions());
+        }
+        std::fs::rename(&temp, path)
+    });
     if let Err(error) = result {
         let _ = std::fs::remove_file(&temp);
         return Err(format!("写入 {} 失败：{error}", path.display()));
@@ -485,9 +487,8 @@ pub fn apply_plan(plan: &Plan) -> Result<Vec<BackupEntry>, String> {
     for file in &changes {
         let result = match &file.after {
             Some(text) => write_atomic(&file.path, text),
-            None => std::fs::remove_file(&file.path).map_err(|e| {
-                format!("删除 {} 失败：{e}", file.path.display())
-            }),
+            None => std::fs::remove_file(&file.path)
+                .map_err(|e| format!("删除 {} 失败：{e}", file.path.display())),
         };
         if let Err(error) = result {
             let rollback = rollback_written(&written);
@@ -627,7 +628,10 @@ mod tests {
         }]);
         let backups = apply_plan(&plan).unwrap();
         assert_eq!(backups.len(), 1);
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), "model = \"new\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "model = \"new\"\n"
+        );
         let backup_text = std::fs::read_to_string(&backups[0].path).unwrap();
         assert_eq!(backup_text, "model = \"old\"\n");
         let _ = std::fs::remove_dir_all(&dir);
@@ -649,7 +653,10 @@ mod tests {
         std::fs::write(&config, "model = \"edited\"\n").unwrap();
         let error = apply_plan(&plan).unwrap_err();
         assert!(error.contains("预览后被其他程序修改"), "{error}");
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), "model = \"edited\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "model = \"edited\"\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

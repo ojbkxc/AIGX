@@ -96,13 +96,17 @@ test.describe('系统设置分类', () => {
     const pane = page.locator('.settings-pane');
 
     // 面板渲染：开关 + 截断长度输入 + 渠道下拉含「全局调度」默认项
+    // （#7 图片兼容面板挂进聊天分区后新增 3 个 number 输入——压缩阈值/
+    //   长边/质量。断言收窄到 ChatSettingsPanel 自己的截断输入，不再
+    //   断言整 pane 的 number 总数。）
     await expect(pane.locator('label', { hasText: '启用会话自动标题' })).toHaveCount(1);
-    await expect(pane.locator('input[type=number]')).toHaveCount(1);
+    const truncateGroup = pane.locator('.form-group', { hasText: '提示词截断长度（字符）' });
+    await expect(truncateGroup.locator('input[type=number]')).toHaveCount(1);
     await expect(pane.locator('option', { hasText: '全局调度' })).toHaveCount(1);
 
     // 开关 + 改截断长度
     await pane.locator('label', { hasText: '启用会话自动标题' }).locator('input[type=checkbox]').check();
-    await pane.locator('input[type=number]').fill('800');
+    await truncateGroup.locator('input[type=number]').fill('800');
 
     const [req, resp] = await Promise.all([
       page.waitForRequest((r) => r.url().includes('/api/chat/settings') && r.method() === 'PUT'),

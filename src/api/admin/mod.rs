@@ -163,9 +163,7 @@ pub use guardrail::{
 };
 
 // 图片压缩与视觉兼容（GET/PUT 设置；保存即热生效）
-pub use image_compat_api::{
-    handle_get_image_compat_settings, handle_update_image_compat_settings,
-};
+pub use image_compat_api::{handle_get_image_compat_settings, handle_update_image_compat_settings};
 
 // 面板品牌自定义（panel_name / logo_url / favicon_url；公开 GET + 管理员 GET/PUT）
 pub use branding::{handle_get_branding, handle_get_public_branding, handle_update_branding};

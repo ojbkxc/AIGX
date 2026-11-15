@@ -195,11 +195,25 @@ pub async fn handle_update(
     let name = body.name.as_deref().unwrap_or(&existing.name);
     let base_url = body.base_url.as_deref().unwrap_or(&existing.base_url);
     let model = body.model.as_deref().unwrap_or(&existing.model);
-    let models = body.models.clone().unwrap_or_else(|| existing.models.clone());
-    let options = body.options.clone().unwrap_or_else(|| existing.options.clone());
+    let models = body
+        .models
+        .clone()
+        .unwrap_or_else(|| existing.models.clone());
+    let options = body
+        .options
+        .clone()
+        .unwrap_or_else(|| existing.options.clone());
     let api_key_probe = body.api_key.as_deref().map(str::trim).unwrap_or("");
-    targets::validate_for_target(target, name, base_url, api_key_probe, model, &models, &options)
-        .map_err(|error| bad_request(&error))?;
+    targets::validate_for_target(
+        target,
+        name,
+        base_url,
+        api_key_probe,
+        model,
+        &models,
+        &options,
+    )
+    .map_err(|error| bad_request(&error))?;
     let sealed = if api_key_probe.is_empty() {
         None
     } else {
@@ -251,15 +265,17 @@ pub async fn handle_delete(
 ) -> Result<Json<Value>, ApiError> {
     verify_admin(&state, &headers).await?;
     let (target, existing) = find_record(&state.alert_store, &id)?;
-    let removed = store::delete(&state.alert_store, target, &id)
-        .map_err(|error| bad_request(&error))?;
+    let removed =
+        store::delete(&state.alert_store, target, &id).map_err(|error| bad_request(&error))?;
     let admin_id = admin_id_from_session(&state, &headers).await;
     record_audit(
         &state,
         &admin_id,
         "delete_client_config",
         &format!("target={} id={}", removed.target, removed.id),
-        Some(json!({ "name": existing.name, "baseUrl": existing.base_url, "enabled": existing.enabled })),
+        Some(
+            json!({ "name": existing.name, "baseUrl": existing.base_url, "enabled": existing.enabled }),
+        ),
         None,
     );
     Ok(Json(json!({ "success": true, "data": null })))
@@ -425,8 +441,8 @@ pub async fn handle_restore(
             continue;
         }
         let _guard = client_config::apply_lock().map_err(|error| bad_request(&error))?;
-        let text = plan::read_backup(&file.path, &backup_id)
-            .map_err(|error| bad_request(&error))?;
+        let text =
+            plan::read_backup(&file.path, &backup_id).map_err(|error| bad_request(&error))?;
         let restore_plan = plan::plan_for_restore(target, &file, text, &backup_id)
             .map_err(|error| bad_request(&error))?;
         let backups = plan::apply_plan(&restore_plan).map_err(|error| bad_request(&error))?;
