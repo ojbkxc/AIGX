@@ -148,16 +148,19 @@ pub async fn handle_model_distribution(
             .collect()
     } else {
         let logs = state.log_store.requests.all_sorted_asc();
-        let mut models: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut models: std::collections::HashMap<String, (String, u64)> =
+            std::collections::HashMap::new();
         for l in &logs {
             if l.created_at < from_ts {
                 continue;
             }
-            *models.entry(l.model.clone()).or_insert(0) += 1;
+            // 大小写不敏感：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，保留首次出现原大小写。
+            let key = l.model.to_ascii_lowercase();
+            *models.entry(key).or_insert((l.model.clone(), 0)).1 += 1;
         }
         models
             .into_iter()
-            .map(|(model, count)| json!({ "model": model, "count": count }))
+            .map(|(_, (display, count))| json!({ "model": display, "count": count }))
             .collect()
     };
     Ok(Json(json!({ "success": true, "data": data })))
@@ -548,7 +551,7 @@ pub async fn handle_report_heatmap(
                     std::collections::BTreeMap::new();
                 let mut per_day_models: std::collections::BTreeMap<
                     String,
-                    std::collections::BTreeMap<String, u64>,
+                    std::collections::BTreeMap<String, (String, u64)>,
                 > = std::collections::BTreeMap::new();
                 for l in &logs {
                     if l.created_at < from_ts || l.created_at > to_ts_end {
@@ -564,18 +567,22 @@ pub async fn handle_report_heatmap(
                     entry.0 += l.cost;
                     entry.1 += 1;
                     entry.2 += l.input_tokens + l.output_tokens;
-                    *per_day_models
+                    // 大小写不敏感：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，保留首次出现原大小写。
+                    let key = l.model.to_ascii_lowercase();
+                    let tk = l.input_tokens + l.output_tokens;
+                    let e = per_day_models
                         .entry(day)
                         .or_default()
-                        .entry(l.model.clone())
-                        .or_insert(0) += l.input_tokens + l.output_tokens;
+                        .entry(key)
+                        .or_insert((l.model.clone(), 0));
+                    e.1 = e.1.saturating_add(tk);
                 }
                 json!(daily
                     .into_iter()
                     .map(|(date, (cost, count, tokens))| {
                         let mut ms: Vec<(String, u64)> = per_day_models
                             .remove(&date)
-                            .map(|m| m.into_iter().collect())
+                            .map(|m| m.into_iter().map(|(_, (d, tk))| (d, tk)).collect())
                             .unwrap_or_default();
                         ms.sort_by_key(|(_, tk)| std::cmp::Reverse(*tk));
                         json!({
@@ -912,7 +919,7 @@ pub async fn handle_report_overview(
             let mut cost = 0i64;
             let mut days_seen: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
-            let mut models: std::collections::HashMap<String, u64> =
+            let mut models: std::collections::HashMap<String, (String, u64)> =
                 std::collections::HashMap::new();
 
             for l in &logs {
@@ -935,9 +942,12 @@ pub async fn handle_report_overview(
                 if !d.is_empty() {
                     days_seen.insert(d);
                 }
-                *models.entry(l.model.clone()).or_insert(0) += 1;
+                // 大小写不敏感：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，保留首次出现原大小写。
+                let key = l.model.to_ascii_lowercase();
+                *models.entry(key).or_insert((l.model.clone(), 0)).1 += 1;
             }
-            let mut top_models: Vec<(String, u64)> = models.into_iter().collect();
+            let mut top_models: Vec<(String, u64)> =
+                models.into_iter().map(|(_, (d, c))| (d, c)).collect();
             top_models.sort_by_key(|a| std::cmp::Reverse(a.1));
             top_models.truncate(5);
             let streak = daily_agg::streak_days(&days_seen, &daily_agg::today_key());
@@ -1095,7 +1105,7 @@ pub async fn handle_report_models(
         }
         let to_ts_end = date_start_ts(&to) + 86_400 - 1;
         let logs = state.log_store.requests.all_sorted_asc();
-        let mut agg: std::collections::HashMap<String, (u64, u64, u64, i64)> =
+        let mut agg: std::collections::HashMap<String, (String, (u64, u64, u64, i64))> =
             std::collections::HashMap::new();
         for l in &logs {
             if l.created_at < from_ts || l.created_at > to_ts_end {
@@ -1106,13 +1116,17 @@ pub async fn handle_report_models(
                     continue;
                 }
             }
-            let e = agg.entry(l.model.clone()).or_insert((0, 0, 0, 0));
-            e.0 += 1;
-            e.1 = e.1.saturating_add(l.input_tokens);
-            e.2 = e.2.saturating_add(l.output_tokens);
-            e.3 = e.3.saturating_add(l.cost);
+            // 大小写不敏感：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，
+            // 保留首次出现的原始大小写作为展示名（与 daily_agg 写/读侧同口径）。
+            let key = l.model.to_ascii_lowercase();
+            let e = agg.entry(key).or_insert((l.model.clone(), (0, 0, 0, 0)));
+            e.1 .0 += 1;
+            e.1 .1 = e.1 .1.saturating_add(l.input_tokens);
+            e.1 .2 = e.1 .2.saturating_add(l.output_tokens);
+            e.1 .3 = e.1 .3.saturating_add(l.cost);
         }
-        let mut items: Vec<(String, (u64, u64, u64, i64))> = agg.into_iter().collect();
+        let mut items: Vec<(String, (u64, u64, u64, i64))> =
+            agg.into_iter().map(|(_, (display, v))| (display, v)).collect();
         items.sort_by_key(|a| std::cmp::Reverse(a.1 .0));
         json!(items
             .into_iter()
@@ -1278,7 +1292,7 @@ type HourBucketAcc = (
     u64,
     u64,
     u64,
-    std::collections::BTreeMap<String, u64>,
+    std::collections::BTreeMap<String, (String, u64)>,
 );
 
 /// 把明细按报表时区整点分进「含当前小时的近 24 桶」（升序，缺数据的桶补零行）。
@@ -1331,13 +1345,17 @@ fn bucket_hours(
             a.1 += 1;
             a.3 += l.input_tokens;
         }
-        *a.5.entry(l.model.clone()).or_insert(0) += l.input_tokens + l.output_tokens;
+        // 大小写不敏感：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，保留首次出现原大小写。
+        let key = l.model.to_ascii_lowercase();
+        let e = a.5.entry(key).or_insert((l.model.clone(), 0));
+        e.1 = e.1.saturating_add(l.input_tokens + l.output_tokens);
     }
     acc
         .into_iter()
         .enumerate()
         .map(|(i, a)| {
-            let mut ms: Vec<(String, u64)> = a.5.into_iter().collect();
+            let mut ms: Vec<(String, u64)> =
+                a.5.into_iter().map(|(_, (d, tk))| (d, tk)).collect();
             ms.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(&y.0)));
             json!({
                 "hour": keys[i].0,
@@ -1442,7 +1460,7 @@ pub async fn handle_report_daily_trend(
                     std::collections::BTreeMap::new();
                 let mut per_day_models: std::collections::BTreeMap<
                     String,
-                    std::collections::HashMap<String, (u64, u64)>,
+                    std::collections::HashMap<String, (String, (u64, u64))>,
                 > = std::collections::BTreeMap::new();
                 for l in &logs {
                     if l.created_at < from_ts || l.created_at > to_ts_end {
@@ -1460,13 +1478,14 @@ pub async fn handle_report_daily_trend(
                     e.2 = e.2.saturating_add(l.output_tokens);
                     e.3 = e.3.saturating_add(l.cost);
                     let tk = l.input_tokens + l.output_tokens;
+                    let key = l.model.to_ascii_lowercase();
                     let m = per_day_models
                         .entry(day)
                         .or_default()
-                        .entry(l.model.clone())
-                        .or_insert((0, 0));
-                    m.0 += 1;
-                    m.1 = m.1.saturating_add(tk);
+                        .entry(key)
+                        .or_insert((l.model.clone(), (0, 0)));
+                    m.1 .0 += 1;
+                    m.1 .1 = m.1 .1.saturating_add(tk);
                 }
                 json!(daily
                     .into_iter()
@@ -1475,6 +1494,7 @@ pub async fn handle_report_daily_trend(
                             .remove(&date)
                             .unwrap_or_default()
                             .into_iter()
+                            .map(|(_, (d, v))| (d, v))
                             .collect();
                         ms.sort_by_key(|a| std::cmp::Reverse(a.1 .0));
                         let top: Vec<Value> = ms

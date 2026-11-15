@@ -503,7 +503,10 @@ where
     F: FnOnce(&mut T),
     T: Named + Default,
 {
-    if let Some(i) = list.iter().position(|item| item.name_ref() == name) {
+    if let Some(i) = list
+        .iter()
+        .position(|item| item.name_ref().eq_ignore_ascii_case(name))
+    {
         f(&mut list[i]);
         return;
     }
@@ -602,13 +605,17 @@ where
     let mut map: std::collections::HashMap<String, T> = std::collections::HashMap::new();
     for row in rows {
         for item in pick(row) {
-            let key = item.name_ref().to_string();
+            let display = item.name_ref().to_string();
+            // 大小写不敏感合并：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，
+            // 避免接口开放/报表把同模型不同大小写拆成两行。保留首次出现的
+            // 原始大小写作为对外展示名。
+            let key = display.to_ascii_lowercase();
             // 必须先写回分组键：or_default() 造出的空项只承载数值，
             // 不 set_name_mut 的话合并结果全是没有名字的空行
             //（读侧 Top 榜会显示成空标题）。
-            let e = map.entry(key.clone()).or_default();
+            let e = map.entry(key).or_default();
             if e.name_ref().is_empty() {
-                e.set_name_mut(&key);
+                e.set_name_mut(&display);
             }
             e.merge_values_from(item);
         }
@@ -1241,5 +1248,68 @@ mod tests {
         );
         present.remove(&fmt(today));
         assert_eq!(streak_days(&present, &fmt(today)), 0);
+    }
+
+    /// 模型名大小写不敏感归一：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型。
+    /// 写侧（push_accum）与读侧（merge_dim）都归一，保留首次出现的原大小写展示名。
+    #[test]
+    fn model_names_merge_case_insensitively() {
+        // 写侧：同一日内两条不同大小写的同名模型折成一条
+        let mut agg = DailyAgg::default();
+        fold_request(
+            &mut agg,
+            &log(Some("u1"), "GLM-5.3-Flash", Some("ch"), 10, 0),
+        );
+        fold_request(
+            &mut agg,
+            &log(Some("u2"), "glm-5.3-flash", Some("ch"), 20, 1),
+        );
+        assert_eq!(agg.by_model.len(), 1, "同日内大小写不同应合并为一条");
+        assert_eq!(
+            agg.by_model[0].name, "GLM-5.3-Flash",
+            "保留首次出现的原大小写"
+        );
+        assert_eq!(agg.by_model[0].count, 2);
+
+        // 读侧：跨日合并同样归一（两个模型家族各自验证）
+        let logs = vec![
+            log(Some("a"), "GLM-5.3-Flash", Some("ch"), 5, 1_735_689_600),
+            log(
+                Some("a"),
+                "glm-5.3-flash",
+                Some("ch"),
+                5,
+                1_735_689_600 + 100,
+            ),
+            log(
+                Some("a"),
+                "DeepSeek-V4.1-Flash",
+                Some("ch"),
+                5,
+                1_735_776_000,
+            ),
+            log(
+                Some("a"),
+                "deepseek-v4.1-flash",
+                Some("ch"),
+                5,
+                1_735_776_100,
+            ),
+        ];
+        let days: Vec<DailyAgg> = aggregate_logs(&logs).into_values().collect();
+        let models = merge_models(&days);
+        assert_eq!(models.len(), 2, "两个模型家族各一行");
+        let glm = models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case("glm-5.3-flash"))
+            .unwrap();
+        assert_eq!(glm.count, 2, "跨日大小写不同应合并");
+        assert_eq!(glm.name, "GLM-5.3-Flash", "保留首次出现的原大小写");
+        let ds = models
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case("deepseek-v4.1-flash"))
+            .unwrap();
+        assert_eq!(ds.count, 2);
+        assert_eq!(ds.name, "DeepSeek-V4.1-Flash");
     }
 }

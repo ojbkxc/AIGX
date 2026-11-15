@@ -22,8 +22,9 @@ use serde_json::Value;
 /// 3. 全局别名映射的**对外名**（关掉的别名不算 —— 列出来会让客户端看得到调不通）；
 /// 4. 管理员登记的自定义模型。
 ///
-/// 返回 `(模型名, owned_by)`；去重已在内部完成，调用方可直接二次过滤
-/// （例如按用户分组白名单收窄、附加价格字段）。
+/// 返回 `(模型名, owned_by)`；去重已在内部完成（**大小写不敏感**：`GLM-5.3-Flash`
+/// 与 `glm-5.3-flash` 视为同一模型，保留首条原大小写对外名），调用方可直接二次
+/// 过滤（例如按用户分组白名单收窄、附加价格字段）。
 pub(crate) async fn collect_available_models(
     state: &AppState,
 ) -> Vec<(String, Option<&'static str>)> {
@@ -71,7 +72,7 @@ pub(crate) async fn collect_available_models(
                 for m in models {
                     if m.is_empty()
                         || state.model_rules.is_disabled(&session.provider, &m)
-                        || !seen.insert(m.clone())
+                        || !seen.insert(m.to_ascii_lowercase())
                     {
                         continue;
                     }
@@ -92,7 +93,7 @@ pub(crate) async fn collect_available_models(
             if state.model_rules.is_disabled(ch.channel_type.as_str(), m) {
                 continue;
             }
-            if !seen.insert(m.clone()) {
+            if !seen.insert(m.to_ascii_lowercase()) {
                 continue;
             }
             model_list.push((m.clone(), channel_owned_by));
@@ -154,7 +155,7 @@ pub(crate) async fn collect_available_models(
                             ch.channel_type.as_str(),
                         );
                         for m in &discovered {
-                            if m.is_empty() || !seen.insert(m.clone()) {
+                            if m.is_empty() || !seen.insert(m.to_ascii_lowercase()) {
                                 continue;
                             }
                             model_list.push((m.clone(), channel_owned_by));
@@ -168,12 +169,12 @@ pub(crate) async fn collect_available_models(
     // 别名映射的对外名也暴露（供客户端按别名调用；别名无渠道归属，纯名字推断）。
     // 用 active_mappings：关掉的别名不参与改名，列出来会让客户端「看得到调不通」。
     for name in state.model_mapper.active_mappings().keys() {
-        if seen.insert(name.clone()) {
+        if seen.insert(name.to_ascii_lowercase()) {
             model_list.push((name.clone(), None));
         }
     }
     for entry in state.model_mapper.custom_models() {
-        if entry.id.is_empty() || !seen.insert(entry.id.clone()) {
+        if entry.id.is_empty() || !seen.insert(entry.id.to_ascii_lowercase()) {
             continue;
         }
         let owned_by = crate::model::metadata::owned_by_for_channel_type(&entry.provider);
