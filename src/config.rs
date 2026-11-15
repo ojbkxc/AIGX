@@ -823,6 +823,10 @@ pub struct AppConfig {
     /// 插件宿主配置（`[plugins]` 段）：运维的插件发布源与安装目录（宿主恒开，无总开关）。
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// 会话图片压缩与图片兼容（`[image_compat]` 段：压缩开关/长边/质量/阈值 +
+    /// 视觉兼容 describe/switch 与备选链；压缩默认开、视觉兼容默认关）。
+    #[serde(default)]
+    pub image_compat: crate::image_compat::ImageCompatConfig,
 }
 
 /// 插件宿主（`[plugins]` 段）。
