@@ -38,6 +38,7 @@ import QueuePanel from '../components/QueuePanel';
 import AutoContinuePanel from '../components/AutoContinuePanel';
 import ModelMetadataPanel from '../components/ModelMetadataPanel';
 import DataManagement from '../components/DataManagement';
+import CloudSyncPanel from '../components/CloudSyncPanel';
 import ScheduledTasks from './ScheduledTasks';
 import './Settings.css';
 
@@ -1233,8 +1234,11 @@ export default function Settings() {
 
       {activeTab === 'data' && (
         <>
-          {/* 数据 = 存储/备份 + 日志保留（原 ops 的 data / logs 子标签） */}
+          {/* 数据 = 存储/备份 + 云同步 + 日志保留（原 ops 的 data / logs 子标签） */}
           <DataManagement />
+          <div style={{ marginTop: 16 }}>
+            <CloudSyncPanel />
+          </div>
           <div style={{ marginTop: 16 }}>
             <LogRetention />
           </div>
