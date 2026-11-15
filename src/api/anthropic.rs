@@ -758,6 +758,7 @@ pub async fn handle_messages(
             request_id: request_id.clone(),
             ip: client_ip.clone(),
             user_id: api_key.user_id.clone(),
+            client: client.clone(),
             handled: false,
         };
         let mut attempt_counter: u32 = 0;
@@ -1471,6 +1472,7 @@ pub async fn handle_messages(
                 rate_bundle: Some(rate_bundle.clone()),
                 request_start,
                 client_ip: client_ip.clone(),
+                client: client.clone(),
                 request_id: request_id.clone(),
                 channel_id: used_channel_id.clone(),
                 channel_name: used_channel_id
@@ -1671,6 +1673,7 @@ pub async fn handle_messages(
             request_id: request_id.clone(),
             ip: client_ip.clone(),
             user_id: api_key.user_id.clone(),
+            client: client.clone(),
             handled: false,
         };
         let mut attempt_counter: u32 = 0;

@@ -207,9 +207,12 @@ mod tests {
             redirect_method(StatusCode::TEMPORARY_REDIRECT, &Method::PUT),
             Some(Method::PUT)
         );
+        // PROPFIND 不在 http crate 的关联常量里（Method::from_bytes 构造，
+        // 见 webdav.rs propfind()），308 语义=保留方法 → 返回同一名值
+        let propfind = Method::from_bytes(b"PROPFIND").expect("PROPFIND 是合法 HTTP 方法");
         assert_eq!(
-            redirect_method(StatusCode::PERMANENT_REDIRECT, &Method::PROPFIND),
-            Some(Method::PROPFIND)
+            redirect_method(StatusCode::PERMANENT_REDIRECT, &propfind),
+            Some(propfind.clone())
         );
         assert_eq!(redirect_method(StatusCode::CREATED, &Method::PUT), None);
     }
