@@ -230,6 +230,26 @@ pub fn target_definitions() -> Vec<Value> {
         .collect()
 }
 
+/// 目标相关的附加校验（在 [`validate_fields`] 之上）。
+///
+/// DSH 的 provider 条目必须带模型清单（`models` 或 `model`）——DSH 的
+/// `llm-pi-ai` 解析层在模型数组为空时会把它当成不可用 provider。
+pub fn validate_for_target(
+    target: Target,
+    name: &str,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    models: &[Value],
+    options: &Value,
+) -> Result<(), String> {
+    validate_fields(name, base_url, api_key, model, models, options)?;
+    if target == Target::Dsh && model.trim().is_empty() && models.is_empty() {
+        return Err("DSH 配置至少需要一个模型 ID".into());
+    }
+    Ok(())
+}
+
 /// 一组记录字段（新增/更新共用的校验入口）。
 pub fn validate_fields(
     name: &str,

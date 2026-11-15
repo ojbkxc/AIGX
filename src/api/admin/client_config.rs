@@ -108,7 +108,8 @@ pub async fn handle_create(
 ) -> Result<Json<Value>, ApiError> {
     verify_admin(&state, &headers).await?;
     let target = Target::parse(&body.target).ok_or_else(|| bad_request("未知的配置目标"))?;
-    targets::validate_fields(
+    targets::validate_for_target(
+        target,
         &body.name,
         &body.base_url,
         &body.api_key,
@@ -197,11 +198,13 @@ pub async fn handle_update(
     let models = body.models.clone().unwrap_or_else(|| existing.models.clone());
     let options = body.options.clone().unwrap_or_else(|| existing.options.clone());
     let api_key_probe = body.api_key.as_deref().map(str::trim).unwrap_or("");
-    targets::validate_fields(name, base_url, api_key_probe, model, &models, &options)
+    targets::validate_for_target(target, name, base_url, api_key_probe, model, &models, &options)
         .map_err(|error| bad_request(&error))?;
-    let sealed = api_key_probe
-        .filter(|key| !key.is_empty())
-        .map(store::seal_key);
+    let sealed = if api_key_probe.is_empty() {
+        None
+    } else {
+        Some(store::seal_key(api_key_probe))
+    };
     let record = store::update(
         &state.alert_store,
         target,

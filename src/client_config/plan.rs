@@ -39,7 +39,7 @@ pub struct FilePlan {
 }
 
 impl FilePlan {
-    fn changed(&self) -> bool {
+    pub fn changed(&self) -> bool {
         match &self.after {
             Some(after) => *after != self.before,
             None => !self.before.is_empty() || Path::new(&self.path).exists(),
@@ -322,7 +322,7 @@ pub fn verify_token(
         "没有可用的预览确认：请先调用预览接口，确认后再应用".to_string()
     })?;
     // 令牌一次性：校验后无论成败都清掉，避免「重复点应用」打出重复写入
-    let _ = store.clear_token(store, plan.target);
+    let _ = store::clear_token(store, plan.target);
     if saved.target != plan.target.id()
         || saved.record_id != plan.record_id
         || saved.fingerprint != fingerprint(plan)
