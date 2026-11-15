@@ -20,6 +20,8 @@ pub(crate) async fn handle_audio_transcriptions(
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
+    // 客户端识别（只读请求头；不改转发/计费行为）
+    let client = crate::api::client_id::identify(&headers);
 
     let content_type = headers
         .get("content-type")
@@ -128,6 +130,7 @@ pub(crate) async fn handle_audio_transcriptions(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
 
             // Prometheus 指标
@@ -146,6 +149,7 @@ pub(crate) async fn handle_audio_transcriptions(
             log.error_msg = Some(format!("Transcription error: {e}"));
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(&model, "unknown", "error", latency_ms);
@@ -175,6 +179,8 @@ pub(crate) async fn handle_audio_translations(
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
+    // 客户端识别（只读请求头；不改转发/计费行为）
+    let client = crate::api::client_id::identify(&headers);
 
     let content_type = headers
         .get("content-type")
@@ -283,6 +289,7 @@ pub(crate) async fn handle_audio_translations(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
 
             // Prometheus 指标
@@ -301,6 +308,7 @@ pub(crate) async fn handle_audio_translations(
             log.error_msg = Some(format!("Translation error: {e}"));
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(&model, "unknown", "error", latency_ms);
@@ -330,6 +338,8 @@ pub(crate) async fn handle_audio_speech(
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
+    // 客户端识别（只读请求头；不改转发/计费行为）
+    let client = crate::api::client_id::identify(&headers);
 
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("tts");
 
@@ -429,6 +439,7 @@ pub(crate) async fn handle_audio_speech(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
 
             // Prometheus 指标
@@ -450,6 +461,7 @@ pub(crate) async fn handle_audio_speech(
             log.error_msg = Some(format!("Text-to-speech error: {e}"));
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(&model_owned, "unknown", "error", latency_ms);

@@ -492,6 +492,7 @@ pub(crate) async fn handle_responses(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone()),
+                client: client.clone(),
                 debug_request_body,
             });
 
@@ -594,6 +595,7 @@ pub(crate) async fn handle_responses(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
+            crate::api::client_id::attach(&mut log, &client);
             if debug_request_body.is_some() {
                 log.debug = crate::log::LogDebugSnapshot::new(
                     debug_request_body.clone(),
@@ -649,6 +651,7 @@ pub(crate) async fn handle_responses(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone()),
+                client: client.clone(),
                 debug_request_body,
             });
 

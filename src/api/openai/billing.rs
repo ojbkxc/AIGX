@@ -972,6 +972,8 @@ pub(crate) struct ResponsesBillingState {
     pub(crate) channel_id: Option<String>,
     /// 渠道名（admin 排查用）
     pub(crate) channel_name: Option<String>,
+    /// 客户端识别结果（handlers 入口 identify 后传入）
+    pub(crate) client: crate::api::client_id::ClientIdentity,
     /// 日志快照：客户端请求体（log_body 开关开启时填充，None 时零开销）
     pub(crate) debug_request_body: Option<String>,
 }
@@ -1035,6 +1037,7 @@ impl ResponsesBillingState {
         log.status_code = if errored { 500 } else { 200 };
         log.ip = self.client_ip.clone();
         log.request_id = Some(self.request_id.clone());
+        crate::api::client_id::attach(&mut log, &self.client);
         // log_body：快照 = 请求体 + 流式拼接文本（关闭时 None 零开销）
         if self.debug_request_body.is_some() {
             log.debug = crate::log::LogDebugSnapshot::new(

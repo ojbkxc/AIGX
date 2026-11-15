@@ -397,6 +397,8 @@ pub async fn handle_messages(
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
+    // 客户端识别（只读请求头；不改转发/计费行为）
+    let client = crate::api::client_id::identify(&headers);
 
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
@@ -1081,6 +1083,7 @@ pub async fn handle_messages(
                         .clone();
                 }
                 log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
+                crate::api::client_id::attach(&mut log, &client);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 // G5：失败路径释放预留——渠道全败时解冻，防止预留永久冻结
@@ -1971,6 +1974,7 @@ pub async fn handle_messages(
                     }
                 }
                 log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
+                crate::api::client_id::attach(&mut log, &client);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 // G5：失败路径释放预留——渠道全败时解冻，防止预留永久冻结
@@ -2129,6 +2133,7 @@ pub async fn handle_messages(
                 );
             }
             log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
 
             // Prometheus 指标
