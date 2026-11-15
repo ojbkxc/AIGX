@@ -85,10 +85,14 @@ const MODEL_CAP: usize = 128;
 const CHANNEL_CAP: usize = 64;
 /// 主档 by_user 上限（只服务管理员 Top 榜）。
 const USER_CAP: usize = 256;
+/// 主档 by_client 上限（只服务报表 Top 客户端榜）。
+const CLIENT_CAP: usize = 64;
 /// 用户行 models 维上限（只服务个人 Top5）。
 const USER_MODEL_CAP: usize = 16;
 /// 用户行渠道维上限（个人 Top 渠道榜）。
 const USER_CHANNEL_CAP: usize = 16;
+/// 用户行客户端维上限（个人 Top 客户端榜）。
+const USER_CLIENT_CAP: usize = 16;
 
 /// 主档的按模型累计项。字段并集覆盖 models/token_trend/cache 类全部端点。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -140,6 +144,26 @@ pub struct UserAccum {
     pub tokens: u64,
 }
 
+/// 主档的按客户端累计项（top_clients 报表维度）。
+///
+/// 分组键 = `RequestLog.client_name`（识别模块输出的规范化名；空串归
+/// `unknown`）。老聚合行没有该维度（serde default 空数组），读侧用
+/// 「总量 − Σby_client」补一条 `unknown` 余量行，保证报表恒等式不破。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClientAccum {
+    pub name: String,
+    pub count: u64,
+    pub successful: u64,
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
+    #[serde(default)]
+    pub cost: i64,
+    #[serde(default)]
+    pub latency_sum: u64,
+}
+
 /// 一天一行的主档。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyAgg {
@@ -160,6 +184,9 @@ pub struct DailyAgg {
     pub by_channel: Vec<ChannelAccum>,
     #[serde(default)]
     pub by_user: Vec<UserAccum>,
+    /// 客户端维度（top_clients 报表；识别模块输出，空串归 unknown）。
+    #[serde(default)]
+    pub by_client: Vec<ClientAccum>,
 }
 
 /// 用户行的按模型累计项：带分模型 token/成本明细，使**个人**报表
@@ -190,6 +217,17 @@ pub struct ChannelLite {
     pub cost: i64,
 }
 
+/// 用户行的轻量客户端维（个人 Top 客户端榜）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClientLite {
+    pub name: String,
+    pub count: u64,
+    #[serde(default)]
+    pub tokens: u64,
+    #[serde(default)]
+    pub cost: i64,
+}
+
 /// 一个用户一天的全精度聚合行。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserDailyRow {
@@ -207,6 +245,9 @@ pub struct UserDailyRow {
     /// 个人榜不 join 渠道表，按名字够用了。
     #[serde(default)]
     pub channels: Vec<ChannelLite>,
+    /// 客户端维度（个人 Top 客户端榜；空串归 unknown）。
+    #[serde(default)]
+    pub clients: Vec<ClientLite>,
 }
 
 /// 回填标记值：as_of 记录回填覆盖到的最后一天（不含今天）。
@@ -368,6 +409,23 @@ impl Named for UserAccum {
     }
 }
 
+impl Named for ClientAccum {
+    fn name_ref(&self) -> &str {
+        &self.name
+    }
+    fn set_name_mut(&mut self, name: &str) {
+        self.name = name.to_string();
+    }
+    fn merge_values_from(&mut self, src: &Self) {
+        self.count += src.count;
+        self.successful += src.successful;
+        self.tokens_in = self.tokens_in.saturating_add(src.tokens_in);
+        self.tokens_out = self.tokens_out.saturating_add(src.tokens_out);
+        self.cost = self.cost.saturating_add(src.cost);
+        self.latency_sum = self.latency_sum.saturating_add(src.latency_sum);
+    }
+}
+
 impl Named for UserModelAccum {
     fn name_ref(&self) -> &str {
         &self.name
@@ -395,6 +453,20 @@ impl Named for ChannelLite {
     }
     fn merge_values_from(&mut self, src: &Self) {
         self.count += src.count;
+        self.cost = self.cost.saturating_add(src.cost);
+    }
+}
+
+impl Named for ClientLite {
+    fn name_ref(&self) -> &str {
+        &self.name
+    }
+    fn set_name_mut(&mut self, name: &str) {
+        self.name = name.to_string();
+    }
+    fn merge_values_from(&mut self, src: &Self) {
+        self.count += src.count;
+        self.tokens = self.tokens.saturating_add(src.tokens);
         self.cost = self.cost.saturating_add(src.cost);
     }
 }
@@ -458,6 +530,20 @@ pub fn fold_request(agg: &mut DailyAgg, log: &RequestLog) {
         });
         prune_accum(&mut agg.by_user, USER_CAP, |a| a.count);
     }
+
+    // 客户端维度：识别输出为空的老日志/内部调用统一归 unknown（报表可对账）。
+    let client = client_key(&log.client_name);
+    push_accum(&mut agg.by_client, client, |a| {
+        a.count += 1;
+        if ok {
+            a.successful += 1;
+        }
+        a.tokens_in = a.tokens_in.saturating_add(log.input_tokens);
+        a.tokens_out = a.tokens_out.saturating_add(log.output_tokens);
+        a.cost = a.cost.saturating_add(log.cost);
+        a.latency_sum = a.latency_sum.saturating_add(log.latency_ms);
+    });
+    prune_accum(&mut agg.by_client, CLIENT_CAP, |a| a.count);
 }
 
 /// 把一条请求日志折进用户日行。
@@ -495,6 +581,29 @@ pub fn fold_user_row(row: &mut UserDailyRow, log: &RequestLog) {
         a.cost = a.cost.saturating_add(log.cost);
     });
     prune_accum(&mut row.channels, USER_CHANNEL_CAP, |a| a.count);
+
+    let client = client_key(&log.client_name);
+    push_accum(&mut row.clients, client, |a| {
+        a.count += 1;
+        a.tokens = a
+            .tokens
+            .saturating_add(log.input_tokens + log.output_tokens);
+        a.cost = a.cost.saturating_add(log.cost);
+    });
+    prune_accum(&mut row.clients, USER_CLIENT_CAP, |a| a.count);
+}
+
+/// 客户端归组键：空串（老日志/未识别路径）统一记 unknown。
+///
+/// 与识别模块的 [`crate::client_id::UNKNOWN_CLIENT`] 同值；这里用字面量是
+/// 为了让聚合模块不依赖识别模块（回填/重建只读日志字段）。
+fn client_key(name: &str) -> &str {
+    let name = name.trim();
+    if name.is_empty() {
+        "unknown"
+    } else {
+        name
+    }
 }
 
 /// 在累计数组里找/建 name 项并应用累加闭包。
@@ -657,6 +766,24 @@ pub fn merge_channels(rows: &[DailyAgg]) -> Vec<ChannelAccum> {
 pub fn merge_users(rows: &[DailyAgg]) -> Vec<UserAccum> {
     let mut v = merge_dim(rows, |r| &r.by_user);
     v.sort_by(|a, b| b.cost.cmp(&a.cost).then(b.count.cmp(&a.count)));
+    v
+}
+
+/// Σby_client，按请求数降序（tie：token 降序）——top_clients 口径。
+pub fn merge_clients(rows: &[DailyAgg]) -> Vec<ClientAccum> {
+    let mut v = merge_dim(rows, |r| &r.by_client);
+    v.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then((b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out)))
+    });
+    v
+}
+
+/// Σ 用户行 clients，按请求数降序——个人 top_clients 口径。
+pub fn merge_user_clients(rows: &[UserDailyRow]) -> Vec<ClientLite> {
+    let mut v = merge_dim(rows, |r| &r.clients);
+    v.sort_by(|a, b| b.count.cmp(&a.count).then(b.tokens.cmp(&a.tokens)));
     v
 }
 
@@ -1007,6 +1134,46 @@ mod tests {
     #[test]
     fn invalid_timestamp_yields_empty_key() {
         assert_eq!(date_key(i64::MIN), "");
+    }
+
+    /// 客户端维度：按识别名归组，空串归 unknown，恒等式 Σby_client = 总请求数。
+    #[test]
+    fn client_dimension_groups_and_falls_back_to_unknown() {
+        let mut a = log(Some("u1"), "gpt", Some("ch"), 100, 0);
+        a.client_name = "Claude Code".to_string();
+        a.input_tokens = 10;
+        a.output_tokens = 5;
+        let mut b = log(Some("u1"), "gpt", Some("ch"), 50, 1);
+        b.client_name = "claude code".to_string();
+        let c = log(Some("u2"), "gpt", Some("ch"), 20, 2); // client_name 空 → unknown
+        let mut agg = DailyAgg::default();
+        for item in [&a, &b, &c] {
+            fold_request(&mut agg, item);
+        }
+        assert_eq!(agg.by_client.len(), 2, "大小写不同应合并，空串归 unknown");
+        let claude = agg
+            .by_client
+            .iter()
+            .find(|item| item.name.eq_ignore_ascii_case("claude code"))
+            .unwrap();
+        assert_eq!(
+            (claude.count, claude.tokens_in, claude.tokens_out),
+            (2, 20, 10)
+        );
+        let unknown = agg
+            .by_client
+            .iter()
+            .find(|item| item.name == "unknown")
+            .unwrap();
+        assert_eq!(unknown.count, 1);
+        let sum: u64 = agg.by_client.iter().map(|item| item.count).sum();
+        assert_eq!(sum, agg.requests, "Σby_client 必须等于总请求数");
+        // 用户行同样带客户端维度。
+        let mut row = UserDailyRow::default();
+        fold_user_row(&mut row, &a);
+        fold_user_row(&mut row, &c);
+        assert_eq!(row.clients.len(), 2);
+        assert_eq!(row.clients.iter().map(|item| item.count).sum::<u64>(), 2);
     }
 
     /// 系统本地时区下的日键 —— `offset = 0` 分支的参照。

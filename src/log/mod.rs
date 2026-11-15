@@ -75,6 +75,13 @@ pub struct RequestLog {
     /// 客户端 IP
     #[serde(default)]
     pub ip: Option<String>,
+    /// 识别出的客户端名（规范化，如 "Claude Code"；未识别 = "unknown"）。
+    /// 老日志无此字段 → 反序列化为空串（零迁移），展示层显示为「未记录」。
+    #[serde(default)]
+    pub client_name: String,
+    /// 客户端版本（显式声明头或 UA 中能提取则填；否则空串）。
+    #[serde(default)]
+    pub client_version: String,
     /// 请求 ID（关联客户端请求）
     #[serde(default)]
     pub request_id: Option<String>,
@@ -649,6 +656,8 @@ impl RequestLog {
             status_code: 200,
             error_msg: None,
             ip: None,
+            client_name: String::new(),
+            client_version: String::new(),
             request_id: None,
             created_at: chrono::Utc::now().timestamp(),
             candidate_channels: Vec::new(),

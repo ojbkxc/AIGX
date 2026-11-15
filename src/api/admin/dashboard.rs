@@ -999,7 +999,7 @@ fn report_cache() -> &'static parking_lot::Mutex<
 /// 并发算两次，也不把重计算塞进临界区）。
 ///
 /// 无 tokio runtime（同步测试上下文）时直接同步执行，语义不变。
-async fn cached_report(
+pub(crate) async fn cached_report(
     endpoint: &str,
     window: &str,
     user_filter: Option<String>,
