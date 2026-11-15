@@ -27,6 +27,7 @@ import ReportSettingsPanel from '../components/ReportSettingsPanel';
 import GatewayPanel from '../components/GatewayPanel';
 import SanitizePanel from '../components/SanitizePanel';
 import ClineHeadersPanel from '../components/ClineHeadersPanel';
+import ClientIdPanel from '../components/ClientIdPanel';
 import ZcodeCaptchaPanel from '../components/ZcodeCaptchaPanel';
 import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
@@ -1169,6 +1170,10 @@ export default function Settings() {
           <div style={{ marginTop: 16 }}>
             {/* Cline 伪装头覆盖表（对照 Agent2API；保存后下一个 Cline 请求生效） */}
             <ClineHeadersPanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            {/* 客户端识别（对照 Agent2API；规则保存后下一个请求生效） */}
+            <ClientIdPanel />
           </div>
           <div style={{ marginTop: 16 }}>
             {/* ZCode 验证码令牌池（对照 Agent2API；令牌由管理页后台铸造） */}

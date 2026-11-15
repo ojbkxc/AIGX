@@ -17,6 +17,7 @@ import RangeSwitcher, { initialRange, rangeLabel as rangeLabelOf, windowOf, read
 import StatCards from '../components/dashboard/StatCards';
 import QuotaCards from '../components/dashboard/QuotaCards';
 import TopSources from '../components/dashboard/TopSources';
+import TopClients from '../components/dashboard/TopClients';
 import UserRanking from '../components/dashboard/UserRanking';
 import ChannelHealth from '../components/dashboard/ChannelHealth';
 import LiveCards from '../components/dashboard/LiveCards';
@@ -26,7 +27,7 @@ import {
 import {
   useCacheRates, useCacheSavings, useCacheTrend24h, useChannelHealth as useChannelHealthQ,
   useDailyTrend, useHeatmap, useLimits, useOverview, usePersonalMe, useRealtime,
-  useReportModels, useTodayTokens, useTokenTrend, useTopSources, useUsageSummary, useUserRanking,
+  useReportModels, useTodayTokens, useTokenTrend, useTopClients, useTopSources, useUsageSummary, useUserRanking,
 } from '../hooks/useDashboard';
 import './Dashboard.css';
 
@@ -108,6 +109,7 @@ export default function Dashboard(): JSX.Element {
   const trend24Q = useCacheTrend24h({ scope });
   const heatmapQ = useHeatmap({ days: 365 }, { scope });
   const sourcesQ = useTopSources(win, { enabled: admin, scope });
+  const clientsQ = useTopClients(win, { scope });
   const userRankQ = useUserRanking(win, { enabled: admin, scope });
   const healthQ = useChannelHealthQ(win, { enabled: admin, scope });
   const realtimeQ = useRealtime({ enabled: admin, scope });
@@ -273,6 +275,9 @@ export default function Dashboard(): JSX.Element {
         <TokenTrendPanel query={tokenTrendQ} lang={lang} rLabel={rLabel} />
         <ModelPanels query={modelsQ} donutData={donutData} colors={donutColors}
           totalTokens={modelTotalTokens} lang={lang} rLabel={rLabel} personal />
+        <PanelWrap title={t('Top 客户端（{{range}}）', { range: t(rLabel) })} query={clientsQ} emptyText={t('暂无客户端数据')}>
+          {(data) => <TopClients data={data} lang={lang} />}
+        </PanelWrap>
         <CachePanels ratesQuery={ratesQ} trendQuery={trend24Q} savings={savings} lang={lang} />
         <HeatmapPanel query={heatmapQ} lang={lang} />
       </div>
@@ -318,10 +323,13 @@ export default function Dashboard(): JSX.Element {
       <ModelPanels query={modelsQ} donutData={donutData} colors={donutColors}
         totalTokens={modelTotalTokens} lang={lang} rLabel={rLabel} personal={false} />
 
-      {/* 10) Top 供应商榜 + 用户消费榜 */}
+      {/* 10) Top 供应商榜 + Top 客户端榜 + 用户消费榜 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
         <PanelWrap title={t('Top 供应商（{{range}}）', { range: t(rLabel) })} query={sourcesQ} emptyText={t('暂无供应商数据')}>
           {(data) => <TopSources data={data} lang={lang} />}
+        </PanelWrap>
+        <PanelWrap title={t('Top 客户端（{{range}}）', { range: t(rLabel) })} query={clientsQ} emptyText={t('暂无客户端数据')}>
+          {(data) => <TopClients data={data} lang={lang} />}
         </PanelWrap>
         <PanelWrap title={t('用户消费排行（Top 20）')} query={userRankQ} emptyText={t('暂无用户排行数据')}>
           {(data) => <UserRanking data={data} lang={lang} />}

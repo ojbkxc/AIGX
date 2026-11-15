@@ -76,6 +76,16 @@ export interface TopSource {
   avg_latency_ms?: number | null;
 }
 
+/** Top 客户端榜行（/api/dashboard/report/top_clients；个人视图 token 为 null） */
+export interface TopClient {
+  name?: string;
+  count?: number;
+  cost?: number;
+  tokens?: number | null;
+  success_rate?: number | null;
+  avg_latency_ms?: number | null;
+}
+
 export interface TokenTrendPoint {
   date?: string;
   input_tokens?: number;
@@ -204,6 +214,10 @@ export const useHeatmap = (win: ReportWindow, opts: PanelOpts = {}) =>
 
 export const useTopSources = (win: ReportWindow, opts: PanelOpts = {}) =>
   usePanel<TopSource[]>('top_sources', win, () => api.getReportTopSources(win), { staleSec: 100, ...opts });
+
+/** Top 客户端榜（管理员全站 / 普通用户个人；识别只读请求头，见 /api/client-id） */
+export const useTopClients = (win: ReportWindow, opts: PanelOpts = {}) =>
+  usePanel<TopClient[]>('top_clients', win, () => api.getReportTopClients(win), { staleSec: 100, ...opts });
 
 export const useTokenTrend = (win: ReportWindow, opts: PanelOpts = {}) =>
   usePanel<TokenTrendPoint[]>('token_trend', win, () => api.getReportTokenTrend(win), { staleSec: 100, ...opts });

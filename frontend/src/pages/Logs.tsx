@@ -75,6 +75,10 @@ export interface RequestLogItem {
   route_truncated?: number;
   /** 最终选中渠道（仅 admin） */
   selected_channel?: string;
+  /** 识别出的客户端名（规范化；空/缺省 = 老日志未记录） */
+  client_name?: string;
+  /** 客户端版本（能提取则有值） */
+  client_version?: string;
 }
 
 export interface AuditLogItem {
@@ -131,6 +135,7 @@ function logsReqColDefs(admin: boolean): TableColumnDef[] {
     ...(admin ? [{ key: 'user', label: '用户', width: 190 }] : []),
     { key: 'time', label: '时间', width: 170, locked: true },
     { key: 'model', label: '模型', width: 150 },
+    { key: 'client', label: '客户端', width: 140 },
     ...(admin ? [{ key: 'channel', label: '供应商', width: 120 }] : []),
     { key: 'tokens', label: 'Tokens', align: 'right' as const, width: 110 },
     { key: 'cost', label: '费用', align: 'right' as const, width: 100 },
@@ -996,6 +1001,21 @@ export default function Logs(): JSX.Element {
                             避免普通用户看穿实际被哪个上游模型服务。 */}
                         {admin && l.origin_model && l.origin_model !== l.model && (
                           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>← {l.origin_model}</div>
+                        )}
+                      </td>
+                      )}
+                      {visibleKeySet.has('client') && (
+                      <td style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                        title={[l.client_name, l.client_version].filter(Boolean).join(' ')}>
+                        {l.client_name ? (
+                          <>
+                            {l.client_name}
+                            {l.client_version && (
+                              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}> {l.client_version}</span>
+                            )}
+                          </>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>{t('未记录')}</span>
                         )}
                       </td>
                       )}

@@ -34,6 +34,7 @@ export function RequestLogDetail({ log, admin, onClose }: {
     // 已剥离），故标签用「模型」而不再写「模型（映射后）」，避免误导。
     { label: admin ? t('模型（映射后）') : t('模型'), value: log.model || '—', mono: true },
     ...(admin ? [{ label: t('原始模型名'), value: log.origin_model || '—', mono: true }] : []),
+    { label: t('客户端'), value: log.client_name ? `${log.client_name}${log.client_version ? ` ${log.client_version}` : ''}` : '—' },
     ...(admin ? [{ label: t('供应商'), value: log.channel_name ? `${log.channel_name}${log.channel_id ? ` (#${log.channel_id})` : ''}` : (log.channel_id ? `#${log.channel_id}` : '—') }] : []),
     { label: t('输入 Tokens'), value: String(log.input_tokens ?? 0) },
     { label: t('输出 Tokens'), value: String(log.output_tokens ?? 0) },
