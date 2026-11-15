@@ -8,6 +8,29 @@
 // 与 lib.rs 一致：openapi.rs 的深层 `json!` 需要更大的宏递归上限。
 #![recursion_limit = "512"]
 
+// ── reqwest 0.13 测试侧 provider 安装（波次2）──────────────────────
+// 与 lib.rs 的同名函数一致：bin target 以私有 mod 复用 src/*.rs 的测试
+// 模块（cfg(test)），其 crate root 是本文件——`crate::test_http_client`
+// 在 bin 视角必须在此可见，否则 bin 测试编译 E0425。
+
+/// 单元测试内构建 reqwest Client 的统一入口：先装 provider 再建客户端。
+#[cfg(test)]
+pub(crate) fn test_http_client() -> reqwest::Client {
+    install_rustls_provider_for_tests();
+    reqwest::Client::new()
+}
+
+/// 在 bin 测试进程内安装一次 rustls ring provider（全局操作，Once 防重入）。
+#[cfg(test)]
+pub(crate) fn install_rustls_provider_for_tests() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("install rustls ring provider");
+    });
+}
+
 mod account;
 mod account_login;
 mod account_session;
