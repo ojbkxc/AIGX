@@ -62,6 +62,7 @@ pub fn build_openapi_document() -> Value {
         paths_sync(),
         paths_client_id(),
         paths_guardrail(),
+        paths_branding_image_compat(),
         paths_mcp(),
     ] {
         if let Value::Object(m) = part {
@@ -1342,6 +1343,24 @@ fn paths_guardrail() -> Value {
     })
 }
 
+/// 面板品牌（#4 管理面小项包）与图片压缩兼容设置（#7）。
+/// GET /api/public/branding 免鉴权（登录页/浏览器页签取 logo 与面板名）。
+fn paths_branding_image_compat() -> Value {
+    json!({
+        "/api/branding": {
+            "get": op("面板品牌", "查询当前品牌（面板名/logo/favicon/标题）与管理员可改字段"),
+            "put": op_body("面板品牌", "更新品牌（panel_name/logo_url/favicon_url，留空字段保持不变）", "{panel_name?, logo_url?, favicon_url?}")
+        },
+        "/api/public/branding": {
+            "get": op("面板品牌", "公开读取品牌（免鉴权；登录页与页签图标数据源）")
+        },
+        "/api/image-compat/settings": {
+            "get": op("图片压缩与兼容", "查询图片压缩与视觉兼容配置"),
+            "put": op_body("图片压缩与兼容", "更新图片压缩与视觉兼容配置", "{...设置项（camelCase，见 GET 响应）}")
+        }
+    })
+}
+
 fn paths_mcp() -> Value {
     json!({
         "/api/mcp": {
@@ -1592,6 +1611,10 @@ mod tests {
         // guardrail 接线 + 降级（对齐 Agent2API v2.6.0 non-plugin 段）
         add("/api/guardrail", &["get", "put"]);
         add("/api/guardrail/degrade/clear", &["post"]);
+        // 面板品牌（#4）+ 图片压缩与兼容设置（#7）
+        add("/api/branding", &["get", "put"]);
+        add("/api/public/branding", &["get"]);
+        add("/api/image-compat/settings", &["get", "put"]);
         add("/api/ip/blacklist", &["post"]);
         add("/api/ip/blacklist/{pattern}", &["delete"]);
         add("/api/ip/filter", &["get", "put"]);
