@@ -23,6 +23,8 @@ pub(crate) async fn handle_rerank(
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
+    // 客户端识别（只读请求头；不改转发/计费行为）
+    let client = crate::api::client_id::identify(&headers);
 
     let model = body.get("model").and_then(|m| m.as_str()).ok_or_else(|| {
         openai_error_response(
@@ -251,6 +253,7 @@ pub(crate) async fn handle_rerank(
             log.error_msg = Some(e.to_string());
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            crate::api::client_id::attach(&mut log, &client);
             // log_body：失败路径快照——上游原始错误信息进 response_body
             if debug_request_body.is_some() {
                 log.debug = crate::log::LogDebugSnapshot::new(
@@ -343,6 +346,7 @@ pub(crate) async fn handle_rerank(
         log.status_code = 200;
         log.ip = client_ip.clone();
         log.request_id = Some(request_id);
+        crate::api::client_id::attach(&mut log, &client);
         // log_body：快照 = 请求体 + 响应 JSON
         if let Some(rb) = debug_request_body.as_deref() {
             let resp_snapshot = serde_json::json!({

@@ -210,7 +210,7 @@ pub async fn handle_delete_client_rule(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _ = require_admin(&state, &headers).await?;
+    let admin = require_admin(&state, &headers).await?;
     let (revision, rules) = client_id::mutate_rules(|rules| {
         let before = rules.len();
         rules.retain(|item| item.id != id);
