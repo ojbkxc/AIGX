@@ -563,13 +563,21 @@ pub async fn handle_messages(
 
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // 客户端 system 已折进消息列表头，再统一走网关策略（custom 会替换它）
-    let mut all_messages = match crate::prompt::apply_prompt_for(
-        &model,
-        &all_messages,
-        &state.gateway_prompt.snapshot(),
-    ) {
-        Some(injected) => injected,
-        None => all_messages,
+    let gateway_prompt = state.gateway_prompt.snapshot();
+    let mut all_messages =
+        match crate::prompt::apply_prompt_for(&model, &all_messages, &gateway_prompt) {
+            Some(injected) => injected,
+            None => all_messages,
+        };
+
+    // 提供商覆盖层的 pre_purge 快照（两处 failover 循环按「这一家」重套判据用）：
+    // 仅在配置了提供商覆盖表时才付出这次 clone 成本，默认路径零额外分配。
+    // 快照点必须在 purge 之前——purge 非幂等（structured/skill 向 user 消息
+    // 追加文本），提供商层重套要从未治理的消息重建。
+    let pre_purge_messages = if gateway_prompt.providers.is_empty() {
+        None
+    } else {
+        Some(all_messages.clone())
     };
 
     // 破甲控制台：请求治理（归一化/改写/结构化/技能注入）；异源 fallback 在
@@ -797,6 +805,22 @@ pub async fn handle_messages(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
+            // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
+            // None → 保持入口层结果（默认路径零开销）。重建后必须重跑 purge
+            // ——重建的消息来自 purge 前快照，本尝试的治理产物要在此补齐。
+            if let Some(pre_purge) = pre_purge_messages.as_ref() {
+                let provider = super::openai::sanitize_provider_id(&state, ch_ref.as_ref());
+                if let Some(mut rebuilt) = crate::prompt::provider_prompt_rebuild(
+                    &model,
+                    &provider,
+                    pre_purge,
+                    &gateway_prompt,
+                ) {
+                    crate::purge::apply_messages(&mut rebuilt, &purge_cfg);
+                    attempt_req.messages = rebuilt;
+                }
+            }
             // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
             crate::api::openai::sanitize_attempt_messages(
                 &state,
@@ -1693,6 +1717,22 @@ pub async fn handle_messages(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
+            // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
+            // None → 保持入口层结果（默认路径零开销）。重建后必须重跑 purge
+            // ——重建的消息来自 purge 前快照，本尝试的治理产物要在此补齐。
+            if let Some(pre_purge) = pre_purge_messages.as_ref() {
+                let provider = super::openai::sanitize_provider_id(&state, ch_ref.as_ref());
+                if let Some(mut rebuilt) = crate::prompt::provider_prompt_rebuild(
+                    &model,
+                    &provider,
+                    pre_purge,
+                    &gateway_prompt,
+                ) {
+                    crate::purge::apply_messages(&mut rebuilt, &purge_cfg);
+                    attempt_req.messages = rebuilt;
+                }
+            }
             // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
             crate::api::openai::sanitize_attempt_messages(
                 &state,

@@ -207,6 +207,39 @@ pub fn apply_prompt_selected(
     apply_with(mode, text, messages)
 }
 
+/// 提供商层重套判据（failover 循环专用）：提供商层的解析结果与入口层
+/// （模型覆盖 > 全局）**不同**时，返回从 `pre_purge` 快照重建的消息列表；
+/// 相同（或无提供商覆盖 / provider 为空）时返回 `None`——调用方什么都不
+/// 用做，零开销。
+///
+/// **为什么重建而不是就地改写**：入口层注入之后紧跟破甲治理（purge，
+/// 非幂等——structured/skill 会向 user 消息追加文本），failover 的每次
+/// 尝试都从已治理的 `chat_req` 克隆而来。提供商层命中时若只对克隆体改写，
+/// 治理产物会残留/叠加；所以必须回退到 purge 前的入口层消息、按三层
+/// 解析重套、再由调用方重跑一次 purge。
+///
+/// `pre_purge` = 入口层 [`apply_prompt_for`] 之后、purge 之前的消息快照
+/// （仅 `cfg.providers` 非空时才需要调用方 clone，否则入口直接跳过）。
+/// `model` 与入口层同口径 = 客户端请求里的模型名原文。
+pub fn provider_prompt_rebuild(
+    model: &str,
+    provider: &str,
+    pre_purge: &[ChatMessage],
+    cfg: &GatewayPrompt,
+) -> Option<Vec<ChatMessage>> {
+    let provider = provider.trim();
+    if cfg.providers.is_empty() || provider.is_empty() {
+        return None;
+    }
+    let entry = resolve_layers(model, None, cfg);
+    let selected = resolve_layers(model, Some(provider), cfg);
+    if entry == selected {
+        return None;
+    }
+    // 文本为空 = 该提供商不注入（撤销入口层的注入），快照原样返回
+    Some(apply_with(selected.0, selected.1, pre_purge).unwrap_or_else(|| pre_purge.to_vec()))
+}
+
 /// 三层解析：模型覆盖 > 提供商覆盖 > 全局（返回借用视图，不克隆文本）。
 ///
 /// 命中某层后**整条替代**（mode + text 一起），不再向下回落 —— 与模型层
@@ -482,6 +515,83 @@ mod tests {
         };
         let out = apply_prompt_selected("m", "", &msgs, &cfg).unwrap();
         assert_eq!(out[0].content.as_deref(), Some("GLOBAL"));
+    }
+
+    /// 提供商层重套判据：providers 空 / provider 空 / 解析结果与入口层相同
+    /// → None（零开销）；不同 → 从 pre_purge 快照重建（含撤销入口注入的
+    /// 空文本分支）。
+    #[test]
+    fn provider_prompt_rebuild_triage() {
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            ModelPromptOverride {
+                mode: PromptMode::Append,
+                text: "PER-PROVIDER".to_string(),
+            },
+        );
+        // providers 表为空 → 永远 None
+        let cfg_empty = GatewayPrompt::default();
+        let pre = vec![user("q")];
+        assert!(provider_prompt_rebuild("m", "anthropic", &pre, &cfg_empty).is_none());
+
+        let cfg = GatewayPrompt {
+            mode: PromptMode::Custom,
+            text: "GLOBAL".to_string(),
+            providers,
+            ..GatewayPrompt::default()
+        };
+        // provider 为空 → None
+        assert!(provider_prompt_rebuild("m", "  ", &pre, &cfg).is_none());
+        // 提供商未命中（回落全局，与入口层相同）→ None
+        assert!(provider_prompt_rebuild("m", "gemini", &pre, &cfg).is_none());
+        // 命中且与入口层不同 → 重建：网关文本 = 提供商层的
+        let rebuilt = provider_prompt_rebuild("m", "anthropic", &pre, &cfg).unwrap();
+        assert_eq!(rebuilt.len(), 2);
+        assert_eq!(rebuilt[0].content.as_deref(), Some("PER-PROVIDER"));
+        assert_eq!(rebuilt[1].content.as_deref(), Some("q"));
+        // pre_purge 快照未被就地改写（重建是纯拷贝语义）
+        assert_eq!(pre[0].content.as_deref(), Some("q"));
+    }
+
+    #[test]
+    fn provider_prompt_rebuild_empty_text_revokes_entry_injection() {
+        // 入口层是 custom 注入、提供商层文本为空（= 该提供商不注入）：
+        // 重建结果应撤销注入（回到 purge 前快照的形态）
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "qoder".to_string(),
+            ModelPromptOverride {
+                mode: PromptMode::Custom,
+                text: "  ".to_string(),
+            },
+        );
+        let cfg = GatewayPrompt {
+            mode: PromptMode::Custom,
+            text: "GLOBAL".to_string(),
+            providers,
+            ..GatewayPrompt::default()
+        };
+        let pre = vec![user("q")];
+        let rebuilt = provider_prompt_rebuild("m", "qoder", &pre, &cfg).unwrap();
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].content.as_deref(), Some("q"));
+        // 模型覆盖命中同一提供商层时也参与比较：模型层命中则入口与所选
+        // 解析可能相同（都命中同一覆盖）→ None
+        let mut models = std::collections::BTreeMap::new();
+        models.insert(
+            "m".to_string(),
+            ModelPromptOverride {
+                mode: PromptMode::Custom,
+                text: "  ".to_string(),
+            },
+        );
+        let cfg2 = GatewayPrompt {
+            models,
+            ..cfg.clone()
+        };
+        // 模型覆盖（空文本）命中 → 入口层=所选层=同一覆盖 → None
+        assert!(provider_prompt_rebuild("m", "qoder", &pre, &cfg2).is_none());
     }
 
     #[test]
