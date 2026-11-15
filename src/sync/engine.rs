@@ -93,18 +93,18 @@ pub fn status_json(state: &AppState) -> Value {
         "consecutive_failures": status.consecutive_failures,
         "retry_at": status.retry_at,
         "last_bytes": status.last_bytes,
-        "next_run_at": next_run_at(state, &config, &status),
+        "next_run_at": next_run_at(&config, &status),
     })
 }
 
 /// 调度视角的下次执行时刻（毫秒；0 = 不会自动执行）。
-fn next_run_at(state: &AppState, config: &SyncConfig, status: &SyncStatus) -> i64 {
+fn next_run_at(config: &SyncConfig, status: &SyncStatus) -> i64 {
     if !config.enabled {
         return 0;
     }
-    let scheduled_state =
+    let sched_state =
         crate::scheduled_tasks::task_state::read(super::scheduler::TASK_KEY).unwrap_or_default();
-    let due = scheduled_state.due_at();
+    let due = sched_state.due_at();
     // 排期条目缺失 = 还没跑过（调度循环下一拍会 `reschedule`），按「现在」给
     if due <= 0 {
         now_ms().max(status.retry_at)
