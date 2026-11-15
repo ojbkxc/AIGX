@@ -77,6 +77,7 @@ mod runtime_log;
 mod sanitize;
 mod scheduled_tasks;
 mod semantic;
+mod server_planes;
 mod sse;
 mod storage;
 mod sync;
@@ -1194,6 +1195,26 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("Starting server at {}", addr);
 
+    // 管理面独立监听（可选，对标 Agent2API 2.7.0）：配置了 admin_bind 时
+    // 主端口只承载数据面 + 探针 + 第三方回调，管理 API / SPA 走独立端口。
+    // 未配置时以下整块逻辑与既往单端口行为逐字一致（零迁移）。
+    if let Some(admin_bind) = config.server.admin_bind.clone() {
+        const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+        server_planes::serve_split(
+            &config.server,
+            &admin_bind,
+            app,
+            livez_state.clone(),
+            shutdown_signal(),
+            DRAIN_TIMEOUT,
+        )
+        .await?;
+        plugin_host.shutdown_all().await;
+        log_store.flush();
+        tracing::info!("Graceful shutdown complete");
+        return Ok(());
+    }
+
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Server listening on {}", addr);
 
@@ -1516,6 +1537,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/auth/captcha", get(api::admin::handle_captcha))
         // 公开端点：按客户端 IP 推荐界面语言（登录页默认语言；无代理头时返回 null）
         .route("/api/public/geo-lang", get(api::admin::handle_geo_lang))
+        // 公开端点：面板品牌信息（登录页在拿到会话前就要渲染名称与 Logo）
+        .route(
+            "/api/public/branding",
+            get(api::admin::handle_get_public_branding),
+        )
         .route(
             "/api/auth/login/send-code",
             post(api::admin::handle_login_send_code),
@@ -1990,6 +2016,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 设置管理
         .route("/api/settings", get(api::admin::handle_get_settings))
         .route("/api/settings", put(api::admin::handle_update_settings))
+        // 面板品牌（管理员 GET/PUT；登录页另用公开 GET /api/public/branding）
+        .route(
+            "/api/branding",
+            get(api::admin::handle_get_branding).put(api::admin::handle_update_branding),
+        )
         .route(
             "/api/oauth/config",
             get(api::admin::handle_get_oauth_config),
