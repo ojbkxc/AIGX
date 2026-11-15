@@ -260,8 +260,10 @@ impl SqliteStore {
     /// 返回数据库中总条目数
     pub fn count(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock();
-        let count: u64 = conn.query_row("SELECT COUNT(*) FROM kv", [], |row| row.get(0))?;
-        Ok(count)
+        // rusqlite 0.41 的 FromSql 未实现 u64（仅 u16 等），COUNT(*) 在 SQLite
+        // 返回 i64，读成 i64 再转 u64（COUNT 恒非负，转换安全）。
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM kv", [], |row| row.get(0))?;
+        Ok(count as u64)
     }
 
     /// 压缩数据库（回收空间）

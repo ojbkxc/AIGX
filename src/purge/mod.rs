@@ -913,16 +913,37 @@ mod tests {
         let mut cfg = enabled();
         cfg.synonym_enabled = true;
         cfg.synonym_pairs = vec![
-            RewriteRule { from: "黑客".to_string(), to: "安全研究人员".to_string() },
-            RewriteRule { from: "攻击".to_string(), to: "测试".to_string() },
-            RewriteRule { from: "木马".to_string(), to: "测试程序".to_string() },
-            RewriteRule { from: "病毒".to_string(), to: "测试样本".to_string() },
-            RewriteRule { from: "入侵".to_string(), to: "访问".to_string() },
+            RewriteRule {
+                from: "黑客".to_string(),
+                to: "安全研究人员".to_string(),
+            },
+            RewriteRule {
+                from: "攻击".to_string(),
+                to: "测试".to_string(),
+            },
+            RewriteRule {
+                from: "木马".to_string(),
+                to: "测试程序".to_string(),
+            },
+            RewriteRule {
+                from: "病毒".to_string(),
+                to: "测试样本".to_string(),
+            },
+            RewriteRule {
+                from: "入侵".to_string(),
+                to: "访问".to_string(),
+            },
         ];
         let applied = apply_messages(&mut messages, &cfg);
         assert!(applied.changed);
-        assert_eq!(messages[0].content.as_deref(), Some("安全研究人员在测试系统"));
-        assert_eq!(messages[1].content.as_deref(), Some("用测试程序和测试样本访问"));
+        assert_eq!(
+            messages[0].content.as_deref(),
+            Some("安全研究人员在测试系统")
+        );
+        assert_eq!(
+            messages[1].content.as_deref(),
+            Some("用测试程序和测试样本访问")
+        );
         assert_eq!(
             messages[2].content.as_deref(),
             Some("黑客"),
@@ -948,13 +969,22 @@ mod tests {
     fn rewrite_texts_counted_returns_hit_count() {
         let mut messages = vec![user("黑客 黑客 和 攻击")];
         let rules = vec![
-            RewriteRule { from: "黑客".to_string(), to: "安全研究人员".to_string() },
-            RewriteRule { from: "攻击".to_string(), to: "测试".to_string() },
+            RewriteRule {
+                from: "黑客".to_string(),
+                to: "安全研究人员".to_string(),
+            },
+            RewriteRule {
+                from: "攻击".to_string(),
+                to: "测试".to_string(),
+            },
         ];
         let (changed, hits) = rewrite_texts_counted(&mut messages, &rules);
         assert!(changed);
         assert_eq!(hits, 3, "黑客×2 + 攻击×1 = 3 次替换");
-        assert_eq!(messages[0].content.as_deref(), Some("安全研究人员 安全研究人员 和 测试"));
+        assert_eq!(
+            messages[0].content.as_deref(),
+            Some("安全研究人员 安全研究人员 和 测试")
+        );
     }
 
     #[test]
