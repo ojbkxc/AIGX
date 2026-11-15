@@ -43,6 +43,7 @@ mod cache;
 mod channel;
 mod chat_session;
 mod checkin;
+mod client_config;
 mod config;
 mod continuation;
 mod cron;
@@ -2564,6 +2565,36 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/account-sessions/desktop-import",
             post(api::admin::desktop_import::handle_desktop_import),
+        )
+        // 客户端接入多配置管理（对齐 Agent2API agents 非插件段）：
+        // 四目标（Claude Code / Codex / Claude Desktop / DSH）× 多份命名
+        // 配置，预览 → 备份 → 写盘的完整闭环。路径写死、凭据加密落库，
+        // 目标文件永不由请求体指定（见 src/client_config/mod.rs 模块头）。
+        .route(
+            "/api/admin/client-configs",
+            get(api::admin::client_config::handle_list)
+                .post(api::admin::client_config::handle_create),
+        )
+        .route(
+            "/api/admin/client-configs/:id",
+            put(api::admin::client_config::handle_update)
+                .delete(api::admin::client_config::handle_delete),
+        )
+        .route(
+            "/api/admin/client-configs/:id/preview",
+            post(api::admin::client_config::handle_preview),
+        )
+        .route(
+            "/api/admin/client-configs/:id/apply",
+            post(api::admin::client_config::handle_apply),
+        )
+        .route(
+            "/api/admin/client-configs/:id/backups",
+            get(api::admin::client_config::handle_backups),
+        )
+        .route(
+            "/api/admin/client-configs/:id/restore",
+            post(api::admin::client_config::handle_restore),
         )
         // 聊天助手工具回路（#34）：工具目录 + 多轮 tool-call 循环
         //（计费走 playground 同链；tools 限管理员，开关默认关）

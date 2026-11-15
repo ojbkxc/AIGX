@@ -7,6 +7,8 @@ pub mod backup_crypto;
 pub mod cache;
 pub mod channels;
 pub mod checkin_center;
+pub mod client_config;
+pub mod client_id;
 pub mod cline_headers;
 pub mod common;
 pub mod dashboard;
