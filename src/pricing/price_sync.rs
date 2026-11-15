@@ -422,6 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_remote_config_upserts_to_store() {
+        crate::install_rustls_provider_for_tests();
         let store = pricing_store();
         let svc = PriceSyncService::new(store.clone());
         let config = RemotePricingConfig {
@@ -456,6 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_remote_config_skips_empty_model_name() {
+        crate::install_rustls_provider_for_tests();
         let store = pricing_store();
         let svc = PriceSyncService::new(store);
         let config = RemotePricingConfig {
@@ -474,6 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_all_startup_fast_path_skips_remote() {
+        crate::install_rustls_provider_for_tests();
         let store = pricing_store();
         // 预置一条定价
         store
@@ -487,6 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_all_local_override_takes_priority() {
+        crate::install_rustls_provider_for_tests();
         let store = pricing_store();
         let mut config = PriceSyncConfig::default();
         // 写一个临时覆盖文件

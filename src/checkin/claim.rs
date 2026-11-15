@@ -2278,7 +2278,7 @@ mod tests {
             };
             let result = tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(claim_for(&Client::new(), &session));
+                .block_on(claim_for(&crate::test_http_client(), &session));
             assert!(!result.success, "{provider} 不该假装成功");
             assert_eq!(result.outcome, CheckinOutcome::Failed);
             assert!(!result.msg.is_empty(), "{provider} 应有明确错误文案");

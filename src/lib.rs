@@ -65,3 +65,30 @@ pub mod zcode_captcha;
 // 启用方式：cargo build --features "sea-orm postgres"（或 sqlite / mysql）
 #[cfg(feature = "sea-orm")]
 pub mod db;
+
+// ── reqwest 0.13 测试侧 provider 安装（波次2）──────────────────────
+//
+// reqwest 0.13 选了 `rustls-no-provider`（不捆绑 crypto provider），
+// `reqwest::Client::new()`/`ClientBuilder::build()` 在缺全局默认 provider 时
+// 会 panic（reqwest client.rs `default_rustls_crypto_provider`）。
+// 二进制入口由 main() 启动早期 install_default 一次覆盖；但单元测试进程
+// （cargo test --lib）不经过 main()，测试内直接/间接构建 Client 必须自行
+// 安装。`Once` 保证全测试进程只装一次。
+
+/// 单元测试内构建 reqwest Client 的统一入口：先装 provider 再建客户端。
+#[cfg(test)]
+pub(crate) fn test_http_client() -> reqwest::Client {
+    install_rustls_provider_for_tests();
+    reqwest::Client::new()
+}
+
+/// 在 lib 测试进程内安装一次 rustls ring provider（全局操作，Once 防重入）。
+#[cfg(test)]
+pub(crate) fn install_rustls_provider_for_tests() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("install rustls ring provider");
+    });
+}

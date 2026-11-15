@@ -441,6 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn sign_roundtrip() {
+        crate::install_rustls_provider_for_tests();
         let client = EpayClient::new(cfg());
         let args = PurchaseArgs {
             pay_type: "alipay".into(),
@@ -479,6 +480,7 @@ mod tests {
 
     #[test]
     fn sign_tampered() {
+        crate::install_rustls_provider_for_tests();
         let client = EpayClient::new(cfg());
         let mut map = HashMap::new();
         map.insert("pid".into(), "1001".into());

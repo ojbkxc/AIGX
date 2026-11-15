@@ -258,7 +258,7 @@ mod tests {
     async fn verify_chatglm_extracts_refresh_from_jwt() {
         let payload = "eyJyZWZyZXNoX3Rva2VuIjoicnQtMSIsImV4cCI6OTk5OTk5OTk5OX0";
         let token = format!("h.{payload}.s");
-        let creds = verify_chatglm(&reqwest::Client::new(), &token)
+        let creds = verify_chatglm(&crate::test_http_client(), &token)
             .await
             .expect("JWT 应当通过校验");
         assert_eq!(creds.secret, token);
@@ -275,7 +275,7 @@ mod tests {
         // 载荷里没有 refresh_token：账号照样落，只是不自动续期
         let payload = "eyJpc19ndWVzdCI6dHJ1ZX0";
         let token = format!("h.{payload}.s");
-        let creds = verify_chatglm(&reqwest::Client::new(), &token)
+        let creds = verify_chatglm(&crate::test_http_client(), &token)
             .await
             .expect("无续期令牌的 JWT 也应当通过");
         assert!(!creds.extra_headers.contains_key("refresh_token"));
@@ -284,18 +284,21 @@ mod tests {
 
     #[tokio::test]
     async fn verify_chatglm_rejects_empty_and_huge() {
-        assert!(verify_chatglm(&reqwest::Client::new(), "").await.is_err());
-        assert!(
-            verify_chatglm(&reqwest::Client::new(), &"a".repeat(MAX_SECRET_LENGTH + 1))
-                .await
-                .is_err()
-        );
+        assert!(verify_chatglm(&crate::test_http_client(), "")
+            .await
+            .is_err());
+        assert!(verify_chatglm(
+            &crate::test_http_client(),
+            &"a".repeat(MAX_SECRET_LENGTH + 1)
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
     async fn verify_chatglm_rejects_too_short_non_jwt() {
         // 既不是三段 JWT、又过短：拒绝（避免把说明文字粘进来）
-        assert!(verify_chatglm(&reqwest::Client::new(), "abc")
+        assert!(verify_chatglm(&crate::test_http_client(), "abc")
             .await
             .is_err());
     }

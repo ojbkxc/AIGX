@@ -734,7 +734,7 @@ mod tests {
             extra: None,
         };
 
-        let bridge = ZaiBridge::with_client("", "test-key", reqwest::Client::new());
+        let bridge = ZaiBridge::with_client("", "test-key", crate::test_http_client());
         let body = bridge.build_body(&req, false);
 
         assert_eq!(body["model"], "glm-5");
@@ -775,7 +775,7 @@ mod tests {
             extra: None,
         };
 
-        let bridge = ZaiBridge::with_client("", "key", reqwest::Client::new());
+        let bridge = ZaiBridge::with_client("", "key", crate::test_http_client());
         let body = bridge.build_body(&req, false);
         assert_eq!(body["max_tokens"], 4096);
     }
@@ -806,7 +806,7 @@ mod tests {
             extra: None,
         };
 
-        let bridge = ZaiBridge::with_client("", "key", reqwest::Client::new());
+        let bridge = ZaiBridge::with_client("", "key", crate::test_http_client());
         let body = bridge.build_body(&req, true);
         assert_eq!(body["stream"], true);
     }
@@ -915,13 +915,13 @@ mod tests {
 
     #[test]
     fn messages_url_format() {
-        let bridge = ZaiBridge::with_client("", "key", reqwest::Client::new());
+        let bridge = ZaiBridge::with_client("", "key", crate::test_http_client());
         assert_eq!(bridge.messages_url(), "https://api.z.ai/api/v2/messages");
     }
 
     #[test]
     fn with_client_uses_default_base_url_when_empty() {
-        let bridge = ZaiBridge::with_client("", "key", reqwest::Client::new());
+        let bridge = ZaiBridge::with_client("", "key", crate::test_http_client());
         assert_eq!(bridge.base_url, "https://api.z.ai/api/v2");
     }
 
@@ -930,7 +930,7 @@ mod tests {
         let bridge = ZaiBridge::with_client(
             "https://custom.example.com/v1/",
             "key",
-            reqwest::Client::new(),
+            crate::test_http_client(),
         );
         assert_eq!(bridge.base_url, "https://custom.example.com/v1");
     }

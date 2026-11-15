@@ -717,7 +717,7 @@ mod tests {
             extra: None,
         };
 
-        let bridge = GeminiBridge::with_client("", "test-key", reqwest::Client::new());
+        let bridge = GeminiBridge::with_client("", "test-key", crate::test_http_client());
         let body = bridge.build_body(&req, false);
 
         // 系统消息提升为 systemInstruction
@@ -870,7 +870,7 @@ mod tests {
             extra: None,
         };
 
-        let bridge = GeminiBridge::with_client("", "test-key", reqwest::Client::new());
+        let bridge = GeminiBridge::with_client("", "test-key", crate::test_http_client());
         let body = bridge.build_body(&req, false);
 
         // 工具定义翻译为 functionDeclarations
@@ -943,7 +943,7 @@ mod tests {
 
     #[test]
     fn generate_url_and_stream_url_format() {
-        let bridge = GeminiBridge::with_client("", "key", reqwest::Client::new());
+        let bridge = GeminiBridge::with_client("", "key", crate::test_http_client());
         assert_eq!(
             bridge.generate_url("gemini-pro"),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
@@ -956,7 +956,7 @@ mod tests {
 
     #[test]
     fn with_client_uses_default_base_url_when_empty() {
-        let bridge = GeminiBridge::with_client("", "key", reqwest::Client::new());
+        let bridge = GeminiBridge::with_client("", "key", crate::test_http_client());
         assert_eq!(
             bridge.base_url,
             "https://generativelanguage.googleapis.com/v1beta"
@@ -968,7 +968,7 @@ mod tests {
         let bridge = GeminiBridge::with_client(
             "https://custom.example.com/v1beta/",
             "key",
-            reqwest::Client::new(),
+            crate::test_http_client(),
         );
         assert_eq!(bridge.base_url, "https://custom.example.com/v1beta");
     }

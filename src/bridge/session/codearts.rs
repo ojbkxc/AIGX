@@ -685,7 +685,7 @@ mod tests {
         let bridge = CodeArtsBridge::new(
             "https://example.invalid",
             "AK:SK:STS",
-            reqwest::Client::new(),
+            crate::test_http_client(),
         );
         assert_eq!(bridge.access_key, "AK");
         assert_eq!(bridge.secret_key, "SK");
@@ -718,8 +718,11 @@ mod tests {
 
     #[test]
     fn signature_header_has_expected_shape() {
-        let bridge =
-            CodeArtsBridge::new("https://example.invalid", "AK:SK", reqwest::Client::new());
+        let bridge = CodeArtsBridge::new(
+            "https://example.invalid",
+            "AK:SK",
+            crate::test_http_client(),
+        );
         let headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             ("X-Sdk-Date".to_string(), "20260101T000000Z".to_string()),

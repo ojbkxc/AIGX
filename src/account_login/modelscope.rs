@@ -139,9 +139,13 @@ mod tests {
 
     #[tokio::test]
     async fn verify_modelscope_accepts_ms_token() {
-        let creds = verify_modelscope(&reqwest::Client::new(), "modelscope", "ms-abcdef0123456789")
-            .await
-            .expect("ms- 令牌应当通过");
+        let creds = verify_modelscope(
+            &crate::test_http_client(),
+            "modelscope",
+            "ms-abcdef0123456789",
+        )
+        .await
+        .expect("ms- 令牌应当通过");
         assert_eq!(creds.secret, "ms-abcdef0123456789");
         assert_eq!(creds.name, "ModelScope");
     }
@@ -149,7 +153,7 @@ mod tests {
     #[tokio::test]
     async fn verify_modelscope_intl_label() {
         let creds = verify_modelscope(
-            &reqwest::Client::new(),
+            &crate::test_http_client(),
             "modelscope-intl",
             "ms-abcdef0123456789",
         )
@@ -160,7 +164,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_modelscope_rejects_wrong_prefix() {
-        let error = verify_modelscope(&reqwest::Client::new(), "modelscope", "not-ms-prefix")
+        let error = verify_modelscope(&crate::test_http_client(), "modelscope", "not-ms-prefix")
             .await
             .expect_err("非 ms- 前缀应当拒绝");
         assert!(error.contains("ms-"), "错误文案应当指出 ms- 前缀：{error}");
@@ -168,11 +172,13 @@ mod tests {
 
     #[tokio::test]
     async fn verify_modelscope_rejects_empty_and_huge() {
-        assert!(verify_modelscope(&reqwest::Client::new(), "modelscope", "")
-            .await
-            .is_err());
+        assert!(
+            verify_modelscope(&crate::test_http_client(), "modelscope", "")
+                .await
+                .is_err()
+        );
         assert!(verify_modelscope(
-            &reqwest::Client::new(),
+            &crate::test_http_client(),
             "modelscope",
             &"a".repeat(MAX_SECRET_LENGTH + 1)
         )
@@ -185,7 +191,7 @@ mod tests {
         // {"userId":"u-9"}
         let payload = "eyJ1c2VySWQiOiJ1LTkifQ";
         let token = format!("h.{payload}.s");
-        let creds = verify_atomcode(&reqwest::Client::new(), &token)
+        let creds = verify_atomcode(&crate::test_http_client(), &token)
             .await
             .expect("JWT 应当通过校验");
         assert_eq!(creds.secret, token);
@@ -196,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_atomcode_without_refresh_still_passes() {
-        let creds = verify_atomcode(&reqwest::Client::new(), "opaque-token-value-1234567890")
+        let creds = verify_atomcode(&crate::test_http_client(), "opaque-token-value-1234567890")
             .await
             .expect("非 JWT 令牌也应当通过（best-effort）");
         assert!(!creds.extra_headers.contains_key("refresh_token"));
@@ -205,8 +211,10 @@ mod tests {
 
     #[tokio::test]
     async fn verify_atomcode_rejects_empty_and_short() {
-        assert!(verify_atomcode(&reqwest::Client::new(), "").await.is_err());
-        assert!(verify_atomcode(&reqwest::Client::new(), "short")
+        assert!(verify_atomcode(&crate::test_http_client(), "")
+            .await
+            .is_err());
+        assert!(verify_atomcode(&crate::test_http_client(), "short")
             .await
             .is_err());
     }

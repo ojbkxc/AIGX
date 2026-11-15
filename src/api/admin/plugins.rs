@@ -1045,7 +1045,7 @@ mod tests {
         let mgr = PluginHostManager::new(
             registry,
             root.clone(),
-            reqwest::Client::new(),
+            crate::test_http_client(),
             crate::plugin_host::process::HostEnv::default(),
             Arc::new(crate::account_session::AccountSessionStore::new(
                 store.clone(),

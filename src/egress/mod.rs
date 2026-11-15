@@ -161,6 +161,7 @@ mod tests {
 
     #[test]
     fn socks5_and_socks5h_share_cached_client() {
+        crate::install_rustls_provider_for_tests();
         let cache = EgressCache::new();
         let a = cache
             .client(Some("socks5://127.0.0.1:1080"))
@@ -179,6 +180,7 @@ mod tests {
 
     #[test]
     fn accepts_socks5_and_socks5h_proxy() {
+        crate::install_rustls_provider_for_tests();
         let cache = EgressCache::new();
         assert!(cache.client(Some("socks5://127.0.0.1:1080")).is_ok());
         assert!(cache.client(Some("socks5h://127.0.0.1:1080")).is_ok());
@@ -186,6 +188,7 @@ mod tests {
 
     #[test]
     fn caches_client_per_proxy() {
+        crate::install_rustls_provider_for_tests();
         let cache = EgressCache::new();
         let a = cache.client(None).expect("direct client");
         let b = cache.client(Some("")).expect("direct client again");

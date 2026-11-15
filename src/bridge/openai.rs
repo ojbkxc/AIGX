@@ -1416,7 +1416,7 @@ mod tests {
         let bridge = super::OpenaiCompatibleBridge::with_session_auth(
             "https://copilot.tencent.com",
             "tok",
-            reqwest::Client::new(),
+            crate::test_http_client(),
             super::AuthMode::Bearer,
             Vec::new(),
             Some("/v2/chat/completions".to_string()),
@@ -1435,7 +1435,7 @@ mod tests {
         let bridge = super::OpenaiCompatibleBridge::with_session_auth(
             "https://atomgit.com",
             "tok",
-            reqwest::Client::new(),
+            crate::test_http_client(),
             super::AuthMode::Bearer,
             Vec::new(),
             None,
@@ -1447,7 +1447,7 @@ mod tests {
         let blank = super::OpenaiCompatibleBridge::with_session_auth(
             "https://atomgit.com",
             "tok",
-            reqwest::Client::new(),
+            crate::test_http_client(),
             super::AuthMode::Bearer,
             Vec::new(),
             Some("   ".to_string()),
@@ -1475,7 +1475,7 @@ mod tests {
             let bridge = super::OpenaiCompatibleBridge::with_session_auth(
                 meta.base_url,
                 "tok",
-                reqwest::Client::new(),
+                crate::test_http_client(),
                 super::AuthMode::Bearer,
                 Vec::new(),
                 Some(meta.chat_path.to_string()),
@@ -1586,7 +1586,7 @@ mod tests {
             extra: Some(serde_json::json!({"seed": 42, "presence_penalty": 0.5})),
         };
         let bridge =
-            super::OpenaiCompatibleBridge::with_client("https://x", "k", reqwest::Client::new());
+            super::OpenaiCompatibleBridge::with_client("https://x", "k", crate::test_http_client());
         let body = bridge.build_body(&req);
 
         // 期望形状 = 旧 json! 建树口径手工构造
@@ -1992,7 +1992,7 @@ mod tests {
         let bridge = super::OpenaiCompatibleBridge::with_session_auth(
             format!("http://{addr}/v1"),
             "sessionid=abc",
-            reqwest::Client::new(),
+            crate::test_http_client(),
             super::AuthMode::Cookie,
             vec![("x-token".to_string(), "{credential}".to_string())],
             Some("/api/chat".to_string()),
@@ -2074,7 +2074,7 @@ data: [DONE]\n\n";
         let bridge = super::OpenaiCompatibleBridge::with_session_auth(
             format!("http://{addr}"),
             "tok",
-            reqwest::Client::new(),
+            crate::test_http_client(),
             super::AuthMode::Bearer,
             Vec::new(),
             Some("/v2/chat/completions".to_string()),
@@ -2116,7 +2116,7 @@ data: [DONE]\n\n";
         let plain = super::OpenaiCompatibleBridge::with_session_auth(
             format!("http://{addr}"),
             "tok",
-            reqwest::Client::new(),
+            crate::test_http_client(),
             super::AuthMode::Bearer,
             Vec::new(),
             Some("/v2/chat/completions".to_string()),

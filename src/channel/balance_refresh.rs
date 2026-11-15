@@ -310,7 +310,7 @@ mod tests {
         not_due.balance_last_query_at = Some(chrono::Utc::now().timestamp());
         store.add(not_due).unwrap();
 
-        let client = reqwest::Client::new();
+        let client = crate::test_http_client();
         let done = sweep(&store, &client).await;
         assert_eq!(done, 1);
 
@@ -334,7 +334,7 @@ mod tests {
         ch.balance_unit = "USD".to_string();
         store.add(ch).unwrap();
 
-        let client = reqwest::Client::new();
+        let client = crate::test_http_client();
         let done = sweep(&store, &client).await;
         assert_eq!(done, 0);
 
@@ -360,7 +360,7 @@ mod tests {
             store.add(ch).unwrap();
         }
 
-        let client = reqwest::Client::new();
+        let client = crate::test_http_client();
         let done = sweep(&store, &client).await;
         assert_eq!(done, 5);
         assert!(
@@ -382,7 +382,7 @@ mod tests {
         ch.balance_query_interval_secs = Some(3600);
         store.add(ch).unwrap();
 
-        let client = reqwest::Client::new();
+        let client = crate::test_http_client();
         // 先让巡检真正开跑——future 是惰性的，不 spawn 就不会执行：
         // 首轮 poll 发生在 tokio::time::sleep 让出之后，list 拿到「gone」，
         // 查询打向 mock（延迟 200ms 留出在途窗口）。

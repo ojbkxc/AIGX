@@ -101,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_lobsterai_accepts_opaque_token() {
-        let creds = verify_lobsterai(&reqwest::Client::new(), "opaque-token-value-1234567890")
+        let creds = verify_lobsterai(&crate::test_http_client(), "opaque-token-value-1234567890")
             .await
             .expect("非 JWT 令牌也应当通过（best-effort）");
         assert_eq!(creds.secret, "opaque-token-value-1234567890");
@@ -113,7 +113,7 @@ mod tests {
         // {"uuid":"u-42"}
         let payload = "eyJ1dWlkIjoidS00MiJ9";
         let token = format!("h.{payload}.s");
-        let creds = verify_lobsterai(&reqwest::Client::new(), &token)
+        let creds = verify_lobsterai(&crate::test_http_client(), &token)
             .await
             .expect("JWT 应当通过校验");
         assert_eq!(creds.secret, token);
@@ -122,18 +122,21 @@ mod tests {
 
     #[tokio::test]
     async fn verify_lobsterai_rejects_empty_and_short() {
-        assert!(verify_lobsterai(&reqwest::Client::new(), "").await.is_err());
-        assert!(verify_lobsterai(&reqwest::Client::new(), "short")
+        assert!(verify_lobsterai(&crate::test_http_client(), "")
+            .await
+            .is_err());
+        assert!(verify_lobsterai(&crate::test_http_client(), "short")
             .await
             .is_err());
     }
 
     #[tokio::test]
     async fn verify_lobsterai_rejects_huge() {
-        assert!(
-            verify_lobsterai(&reqwest::Client::new(), &"a".repeat(MAX_SECRET_LENGTH + 1))
-                .await
-                .is_err()
-        );
+        assert!(verify_lobsterai(
+            &crate::test_http_client(),
+            &"a".repeat(MAX_SECRET_LENGTH + 1)
+        )
+        .await
+        .is_err());
     }
 }

@@ -267,7 +267,7 @@ async fn loomy_claims_successfully() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("loomy", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("loomy", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert!(result.msg.contains("128"), "文案应含余额：{}", result.msg);
@@ -286,7 +286,7 @@ async fn loomy_reports_expired_session() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("loomy", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("loomy", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Failed);
     assert!(result.msg.contains("失效"), "文案：{}", result.msg);
@@ -311,7 +311,7 @@ async fn kuku_claims_and_reports_already_claimed() {
     ])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("kuku", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("kuku", &base)).await;
 
     // 面板没有可领任务 → 已领过（幂等）
     assert!(
@@ -353,7 +353,7 @@ async fn qoder_claims_campaign() {
     ])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("qoder", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("qoder", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert!(result.msg.contains("25"), "文案应含奖励：{}", result.msg);
@@ -374,7 +374,7 @@ async fn qoder_reports_already_claimed() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("qoder", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("qoder", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Already);
 }
@@ -388,7 +388,7 @@ async fn qoder_reports_no_campaign_as_pending() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("qoder", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("qoder", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Pending);
 }
@@ -404,7 +404,7 @@ async fn raccoon_claims_successfully() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("xiaohuanxiong", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("xiaohuanxiong", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/api/web/office/v3/setting_info");
@@ -421,7 +421,7 @@ async fn autoclaw_claims_task() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("autoclaw", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("autoclaw", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/autoclaw-proxy/proxy/autoclaw-task-complete");
@@ -463,7 +463,11 @@ async fn workbuddy_claims_daily_checkin() {
     .await;
 
     // 国际版才走「活动状态 → 领取」两步（国内版直接领）
-    let result = claim_for(&reqwest::Client::new(), &account("workbuddy-intl", &base)).await;
+    let result = claim_for(
+        &crate::test_http_client(),
+        &account("workbuddy-intl", &base),
+    )
+    .await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/billing/meter/checkin-activity-status");
@@ -479,7 +483,11 @@ async fn workbuddy_reports_activity_not_open_as_pending() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("workbuddy-intl", &base)).await;
+    let result = claim_for(
+        &crate::test_http_client(),
+        &account("workbuddy-intl", &base),
+    )
+    .await;
 
     assert_eq!(result.outcome, CheckinOutcome::Pending);
 }
@@ -509,7 +517,7 @@ async fn trae_claims_credits() {
     ])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("trae", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("trae", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/trae/api/v2/ug/checkin_credits/status");
@@ -525,7 +533,7 @@ async fn trae_reports_not_open_as_pending() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("trae", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("trae", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Pending);
 }
@@ -539,7 +547,7 @@ async fn trae_reports_already_checked_in() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("trae", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("trae", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Already);
 }
@@ -586,7 +594,7 @@ async fn codearts_claims_ops_welfare() {
     ])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("codearts", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("codearts", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/v1/ops/delivery");
@@ -614,7 +622,7 @@ async fn officeace_claims_bonus() {
     let mut session = account("officeace", &base);
     session.credential.secret = "ak-test:sk-test:sts-test:proj-test".to_string();
 
-    let result = claim_for(&reqwest::Client::new(), &session).await;
+    let result = claim_for(&crate::test_http_client(), &session).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/v1/subscription/bonus/claim");
@@ -636,7 +644,7 @@ async fn modelscope_checks_in_via_login_info() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("modelscope", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("modelscope", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert!(
@@ -671,7 +679,7 @@ async fn modelscope_reports_expired_session() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("modelscope", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("modelscope", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Failed);
     assert!(result.msg.contains("失效"), "文案：{}", result.msg);
@@ -686,7 +694,7 @@ async fn modelscope_reports_bad_business_code() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("modelscope", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("modelscope", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Failed);
     assert!(
@@ -709,7 +717,7 @@ async fn zcode_claim_with_pool_token(provider: &str, base: &str) -> super::Claim
     };
     for _ in 0..3 {
         crate::zcode_captcha::push("runtime-test-param", "cn");
-        result = claim_for(&reqwest::Client::new(), &account(provider, base)).await;
+        result = claim_for(&crate::test_http_client(), &account(provider, base)).await;
         if !result.msg.contains("令牌池") {
             return result;
         }
@@ -809,7 +817,7 @@ async fn zcode_reports_empty_plans_as_pending() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("zcode", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("zcode", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Pending);
     assert!(
@@ -828,7 +836,7 @@ async fn zcode_reports_expired_session() {
     )])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("zcode", &base)).await;
+    let result = claim_for(&crate::test_http_client(), &account("zcode", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Failed);
     assert!(result.msg.contains("失效"), "文案：{}", result.msg);
@@ -841,7 +849,7 @@ async fn every_provider_rejects_empty_credential() {
     for provider in super::claim::supported_providers() {
         let mut session = account(provider, "http://127.0.0.1:1");
         session.credential.secret = String::new();
-        let result = claim_for(&reqwest::Client::new(), &session).await;
+        let result = claim_for(&crate::test_http_client(), &session).await;
         assert_eq!(
             result.outcome,
             CheckinOutcome::Failed,
