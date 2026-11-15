@@ -479,13 +479,20 @@ pub async fn handle_messages(
     };
     // #40 §1 接缝（会话型端点）：anthropic body 同扫 messages/content blocks
     //（from_chat_body 对两个列表通用；能力推导与 openai 面同口径）
+    let body_needs = crate::api::openai::from_chat_body(&body);
+    // 图片兼容上下文（#7）：describe/switch 裁决与 chat 端点同口径；
+    // switch 命中时把 model 换成视觉模型（选路/计费/日志全按视觉模型，
+    // 视觉模型未定价时 build 内自动降级回原模型）。
+    let image_ctx =
+        crate::image_compat::RequestImageContext::build(&state, &model, body_needs.images);
+    let model = image_ctx.routing_model(&model);
     let candidates = super::openai::resolve_bridges_with_affinity_needs(
         &state,
         &model,
         session_id.as_deref(),
         api_key.provider_filter().as_deref(),
         route_capture.as_mut(),
-        crate::api::openai::from_chat_body(&body),
+        body_needs,
     );
     if candidates.is_empty() {
         return anthropic_error(
@@ -663,6 +670,17 @@ pub async fn handle_messages(
                 );
                 chat_req.messages = messages;
             }
+        }
+    }
+
+    // 图片兼容数据面（#7，guardrail 之后、计费预留之前，一次请求只做一遍；
+    // 与 chat 端点同口径）：describe 替换 + 压缩，失败保留原样不阻断。
+    if image_ctx.has_images {
+        let changed = image_ctx
+            .prepare_attempt(&state, &mut chat_req.messages)
+            .await;
+        if changed {
+            tracing::debug!("image_compat: anthropic request image processing applied");
         }
     }
 

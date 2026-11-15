@@ -184,6 +184,12 @@ pub(crate) async fn handle_chat_completions(
     // #40 §1 接缝（会话型端点）：从请求体推出能力需求（tools/images/video）
     // 供选路能力过滤——chat 侧 messages 列表 + 顶层 tools/tool_choice
     let body_needs = super::needs::from_chat_body(&body);
+    // 图片兼容上下文（#7）：按快照裁决 describe/switch（switch 命中时把
+    // routing_model 换成视觉模型——选路、计费预留、日志归属全按视觉模型；
+    // 视觉模型未定价时 build 内自动降级回原模型）。压缩在每轮尝试发送前做。
+    let image_ctx =
+        crate::image_compat::RequestImageContext::build(&state, &model, body_needs.images);
+    let model = image_ctx.routing_model(&model);
     let provider_filter = api_key.provider_filter();
     let candidates = resolve_bridges_with_affinity_needs(
         &state,
@@ -373,6 +379,21 @@ pub(crate) async fn handle_chat_completions(
                 );
                 chat_req.messages = messages;
             }
+        }
+    }
+
+    // 图片兼容数据面（#7，guardrail 之后、计费预留之前，一次请求只做一遍）：
+    // - describe：把图片块替换为辅助识图文本（调上游，须在计费估算前完成，
+    //   预留按改写后的消息估）；
+    // - 压缩：内联大图缩边重编码（纯 CPU，spawn_blocking）。
+    // 失败一律保留原样不阻断；两步都做在 chat_req.messages 上，failover
+    // 每轮复用（识图结果随请求缓存语义由上游自行处理，压缩结果有 LRU）。
+    if image_ctx.has_images {
+        let changed = image_ctx
+            .prepare_attempt(&state, &mut chat_req.messages)
+            .await;
+        if changed {
+            tracing::debug!("image_compat: chat request image processing applied");
         }
     }
 
