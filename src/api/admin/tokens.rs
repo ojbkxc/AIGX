@@ -22,6 +22,13 @@ use super::common::{error_response, verify_user};
 // 这里需要引用主 crate 的 ApiKey 相关类型
 use crate::api::auth::{ApiKey, CreateApiKeyOptions};
 
+/// 最后一把启用 Key 的保护提示（删除 / 停用共用同一口径）。
+///
+/// 对标 Agent2API 2.9.1：网关至少要保留一把可用 API Key，否则数据面
+/// 会整体 fail-closed（所有 /v1 请求 401），等于把网关锁死。
+const LAST_KEY_GUARD_MSG: &str =
+    "这是最后一把启用的 API Key：请先新建并启用一把新 Key，再删除/停用当前这把";
+
 /// API Key 创建请求
 #[derive(Debug, Deserialize)]
 pub struct KeyRequest {
@@ -338,6 +345,16 @@ pub async fn handle_update_token(
             return Err(error_response("无效的令牌状态", StatusCode::BAD_REQUEST));
         }
     }
+    // 最后一把 Key 保护（对标 Agent2API 2.9.1）：把唯一可用的 Key 停用/置为
+    // 过期前拒绝，提示先新建。删除路径同款保护见 handle_delete_token。
+    // 目标 Key 本身不可用（已停用/已过期）时 would_drop_last_enabled 返回
+    // false，重复停用不会误拦。
+    if let Some(s) = &body.status {
+        let will_enable = matches!(s.as_str(), "active" | "enable" | "enabled");
+        if !will_enable && state.api_key_store.would_drop_last_enabled(&id) {
+            return Err(error_response(LAST_KEY_GUARD_MSG, StatusCode::CONFLICT));
+        }
+    }
     match state.api_key_store.update(&id, |k| {
         if let Some(n) = &body.name {
             k.name = n.clone();
@@ -397,6 +414,12 @@ pub async fn handle_delete_token(
         if !owns {
             return Err(error_response("Token not found", StatusCode::NOT_FOUND));
         }
+    }
+    // 最后一把 Key 保护（对标 Agent2API 2.9.1）：删除后若系统不再有可用
+    // Key，拒绝并提示先新建。放在所有权校验之后：越权请求仍按 404 处理，
+    // 不向普通用户泄露「这是系统最后一把 Key」的信息。
+    if state.api_key_store.would_drop_last_enabled(&id) {
+        return Err(error_response(LAST_KEY_GUARD_MSG, StatusCode::CONFLICT));
     }
     match state.api_key_store.delete(&id) {
         Ok(_) => {

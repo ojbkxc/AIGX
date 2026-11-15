@@ -679,6 +679,38 @@ impl ApiKeyStore {
         self.keys.read().values().cloned().collect()
     }
 
+    /// 当前**可用**的启用密钥数量（`is_enabled()` 且未过期）。
+    ///
+    /// 「可用」口径与数据面 `validate_request` 的准入一致：仅 `is_active &&
+    /// status == "active"` 不够——过期 Key 实际无法鉴权，不应计入「至少保留
+    /// 一把可用 Key」的保护名额（否则会逼管理员保留一把已失效的钥匙）。
+    pub fn enabled_count(&self) -> usize {
+        self.keys
+            .read()
+            .values()
+            .filter(|k| k.is_enabled() && !k.is_expired())
+            .count()
+    }
+
+    /// 删除/停用该 Key 后是否会导致全系统不再有可用的启用 Key。
+    ///
+    /// 对标 Agent2API 2.9.1「最后一把 Key 保护」：目标 Key 必须本身可用，
+    /// 且它是当前唯一一把可用 Key 时返回 true（调用方应拒绝操作并提示先新建）。
+    /// 未知 id / 目标已停用或已过期 → false（不占保护名额）。
+    pub fn would_drop_last_enabled(&self, id: &str) -> bool {
+        let keys = self.keys.read();
+        let Some(target) = keys.get(id) else {
+            return false;
+        };
+        if !target.is_enabled() || target.is_expired() {
+            return false;
+        }
+        keys.values()
+            .filter(|k| k.is_enabled() && !k.is_expired())
+            .count()
+            <= 1
+    }
+
     pub fn len(&self) -> usize {
         self.keys.read().len()
     }
@@ -1376,5 +1408,78 @@ mod session_registry_tests {
         };
         let k = s.generate_with_options(opts).unwrap();
         assert!(k.key.starts_with("sk-"));
+    }
+
+    // ── 网关 Key 保护（对标 Agent2API 2.7.0 fail-closed / 2.9.1 最后一把）──
+
+    /// 空库 fail-closed：未建任何 Key 时任意 Key（含空库自带前缀）都不可通过。
+    ///
+    /// 数据面 `verify_api_key_full` 对缺失 Authorization 直接 401；带任意 Key
+    /// 时落到这里 → `validate` 无命中 → `ApiKeyError::Invalid` → 401。没有
+    /// 「未建 Key 就放行」的旁路。
+    #[test]
+    fn empty_store_rejects_any_key_fail_closed() {
+        let s = key_store();
+        assert_eq!(s.enabled_count(), 0);
+        assert!(s.validate("sk-anything").is_none());
+        for key in ["sk-anything", "anything", "", "sk-"] {
+            assert!(
+                matches!(
+                    s.validate_request(key, "gpt-4o", None),
+                    Err(ApiKeyError::Invalid)
+                ),
+                "空库必须 fail-closed 拒绝 {key:?}"
+            );
+        }
+    }
+
+    /// 最后一把启用 Key 的判定：只在「目标可用且它是唯一可用」时为 true。
+    #[test]
+    fn would_drop_last_enabled_tracks_usable_keys() {
+        let s = key_store();
+        assert!(
+            !s.would_drop_last_enabled("missing"),
+            "未知 id 不占用保护名额"
+        );
+
+        let first = s.generate("first").unwrap();
+        assert_eq!(s.enabled_count(), 1);
+        assert!(
+            s.would_drop_last_enabled(&first.id),
+            "唯一可用 Key 删除/停用必须被保护"
+        );
+
+        let second = s.generate("second").unwrap();
+        assert_eq!(s.enabled_count(), 2);
+        assert!(!s.would_drop_last_enabled(&first.id));
+        assert!(!s.would_drop_last_enabled(&second.id));
+
+        // 停用第二把后，第一把重新成为最后一把
+        s.update(&second.id, |k| k.status = "disabled".to_string())
+            .unwrap();
+        assert_eq!(s.enabled_count(), 1);
+        assert!(s.would_drop_last_enabled(&first.id));
+        // 已停用的 Key 自身不占用保护名额（删除它不减少可用 Key 数）
+        assert!(
+            !s.would_drop_last_enabled(&second.id),
+            "已停用 Key 不应被保护"
+        );
+    }
+
+    /// 过期 Key 不算「可用」，不应阻止删除/停用（否则会逼用户保留死钥匙）。
+    #[test]
+    fn expired_key_does_not_count_as_usable() {
+        let s = key_store();
+        let expired = s.generate("expired").unwrap();
+        s.update(&expired.id, |k| {
+            k.expires_at = Some(chrono::Utc::now().timestamp() - 60);
+        })
+        .unwrap();
+        assert_eq!(s.enabled_count(), 0);
+        assert!(!s.would_drop_last_enabled(&expired.id));
+
+        let live = s.generate("live").unwrap();
+        assert_eq!(s.enabled_count(), 1);
+        assert!(s.would_drop_last_enabled(&live.id));
     }
 }
