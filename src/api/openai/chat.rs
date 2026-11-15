@@ -103,6 +103,8 @@ pub(crate) async fn handle_chat_completions(
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
+    // 客户端识别（只读请求头；不改转发/计费行为）
+    let client = crate::api::client_id::identify(&headers);
 
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
@@ -462,6 +464,7 @@ pub(crate) async fn handle_chat_completions(
             request_id: request_id.clone(),
             ip: client_ip.clone(),
             user_id: api_key.user_id.clone(),
+            client: client.clone(),
             handled: false,
         };
         // 破甲异源递进：主模型候选在前，配置了 fallback_models 时追加异源候选
@@ -826,6 +829,7 @@ pub(crate) async fn handle_chat_completions(
                     );
                 }
                 log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
+                crate::api::client_id::attach(&mut log, &client);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1072,6 +1076,7 @@ pub(crate) async fn handle_chat_completions(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone()),
+                client: client.clone(),
                 candidate_channels: candidate_channel_ids.clone(),
                 filtered_channels: filtered_channels.clone(),
                 route_config,
@@ -1276,6 +1281,7 @@ pub(crate) async fn handle_chat_completions(
                 );
             }
             log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
             crate::metrics::global().record_request(
                 &model,
@@ -1321,6 +1327,7 @@ pub(crate) async fn handle_chat_completions(
             request_id: request_id.clone(),
             ip: client_ip.clone(),
             user_id: api_key.user_id.clone(),
+            client: client.clone(),
             handled: false,
         };
         // 破甲异源递进：主模型候选在前，配置了 fallback_models 时追加异源候选
@@ -1672,6 +1679,7 @@ pub(crate) async fn handle_chat_completions(
                     );
                 }
                 log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
+                crate::api::client_id::attach(&mut log, &client);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1819,6 +1827,7 @@ pub(crate) async fn handle_chat_completions(
                 );
             }
             log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
+            crate::api::client_id::attach(&mut log, &client);
             state.log_store.record_request(log);
 
             // Prometheus 指标

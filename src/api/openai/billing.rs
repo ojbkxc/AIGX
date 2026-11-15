@@ -748,6 +748,8 @@ pub(crate) struct StreamBillingState {
     pub(crate) channel_id: Option<String>,
     /// 渠道名（admin 排查用）
     pub(crate) channel_name: Option<String>,
+    /// 客户端识别结果（handlers 入口 identify 后传入）
+    pub(crate) client: crate::api::client_id::ClientIdentity,
     /// P1-7：调度决策回放（流式路径补全）
     pub(crate) candidate_channels: Vec<String>,
     pub(crate) filtered_channels: Vec<crate::log::FilteredChannel>,
@@ -857,6 +859,7 @@ impl StreamBillingState {
         log.status_code = if errored { 500 } else { 200 };
         log.ip = self.client_ip.clone();
         log.request_id = Some(self.request_id.clone());
+        crate::api::client_id::attach(&mut log, &self.client);
         log.candidate_channels = self.candidate_channels.clone();
         log.filtered_channels = self.filtered_channels.clone();
         log.selected_channel = self.channel_id.clone();
@@ -1174,6 +1177,7 @@ pub(crate) fn write_attempt_499_log(
     cost: i64,
     ip: Option<String>,
     request_id: &str,
+    client: &crate::api::client_id::ClientIdentity,
 ) {
     let mut log = crate::log::RequestLog::new();
     log.user_id = None;
@@ -1189,6 +1193,7 @@ pub(crate) fn write_attempt_499_log(
     log.error_msg = Some("client closed before first event".to_string());
     log.ip = ip;
     log.request_id = Some(request_id.to_string());
+    crate::api::client_id::attach(&mut log, client);
     log_store.record_request(log);
 }
 
@@ -1212,6 +1217,8 @@ pub(crate) struct AttemptStartGuard {
     pub request_id: String,
     pub ip: Option<String>,
     pub user_id: Option<String>,
+    /// 客户端识别结果（handlers 入口 identify 后传入；499 日志写点消费）
+    pub client: crate::api::client_id::ClientIdentity,
     pub handled: bool,
 }
 
@@ -1250,6 +1257,7 @@ impl AttemptStartGuard {
             cost,
             self.ip.clone(),
             &self.request_id,
+            &self.client,
         );
     }
 }
@@ -1387,6 +1395,7 @@ mod price_snapshot_tests {
             45,
             Some("9.9.9.9".to_string()),
             "req-499",
+            &crate::api::client_id::ClientIdentity::default(),
         );
         let logs = log_store.requests.list_all();
         let hit = logs
