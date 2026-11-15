@@ -106,6 +106,14 @@ use user_group::UserGroupStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // reqwest 0.13 选了 `rustls-no-provider`（不捆绑 crypto provider），
+    // 构建任何 reqwest::Client 前必须安装一次全局默认 provider；
+    // 缺失会在 Client 构建时 panic。此处放 main 入口最早期，只调用一次。
+    // 与 tokio-rustls 0.26（SMTP STARTTLS）统一用 ring，单一 crypto provider。
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls ring provider");
+
     // 初始化日志：默认保持文本格式（不改变现有运维习惯）；
     // 设置 AIGX_LOG_FORMAT=json 时切换为结构化 JSON（每行一个对象）。
     let log_filter =

@@ -304,7 +304,20 @@ async fn spawn_server(home: &std::path::Path, log_path: &std::path::Path) -> (Ch
 
 // ─── 管理面 bootstrap（移植自 C:\tmp\aigx-499-regress\bootstrap.mjs）───
 
+/// reqwest 0.13 选了 `rustls-no-provider`，测试进程内构建第一个
+/// reqwest::Client 前必须安装一次全局 crypto provider（缺失会在
+/// Client 构建时 panic）。`install_default` 是全局操作，Once 防重入。
+fn install_rustls_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("install rustls ring provider");
+    });
+}
+
 fn client() -> reqwest::Client {
+    install_rustls_provider();
     reqwest::Client::builder()
         .no_proxy()
         .timeout(CONTROL_TIMEOUT)
