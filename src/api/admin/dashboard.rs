@@ -1105,7 +1105,8 @@ pub async fn handle_report_models(
         }
         let to_ts_end = date_start_ts(&to) + 86_400 - 1;
         let logs = state.log_store.requests.all_sorted_asc();
-        let mut agg: std::collections::HashMap<String, (String, (u64, u64, u64, i64))> =
+        type ModelAgg = (String, (u64, u64, u64, i64));
+        let mut agg: std::collections::HashMap<String, ModelAgg> =
             std::collections::HashMap::new();
         for l in &logs {
             if l.created_at < from_ts || l.created_at > to_ts_end {
@@ -1458,9 +1459,10 @@ pub async fn handle_report_daily_trend(
                 let logs = state.log_store.requests.all_sorted_asc();
                 let mut daily: std::collections::BTreeMap<String, (u64, u64, u64, i64)> =
                     std::collections::BTreeMap::new();
+                type DayModelEntry = (String, (u64, u64));
                 let mut per_day_models: std::collections::BTreeMap<
                     String,
-                    std::collections::HashMap<String, (String, (u64, u64))>,
+                    std::collections::HashMap<String, DayModelEntry>,
                 > = std::collections::BTreeMap::new();
                 for l in &logs {
                     if l.created_at < from_ts || l.created_at > to_ts_end {
