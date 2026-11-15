@@ -3554,5 +3554,16 @@
   "识别规则已保存，下一个请求立即生效": "Rule saved; effective for the next request",
   "删除该识别规则？": "Delete this rule?",
   "规则已删除": "Rule deleted",
-  "只读请求头判定请求来自哪个客户端，写入请求日志与报表；不改变转发行为。": "Identifies the client from request headers only, for logs and reports; it does not change forwarding."
+  "只读请求头判定请求来自哪个客户端，写入请求日志与报表；不改变转发行为。": "Identifies the client from request headers only, for logs and reports; it does not change forwarding.",
+  "品牌": "Brand",
+  "品牌设置已保存": "Branding settings saved",
+  "自定义面板名称、Logo 与 favicon；保存后刷新页面生效。": "Customize panel name, logo and favicon; refresh the page after saving.",
+  "面板名称": "Panel Name",
+  "显示在登录页标题与侧栏；留空则回退默认值。": "Shown on the login page title and sidebar; leave empty to fall back to the default.",
+  "Logo 地址": "Logo URL",
+  "支持 http(s) 外链或站内路径（以 / 开头）；默认 /logo.png。": "Supports http(s) external links or site paths (starting with /); default /logo.png.",
+  "Logo 预览": "Logo preview",
+  "favicon 地址（可选）": "Favicon URL (optional)",
+  "留空则沿用 Logo": "Leave empty to reuse the logo",
+  "浏览器页签图标；留空则使用 Logo 地址。": "Browser tab icon; falls back to the logo URL when empty."
 }

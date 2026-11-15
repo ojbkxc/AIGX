@@ -112,6 +112,8 @@ import type {
   ScheduledTaskItem,
   ScheduledTaskPatch,
   ScheduledTaskRunResult,
+  BrandingData,
+  BrandingAdminData,
 } from '@/types';
 // 路由回放/粘滞会话类型独立成文件（types/index.ts 正被 #13 并行编辑，避免共享大文件互卷在制品）
 import type { RouteReplaySnapshot, RouteStickyList } from '@/types/routing-replay';
@@ -629,6 +631,14 @@ export const api = {
     request<ApiResponse<SettingsItem>>('GET', `${API_BASE}/settings`),
   updateSettings: (mappings: unknown, replace_all = false): Promise<ApiResponse<SettingsItem>> =>
     request<ApiResponse<SettingsItem>>('PUT', `${API_BASE}/settings`, { mappings, replace_all }),
+
+  // 面板品牌（公开 GET 免鉴权；管理员 GET/PUT）
+  getPublicBranding: (): Promise<ApiResponse<BrandingData>> =>
+    request<ApiResponse<BrandingData>>('GET', `${API_BASE}/public/branding`, null, { skipAuthRedirect: true }),
+  getBranding: (): Promise<ApiResponse<BrandingAdminData>> =>
+    request<ApiResponse<BrandingAdminData>>('GET', `${API_BASE}/branding`),
+  updateBranding: (data: { panel_name?: string; logo_url?: string; favicon_url?: string }): Promise<ApiResponse<BrandingData>> =>
+    request<ApiResponse<BrandingData>>('PUT', `${API_BASE}/branding`, data),
 
   // Limits
   updateLimits: (data: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>

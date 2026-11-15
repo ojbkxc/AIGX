@@ -31,6 +31,7 @@ import ClientIdPanel from '../components/ClientIdPanel';
 import ZcodeCaptchaPanel from '../components/ZcodeCaptchaPanel';
 import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
+import BrandingSettingsPanel from '../components/BrandingSettingsPanel';
 import DebugTrafficPanel from '../components/DebugTrafficPanel';
 import StreamCompatPanel from '../components/StreamCompatPanel';
 import QueuePanel from '../components/QueuePanel';
@@ -798,6 +799,9 @@ export default function Settings() {
               </div>
             </div>
           </div>
+
+          {/* 品牌自定义（面板名称 / Logo / favicon） */}
+          <BrandingSettingsPanel />
 
           {/* 反馈与需求（原「账户」分类迁入；对照 Agent2API「设置 → 反馈与需求」：跳 GitHub issue 模板） */}
           <div className="card" style={{ marginTop: 16 }}>

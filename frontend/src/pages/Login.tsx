@@ -6,6 +6,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { cycleTheme } from '../lib/theme';
 import { useAltcha } from '../hooks/useAltcha';
+import { useBranding } from '../hooks/useBranding';
 import AltchaWidget from '../components/AltchaWidget';
 
 /**
@@ -35,6 +36,7 @@ function friendlyLoginError(err: unknown, t: (k: string) => string): string {
 
 export default function Login(): JSX.Element {
   const { t, i18n } = useTranslation();
+  const branding = useBranding();
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [error, setError] = useState<string>('');
@@ -472,10 +474,10 @@ export default function Login(): JSX.Element {
             justifyContent: 'center',
             margin: '0 auto 14px',
           }}>
-            <img src="/logo.png" alt="AIGX" width={44} height={44} />
+            <img src={branding.logo_url} alt={branding.panel_name} width={44} height={44} />
           </div>
           <h1 style={{ fontSize: '20px', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Inter', sans-serif", letterSpacing: '-0.4px' }}>
-            AIGX Gateway
+            {branding.panel_name} Gateway
           </h1>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
             {t('登录管理面板')}

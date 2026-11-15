@@ -2315,3 +2315,21 @@ export interface PurgeData {
   stats: PurgeStats;
   runtime: PurgeRuntime;
 }
+
+/** GET /api/public/branding 的 data 结构（免鉴权） */
+export interface BrandingData {
+  panel_name: string;
+  logo_url: string;
+  favicon_url: string;
+  title: string;
+}
+
+/** GET /api/branding 的 data 结构（管理员） */
+export interface BrandingAdminData {
+  current: BrandingData;
+  defaults: {
+    panel_name: string;
+    logo_url: string;
+    favicon_url: string;
+  };
+}
