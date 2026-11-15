@@ -100,6 +100,10 @@ pub struct ChannelRequest {
     pub channel_type: String,
     #[serde(default)]
     pub base_url: String,
+    /// 备用入口（同一上游的备用 base_url 列表，仅可信 HTTPS；按顺序尝试）。
+    /// 空 = 不启用。服务端会归一化（去空白/去重/排除主入口）并校验。
+    #[serde(default)]
+    pub backup_base_urls: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -157,6 +161,9 @@ impl ChannelRequest {
             name: self.name.clone(),
             channel_type: ChannelType::from_str_lossy(&self.channel_type),
             base_url: self.base_url.clone(),
+            // 归一化在 handler 里做（需要主入口 base_url 去重 + 逐条校验）；
+            // 这里先原样带上，避免构造器里藏错误分支（新建测试也走这条路径）。
+            backup_base_urls: self.backup_base_urls.clone(),
             // 三态归一：None/Some("") → 空密钥；Some(key) → 密钥
             // （新增时 None = 空密钥渠道；更新时 handler 先按 prev 保持原值再应用 Some）
             api_key: self.api_key.clone().unwrap_or_default(),
@@ -202,6 +209,47 @@ fn validate_balance_scheme(raw: &str) -> String {
     } else {
         String::new()
     }
+}
+
+/// 渠道地址校验（新增 / 更新共用）：
+/// 1. 主入口 `base_url`：空合法（CF / 账号型渠道无渠道级地址），非空走 SSRF 防护；
+/// 2. 备用入口：归一化（去空白 / 去重 / 排除主入口 / 上限 8 条）+ 逐条「可信
+///    HTTPS」校验 + 逐条 SSRF 防护（备用入口同样是凭证出站口）；
+/// 3. 只有渠道级 base_url 的类型（openai_compatible / anthropic / gemini / zai）
+///    才允许设备用入口 —— 账号型渠道的上游地址由账号决定，插件/CF 无地址，
+///    配了也不会生效，直接拒绝避免静默失效。
+///
+/// 校验通过后就地写回归一化后的列表（落盘的永远是规范形态）。
+fn validate_channel_endpoints(
+    body: &mut ChannelRequest,
+    allow_internal_upstream: bool,
+) -> Result<(), String> {
+    if !body.base_url.trim().is_empty() {
+        crate::net_guard::validate_outbound_url(&body.base_url, allow_internal_upstream)
+            .map_err(|rej| rej.message())?;
+    }
+    let normalized =
+        crate::channel::normalize_backup_base_urls(&body.backup_base_urls, &body.base_url)?;
+    if !normalized.is_empty() {
+        let channel_type = ChannelType::from_str_lossy(&body.channel_type);
+        if !matches!(
+            channel_type,
+            ChannelType::OpenaiCompatible
+                | ChannelType::Anthropic
+                | ChannelType::Gemini
+                | ChannelType::Zai
+        ) {
+            return Err(
+                "备用入口仅适用于渠道级 base_url 的类型（openai_compatible / anthropic / gemini / zai）；账号型渠道请在账号上配置地址".to_string(),
+            );
+        }
+        for url in &normalized {
+            crate::net_guard::validate_outbound_url(url, allow_internal_upstream)
+                .map_err(|rej| format!("备用入口 {url}：{}", rej.message()))?;
+        }
+    }
+    body.backup_base_urls = normalized;
+    Ok(())
 }
 
 /// 密钥脱敏（列表/详情展示用）：>12 字符保留首 8 + 末 4，否则全掩码。
@@ -269,6 +317,8 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         "name": ch.name,
         "channel_type": ch.channel_type.as_str(),
         "base_url": ch.base_url,
+        // 备用入口（非机密，原样回显供编辑表单）
+        "backup_base_urls": ch.backup_base_urls,
         "api_key": masked_key,
         "priority": ch.priority,
         "weight": ch.weight,
@@ -460,19 +510,12 @@ pub async fn handle_available_models(
 pub async fn handle_add_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<ChannelRequest>,
+    Json(mut body): Json<ChannelRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = verify_admin(&state, &headers).await?;
-    // SSRF 防护：拒绝把上游指向内网/环回/云元数据地址。
-    // 空 base_url 合法（Cloudflare / 账号型渠道无渠道级地址）。
-    if !body.base_url.trim().is_empty() {
-        if let Err(rej) = crate::net_guard::validate_outbound_url(
-            &body.base_url,
-            config.usage.allow_internal_upstream,
-        ) {
-            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
-        }
-    }
+    // SSRF 防护 + 备用入口校验（可信 HTTPS / 去重 / 类型适用性）
+    validate_channel_endpoints(&mut body, config.usage.allow_internal_upstream)
+        .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
     // 插件渠道必须指明接管哪家 provider（数据面 PluginBridge 按它路由；
     // 留空的插件渠道会被 resolve 跳过，等于白建）
     if ChannelType::from_str_lossy(&body.channel_type) == ChannelType::Plugin
@@ -544,18 +587,12 @@ pub async fn handle_update_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(body): Json<ChannelRequest>,
+    Json(mut body): Json<ChannelRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = verify_admin(&state, &headers).await?;
-    // SSRF 防护（与新增同口径）：拒绝内网/环回/元数据地址。
-    if !body.base_url.trim().is_empty() {
-        if let Err(rej) = crate::net_guard::validate_outbound_url(
-            &body.base_url,
-            config.usage.allow_internal_upstream,
-        ) {
-            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
-        }
-    }
+    // SSRF 防护 + 备用入口校验（与新增同口径）
+    validate_channel_endpoints(&mut body, config.usage.allow_internal_upstream)
+        .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
     // 插件渠道必须指明接管哪家 provider（同新增口径；表单未带该字段的
     // 更新请求会在这里被拦下，前端需回填当前值）
     if ChannelType::from_str_lossy(&body.channel_type) == ChannelType::Plugin

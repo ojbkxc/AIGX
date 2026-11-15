@@ -127,6 +127,7 @@ mod tests {
             name: format!("ch-{id}"),
             channel_type: ChannelType::OpenaiCompatible,
             base_url: base_url.to_string(),
+            backup_base_urls: Vec::new(),
             api_key: Channel::encode_api_key("sk-test"),
             priority: 10,
             weight: 1,

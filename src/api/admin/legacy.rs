@@ -4824,6 +4824,7 @@ mod tests {
             name: "测试渠道".to_string(),
             channel_type,
             base_url: base_url.to_string(),
+            backup_base_urls: Vec::new(),
             api_key: String::new(),
             priority: 0,
             weight: 1,

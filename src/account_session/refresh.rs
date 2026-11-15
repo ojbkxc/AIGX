@@ -84,7 +84,7 @@ pub(crate) struct RefreshFingerprint {
     pub refresh: String,
 }
 
-/// 假成功核对结论（issue #407）。
+/// 假成功核对结论（issue #407；3.4.1 刷新结果核验）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshVerdict {
     /// 确有推进 —— 维持 `Refreshed`。
@@ -94,24 +94,37 @@ pub(crate) enum RefreshVerdict {
     Indeterminate,
     /// 明确未推进（上游报成功但凭据一模一样）—— 转 `Failed`，不改写凭据。
     Unchanged,
+    /// 凭据推没推进都不算数：刷新后的 `expires_at` 仍在过去（刷新后仍判定
+    /// 过期）。转 `Failed`，不改写凭据（3.4.1 的第二条判据）。
+    StillExpired,
 }
 
 /// 判定一次刷新是否真的推进了凭据（纯函数，issue #407）。
 ///
 /// 判据（任一成立即 `Advanced`）：
-/// 1. `expires_at` 变大（前后都拿得到时）；
+/// 1. `expires_at` 变大（前后都拿得到时）；刷新前没有、刷新后有（且未过期）
+///    也算推进（上游这次把有效期明确了）；
 /// 2. access 明文变化（次级判据，覆盖「上游换 token 但不给过期时间」）；
-/// 3. refresh 明文变化（覆盖「只轮换 refresh / OfficeAce 续期载荷变化」）。
+/// 3. refresh 明文变化（**轮换 refresh_token 属于正常形态**：部分上游只轮换
+///    refresh、access 不变，不能因此判失败；OfficeAce 的续期载荷也落在这里）。
 ///
 /// 三条都不成立时：若刷新前**本就没有** `expires_at` 可判（字段本就为空），
 /// 则判不准 → `Indeterminate`（保守方向：绝不倒扣 —— 误报失败会把可用账号
 /// 标记失效）；否则明确未推进 → `Unchanged`。
+///
+/// **注意**：判定「刷新后仍过期」需要当前时刻，见 [`refresh_effect`] ——
+/// 本函数保持纯前后比较，只回答「有没有推进」，不回答「推进后的凭据能不能用」。
 pub(crate) fn fingerprint_advanced(
     before: &RefreshFingerprint,
     after: &RefreshFingerprint,
 ) -> RefreshVerdict {
-    let expiry_advanced =
-        matches!((before.expires_at, after.expires_at), (Some(b), Some(a)) if a > b);
+    let expiry_advanced = match (before.expires_at, after.expires_at) {
+        (Some(b), Some(a)) => a > b,
+        // 刷新前未知 / 不判、刷新后给出正数有效期：上游这次把有效期明确了。
+        // （`<= 0` 是「不判」哨兵；真正是否已过期由 refresh_effect 判。）
+        (None, Some(a)) => a > 0,
+        _ => false,
+    };
     if expiry_advanced || before.token != after.token || before.refresh != after.refresh {
         return RefreshVerdict::Advanced;
     }
@@ -122,6 +135,34 @@ pub(crate) fn fingerprint_advanced(
         return RefreshVerdict::Indeterminate;
     }
     RefreshVerdict::Unchanged
+}
+
+/// 刷新后的凭据是否仍判定过期（`expires_at > 0` 且 `<= now`）。
+///
+/// 与 [`AccountSession::is_expired`] 同口径；`None` / `<= 0` 视为「不判」。
+pub(crate) fn still_expired_after_refresh(after: &RefreshFingerprint, now: i64) -> bool {
+    after.expires_at.is_some_and(|e| e > 0 && e <= now)
+}
+
+/// 一次刷新的完整效果核验（**手动刷新与自动维护共用的唯一判据**）。
+///
+/// 顺序即语义：
+/// 1. 刷新后仍判定过期 → `StillExpired`（哪怕 access 变了也不落盘：交付出去
+///    的凭据立刻不可用，账号仍是坏的）；
+/// 2. 否则走 [`fingerprint_advanced`] 判「有没有推进」。
+///
+/// 两条失败判据都会让调用方返回 `RefreshOutcome::Failed`：**不 CAS 落盘**
+/// （`updated_at` / `error_count` / `last_error` 都不动 = 不更新任何"last_success"
+/// 语义），自动维护计入失败数、手动刷新回 `success:false`。
+pub(crate) fn refresh_effect(
+    before: &RefreshFingerprint,
+    after: &RefreshFingerprint,
+    now: i64,
+) -> RefreshVerdict {
+    if still_expired_after_refresh(after, now) {
+        return RefreshVerdict::StillExpired;
+    }
+    fingerprint_advanced(before, after)
 }
 
 /// 从账号快照取指纹（刷新前的 `before`）。
@@ -351,19 +392,43 @@ async fn refresh_one_inner(
         Ok(tokens) => tokens,
         Err(outcome) => return Ok(outcome),
     };
-    // issue #407：上游返回 Ok 只代表「这次调用没报错」，可能什么都没换到
-    // （上游原样回了旧值 / 插件自己吞了失败）。落盘前比一次刷新前后的凭证
-    // 指纹：明确未推进就判 Failed 且**不落盘**（旧快照仍可重试，不会把账号
-    // 刷废）；判不准则保守放行并 warn（SPEC §6：倒扣代价更大，不误报失败）。
-    match fingerprint_advanced(&session_fingerprint(session), &token_fingerprint(&tokens)) {
+    // issue #407 / 3.4.1：上游返回 Ok 只代表「这次调用没报错」，可能什么都没换到
+    // （上游原样回了旧值 / 插件自己吞了失败），也可能换回来一份**仍然过期**的
+    // 凭据。落盘前做一次完整效果核验（[`refresh_effect`]）：
+    // - 刷新后仍判定过期 → Failed；
+    // - 明确未推进（access 未变、expires_at 未延后、refresh 也未轮换）→ Failed；
+    // - 判不准则保守放行并 warn（SPEC §6：倒扣代价更大，不误报失败）。
+    //
+    // 两条失败判据都**不落盘**：旧快照仍可重试，不会把账号刷废；也正因为不
+    // 调用 `update_tokens_cas`，`updated_at / error_count / last_error`（在该
+    // 函数里被清零/推进的"成功态"字段）一概不动 —— 即"不更新 last_success"。
+    // 手动刷新（`api::admin::account_sessions::handle_account_refresh`）与自动
+    // 维护（本文件的 `refresh_expiring`）都走本函数，判据**只有这一份**。
+    //
+    // 判据里 refresh 明文变化算「推进」：部分上游刷新时轮换 refresh_token 而
+    // access 不变（正常形态），不能把 access 未变当成失败；反过来，只轮换
+    // refresh 而 access/expires 都未推进也算推进（OfficeAce 的续期载荷形态）。
+    let now = chrono::Utc::now().timestamp();
+    match refresh_effect(
+        &session_fingerprint(session),
+        &token_fingerprint(&tokens),
+        now,
+    ) {
         RefreshVerdict::Advanced => {}
         RefreshVerdict::Indeterminate => tracing::warn!(
             "account {} 刷新前后凭证指纹无从判定（expires_at 为空且 token/refresh 未变），保守按成功处理",
             session.id
         ),
+        RefreshVerdict::StillExpired => {
+            return Ok(RefreshOutcome::Failed(
+                "刷新未生效：上游返回的凭据在刷新后仍判定过期（expires_at 已过），未写入账号，请重新登录"
+                    .to_string(),
+            ))
+        }
         RefreshVerdict::Unchanged => {
             return Ok(RefreshOutcome::Failed(
-                "上游未推进凭证（expires_at/updated_at 未变化），账号可能已失效".to_string(),
+                "刷新未生效：access_token 未变且 expires_at 未延后（refresh_token 也未轮换），上游可能未真正换证"
+                    .to_string(),
             ))
         }
     }
@@ -1634,6 +1699,65 @@ mod tests {
             fingerprint_advanced(&before, &after),
             RefreshVerdict::Unchanged,
             "判不准的形态不得被当成明确失败"
+        );
+    }
+
+    // ── 3.4.1 刷新结果核验：完整判据（手动 / 自动共用 refresh_effect）──────
+
+    #[test]
+    fn refresh_effect_rejects_credential_still_expired_after_refresh() {
+        // 上游「成功」返回了新 access，但过期时间仍在过去：凭据交付出去立刻
+        // 不可用 —— 即使指纹有推进（access 变了）也判 StillExpired，不落盘。
+        let now = 10_000;
+        let before = stamp(Some(9_000), "tok-old", "ref-old");
+        let after = stamp(Some(now - 1), "tok-new", "ref-new");
+        assert_eq!(
+            refresh_effect(&before, &after, now),
+            RefreshVerdict::StillExpired
+        );
+        // 过期时间恰好等于当前时刻同样算「仍过期」（与 is_expired 的 <= 同口径）
+        let exactly_now = stamp(Some(now), "tok-new", "ref-new");
+        assert_eq!(
+            refresh_effect(&before, &exactly_now, now),
+            RefreshVerdict::StillExpired
+        );
+        // 反向对照：未来有效期 + access 变化 = 正常成功
+        let fresh = stamp(Some(now + 3_600), "tok-new", "ref-new");
+        assert_eq!(
+            refresh_effect(&before, &fresh, now),
+            RefreshVerdict::Advanced
+        );
+    }
+
+    #[test]
+    fn refresh_effect_rejects_no_advance_but_accepts_refresh_rotation() {
+        let now = 10_000;
+        // 未推进：access / expires_at / refresh 三样全没变 → 明确失败
+        let before = stamp(Some(now + 1_000), "tok-old", "ref-old");
+        let unchanged = stamp(Some(now + 1_000), "tok-old", "ref-old");
+        assert_eq!(
+            refresh_effect(&before, &unchanged, now),
+            RefreshVerdict::Unchanged
+        );
+        // 正常轮换：上游只轮换了 refresh_token，access 与 expires_at 都没变 ——
+        // 这是部分上游的正常形态，**不得**判失败。
+        let rotated = stamp(Some(now + 1_000), "tok-old", "ref-new");
+        assert_eq!(
+            refresh_effect(&before, &rotated, now),
+            RefreshVerdict::Advanced
+        );
+    }
+
+    #[test]
+    fn expiry_known_after_unknown_counts_as_advance() {
+        // 刷新前没有 expires_at、刷新后给出未来有效期：上游把有效期明确了，
+        // 算推进（不能因为「前后都拿得到」才比较而漏判成 Indeterminate）。
+        let now = 10_000;
+        let before = stamp(None, "tok-old", "ref-old");
+        let after = stamp(Some(now + 600), "tok-old", "ref-old");
+        assert_eq!(
+            refresh_effect(&before, &after, now),
+            RefreshVerdict::Advanced
         );
     }
 }

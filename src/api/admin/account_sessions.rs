@@ -356,6 +356,7 @@ fn resolve_or_create_auto_channel(
         name: name.clone(),
         channel_type: ChannelType::Account,
         base_url: base_url.to_string(),
+        backup_base_urls: Vec::new(),
         api_key: String::new(),
         priority: 0,
         weight: 1,

@@ -258,6 +258,20 @@ pub struct Channel {
     /// 上游基础 URL（OpenAI 兼容：`https://api.deepseek.com`；CF 留空）
     #[serde(default)]
     pub base_url: String,
+    /// 备用入口（同一上游的备用 base_url 列表，按顺序尝试）。
+    ///
+    /// 语义（对照 A2A 3.4.0「可选入口与地址容错」）：
+    /// - **只作用于本次上游请求这一跳**：主入口 DNS 解析失败 / 连接失败时，
+    ///   按列表顺序改用备用入口重发；渠道/账号选择、代理出口（同一个
+    ///   `state.http_client`）、重试预算与选路结果都不变；
+    /// - 上游 5xx/429、流中断、超时**不**换入口（避免对已受理请求重复计费）；
+    /// - 仅接受**可信 HTTPS**（`https://`、无 userinfo、默认 443、无 query/
+    ///   fragment）：写入时由管理面校验，运行期 [`Self::trusted_backup_base_urls`]
+    ///   再过滤一次（手改数据文件也不能把明文/凭证 URL 带进连接层）；
+    /// - 账号型渠道不适用（上游地址由账号的 `base_url` 决定，本列表会被忽略）；
+    /// - 上限 [`MAX_BACKUP_BASE_URLS`] 条，去重、去首尾空白。
+    #[serde(default)]
+    pub backup_base_urls: Vec<String>,
     /// 编码后的 api_key（`enc:` 前缀 + base64）
     #[serde(default)]
     pub api_key: String,
@@ -351,10 +365,97 @@ fn default_status() -> String {
     "enabled".to_string()
 }
 
+/// 备用入口条数上限。
+pub const MAX_BACKUP_BASE_URLS: usize = 8;
+
+/// 备用入口是否「可信 HTTPS」。
+///
+/// 口径（对照 A2A `network_fallback::trusted`）：
+/// - scheme 必须是 `https`（明文 HTTP 直接拒绝 —— 备用入口也是凭证出站口）；
+/// - host 非空；**不接受 userinfo**（`https://user:pass@host` 会泄露凭证）；
+/// - 端口必须为 443 或省略（不允许备用入口把流量带到非标端口）；
+/// - 不允许 query / fragment（base_url 只表达地址前缀）。
+pub fn backup_base_url_is_trusted(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| !host.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+/// 校验并归一化备用入口列表（管理面写入口）。
+///
+/// 规则：去首尾空白、丢弃空行、去重（保留首次出现顺序）、排除与主入口相同者、
+/// 每条必须通过 [`backup_base_url_is_trusted`]、总数不超过
+/// [`MAX_BACKUP_BASE_URLS`]。返回归一化后的列表，供 `Channel` 落盘。
+///
+/// 空列表合法（= 不启用备用入口）。
+pub fn normalize_backup_base_urls(
+    raw: &[String],
+    primary_base_url: &str,
+) -> Result<Vec<String>, String> {
+    let primary = primary_base_url.trim().trim_end_matches('/');
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (index, entry) in raw.iter().enumerate() {
+        let url = entry.trim().trim_end_matches('/');
+        if url.is_empty() || url == primary {
+            continue;
+        }
+        if !backup_base_url_is_trusted(url) {
+            return Err(format!(
+                "备用入口第 {} 条不是可信 HTTPS 地址（要求 https://、默认 443 端口、不带用户名密码/查询串）：{url}",
+                index + 1
+            ));
+        }
+        if seen.insert(url.to_string()) {
+            out.push(url.to_string());
+        }
+    }
+    if out.len() > MAX_BACKUP_BASE_URLS {
+        return Err(format!(
+            "备用入口最多 {MAX_BACKUP_BASE_URLS} 条（当前 {} 条）",
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
 impl Channel {
     /// 是否启用
     pub fn is_enabled(&self) -> bool {
         self.status == "enabled"
+    }
+
+    /// 运行期生效的备用入口（已过滤：仅可信 HTTPS、去重、排除与主入口相同者）。
+    ///
+    /// 写入时管理面已校验过一次；这里再过滤是**防御性**的：渠道记录可能来自
+    /// 手改数据文件 / 旧版本 / 迁移导入，连接层绝不能拿到明文 HTTP 或带
+    /// userinfo 的 URL。空列表 = 不启用备用入口（默认路径，零额外开销）。
+    pub fn trusted_backup_base_urls(&self) -> Vec<String> {
+        let primary = self.base_url.trim().trim_end_matches('/');
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for raw in &self.backup_base_urls {
+            let url = raw.trim().trim_end_matches('/');
+            if url.is_empty()
+                || url == primary
+                || !backup_base_url_is_trusted(url)
+                || !seen.insert(url.to_string())
+            {
+                continue;
+            }
+            out.push(url.to_string());
+            if out.len() >= MAX_BACKUP_BASE_URLS {
+                break;
+            }
+        }
+        out
     }
 
     /// 是否支持指定模型（models 为空视为全支持）
@@ -2102,6 +2203,7 @@ mod tests {
             name: format!("ch-{id}"),
             channel_type: ChannelType::OpenaiCompatible,
             base_url: "https://api.deepseek.com".to_string(),
+            backup_base_urls: Vec::new(),
             api_key: "sk-test".to_string(),
             priority: prio,
             weight: 1,
@@ -2810,5 +2912,78 @@ mod tests {
             // 占位 TTL 过期分支：无法在测试中快进 120s（避免 sleep 120s 拖慢），
             // 过期清除由 half_open_occupied 惰性触发，逻辑与未过期分支对称。
         });
+    }
+
+    // ── 备用入口（3.4.0 可选入口与地址容错）──────────────────────────
+
+    #[test]
+    fn backup_entry_must_be_trusted_https() {
+        // 合法：https、默认端口、无 userinfo / query / fragment
+        assert!(backup_base_url_is_trusted("https://api2.example.com"));
+        assert!(backup_base_url_is_trusted("https://api2.example.com/v1"));
+        assert!(backup_base_url_is_trusted(
+            "https://api2.example.com:443/v1"
+        ));
+        // 非法：明文 HTTP / 非标端口 / userinfo / query / fragment / 裸 host
+        assert!(!backup_base_url_is_trusted("http://api2.example.com"));
+        assert!(!backup_base_url_is_trusted("https://api2.example.com:8443"));
+        assert!(!backup_base_url_is_trusted(
+            "https://user:pass@api2.example.com"
+        ));
+        assert!(!backup_base_url_is_trusted("https://api2.example.com?x=1"));
+        assert!(!backup_base_url_is_trusted("https://api2.example.com#f"));
+        assert!(!backup_base_url_is_trusted("api2.example.com"));
+        assert!(!backup_base_url_is_trusted(""));
+    }
+
+    #[test]
+    fn normalize_backup_entries_dedups_and_excludes_primary() {
+        let raw = vec![
+            " https://api2.example.com/ ".to_string(),
+            String::new(),
+            "https://api.deepseek.com".to_string(), // 与主入口相同 → 丢弃
+            "https://api2.example.com".to_string(), // 去重（尾斜杠归一后同一条）
+            "https://api3.example.com".to_string(),
+        ];
+        let out = normalize_backup_base_urls(&raw, "https://api.deepseek.com").unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "https://api2.example.com".to_string(),
+                "https://api3.example.com".to_string()
+            ],
+            "顺序保留首次出现，主入口与重复项被剔除"
+        );
+        // 非法条目 → 明确报错（不静默丢弃：写入口要让管理员知道哪条不合格）
+        let err = normalize_backup_base_urls(
+            &["http://plain.example.com".to_string()],
+            "https://api.deepseek.com",
+        )
+        .unwrap_err();
+        assert!(err.contains("可信 HTTPS"), "实得：{err}");
+        // 超过上限直接拒绝
+        let too_many: Vec<String> = (0..=MAX_BACKUP_BASE_URLS)
+            .map(|i| format!("https://b{i}.example.com"))
+            .collect();
+        assert!(normalize_backup_base_urls(&too_many, "").is_err());
+    }
+
+    #[test]
+    fn channel_runtime_backup_list_filters_untrusted_and_primary() {
+        let mut ch = sample("backup", 1, vec!["m"]);
+        ch.base_url = "https://primary.example.com".to_string();
+        ch.backup_base_urls = vec![
+            "https://primary.example.com".to_string(), // 主入口 → 剔除
+            "http://plain.example.com".to_string(),    // 明文 → 剔除（手改数据文件的防御）
+            "https://backup.example.com".to_string(),
+            "https://backup.example.com/".to_string(), // 归一后重复 → 剔除
+        ];
+        assert_eq!(
+            ch.trusted_backup_base_urls(),
+            vec!["https://backup.example.com".to_string()]
+        );
+        // 默认（空列表）= 空结果，调用方据此零开销走原路径
+        let bare = sample("bare", 1, vec!["m"]);
+        assert!(bare.trusted_backup_base_urls().is_empty());
     }
 }

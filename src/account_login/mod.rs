@@ -621,6 +621,7 @@ fn ensure_channel(
         name: format!("{label} 账号池"),
         channel_type: ChannelType::Account,
         base_url: String::new(),
+        backup_base_urls: Vec::new(),
         api_key: String::new(),
         priority: 0,
         weight: 1,

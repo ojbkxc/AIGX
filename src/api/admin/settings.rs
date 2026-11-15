@@ -1086,9 +1086,48 @@ pub async fn handle_get_gateway_prompt(
             "mode": cfg.mode,
             "text": cfg.text,
             "models": cfg.models,
+            "providers": cfg.providers,
             "developer_role_compat": cfg.developer_role_compat,
         }
     })))
+}
+
+/// 解析一层覆盖表（`models` / `providers` 共用）：整块替换，`null` 值删除该项。
+///
+/// 键 = 模型名或提供商 id；值 `{mode, text}`。文本上限与全局同口径（64000 字符）。
+fn parse_prompt_overrides(
+    value: &Value,
+    label: &str,
+) -> Result<std::collections::BTreeMap<String, crate::prompt::ModelPromptOverride>, String> {
+    if !value.is_object() && !value.is_null() {
+        return Err(format!("{label} 必须是对象"));
+    }
+    let mut next = std::collections::BTreeMap::new();
+    if let Some(map) = value.as_object() {
+        for (key, item) in map {
+            if item.is_null() {
+                continue;
+            }
+            let mode = item
+                .get("mode")
+                .and_then(|m| m.as_str())
+                .and_then(crate::prompt::PromptMode::parse)
+                .unwrap_or(crate::prompt::PromptMode::Passthrough);
+            let text = item
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if text.chars().count() > 64_000 {
+                return Err(format!("{label} 项 {key} 的提示词过长（上限 64000 字符）"));
+            }
+            next.insert(
+                key.clone(),
+                crate::prompt::ModelPromptOverride { mode, text },
+            );
+        }
+    }
+    Ok(next)
 }
 
 /// PUT /api/gateway/prompt —— 保存系统提示词（热生效：下一请求即按新策略注入）。
@@ -1126,38 +1165,13 @@ pub async fn handle_update_gateway_prompt(
     }
     // 按模型覆盖：整块替换（前端提交完整表；键 = 模型名，null/空文本 = 删除该项）
     if let Some(models) = body.get("models") {
-        if !models.is_object() && !models.is_null() {
-            return Err(error_response("models 必须是对象", StatusCode::BAD_REQUEST));
-        }
-        let mut next = std::collections::BTreeMap::new();
-        if let Some(map) = models.as_object() {
-            for (model, value) in map {
-                if value.is_null() {
-                    continue;
-                }
-                let mode = value
-                    .get("mode")
-                    .and_then(|m| m.as_str())
-                    .and_then(crate::prompt::PromptMode::parse)
-                    .unwrap_or(crate::prompt::PromptMode::Passthrough);
-                let text = value
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if text.chars().count() > 64_000 {
-                    return Err(error_response(
-                        &format!("模型 {model} 的提示词过长（上限 64000 字符）"),
-                        StatusCode::BAD_REQUEST,
-                    ));
-                }
-                next.insert(
-                    model.clone(),
-                    crate::prompt::ModelPromptOverride { mode, text },
-                );
-            }
-        }
-        cfg.models = next;
+        cfg.models = parse_prompt_overrides(models, "models")
+            .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
+    }
+    // 按提供商覆盖：整块替换（键 = 渠道/账号 provider；优先级低于模型层）
+    if let Some(providers) = body.get("providers") {
+        cfg.providers = parse_prompt_overrides(providers, "providers")
+            .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
     }
 
     state.gateway_prompt.update(cfg.clone()).map_err(|e| {
@@ -1168,9 +1182,11 @@ pub async fn handle_update_gateway_prompt(
     })?;
 
     tracing::info!(
-        "网关系统提示词已更新: mode={} 长度 {}",
+        "网关系统提示词已更新: mode={} 长度 {}（模型覆盖 {} 条 / 提供商覆盖 {} 条）",
         cfg.mode.as_str(),
-        cfg.text.chars().count()
+        cfg.text.chars().count(),
+        cfg.models.len(),
+        cfg.providers.len()
     );
 
     Ok(Json(json!({
@@ -1180,6 +1196,7 @@ pub async fn handle_update_gateway_prompt(
             "text": cfg.text,
             "developer_role_compat": cfg.developer_role_compat,
             "models": cfg.models,
+            "providers": cfg.providers,
         }
     })))
 }

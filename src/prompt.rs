@@ -9,8 +9,18 @@
 //! [`apply_prompt`]；管理面经 `/api/gateway/prompt` 读写（FileStore 键
 //! `gateway_prompt`），保存即生效。
 //!
-//! 简化口径（相对 A2A）：不做逐 provider 覆盖、不做提示词文件来源三档、
-//! 不做降级中性提示词——AIGX 无该降级机制，只有全局一份文本 + 模式。
+//! 覆盖层级（优先级从高到低，对照 A2A 2.9.0 的逐 provider 覆盖）：
+//! 1. **模型覆盖**（`models`，键 = 客户端请求里的模型名）——入口处即可判定；
+//! 2. **提供商覆盖**（`providers`，键 = 渠道/账号 provider：账号型渠道取
+//!    账号的 provider（qoder / trae …），其余渠道取渠道类型
+//!    （openai_compatible / anthropic / gemini / zai））——选路后才知道是哪一家；
+//! 3. **全局**（`mode` / `text`）。
+//!
+//! 命中任一覆盖层即**整条替代**下一层的 mode/text（不是逐字段合并）；
+//! 文本为空表示「该层不注入」，等价 passthrough。
+//!
+//! 简化口径（相对 A2A）：不做提示词文件来源三档、不做降级中性提示词——
+//! AIGX 无该降级机制。
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -54,12 +64,13 @@ impl PromptMode {
     }
 }
 
-/// 单个模型的提示词覆盖。
+/// 单个模型 / 单个提供商的提示词覆盖。
 ///
 /// AIGX 适配形态：A2A 按 provider 覆盖（它一家一个上游），而 AIGX 的数据面
 /// 入口在解析阶段只拿到客户端请求的**模型名**，provider 要等选路后才确定。
 /// 因此这里按「模型名」覆盖 —— 语义等价（都是「这一路请求用另一套提示词」），
-/// 且能在入口处直接判定。
+/// 且能在入口处直接判定；**提供商层**（[`GatewayPrompt::providers`]）在
+/// 选路后的逐次尝试里生效。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelPromptOverride {
     #[serde(default)]
@@ -79,9 +90,19 @@ pub struct GatewayPrompt {
     #[serde(default)]
     pub text: String,
     /// 按模型覆盖（键 = 客户端请求里的模型名原文）：命中则整条替代全局
-    /// mode/text，未命中回落全局。空表 = 全部走全局（默认路径）。
+    /// mode/text，未命中回落提供商 / 全局。空表 = 全部走下一层（默认路径）。
     #[serde(default)]
     pub models: std::collections::BTreeMap<String, ModelPromptOverride>,
+    /// 按提供商覆盖（键 = 渠道/账号 provider）：
+    /// - 账号型渠道取账号的 provider（`account_sessions.provider_for_channel`，
+    ///   与出站脱敏的 provider 作用域同一口径）；
+    /// - 其余渠道取渠道类型名（openai_compatible / anthropic / gemini / zai …）。
+    ///
+    /// 优先级：模型覆盖 > 提供商覆盖 > 全局。命中提供商层时整条替代全局
+    /// mode/text；空文本 = 该提供商不注入。空表 = 全部走全局（默认路径，
+    /// 数据面零额外分配）。
+    #[serde(default)]
+    pub providers: std::collections::BTreeMap<String, ModelPromptOverride>,
     /// developer 角色兼容（对照 A2A developerRoleCompat，默认开）：
     /// OpenAI 新 SDK 用 `role:"developer"` 取代 system，多数上游只认
     /// system——开启时入口解析把 developer 归一为 system；关闭时按原
@@ -100,6 +121,7 @@ impl Default for GatewayPrompt {
             mode: PromptMode::Passthrough,
             text: String::new(),
             models: std::collections::BTreeMap::new(),
+            providers: std::collections::BTreeMap::new(),
             developer_role_compat: default_developer_role_compat(),
         }
     }
@@ -152,19 +174,57 @@ pub fn apply_prompt(messages: &[ChatMessage], cfg: &GatewayPrompt) -> Option<Vec
     apply_prompt_for("", messages, cfg)
 }
 
-/// 按模型名应用提示词策略：先查该模型是否有专用覆盖，未命中回落全局。
+/// 按模型名应用提示词策略：模型覆盖 > 全局。
 ///
-/// 与 [`apply_prompt`] 是同一套逻辑，只是多了一层「按模型覆盖」的查表。
+/// 入口解析阶段（选路前）用它 —— 此时还不知道本次请求会落到哪一家，
+/// 提供商层由 [`apply_prompt_selected`] 在**逐次尝试**里补上。
 pub fn apply_prompt_for(
     model: &str,
     messages: &[ChatMessage],
     cfg: &GatewayPrompt,
 ) -> Option<Vec<ChatMessage>> {
-    let (mode, text) = match cfg.models.get(model) {
-        Some(over) => (over.mode, over.text.as_str()),
-        None => (cfg.mode, cfg.text.as_str()),
-    };
+    let (mode, text) = resolve_layers(model, None, cfg);
     apply_with(mode, text, messages)
+}
+
+/// 按模型名 + 提供商应用提示词策略：模型覆盖 > 提供商覆盖 > 全局。
+///
+/// 数据面的**唯一推荐入口**：选路后逐次尝试时调用，`provider` 取
+/// `api::openai::sanitize_provider_id`（账号型渠道 = 账号 provider，
+/// 其余 = 渠道类型名），与出站脱敏同一口径。`provider` 为空串时只剩
+/// 模型覆盖 / 全局两层（等价 [`apply_prompt_for`]）。
+///
+/// **为什么在逐次尝试里而不是入口**：同一请求可能 failover 到不同 provider
+/// 的渠道，每换一家都要按那一家的覆盖重新套一遍；入口那次（无 provider）
+/// 的结果不能复用。见 chat/anthropic 两个 failover 循环的调用点。
+pub fn apply_prompt_selected(
+    model: &str,
+    provider: &str,
+    messages: &[ChatMessage],
+    cfg: &GatewayPrompt,
+) -> Option<Vec<ChatMessage>> {
+    let (mode, text) = resolve_layers(model, Some(provider), cfg);
+    apply_with(mode, text, messages)
+}
+
+/// 三层解析：模型覆盖 > 提供商覆盖 > 全局（返回借用视图，不克隆文本）。
+///
+/// 命中某层后**整条替代**（mode + text 一起），不再向下回落 —— 与模型层
+/// 既有语义一致：覆盖层是「这一路请求用另一套提示词」，不是逐字段合并。
+fn resolve_layers<'a>(
+    model: &str,
+    provider: Option<&str>,
+    cfg: &'a GatewayPrompt,
+) -> (PromptMode, &'a str) {
+    if let Some(over) = cfg.models.get(model) {
+        return (over.mode, over.text.as_str());
+    }
+    if let Some(provider) = provider.filter(|p| !p.is_empty()) {
+        if let Some(over) = cfg.providers.get(provider) {
+            return (over.mode, over.text.as_str());
+        }
+    }
+    (cfg.mode, cfg.text.as_str())
 }
 
 /// 提示词策略本体：给定了模式与文本时如何改写消息列表。
@@ -340,6 +400,88 @@ mod tests {
         assert!(apply_prompt_for("silent-model", &msgs, &cfg).is_none());
         // 其它模型仍走全局
         assert!(apply_prompt_for("other", &msgs, &cfg).is_some());
+    }
+
+    #[test]
+    fn provider_override_beats_global_and_model_beats_provider() {
+        let msgs = vec![user("q")];
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            ModelPromptOverride {
+                mode: PromptMode::Append,
+                text: "PER-PROVIDER".to_string(),
+            },
+        );
+        let mut models = std::collections::BTreeMap::new();
+        models.insert(
+            "claude-3-7".to_string(),
+            ModelPromptOverride {
+                mode: PromptMode::Custom,
+                text: "PER-MODEL".to_string(),
+            },
+        );
+        let cfg = GatewayPrompt {
+            mode: PromptMode::Custom,
+            text: "GLOBAL".to_string(),
+            models,
+            providers,
+            ..GatewayPrompt::default()
+        };
+        // 三层全在：模型 > 提供商 > 全局
+        let model_hit = apply_prompt_selected("claude-3-7", "anthropic", &msgs, &cfg).unwrap();
+        assert_eq!(model_hit[0].content.as_deref(), Some("PER-MODEL"));
+        // 模型未命中、提供商命中：用提供商层（整条替代，不是 mode 混合）
+        let provider_hit = apply_prompt_selected("gpt-4o", "anthropic", &msgs, &cfg).unwrap();
+        assert_eq!(provider_hit[0].content.as_deref(), Some("PER-PROVIDER"));
+        // 两层都未命中：回落全局
+        let fallback = apply_prompt_selected("gpt-4o", "gemini", &msgs, &cfg).unwrap();
+        assert_eq!(fallback[0].content.as_deref(), Some("GLOBAL"));
+    }
+
+    #[test]
+    fn provider_override_empty_text_disables_injection() {
+        let msgs = vec![user("q")];
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "qoder".to_string(),
+            ModelPromptOverride {
+                mode: PromptMode::Append,
+                text: " ".to_string(),
+            },
+        );
+        let cfg = GatewayPrompt {
+            mode: PromptMode::Custom,
+            text: "GLOBAL".to_string(),
+            providers,
+            ..GatewayPrompt::default()
+        };
+        // 该提供商文本为空 → 不做注入（即使全局是 custom）
+        assert!(apply_prompt_selected("m", "qoder", &msgs, &cfg).is_none());
+        // 其它提供商仍走全局
+        assert!(apply_prompt_selected("m", "trae", &msgs, &cfg).is_some());
+    }
+
+    #[test]
+    fn empty_provider_falls_through_to_global() {
+        // 取不到 provider（空串）时不允许命中 providers 表里的空键
+        let msgs = vec![user("q")];
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            String::new(),
+            ModelPromptOverride {
+                mode: PromptMode::Append,
+                text: "EMPTY-KEY".to_string(),
+            },
+        );
+        let cfg = GatewayPrompt {
+            mode: PromptMode::Custom,
+            text: "GLOBAL".to_string(),
+            providers,
+            ..GatewayPrompt::default()
+        };
+        let out = apply_prompt_selected("m", "", &msgs, &cfg).unwrap();
+        assert_eq!(out[0].content.as_deref(), Some("GLOBAL"));
     }
 
     #[test]
