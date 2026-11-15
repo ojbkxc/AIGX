@@ -45,6 +45,9 @@ import type {
   DiagnosticsBreakers,
   PluginPackSummary,
   PluginsPayload,
+  ScriptCatalogPayload,
+  ScriptPackageView,
+  ScriptPackagesPayload,
   PricingSyncConfigItem,
   ExchangeRatesItem,
   IpFilterConfigItem,
@@ -1417,6 +1420,36 @@ export const api = {
   /** 在途操作进度（安装/更新任务的阶段与字节读数） */
   getPluginProgress: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/progress`),
+
+  // ── 脚本插件管理（Magpie 脚本包；一个 Bun 宿主承载全部 npm 风格脚本）──
+  // 契约锚点：src/api/admin/script_plugins.rs
+  /** 脚本插件列表：宿主状态 + 全部已装包（含 providerRouted） */
+  listScriptPlugins: (): Promise<ApiResponse<ScriptPackagesPayload>> =>
+    request<ApiResponse<ScriptPackagesPayload>>('GET', `${API_BASE}/plugins/scripts`),
+  /** Magpie 目录：状态（三分类计数/阶段时间戳/错误）+ 条目（camelCase） */
+  scriptCatalog: (): Promise<ApiResponse<ScriptCatalogPayload>> =>
+    request<ApiResponse<ScriptCatalogPayload>>('GET', `${API_BASE}/plugins/scripts/catalog`),
+  /** 手动刷新 Magpie 目录（force 无视 TTL；异步后台任务，立即返回） */
+  refreshScriptCatalog: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/scripts/refresh`),
+  /**
+   * 安装脚本包。trusted=true 必须由二次确认弹窗传（脚本不是沙箱，
+   * 将以 Bun 进程权限运行）；安装含下载/解包/依赖安装，可能几十秒。
+   */
+  installScriptPackage: (selector: string, trusted: boolean): Promise<ApiResponse<{ package: ScriptPackageView }>> =>
+    request<ApiResponse<{ package: ScriptPackageView }>>('POST', `${API_BASE}/plugins/scripts/install`, { selector, trusted }),
+  /** 脚本包启停（触发宿主热切换，失败后端自动回滚） */
+  enableScriptPackage: (id: string, enabled: boolean, version?: string): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/scripts/enable`, { id, ...(version ? { version } : {}), enabled }),
+  /** 卸载脚本包（先停用再删盘） */
+  uninstallScriptPackage: (id: string, version?: string): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/scripts/uninstall`, { id, ...(version ? { version } : {}) }),
+  /** 保存脚本包配置（values 为逐键对象；启用中的包会重建宿主让脚本读到新值） */
+  saveScriptPackageOptions: (id: string, values: Record<string, unknown>, version?: string): Promise<ApiResponse<{ package: ScriptPackageView }>> =>
+    request<ApiResponse<{ package: ScriptPackageView }>>('POST', `${API_BASE}/plugins/scripts/options`, { id, ...(version ? { version } : {}), values }),
+  /** 手动重启脚本宿主（排障用；无已启用包时等于关停宿主） */
+  rebuildScriptHost: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/scripts/rebuild`),
 
   // 系统监控
   getSystemMonitor: (): Promise<ApiResponse<SystemMonitorItem>> =>

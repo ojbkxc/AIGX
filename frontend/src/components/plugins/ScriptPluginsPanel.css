@@ -1,0 +1,118 @@
+/* 脚本插件（Magpie）面板 —— 复用 Plugins 页的 pl-grid/pl-card 体系，这里只补本面板特有的。 */
+
+/* 宿主状态条：横向滚动徽章 + 文案 */
+.pls-host-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.04));
+}
+
+/* 目录状态行（第二行，包数/时间戳/错误） */
+.pls-host-bar.pls-cat-bar {
+  margin-top: 6px;
+  font-size: 11.5px;
+}
+
+/* 目录筛选工具栏 */
+.pls-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.pls-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 200px;
+}
+
+.pls-search .form-input {
+  width: 100%;
+}
+
+.pls-toolbar .form-input {
+  min-width: 130px;
+}
+
+/* 目录分组：标题 + 计数 + 网格 */
+.pls-group {
+  margin-top: 14px;
+}
+
+.pls-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pls-group-title h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.pls-group-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface-bg, rgba(127, 127, 127, 0.12));
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+/* 星标 / 仓库链接 / provider 徽标集合 */
+.pls-stars {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.pls-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.pls-repo:hover {
+  color: var(--primary-color);
+}
+
+.pls-providers {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+}
+
+/* 不可安装条目置灰 */
+.pl-card.is-disabled {
+  opacity: 0.55;
+}
+
+/* 配置弹窗的键值行 */
+.pls-opt-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pls-opt-key {
+  flex: 0 0 200px;
+}
+
+.pls-opt-val {
+  flex: 1;
+}

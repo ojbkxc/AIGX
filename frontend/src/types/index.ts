@@ -2218,6 +2218,108 @@ export interface PluginsPayload {
   operations: PluginOperation[];
 }
 
+// ── 脚本插件（Magpie；/api/plugins/scripts*）─────────────────────────
+// 契约锚点：src/api/admin/script_plugins.rs（手写视图）与
+// src/plugin_host/script/catalog/types.rs（PublicEntry serde camelCase）。
+
+/** 脚本包声明的一家 provider（OpenCode v1 auth.provider 的投影） */
+export interface ScriptProviderView {
+  id: string;
+  label: string;
+  upstream?: string | null;
+  models: string[];
+}
+
+/** 已安装脚本包（GET /api/plugins/scripts 的 packages[]） */
+export interface ScriptPackageView {
+  id: string;
+  label: string;
+  version: string;
+  /** `magpie` / `npm` / `github` / `local` */
+  source: string;
+  /** `official` / `recommended` / `third-party` */
+  publisher: string;
+  providers: ScriptProviderView[];
+  entry?: string | null;
+  sourceRef: string;
+  repository?: string | null;
+  summary?: string | null;
+  /** unix 秒 */
+  installedAt: number;
+  enabled: boolean;
+  /** 运维显式信任（脚本不是沙箱，trusted=true 才允许启用） */
+  trusted: boolean;
+  options: { values: Record<string, unknown> };
+  /** 任一 provider 被脚本宿主实际接管（宿主未跑/未装载 = false） */
+  providerRouted: boolean;
+}
+
+/** 脚本宿主状态（GET /api/plugins/scripts 的 host） */
+export interface ScriptHostView {
+  running: boolean;
+  packages: number;
+  providers: string[];
+  lastError?: string | null;
+  crashes: number;
+}
+
+/** GET /api/plugins/scripts 响应 data */
+export interface ScriptPackagesPayload {
+  host: ScriptHostView;
+  packages: ScriptPackageView[];
+}
+
+/** Magpie 目录条目（后端 PublicEntry camelCase 投影，字段只读透传） */
+export interface ScriptCatalogEntryView {
+  name: string;
+  label: string;
+  version: string | null;
+  providers: string[];
+  kind: string | null;
+  /** `official` / `recommended` / `third-party` */
+  publisher: string;
+  magpieOfficial: boolean;
+  magpieRecommended: boolean;
+  /** `magpie` / `npm` / `github` */
+  source: string;
+  /** 安装指示串（安装时原样回传 /api/plugins/scripts/install） */
+  selector: string;
+  summary: string | null;
+  repository: string | null;
+  repositoryUrl: string | null;
+  stars: number | null;
+  starsAt: number | null;
+  iconSources: string[];
+  installable: boolean;
+  unavailableReason: string | null;
+  pushedAt: number | null;
+  manifestAt: number | null;
+  providerVerified: boolean | null;
+}
+
+/** Magpie 目录状态（后端 Status；serde snake_case——字段名与后端 JSON 原样一致） */
+export interface ScriptCatalogStatus {
+  market_at: number;
+  github_at: number;
+  stars_at: number;
+  market_error: string | null;
+  github_error: string | null;
+  github_missing: boolean;
+  market_stale: boolean;
+  github_stale: boolean;
+  stars_stale: boolean;
+  official: number;
+  recommended: number;
+  third_party: number;
+  ignored: number;
+}
+
+/** GET /api/plugins/scripts/catalog 响应 data */
+export interface ScriptCatalogPayload {
+  status: ScriptCatalogStatus;
+  entries: ScriptCatalogEntryView[];
+}
+
 /**
  * 聊天会话摘要（GET /api/chat/sessions 列表项 / fork 响应的 session）。
  * 后端锚点：src/chat_session/mod.rs:70-83（serde camelCase）。

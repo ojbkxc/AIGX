@@ -2,11 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Download, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { api } from '../api';
+import ScriptPluginsPanel from '../components/plugins/ScriptPluginsPanel';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Badge, Button, Card, EmptyState, Loading, Switch, Tooltip } from '../components/ui';
+import { Badge, Button, Card, EmptyState, Loading, Switch, Tabs, Tooltip } from '../components/ui';
 import type { PluginOperation, PluginPackSummary, PluginsPayload, StorePlugin } from '../types';
 import './Plugins.css';
+
+/** 插件页分组：原生插件包 / 脚本插件（Magpie） */
+type PluginTab = 'native' | 'scripts';
 
 /** 安装时间（unix 毫秒/秒归一）→ 人话 */
 function fmtInstalledAt(value: unknown): string {
@@ -251,6 +255,8 @@ export default function Plugins(): JSX.Element {
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  /** 插件页分组（原生插件包 / 脚本插件（Magpie）） */
+  const [tab, setTab] = useState<PluginTab>('native');
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -406,84 +412,102 @@ export default function Plugins(): JSX.Element {
         </div>
       </div>
 
-      {error && <div className="error-message">{error}</div>}
+      {/* 原生插件 / 脚本插件（Magpie）两个分组 */}
+      <Tabs<PluginTab>
+        className="pl-tabs"
+        ariaLabel={t('插件管理')}
+        items={[
+          { key: 'native', label: t('原生插件') },
+          { key: 'scripts', label: t('脚本插件（Magpie）') },
+        ]}
+        active={tab}
+        onChange={(k) => setTab(k)}
+      />
 
-      {loading ? (
-        <Loading text={t('读取插件列表')} />
-      ) : notReady ? (
-        <EmptyState
-          icon="🧩"
-          message={t('插件管理后端尚未就绪')}
-          action={<p className="pl-empty-hint">{t('AIGX 的插件机制正在建设中（契约对齐 Agent2API：安装 / 启停 / 目录 / 进度）。后端上线本页即自动可用；当前版本的提供商全部内置于网关，无需插件即可使用。')}</p>}
-        />
+      {tab === 'scripts' ? (
+        <ScriptPluginsPanel />
       ) : (
-        <Card
-          title={`${t('已安装插件')} (${packs.length})`}
-          actions={
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <Badge tone={anyHostRunning ? 'success' : 'neutral'}>
-                {anyHostRunning ? t('宿主运行中') : externalPacks.length ? t('宿主未运行') : t('内置实现')}
-              </Badge>
-              <Button variant="outline" size="sm" onClick={() => void handleRefreshStore()} disabled={busy}>
-                {busyId === 'refresh' ? <Loader2 size={13} className="spin" /> : null}
-                {t('刷新目录')}
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => void handleCheckUpdates()} disabled={busy}>
-                {busyId === 'check' || catalog?.checking ? t('检查中…') : t('检查更新')}
-              </Button>
-            </div>
-          }
-        >
-          {packs.length === 0 && storePlugins.length === 0 ? (
+        <div hidden={tab !== 'native'}>
+          {error && <div className="error-message">{error}</div>}
+
+          {loading ? (
+            <Loading text={t('读取插件列表')} />
+          ) : notReady ? (
             <EmptyState
               icon="🧩"
-              message={t('暂无已安装的插件')}
-              action={<p className="pl-empty-hint">{t('AIGX 当前所有提供商均内置于网关（注册表静态表达），无需插件即可使用。插件包用于扩展后续的第三方提供商。')}</p>}
+              message={t('插件管理后端尚未就绪')}
+              action={<p className="pl-empty-hint">{t('AIGX 的插件机制正在建设中（契约对齐 Agent2API：安装 / 启停 / 目录 / 进度）。后端上线本页即自动可用；当前版本的提供商全部内置于网关，无需插件即可使用。')}</p>}
             />
           ) : (
-            <div className="pl-grid">
-              {packs.map((pack) => (
-                <InstalledPackCard
-                  key={pack.id}
-                  pack={pack}
-                  operation={operations.find((op) => op.id === pack.id)}
-                  busy={busy}
-                  onEnabled={(v) => handleEnabled(pack, v)}
-                  onRemove={() => handleUninstall(pack)}
-                  onProviderEnabled={(provider, v) => handleProviderEnabled(pack, provider, v)}
+            <Card
+              title={`${t('已安装插件')} (${packs.length})`}
+              actions={
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <Badge tone={anyHostRunning ? 'success' : 'neutral'}>
+                    {anyHostRunning ? t('宿主运行中') : externalPacks.length ? t('宿主未运行') : t('内置实现')}
+                  </Badge>
+                  <Button variant="outline" size="sm" onClick={() => void handleRefreshStore()} disabled={busy}>
+                    {busyId === 'refresh' ? <Loader2 size={13} className="spin" /> : null}
+                    {t('刷新目录')}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => void handleCheckUpdates()} disabled={busy}>
+                    {busyId === 'check' || catalog?.checking ? t('检查中…') : t('检查更新')}
+                  </Button>
+                </div>
+              }
+            >
+              {packs.length === 0 && storePlugins.length === 0 ? (
+                <EmptyState
+                  icon="🧩"
+                  message={t('暂无已安装的插件')}
+                  action={<p className="pl-empty-hint">{t('AIGX 当前所有提供商均内置于网关（注册表静态表达），无需插件即可使用。插件包用于扩展后续的第三方提供商。')}</p>}
                 />
-              ))}
-              {storePlugins.map((item) => (
-                <StorePackCard
-                  key={item.id}
-                  item={item}
-                  target={payload?.target || ''}
-                  catalogAvailable={catalog?.available !== false}
-                  catalogReason={catalog?.reason}
-                  busy={busy}
-                  onInstall={handleInstall}
-                />
-              ))}
-            </div>
+              ) : (
+                <div className="pl-grid">
+                  {packs.map((pack) => (
+                    <InstalledPackCard
+                      key={pack.id}
+                      pack={pack}
+                      operation={operations.find((op) => op.id === pack.id)}
+                      busy={busy}
+                      onEnabled={(v) => handleEnabled(pack, v)}
+                      onRemove={() => handleUninstall(pack)}
+                      onProviderEnabled={(provider, v) => handleProviderEnabled(pack, provider, v)}
+                    />
+                  ))}
+                  {storePlugins.map((item) => (
+                    <StorePackCard
+                      key={item.id}
+                      item={item}
+                      target={payload?.target || ''}
+                      catalogAvailable={catalog?.available !== false}
+                      catalogReason={catalog?.reason}
+                      busy={busy}
+                      onInstall={handleInstall}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* 诊断信息（对齐上游：目录 / 平台 / 协议版本折叠区） */}
+              {payload && (
+                <details className="pl-diagnostics">
+                  <summary>{t('诊断信息')}</summary>
+                  <div>
+                    <span>{t('插件目录')} <code>{payload.pluginsDir || '—'}</code></span>
+                    <span>{t('当前平台')} <code>{payload.target || '—'}</code></span>
+                    <span>{t('协议版本')} {payload.protocol || '—'}</span>
+                    {catalog?.reason ? <span className="pl-dg-err">{catalog.reason}</span> : null}
+                    {host?.lastError ? <span className="pl-dg-err">{host.lastError}</span> : null}
+                  </div>
+                </details>
+              )}
+            </Card>
           )}
 
-          {/* 诊断信息（对齐上游：目录 / 平台 / 协议版本折叠区） */}
-          {payload && (
-            <details className="pl-diagnostics">
-              <summary>{t('诊断信息')}</summary>
-              <div>
-                <span>{t('插件目录')} <code>{payload.pluginsDir || '—'}</code></span>
-                <span>{t('当前平台')} <code>{payload.target || '—'}</code></span>
-                <span>{t('协议版本')} {payload.protocol || '—'}</span>
-                {catalog?.reason ? <span className="pl-dg-err">{catalog.reason}</span> : null}
-                {host?.lastError ? <span className="pl-dg-err">{host.lastError}</span> : null}
-              </div>
-            </details>
-          )}
-        </Card>
+          <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+        </div>
       )}
-
-      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
