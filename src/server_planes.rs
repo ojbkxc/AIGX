@@ -135,11 +135,27 @@ async fn data_plane_guard(req: axum::extract::Request, next: Next) -> Response {
 }
 
 async fn admin_plane_guard(req: axum::extract::Request, next: Next) -> Response {
-    if plane_allows(Plane::Admin, req.uri().path()) {
-        next.run(req).await
-    } else {
-        plane_not_found()
+    if !plane_allows(Plane::Admin, req.uri().path()) {
+        return plane_not_found();
     }
+    let mut resp = next.run(req).await;
+    // CORS 按监听器分挂：管理面**不发**跨域许可头。
+    //
+    // 管理前端随 admin_bind 同源提供，不存在合法的跨域管理调用；而
+    // `build_router` 里统一挂的 CorsLayer 会把 `cors_origins`（数据面给
+    // API 客户端用的清单）同样回给管理面，等于允许任何被列入数据面来源的
+    // 站点携带凭据跨域调用管理 API。这里在最外层剥掉全部 `Access-Control-*`
+    // 响应头（含预检响应），使管理面对浏览器表现为纯同源。数据面不受影响。
+    let headers = resp.headers_mut();
+    let cors_keys: Vec<axum::http::HeaderName> = headers
+        .keys()
+        .filter(|k| k.as_str().starts_with("access-control-"))
+        .cloned()
+        .collect();
+    for key in cors_keys {
+        headers.remove(key);
+    }
+    resp
 }
 
 /// 给路由套上平面守卫（最外层：先判平面，未命中直接 404，不进业务中间件）。
@@ -260,26 +276,52 @@ pub async fn serve_split(
 
     let mut data_fut = Box::pin(std::future::IntoFuture::into_future(data_serve));
     let mut admin_fut = Box::pin(std::future::IntoFuture::into_future(admin_serve));
-    let drain = async move {
+    let drain = Box::pin(async move {
         // 信号未到前不启用超时；`Err` 表示信号任务在发送前已结束。
         if deadline_rx.recv().await.is_err() {
             std::future::pending::<()>().await;
         }
         tokio::time::sleep(drain_timeout).await;
-    };
+    });
 
-    tokio::select! {
-        (data_res, admin_res) = async { tokio::join!(&mut data_fut, &mut admin_fut) } => {
-            data_res?;
-            admin_res?;
+    // 两个 serve 都可能在「收到信号前」出错（accept 失败等）：任一出错即
+    // 放弃另一个并返回错误；两者都因优雅关停结束则正常返回。
+    let mut data_done = false;
+    let mut admin_done = false;
+    let mut first_error: Option<anyhow::Error> = None;
+    let mut drain = drain;
+    let timed_out = loop {
+        if data_done && admin_done {
+            break false;
         }
-        _ = drain => {
-            tracing::warn!(
-                "Graceful shutdown timed out after {}s of draining; forcing exit with in-flight requests pending",
-                drain_timeout.as_secs()
-            );
+        tokio::select! {
+            r = &mut data_fut, if !data_done => {
+                data_done = true;
+                if let Err(e) = r {
+                    first_error = Some(e.into());
+                    break false;
+                }
+            }
+            r = &mut admin_fut, if !admin_done => {
+                admin_done = true;
+                if let Err(e) = r {
+                    first_error = Some(e.into());
+                    break false;
+                }
+            }
+            _ = &mut drain => {
+                tracing::warn!(
+                    "Graceful shutdown timed out after {}s of draining; forcing exit with in-flight requests pending",
+                    drain_timeout.as_secs()
+                );
+                break true;
+            }
         }
+    };
+    if let Some(e) = first_error {
+        return Err(e);
     }
+    let _ = timed_out;
 
     Ok(())
 }

@@ -49,6 +49,7 @@ pub mod runtime_log;
 pub mod sanitize;
 pub mod scheduled_tasks;
 pub mod semantic;
+pub mod server_planes;
 pub mod sse;
 pub mod storage;
 pub mod sync;
