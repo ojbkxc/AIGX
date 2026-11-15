@@ -1205,7 +1205,14 @@ pub(crate) async fn handle_chat_completions(
         // (b) tools/tool_choice/stop/top_p 不同的请求命中同一条目，返回错误结果
         // （键在函数前段已按原口径算好，见 is_stream 下方的 cache_key）
         let cache_key = cache_key.expect("非流式路径必有缓存键");
-        if let Some(cached) = state.response_cache.get(&cache_key).await {
+        // 护栏开启时跳过响应缓存：缓存会绕过输入降级/输出拦截与假答复门控，
+        // 形成「配置已开但仍放行」的假绿路径。护栏默认关闭 → 逐字节不变。
+        let cached = if guardrail.enabled() {
+            None
+        } else {
+            state.response_cache.get(&cache_key).await
+        };
+        if let Some(cached) = cached {
             tracing::debug!("response cache hit for model {}", model);
             let prompt_tokens = cached
                 .get("usage")
@@ -1876,7 +1883,10 @@ pub(crate) async fn handle_chat_completions(
                     "total_tokens": response.usage.total_tokens,
                 }
             });
-            state.response_cache.insert(cache_key, json.clone()).await;
+            // 护栏开启时同样不写缓存（与上面的跳过读取同因：已开时缓存无意义）
+            if !guardrail.enabled() {
+                state.response_cache.insert(cache_key, json.clone()).await;
+            }
             let mut resp = Json(json).into_response();
             resp.headers_mut()
                 .insert("x-aigx-cache", "miss".parse().unwrap());
