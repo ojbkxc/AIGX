@@ -92,20 +92,45 @@ pub(crate) fn redact_url(raw: &str) -> String {
     }
 }
 
-/// 一段自由文本的脱敏：把任何含 `://` 的空白分词按 URL 处理。
+/// 一段自由文本的脱敏：扫描所有含 `://` 的片段，把 URL 本体替换为脱敏形态。
 ///
-/// 不引入正则依赖：错误详情里 URL 总是以空白分隔的整体出现，分词足够。
+/// 不引入正则依赖：错误详情里的 URL 可能被括号 / 引号 / 中文标点包着
+///（`(https://u:p@host/x?y=1):`），所以先从 `://` 向左回溯到 scheme 起点，
+/// 再向右取到标点 / 空白为止。
 pub(crate) fn redact_text(text: &str) -> String {
-    text.split_whitespace()
-        .map(|token| {
-            if token.contains("://") {
-                redact_url(token)
-            } else {
-                token.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let Some(idx) = rest.find("://") else {
+            out.push_str(rest);
+            break;
+        };
+        // scheme 起点：从 `://` 向左回溯 `[A-Za-z0-9+.-]`
+        let head = &rest[..idx];
+        let scheme_start = head
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(idx);
+        out.push_str(&rest[..scheme_start]);
+        let candidate = &rest[scheme_start..];
+        let end = candidate
+            .char_indices()
+            .find(|(_, c)| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | '，' | '。' | '；' | '：'
+                    )
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(candidate.len());
+        out.push_str(&redact_url(&candidate[..end]));
+        rest = &candidate[end..];
+    }
+    out
 }
 
 #[cfg(test)]

@@ -47,8 +47,6 @@ pub mod webdav;
 
 use std::sync::OnceLock;
 
-pub use config::{SaveInput, SyncConfig, SyncStatus};
-
 /// 全局同步锁（上传 / 拉取 / 调度循环共用）。
 pub(crate) fn sync_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();

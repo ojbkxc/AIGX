@@ -48,9 +48,9 @@ pub fn spawn(state: AppState) {
                         applied_interval_ms = interval_ms;
                     }
                 }
-                let task_state = task_state::read(TASK_KEY).unwrap_or_default();
+                let sched_state = task_state::read(TASK_KEY).unwrap_or_default();
                 let now = super::now_ms();
-                if !task_state.running() && now >= task_state.due_at() {
+                if !sched_state.running() && now >= sched_state.due_at() {
                     run_once(&state, &sync_config, interval_ms).await;
                 }
             } else {

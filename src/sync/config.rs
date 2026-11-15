@@ -259,18 +259,18 @@ impl SyncConfig {
 
     /// 远端路径的展示形态。
     pub fn remote_display(&self) -> String {
-        let path_segments = path_segments(&self.path).unwrap_or_default();
+        let base_segments = path_segments(&self.path).unwrap_or_default();
         match self.backend.as_str() {
             PROVIDER_S3 => {
                 let mut segments = path_segments(&self.s3.prefix).unwrap_or_default();
-                segments.extend(path_segments);
+                segments.extend(base_segments);
                 if self.s3.bucket.is_empty() {
                     segments.join("/")
                 } else {
                     format!("{}/{}", self.s3.bucket, segments.join("/"))
                 }
             }
-            _ => format!("/{}", path_segments.join("/")),
+            _ => format!("/{}", base_segments.join("/")),
         }
     }
 
