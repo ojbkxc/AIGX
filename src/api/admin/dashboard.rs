@@ -156,7 +156,7 @@ pub async fn handle_model_distribution(
             }
             // 大小写不敏感：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，保留首次出现原大小写。
             let key = l.model.to_ascii_lowercase();
-            *models.entry(key).or_insert((l.model.clone(), 0)).1 += 1;
+            models.entry(key).or_insert((l.model.clone(), 0)).1 += 1;
         }
         models
             .into_iter()
@@ -944,7 +944,7 @@ pub async fn handle_report_overview(
                 }
                 // 大小写不敏感：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，保留首次出现原大小写。
                 let key = l.model.to_ascii_lowercase();
-                *models.entry(key).or_insert((l.model.clone(), 0)).1 += 1;
+                models.entry(key).or_insert((l.model.clone(), 0)).1 += 1;
             }
             let mut top_models: Vec<(String, u64)> =
                 models.into_iter().map(|(_, (d, c))| (d, c)).collect();
