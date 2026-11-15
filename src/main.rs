@@ -78,6 +78,7 @@ mod scheduled_tasks;
 mod semantic;
 mod sse;
 mod storage;
+mod sync;
 mod ticket;
 mod token_estimate;
 mod update;
