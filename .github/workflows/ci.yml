@@ -45,8 +45,8 @@ jobs:
       - name: Audit dependencies
         # 显式豁免清单（#24 波次落地后 2026-11-15 更新）：
         # reqwest 0.13.5 → hickory 0.26.3（解 14 条）；sea-orm 2.0 → rsa 出树
-        # （解 1 条）；zip 2.6.1 > 2.3.0（0429 不再适用）。原 22 条移除 16 条，
-        # 余 6 条豁免如下。组1–3 为父依赖约束卡死，组4 为手工解压绕过。
+        # （解 1 条）。原 22 条移除 15 条，余 7 条豁免如下。组1–3 为父依赖
+        # 约束卡死，组4 为手工解压绕过。
         run: |
           ignores=(
             # 组1 ×1：libsqlite3-sys 0.37 修复线 0.39 需 rusqlite 0.41，
@@ -58,11 +58,12 @@ jobs:
             #   非 sqlx 链——rsa 已随 sea-orm 2.0 出树），修复线 0.7.6
             #   需 elliptic-curve 大版本升级
             RUSTSEC-2026-0387
-            # 组3 ×3：zip 2.6.1 恒久豁免——3 条触发路径全在 ZipArchive::
+            # 组3 ×4：zip 2.6.1 恒久豁免——4 条触发路径全在 ZipArchive::
             #   extract 等便捷 API；本仓 plugin_host/install.rs 手工逐条
             #   解压（by_index + safe_join 防 zip-slip），从不调用漏洞 API
-            #   （RUSTSEC-2026-0429 修复线 2.3.0，2.6.1 已越过，不再豁免）
-            RUSTSEC-2026-0367 RUSTSEC-2026-0369 RUSTSEC-2026-0368
+            #   （4 条修复线均 >= 9.0.0，升级跨 7 个大版本，本窗口不升）
+            RUSTSEC-2026-0429 RUSTSEC-2026-0367 RUSTSEC-2026-0369
+            RUSTSEC-2026-0368
             # 组4 ×1：unsafe-libyaml（serde_yaml_ng 0.10 传递依赖，仍
             #   unmaintained）；唯一使用点 proxy_pool/clash.rs 仅 Value+
             #   from_str 纯数据反序列化，迁移超本窗口
