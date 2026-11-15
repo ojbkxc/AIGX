@@ -58,6 +58,10 @@ pub fn build_openapi_document() -> Value {
         paths_accounts_network(),
         paths_docs(),
         paths_diagnostics(),
+        paths_client_config(),
+        paths_sync(),
+        paths_client_id(),
+        paths_guardrail(),
         paths_mcp(),
     ] {
         if let Value::Object(m) = part {
@@ -734,6 +738,9 @@ fn paths_dashboard_usage() -> Value {
         "/api/usage/summary": {
             "get": op("看板", "用量总摘要"),
             "post": op("看板", "强制刷新用量统计缓存（写操作）")
+        },
+        "/api/dashboard/report/top_clients": {
+            "get": op_params("看板", "客户端用量排行", &[query_param("days", "integer", "回溯天数")])
         }
     })
 }
@@ -1257,6 +1264,84 @@ fn paths_diagnostics() -> Value {
     })
 }
 
+fn paths_client_config() -> Value {
+    json!({
+        "/api/admin/client-configs": {
+            "get": op_params("客户端配置", "列出客户端接入配置（按目标分组）",
+                &[query_param("target", "string", "按目标过滤（claude_code/codex/claude_desktop/dsh）")]),
+            "post": op_body("客户端配置", "创建客户端接入配置",
+                "target: 目标类型, name: 配置名, enabled: bool, settings/config 内容; 凭据字段单独走 .credentials.yaml")
+        },
+        "/api/admin/client-configs/{id}": {
+            "put": op_body("客户端配置", "更新客户端接入配置", "与创建同结构"),
+            "delete": op_params("客户端配置", "删除客户端接入配置", &[path_param("id")])
+        },
+        "/api/admin/client-configs/{id}/preview": {
+            "post": op_params("客户端配置", "预览将要写入的文件（不落盘）", &[path_param("id")])
+        },
+        "/api/admin/client-configs/{id}/apply": {
+            "post": op_params("客户端配置", "应用配置（写盘前自动备份原文件）", &[path_param("id")])
+        },
+        "/api/admin/client-configs/{id}/backups": {
+            "get": op_params("客户端配置", "列出该配置的自动备份", &[path_param("id")])
+        },
+        "/api/admin/client-configs/{id}/restore": {
+            "post": op_body("客户端配置", "从备份恢复配置", "backup: 备份序号")
+        }
+    })
+}
+
+fn paths_sync() -> Value {
+    json!({
+        "/api/admin/sync/config": {
+            "get": op("云同步", "查询云同步配置（WebDAV/S3）"),
+            "put": op_body("云同步", "更新云同步配置", "enabled: bool, backend: webdav|s3, url/credentials/interval 等")
+        },
+        "/api/admin/sync/test": {
+            "post": op("云同步", "测试云同步连通性（不执行同步）")
+        },
+        "/api/admin/sync/now": {
+            "post": op("云同步", "立即执行一次同步（增量哈希判断）")
+        },
+        "/api/admin/sync/pull": {
+            "post": op_body("云同步", "从云端拉取并合并恢复（危险操作）", "strategy: remote_wins|remote_force|local_force")
+        },
+        "/api/admin/sync/status": {
+            "get": op("云同步", "查询同步状态（上次成功/错误/连续失败）")
+        }
+    })
+}
+
+fn paths_client_id() -> Value {
+    json!({
+        "/api/client-id": {
+            "get": op("客户端识别", "列出客户端识别规则")
+        },
+        "/api/client-id/rules": {
+            "post": op_body("客户端识别", "新增客户端识别规则", "name: string, match_type: ua|header, match_mode: prefix|contains|regex, client: 客户端名, priority: int, enabled: bool")
+        },
+        "/api/client-id/rules/{id}": {
+            "put": op_body("客户端识别", "更新客户端识别规则", "与新增同结构"),
+            "delete": op_params("客户端识别", "删除客户端识别规则", &[path_param("id")])
+        },
+        "/api/client-id/preview": {
+            "post": op_body("客户端识别", "预览某请求头/UA 的识别结果", "ua/headers 输入 → 识别出的客户端名")
+        }
+    })
+}
+
+fn paths_guardrail() -> Value {
+    json!({
+        "/api/guardrail": {
+            "get": op("内容护栏", "查询护栏配置（关键词/正则/降级策略）"),
+            "put": op_body("内容护栏", "更新护栏配置", "input/output: {enabled, patterns[], mode: reject|degrade}, fake_reply: {enabled, patterns[]}")
+        },
+        "/api/guardrail/degrade/clear": {
+            "post": op("内容护栏", "手动解除降级状态（降级期到次日 00:00 UTC+8 前可手动解除）")
+        }
+    })
+}
+
 fn paths_mcp() -> Value {
     json!({
         "/api/mcp": {
@@ -1459,6 +1544,13 @@ mod tests {
         add("/api/cache/clear", &["post"]);
         add("/api/cache/stats", &["get"]);
         add("/api/channels", &["get", "post"]);
+        // 客户端接入多配置管理（对齐 Agent2API v3.5.0 non-plugin 段）
+        add("/api/admin/client-configs", &["get", "post"]);
+        add("/api/admin/client-configs/{id}", &["delete", "put"]);
+        add("/api/admin/client-configs/{id}/apply", &["post"]);
+        add("/api/admin/client-configs/{id}/backups", &["get"]);
+        add("/api/admin/client-configs/{id}/preview", &["post"]);
+        add("/api/admin/client-configs/{id}/restore", &["post"]);
         add("/api/channels/chat_test", &["post"]);
         add("/api/channels/fetch_models", &["post"]);
         add("/api/channels/{id}", &["delete", "patch", "put"]);
@@ -1487,6 +1579,7 @@ mod tests {
         add("/api/dashboard/report/overview", &["get"]);
         add("/api/dashboard/report/token_trend", &["get"]);
         add("/api/dashboard/report/top_sources", &["get"]);
+        add("/api/dashboard/report/top_clients", &["get"]);
         add("/api/dashboard/scheduler_status", &["get"]);
         add("/api/dashboard/user_ranking", &["get"]);
         add("/api/diagnostics/breakers", &["get"]);
@@ -1496,6 +1589,9 @@ mod tests {
         add("/api/epay/info", &["get"]);
         add("/api/groups", &["get", "post"]);
         add("/api/groups/{name}", &["delete", "put"]);
+        // guardrail 接线 + 降级（对齐 Agent2API v2.6.0 non-plugin 段）
+        add("/api/guardrail", &["get", "put"]);
+        add("/api/guardrail/degrade/clear", &["post"]);
         add("/api/ip/blacklist", &["post"]);
         add("/api/ip/blacklist/{pattern}", &["delete"]);
         add("/api/ip/filter", &["get", "put"]);
@@ -1651,6 +1747,17 @@ mod tests {
         add("/api/subscription/balance/pay", &["post"]);
         add("/api/subscription/plans", &["get"]);
         add("/api/subscription/self", &["get"]);
+        // 云同步（对齐 Agent2API v3.5.0 non-plugin 段）
+        add("/api/admin/sync/config", &["get", "put"]);
+        add("/api/admin/sync/now", &["post"]);
+        add("/api/admin/sync/pull", &["post"]);
+        add("/api/admin/sync/status", &["get"]);
+        add("/api/admin/sync/test", &["post"]);
+        // 客户端识别（对齐 Agent2API v3.4.2 non-plugin 段）
+        add("/api/client-id", &["get"]);
+        add("/api/client-id/preview", &["post"]);
+        add("/api/client-id/rules", &["post"]);
+        add("/api/client-id/rules/{id}", &["delete", "put"]);
         add("/api/tokens", &["get", "post"]);
         add("/api/tokens/today", &["get"]);
         add("/api/tokens/{id}", &["delete", "put"]);
