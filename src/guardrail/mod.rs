@@ -13,7 +13,17 @@ use async_trait::async_trait;
 
 use crate::bridge::{ChatFormat, ChatResponse};
 
+pub mod degrade;
+pub mod fake_reply;
 pub mod keyword;
+pub mod settings;
+
+pub use fake_reply::{peek_for_fake_reply, FakeReplyMatcher, FakeReplyPeek};
+pub use settings::{
+    current_settings, ensure_installed, guard_output_stream, install, neutral_messages, snapshot,
+    update, GuardrailAction, GuardrailRuleSpec, GuardrailRuntime, GuardrailSettings,
+    GuardrailStore, InputDecision, OutputScanner, RuleKind, GUARDRAIL_SETTINGS_KEY,
+};
 
 /// 护栏裁决结果
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,6 +4,7 @@ pub mod assistant;
 pub mod auth;
 pub mod backup;
 pub mod backup_crypto;
+pub mod branding;
 pub mod cache;
 pub mod channels;
 pub mod checkin_center;
@@ -15,6 +16,7 @@ pub mod dashboard;
 pub mod debug;
 pub mod desktop_import;
 pub mod diagnostics;
+pub mod guardrail;
 pub mod logs;
 pub mod mcp;
 pub mod model_manage;
@@ -153,6 +155,11 @@ pub use security::{handle_security_events, handle_security_summary};
 
 // 破甲控制台（请求治理总控：GET/PUT 配置 + 进程统计）
 pub use purge::{handle_get_purge, handle_update_purge};
+
+// 护栏（输入/输出黑名单 + 200 假答复门控：GET/PUT 配置 + 解除降级）
+pub use guardrail::{
+    handle_clear_guardrail_degrade, handle_get_guardrail, handle_update_guardrail,
+};
 
 // 调试模式：上游原始报文查看/清空（对照 Agent2API `/api/debug/traffic`）
 pub use debug::{

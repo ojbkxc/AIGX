@@ -26,7 +26,7 @@ impl KeywordRule {
         Regex::new(pattern).map(Self::Regex)
     }
 
-    fn matches(&self, haystack: &str) -> bool {
+    pub(crate) fn matches(&self, haystack: &str) -> bool {
         match self {
             KeywordRule::Literal(needle) => {
                 let h = haystack.to_lowercase();
@@ -37,7 +37,7 @@ impl KeywordRule {
         }
     }
 
-    fn description(&self) -> String {
+    pub(crate) fn description(&self) -> String {
         match self {
             KeywordRule::Literal(s) => format!("literal {s:?}"),
             KeywordRule::Regex(r) => format!("regex /{}/", r.as_str()),
@@ -81,6 +81,19 @@ impl KeywordBlocklist {
 
     fn first_match(&self, text: &str) -> Option<&KeywordRule> {
         self.rules.iter().find(|r| r.matches(text))
+    }
+
+    /// 文本命中第一条规则时返回规则描述（同步版，供流式增量扫描复用）。
+    ///
+    /// 与 [`Guardrail::check_output`] 同口径（只看传入文本），但不需要
+    /// 先构造 `ChatResponse`——流式路径逐 chunk 扫描时用它。
+    pub fn first_match_text(&self, text: &str) -> Option<String> {
+        self.first_match(text).map(|rule| rule.description())
+    }
+
+    /// 规则条数（诊断/管理面展示用）。
+    pub fn rule_count(&self) -> usize {
+        self.rules.len()
     }
 }
 

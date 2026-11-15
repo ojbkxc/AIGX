@@ -51,6 +51,7 @@ mod debug_traffic;
 mod egress;
 mod error_translate;
 mod graphql;
+mod guardrail;
 mod health;
 mod hub;
 mod ip;
@@ -372,6 +373,9 @@ async fn main() -> anyhow::Result<()> {
     // 破甲控制台：配置热更新；启动时刻只用于页面展示运行时长
     let purge = Arc::new(crate::purge::PurgeStore::with_store(store.clone()));
     crate::purge::init_started_at();
+    // 护栏（输入/输出黑名单 + 200 假答复门控）：进程级存储，默认全关；
+    // 启动时从盘恢复，管理面保存即热生效
+    crate::guardrail::install(store.clone());
 
     // 额外脱敏请求头名单（对照 Agent2API「设置 → 网关 → 指纹脱敏」）：
     // 启动时从盘恢复进程级快照；保存设置时热更新
@@ -2134,6 +2138,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/purge",
             get(api::admin::handle_get_purge).put(api::admin::handle_update_purge),
+        )
+        // 护栏（输入/输出黑名单 + 200 假答复门控；默认全关）
+        .route(
+            "/api/guardrail",
+            get(api::admin::handle_get_guardrail).put(api::admin::handle_update_guardrail),
+        )
+        .route(
+            "/api/guardrail/degrade/clear",
+            post(api::admin::handle_clear_guardrail_degrade),
         )
         // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
         .route(

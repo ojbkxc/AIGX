@@ -579,7 +579,7 @@ pub async fn handle_messages(
         .into_response();
     }
 
-    let chat_req = ChatFormat {
+    let mut chat_req = ChatFormat {
         model: model.clone(),
         messages: all_messages,
         // Anthropic tools 格式 → OpenAI tools 格式（上游统一 OpenAI 协议）
@@ -629,6 +629,40 @@ pub async fn handle_messages(
         web_search_options: None,
         extra: body.get("metadata").cloned(),
     };
+
+    // 护栏（输入侧，默认关闭）：与 chat 端点同口径。关闭时只做一次 Arc
+    // 快照读取，出站字节逐字节不变。命中词表：
+    // - reject：返回标准 Anthropic 错误；
+    // - degrade（默认）：同账号换中性提示词原地重发一次，并触发降级状态机
+    //   （到次日 00:00 UTC+8，触发不续期，可手动解除）。
+    let guardrail = crate::guardrail::snapshot();
+    if guardrail.enabled() && guardrail.input_enabled() {
+        let degrade_active = crate::guardrail::degrade::active();
+        match guardrail.decide_input(&chat_req.messages, degrade_active) {
+            crate::guardrail::InputDecision::Allow { messages: None } => {}
+            crate::guardrail::InputDecision::Allow {
+                messages: Some(rewritten),
+            } => {
+                chat_req.messages = rewritten;
+            }
+            crate::guardrail::InputDecision::Reject { reason } => {
+                tracing::warn!("guardrail: input rejected (messages): {reason}");
+                return anthropic_error(
+                    "invalid_request_error",
+                    &format!("Request blocked by guardrail: {reason}"),
+                    StatusCode::BAD_REQUEST,
+                )
+                .into_response();
+            }
+            crate::guardrail::InputDecision::Degrade { reason, messages } => {
+                let until = crate::guardrail::degrade::trigger();
+                tracing::warn!(
+                    "guardrail: input degraded to neutral prompt ({reason}), retry same account; degrade until {until}"
+                );
+                chat_req.messages = messages;
+            }
+        }
+    }
 
     // P1 两段式计费：请求前预留配额，流式/非流式结算时多退少补。
     // 此前 Anthropic 分支未接两段式（reservation: None），余额耗尽用户可在
@@ -774,6 +808,65 @@ pub async fn handle_messages(
             };
             match attempt {
                 Ok(s) => {
+                    // 护栏（HTTP 200 假答复门控，默认关闭）：与 chat 流式同口径。
+                    // 词表非空时先读前缀；命中则丢弃本轮流，记录一次失败尝试、
+                    // 换下一个候选，且不记渠道成功。词表为空时原流逐字下发。
+                    let s = if guardrail.fake_reply_enabled() {
+                        match crate::guardrail::peek_for_fake_reply(s, guardrail.fake_reply()).await
+                        {
+                            crate::guardrail::FakeReplyPeek::Refused { pattern } => {
+                                let reason = format!("upstream fake reply matched {pattern}");
+                                if let Some(c) = &cid {
+                                    filtered_channels.push(crate::log::FilteredChannel {
+                                        channel_id: c.clone(),
+                                        reason: reason.clone(),
+                                    });
+                                    let fake_err =
+                                        crate::bridge::BridgeError::Config(reason.clone());
+                                    state.channel_store.record_channel_failure(
+                                        c,
+                                        Some(&upstream),
+                                        crate::channel::ChannelStore::classify_bridge_error(
+                                            &fake_err,
+                                        ),
+                                        &reason,
+                                        session_id.as_deref(),
+                                    );
+                                    state.channel_store.mark_cooldown(c, reason.clone(), 60);
+                                }
+                                if let Some(capture) = route_capture.as_mut() {
+                                    capture.push_attempt(crate::log::AttemptDetail {
+                                        index: attempt_index,
+                                        channel_id: cid.clone().unwrap_or_default(),
+                                        channel_name: ch_ref
+                                            .as_ref()
+                                            .map(|c| c.name.clone())
+                                            .unwrap_or_default(),
+                                        provider: ch_ref
+                                            .as_ref()
+                                            .map(|c| c.channel_type.as_str().to_string())
+                                            .unwrap_or_default(),
+                                        account: String::new(),
+                                        model: upstream.clone(),
+                                        sticky_hit,
+                                        started_at: attempt_started_at,
+                                        finished_at: Some(chrono::Utc::now().timestamp()),
+                                        status: Some(200),
+                                        error: Some(reason.clone()),
+                                        notice: Some("fake reply detected in stream prefix".into()),
+                                    });
+                                }
+                                tracing::warn!(
+                                    "messages stream fake reply detected (prefix): {plan_model} -> next candidate"
+                                );
+                                last_error = Some(crate::bridge::BridgeError::Config(reason));
+                                continue;
+                            }
+                            crate::guardrail::FakeReplyPeek::Pass(s) => s,
+                        }
+                    } else {
+                        s
+                    };
                     // 破甲异源递进（流式侧）：与非流式同口径——建流成功不代表没拒答。
                     // 仅在「异源已开 + 主模型 + 已达触发轮次 + 配了异源模型」时
                     // 先读前缀判定；其余情形原流逐字下发（零改动）。
@@ -1025,8 +1118,11 @@ pub async fn handle_messages(
                 .into_response();
             }
         };
+        // 护栏（输出侧，默认关闭）：命中输出词表时把标准错误帧作为流的最后
+        // 一项吐出（middle 的 Err 分支按既有错误帧收尾；suffix 照常收尾，
+        // 日志记流错误）。词表为空时原流逐字下发。
+        let stream = crate::guardrail::guard_output_stream(stream, &guardrail);
         {
-            // 累积输出文本用于流结束时估算 token（问题 3）
             let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
             let acc_for_map = acc.clone();
             // 工具按次调用计数表（流式过程统计 tool_use 起始块）
@@ -1504,6 +1600,8 @@ pub async fn handle_messages(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // 输出侧护栏命中（非流式）：终止候选循环并按标准错误返回
+        let mut output_block: Option<String> = None;
         // 连接稳定性：failover 总预算（候选上限 + 总时长），与流式/openai 面同口径
         let mut failover_budget = crate::api::failover::FailoverBudget::new();
         // P1-7：调度决策回放——记录候选渠道与被过滤渠道（与 openai 非流式路径对齐）
@@ -1601,6 +1699,57 @@ pub async fn handle_messages(
                 Ok(resp) => {
                     // #47：计费接管点/记账点（见各分支语义）
                     attempt_guard.handoff();
+                    // 护栏（HTTP 200 假答复门控，默认关闭）：与 chat 非流式同口径。
+                    // 命中 → 记录一次失败尝试、换下一个候选，且不记渠道成功。
+                    if guardrail.fake_reply_enabled() {
+                        if let Some(pattern) = guardrail.fake_reply_hit(resp.message.content_str())
+                        {
+                            let reason = format!("upstream fake reply matched {pattern}");
+                            crate::purge::record_refusal();
+                            if let Some(c) = &cid {
+                                filtered_channels.push(crate::log::FilteredChannel {
+                                    channel_id: c.clone(),
+                                    reason: reason.clone(),
+                                });
+                                let fake_err = crate::bridge::BridgeError::Config(reason.clone());
+                                state.channel_store.record_channel_failure(
+                                    c,
+                                    Some(&upstream),
+                                    crate::channel::ChannelStore::classify_bridge_error(&fake_err),
+                                    &reason,
+                                    session_id.as_deref(),
+                                );
+                                state.channel_store.mark_cooldown(c, reason.clone(), 60);
+                            }
+                            if let Some(capture) = route_capture.as_mut() {
+                                capture.push_attempt(crate::log::AttemptDetail {
+                                    index: attempt_index,
+                                    channel_id: cid.clone().unwrap_or_default(),
+                                    channel_name: ch_ref
+                                        .as_ref()
+                                        .map(|c| c.name.clone())
+                                        .unwrap_or_default(),
+                                    provider: ch_ref
+                                        .as_ref()
+                                        .map(|c| c.channel_type.as_str().to_string())
+                                        .unwrap_or_default(),
+                                    account: String::new(),
+                                    model: upstream.clone(),
+                                    sticky_hit,
+                                    started_at: attempt_started_at,
+                                    finished_at: Some(chrono::Utc::now().timestamp()),
+                                    status: Some(200),
+                                    error: Some(reason.clone()),
+                                    notice: Some("fake reply (HTTP 200) detected".into()),
+                                });
+                            }
+                            tracing::warn!(
+                                "messages fake reply detected (HTTP 200): {plan_model} -> next candidate"
+                            );
+                            last_error = Some(crate::bridge::BridgeError::Config(reason));
+                            continue;
+                        }
+                    }
                     // 破甲异源递进（非流式侧）：到达触发轮次后，主模型响应若判定
                     // 为拒答则不结算本轮，直接尝试后续候选（通常是异源模型）。
                     // 与 chat 端点同口径；拒答不是渠道不健康，不记渠道失败。
@@ -1616,6 +1765,46 @@ pub async fn handle_messages(
                             "refusal detected; switching to fallback model".into(),
                         ));
                         continue;
+                    }
+                    // 护栏（输出侧，非流式）：命中输出词表 → 不结算、不记渠道
+                    // 成功，按标准错误返回（内容问题与渠道无关，不换渠道）。
+                    if let Some(reason) = guardrail.output_hit(resp.message.content_str()) {
+                        tracing::warn!("guardrail: output blocked (messages): {reason}");
+                        if let Some(c) = &cid {
+                            filtered_channels.push(crate::log::FilteredChannel {
+                                channel_id: c.clone(),
+                                reason: format!("output blocked by {reason}"),
+                            });
+                        }
+                        if let Some(capture) = route_capture.as_mut() {
+                            capture.push_attempt(crate::log::AttemptDetail {
+                                index: attempt_index,
+                                channel_id: cid.clone().unwrap_or_default(),
+                                channel_name: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_default(),
+                                provider: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.channel_type.as_str().to_string())
+                                    .unwrap_or_default(),
+                                account: String::new(),
+                                model: upstream.clone(),
+                                sticky_hit,
+                                started_at: attempt_started_at,
+                                finished_at: Some(chrono::Utc::now().timestamp()),
+                                status: Some(200),
+                                error: Some(format!("output blocked by {reason}")),
+                                notice: Some("guardrail output blocked".into()),
+                            });
+                        }
+                        output_block = Some(reason.clone());
+                        last_error = Some(crate::bridge::BridgeError::Config(format!(
+                            "guardrail: output blocked by {reason}"
+                        )));
+                        used_channel_id = cid;
+                        used_upstream = Some(upstream);
+                        break;
                     }
                     if attempt_index > 1 {
                         crate::purge::record_early_success();
@@ -1743,8 +1932,13 @@ pub async fn handle_messages(
                 // #47：计费接管点/记账点（见各分支语义）
                 attempt_guard.handoff();
                 let latency_ms = request_start.elapsed().as_millis() as u64;
-                let status_code = StatusCode::from_u16(e.http_status())
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let status_code = if output_block.is_some() {
+                    // 输出被护栏拦截：客户端收到 400（不是 5xx）
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::from_u16(e.http_status())
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+                };
                 let mut log = crate::log::RequestLog::new();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
@@ -1806,6 +2000,14 @@ pub async fn handle_messages(
                 // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
                 // 原文（未脱敏）落服务端日志供排障；客户端只收脱敏版。
                 tracing::warn!("messages error (raw, ops): {e}");
+                if let Some(reason) = output_block {
+                    return anthropic_error(
+                        "invalid_request_error",
+                        &format!("Response blocked by guardrail: {reason}"),
+                        StatusCode::BAD_REQUEST,
+                    )
+                    .into_response();
+                }
                 return anthropic_error(
                     e.error_type(),
                     &crate::error_translate::sanitize_error_message(&e.to_string()),
