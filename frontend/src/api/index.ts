@@ -139,6 +139,8 @@ import type {
   ClientConfigTargetId,
   ClientConfigUpsertBody,
 } from '@/types/client-config';
+// 会话图片压缩与视觉兼容类型（#7；独立文件，理由同上：types/index.ts 并行编辑）
+import type { ImageCompatSettingsBody, ImageCompatSettingsItem } from '@/types/image-compat';
 // 工具调用 / usage 帧适配层（#63；回灌层未定，形状变更只改适配层）
 import { extractToolCalls, extractUsage, type ToolCallWireMode } from '@/lib/toolCallAdapter';
 
@@ -980,6 +982,12 @@ export const api = {
     request<ApiResponse<GatewaySettingsItem>>('GET', `${API_BASE}/gateway/settings`),
   saveGatewaySettings: (data: Record<string, unknown>): Promise<ApiResponse<GatewaySettingsItem>> =>
     request<ApiResponse<GatewaySettingsItem>>('PUT', `${API_BASE}/gateway/settings`, data),
+  // 会话图片压缩与视觉兼容（/api/image-compat/settings，#7）：GET 响应 camelCase，
+  // PUT body camelCase（后端收别名），缺省字段保持原值；保存即热生效。越界 400。
+  getImageCompatSettings: (): Promise<ApiResponse<ImageCompatSettingsItem>> =>
+    request<ApiResponse<ImageCompatSettingsItem>>('GET', `${API_BASE}/image-compat/settings`),
+  saveImageCompatSettings: (data: ImageCompatSettingsBody): Promise<ApiResponse<ImageCompatSettingsItem>> =>
+    request<ApiResponse<ImageCompatSettingsItem>>('PUT', `${API_BASE}/image-compat/settings`, data),
   // 安全策略（登录失败锁定 / 限流阈值；对照 Agent2API「设置 → 安全」）
   // 阈值与开关保存即生效，锁定时长改后需重启服务。
   getSecurityPolicy: (): Promise<ApiResponse<SecurityPolicyItem>> =>
