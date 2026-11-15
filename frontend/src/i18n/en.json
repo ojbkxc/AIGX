@@ -3697,5 +3697,10 @@
   "字面子串": "Literal substring",
   "词表里有空规则，请填写或删除": "The pattern list contains an empty rule; fill it in or remove it",
   "正则无效": "Invalid regex",
-  "护栏配置已保存，立即生效": "Guardrail settings saved and take effect immediately"
+  "护栏配置已保存，立即生效": "Guardrail settings saved and take effect immediately",
+  "规则名称不能为空": "Rule name is required",
+  "客户端识别": "Client identification",
+  "命中后的客户端名不能为空": "Target client name is required",
+  "匹配内容不能为空": "Match content is required",
+  "User-Agent": "User-Agent"
 }
