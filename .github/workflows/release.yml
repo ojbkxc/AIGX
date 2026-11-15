@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout（全历史，供 changelog 对比上一 tag）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
