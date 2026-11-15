@@ -136,15 +136,30 @@ fn patch(
                 .ok_or_else(|| format!("TOML 字段 {key} 不是表，拒绝覆盖"))?;
             patch(child, old, new)?;
         } else {
+            // 继承旧条目的装饰（toml_edit 解析器把独立注释行挂到**下一个键
+            // 的 leaf_decor.prefix**；Table::insert 的 Occupied 分支会执行
+            // key_mut().fmt() 把它抹掉——必须先存后补）：
+            // - Key 层：前置注释 / 空行（独立注释行的归属地）
+            // - Value 层：行内前导空白与行尾注释
+            let old_key_decor = table
+                .get_key_value(key)
+                .map(|(old_key, _)| old_key.leaf_decor().clone());
+            let old_val_decor = table
+                .get(key)
+                .and_then(toml_edit::Item::as_value)
+                .map(|old_val| old_val.decor().clone());
             let mut replacement = item(value)?;
-            if let (Some(old), Some(new)) = (
-                table.get(key).and_then(toml_edit::Item::as_value),
-                replacement.as_value_mut(),
-            ) {
-                // 继承原值的行尾注释与前后空白装饰
-                *new.decor_mut() = old.decor().clone();
+            if let Some(new_val) = replacement.as_value_mut() {
+                if let Some(decor) = old_val_decor {
+                    *new_val.decor_mut() = decor;
+                }
             }
             table.insert(key, replacement);
+            if let Some(decor) = old_key_decor {
+                if let Some(mut new_key) = table.key_mut(key) {
+                    *new_key.leaf_decor_mut() = decor;
+                }
+            }
         }
     }
     Ok(())

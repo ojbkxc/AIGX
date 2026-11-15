@@ -295,13 +295,14 @@ pub(crate) async fn ensure_directories(
         if status.is_success() {
             continue;
         }
-        if status == StatusCode::METHOD_NOT_ALLOWED
+        // 405/409/3xx：目录可能已存在（MKCOL 对已存在目录的典型回包），
+        // 用 PROPFIND 复核，存在即视为成功。
+        if (status == StatusCode::METHOD_NOT_ALLOWED
             || status == StatusCode::CONFLICT
-            || status.is_redirection()
+            || status.is_redirection())
+            && propfind_exists(&client, &final_url, auth).await?
         {
-            if propfind_exists(&client, &final_url, auth).await? {
-                continue;
-            }
+            continue;
         }
         return Err(status_error("MKCOL", status, &final_url));
     }

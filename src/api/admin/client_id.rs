@@ -227,13 +227,13 @@ pub async fn handle_delete_client_rule(
     })))
 }
 
-/// 预览请求体：`{ userAgent?, headers?: {name: value} }`
+/// 预览请求体：`{ userAgent?, headers?: {name: value} }`。
 ///
-/// pub(crate)：handle_preview_client_id 是 pub handler（bin/lib 双 target
-/// 经 main.rs 路由引用），私有类型出现在 pub 签名会 E0445/E0446。
+/// pub：handle_preview_client_id 是 pub handler（bin/lib 双 target 经
+/// main.rs 路由引用），签名可见性必须 ≥ 类型可见性（clippy private_interfaces）。
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PreviewBody {
+pub struct PreviewBody {
     #[serde(default)]
     user_agent: Option<String>,
     #[serde(default)]

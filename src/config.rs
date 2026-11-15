@@ -154,6 +154,11 @@ pub fn validate_brand_url(raw: &str) -> Result<String, String> {
     if url.is_empty() {
         return Err("地址不能为空".to_string());
     }
+    // 首尾空白属于「看起来对、写进去就变样」的模糊输入：不替调用方静默
+    // trim，原样拒绝（与下方「不能包含空白」同一保守口径）。
+    if raw != url {
+        return Err("地址不能带首尾空白".to_string());
+    }
     if url.len() > 2048 {
         return Err("地址过长（上限 2048 字符）".to_string());
     }

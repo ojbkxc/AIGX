@@ -778,7 +778,7 @@ fn version_at(value: &str, pos_after: usize) -> String {
     if pos_after == 0 || pos_after > bytes.len() {
         return String::new();
     }
-    let mut index = pos_after;
+    let index = pos_after;
     // 匹配内容自身以 '/' 结尾（如 "MyClient/"）：版本紧跟其后。
     if bytes[index - 1] == b'/' {
         return take_version(bytes, index).unwrap_or_default();
@@ -836,20 +836,10 @@ fn read_header(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// 按字符截断并把控制字符替换为空格。
 fn bounded_text(text: &str, max_chars: usize) -> String {
-    let mut out = String::with_capacity(text.len().min(max_chars));
-    let mut count = 0usize;
-    for ch in text.chars() {
-        if count >= max_chars {
-            break;
-        }
-        if ch.is_control() {
-            out.push(' ');
-        } else {
-            out.push(ch);
-        }
-        count += 1;
-    }
-    out
+    text.chars()
+        .take(max_chars)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
 }
 
 fn eq_ci(left: &str, right: &str) -> bool {

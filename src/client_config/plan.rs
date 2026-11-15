@@ -282,14 +282,16 @@ pub fn line_diff(before: &str, after: &str) -> Vec<Value> {
             out.push(json!({"kind":"same","text":b[j],"oldLine":i+1,"newLine":j+1}));
             i += 1;
             j += 1;
-        } else if j < b.len()
-            && (i == a.len() || lcs[i * width + j + 1] >= lcs[(i + 1) * width + j])
+        } else if i < a.len()
+            && (j == b.len() || lcs[(i + 1) * width + j] >= lcs[i * width + j + 1])
         {
-            out.push(json!({"kind":"added","text":b[j],"newLine":j+1}));
-            j += 1;
-        } else {
+            // removed 优先：LCS 得分并列时按统一 diff 惯例先删后增
+            // （"a\nb\n"→"a\nc\n" 输出 [same, removed(b), added(c)]）
             out.push(json!({"kind":"removed","text":a[i],"oldLine":i+1}));
             i += 1;
+        } else {
+            out.push(json!({"kind":"added","text":b[j],"newLine":j+1}));
+            j += 1;
         }
     }
     out
@@ -351,14 +353,6 @@ pub struct BackupEntry {
 
 const BAK_MARK: &str = ".bak.";
 
-fn backup_id(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.rsplit_once(BAK_MARK))
-        .map(|(_, id)| id.to_string())
-        .unwrap_or_default()
-}
-
 /// 列出某文件的备份（新的在前）。
 pub fn list_backups(file: &Path) -> Result<Vec<BackupEntry>, String> {
     let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
@@ -392,7 +386,7 @@ pub fn list_backups(file: &Path) -> Result<Vec<BackupEntry>, String> {
             size,
         });
     }
-    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    items.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
     Ok(items)
 }
 
@@ -400,7 +394,14 @@ pub fn list_backups(file: &Path) -> Result<Vec<BackupEntry>, String> {
 ///
 /// 备份 ID 用毫秒时间戳；同一毫秒重复备份时递增直到不撞名。
 fn backup_file(path: &Path, before: &str) -> Result<BackupEntry, String> {
-    let mut created_at = now_ms();
+    // 探测起点必须严格大于已有备份的最大时间戳：now_ms() 在同毫秒竞争或
+    // 时钟抖动下可能 ≤ 已占用值，探测找到的空位会落在占用区中间——新备份
+    // 排序后落进轮转删除区，被自己的轮转立即清掉（backup_rotation 契约）。
+    let mut created_at = list_backups(path)?
+        .first()
+        .map(|e| e.created_at + 1)
+        .unwrap_or(0)
+        .max(now_ms());
     let mut target = PathBuf::new();
     for _ in 0..1000 {
         target = PathBuf::from(format!("{}{BAK_MARK}{created_at}", path.display()));

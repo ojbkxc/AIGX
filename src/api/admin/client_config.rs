@@ -46,10 +46,6 @@ fn not_found() -> ApiError {
     error_response("配置不存在", StatusCode::NOT_FOUND)
 }
 
-fn internal(message: &str) -> ApiError {
-    error_response(message, StatusCode::INTERNAL_SERVER_ERROR)
-}
-
 fn find_record(store: &crate::storage::FileStore, id: &str) -> Result<(Target, Record), ApiError> {
     match store::find(store, id) {
         Ok(Some(found)) => Ok(found),

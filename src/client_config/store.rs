@@ -330,10 +330,7 @@ pub fn mark_applied(store: &FileStore, target: Target, id: &str, at: i64) -> Res
     })
 }
 
-fn slot<'a>(
-    targets: &'a mut [(Target, Vec<Record>)],
-    target: Target,
-) -> Result<&'a mut Vec<Record>, String> {
+fn slot(targets: &mut [(Target, Vec<Record>)], target: Target) -> Result<&mut Vec<Record>, String> {
     targets
         .iter_mut()
         .find(|(item, _)| *item == target)

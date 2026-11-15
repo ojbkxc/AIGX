@@ -136,8 +136,16 @@ impl SyncEntry {
 }
 
 /// 一组条目的内容哈希。
+///
+/// **只覆盖「键 + 原始值」**：`updated_at` 是元数据，仅时间戳推进（无内容
+/// 变化）不得触发上传（hash_skip_decision 契约——否则每次凭证维护都会
+/// 白传一份全库快照）。
 pub fn hash_entries(entries: &BTreeMap<String, SyncEntry>) -> String {
-    match serde_json::to_vec(entries) {
+    let contents: BTreeMap<&String, &serde_json::Value> = entries
+        .iter()
+        .map(|(key, entry)| (key, &entry.value))
+        .collect();
+    match serde_json::to_vec(&contents) {
         Ok(bytes) => super::sha256_hex(&bytes),
         Err(_) => String::new(),
     }
@@ -254,7 +262,8 @@ pub struct MergeStats {
     pub added: usize,
     /// 冲突且取远端（覆盖本机）的条目数。
     pub updated: usize,
-    /// 冲突且保留本机的条目数。
+    /// 保留本机的条目数（冲突保留 + 本机独有；恒等式
+    /// `added + updated + kept_local == merged.len()`）。
     pub kept_local: usize,
     /// 远端快照里混入的「本机专属键」条数（已忽略）。
     pub ignored_remote_keys: usize,
@@ -527,7 +536,8 @@ mod tests {
         assert_eq!(outcome.merged["local-only"].value, json!({"v": "local"}));
         assert_eq!(outcome.stats.added, 1);
         assert_eq!(outcome.stats.updated, 1);
-        assert_eq!(outcome.stats.kept_local, 3);
+        // 冲突保留（old-remote）+ 本机独有（local-only）= 2；恒等式 1+1+2=4=merged.len()
+        assert_eq!(outcome.stats.kept_local, 2);
         assert_eq!(outcome.writes.len(), 2);
     }
 
