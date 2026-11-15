@@ -1,0 +1,52 @@
+/* 注册页：邮箱白名单拆分输入（本地部分 + 域名下拉）与注册关闭提示 */
+
+/* 邮箱拆分行：本地部分输入框 + 域名下拉 */
+.email-split {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.email-split .email-split-local {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 复用 .form-input 的高度/边框/背景，只覆盖 select 的宽度与原生外观 */
+.email-split .email-split-domain {
+  flex: 0 0 150px;
+  width: 150px;
+  padding-right: 8px;
+  cursor: pointer;
+  color: var(--input-text);
+  background: var(--input-bg);
+}
+
+.email-split .email-split-domain:disabled {
+  cursor: not-allowed;
+}
+
+/* 窄屏：本地部分与下拉纵向堆叠，避免下拉把输入框挤没 */
+@media (max-width: 480px) {
+  .email-split {
+    flex-direction: column;
+  }
+
+  .email-split .email-split-local,
+  .email-split .email-split-domain {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+}
+
+/* 注册已关闭提示（warning 语义令牌，明暗主题自动适配） */
+.register-closed-notice {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  color: var(--warning-text, #b45309);
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  margin-bottom: 14px;
+  text-align: center;
+}

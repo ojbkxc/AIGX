@@ -52,8 +52,8 @@ pub use auth::{
     handle_google_oauth_callback, handle_linuxdo_bind_start, handle_linuxdo_oauth_authorize,
     handle_linuxdo_oauth_callback, handle_login, handle_login_send_code, handle_login_totp,
     handle_login_with_code, handle_logout, handle_oauth_consume, handle_oauth_unbind,
-    handle_refresh_session, handle_register, handle_reset_password, handle_totp_disable,
-    handle_totp_enable, handle_totp_setup,
+    handle_refresh_session, handle_register, handle_register_options, handle_reset_password,
+    handle_totp_disable, handle_totp_enable, handle_totp_setup,
 };
 
 pub use users::{

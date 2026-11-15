@@ -3,10 +3,11 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGS, setLanguage } from '../i18n';
 import { Eye, EyeOff } from 'lucide-react';
-import { api } from '../api';
+import { api, type RegisterOptions } from '../api';
 import { cycleTheme } from '../lib/theme';
 import { useAltcha } from '../hooks/useAltcha';
 import AltchaWidget from '../components/AltchaWidget';
+import './Register.css';
 
 type UsernameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error';
 
@@ -23,6 +24,10 @@ interface RegisterResponse {
 
 export default function Register() {
   const [email, setEmail] = useState('');
+  // 白名单启用时：邮箱拆成「本地部分 + 域名下拉」（域名含 @ 前缀，如 @163.com）
+  const [localPart, setLocalPart] = useState('');
+  const [selectedDomain, setSelectedDomain] = useState('');
+  const [options, setOptions] = useState<RegisterOptions | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -42,6 +47,30 @@ export default function Register() {
     const aff = params.get('aff') || params.get('aff_code') || '';
     if (aff) setAffCode(aff);
   }, []);
+
+  // 注册选项（公共端点）：注册开关 / 邮箱白名单 / 机器人校验。
+  // 拉取失败时按「注册开放、单邮箱输入框」降级，避免整页不可用。
+  useEffect(() => {
+    let cancelled = false;
+    api.getRegisterOptions()
+      .then((res) => {
+        if (!cancelled && res?.success && res.data) setOptions(res.data);
+      })
+      .catch(() => {
+        // 端点不可用（如旧后端）时保持默认：注册开放 + 单邮箱输入框
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 白名单启用：邮箱拆为「本地部分 + 域名下拉」
+  const whitelistEnabled = options?.email_whitelist_enable === true;
+  // 注册开关：未取到选项前默认视为开放（避免首屏误判为关闭）
+  const registerClosed = options !== null && !options.register_enabled;
+  // 机器人校验开关（options 未取到时沿用旧行为：由 ALTCHA 自身状态兜底）
+  const captchaRequired = options?.captcha_required === true;
+  const emailSuffixes = options?.email_whitelist_suffix ?? [];
 
   // ── 用户名实时可用性检查（防抖 300ms）──
   // 状态：'idle' 未检查 / 'checking' 检查中 / 'available' 可用 / 'taken' 已占用 / 'error' 检查失败
@@ -123,7 +152,17 @@ export default function Register() {
     e.preventDefault();
     setError('');
 
-    if (!email || !password) {
+    if (registerClosed) {
+      setError(t('注册已关闭'));
+      return;
+    }
+    // 白名单启用：本地部分非空 + 已选域名，拼成完整邮箱（域名已含 @ 前缀）
+    if (whitelistEnabled && (!localPart.trim() || !selectedDomain)) {
+      setError(t('请填写本地部分和选择域名'));
+      return;
+    }
+    const finalEmail = whitelistEnabled ? `${localPart.trim()}${selectedDomain}` : email;
+    if (!finalEmail || !password) {
       setError(t('请填写邮箱和密码'));
       return;
     }
@@ -143,13 +182,18 @@ export default function Register() {
       setError(t('正在完成机器人校验，请稍候…'));
       return;
     }
+    // 服务端要求机器人校验但当前未拿到答案（如开关中途开启）：给出明确提示
+    if (captchaRequired && altcha.state !== 'verified') {
+      setError(t('需要完成机器人校验'));
+      return;
+    }
 
     setLoading(true);
     try {
-      const res = (await api.register(email, password, username || undefined, affCode || undefined, altcha.payload ?? undefined)) as RegisterResponse;
+      const res = (await api.register(finalEmail, password, username || undefined, affCode || undefined, altcha.payload ?? undefined)) as RegisterResponse;
       if (res.success) {
         // 注册成功后自动跳转登录页
-        navigate('/login', { state: { registered: true, email } });
+        navigate('/login', { state: { registered: true, email: finalEmail } });
       } else {
         setError(res.error || t('注册失败'));
       }
@@ -285,18 +329,56 @@ export default function Register() {
         <AltchaWidget state={altcha.state} onRetry={altcha.reset} />
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          {/* 注册已关闭（register_enabled=false）：提示 + 表单整体禁用 */}
+          {registerClosed && (
+            <div className="register-closed-notice">{t('注册已关闭')}</div>
+          )}
           <div className="form-group">
-            <label htmlFor="email">{t('邮箱 *')}</label>
-            <input
-              id="email"
-              type="email"
-              className="form-input"
-              placeholder={t('请输入邮箱')}
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoFocus
-              disabled={loading}
-            />
+            <label htmlFor={whitelistEnabled ? 'emailLocal' : 'email'}>{t('邮箱 *')}</label>
+            {whitelistEnabled ? (
+              // 白名单启用：只填本地部分（如 143），域名从下拉选择（如 @163.com）
+              <div className="email-split">
+                <input
+                  id="emailLocal"
+                  type="text"
+                  className="form-input email-split-local"
+                  placeholder={t('本地部分')}
+                  value={localPart}
+                  onChange={(e) => setLocalPart(e.target.value.replace(/@/g, ''))}
+                  autoFocus
+                  disabled={loading || registerClosed}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <select
+                  id="emailDomain"
+                  className="form-input email-split-domain"
+                  value={selectedDomain}
+                  onChange={(e) => setSelectedDomain(e.target.value)}
+                  disabled={loading || registerClosed}
+                  aria-label={t('域名')}
+                >
+                  <option value="">{t('请选择域名')}</option>
+                  {emailSuffixes.map((suffix) => (
+                    <option key={suffix} value={`@${suffix}`}>{`@${suffix}`}</option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <input
+                id="email"
+                type="email"
+                className="form-input"
+                placeholder={t('请输入邮箱')}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoFocus
+                disabled={loading || registerClosed}
+              />
+            )}
+            {whitelistEnabled && (
+              <span className="form-hint">{t('邮箱后缀由白名单限定')}</span>
+            )}
           </div>
           <div className="form-group">
             <label htmlFor="username">{t('昵称（可选）')}</label>
@@ -365,7 +447,7 @@ export default function Register() {
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={loading}
+            disabled={loading || registerClosed}
             style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
           >
             {loading ? t('注册中...') : t('注册')}

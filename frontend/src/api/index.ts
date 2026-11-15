@@ -241,6 +241,18 @@ async function request<T = unknown>(
   return data as T;
 }
 
+/** 注册选项（GET /api/auth/register/options 公共端点返回） */
+export interface RegisterOptions {
+  /** 注册开关：false 时前端显示「注册已关闭」并禁用提交 */
+  register_enabled: boolean;
+  /** 邮箱白名单开关：true 时邮箱拆为「本地部分 + 域名下拉」 */
+  email_whitelist_enable: boolean;
+  /** 允许的邮箱域名后缀（不含 @，已 trim/去重/排序） */
+  email_whitelist_suffix: string[];
+  /** 机器人校验（ALTCHA）开关 */
+  captcha_required: boolean;
+}
+
 export const api = {
   // ==================== 顶层便捷方法（页面直调，沿用后端路由契约） ====================
   login: (email: string, password: string, captcha?: string): Promise<ApiResponse<LoginResult>> =>
@@ -260,6 +272,9 @@ export const api = {
       aff_code: affCode ?? undefined,
       captcha,
     }),
+  // 注册页公共选项（GET /api/auth/register/options，无需鉴权）：注册开关 / 邮箱白名单后缀 / 机器人校验开关
+  getRegisterOptions: (): Promise<ApiResponse<RegisterOptions>> =>
+    request<ApiResponse<RegisterOptions>>('GET', `${API_BASE}/auth/register/options`, null, { skipAuthRedirect: true }),
   forgotPassword: (email: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/forgot-password`, { email }, { skipAuthRedirect: true }),
   changePassword: (old_password: string, new_password: string): Promise<ApiResponse<MessageResult>> =>

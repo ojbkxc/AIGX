@@ -1525,6 +1525,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(api::admin::handle_totp_disable),
         )
         .route("/api/auth/register", post(api::admin::handle_register))
+        // 公开端点：注册页公共选项（注册开关/邮箱白名单后缀/机器人校验开关）
+        .route(
+            "/api/auth/register/options",
+            get(api::admin::handle_register_options),
+        )
         .route(
             "/api/auth/github",
             get(api::admin::handle_github_oauth_authorize),

@@ -488,6 +488,40 @@ pub async fn handle_register(
     })))
 }
 
+/// GET /api/auth/register/options — 注册页公共选项（无需鉴权）。
+///
+/// 公开端点：注册页据此渲染（注册开关状态 / 邮箱白名单开关 + 域名下拉 /
+/// 机器人校验开关）。即使 register_enabled=false 也返回完整选项
+/// （前端显示「注册已关闭」），不做鉴权、不返回任何用户信息。
+/// `email_whitelist_suffix` 取 config 快照后 trim 去空、去重、按字典序排序，
+/// 保证输出顺序稳定（前端可直接渲染下拉）。
+pub async fn handle_register_options(State(state): State<AppState>) -> Json<Value> {
+    let config = state.config_manager.get().await;
+    Json(serde_json::json!({
+        "success": true,
+        "data": register_options_payload(&config)
+    }))
+}
+
+/// 把配置归一化为注册页选项（纯函数，供 handler 与单测共用）。
+fn register_options_payload(config: &crate::config::AppConfig) -> Value {
+    let mut suffixes: Vec<String> = config
+        .usage
+        .email_whitelist_suffix
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    suffixes.sort();
+    suffixes.dedup();
+    serde_json::json!({
+        "register_enabled": config.usage.register_enabled,
+        "email_whitelist_enable": config.usage.email_whitelist_enable,
+        "email_whitelist_suffix": suffixes,
+        "captcha_required": crate::config::security_captcha_enabled(),
+    })
+}
+
 /// POST /api/auth/change-password — 登录后修改密码
 ///
 /// 需要有效会话；先校验旧密码（防止会话泄露被直接改密），
@@ -2094,4 +2128,87 @@ pub async fn handle_refresh_session(
             "expiresAt": new_session.expires_at,
         }
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::register_options_payload;
+    use crate::config::AppConfig;
+
+    /// suffix 归一化：trim 去空、去重、按字典序排序；开关与注册开关原样透传。
+    #[test]
+    fn register_options_normalizes_suffix_list() {
+        let mut cfg = AppConfig::default();
+        cfg.usage.register_enabled = true;
+        cfg.usage.email_whitelist_enable = true;
+        cfg.usage.email_whitelist_suffix = vec![
+            "  gmail.com  ".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "163.com".to_string(),
+            "163.com".to_string(),
+            "126.com".to_string(),
+            "gmail.com".to_string(),
+        ];
+        let payload = register_options_payload(&cfg);
+        assert_eq!(payload["register_enabled"], true);
+        assert_eq!(payload["email_whitelist_enable"], true);
+        assert_eq!(
+            payload["email_whitelist_suffix"],
+            serde_json::json!(["126.com", "163.com", "gmail.com"]),
+            "去空去重后必须按字典序稳定排序"
+        );
+    }
+
+    /// 白名单开关关闭时仍返回后缀列表（前端可预渲染；该列表非敏感信息）。
+    #[test]
+    fn register_options_returns_suffixes_even_when_whitelist_disabled() {
+        let mut cfg = AppConfig::default();
+        cfg.usage.email_whitelist_enable = false;
+        cfg.usage.email_whitelist_suffix = vec!["gmail.com".to_string()];
+        let payload = register_options_payload(&cfg);
+        assert_eq!(payload["email_whitelist_enable"], false);
+        assert_eq!(
+            payload["email_whitelist_suffix"],
+            serde_json::json!(["gmail.com"])
+        );
+    }
+
+    /// register_enabled=false 时仍完整返回选项（前端据此显示「注册已关闭」）。
+    #[test]
+    fn register_options_returns_full_payload_when_register_disabled() {
+        let mut cfg = AppConfig::default();
+        cfg.usage.register_enabled = false;
+        cfg.usage.email_whitelist_enable = true;
+        cfg.usage.email_whitelist_suffix = vec!["163.com".to_string()];
+        let payload = register_options_payload(&cfg);
+        assert_eq!(payload["register_enabled"], false);
+        assert_eq!(payload["email_whitelist_enable"], true);
+        assert_eq!(
+            payload["email_whitelist_suffix"],
+            serde_json::json!(["163.com"])
+        );
+    }
+
+    /// captcha_required 跟随安全策略原子快照（set_security_captcha 写入，默认开）。
+    ///
+    /// 快照是进程级全局，本测试写入后立即断言并还原为默认 true，
+    /// 避免影响同进程其它测试。
+    #[test]
+    fn register_options_captcha_required_follows_snapshot() {
+        let cfg = AppConfig::default();
+        crate::config::set_security_captcha(false);
+        assert_eq!(
+            register_options_payload(&cfg)["captcha_required"],
+            false,
+            "快照关 → captcha_required=false"
+        );
+        crate::config::set_security_captcha(true);
+        assert_eq!(
+            register_options_payload(&cfg)["captcha_required"],
+            true,
+            "快照开 → captcha_required=true"
+        );
+        crate::config::set_security_captcha(true);
+    }
 }

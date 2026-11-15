@@ -10,7 +10,7 @@ import {
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Tabs, SkeletonList } from '../components/ui';
+import { Tabs, SkeletonList, Switch } from '../components/ui';
 import { getThemeMode, applyTheme, type ThemeMode } from '../lib/theme';
 import { getZoom, applyZoom, ZOOM_LEVELS } from '../lib/zoom';
 import Epay from './Epay';
@@ -274,6 +274,15 @@ export default function Settings() {
   const [exchangeRatesLoading, setExchangeRatesLoading] = useState(false);
   const [exchangeRatesSaving, setExchangeRatesSaving] = useState(false);
 
+  // ── 邮箱白名单（注册限制：仅允许指定域名后缀的邮箱注册；随 /limits 读写）──
+  const [emailWl, setEmailWl] = useState<{ enabled: boolean; domains: string[] }>({
+    enabled: false,
+    domains: [],
+  });
+  const [emailWlLoading, setEmailWlLoading] = useState(false);
+  const [emailWlSaving, setEmailWlSaving] = useState(false);
+  const [emailWlDraft, setEmailWlDraft] = useState('');
+
   // ── 通用确认弹窗（用于清空缓存等危险操作）──
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
@@ -296,6 +305,7 @@ export default function Settings() {
     loadCacheStats();
     loadPriceSyncConfig();
     loadExchangeRates();
+    loadEmailWhitelist();
   }, []);
 
   const loadRateLimitConfig = async () => {
@@ -431,6 +441,58 @@ export default function Settings() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setExchangeRatesSaving(false);
+    }
+  };
+
+  // ── 邮箱白名单（读：email_whitelist_enable + email_whitelist_suffix，随 /limits）──
+  const loadEmailWhitelist = async () => {
+    setEmailWlLoading(true);
+    try {
+      const res = await api.getLimits();
+      const d = res?.data as Record<string, unknown> | undefined;
+      const suffix = Array.isArray(d?.email_whitelist_suffix)
+        ? (d.email_whitelist_suffix as string[]).map((s) => String(s))
+        : [];
+      setEmailWl({ enabled: Boolean(d?.email_whitelist_enable), domains: suffix });
+    } catch {
+      // 邮箱白名单未启用或加载失败，静默处理（区块照常渲染，默认关闭）
+    } finally {
+      setEmailWlLoading(false);
+    }
+  };
+
+  // 添加域名行（去首尾空白 + 小写：域名大小写不敏感；重复项忽略，与破甲控制台词表同款）
+  const addEmailWlDomain = (): void => {
+    const next = emailWlDraft.trim().toLowerCase();
+    if (!next || emailWl.domains.includes(next)) {
+      setEmailWlDraft('');
+      return;
+    }
+    setEmailWl({ ...emailWl, domains: [...emailWl.domains, next] });
+    setEmailWlDraft('');
+  };
+
+  // 保存：规范化（trim + 小写、空行忽略）后随 settings PUT（/limits）一起提交两个字段
+  const handleEmailWhitelistSave = async () => {
+    if (emailWl.domains.some((d) => d.trim() !== '' && /\s/.test(d))) {
+      setError(t('邮箱域名不能包含空格'));
+      return;
+    }
+    const domains = emailWl.domains
+      .map((d) => d.trim().toLowerCase())
+      .filter((d) => d !== '');
+    setEmailWlSaving(true);
+    setError('');
+    try {
+      await api.updateLimits({
+        email_whitelist_enable: emailWl.enabled,
+        email_whitelist_suffix: domains,
+      });
+      addToast(t('邮箱白名单已保存，下一个注册立即生效'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEmailWlSaving(false);
     }
   };
 
@@ -642,6 +704,101 @@ export default function Settings() {
                   </button>
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* 邮箱白名单（注册限制：仅允许指定域名后缀的邮箱注册；保存后下一个注册立即生效） */}
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('邮箱白名单')}</h2>
+              <p className="card-subtitle">{t('settingsEmailWhitelistHint')}</p>
+            </div>
+            <div className="card-body">
+              {emailWlLoading ? (
+                <SkeletonList rows={3} />
+              ) : (
+                <div className="settings-form">
+                  <div className="form-group">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Switch
+                        checked={emailWl.enabled}
+                        onChange={(next) => setEmailWl({ ...emailWl, enabled: next })}
+                      />
+                      {t('启用邮箱白名单')}
+                    </label>
+                    <span className="form-hint">{t('settingsEmailWhitelistEnableHint')}</span>
+                  </div>
+
+                  <div className="form-group">
+                    <label>{t('允许的邮箱域名')}</label>
+                    <span className="form-hint">{t('settingsEmailWhitelistDomainsHint')}</span>
+                    {emailWl.domains.length === 0 ? (
+                      <div className="empty-state">
+                        <p>{t('settingsEmailWhitelistEmpty')}</p>
+                      </div>
+                    ) : (
+                      <div className="email-wl-list">
+                        {emailWl.domains.map((domain, idx) => (
+                          <div key={idx} className="email-wl-row">
+                            <input
+                              className="form-input email-wl-input"
+                              value={domain}
+                              placeholder="163.com"
+                              onChange={(e) =>
+                                setEmailWl({
+                                  ...emailWl,
+                                  domains: emailWl.domains.map((d, i) =>
+                                    i === idx ? e.target.value : d,
+                                  ),
+                                })
+                              }
+                            />
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() =>
+                                setEmailWl({
+                                  ...emailWl,
+                                  domains: emailWl.domains.filter((_, i) => i !== idx),
+                                })
+                              }
+                            >
+                              {t('删除')}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="email-wl-add">
+                      <input
+                        className="form-input email-wl-input"
+                        value={emailWlDraft}
+                        placeholder="163.com"
+                        onChange={(e) => setEmailWlDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            addEmailWlDomain();
+                          }
+                        }}
+                      />
+                      <button type="button" className="btn btn-secondary" onClick={addEmailWlDomain}>
+                        {t('添加域名')}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="settings-actions">
+                    <button
+                      className="btn btn-primary"
+                      onClick={handleEmailWhitelistSave}
+                      disabled={emailWlSaving}
+                    >
+                      {emailWlSaving ? t('保存中...') : t('保存更改')}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

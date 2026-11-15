@@ -159,6 +159,7 @@ fn paths_auth() -> Value {
         "/api/auth/totp/enable": { "post": op_body("认证", "确认启用 TOTP", "code: string（6 位验证码）") },
         "/api/auth/totp/disable": { "post": op_body("认证", "关闭 TOTP 两步验证", "password: string") },
         "/api/auth/register": { "post": op_pub("认证", "用户注册（邮箱+密码）") },
+        "/api/auth/register/options": { "get": op_pub("认证", "注册页公共选项（注册开关/邮箱白名单后缀/机器人校验开关；无需鉴权）") },
         "/api/auth/forgot-password": { "post": op_pub("认证", "忘记密码（生成重置 token）") },
         "/api/auth/reset-password": { "post": op_pub("认证", "凭重置 token 重置密码") },
         "/api/auth/change-password": { "post": op_body("认证", "修改本人密码", "old_password/new_password: string") },
@@ -1450,6 +1451,7 @@ mod tests {
         add("/api/auth/login/totp", &["post"]);
         add("/api/auth/logout", &["post"]);
         add("/api/auth/register", &["post"]);
+        add("/api/auth/register/options", &["get"]);
         add("/api/auth/reset-password", &["post"]);
         add("/api/auth/totp/disable", &["post"]);
         add("/api/auth/totp/enable", &["post"]);
