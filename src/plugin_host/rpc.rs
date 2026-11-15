@@ -217,6 +217,21 @@ pub trait CallbackHandler: Send + Sync {
     /// 这是同步方法——回调的语义是「插件问网关一个问题，网关答一嘴」，
     /// 不涉及长耗时。需要落盘/读库的回调由实现方自己处理。
     fn handle(&self, method: &str, params: Value) -> Result<Value, RpcError>;
+
+    /// 异步回调（脚本宿主的 egress / 协议转换需要真正 await I/O）。
+    ///
+    /// 默认实现委托给 [`Self::handle`]——原生插件的回调全部走同步语义，
+    /// 行为零变化。脚本宿主的 `ScriptCallbacks` 覆写它实现
+    /// `script.transport.*` / `script.protocol.*` 的流式阻塞语义。
+    fn handle_async<'a>(
+        &'a self,
+        method: &'a str,
+        params: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, RpcError>> + Send + 'a>>
+    {
+        let result = self.handle(method, params);
+        Box::pin(async move { result })
+    }
 }
 
 /// 无回调能力的处理器（M1 骨架用，M3 换成真正的 `callbacks.rs`）。
@@ -590,6 +605,11 @@ impl RpcChannel {
     pub async fn pending_count(&self) -> usize {
         self.shared.pending.read().await.len()
     }
+
+    /// 当前活跃流数（热切换前的在途排空判定用）。
+    pub async fn active_streams(&self) -> usize {
+        self.shared.streams.read().await.len()
+    }
 }
 
 impl Shared {
@@ -685,25 +705,34 @@ async fn read_loop(mut reader: BufReader<BoxReader>, shared: Arc<Shared>) {
         };
         match frame.kind() {
             FrameKind::Request => {
-                // 插件→网关请求（回调）
+                // 插件→网关请求（回调）。**每个回调独立 spawn**：脚本宿主的
+                // `script.transport.read` 会阻塞到上游下一块数据（可能是
+                // 几十秒），就地 await 会把整条读循环卡住——同一宿主的其它
+                // provider 流（甚至网关自己发出的请求应答）全部排队。回调
+                // 应答按 id 关联，乱序安全（插件 SDK 也是按 id 匹配）。
                 let method = frame.method.unwrap_or_default();
                 let params = frame.params.unwrap_or(Value::Null);
-                let result = shared.callbacks.handle(&method, params);
-                let response = match result {
-                    Ok(value) => Frame {
-                        id: frame.id,
-                        result: Some(value),
-                        ..Default::default()
-                    },
-                    Err(err) => Frame {
-                        id: frame.id,
-                        error: Some(err),
-                        ..Default::default()
-                    },
-                };
-                if let Err(e) = shared.write_frame(&response).await {
-                    tracing::warn!("plugin RPC callback response write failed: {e}");
-                }
+                let id = frame.id;
+                let callbacks = shared.callbacks.clone();
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    let result = callbacks.handle_async(&method, params).await;
+                    let response = match result {
+                        Ok(value) => Frame {
+                            id,
+                            result: Some(value),
+                            ..Default::default()
+                        },
+                        Err(err) => Frame {
+                            id,
+                            error: Some(err),
+                            ..Default::default()
+                        },
+                    };
+                    if let Err(e) = shared.write_frame(&response).await {
+                        tracing::warn!("plugin RPC callback response write failed: {e}");
+                    }
+                });
             }
             FrameKind::Notification => {
                 // 通知：M1 只记日志

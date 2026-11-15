@@ -242,7 +242,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
         td(
             "aigx_plugin_status",
             "插件/内置供应商目录状态",
-            "只读：插件清单与在途/更新状态（view 选 list/progress/updates/release；内置 provider 目录随版本发布，progress/updates/release 为空态说明）",
+            "只读：插件清单与在途/更新状态（view 选 list/progress/updates/release；脚本插件（Magpie）目录用 script-catalog，宿主状态用 script-list）",
             ReadOnly,
             "view",
             &[
@@ -250,12 +250,14 @@ pub(super) fn tools() -> Vec<ToolDef> {
                 "/api/plugins/progress",
                 "/api/plugins/update",
                 "/api/plugins/release",
+                "/api/plugins/scripts",
+                "/api/plugins/scripts/catalog",
             ],
             || {
                 json!({
                     "type": "object",
                     "properties": {
-                        "view": { "type": "string", "enum": ["list", "progress", "updates", "release"], "description": "视图种类" }
+                        "view": { "type": "string", "enum": ["list", "progress", "updates", "release", "script-list", "script-catalog"], "description": "视图种类" }
                     },
                     "required": ["view"]
                 })
@@ -273,6 +275,17 @@ pub(super) fn tools() -> Vec<ToolDef> {
                         }
                         "release" => {
                             admin::plugins::handle_refresh_plugin_release(State(s.clone()), h.clone()).await
+                        }
+                        "script-list" => {
+                            admin::script_plugins::handle_list_script_packages(
+                                State(s.clone()),
+                                h.clone(),
+                            )
+                            .await
+                        }
+                        "script-catalog" => {
+                            admin::script_plugins::handle_script_catalog(State(s.clone()), h.clone())
+                                .await
                         }
                         _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
                     })

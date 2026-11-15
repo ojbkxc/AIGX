@@ -39,6 +39,7 @@ pub mod queue_api;
 pub mod redemptions;
 pub mod routing;
 pub mod scheduled_tasks;
+pub mod script_plugins; // 脚本插件管理面（Magpie 脚本包：目录/安装/启停/卸载/配置/宿主）
 pub mod security;
 pub mod settings;
 pub mod subscriptions;

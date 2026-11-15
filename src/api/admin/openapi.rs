@@ -1141,6 +1141,42 @@ fn paths_accounts_network() -> Value {
         "/api/plugins/progress": {
             "get": op("插件", "在途安装/更新操作（当前恒空）")
         },
+        "/api/plugins/scripts": {
+            "get": op("插件", "脚本插件列表（Magpie 脚本包：宿主状态 + 已装包，含 providerRouted）")
+        },
+        "/api/plugins/scripts/catalog": {
+            "get": op("插件", "Magpie 脚本目录（状态 + 三分类条目，official/recommended/third-party）")
+        },
+        "/api/plugins/scripts/refresh": {
+            "post": op("插件", "手动刷新 Magpie 目录（force 无视 TTL；异步后台任务）")
+        },
+        "/api/plugins/scripts/install": {
+            "post": op_body(
+                "插件",
+                "安装脚本包（trusted=true 须前端二次确认；下载/解包/依赖安装可能几十秒）",
+                "{ selector, trusted }",
+            )
+        },
+        "/api/plugins/scripts/enable": {
+            "post": op_body(
+                "插件",
+                "脚本包启停（触发宿主热切换；失败自动回滚）",
+                "{ id, version?, enabled }",
+            )
+        },
+        "/api/plugins/scripts/uninstall": {
+            "post": op_body("插件", "卸载脚本包（先停用再删盘；Local 来源不删本机目录）", "{ id, version? }")
+        },
+        "/api/plugins/scripts/options": {
+            "post": op_body(
+                "插件",
+                "保存脚本包配置（启用中的包会重建宿主让脚本读到新值）",
+                "{ id, version?, values }",
+            )
+        },
+        "/api/plugins/scripts/rebuild": {
+            "post": op("插件", "手动重启脚本宿主（排障用；无已启用包时等于关停宿主）")
+        },
         "/api/public/geo-lang": {
             "get": op("公开", "按 IP 推断语言")
         },
@@ -1503,6 +1539,14 @@ mod tests {
         add("/api/plugins/update", &["get"]);
         add("/api/plugins/release", &["get"]);
         add("/api/plugins/progress", &["get"]);
+        add("/api/plugins/scripts", &["get"]);
+        add("/api/plugins/scripts/catalog", &["get"]);
+        add("/api/plugins/scripts/refresh", &["post"]);
+        add("/api/plugins/scripts/install", &["post"]);
+        add("/api/plugins/scripts/enable", &["post"]);
+        add("/api/plugins/scripts/uninstall", &["post"]);
+        add("/api/plugins/scripts/options", &["post"]);
+        add("/api/plugins/scripts/rebuild", &["post"]);
         add("/api/public/geo-lang", &["get"]);
         add("/api/tickets", &["get", "post"]);
         add("/api/tickets/close", &["post"]);

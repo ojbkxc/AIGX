@@ -25,6 +25,7 @@ pub mod manager;
 pub mod process;
 pub mod registry;
 pub mod rpc;
+pub mod script;
 
 pub use callbacks::PluginCallbacks;
 pub use install::{install_from_zip, InstallError, PackManifest};

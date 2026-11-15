@@ -118,6 +118,16 @@ impl JsonFileStore {
         }
     }
 
+    /// 与 `SqliteStore::open` 同签名（无 rusqlite 构建下 `FileStore` 即本类型）。
+    ///
+    /// 存在的意义是**签名一致**：调用方（main.rs 的启动路径、proxy_pool 的
+    /// 测试）对 `FileStore::open(dir)` 的使用在两种后端下都是合法的，不该
+    /// 因为换了 feature 组合就编译不过。
+    pub fn open(dir: PathBuf) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self::new(dir))
+    }
+
     fn path_of(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{}.json", encode_key(key)))
     }

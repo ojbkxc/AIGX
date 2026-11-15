@@ -191,6 +191,10 @@ pub struct AppState {
     /// 启动时恢复已启用包，数据面经
     /// `process_for_provider` 路由到插件进程）。
     pub plugin_host: Arc<crate::plugin_host::PluginHostManager>,
+    /// 脚本插件宿主管理器（一个 Bun 进程承载全部 npm 风格脚本包；
+    /// 数据面经 `route_for_provider` 同步路由，管理面走
+    /// `/api/plugins/scripts*`）。
+    pub script_host: Arc<crate::plugin_host::script::ScriptHostManager>,
 }
 impl AppState {
     /// 返回是否启用了 SeaORM 后端。

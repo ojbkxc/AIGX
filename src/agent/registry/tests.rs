@@ -312,7 +312,7 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "/api/public/geo-lang",
             "按调用方自身 IP 给出界面语言建议（登录页用），输入不可由参数指定；对 AI 无信息价值。若需按 IP 判地区，应另立显式 ip 入参的新端点，不复用本路由",
         ),
-        // ── 2026-11-15 对齐 Agent2API 批（新面板路由，均为「界面配置」类，非运维动作）──
+// ── 2026-11-15 对齐 Agent2API 批（新面板路由，均为「界面配置」类，非运维动作）──
         (
             "/api/admin/client-configs",
             "客户端接入多配置管理（写本机客户端配置文件）：写盘目标是宿主机用户目录，AI 面不应触碰宿主文件系统",
@@ -344,6 +344,10 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
         (
             "/api/image-compat",
             "图片压缩与视觉兼容设置：转发行为配置，须人工在环（与 /api/settings 同性质，settings 面未整体工具化前不单开）",
+        ),
+        (
+            "/api/plugins/scripts/install",
+            "脚本插件安装=执行第三方代码；安装接口强制 trusted=true（运维对「脚本以 Bun 进程权限运行」的显式确认）。AI 代填这个布尔等于替人担责，故本路由不提供 AI 面——安装只能由人在插件页二次确认后发起。启停/卸载/改配置仍归 aigx_plugin_manage",
         ),
     ];
 

@@ -561,13 +561,28 @@ async fn main() -> anyhow::Result<()> {
         loopback_port: config.server.port,
     };
     let plugin_host = Arc::new(crate::plugin_host::PluginHostManager::new(
-        pack_registry,
+        pack_registry.clone(),
         plugins_root,
         http_client.as_ref().clone(),
         host_env,
         Arc::new(account_sessions.clone()),
         store.clone(),
     ));
+
+    // 脚本插件宿主（一个 Bun 进程承载全部 npm 风格脚本包，对齐 A2A 3.5
+    // 的 Magpie 脚本插件体系）：目录刷新任务在 Catalog::spawn 里启动，
+    // 已启用包的恢复在下方后台任务（`script_host.start()`）。
+    let script_catalog = crate::plugin_host::script::catalog::Catalog::spawn(
+        &crate::plugin_host::script::script_plugins_root(&data_dir),
+    );
+    let script_host = crate::plugin_host::script::ScriptHostManager::new(
+        data_dir.clone(),
+        store.clone(),
+        Arc::new(account_sessions.clone()),
+        http_client.as_ref().clone(),
+        script_catalog,
+        pack_registry,
+    );
 
     // 初始化公开注册速率限制器（per-IP，60s 窗口，最多 10000 个 IP 条目）
     // 使用基于 dashmap 的 AsyncCache 替代 moka（离线环境 moka 不可得，行为等效）
@@ -786,6 +801,7 @@ async fn main() -> anyhow::Result<()> {
             gates
         },
         plugin_host: plugin_host.clone(),
+        script_host: script_host.clone(),
     };
 
     tracing::info!(
@@ -811,6 +827,13 @@ async fn main() -> anyhow::Result<()> {
     let ph = plugin_host.clone();
     tokio::spawn(async move {
         ph.restore_enabled().await;
+    });
+
+    // 脚本宿主启动恢复：有已启用脚本包就拉起 Bun 宿主（后台任务；Bun 首次
+    // 可能触发下载，慢启动不拖网关）。无已启用包则什么都不做。
+    let sh = script_host.clone();
+    tokio::spawn(async move {
+        sh.start().await;
     });
 
     // 构建路由
@@ -1195,6 +1218,7 @@ async fn main() -> anyhow::Result<()> {
     let log_store = state.log_store.clone();
     // 插件宿主也要在 state 被消费前取出（关停序列里优雅关闭子进程）。
     let plugin_host = state.plugin_host.clone();
+    let script_host = state.script_host.clone();
     let app = build_router(state, &config);
 
     // 启动服务器
@@ -1272,6 +1296,8 @@ async fn main() -> anyhow::Result<()> {
     // 插件宿主：优雅关闭全部插件子进程（先 RPC shutdown 等 5s，超时 kill，
     // 不留孤儿进程；崩溃退避监督循环见到 shutdown_requested 标记即退出）。
     plugin_host.shutdown_all().await;
+    // 脚本宿主：先 RPC shutdown 等宿主自行退出，5s 超时 kill Bun。
+    script_host.shutdown().await;
 
     // 关闭序列最后一步：把日志异步写队列刷干净（内部自带 10s 超时兜底）。
     log_store.flush();
@@ -2806,6 +2832,39 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/plugins/progress",
             get(api::admin::plugins::handle_get_plugin_progress),
+        )
+        // 脚本插件管理面（Magpie 脚本包：一个 Bun 宿主承载全部 npm 风格脚本）
+        .route(
+            "/api/plugins/scripts",
+            get(api::admin::script_plugins::handle_list_script_packages),
+        )
+        .route(
+            "/api/plugins/scripts/catalog",
+            get(api::admin::script_plugins::handle_script_catalog),
+        )
+        .route(
+            "/api/plugins/scripts/refresh",
+            post(api::admin::script_plugins::handle_script_refresh),
+        )
+        .route(
+            "/api/plugins/scripts/install",
+            post(api::admin::script_plugins::handle_script_install),
+        )
+        .route(
+            "/api/plugins/scripts/enable",
+            post(api::admin::script_plugins::handle_script_enable),
+        )
+        .route(
+            "/api/plugins/scripts/uninstall",
+            post(api::admin::script_plugins::handle_script_uninstall),
+        )
+        .route(
+            "/api/plugins/scripts/options",
+            post(api::admin::script_plugins::handle_script_options),
+        )
+        .route(
+            "/api/plugins/scripts/rebuild",
+            post(api::admin::script_plugins::handle_script_rebuild),
         )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
         .route(

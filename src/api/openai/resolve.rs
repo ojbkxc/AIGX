@@ -390,14 +390,24 @@ pub(crate) fn resolve_bridges_needs(
             crate::channel::ChannelType::Plugin => {
                 // 插件渠道：转发由插件子进程构造并发出（网关不实现上游
                 // 伪装头/签名）。plugin_provider 指明插件里的哪一家；
-                // 进程必须正在跑（退避窗口内 process_for_provider 返回
-                // None → 不 push，调用方按 no_bridge 处理）。
+                // 两级查找：原生插件进程优先（每包一进程），否则脚本宿主
+                // （一个 Bun 承载全部脚本包）。两者都未接管（未装/未启用/
+                // 崩溃退避窗口）→ 不 push，调用方按 no_bridge 处理。
                 let provider = ch.plugin_provider.clone();
                 if provider.is_empty() {
                     tracing::warn!("[Plugin] 渠道 {} 未配置 plugin_provider，跳过", ch.id);
                 } else if let Some(process) = state.plugin_host.process_for_provider(&provider) {
                     result.push((
                         Arc::new(crate::bridge::plugin::PluginBridge::new(process, provider)),
+                        Some(ch.id.clone()),
+                        Some(ch.clone()),
+                    ));
+                } else if let Some(route) = state.script_host.route_for_provider(&provider) {
+                    result.push((
+                        Arc::new(crate::bridge::plugin::PluginBridge::new_script(
+                            route.channel,
+                            route.provider,
+                        )),
                         Some(ch.id.clone()),
                         Some(ch.clone()),
                     ));

@@ -24,7 +24,20 @@ use axum::body::Bytes;
 use RiskLevel::HighRisk;
 
 /// `aigx_plugin_manage` 的 action 白名单（schema enum 与分派表同源，防「列了却调不到」）。
-const PLUGIN_MANAGE_ACTIONS: [&str; 4] = ["enable", "disable", "provider-enable", "uninstall"];
+///
+/// 前 4 条是原生插件包；`script-*` 是脚本插件（Magpie，一个 Bun 宿主承载
+/// 全部 npm 风格脚本）的写动作。**不提供 script-install**：安装强制
+/// `trusted=true`，那是运维对「执行第三方代码」的显式确认，AI 代填等于
+/// 替人担责——安装由人在插件页二次确认，AI 只能启停/卸载/改配置。
+const PLUGIN_MANAGE_ACTIONS: [&str; 7] = [
+    "enable",
+    "disable",
+    "provider-enable",
+    "uninstall",
+    "script-enable",
+    "script-uninstall",
+    "script-options",
+];
 
 /// `aigx_scheduled_task_manage` 的 action 白名单。
 const SCHEDULED_TASK_MANAGE_ACTIONS: [&str; 2] = ["configure", "run"];
@@ -37,7 +50,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
         td(
             "aigx_plugin_manage",
             "插件管理",
-            "高危写：内置 provider 目录的按家启停（provider-enable，数据面选号即时生效）/ 包级启停（enable/disable，内置包不支持，返回降级说明）/ 卸载（uninstall，内置包不支持）。真实动作是 provider-enable；需审批",
+            "高危写：内置 provider 目录的按家启停（provider-enable，数据面选号即时生效）/ 包级启停（enable/disable，内置包不支持，返回降级说明）/ 卸载（uninstall，内置包不支持）/ 脚本插件（Magpie）启停、卸载、改配置（script-*；安装须人在环确认信任，不提供）。需审批",
             HighRisk,
             "provider",
             &[
@@ -45,6 +58,11 @@ pub(super) fn tools() -> Vec<ToolDef> {
                 "/api/plugins/enable",
                 "/api/plugins/provider",
                 "/api/plugins/uninstall",
+                "/api/plugins/scripts/enable",
+                "/api/plugins/scripts/uninstall",
+                "/api/plugins/scripts/options",
+                "/api/plugins/scripts/refresh",
+                "/api/plugins/scripts/rebuild",
             ],
             plugin_manage_schema,
             |s, h, a| {
@@ -101,11 +119,73 @@ pub(super) fn tools() -> Vec<ToolDef> {
                             }),
                         )
                         .await),
+                        // ---------- 脚本插件（Magpie）----------
+                        // 安装（script-install）**不对外**：trusted=true 是运维
+                        // 对「执行第三方代码」的显式确认，AI 代填等于替人担责。
+                        "script-enable" => {
+                            let enabled = a.get("enabled").and_then(Value::as_bool).ok_or_else(
+                                || {
+                                    (
+                                        -32602,
+                                        "Invalid params: script-enable requires boolean `enabled`"
+                                            .to_string(),
+                                    )
+                                },
+                            )?;
+                            let version = a.get("version").and_then(Value::as_str);
+                            out(admin::script_plugins::handle_script_enable(
+                                State(s.clone()),
+                                h.clone(),
+                                Json(admin::script_plugins::ScriptEnableBody {
+                                    id: pack_id,
+                                    version: version.map(String::from),
+                                    enabled,
+                                }),
+                            )
+                            .await)
+                        }
+                        "script-uninstall" => {
+                            let version = a.get("version").and_then(Value::as_str);
+                            out(admin::script_plugins::handle_script_uninstall(
+                                State(s.clone()),
+                                h.clone(),
+                                Json(admin::script_plugins::ScriptUninstallBody {
+                                    id: pack_id,
+                                    version: version.map(String::from),
+                                }),
+                            )
+                            .await)
+                        }
+                        "script-options" => {
+                            let values = a
+                                .get("values")
+                                .and_then(Value::as_object)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    (
+                                        -32602,
+                                        "Invalid params: script-options requires object `values`"
+                                            .to_string(),
+                                    )
+                                })?;
+                            let version = a.get("version").and_then(Value::as_str);
+                            out(admin::script_plugins::handle_script_options(
+                                State(s.clone()),
+                                h.clone(),
+                                Json(admin::script_plugins::ScriptOptionsBody {
+                                    id: pack_id,
+                                    version: version.map(String::from),
+                                    values,
+                                }),
+                            )
+                            .await)
+                        }
                         other => Err((
                             -32602,
                             format!(
                                 "Invalid action for aigx_plugin_manage: {other} \
-                                 (expect enable/disable/provider-enable/uninstall)"
+                                 (expect enable/disable/provider-enable/uninstall/\
+                                 script-enable/script-uninstall/script-options)"
                             ),
                         )),
                     }
@@ -333,6 +413,11 @@ mod tests {
         "/api/plugins/enable",
         "/api/plugins/provider",
         "/api/plugins/uninstall",
+        "/api/plugins/scripts/enable",
+        "/api/plugins/scripts/uninstall",
+        "/api/plugins/scripts/options",
+        "/api/plugins/scripts/refresh",
+        "/api/plugins/scripts/rebuild",
     ];
     const SCHEDULED_COVERS: &[&str] =
         &["/api/scheduled-tasks/{id}", "/api/scheduled-tasks/{id}/run"];
@@ -406,6 +491,9 @@ mod tests {
             ["admin::plugins::handle_set_plugin_", "enabled("].concat(),
             ["admin::plugins::handle_set_plugin_provider_", "enabled("].concat(),
             ["admin::plugins::handle_uninstall_", "plugin("].concat(),
+            ["admin::script_plugins::handle_script_", "enable("].concat(),
+            ["admin::script_plugins::handle_script_", "uninstall("].concat(),
+            ["admin::script_plugins::handle_script_", "options("].concat(),
             ["admin::scheduled_tasks::configure_", "handler("].concat(),
             ["admin::scheduled_tasks::run_", "handler("].concat(),
             ["admin::add_network_", "account("].concat(),

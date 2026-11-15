@@ -34,26 +34,61 @@ use super::{
     ChatMessage, ChatResponse, FinishReason, Role, ToolCall, ToolCallDelta, UpstreamErrorView,
     UpstreamWire, UsageStats,
 };
+use crate::plugin_host::rpc::RpcChannel;
 use crate::plugin_host::{PluginProcess, RpcError, StreamCall, StreamEvent};
 
 /// call_stream 等 head 的超时（与 rpc.rs 的 HEAD_TIMEOUT 一致）。
 const HEAD_WAIT_MS: u64 = 30_000;
 
+/// 插件后端：原生二进制进程或脚本宿主的 RPC 通道。
+///
+/// 两者的 wire 契约完全相同（`conversation` → head/chunk/end），差异只在
+/// 「谁持有通道」：原生包每包一个进程，脚本包共用一个 Bun 进程（通道随
+/// 宿主热切换替换）。桥只依赖 `&RpcChannel`，两个变体行为一致。
+pub enum PluginBackend {
+    /// 原生插件子进程。
+    Native(Arc<PluginProcess>),
+    /// 脚本宿主（一个 Bun 承载全部脚本包）。
+    Script(Arc<RpcChannel>),
+}
+
+impl PluginBackend {
+    fn rpc(&self) -> &RpcChannel {
+        match self {
+            Self::Native(process) => &process.rpc,
+            Self::Script(channel) => channel,
+        }
+    }
+}
+
 /// 插件接管的 provider 的 Bridge。
 ///
-/// 每份候选持有一个 `Arc<PluginProcess>`（共享插件进程）+ provider id。
-/// 进程句柄由 `PluginHostManager::process_for_provider` 给出——只有
-/// 「插件声明了该 provider 且进程在跑」才会构造成功，因此这里拿到的
-/// 进程必然活着（崩溃退避窗口内 resolve 层就拿不到它，根本到不了这里）。
+/// 每份候选持有一个后端句柄（原生进程 / 脚本通道）+ provider id。
+/// 句柄由 `PluginHostManager::process_for_provider` 或
+/// `ScriptHostManager::route_for_provider` 给出——只有「插件声明了该
+/// provider 且宿主在跑」才会构造成功，因此这里拿到的通道必然活着
+/// （崩溃退避窗口内 resolve 层就拿不到它，根本到不了这里）。
 pub struct PluginBridge {
-    process: Arc<PluginProcess>,
+    backend: PluginBackend,
     provider: String,
 }
 
 impl PluginBridge {
-    /// 构造。
+    /// 原生插件桥。
     pub fn new(process: Arc<PluginProcess>, provider: String) -> Self {
-        Self { process, provider }
+        Self {
+            backend: PluginBackend::Native(process),
+            provider,
+        }
+    }
+
+    /// 脚本插件桥（`provider` 是 JS 侧实际接管的 id，可能与渠道里声明的
+    /// 不同——冲突加缀时由 `identities` 翻译，见 runtime 的路由表）。
+    pub fn new_script(channel: Arc<RpcChannel>, provider: String) -> Self {
+        Self {
+            backend: PluginBackend::Script(channel),
+            provider,
+        }
     }
 
     /// 发起一次 conversation 流式调用。
@@ -67,8 +102,8 @@ impl PluginBridge {
             "account": "",
             "body": build_openai_body(req),
         });
-        self.process
-            .rpc
+        self.backend
+            .rpc()
             .call_stream("conversation", params)
             .await
             .map_err(|e| map_rpc_error(&e))
