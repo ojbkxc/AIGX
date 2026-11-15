@@ -17,6 +17,7 @@ pub mod debug;
 pub mod desktop_import;
 pub mod diagnostics;
 pub mod guardrail;
+pub mod image_compat_api; // 图片压缩与视觉兼容设置面（对照 Agent2API /api/image-compat/settings）
 pub mod logs;
 pub mod mcp;
 pub mod model_manage;
@@ -159,6 +160,11 @@ pub use purge::{handle_get_purge, handle_update_purge};
 // 护栏（输入/输出黑名单 + 200 假答复门控：GET/PUT 配置 + 解除降级）
 pub use guardrail::{
     handle_clear_guardrail_degrade, handle_get_guardrail, handle_update_guardrail,
+};
+
+// 图片压缩与视觉兼容（GET/PUT 设置；保存即热生效）
+pub use image_compat_api::{
+    handle_get_image_compat_settings, handle_update_image_compat_settings,
 };
 
 // 面板品牌自定义（panel_name / logo_url / favicon_url；公开 GET + 管理员 GET/PUT）
