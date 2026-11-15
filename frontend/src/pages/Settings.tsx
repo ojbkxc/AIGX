@@ -23,6 +23,7 @@ import LogRetention from './LogRetention';
 import UpdatePanel from '../components/UpdatePanel';
 import AgentSettingsPanel from '../components/AgentSettingsPanel';
 import ChatSettingsPanel from '../components/ChatSettingsPanel';
+import ImageCompatPanel from '../components/ImageCompatPanel';
 import ReportSettingsPanel from '../components/ReportSettingsPanel';
 import GatewayPanel from '../components/GatewayPanel';
 import SanitizePanel from '../components/SanitizePanel';
@@ -1229,7 +1230,15 @@ export default function Settings() {
 
       {activeTab === 'assistant' && <AgentSettingsPanel />}
 
-      {activeTab === 'chat' && <ChatSettingsPanel />}
+      {activeTab === 'chat' && (
+        <>
+          <ChatSettingsPanel />
+          <div style={{ marginTop: 16 }}>
+            {/* 图片压缩与视觉兼容（#7；对照 Agent2API 会话图片压缩/图片兼容） */}
+            <ImageCompatPanel />
+          </div>
+        </>
+      )}
       {activeTab === 'report' && <ReportSettingsPanel />}
 
       {activeTab === 'data' && (
