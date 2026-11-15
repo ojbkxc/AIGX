@@ -39,6 +39,7 @@ pub mod scheduled_tasks;
 pub mod security;
 pub mod settings;
 pub mod subscriptions;
+pub mod sync;
 pub mod tickets;
 pub mod tokens;
 pub mod update;
