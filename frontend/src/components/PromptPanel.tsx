@@ -14,6 +14,9 @@ import type { PromptMode } from '../types';
  * - 替换：删掉客户端全部 system 消息，头部插入网关自有提示词
  * - 追加：保留客户端 system，在其后追加一条网关提示词
  *
+ * 覆盖层级（优先级从高到低）：按模型覆盖 > 按提供商覆盖（键 = 账号池
+ * 提供商名或渠道类型）> 全局；命中任一层即整条替代下层 mode/text。
+ *
  * 保存即热生效：下一请求即按新策略注入，无需重启。
  */
 
@@ -42,6 +45,13 @@ interface ModelOverrideRow {
   text: string;
 }
 
+/** 单条「按提供商覆盖」草稿（键=账号 provider 名或渠道类型名）。 */
+interface ProviderOverrideRow {
+  provider: string;
+  mode: PromptMode;
+  text: string;
+}
+
 export default function PromptPanel(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -52,6 +62,7 @@ export default function PromptPanel(): JSX.Element {
   const [text, setText] = useState('');
   const [devCompat, setDevCompat] = useState(true);
   const [rows, setRows] = useState<ModelOverrideRow[]>([]);
+  const [providerRows, setProviderRows] = useState<ProviderOverrideRow[]>([]);
 
   useEffect(() => {
     void (async () => {
@@ -69,6 +80,13 @@ export default function PromptPanel(): JSX.Element {
               text: over.text ?? '',
             })),
           );
+          setProviderRows(
+            Object.entries(d.providers ?? {}).map(([provider, over]) => ({
+              provider,
+              mode: over.mode ?? 'passthrough',
+              text: over.text ?? '',
+            })),
+          );
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -82,18 +100,25 @@ export default function PromptPanel(): JSX.Element {
     setSaving(true);
     setError('');
     try {
-      // 空模型名 / 重名行直接丢弃（后者保留先出现的），避免写入无法命中的键
+      // 空模型名/提供商名 / 重名行直接丢弃（后者保留先出现的），避免写入无法命中的键
       const models: Record<string, { mode: PromptMode; text: string }> = {};
       for (const row of rows) {
         const name = row.model.trim();
         if (!name || models[name]) continue;
         models[name] = { mode: row.mode, text: row.text };
       }
+      const providers: Record<string, { mode: PromptMode; text: string }> = {};
+      for (const row of providerRows) {
+        const name = row.provider.trim();
+        if (!name || providers[name]) continue;
+        providers[name] = { mode: row.mode, text: row.text };
+      }
       const res = await api.saveGatewayPrompt({
         mode,
         text,
         developer_role_compat: devCompat,
         models,
+        providers,
       });
       const d = res?.data;
       if (d) {
@@ -103,6 +128,13 @@ export default function PromptPanel(): JSX.Element {
         setRows(
           Object.entries(d.models ?? {}).map(([model, over]) => ({
             model,
+            mode: over.mode ?? 'passthrough',
+            text: over.text ?? '',
+          })),
+        );
+        setProviderRows(
+          Object.entries(d.providers ?? {}).map(([provider, over]) => ({
+            provider,
             mode: over.mode ?? 'passthrough',
             text: over.text ?? '',
           })),
@@ -118,6 +150,10 @@ export default function PromptPanel(): JSX.Element {
 
   const updateRow = (index: number, patch: Partial<ModelOverrideRow>): void => {
     setRows(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  };
+
+  const updateProviderRow = (index: number, patch: Partial<ProviderOverrideRow>): void => {
+    setProviderRows(providerRows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   };
 
   if (loading) {
@@ -246,6 +282,72 @@ export default function PromptPanel(): JSX.Element {
                 onClick={() => setRows([...rows, { model: '', mode: 'append', text: '' }])}
               >
                 {t('添加模型覆盖')}
+              </button>
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>{t('按提供商覆盖')}</label>
+            <div className="form-hint" style={{ marginBottom: 8 }}>
+              {t('键 = 账号池提供商名（qoder / trae …）或渠道类型（openai_compatible / anthropic …）；优先级低于按模型覆盖，命中则整条替代全局设置。正文留空 = 该提供商不做注入。')}
+            </div>
+            {providerRows.length === 0 ? (
+              <div className="empty-state">
+                <p>{t('暂无按提供商覆盖，全部请求走全局设置')}</p>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {providerRows.map((row, i) => (
+                  <div
+                    key={`${row.provider}-${i}`}
+                    style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 12 }}
+                  >
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                      <input
+                        className="form-input"
+                        style={{ flex: 2 }}
+                        placeholder={t('提供商（账号池提供商名或渠道类型）')}
+                        value={row.provider}
+                        onChange={(e) => updateProviderRow(i, { provider: e.target.value })}
+                      />
+                      <select
+                        className="form-input"
+                        style={{ flex: 1 }}
+                        value={row.mode}
+                        onChange={(e) => updateProviderRow(i, { mode: e.target.value as PromptMode })}
+                      >
+                        {MODES.map((m) => (
+                          <option key={m.value} value={m.value}>
+                            {t(m.label)}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => setProviderRows(providerRows.filter((_, idx) => idx !== i))}
+                      >
+                        {t('删除')}
+                      </button>
+                    </div>
+                    <textarea
+                      className="form-input"
+                      rows={3}
+                      placeholder={t('该提供商的提示词正文（留空 = 不注入）')}
+                      value={row.text}
+                      onChange={(e) => updateProviderRow(i, { text: e.target.value })}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setProviderRows([...providerRows, { provider: '', mode: 'append', text: '' }])}
+              >
+                {t('添加提供商覆盖')}
               </button>
             </div>
           </div>
