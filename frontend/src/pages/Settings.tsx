@@ -275,13 +275,12 @@ export default function Settings() {
   const [exchangeRatesSaving, setExchangeRatesSaving] = useState(false);
 
   // ── 邮箱白名单（注册限制：仅允许指定域名后缀的邮箱注册；随 /limits 读写）──
-  const [emailWl, setEmailWl] = useState<{ enabled: boolean; domains: string[] }>({
-    enabled: false,
-    domains: [],
-  });
+  // 编辑形态是**一个逗号分隔的字符串**（「用 , 隔开代表下一个」），提交时才拆成数组；
+  // 逐行增删的编辑器对几个域名来说太啰嗦。
+  const [emailWlEnabled, setEmailWlEnabled] = useState(false);
+  const [emailWlText, setEmailWlText] = useState('');
   const [emailWlLoading, setEmailWlLoading] = useState(false);
   const [emailWlSaving, setEmailWlSaving] = useState(false);
-  const [emailWlDraft, setEmailWlDraft] = useState('');
 
   // ── 通用确认弹窗（用于清空缓存等危险操作）──
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
@@ -445,15 +444,17 @@ export default function Settings() {
   };
 
   // ── 邮箱白名单（读：email_whitelist_enable + email_whitelist_suffix，随 /limits）──
+  // 数组按 `,` / `，` / 换行 / 空白 连成一行展示，用户看到的即「逗号分隔」。
   const loadEmailWhitelist = async () => {
     setEmailWlLoading(true);
     try {
       const res = await api.getLimits();
       const d = res?.data as Record<string, unknown> | undefined;
       const suffix = Array.isArray(d?.email_whitelist_suffix)
-        ? (d.email_whitelist_suffix as string[]).map((s) => String(s))
+        ? (d.email_whitelist_suffix as string[]).map((s) => String(s).trim()).filter((s) => s !== '')
         : [];
-      setEmailWl({ enabled: Boolean(d?.email_whitelist_enable), domains: suffix });
+      setEmailWlEnabled(Boolean(d?.email_whitelist_enable));
+      setEmailWlText(suffix.join(','));
     } catch {
       // 邮箱白名单未启用或加载失败，静默处理（区块照常渲染，默认关闭）
     } finally {
@@ -461,33 +462,28 @@ export default function Settings() {
     }
   };
 
-  // 添加域名行（去首尾空白 + 小写：域名大小写不敏感；重复项忽略，与破甲控制台词表同款）
-  const addEmailWlDomain = (): void => {
-    const next = emailWlDraft.trim().toLowerCase();
-    if (!next || emailWl.domains.includes(next)) {
-      setEmailWlDraft('');
-      return;
-    }
-    setEmailWl({ ...emailWl, domains: [...emailWl.domains, next] });
-    setEmailWlDraft('');
-  };
-
-  // 保存：规范化（trim + 小写、空行忽略）后随 settings PUT（/limits）一起提交两个字段
+  // 保存：把逗号分隔文本拆成数组（`,` `，` 空白 换行都算分隔符），去空/去重/小写。
+  // 域名大小写不敏感，统一小写后再提交，避免 user@163.COM 与白名单对不上。
   const handleEmailWhitelistSave = async () => {
-    if (emailWl.domains.some((d) => d.trim() !== '' && /\s/.test(d))) {
-      setError(t('邮箱域名不能包含空格'));
-      return;
+    const seen = new Set<string>();
+    const domains: string[] = [];
+    for (const raw of emailWlText.split(/[,，\s]+/)) {
+      const d = raw.trim().toLowerCase();
+      // 容忍用户按习惯写 `@163.com`，去掉前导 @
+      const norm = d.replace(/^@+/, '');
+      if (norm === '' || seen.has(norm)) continue;
+      seen.add(norm);
+      domains.push(norm);
     }
-    const domains = emailWl.domains
-      .map((d) => d.trim().toLowerCase())
-      .filter((d) => d !== '');
     setEmailWlSaving(true);
     setError('');
     try {
       await api.updateLimits({
-        email_whitelist_enable: emailWl.enabled,
+        email_whitelist_enable: emailWlEnabled,
         email_whitelist_suffix: domains,
       });
+      // 回填规范化后的文本，让用户看到最终生效的形态（去重、去 @、小写）
+      setEmailWlText(domains.join(','));
       addToast(t('邮箱白名单已保存，下一个注册立即生效'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -721,8 +717,8 @@ export default function Settings() {
                   <div className="form-group">
                     <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <Switch
-                        checked={emailWl.enabled}
-                        onChange={(next) => setEmailWl({ ...emailWl, enabled: next })}
+                        checked={emailWlEnabled}
+                        onChange={setEmailWlEnabled}
                       />
                       {t('启用邮箱白名单')}
                     </label>
@@ -730,62 +726,17 @@ export default function Settings() {
                   </div>
 
                   <div className="form-group">
-                    <label>{t('允许的邮箱域名')}</label>
+                    <label htmlFor="emailWhitelistDomains">{t('允许的邮箱域名')}</label>
+                    <input
+                      id="emailWhitelistDomains"
+                      className="form-input"
+                      value={emailWlText}
+                      placeholder="qq.com,163.com,gmail.com"
+                      onChange={(e) => setEmailWlText(e.target.value)}
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
                     <span className="form-hint">{t('settingsEmailWhitelistDomainsHint')}</span>
-                    {emailWl.domains.length === 0 ? (
-                      <div className="empty-state">
-                        <p>{t('settingsEmailWhitelistEmpty')}</p>
-                      </div>
-                    ) : (
-                      <div className="email-wl-list">
-                        {emailWl.domains.map((domain, idx) => (
-                          <div key={idx} className="email-wl-row">
-                            <input
-                              className="form-input email-wl-input"
-                              value={domain}
-                              placeholder="163.com"
-                              onChange={(e) =>
-                                setEmailWl({
-                                  ...emailWl,
-                                  domains: emailWl.domains.map((d, i) =>
-                                    i === idx ? e.target.value : d,
-                                  ),
-                                })
-                              }
-                            />
-                            <button
-                              type="button"
-                              className="btn btn-secondary"
-                              onClick={() =>
-                                setEmailWl({
-                                  ...emailWl,
-                                  domains: emailWl.domains.filter((_, i) => i !== idx),
-                                })
-                              }
-                            >
-                              {t('删除')}
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="email-wl-add">
-                      <input
-                        className="form-input email-wl-input"
-                        value={emailWlDraft}
-                        placeholder="163.com"
-                        onChange={(e) => setEmailWlDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            addEmailWlDomain();
-                          }
-                        }}
-                      />
-                      <button type="button" className="btn btn-secondary" onClick={addEmailWlDomain}>
-                        {t('添加域名')}
-                      </button>
-                    </div>
                   </div>
 
                   <div className="settings-actions">

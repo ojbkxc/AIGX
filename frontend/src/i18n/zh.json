@@ -3458,11 +3458,8 @@
   "邮箱白名单": "邮箱白名单",
   "启用邮箱白名单": "启用邮箱白名单",
   "允许的邮箱域名": "允许的邮箱域名",
-  "添加域名": "添加域名",
   "邮箱白名单已保存，下一个注册立即生效": "邮箱白名单已保存，下一个注册立即生效",
-  "邮箱域名不能包含空格": "邮箱域名不能包含空格",
   "settingsEmailWhitelistHint": "限制注册邮箱的域名后缀，仅列表内域名的邮箱可注册。",
   "settingsEmailWhitelistEnableHint": "开启后仅允许列表内域名后缀的邮箱注册（如 163.com 匹配 user@163.com）；列表为空时任何邮箱都无法注册。保存后下一个注册立即生效。",
-  "settingsEmailWhitelistDomainsHint": "按 @ 后的完整域名精确匹配：163.com 可注册 user@163.com，但不匹配 user@mail.163.com（子域需单独添加）。",
-  "settingsEmailWhitelistEmpty": "暂无域名，添加后保存生效"
+  "settingsEmailWhitelistDomainsHint": "用英文逗号分隔多个域名，如 qq.com,163.com；按 @ 后的完整域名精确匹配（163.com 匹配 user@163.com，不匹配 user@mail.163.com，子域需单独添加）。"
 }

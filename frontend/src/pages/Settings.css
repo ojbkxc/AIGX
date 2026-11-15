@@ -176,28 +176,3 @@
   line-height: 1.6;
   max-width: 520px;
 }
-
-/* ── 邮箱白名单：域名列表编辑器（增删按钮，与破甲控制台词表编辑同风格）── */
-.email-wl-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.email-wl-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.email-wl-input {
-  flex: 1;
-  min-width: 0;
-}
-
-.email-wl-add {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}

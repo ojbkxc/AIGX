@@ -71,6 +71,16 @@ export default function Register() {
   // 机器人校验开关（options 未取到时沿用旧行为：由 ALTCHA 自身状态兜底）
   const captchaRequired = options?.captcha_required === true;
   const emailSuffixes = options?.email_whitelist_suffix ?? [];
+  // 默认选中的域名（下拉首项）。单独取出来当 effect 依赖：emailSuffixes 每次
+  // 渲染都是新数组（`?? []`），直接依赖会让 effect 每帧都跑。
+  const defaultDomain = emailSuffixes.length > 0 ? `@${emailSuffixes[0]}` : '';
+
+  // 默认选中第一项域名：多数人只有一个可选域名，让用户只需填本地部分。
+  // 只在「还没选」时补默认 —— 用户手动选过别的域名后不能被后续渲染冲掉。
+  useEffect(() => {
+    if (!whitelistEnabled || defaultDomain === '') return;
+    if (selectedDomain === '') setSelectedDomain(defaultDomain);
+  }, [whitelistEnabled, defaultDomain, selectedDomain]);
 
   // ── 用户名实时可用性检查（防抖 300ms）──
   // 状态：'idle' 未检查 / 'checking' 检查中 / 'available' 可用 / 'taken' 已占用 / 'error' 检查失败
@@ -358,7 +368,11 @@ export default function Register() {
                   disabled={loading || registerClosed}
                   aria-label={t('域名')}
                 >
-                  <option value="">{t('请选择域名')}</option>
+                  {/* 列表为空时（白名单开启但没配域名 = 没人能注册）保留空占位；
+                      非空时首项在下面的 effect 里被默认选中，不渲染「请选择域名」 */}
+                  {emailSuffixes.length === 0 && (
+                    <option value="">{t('请选择域名')}</option>
+                  )}
                   {emailSuffixes.map((suffix) => (
                     <option key={suffix} value={`@${suffix}`}>{`@${suffix}`}</option>
                   ))}

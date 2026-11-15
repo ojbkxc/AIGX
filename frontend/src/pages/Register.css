@@ -12,11 +12,15 @@
   min-width: 0;
 }
 
-/* 复用 .form-input 的高度/边框/背景，只覆盖 select 的宽度与原生外观 */
+/* 复用 .form-input 的高度/边框/背景，只覆盖 select 的宽度与原生外观。
+   `flex: 0 0 auto` + `width: auto`：宽度由内容撑开（如 `@163.com` 五六十像素），
+   不预设 150px —— 下拉贴右、输入框吃满剩余宽度，窄屏也不至于把输入框挤没。 */
 .email-split .email-split-domain {
-  flex: 0 0 150px;
-  width: 150px;
-  padding-right: 8px;
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 45%;
+  padding-left: 8px;
+  padding-right: 4px;
   cursor: pointer;
   color: var(--input-text);
   background: var(--input-bg);
@@ -26,16 +30,16 @@
   cursor: not-allowed;
 }
 
-/* 窄屏：本地部分与下拉纵向堆叠，避免下拉把输入框挤没 */
+/* 窄屏（手机）：保持一行。下拉本就窄（内容宽度），不再纵向堆叠 ——
+   堆叠后两个控件各占一整行反而更占纵向空间、更像两个独立字段。 */
 @media (max-width: 480px) {
   .email-split {
-    flex-direction: column;
+    gap: 6px;
   }
 
-  .email-split .email-split-local,
   .email-split .email-split-domain {
-    flex: 1 1 auto;
-    width: 100%;
+    font-size: 13px;
+    padding-left: 6px;
   }
 }
 
