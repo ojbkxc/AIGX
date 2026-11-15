@@ -16,7 +16,6 @@ pub mod channel;
 pub mod chat_session;
 pub mod checkin;
 pub mod client_config;
-pub mod client_id;
 pub mod config;
 pub mod continuation;
 pub mod cron;
