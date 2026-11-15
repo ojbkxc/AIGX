@@ -164,11 +164,6 @@ pub use guardrail::{
 // 面板品牌自定义（panel_name / logo_url / favicon_url；公开 GET + 管理员 GET/PUT）
 pub use branding::{handle_get_branding, handle_get_public_branding, handle_update_branding};
 
-// 护栏（输入/输出黑名单 + 200 假答复门控：GET/PUT 配置 + 解除降级）
-pub use guardrail::{
-    handle_clear_guardrail_degrade, handle_get_guardrail, handle_update_guardrail,
-};
-
 // 调试模式：上游原始报文查看/清空（对照 Agent2API `/api/debug/traffic`）
 pub use debug::{
     handle_clear_debug_traffic, handle_get_debug, handle_get_debug_traffic, handle_update_debug,
