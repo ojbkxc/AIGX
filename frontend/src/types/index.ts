@@ -318,6 +318,8 @@ export interface ChannelItem {
   name: string;
   channel_type?: string;
   base_url?: string;
+  /** 备用入口（同一上游的备用 base_url 列表，仅可信 HTTPS；按顺序尝试） */
+  backup_base_urls?: string[];
   models?: string[];
   /// 上游 /models 自动发现并缓存的模型快照（"留空=全部"渠道调试下拉用）
   discovered_models?: string[];
@@ -1787,6 +1789,8 @@ export interface GatewayPromptItem {
   text: string;
   /** 按模型覆盖（键 = 模型名；命中则整条替代全局 mode/text） */
   models?: Record<string, { mode: PromptMode; text: string }>;
+  /** 按提供商覆盖（键 = 账号 provider 名或渠道类型名；优先级：模型 > 提供商 > 全局） */
+  providers?: Record<string, { mode: PromptMode; text: string }>;
   developer_role_compat?: boolean;
 }
 

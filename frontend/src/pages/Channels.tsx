@@ -44,6 +44,8 @@ interface ChannelItem {
   name: string;
   channel_type: string;
   base_url?: string;
+  /** 备用入口（同一上游的备用 base_url 列表，仅可信 HTTPS；按顺序尝试） */
+  backup_base_urls?: string[];
   api_key?: string;
   priority: number;
   weight: number;
@@ -160,6 +162,13 @@ interface ChannelFormState {
   balance_fields: Record<string, string>;
   /** 插件渠道接管的 provider id（channel_type=plugin 时必填） */
   plugin_provider: string;
+  /**
+   * 备用入口（每行一个 URL，与后端 textarea 表单惯例一致；提交时按行切分）。
+   * 后端三态语义与 api_key 同口径：缺省 = 保持原值、[] = 显式清空、
+   * 有值 = 覆盖（服务端归一化 + 校验可信 HTTPS）。这里总是提交（空串切分
+   * 后为 []），用户清空输入框即等于「清掉备用入口」，与 quirks 同策略。
+   */
+  backup_base_urls: string;
 }
 
 /** quirks 的表单形态（与后端 snake_case 字段对齐） */
@@ -1001,6 +1010,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       balance_query_interval_secs: '0',
       balance_fields: {},
       plugin_provider: '',
+      backup_base_urls: '',
     };
   }
 
@@ -1384,6 +1394,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
         name: ch.name,
         channel_type: ch.channel_type || 'openai_compatible',
         base_url: ch.base_url,
+        backup_base_urls: ch.backup_base_urls,
         api_key: ch.api_key,
         priority: ch.priority ?? 0,
         weight: ch.weight ?? 1,
@@ -1502,6 +1513,8 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       // 余额凭证存在 quirks.headers 里，编辑时回填到专用输入框（并从 headers 文本里剔除，
       // 避免同一份值既在文本框又在专用框、提交时互相覆盖）
       balance_fields: extractBalanceFields(ch.quirks),
+      // 备用入口回填：每行一个 URL（后端已归一化为去尾斜杠的可信 HTTPS 列表）
+      backup_base_urls: (ch.backup_base_urls || []).join('\n'),
     });
     // 编辑直达第 2 步（供应商已定）
     setModalStep('form');
@@ -1541,6 +1554,13 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       // 插件渠道：plugin_provider 是 ChannelRequest 的 serde(default) 字段，
       // 直接透传（后端 add/update 校验 plugin 类型时必填，空串会被 400 拦下）
       plugin_provider: form.plugin_provider,
+      // 备用入口：总是提交数组（后端 Option<Vec<String>> 三态，缺省 = 保持原值）。
+      // 每行一个 URL，空行丢弃；清空输入框 = 提交 [] = 显式清掉备用入口。
+      // 服务端归一化（去重/去主入口/校验可信 HTTPS），超限或非法 URL 返回 400。
+      backup_base_urls: form.backup_base_urls
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean),
       // #32 PR3：巡检间隔**刻意不放进 PUT/POST body**——后端 `ChannelRequest` 没有
       // 这个字段，带上只会被 serde 静默吞掉，看起来「提交了」其实什么都没发生。
       // 写在 payload 里更是个陷阱：下一个人会以为 PUT 能改它。唯一写路径是 PATCH，
@@ -2302,6 +2322,25 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                   onChange={(e) => setForm({ ...form, base_url: e.target.value })}
                   hint={t('未带 /v1 时会自动补齐')}
                 />
+              )}
+              {/* 备用入口：主入口连接失败时按顺序改用的备用 base_url（账号池 /
+                  Cloudflare / 插件渠道不适用——上游地址由账号或插件包决定）。
+                  仅可信 HTTPS（https://、默认 443、不带用户名密码/查询串），
+                  上限 8 条；非法 URL 或超限由后端 400 拦下并在表单顶部报错。 */}
+              {form.channel_type !== 'plugin' && form.channel_type !== 'cloudflare' && form.channel_type !== 'account' && (
+                <div className="form-group">
+                  <label>{t('备用入口（可选）')}</label>
+                  <textarea
+                    className="form-input"
+                    rows={3}
+                    placeholder={'https://backup-1.example.com\nhttps://backup-2.example.com'}
+                    value={form.backup_base_urls}
+                    onChange={(e) => setForm({ ...form, backup_base_urls: e.target.value })}
+                  />
+                  <div className="form-hint">
+                    {t('每行一个地址；主入口连接失败（DNS/连接层错误）时按顺序改用，上游已受理后的失败不换。仅可信 HTTPS，最多 8 条。')}
+                  </div>
+                </div>
               )}
               {form.channel_type !== 'plugin' && (
                 <div className="form-group">
