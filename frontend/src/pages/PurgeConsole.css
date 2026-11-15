@@ -29,27 +29,84 @@
   font-weight: 400;
 }
 
-/* 6 张统计卡：≥1200 一行 6 张，641–1199 两行 3 张，≤640 两列 3 行——行行对齐，不留空轨道 */
+/* 7 张统计卡：≥1400 一行 7 张，700–1399 两行 4 张，≤699 两列 4 行——行行对齐，不留空轨道 */
 .purge-stats {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 12px;
 }
 
-@media (max-width: 1199px) {
+@media (max-width: 1399px) {
   .purge-stats {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 699px) {
   .purge-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
 }
 
-/* 开关行：标题加粗 + 描述弱化，行间 1px 分隔线（对齐参考图 7 行开关） */
+/* 失败分类条：4 个终态失败计数的语义色横条，一眼看出失败构成。
+   颜色走主题令牌（--danger-text/--warning-text/--accent-color/--text-muted），暗亮自动适配 */
+.purge-failure-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.purge-failure-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--card-bg);
+}
+
+.purge-failure-value {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.purge-failure-label {
+  font-size: var(--font-size-xs, 10.5px);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.purge-failure-cell.tone-danger .purge-failure-value {
+  color: var(--danger-text, #ef4444);
+}
+
+.purge-failure-cell.tone-warning .purge-failure-value {
+  color: var(--warning-text, #f59e0b);
+}
+
+.purge-failure-cell.tone-accent .purge-failure-value {
+  color: var(--accent-color, #2f6fed);
+}
+
+.purge-failure-cell.tone-muted .purge-failure-value {
+  color: var(--text-muted);
+}
+
+/* 窄屏（≤480）：2×2 网格，每个单元格更宽更易读 */
+@media (max-width: 480px) {
+  .purge-failure-cell {
+    flex: 1 1 calc(50% - 4px);
+  }
+}
+
+/* 开关行：标题加粗 + 描述弱化，行间 1px 分隔线（对齐参考图 8 行开关） */
 .purge-rows {
   display: flex;
   flex-direction: column;

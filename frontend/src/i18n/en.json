@@ -3438,5 +3438,14 @@
   "没有需要保存的修改": "No changes to save",
   "统计": "Statistics",
   "当前页行数超过渲染上限，仅渲染前 200 行，请调整每页条数后翻页查看剩余数据": "Current page exceeds the rendering limit (200 rows); adjust page size or paginate to view the rest",
-  "日志加载失败，请重试": "Failed to load logs — please retry"
+  "日志加载失败，请重试": "Failed to load logs — please retry",
+  "空答": "Empty",
+  "其它": "Other",
+  "失败分类": "Failure categories",
+  "同义词替换": "Synonym substitution",
+  "同义词命中": "Synonym hits",
+  "同义词表": "Synonym table",
+  "敏感词": "Sensitive term",
+  "同义词": "Synonym",
+  "暂无同义词，点击右上角「添加规则」新建一条": "No synonyms yet — use “Add rule” in the top-right to create one"
 }

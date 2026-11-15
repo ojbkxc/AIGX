@@ -21,6 +21,7 @@ type BoolKey =
   | 'enabled'
   | 'system_normalize'
   | 'dead_zone_rewrite'
+  | 'synonym_enabled'
   | 'reduce_reasoning'
   | 'cross_source_fallback'
   | 'skill_inject'
@@ -41,6 +42,11 @@ const SWITCHES: Array<{ key: BoolKey; label: string; desc: string }> = [
     key: 'dead_zone_rewrite',
     label: '死区词改写',
     desc: '按下方词表把易触发拒绝的措辞换成中性表述',
+  },
+  {
+    key: 'synonym_enabled',
+    label: '同义词替换',
+    desc: '按同义词表把易触发拒绝的词换成语义相近的中性词（与死区词改写并列）',
   },
   {
     key: 'reduce_reasoning',
@@ -172,13 +178,49 @@ const StatsGrid = memo(function StatsGrid({
       <StatCard title={t('提前收效')} value={stats.early_success} />
       <StatCard title={t('技能命中')} value={stats.skill_hits} />
       <StatCard title={t('拒绝样本')} value={stats.refusals} />
+      <StatCard title={t('同义词命中')} value={stats.synonym_hits} />
     </div>
   );
 });
 
 /**
- * 开关行（memo）：`flags` 由父组件 useMemo 按 7 个原语派生，数组引用只在开关本身变化时变，
- * 故编辑文本/词表不会连带重渲染这 7 行。
+ * 失败分类条（memo）：把 refusal/empty/filter/other 四个终态失败计数
+ * 从参数网格里的「N / N / N / N」文本升级为带语义色的横条，一眼看出失败构成。
+ */
+const FailureBar = memo(function FailureBar({
+  refusal,
+  empty,
+  filter,
+  other,
+  t,
+}: {
+  refusal: number;
+  empty: number;
+  filter: number;
+  other: number;
+  t: TFunction;
+}): JSX.Element {
+  const items = [
+    { label: t('拒绝'), value: refusal, tone: 'danger' },
+    { label: t('空答'), value: empty, tone: 'warning' },
+    { label: t('过滤'), value: filter, tone: 'accent' },
+    { label: t('其它'), value: other, tone: 'muted' },
+  ];
+  return (
+    <div className="purge-failure-bar" role="group" aria-label={t('失败分类')}>
+      {items.map((item) => (
+        <div key={item.label} className={`purge-failure-cell tone-${item.tone}`}>
+          <span className="purge-failure-value">{item.value}</span>
+          <span className="purge-failure-label">{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+});
+
+/**
+ * 开关行（memo）：`flags` 由父组件 useMemo 按 8 个原语派生，数组引用只在开关本身变化时变，
+ * 故编辑文本/词表不会连带重渲染这 8 行。
  */
 const SwitchRows = memo(function SwitchRows({
   flags,
@@ -252,10 +294,6 @@ const ParamGrid = memo(function ParamGrid({
         </strong>
       </div>
       <div className="purge-param">
-        <span>{t('synonym 模式')}</span>
-        <strong>{t('未启用')}</strong>
-      </div>
-      <div className="purge-param">
         <span>{t('异源模型')}</span>
         <strong>{fallbackModels || '—'}</strong>
       </div>
@@ -313,6 +351,9 @@ export default function PurgeConsole(): JSX.Element {
   // 词表增删后的焦点回归：'add' → 最后一行首个输入；数字 → 该下标行（删除后补位行）
   const rulesRef = useRef<HTMLDivElement | null>(null);
   const focusRule = useRef<number | 'add' | null>(null);
+  // 同义词词表增删后的焦点回归（与死区词表独立，互不干扰）
+  const synRulesRef = useRef<HTMLDivElement | null>(null);
+  const focusSynRule = useRef<number | 'add' | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -437,12 +478,47 @@ export default function PurgeConsole(): JSX.Element {
     setDraft((d) => (d ? { ...d, rewrite_rules: d.rewrite_rules.filter((_, i) => i !== index) } : d));
   }, []);
 
+  const patchSynonymRule = useCallback((index: number, part: Partial<PurgeRewriteRule>): void => {
+    setDirty(true);
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            synonym_pairs: d.synonym_pairs.map((rule, i) => (i === index ? { ...rule, ...part } : rule)),
+          }
+        : d,
+    );
+  }, []);
+
+  const addSynonymRule = useCallback((): void => {
+    setDirty(true);
+    focusSynRule.current = 'add';
+    setDraft((d) => (d ? { ...d, synonym_pairs: [...d.synonym_pairs, { from: '', to: '' }] } : d));
+  }, []);
+
+  const removeSynonymRule = useCallback((index: number): void => {
+    setDirty(true);
+    focusSynRule.current = index;
+    setDraft((d) => (d ? { ...d, synonym_pairs: d.synonym_pairs.filter((_, i) => i !== index) } : d));
+  }, []);
+
   // 词表增删后把焦点落回列表内，避免按钮随行卸载后焦点掉到 body
   useEffect(() => {
     if (focusRule.current === null || !draft) return;
     const target = focusRule.current;
     focusRule.current = null;
     const rows = rulesRef.current?.querySelectorAll<HTMLElement>('.purge-rule-row');
+    if (!rows || rows.length === 0) return;
+    const idx = target === 'add' ? rows.length - 1 : Math.min(target, rows.length - 1);
+    rows[idx]?.querySelector<HTMLInputElement>('input')?.focus();
+  }, [draft]);
+
+  // 同义词词表增删后焦点回归（与死区词表独立）
+  useEffect(() => {
+    if (focusSynRule.current === null || !draft) return;
+    const target = focusSynRule.current;
+    focusSynRule.current = null;
+    const rows = synRulesRef.current?.querySelectorAll<HTMLElement>('.purge-rule-row');
     if (!rows || rows.length === 0) return;
     const idx = target === 'add' ? rows.length - 1 : Math.min(target, rows.length - 1);
     rows[idx]?.querySelector<HTMLInputElement>('input')?.focus();
@@ -460,7 +536,7 @@ export default function PurgeConsole(): JSX.Element {
     }
   }, []);
 
-  // 开关行入参：按 7 个原语派生，数组引用只在开关本身变化时改变——
+  // 开关行入参：按 8 个原语派生，数组引用只在开关本身变化时改变——
   // 文本/词表编辑不会让 SwitchRows 命中重渲染（memo 才有意义）。
   const flags = useMemo(
     () =>
@@ -470,6 +546,7 @@ export default function PurgeConsole(): JSX.Element {
       draft?.enabled,
       draft?.system_normalize,
       draft?.dead_zone_rewrite,
+      draft?.synonym_enabled,
       draft?.reduce_reasoning,
       draft?.cross_source_fallback,
       draft?.skill_inject,
@@ -483,9 +560,9 @@ export default function PurgeConsole(): JSX.Element {
         <div className="page-header">
           <h1>{t('破甲控制台')}</h1>
         </div>
-        <SkeletonCards count={6} />
+        <SkeletonCards count={7} />
         <Card title={t('开关')}>
-          <SkeletonList rows={7} />
+          <SkeletonList rows={8} />
         </Card>
         <Card title={t('只读参数')}>
           <div className="purge-skeleton-params" role="status" aria-busy="true">
@@ -535,6 +612,14 @@ export default function PurgeConsole(): JSX.Element {
 
       <StatsGrid stats={stats} retryRate={retryRate} t={t} />
 
+      <FailureBar
+        refusal={stats.failure_refusal}
+        empty={stats.failure_empty}
+        filter={stats.failure_filter}
+        other={stats.failure_other}
+        t={t}
+      />
+
       <Card
         title={t('开关')}
         actions={<span className="purge-hint">{t('点一下立即生效，重启后保留')}</span>}
@@ -582,6 +667,34 @@ export default function PurgeConsole(): JSX.Element {
                 removeLabel={t('删除')}
                 onPatch={patchRule}
                 onRemove={removeRule}
+              />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card
+        title={t('同义词表')}
+        actions={
+          <Button variant="outline" size="sm" onClick={addSynonymRule}>
+            {t('添加规则')}
+          </Button>
+        }
+      >
+        {draft.synonym_pairs.length === 0 ? (
+          <p className="purge-empty">{t('暂无同义词，点击右上角「添加规则」新建一条')}</p>
+        ) : (
+          <div className="purge-rules" ref={synRulesRef}>
+            {draft.synonym_pairs.map((rule, index) => (
+              <RuleRow
+                key={index}
+                rule={rule}
+                index={index}
+                fromLabel={t('敏感词')}
+                toLabel={t('同义词')}
+                removeLabel={t('删除')}
+                onPatch={patchSynonymRule}
+                onRemove={removeSynonymRule}
               />
             ))}
           </div>

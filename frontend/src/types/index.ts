@@ -2268,6 +2268,7 @@ export interface PurgeSettings {
   enabled: boolean;
   system_normalize: boolean;
   dead_zone_rewrite: boolean;
+  synonym_enabled: boolean;
   reduce_reasoning: boolean;
   cross_source_fallback: boolean;
   skill_inject: boolean;
@@ -2277,6 +2278,7 @@ export interface PurgeSettings {
   fallback_trigger_attempt: number;
   fallback_models: string[];
   rewrite_rules: PurgeRewriteRule[];
+  synonym_pairs: PurgeRewriteRule[];
   normalize_strip_prefixes: string[];
   skill_dir: string;
   skill_inject_limit: number;
@@ -2295,6 +2297,7 @@ export interface PurgeStats {
   failure_empty: number;
   failure_filter: number;
   failure_other: number;
+  synonym_hits: number;
 }
 
 /** 破甲控制台运行信息 */

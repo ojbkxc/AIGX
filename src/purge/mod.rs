@@ -8,6 +8,7 @@
 //! - `enabled=false`：数据面完全零改动（不取快照、不分配）。
 //! - `system_normalize`：合并连续 system、去重、折叠多余空行、剥离配置前缀。
 //! - `dead_zone_rewrite`：字面 from→to 改写（system/user 文本）。
+//! - `synonym_enabled`：同义词替换（与死区词改写并列的第二种改写策略，system/user 文本）。
 //! - `reduce_reasoning`：把 high/medium/xhigh 压到 `reasoning_floor`（默认 low）。
 //! - `cross_source_fallback`：主模型候选耗尽后尝试 `fallback_models`（仅 chat）。
 //! - `skill_inject`：扫 `skill_dir` 的 SKILL.md，关键词命中追加到末条 user。
@@ -60,6 +61,28 @@ fn default_rewrite_rules() -> Vec<RewriteRule> {
     .collect()
 }
 
+fn default_synonym_pairs() -> Vec<RewriteRule> {
+    // 中性、合规语境的同义词示例；管理员可在页面上增删改。
+    // 与 dead_zone_rewrite 的字面改写并列：本表语义上是同义替换，
+    // 把易触发拒绝的措辞换成语义相近的中性词。
+    [
+        ("黑客", "安全研究人员"),
+        ("漏洞利用", "漏洞验证"),
+        ("攻击", "测试"),
+        ("破解", "分析"),
+        ("木马", "测试程序"),
+        ("病毒", "测试样本"),
+        ("入侵", "访问"),
+        ("渗透", "评估"),
+    ]
+    .into_iter()
+    .map(|(from, to)| RewriteRule {
+        from: from.to_string(),
+        to: to.to_string(),
+    })
+    .collect()
+}
+
 fn default_reasoning_floor() -> String {
     "low".to_string()
 }
@@ -94,6 +117,8 @@ pub struct PurgeSettings {
     pub system_normalize: bool,
     /// 死区词改写
     pub dead_zone_rewrite: bool,
+    /// 同义词替换（与死区词改写并列的第二种改写策略）
+    pub synonym_enabled: bool,
     /// 降思考
     pub reduce_reasoning: bool,
     /// 异源递进
@@ -117,6 +142,8 @@ pub struct PurgeSettings {
     pub fallback_models: Vec<String>,
     /// 改写词表
     pub rewrite_rules: Vec<RewriteRule>,
+    /// 同义词表（synonym_enabled 时生效）
+    pub synonym_pairs: Vec<RewriteRule>,
     /// system 归一化要剥离的行前缀
     pub normalize_strip_prefixes: Vec<String>,
     /// 技能目录
@@ -135,6 +162,7 @@ impl Default for PurgeSettings {
             enabled: false,
             system_normalize: false,
             dead_zone_rewrite: false,
+            synonym_enabled: false,
             reduce_reasoning: false,
             cross_source_fallback: false,
             skill_inject: false,
@@ -144,6 +172,7 @@ impl Default for PurgeSettings {
             fallback_trigger_attempt: default_fallback_trigger_attempt(),
             fallback_models: Vec::new(),
             rewrite_rules: default_rewrite_rules(),
+            synonym_pairs: default_synonym_pairs(),
             normalize_strip_prefixes: Vec::new(),
             skill_dir: default_skill_dir(),
             skill_inject_limit: default_skill_inject_limit(),
@@ -233,6 +262,7 @@ pub struct PurgeStats {
     pub failure_empty: u64,
     pub failure_filter: u64,
     pub failure_other: u64,
+    pub synonym_hits: u64,
 }
 
 static STAT_RESPONSES: AtomicU64 = AtomicU64::new(0);
@@ -244,6 +274,7 @@ static STAT_FAILURE_REFUSAL: AtomicU64 = AtomicU64::new(0);
 static STAT_FAILURE_EMPTY: AtomicU64 = AtomicU64::new(0);
 static STAT_FAILURE_FILTER: AtomicU64 = AtomicU64::new(0);
 static STAT_FAILURE_OTHER: AtomicU64 = AtomicU64::new(0);
+static STAT_SYNONYM_HITS: AtomicU64 = AtomicU64::new(0);
 
 fn bump(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
@@ -281,6 +312,10 @@ pub fn record_failure(category: FailureCategory) {
     }
 }
 
+pub fn record_synonym_hit() {
+    bump(&STAT_SYNONYM_HITS);
+}
+
 pub fn snapshot() -> PurgeStats {
     PurgeStats {
         responses: STAT_RESPONSES.load(Ordering::Relaxed),
@@ -292,6 +327,7 @@ pub fn snapshot() -> PurgeStats {
         failure_empty: STAT_FAILURE_EMPTY.load(Ordering::Relaxed),
         failure_filter: STAT_FAILURE_FILTER.load(Ordering::Relaxed),
         failure_other: STAT_FAILURE_OTHER.load(Ordering::Relaxed),
+        synonym_hits: STAT_SYNONYM_HITS.load(Ordering::Relaxed),
     }
 }
 
@@ -319,7 +355,7 @@ pub fn pid() -> u32 {
 
 /// 对归一化消息列表应用全部已启用的治理项。
 ///
-/// 顺序：normalize → rewrite → structured → skill（技能内容不参与改写）。
+/// 顺序：normalize → dead_zone_rewrite → synonym → structured → skill（技能内容不参与改写）。
 /// 总开关关闭时立即返回，零分配。
 pub fn apply_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) -> Applied {
     if !cfg.enabled {
@@ -331,6 +367,13 @@ pub fn apply_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) -> A
     }
     if cfg.dead_zone_rewrite && !cfg.rewrite_rules.is_empty() {
         changed |= rewrite_texts(messages, &cfg.rewrite_rules);
+    }
+    if cfg.synonym_enabled && !cfg.synonym_pairs.is_empty() {
+        let (syn_changed, syn_hits) = rewrite_texts_counted(messages, &cfg.synonym_pairs);
+        if syn_hits > 0 {
+            record_synonym_hit();
+        }
+        changed |= syn_changed;
     }
     if cfg.structured_prompt && !cfg.structured_suffix.trim().is_empty() {
         changed |= append_to_last_user(messages, &cfg.structured_suffix);
@@ -431,6 +474,32 @@ fn rewrite_texts(messages: &mut [ChatMessage], rules: &[RewriteRule]) -> bool {
         }
     }
     changed
+}
+
+/// 与 `rewrite_texts` 同逻辑，但额外返回实际替换次数（逐条规则的命中次数累加）。
+///
+/// 用于 synonym 路径的命中计数：dead_zone_rewrite 路径继续用旧 `rewrite_texts`
+/// （行为不变），synonym 路径用本函数并在命中时 `record_synonym_hit()`。
+fn rewrite_texts_counted(messages: &mut [ChatMessage], rules: &[RewriteRule]) -> (bool, u64) {
+    let mut changed = false;
+    let mut hits = 0u64;
+    for message in messages.iter_mut() {
+        if !matches!(message.role, Role::System | Role::User) {
+            continue;
+        }
+        let Some(content) = message.content.as_mut() else {
+            continue;
+        };
+        for rule in rules {
+            if rule.from.is_empty() || !content.contains(&rule.from) {
+                continue;
+            }
+            hits += content.matches(&rule.from).count() as u64;
+            *content = content.replace(&rule.from, &rule.to);
+            changed = true;
+        }
+    }
+    (changed, hits)
 }
 
 fn normalize_system(messages: &mut Vec<ChatMessage>, prefixes: &[String]) -> bool {
@@ -835,6 +904,60 @@ mod tests {
     }
 
     #[test]
+    fn synonym_rewrites_and_counts_hits() {
+        let mut messages = vec![
+            sys("黑客在攻击系统"),
+            user("用木马和病毒入侵"),
+            ChatMessage::assistant("黑客"),
+        ];
+        let mut cfg = enabled();
+        cfg.synonym_enabled = true;
+        cfg.synonym_pairs = vec![
+            RewriteRule { from: "黑客".to_string(), to: "安全研究人员".to_string() },
+            RewriteRule { from: "攻击".to_string(), to: "测试".to_string() },
+            RewriteRule { from: "木马".to_string(), to: "测试程序".to_string() },
+            RewriteRule { from: "病毒".to_string(), to: "测试样本".to_string() },
+            RewriteRule { from: "入侵".to_string(), to: "访问".to_string() },
+        ];
+        let applied = apply_messages(&mut messages, &cfg);
+        assert!(applied.changed);
+        assert_eq!(messages[0].content.as_deref(), Some("安全研究人员在测试系统"));
+        assert_eq!(messages[1].content.as_deref(), Some("用测试程序和测试样本访问"));
+        assert_eq!(
+            messages[2].content.as_deref(),
+            Some("黑客"),
+            "assistant 不改写"
+        );
+    }
+
+    #[test]
+    fn synonym_disabled_is_noop() {
+        let mut messages = vec![user("黑客在攻击")];
+        let mut cfg = enabled();
+        cfg.synonym_pairs = vec![RewriteRule {
+            from: "黑客".to_string(),
+            to: "安全研究人员".to_string(),
+        }];
+        // synonym_enabled 默认 false → 不改写
+        let applied = apply_messages(&mut messages, &cfg);
+        assert!(!applied.changed);
+        assert_eq!(messages[0].content.as_deref(), Some("黑客在攻击"));
+    }
+
+    #[test]
+    fn rewrite_texts_counted_returns_hit_count() {
+        let mut messages = vec![user("黑客 黑客 和 攻击")];
+        let rules = vec![
+            RewriteRule { from: "黑客".to_string(), to: "安全研究人员".to_string() },
+            RewriteRule { from: "攻击".to_string(), to: "测试".to_string() },
+        ];
+        let (changed, hits) = rewrite_texts_counted(&mut messages, &rules);
+        assert!(changed);
+        assert_eq!(hits, 3, "黑客×2 + 攻击×1 = 3 次替换");
+        assert_eq!(messages[0].content.as_deref(), Some("安全研究人员 安全研究人员 和 测试"));
+    }
+
+    #[test]
     fn structured_suffix_appends_to_last_user() {
         let mut messages = vec![user("a"), sys("s"), user("b")];
         let mut cfg = enabled();
@@ -993,6 +1116,8 @@ mod tests {
         assert_eq!(cfg.retry_limit, 8);
         assert_eq!(cfg.skill_dir, DEFAULT_SKILL_DIR);
         assert!(!cfg.rewrite_rules.is_empty());
+        assert!(!cfg.synonym_pairs.is_empty());
+        assert!(!cfg.synonym_enabled);
     }
 
     #[test]

@@ -112,6 +112,22 @@ fn normalize(mut cfg: PurgeSettings) -> PurgeSettings {
         .take(200)
         .collect();
 
+    cfg.synonym_pairs = cfg
+        .synonym_pairs
+        .into_iter()
+        .filter_map(|rule| {
+            let from = rule.from.trim().to_string();
+            if from.is_empty() {
+                return None;
+            }
+            Some(RewriteRule {
+                from,
+                to: rule.to.trim().to_string(),
+            })
+        })
+        .take(200)
+        .collect();
+
     cfg.normalize_strip_prefixes = cfg
         .normalize_strip_prefixes
         .into_iter()
