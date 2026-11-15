@@ -160,6 +160,8 @@ regex = "1"
 
 # CSV 解析（公开提示词源 prompts.chat 的 prompts.csv）
 csv = "1"
+toml_edit = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
 tempfile = "3"
