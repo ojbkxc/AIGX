@@ -62,6 +62,14 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// 管理面独立监听地址（可选，如 `127.0.0.1:9528`）。
+    ///
+    /// 设置后：主端口只承载数据面（`/v1/*`、无前缀兼容路由、`/livez`、
+    /// `/readyz`、`/health`、`/metrics`）；管理面 `/api/*`、OAuth 浏览器
+    /// 回调与前端静态资源只在 `admin_bind` 监听。未设置（None）时保持
+    /// 单端口行为，存量部署零迁移。修改后需重启进程生效。
+    #[serde(default)]
+    pub admin_bind: Option<String>,
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
     /// 日志目录（可选，默认 = data_dir/logs）
@@ -85,7 +93,7 @@ pub struct ServerConfig {
     pub generated_images_max_bytes: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminConfig {
     /// 会话签名密钥。为空时首次启动由 `ensure_session_secret` 生成并持久化。
     #[serde(default)]
@@ -93,10 +101,87 @@ pub struct AdminConfig {
     /// 会话有效期（小时），默认 24。
     #[serde(default = "default_session_ttl")]
     pub session_ttl_hours: i64,
+    /// 面板名称（默认 `AIGX`）：登录页、侧栏品牌、页面标题共用。
+    #[serde(default = "default_panel_name")]
+    pub panel_name: String,
+    /// 面板 Logo 地址：默认站内 `/logo.png`；允许 http(s) 绝对 URL 或站内
+    /// `/` 开头路径（拒绝 `javascript:` / `data:` 等可执行协议，防 XSS）。
+    #[serde(default = "default_logo_url")]
+    pub logo_url: String,
+    /// 浏览器页签图标地址（可选）：为空时沿用 logo_url。
+    #[serde(default)]
+    pub favicon_url: Option<String>,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            session_secret: String::new(),
+            session_ttl_hours: default_session_ttl(),
+            panel_name: default_panel_name(),
+            logo_url: default_logo_url(),
+            favicon_url: None,
+        }
+    }
 }
 
 fn default_session_ttl() -> i64 {
     24
+}
+
+/// 默认面板名称（与 static/index.html 的 `<title>` 前缀一致）。
+pub fn default_panel_name() -> String {
+    "AIGX".to_string()
+}
+
+/// 默认 Logo：站内静态资源（`static/logo.png`）。
+pub fn default_logo_url() -> String {
+    "/logo.png".to_string()
+}
+
+/// 校验品牌资源地址（Logo / favicon）。
+///
+/// 只接受两类形态：
+/// - `http://` / `https://` 绝对 URL（外链，交给浏览器按远端 CSP 处理）；
+/// - 站内绝对路径 `/...`（如 `/logo.png`、`/assets/brand.png`）。
+///
+/// 明确拒绝 `javascript:`、`data:`、`vbscript:` 等可执行/内联协议
+/// ——它们会直接注入 `<img src>` / `<link href>` 造成 XSS。
+/// 空串与相对路径（如 `logo.png`）也拒绝：空串等于无品牌资源，相对
+/// 路径会随 SPA 路由漂移，语义不确定。
+pub fn validate_brand_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Err("地址不能为空".to_string());
+    }
+    if url.len() > 2048 {
+        return Err("地址过长（上限 2048 字符）".to_string());
+    }
+    // 控制字符（含换行/制表）可以在部分解析器里被折叠成注入面，一律拒绝
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("地址不能包含空白或控制字符".to_string());
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        // 主机部分必须存在（`https://` 单独不是可用地址）
+        let rest = &url[url.find("//").map(|i| i + 2).unwrap_or(url.len())..];
+        if rest.is_empty() || rest.starts_with('/') {
+            return Err("http(s) 地址缺少主机名".to_string());
+        }
+        return Ok(url.to_string());
+    }
+    if let Some(rest) = url.strip_prefix('/') {
+        // 站内路径：排除协议相对 URL（`//evil.com/x` 会被浏览器当外域）
+        if rest.starts_with('/') {
+            return Err("站内路径不能以 // 开头（会被解析为外域地址）".to_string());
+        }
+        // 拒绝 `javascript:` 之类伪装成站内路径的形态（如 `/javascript:x`）
+        if lower.contains(':') {
+            return Err("站内路径不能包含协议前缀".to_string());
+        }
+        return Ok(url.to_string());
+    }
+    Err("只支持 http(s):// 外链或站内 / 开头路径".to_string())
 }
 
 fn default_cf_binding_url() -> String {
@@ -856,6 +941,7 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            admin_bind: None,
             data_dir: default_data_dir(),
             log_dir: None,
             request_stats_dir: None,
@@ -1683,6 +1769,15 @@ fn apply_env_overrides_from(mut config: AppConfig, var: fn(&str) -> Option<Strin
     if let Some(v) = var("AIGX_SERVER__DATA_DIR") {
         config.server.data_dir = v;
     }
+    // 管理面独立监听（空串 = 不启用，保持单端口）
+    if let Some(v) = var("AIGX_SERVER__ADMIN_BIND") {
+        let trimmed = v.trim().to_string();
+        config.server.admin_bind = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+    }
     if let Some(v) = var("AIGX_CF_BINDING_URL") {
         config.cf_binding_url = v;
     }
@@ -1883,5 +1978,71 @@ mod tests {
                 .contains("port = 7777"),
             "走 load 分支不得改写已存在的配置文件"
         );
+    }
+
+    // ── 品牌地址校验（面板名称/Logo/favicon，防 XSS）──────────────
+
+    #[test]
+    fn brand_url_accepts_http_https_and_site_paths() {
+        for ok in [
+            "https://cdn.example.com/logo.png",
+            "http://example.com/a/b?x=1",
+            "/logo.png",
+            "/assets/brand-abc123.png",
+        ] {
+            assert_eq!(
+                super::validate_brand_url(ok).as_deref(),
+                Ok(ok),
+                "应接受合法品牌地址：{ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn brand_url_rejects_executable_and_ambiguous_forms() {
+        for bad in [
+            "",
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "data:image/png;base64,AAAA",
+            "vbscript:msgbox(1)",
+            "//evil.example.com/logo.png",
+            "/javascript:alert(1)",
+            "logo.png",
+            "ftp://example.com/logo.png",
+            "https://",
+            "  /logo.png",
+            "/logo with space.png",
+        ] {
+            assert!(
+                super::validate_brand_url(bad).is_err(),
+                "必须拒绝品牌地址：{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_config_defaults_brand_and_round_trips_toml() {
+        let cfg = super::AdminConfig::default();
+        assert_eq!(cfg.panel_name, "AIGX");
+        assert_eq!(cfg.logo_url, "/logo.png");
+        assert!(cfg.favicon_url.is_none());
+        // 旧配置文件（无品牌字段）反序列化后取默认值，零迁移
+        let old: super::AdminConfig =
+            toml::from_str("session_secret = \"s\"\nsession_ttl_hours = 12\n").unwrap();
+        assert_eq!(old.panel_name, "AIGX");
+        assert_eq!(old.logo_url, "/logo.png");
+        assert_eq!(old.session_ttl_hours, 12);
+    }
+
+    #[test]
+    fn server_config_admin_bind_defaults_none_and_parses_optional() {
+        assert!(super::ServerConfig::default().admin_bind.is_none());
+        let parsed: super::ServerConfig =
+            toml::from_str("admin_bind = \"127.0.0.1:9528\"\n").unwrap();
+        assert_eq!(parsed.admin_bind.as_deref(), Some("127.0.0.1:9528"));
+        // 缺省时主端口/主机保持原默认（零迁移）
+        assert_eq!(parsed.port, 8080);
+        assert_eq!(parsed.host, "127.0.0.1");
     }
 }
