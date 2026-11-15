@@ -11,7 +11,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, Globe,
-  Puzzle, Route as RouteIcon, Flame,
+  Puzzle, Route as RouteIcon, Flame, Laptop,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -57,6 +57,8 @@ const navItems: NavItem[] = [
   { path: '/proxy-pool', labelKey: '网络代理', icon: Globe, adminOnly: true },
   // 插件管理（契约对齐 Agent2API 插件页；后端建设中整页降级空态，就绪即生效）
   { path: '/plugins', labelKey: '插件管理', icon: Puzzle, adminOnly: true },
+  // 客户端接入（#3）：Claude Code / Codex / Claude Desktop / DSH 多配置管理
+  { path: '/client-config', labelKey: '客户端接入', icon: Laptop, adminOnly: true },
 ];
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
 // 管理员 16 项 / 客户 8 项。合并历史：
@@ -111,6 +113,7 @@ const navGroups: NavGroup[] = [
       // 文档 → 并入「API 密钥」第二 Tab「接入文档」（07 E.3：密钥与文档是
       // 同一件事的两半；且全员可见——普通用户也要知道怎么填客户端），顶级菜单下线
       navItemOf('/plugins'),        // 插件管理（后端建设中降级空态）
+      navItemOf('/client-config'),   // 客户端接入（多配置管理与写入）
       navItemOf('/settings'),        // 系统设置（含「定时任务」分类）
       navItemOf('/agent'),           // AI 运维
     ],

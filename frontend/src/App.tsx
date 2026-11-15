@@ -52,6 +52,8 @@ const Prompts = lazyPage(() => import('./pages/Prompts'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
 const Plugins = lazyPage(() => import('./pages/Plugins'));
+// 客户端接入多配置管理（#3）：四客户端 × 多份命名配置 + 预览/备份/恢复
+const ClientConfig = lazyPage(() => import('./pages/ClientConfig'));
 
 /**
  * 带查询参数重定向的路由包装。
@@ -255,6 +257,7 @@ export default function App(): JSX.Element {
           <Route path="/docs" element={<Navigate to="/keys?tab=docs" replace />} />
           {/* 插件管理（契约对齐 Agent2API；后端建设中整页降级空态） */}
           <Route path="/plugins" element={<AdminRoute><Plugins /></AdminRoute>} />
+          <Route path="/client-config" element={<AdminRoute><ClientConfig /></AdminRoute>} />
           <Route path="/tickets" element={<ProtectedLayout><Tickets /></ProtectedLayout>} />
           <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
           <Route path="*" element={<RouteErrorPage status={404} />} />

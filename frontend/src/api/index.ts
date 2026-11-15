@@ -127,6 +127,16 @@ import type {
 import type { DesktopSourceItem } from '@/types/desktop';
 // 报表时区设置类型（#20；独立文件理由同上：types/index.ts 正被 #13 并行编辑）
 import type { ReportSettingsItem, TzMigrateResult } from '@/types/report-tz';
+// 客户端接入多配置管理（#3；独立文件，理由同上）
+import type {
+  ClientConfigApplyData,
+  ClientConfigBackupsData,
+  ClientConfigListData,
+  ClientConfigPreviewData,
+  ClientConfigRestoreData,
+  ClientConfigTargetId,
+  ClientConfigUpsertBody,
+} from '@/types/client-config';
 // 工具调用 / usage 帧适配层（#63；回灌层未定，形状变更只改适配层）
 import { extractToolCalls, extractUsage, type ToolCallWireMode } from '@/lib/toolCallAdapter';
 
@@ -315,6 +325,9 @@ export const api = {
     request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/heatmap?${reportWindowQs({ days: 365, ...q })}`),
   getReportTopSources: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
     request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/top_sources?${reportWindowQs(q)}`),
+  // 客户端维度 Top 榜（识别模块输出；普通用户后端按 user_id 自动收敛）
+  getReportTopClients: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/top_clients?${reportWindowQs(q)}`),
   getReportTokenTrend: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
     request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/token_trend?${reportWindowQs(q)}`),
   getReportOverview: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem>> =>
@@ -788,6 +801,46 @@ export const api = {
     request<ApiResponse<DesktopSourceItem[]>>('GET', `${API_BASE}/account-sessions/desktop/sources`),
   importDesktopAccount: (data: { source_id: string; name?: string }): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/account-sessions/desktop-import`, data),
+  // ── 客户端接入多配置管理（#3）────────────────────────────────
+  // 四目标（claude-code / codex / claude-desktop / dsh）× 多份命名配置；
+  // 写入前必须 preview 拿 token，apply 时原样回传（后端指纹绑定文件现状）。
+  listClientConfigs: (target?: ClientConfigTargetId): Promise<ApiResponse<ClientConfigListData>> =>
+    request<ApiResponse<ClientConfigListData>>(
+      'GET',
+      `${API_BASE}/admin/client-configs${target ? `?target=${encodeURIComponent(target)}` : ''}`,
+    ),
+  createClientConfig: (data: ClientConfigUpsertBody): Promise<ApiResponse<unknown>> =>
+    request<ApiResponse<unknown>>('POST', `${API_BASE}/admin/client-configs`, data),
+  updateClientConfig: (id: string, data: ClientConfigUpsertBody): Promise<ApiResponse<unknown>> =>
+    request<ApiResponse<unknown>>('PUT', `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}`, data),
+  deleteClientConfig: (id: string): Promise<ApiResponse<null>> =>
+    request<ApiResponse<null>>('DELETE', `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}`),
+  previewClientConfig: (id: string): Promise<ApiResponse<ClientConfigPreviewData>> =>
+    request<ApiResponse<ClientConfigPreviewData>>(
+      'POST',
+      `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}/preview`,
+    ),
+  applyClientConfig: (id: string, token: string): Promise<ApiResponse<ClientConfigApplyData>> =>
+    request<ApiResponse<ClientConfigApplyData>>(
+      'POST',
+      `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}/apply`,
+      { token },
+    ),
+  getClientConfigBackups: (id: string): Promise<ApiResponse<ClientConfigBackupsData>> =>
+    request<ApiResponse<ClientConfigBackupsData>>(
+      'GET',
+      `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}/backups`,
+    ),
+  restoreClientConfig: (
+    id: string,
+    backup: string,
+    kind?: 'config' | 'credentials',
+  ): Promise<ApiResponse<ClientConfigRestoreData>> =>
+    request<ApiResponse<ClientConfigRestoreData>>(
+      'POST',
+      `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}/restore`,
+      { backup, kind },
+    ),
   deleteAccountSession: (id: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`),
   /**
@@ -980,6 +1033,17 @@ export const api = {
     request<ApiResponse<ClineHeadersItem>>('GET', `${API_BASE}/cline-headers`),
   saveClineHeaders: (overrides: Record<string, string>): Promise<ApiResponse<ClineHeadersItem>> =>
     request<ApiResponse<ClineHeadersItem>>('PUT', `${API_BASE}/cline-headers`, { overrides }),
+  // ── 客户端识别（对照 Agent2API core/client）：规则 CRUD + 预览 ──
+  getClientId: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/client-id`),
+  createClientRule: (rule: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/client-id/rules`, rule),
+  updateClientRule: (id: string, rule: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/client-id/rules/${encodeURIComponent(id)}`, rule),
+  deleteClientRule: (id: string): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('DELETE', `${API_BASE}/client-id/rules/${encodeURIComponent(id)}`),
+  previewClientId: (sample: { userAgent?: string; headers?: Record<string, string> }): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/client-id/preview`, sample),
   // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」；热生效）
   getGatewayPrompt: (): Promise<ApiResponse<GatewayPromptItem>> =>
     request<ApiResponse<GatewayPromptItem>>('GET', `${API_BASE}/gateway/prompt`),
