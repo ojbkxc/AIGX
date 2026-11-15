@@ -678,6 +678,7 @@ mod scheduler_trait_tests {
                 name: format!("ch-{id}"),
                 channel_type: ChannelType::OpenaiCompatible,
                 base_url: format!("https://ch{id}.example.com"),
+                backup_base_urls: Vec::new(),
                 api_key: String::new(),
                 priority: 0,
                 weight,
