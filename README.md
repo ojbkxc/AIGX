@@ -75,10 +75,10 @@ docker run -d --name aigx \
   -p 8080:8080 \
   -v aigx-data:/home/aigx/.aigx \
   --restart unless-stopped \
-  docker.io/ojbkxc/ds2api:latest
+  docker.io/ojbkxc/aigx:latest
 ```
 
-- 镜像名是 `ds2api`（历史遗留，与仓库名不同），**多架构**（linux/amd64 + linux/arm64），压缩后约 30MB。
+- 镜像名 `aigx`（与项目同名；2026-11-16 起由历史名 `ds2api` 迁来），**多架构**（linux/amd64 + linux/arm64），压缩后约 30MB。
 - 数据全部落在挂载卷 `/home/aigx/.aigx`（`config.toml` + SQLite）。
 - 想接 PostgreSQL / MySQL：挂载自己的 `config.toml` 并填 `[database] url`（需按 `--features "sea-orm,postgres"` 编译），详见[部署指南](./DEPLOYMENT.md)。
 

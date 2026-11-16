@@ -1,5 +1,6 @@
 # AIGX Docker 镜像构建与推送
-# 目标仓库：docker.io/ojbkxc/ds2api
+# 目标仓库：docker.io/ojbkxc/aigx（2026-11-16 用户要求镜像名与项目名一致，
+# 历史名 ds2api 停用；仓库已建好并 active）
 # 凭据：GitHub Secrets（DOCKER_USERNAME / DOCKER_TOKEN），勿硬编码
 
 name: Docker Publish
@@ -37,7 +38,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: docker.io/ojbkxc/ds2api
+          images: docker.io/ojbkxc/aigx
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=tag

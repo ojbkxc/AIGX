@@ -345,7 +345,7 @@ jobs:
           ### 容器镜像
 
           \`\`\`bash
-          docker pull docker.io/ojbkxc/ds2api:${VER}
+          docker pull docker.io/ojbkxc/aigx:${VER}
           \`\`\`
 
           > 容器部署请以拉新镜像的方式更新（镜像内原地更新/重启不可靠）。

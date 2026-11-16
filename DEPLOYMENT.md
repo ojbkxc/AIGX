@@ -791,10 +791,10 @@ curl -s -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application
 
 #### Docker 部署回滚
 
-镜像发布在 `docker.io/ojbkxc/ds2api`，tag 即版本号（`v1.0.57`），拉取上一版本重新部署：
+镜像发布在 `docker.io/ojbkxc/aigx`，tag 即版本号（`v1.0.57`），拉取上一版本重新部署：
 
 ```bash
-docker pull docker.io/ojbkxc/ds2api:<上一版本>
+docker pull docker.io/ojbkxc/aigx:<上一版本>
 docker compose up -d   # 或等价的 docker run 命令
 ```
 
