@@ -256,7 +256,7 @@ mod tests {
 
     /// 测试辅助：只建 Refresher（加载/建空缓存），不起网络循环。
     async fn spawn_inner_for_test(dir: &std::path::Path) -> Arc<Refresher> {
-        let r = Refresher::new(&dir.to_path_buf());
+        let r = Refresher::new(dir);
         // 预写空缓存文件，避免 load 走 default 路径干扰断言
         let _ = r.cache.lock().await.save(&r.path);
         r

@@ -550,7 +550,7 @@ mod tests {
         let root = Path::new("/data/script-plugins");
         let payload = build_init_payload(
             root,
-            &[pkg.clone()],
+            std::slice::from_ref(&pkg),
             vec!["native".into()],
             Some("/c.json".into()),
         );
