@@ -25,6 +25,11 @@ jobs:
     name: 发布闸门（版本 → changelog → 附件完整性）
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'ojbkxc/AIGX'
+    # gh 需要显式令牌与仓库定位：不注入时 `gh release view` / `gh release upload`
+    # 必然失败，被 `2>/dev/null || true` 吞掉后表现为「附件全部缺失」的假红。
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Checkout（全历史，供 changelog 对比上一 tag）
@@ -84,11 +89,6 @@ jobs:
           cat "$OUT"
 
       - name: 等待 build.yml 完成发布产物并核对附件清单
-        # gh 需要显式令牌与仓库定位：不注入时 `gh release view` 必然失败，
-        # 被 `|| true` 吞掉后 assets 恒为空 → 闸门假报「全部缺失」。
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
           VER="$(cat VERSION)"
           TAG="v$VER"
