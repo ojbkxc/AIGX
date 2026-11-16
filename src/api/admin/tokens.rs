@@ -185,10 +185,31 @@ pub async fn handle_list_tokens(
     })))
 }
 
+/// 渠道型渠道在「provider 候选表」里的 provider 键。
+///
+/// 与数据面 Key 白名单同口径（`resolve::channel_matches_allowed_providers`）：
+/// - 插件渠道的真实 provider 在 `plugin_provider`，`channel_type.as_str()` 恒为
+///   `"plugin"` —— 候选表若给 `"plugin"`，运维选了它对插件渠道会全被拦；
+/// - 空 `plugin_provider` 的插件渠道本身不可路由（resolve 里跳过），不进候选表；
+/// - 账号型渠道无单一 provider（按账号池聚合），返回 None。
+fn channel_provider_key(ch: &crate::channel::Channel) -> Option<String> {
+    use crate::channel::ChannelType;
+    match ch.channel_type {
+        ChannelType::Account => None,
+        ChannelType::Plugin => {
+            let p = ch.plugin_provider.trim();
+            (!p.is_empty()).then(|| p.to_string())
+        }
+        other => Some(other.as_str().to_string()),
+    }
+}
+
 /// 候选表聚合（07 D 章：providers + modelsByProvider，上游 `keys_api.rs:60-80`）。
 ///
-/// - **providers**：渠道型渠道的 `channel_type` ∪ 账号池出现过的 provider kind，
-///   即数据面白名单可填的全部合法值（与 `ApiKey::allows_provider` 同口径）；
+/// - **providers**：渠道型渠道的 provider 键 ∪ 账号池出现过的 provider kind，
+///   即数据面白名单可填的全部合法值（与 `ApiKey::allows_provider` /
+///   `resolve::channel_matches_allowed_providers` 同口径——插件渠道按
+///   `plugin_provider` 计，不是字面量 `"plugin"`）；
 /// - **modelsByProvider**：每家下实际可用的模型集合——渠道型取该类型全部渠道的
 ///   `models ∪ discovered_models`；账号型取该家账号的模型白名单，白名单为空
 ///   （= 跟随渠道）时并入归属渠道的模型。
@@ -196,14 +217,12 @@ pub async fn handle_list_tokens(
 /// 返回 `(providers, modelsByProvider)`；都用 BTree 排序保证响应稳定。
 pub(crate) fn provider_candidates(state: &AppState) -> (Vec<String>, Value) {
     let mut models_by: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    // 渠道型：按 channel_type 聚合
+    // 渠道型：按 provider 键聚合（插件渠道 = plugin_provider）
     for ch in state.channel_store.list() {
-        if ch.channel_type == crate::channel::ChannelType::Account {
+        let Some(key) = channel_provider_key(&ch) else {
             continue;
-        }
-        let entry = models_by
-            .entry(ch.channel_type.as_str().to_string())
-            .or_default();
+        };
+        let entry = models_by.entry(key).or_default();
         for m in ch.models.iter().chain(ch.discovered_models.iter()) {
             entry.insert(m.clone());
         }
@@ -454,5 +473,52 @@ pub async fn handle_reset_token_used(
         Ok(Json(json!({ "success": true, "data": null })))
     } else {
         Err(error_response("Token not found", StatusCode::NOT_FOUND))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::channel_provider_key;
+    use crate::channel::{Channel, ChannelType};
+
+    fn channel(value: serde_json::Value) -> Channel {
+        serde_json::from_value(value).expect("Channel 反序列化")
+    }
+
+    /// 候选表的 provider 键必须与数据面 Key 白名单同口径：
+    /// 插件渠道按 `plugin_provider`（字面量 "plugin" 会与
+    /// `resolve::channel_matches_allowed_providers` 的拦截规则打架）。
+    #[test]
+    fn provider_key_matches_data_plane_allowlist() {
+        let plugin = channel(serde_json::json!({
+            "id": "c1", "name": "插件渠道", "channel_type": "plugin",
+            "plugin_provider": "kiro"
+        }));
+        assert_eq!(plugin.channel_type, ChannelType::Plugin);
+        assert_eq!(channel_provider_key(&plugin).as_deref(), Some("kiro"));
+
+        // 空 plugin_provider：渠道本身不可路由，不进候选表
+        let empty = channel(serde_json::json!({
+            "id": "c2", "name": "空", "channel_type": "plugin", "plugin_provider": " "
+        }));
+        assert!(
+            channel_provider_key(&empty).is_none(),
+            "空白 provider 不应成为候选"
+        );
+
+        // 普通渠道型仍按 channel_type
+        let anthropic = channel(serde_json::json!({
+            "id": "c3", "name": "a", "channel_type": "anthropic"
+        }));
+        assert_eq!(
+            channel_provider_key(&anthropic).as_deref(),
+            Some("anthropic")
+        );
+
+        // 账号型无单一 provider（由账号池聚合）
+        let account = channel(serde_json::json!({
+            "id": "c4", "name": "acct", "channel_type": "account"
+        }));
+        assert!(channel_provider_key(&account).is_none());
     }
 }

@@ -229,6 +229,28 @@ pub(crate) fn resolve_bridges_with_affinity_needs(
     }
     result
 }
+/// Key 级 provider 白名单判定（`allowedProviders`，数据面候选过滤用）。
+///
+/// provider 名按渠道形态取：
+/// - **账号型渠道**：无单一 provider（真正干活的是选中的账号，`AccountBridge`
+///   内部按账号 provider 再过滤），这里一律放行；
+/// - **插件渠道**（`ChannelType::Plugin`）：真实 provider 是 `plugin_provider`
+///   字段——`channel_type` 只是字面量 `"plugin"`，不是 provider id。用字面量
+///   匹配会让任何配了白名单的 Key 把插件渠道**全部**过滤掉；
+/// - 其余渠道：provider 名 = `channel_type`（`openai_compatible` 等）。
+pub(crate) fn channel_matches_allowed_providers(
+    channel_type: crate::channel::ChannelType,
+    plugin_provider: &str,
+    allowed: &[String],
+) -> bool {
+    use crate::channel::ChannelType;
+    match channel_type {
+        ChannelType::Account => true,
+        ChannelType::Plugin => allowed.iter().any(|p| p == plugin_provider),
+        other => allowed.iter().any(|p| p == other.as_str()),
+    }
+}
+
 /// 无亲和性版本（既有端点沿用：embeddings/images/audio 等无会话语义的请求）。
 ///
 /// #40 §1：本函数 = [`resolve_bridges_needs`] 传
@@ -335,13 +357,12 @@ pub(crate) fn resolve_bridges_needs(
             }
             continue;
         }
-        // Key 级 provider 白名单（07 D 章 allowedProviders）：渠道型按
-        // channel_type 过滤；账号型无单一 provider，进 AccountBridge 后按
-        // 账号 provider 过滤（与上面 model_rules 的分层同一形状）。
+        // Key 级 provider 白名单（07 D 章 allowedProviders）：渠道型按真实
+        // provider 过滤（插件渠道 = plugin_provider，不是字面量 "plugin"）；
+        // 账号型无单一 provider，进 AccountBridge 后按账号 provider 过滤
+        //（与上面 model_rules 的分层同一形状）。
         if let Some(allowed) = allowed_providers {
-            if ch.channel_type != crate::channel::ChannelType::Account
-                && !allowed.iter().any(|p| p == ch.channel_type.as_str())
-            {
+            if !channel_matches_allowed_providers(ch.channel_type, &ch.plugin_provider, allowed) {
                 if let Some(c) = capture.as_mut() {
                     c.push_filtered(&ch.id, REASON_KEY_PROVIDER_NOT_ALLOWED);
                 }
@@ -748,3 +769,64 @@ pub(crate) type BridgeCandidate = (
     Option<String>,
     Option<crate::channel::Channel>,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::channel_matches_allowed_providers;
+    use crate::channel::ChannelType;
+
+    /// 表驱动：Key 级 provider 白名单在各渠道形态下的判定。
+    ///
+    /// 核心回归：插件渠道必须按 `plugin_provider` 匹配——用字面量
+    /// `"plugin"` 会让配了白名单的 Key 把全部插件渠道筛掉（生产实证）。
+    #[test]
+    fn allowed_providers_table() {
+        let allowed = vec!["kiro".to_string(), "anthropic".to_string()];
+        let cases: &[(ChannelType, &str, bool, &str)] = &[
+            (
+                ChannelType::Plugin,
+                "kiro",
+                true,
+                "插件渠道按 plugin_provider 命中",
+            ),
+            (
+                ChannelType::Plugin,
+                "astudio",
+                false,
+                "未命中白名单必须拦截",
+            ),
+            (
+                ChannelType::Plugin,
+                "",
+                false,
+                "空 plugin_provider 不能蒙混",
+            ),
+            (
+                ChannelType::OpenaiCompatible,
+                "",
+                false,
+                "渠道型仍按 channel_type 判定",
+            ),
+            (ChannelType::Anthropic, "", true, "渠道型命中"),
+            (
+                ChannelType::Account,
+                "",
+                true,
+                "账号型在选号层过滤，这里放行",
+            ),
+        ];
+        for (ty, plugin_provider, expected, why) in cases {
+            assert_eq!(
+                channel_matches_allowed_providers(*ty, plugin_provider, &allowed),
+                *expected,
+                "{why}（{ty:?}/{plugin_provider:?}）"
+            );
+        }
+        // 白名单写字面量 "plugin" 不再放行所有插件渠道（它不是 provider id）
+        assert!(!channel_matches_allowed_providers(
+            ChannelType::Plugin,
+            "kiro",
+            &["plugin".to_string()]
+        ));
+    }
+}

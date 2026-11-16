@@ -44,6 +44,78 @@ use crate::plugin_host::script::operations;
 use crate::plugin_host::script::runtime::ScriptHostStatus;
 use crate::plugin_host::script::types::ScriptPackage;
 
+/// 管理面写操作串行闸。
+///
+/// `operations` 的落盘是「读 KV → 改 → 整表写回」（见 `script/storage.rs`），
+/// 跨请求并发会互相覆盖（丢更新）；安装/卸载还会同时动包目录与触发宿主重建。
+/// 管理面（含 Agent 工具经 `registry/w_resources` 复用的同一批 handler）在这里
+/// 串行：安装几十秒期间其它写操作排队等待——与前端 busy 互斥的语义一致，
+/// 「同一时刻只有一个写操作」。
+///
+/// 只包写端点；GET 与 refresh（纯唤醒后台任务）不占锁。
+static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+// ── 错误文案整形 ────────────────────────────────────────────────────
+
+/// 管理面错误文案上限（字符数）。宿主启动失败时底层会把子进程 stderr
+/// 全文塞进 error（生产实测 5937 字节、40 行 `Error relocating ...`），
+/// 直接回给前端既撑爆 UI 也毫无信息量。
+const MAX_ERROR_CHARS: usize = 512;
+
+/// 截断后追加的指引（日志在服务端，前端拿不到）。
+const ERROR_LOG_HINT: &str = "…（完整日志见 journalctl -u aigx）";
+
+/// 已知根因归类：命中即返回一句可操作的提示。
+///
+/// 宿主（Bun）起不来的常见原因在 error 里只表现为一大段 loader 报错，
+/// 归类后用户才知道下一步该做什么。
+fn classify_host_error(raw: &str) -> Option<&'static str> {
+    let lower = raw.to_lowercase();
+    let bun_load_failure = lower.contains("bun runtime unavailable")
+        || lower.contains("error loading shared library")
+        || lower.contains("error relocating");
+    if bun_load_failure {
+        return Some(
+            "Bun 运行时无法在当前系统加载（libc 或 CPU 架构不匹配）。请查看 journalctl -u aigx 获取详情。",
+        );
+    }
+    // 「找不到 bun 可执行文件」：error 里通常带 bun 路径 + No such file。
+    if lower.contains("no such file or directory") && lower.contains("bun") {
+        return Some(
+            "找不到 Bun 可执行文件。请确认 Bun 已安装且网关进程的 PATH 可见（journalctl -u aigx 查看详情）。",
+        );
+    }
+    None
+}
+
+/// 把底层错误整形成「归类提示 + 截断摘要」。
+///
+/// 语义不变：调用方仍以 `success:false` + 4xx 返回，前端照旧按失败处理；
+/// 这里只改文案长度与可读性。归类命中时直接返回归类提示（丢掉 stderr
+/// 噪声），否则保留前 3 行 + 末 1 行、总长 ≤ [`MAX_ERROR_CHARS`]。
+pub fn summarize_error(raw: &str) -> String {
+    if let Some(hint) = classify_host_error(raw) {
+        return hint.to_string();
+    }
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut picked: Vec<&str> = Vec::new();
+    if lines.len() <= 4 {
+        picked.extend(lines.iter().copied());
+    } else {
+        picked.extend(lines.iter().take(3).copied());
+        picked.push(lines[lines.len() - 1]);
+    }
+    let joined = picked.join("\n");
+    if joined.chars().count() <= MAX_ERROR_CHARS {
+        return joined;
+    }
+    // 截断时预留指引长度，保证「摘要 + 指引」仍在上限内。
+    let budget = MAX_ERROR_CHARS.saturating_sub(ERROR_LOG_HINT.chars().count());
+    let mut truncated: String = joined.chars().take(budget).collect();
+    truncated.push_str(ERROR_LOG_HINT);
+    truncated
+}
+
 // ── 请求体 ──────────────────────────────────────────────────────────
 
 /// 安装请求体。`trusted` 必须由前端二次确认弹窗后显式传 true——
@@ -206,9 +278,10 @@ pub async fn handle_script_install(
             StatusCode::BAD_REQUEST,
         ));
     }
+    let _write = WRITE_LOCK.lock().await;
     let package = operations::install(&state.script_host, &selector, body.trusted)
         .await
-        .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+        .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
     tracing::info!(
         "[Script] 管理面安装脚本包 {}（v{}，来源 {}）",
         package.id,
@@ -234,6 +307,7 @@ pub async fn handle_script_enable(
     if id.is_empty() {
         return Err(error_response("包 id 不能为空", StatusCode::BAD_REQUEST));
     }
+    let _write = WRITE_LOCK.lock().await;
     operations::set_enabled(
         &state.script_host,
         &id,
@@ -241,7 +315,7 @@ pub async fn handle_script_enable(
         body.enabled,
     )
     .await
-    .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+    .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
     tracing::info!(
         "[Script] 管理面{}脚本包 {}",
         if body.enabled { "启用" } else { "停用" },
@@ -264,9 +338,10 @@ pub async fn handle_script_uninstall(
     if id.is_empty() {
         return Err(error_response("包 id 不能为空", StatusCode::BAD_REQUEST));
     }
+    let _write = WRITE_LOCK.lock().await;
     operations::uninstall(&state.script_host, &id, body.version.as_deref())
         .await
-        .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+        .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
     Ok(Json(json!({ "success": true, "data": { "ok": true } })))
 }
 
@@ -282,6 +357,7 @@ pub async fn handle_script_options(
     if id.is_empty() {
         return Err(error_response("包 id 不能为空", StatusCode::BAD_REQUEST));
     }
+    let _write = WRITE_LOCK.lock().await;
     let package = operations::update_options(
         &state.script_host,
         &id,
@@ -289,7 +365,7 @@ pub async fn handle_script_options(
         body.values,
     )
     .await
-    .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+    .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
     let routed: HashSet<String> = state.script_host.routed_providers().into_iter().collect();
     Ok(Json(json!({
         "success": true,
@@ -304,11 +380,12 @@ pub async fn handle_script_rebuild(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
+    let _write = WRITE_LOCK.lock().await;
     let status = state
         .script_host
         .rebuild("manual")
         .await
-        .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+        .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
     tracing::info!("[Script] 管理面手动重启脚本宿主");
     Ok(Json(json!({
         "success": true,
@@ -381,5 +458,98 @@ mod tests {
         assert_eq!(v["providers"][0], "kiro");
         assert_eq!(v["lastError"], "boom");
         assert_eq!(v["crashes"], 3);
+    }
+
+    /// 信任闸门的线上契约：`trusted` 缺省必须是 false（安装必须显式确认），
+    /// 绝不能因为字段漏传而在反序列化层被放大成 true。
+    #[test]
+    fn install_body_trusted_defaults_false() {
+        let body: ScriptInstallBody = serde_json::from_value(json!({
+            "selector": "magpie:kiro"
+        }))
+        .expect("selector only should deserialize");
+        assert!(!body.trusted, "trusted 缺省必须为 false");
+
+        let body: ScriptInstallBody = serde_json::from_value(json!({
+            "selector": "magpie:kiro",
+            "trusted": true
+        }))
+        .expect("explicit trusted should deserialize");
+        assert!(body.trusted);
+    }
+
+    /// `version` 为可选字段：多版本共存时管理面必须能按 version 精确操作。
+    #[test]
+    fn enable_uninstall_body_version_optional() {
+        let body: ScriptEnableBody =
+            serde_json::from_value(json!({ "id": "a", "enabled": true })).unwrap();
+        assert_eq!(body.version, None);
+        let body: ScriptEnableBody =
+            serde_json::from_value(json!({ "id": "a", "version": "1.0.0", "enabled": true }))
+                .unwrap();
+        assert_eq!(body.version.as_deref(), Some("1.0.0"));
+        let body: ScriptUninstallBody = serde_json::from_value(json!({ "id": "a" })).unwrap();
+        assert_eq!(body.version, None);
+    }
+
+    /// 生产实测形态：宿主启动失败时 error 是 40 行 loader 报错（5937 字节）。
+    /// 归类后必须只剩一句可操作提示。
+    #[test]
+    fn summarize_bun_loader_failure_is_classified() {
+        let mut raw = String::from(
+            "宿主重建失败，已回滚启停状态：启动脚本宿主失败: Bun runtime unavailable: bun --version 退出码 Some(127)：Error loading shared library libstdc++.so.6: No such file or directory\n",
+        );
+        for i in 0..40 {
+            raw.push_str(&format!(
+                "Error relocating /opt/aigx/bun: symbol __libc_start_main version GLIBC_2.34 not defined ({i})\n"
+            ));
+        }
+        let out = summarize_error(&raw);
+        assert!(
+            out.chars().count() <= MAX_ERROR_CHARS,
+            "must be truncated: {} chars",
+            out.chars().count()
+        );
+        assert!(out.contains("Bun 运行时"), "got: {out}");
+        assert!(
+            !out.contains("Error relocating"),
+            "stderr noise must be dropped: {out}"
+        );
+    }
+
+    /// 非归类命中：保留前 3 行 + 末 1 行；未超上限时不加指引（不给用户噪声）。
+    #[test]
+    fn summarize_plain_error_keeps_head_and_tail() {
+        let raw: String = (0..40)
+            .map(|i| format!("line-{i}-{}", "x".repeat(20)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = summarize_error(&raw);
+        assert!(out.chars().count() <= MAX_ERROR_CHARS);
+        assert!(out.contains("line-0-"));
+        assert!(out.contains("line-2-"));
+        assert!(out.contains("line-39-"));
+        assert!(!out.contains("line-10-"));
+        assert!(!out.ends_with(ERROR_LOG_HINT));
+    }
+
+    /// 超长摘要：截断到上限并追加日志指引（指引本身也在上限内）。
+    #[test]
+    fn summarize_long_error_truncates_with_hint() {
+        let raw: String = (0..40)
+            .map(|i| format!("line-{i}-{}", "x".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = summarize_error(&raw);
+        assert!(out.chars().count() <= MAX_ERROR_CHARS);
+        assert!(out.ends_with(ERROR_LOG_HINT));
+        assert!(out.contains("line-0-"));
+    }
+
+    /// 短错误原样透传（不要给用户加噪声）。
+    #[test]
+    fn summarize_short_error_passthrough() {
+        assert_eq!(summarize_error("包 id 不能为空"), "包 id 不能为空");
+        assert_eq!(summarize_error(""), "");
     }
 }
