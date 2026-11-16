@@ -33,6 +33,7 @@ use super::types::{ScriptPackage, ScriptProviderInfo, ScriptSource};
 const MAX_DOWNLOAD_BYTES: usize = 32 * 1024 * 1024;
 
 /// 安装结果：落盘后的包元数据（未写 KV——由 operations 决定何时登记）。
+#[derive(Debug)]
 pub struct InstalledPackage {
     /// 目录名（`script-{hash}`）。
     pub dir_name: String,
@@ -201,12 +202,15 @@ async fn install_local(
     super::packages::validate_name(&name)?;
     super::packages::validate_version(&version)?;
     let entry = super::packages::resolve_entry(&manifest)?;
+    // 入口路径校验：绝对路径 / `..` / 盘符前缀一律拒绝（否则 dir.join(entry)
+    // 会把入口指到目录外，宿主随之加载任意文件）。
+    let Some(entry_rel) = super::packages::safe_entry_rel(&entry) else {
+        bail!("入口路径非法（绝对路径或含 ..）：{entry}");
+    };
+    let entry_abs = dir.join(&entry_rel);
     // 入口必须真实存在
-    if !dir.join(entry.trim_start_matches("./")).is_file() {
-        bail!(
-            "入口文件不存在：{}",
-            dir.join(entry.trim_start_matches("./")).display()
-        );
+    if !entry_abs.is_file() {
+        bail!("入口文件不存在：{}", entry_abs.display());
     }
     let _ = script_root;
     let _ = source;
@@ -244,22 +248,34 @@ async fn fetch_npm_meta(client: &reqwest::Client, name: &str) -> Result<serde_js
     resp.json().await.context("解析 npm registry 响应失败")
 }
 
-/// 从 tarball 里只读 package.json 的 name（GitHub 通路用）。
+/// 从 tarball 里只读**根级** package.json 的 name（GitHub 通路用）。
+///
+/// GitHub codeload 布局是 `{repo}-{sha}/package.json`；仓库里还可能有
+/// `examples/x/package.json`、`packages/y/package.json` 等嵌套清单，且
+/// tar 顺序不保证根清单在前。只按「恰好两个路径分量且末段是
+/// package.json」判定根清单，避免取到嵌套包的 name 导致后续解包因
+/// 「name 与安装来源不一致」失败。
 fn peek_package_name(archive: &[u8]) -> Option<String> {
+    use std::io::Read as _;
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
     let mut ar = tar::Archive::new(decoder);
     for entry in ar.entries().ok()? {
-        let mut entry = entry.ok()?;
+        let entry = entry.ok()?;
         let path = entry.path().ok()?.into_owned();
-        if path.ends_with("package.json") {
-            let mut buf = Vec::new();
-            std::io::copy(&mut entry, &mut buf).ok()?;
-            if buf.len() > 256 * 1024 {
-                return None;
-            }
-            let v: serde_json::Value = serde_json::from_slice(&buf).ok()?;
-            return v.get("name").and_then(|n| n.as_str()).map(str::to_string);
+        let comps: Vec<_> = path.components().collect();
+        let is_root_manifest = comps.len() == 2
+            && matches!(comps[1], std::path::Component::Normal(n) if n == "package.json");
+        if !is_root_manifest {
+            continue;
         }
+        // 有界读取：清单超限按「读不到」处理（不把大文件读进内存）。
+        let mut buf = Vec::new();
+        entry.take(256 * 1024 + 1).read_to_end(&mut buf).ok()?;
+        if buf.len() > 256 * 1024 {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&buf).ok()?;
+        return v.get("name").and_then(|n| n.as_str()).map(str::to_string);
     }
     None
 }
@@ -399,6 +415,52 @@ mod tests {
             ("index.js", b"x"),
         ]);
         assert_eq!(peek_package_name(&tar).as_deref(), Some("gh-pkg"));
+    }
+
+    #[test]
+    fn peek_name_ignores_nested_manifest_before_root() {
+        // tar 顺序里先出现 examples/x/package.json 时，不能取错包名。
+        let tar = super::super::packages::tests::make_tarball(&[
+            (
+                "examples/demo/package.json",
+                br#"{"name":"demo","version":"9.9.9"}"#,
+            ),
+            (
+                "package.json",
+                br#"{"name":"gh-pkg","version":"1.0.0","main":"index.js"}"#,
+            ),
+            ("index.js", b"x"),
+        ]);
+        assert_eq!(peek_package_name(&tar).as_deref(), Some("gh-pkg"));
+    }
+
+    #[test]
+    fn install_local_rejects_entry_escaping_package_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // 包目录外的文件：入口若指向它会逃出包根
+        std::fs::write(dir.path().join("outside.js"), b"x").unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            br#"{"name":"p","version":"1.0.0","main":"../outside.js"}"#,
+        )
+        .unwrap();
+        let src = InstallSource::Local {
+            path: pkg.to_string_lossy().into_owned(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(fetch_and_unpack(
+            &crate::test_http_client(),
+            &src,
+            dir.path(),
+            vec![],
+        ));
+        let msg = match res {
+            Ok(_) => panic!("越界入口必须被拒绝"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(msg.contains("入口路径非法"), "{msg}");
     }
 
     #[test]

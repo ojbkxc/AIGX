@@ -87,6 +87,12 @@ pub fn dir_name_for(package_name: &str) -> String {
 }
 
 /// 版本串校验（入路径前）。
+///
+/// 字符集之外还必须拒掉**路径危险形态**：`unpack_tarball` 直接把 version
+/// 拼进 `packages/{hash}/{version}`，而 `version=".."` 会让 dest 变成
+/// `packages/{hash}/..`（= 整个 packages 根，`remove_dir_all` 会删掉全部
+/// 已装包）；`version="."` 同理指向 hash 目录本身。合法 semver 不含连续
+/// 点、不以点开头，所以收紧不会误伤真实包。
 pub fn validate_version(version: &str) -> Result<()> {
     if version.is_empty() {
         bail!("版本号为空");
@@ -99,6 +105,17 @@ pub fn validate_version(version: &str) -> Result<()> {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
     {
         bail!("版本号含非法字符：{version}（只允许字母数字与 .+-）");
+    }
+    // 路径段安全：拒绝纯点段（"."/".."/"..."）与任何连续点（`..` 会
+    // 被 Filesystem 解释为上跳；semver 本身不允许连续点）。
+    if version.contains("..") {
+        bail!("版本号含连续点，拒绝（可能是路径穿越）：{version}");
+    }
+    if version.starts_with('.') {
+        bail!("版本号不得以 . 开头：{version}");
+    }
+    if !version.chars().any(|c| c.is_ascii_alphanumeric()) {
+        bail!("版本号必须含字母或数字：{version}");
     }
     Ok(())
 }
@@ -174,6 +191,28 @@ pub fn resolve_entry(manifest_json: &serde_json::Value) -> Result<String> {
     }
 }
 
+/// 把清单里的入口串解析成**安全的相对路径**；绝对路径 / `..` / 盘符前缀
+/// 一律拒绝（返回 None）。
+///
+/// 入口串来自 package.json（第三方内容）：`main`/`exports` 写 `../../x`
+/// 或 `C:\x` 时，`root.join(entry)` 会逃出包目录（Windows 上 `join` 绝对
+/// 路径直接替换 base）。解包通路还能靠「必须在 collected 里」兜住，但
+/// Local 通路直接 `dir.join(entry).is_file()` 检查——不做这层校验会让
+/// 包把入口指到目录外，宿主随之加载任意文件。
+pub fn safe_entry_rel(entry: &str) -> Option<PathBuf> {
+    let trimmed = entry.trim_start_matches("./");
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(trimmed);
+    for c in p.components() {
+        if !matches!(c, std::path::Component::Normal(_)) {
+            return None;
+        }
+    }
+    Some(p)
+}
+
 /// 解包 npm tarball（`.tgz`：gzip + tar），只接受单一根目录。
 ///
 /// 返回解包后的包根路径（`{packages_root}/{dir_name}/{version}`）。
@@ -235,6 +274,16 @@ pub fn unpack_tarball(bytes: &[u8], package_name: &str, packages_root: &Path) ->
         if rel.as_os_str().is_empty() {
             continue; // 根目录本身
         }
+        // 收集出的相对路径必须只含 Normal 分量。Windows 下 `pkg/C:/evil`
+        // 的 `C:` 段会被解析成盘符前缀，`staging.join(rel)` 会**整体替换**
+        // base（写到 staging 之外）；ParentDir 已在上面拒绝，这里补
+        // Prefix / RootDir / CurDir（跨平台正确，Unix 上 `C:` 是普通名）。
+        if rel
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            bail!("包内路径形态非法：{}", path.display());
+        }
         if !seen.insert(rel.clone()) {
             bail!("包内路径重复：{}", rel.display());
         }
@@ -284,33 +333,33 @@ pub fn unpack_tarball(bytes: &[u8], package_name: &str, packages_root: &Path) ->
         });
 
     // 入口必须在包内真实存在（扫描一遍 collected 判断）。
-    let entry_rel = PathBuf::from(entry.trim_start_matches("./"));
+    let Some(entry_rel) = safe_entry_rel(&entry) else {
+        bail!("入口路径非法（绝对路径或含 ..）：{entry}");
+    };
     if !collected.iter().any(|(p, _)| p == &entry_rel) {
         bail!("入口文件不存在：{entry}");
     }
 
     // 第二遍：真正落盘（staging → rename，避免半截目录被当成有效包）。
+    //
+    // staging 名必须**每次唯一**：同名同版本的并发安装若共用固定 staging
+    // 路径，一方的 `remove_dir_all` 会删掉另一方正在写的文件，rename 还会
+    // 互相踩踏，最终可能提交出混合内容的目录。pid + 进程内单调序足够。
     let dir_name = dir_name_for(name);
     let dest = packages_root.join(&dir_name).join(version);
-    let staging = packages_root.join(format!(".{dir_name}.{version}.staging"));
-    let _ = std::fs::remove_dir_all(&staging);
+    let staging = packages_root.join(format!(
+        ".{dir_name}.{version}.{}.{}.staging",
+        std::process::id(),
+        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&staging)
         .with_context(|| format!("创建暂存目录失败：{}", staging.display()))?;
-    for (rel, content) in &collected {
-        let out = staging.join(rel);
-        if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("创建目录失败：{}", parent.display()))?;
-        }
-        std::fs::write(&out, content)
-            .with_context(|| format!("写入文件失败：{}", out.display()))?;
+    // 任何失败路径都必须清掉 staging，否则会在 packages 根下留半成品。
+    if let Err(err) = write_staging(&staging, &collected) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
     }
-    // 目标已存在（重装同版本）先删，保证 rename 成功。
-    let _ = std::fs::remove_dir_all(&dest);
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::rename(&staging, &dest).context("提交包目录失败")?;
+    commit_staging(&staging, &dest)?;
 
     Ok(Manifest {
         name: name.to_string(),
@@ -320,11 +369,68 @@ pub fn unpack_tarball(bytes: &[u8], package_name: &str, packages_root: &Path) ->
     })
 }
 
-/// 校验 npm tarball 的 `dist.integrity` 串（形如 `sha512-<base64>`）。
+/// staging 目录名唯一序（包安装进程内单调）。
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 把收集到的文件写进 staging（任何一步失败都由调用方清 staging）。
+fn write_staging(staging: &Path, files: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    for (rel, content) in files {
+        let out = staging.join(rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建目录失败：{}", parent.display()))?;
+        }
+        std::fs::write(&out, content)
+            .with_context(|| format!("写入文件失败：{}", out.display()))?;
+    }
+    Ok(())
+}
+
+/// 把 staging 提交为 dest：旧版本先移到备份，提交失败则还原。
 ///
-/// **凡是能识别的算法都必须真校验**；识别不了的一律跳过而不是「视为通过」——
-/// 一旦 integrity 里只有我们不认识的算法，调用方就拿不到任何保证，
-/// 此时宁可让上层按「无完整性」处理（编目侧的 installable 标记会体现）。
+/// 直接 `remove_dir_all(dest)` 再 rename 的写法在 rename 失败时会把
+/// **旧版本一并毁掉**（磁盘满/杀软锁文件/Windows 目录占用都可能触发）。
+/// 备份 + 还原保证「失败后旧版本仍在」。
+fn commit_staging(staging: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let backup = PathBuf::from(format!("{}.old", staging.display()));
+    let _ = std::fs::remove_dir_all(&backup);
+    let had_old = dest.exists();
+    if had_old {
+        std::fs::rename(dest, &backup).context("暂存旧版本目录失败")?;
+    }
+    match std::fs::rename(staging, dest) {
+        Ok(()) => {
+            if had_old {
+                let _ = std::fs::remove_dir_all(&backup);
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if had_old {
+                // 还原旧版本；还原失败只能记录（此时旧版本在 backup 里）
+                if let Err(rb) = std::fs::rename(&backup, dest) {
+                    tracing::warn!(
+                        "[Script] 提交失败且旧版本还原失败（旧版本在 {}）：{rb}",
+                        backup.display()
+                    );
+                }
+            }
+            let _ = std::fs::remove_dir_all(staging);
+            Err(err).context("提交包目录失败")
+        }
+    }
+}
+
+/// 校验包体的 SRI 完整性声明（`sha512-<base64>` / `sha256-<base64>`，
+/// 可多条空格分隔）。
+///
+/// **必须至少真校验一条可识别的算法**：调用方只在「声明存在」时才调本
+/// 函数，若声明里全是未知算法而这里静默返回 Ok，`integrity: "sha1-…"`
+/// 之类的声明就会变成「有声明但零校验」的完整性绕过。未知算法本身跳过
+///（SRI 允许多算法并存），但整条声明没有一条能验 → 报错。
 pub fn verify_integrity(bytes: &[u8], integrity: &str) -> Result<()> {
     use base64::Engine as _;
     use sha2::Sha512;
@@ -334,24 +440,24 @@ pub fn verify_integrity(bytes: &[u8], integrity: &str) -> Result<()> {
         let Some((algo, b64)) = part.split_once('-') else {
             continue;
         };
-        let expected = base64::engine::general_purpose::STANDARD
+        // 先判算法再解码：未知算法连 base64 都不必解（避免畸形未知算法
+        // 因解码失败而报「base64 错误」这种误导信息）。
+        let expected = match algo {
+            "sha512" => Sha512::digest(bytes).to_vec(),
+            "sha256" => Sha256::digest(bytes).to_vec(),
+            _ => continue, // 未知算法不参与判定
+        };
+        let declared = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .with_context(|| format!("integrity base64 解码失败：{algo}"))?;
-
-        let actual: Option<Vec<u8>> = match algo {
-            "sha512" => Some(Sha512::digest(bytes).to_vec()),
-            "sha256" => Some(Sha256::digest(bytes).to_vec()),
-            // 未来出现 sha3/blake 等：不认识的算法不参与判定。
-            _ => None,
-        };
-        let Some(actual) = actual else { continue };
-
-        if expected != actual {
+        if declared != expected {
             bail!("包完整性校验失败（{algo} 摘要不匹配）");
         }
         checked_any = true;
     }
-    let _ = checked_any; // 调用方按「是否提供 integrity」决定要不要强制，不在这里判定
+    if !checked_any {
+        bail!("完整性声明里没有可校验的算法（支持 sha512/sha256）：{integrity}");
+    }
     Ok(())
 }
 
@@ -401,6 +507,128 @@ pub(crate) mod tests {
         assert!(validate_version("1.2.3-beta.1+build").is_ok());
         assert!(validate_version("../x").is_err());
         assert!(validate_version("").is_err());
+        // 路径危险形态：纯点段 / 连续点 / 点开头（会逃出 packages/{hash}/）
+        for bad in [".", "..", "...", "1..2", ".1.0", "+", "-"] {
+            assert!(validate_version(bad).is_err(), "应拒绝版本 {bad:?}");
+        }
+    }
+
+    #[test]
+    fn unpack_rejects_dot_dot_version_without_touching_packages_root() {
+        // 恶意 package.json version=".." 曾能把 dest 解析成 packages 根，
+        // remove_dir_all 会删光全部已装包。必须在落盘前拒绝。
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("packages");
+        std::fs::create_dir_all(&root).unwrap();
+        let victim = root.join("script-victim").join("1.0.0");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
+
+        let tar = make_tarball(&[
+            (
+                "package.json",
+                br#"{"name":"my-pkg","version":"..","main":"index.mjs"}"#,
+            ),
+            ("index.mjs", b"x"),
+        ]);
+        let err = unpack_tarball(&tar, "my-pkg", &root).unwrap_err();
+        assert!(err.to_string().contains("版本号"), "{err}");
+        // 既有包目录必须毫发无损
+        assert!(victim.join("keep.txt").is_file(), "不得删除既有包目录");
+    }
+
+    #[test]
+    fn verify_integrity_rejects_unknown_algorithm_only() {
+        // 全未知算法不能「静默通过」（有声明但零校验 = 绕过）。
+        let err = verify_integrity(b"data", "sha1-abc=").unwrap_err();
+        assert!(err.to_string().contains("没有可校验的算法"), "{err}");
+        // 畸形/空声明同样拒绝
+        assert!(verify_integrity(b"data", "garbage").is_err());
+        assert!(verify_integrity(b"data", "").is_err());
+    }
+
+    #[test]
+    fn verify_integrity_sha512_and_sha256_roundtrip() {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256, Sha512};
+        let data = b"hello-tarball";
+        let s512 = base64::engine::general_purpose::STANDARD.encode(Sha512::digest(data));
+        let s256 = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(data));
+        assert!(verify_integrity(data, &format!("sha512-{s512}")).is_ok());
+        assert!(verify_integrity(data, &format!("sha256-{s256}")).is_ok());
+        // 多算法并存：已知算法必须真校验
+        assert!(verify_integrity(data, &format!("sha512-{s512} sha256-{s256}")).is_ok());
+        // 哈希不符 → 拒绝
+        let bad = base64::engine::general_purpose::STANDARD.encode(Sha512::digest(b"other"));
+        assert!(verify_integrity(data, &format!("sha512-{bad}")).is_err());
+        // 未知算法混在已知算法里：已知算法校验通过即放行
+        assert!(verify_integrity(data, &format!("sha512-{s512} sha1-whatever")).is_ok());
+    }
+
+    #[test]
+    fn reinstall_replaces_dest_and_leaves_no_staging_or_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("packages");
+        let tar = make_tarball(&[
+            ("package.json", &manifest("my-pkg", "1.0.0", "index.mjs")),
+            ("index.mjs", b"v1"),
+        ]);
+        unpack_tarball(&tar, "my-pkg", &root).unwrap();
+        // 同版本重装
+        let tar2 = make_tarball(&[
+            ("package.json", &manifest("my-pkg", "1.0.0", "index.mjs")),
+            ("index.mjs", b"v2"),
+        ]);
+        unpack_tarball(&tar2, "my-pkg", &root).unwrap();
+        let dest = root.join(dir_name_for("my-pkg")).join("1.0.0");
+        assert_eq!(std::fs::read(dest.join("index.mjs")).unwrap(), b"v2");
+        // 不应残留 staging / backup
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".staging") || n.contains(".old"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "不应残留 staging/backup：{leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn staging_names_are_unique() {
+        // 同名同版本并发安装不得共用 staging 路径。
+        let root = Path::new("/tmp/packages");
+        let mk = || {
+            root.join(format!(
+                ".x.{}.{}.{}.staging",
+                "1.0.0",
+                std::process::id(),
+                STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ))
+        };
+        assert_ne!(mk(), mk());
+    }
+
+    #[test]
+    fn safe_entry_rel_accepts_relative_and_rejects_escape() {
+        assert_eq!(
+            safe_entry_rel("./dist/server.mjs"),
+            Some(PathBuf::from("dist/server.mjs"))
+        );
+        assert_eq!(
+            safe_entry_rel("index.mjs"),
+            Some(PathBuf::from("index.mjs"))
+        );
+        assert!(safe_entry_rel("").is_none());
+        assert!(safe_entry_rel("../outside.js").is_none());
+        assert!(safe_entry_rel("a/../../b.js").is_none());
+        assert!(safe_entry_rel("/etc/passwd").is_none());
+        #[cfg(windows)]
+        {
+            assert!(safe_entry_rel(r"C:\evil.js").is_none());
+            assert!(safe_entry_rel("C:evil.js").is_none());
+        }
     }
 
     #[test]

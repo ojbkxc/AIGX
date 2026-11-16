@@ -333,6 +333,14 @@ pub fn validate_package_name(name: &str) -> Result<(), SourceError> {
                 "只允许小写字母数字 - _ . / @",
             ));
         }
+        // `@` 只允许出现在 scoped 名的第 0 位（`@scope/name`）：中间的
+        // `@`（如 `@a/b@c`）不是合法 npm 名，且会污染 registry URL。
+        if ch == '@' && i > 0 {
+            return Err(SourceError::BadName(
+                name.to_string(),
+                "只允许开头一个 @（scoped 前缀）",
+            ));
+        }
         // npm 规则：name 不得以 . 或 _ 开头（scoped 的 @ 前缀除外）
         if i == 0 && matches!(ch, '.' | '_') {
             return Err(SourceError::BadName(name.to_string(), "不得以 . 或 _ 开头"));
@@ -370,14 +378,17 @@ fn validate_version_ish(version: &str) -> Result<(), SourceError> {
         ));
     }
     // semver 与 npm dist-tag 都不含下划线/空格等——字符集钉死到
-    // [A-Za-z0-9.+-]，与 version_dir 消毒口径一致。
+    // [A-Za-z0-9.+-]，与 version_dir 消毒口径一致；连续点/点开头不是
+    // 合法 semver，也拒绝（它们会进 source_ref 与包版本目录）。
     if version
         .chars()
         .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')))
+        || version.contains("..")
+        || version.starts_with('.')
     {
         return Err(SourceError::BadName(
             version.to_string(),
-            "版本段只允许字母数字 . - +",
+            "版本段只允许字母数字 . - +，且不得含连续点或以点开头",
         ));
     }
     Ok(())
@@ -638,6 +649,12 @@ mod tests {
         assert!(parse("a/b").is_err()); // 裸名带 /
         assert!(parse("pkg;rm -rf").is_err()); // 注入字符
         assert!(parse("pkg@ver with space").is_err());
+        // `@` 只能出现在 scoped 前缀位
+        assert!(parse("@a/b@c@1.0").is_err());
+        // 版本段的路径危险形态
+        assert!(parse("pkg@..").is_err());
+        assert!(parse("pkg@1..2").is_err());
+        assert!(parse("pkg@.hidden").is_err());
     }
 
     #[test]

@@ -28,6 +28,33 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_NODE_MODULES_BYTES: u64 = 512 * 1024 * 1024;
 /// 已安装标记文件名（存在则跳过重复安装）。
 const MARKER: &str = ".aigx-dependencies";
+/// staging 目录名唯一序。
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 构造本轮安装的 staging 目录名（pid + 单调序，并发安装不互踩）。
+fn staging_dir(package_dir: &Path) -> PathBuf {
+    package_dir.join(format!(
+        ".aigx-staging-install.{}.{}",
+        std::process::id(),
+        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
+/// 只保留依赖声明字段（去掉 scripts/dev 等，防安装期执行第三方脚本）。
+///
+/// `peerDependencies` 必须保留：`has_deps` 把它算作「有依赖」，若这里
+/// 丢掉，只有 peer 依赖的包会跑一次空 install 并写 `no-node-modules`
+/// 标记，依赖永远不会被装上。
+fn trimmed_manifest(manifest: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "name": "aigx-script-deps",
+        "version": "0.0.0",
+        "private": true,
+        "dependencies": manifest.get("dependencies").cloned().unwrap_or(serde_json::json!({})),
+        "optionalDependencies": manifest.get("optionalDependencies").cloned().unwrap_or(serde_json::json!({})),
+        "peerDependencies": manifest.get("peerDependencies").cloned().unwrap_or(serde_json::json!({})),
+    })
+}
 
 /// 安装依赖（如需要），返回是否实际执行了安装。
 ///
@@ -61,16 +88,9 @@ pub async fn install_if_needed(bun: &Path, package_dir: &Path) -> Result<bool> {
     // 临时目录里只放一个最小 package.json（只保留依赖声明字段）。
     // 为什么不直接在包目录装：包目录是我们判定过内容的「干净区」，
     // bun 可能顺手写 lockfile/缓存；隔离后再把 node_modules 搬进去更可控。
-    let staging = package_dir.join(".aigx-staging-install");
-    let _ = std::fs::remove_dir_all(&staging);
+    let staging = staging_dir(package_dir);
     std::fs::create_dir_all(&staging).context("创建安装暂存目录失败")?;
-    let trimmed = serde_json::json!({
-        "name": "aigx-script-deps",
-        "version": "0.0.0",
-        "private": true,
-        "dependencies": manifest.get("dependencies").cloned().unwrap_or(serde_json::json!({})),
-        "optionalDependencies": manifest.get("optionalDependencies").cloned().unwrap_or(serde_json::json!({})),
-    });
+    let trimmed = trimmed_manifest(&manifest);
     std::fs::write(
         staging.join("package.json"),
         serde_json::to_vec_pretty(&trimmed)?,
@@ -88,10 +108,19 @@ pub async fn install_if_needed(bun: &Path, package_dir: &Path) -> Result<bool> {
     // 超时后 future 被 drop：`kill_on_drop` 保证挂死的 bun install 不残留。
     cmd.kill_on_drop(true);
 
-    let output = tokio::time::timeout(INSTALL_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| anyhow::anyhow!("bun install 超时（{}s）", INSTALL_TIMEOUT.as_secs()))?
-        .context("无法执行 bun install")?;
+    // 超时 / 无法执行也要清 staging（原实现只清了「退出码非零」一条路径，
+    // 超时会在包目录里留下半套 node_modules）。
+    let output = match tokio::time::timeout(INSTALL_TIMEOUT, cmd.output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(err)) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(anyhow::Error::new(err).context("无法执行 bun install"));
+        }
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            bail!("bun install 超时（{}s）", INSTALL_TIMEOUT.as_secs());
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let _ = std::fs::remove_dir_all(&staging);
@@ -111,7 +140,13 @@ pub async fn install_if_needed(bun: &Path, package_dir: &Path) -> Result<bool> {
     }
 
     // 体积检查：依赖树总量必须有界。
-    let size = dir_size(&modules)?;
+    let size = match dir_size(&modules) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
     if size > MAX_NODE_MODULES_BYTES {
         let _ = std::fs::remove_dir_all(&staging);
         bail!("node_modules 过大：{size} bytes（上限 {MAX_NODE_MODULES_BYTES}）");
@@ -120,7 +155,10 @@ pub async fn install_if_needed(bun: &Path, package_dir: &Path) -> Result<bool> {
     // 搬进包目录（先删旧的，保证形态一致）。
     let dest = package_dir.join("node_modules");
     let _ = std::fs::remove_dir_all(&dest);
-    std::fs::rename(&modules, &dest).context("移动 node_modules 失败")?;
+    if let Err(e) = std::fs::rename(&modules, &dest) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e).context("移动 node_modules 失败");
+    }
     let _ = std::fs::remove_dir_all(&staging);
     write_marker(package_dir, "ignore-scripts")?;
     Ok(true)
@@ -221,5 +259,40 @@ mod tests {
         std::fs::write(dir.path().join("a/x"), vec![0u8; 100]).unwrap();
         std::fs::write(dir.path().join("a/b/y"), vec![0u8; 50]).unwrap();
         assert_eq!(dir_size(dir.path()).unwrap(), 150);
+    }
+
+    #[test]
+    fn trimmed_manifest_keeps_peer_dependencies() {
+        // peerDependencies 被 has_deps 计入依赖，trimmed 必须保留它，
+        // 否则只有 peer 依赖的包会永远装不上依赖。
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{
+              "name":"p","version":"1.0.0",
+              "dependencies":{"a":"1"},
+              "optionalDependencies":{"b":"2"},
+              "peerDependencies":{"c":"3"},
+              "devDependencies":{"d":"4"},
+              "scripts":{"postinstall":"echo pwn"}
+            }"#,
+        )
+        .unwrap();
+        let t = trimmed_manifest(&manifest);
+        assert_eq!(t["dependencies"]["a"], "1");
+        assert_eq!(t["optionalDependencies"]["b"], "2");
+        assert_eq!(t["peerDependencies"]["c"], "3");
+        assert!(t.get("devDependencies").is_none(), "dev 依赖不应安装");
+        assert!(t.get("scripts").is_none(), "安装脚本必须剥离");
+        // 空清单也能给出合法对象
+        let empty = trimmed_manifest(&serde_json::json!({}));
+        assert!(empty["dependencies"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn staging_dir_is_unique_per_call() {
+        let base = Path::new("/tmp/pkg");
+        let a = staging_dir(base);
+        let b = staging_dir(base);
+        assert_ne!(a, b, "并发安装不得共用 staging 目录");
+        assert!(a.starts_with(base));
     }
 }

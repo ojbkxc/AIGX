@@ -31,7 +31,7 @@
 //! 只跟随 `./` `../` 相对导入，包名导入（`node:fs`、`npm-pkg`）不解析。
 //! 到达边界即停——没扫到就算没验证（provider_verified=None/false）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// 单个文件源码上限（256KB：真实插件入口远小于此，超限按无效文件跳过）。
@@ -252,18 +252,116 @@ fn read_template(b: &[char], mut i: usize) -> (String, usize) {
     (s, i)
 }
 
-/// 在 token 流里找 `auth` 后接对象字面量，并在其中找 `provider: "xxx"`。
+/// 从 token 流里收集 `const/let/var NAME = "value"` 的字符串常量。
 ///
-/// 两种前缀形态都收（都是真实 npm 包里的常见写法）：
+/// tokenizer 不产出 `=` 标点（只有 `{ } : , ( ) [ ]`），所以声明形态在
+/// token 流里表现为连续三元组 `[Word(const|let|var), Word(NAME), Str(value)]`。
+/// 真实插件的 provider id 常写成 `const PROVIDER = "wps-lingxi"` 再
+/// `provider: PROVIDER` 引用——只认字符串字面量会整片漏掉（生产 count=0
+/// 的根因）。
+fn collect_consts(toks: &[Tok]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut i = 0;
+    while i + 2 < toks.len() {
+        let is_decl = matches!(&toks[i], Tok::Word(w) if w == "const" || w == "let" || w == "var");
+        if is_decl {
+            if let (Tok::Word(name), Tok::Str(val)) = (&toks[i + 1], &toks[i + 2]) {
+                map.insert(name.clone(), val.clone());
+                i += 3;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    map
+}
+
+/// 一条具名 import 绑定：`import { imported as local } from "./spec"`。
+#[derive(Clone, Debug, PartialEq)]
+struct NamedImport {
+    /// 本文件里的本地名（`A as B` 取 B）。
+    local: String,
+    /// 源文件里导出的名字（`A as B` 取 A）。
+    imported: String,
+    /// 相对说明符（`./x` / `../y`）。
+    spec: String,
+}
+
+/// 解析 `import { A, B as C } from "./x"` 形态的具名导入。
+///
+/// 只处理带 `{ … }` 的具名导入（provider id 常量基本都是具名导出）；
+/// 默认导入 / 命名空间导入不参与常量解析（极少承载 provider id）。
+fn parse_named_imports(toks: &[Tok]) -> Vec<NamedImport> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if !matches!(&toks[i], Tok::Word(w) if w == "import") {
+            i += 1;
+            continue;
+        }
+        // 跳过 `import(` 动态导入与 `import.meta`
+        if matches!(toks.get(i + 1), Some(Tok::Punct('('))) {
+            i += 1;
+            continue;
+        }
+        // 必须是 `import { … } from "<spec>"`
+        if !matches!(toks.get(i + 1), Some(Tok::Punct('{'))) {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 2;
+        let mut pairs: Vec<(String, String)> = Vec::new(); // (imported, local)
+        while j < toks.len() && !matches!(toks.get(j), Some(Tok::Punct('}'))) {
+            match toks.get(j) {
+                Some(Tok::Word(name)) => {
+                    // 可能是 `A` 或 `A as B`
+                    if matches!(toks.get(j + 1), Some(Tok::Word(a)) if a == "as") {
+                        if let Some(Tok::Word(local)) = toks.get(j + 2) {
+                            pairs.push((name.clone(), local.clone()));
+                            j += 3;
+                            continue;
+                        }
+                    }
+                    pairs.push((name.clone(), name.clone()));
+                    j += 1;
+                }
+                _ => j += 1,
+            }
+        }
+        // 期望 `} from "<spec>"`
+        if matches!(toks.get(j), Some(Tok::Punct('}')))
+            && matches!(toks.get(j + 1), Some(Tok::Word(f)) if f == "from")
+        {
+            if let Some(Tok::Str(spec)) = toks.get(j + 2) {
+                if spec.starts_with("./") || spec.starts_with("../") {
+                    for (imported, local) in pairs {
+                        out.push(NamedImport {
+                            local,
+                            imported,
+                            spec: spec.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// 在 token 流里找 `auth` 后接对象字面量，并在其中找 `provider: <值>`。
+///
+/// `<值>` 可以是字符串字面量，也可以是标识符（常量引用）；后者交给
+/// `resolve` 闭包解析成字符串。两种前缀形态都收（都是真实 npm 包里的常见写法）：
 /// - **对象属性** `auth: { … }`（auth 后紧跟 `:`）
 /// - **变量赋值** `const auth = { … }` / `export const auth = { … }`
 ///   （auth 后是 `=`；整个常量对象就是 provider 定义，这是上游脚本
 ///   导出 provider 的主流写法，漏掉会把有效包误判为「无 auth 证据」）
 ///
 /// 找到 `auth` 词后向后看有限窗口（256 token ≈ 一个对象字面量的合理大小）：
-/// 窗口内出现 `provider:` 且值是字符串即命中；`methods`/`loader` 键
+/// 窗口内出现 `provider:` 且值可解析成字符串即命中；`methods`/`loader` 键
 /// 提升置信但不强求。
-fn find_auth_provider(toks: &[Tok]) -> ScanOutcome {
+fn find_auth_provider_with(toks: &[Tok], resolve: &dyn Fn(&str) -> Option<String>) -> ScanOutcome {
     let mut out = ScanOutcome::default();
     for (idx, tok) in toks.iter().enumerate() {
         if !matches!(tok, Tok::Word(w) if w == "auth") {
@@ -279,7 +377,7 @@ fn find_auth_provider(toks: &[Tok]) -> ScanOutcome {
             (Some(Tok::Punct('{')), _) => idx + 2,
             _ => continue,
         };
-        // 在对象体内扫：provider: "xxx"（对象边界用大括号配对）
+        // 在对象体内扫：provider: <值>（对象边界用大括号配对）
         let mut depth = 1usize;
         let mut j = body_start;
         let mut provider: Option<String> = None;
@@ -300,13 +398,18 @@ fn find_auth_provider(toks: &[Tok]) -> ScanOutcome {
                     }
                     if (w == "provider" || w == "label" || w == "name")
                         && matches!(toks.get(j + 1), Some(Tok::Punct(':')))
-                        && matches!(toks.get(j + 2), Some(Tok::Str(_)))
                     {
-                        if let Some(Tok::Str(s)) = toks.get(j + 2) {
+                        // 值：字符串字面量 或 标识符（常量引用）
+                        let value = match toks.get(j + 2) {
+                            Some(Tok::Str(s)) => Some(s.clone()),
+                            Some(Tok::Word(ident)) => resolve(ident),
+                            _ => None,
+                        };
+                        if let Some(s) = value {
                             if w == "provider" {
-                                provider = Some(s.clone());
+                                provider = Some(s);
                             } else if label.is_none() && !s.is_empty() {
-                                label = Some(s.clone());
+                                label = Some(s);
                             }
                         }
                     }
@@ -316,9 +419,6 @@ fn find_auth_provider(toks: &[Tok]) -> ScanOutcome {
             j += 1;
         }
         if let Some(p) = provider {
-            // provider 找到了才算命中；methods/loader 是佐证（保存在
-            // provider_id 命中时无需额外输出——置信度管理面可见
-            // provider_verified=true 即代表「找到 provider 字面量」）
             out.provider_id = Some(p);
             out.label = label;
             let _ = evidence;
@@ -326,6 +426,41 @@ fn find_auth_provider(toks: &[Tok]) -> ScanOutcome {
         }
     }
     out
+}
+
+/// 只认字符串字面量版本（无常量解析；仅测试用，保留直观的基线断言）。
+#[cfg(test)]
+fn find_auth_provider(toks: &[Tok]) -> ScanOutcome {
+    find_auth_provider_with(toks, &|_| None)
+}
+
+/// 为一个文件的 token 流构造常量环境：同文件 `const` + 一层具名 import。
+///
+/// provider id 在生产插件里几乎都以常量形态出现（`const PROVIDER="x"` 或
+/// `import { POOL_PROVIDER } from "./lib"`），只认字面量会整片漏掉。这里
+/// 解析同文件常量，并跟随**一层**相对具名导入（provider id 常量极少跨
+/// 两层以上，限定一层即可覆盖现实形态且避免无界读文件）。
+fn build_const_env(root: &Path, file: &Path, toks: &[Tok]) -> HashMap<String, String> {
+    let mut env = collect_consts(toks);
+    for imp in parse_named_imports(toks) {
+        let Some(target) = resolve_import(file, &imp.spec, root) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&target) else {
+            continue;
+        };
+        if bytes.len() > MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(src) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let child = collect_consts(&tokenize(&src));
+        if let Some(val) = child.get(&imp.imported) {
+            env.insert(imp.local.clone(), val.clone());
+        }
+    }
+    env
 }
 
 /// 解析一个 JS/TS 文件里的相对导入说明符（`./` `../` 开头）。
@@ -394,7 +529,9 @@ pub fn scan_entry(root: &Path, entry: &Path) -> Option<ScanOutcome> {
     queue.push_back(start.clone());
 
     let mut total = src.len();
-    let outcome = find_auth_provider(&tokenize(&src));
+    let entry_toks = tokenize(&src);
+    let entry_env = build_const_env(root, &start, &entry_toks);
+    let outcome = find_auth_provider_with(&entry_toks, &|id| entry_env.get(id).cloned());
     if outcome.provider_id.is_some() {
         return Some(ScanOutcome {
             files_read: 1,
@@ -430,7 +567,9 @@ pub fn scan_entry(root: &Path, entry: &Path) -> Option<ScanOutcome> {
                 continue;
             };
             visited.insert(target.clone());
-            let oc = find_auth_provider(&tokenize(&child_src));
+            let child_toks = tokenize(&child_src);
+            let child_env = build_const_env(root, &target, &child_toks);
+            let oc = find_auth_provider_with(&child_toks, &|id| child_env.get(id).cloned());
             if oc.provider_id.is_some() {
                 return Some(ScanOutcome {
                     files_read: visited.len(),
@@ -521,6 +660,63 @@ mod tests {
         assert_eq!(oc.provider_id.as_deref(), Some("deep-one"));
         assert_eq!(oc.files_read, 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_file_const_provider_resolves() {
+        // 生产真形态：provider id 来自同文件常量（lingxi: const PROVIDER）。
+        let src = r#"
+        const PROVIDER = "wps-lingxi"
+        export default {
+          provider: { id: PROVIDER },
+          auth: { provider: PROVIDER, icon: "x" },
+        }
+        "#;
+        let toks = tokenize(src);
+        let env = collect_consts(&toks);
+        assert_eq!(env.get("PROVIDER").map(String::as_str), Some("wps-lingxi"));
+        let oc = find_auth_provider_with(&toks, &|id| env.get(id).cloned());
+        assert_eq!(oc.provider_id.as_deref(), Some("wps-lingxi"));
+    }
+
+    #[test]
+    fn cross_file_imported_const_provider_resolves() {
+        // 生产真形态：provider id 来自 `import { POOL_PROVIDER } from "./lib"`
+        //（gptpool），常量定义在另一文件。
+        let dir = std::env::temp_dir().join("aigx_scan_const_import");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(
+            dir.join("index.mjs"),
+            "import { createPoolConnector, POOL_PROVIDER } from './lib/pool.mjs';\n\
+             export default { auth: { provider: POOL_PROVIDER } };\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib").join("pool.mjs"),
+            "export const POOL_PROVIDER = \"gptfree-pool\";\nexport function createPoolConnector(){}\n",
+        )
+        .unwrap();
+        let oc = scan_entry(&dir, Path::new("index.mjs")).unwrap();
+        assert_eq!(oc.provider_id.as_deref(), Some("gptfree-pool"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn aliased_import_const_resolves() {
+        // `import { A as B }`：provider: B 应解析成 A 的值。
+        let toks = tokenize(
+            "import { RAW_ID as ID } from './c.mjs';\nexport default { auth: { provider: ID } };",
+        );
+        let imports = parse_named_imports(&toks);
+        assert_eq!(
+            imports,
+            vec![NamedImport {
+                local: "ID".into(),
+                imported: "RAW_ID".into(),
+                spec: "./c.mjs".into()
+            }]
+        );
     }
 
     #[test]

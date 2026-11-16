@@ -44,8 +44,19 @@ pub const SEARCH_URL: &str = "https://api.github.com/search/repositories?q=topic
 pub const MAX_PAGES: u32 = 10;
 /// 每页条数（GitHub 搜索 API 单页上限就是 100）。
 pub const PAGE_SIZE: u32 = 100;
-/// 6h 内未 push 的仓进 ignored（活跃度闸门）。
+/// 活跃度**软判据**：不再作为硬闸门（原 6h 硬窗过严，13h 前的仓也被丢）。
+///
+/// 改为「有界 + 按新鲜度优先」：不设硬窗，按 pushed_at 降序取前
+/// [`MAX_VERIFY_PER_CYCLE`] 个仓深扫；新鲜仓永远优先，老仓在配额允许时
+/// 补扫（并进 ignored 缓存，后续轮次不重复烧）。本常量仅作口径文档锚点。
+#[allow(dead_code)]
 pub const PUSH_IGNORE_WINDOW_SECS: i64 = 6 * 3600;
+/// 每轮深扫仓数上限。
+///
+/// 每个仓 2+N 个 raw 请求；GitHub 匿名配额 60 req/h，带 token 5000/h。
+/// 30 个仓 ≈ 90+ raw 请求/轮（TTL 10min，带 token 完全够，匿名则会触发
+/// 限流退避——此时 cache 的重试闸门会自动降频，不会烧穿）。
+pub const MAX_VERIFY_PER_CYCLE: usize = 30;
 /// 搜索响应大小上限（100 条 repo JSON ~200KB，给 10 倍余量）。
 const SEARCH_MAX_BYTES: usize = 2 << 20;
 /// 单文件 raw 拉取上限（与 provider::MAX_FILE_BYTES 同口径）。
@@ -187,15 +198,8 @@ async fn verify_repo(client: &reqwest::Client, item: &RepoItem) -> RepoVerdict {
         .unwrap_or(0);
     verdict.pushed_at = pushed;
 
-    // 1) 活跃度闸门：6h 内无 push → ignored（省深扫配额）
-    let now = network::now_unix();
-    if pushed > 0 && now - pushed > PUSH_IGNORE_WINDOW_SECS {
-        verdict.ignore_reason = Some(format!(
-            "最近 push 距今超过 6h（{}天前），暂不验证",
-            (now - pushed) / 86400
-        ));
-        return verdict;
-    }
+    // 活跃度不再是硬闸门：新鲜度只在 fetch_github 里决定扫描优先级与
+    // 每轮配额（MAX_VERIFY_PER_CYCLE）。这里直接进深扫。
 
     // 2) package.json（main 404 时 master 兜底一次）
     let branch = "main";
@@ -472,33 +476,7 @@ pub async fn fetch_github(
     ignored: &[IgnoredRepo],
 ) -> Result<(Vec<Entry>, Vec<IgnoredRepo>), Failure> {
     let items = search_repos(client).await?;
-    let candidates: Vec<RepoItem> = items
-        .iter()
-        .filter(|i| {
-            // 自家组织仓不进第三方（官方/推荐已由 market 覆盖）
-            // 先绑定 lower 再取 owner：to_lowercase() 临时值若与 split()
-            // 链在同一 let 里，语句结束即 drop，owner 悬空（E0716）
-            let lower = i.repo.to_lowercase();
-            let owner = lower.split('/').next().unwrap_or("");
-            if owner == "magpie-community" {
-                return false;
-            }
-            if market_names.contains(&lower) {
-                return false;
-            }
-            // 已忽略且没有新 push → 本轮跳过
-            let pushed = i
-                .pushed_at
-                .as_deref()
-                .and_then(network::iso_to_unix)
-                .unwrap_or(0);
-            let stale_ignored = ignored
-                .iter()
-                .any(|r| r.repo == i.repo && pushed <= r.pushed_at);
-            !stale_ignored
-        })
-        .cloned()
-        .collect();
+    let candidates = select_candidates(&items, market_names, ignored, MAX_VERIFY_PER_CYCLE);
 
     let client2 = std::sync::Arc::new(client.clone());
     let verdicts = network::map_limited(SCAN_CONCURRENCY, candidates, move |it| {
@@ -527,6 +505,63 @@ pub async fn fetch_github(
         }
     }
     Ok((entries, new_ignored))
+}
+
+/// 从搜索结果筛出本轮要深扫的仓：去自家/已策展/已忽略且无新 push，
+/// 再按 `pushed_at` 降序取前 `cap` 个。
+///
+/// **按新鲜度排序 + 有界**取代了原「6h 硬闸门」：新鲜仓永远优先（老仓不会
+/// 挤掉活跃仓的配额），老仓在配额允许时补扫；已忽略且无新 push 的仓仍
+/// 跳过（不重复烧配额）。抽成纯函数便于单测（不碰网络）。
+fn select_candidates(
+    items: &[RepoItem],
+    market_names: &HashSet<String>,
+    ignored: &[IgnoredRepo],
+    cap: usize,
+) -> Vec<RepoItem> {
+    let mut cands: Vec<RepoItem> = items
+        .iter()
+        .filter(|i| {
+            // 自家组织仓不进第三方（官方/推荐已由 market 覆盖）
+            // 先绑定 lower 再取 owner：to_lowercase() 临时值若与 split()
+            // 链在同一 let 里，语句结束即 drop，owner 悬空（E0716）
+            let lower = i.repo.to_lowercase();
+            let owner = lower.split('/').next().unwrap_or("");
+            if owner == "magpie-community" {
+                return false;
+            }
+            if market_names.contains(&lower) {
+                return false;
+            }
+            // 已忽略且没有新 push → 本轮跳过
+            let pushed = i
+                .pushed_at
+                .as_deref()
+                .and_then(network::iso_to_unix)
+                .unwrap_or(0);
+            let stale_ignored = ignored
+                .iter()
+                .any(|r| r.repo == i.repo && pushed <= r.pushed_at);
+            !stale_ignored
+        })
+        .cloned()
+        .collect();
+    // pushed_at 降序（无时间的排最后）；稳定排序保证同时间按搜索序。
+    cands.sort_by(|a, b| {
+        let pa = a
+            .pushed_at
+            .as_deref()
+            .and_then(network::iso_to_unix)
+            .unwrap_or(0);
+        let pb = b
+            .pushed_at
+            .as_deref()
+            .and_then(network::iso_to_unix)
+            .unwrap_or(0);
+        pb.cmp(&pa)
+    });
+    cands.truncate(cap);
+    cands
 }
 
 /// 对已收录的第三方条目刷新 stars（第三阶段；6h TTL）。
@@ -633,5 +668,73 @@ mod tests {
         .unwrap();
         assert_eq!(r.items[0].repo, "a/b");
         assert_eq!(r.items[0].stargazers_count, 7);
+    }
+
+    fn item(repo: &str, pushed: &str) -> RepoItem {
+        RepoItem {
+            repo: repo.into(),
+            html_url: format!("https://github.com/{repo}"),
+            pushed_at: Some(pushed.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn select_candidates_prefers_recent_and_caps() {
+        // 老仓不再被硬闸门丢弃，但新鲜仓优先进入有限配额。
+        let items = vec![
+            item("old/very-old", "2026-01-01T00:00:00Z"),
+            item("fresh/new", "2026-11-16T05:00:00Z"),
+            item("mid/recent", "2026-11-15T00:00:00Z"),
+        ];
+        let market: HashSet<String> = HashSet::new();
+        let sel = select_candidates(&items, &market, &[], 2);
+        assert_eq!(sel.len(), 2, "应被 cap 截断到 2");
+        assert_eq!(sel[0].repo, "fresh/new", "最新的排第一");
+        assert_eq!(sel[1].repo, "mid/recent");
+        // cap 足够大时老仓也进（不再被 6h 硬闸门丢）
+        let all = select_candidates(&items, &market, &[], 10);
+        assert!(all.iter().any(|i| i.repo == "old/very-old"), "老仓应保留");
+    }
+
+    #[test]
+    fn select_candidates_skips_own_market_and_stale_ignored() {
+        let items = vec![
+            item("magpie-community/official", "2026-11-16T05:00:00Z"),
+            item("someone/curated", "2026-11-16T05:00:00Z"),
+            item("someone/ignored-nochange", "2026-11-10T00:00:00Z"),
+            item("someone/ignored-but-newpush", "2026-11-16T05:00:00Z"),
+        ];
+        let mut market: HashSet<String> = HashSet::new();
+        market.insert("someone/curated".into());
+        let ignored = vec![
+            IgnoredRepo {
+                repo: "someone/ignored-nochange".into(),
+                reason: "x".into(),
+                at: 0,
+                pushed_at: network::iso_to_unix("2026-11-10T00:00:00Z").unwrap(),
+            },
+            IgnoredRepo {
+                repo: "someone/ignored-but-newpush".into(),
+                reason: "x".into(),
+                at: 0,
+                pushed_at: network::iso_to_unix("2026-11-01T00:00:00Z").unwrap(),
+            },
+        ];
+        let sel = select_candidates(&items, &market, &ignored, 10);
+        let names: Vec<&str> = sel.iter().map(|i| i.repo.as_str()).collect();
+        assert!(
+            !names.contains(&"magpie-community/official"),
+            "自家仓应排除"
+        );
+        assert!(!names.contains(&"someone/curated"), "已策展应排除");
+        assert!(
+            !names.contains(&"someone/ignored-nochange"),
+            "已忽略且无新 push 应排除"
+        );
+        assert!(
+            names.contains(&"someone/ignored-but-newpush"),
+            "已忽略但有新 push 应重新验证"
+        );
     }
 }

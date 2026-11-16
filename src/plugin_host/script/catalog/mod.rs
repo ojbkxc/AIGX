@@ -66,7 +66,9 @@ mod cache;
 mod github;
 mod market;
 mod network;
-mod provider;
+// pub(crate)：安装链路（operations.rs）在 npm/github/local 来源安装后复用
+// 入口静态扫描回填 provider 声明（不执行代码，只读源码文本）。
+pub(crate) mod provider;
 mod refresh;
 mod types;
 
