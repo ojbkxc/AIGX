@@ -22,15 +22,43 @@ import { Badge, Button, Card, EmptyState, Loading, Switch, Tooltip } from '../ui
 import type {
   ScriptCatalogEntryView,
   ScriptCatalogPayload,
+  ScriptCatalogStatus,
   ScriptPackageView,
   ScriptPackagesPayload,
 } from '../../types';
 import './ScriptPluginsPanel.css';
 
+/** options 字节上限（对齐后端 `MAX_SETTINGS_BYTES = 256 KiB`，超限后端 400） */
+const MAX_OPTIONS_BYTES = 256 * 1024;
+
 /** unix 秒 → 日期（目录时间戳展示用） */
 function fmtUnix(value: number | null | undefined): string {
   if (!value || value <= 0) return '—';
   return new Date(value * 1000).toLocaleString();
+}
+
+/** 错误文案展示上限：后端已截断到 512 字符，这里再兜一层，避免 toast 被撑爆 */
+const MAX_ERROR_DISPLAY = 300;
+
+/**
+ * 错误 → 单行可读文案。
+ *
+ * 宿主启动失败时后端可能带回多行 stderr（已截断），toast/错误条里换行与
+ * 超长文本会溢出容器。这里压成单行并限长；完整文案由调用方通过 title
+ * 提示（悬停可见）。
+ */
+function formatError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const oneLine = raw.replace(/\s*\n+\s*/g, ' ⏎ ').trim();
+  return oneLine.length > MAX_ERROR_DISPLAY ? `${oneLine.slice(0, MAX_ERROR_DISPLAY)}…` : oneLine;
+}
+
+/** 目录刷新是否已有进展：刷新是后台异步任务（refresh 端点只负责唤醒），
+ * 阶段时间戳前进即视为本轮已落地。无基线时退化为「两个阶段都不过期」。
+ */
+function catalogAdvanced(prev: ScriptCatalogStatus | undefined, next: ScriptCatalogStatus): boolean {
+  if (!prev) return !next.market_stale && !next.github_stale;
+  return next.market_at !== prev.market_at || next.github_at !== prev.github_at;
 }
 
 /** 发布者三分类 → 徽标（tone 与原生插件页 badge 色板同源） */
@@ -94,7 +122,7 @@ function CatalogCard({
       <div className="pl-card-meta">
         {entry.stars ? (
           <span className="pls-stars">
-            <Star size={11} /> {entry.stars} 星
+            <Star size={11} /> {t('{{count}} 星', { count: entry.stars })}
           </span>
         ) : null}
         {repoUrl ? (
@@ -201,7 +229,13 @@ function InstalledScriptCard({
         <Button variant="outline" size="sm" disabled={busy} onClick={() => onEditOptions(pkg)}>
           {t('配置')}
         </Button>
-        <Tooltip label={t('卸载后该脚本包的提供商将停止接管请求')}>
+        <Tooltip
+          label={
+            pkg.source === 'local'
+              ? t('卸载仅移除本机目录包的插件登记、配置与元数据，本机文件不会被删除')
+              : t('卸载后该脚本包的提供商将停止接管请求，插件包目录会被删除')
+          }
+        >
           <Button variant="danger" size="sm" disabled={busy} onClick={() => onUninstall(pkg)}>
             <Trash2 size={13} /> {t('卸载')}
           </Button>
@@ -230,6 +264,8 @@ function OptionsDialog({
       value: typeof value === 'string' ? value : JSON.stringify(value),
     }))
   );
+  /** 保存失败的就地错误：弹窗不关，用户能看着错误改 */
+  const [saveError, setSaveError] = useState('');
 
   const updateRow = (index: number, patch: Partial<{ key: string; value: string }>): void => {
     setRows((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -251,7 +287,13 @@ function OptionsDialog({
         values[row.key] = row.value;
       }
     }
-    await onSave(pkg, values);
+    try {
+      setSaveError('');
+      await onSave(pkg, values);
+    } catch (err) {
+      // 失败必须可见且弹窗保持打开（onSave 成功时才由父层关闭）
+      setSaveError(formatError(err));
+    }
   };
 
   return (
@@ -293,6 +335,11 @@ function OptionsDialog({
           <p className="pl-store-hint" style={{ marginTop: 8 }}>
             {t('值按 JSON 解析（数字/布尔/对象直接生效），解析失败按字符串保存。')}
           </p>
+          {saveError ? (
+            <div className="error-message" style={{ marginTop: 10 }} title={saveError}>
+              {saveError}
+            </div>
+          ) : null}
         </div>
         <div className="modal-footer">
           <Button variant="outline" onClick={onClose}>
@@ -318,6 +365,16 @@ export default function ScriptPluginsPanel(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
   const mounted = useRef(true);
+  /**
+   * 写操作互斥（ref 而非 state）：防止同一渲染帧内连点两个按钮时，
+   * 两个闭包都读到旧的 busy=false 而并发发起写请求。
+   */
+  const busyRef = useRef(false);
+  /**
+   * 回读序号：并发 load（首屏 + 写操作后回读 + 刷新目录轮询）可能乱序返回，
+   * 只允许最新一次的结果落地，避免旧快照覆盖新状态（竞态）。
+   */
+  const loadSeq = useRef(0);
 
   const [payload, setPayload] = useState<ScriptPackagesPayload | null>(null);
   const [catalog, setCatalog] = useState<ScriptCatalogPayload | null>(null);
@@ -341,23 +398,28 @@ export default function ScriptPluginsPanel(): JSX.Element {
   }, []);
 
   const load = useCallback(async (): Promise<void> => {
+    const seq = ++loadSeq.current;
     try {
       const [listRes, catRes] = await Promise.all([api.listScriptPlugins(), api.scriptCatalog()]);
-      if (!mounted.current) return;
+      if (!mounted.current || seq !== loadSeq.current) return;
       setPayload(listRes?.data ?? null);
       setCatalog(catRes?.data ?? null);
       setNotReady(false);
       setError('');
     } catch (err) {
-      if (!mounted.current) return;
+      if (!mounted.current || seq !== loadSeq.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       const is404 = /404|not found/i.test(msg);
       setNotReady(is404);
-      setError(is404 ? '' : msg);
-      setPayload(null);
-      setCatalog(null);
+      setError(is404 ? '' : formatError(msg));
+      // 404 = 管理面未提供（降级空态）；其它错误保留上次成功数据，
+      // 只挂错误条——瞬时网络抖动不该把已加载的面板整块清空。
+      if (is404) {
+        setPayload(null);
+        setCatalog(null);
+      }
     } finally {
-      if (mounted.current) setLoading(false);
+      if (mounted.current && seq === loadSeq.current) setLoading(false);
     }
   }, []);
 
@@ -405,18 +467,38 @@ export default function ScriptPluginsPanel(): JSX.Element {
 
   const busy = busyKey != null;
 
-  /** 通用写操作包装：busyKey 占位 + 完成回读 + toast */
-  const runMutation = async (key: string, action: () => Promise<void>): Promise<void> => {
-    if (busy) return;
+  /**
+   * 通用写操作包装：busyRef 互斥 + busyKey 占位 + 无论成败回读 + toast。
+   *
+   * 失败后也回读：后端存在「已落盘但宿主重建失败」这类半成功
+   * （如 options 保存后 rebuild 失败），UI 必须反映真实状态而不是停在
+   * 点击前的旧快照。
+   *
+   * `toastError=false` 供确认弹窗内使用：错误改为抛出，由 ConfirmDialog
+   * 就地展示并保持弹窗打开（用户可直接重试），不再叠一条转瞬即逝的 toast。
+   */
+  const runMutation = async (
+    key: string,
+    action: () => Promise<void>,
+    opts: { toastError?: boolean } = {}
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (busyRef.current) return { ok: false, error: 'busy' };
+    busyRef.current = true;
     setBusyKey(key);
+    let ok = false;
+    let error: string | undefined;
     try {
       await action();
-      await load();
+      ok = true;
     } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
+      error = formatError(err);
+      if (opts.toastError !== false) addToast(error, 'error');
     } finally {
+      await load();
+      busyRef.current = false;
       if (mounted.current) setBusyKey(null);
     }
+    return { ok, error };
   };
 
   /** 目录卡「安装」：二次确认（含沙箱警告）后才传 trusted=true */
@@ -427,223 +509,301 @@ export default function ScriptPluginsPanel(): JSX.Element {
       confirmText: t('确认安装'),
       danger: true,
       onConfirm: async () => {
-        await runMutation(`install:${entry.selector}`, async () => {
-          await api.installScriptPackage(entry.selector, true);
-          addToast(t('脚本包已安装'));
-        });
+        const res = await runMutation(
+          `install:${entry.selector}`,
+          async () => {
+            await api.installScriptPackage(entry.selector, true);
+            addToast(t('脚本包已安装'));
+          },
+          { toastError: false }
+        );
+        // 抛出让 ConfirmDialog 就地显示后端错误并保持打开，用户可修正/重试
+        if (!res.ok && res.error && res.error !== 'busy') throw new Error(res.error);
       },
     });
   };
 
   const handleToggleEnabled = (pkg: ScriptPackageView, enabled: boolean): void => {
-    void runMutation(`enable:${pkg.id}`, async () => {
-      await api.enableScriptPackage(pkg.id, enabled);
+    void runMutation(`enable:${pkg.id}@${pkg.version}`, async () => {
+      // 必须带 version：多版本共存时后端缺省选「最后登记」的版本，
+      // 不传就会把另一张卡片的版本切了。
+      await api.enableScriptPackage(pkg.id, enabled, pkg.version);
       addToast(enabled ? t('脚本包已启用') : t('脚本包已停用'));
     });
   };
 
   const handleUninstall = (pkg: ScriptPackageView): void => {
+    const name = pkg.label || pkg.id;
+    // Local 来源是「本机目录原地登记」，卸载不删运行者的源码目录；
+    // 确认文案必须按来源区分，否则会误导用户以为文件被删。
+    const isLocal = pkg.source === 'local';
     setConfirmState({
       title: t('卸载脚本包'),
-      message: t('确定卸载「{{name}}」吗？该脚本包声明的提供商将停止接管请求，包配置与元数据会被删除。', {
-        name: pkg.label || pkg.id,
-      }),
+      message: isLocal
+        ? t('确定卸载「{{name}}」吗？该包是「本机目录」来源，仅移除插件登记、配置与元数据，本机文件不会被删除。', { name })
+        : t('确定卸载「{{name}}」吗？该脚本包声明的提供商将停止接管请求，插件包目录、包配置与元数据都会被删除。', { name }),
       confirmText: t('卸载'),
       danger: true,
       onConfirm: async () => {
-        await runMutation(`remove:${pkg.id}`, async () => {
-          await api.uninstallScriptPackage(pkg.id);
-          addToast(t('脚本包已卸载'));
-        });
+        const res = await runMutation(
+          `remove:${pkg.id}@${pkg.version}`,
+          async () => {
+            // 带 version：不带时后端会删掉同 id 的全部版本，而 UI 只展示单张卡片
+            await api.uninstallScriptPackage(pkg.id, pkg.version);
+            addToast(t('脚本包已卸载'));
+          },
+          { toastError: false }
+        );
+        if (!res.ok && res.error && res.error !== 'busy') throw new Error(res.error);
       },
     });
   };
 
   const handleSaveOptions = async (pkg: ScriptPackageView, values: Record<string, unknown>): Promise<void> => {
-    try {
-      await api.saveScriptPackageOptions(pkg.id, values);
-      addToast(t('配置已保存'));
-      setEditingPkg(null);
-      await load();
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
+    // 后端强制 ≤ 256 KiB（MAX_SETTINGS_BYTES）：本地先量一次，给出可读错误，
+    // 而不是等整轮请求被 400 打回。
+    const bytes = new TextEncoder().encode(JSON.stringify(values)).length;
+    if (bytes > MAX_OPTIONS_BYTES) {
+      throw new Error(t('配置过大（{{size}} KiB），上限 256 KiB', { size: Math.ceil(bytes / 1024) }));
     }
+    const res = await runMutation(
+      `options:${pkg.id}@${pkg.version}`,
+      async () => {
+        await api.saveScriptPackageOptions(pkg.id, values, pkg.version);
+        addToast(t('配置已保存'));
+      },
+      { toastError: false }
+    );
+    if (!res.ok) {
+      // 抛回 OptionsDialog：弹窗保持打开并就地显示错误，用户改完可直接重试
+      if (res.error && res.error !== 'busy') throw new Error(res.error);
+      return;
+    }
+    setEditingPkg(null);
   };
 
+  /**
+   * 刷新目录：POST 只唤醒后台任务立即返回，结果落在 catalog.status 上。
+   * 这里轮询几次状态并如实汇报——不能无条件 toast「已刷新」（上游失败或
+   * 重试闸门拦截时目录根本没变）。
+   */
   const handleRefreshCatalog = async (): Promise<void> => {
-    if (busy) return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusyKey('refresh');
     try {
+      const prev = catalog?.status;
       await api.refreshScriptCatalog();
-      // 后台任务异步刷新：等一小段再回读，让新条目可见
-      await new Promise((resolve) => window.setTimeout(resolve, 2500));
-      await load();
-      addToast(t('目录已刷新'));
+      let latest: ScriptCatalogPayload | null = null;
+      for (let i = 0; i < 4; i++) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        if (!mounted.current) return;
+        const res = await api.scriptCatalog();
+        latest = res?.data ?? null;
+        if (latest && catalogAdvanced(prev, latest.status)) break;
+      }
+      const refreshError = latest?.status.market_error || latest?.status.github_error;
+      if (refreshError) {
+        addToast(t('目录刷新失败：{{err}}', { err: formatError(refreshError) }), 'error');
+      } else if (!latest || latest.status.market_stale || latest.status.github_stale) {
+        addToast(t('目录刷新尚未完成（上游受限或网络较慢），请稍后刷新查看。'), 'warning');
+      } else {
+        addToast(t('目录已刷新'));
+      }
     } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
+      addToast(formatError(err), 'error');
     } finally {
+      await load();
+      busyRef.current = false;
       if (mounted.current) setBusyKey(null);
     }
   };
 
-  const handleRebuildHost = async (): Promise<void> => {
-    if (busy) return;
-    setBusyKey('rebuild');
-    try {
+  const handleRebuildHost = (): void => {
+    void runMutation('rebuild', async () => {
       await api.rebuildScriptHost();
-      await load();
       addToast(t('宿主已重启'));
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      if (mounted.current) setBusyKey(null);
-    }
+    });
   };
 
   return (
     <div>
-      {/* 宿主状态条 */}
-      <Card
-        title={t('宿主状态')}
-        actions={
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <Button variant="outline" size="sm" onClick={() => void handleRefreshCatalog()} disabled={busy}>
-              {busyKey === 'refresh' ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
-              {busyKey === 'refresh' ? t('刷新目录中…') : t('刷新目录')}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => void handleRebuildHost()} disabled={busy}>
-              {busyKey === 'rebuild' ? <Loader2 size={13} className="spin" /> : <RotateCcw size={13} />}
-              {busyKey === 'rebuild' ? t('重启宿主中…') : t('重启宿主')}
-            </Button>
-          </div>
-        }
-      >
-        <div className="pls-host-bar">
-          <Badge tone={host?.running ? 'success' : 'neutral'}>{host?.running ? t('宿主运行中') : t('宿主未运行')}</Badge>
-          <span>{t('已装载 {{count}} 个包', { count: host?.packages ?? 0 })}</span>
-          <span>{t('接管 {{count}} 家提供商', { count: host?.providers.length ?? 0 })}</span>
-          {host && host.crashes > 0 ? <Badge tone="warning">{t('崩溃 {{count}} 次', { count: host.crashes })}</Badge> : null}
-          {host?.lastError ? <span className="pl-dg-err" title={host.lastError}>{t('最近错误：{{err}}', { err: host.lastError })}</span> : null}
+      {notReady ? (
+        <EmptyState
+          icon="🧩"
+          message={t('脚本插件后端尚未就绪')}
+          action={<p className="pl-empty-hint">{t('当前后端未提供脚本插件管理面（端点 404），请升级 AIGX 后端后重试。')}</p>}
+        />
+      ) : error && !payload ? (
+        <div className="error-message">
+          {error}
+          <Button className="pls-error-retry" variant="outline" size="sm" onClick={() => void load()}>
+            {t('重试')}
+          </Button>
         </div>
-        {catalog?.status ? (
-          <div className="pls-host-bar pls-cat-bar">
-            <span>{t('目录：官方 {{a}} / 推荐 {{b}} / 第三方 {{c}}', {
-              a: catalog.status.official,
-              b: catalog.status.recommended,
-              c: catalog.status.third_party,
-            })}</span>
-            <span>{t('市场清单更新于 {{time}}', { time: fmtUnix(catalog.status.market_at) })}</span>
-            {catalog.status.market_error ? <span className="pl-dg-err">{catalog.status.market_error}</span> : null}
-            {catalog.status.github_error ? <span className="pl-dg-err">{catalog.status.github_error}</span> : null}
-          </div>
-        ) : null}
-      </Card>
+      ) : (
+        <>
+          {/* 局部失败：保留上次成功数据，只挂错误条 + 重试 */}
+          {error ? (
+            <div className="error-message">
+              {error}
+              <Button className="pls-error-retry" variant="outline" size="sm" onClick={() => void load()}>
+                {t('重试')}
+              </Button>
+            </div>
+          ) : null}
 
-      {/* 已安装脚本包 */}
-      <div style={{ marginTop: 14 }}>
-      <Card title={`${t('已安装脚本包')} (${packages.length})`}>
-        {packages.length === 0 ? (
-          <EmptyState icon="🧩" message={t('暂无已安装脚本包')} />
-        ) : (
-          <div className="pl-grid">
-            {packages.map((pkg) => (
-              <InstalledScriptCard
-                key={`${pkg.id}@${pkg.version}`}
-                pkg={pkg}
-                busy={busy}
-                onToggleEnabled={handleToggleEnabled}
-                onUninstall={handleUninstall}
-                onEditOptions={(p) => setEditingPkg(p)}
-              />
-            ))}
-          </div>
-        )}
-      </Card>
-      </div>
-
-      {/* Magpie 目录（三分类） */}
-      <div style={{ marginTop: 14 }}>
-      <Card title={`${t('脚本插件目录')} (${filteredEntries.length})`}>
-        <div className="pls-toolbar">
-          <div className="pls-search">
-            <Search size={13} />
-            <input
-              className="form-input"
-              placeholder={t('搜索脚本插件…')}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-          </div>
-          <select
-            className="form-input"
-            value={sourceFilter}
-            onChange={(e) => setSourceFilter(e.target.value as 'all' | 'magpie' | 'npm' | 'github')}
-            aria-label={t('来源筛选')}
-          >
-            <option value="all">{t('全部来源')}</option>
-            <option value="magpie">Magpie</option>
-            <option value="npm">npm</option>
-            <option value="github">GitHub</option>
-          </select>
-          <select
-            className="form-input"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as 'all' | 'installed' | 'notInstalled' | 'updatable')}
-            aria-label={t('状态筛选')}
-          >
-            <option value="all">{t('全部状态')}</option>
-            <option value="installed">{t('已安装')}</option>
-            <option value="notInstalled">{t('未安装')}</option>
-            <option value="updatable">{t('可更新')}</option>
-          </select>
-        </div>
-
-        {notReady ? (
-          <EmptyState
-            icon="🧩"
-            message={t('脚本插件后端尚未就绪')}
-            action={<p className="pl-empty-hint">{t('AIGX 的脚本插件管理面正在建设中；后端上线本区块即自动可用。')}</p>}
-          />
-        ) : error ? (
-          <div className="error-message">{error}</div>
-        ) : loading ? (
-          <Loading text={t('正在读取脚本插件…')} />
-        ) : entries.length === 0 ? (
-          <EmptyState
-            icon="🧩"
-            message={t('暂无目录条目')}
-            action={<p className="pl-empty-hint">{t('目录尚未拉取，点「刷新目录」试试；也可能是网络/上游不可用。')}</p>}
-          />
-        ) : filteredEntries.length === 0 ? (
-          <p className="pl-empty-hint">{t('没有符合筛选条件的条目。')}</p>
-        ) : (
-          groups.map((group) => (
-            <div className="pls-group" key={group.title}>
-              <div className="pls-group-title">
-                <h4>{group.title}</h4>
-                <span className="pls-group-count">{group.entries.length}</span>
+          {/* 宿主状态条 */}
+          <Card
+            title={t('宿主状态')}
+            actions={
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <Button variant="outline" size="sm" onClick={() => void handleRefreshCatalog()} disabled={busy}>
+                  {busyKey === 'refresh' ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
+                  {busyKey === 'refresh' ? t('刷新目录中…') : t('刷新目录')}
+                </Button>
+                <Button variant="outline" size="sm" onClick={handleRebuildHost} disabled={busy}>
+                  {busyKey === 'rebuild' ? <Loader2 size={13} className="spin" /> : <RotateCcw size={13} />}
+                  {busyKey === 'rebuild' ? t('重启宿主中…') : t('重启宿主')}
+                </Button>
               </div>
-              {group.entries.length === 0 ? (
-                <p className="pl-empty-hint">{t('暂无条目')}</p>
+            }
+          >
+            {payload ? (
+              <>
+                <div className="pls-host-bar">
+                  <Badge tone={host?.running ? 'success' : 'neutral'}>{host?.running ? t('宿主运行中') : t('宿主未运行')}</Badge>
+                  <span>{t('已装载 {{count}} 个包', { count: host?.packages ?? 0 })}</span>
+                  <span>{t('接管 {{count}} 家提供商', { count: host?.providers.length ?? 0 })}</span>
+                  {host && host.crashes > 0 ? <Badge tone="warning">{t('崩溃 {{count}} 次', { count: host.crashes })}</Badge> : null}
+                  {host?.lastError ? <span className="pl-dg-err" title={host.lastError}>{t('最近错误：{{err}}', { err: formatError(host.lastError) })}</span> : null}
+                </div>
+                {catalog?.status ? (
+                  <div className="pls-host-bar pls-cat-bar">
+                    <span>{t('目录：官方 {{a}} / 推荐 {{b}} / 第三方 {{c}}', {
+                      a: catalog.status.official,
+                      b: catalog.status.recommended,
+                      c: catalog.status.third_party,
+                    })}</span>
+                    <span>{t('市场清单更新于 {{time}}', { time: fmtUnix(catalog.status.market_at) })}</span>
+                    {catalog.status.market_error ? <span className="pl-dg-err" title={catalog.status.market_error}>{formatError(catalog.status.market_error)}</span> : null}
+                    {catalog.status.github_error ? <span className="pl-dg-err" title={catalog.status.github_error}>{formatError(catalog.status.github_error)}</span> : null}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              // 首次加载 / 读取失败：不能显示成「宿主未运行 0 个包」——那是两种完全不同的状态
+              <p className="pl-empty-hint">
+                {loading ? t('正在读取宿主状态…') : t('宿主状态读取失败')}
+              </p>
+            )}
+          </Card>
+
+          {/* 已安装脚本包 */}
+          <div style={{ marginTop: 14 }}>
+            <Card title={`${t('已安装脚本包')} (${packages.length})`}>
+              {loading && !payload ? (
+                <Loading text={t('正在读取脚本插件…')} />
+              ) : packages.length === 0 ? (
+                <EmptyState
+                  icon="🧩"
+                  message={t('暂无已安装脚本包')}
+                  action={<p className="pl-empty-hint">{t('从下方目录选择脚本包安装后，在这里启停、配置与卸载。')}</p>}
+                />
               ) : (
                 <div className="pl-grid">
-                  {group.entries.map((entry) => (
-                    <CatalogCard
-                      key={entry.name}
-                      entry={entry}
-                      installed={installedByName.get(entry.name.toLowerCase())}
-                      installing={busyKey === `install:${entry.selector}`}
+                  {packages.map((pkg) => (
+                    <InstalledScriptCard
+                      key={`${pkg.id}@${pkg.version}`}
+                      pkg={pkg}
                       busy={busy}
-                      onInstall={handleInstall}
+                      onToggleEnabled={handleToggleEnabled}
+                      onUninstall={handleUninstall}
+                      onEditOptions={(p) => setEditingPkg(p)}
                     />
                   ))}
                 </div>
               )}
-            </div>
-          ))
-        )}
-      </Card>
-      </div>
+            </Card>
+          </div>
+
+          {/* Magpie 目录（三分类） */}
+          <div style={{ marginTop: 14 }}>
+            <Card title={`${t('脚本插件目录')} (${filteredEntries.length})`}>
+              <div className="pls-toolbar">
+                <div className="pls-search">
+                  <Search size={13} />
+                  <input
+                    className="form-input"
+                    placeholder={t('搜索脚本插件…')}
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                </div>
+                <select
+                  className="form-input"
+                  value={sourceFilter}
+                  onChange={(e) => setSourceFilter(e.target.value as 'all' | 'magpie' | 'npm' | 'github')}
+                  aria-label={t('来源筛选')}
+                >
+                  <option value="all">{t('全部来源')}</option>
+                  <option value="magpie">Magpie</option>
+                  <option value="npm">npm</option>
+                  <option value="github">GitHub</option>
+                </select>
+                <select
+                  className="form-input"
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as 'all' | 'installed' | 'notInstalled' | 'updatable')}
+                  aria-label={t('状态筛选')}
+                >
+                  <option value="all">{t('全部状态')}</option>
+                  <option value="installed">{t('已安装')}</option>
+                  <option value="notInstalled">{t('未安装')}</option>
+                  <option value="updatable">{t('可更新')}</option>
+                </select>
+              </div>
+
+              {loading && !catalog ? (
+                <Loading text={t('正在读取脚本插件…')} />
+              ) : entries.length === 0 ? (
+                <EmptyState
+                  icon="🧩"
+                  message={t('暂无目录条目')}
+                  action={<p className="pl-empty-hint">{t('目录尚未拉取，点「刷新目录」试试；也可能是网络/上游不可用。')}</p>}
+                />
+              ) : filteredEntries.length === 0 ? (
+                <p className="pl-empty-hint">{t('没有符合筛选条件的条目。')}</p>
+              ) : (
+                groups.map((group) => (
+                  <div className="pls-group" key={group.title}>
+                    <div className="pls-group-title">
+                      <h4>{group.title}</h4>
+                      <span className="pls-group-count">{group.entries.length}</span>
+                    </div>
+                    {group.entries.length === 0 ? (
+                      <p className="pl-empty-hint">{t('暂无条目')}</p>
+                    ) : (
+                      <div className="pl-grid">
+                        {group.entries.map((entry) => (
+                          <CatalogCard
+                            key={entry.name}
+                            entry={entry}
+                            installed={installedByName.get(entry.name.toLowerCase())}
+                            installing={busyKey === `install:${entry.selector}`}
+                            busy={busy}
+                            onInstall={handleInstall}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </Card>
+          </div>
+        </>
+      )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
       {editingPkg ? (

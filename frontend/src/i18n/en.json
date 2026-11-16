@@ -3730,7 +3730,6 @@
   "目录：官方 {{a}} / 推荐 {{b}} / 第三方 {{c}}": "Directory: official {{a}} / recommended {{b}} / third-party {{c}}",
   "目录尚未拉取，点「刷新目录」试试；也可能是网络/上游不可用。": "Directory not fetched yet — try \"Refresh Catalog\"; the network/upstream may also be unavailable.",
   "目录已刷新": "Catalog refreshed",
-  "确定卸载「{{name}}」吗？该脚本包声明的提供商将停止接管请求，包配置与元数据会被删除。": "Uninstall \"{{name}}\"? Its providers will stop claiming requests, and package settings/metadata will be deleted.",
   "确认安装": "Confirm install",
   "市场清单更新于 {{time}}": "Market manifest updated {{time}}",
   "受信任": "Trusted",
@@ -3760,5 +3759,16 @@
   "重启宿主": "Restart host",
   "重启宿主中…": "Restarting host…",
   "最近错误：{{err}}": "Last error: {{err}}",
-  "AIGX 的脚本插件管理面正在建设中；后端上线本区块即自动可用。": "AIGX script plugin management is under construction; this block activates automatically once the backend ships."
+  "{{count}} 星": "{{count}} stars",
+  "从下方目录选择脚本包安装后，在这里启停、配置与卸载。": "Install a script plugin from the catalog below, then enable, configure, or uninstall it here.",
+  "卸载仅移除本机目录包的插件登记、配置与元数据，本机文件不会被删除": "Uninstall removes only the registration, settings, and metadata of this local-directory plugin; local files are kept",
+  "卸载后该脚本包的提供商将停止接管请求，插件包目录会被删除": "Uninstalling stops this plugin's providers from claiming requests and deletes the plugin package directory",
+  "宿主状态读取失败": "Failed to read host status",
+  "当前后端未提供脚本插件管理面（端点 404），请升级 AIGX 后端后重试。": "This backend does not provide the script plugin API (HTTP 404). Upgrade the AIGX backend and retry.",
+  "正在读取宿主状态…": "Reading host status…",
+  "目录刷新失败：{{err}}": "Catalog refresh failed: {{err}}",
+  "目录刷新尚未完成（上游受限或网络较慢），请稍后刷新查看。": "Catalog refresh has not finished yet (upstream throttled or slow network). Refresh again later.",
+  "确定卸载「{{name}}」吗？该包是「本机目录」来源，仅移除插件登记、配置与元数据，本机文件不会被删除。": "Uninstall \"{{name}}\"? This plugin is a local-directory registration: only the plugin registration, settings, and metadata are removed; local files are kept.",
+  "确定卸载「{{name}}」吗？该脚本包声明的提供商将停止接管请求，插件包目录、包配置与元数据都会被删除。": "Uninstall \"{{name}}\"? Its providers will stop claiming requests, and the plugin directory, settings, and metadata will be deleted.",
+  "配置过大（{{size}} KiB），上限 256 KiB": "Configuration too large ({{size}} KiB); the limit is 256 KiB"
 }

@@ -116,3 +116,9 @@
 .pls-opt-val {
   flex: 1;
 }
+
+/* 错误条里的「重试」按钮：与错误文案同行，留出间距 */
+.pls-error-retry {
+  margin-left: 10px;
+  vertical-align: middle;
+}
