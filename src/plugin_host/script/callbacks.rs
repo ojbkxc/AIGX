@@ -151,7 +151,7 @@ mod tests {
     fn callbacks(store: Arc<FileStore>) -> Arc<ScriptCallbacks> {
         let sessions = Arc::new(AccountSessionStore::new(store.clone()));
         ScriptCallbacks::new(
-            Transport::new(reqwest::Client::new()),
+            Transport::new(crate::test_http_client()),
             ProtocolRegistry::new(),
             sessions,
             store,

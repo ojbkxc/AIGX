@@ -469,7 +469,7 @@ mod tests {
     // ── 参数校验（校验发生在发请求前，不打网络）─────────────────
 
     fn transport() -> Arc<Transport> {
-        Transport::new(reqwest::Client::new())
+        Transport::new(crate::test_http_client())
     }
 
     #[tokio::test]

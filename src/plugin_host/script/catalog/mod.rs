@@ -189,6 +189,7 @@ mod tests {
 
         // 不起网络循环（Refresher::new 只加载磁盘缓存）；
         // 网络路径由 CI 的集成测试覆盖，这里验证 API 形状。
+        crate::install_rustls_provider_for_tests();
         let r = Refresher::new(&dir);
         let cat = Catalog { inner: r };
         let s = cat.status().await;
@@ -207,6 +208,7 @@ mod tests {
         let dir = std::env::temp_dir().join("aigx_catalog_mod_test2");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        crate::install_rustls_provider_for_tests();
         let r = Refresher::new(&dir);
         {
             let mut c = r.cache.lock().await;

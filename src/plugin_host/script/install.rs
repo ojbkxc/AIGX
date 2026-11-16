@@ -381,7 +381,7 @@ mod tests {
     fn fetch_npm_meta_rejects_bad_name() {
         // 名称校验在发请求前就拒（不浪费一次网络往返）
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let client = reqwest::Client::new();
+        let client = crate::test_http_client();
         assert!(rt.block_on(fetch_npm_meta(&client, "../evil")).is_err());
         assert!(rt.block_on(fetch_npm_meta(&client, "")).is_err());
     }

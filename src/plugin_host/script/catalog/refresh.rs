@@ -256,6 +256,8 @@ mod tests {
 
     /// 测试辅助：只建 Refresher（加载/建空缓存），不起网络循环。
     async fn spawn_inner_for_test(dir: &std::path::Path) -> Arc<Refresher> {
+        // Refresher::new 会建 reqwest Client；测试进程不经 main() 的 provider 安装。
+        crate::install_rustls_provider_for_tests();
         let r = Refresher::new(dir);
         // 预写空缓存文件，避免 load 走 default 路径干扰断言
         let _ = r.cache.lock().await.save(&r.path);
