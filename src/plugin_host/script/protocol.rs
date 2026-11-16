@@ -30,7 +30,7 @@
 //! `bridge/gemini.rs` / `api/openai/responses_convert.rs`），保证同一上游
 //! 字节在「原生渠道」与「脚本渠道」得到相同的 OpenAI 流。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -125,11 +125,10 @@ impl ProtocolRegistry {
         };
         entry.last_used = now;
         let out = entry.converter.push(data);
-        Ok(if out.is_empty() {
-            json!({})
-        } else {
-            json!({ "data": STANDARD.encode(&out) })
-        })
+        // 即使本次没有产出也回显 `"data": ""`：provider.mjs 在 `data`
+        // 缺失时会回退为「透传上游原始字节」，半行 Anthropic/Gemini SSE
+        // 会混进 OpenAI 流并打乱下游行缓冲（丢事件）。空串 = 已转换、无输出。
+        Ok(json!({ "data": STANDARD.encode(&out) }))
     }
 
     /// `script.protocol.finish`：冲刷转换器尾部并移除会话。
@@ -282,6 +281,19 @@ fn usage_json(prompt: u64, completion: u64) -> Value {
     })
 }
 
+/// 带缓存命中明细的 usage。
+///
+/// OpenAI 口径：`prompt_tokens_details.cached_tokens` 是 `prompt_tokens`
+/// 的**子集**（网关 billing 依赖该子集按缓存价打折），因此调用方必须把
+/// 上游的缓存量并进 `prompt_tokens` 之后再放明细。
+fn usage_json_cached(prompt: u64, completion: u64, cached: u64) -> Value {
+    let mut usage = usage_json(prompt, completion);
+    if cached > 0 {
+        usage["prompt_tokens_details"] = json!({ "cached_tokens": cached.min(prompt) });
+    }
+    usage
+}
+
 // ── Anthropic ─────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -290,6 +302,8 @@ struct AnthropicState {
     id: String,
     model: String,
     input_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
     sent_finish: bool,
     sent_done: bool,
     tool_index_by_block: BTreeMap<usize, usize>,
@@ -328,10 +342,7 @@ impl AnthropicState {
                         self.model = model.to_string();
                     }
                     if let Some(usage) = message.get("usage") {
-                        self.input_tokens = usage
-                            .get("input_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
+                        self.absorb_usage(usage);
                     }
                 }
                 out.push_str(&chunk_line(
@@ -344,19 +355,54 @@ impl AnthropicState {
             }
             "content_block_start" => {
                 if let Some(block) = v.get("content_block") {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        let block_index =
-                            v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                        let tool_index = self.tool_index(block_index);
-                        let id = block.get("id").and_then(Value::as_str).unwrap_or("");
-                        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-                        out.push_str(&chunk_line(
-                            self.chat_id(),
-                            self.chat_model(),
-                            tool_start(tool_index, id, name),
-                            None,
-                            None,
-                        ));
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("tool_use") => {
+                            let block_index =
+                                v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                            let tool_index = self.tool_index(block_index);
+                            let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                            let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                            out.push_str(&chunk_line(
+                                self.chat_id(),
+                                self.chat_model(),
+                                tool_start(tool_index, id, name),
+                                None,
+                                None,
+                            ));
+                            // 部分 Anthropic 兼容上游把完整 input 放在
+                            // content_block_start 里、之后不再发 input_json_delta：
+                            // 只在 start 带上工具参数，丢掉就等于丢整个入参。
+                            if let Some(input) = block
+                                .get("input")
+                                .filter(|i| i.as_object().is_some_and(|m| !m.is_empty()))
+                            {
+                                let encoded = serde_json::to_string(input).unwrap_or_default();
+                                out.push_str(&chunk_line(
+                                    self.chat_id(),
+                                    self.chat_model(),
+                                    tool_args(tool_index, &encoded),
+                                    None,
+                                    None,
+                                ));
+                            }
+                        }
+                        Some("text") => {
+                            // 同理：初始文本一般为空串，非空时不能吞掉。
+                            if let Some(text) = block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .filter(|t| !t.is_empty())
+                            {
+                                out.push_str(&chunk_line(
+                                    self.chat_id(),
+                                    self.chat_model(),
+                                    text_delta(text),
+                                    None,
+                                    None,
+                                ));
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -404,6 +450,10 @@ impl AnthropicState {
                 }
             }
             "message_delta" => {
+                if let Some(usage) = v.get("usage") {
+                    // 部分后端只在 message_delta 补齐 input/cache 计数（max-wins）
+                    self.absorb_usage(usage);
+                }
                 let finish = v
                     .get("delta")
                     .and_then(|d| d.get("stop_reason"))
@@ -412,21 +462,31 @@ impl AnthropicState {
                 let completion = v
                     .get("usage")
                     .and_then(|u| u.get("output_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                if finish.is_some() {
-                    self.sent_finish = true;
-                }
+                    .and_then(Value::as_u64);
+                // usage 只在 output_tokens 出现时产出（没有 usage 帧就别伪造 0）
+                let usage = completion
+                    .map(|c| usage_json_cached(self.prompt_tokens(), c, self.cache_read_tokens));
                 if let Some(finish) = finish {
+                    self.sent_finish = true;
                     out.push_str(&chunk_line(
                         self.chat_id(),
                         self.chat_model(),
                         json!({}),
                         Some(finish),
-                        Some(usage_json(self.input_tokens, completion)),
+                        usage,
                     ));
                     out.push_str(done_line());
                     self.sent_done = true;
+                } else if let Some(usage) = usage {
+                    // 只有 usage、没有 stop_reason（部分兼容上游单独一帧给
+                    // usage）：先落 usage，finish 等 message_stop 兜底补发。
+                    out.push_str(&chunk_line(
+                        self.chat_id(),
+                        self.chat_model(),
+                        json!({}),
+                        None,
+                        Some(usage),
+                    ));
                 }
             }
             "message_stop" => {
@@ -501,6 +561,35 @@ impl AnthropicState {
         }
     }
 
+    /// 记录 input/cache 计数（max-wins：不同上游把它们分散在
+    /// message_start / message_delta 两帧里）。
+    fn absorb_usage(&mut self, usage: &Value) {
+        if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
+            self.input_tokens = self.input_tokens.max(v);
+        }
+        if let Some(v) = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.cache_creation_tokens = self.cache_creation_tokens.max(v);
+        }
+        if let Some(v) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
+            self.cache_read_tokens = self.cache_read_tokens.max(v);
+        }
+    }
+
+    /// OpenAI 口径的 prompt 总量。
+    ///
+    /// Anthropic 的 `input_tokens` **不含**缓存量：`cache_creation_input_tokens`
+    /// 与 `cache_read_input_tokens` 是 prompt 之外的追加量，必须并入
+    /// `prompt_tokens`（否则缓存命中越多、账单越低）。缓存读取量另放
+    /// `prompt_tokens_details.cached_tokens` 作折扣子集。
+    fn prompt_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.cache_creation_tokens)
+            .saturating_add(self.cache_read_tokens)
+    }
+
     /// content_block index → 密集 tool_calls index（文本块与工具块共用
     /// 序号空间，直接透传会在下游 tool_calls 数组里留空洞）。
     fn tool_index(&mut self, block_index: usize) -> usize {
@@ -535,6 +624,15 @@ struct ResponsesState {
     prompt_tokens: u64,
     sent_finish: bool,
     sent_done: bool,
+    /// 是否输出过 function_call（终态 finish_reason 据此映射 tool_calls）。
+    saw_tool_call: bool,
+    /// 已收到增量参数（`response.function_call_arguments.delta`）的
+    /// item id / call_id；用于避免 `*.done` 兜底再吐一遍完整 arguments。
+    args_streamed: BTreeSet<String>,
+    /// 键缺失时（上游没给 item id / call_id）是否已收到增量参数。
+    unkeyed_args_streamed: bool,
+    /// 键缺失时最近分配的 tool index（参数增量跟着最近的 item 走）。
+    last_unkeyed_index: Option<usize>,
     /// item id / call_id → 密集 tool_calls index。
     tool_index: BTreeMap<String, usize>,
     next_tool_index: usize,
@@ -591,7 +689,8 @@ impl ResponsesState {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let index = self.index_for(&key);
+                let index = self.index_for(&key, true);
+                self.saw_tool_call = true;
                 let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or(&key);
                 let name = item.get("name").and_then(Value::as_str).unwrap_or("");
                 out.push_str(&chunk_line(
@@ -632,7 +731,8 @@ impl ResponsesState {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    let index = self.index_for(&key);
+                    let index = self.index_for(&key, false);
+                    self.mark_args_streamed(&key);
                     out.push_str(&chunk_line(
                         self.chat_id(),
                         self.chat_model(),
@@ -642,45 +742,90 @@ impl ResponsesState {
                     ));
                 }
             }
-            "response.completed" | "response.incomplete" | "response.failed" => {
-                if let Some(resp) = v.get("response") {
-                    if let Some(usage) = resp.get("usage") {
-                        self.prompt_tokens = usage
-                            .get("input_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(self.prompt_tokens);
-                        let completion = usage
-                            .get("output_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let finish = v.get("type").and_then(Value::as_str)
-                            == Some("response.failed")
-                            || resp.get("status").and_then(Value::as_str) == Some("failed");
-                        if finish {
-                            out.push_str(&error_sse_line(
-                                resp.get("error"),
-                                "upstream response failed",
-                            ));
-                        }
-                        self.sent_finish = true;
-                        out.push_str(&chunk_line(
-                            self.chat_id(),
-                            self.chat_model(),
-                            json!({}),
-                            Some("stop"),
-                            Some(usage_json(self.prompt_tokens, completion)),
-                        ));
-                    } else {
-                        self.sent_finish = true;
-                        out.push_str(&chunk_line(
-                            self.chat_id(),
-                            self.chat_model(),
-                            json!({}),
-                            Some("stop"),
-                            None,
-                        ));
-                    }
+            // 部分实现不发参数增量、只在 .done 里给完整 arguments：
+            // 未见增量的 item 用它兜底，否则客户端拿到空入参。
+            "response.function_call_arguments.done" => {
+                let Some(arguments) = v.get("arguments").and_then(Value::as_str) else {
+                    return;
+                };
+                let key = v
+                    .get("item_id")
+                    .or_else(|| v.get("call_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                self.emit_pending_arguments(&key, arguments, out);
+            }
+            "response.output_item.done" => {
+                let Some(item) = v.get("item") else { return };
+                if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                    return;
                 }
+                let key = item
+                    .get("id")
+                    .or_else(|| item.get("call_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                    self.emit_pending_arguments(&key, arguments, out);
+                }
+            }
+            "response.completed" | "response.incomplete" | "response.failed" => {
+                let event_type = v.get("type").and_then(Value::as_str).unwrap_or("");
+                let resp = v.get("response");
+                let failed = event_type == "response.failed"
+                    || resp.and_then(|r| r.get("status")).and_then(Value::as_str) == Some("failed");
+                if failed {
+                    out.push_str(&error_sse_line(
+                        resp.and_then(|r| r.get("error")),
+                        "upstream response failed",
+                    ));
+                }
+                let usage = resp.and_then(|r| r.get("usage")).map(|usage| {
+                    if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
+                        self.prompt_tokens = self.prompt_tokens.max(v);
+                    }
+                    let completion = usage
+                        .get("output_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let cached = usage
+                        .pointer("/input_tokens_details/cached_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    usage_json_cached(self.prompt_tokens, completion, cached)
+                });
+                // finish_reason 映射：failed → stop（错误行已透出）；
+                // incomplete（截断/内容过滤）→ length / content_filter；
+                // 本轮输出过 function_call → tool_calls；其余 → stop。
+                let incomplete = event_type == "response.incomplete"
+                    || resp.and_then(|r| r.get("status")).and_then(Value::as_str)
+                        == Some("incomplete");
+                let reason = if failed {
+                    "stop"
+                } else if incomplete {
+                    match resp
+                        .and_then(|r| r.get("incomplete_details"))
+                        .and_then(|d| d.get("reason"))
+                        .and_then(Value::as_str)
+                    {
+                        Some("content_filter") => "content_filter",
+                        _ => "length",
+                    }
+                } else if self.saw_tool_call {
+                    "tool_calls"
+                } else {
+                    "stop"
+                };
+                self.sent_finish = true;
+                out.push_str(&chunk_line(
+                    self.chat_id(),
+                    self.chat_model(),
+                    json!({}),
+                    Some(reason),
+                    usage,
+                ));
                 if !self.sent_done {
                     out.push_str(done_line());
                     self.sent_done = true;
@@ -734,7 +879,20 @@ impl ResponsesState {
         }
     }
 
-    fn index_for(&mut self, key: &str) -> usize {
+    fn index_for(&mut self, key: &str, fresh_item: bool) -> usize {
+        if key.is_empty() {
+            // 没有 item id / call_id：`output_item.added` 视为新 item 分配新
+            // index，参数增量则沿用最近分配的 index。不做这层区分的话，
+            // 多个无 id 的调用会全撞到 index 0，客户端按 index 合并参数时
+            // 把两份 JSON 拼坏。
+            if fresh_item || self.last_unkeyed_index.is_none() {
+                let idx = self.next_tool_index;
+                self.next_tool_index += 1;
+                self.last_unkeyed_index = Some(idx);
+                return idx;
+            }
+            return self.last_unkeyed_index.unwrap_or(0);
+        }
         if let Some(idx) = self.tool_index.get(key) {
             return *idx;
         }
@@ -742,6 +900,38 @@ impl ResponsesState {
         self.next_tool_index += 1;
         self.tool_index.insert(key.to_string(), idx);
         idx
+    }
+
+    fn mark_args_streamed(&mut self, key: &str) {
+        if key.is_empty() {
+            self.unkeyed_args_streamed = true;
+        } else {
+            self.args_streamed.insert(key.to_string());
+        }
+    }
+
+    fn args_already_streamed(&self, key: &str) -> bool {
+        if key.is_empty() {
+            self.unkeyed_args_streamed
+        } else {
+            self.args_streamed.contains(key)
+        }
+    }
+
+    /// `.done` 类事件携带的完整 arguments 兜底：仅在该 item 没走过增量时发。
+    fn emit_pending_arguments(&mut self, key: &str, arguments: &str, out: &mut String) {
+        if arguments.is_empty() || self.args_already_streamed(key) {
+            return;
+        }
+        let index = self.index_for(key, false);
+        self.mark_args_streamed(key);
+        out.push_str(&chunk_line(
+            self.chat_id(),
+            self.chat_model(),
+            tool_args(index, arguments),
+            None,
+            None,
+        ));
     }
 }
 
@@ -781,10 +971,26 @@ impl GeminiState {
         if let Some(model) = v.get("modelVersion").and_then(Value::as_str) {
             self.model = model.to_string();
         }
+        // 提示词被安全策略拦截：帧里没有 candidates，只有 promptFeedback。
+        // 不映射就会以默认 stop 收尾，下游误以为是完整回答。
+        if let Some(block) = v
+            .get("promptFeedback")
+            .and_then(|f| f.get("blockReason"))
+            .and_then(Value::as_str)
+            .filter(|r| !r.is_empty())
+        {
+            let reason = if block == "SAFETY" {
+                "content_filter"
+            } else {
+                "stop"
+            };
+            self.emit_finish(out, v.get("usageMetadata"), reason);
+            return;
+        }
         let Some(candidate) = v.get("candidates").and_then(|c| c.get(0)) else {
             // 只有 usageMetadata 的收尾帧
             if let Some(usage) = v.get("usageMetadata") {
-                self.emit_finish(out, Some(usage));
+                self.emit_finish(out, Some(usage), "stop");
             }
             return;
         };
@@ -833,16 +1039,16 @@ impl GeminiState {
                 }
             }
         }
-        if candidate
+        if let Some(reason) = candidate
             .get("finishReason")
             .and_then(Value::as_str)
-            .is_some_and(|r| !r.is_empty())
+            .filter(|r| !r.is_empty())
         {
-            self.emit_finish(out, v.get("usageMetadata"));
+            self.emit_finish(out, v.get("usageMetadata"), gemini_finish(reason));
         }
     }
 
-    fn emit_finish(&mut self, out: &mut String, usage: Option<&Value>) {
+    fn emit_finish(&mut self, out: &mut String, usage: Option<&Value>, reason: &'static str) {
         if self.sent_finish {
             return;
         }
@@ -856,13 +1062,18 @@ impl GeminiState {
                 .get("candidatesTokenCount")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            usage_json(prompt, completion)
+            // cachedContentTokenCount 是 promptTokenCount 的子集（OpenAI 口径）
+            let cached = u
+                .get("cachedContentTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            usage_json_cached(prompt, completion, cached)
         });
         out.push_str(&chunk_line(
             self.chat_id(),
             self.chat_model(),
             json!({}),
-            Some("stop"),
+            Some(reason),
             usage,
         ));
         if !self.sent_done {
@@ -882,7 +1093,7 @@ impl GeminiState {
                 }
             }
         }
-        self.emit_finish(&mut out, None);
+        self.emit_finish(&mut out, None, "stop");
         out.into_bytes()
     }
 
@@ -896,6 +1107,21 @@ impl GeminiState {
         } else {
             &self.model
         }
+    }
+}
+
+/// Gemini `finishReason` → OpenAI `finish_reason`。
+///
+/// 与 `bridge/gemini.rs::parse_finish_reason` 同口径：长度别名族（含
+/// `MAX_TOKENS`，大小写不敏感）→ length，`SAFETY` → content_filter，
+/// 其余（`STOP` / `RECITATION` / 未知）→ stop。
+fn gemini_finish(reason: &str) -> &'static str {
+    if crate::bridge::is_length_finish(reason) {
+        return "length";
+    }
+    match reason {
+        "SAFETY" => "content_filter",
+        _ => "stop",
     }
 }
 
@@ -923,6 +1149,95 @@ fn message_text(content: Option<&Value>) -> String {
     }
 }
 
+/// 把 tool_result 块合并进前一条 user 轮次（并行工具结果的规范形状）。
+/// 没有可合并的 user 轮次时返回 false，由调用方新起一条消息。
+///
+/// 只就地改写最后一条消息的内容（不改变外层消息数组长度），故收 `&mut [Value]`。
+fn merge_tool_result(messages: &mut [Value], block: &Value) -> bool {
+    let Some(last) = messages.last_mut() else {
+        return false;
+    };
+    if last.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    if let Some(arr) = last.get_mut("content").and_then(Value::as_array_mut) {
+        arr.push(block.clone());
+        return true;
+    }
+    let prior_text = last
+        .get("content")
+        .and_then(Value::as_str)
+        .map(String::from);
+    if let Some(text) = prior_text {
+        last["content"] = json!([{ "type": "text", "text": text }, block.clone()]);
+        return true;
+    }
+    false
+}
+
+/// user 消息 content → Anthropic content。
+///
+/// 数组内容保留 text 与 base64 图片/文档块；http(s) 图片 URL 需异步下载，
+/// 同步转换里丢弃（与 `bridge/anthropic.rs` 同口径）。其余情况用拼接文本，
+/// 空内容兜底 `"..."`（Anthropic 拒绝空 content）。
+fn anthropic_user_content(content: Option<&Value>) -> Value {
+    if let Some(Value::Array(blocks)) = content {
+        let mut converted: Vec<Value> = Vec::new();
+        for b in blocks {
+            match b.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(text) = b.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            converted.push(json!({ "type": "text", "text": text }));
+                        }
+                    }
+                }
+                Some("image_url") | Some("input_image") => {
+                    if let Some(block) = anthropic_media_block(b) {
+                        converted.push(block);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !converted.is_empty() {
+            return Value::Array(converted);
+        }
+    }
+    let text = message_text(content);
+    Value::String(if text.is_empty() { "...".into() } else { text })
+}
+
+/// OpenAI 图片块 → Anthropic `image` / `document` 块（仅 base64 data URI）。
+fn anthropic_media_block(block: &Value) -> Option<Value> {
+    let url = block.get("image_url").and_then(|u| {
+        u.as_str()
+            .map(String::from)
+            .or_else(|| u.get("url").and_then(Value::as_str).map(String::from))
+    })?;
+    let rest = url.strip_prefix("data:")?;
+    let comma = rest.find(',')?;
+    let meta = &rest[..comma];
+    let payload = &rest[comma + 1..];
+    let media_type = meta.strip_suffix(";base64")?;
+    if media_type.is_empty() || payload.is_empty() {
+        return None;
+    }
+    let block_type = if media_type == "application/pdf" {
+        "document"
+    } else {
+        "image"
+    };
+    Some(json!({
+        "type": block_type,
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": payload,
+        },
+    }))
+}
+
 fn to_anthropic_body(body: &Value) -> Value {
     let messages = body
         .get("messages")
@@ -931,30 +1246,41 @@ fn to_anthropic_body(body: &Value) -> Value {
         .unwrap_or_default();
     let mut system_parts: Vec<String> = Vec::new();
     let mut out_messages: Vec<Value> = Vec::new();
+    let mut seen_non_system = false;
     for msg in &messages {
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
         match role {
             "system" | "developer" => {
                 let text = message_text(msg.get("content"));
-                if !text.is_empty() {
+                if text.is_empty() {
+                    continue;
+                }
+                if seen_non_system {
+                    // Anthropic 只有顶层 system；会话中途的 system 指令降级为
+                    // user 轮次（保留语义，与 bridge/anthropic.rs 同口径）
+                    out_messages.push(json!({ "role": "user", "content": text }));
+                } else {
                     system_parts.push(text);
                 }
             }
             "tool" => {
-                let tool_use_id = msg
-                    .get("tool_call_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                out_messages.push(json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": message_text(msg.get("content")),
-                    }],
-                }));
+                seen_non_system = true;
+                let block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": msg
+                        .get("tool_call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    "content": message_text(msg.get("content")),
+                });
+                // 并行 tool_calls 的多个 tool 结果属于同一条 user 消息里的
+                // 多个 tool_result 块；连续同角色轮次 Anthropic 会 400
+                if !merge_tool_result(&mut out_messages, &block) {
+                    out_messages.push(json!({ "role": "user", "content": [block] }));
+                }
             }
             "assistant" => {
+                seen_non_system = true;
                 let mut blocks: Vec<Value> = Vec::new();
                 let text = message_text(msg.get("content"));
                 if !text.is_empty() {
@@ -985,16 +1311,32 @@ fn to_anthropic_body(body: &Value) -> Value {
                 }
             }
             _ => {
-                let text = message_text(msg.get("content"));
-                out_messages.push(json!({ "role": "user", "content": text }));
+                seen_non_system = true;
+                out_messages.push(json!({
+                    "role": "user",
+                    "content": anthropic_user_content(msg.get("content")),
+                }));
             }
         }
     }
+    // Anthropic 要求首条消息为 user；首条是 assistant 时补占位 user
+    let first_role = out_messages
+        .first()
+        .and_then(|m| m.get("role"))
+        .and_then(Value::as_str);
+    if !out_messages.is_empty() && first_role != Some("user") {
+        out_messages.insert(
+            0,
+            json!({ "role": "user", "content": [{ "type": "text", "text": "..." }] }),
+        );
+    }
     let mut out = json!({
         "model": body.get("model").cloned().unwrap_or(Value::Null),
+        // 显式 null 不算给了 max_tokens（OpenAI SDK 会把未设值序列化成 null）
         "max_tokens": body
             .get("max_tokens")
-            .or_else(|| body.get("max_completion_tokens"))
+            .filter(|v| !v.is_null())
+            .or_else(|| body.get("max_completion_tokens").filter(|v| !v.is_null()))
             .cloned()
             .unwrap_or(json!(4096)),
         "messages": out_messages,
@@ -1022,7 +1364,7 @@ fn to_anthropic_body(body: &Value) -> Value {
             out["tools"] = json!(converted);
         }
     }
-    if let Some(tc) = body.get("tool_choice") {
+    if let Some(tc) = body.get("tool_choice").filter(|v| !v.is_null()) {
         let mapped = match tc {
             Value::String(s) => match s.as_str() {
                 "required" => json!({ "type": "any" }),
@@ -1040,11 +1382,11 @@ fn to_anthropic_body(body: &Value) -> Value {
         out["tool_choice"] = mapped;
     }
     for key in ["temperature", "top_p"] {
-        if let Some(v) = body.get(key) {
+        if let Some(v) = body.get(key).filter(|v| !v.is_null()) {
             out[key] = v.clone();
         }
     }
-    if let Some(stop) = body.get("stop") {
+    if let Some(stop) = body.get("stop").filter(|v| !v.is_null()) {
         out["stop_sequences"] = match stop {
             Value::String(s) => json!([s]),
             other => other.clone(),
@@ -1148,7 +1490,7 @@ fn to_responses_body(body: &Value) -> Value {
         ("temperature", "temperature"),
         ("top_p", "top_p"),
     ] {
-        if let Some(v) = body.get(from) {
+        if let Some(v) = body.get(from).filter(|v| !v.is_null()) {
             out[to] = v.clone();
         }
     }
@@ -1161,6 +1503,28 @@ fn to_gemini_body(body: &Value) -> Value {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // OpenAI tool 消息只带 tool_call_id、不带函数名，而 Gemini 的
+    // functionResponse.name 必须与 functionCall 对齐（否则上游 400）。
+    // 先从 assistant 轮的 tool_calls 建 call id → name 映射。
+    let mut call_names: HashMap<String, String> = HashMap::new();
+    for msg in &messages {
+        if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for call in calls {
+            if let (Some(id), Some(name)) = (
+                call.get("id").and_then(Value::as_str),
+                call.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str),
+            ) {
+                call_names.insert(id.to_string(), name.to_string());
+            }
+        }
+    }
     let mut system_parts: Vec<Value> = Vec::new();
     let mut contents: Vec<Value> = Vec::new();
     for msg in &messages {
@@ -1173,16 +1537,26 @@ fn to_gemini_body(body: &Value) -> Value {
                 }
             }
             "tool" => {
+                let tool_call_id = msg
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let name = msg
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .or_else(|| call_names.get(tool_call_id).map(String::as_str))
+                    .unwrap_or("tool");
+                let text = message_text(msg.get("content"));
+                // Gemini 的 response 是 Struct：内容本身是 JSON 对象时原样
+                // 回传，否则包一层（与 bridge/gemini.rs 同口径）。
+                let response = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({ "result": text }));
                 contents.push(json!({
                     "role": "user",
                     "parts": [{
-                        "functionResponse": {
-                            "name": msg
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("tool"),
-                            "response": { "content": message_text(msg.get("content")) },
-                        }
+                        "functionResponse": { "name": name, "response": response }
                     }],
                 }));
             }
@@ -1235,11 +1609,11 @@ fn to_gemini_body(body: &Value) -> Value {
         ("max_tokens", "maxOutputTokens"),
         ("max_completion_tokens", "maxOutputTokens"),
     ] {
-        if let Some(v) = body.get(from) {
+        if let Some(v) = body.get(from).filter(|v| !v.is_null()) {
             generation.insert(to.to_string(), v.clone());
         }
     }
-    if let Some(stop) = body.get("stop") {
+    if let Some(stop) = body.get("stop").filter(|v| !v.is_null()) {
         let list = match stop {
             Value::String(s) => json!([s]),
             other => other.clone(),
@@ -1333,7 +1707,10 @@ mod tests {
             br#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"he"#;
         let second = br#"llo"}}"#;
         let out1 = reg.chunk("anthropic", 9, first).await.unwrap();
-        assert!(out1.get("data").is_none(), "半行不应产出: {out1}");
+        assert_eq!(
+            out1["data"], "",
+            "半行时应显式返回空 data（不能缺键）: {out1}"
+        );
         let mut second_full = second.to_vec();
         second_full.push(b'\n');
         let out2 = reg.chunk("anthropic", 9, &second_full).await.unwrap();
@@ -1510,5 +1887,460 @@ mod tests {
         // chat 协议原样透传
         let c = ProtocolRegistry::request("chat", &body).unwrap();
         assert_eq!(c["body"], body);
+    }
+
+    // ── 审查修复的回归测试 ─────────────────────────────────────────
+
+    /// 半行缓冲的 chunk 必须回显 `"data": ""`：provider.mjs 在 `data`
+    /// 缺失时回退为透传上游原始字节——半行 Anthropic SSE 混进 OpenAI 流，
+    /// 还会打乱下游 SseLineParser 的行缓冲（丢下一帧）。
+    #[tokio::test]
+    async fn partial_line_yields_empty_data_not_raw_passthrough() {
+        let reg = ProtocolRegistry::new();
+        let out = reg
+            .chunk("anthropic", 21, br#"data: {"type":"message_start","#)
+            .await
+            .unwrap();
+        assert!(out["data"].is_string(), "必须显式回显空串: {out}");
+        assert_eq!(out["data"], "");
+        assert_eq!(reg.active().await, 1, "半行缓冲的会话必须保留");
+        reg.finish(21).await.unwrap();
+        assert_eq!(reg.active().await, 0);
+    }
+
+    /// 一次读回多个事件、且在一个事件 JSON 的正中间切开：逐行缓冲不能丢帧。
+    #[tokio::test]
+    async fn anthropic_multiple_events_split_at_arbitrary_offsets() {
+        let reg = ProtocolRegistry::new();
+        let wire = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"c\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ab\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cd\"}}\n\n"
+        );
+        let cut = wire.find("\"ab\"").unwrap() + 1;
+        let out1 = reg
+            .chunk("anthropic", 22, &wire.as_bytes()[..cut])
+            .await
+            .unwrap();
+        let out2 = reg
+            .chunk("anthropic", 22, &wire.as_bytes()[cut..])
+            .await
+            .unwrap();
+        let mut all = Vec::new();
+        for out in [out1, out2] {
+            let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+            all.extend(parse_out(&bytes));
+        }
+        let content: String = all
+            .iter()
+            .filter_map(|e| e["choices"][0]["delta"]["content"].as_str())
+            .collect();
+        assert_eq!(content, "abcd", "切开的事件复原后不丢帧: {all:?}");
+        assert_eq!(all[0]["choices"][0]["delta"]["role"], "assistant");
+    }
+
+    /// Anthropic 的 input_tokens 不含缓存；cache_creation/cache_read 是
+    /// prompt 之外的追加量，必须并进 OpenAI 的 prompt_tokens，且读取量
+    /// 要放进 prompt_tokens_details.cached_tokens（网关按子集算折扣）。
+    #[tokio::test]
+    async fn anthropic_cache_tokens_counted_in_prompt() {
+        let reg = ProtocolRegistry::new();
+        let input = concat!(
+            r#"{"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000}}}"#,
+            "\n",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
+            "\n"
+        );
+        let out = reg.chunk("anthropic", 23, input.as_bytes()).await.unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        let finish = events.last().unwrap();
+        assert_eq!(finish["usage"]["prompt_tokens"], 1105);
+        assert_eq!(finish["usage"]["completion_tokens"], 7);
+        assert_eq!(finish["usage"]["total_tokens"], 1112);
+        assert_eq!(
+            finish["usage"]["prompt_tokens_details"]["cached_tokens"],
+            1000
+        );
+    }
+
+    /// message_delta 只有 usage、没有 stop_reason 时不能把 usage 丢掉
+    /// （finish 由 message_stop 兜底补发）。
+    #[tokio::test]
+    async fn anthropic_usage_frame_without_stop_reason_kept() {
+        let reg = ProtocolRegistry::new();
+        let input = concat!(
+            r#"{"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":2}}}"#,
+            "\n",
+            r#"{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":4}}"#,
+            "\n",
+            r#"{"type":"message_stop"}"#,
+            "\n"
+        );
+        let out = reg.chunk("anthropic", 24, input.as_bytes()).await.unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        let with_usage = events
+            .iter()
+            .find(|e| e.get("usage").is_some())
+            .expect("usage 不能丢");
+        assert_eq!(with_usage["usage"]["prompt_tokens"], 2);
+        assert_eq!(with_usage["usage"]["completion_tokens"], 4);
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "stop"
+        );
+        assert!(has_done(&bytes));
+    }
+
+    /// 部分兼容上游把完整 input 放在 content_block_start（不再发
+    /// input_json_delta）：入参不能丢。
+    #[tokio::test]
+    async fn anthropic_tool_input_in_content_block_start() {
+        let reg = ProtocolRegistry::new();
+        let input = concat!(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_9","name":"f","input":{"a":1}}}"#,
+            "\n",
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}"#,
+            "\n"
+        );
+        let out = reg.chunk("anthropic", 25, input.as_bytes()).await.unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        assert_eq!(
+            events[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "f"
+        );
+        assert_eq!(
+            events[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"a\":1}"
+        );
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "tool_calls"
+        );
+    }
+
+    /// Gemini finishReason 必须映射：MAX_TOKENS → length、SAFETY →
+    /// content_filter（原实现一律 stop，截断/拦截被伪装成完整回答）。
+    #[tokio::test]
+    async fn gemini_finish_reason_aliases_mapped() {
+        let reg = ProtocolRegistry::new();
+        let input = concat!(
+            r#"{"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"cachedContentTokenCount":4}}"#,
+            "\n"
+        );
+        let out = reg.chunk("gemini", 31, input.as_bytes()).await.unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        let last = events.last().unwrap();
+        assert_eq!(last["choices"][0]["finish_reason"], "length");
+        assert_eq!(last["usage"]["prompt_tokens"], 5);
+        assert_eq!(last["usage"]["prompt_tokens_details"]["cached_tokens"], 4);
+        assert!(has_done(&bytes));
+
+        let out = reg
+            .chunk(
+                "gemini",
+                32,
+                b"{\"candidates\":[{\"finishReason\":\"SAFETY\"}]}\n",
+            )
+            .await
+            .unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "content_filter"
+        );
+        assert!(has_done(&bytes));
+    }
+
+    /// promptFeedback.blockReason 是「提示词被拦截」的终态：没有 candidates，
+    /// 必须映射成 content_filter 收尾，而不是默认 stop。
+    #[tokio::test]
+    async fn gemini_prompt_feedback_blocks_with_content_filter() {
+        let reg = ProtocolRegistry::new();
+        let out = reg
+            .chunk(
+                "gemini",
+                33,
+                b"{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"usageMetadata\":{\"promptTokenCount\":3}}\n",
+            )
+            .await
+            .unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        let last = events.last().unwrap();
+        assert_eq!(last["choices"][0]["finish_reason"], "content_filter");
+        assert_eq!(last["usage"]["prompt_tokens"], 3);
+        assert!(has_done(&bytes));
+    }
+
+    /// Responses：输出过 function_call 时 finish_reason 应为 tool_calls；
+    /// 参数增量跨帧拼接正确；`.done` 携带的完整 arguments 不与增量重复；
+    /// usage 的 cached_tokens 映射到 prompt_tokens_details。
+    #[tokio::test]
+    async fn responses_tool_calls_finish_and_args() {
+        let reg = ProtocolRegistry::new();
+        let input = concat!(
+            r#"{"type":"response.created","response":{"id":"resp_2","model":"m"}}"#,
+            "\n",
+            r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get"}}"#,
+            "\n",
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"a\":"}"#,
+            "\n",
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"1}"}"#,
+            "\n",
+            r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"a\":1}"}"#,
+            "\n",
+            r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":2,"input_tokens_details":{"cached_tokens":3}}}}"#,
+            "\n"
+        );
+        let out = reg.chunk("responses", 41, input.as_bytes()).await.unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        let start = events
+            .iter()
+            .find(|e| !e["choices"][0]["delta"]["tool_calls"].is_null())
+            .expect("应有 tool 起始帧");
+        assert_eq!(start["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            start["choices"][0]["delta"]["tool_calls"][0]["id"],
+            "call_1"
+        );
+        let args: String = events
+            .iter()
+            .filter_map(|e| {
+                e["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str()
+            })
+            .collect();
+        assert_eq!(args, "{\"a\":1}", "增量拼接，且 .done 不重复追加");
+        let last = events.last().unwrap();
+        assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(last["usage"]["prompt_tokens"], 4);
+        assert_eq!(last["usage"]["prompt_tokens_details"]["cached_tokens"], 3);
+        assert!(has_done(&bytes));
+    }
+
+    /// response.incomplete（max_output_tokens 截断）→ finish_reason length。
+    #[tokio::test]
+    async fn responses_incomplete_maps_to_length() {
+        let reg = ProtocolRegistry::new();
+        let input = concat!(
+            r#"{"type":"response.created","response":{"id":"resp_3","model":"m"}}"#,
+            "\n",
+            r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":9,"output_tokens":9}}}"#,
+            "\n"
+        );
+        let out = reg.chunk("responses", 42, input.as_bytes()).await.unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "length"
+        );
+        assert!(has_done(&bytes));
+    }
+
+    /// 终态事件不带 response 对象时也必须先发 finish 再发 [DONE]（原实现
+    /// 先发 [DONE]，finish 被 finish() 追加到 DONE 之后 → 客户端已停读）。
+    #[tokio::test]
+    async fn responses_done_never_precedes_finish() {
+        let reg = ProtocolRegistry::new();
+        let out = reg
+            .chunk("responses", 43, b"{\"type\":\"response.completed\"}\n")
+            .await
+            .unwrap();
+        let text = String::from_utf8(STANDARD.decode(out["data"].as_str().unwrap()).unwrap())
+            .expect("output utf8");
+        let finish_at = text
+            .find("\"finish_reason\":\"stop\"")
+            .expect("应补 finish 帧");
+        let done_at = text.find("data: [DONE]").expect("应发 [DONE]");
+        assert!(finish_at < done_at, "[DONE] 必须在 finish 之后: {text}");
+        assert_eq!(reg.finish(43).await.unwrap(), json!({}));
+    }
+
+    /// 上游不给 item id / call_id 时，多个 function_call 不能全落到 index 0
+    /// （客户端按 index 合并参数会把两份 JSON 拼坏）。
+    #[tokio::test]
+    async fn responses_unkeyed_function_calls_get_distinct_indices() {
+        let reg = ProtocolRegistry::new();
+        let input = concat!(
+            r#"{"type":"response.output_item.added","item":{"type":"function_call","name":"a"}}"#,
+            "\n",
+            r#"{"type":"response.function_call_arguments.delta","delta":"{}"}"#,
+            "\n",
+            r#"{"type":"response.output_item.added","item":{"type":"function_call","name":"b"}}"#,
+            "\n",
+            r#"{"type":"response.function_call_arguments.delta","delta":"{\"x\":1}"}"#,
+            "\n"
+        );
+        let out = reg.chunk("responses", 44, input.as_bytes()).await.unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        assert_eq!(
+            events[0]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
+        assert_eq!(
+            events[1]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
+        assert_eq!(
+            events[2]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            1
+        );
+        assert_eq!(
+            events[3]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            1
+        );
+    }
+
+    /// 上游只发 output_item.done（无参数增量）时用其完整 arguments 兜底。
+    #[tokio::test]
+    async fn responses_full_arguments_in_done_used_without_deltas() {
+        let reg = ProtocolRegistry::new();
+        let input = concat!(
+            r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_9","call_id":"call_9","name":"f"}}"#,
+            "\n",
+            r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_9","call_id":"call_9","name":"f","arguments":"{\"k\":2}"}}"#,
+            "\n"
+        );
+        let out = reg.chunk("responses", 45, input.as_bytes()).await.unwrap();
+        let bytes = STANDARD.decode(out["data"].as_str().unwrap()).unwrap();
+        let events = parse_out(&bytes);
+        assert_eq!(events.len(), 2, "起始帧 + 兜底参数帧: {events:?}");
+        assert_eq!(
+            events[1]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
+        assert_eq!(
+            events[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"k\":2}"
+        );
+    }
+
+    /// 并行工具调用的多个 tool 结果合并成一条 user 消息里的多个
+    /// tool_result 块（Anthropic 不接受连续同角色轮次）。
+    #[test]
+    fn request_conversion_anthropic_merges_parallel_tool_results() {
+        let body = json!({
+            "model": "claude-x",
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+                    {"id": "call_2", "type": "function", "function": {"name": "b", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "r1"},
+                {"role": "tool", "tool_call_id": "call_2", "content": "r2"}
+            ]
+        });
+        let out = ProtocolRegistry::request("anthropic", &body).unwrap();
+        let msgs = out["body"]["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "两个 tool 结果应合并成一条 user: {msgs:?}");
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["tool_use_id"], "call_1");
+        assert_eq!(msgs[2]["content"][1]["tool_use_id"], "call_2");
+    }
+
+    /// 中途 system 指令降级为 user 轮次（Anthropic 只有顶层 system）；
+    /// 首条为 assistant 时补占位 user（Anthropic 要求首条 user）。
+    #[test]
+    fn request_conversion_anthropic_mid_system_and_leading_assistant() {
+        let body = json!({
+            "model": "m",
+            "messages": [
+                {"role": "assistant", "content": "first"},
+                {"role": "user", "content": "u"},
+                {"role": "system", "content": "later instruction"}
+            ]
+        });
+        let out = ProtocolRegistry::request("anthropic", &body).unwrap();
+        let b = &out["body"];
+        assert!(b.get("system").is_none(), "中途 system 不应提升为顶层: {b}");
+        let msgs = b["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "user", "首条必须补占位 user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[3]["role"], "user");
+        assert_eq!(msgs[3]["content"], "later instruction");
+    }
+
+    /// user 消息里的 base64 图片块不能丢（Anthropic 原生桥支持该转换）。
+    #[test]
+    fn request_conversion_anthropic_image_data_uri_kept() {
+        let body = json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "see"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]
+            }]
+        });
+        let out = ProtocolRegistry::request("anthropic", &body).unwrap();
+        let content = &out["body"]["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
+    }
+
+    /// Gemini 的 functionResponse.name 必须与 functionCall 对齐：OpenAI 的
+    /// tool 消息只有 tool_call_id，名字要从 assistant 轮解出来。
+    #[test]
+    fn request_conversion_gemini_tool_response_name_and_json_result() {
+        let body = json!({
+            "model": "gemini-x",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"BJ\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp\":21}"}
+            ]
+        });
+        let out = ProtocolRegistry::request("gemini", &body).unwrap();
+        let contents = out["body"]["contents"].as_array().unwrap();
+        let resp = &contents[2]["parts"][0]["functionResponse"];
+        assert_eq!(
+            resp["name"], "get_weather",
+            "函数名必须按 id 解出: {contents:?}"
+        );
+        assert_eq!(resp["response"]["temp"], 21);
+        assert_eq!(
+            contents[1]["parts"][0]["functionCall"]["name"],
+            "get_weather"
+        );
+    }
+
+    /// 显式 null 的参数（OpenAI SDK 序列化常见）不能原样透传给上游。
+    #[test]
+    fn request_conversion_drops_explicit_nulls() {
+        let body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": null,
+            "temperature": null,
+            "top_p": null,
+            "stop": null
+        });
+        let a = ProtocolRegistry::request("anthropic", &body).unwrap();
+        assert_eq!(a["body"]["max_tokens"], 4096);
+        assert!(a["body"].get("temperature").is_none());
+        assert!(a["body"].get("top_p").is_none());
+        assert!(a["body"].get("stop_sequences").is_none());
+
+        let r = ProtocolRegistry::request("responses", &body).unwrap();
+        assert!(r["body"].get("max_output_tokens").is_none());
+        assert!(r["body"].get("temperature").is_none());
+        assert!(r["body"].get("top_p").is_none());
+
+        let g = ProtocolRegistry::request("gemini", &body).unwrap();
+        assert!(g["body"].get("generationConfig").is_none());
     }
 }
