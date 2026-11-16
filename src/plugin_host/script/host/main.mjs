@@ -19,7 +19,10 @@
 import { Wire } from "./wire.mjs";
 import { loadPackages } from "./loader.mjs";
 import { createDispatcher } from "./provider.mjs";
-import { classifyError, describeError, ErrorCodes } from "./errors.mjs";
+import { classifyError, describeError, ErrorCodes, ProviderError } from "./errors.mjs";
+
+/** 本宿主实现的协议版本（与 plugin_host/rpc.rs 的 PROTOCOL_VERSION 对表）。 */
+const HOST_PROTOCOL = 1;
 
 const wire = new Wire();
 /** init 完成前的请求一律按 local_precondition 拒绝。 */
@@ -36,6 +39,14 @@ function makeIO() {
 /** init 握手：加载全部包 → 建 dispatch 表 → 回 providers。 */
 async function handleInit(frame) {
   const params = frame.params && typeof frame.params === "object" ? frame.params : {};
+  // 协议版本对表（rpc.rs 的 PROTOCOL_VERSION）：不一致拒绝加载，别带着
+  // 未知语义的载荷硬跑。缺省（老网关的平铺形状）不做校验。
+  if (typeof params.protocol === "number" && params.protocol !== HOST_PROTOCOL) {
+    throw new ProviderError(
+      ErrorCodes.LocalPrecondition,
+      `protocol mismatch: gateway=${params.protocol}, host=${HOST_PROTOCOL}`,
+    );
+  }
   // types.rs 契约：载荷在 params.init（snake_case）；平铺形状兼容读取
   const init = params.init && typeof params.init === "object" ? params.init : params;
   const io = makeIO();

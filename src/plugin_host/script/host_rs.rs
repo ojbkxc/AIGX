@@ -40,10 +40,11 @@
 //! [`supervise`]（500ms 轮询 try_wait，异常退出标 Crashed）/
 //! [`shutdown`]（先 RPC shutdown 5s 宽限，超时 kill）。
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -68,6 +69,13 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// stderr 单行字节上限（脚本刷屏时硬切，防撑爆内存）。
 const STDERR_LINE_LIMIT: usize = 1 << 16;
+
+/// 握手失败时随错误回报的 stderr 尾巴大小。
+///
+/// 正常路径 stderr 只进 tracing；但宿主起不来时（Bun 缺动态库、脚本顶层
+/// 抛错、import 失败）根因几乎只在 stderr 里，而管理面的 `lastError` 是
+/// 运维唯一能看到的字段——必须把尾巴带上去，否则只剩一句「启动失败」。
+const STDERR_TAIL_BYTES: usize = 8 << 10;
 
 /// supervise 的退出轮询间隔（同原生插件）。
 const SUPERVISE_POLL: Duration = Duration::from_millis(500);
@@ -254,7 +262,19 @@ pub async fn spawn_host(
         .map_err(|e| ScriptHostError::Runtime(format!("{e:#}")))?;
     let host_dir = materialize_host_files(data_dir)?;
 
+    // init 载荷先序列化再 spawn：反序列化不会失败也不能失败，但「spawn 后
+    // 才可能出错的步骤」越少越好——早退路径上的子进程没人 kill。
+    let init = serde_json::to_value(&payload)
+        .map_err(|e| ScriptHostError::Serde(format!("init payload: {e}")))?;
+    let params = serde_json::json!({
+        "protocol": PROTOCOL_VERSION,
+        "init": init,
+    });
+
     let mut cmd = bun::run_command(&bun_exe, &host_dir);
+    // spawn_host 的 future 被 drop（调用方取消 / 任务 abort）时兜底杀子进程：
+    // 正常路径由 shutdown/kill 接管，这里防的是「spawn 成功但没人再管它」。
+    cmd.kill_on_drop(true);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -264,19 +284,12 @@ pub async fn spawn_host(
     let stdin = child.stdin.take().expect("stdin was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
-    // stderr 有界直连 tracing：宿主/脚本崩溃时能看到原因，刷屏会被硬切
-    tokio::spawn(pump_stderr(stderr));
+    // stderr 有界直连 tracing + 留一份尾巴：宿主/脚本崩溃时能看到原因，
+    // 刷屏会被硬切；握手失败时尾巴随错误一起上报（见 STDERR_TAIL_BYTES）。
+    let stderr_tail: Arc<StdMutex<StderrTail>> = Arc::new(StdMutex::new(StderrTail::default()));
+    tokio::spawn(pump_stderr(stderr, stderr_tail.clone()));
 
     let rpc = RpcChannel::new(Box::new(stdout), Box::new(stdin), callbacks);
-
-    // init 载荷：serde 序列化 ScriptInitPayload（字段名即 wire 键，
-    // snake_case 无 rename——与 HostEnv 同约定）
-    let init = serde_json::to_value(&payload)
-        .map_err(|e| ScriptHostError::Serde(format!("init payload: {e}")))?;
-    let params = serde_json::json!({
-        "protocol": PROTOCOL_VERSION,
-        "init": init,
-    });
 
     // init 握手（60s）：宿主要动态 import 全部 npm 包。失败路径当场
     // kill + 关读循环——不留半死进程。
@@ -286,16 +299,22 @@ pub async fn spawn_host(
         Ok(Err(err)) => {
             rpc.shutdown();
             let _ = child.kill().await;
-            return Err(err.into());
+            return Err(ScriptHostError::Handshake(attach_stderr_tail(
+                err,
+                &stderr_tail,
+            )));
         }
         Err(_) => {
             rpc.shutdown();
             let _ = child.kill().await;
-            return Err(RpcError {
+            let err = RpcError {
                 message: "script host init timeout (60s)".into(),
                 code: Some("timeout".into()),
-            }
-            .into());
+            };
+            return Err(ScriptHostError::Handshake(attach_stderr_tail(
+                err,
+                &stderr_tail,
+            )));
         }
     };
 
@@ -393,11 +412,72 @@ pub async fn shutdown(host: &ScriptHost) {
     *host.state.write().await = ScriptHostState::Shutdown;
 }
 
+/// 有界 stderr 尾巴（最近若干行，总量 ≤ [`STDERR_TAIL_BYTES`]）。
+///
+/// 握手失败时拼进错误消息——宿主起不来的根因（Bun 缺动态库 / 脚本抛错）
+/// 只会出现在这里。超限时丢最旧的行：崩溃原因的末几行比开头的噪声重要。
+#[derive(Default)]
+struct StderrTail {
+    lines: VecDeque<String>,
+    bytes: usize,
+}
+
+impl StderrTail {
+    fn push(&mut self, line: &str) {
+        let line = if line.len() > STDERR_TAIL_BYTES {
+            // 单行超限：留头部（Bun/JS 的报错签名通常在行首）
+            format!("{}…(truncated)", utf8_head(line, STDERR_TAIL_BYTES))
+        } else {
+            line.to_string()
+        };
+        self.bytes += line.len() + 1;
+        self.lines.push_back(line);
+        while self.bytes > STDERR_TAIL_BYTES && self.lines.len() > 1 {
+            if let Some(old) = self.lines.pop_front() {
+                self.bytes -= old.len() + 1;
+            }
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::with_capacity(self.bytes);
+        for line in &self.lines {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+        }
+        out
+    }
+}
+
+/// 取不超过 `max` 字节的 UTF-8 前缀（不切断字符边界）。
+fn utf8_head(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &s[..cut]
+}
+
+/// 把 stderr 尾巴拼进错误消息（无尾巴时原样返回）。
+fn attach_stderr_tail(mut err: RpcError, tail: &StdMutex<StderrTail>) -> RpcError {
+    let rendered = tail.lock().unwrap_or_else(|e| e.into_inner()).render();
+    if !rendered.is_empty() {
+        err.message = format!("{}\nscript-host stderr (tail):\n{rendered}", err.message);
+    }
+    err
+}
+
 /// stderr 有界行泵。
 ///
 /// 按 `fill_buf` 分块攒行（`read_until` 对不换行的流是无界分配——脚本
 /// 刷屏场景不可接受）；超过 [`STDERR_LINE_LIMIT`] 时硬切当行并继续。
-async fn pump_stderr(stderr: ChildStderr) {
+/// 每行同时记进 `tail`（握手失败时随错误上报）。
+async fn pump_stderr(stderr: ChildStderr, tail: Arc<StdMutex<StderrTail>>) {
     let mut reader = tokio::io::BufReader::new(stderr);
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -410,7 +490,7 @@ async fn pump_stderr(stderr: ChildStderr) {
             if available.is_empty() {
                 // EOF：把尾巴吐出去再收工
                 if !buf.is_empty() {
-                    emit_stderr_line(&buf);
+                    emit_stderr_line(&buf, &tail);
                 }
                 return;
             }
@@ -418,7 +498,7 @@ async fn pump_stderr(stderr: ChildStderr) {
                 Some(pos) => {
                     buf.extend_from_slice(&available[..pos]);
                     reader.consume(pos + 1);
-                    emit_stderr_line(&buf);
+                    emit_stderr_line(&buf, &tail);
                     break;
                 }
                 None => {
@@ -427,7 +507,7 @@ async fn pump_stderr(stderr: ChildStderr) {
                     reader.consume(len);
                     if buf.len() > STDERR_LINE_LIMIT {
                         // 行超限：硬切记录（防刷屏撑爆内存），下一轮从行中继续
-                        emit_stderr_line(&buf);
+                        emit_stderr_line(&buf, &tail);
                         buf.clear();
                         break;
                     }
@@ -437,12 +517,14 @@ async fn pump_stderr(stderr: ChildStderr) {
     }
 }
 
-fn emit_stderr_line(bytes: &[u8]) {
+fn emit_stderr_line(bytes: &[u8], tail: &StdMutex<StderrTail>) {
     let text = String::from_utf8_lossy(bytes);
     let text = text.trim_end_matches(['\n', '\r']);
-    if !text.is_empty() {
-        tracing::warn!("[script-host stderr] {text}");
+    if text.is_empty() {
+        return;
     }
+    tracing::warn!("[script-host stderr] {text}");
+    tail.lock().unwrap_or_else(|e| e.into_inner()).push(text);
 }
 
 #[cfg(test)]
@@ -588,5 +670,68 @@ mod tests {
         assert!(parse_identities(&serde_json::json!({"providers": []})).is_empty());
         assert!(parse_identities(&serde_json::json!({"identities": "bad"})).is_empty());
         assert!(parse_identities(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn stderr_tail_keeps_latest_lines_within_bound() {
+        let mut tail = StderrTail::default();
+        // 每行 1KiB，塞 20 行（20KiB > 8KiB）→ 只留尾巴，最旧的行被丢
+        let line = "x".repeat(1024);
+        for i in 0..20 {
+            tail.push(&format!("{i:02}-{line}"));
+        }
+        assert!(
+            tail.bytes <= STDERR_TAIL_BYTES,
+            "总量必须受限: {}",
+            tail.bytes
+        );
+        let rendered = tail.render();
+        assert!(rendered.contains("19-"), "最新行必须保留");
+        assert!(!rendered.contains("00-"), "最旧的行应被丢弃");
+    }
+
+    #[test]
+    fn stderr_tail_truncates_single_oversized_line() {
+        let mut tail = StderrTail::default();
+        tail.push(&"y".repeat(STDERR_TAIL_BYTES * 2));
+        assert_eq!(tail.lines.len(), 1);
+        let rendered = tail.render();
+        assert!(
+            rendered.len() < STDERR_TAIL_BYTES * 2,
+            "单行超限也要截断: {}",
+            rendered.len()
+        );
+        assert!(rendered.contains("truncated"));
+    }
+
+    #[test]
+    fn utf8_head_respects_char_boundary() {
+        // 中文 3 字节/字：max 落在字符中间时必须回退，不 panic
+        let s = "错误原因";
+        assert_eq!(utf8_head(s, 4), "错");
+        assert_eq!(utf8_head(s, 3), "错");
+        assert_eq!(utf8_head(s, 100), s);
+        assert_eq!(utf8_head(s, 0), "");
+    }
+
+    #[test]
+    fn attach_stderr_tail_appends_only_when_present() {
+        let tail = StdMutex::new(StderrTail::default());
+        let err = RpcError {
+            message: "init failed".into(),
+            code: Some("closed".into()),
+        };
+        let untouched = attach_stderr_tail(err.clone(), &tail);
+        assert_eq!(untouched.message, "init failed", "无 stderr 时消息不变");
+
+        tail.lock()
+            .unwrap()
+            .push("Error relocating /lib/libstdc++.so.6: version GLIBCXX_3.4 not found");
+        let with_tail = attach_stderr_tail(err, &tail);
+        assert!(with_tail.message.starts_with("init failed"));
+        assert!(
+            with_tail.message.contains("Error relocating"),
+            "根因必须进错误消息（管理面 lastError 的来源）"
+        );
     }
 }

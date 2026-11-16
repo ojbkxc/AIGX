@@ -12,30 +12,38 @@
 //!    claimed/catalog_path）；
 //! 2. spawn 新宿主并完成 init 握手（60s）；**成功才换指针**——失败时旧
 //!    宿主原样继续服务（回滚 = 什么都不做）；
-//! 3. 换指针后，旧宿主交给后台排空：等 `pending_count==0 && active_streams==0`
+//! 3. 换指针时「升代际 + 换指针 + 换 owners/aliases」在**同一把 host 写锁**
+//!    内提交；数据面读者持 host 读锁期间才读路由表，因此永远看到同一代际
+//!    的完整视图（不会「新宿主配旧路由表」）；
+//! 4. 旧宿主交给后台排空：等 `pending_count==0 && active_streams==0`
 //!    （最多 60s）再优雅关闭。在途 conversation 不会因热切换被腰斩。
 //!
 //! 同一时刻只允许一个 rebuild（`rebuild_lock`）；`generation` 代际保证
-//! 「崩溃重启」与「人工 rebuild」不会双拉。
+//!「崩溃重启」与「人工 rebuild」不会双拉：崩溃退避循环在**锁内**复核代际，
+//! 人工路径完成提交后它直接放弃，绝不拆掉刚建立的宿主。崩溃监督循环的
+//! 清理同样在 host 写锁内以「指针 ptr_eq」为权威判据——旧循环不可能把
+//! 新宿主的路由表/状态清空。
 //!
 //! ## 数据面路由（同步）
 //!
 //! `resolve.rs` 的候选构造是同步函数——`route_for_provider()` 不能 await。
 //! 这里用 parking_lot 锁 + `Option<Arc<ScriptHost>>` 快照：宿主指针存在
-//! 即代表 Running（崩溃/关闭时由监督循环清空）。owners/aliases 表在 init
-//! 握手成功后原子替换。
+//! 即代表 Running（崩溃/关闭时由监督循环清空）。原生实现永远优先——
+//! `route_for_provider` 对「请求 id」与「别名翻译后的实际 id」都查原生
+//! 让位判据，路由表构造期（`compute_routing`）亦按 reserved 过滤。
 //!
 //! ## reserved 口径
 //!
 //! 原生 provider（`PROVIDERS` ∪ `SESSION_PROVIDERS`）+ 原生插件包声明的
 //! provider 全部进 reserved；脚本对它们没有接管权（与 `is_plugin_owned`
-//! 同立场）。JS 侧 `loader.mjs` 也会按 reserved 让位，网关侧再兜一道。
+//! 同立场）。JS 侧 `loader.mjs` 也会按 reserved 让位，网关侧再兜一道
+//!（见 `compute_routing` 的 reserved 过滤与 `route_for_provider` 的原生检查）。
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,6 +65,9 @@ use super::transport::Transport;
 use super::types::{script_plugins_root, ScriptPackage, ScriptProviderInfo};
 
 /// 崩溃重启退避表（与原生插件同节奏）。
+///
+/// 档位索引 = 「连续崩溃次数 - 1」+ 「本次崩溃事件内的重拉失败次数」：
+/// 崩溃越频、重拉失败越多，退避越长（钳到最后一档 60s）。
 const RESTART_BACKOFF: [Duration; 7] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -75,6 +86,13 @@ const MAX_RESTART_ATTEMPTS: u32 = 5;
 /// 旧宿主排空的轮询间隔 / 最长等待。
 const DRAIN_POLL: Duration = Duration::from_millis(500);
 const DRAIN_MAX: Duration = Duration::from_secs(60);
+
+/// 「稳定运行」门槛：宿主活了这么久才崩，视为新一次独立崩溃（连续计数
+/// 归 1）；短于它才崩说明在崩溃循环里，计数继续累加、退避升档。
+///
+/// 没有这条，稳定运行数周的宿主偶发崩溃会因历史累计次数被罚 60s 退避；
+/// 反之「起来就崩」的宿主会以 1s 节奏无限重拉（每次成功重拉都会清计数）。
+const STABLE_RUN: Duration = Duration::from_secs(60);
 
 /// 运行期状态快照（管理面展示）。
 #[derive(Clone, Debug, Default, Serialize)]
@@ -123,9 +141,16 @@ pub struct ScriptHostManager {
     runtime: PlRwLock<ScriptHostStatus>,
     /// rebuild 串行化。
     rebuild_lock: Mutex<()>,
+    /// 网关关停标记：置位后一切 rebuild（含崩溃退避重拉）拒绝再拉宿主，
+    /// 防止关停序列与热切换竞态留下无人监管的 Bun 进程。
+    shutting_down: AtomicBool,
     /// 代际（监督循环的过期判据）。
     generation: AtomicU64,
 }
+
+/// 崩溃重拉的装箱 future（见 [`ScriptHostManager::restart_after_crash`]）。
+pub type CrashRestartFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<Result<ScriptHostStatus, String>>> + Send + 'a>>;
 
 impl ScriptHostManager {
     /// 构造（不启动进程；由 [`Self::start`] 或 API 层 rebuild 拉起）。
@@ -154,6 +179,7 @@ impl ScriptHostManager {
             aliases: PlRwLock::new(HashMap::new()),
             runtime: PlRwLock::new(ScriptHostStatus::default()),
             rebuild_lock: Mutex::new(()),
+            shutting_down: AtomicBool::new(false),
             generation: AtomicU64::new(0),
         })
     }
@@ -193,15 +219,22 @@ impl ScriptHostManager {
     /// 数据面路由（**同步**）。未接管 / 宿主不在跑 → `None`。
     ///
     /// `provider` 接受声明 id 或实际 id；返回值里的 `provider` 是实际 id。
+    ///
+    /// **快照一致性**：host 读锁要持有到 owners/aliases 都读完。rebuild 的
+    /// 「升代际 + 换指针 + 换两张表」在同一把 host 写锁内提交，读者因此要么
+    /// 看到旧代际的完整视图、要么看到新代际的完整视图——不会出现「新宿主配
+    /// 旧路由表」的误路由（同步函数，全程不 await，不构成跨 await 持锁）。
     pub fn route_for_provider(&self, provider: &str) -> Option<ScriptRoute> {
         if provider.is_empty() {
             return None;
         }
-        // 原生实现存在时脚本不接管（与 is_plugin_owned 同口径，含热路径）
-        if crate::plugin_host::registry::is_native_provider(provider) {
+        // 原生优先（热路径快速判定，不取路由锁）：AIGX 原生实现或已启用的原生
+        // 插件包声明的 provider，脚本一律不接管（与 is_plugin_owned 同立场）。
+        if script_takeover_blocked(&self.native_registry, provider) {
             return None;
         }
-        let host = self.host.read().clone()?;
+        let slot = self.host.read();
+        let host = slot.as_ref()?.clone();
         if !self.owners.read().contains_key(provider) {
             return None;
         }
@@ -211,6 +244,11 @@ impl ScriptHostManager {
             .get(provider)
             .cloned()
             .unwrap_or_else(|| provider.to_string());
+        // 别名翻译后的**实际** id 撞原生同样让位：请求 id 不是原生，不代表
+        // 实际接管的 id 不是（identities 是宿主自报，网关侧必须再兜一道）。
+        if script_takeover_blocked(&self.native_registry, &active) {
+            return None;
+        }
         Some(ScriptRoute {
             channel: host.rpc(),
             provider: active,
@@ -245,11 +283,37 @@ impl ScriptHostManager {
     ) -> Pin<Box<dyn Future<Output = Result<ScriptHostStatus, String>> + Send + 'a>> {
         Box::pin(async move {
             let _guard = self.rebuild_lock.lock().await;
-            self.rebuild_locked(reason).await
+            self.rebuild_locked(reason, false).await
         })
     }
 
-    async fn rebuild_locked(self: &Arc<Self>, reason: &str) -> Result<ScriptHostStatus, String> {
+    /// 崩溃重启专用入口：**拿到 rebuild_lock 之后**再复核代际，过期即放弃。
+    ///
+    /// 监督循环若只在锁外查代际，人工 rebuild 可能恰好在其「查完 → 等锁」的
+    /// 窗口里完成并装好新宿主；此时再跑一次 rebuild 会把刚起来的宿主拆掉
+    ///（双拉）。返回 `None` = 本次重拉已无意义（新的代际已接手）。
+    ///
+    /// 返回装箱 future 的原因同 [`Self::rebuild`]（同一个递归环上的声明边）。
+    fn restart_after_crash<'a>(self: &'a Arc<Self>, generation: u64) -> CrashRestartFuture<'a> {
+        Box::pin(async move {
+            let _guard = self.rebuild_lock.lock().await;
+            if self.generation.load(Ordering::Relaxed) != generation {
+                return None;
+            }
+            Some(self.rebuild_locked("crash-restart", true).await)
+        })
+    }
+
+    async fn rebuild_locked(
+        self: &Arc<Self>,
+        reason: &str,
+        keep_crash_streak: bool,
+    ) -> Result<ScriptHostStatus, String> {
+        // 关停序列已启动：此刻 spawn 出来的宿主没人关，直接拒绝（含崩溃重拉）。
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err("网关正在关闭，拒绝重建脚本宿主".to_string());
+        }
+
         let packages: Vec<ScriptPackage> = storage::load_packages(&self.store)
             .into_iter()
             .filter(|p| p.enabled)
@@ -257,11 +321,18 @@ impl ScriptHostManager {
 
         if packages.is_empty() {
             // 没有启用的包：关掉宿主并清表（旧宿主排空后关闭）。
-            // 代际 +1 让旧监督循环醒来自行退出。
-            self.generation.fetch_add(1, Ordering::Relaxed);
-            let old = self.host.write().take();
-            self.owners.write().clear();
-            self.aliases.write().clear();
+            // 升级代际 + 摘指针 + 清两张表：同一把 host 写锁内完成——崩溃监督
+            // 循环的「代际复核 + 清表」也在这把锁内，两边线性化，不会互清。
+            let old = {
+                let mut slot = self.host.write();
+                let mut owners = self.owners.write();
+                let mut aliases = self.aliases.write();
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                let old = slot.take();
+                owners.clear();
+                aliases.clear();
+                old
+            };
             {
                 let mut rt = self.runtime.write();
                 rt.running = false;
@@ -269,6 +340,9 @@ impl ScriptHostManager {
                 rt.providers.clear();
                 rt.last_error = None;
                 // crashes 保留（展示历史），下次成功启动清零
+                if !keep_crash_streak {
+                    rt.crashes = 0;
+                }
             }
             if let Some(old) = old {
                 self.spawn_drain(old);
@@ -290,19 +364,25 @@ impl ScriptHostManager {
         let payload = build_init_payload(
             &self.script_root,
             &packages,
-            reserved,
+            reserved.iter().cloned().collect(),
             Some(self.catalog.catalog_path().to_string_lossy().into_owned()),
         );
 
         // 先 spawn 新宿主再动任何状态：失败时旧宿主/旧代际原样保留
         //（否则新宿主没起来、旧监督循环却被代际失效，崩溃后无人接管）。
-        let new_host = host_rs::spawn_host(&self.data_dir, payload, callbacks)
-            .await
-            .map_err(|e| format!("启动脚本宿主失败: {e}"))?;
-        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        // 失败同时写 last_error：状态快照的契约是「最近一次启动失败」可见。
+        let new_host = match host_rs::spawn_host(&self.data_dir, payload, callbacks).await {
+            Ok(host) => host,
+            Err(e) => {
+                let msg = format!("启动脚本宿主失败: {e}");
+                // 旧宿主仍在服务（running/providers 保持原值），只记错误原因
+                self.runtime.write().last_error = Some(msg.clone());
+                return Err(msg);
+            }
+        };
 
         // 路由表：声明 id → 实际 id（identities 映射；无冲突同名）
-        let (owners, aliases, providers) = self.build_routing(&packages, &new_host);
+        let (owners, aliases, providers) = self.build_routing(&packages, &new_host, &reserved);
 
         // 别名表落盘（KV `plugin:script-identities` + 投影）：宿主重启后
         // JS 侧从 registry.json 读到的 identities 与网关路由同源。
@@ -312,22 +392,46 @@ impl ScriptHostManager {
             tracing::warn!("[Script] 落盘 identities 失败（路由不受影响）：{e:#}");
         }
 
-        let old = self.host.write().replace(new_host.clone());
-        {
-            let mut owners_lock = self.owners.write();
-            *owners_lock = owners;
-        }
-        {
-            let mut aliases_lock = self.aliases.write();
-            *aliases_lock = aliases;
-        }
+        // 提交点：升代际 + 换指针 + 换两张表在同一把 host 写锁内完成。
+        // 读者（route_for_provider）持 host 读锁期间才读这两张表，因此永远
+        // 看到同一代际的完整视图；崩溃监督循环的清理也用同一把锁复核代际。
+        //
+        // **锁内复核关停标记**：shutdown() 不抢 rebuild_lock（它可能被一次
+        // 含 Bun 下载的重建持有数分钟，关停不能被它拖住）。若关停已置位，
+        // 本函数刚 spawn 的宿主会被装上却再没人关——所以在同一把锁内再查
+        // 一次，命中即放弃提交、并在锁外关掉新宿主。shutdown 与提交都在这
+        // 把写锁上线性化：要么本函数先提交（随后 shutdown 的 take 会关掉它），
+        // 要么 shutdown 先置位（本函数看到标记而放弃），不存在孤儿进程。
+        let committed = {
+            let mut slot = self.host.write();
+            if self.shutting_down.load(Ordering::SeqCst) {
+                None
+            } else {
+                let mut owners_lock = self.owners.write();
+                let mut aliases_lock = self.aliases.write();
+                let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+                let old = slot.replace(new_host.clone());
+                *owners_lock = owners;
+                *aliases_lock = aliases;
+                Some((old, generation))
+            }
+        };
+        let Some((old, generation)) = committed else {
+            // 关停窗口里起好的宿主：直接关闭，不留孤儿。
+            host_rs::shutdown(&new_host).await;
+            return Err("网关正在关闭，放弃提交新宿主".to_string());
+        };
         {
             let mut rt = self.runtime.write();
             rt.running = true;
             rt.packages = packages.len();
             rt.providers = providers;
             rt.last_error = None;
-            rt.crashes = 0;
+            // 人工/启动路径是一次全新启用周期：崩溃连续计数清零；
+            // 崩溃重拉成功则保留计数，供下一次崩溃选更长的退避档位。
+            if !keep_crash_streak {
+                rt.crashes = 0;
+            }
         }
         if let Some(old) = old {
             self.spawn_drain(old);
@@ -348,14 +452,27 @@ impl ScriptHostManager {
     }
 
     /// 网关关闭：优雅关闭宿主。
+    ///
+    /// **不抢 `rebuild_lock`**：一次重建可能正卡在 Bun 下载/init 握手（最长
+    /// 数分钟），关停不能被它拖住。关停与重建在 `host` 写锁上线性化——
+    /// 重建的提交点会在锁内复核 `shutting_down`：命中则放弃提交并关掉刚起
+    /// 的宿主；已提交的宿主由这里的 take 关闭。两条路径都不会留下孤儿进程。
     pub async fn shutdown(&self) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        let old = self.host.write().take();
-        self.owners.write().clear();
-        self.aliases.write().clear();
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let old = {
+            let mut slot = self.host.write();
+            let mut owners = self.owners.write();
+            let mut aliases = self.aliases.write();
+            self.generation.fetch_add(1, Ordering::Relaxed);
+            let old = slot.take();
+            owners.clear();
+            aliases.clear();
+            old
+        };
         {
             let mut rt = self.runtime.write();
             rt.running = false;
+            rt.packages = 0;
             rt.providers.clear();
         }
         if let Some(old) = old {
@@ -364,7 +481,7 @@ impl ScriptHostManager {
     }
 
     /// reserved 集合：内置 provider + 原生插件包声明。
-    fn reserved_providers(&self) -> Vec<String> {
+    fn reserved_providers(&self) -> BTreeSet<String> {
         let mut set: BTreeSet<String> = crate::account_session::registry::PROVIDERS
             .iter()
             .map(|s| s.kind.to_string())
@@ -379,59 +496,82 @@ impl ScriptHostManager {
                 set.insert(provider.id);
             }
         }
-        set.into_iter().collect()
+        set
     }
 
     /// 由启用包集合 + init 应答构造路由表。
     ///
     /// 投影到纯函数 [`compute_routing`]（宿主句柄只提供只读快照），
     /// 便于单测覆盖「加载失败让位 / 声明与实际 id 不同 / 未声明 provider
-    /// 的 npm 包」这些路由形态。
+    /// 的 npm 包 / 与原生重叠必须让位」这些路由形态。
+    #[allow(clippy::type_complexity)]
     fn build_routing(
         &self,
         packages: &[ScriptPackage],
         host: &ScriptHost,
+        reserved: &BTreeSet<String>,
     ) -> (
         HashMap<String, String>,
         HashMap<String, String>,
         Vec<String>,
     ) {
-        compute_routing(packages, host.providers(), host.identities())
+        compute_routing(packages, host.providers(), host.identities(), reserved)
     }
 
     /// 监督一个宿主进程的生命周期。
     async fn supervise_host(self: Arc<Self>, host: Arc<ScriptHost>, generation: u64) {
+        let started = tokio::time::Instant::now();
         host_rs::supervise(host.clone()).await;
         if host.is_shutdown_requested() {
             return;
         }
-        // 代际过期（人工 rebuild/关闭已换新宿主）：旧循环不再动作
-        if self.generation.load(Ordering::Relaxed) != generation {
-            return;
-        }
-        // 意外退出：清指针 → 退避重启
+        let ran_for = started.elapsed();
+        // 意外退出：整段「复核代际 → 摘指针 → 清两张表」在同一把 host 写锁内。
+        //
+        // 代际检查单独放在锁外挡不住窗口：人工 rebuild 可能在检查通过之后才
+        // 完成提交（升代际 + 换指针 + 换表都在同一把写锁内），旧循环若仍去
+        // 清 owners/aliases，就把**新宿主**的路由表清空了——数据面静默停服
+        // 直到下一次 rebuild。指针 ptr_eq 命中才是唯一的权威判据。
         {
             let mut slot = self.host.write();
-            if slot.as_ref().is_some_and(|h| Arc::ptr_eq(h, &host)) {
-                *slot = None;
+            if self.generation.load(Ordering::Relaxed) != generation {
+                return;
             }
+            if !slot.as_ref().is_some_and(|h| Arc::ptr_eq(h, &host)) {
+                // 指针已被更新的宿主取代：它的路由/状态归它自己的监督循环维护
+                return;
+            }
+            *slot = None;
+            self.owners.write().clear();
+            self.aliases.write().clear();
         }
-        self.owners.write().clear();
-        self.aliases.write().clear();
         let crashes = {
             let mut rt = self.runtime.write();
             rt.running = false;
+            rt.packages = 0;
             rt.providers.clear();
-            rt.crashes += 1;
+            // 稳定运行后崩溃 = 新一次独立崩溃：连续计数从 1 重算（否则偶发
+            // 崩溃会被历史累计拖进 60s 退避）；快速崩溃循环才累加升档。
+            rt.crashes = if ran_for >= STABLE_RUN {
+                1
+            } else {
+                rt.crashes.saturating_add(1)
+            };
             rt.crashes
         };
-        tracing::warn!("[Script] 脚本宿主意外退出（本周期第 {crashes} 次），退避重启");
+        tracing::warn!(
+            "[Script] 脚本宿主意外退出（连续第 {crashes} 次，运行 {}s），退避重启",
+            ran_for.as_secs()
+        );
 
         for attempt in 0..MAX_RESTART_ATTEMPTS {
-            // attempt 是 u32、表索引是 usize：先转再钳（超表取最后一档）
-            let delay = RESTART_BACKOFF[(attempt as usize).min(RESTART_BACKOFF.len() - 1)];
-            tokio::time::sleep(delay).await;
+            // 退避按「连续崩溃次数 + 本次事件内的失败次数」升档（钳到表尾），
+            // 避免「起来就崩」的宿主以 1s 节奏无限重拉。
+            tokio::time::sleep(backoff_delay(crashes, attempt)).await;
             if self.generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            if self.shutting_down.load(Ordering::SeqCst) {
                 return;
             }
             // 没有任何启用包了（运维在退避窗口里全停了）：不再重拉
@@ -442,12 +582,18 @@ impl ScriptHostManager {
                 self.runtime.write().running = false;
                 return;
             }
-            match self.rebuild("crash-restart").await {
-                Ok(_) => {
+            // 锁内复核代际：人工 rebuild 若已在等锁窗口完成，这里放弃，
+            // 绝不把刚起来的宿主再拆一次（拒绝双拉）。
+            match self.restart_after_crash(generation).await {
+                None => {
+                    tracing::debug!("[Script] 崩溃重拉已由新的代际接管，本次放弃");
+                    return;
+                }
+                Some(Ok(_)) => {
                     tracing::info!("[Script] 宿主崩溃后重拉成功（第 {} 次尝试）", attempt + 1);
                     return;
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     {
                         let mut rt = self.runtime.write();
                         rt.last_error = Some(e.clone());
@@ -484,14 +630,20 @@ impl ScriptHostManager {
 /// 表只作兜底（老宿主不报 identities 时）。只登记 `providers` 里确实
 /// 在跑的 id——加载失败/让位的家不会留下死路由。
 ///
+/// **原生优先**：`reserved`（AIGX 原生实现 ∪ 原生插件包声明的 provider）
+/// 里的 id 一律不登记——JS 侧装载器本应按 reserved 让位，这里是网关侧
+/// 再兜一道（声明 id 与实际 id 两个方向都查）。
+///
 /// 返回 `(owners, aliases, actuals)`：
 /// - owners：声明 id 与实际 id 都指向包 id（两个方向都能路由）；
 /// - aliases：声明 id → 实际 id（无映射 = 同名）；
 /// - actuals：实际接管的 id 列表（管理面展示）。
+#[allow(clippy::type_complexity)]
 fn compute_routing(
     packages: &[ScriptPackage],
     providers: &[ScriptProviderInfo],
     identities: &serde_json::Map<String, serde_json::Value>,
+    reserved: &BTreeSet<String>,
 ) -> (
     HashMap<String, String>,
     HashMap<String, String>,
@@ -514,6 +666,10 @@ fn compute_routing(
             if !loaded.contains(actual) {
                 continue;
             }
+            // 原生让位（网关侧兜底）：声明 id 或实际 id 撞 reserved 都不登记。
+            if reserved.contains(requested) || reserved.contains(actual) {
+                continue;
+            }
             owners.insert(requested.clone(), pkg_id.clone());
             owners.insert(actual.to_string(), pkg_id.clone());
             if requested != actual {
@@ -526,6 +682,9 @@ fn compute_routing(
     // 2) 兜底：包清单声明的 provider（identities 缺失时按同名登记）
     for pkg in packages {
         for declared in &pkg.providers {
+            if reserved.contains(&declared.id) {
+                continue;
+            }
             if owners.contains_key(&declared.id) || !loaded.contains(declared.id.as_str()) {
                 continue;
             }
@@ -537,6 +696,24 @@ fn compute_routing(
     actuals.sort();
     actuals.dedup();
     (owners, aliases, actuals)
+}
+
+/// 路由权威判据：provider 已有 AIGX 原生实现，或由**已启用的原生插件包**
+/// 声明 → 脚本不接管（与 `is_plugin_owned` 同立场）。
+///
+/// 数据面热路径也会走到这里，`is_plugin_owned` 只做列表扫描 + 一次 id
+/// clone，没有分配放大。
+fn script_takeover_blocked(native_registry: &PackRegistry, provider: &str) -> bool {
+    crate::plugin_host::registry::is_native_provider(provider)
+        || native_registry.is_plugin_owned(provider)
+}
+
+/// 崩溃重启的退避时长：连续崩溃次数决定起始档位，单次崩溃事件内的重拉
+/// 失败次数继续后移；索引钳到表尾（表长是常量 7，无除零面；`saturating`
+/// 防长期崩溃把计数推到 u32 边界时溢出）。
+fn backoff_delay(crashes: u32, attempt: u32) -> Duration {
+    let index = crashes.saturating_sub(1).saturating_add(attempt);
+    RESTART_BACKOFF[(index as usize).min(RESTART_BACKOFF.len() - 1)]
 }
 
 /// 宿主上报的 identities JSON → 落盘用的强类型表。
@@ -600,7 +777,8 @@ mod tests {
         let providers = vec![provider("kiro-2")];
         let mut identities = serde_json::Map::new();
         identities.insert("@a/kiro".into(), json!({ "kiro": "kiro-2" }));
-        let (owners, aliases, actuals) = compute_routing(&packages, &providers, &identities);
+        let (owners, aliases, actuals) =
+            compute_routing(&packages, &providers, &identities, &BTreeSet::new());
         assert_eq!(owners.get("kiro"), Some(&"@a/kiro".to_string()));
         assert_eq!(owners.get("kiro-2"), Some(&"@a/kiro".to_string()));
         assert_eq!(aliases.get("kiro"), Some(&"kiro-2".to_string()));
@@ -612,7 +790,8 @@ mod tests {
         // 包声明了 kiro，但 JS 侧没装载成功 / 让位（providers 列表里没有）
         // → 不能留死路由。
         let packages = vec![pkg("@a/kiro", &["kiro"])];
-        let (owners, aliases, actuals) = compute_routing(&packages, &[], &serde_json::Map::new());
+        let (owners, aliases, actuals) =
+            compute_routing(&packages, &[], &serde_json::Map::new(), &BTreeSet::new());
         assert!(owners.is_empty());
         assert!(aliases.is_empty());
         assert!(actuals.is_empty());
@@ -626,7 +805,8 @@ mod tests {
         let providers = vec![provider("astudio")];
         let mut identities = serde_json::Map::new();
         identities.insert("some-npm-pkg".into(), json!({ "astudio": "astudio" }));
-        let (owners, _aliases, actuals) = compute_routing(&packages, &providers, &identities);
+        let (owners, _aliases, actuals) =
+            compute_routing(&packages, &providers, &identities, &BTreeSet::new());
         assert_eq!(owners.get("astudio"), Some(&"some-npm-pkg".to_string()));
         assert_eq!(actuals, vec!["astudio".to_string()]);
     }
@@ -636,11 +816,98 @@ mod tests {
         // 老宿主不报 identities：包声明与实际 id 同名时仍要能路由。
         let packages = vec![pkg("@a/kiro", &["kiro"])];
         let providers = vec![provider("kiro")];
-        let (owners, aliases, actuals) =
-            compute_routing(&packages, &providers, &serde_json::Map::new());
+        let (owners, aliases, actuals) = compute_routing(
+            &packages,
+            &providers,
+            &serde_json::Map::new(),
+            &BTreeSet::new(),
+        );
         assert_eq!(owners.get("kiro"), Some(&"@a/kiro".to_string()));
         assert!(aliases.is_empty());
         assert_eq!(actuals, vec!["kiro".to_string()]);
+    }
+
+    #[test]
+    fn routing_yields_reserved_even_with_alias() {
+        // 网关侧兜底：宿主（即使行为异常）把原生 provider「kiro」报成实际
+        // 接管 id「kiro-2」，reserved 包含 kiro 时整对映射都必须丢弃——
+        // 脚本对原生实现没有接管权。
+        let packages = vec![pkg("@a/kiro", &["kiro"])];
+        let providers = vec![provider("kiro-2")];
+        let mut identities = serde_json::Map::new();
+        identities.insert("@a/kiro".into(), json!({ "kiro": "kiro-2" }));
+        let reserved: BTreeSet<String> = ["kiro".to_string()].into_iter().collect();
+        let (owners, aliases, actuals) =
+            compute_routing(&packages, &providers, &identities, &reserved);
+        assert!(owners.is_empty(), "声明 id 撞 reserved 不得登记");
+        assert!(aliases.is_empty());
+        assert!(actuals.is_empty());
+    }
+
+    #[test]
+    fn routing_fallback_skips_reserved_declared_id() {
+        // 兜底路径同样让位：包清单声明的原生 provider 不许登记。
+        let packages = vec![pkg("@a/kiro", &["kiro", "custom"])];
+        let providers = vec![provider("kiro"), provider("custom")];
+        let reserved: BTreeSet<String> = ["kiro".to_string()].into_iter().collect();
+        let (owners, aliases, actuals) =
+            compute_routing(&packages, &providers, &serde_json::Map::new(), &reserved);
+        assert!(!owners.contains_key("kiro"), "原生 id 不入 owners");
+        assert_eq!(owners.get("custom"), Some(&"@a/kiro".to_string()));
+        assert!(aliases.is_empty());
+        assert_eq!(actuals, vec!["custom".to_string()]);
+    }
+
+    #[test]
+    fn backoff_escalates_with_consecutive_crashes() {
+        // 首次崩溃首次重拉 = 1s；崩溃数与失败数都按档位后移；钳到 60s。
+        assert_eq!(backoff_delay(1, 0), Duration::from_secs(1));
+        assert_eq!(backoff_delay(1, 1), Duration::from_secs(2));
+        assert_eq!(backoff_delay(5, 0), Duration::from_secs(16));
+        assert_eq!(backoff_delay(6, 0), Duration::from_secs(30));
+        assert_eq!(backoff_delay(7, 0), Duration::from_secs(60));
+        // 越界输入不 panic、不溢出（钳表尾）
+        assert_eq!(backoff_delay(u32::MAX, u32::MAX), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn takeover_blocked_by_native_and_native_pack() {
+        use crate::plugin_host::registry::{PackMeta, PackProvider, PackRegistry};
+        use crate::storage::FileStore;
+
+        // 内置原生实现永远让位
+        let dir = tempfile::TempDir::new().unwrap();
+        let registry = PackRegistry::new(Arc::new(FileStore::new(dir.path().to_path_buf())));
+        assert!(script_takeover_blocked(&registry, "openai"));
+
+        // 原生插件包声明的 provider 同样让位（仅当包已启用）。
+        // 用一个明确的「非内置」id：workbuddy/qoder 等是内置原生实现，
+        // 会命中断言里的第一条判据，掩盖本用例要验的插件包分支。
+        const PACK_PROVIDER: &str = "script-demo-provider";
+        let meta = PackMeta {
+            id: "native-pack".into(),
+            name: "native-pack".into(),
+            version: "1.0.0".into(),
+            enabled: true,
+            providers: vec![PackProvider {
+                id: PACK_PROVIDER.into(),
+                label: "Demo".into(),
+                default_enabled: true,
+            }],
+            ..Default::default()
+        };
+        registry.upsert(meta.clone()).unwrap();
+        assert!(script_takeover_blocked(&registry, PACK_PROVIDER));
+        assert!(
+            !script_takeover_blocked(&registry, "free-provider"),
+            "未被任何原生实现声明的 provider 可被脚本接管"
+        );
+        // upsert 会保留既有 enabled（重装不重置运维选择），停用要走 set_enabled
+        registry.set_enabled("native-pack", false).unwrap();
+        assert!(
+            !script_takeover_blocked(&registry, PACK_PROVIDER),
+            "已停用的原生包不抢路由"
+        );
     }
 
     #[test]

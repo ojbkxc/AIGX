@@ -28,12 +28,52 @@ export const ErrorCodes = Object.freeze({
 
 const KNOWN_CODES = new Set(Object.values(ErrorCodes));
 
-/** 网关回调报错码 → 宿主错误码的映射（回调失败多半是本地条件问题）。 */
+/**
+ * 网关回调报错码 → 宿主错误码的映射（回调失败多半是本地条件问题，
+ * 但上游网络失败与转换器饱和不是）。
+ *
+ * - `not_found` / `bad_request`：参数/账号/配置问题 → local_precondition
+ * - `no_handler`：网关没实现该方法 → unsupported
+ * - `transport`：网关出口的上游请求/读取失败 → provider_http（无 status；
+ *   归 internal 会把「上游网络故障」误报成宿主 bug，影响网关侧重试判断）
+ * - `timeout`：出口读等上游 30min 无数据（上游停滞）→ provider_http
+ * - `too_many`：转换器会话饱和 → local_precondition（容量/前置条件）
+ */
 const GATEWAY_CODE_MAP = Object.freeze({
   not_found: "local_precondition",
   bad_request: "local_precondition",
   no_handler: "unsupported",
+  transport: "provider_http",
+  timeout: "provider_http",
+  too_many: "local_precondition",
 });
+
+/** Node/Bun fetch 的网络层错误码（脚本自己 fetch 上游失败时抛出）。 */
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/** 是否网络层失败（err.cause.code 是 Node 错误码，或 TypeError: fetch failed）。 */
+function isNetworkFailure(err) {
+  const cause = err?.cause;
+  if (cause && typeof cause === "object" && typeof cause.code === "string") {
+    if (NETWORK_ERROR_CODES.has(cause.code)) return true;
+  }
+  if (typeof err?.code === "string" && NETWORK_ERROR_CODES.has(err.code)) return true;
+  return err?.name === "TypeError" && /\bfetch failed\b/i.test(String(err?.message ?? ""));
+}
 
 /** 带错误码的宿主错误。extra 里的字段（如 status）原样保留，随线上帧带出。 */
 export class ProviderError extends Error {
@@ -98,6 +138,14 @@ export function classifyError(err) {
     // 网关回调失败（store.get 没账号 / no_handler 等）——按映射归一
     if (code && GATEWAY_CODE_MAP[code]) {
       return { message: err.message || code, code: GATEWAY_CODE_MAP[code] };
+    }
+    // 脚本自己 fetch 上游的网络层失败（DNS/连接/读超时）：不可重试的
+    // internal 会让网关把它当宿主 bug；归 provider_http 才是正确语义
+    if (isNetworkFailure(err)) {
+      return {
+        message: err.message || "upstream network failure",
+        code: ErrorCodes.ProviderHttp,
+      };
     }
     if (err.message) return { message: String(err.message), code: ErrorCodes.Internal };
   }

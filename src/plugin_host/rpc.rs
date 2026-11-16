@@ -594,10 +594,24 @@ impl RpcChannel {
         self.shared.write_frame(&frame).await
     }
 
-    /// 关闭通道：abort 读循环任务。
+    /// 关闭通道：abort 读循环任务，并把全部在途请求/流**明确失败**。
+    ///
+    /// `abort` 会直接丢弃读循环 future，末尾的 EOF 清理（失败 pending /
+    /// 摘流）**不会执行**；只 abort 的话，等应答的 oneshot 与流通道的发送端
+    /// 还活在 `Shared` 里，接收端永远等不到信号——热切换排空超时、网关关停
+    /// 走到这条路径时，在途 `call` / `StreamCall::next` 会悬挂到进程退出。
+    /// 这里补一次 fail_all，让它们以 `closed` / `eof` 错误及时终结。
     pub fn shutdown(&self) {
         if let Some(h) = &self.shutdown {
             h.abort();
+        }
+        // 只有运行时上下文里才有人在等（`RpcChannel::new` 本身就要求
+        // runtime）；无 runtime 的构造路径没有等待者，跳过即可。
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let shared = self.shared.clone();
+            handle.spawn(async move {
+                fail_all(&shared, "plugin channel shut down", "closed").await;
+            });
         }
     }
 
@@ -783,29 +797,37 @@ async fn read_loop(mut reader: BufReader<BoxReader>, shared: Arc<Shared>) {
     }
     // EOF：所有在途请求失败；所有活流摘除——接收端收到 None 后由
     // `StreamCall::next` 把截断上报为错误（不当正常结束）
-    {
-        let failed: Vec<_> = shared
-            .pending
-            .write()
-            .await
-            .drain()
-            .map(|(_, tx)| {
-                let _ = tx.send(Frame {
-                    error: Some(RpcError::new("plugin process exited", "eof")),
-                    ..Default::default()
-                });
-            })
-            .collect();
-        if !failed.is_empty() {
-            tracing::warn!(
-                "plugin RPC channel closed, {} pending requests failed",
-                failed.len()
-            );
-        }
-        let dropped = shared.streams.write().await.drain().count();
-        if dropped > 0 {
-            tracing::warn!("plugin RPC channel closed, {dropped} active streams dropped");
-        }
+    fail_all(&shared, "plugin process exited", "eof").await;
+}
+
+/// 把全部在途请求/流明确失败（幂等；两个入口共用）。
+///
+/// - 读循环 EOF：插件进程退出 → 错误码 `eof`；
+/// - [`RpcChannel::shutdown`]：网关主动关通道（abort 跳过了 EOF 清理）→ `closed`。
+///
+/// pending 逐个投错误帧（`call` 收到即返回 Err）；streams 直接清空
+///（发送端 drop → 接收端 `recv()` 得到 None → `StreamCall::next` 按截断报错）。
+async fn fail_all(shared: &Shared, message: &str, code: &str) {
+    let failed: Vec<oneshot::Sender<Frame>> = shared
+        .pending
+        .write()
+        .await
+        .drain()
+        .map(|(_, tx)| tx)
+        .collect();
+    let pending_count = failed.len();
+    for tx in failed {
+        let _ = tx.send(Frame {
+            error: Some(RpcError::new(message, code)),
+            ..Default::default()
+        });
+    }
+    let dropped = shared.streams.write().await.drain().count();
+    if pending_count > 0 {
+        tracing::warn!("plugin RPC channel closed, {pending_count} pending requests failed");
+    }
+    if dropped > 0 {
+        tracing::warn!("plugin RPC channel closed, {dropped} active streams dropped");
     }
 }
 
@@ -1475,5 +1497,76 @@ mod tests {
             assert!(n >= DEFAULT_WINDOW_BYTES / 2, "每次归还应攒满半个窗口: {n}");
             assert!(n <= charge * CHUNKS, "归还量不应超过总消费");
         }
+    }
+
+    // ── shutdown：abort 读循环后，在途请求/流必须明确失败（不能悬挂）────
+
+    /// `call()` 等在应答上时调 shutdown：oneshot 发送端还躺在 `pending` 表
+    /// 里，只 abort 读循环的话接收端永远等不到信号。修复后必须立刻以
+    /// `closed` 错误终结。
+    #[tokio::test]
+    async fn shutdown_fails_pending_call_instead_of_hanging() {
+        let (client_read, client_write, plugin_read, plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+        // 插件侧：读走请求但不回帧（进程活着、卡住）
+        let mock = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let _ = read_one_frame(&mut reader).await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(plugin_write);
+        });
+        let call = client.call("ping", Value::Null);
+        let shutdown = async {
+            // 让 call 先登记 pending 并进入等待
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            client.shutdown();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(call, shutdown)
+        })
+        .await
+        .expect("shutdown 后在途 call 必须失败，不能悬挂");
+        let err = result.expect_err("在途 call 应以错误终结");
+        assert_eq!(err.code.as_deref(), Some("closed"));
+        mock.abort();
+    }
+
+    /// 已拿到 head、正在消费的流：shutdown 后 `next()` 必须以截断错误终结
+    ///（流通道发送端被摘除 → recv None → eof），而不是永远等下去。
+    #[tokio::test]
+    async fn shutdown_interrupts_inflight_stream_instead_of_hanging() {
+        let (client_read, client_write, plugin_read, mut plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+        let mock = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let req = read_one_frame(&mut reader).await;
+            let head = Frame {
+                id: req.id,
+                event: Some("head".into()),
+                status: Some(200),
+                ..Default::default()
+            };
+            write_frame_line(&mut plugin_write, &head).await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let mut call = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.call_stream("conversation", Value::Null),
+        )
+        .await
+        .expect("head 应已到达")
+        .expect("call_stream 应成功");
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::Head { .. }
+        ));
+        client.shutdown();
+        let next = tokio::time::timeout(Duration::from_secs(2), call.next())
+            .await
+            .expect("shutdown 后 next 必须及时终结，不能悬挂")
+            .expect("应有一个终态事件");
+        let err = next.expect_err("截断应以错误上报");
+        assert_eq!(err.code.as_deref(), Some("eof"));
+        mock.abort();
     }
 }

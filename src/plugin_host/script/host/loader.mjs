@@ -40,9 +40,21 @@
 // 向上三级即 root（storage.rs「宿主用相对路径读同级投影」的约定）。
 // 两处都没有 = 无运维配置（不是错误）。
 
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+
+/**
+ * target 是否在 root 之内（含相等）。
+ *
+ * 包目录是第三方内容：package.json 的 main/exports 可以写绝对路径或
+ * `../../x`——解析结果必须被钉死在包自己的目录里，否则 loader 会把宿主
+ * 导向包外的任意 JS 文件。符号链接同样算越界（realpath 后再判一次）。
+ */
+function isInside(root, target) {
+  const rel = path.relative(root, target);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
 
 /**
  * 从 package.json 推导入口候选（相对路径列表，按优先级排）。
@@ -89,12 +101,27 @@ async function resolveEntry(pkgDir) {
   } catch {
     // 没有 package.json 的裸目录：只试兜底入口
   }
+  const rootAbs = path.resolve(pkgDir);
+  let rootReal = rootAbs;
+  try {
+    rootReal = await realpath(rootAbs);
+  } catch {
+    // 包目录本身不存在/不可解析：后面的 stat 会逐个失败
+  }
   for (const rel of entryCandidates(pkgJson)) {
-    const base = path.resolve(pkgDir, rel);
+    // 入口必须是包目录里的相对路径：绝对路径与 `../` 一律拒绝
+    if (typeof rel !== "string" || rel.length === 0) continue;
+    if (path.isAbsolute(rel)) continue;
+    const base = path.resolve(rootAbs, rel);
+    if (!isInside(rootAbs, base)) continue;
     for (const candidate of expandExtensions(base)) {
       try {
         const st = await stat(candidate);
-        if (st.isFile()) return candidate;
+        if (!st.isFile()) continue;
+        // 符号链接解析后仍须落在包目录内（realpath 失败按不存在处理）
+        const real = await realpath(candidate);
+        if (!isInside(rootReal, real)) continue;
+        return candidate;
       } catch {
         // 试下一个
       }
@@ -132,8 +159,12 @@ async function readOptions(pkgDir, pkgName) {
   } catch {
     // 投影缺失/坏文件/版本不符：走落盘 fallback（不是错误）
   }
-  // 2. 落盘 options 文件（pkg-installer 安装时写）
-  const optionsPath = path.join(scriptRoot, "options", `${pkgName}.json`);
+  // 2. 落盘 options 文件（pkg-installer 安装时写）。
+  //    包名来自第三方 package.json：`../../x` 之类的名字不能把路径带出
+  //    options 目录（否则等于让包读宿主任意 JSON 文件）。
+  const optionsDir = path.resolve(scriptRoot, "options");
+  const optionsPath = path.resolve(optionsDir, `${pkgName}.json`);
+  if (!isInside(optionsDir, optionsPath)) return {};
   try {
     const parsed = JSON.parse(await readFile(optionsPath, "utf8"));
     return isPlainObject(parsed) ? parsed : {};

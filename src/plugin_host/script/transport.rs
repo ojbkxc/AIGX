@@ -38,18 +38,27 @@
 //! 小写，与宿主侧 wire 帧的小写头约定一致。
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use uuid::Uuid;
 
 use crate::plugin_host::rpc::RpcError;
 
 /// 请求体 + 响应的累计字节上限（120MB）。
 const MAX_TOTAL_BYTES: usize = 120 * 1024 * 1024;
+
+/// 并发流式会话上限。
+///
+/// 每秒上限之外的第二道有界性：每个会话持有一条上游连接与最多 120MB 的
+/// 累计流；reaper 只按「空闲 30min」回收，不限制瞬时数量——没有这个闸，
+/// 一段脚本内容可以在几分钟内开成千上万条上游连接把网关拖垮。正常负载
+/// 下并发会话数 = 同时进行的 conversation 数，1024 有充裕余量。
+const MAX_SESSIONS: usize = 1024;
 
 /// read 单块下限：网络块小于此值先攒（攒到 ≥ 此值或 EOF 才吐）。
 const MIN_SLICE_BYTES: usize = 1024;
@@ -70,6 +79,13 @@ const REAPER_TICK: Duration = Duration::from_secs(60);
 struct Session {
     /// reqwest 的 `chunk()` 要 `&mut`——整把锁包住响应与读取状态。
     inner: Mutex<SessionInner>,
+    /// close()/reaper 的唤醒源：阻塞中的 read 立即放弃等待。
+    ///
+    /// 用 `notify_one`（存许可）而非 `notify_waiters`：close 先于 read 的
+    /// select 到达时也不会丢信号。
+    cancel: Notify,
+    /// 会话已被关闭（close/reaper 置位；read 的每个等待点先查再等）。
+    closed: AtomicBool,
 }
 
 struct SessionInner {
@@ -192,6 +208,17 @@ impl Transport {
             req = req.body(b.clone());
         }
 
+        let stream = obj.get("stream").and_then(Value::as_bool).unwrap_or(false);
+        // 并发会话闸：超限直接拒，**不发上游请求**。脚本内容不可信，循环
+        // `transport.request{stream:true}` 若不设闸会在 reaper 回收前开出
+        // 无上限的上游连接（每会话还允许 120MB 累计流）。
+        if stream && self.sessions.read().await.len() >= MAX_SESSIONS {
+            return Err(rpc_error(
+                "transport",
+                format!("too many open transport sessions ({MAX_SESSIONS}); retry later"),
+            ));
+        }
+
         let resp = req
             .send()
             .await
@@ -200,7 +227,7 @@ impl Transport {
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
 
-        if !obj.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+        if !stream {
             // 非流式：全量读 body（累计计数 ≤120MB），一次回
             let mut resp = resp;
             let mut total = body.as_ref().map_or(0, |b| b.len());
@@ -244,16 +271,22 @@ impl Transport {
                 done: false,
                 last_read: now_unix(),
             }),
+            cancel: Notify::new(),
+            closed: AtomicBool::new(false),
         });
         self.sessions.write().await.insert(id.clone(), session);
         Ok(json!({ "status": status, "headers": headers, "session": id }))
     }
 
-    /// `script.transport.read`：取下一块（阻塞到有块 / EOF / 超时）。
+    /// `script.transport.read`：取下一块（阻塞到有块 / EOF / 超时 / 关闭）。
     ///
     /// 状态机：正常 → 攒缓冲够 1KiB 就吐（不读网络）→ 网络块攒进缓冲 →
     /// EOF 进 flush 模式（尾巴按普通块吐完，最后一帧才 `done:true`）。
-    /// 网络错误 / 30min 无块 / 累计超限 → 会话终结并从表摘除。
+    /// 网络错误 / 30min 无块 / 累计超限 / 会话被 close → 会话终结并从表摘除。
+    ///
+    /// **活跃时刻**：只要本函数吐出数据（无论来自网络还是缓冲）就刷新
+    /// `last_read`——reaper 的判据是「30min 没有任何读取活动」，不是「30min
+    /// 没有网络到达」；否则一个持续从缓冲消费的慢会话会被误杀、缓冲数据丢失。
     pub async fn read(&self, session: &str) -> Result<Value, RpcError> {
         let sess = {
             let sessions = self.sessions.read().await;
@@ -262,10 +295,14 @@ impl Transport {
         .ok_or_else(|| rpc_error("not_found", format!("unknown session '{session}'")))?;
 
         let mut inner = sess.inner.lock().await;
+        if sess.closed.load(Ordering::Acquire) {
+            return Err(session_closed(session));
+        }
 
         // EOF 后：flush 模式——尾巴按普通块吐完（分片规则同正文），空了才正式终结
         if inner.done {
             if let Some(tail) = next_slice(&mut inner.buf, true) {
+                inner.last_read = now_unix();
                 return Ok(chunk_frame(&tail));
             }
             drop(inner);
@@ -275,11 +312,31 @@ impl Transport {
 
         // 攒缓冲已够一块（上次 read 攒下的）：直接吐，不读网络
         if let Some(slice) = next_slice(&mut inner.buf, false) {
+            inner.last_read = now_unix();
             return Ok(chunk_frame(&slice));
         }
 
         loop {
-            match tokio::time::timeout(READ_TIMEOUT, inner.response.chunk()).await {
+            if sess.closed.load(Ordering::Acquire) {
+                inner.done = true;
+                drop(inner);
+                self.sessions.write().await.remove(session);
+                return Err(session_closed(session));
+            }
+            // close/reaper 的唤醒与网络块等待二选一。notified() 在 select 前
+            // 创建、notify_one 存许可，故「close 先到、read 后等」不丢信号。
+            let cancel = sess.cancel.notified();
+            let next = tokio::select! {
+                biased;
+                _ = cancel => {
+                    inner.done = true;
+                    drop(inner);
+                    self.sessions.write().await.remove(session);
+                    return Err(session_closed(session));
+                }
+                next = tokio::time::timeout(READ_TIMEOUT, inner.response.chunk()) => next,
+            };
+            match next {
                 // 30min 无块：会话终结并回收（慢上游不留僵尸会话）
                 Err(_) => {
                     inner.done = true;
@@ -300,6 +357,7 @@ impl Transport {
                     // EOF：进 flush 模式；有尾巴先吐普通块，空则当场终结
                     inner.done = true;
                     if let Some(tail) = next_slice(&mut inner.buf, true) {
+                        inner.last_read = now_unix();
                         return Ok(chunk_frame(&tail));
                     }
                     drop(inner);
@@ -327,17 +385,24 @@ impl Transport {
 
     /// `script.transport.close`：关会话（幂等）。
     ///
-    /// 从表摘除 + drop response 断上游连接；进行中的 read 手里持有 Arc
-    /// 会自然跑到 EOF/错误，宿主下次 read 拿 `not_found`。
+    /// 从表摘除 + **唤醒阻塞中的 read**（置 closed + notify）。read 醒来
+    /// 立即放弃等待并 drop 响应（断上游连接）——旧实现只摘表，read 手里
+    /// 持有 Arc 会在上游静默时把连接拖到 30min 超时为止。重复 close 返回
+    /// `{}`（不存在也幂等）。
     pub async fn close(&self, session: &str) -> Result<Value, RpcError> {
-        self.sessions.write().await.remove(session);
+        if let Some(sess) = self.sessions.write().await.remove(session) {
+            sess.closed.store(true, Ordering::Release);
+            sess.cancel.notify_one();
+        }
         Ok(json!({}))
     }
 
     /// 清掉空闲超阈值的会话（reaper 调用）。
     ///
     /// 只 `try_lock`：锁被 read 持有 = 会话正在等块（活跃），跳过——
-    /// reaper 永不误杀进行中的读取。
+    /// reaper 永不误杀进行中的读取。摘表后置 closed + notify：若有 read
+    /// 正排在锁上等，它醒来会以「会话已关闭」错误终结（而不是拿到伪造的
+    /// `done:true` 把截断当正常结束）。
     async fn reap_idle(&self) {
         let candidates: Vec<(String, Arc<Session>)> = {
             let sessions = self.sessions.read().await;
@@ -348,13 +413,15 @@ impl Transport {
         };
         let now = now_unix();
         for (id, sess) in candidates {
-            let Ok(mut inner) = sess.inner.try_lock() else {
+            let Ok(inner) = sess.inner.try_lock() else {
                 continue; // read 正持有：活跃
             };
             if now - inner.last_read >= IDLE_SECS {
-                inner.done = true;
                 drop(inner);
-                self.sessions.write().await.remove(&id);
+                if let Some(removed) = self.sessions.write().await.remove(&id) {
+                    removed.closed.store(true, Ordering::Release);
+                    removed.cancel.notify_one();
+                }
             }
         }
     }
@@ -414,6 +481,11 @@ fn rpc_error(code: &str, message: impl Into<String>) -> RpcError {
 
 fn bad_request(message: impl Into<String>) -> RpcError {
     rpc_error("bad_request", message)
+}
+
+/// 会话已被关闭（close/reaper）：read 以 `not_found` 语义终结。
+fn session_closed(session: &str) -> RpcError {
+    rpc_error("not_found", format!("session '{session}' closed"))
 }
 
 #[cfg(test)]
@@ -557,5 +629,216 @@ mod tests {
         assert_eq!(first, serde_json::json!({}));
         let second = t.close("never-existed").await.unwrap();
         assert_eq!(second, serde_json::json!({}));
+    }
+
+    // ── 会话生命周期端到端（本地假上游，打环回网络）──────────────
+
+    /// 起一个「回完响应头就挂住、不再发数据」的上游（模拟静默慢上游）。
+    async fn stall_upstream() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 1000000\r\n\r\npartial",
+                        )
+                        .await;
+                    let _ = sock.flush().await;
+                    // 不再发数据；也不关连接
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// 起一个按给定字节数回完 body 的上游（分段写，制造多个网络块）。
+    async fn blob_upstream(bytes: usize) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {bytes}\r\n\r\n"
+                    );
+                    if sock.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let chunk = vec![b'x'; 64 * 1024];
+                    let mut sent = 0usize;
+                    while sent < bytes {
+                        let n = (bytes - sent).min(chunk.len());
+                        if sock.write_all(&chunk[..n]).await.is_err() {
+                            return;
+                        }
+                        sent += n;
+                    }
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// close 必须**打断阻塞中的 read**：旧实现只摘表，read 手里持有 Arc
+    /// 会在静默上游上把连接拖到 30min 超时为止（会话表已清但连接/缓冲滞留）。
+    #[tokio::test]
+    async fn close_wakes_blocked_read_and_evicts_session() {
+        let addr = stall_upstream().await;
+        let t = transport();
+        let created = t
+            .request(&serde_json::json!({
+                "url": format!("http://{addr}/x"),
+                "stream": true
+            }))
+            .await
+            .unwrap();
+        let session = created["session"]
+            .as_str()
+            .expect("stream=true 应返回 session")
+            .to_string();
+        let reader = t.clone();
+        let read_session = session.clone();
+        let read_task = tokio::spawn(async move { reader.read(&read_session).await });
+        // 让 read 真正进入「等下一块」的阻塞态（"partial" < 1KiB 会继续攒）
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        t.close(&session).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), read_task)
+            .await
+            .expect("close 必须唤醒阻塞中的 read（不能等 30min 超时）")
+            .expect("read 任务不应 panic");
+        let err = result.expect_err("已关闭会话的 read 应以错误终结");
+        assert_eq!(err.code.as_deref(), Some("not_found"));
+        assert!(t.sessions.read().await.is_empty(), "会话表应已清空");
+    }
+
+    /// 流式会话端到端：read 逐块取到 EOF 的 `done:true`，会话摘表，
+    /// 之后的 read 拿 `not_found`（字节完整、不重复不丢失）。
+    #[tokio::test]
+    async fn stream_session_drains_to_done_and_evicts() {
+        const TOTAL: usize = 300 * 1024;
+        let addr = blob_upstream(TOTAL).await;
+        let t = transport();
+        let created = t
+            .request(&serde_json::json!({
+                "url": format!("http://{addr}/blob"),
+                "stream": true
+            }))
+            .await
+            .unwrap();
+        assert_eq!(created["status"], 200);
+        let session = created["session"].as_str().unwrap().to_string();
+        let mut total = 0usize;
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(10), t.read(&session))
+                .await
+                .expect("read 不应悬挂")
+                .unwrap();
+            if let Some(b64) = frame.get("chunk_b64").and_then(Value::as_str) {
+                total += STANDARD.decode(b64).unwrap().len();
+            }
+            if frame.get("done").and_then(Value::as_bool) == Some(true) {
+                break;
+            }
+        }
+        assert_eq!(total, TOTAL, "字节不能丢");
+        let err = t.read(&session).await.unwrap_err();
+        assert_eq!(
+            err.code.as_deref(),
+            Some("not_found"),
+            "done 后会话应已摘除"
+        );
+    }
+
+    /// 从缓冲吐块也必须刷新 `last_read`：reaper 的判据是「没有读取活动」，
+    /// 否则持续消费缓冲的慢会话会被误杀、缓冲数据丢失。
+    #[tokio::test]
+    async fn buffered_slice_read_refreshes_last_read() {
+        let addr = blob_upstream(300 * 1024).await;
+        let t = transport();
+        let created = t
+            .request(&serde_json::json!({
+                "url": format!("http://{addr}/blob"),
+                "stream": true
+            }))
+            .await
+            .unwrap();
+        let session = created["session"].as_str().unwrap().to_string();
+        let _first = t.read(&session).await.unwrap();
+        let sess = {
+            let sessions = t.sessions.read().await;
+            sessions.get(&session).cloned().unwrap()
+        };
+        {
+            let mut inner = sess.inner.lock().await;
+            // 造一个「网络块早已到达、但已超空闲阈值」的缓冲场景
+            inner.buf.extend_from_slice(&[b'z'; 2048]);
+            inner.last_read = now_unix() - IDLE_SECS - 1;
+        }
+        let frame = t.read(&session).await.unwrap();
+        assert!(
+            frame.get("chunk_b64").is_some(),
+            "应从缓冲直接吐块: {frame}"
+        );
+        let refreshed = now_unix() - sess.inner.lock().await.last_read;
+        assert!(
+            refreshed < IDLE_SECS,
+            "从缓冲吐块必须刷新活跃时刻（当前差 {refreshed}s）"
+        );
+        t.close(&session).await.unwrap();
+    }
+
+    /// 会话表有硬上限：超限的流式请求直接拒且**不发上游请求**。
+    #[tokio::test]
+    async fn session_capacity_is_bounded() {
+        let addr = stall_upstream().await;
+        let t = transport();
+        let created = t
+            .request(&serde_json::json!({
+                "url": format!("http://{addr}/x"),
+                "stream": true
+            }))
+            .await
+            .unwrap();
+        let session = created["session"].as_str().unwrap().to_string();
+        let sess = {
+            let sessions = t.sessions.read().await;
+            sessions.get(&session).cloned().unwrap()
+        };
+        {
+            let mut sessions = t.sessions.write().await;
+            while sessions.len() < MAX_SESSIONS {
+                let key = format!("seed-{}", sessions.len());
+                sessions.insert(key, sess.clone());
+            }
+        }
+        let err = t
+            .request(&serde_json::json!({
+                "url": format!("http://{addr}/overflow"),
+                "stream": true
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("transport"));
+        assert!(
+            err.message.contains("too many open transport sessions"),
+            "错误文案: {}",
+            err.message
+        );
+        // 非流式请求不占会话表，即使表满也应放行
+        let blob_addr = blob_upstream(1024).await;
+        let out = t
+            .request(&serde_json::json!({"url": format!("http://{blob_addr}/plain")}))
+            .await;
+        assert!(out.is_ok(), "非流式请求不应受会话上限影响");
     }
 }

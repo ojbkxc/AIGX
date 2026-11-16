@@ -120,10 +120,20 @@ impl CallbackHandler for ScriptCallbacks {
         params: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, RpcError>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(result) = self.handle_script(method, params.clone()).await {
-                return result;
+            // 先按命名空间分流再决定参数归属：`params` 只 move 一次。
+            // 绝不能 clone——`script.transport.request` 的 `body_b64` 可达
+            // 上百 MB（插件转发整个请求体），一次深拷贝就是整包内存翻倍；
+            // 原生回调（store/settings/…）也不该白拷贝一遍。
+            if !method.starts_with("script.") {
+                return self.inner.handle(method, params);
             }
-            self.inner.handle(method, params)
+            match self.handle_script(method, params).await {
+                Some(result) => result,
+                None => Err(RpcError {
+                    message: format!("unsupported callback: {method}"),
+                    code: Some("unsupported".into()),
+                }),
+            }
         })
     }
 }
@@ -258,5 +268,48 @@ mod tests {
             .handle("script.protocol.finish", json!({"stream": 1}))
             .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("unsupported"));
+    }
+
+    #[tokio::test]
+    async fn unknown_script_method_keeps_unsupported_shape() {
+        // `script.` 前缀的未知方法：错误形状与旧实现（落到 inner 的
+        // unsupported callback）逐字一致，只是不再白 clone 一份 params。
+        let store = Arc::new(FileStore::new(
+            tempfile::TempDir::new().unwrap().path().to_path_buf(),
+        ));
+        let cb = callbacks(store);
+        let err = cb
+            .handle_async("script.unknown", json!({"k": 1}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("unsupported"));
+        assert!(
+            err.message.contains("script.unknown"),
+            "错误文案应点名方法: {}",
+            err.message
+        );
+    }
+
+    /// 原生回调携带大字段（生产里 transport 会转发整包 ~160MB 的请求体）
+    /// 必须原样工作：新版只 move、不 clone params，行为与旧版等值。
+    #[tokio::test]
+    async fn native_callback_with_large_params_still_works() {
+        const BIG: usize = 4 * 1024 * 1024;
+        let store = Arc::new(FileStore::new(
+            tempfile::TempDir::new().unwrap().path().to_path_buf(),
+        ));
+        let cb = callbacks(store);
+        let big = "x".repeat(BIG);
+        cb.handle_async(
+            "settings.set",
+            json!({"provider": "kiro", "key": "big", "value": big}),
+        )
+        .await
+        .unwrap();
+        let got = cb
+            .handle_async("settings.get", json!({"provider": "kiro", "key": "big"}))
+            .await
+            .unwrap();
+        assert_eq!(got.as_str().map(str::len), Some(BIG));
     }
 }

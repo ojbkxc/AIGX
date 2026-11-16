@@ -199,21 +199,27 @@ async function runConversation(wire, record, params, rpcId) {
   const hook = record.hooks.conversation;
   if (typeof hook === "function") {
     // 脚本全权实现：给它绑好本次 RPC id 的发送器
-    const streamState = { used: false, ended: false };
+    const streamState = { headSent: false, ended: false };
     const stream = makeStream(wire, rpcId, streamState);
     try {
       const result = await hook(params, record.options, stream);
-      if (streamState.used) {
+      if (streamState.headSent) {
         if (!streamState.ended) await wire.sendEnd(rpcId);
         return STREAMED;
       }
+      // head 未发却已 error() 终结：帧已出，不再回普通应答（否则双应答）
+      if (streamState.ended) return STREAMED;
       return result === undefined ? null : result;
     } catch (err) {
-      if (streamState.used) {
+      if (streamState.headSent) {
         // head 已发：流错误帧终结（不能同时回 error 应答——双应答毁协议）
-        await wire.sendStreamError(rpcId, classifyError(err));
+        if (!streamState.ended) {
+          await wire.sendStreamError(rpcId, classifyError(err));
+        }
         return STREAMED;
       }
+      // 脚本已显式 error() 过：错误帧已出，这里不再补第二条
+      if (streamState.ended) return STREAMED;
       throw err;
     }
   }
@@ -222,22 +228,35 @@ async function runConversation(wire, record, params, rpcId) {
 
 /** 给脚本钩子的流式发送器（绑定当前请求的 RPC id）。 */
 function makeStream(wire, rpcId, state) {
+  // 网关 call_stream 要求首帧必须是 head：head 之前的 chunk/end 会让整条
+  // 流在网关侧判协议违规（客户端拿到传输错误而非可读原因）。这里直接抛
+  // local_precondition，让 dispatcher 用干净的 error 应答拒绝。
+  const requireHead = (what) => {
+    if (!state.headSent) {
+      throw precondition(`stream.${what} called before stream.head`);
+    }
+    if (state.ended) {
+      throw precondition(`stream.${what} called after stream.end/error`);
+    }
+  };
   return {
     head: async (status, headers, upstream) => {
-      state.used = true;
+      if (state.headSent) throw precondition("stream.head called twice");
+      state.headSent = true;
       await wire.sendHead(rpcId, status, headers, upstream);
     },
     chunk: async (bytes) => {
-      state.used = true;
+      requireHead("chunk");
       await wire.sendChunk(rpcId, bytes);
     },
     end: async () => {
-      state.used = true;
+      requireHead("end");
       state.ended = true;
       await wire.sendEnd(rpcId);
     },
     error: async (err) => {
-      state.used = true;
+      // error 可以在 head 之前（网关把 error 应答当调用拒绝）——只发一次
+      if (state.ended) return;
       state.ended = true;
       await wire.sendStreamError(rpcId, classifyError(err));
     },
@@ -338,18 +357,21 @@ async function runDefaultConversation(wire, record, params, rpcId) {
 
     if (status < 200 || status >= 300) {
       // 非 2xx：head(状态码) → 错误体字节 → end（网关 take_head 的约定——
-      // 错误体让网关按上游错误形状解析，客户端不拿到半截 SSE 当错误）
-      const errBytes = await drainSession(wire, session);
-      headSent = true;
+      // 错误体让网关按上游错误形状解析，客户端不拿到半截 SSE 当错误）。
+      // head 必须**先**发：网关等 head 只有 30s，慢错误体（上游挂着不吐）
+      // 若在 head 之前收齐，整条流会先被判 head 超时，客户端拿到 504 而
+      // 不是上游的真实错误。
       await wire.sendHead(rpcId, status, respHeaders, upstream);
+      headSent = true;
+      const errBytes = await drainSession(wire, session);
       if (errBytes.length > 0) await wire.sendChunk(rpcId, errBytes);
       await wire.sendEnd(rpcId);
       return STREAMED;
     }
 
     // 4. head：状态 + 上游响应头 + 自报协议
-    headSent = true;
     await wire.sendHead(rpcId, status, respHeaders, upstream);
+    headSent = true;
 
     // 5. SSE 循环：上游原始字节 →（非 chat 经网关转换）→ chunk 帧
     const convert = upstream !== "chat";
@@ -369,7 +391,11 @@ async function runDefaultConversation(wire, record, params, rpcId) {
           stream: rpcId,
           data: b64(raw),
         });
-        out = isPlainObject(c) && typeof c.data === "string" ? unb64(c.data) : raw;
+        // 转换器持有这条流：`data` 缺失/形状不对时**不能**回退成原始字节
+        // 透传——上游协议（Anthropic/Gemini）的 SSE 混进 OpenAI 流会打乱
+        // 下游行缓冲。网关契约是恒回 `"data": <b64>`（没产出时为空串），
+        // 对不上的实现按「本次无输出」处理，尾部由 protocol.finish 兜住。
+        out = isPlainObject(c) && typeof c.data === "string" ? unb64(c.data) : Buffer.alloc(0);
       }
       if (out.length > 0) await wire.sendChunk(rpcId, out);
     }

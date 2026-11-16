@@ -25,6 +25,8 @@
 // - control（store.* / settings.* / log / notify）160
 //   达到上限的调用排队等槽位（30s 等不到按失败处理，不无限挂起）。
 
+import { ErrorCodes, ProviderError } from "./errors.mjs";
+
 export const MAX_LINE_BYTES = 128 * 1024 * 1024;
 export const MAX_CHUNK_BYTES = 64 * 1024;
 export const DEFAULT_WINDOW_BYTES = 512 * 1024;
@@ -34,6 +36,17 @@ export const MAX_INFLIGHT_CONTROL = 160;
 
 /** 等回调槽位的超时（上限是防御，正常永远等得到）。 */
 const SLOT_WAIT_TIMEOUT_MS = 30_000;
+
+/**
+ * 等 credit 的兜底超时（5 分钟）。
+ *
+ * 背压本身无限等是对的（客户端慢是常态），但网关**丢弃**一条流时不会
+ * 再发 credit、也不关 stdin（宿主还活着服务别的流）：等 credit 的协程
+ * 会永久挂住，该流的会话/协程永不释放。5 分钟 = 「客户端连续 5 分钟零
+ * 消费」在现实中只可能是流已被丢弃或连接已死；比网关 transport.read 的
+ * 30 分钟空闲阈值短，又远长于正常的慢客户端停顿。
+ */
+const CREDIT_WAIT_TIMEOUT_MS = 300_000;
 
 /** 控制类回调方法（其余一律按网络面 normal 计）。 */
 const CONTROL_METHODS = new Set(["log", "notify"]);
@@ -123,12 +136,26 @@ export class Wire {
     }
   }
 
-  /** 成功应答网关的请求（result 可以是 null）。写失败不炸：网关死了说什么都没用。 */
+  /**
+   * 成功应答网关的请求（result 可以是 null）。
+   *
+   * 写失败不炸：网关死了说什么都没用。但**序列化失败**（脚本返回 BigInt /
+   * 循环引用）必须转成 error 应答——否则网关的 pending 会一直等一个永远
+   * 不会到的 result，只能靠它自己的超时兜底。
+   */
   async reply(id, result) {
     try {
       await this.writeLine({ id, result: result === undefined ? null : result });
     } catch (err) {
       this.#logStderr(`reply(${id}) 写失败：${describe(err)}`);
+      try {
+        await this.writeLine({
+          id,
+          error: { message: `result not serializable: ${describe(err)}`, code: "internal" },
+        });
+      } catch {
+        // 通道本身坏了：没有第二条路
+      }
     }
   }
 
@@ -145,6 +172,9 @@ export class Wire {
 
   /** 流中段错误帧：head 已发后的失败通道（网关把 error 应答投进流通道作终结）。 */
   async sendStreamError(id, err) {
+    // 流已终态：窗口必须摘除（否则每条失败流泄漏一个 #windows 表项，
+    // 等 credit 的挂起者也要唤醒——它们此后一律失败而不是空等）。
+    this.#closeStream(id);
     const error = { message: err?.message ?? "internal error", code: err?.code ?? "internal" };
     if (typeof err?.status === "number") error.status = err.status;
     try {
@@ -154,9 +184,9 @@ export class Wire {
     }
   }
 
-  /** 日志通知（id=0，无应答；网关 tracing 直收）。 */
+  /** 日志通知（id=0，无应答；网关读循环按 `event:"log"` + 顶层 message 记 info）。 */
   notifyLog(level, message) {
-    this.writeLine({ id: 0, method: "log", params: { level, message } }).catch(() => {});
+    this.writeLine({ id: 0, event: "log", level, message }).catch(() => {});
   }
 
   /** 启动事件（加载阶段的装载摘要，网关侧按事件帧观察）。 */
@@ -168,8 +198,26 @@ export class Wire {
 
   /** 流的第一帧：上游状态码 + 响应头（小写键）+ 自报协议。 */
   async sendHead(id, status, headers, upstream) {
-    const frame = { id, event: "head", status: status ?? 200, headers: headers ?? {} };
-    if (upstream) frame.upstream = upstream;
+    // 网关按 u16 解析 status、BTreeMap<String,String> 解析 headers：一个
+    // 类型不对的字段会让整帧 deserialize 失败被丢弃 → 网关等不到 head
+    // 直到 30s 超时。这里先归一（脚本可以传 "429"/数字头值，别害整条流）。
+    const code = Number(status);
+    const safeStatus = Number.isInteger(code) && code >= 100 && code <= 599 ? code : 200;
+    const outHeaders = {};
+    if (headers && typeof headers === "object") {
+      for (const [k, v] of Object.entries(headers)) {
+        if (typeof k !== "string" || k.length === 0) continue;
+        if (typeof v === "string") outHeaders[k.toLowerCase()] = v;
+        else if (typeof v === "number" || typeof v === "boolean") {
+          outHeaders[k.toLowerCase()] = String(v);
+        }
+      }
+    }
+    const frame = { id, event: "head", status: safeStatus, headers: outHeaders };
+    if (typeof upstream === "string" && upstream.length > 0) frame.upstream = upstream;
+    // 窗口随 head 建立（与网关 StreamCall 的初始窗口同口径）：chunk 仅在
+    // 流已开时合法，窗口存在与否就是「流是否还开着」的判据。
+    if (!this.#windows.has(id)) this.#windows.set(id, DEFAULT_WINDOW_BYTES);
     await this.writeLine(frame);
   }
 
@@ -179,14 +227,43 @@ export class Wire {
    * 每块计费 = 载荷 + FRAME_OVERHEAD_BYTES，与网关 StreamCall 的消费计费
    * 同口径——差一个常量两边窗口就会缓慢泄漏，背压形同虚设。窗口不够时
    * 挂起等 credit（背压是常态不是错误，不设超时：网关死了 stdin EOF
-   * 会杀掉整个宿主）。
+   * 会杀掉整个宿主）。但**窗口已被本端关闭**（sendEnd / sendStreamError）
+   * 时必须立刻失败，否则等 credit 的协程永远醒不来、流资源永不释放。
    */
   async sendChunk(id, bytes) {
-    if (!this.#windows.has(id)) this.#windows.set(id, DEFAULT_WINDOW_BYTES);
     for (const piece of splitChunks(bytes)) {
-      await this.#waitForWindow(id, piece.length);
-      const rest = this.#windows.get(id) - piece.length - FRAME_OVERHEAD_BYTES;
-      this.#windows.set(id, rest);
+      // 计费口径必须与扣减口径一致：漏算 overhead 时宿主会在「只够载荷」
+      // 的窗口上再发一块，窗口被透支（网关按真实消费归还，两边不再对得上）。
+      const cost = piece.length + FRAME_OVERHEAD_BYTES;
+      for (;;) {
+        const cur = this.#windows.get(id);
+        if (cur === undefined) {
+          // 流已收尾（sendEnd / sendStreamError 摘了窗口）：后续块是协议违规
+          throw new ProviderError(
+            ErrorCodes.LocalPrecondition,
+            `stream ${id} already closed; refusing to send chunk`,
+          );
+        }
+        if (cur >= cost) {
+          this.#windows.set(id, cur - cost);
+          break;
+        }
+        // 兜底超时：网关丢弃流（不再等这条流，也不再归还额度）时，
+        // 无限等信用 = 永久挂起（见 CREDIT_WAIT_TIMEOUT_MS）。
+        const woke = await this.#waitForCredit(id, CREDIT_WAIT_TIMEOUT_MS);
+        if (!woke) {
+          if (!this.#windows.has(id)) {
+            throw new ProviderError(
+              ErrorCodes.LocalPrecondition,
+              `stream ${id} closed while waiting for credit`,
+            );
+          }
+          throw new ProviderError(
+            ErrorCodes.LocalPrecondition,
+            `stream ${id} credit wait timeout (${CREDIT_WAIT_TIMEOUT_MS}ms): gateway stopped consuming`,
+          );
+        }
+      }
       await this.writeLine({
         id,
         event: "chunk",
@@ -197,8 +274,7 @@ export class Wire {
 
   /** 流正常收尾。摘除窗口并唤醒所有等 credit 的挂起者（不会有下一块了）。 */
   async sendEnd(id) {
-    this.#windows.delete(id);
-    this.#wakeCreditWaiters(id);
+    this.#closeStream(id);
     try {
       await this.writeLine({ id, event: "end" });
     } catch (err) {
@@ -308,9 +384,13 @@ export class Wire {
     const streamId = Number(params.id);
     const n = Number(params.n);
     if (Number.isFinite(streamId) && Number.isFinite(n) && n > 0) {
-      const cur = this.#windows.get(streamId) ?? 0;
-      this.#windows.set(streamId, cur + n);
-      this.#wakeCreditWaiters(streamId);
+      // 只补充**还开着**的流：流收尾后迟到的 credit 不能重建表项（重建即
+      // 永久泄漏——没有第二次收尾会再来摘它）。窗口随 head 建立（sendHead），
+      // 网关的 credit 只可能跟着块回来，不会先到。
+      if (this.#windows.has(streamId)) {
+        this.#windows.set(streamId, this.#windows.get(streamId) + n);
+        this.#wakeCreditWaiters(streamId);
+      }
     }
     try {
       await this.writeLine({ id: frame.id, result: null });
@@ -319,17 +399,44 @@ export class Wire {
     }
   }
 
-  #waitForWindow(streamId, need) {
-    const cur = this.#windows.get(streamId) ?? 0;
-    if (cur >= need) return Promise.resolve();
+  /**
+   * 等一次窗口补充（credit 或流关闭）；超时/关闭返回 false。
+   *
+   * 醒来后由 sendChunk 重查额度：唤醒是「状态变了」而不是「额度够了」。
+   */
+  #waitForCredit(streamId, timeoutMs) {
     return new Promise((resolve) => {
       let waiters = this.#creditWaiters.get(streamId);
       if (!waiters) {
         waiters = [];
         this.#creditWaiters.set(streamId, waiters);
       }
-      waiters.push(resolve);
+      let settled = false;
+      const waiter = {
+        finish: (woken) => {
+          if (settled) return; // 超时与唤醒可能同时到达：只认第一个
+          settled = true;
+          clearTimeout(timer);
+          const i = waiters.indexOf(waiter);
+          if (i >= 0) waiters.splice(i, 1);
+          if (waiters.length === 0) this.#creditWaiters.delete(streamId);
+          resolve(woken);
+        },
+      };
+      const timer = setTimeout(() => waiter.finish(false), timeoutMs);
+      waiters.push(waiter);
     });
+  }
+
+  /**
+   * 摘窗口 + 唤醒等 credit 的挂起者（不能空转等一个永远不会来的 credit）。
+   *
+   * 唤醒是「状态变了，重查」而不是「额度够了」——挂起者醒来先看窗口还在
+   * 不在（被摘 = 流已收尾），再按当前额度决定发送还是继续等。
+   */
+  #closeStream(streamId) {
+    this.#windows.delete(streamId);
+    this.#wakeCreditWaiters(streamId);
   }
 
   #wakeCreditWaiters(streamId) {
@@ -338,7 +445,7 @@ export class Wire {
     this.#creditWaiters.delete(streamId);
     for (const w of waiters) {
       try {
-        w();
+        w.finish(true);
       } catch {
         // 唤醒回调不应抛
       }
