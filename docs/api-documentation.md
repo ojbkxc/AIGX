@@ -6,6 +6,25 @@
 - **Content-Type**: `application/json`
 - **认证方式**: Bearer Token (JWT)
 
+## 管理面 `/api/*` 响应壳约定
+
+同一网关里的管理端点产出于不同年代，成功/失败壳有两种形态并存。**新端点
+一律用标准壳**；老端点按表兼容，前端 `unwrap` 是兼容层不是契约：
+
+| 场景 | 形状 | 说明 |
+|---|---|---|
+| 成功（标准） | `{"success": true, "data": <值>}` | 绝大多数 `/api/*` 端点 |
+| 成功（裸值） | 直接返回业务对象/数组 | 历史端点（约 334 处）：前端按「缺 `data` 回退整包」兼容 |
+| 失败（标准） | `{"success": false, "error": "<可读消息>"}` | `api::admin::common::error_response` |
+| 失败（裸值） | `{"success": false, "message": "..."}` | 已收敛（network.rs 的重复实现已删除） |
+
+- 数据面 `/v1/*` 不走这套壳：错误统一为 OpenAI 规范
+  `{"error": {"message","type","param","code"}}`，跨协议错误码（Anthropic /
+  Bedrock / Vertex / Azure）由 `error_translate::render_openai_error` 推导，
+  状态码按 `BridgeError::http_status`（上游 4xx 透传、其余 502/503）。
+- 管理面新代码请用 `{"success": true, "data": ...}`；**不要**给同一端点混用
+  两种成功壳 —— 前端兼容层只能兜「缺 data」，兜不了语义不一致。
+
 ## 接口列表
 
 ---
