@@ -50,10 +50,9 @@ impl AccountLease {
 
 impl Drop for AccountLease {
     fn drop(&mut self) {
-        let mut sessions = self.inner.sessions.write();
-        if let Some(s) = sessions.iter_mut().find(|s| s.id == self.session.id) {
-            s.in_flight = s.in_flight.saturating_sub(1);
-        }
+        // 归还只动运行态表，不再拿 `sessions` 的写锁 —— 这是每请求一次的
+        // 热路径，过去它和选路一起抢同一把锁。
+        self.inner.release_runtime(&self.session.id);
     }
 }
 
@@ -163,6 +162,14 @@ impl SkipReasons {
 struct Inner {
     store: Arc<FileStore>,
     sessions: RwLock<Vec<AccountSession>>,
+    /// 运行态计数：`account id → (在途数, 最近使用时刻)`。
+    ///
+    /// **为什么从 `sessions` 里拆出来**：选路曾经必须拿 `sessions.write()`
+    /// 才能 `in_flight += 1`，于是所有请求在同一把写锁上串行，且锁内还要
+    /// 深拷贝选中账号（含凭证）。拆成独立的 `DashMap` 后，选路只读 `sessions`
+    /// （`read()` 可并发），在途计数走无锁分片；`AccountSession::in_flight` /
+    /// `last_used_at` 仍是权威快照值，每次选路时从这里同步回快照。
+    runtime: DashMap<String, AccountRuntime>,
     /// 账号目录能力索引（#40 §1）：启动时按账号构建，目录同步时增量刷新。
     /// 选号热路径按模型名查能力位，**零 DB 读**（见 `catalog::AccountCapabilityIndex`）。
     /// 备份/外部直写 KV 恢复后需重启才生效 —— 与 `ModelMetadataRegistry` 同口径。
@@ -175,6 +182,45 @@ struct Inner {
     retry_on_status: RwLock<Vec<u16>>,
     /// 落盘节流：account id → 上次持久化 unix 秒。
     persisted_at: DashMap<String, i64>,
+}
+
+/// 单个账号的运行态（不落盘，重启归零）。
+#[derive(Debug, Clone, Copy, Default)]
+struct AccountRuntime {
+    in_flight: u32,
+    last_used_at: Option<i64>,
+}
+
+impl Inner {
+    /// 在途数（读不到 = 0）。
+    fn in_flight_of(&self, id: &str) -> u32 {
+        self.runtime
+            .get(id)
+            .map(|entry| entry.in_flight)
+            .unwrap_or(0)
+    }
+
+    /// 原子「检查 + 占用」：返回新在途数；已达并发上限返回 `None`。
+    ///
+    /// 原实现靠 `sessions` 写锁把「检查上限 + 自增」串行化。选路改成读锁后，
+    /// 检查留在这里做 —— `DashMap` 的 entry 在持分片锁期间完成两步，并发
+    /// 请求不会同时越过 `max_concurrency`（硬上限语义不变）。
+    fn try_acquire_runtime(&self, id: &str, max_concurrency: u32, now: i64) -> Option<u32> {
+        let mut entry = self.runtime.entry(id.to_string()).or_default();
+        if max_concurrency > 0 && entry.in_flight >= max_concurrency {
+            return None;
+        }
+        entry.in_flight = entry.in_flight.saturating_add(1);
+        entry.last_used_at = Some(now);
+        Some(entry.in_flight)
+    }
+
+    /// 在途 -1（lease 归还）。
+    fn release_runtime(&self, id: &str) {
+        if let Some(mut entry) = self.runtime.get_mut(id) {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
+        }
+    }
 }
 
 /// 账号会话池（内部 `Arc`，`clone` 廉价——可安全塞进 `AppState`/Bridge）。
@@ -234,6 +280,7 @@ impl AccountSessionStore {
             inner: Arc::new(Inner {
                 store,
                 sessions: RwLock::new(Vec::new()),
+                runtime: DashMap::new(),
                 capabilities: RwLock::new(HashMap::new()),
                 egress,
                 policy: RwLock::new(RotationPolicy::default()),
@@ -372,8 +419,25 @@ impl AccountSessionStore {
     }
 
     /// 全部账号快照（管理面列表）。
+    ///
+    /// 运行态（在途数 / 最近使用）从 `runtime` 表叠加：快照里的这两个字段
+    /// 只是写入时刻的投影，不叠加就会让管理面永远显示 0 在途。
     pub fn all(&self) -> Vec<AccountSession> {
-        self.inner.sessions.read().clone()
+        let mut sessions = self.inner.sessions.read().clone();
+        self.overlay_runtime(&mut sessions);
+        sessions
+    }
+
+    /// 把运行态表的值写进快照（管理面/回放读路径共用）。
+    fn overlay_runtime(&self, sessions: &mut [AccountSession]) {
+        for session in sessions.iter_mut() {
+            if let Some(entry) = self.inner.runtime.get(&session.id) {
+                session.in_flight = entry.in_flight;
+                if entry.last_used_at.is_some() {
+                    session.last_used_at = entry.last_used_at;
+                }
+            }
+        }
     }
 
     /// 底层 KV 存储（账号池目录缓存等旁路数据也落在同一库里）。
@@ -383,13 +447,16 @@ impl AccountSessionStore {
 
     /// 指定渠道的账号快照。
     pub fn for_channel(&self, channel_id: &str) -> Vec<AccountSession> {
-        self.inner
+        let mut sessions: Vec<AccountSession> = self
+            .inner
             .sessions
             .read()
             .iter()
             .filter(|s| s.channel_id == channel_id)
             .cloned()
-            .collect()
+            .collect();
+        self.overlay_runtime(&mut sessions);
+        sessions
     }
 
     /// 指定渠道的**供应商名**（取首个非空 `provider`）。
@@ -407,13 +474,19 @@ impl AccountSessionStore {
     }
 
     /// 按 id 取账号（id 全局唯一）。
+    ///
+    /// 与 `all()`/`for_channel()` 同口径叠加运行态：否则管理面单账号详情
+    /// 看到的 `in_flight` 停在最后一次 `upsert` 时刻的投影值。
     pub fn get(&self, id: &str) -> Option<AccountSession> {
-        self.inner
+        let mut session = self
+            .inner
             .sessions
             .read()
             .iter()
             .find(|s| s.id == id)
-            .cloned()
+            .cloned()?;
+        self.overlay_runtime(std::slice::from_mut(&mut session));
+        Some(session)
     }
 
     /// 账号数量。
@@ -484,14 +557,18 @@ impl AccountSessionStore {
         }
         self.persist(&next)?;
         {
+            // 运行态在 `runtime` 表里，快照上的 `in_flight` / `last_used_at`
+            // 只是投影；写回快照时按运行态表重算，避免管理面覆盖掉计数。
+            let runtime = self.inner.runtime.get(&next.id).map(|e| *e);
+            let mut slot_value = next.clone();
+            if let Some(rt) = runtime {
+                slot_value.in_flight = rt.in_flight;
+                slot_value.last_used_at = rt.last_used_at;
+            }
             let mut sessions = self.inner.sessions.write();
-            match sessions.iter_mut().find(|s| s.id == next.id) {
-                Some(slot) => {
-                    let in_flight = slot.in_flight;
-                    *slot = next.clone();
-                    slot.in_flight = in_flight;
-                }
-                None => sessions.push(next.clone()),
+            match sessions.iter_mut().find(|s| s.id == slot_value.id) {
+                Some(slot) => *slot = slot_value,
+                None => sessions.push(slot_value),
             }
             sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         }
@@ -679,7 +756,9 @@ impl AccountSessionStore {
         } = filters;
         let mut detail = detail;
         let now = chrono::Utc::now().timestamp();
-        let mut sessions = self.inner.sessions.write();
+        // 选路只读 `sessions`：并发请求不再在同一把写锁上排队。运行态
+        // （在途数 / 最近使用）从独立 `runtime` 表读，选中后用无锁分片 +1。
+        let sessions = self.inner.sessions.read();
         // 能力索引只在有需求时上锁（空需求 = 老路径，连锁都不碰）。
         // 锁序统一 sessions → capabilities，与 `channel_may_serve` 一致。
         let capabilities = if needs.is_empty() {
@@ -799,7 +878,9 @@ impl AccountSessionStore {
                 }
                 continue;
             }
-            if session.max_concurrency > 0 && session.in_flight >= session.max_concurrency {
+            if session.max_concurrency > 0
+                && self.inner.in_flight_of(&session.id) >= session.max_concurrency
+            {
                 reasons.concurrency += 1;
                 if let Some(cap) = detail.as_mut() {
                     cap.push(self.skip_detail(session, "concurrency"));
@@ -837,12 +918,45 @@ impl AccountSessionStore {
         // priority 组已在上面切好，sort_order 不会跨组串动。
         let group = narrow_to_top_sort_order(&sessions, group);
         let order = scope.map(|s| s.account_order.as_slice()).unwrap_or(&[]);
-        let pick = pick_by_rules(&sessions, &group, order, sort_rules)
-            .unwrap_or_else(|| pick_weighted(&sessions, &group, now));
-        let next_in_flight = sessions[pick].in_flight.saturating_add(1);
-        sessions[pick].in_flight = next_in_flight;
-        sessions[pick].last_used_at = Some(now);
-        let session = sessions[pick].clone();
+        // 抢占式占用：上面的并发快速过滤读的是运行态快照，两个并发请求可能
+        // 同时看到一个空位（原实现靠写锁串行免掉这个窗口）。这里对选中的
+        // 账号做原子的「检查 + 自增」，失败就把该账号踢出候选再选一次 ——
+        // 并发上限仍是硬约束，也不至于因一个热门账号占满就整渠道失败。
+        let mut contended: Vec<&str> = Vec::new();
+        let mut claimed: Option<(usize, u32)> = None;
+        loop {
+            let available: Vec<usize> = group
+                .iter()
+                .copied()
+                .filter(|index| !contended.contains(&sessions[*index].id.as_str()))
+                .collect();
+            if available.is_empty() {
+                break;
+            }
+            let pick = pick_by_rules(&sessions, &available, order, sort_rules)
+                .unwrap_or_else(|| pick_weighted(&sessions, &available, now));
+            match self.inner.try_acquire_runtime(
+                &sessions[pick].id,
+                sessions[pick].max_concurrency,
+                now,
+            ) {
+                Some(next_in_flight) => {
+                    claimed = Some((pick, next_in_flight));
+                    break;
+                }
+                None => contended.push(&sessions[pick].id),
+            }
+        }
+        let Some((pick, next_in_flight)) = claimed else {
+            // 全部候选都在窗口内被抢光：与快速过滤同口径计数
+            reasons.concurrency += contended.len();
+            return (None, reasons);
+        };
+        // 快照上的两个字段是**投影**，在下面克隆前同步回读到的值，
+        // 保证命中方拿到的 `in_flight` 是准确的。
+        let mut session = sessions[pick].clone();
+        session.in_flight = next_in_flight;
+        session.last_used_at = Some(now);
         drop(sessions);
         self.persist_throttled(&session);
         (
@@ -1860,6 +1974,68 @@ mod tests {
             assert!(pool.acquire("ch", "m", None).is_none());
             drop(lease);
             assert!(pool.acquire("ch", "m", None).is_some());
+        });
+    }
+
+    /// 回归（R3）：并发上限是硬约束 —— 选路改读锁后，多线程同时抢同一个
+    /// 账号也不能越过 `max_concurrency`（检查+自增在 runtime 分片锁内原子）。
+    #[test]
+    fn concurrent_acquire_never_exceeds_max_concurrency() {
+        with_secret_dir("runtime-race", || {
+            let pool = pool();
+            let mut only = session("ch", "only", 0);
+            only.max_concurrency = 1;
+            pool.upsert(only).unwrap();
+            let barrier = Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let pool = pool.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        pool.acquire("ch", "m", None)
+                    })
+                })
+                .collect();
+            let leases: Vec<_> = handles
+                .into_iter()
+                .filter_map(|handle| handle.join().unwrap())
+                .collect();
+            assert_eq!(leases.len(), 1, "并发上限必须挡住其余 7 个请求");
+            assert_eq!(pool.all()[0].in_flight, 1);
+            drop(leases);
+            assert_eq!(pool.all()[0].in_flight, 0);
+        });
+    }
+
+    /// 回归（R3）：在途计数从 `sessions` 拆到独立 `runtime` 表后，
+    /// 管理面读路径必须叠加运行态，且运行态不落盘（重启归零）。
+    #[test]
+    fn runtime_counts_overlay_into_snapshots_and_stay_off_disk() {
+        with_secret_dir("runtime-overlay", || {
+            let dir = TempDir::new().unwrap();
+            let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+            let pool = AccountSessionStore::new(store.clone());
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            assert_eq!(pool.all()[0].in_flight, 0);
+
+            let lease = pool.acquire("ch", "m", None).expect("首个租约");
+            assert_eq!(lease.id(), account.id);
+            // 三个管理面读出口同口径叠加：全量 / 按渠道 / 按 id
+            assert_eq!(pool.all()[0].in_flight, 1);
+            assert_eq!(pool.for_channel("ch")[0].in_flight, 1);
+            assert_eq!(pool.get(&account.id).unwrap().in_flight, 1);
+            // 快照上的 last_used_at 同步刷新（原值可能是 None）
+            assert!(pool.get(&account.id).unwrap().last_used_at.is_some());
+
+            // 运行态不落盘：换一个实例从同一 KV 加载，在途数归零——
+            // 否则网关重启会把「崩溃前在途」永久算进并发上限。
+            let reloaded = AccountSessionStore::new(store.clone());
+            assert_eq!(reloaded.all()[0].in_flight, 0);
+
+            // 归还只动 runtime：原实例叠加后也归零
+            drop(lease);
+            assert_eq!(pool.all()[0].in_flight, 0);
         });
     }
 

@@ -768,6 +768,70 @@ impl RequestLogStore {
         format!("reqlog:{}:{}", log.created_at, log.id)
     }
 
+    /// 二级索引键：`request_id`（以及日志自带的 `id`）→ 主键。
+    ///
+    /// `reqlog:{ts}:{id}` 的两个部分都是写入时才定的，光凭 `request_id`
+    /// 找不到主键，历史上只能 `list_all()` 全键 + 逐条反序列化去比对 ——
+    /// 日志保留量上万后单次详情查询就是秒级。写入时顺手记一条索引，
+    /// `get_by_request_id` 就能 O(1) 点查。
+    ///
+    /// 键里对 id 做百分号转义：`request_id` 可能含 `/`（Anthropic 的
+    /// `req_...` 之外还有客户端自带格式），直接拼进键会破坏前缀语义。
+    fn index_key(id: &str, value: &str) -> String {
+        format!("reqlog_id:{id}={value}")
+    }
+
+    fn escape_index_component(value: &str) -> String {
+        value.replace('%', "%25").replace('=', "%3D")
+    }
+
+    /// 写入某条日志的索引（`id` 与 `request_id` 各一条，重复的不重复写）。
+    fn write_indexes(&self, log: &RequestLog, primary: &str) -> anyhow::Result<()> {
+        let mut written: Vec<&str> = Vec::new();
+        for candidate in std::iter::once(log.id.as_str())
+            .chain(log.request_id.as_deref())
+            .filter(|value| !value.is_empty())
+        {
+            if written.contains(&candidate) {
+                continue;
+            }
+            written.push(candidate);
+            let key = Self::index_key(&Self::escape_index_component(candidate), primary);
+            self.store.put(&key, &true)?;
+        }
+        Ok(())
+    }
+
+    /// 删日志时连带删它的索引。
+    ///
+    /// 删除路径手里通常只有主键（保留期裁剪、容量裁剪、清空），所以这里先
+    /// 读出整条日志拿 `request_id` —— 只多一次点查，但能避免留下指向已删
+    /// 主键的悬空索引（`get_by_request_id` 命中它只会白跑一次 get）。
+    fn delete_indexes_by_primary(&self, primary: &str) {
+        let mut candidates: Vec<String> = Vec::new();
+        if let Ok(Some(log)) = self.store.get::<RequestLog>(primary) {
+            if !log.id.is_empty() {
+                candidates.push(log.id);
+            }
+            if let Some(request_id) = log.request_id.filter(|value| !value.is_empty()) {
+                candidates.push(request_id);
+            }
+        }
+        if candidates.is_empty() {
+            // 读不到（已损坏/已删）：至少按主键尾段兜底
+            if let Some(id) = primary.rsplit(':').next().filter(|id| !id.is_empty()) {
+                candidates.push(id.to_string());
+            }
+        }
+        candidates.dedup();
+        for candidate in candidates {
+            let key = Self::index_key(&Self::escape_index_component(&candidate), primary);
+            if let Err(e) = self.store.delete(&key) {
+                tracing::warn!("request log index delete failed for {key}: {e}");
+            }
+        }
+    }
+
     /// 追加一条请求日志
     pub fn add(&self, mut log: RequestLog) -> anyhow::Result<RequestLog> {
         if log.id.is_empty() {
@@ -787,6 +851,7 @@ impl RequestLogStore {
         }
         let key = Self::key_of(&log);
         self.store.put(&key, &log)?;
+        self.write_indexes(&log, &key)?;
         Ok(log)
     }
 
@@ -890,6 +955,7 @@ impl RequestLogStore {
         const BATCH: usize = 5000;
         for chunk in std::mem::take(&mut doomed).chunks(BATCH) {
             for k in chunk {
+                self.delete_indexes_by_primary(k);
                 if let Err(e) = self.store.delete(k) {
                     tracing::warn!("retention delete failed for {k}: {e}");
                 }
@@ -935,9 +1001,31 @@ impl RequestLogStore {
 
     /// Phase1-B 路由回放：按 request_id（或日志 id）取单条请求日志。
     ///
-    /// 管理面冷路径：线性扫保留窗口内的日志（有 retention 上限），不做
-    /// 额外索引；命中最新一条即返回。
+    /// 按 `request_id`（或日志自带 `id`）查单条请求日志。
+    ///
+    /// **走二级索引**：写入时 `write_indexes` 记了 `reqlog_id:{id}={主键}`，
+    /// 这里先索引点查，命中直接按主键取整条 —— O(1)，不再全键扫描 + 逐条
+    /// 反序列化比对。索引缺失（历史数据、索引被手工清过）时回退旧的全扫，
+    /// 行为不变、只是慢。
     pub fn get_by_request_id(&self, request_id: &str) -> Option<RequestLog> {
+        let index_key = Self::index_key(&Self::escape_index_component(request_id), "");
+        // 索引键前缀是 `reqlog_id:{id}=`，主键跟在 `=` 之后；用前缀列键取最新一条
+        // （同一 request_id 理论上唯一，重复时取最新与旧全扫 `find` 的语义一致）。
+        if let Ok(keys) = self
+            .store
+            .list_latest_keys(&index_key, 1)
+            .or_else(|_| self.store.list(&index_key))
+        {
+            if let Some(key) = keys.first() {
+                let primary = key.split_once('=').map(|(_, rest)| rest).unwrap_or("");
+                if !primary.is_empty() {
+                    if let Ok(Some(log)) = self.store.get::<RequestLog>(primary) {
+                        return Some(log);
+                    }
+                }
+            }
+        }
+        // 回退：索引没命中（历史数据未建索引 / request_id 只存在于旧记录）
         self.list_all()
             .into_iter()
             .find(|l| l.id == request_id || l.request_id.as_deref() == Some(request_id))
@@ -1025,6 +1113,7 @@ impl RequestLogStore {
         let keys = self.store.list("reqlog:")?;
         let target = keys.into_iter().find(|k| k.ends_with(&format!(":{id}")));
         if let Some(k) = target {
+            self.delete_indexes_by_primary(&k);
             self.store.delete(&k)?;
         }
         Ok(())
@@ -1041,11 +1130,12 @@ impl RequestLogStore {
         removed
     }
 
-    /// 清空全部请求日志，返回删除条数
+    /// 清空全部请求日志（连同它们的二级索引），返回删除条数
     pub fn clear_all(&self) -> anyhow::Result<usize> {
         let keys = self.store.list("reqlog:")?;
         let n = keys.len();
         for k in &keys {
+            self.delete_indexes_by_primary(k);
             if let Err(e) = self.store.delete(k) {
                 tracing::warn!("clear request log failed for {k}: {e}");
             }
@@ -1463,6 +1553,11 @@ pub(crate) fn purge_request_overflow(store: &FileStore) -> anyhow::Result<()> {
     let excess =
         (timed.len().saturating_sub(max_logs) + RequestLogStore::PURGE_BATCH).min(timed.len());
     for (_, k) in timed.into_iter().take(excess) {
+        if let Some(id) = k.rsplit(':').next().filter(|id| !id.is_empty()) {
+            let index =
+                RequestLogStore::index_key(&RequestLogStore::escape_index_component(id), &k);
+            let _ = store.delete(&index);
+        }
         if let Err(e) = store.delete(&k) {
             tracing::warn!("request log purge failed for {k}: {e}");
         }
@@ -2136,6 +2231,34 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].model, "gpt-4");
         assert_eq!(all[0].input_tokens, 100);
+    }
+
+    /// R2：`get_by_request_id` 走二级索引（写入时建的 `reqlog_id:{id}={主键}`）。
+    ///
+    /// 这里断言的是**语义正确性**（按日志 id 与 request_id 都能查到、
+    /// 删除后不再命中、重复写入不会互相顶掉），索引的 O(1) 特性由
+    /// 存储层 `list_latest_keys` 的单键 LIMIT 保证，不在单测里计时间。
+    #[test]
+    fn get_by_request_id_uses_index_and_survives_delete() {
+        let s = store();
+        let mut log = RequestLog::new();
+        log.id = "log-abc".to_string();
+        log.request_id = Some("req/with=special".to_string());
+        log.model = "m1".to_string();
+        s.requests.add(log).unwrap();
+
+        let by_id = s.requests.get_by_request_id("log-abc").expect("按 id 命中");
+        assert_eq!(by_id.model, "m1");
+        let by_request = s
+            .requests
+            .get_by_request_id("req/with=special")
+            .expect("按 request_id 命中（含 / 与 = 的转义）");
+        assert_eq!(by_request.model, "m1");
+
+        // 删除后两条索引都必须清理干净，不能留悬空
+        s.requests.delete_by_id("log-abc").unwrap();
+        assert!(s.requests.get_by_request_id("log-abc").is_none());
+        assert!(s.requests.get_by_request_id("req/with=special").is_none());
     }
 
     #[test]
