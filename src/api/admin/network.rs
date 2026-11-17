@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::verify_admin;
+use super::common::{error_response, verify_admin};
 use crate::account::CfAccount;
 
 /// 持久化 key：FileStore 中的网络层配置 JSON。
@@ -538,12 +538,10 @@ pub async fn restart_network(
     })))
 }
 
-/// 统一错误响应（与 admin 模块其他 handler 一致的 (StatusCode, Json) 形态）
-fn error_response(msg: &str, status: StatusCode) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "success": false, "message": msg })))
-}
-
-/// 错误类型
+/// 网络层管理面的错误类型（实现 `IntoResponse`，新代码可直接 `?`）。
+///
+/// 与 `api/admin/common.rs::error_response` 同壳（`{"success": false, "error"}`）
+/// —— 两处返回形状必须一致，否则前端同一段解析会在不同端点行为分叉。
 #[derive(Debug)]
 pub enum ApiError {
     NetworkLayerDisabled,
@@ -552,4 +550,33 @@ pub enum ApiError {
     AlreadyExists,
     NotImplemented,
     Internal(String),
+}
+
+impl ApiError {
+    /// 对应的 HTTP 状态与文案。
+    fn parts(&self) -> (StatusCode, String) {
+        match self {
+            Self::NetworkLayerDisabled => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "网络层已被管理员关闭（设置 → 网络层）".to_string(),
+            ),
+            Self::NetworkLayerNotStarted => {
+                (StatusCode::SERVICE_UNAVAILABLE, "网络层未启动".to_string())
+            }
+            Self::AccountNotFound => (StatusCode::NOT_FOUND, "账号未找到".to_string()),
+            Self::AlreadyExists => (StatusCode::CONFLICT, "资源已存在".to_string()),
+            Self::NotImplemented => (
+                StatusCode::NOT_IMPLEMENTED,
+                "该网络层后端尚未实现".to_string(),
+            ),
+            Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+        }
+    }
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, message) = self.parts();
+        error_response(&message, status).into_response()
+    }
 }
