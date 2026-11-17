@@ -8,6 +8,7 @@ import { cycleTheme } from '../lib/theme';
 import { useAltcha } from '../hooks/useAltcha';
 import { useBranding } from '../hooks/useBranding';
 import AltchaWidget from '../components/AltchaWidget';
+import TurnstileWidget from '../components/TurnstileWidget';
 
 /**
  * 把登录接口的错误统一成用户能读懂的中文。
@@ -535,8 +536,32 @@ export default function Login(): JSX.Element {
           </form>
         ) : (
         <>
-        {/* 机器人校验：挂载即自动求解，真人不需操作；失败可点击重试 */}
-        <AltchaWidget state={altcha.state} onRetry={altcha.reset} />
+        {/* 机器人校验：ALTCHA 挂载即自动求解；Turnstile 渲染 Cloudflare 组件。
+            提供方由后端 challenge 的 provider 字段决定，前端不自选。 */}
+        {altcha.provider === 'turnstile' ? (
+          <div>
+            <TurnstileWidget
+              key={altcha.widgetKey}
+              siteKey={altcha.siteKey}
+              onToken={altcha.setTurnstileToken}
+              onError={altcha.markError}
+            />
+            {altcha.state === 'error' && (
+              <button
+                type="button"
+                onClick={altcha.reset}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontSize: '12px', color: 'var(--error-color, #dc2626)', padding: '0 0 12px',
+                }}
+              >
+                {t('机器人校验失败，点击重试')}
+              </button>
+            )}
+          </div>
+        ) : (
+          <AltchaWidget state={altcha.state} onRetry={altcha.reset} />
+        )}
 
         {/* 登录方式切换：密码 / 邮箱验证码 */}
         <div style={{

@@ -132,7 +132,7 @@ pub async fn handle_login(
                 StatusCode::BAD_REQUEST,
             ));
         }
-        if let Err(message) = crate::altcha::verify(&state, token) {
+        if let Err(message) = crate::altcha::verify(&state, token).await {
             return Err(error_response(&message, StatusCode::BAD_REQUEST));
         }
     }
@@ -348,7 +348,7 @@ pub async fn handle_register(
                 StatusCode::BAD_REQUEST,
             ));
         }
-        if let Err(message) = crate::altcha::verify(&state, token) {
+        if let Err(message) = crate::altcha::verify(&state, token).await {
             return Err(error_response(&message, StatusCode::BAD_REQUEST));
         }
     }
@@ -1946,7 +1946,7 @@ pub async fn handle_login_with_code(
                 StatusCode::BAD_REQUEST,
             ));
         }
-        if let Err(message) = crate::altcha::verify(&state, token) {
+        if let Err(message) = crate::altcha::verify(&state, token).await {
             return Err(error_response(&message, StatusCode::BAD_REQUEST));
         }
     }

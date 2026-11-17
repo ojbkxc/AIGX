@@ -672,6 +672,8 @@ async fn main() -> anyhow::Result<()> {
     );
     // 机器人校验开关快照（登录 / 注册 handler 同步读取）
     config::set_security_captcha(security.captcha_enabled);
+    // 机器人校验提供方快照（altcha | turnstile + Turnstile site key）
+    config::set_security_captcha_provider(&security.captcha_provider, &security.turnstile_site_key);
 
     // 邮箱验证码登录：<email> → 6 位验证码（TTL=5 分钟）
     let login_code_cache = Arc::new(

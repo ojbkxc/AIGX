@@ -980,6 +980,17 @@ pub struct SecurityPolicyConfig {
     /// 失败锁定拦的是「同源高频失败」（换 IP 就绕开），本项补的是另一维。
     #[serde(default = "default_captcha_enabled")]
     pub captcha_enabled: bool,
+    /// 机器人校验提供方：`altcha`（默认，自托管 proof-of-work）/ `turnstile`
+    /// （Cloudflare Turnstile，须另配 site/secret key）。
+    #[serde(default = "default_captcha_provider")]
+    pub captcha_provider: String,
+    /// Cloudflare Turnstile site key（公开，随 challenge 下发给前端渲染组件）。
+    #[serde(default)]
+    pub turnstile_site_key: String,
+}
+
+fn default_captcha_provider() -> String {
+    "altcha".to_string()
 }
 
 fn default_captcha_enabled() -> bool {
@@ -1014,6 +1025,8 @@ impl Default for SecurityPolicyConfig {
             lock_minutes: default_lock_minutes(),
             rate_limit_per_minute: default_rate_limit_per_minute(),
             captcha_enabled: default_captcha_enabled(),
+            captcha_provider: default_captcha_provider(),
+            turnstile_site_key: String::new(),
         }
     }
 }
@@ -1021,12 +1034,19 @@ impl Default for SecurityPolicyConfig {
 impl SecurityPolicyConfig {
     /// 落盘与运行期都用归一化后的值（越界输入夹到合法区间）。
     pub fn normalized(&self) -> Self {
+        let provider = self.captcha_provider.trim().to_ascii_lowercase();
         Self {
             lockout_enabled: self.lockout_enabled,
             fail_threshold: self.fail_threshold.clamp(1, 100),
             lock_minutes: self.lock_minutes.clamp(1, 1440),
             rate_limit_per_minute: self.rate_limit_per_minute.clamp(1, 1000),
             captcha_enabled: self.captcha_enabled,
+            // 未知提供方一律回落 altcha（自托管，永不因配置手滑把登录打出站）
+            captcha_provider: match provider.as_str() {
+                "turnstile" => "turnstile".to_string(),
+                _ => "altcha".to_string(),
+            },
+            turnstile_site_key: self.turnstile_site_key.trim().to_string(),
         }
     }
 }
@@ -1315,6 +1335,12 @@ static SECURITY_RATE_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 /// 是否启用机器人校验（ALTCHA proof-of-work，默认开）。
 static SECURITY_CAPTCHA_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
+/// 机器人校验提供方（`altcha` / `turnstile`；空 = 默认 altcha）。
+static SECURITY_CAPTCHA_PROVIDER: parking_lot::RwLock<String> =
+    parking_lot::RwLock::new(String::new());
+/// Turnstile site key（公开；未配置时 turnstile 模式视为不可用）。
+static SECURITY_TURNSTILE_SITE_KEY: parking_lot::RwLock<String> =
+    parking_lot::RwLock::new(String::new());
 
 /// 读取「是否启用失败锁定」快照。
 pub fn security_lockout_enabled() -> bool {
@@ -1353,6 +1379,31 @@ pub fn set_security_policy(lockout_enabled: bool, fail_threshold: u32, rate_limi
 /// 由 main 启动与 settings 更新端点写入机器人校验开关。
 pub fn set_security_captcha(v: bool) {
     SECURITY_CAPTCHA_ENABLED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 读取机器人校验提供方（`altcha` / `turnstile`；登录路径同步读取）。
+pub fn security_captcha_provider() -> String {
+    let current = SECURITY_CAPTCHA_PROVIDER.read().clone();
+    if current.is_empty() {
+        "altcha".to_string()
+    } else {
+        current
+    }
+}
+
+/// 读取 Turnstile site key（公开；空 = 未配置）。
+pub fn security_turnstile_site_key() -> String {
+    SECURITY_TURNSTILE_SITE_KEY.read().clone()
+}
+
+/// 由 main 启动与 settings 更新端点写入提供方快照。
+pub fn set_security_captcha_provider(provider: &str, turnstile_site_key: &str) {
+    let provider = provider.trim().to_ascii_lowercase();
+    *SECURITY_CAPTCHA_PROVIDER.write() = match provider.as_str() {
+        "turnstile" => "turnstile".to_string(),
+        _ => "altcha".to_string(),
+    };
+    *SECURITY_TURNSTILE_SITE_KEY.write() = turnstile_site_key.trim().to_string();
 }
 
 // ── 报表时区快照（`[report]` 段）────────────────────────────────
@@ -2027,6 +2078,31 @@ fn apply_env_overrides_from(mut config: AppConfig, var: fn(&str) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::redact_url_credentials;
+    use super::SecurityPolicyConfig;
+
+    /// captcha provider 归一化：大小写/空白容忍，未知值回落自托管的 altcha
+    /// （配置手滑不能把登录打到第三方）；site key 去空白。
+    #[test]
+    fn security_policy_normalizes_captcha_provider() {
+        let mut cfg = SecurityPolicyConfig {
+            captcha_provider: " Turnstile ".to_string(),
+            turnstile_site_key: "  site-key  ".to_string(),
+            ..SecurityPolicyConfig::default()
+        };
+        let normalized = cfg.normalized();
+        assert_eq!(normalized.captcha_provider, "turnstile");
+        assert_eq!(normalized.turnstile_site_key, "site-key");
+
+        cfg.captcha_provider = "hcaptcha".to_string();
+        assert_eq!(
+            cfg.normalized().captcha_provider,
+            "altcha",
+            "未知提供方回落 altcha"
+        );
+
+        cfg.captcha_provider = String::new();
+        assert_eq!(cfg.normalized().captcha_provider, "altcha");
+    }
 
     #[test]
     fn redacts_database_credentials_in_logs() {

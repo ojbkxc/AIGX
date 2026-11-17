@@ -806,17 +806,30 @@ pub struct SecurityPolicyRequest {
     pub fail_threshold: Option<u32>,
     pub lock_minutes: Option<u64>,
     pub rate_limit_per_minute: Option<u32>,
-    /// 机器人校验（ALTCHA proof-of-work）开关
+    /// 机器人校验开关（ALTCHA/Turnstile）
     pub captcha_enabled: Option<bool>,
+    /// 机器人校验提供方：`altcha`（默认）/ `turnstile`
+    pub captcha_provider: Option<String>,
+    /// Turnstile site key（公开）
+    pub turnstile_site_key: Option<String>,
+    /// Turnstile secret key：缺省 = 不改；空串 = 清除；非空 = 覆盖（存 KV，不落 config）
+    pub turnstile_secret_key: Option<String>,
 }
 
-fn security_policy_json(config: &crate::config::SecurityPolicyConfig) -> Value {
+fn security_policy_json(
+    config: &crate::config::SecurityPolicyConfig,
+    turnstile_secret_set: bool,
+) -> Value {
     json!({
         "lockoutEnabled": config.lockout_enabled,
         "failThreshold": config.fail_threshold,
         "lockMinutes": config.lock_minutes,
         "rateLimitPerMinute": config.rate_limit_per_minute,
         "captchaEnabled": config.captcha_enabled,
+        "captchaProvider": config.captcha_provider,
+        "turnstileSiteKey": config.turnstile_site_key,
+        // 只回「是否已设置」，secret 明文永不出网关
+        "turnstileSecretSet": turnstile_secret_set,
         // `lockMinutes` 是失败计数缓存的 TTL，建缓存时固定 → 改后需重启服务生效；
         // 其余走原子快照，保存即生效。
         "restartRequiredFields": ["lockMinutes"],
@@ -831,7 +844,10 @@ pub async fn handle_get_security_policy(
     let config = verify_admin(&state, &headers).await?;
     Ok(Json(json!({
         "success": true,
-        "data": security_policy_json(&config.security),
+        "data": security_policy_json(
+            &config.security,
+            crate::altcha::turnstile_secret_set(&state),
+        ),
     })))
 }
 
@@ -845,6 +861,8 @@ pub async fn handle_update_security_policy(
     Json(body): Json<SecurityPolicyRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // 字段级读-改-写（P2）
+    // secret 存 KV 不落 config：先取出（body 会被闭包 move），写完配置再落 KV
+    let turnstile_secret = body.turnstile_secret_key.clone();
     let config = update_admin_config(&state, &headers, move |config| {
         if let Some(v) = body.lockout_enabled {
             config.security.lockout_enabled = v;
@@ -861,21 +879,37 @@ pub async fn handle_update_security_policy(
         if let Some(v) = body.captcha_enabled {
             config.security.captcha_enabled = v;
         }
+        if let Some(v) = body.captcha_provider.as_deref() {
+            config.security.captcha_provider = v.to_string();
+        }
+        if let Some(v) = body.turnstile_site_key.as_deref() {
+            config.security.turnstile_site_key = v.to_string();
+        }
         config.security = config.security.normalized();
         Ok(())
     })
     .await?;
+    if let Some(secret) = turnstile_secret {
+        crate::altcha::set_turnstile_secret(&state, &secret);
+    }
     // 阈值 / 限流 / 开关立即生效（登录 handler 读进程级快照）
     crate::config::set_security_policy(
         config.security.lockout_enabled,
         config.security.fail_threshold,
         config.security.rate_limit_per_minute,
     );
-    // 机器人校验开关走进程级快照，保存即生效
+    // 机器人校验开关 / 提供方 / site key 走进程级快照，保存即生效
     crate::config::set_security_captcha(config.security.captcha_enabled);
+    crate::config::set_security_captcha_provider(
+        &config.security.captcha_provider,
+        &config.security.turnstile_site_key,
+    );
     Ok(Json(json!({
         "success": true,
-        "data": security_policy_json(&config.security),
+        "data": security_policy_json(
+            &config.security,
+            crate::altcha::turnstile_secret_set(&state),
+        ),
     })))
 }
 

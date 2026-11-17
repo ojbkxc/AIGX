@@ -41,6 +41,10 @@ use crate::api::openai::AppState;
 
 /// 密钥在 KV 里的存储键。
 const KV_SECRET_KEY: &str = "auth.altcha_secret";
+/// Turnstile secret 在 KV 里的存储键（与 ALTCHA 密钥同库、不落 config.toml）。
+const KV_TURNSTILE_SECRET: &str = "auth.turnstile_secret";
+/// Cloudflare Turnstile 校验地址。
+const TURNSTILE_SITEVERIFY: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 /// challenge 有效期：登录页加载到提交的合理上限（对齐上游同款 10 分钟）。
 const CHALLENGE_TTL_MS: i64 = 10 * 60 * 1000;
 /// 枚举上限量级：浏览器分批枚举 5–10 万次 SHA-256 在百毫秒到一秒级，对
@@ -115,11 +119,42 @@ pub fn enabled() -> bool {
     crate::config::security_captcha_enabled()
 }
 
+/// 当前**生效**的校验提供方。
+///
+/// `turnstile` 只有在 site key 与 secret 都已配置时才真正启用；缺任一项一律
+/// 回落 `altcha`（自托管），避免「开关打开但配置不全」把登录锁死 —— 前端
+/// challenge 形状与后端 verify 分派必须看同一个生效值。
+pub fn effective_provider(state: &AppState) -> &'static str {
+    if crate::config::security_captcha_provider() == "turnstile"
+        && !crate::config::security_turnstile_site_key()
+            .trim()
+            .is_empty()
+        && turnstile_secret_set(state)
+    {
+        "turnstile"
+    } else {
+        "altcha"
+    }
+}
+
 /// 签发一道 challenge（登录页的 `GET /api/auth/captcha` 用）。
 /// 开关关闭时返回 `None`（端点回 400，前端跳过校验）。
+///
+/// 按生效提供方返回不同形状：
+/// - `altcha`：proof-of-work 题面（`algorithm/challenge/maxnumber/salt/signature`）；
+/// - `turnstile`：`{provider, siteKey}`（前端据此加载 Cloudflare 组件）。
+///
+/// 两种都带 `provider` 字段，前端只认它，不猜形状。
 pub fn challenge(state: &AppState) -> Option<Value> {
     if !enabled() {
         return None;
+    }
+    if effective_provider(state) == "turnstile" {
+        let site_key = crate::config::security_turnstile_site_key();
+        return Some(json!({
+            "provider": "turnstile",
+            "siteKey": site_key,
+        }));
     }
     let salt = random_hex(12);
     let maxnumber = random_range(MAXNUMBER_MIN, MAXNUMBER_MAX);
@@ -142,6 +177,7 @@ pub fn challenge(state: &AppState) -> Option<Value> {
     }
 
     Some(json!({
+        "provider": "altcha",
         "algorithm": "SHA-256",
         "challenge": challenge_hex,
         "maxnumber": maxnumber,
@@ -150,12 +186,96 @@ pub fn challenge(state: &AppState) -> Option<Value> {
     }))
 }
 
-/// 验证登录 / 注册请求携带的 ALTCHA payload。
+/// Turnstile secret 是否已配置（设置页只回「是否已设置」，不回明文）。
+pub fn turnstile_secret_set(state: &AppState) -> bool {
+    state
+        .alert_store
+        .get::<String>(KV_TURNSTILE_SECRET)
+        .ok()
+        .flatten()
+        .is_some_and(|secret| !secret.trim().is_empty())
+}
+
+/// 设置 / 清除 Turnstile secret（空串 = 清除；存 KV，不写 config.toml）。
+pub fn set_turnstile_secret(state: &AppState, secret: &str) {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        if let Err(error) = state.alert_store.delete(KV_TURNSTILE_SECRET) {
+            tracing::warn!("clear turnstile secret failed: {error}");
+        }
+    } else if let Err(error) = state
+        .alert_store
+        .put(KV_TURNSTILE_SECRET, &secret.to_string())
+    {
+        tracing::warn!("persist turnstile secret failed: {error}");
+    }
+}
+
+/// 验证登录 / 注册请求携带的机器人校验 payload。
 /// 失败返回给用户看的原因（端点原样转 400）。开关关闭时直接放行。
-pub fn verify(state: &AppState, token: &str) -> Result<(), String> {
+///
+/// 按生效提供方分派：`altcha` 本地验签（同步），`turnstile` 调 Cloudflare
+/// siteverify（异步，5s 超时）。配置不全时 `effective_provider` 已回落
+/// altcha，前后端不会各走一半。
+pub async fn verify(state: &AppState, token: &str) -> Result<(), String> {
     if !enabled() {
         return Ok(());
     }
+    if effective_provider(state) == "turnstile" {
+        return verify_turnstile(state, token).await;
+    }
+    verify_altcha(state, token)
+}
+
+/// Cloudflare Turnstile：token 由前端组件产出，服务端调 siteverify 校验。
+async fn verify_turnstile(state: &AppState, token: &str) -> Result<(), String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("请先完成机器人校验".to_string());
+    }
+    let secret = state
+        .alert_store
+        .get::<String>(KV_TURNSTILE_SECRET)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if secret.trim().is_empty() {
+        return Err("Turnstile 未配置 secret key，请管理员先完成配置".to_string());
+    }
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+    let response = client
+        .post(TURNSTILE_SITEVERIFY)
+        .form(&[("secret", secret.trim()), ("response", token)])
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!("turnstile siteverify request failed: {error}");
+            "机器人校验服务不可用，请稍后重试".to_string()
+        })?;
+    let body: Value = response.json().await.map_err(|error| {
+        tracing::warn!("turnstile siteverify bad response: {error}");
+        "机器人校验服务返回异常，请稍后重试".to_string()
+    })?;
+    if body.get("success").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    tracing::warn!(
+        "turnstile rejected token: {}",
+        body.get("error-codes")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    );
+    Err("机器人校验未通过，请刷新页面重试".to_string())
+}
+
+/// ALTCHA 本地验签 + 台账校验（原 `verify` 主体）。
+fn verify_altcha(state: &AppState, token: &str) -> Result<(), String> {
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(token.trim())
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(token.trim()))

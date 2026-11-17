@@ -28,6 +28,10 @@ export default function SecurityPolicyPanel(): JSX.Element {
   const [lockMinutes, setLockMinutes] = useState('5');
   const [rateLimit, setRateLimit] = useState('10');
   const [captchaEnabled, setCaptchaEnabled] = useState(true);
+  const [captchaProvider, setCaptchaProvider] = useState<'altcha' | 'turnstile'>('altcha');
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState('');
+  const [turnstileSecret, setTurnstileSecret] = useState('');
+  const [turnstileSecretSet, setTurnstileSecretSet] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -40,6 +44,9 @@ export default function SecurityPolicyPanel(): JSX.Element {
         setLockMinutes(String(d.lockMinutes ?? 5));
         setRateLimit(String(d.rateLimitPerMinute ?? 10));
         setCaptchaEnabled(d.captchaEnabled !== false);
+        setCaptchaProvider(d.captchaProvider === 'turnstile' ? 'turnstile' : 'altcha');
+        setTurnstileSiteKey(String(d.turnstileSiteKey ?? ''));
+        setTurnstileSecretSet(Boolean(d.turnstileSecretSet));
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -73,6 +80,10 @@ export default function SecurityPolicyPanel(): JSX.Element {
         lock_minutes: lockVal,
         rate_limit_per_minute: rateVal,
         captcha_enabled: captchaEnabled,
+        captcha_provider: captchaProvider,
+        turnstile_site_key: turnstileSiteKey.trim(),
+        // secret 留空 = 不改；非空 = 覆盖（清空请用「清除密钥」按钮）
+        ...(turnstileSecret.trim() ? { turnstile_secret_key: turnstileSecret.trim() } : {}),
       });
       const d = res?.data;
       if (d) {
@@ -81,8 +92,28 @@ export default function SecurityPolicyPanel(): JSX.Element {
         setLockMinutes(String(d.lockMinutes ?? lockVal));
         setRateLimit(String(d.rateLimitPerMinute ?? rateVal));
         setCaptchaEnabled(d.captchaEnabled !== false);
+        setCaptchaProvider(d.captchaProvider === 'turnstile' ? 'turnstile' : 'altcha');
+        setTurnstileSiteKey(String(d.turnstileSiteKey ?? ''));
+        setTurnstileSecretSet(Boolean(d.turnstileSecretSet));
       }
+      setTurnstileSecret('');
       addToast(t('安全策略已保存（阈值/上限/开关立即生效，锁定时长需重启服务）'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** 清除 Turnstile secret（显式空串，区别于「留空不改」）。 */
+  const clearTurnstileSecret = async (): Promise<void> => {
+    setSaving(true);
+    setError('');
+    try {
+      const res = await api.saveSecurityPolicy({ turnstile_secret_key: '' });
+      setTurnstileSecretSet(Boolean(res?.data?.turnstileSecretSet));
+      setTurnstileSecret('');
+      addToast(t('Turnstile secret 已清除'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -170,9 +201,67 @@ export default function SecurityPolicyPanel(): JSX.Element {
               <span>{t('启用机器人校验（无感人机验证）')}</span>
             </label>
             <div className="form-hint">
-              {t('开启后登录、注册、邮箱验证码登录前需完成 ALTCHA 工作量证明；真人不需操作，脚本会被拦在密码校验之前。')}
+              {t('开启后登录、注册、邮箱验证码登录前需完成机器人校验；真人不需操作，脚本会被拦在密码校验之前。')}
             </div>
           </div>
+
+          <div className="form-group">
+            <label>{t('机器人校验提供方')}</label>
+            <select
+              className="form-input"
+              value={captchaProvider}
+              disabled={!captchaEnabled}
+              onChange={(e) => setCaptchaProvider(e.target.value === 'turnstile' ? 'turnstile' : 'altcha')}
+            >
+              <option value="altcha">{t('ALTCHA（自托管工作量证明，默认）')}</option>
+              <option value="turnstile">{t('Cloudflare Turnstile')}</option>
+            </select>
+            <div className="form-hint">
+              {t('ALTCHA 不依赖外部服务；Turnstile 需配置 Cloudflare 的 site key 与 secret key。')}
+            </div>
+          </div>
+
+          {captchaProvider === 'turnstile' && (
+            <>
+              <div className="form-group">
+                <label>{t('Turnstile site key（公开）')}</label>
+                <input
+                  className="form-input"
+                  value={turnstileSiteKey}
+                  disabled={!captchaEnabled}
+                  onChange={(e) => setTurnstileSiteKey(e.target.value)}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('Turnstile secret key（仅存网关，不回显）')}</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    className="form-input"
+                    type="password"
+                    value={turnstileSecret}
+                    placeholder={
+                      turnstileSecretSet ? t('已设置，留空不改') : t('未设置')
+                    }
+                    disabled={!captchaEnabled}
+                    onChange={(e) => setTurnstileSecret(e.target.value)}
+                  />
+                  {turnstileSecretSet && (
+                    <button
+                      className="btn btn-secondary"
+                      type="button"
+                      disabled={saving}
+                      onClick={() => void clearTurnstileSecret()}
+                    >
+                      {t('清除密钥')}
+                    </button>
+                  )}
+                </div>
+                <div className="form-hint">
+                  {t('secret 只存放于网关 KV（不写配置文件），接口只返回是否已设置。')}
+                </div>
+              </div>
+            </>
+          )}
 
           <div className="settings-actions">
             <button className="btn btn-primary" onClick={() => void save()} disabled={saving}>
