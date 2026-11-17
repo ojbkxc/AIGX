@@ -57,7 +57,7 @@ use crate::storage::FileStore;
 pub use account_search::{test_provider, AccountSearchHost, PluginHostSearchBridge};
 pub use bridge::VISION_BRIDGE_SCRIPT;
 pub use image_bridge::IMAGE_BRIDGE_SCRIPT;
-pub use image_config::{ImageConfig, ImageOperation, ImageTarget};
+pub use image_config::ImageConfig;
 pub use install::{
     install_mcp, install_skill, mcp_targets, skill_targets, uninstall_mcp, uninstall_skill,
     InstallOutcome,
@@ -68,13 +68,12 @@ pub use mcp::{
 };
 pub use search::{batch_items, run_fetch, run_search, SearchError, SearchErrorCode};
 pub use skill_package::{
-    build_skill_files, is_skill_variant, recommended_skill_variant, skill_variants, SkillFile,
-    SkillVariant, WEB_SEARCH_SKILL_NAME, WEB_SEARCH_SKILL_VERSION,
+    build_skill_files, is_skill_variant, recommended_skill_variant, skill_variants,
+    WEB_SEARCH_SKILL_NAME, WEB_SEARCH_SKILL_VERSION,
 };
 pub use vision::{
-    clear_vision_config, is_reasoning_level, is_usable_key, mask_key, run_vision,
-    save_vision_config, test_vision, vision_config, vision_key_options, VisionCatalogModel,
-    VisionConfig, VISION_MAX_IMAGES, VISION_MAX_PROMPT_LENGTH, VISION_SERVICE_NAME,
+    clear_vision_config, is_usable_key, mask_key, run_vision, save_vision_config, test_vision,
+    vision_config, vision_key_options, VisionCatalogModel, VisionConfig, VISION_SERVICE_NAME,
     VISION_SERVICE_VERSION,
 };
 

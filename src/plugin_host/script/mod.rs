@@ -82,8 +82,4 @@ pub mod usage;
 pub mod websocket;
 
 pub use runtime::ScriptHostManager;
-pub use types::{
-    script_plugins_root, ScriptCatalogEntry, ScriptInitPayload, ScriptPackage, ScriptPackageEntry,
-    ScriptProviderInfo, ScriptPublisher, ScriptSettingField, ScriptSettingsOptions, ScriptSource,
-    MAX_SCRIPT_PACKAGES, MAX_SETTINGS_BYTES, SCRIPT_PLUGINS_DIR,
-};
+pub use types::{script_plugins_root, ScriptSource};

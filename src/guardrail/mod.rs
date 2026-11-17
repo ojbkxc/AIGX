@@ -18,11 +18,10 @@ pub mod fake_reply;
 pub mod keyword;
 pub mod settings;
 
-pub use fake_reply::{peek_for_fake_reply, FakeReplyMatcher, FakeReplyPeek};
+pub use fake_reply::{peek_for_fake_reply, FakeReplyPeek};
 pub use settings::{
-    current_settings, ensure_installed, guard_output_stream, install, neutral_messages, snapshot,
-    update, GuardrailAction, GuardrailRuleSpec, GuardrailRuntime, GuardrailSettings,
-    GuardrailStore, InputDecision, OutputScanner, RuleKind, GUARDRAIL_SETTINGS_KEY,
+    current_settings, ensure_installed, guard_output_stream, install, snapshot, update,
+    GuardrailSettings, InputDecision,
 };
 
 /// 护栏裁决结果

@@ -35,12 +35,7 @@ pub mod script;
 // 内部为进程级注册表，数据面经 `wasm::host_for_provider` 路由）。
 pub(crate) mod wasm;
 
-pub use callbacks::PluginCallbacks;
-pub use install::{install_from_zip, InstallError, PackManifest};
-pub use manager::{PackRuntime, PluginHostManager};
-pub use process::{host_target_triple, PluginProcess, ProcessState, SpawnError};
-pub use registry::{is_native_provider, PackMeta, PackProvider, PackRegistry};
-pub use rpc::{
-    CallbackHandler, Frame, FrameKind, NoopCallbacks, RpcChannel, RpcError, StreamCall,
-    StreamEvent, MAX_CHUNK_BYTES, MAX_LINE_BYTES, PROTOCOL_VERSION,
-};
+pub use manager::PluginHostManager;
+pub use process::{host_target_triple, PluginProcess};
+pub use registry::PackMeta;
+pub use rpc::{RpcError, StreamCall, StreamEvent};

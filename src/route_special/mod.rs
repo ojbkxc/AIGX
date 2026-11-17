@@ -44,8 +44,8 @@ use crate::storage::FileStore;
 pub mod compact;
 pub mod title;
 
-pub use compact::{CompactRoute, CompactRoutes, CompactRoutesSnapshot};
-pub use title::{Fallback, TitleRoutes, TitleRoutesSnapshot, TitleRule};
+pub use compact::{CompactRoutes, CompactRoutesSnapshot};
+pub use title::{Fallback, TitleRoutes, TitleRoutesSnapshot};
 
 /// 支持的客户端 id（稳定、小写短横线）。新增一家要同时在 `title` / `compact`
 /// 的判据与 `api::admin` 的校验里加上，否则界面能勾、请求永不命中。

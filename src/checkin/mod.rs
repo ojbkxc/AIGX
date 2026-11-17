@@ -46,7 +46,7 @@ pub mod travel;
 #[cfg(test)]
 mod runtime_tests;
 
-pub use store::{AccountPlan, CheckinOutcome, CheckinRecord, CheckinSchedule, CheckinStore};
+pub use store::{CheckinOutcome, CheckinStore};
 
 /// 一次签到的结果（各家 claim 的统一返回）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

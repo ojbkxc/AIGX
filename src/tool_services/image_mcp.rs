@@ -80,7 +80,7 @@ fn generation_tool(editing: bool, count: u32, retention: u32) -> Value {
 mod tests {
     use super::*;
     use crate::storage::FileStore;
-    use crate::tool_services::{ImageConfig, ImageTarget};
+    use crate::tool_services::image_config::{ImageConfig, ImageTarget};
     use serde_json::json;
     use std::sync::Arc;
 

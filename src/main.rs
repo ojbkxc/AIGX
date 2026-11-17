@@ -4,13 +4,14 @@
 // lib 与 bin 两个 crate，两个 crate root 还各复制了一份 rustls provider
 // 安装逻辑。
 //
-// ⚠️ 下面两条 allow 是**双 target 时代的遗留遮罩**，现在已无 lib 视角可
-// 辩解：`cargo check --all-targets` 实测暴露 374 处 never-used（多为预留
-// API 与只被测试用到的辅助函数）。拆除遮罩需要逐项判定「删掉 / 补调用 /
-// 标 cfg(test)」，是独立的一次清理波次，不在本次结构收口内混做。
+// ⚠️ dead_code 仍是 crate 级 allow（双 target 遮罩的最后一层）：摘掉后实测
+// 377 处 never-used。unused_imports 遮罩已**永久删除**（未用 import 清零，
+// 顺带清掉一批无人消费的 re-export）。剩余项多为「预留 API vs 半死钩子」
+// 两类，需逐项判定 —— 例如 `invalidate_account` 是缺失的凭证变更钩子、
+// `provider_is_plugin_owned` 疑似未接线路由，盲删会把线索一起删掉。清理
+// 完成前保留 dead_code allow；新增代码需要预留符号时在**项级**标注并在
+// 注释写明消费方（协议线表 / 宿主 JS 等编译器不可见的契约）。
 #![allow(dead_code)]
-#![allow(unused_imports)]
-// openapi.rs 的深层 `json!` 需要更大的宏递归上限。
 #![recursion_limit = "512"]
 
 // ── reqwest 0.13 测试侧 provider 安装（波次2）──────────────────────
@@ -1543,7 +1544,6 @@ where
         mut writer: tracing_subscriber::fmt::format::Writer<'_>,
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
-        use std::fmt::Write as _;
         let meta = event.metadata();
         let mut map = serde_json::Map::new();
         map.insert(

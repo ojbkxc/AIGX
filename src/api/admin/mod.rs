@@ -290,8 +290,8 @@ pub use route_special::{
 
 pub use queue_api::{handle_get_queue, handle_update_queue};
 
-// 间隔型定时任务（凭证维护/模型刷新/版本检查 + 三页自动刷新的开关与间隔）
-pub use scheduled_tasks::{configure_handler, list_handler, run_handler};
+// 间隔型定时任务（凭证维护/模型刷新/版本检查 + 三页自动刷新的开关与间隔）：
+// 执行体直接按 `admin::scheduled_tasks::*` 路径引用，不在本处 re-export。
 
 // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
 pub use cline_headers::{handle_get_cline_headers, handle_update_cline_headers};

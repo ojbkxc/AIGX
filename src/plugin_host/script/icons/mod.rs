@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-pub use cache::{read, source};
+pub use cache::read;
 
 struct Worker {
     wake: Notify,
