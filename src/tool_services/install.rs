@@ -3,10 +3,9 @@
 //! 工具服务的「本机接入」：把 Skill 包 / MCP 配置写进本机客户端。
 //!
 //! ── 落点复用现有客户端路径表 ────────────────────────────────
-//! AIGX 的「Agent 配置」页已有四个客户端目标
-//! （`client_config::targets::Target`：claude-code / codex / claude-desktop /
-//! dsh）与 JSON / TOML / YAML 的无损渲染器（`client_config::edit`）。本模块
-//! 不另维护一份客户端清单：
+//! AIGX 已有四个客户端目标（`config_files::Target`：claude-code / codex /
+//! claude-desktop / dsh）与 JSON / TOML / YAML 的无损渲染器
+//! （`config_files::{parse, render}`）。本模块不另维护一份客户端清单：
 //!   · Skill：写到客户端配置目录下的 `skills/<package>/…`，包含 SKILL.md、
 //!     skill.json、运行时脚本与 `.agent2api.json`（API Key）；目录里有
 //!     `skill.json` 且 `name` 匹配才视为「我们装的」，卸载不会删别人的目录；
@@ -15,9 +14,9 @@
 //!     视觉分析还可以用本地桥接（stdio）形态以支持本地图片路径。
 //!
 //! ── 与上游的两个差异 ────────────────────────────────────────
-//! 1. 上游走 `agents::resources` 的预览+确认令牌；AIGX 现有 client_config 的
-//!    预览令牌接口面向「整条配置记录」，不覆盖 MCP server 项。此处直接改写
-//!    单个 `mcpServers.<name>` 键（原子写 + 渲染后回读校验由 edit::render 保证）；
+//! 1. 上游走 `agents::resources` 的预览+确认令牌；AIGX 已移除「客户端接入」
+//!    管理面（原整条配置记录的预览令牌），此处直接改写单个
+//!    `mcpServers.<name>` 键（原子写 + 渲染后回读校验由 edit::render 保证）；
 //! 2. DSH 的凭据文件（`.credentials.yaml`）不参与：MCP 条目把 Authorization
 //!    内联在 headers 里，Skill 用包内配置文件，两者都不需要 DSH 凭据引用。
 
@@ -25,8 +24,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::client_config::edit;
-use crate::client_config::targets::Target;
+use super::config_files as edit;
+use super::config_files::Target;
 
 #[derive(Clone, Debug)]
 pub struct InstallOutcome {

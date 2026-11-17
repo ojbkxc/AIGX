@@ -1,0 +1,530 @@
+/* 路由页骨架（rail 五项导航 + 右侧内容区）。
+   本文件只承载「页面骨架」的布局类：
+     · .rt-shell / .rt-shell-rail / .rt-shell-main —— 左窄栏 + 右内容区
+     · .rt-nav-* —— rail 导航项（五项：配置 / 回放 / 压缩 / 标题 / 视觉）
+     · .rt-special-* —— 特殊路由面板与工作台面板的共用零件
+     · .rt-flow-* / .rt-trace-* / .rt-ws-* —— 工作台面板零件
+   取值一律走 AIGX 既有令牌（App.css :root 的 --card-bg / --border-color /
+   --primary-color / --text-muted / --hover-bg / --accent-contrast 等），
+   不引入第二套设计语言；密度对齐 Routing.css 的 .rt-table 基准。 */
+
+/* ── 骨架：左 rail + 右内容 ─────────────────────────────── */
+.rt-shell {
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .rt-shell {
+    grid-template-columns: 1fr;
+  }
+}
+.rt-shell-rail {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+}
+@media (max-width: 900px) {
+  .rt-shell-rail {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+.rt-shell-rail-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 4px 6px;
+  text-transform: uppercase;
+}
+.rt-nav-item {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  padding: 7px 9px;
+  cursor: pointer;
+  color: inherit;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  min-width: 0;
+}
+.rt-nav-item:hover {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.1));
+}
+.rt-nav-item.is-on {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.1));
+  border-color: color-mix(in srgb, var(--primary-color) 35%, transparent);
+  font-weight: 600;
+}
+.rt-nav-item:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: -2px;
+}
+.rt-nav-icon {
+  flex: 0 0 auto;
+  opacity: 0.75;
+}
+.rt-nav-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rt-nav-dirty {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d97706;
+}
+.rt-nav-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+}
+.rt-shell-main {
+  min-width: 0;
+}
+
+/* ── 特殊路由面板壳 ─────────────────────────────────────── */
+.rt-special-panel {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--card-bg);
+  padding: 16px;
+}
+.rt-special-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.rt-special-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.rt-special-lede {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-muted);
+  max-width: 72ch;
+}
+.rt-special-enable {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.rt-special-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 2px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.rt-special-body {
+  margin-top: 12px;
+}
+.rt-special-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.rt-special-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0 6px;
+}
+.rt-special-section-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.rt-special-section-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 规则行：整行一块，编辑态原地展开 */
+.rt-special-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--surface-bg, var(--card-bg));
+}
+.rt-special-row + .rt-special-row {
+  margin-top: 8px;
+}
+.rt-special-row.is-off {
+  opacity: 0.62;
+}
+.rt-special-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.rt-special-row-title {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rt-special-row-detail {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.rt-special-row-detail code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--hover-bg, rgba(128, 128, 128, 0.1));
+  color: inherit;
+}
+.rt-special-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.rt-special-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* 行内编辑器 */
+.rt-special-editor {
+  border: 1px solid color-mix(in srgb, var(--primary-color) 30%, var(--border-color));
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--accent-soft, rgba(99, 102, 241, 0.05));
+  margin-top: 8px;
+}
+.rt-special-editor-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+@media (max-width: 760px) {
+  .rt-special-editor-fields {
+    grid-template-columns: 1fr;
+  }
+}
+.rt-special-editor-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.rt-special-editor-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.rt-special-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.rt-special-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.rt-special-check em {
+  font-style: normal;
+}
+.rt-special-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+.rt-special-add-row .form-input {
+  min-width: 0;
+  flex: 1;
+}
+.rt-special-backup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin-top: 6px;
+}
+.rt-special-backup-row > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rt-chip-x {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 0 0 4px;
+  font-size: 13px;
+  line-height: 1;
+}
+.rt-conflict {
+  margin-top: 10px;
+}
+.rt-conflict-actions {
+  margin-top: 8px;
+}
+
+/* ── 工作台：模型覆盖对比 ───────────────────────────────── */
+.rt-ws-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.rt-ws-toolbar .form-input {
+  max-width: 320px;
+}
+.rt-ws-changed {
+  color: var(--primary-color);
+  font-weight: 600;
+}
+
+/* ── 工作台：请求流向 ───────────────────────────────────── */
+.rt-flow-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.rt-flow-toolbar .rt-seg-btn {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+.rt-flow-win.is-on {
+  background: var(--primary-color);
+  color: var(--accent-contrast);
+  font-weight: 600;
+}
+.rt-flow-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.rt-flow-stats > div {
+  flex: 1 1 110px;
+  min-width: 96px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rt-flow-stats b {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.rt-flow-stats span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ── 工作台：请求跟踪 ───────────────────────────────────── */
+.rt-trace-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .rt-trace-layout {
+    grid-template-columns: 1fr;
+  }
+}
+.rt-trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 560px;
+  overflow: auto;
+  margin-top: 10px;
+}
+.rt-trace-row {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 8px 9px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.rt-trace-row:hover {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.08));
+}
+.rt-trace-row.is-on {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.1));
+  border-color: color-mix(in srgb, var(--primary-color) 30%, transparent);
+}
+.rt-trace-row-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.rt-trace-row-line b {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.rt-trace-row-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rt-trace-state {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.rt-trace-state.is-success {
+  color: #0d9488;
+}
+.rt-trace-state.is-failed {
+  color: var(--danger-color, #dc2626);
+}
+.rt-trace-state.is-running {
+  color: var(--primary-color);
+}
+.rt-trace-foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.rt-trace-detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.rt-trace-detail-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.rt-trace-metrics {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.rt-trace-metrics > div {
+  flex: 1 1 96px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+}
+.rt-trace-metrics b {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.rt-trace-metrics span {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.rt-trace-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.rt-trace-attempts {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.rt-trace-attempts li + li {
+  margin-top: 4px;
+}
+.rt-trace-err {
+  margin: 2px 0 0;
+  color: var(--danger-color, #dc2626);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+/* ── 保存条（与 Routing.css 的 .rt-savebar 同域，本页骨架沿用） ── */
+.rt-shell .rt-savebar {
+  margin-top: 12px;
+}

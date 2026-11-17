@@ -10,7 +10,6 @@ pub mod channels;
 pub mod checkin_center;
 pub mod checkin_records; // 签到台账（对齐 A2A api/checkin_records.rs；T6 填充）
 pub mod checkin_schedules; // 签到计划（对齐 A2A api/checkin_schedules.rs；T6 填充）
-pub mod client_config;
 pub mod client_id;
 pub mod cline_headers;
 pub mod common;
@@ -48,7 +47,9 @@ pub mod proxy_pool_api;
 pub mod purge;
 pub mod queue_api;
 pub mod redemptions;
+pub mod route_special; // 特殊路由设置面（压缩/标题，对照 Agent2API /api/models/*-routes）
 pub mod routing;
+pub mod routing_workspace; // 路由工作台（对照 Agent2API v3.5.0-beta.1 routing_workspace/flow/trace）
 pub mod scheduled_tasks;
 pub mod script_plugins; // 脚本插件管理面（Magpie 脚本包：目录/安装/启停/卸载/配置/宿主）
 pub mod security;
@@ -64,6 +65,7 @@ pub mod update;
 pub mod upgrade; // 数据升级端点（对照 Agent2API /api/upgrade）
 pub mod user_tools; // 用户工具策略管理面（#34 §5.1：GET/PUT policy + GET catalog）
 pub mod users; // 网络层管理模块
+pub mod vision_compat; // 视觉兼容设置面（对照 Agent2API /api/vision-compatibility）
 pub mod zcode_captcha; // ZCode 人机验证令牌池（对照 Agent2API /api/zcode/captcha*）
 
 pub use auth::{
@@ -181,6 +183,9 @@ pub use guardrail::{
 // 图片压缩与视觉兼容（GET/PUT 设置；保存即热生效）
 pub use image_compat_api::{handle_get_image_compat_settings, handle_update_image_compat_settings};
 
+// 视觉兼容设置面（对照 Agent2API /api/vision-compatibility；规则集权威 + revision CAS）
+pub use vision_compat::{handle_get_vision_compatibility, handle_update_vision_compatibility};
+
 // 面板品牌自定义（panel_name / logo_url / favicon_url；公开 GET + 管理员 GET/PUT）
 pub use branding::{handle_get_branding, handle_get_public_branding, handle_update_branding};
 
@@ -271,6 +276,18 @@ pub use routing::{
     handle_get_routing, handle_get_routing_group, handle_get_routing_profiles,
     handle_put_routing_group, handle_put_routing_profiles, handle_routing_defaults,
     handle_routing_preview, handle_routing_queue, handle_update_routing,
+};
+
+// 路由工作台（对照 Agent2API v3.5.0-beta.1 workspace/flow/trace/replays）
+pub use routing_workspace::{
+    handle_get_routing_flow, handle_get_routing_replays, handle_get_routing_trace,
+    handle_get_routing_trace_request, handle_get_routing_workspace,
+};
+
+// 特殊路由（压缩/标题）：GET/PUT 配置（revision CAS，保存即热生效）
+pub use route_special::{
+    handle_get_compact_routes, handle_get_title_routes, handle_put_compact_routes,
+    handle_put_title_routes,
 };
 
 pub use queue_api::{handle_get_queue, handle_update_queue};

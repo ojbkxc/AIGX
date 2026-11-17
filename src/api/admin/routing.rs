@@ -314,9 +314,9 @@ pub async fn handle_routing_queue(
     })))
 }
 
-/// 预演投影（`/api/routing/queue` 与 `/api/routing/preview` 共用，**不造
-/// 第二套**）：plan 的参与候选 + 被挡门外的启用渠道两段 JSON。
-fn queue_projection(
+/// 预演投影（`/api/routing/queue`、`/api/routing/preview` 与 `/api/routing/workspace`
+/// 共用，**不造第二套**）：plan 的参与候选 + 被挡门外的启用渠道两段 JSON。
+pub(crate) fn queue_projection(
     state: &AppState,
     plan: &crate::channel::routing_policy::RoutePlan<'_>,
     breaker_map: &std::collections::HashMap<String, String>,

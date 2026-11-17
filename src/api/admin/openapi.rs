@@ -58,7 +58,6 @@ pub fn build_openapi_document() -> Value {
         paths_accounts_network(),
         paths_docs(),
         paths_diagnostics(),
-        paths_client_config(),
         paths_sync(),
         paths_client_id(),
         paths_guardrail(),
@@ -447,6 +446,15 @@ fn paths_model_manage() -> Value {
         },
         "/api/models/custom/remove": {
             "post": op_body("模型管理", "删除自定义模型登记", "provider: string, id: string")
+        },
+        // 特殊路由（压缩/标题，对照 Agent2API v3.5.0-beta.1 /api/models/*-routes）
+        "/api/models/compact-routes": {
+            "get": op("特殊路由", "读取压缩路由配置（config/revision/clients/models/maxRules；存储非法时 config:null + error，revision 供 CAS 覆盖修复）"),
+            "put": op_body("特殊路由", "整份写入压缩路由配置（revision 不符 409；同 client+source 唯一，保存即热生效）", "{config, revision}")
+        },
+        "/api/models/title-routes": {
+            "get": op("特殊路由", "读取标题路由配置（config/revision/clients/models/maxRules；存储非法时 config:null + error，revision 供 CAS 覆盖修复）"),
+            "put": op_body("特殊路由", "整份写入标题路由配置（revision 不符 409；target 模型存在性校验，保存即热生效）", "{config, revision}")
         },
     })
 }
@@ -1031,6 +1039,49 @@ fn paths_settings_ops() -> Value {
         "/api/routing/replay/{request_id}": {
             "get": op_params("路由", "路由回放快照（Phase1-B/#26/#32 只读投影：候选序/过滤原因/选中/策略快照/account_skips 按渠道分组且有界/attempt_details 逐次上游尝试明细（index/channel/provider/model/stickyHit/startedAt/finishedAt/status/error/notice；有界 64+截断计数）/route_truncated 与 attempt_details_truncated 截断计数；route_replay 开关开启的请求才有完整数据）", &[path_param("request_id")])
         },
+        // 路由工作台（对照 Agent2API v3.5.0-beta.1 routing_workspace/flow/trace）
+        "/api/routing/workspace": {
+            "get": op_params("路由", "路由工作台：模型覆盖对比（profile vs inheritedProfile + provenance）+ 今日指标 + provider 行 + 候选队列；?model=", &[query_param("model", "string", "模型请求名（可选；空=全局视图）")])
+        },
+        "/api/routing/flow": {
+            "get": op_params("路由", "请求流向（window/running 两 scope；detail=paths/requests/sessions/models 四档；分钟窗仅 5/10/30/60）", &[
+                query_param("minutes", "integer", "5/10/30/60（缺省 10）"),
+                query_param("scope", "string", "window | running（缺省 window）"),
+                query_param("detail", "string", "paths | requests | sessions | models（缺省 paths）"),
+                query_param("model", "string", "模型过滤"),
+                query_param("client", "string", "客户端名过滤（__unknown = 未识别）"),
+                query_param("provider", "string", "provider 过滤"),
+                query_param("account", "string", "账号过滤（AIGX 无数据源，恒空并列入 unsupportedFilters）"),
+                query_param("offset", "integer", "分页偏移"),
+                query_param("limit", "integer", "页大小 1-100（缺省 30）")
+            ])
+        },
+        "/api/routing/trace": {
+            "get": op_params("路由", "请求跟踪列表（终态日志倒序分页；status=ok/error/switched/sticky；扫描有界 5000，scanTruncated 标注）", &[
+                query_param("model", "string", "模型过滤"),
+                query_param("search", "string", "模糊匹配 model/origin_model/id/request_id/channel_name"),
+                query_param("status", "string", "ok | error | switched | sticky（running 请走 flow）"),
+                query_param("start", "integer", "unix 秒下界"),
+                query_param("end", "integer", "unix 秒上界"),
+                query_param("minutes", "integer", "可选时间窗 1-1440（start 优先）"),
+                query_param("offset", "integer", "分页偏移"),
+                query_param("limit", "integer", "页大小 1-100（缺省 30）")
+            ])
+        },
+        "/api/routing/trace/request": {
+            "get": op_params("路由", "单条请求详情（含 routeConfig/filteredChannels/accountSkips/attemptDetails/stickyHits/对话与调试标志）", &[
+                query_param("id", "string", "日志 id 或 request_id"),
+                query_param("ts", "integer", "可选 unix 秒（同 id 多条时定位）")
+            ])
+        },
+        "/api/routing/replays": {
+            "get": op_params("路由", "可回放请求列表（仅 route_replay 有捕获的终态日志；status=error/sticky；单条详情仍走 /replay/{request_id}）", &[
+                query_param("model", "string", "模型过滤"),
+                query_param("status", "string", "error | sticky"),
+                query_param("offset", "integer", "分页偏移"),
+                query_param("limit", "integer", "页大小 1-100（缺省 30）")
+            ])
+        },
         "/api/gateway/prompt": {
             "get": op("网关", "查询系统提示词注入配置（模式/文本）"),
             "put": op_body("网关", "更新系统提示词注入（热生效）", "mode(passthrough/custom/append)/text")
@@ -1607,33 +1658,6 @@ fn paths_diagnostics() -> Value {
     })
 }
 
-fn paths_client_config() -> Value {
-    json!({
-        "/api/admin/client-configs": {
-            "get": op_params("客户端配置", "列出客户端接入配置（按目标分组）",
-                &[query_param("target", "string", "按目标过滤（claude_code/codex/claude_desktop/dsh）")]),
-            "post": op_body("客户端配置", "创建客户端接入配置",
-                "target: 目标类型, name: 配置名, enabled: bool, settings/config 内容; 凭据字段单独走 .credentials.yaml")
-        },
-        "/api/admin/client-configs/{id}": {
-            "put": op_body("客户端配置", "更新客户端接入配置", "与创建同结构"),
-            "delete": op_params("客户端配置", "删除客户端接入配置", &[path_param("id")])
-        },
-        "/api/admin/client-configs/{id}/preview": {
-            "post": op_params("客户端配置", "预览将要写入的文件（不落盘）", &[path_param("id")])
-        },
-        "/api/admin/client-configs/{id}/apply": {
-            "post": op_params("客户端配置", "应用配置（写盘前自动备份原文件）", &[path_param("id")])
-        },
-        "/api/admin/client-configs/{id}/backups": {
-            "get": op_params("客户端配置", "列出该配置的自动备份", &[path_param("id")])
-        },
-        "/api/admin/client-configs/{id}/restore": {
-            "post": op_body("客户端配置", "从备份恢复配置", "backup: 备份序号")
-        }
-    })
-}
-
 fn paths_sync() -> Value {
     json!({
         "/api/admin/sync/config": {
@@ -1699,6 +1723,11 @@ fn paths_branding_image_compat() -> Value {
         "/api/image-compat/settings": {
             "get": op("图片压缩与兼容", "查询图片压缩与视觉兼容配置"),
             "put": op_body("图片压缩与兼容", "更新图片压缩与视觉兼容配置", "{...设置项（camelCase，见 GET 响应）}")
+        },
+        // 视觉兼容规则集（对照 Agent2API /api/vision-compatibility；规则集权威 + revision CAS）
+        "/api/vision-compatibility": {
+            "get": op("图片压缩与兼容", "读取视觉兼容规则集（config/revision/models/sharedTarget/maxTargets/maxModels/legacyExpanded）"),
+            "put": op_body("图片压缩与兼容", "写入视觉兼容规则集（revision 提供时校验，不符 409；保存即热生效）", "{config, revision?, consent?}")
         }
     })
 }
@@ -1990,13 +2019,6 @@ mod tests {
         add("/api/cache/clear", &["post"]);
         add("/api/cache/stats", &["get"]);
         add("/api/channels", &["get", "post"]);
-        // 客户端接入多配置管理（对齐 Agent2API v3.5.0 non-plugin 段）
-        add("/api/admin/client-configs", &["get", "post"]);
-        add("/api/admin/client-configs/{id}", &["delete", "put"]);
-        add("/api/admin/client-configs/{id}/apply", &["post"]);
-        add("/api/admin/client-configs/{id}/backups", &["get"]);
-        add("/api/admin/client-configs/{id}/preview", &["post"]);
-        add("/api/admin/client-configs/{id}/restore", &["post"]);
         add("/api/channels/chat_test", &["post"]);
         add("/api/channels/fetch_models", &["post"]);
         add("/api/channels/{id}", &["delete", "patch", "put"]);
@@ -2043,6 +2065,8 @@ mod tests {
         add("/api/branding", &["get", "put"]);
         add("/api/public/branding", &["get"]);
         add("/api/image-compat/settings", &["get", "put"]);
+        // 视觉兼容规则集（对照 Agent2API /api/vision-compatibility）
+        add("/api/vision-compatibility", &["get", "put"]);
         add("/api/ip/blacklist", &["post"]);
         add("/api/ip/blacklist/{pattern}", &["delete"]);
         add("/api/ip/filter", &["get", "put"]);
@@ -2078,6 +2102,12 @@ mod tests {
         add("/api/routing/sticky", &["get"]);
         add("/api/routing/sticky/clear", &["post"]);
         add("/api/routing/replay/{request_id}", &["get"]);
+        // 路由工作台（对照 Agent2API v3.5.0-beta.1 workspace/flow/trace/replays）
+        add("/api/routing/workspace", &["get"]);
+        add("/api/routing/flow", &["get"]);
+        add("/api/routing/trace", &["get"]);
+        add("/api/routing/trace/request", &["get"]);
+        add("/api/routing/replays", &["get"]);
         add("/api/update/cleanup-artifacts", &["post"]);
         add("/api/assistant/tools", &["get"]);
         add("/api/assistant/chat", &["post"]);
@@ -2124,6 +2154,9 @@ mod tests {
         add("/api/models/available", &["get"]);
         add("/api/models/custom", &["post"]);
         add("/api/models/custom/remove", &["post"]);
+        // 特殊路由（压缩/标题，对照 Agent2API v3.5.0-beta.1 /api/models/*-routes）
+        add("/api/models/compact-routes", &["get", "put"]);
+        add("/api/models/title-routes", &["get", "put"]);
         add("/api/models/manage", &["get"]);
         add("/api/models/metadata", &["get", "put"]);
         add("/api/models/metadata/refresh", &["post"]);

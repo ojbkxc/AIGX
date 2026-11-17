@@ -1,6 +1,6 @@
 /**
  * 会话图片压缩与图片兼容设置（#7；独立文件理由：types/index.ts 正被并行编辑，
- * 避免共享大文件互卷在制品 —— 惯例同 report-tz / client-config）。
+ * 避免共享大文件互卷在制品 —— 惯例同 report-tz / routing-replay）。
  *
  * GET 响应 camelCase；PUT body 也用 camelCase（后端收 camelCase 别名，
  * snake_case 为主键，本面板统一 camelCase 与响应一致）。缺省字段保持原值。

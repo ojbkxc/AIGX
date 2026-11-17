@@ -11,7 +11,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, Globe,
-  Puzzle, Route as RouteIcon, Flame, Laptop, Wrench,
+  Puzzle, Route as RouteIcon, Flame, Wrench,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -59,8 +59,6 @@ const navItems: NavItem[] = [
   { path: '/plugins', labelKey: '插件管理', icon: Puzzle, adminOnly: true },
   // 工具服务（A2A v3.5.0-beta.1 对齐）：MCP & Skills 接入 / 搜索提供商 / 视觉分析绑定
   { path: '/tools', labelKey: '工具服务', icon: Wrench, adminOnly: true },
-  // 客户端接入（#3）：Claude Code / Codex / Claude Desktop / DSH 多配置管理
-  { path: '/client-config', labelKey: '客户端接入', icon: Laptop, adminOnly: true },
 ];
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
 // 管理员 16 项 / 客户 8 项。合并历史：
@@ -100,13 +98,13 @@ const navGroups: NavGroup[] = [
     labelKey: '管理',
     adminOnly: true,
     items: [
+      navItemOf('/purge'),           // 破甲控制台（请求治理总控）
       navItemOf('/model-manage'),    // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
       navItemOf('/channels'),        // 供应商（统一列表 + 账号池 / 健康 / 签到 子 Tab）
       navItemOf('/proxy-pool'),      // 网络代理（出口代理池）
       navItemOf('/users'),           // 用户管理（含「工具权限」Tab）
       navItemOf('/products'),        // 套餐与兑换码（双 Tab）
       navItemOf('/routing'),         // 路由（分层档案 / 预演 / 回放 / 粘滞）
-      navItemOf('/purge'),           // 破甲控制台（请求治理总控）
       // 签到中心 → 并入「供应商」页「签到」Tab（每日额度领取与账号池强耦合），顶级菜单下线
       // 用户工具权限 → 并入「用户管理」页「工具权限」Tab，顶级菜单下线
       // 定时任务 → 并入「系统设置」分类（scheduled），顶级菜单下线
@@ -116,7 +114,6 @@ const navGroups: NavGroup[] = [
       // 同一件事的两半；且全员可见——普通用户也要知道怎么填客户端），顶级菜单下线
       navItemOf('/plugins'),        // 插件管理（后端建设中降级空态）
       navItemOf('/tools'),          // 工具服务（Skill / MCP 接入、搜索提供商、视觉分析）
-      navItemOf('/client-config'),   // 客户端接入（多配置管理与写入）
       navItemOf('/settings'),        // 系统设置（含「定时任务」分类）
       navItemOf('/agent'),           // AI 运维
     ],

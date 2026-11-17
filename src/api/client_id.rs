@@ -128,6 +128,12 @@ pub const BUILTIN_CLIENTS: &[BuiltinClient] = &[
         ],
     },
     BuiltinClient {
+        id: "zcode",
+        name: "ZCode",
+        aliases: &["zcode", "z-code"],
+        products: &["zcode"],
+    },
+    BuiltinClient {
         id: "cline",
         name: "Cline",
         aliases: &["cline", "cline-cli", "cline-sdk"],
@@ -946,6 +952,30 @@ mod tests {
             assert_eq!(identity.name, name, "UA={ua}");
             assert_eq!(identity.version, version, "UA={ua}");
         }
+    }
+
+    /// ZCode：UA 内置识别 + 显式声明归一（压缩路由依赖这个名字）。
+    ///
+    /// 来源：A2A `core/client/catalog.rs` 的 `BuiltinClient { id: "zcode",
+    /// products: &["zcode"], ua: "ZCode/3.10.1" }`。缺这条时 ZCode 的压缩
+    /// 请求只能靠用户手工加自定义规则识别，等于默认不生效。
+    #[test]
+    fn zcode_ua_and_declaration_are_builtin() {
+        let identity = identify_with(
+            &headers(&[("user-agent", "ZCode/3.10.1")]),
+            &CompiledRules::default(),
+        );
+        assert_eq!(identity.name, "ZCode");
+        assert_eq!(identity.version, "3.10.1");
+        assert_eq!(identity.source, "builtin_ua");
+
+        // 显式声明路径：`X-Client-Name: zcode` 归一到同一规范名。
+        let declared = identify_with(
+            &headers(&[("x-client-name", "zcode")]),
+            &CompiledRules::default(),
+        );
+        assert_eq!(declared.name, "ZCode");
+        assert_eq!(declared.source, "declared");
     }
 
     /// 普通浏览器 UA → unknown（不把通用平台当客户端）。

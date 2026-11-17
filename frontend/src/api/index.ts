@@ -153,18 +153,23 @@ import type {
 import type { DesktopSourceItem } from '@/types/desktop';
 // 报表时区设置类型（#20；独立文件理由同上：types/index.ts 正被 #13 并行编辑）
 import type { ReportSettingsItem, TzMigrateResult } from '@/types/report-tz';
-// 客户端接入多配置管理（#3；独立文件，理由同上）
-import type {
-  ClientConfigApplyData,
-  ClientConfigBackupsData,
-  ClientConfigListData,
-  ClientConfigPreviewData,
-  ClientConfigRestoreData,
-  ClientConfigTargetId,
-  ClientConfigUpsertBody,
-} from '@/types/client-config';
 // 会话图片压缩与视觉兼容类型（#7；独立文件，理由同上：types/index.ts 并行编辑）
 import type { ImageCompatSettingsBody, ImageCompatSettingsItem } from '@/types/image-compat';
+// 路由工作台 / 特殊路由（压缩 / 标题 / 视觉兼容）类型（本波新增；独立文件，不改 types/index.ts）
+import type {
+  CompactRoutesConfig,
+  CompactRoutesView,
+  RoutingFlowQuery,
+  RoutingFlowSnapshot,
+  RoutingTraceList,
+  RoutingTraceQuery,
+  RoutingTraceRow,
+  RoutingWorkspaceView,
+  TitleRoutesConfig,
+  TitleRoutesView,
+  VisionCompatView,
+  VisionSettingsConfig,
+} from '@/types/routing-workspace';
 // 工具调用 / usage 帧适配层（#63；回灌层未定，形状变更只改适配层）
 import { extractToolCalls, extractUsage, type ToolCallWireMode } from '@/lib/toolCallAdapter';
 
@@ -842,46 +847,6 @@ export const api = {
     request<ApiResponse<DesktopSourceItem[]>>('GET', `${API_BASE}/account-sessions/desktop/sources`),
   importDesktopAccount: (data: { source_id: string; name?: string }): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/account-sessions/desktop-import`, data),
-  // ── 客户端接入多配置管理（#3）────────────────────────────────
-  // 四目标（claude-code / codex / claude-desktop / dsh）× 多份命名配置；
-  // 写入前必须 preview 拿 token，apply 时原样回传（后端指纹绑定文件现状）。
-  listClientConfigs: (target?: ClientConfigTargetId): Promise<ApiResponse<ClientConfigListData>> =>
-    request<ApiResponse<ClientConfigListData>>(
-      'GET',
-      `${API_BASE}/admin/client-configs${target ? `?target=${encodeURIComponent(target)}` : ''}`,
-    ),
-  createClientConfig: (data: ClientConfigUpsertBody): Promise<ApiResponse<unknown>> =>
-    request<ApiResponse<unknown>>('POST', `${API_BASE}/admin/client-configs`, data),
-  updateClientConfig: (id: string, data: ClientConfigUpsertBody): Promise<ApiResponse<unknown>> =>
-    request<ApiResponse<unknown>>('PUT', `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}`, data),
-  deleteClientConfig: (id: string): Promise<ApiResponse<null>> =>
-    request<ApiResponse<null>>('DELETE', `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}`),
-  previewClientConfig: (id: string): Promise<ApiResponse<ClientConfigPreviewData>> =>
-    request<ApiResponse<ClientConfigPreviewData>>(
-      'POST',
-      `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}/preview`,
-    ),
-  applyClientConfig: (id: string, token: string): Promise<ApiResponse<ClientConfigApplyData>> =>
-    request<ApiResponse<ClientConfigApplyData>>(
-      'POST',
-      `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}/apply`,
-      { token },
-    ),
-  getClientConfigBackups: (id: string): Promise<ApiResponse<ClientConfigBackupsData>> =>
-    request<ApiResponse<ClientConfigBackupsData>>(
-      'GET',
-      `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}/backups`,
-    ),
-  restoreClientConfig: (
-    id: string,
-    backup: string,
-    kind?: 'config' | 'credentials',
-  ): Promise<ApiResponse<ClientConfigRestoreData>> =>
-    request<ApiResponse<ClientConfigRestoreData>>(
-      'POST',
-      `${API_BASE}/admin/client-configs/${encodeURIComponent(id)}/restore`,
-      { backup, kind },
-    ),
   deleteAccountSession: (id: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`),
   /**
@@ -1075,6 +1040,52 @@ export const api = {
     all?: boolean;
   }): Promise<ApiResponse<{ cleared: number }>> =>
     request<ApiResponse<{ cleared: number }>>('POST', `${API_BASE}/routing/sticky/clear`, body),
+  // ── 路由工作台（be-routing）：workspace 覆盖对比 / flow 请求流向 / trace 跟踪 ──
+  // 契约形状见 types/routing-workspace.ts；端点未就绪时 404，调用方按空态降级。
+  getRoutingWorkspace: (model?: string): Promise<ApiResponse<RoutingWorkspaceView>> =>
+    request<ApiResponse<RoutingWorkspaceView>>(
+      'GET',
+      `${API_BASE}/routing/workspace${model ? `?model=${encodeURIComponent(model)}` : ''}`,
+    ),
+  getRoutingFlow: (query: RoutingFlowQuery): Promise<ApiResponse<RoutingFlowSnapshot>> =>
+    request<ApiResponse<RoutingFlowSnapshot>>('GET', `${API_BASE}/routing/flow?${buildQuery({ ...query })}`),
+  getRoutingTrace: (query: RoutingTraceQuery): Promise<ApiResponse<RoutingTraceList>> =>
+    request<ApiResponse<RoutingTraceList>>('GET', `${API_BASE}/routing/trace?${buildQuery({ ...query })}`),
+  getRoutingTraceRequest: (id: string, ts?: number): Promise<ApiResponse<RoutingTraceRow>> =>
+    request<ApiResponse<RoutingTraceRow>>(
+      'GET',
+      `${API_BASE}/routing/trace/request?id=${encodeURIComponent(id)}${ts != null ? `&ts=${encodeURIComponent(String(ts))}` : ''}`,
+    ),
+  // ── 压缩路由（be-special）。canonical 路径对齐 Agent2API v3.5.0-beta.1：
+  //    GET/PUT /api/models/compact-routes。PUT body `{ config, revision }`；
+  //    修订号不符 → 409（err.status 可辨）。**不做 404 回退**：端点未注册
+  //    直接报错可见，避免每次请求多打一次、也避免掩盖接线问题。
+  getCompactRoutes: (): Promise<ApiResponse<CompactRoutesView>> =>
+    request<ApiResponse<CompactRoutesView>>('GET', `${API_BASE}/models/compact-routes`),
+  saveCompactRoutes: (config: CompactRoutesConfig, revision: string): Promise<ApiResponse<CompactRoutesView>> =>
+    request<ApiResponse<CompactRoutesView>>('PUT', `${API_BASE}/models/compact-routes`, {
+      config,
+      revision,
+    }),
+  // ── 标题路由（be-special）。canonical：GET/PUT /api/models/title-routes ──
+  getTitleRoutes: (): Promise<ApiResponse<TitleRoutesView>> =>
+    request<ApiResponse<TitleRoutesView>>('GET', `${API_BASE}/models/title-routes`),
+  saveTitleRoutes: (config: TitleRoutesConfig, revision: string): Promise<ApiResponse<TitleRoutesView>> =>
+    request<ApiResponse<TitleRoutesView>>('PUT', `${API_BASE}/models/title-routes`, {
+      config,
+      revision,
+    }),
+  // ── 视觉兼容（be-vision）：GET/PUT /api/vision-compatibility（整块 + revision）──
+  getVisionCompatibility: (): Promise<ApiResponse<VisionCompatView>> =>
+    request<ApiResponse<VisionCompatView>>('GET', `${API_BASE}/vision-compatibility`),
+  saveVisionCompatibility: (
+    config: VisionSettingsConfig,
+    revision: string,
+  ): Promise<ApiResponse<VisionCompatView>> =>
+    request<ApiResponse<VisionCompatView>>('PUT', `${API_BASE}/vision-compatibility`, {
+      config,
+      revision,
+    }),
   // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」；保存即生效）
   getClineHeaders: (): Promise<ApiResponse<ClineHeadersItem>> =>
     request<ApiResponse<ClineHeadersItem>>('GET', `${API_BASE}/cline-headers`),

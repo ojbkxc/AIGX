@@ -11,6 +11,17 @@
 //!      （一次请求内同一张图只调用一次）；
 //!    - `switch`（切换视觉模型）：把请求改路由到配置的视觉模型；
 //!
+//!    3.5.0-beta.1 完整形状（规则列表 / `assist` / `reroute` /
+//!    `unknown_capability` / `fallback = designated` / provider+model 精确名单 /
+//!    `reasoning` 等级）由子模块 [`vision`] 承载，新端点
+//!    `GET/PUT /api/vision-compatibility` 写入 `config.image_compat.vision`。
+//!    扁平字段（`mode=describe|switch` + `vision_model` + `fallback_models`）是
+//!    **旧端点契约**的回退形状：新面未写过 `vision` 时由
+//!    [`vision::legacy_from_flat`] 换算成等价旧版设置（注意旧口径「未配视觉
+//!    模型 = 不生效」，所以扁平值必须真有目标才会干预）。两条路互斥、同一
+//!    时刻只有一份视觉兼容在跑；旧面板改了视觉字段会重建旧版形状让新规则集
+//!    让位（最后一个写入方赢），只改压缩参数则不动 `vision`。
+//!
 //!    两种模式默认关闭 —— 关闭时逐字节零行为变化。
 //! 3. **视觉备选链**：视觉模型调用失败（沿用既有可重试语义）时按
 //!    `fallback_models` 顺序回退。
@@ -27,6 +38,13 @@
 //! （路由侧 hook），lib 视角下另有若干入口没有调用方 —— 与 `api::openai`
 //! 同口径整模块豁免 dead_code。
 #![allow(dead_code)]
+
+/// 视觉兼容规则引擎（对齐 Agent2API `config/vision_compat.rs`）。
+///
+/// 作为子模块随 `image_compat` 一起编译 —— `main.rs`（bin）与 `lib.rs` 各自
+/// 声明 `mod image_compat;`，子模块无需在任一 target 再申明，两个 target 都
+/// 拿到同一份实现（也避免压缩与视觉各持一份「视觉开关」）。
+pub mod vision;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,6 +122,15 @@ pub struct ImageCompatConfig {
     /// 辅助识图提示词，空 = 默认提示词。
     #[serde(default)]
     pub describe_prompt: String,
+    /// 视觉兼容规则集（对齐 Agent2API `visionCompatibility`；由
+    /// `GET/PUT /api/vision-compatibility` 读写）。
+    ///
+    /// `None` = 新设置面从未启用 —— 数据面回落到上面的扁平字段
+    ///（`vision_enabled`/`mode`/`vision_model`/`fallback_models`，旧端点契约）；
+    /// `Some(_)` = 新端点已成为权威，扁平字段不再参与裁决。两条路互斥，
+    /// 同一时刻只有一份「视觉兼容」在跑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<vision::VisionSettings>,
 }
 
 fn default_true() -> bool {
@@ -134,6 +161,7 @@ impl Default for ImageCompatConfig {
             vision_model: String::new(),
             fallback_models: Vec::new(),
             describe_prompt: String::new(),
+            vision: None,
         }
     }
 }
@@ -160,6 +188,7 @@ impl ImageCompatConfig {
                 .filter(|m| !m.is_empty())
                 .collect(),
             describe_prompt: self.describe_prompt.clone(),
+            vision: self.vision.clone(),
         }
     }
 
@@ -645,99 +674,334 @@ pub fn clear_cache() {
     });
 }
 
-// ── 图片兼容：能力判定 / 路由决策 / 辅助识图 ──────────────────────────
+// ── 辅助识图结果缓存（跨请求复用；对齐 A2A `reuse_results`）─────────────
 
-/// 视觉兼容决策（纯函数，便于单测钉住默认关闭语义）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VisionDecision {
-    /// 不干预（未开启 / 请求无图 / 模型本身支持 vision / 未配置视觉模型）
-    Keep,
-    /// 辅助识图：把图片替换为文本描述（就地改写消息）
-    Describe,
-    /// 切换视觉模型：改路由到该模型
-    Switch(String),
+/// 条目上限：帮「多轮对话里反复出现的同几张图」；纯内存，不落盘。
+const DESCRIBE_CACHE_MAX_ENTRIES: usize = 256;
+
+struct DescribeEntry {
+    text: String,
+    used: u64,
 }
 
-/// 模型能力位是否含 `vision`（大小写不敏感；未知模型 = 不含）。
-pub fn model_supports_vision(state: &crate::api::openai::AppState, model: &str) -> bool {
-    state
-        .model_metadata
-        .get(model, None)
-        .capabilities
-        .iter()
-        .any(|cap| cap.eq_ignore_ascii_case("vision"))
+struct DescribeCache {
+    entries: HashMap<String, DescribeEntry>,
+    seq: u64,
 }
 
-/// 视觉决策：仅在 `vision_enabled` 且请求含图且目标模型**不含** vision 时生效。
+static DESCRIBE_CACHE: RwLock<Option<DescribeCache>> = RwLock::new(None);
+
+/// 缓存键 = 图片内容哈希 + 视觉模型 + 提示词哈希。
 ///
-/// `has_images` 由调用方从请求体推导（与选路能力过滤共用同一信号）。
-pub fn vision_decision(
-    cfg: &ImageCompatConfig,
-    model_has_vision: bool,
-    has_images: bool,
-) -> VisionDecision {
-    if !cfg.vision_enabled || !has_images || model_has_vision {
-        return VisionDecision::Keep;
-    }
-    let vision_model = cfg.vision_model.trim();
-    if vision_model.is_empty() {
-        // 未配置视觉模型 = 无从识图/切换，保持原行为（记一次告警由调用方做）
-        return VisionDecision::Keep;
-    }
-    if cfg.mode.trim().eq_ignore_ascii_case(MODE_SWITCH) {
-        VisionDecision::Switch(vision_model.to_string())
-    } else {
-        VisionDecision::Describe
-    }
+/// 换模型或改提示词即换键（无需失效逻辑），也避免把 A 图描述写给 B 图。
+fn describe_cache_key(image_hash: &str, model: &str, prompt: &str) -> String {
+    format!(
+        "{}|{}|{}",
+        image_hash,
+        model.trim().to_ascii_lowercase(),
+        sha256_hex(prompt.as_bytes())
+    )
 }
 
-/// 视觉备选链：主视觉模型在前，`fallback_models` 依次在后（去重、去空）。
-///
-/// 只在请求含图时才返回候选链（无图请求不因视觉配置改变路由与计费）。
-/// 首个元素 = 实际发出的模型（switch 模式下即视觉模型）；其后为回退顺序。
-pub fn vision_attempt_chain(
-    primary: &str,
-    cfg: &ImageCompatConfig,
-    has_images: bool,
-) -> Vec<String> {
-    let mut chain: Vec<String> = Vec::new();
-    if !has_images {
-        return chain;
-    }
-    let primary = primary.trim();
-    if !primary.is_empty() {
-        chain.push(primary.to_string());
-    }
-    if cfg.vision_enabled {
-        for model in &cfg.fallback_models {
-            let model = model.trim();
-            if model.is_empty() || chain.iter().any(|m| m == model) {
-                continue;
-            }
-            chain.push(model.to_string());
+/// 命中返回描述文本（并刷新 LRU 访问序）。
+fn describe_cache_lookup(key: &str) -> Option<String> {
+    let mut guard = DESCRIBE_CACHE.write();
+    let cache = guard.as_mut()?;
+    cache.seq = cache.seq.wrapping_add(1);
+    let seq = cache.seq;
+    let entry = cache.entries.get_mut(key)?;
+    entry.used = seq;
+    Some(entry.text.clone())
+}
+
+/// 写入（成功描述才写）；超上限按最久未用淘汰。
+fn describe_cache_store(key: String, text: String) {
+    let mut guard = DESCRIBE_CACHE.write();
+    let cache = guard.get_or_insert_with(|| DescribeCache {
+        entries: HashMap::new(),
+        seq: 0,
+    });
+    if !cache.entries.contains_key(&key) && cache.entries.len() >= DESCRIBE_CACHE_MAX_ENTRIES {
+        if let Some(oldest) = cache
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.used)
+            .map(|(key, _)| key.clone())
+        {
+            cache.entries.remove(&oldest);
         }
     }
-    chain
+    cache.seq = cache.seq.wrapping_add(1);
+    let seq = cache.seq;
+    cache.entries.insert(key, DescribeEntry { text, used: seq });
+}
+
+/// 识图缓存条目数（仅测试用）。
+#[cfg(test)]
+pub fn describe_cache_entry_count() -> usize {
+    DESCRIBE_CACHE
+        .read()
+        .as_ref()
+        .map(|cache| cache.entries.len())
+        .unwrap_or(0)
+}
+
+/// 清空识图缓存（仅测试用）。
+#[cfg(test)]
+pub fn describe_cache_clear() {
+    DESCRIBE_CACHE.write().take();
+}
+
+// ── 图片兼容：能力判定 / 路由决策 / 辅助识图 ──────────────────────────
+
+/// 视觉兼容决策（数据面消费；由 `vision::decide` 裁决后归一）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VisionDecision {
+    /// 不干预（未开启 / 请求无图 / 模型本身支持 vision / 无可用目标）
+    Keep,
+    /// 辅助识图：把图片替换为文本描述（就地改写消息）
+    Describe(DescribePlan),
+    /// 整体接管：改路由到视觉模型（`Vec` 为接管链，首元素为主）
+    Reroute(Vec<vision::VisionTarget>),
+}
+
+/// `Describe` 的完整执行计划（目标 + 可配置项，全部经数据面消费）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribePlan {
+    /// 实际读图的视觉模型（含 provider / reasoning）。
+    pub target: vision::VisionTarget,
+    /// 相同图片的识读结果是否跨请求复用（`vision::VisionSettings::rules[].reuse_results`）。
+    pub reuse_results: bool,
+    /// 视觉上游调用超时（秒；`timeout_seconds`，已在 `vision` 里夹到 [5,120]）。
+    pub timeout_seconds: u64,
+}
+
+/// 目录里 `supportsImages` 的管理员覆盖（三态：`Some(true/false)` = 显式覆盖）。
+///
+/// `provider = None` 时按模型 id 扫全部覆盖（多 provider 存在同一模型时取第一条；
+/// 数据面此时本就是 best-effort，见 [`provider_for_model`]）。
+fn vision_override(model: &str, provider: Option<&str>) -> Option<bool> {
+    if let Some(provider) = provider {
+        let values = crate::model::capability_overrides::lookup(provider, model)?;
+        return values.get("supportsImages").and_then(Value::as_bool);
+    }
+    let store = crate::model::capability_overrides::current()?;
+    store
+        .all()
+        .into_iter()
+        .find(|entry| entry.id == model)
+        .and_then(|entry| entry.values.get("supportsImages").and_then(Value::as_bool))
+}
+
+/// 模型图片能力**三态**（对齐上游「能力未声明 ≠ 支持」口径）。
+///
+/// - `Some(true)`：目录/models.dev 声明 `vision`，或管理员覆盖为 true；
+/// - `Some(false)`：管理员覆盖为 false；
+/// - `None`：**未声明**（能力位里没有 `vision` 也没有覆盖）——`unknown_capability`
+///   在这种情况下决定是否直接按兼容处理。
+///
+/// 与模型管理出口 `capabilityFlags.supportsImages` 同口径（`flags_from_tags`：
+/// 有 `vision` 标签 = true，没有 = null），两条出口不会各自演化。
+pub fn model_vision_capability(
+    state: &crate::api::openai::AppState,
+    provider: Option<&str>,
+    model: &str,
+) -> Option<bool> {
+    if let Some(overridden) = vision_override(model, provider) {
+        return Some(overridden);
+    }
+    let meta = state.model_metadata.get(model, None);
+    let flags = crate::model::capability_overrides::flags_from_tags(&meta.capabilities);
+    flags.get("supportsImages").and_then(Value::as_bool)
+}
+
+/// 模型能力位是否含 `vision`（大小写不敏感；未声明 = false）。
+pub fn model_supports_vision(state: &crate::api::openai::AppState, model: &str) -> bool {
+    model_vision_capability(state, None, model) == Some(true)
+}
+
+/// 生效的视觉配置：新端点写过 `Some(vision)` 就用它，否则回落到扁平字段。
+pub fn effective_vision_settings(cfg: &ImageCompatConfig) -> vision::VisionSettings {
+    match &cfg.vision {
+        Some(settings) => settings.clone(),
+        None => vision::legacy_from_flat(
+            cfg.vision_enabled,
+            &cfg.mode,
+            &cfg.vision_model,
+            &cfg.fallback_models,
+        ),
+    }
+}
+
+/// 这份视觉设置有没有可能干预任何请求（热路径短路用）。
+///
+/// 只看「有没有非空名单 / 非空目标」——不查模型能力（那才是真正的判定）。
+fn vision_settings_active(settings: &vision::VisionSettings) -> bool {
+    if !settings.enabled {
+        return false;
+    }
+    if settings
+        .rules
+        .iter()
+        .any(|rule| rule.enabled && !rule.models.is_empty())
+    {
+        return true;
+    }
+    if settings.is_legacy() {
+        return match settings.mode.unwrap_or_default() {
+            vision::Mode::Assist => settings.assist.target.is_some(),
+            vision::Mode::Reroute => !settings.reroute.targets.is_empty(),
+        };
+    }
+    !settings.assist.models.is_empty() || !settings.reroute.models.is_empty()
+}
+
+/// 工具服务的共享视觉模型（`ModelSource::Shared` 的来源）。
+///
+/// AIGX 用「工具服务 → 视觉」配置承载上游的 `shared_target()`：优先用
+/// `downstream_model`（对外模型名，数据面按它选路，与 `resolve_bridges` 一致），
+/// 为空时退回 `upstream_model`。
+pub fn shared_vision_target(state: &crate::api::openai::AppState) -> Option<vision::VisionTarget> {
+    let config = state.tool_services.load().vision?;
+    let model = if config.downstream_model.trim().is_empty() {
+        config.upstream_model.clone()
+    } else {
+        config.downstream_model.clone()
+    };
+    if model.trim().is_empty() {
+        return None;
+    }
+    Some(vision::VisionTarget {
+        provider: config.provider,
+        model,
+        reasoning: config.reasoning,
+    })
+}
+
+/// 请求模型在候选渠道里的 provider（best-effort；`None` = 未声明 → 名单按模型名匹配）。
+///
+/// AIGX 在选路前只知道模型名。这里取「承载该模型的启用渠道」的 provider，
+/// 与模型管理视图（`model::manage::build_view`）同口径：
+/// 账号型渠道取**账号自己的** `provider`（而非字面量 `"account"`），其余渠道取
+/// `channel_type`，插件渠道取 `plugin_provider`。找不到承载方时返回 `None`，
+/// `rule_for_ctx` 退化为只比模型名。
+fn provider_for_model(state: &crate::api::openai::AppState, model: &str) -> Option<String> {
+    let channels = state.channel_store.list();
+    for channel in &channels {
+        if !channel.is_enabled() {
+            continue;
+        }
+        if channel.channel_type == crate::channel::ChannelType::Account {
+            // 账号型渠道：模型来自账号白名单（空白名单 = 账号目录，视为承载）。
+            for session in state.account_sessions.for_channel(&channel.id) {
+                if session.status != "enabled" {
+                    continue;
+                }
+                let serves = session.models.is_empty()
+                    || session.models.iter().any(|m| m.eq_ignore_ascii_case(model));
+                if !serves {
+                    continue;
+                }
+                let provider = if session.provider.trim().is_empty() {
+                    crate::account_session::registry::DEFAULT_PROVIDER_KIND.to_string()
+                } else {
+                    session.provider.clone()
+                };
+                return Some(provider);
+            }
+            continue;
+        }
+        let serves = channel
+            .models
+            .iter()
+            .chain(channel.discovered_models.iter())
+            .any(|m| m.eq_ignore_ascii_case(model));
+        if !serves {
+            continue;
+        }
+        let provider = match channel.channel_type {
+            crate::channel::ChannelType::Plugin => channel.plugin_provider.clone(),
+            other => other.as_str().to_string(),
+        };
+        if !provider.trim().is_empty() {
+            return Some(provider);
+        }
+    }
+    None
+}
+
+/// 视觉决策：由 [`vision::decide`] 裁决（规则列表 → 旧版形状 → 两块名单，
+/// `None` = 保持原样逐字节不变）。
+///
+/// `capability` 三态来自 [`model_vision_capability`]；`provider` 来自
+/// [`provider_for_model`]（`None` = 未知）；`shared_target` 来自
+/// [`shared_vision_target`]。
+pub fn vision_decision(
+    cfg: &ImageCompatConfig,
+    capability: Option<bool>,
+    has_images: bool,
+    provider: Option<&str>,
+    model: &str,
+    shared_target: Option<vision::VisionTarget>,
+) -> VisionDecision {
+    let settings = effective_vision_settings(cfg);
+    match vision::decide(
+        &settings,
+        provider,
+        model,
+        capability,
+        has_images,
+        shared_target,
+    ) {
+        None => VisionDecision::Keep,
+        Some(action) => match action.mode {
+            vision::Mode::Assist => match action.assist_target {
+                Some(target) => VisionDecision::Describe(DescribePlan {
+                    target,
+                    reuse_results: action.reuse_results,
+                    timeout_seconds: action.timeout_seconds,
+                }),
+                None => VisionDecision::Keep,
+            },
+            vision::Mode::Reroute => {
+                if action.reroute_targets.is_empty() {
+                    VisionDecision::Keep
+                } else {
+                    VisionDecision::Reroute(action.reroute_targets)
+                }
+            }
+        },
+    }
+}
+
+/// 接管链的模型名（首元素为主；去重、去空）。供数据面/日志使用。
+pub fn reroute_model_chain(chain: &[vision::VisionTarget]) -> Vec<String> {
+    vision::target_chain_models(chain)
 }
 
 /// 辅助识图：把消息里的内联图/外链图逐张交给辅助视觉模型生成描述，
 /// 以文本块替换图片块。
 ///
 /// - 一次请求内**同一张图（按内容哈希）只调用一次**，重复出现的图片复用描述；
-/// - 单张失败保留原图（不阻断请求）；
+/// - `reuse_results` 为真时跨请求复用（进程内 LRU，键含图片哈希+模型+提示词）；
+///   为假时既不读也不写缓存；
+/// - 单张失败保留原图（不阻断请求）；上游调用受 `timeout_seconds` 约束；
 /// - 最多处理 [`MAX_DESCRIBE_IMAGES`] 张，超出部分记日志后保留原图。
 ///
 /// 返回被替换的图片块数量。
 pub async fn describe_images(
     state: &crate::api::openai::AppState,
     messages: &mut [ChatMessage],
-    cfg: &ImageCompatConfig,
+    plan: &DescribePlan,
+    prompt: &str,
 ) -> usize {
-    let vision_model = cfg.vision_model.trim();
+    let vision_model = plan.target.model.trim();
     if vision_model.is_empty() {
         return 0;
     }
-    let prompt = cfg.effective_describe_prompt().to_string();
+    let prompt = prompt.to_string();
+    let reuse = plan.reuse_results;
+    let timeout_seconds = plan.timeout_seconds;
     // 1) 收集所有图片块位置与 URI，按内容哈希去重
     let mut slots: Vec<(usize, usize, String, String)> = Vec::new(); // (msg, block, hash, uri)
     for (mi, message) in messages.iter().enumerate() {
@@ -777,7 +1041,29 @@ pub async fn describe_images(
             break;
         }
         budget -= 1;
-        let desc = describe_one(state, vision_model, &prompt, uri).await;
+        // 跨请求复用：命中缓存直接跳过上游调用（`reuse_results=false` 时不读）。
+        let key = describe_cache_key(hash, vision_model, &prompt);
+        if reuse {
+            if let Some(text) = describe_cache_lookup(&key) {
+                descriptions.insert(hash.clone(), Some(text));
+                continue;
+            }
+        }
+        let desc = describe_one(
+            state,
+            vision_model,
+            &plan.target.reasoning,
+            &prompt,
+            uri,
+            timeout_seconds,
+        )
+        .await;
+        // 只缓存成功结果（失败留给下次重试）；`reuse_results=false` 时不写。
+        if reuse {
+            if let Some(text) = &desc {
+                describe_cache_store(key, text.clone());
+            }
+        }
         descriptions.insert(hash.clone(), desc);
     }
     // 3) 就地替换：同一哈希复用同一描述
@@ -814,11 +1100,17 @@ fn replace_block_with_text(block: &mut Value, description: &str) -> bool {
 }
 
 /// 单张图片 → 描述（失败返回 None）。进程内直调 bridge（不经计费/鉴权）。
+///
+/// 上游调用受 `timeout_seconds` 约束：超时按「可重试失败」处理（记日志 +
+/// 试下一个候选渠道），不静默吞掉。图片**下载**不在此层（本函数只处理
+/// data URI / 外链原样透传给上游），故不套这个超时。
 async fn describe_one(
     state: &crate::api::openai::AppState,
     vision_model: &str,
+    reasoning: &str,
     prompt: &str,
     uri: &str,
+    timeout_seconds: u64,
 ) -> Option<String> {
     let candidates =
         crate::api::openai::resolve_bridges_with_affinity(state, vision_model, None, None, None);
@@ -859,12 +1151,21 @@ async fn describe_one(
             top_k: None,
             stop: None,
             tool_choice: None,
-            reasoning_effort: None,
+            reasoning_effort: if reasoning.trim().is_empty() {
+                None
+            } else {
+                Some(reasoning.trim().to_string())
+            },
             web_search_options: None,
             extra: None,
         };
-        match bridge.chat(&req, &ctx).await {
-            Ok(resp) => {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_seconds),
+            bridge.chat(&req, &ctx),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
                 let text = resp.message.content_str().trim().to_string();
                 if text.is_empty() {
                     tracing::warn!("image_compat: empty description from {cid:?}");
@@ -872,12 +1173,18 @@ async fn describe_one(
                 }
                 return Some(text);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 if !crate::api::openai::is_retryable_bridge_error(&e) {
                     tracing::warn!("image_compat: describe failed (non-retryable) on {cid:?}: {e}");
                     return None;
                 }
                 tracing::warn!("image_compat: describe failed on {cid:?}: {e}, trying next");
+            }
+            Err(_elapsed) => {
+                // 超时 = 按可重试失败处理（记日志 + 试下一个候选），不静默吞掉。
+                tracing::warn!(
+                    "image_compat: describe timed out after {timeout_seconds}s on {cid:?}, trying next"
+                );
             }
         }
     }
@@ -900,17 +1207,51 @@ pub struct RequestImageContext {
 impl RequestImageContext {
     /// 构建上下文。`has_images` 来自 `needs::from_chat_body(...).images`。
     ///
-    /// 视觉决策只看配置与目标模型能力位；`switch` 模式下若视觉模型未定价且
-    /// 无渠道声明则降级为 `Keep`（B09，不产生免费用量）。
+    /// 视觉决策走 `vision::decide`（规则列表 / 旧版形状 / 两块名单）。整体接管
+    /// （reroute，旧称 `switch`）时，若主接管模型未定价且无渠道声明则降级为
+    /// `Keep`（B09，不产生免费用量）。
+    ///
+    /// provider 推导只在「有图请求」时做（要扫渠道找承载方）；无图请求在
+    /// `vision::decide` 里第一行就按 `has_images=false` 短路，不付扫描成本。
     pub fn build(state: &crate::api::openai::AppState, model: &str, has_images: bool) -> Self {
         let cfg = settings();
-        let mut decision = vision_decision(&cfg, model_supports_vision(state, model), has_images);
-        if let VisionDecision::Switch(vm) = &decision {
-            if crate::api::openai::ensure_model_priced(state, vm).is_err() {
-                tracing::warn!(
-                    "image_compat: vision model '{vm}' is not priced/declared, keep original route"
-                );
-                decision = VisionDecision::Keep;
+        // 热路径早退：默认配置（视觉兼容关、无规则/无目标）⇒ Keep，不构建
+        // VisionSettings、不扫渠道、不查元数据。压缩开关独立于此。
+        let vision_active = if let Some(settings) = &cfg.vision {
+            vision_settings_active(settings)
+        } else {
+            // 扁平回退形状：只有「开了 + 有目标」才可能干预。
+            cfg.vision_enabled
+                && (!cfg.vision_model.trim().is_empty() || !cfg.fallback_models.is_empty())
+        };
+        let mut decision = if has_images && vision_active {
+            // provider 走 best-effort 解析（只扫启用渠道 / 账号，且仅在视觉
+            // 兼容真的配置过时执行）：解析到 → 名单按 provider+model 精确匹配；
+            // 解析不到（模型未在任何启用渠道声明）→ `None` 退化为只比模型名，
+            // 规则仍生效。能力位按模型查注册表（含管理员 `supportsImages` 覆盖）。
+            let provider = provider_for_model(state, model);
+            let capability = model_vision_capability(state, provider.as_deref(), model);
+            let shared = shared_vision_target(state);
+            vision_decision(
+                &cfg,
+                capability,
+                has_images,
+                provider.as_deref(),
+                model,
+                shared,
+            )
+        } else {
+            VisionDecision::Keep
+        };
+        if let VisionDecision::Reroute(targets) = &decision {
+            if let Some(primary) = targets.first() {
+                if crate::api::openai::ensure_model_priced(state, &primary.model).is_err() {
+                    tracing::warn!(
+                        "image_compat: vision model '{}' is not priced/declared, keep original route",
+                        primary.model
+                    );
+                    decision = VisionDecision::Keep;
+                }
             }
         }
         Self {
@@ -930,10 +1271,13 @@ impl RequestImageContext {
         &self.decision
     }
 
-    /// 本次请求实际应路由到的模型（`switch` = 视觉模型，其它 = 原模型）。
+    /// 本次请求实际应路由到的模型（reroute = 接管链首模型，其它 = 原模型）。
     pub fn routing_model(&self, requested: &str) -> String {
         match &self.decision {
-            VisionDecision::Switch(vm) => vm.clone(),
+            VisionDecision::Reroute(targets) => targets
+                .first()
+                .map(|target| target.model.clone())
+                .unwrap_or_else(|| requested.to_string()),
             _ => requested.to_string(),
         }
     }
@@ -953,8 +1297,9 @@ impl RequestImageContext {
             return false;
         }
         let mut changed = false;
-        if matches!(self.decision, VisionDecision::Describe) {
-            let replaced = describe_images(state, messages, &self.cfg).await;
+        if let VisionDecision::Describe(plan) = &self.decision {
+            let prompt = self.cfg.effective_describe_prompt().to_string();
+            let replaced = describe_images(state, messages, plan, &prompt).await;
             if replaced > 0 {
                 tracing::info!("image_compat: {replaced} image(s) replaced with descriptions");
                 changed = true;
@@ -1197,30 +1542,86 @@ mod tests {
         cfg.vision_model = "qwen-vl".to_string();
         // 总开关关闭（默认）：即使模型无 vision、请求有图也不干预
         assert_eq!(
-            vision_decision(&cfg, false, true),
+            vision_decision(&cfg, Some(false), true, Some("p"), "m", None),
             VisionDecision::Keep,
             "默认关闭时行为不变"
         );
         // 无图 / 模型本身支持 vision：不干预
         cfg.vision_enabled = true;
-        assert_eq!(vision_decision(&cfg, false, false), VisionDecision::Keep);
-        assert_eq!(vision_decision(&cfg, true, true), VisionDecision::Keep);
-        // describe（默认模式）
-        assert_eq!(vision_decision(&cfg, false, true), VisionDecision::Describe);
-        // switch
+        assert_eq!(
+            vision_decision(&cfg, Some(false), false, Some("p"), "m", None),
+            VisionDecision::Keep
+        );
+        assert_eq!(
+            vision_decision(&cfg, Some(true), true, Some("p"), "m", None),
+            VisionDecision::Keep
+        );
+        // describe（默认模式，旧扁平字段 → legacy assist，target 取 vision_model）
+        assert_eq!(
+            vision_decision(&cfg, Some(false), true, Some("p"), "m", None),
+            VisionDecision::Describe(DescribePlan {
+                target: vision::VisionTarget {
+                    provider: String::new(),
+                    model: "qwen-vl".to_string(),
+                    reasoning: String::new(),
+                },
+                // 旧扁平形状固定 reuse_results=true（default）与 timeout=30
+                reuse_results: true,
+                timeout_seconds: 30,
+            })
+        );
+        // switch（旧扁平字段 → legacy reroute，接管链 = vision_model + fallbacks）
         cfg.mode = MODE_SWITCH.to_string();
         assert_eq!(
-            vision_decision(&cfg, false, true),
-            VisionDecision::Switch("qwen-vl".to_string())
+            vision_decision(&cfg, Some(false), true, Some("p"), "m", None),
+            VisionDecision::Reroute(vec![vision::VisionTarget {
+                provider: String::new(),
+                model: "qwen-vl".to_string(),
+                reasoning: String::new(),
+            }])
         );
         // 未配置视觉模型：不干预（describe/switch 都无目标）
         cfg.vision_model.clear();
-        assert_eq!(vision_decision(&cfg, false, true), VisionDecision::Keep);
+        assert_eq!(
+            vision_decision(&cfg, Some(false), true, Some("p"), "m", None),
+            VisionDecision::Keep
+        );
         // 非法 mode 归一为 describe
         let mut cfg2 = cfg.clone();
         cfg2.vision_model = "vm".to_string();
         cfg2.mode = "weird".to_string();
         assert_eq!(cfg2.normalized().mode, MODE_DESCRIBE);
+    }
+
+    #[test]
+    fn new_vision_settings_take_precedence_over_flat_fields() {
+        // 扁平字段说 describe "flat-vm"，但新设置面写入 reroute "new-vm" → 新面赢
+        let mut cfg = cfg();
+        cfg.vision_enabled = true;
+        cfg.mode = MODE_DESCRIBE.to_string();
+        cfg.vision_model = "flat-vm".to_string();
+        cfg.vision = Some(vision::VisionSettings {
+            rules: vec![vision::VisionRule {
+                models: vec![vision::ModelRef::new("p", "m")],
+                mode: vision::Mode::Reroute,
+                prefer_current_route: false,
+                targets: vec![vision::VisionTarget {
+                    provider: "p".to_string(),
+                    model: "new-vm".to_string(),
+                    reasoning: String::new(),
+                }],
+                ..vision::VisionRule::default()
+            }],
+            ..vision::VisionSettings::default()
+        });
+        assert_eq!(
+            vision_decision(&cfg, Some(false), true, Some("p"), "m", None),
+            VisionDecision::Reroute(vec![vision::VisionTarget {
+                provider: "p".to_string(),
+                model: "new-vm".to_string(),
+                reasoning: String::new(),
+            }])
+        );
     }
 
     #[test]
@@ -1250,31 +1651,48 @@ mod tests {
     }
 
     #[test]
-    fn vision_attempt_chain_orders_fallbacks_and_dedupes() {
+    fn legacy_reroute_chain_orders_fallbacks_and_dedupes() {
         let mut cfg = cfg();
         cfg.vision_enabled = true;
+        cfg.mode = MODE_SWITCH.to_string();
+        cfg.vision_model = "primary".to_string();
         cfg.fallback_models = vec![
             "fallback-a".to_string(),
             "fallback-b".to_string(),
-            "primary".to_string(), // 与主模型同名：去重
+            "Primary".to_string(), // 与主模型同名（大小写不敏感）：去重
             "  ".to_string(),      // 空白：丢弃
         ];
         assert_eq!(
-            vision_attempt_chain("primary", &cfg, true),
-            vec![
-                "primary".to_string(),
-                "fallback-a".to_string(),
-                "fallback-b".to_string()
-            ],
-            "回退顺序必须与配置顺序一致，且主模型去重"
+            vision_decision(&cfg, Some(false), true, Some("p"), "req", None),
+            VisionDecision::Reroute(vec![
+                vision::VisionTarget {
+                    provider: String::new(),
+                    model: "primary".to_string(),
+                    reasoning: String::new(),
+                },
+                vision::VisionTarget {
+                    provider: String::new(),
+                    model: "fallback-a".to_string(),
+                    reasoning: String::new(),
+                },
+                vision::VisionTarget {
+                    provider: String::new(),
+                    model: "fallback-b".to_string(),
+                    reasoning: String::new(),
+                },
+            ]),
+            "接管链顺序必须与配置顺序一致，且主模型去重（大小写不敏感）"
         );
         // 无图请求：不改变路由
-        assert!(vision_attempt_chain("primary", &cfg, false).is_empty());
-        // 总开关关闭：只有主模型
+        assert_eq!(
+            vision_decision(&cfg, Some(false), false, Some("p"), "req", None),
+            VisionDecision::Keep
+        );
+        // 总开关关闭：Keep
         cfg.vision_enabled = false;
         assert_eq!(
-            vision_attempt_chain("primary", &cfg, true),
-            vec!["primary".to_string()]
+            vision_decision(&cfg, Some(false), true, Some("p"), "req", None),
+            VisionDecision::Keep
         );
     }
 
@@ -1290,6 +1708,7 @@ mod tests {
             vision_model: "  vm  ".to_string(),
             fallback_models: vec![" a ".to_string(), String::new()],
             describe_prompt: String::new(),
+            vision: None,
         };
         let n = raw.normalized();
         assert_eq!(n.max_edge, MAX_EDGE_MIN);
@@ -1324,5 +1743,55 @@ mod tests {
             .expect("url");
         assert!(next.starts_with("data:image/png;base64,"));
         assert_ne!(next, uri);
+    }
+
+    // ── 跨请求识图缓存（reuse_results 的载体）──────────────────────────
+    #[test]
+    fn describe_cache_key_depends_on_image_model_and_prompt() {
+        let base = describe_cache_key("img-hash", "qwen-vl", "描述这张图");
+        assert_eq!(
+            base,
+            describe_cache_key("img-hash", " qwen-vl ", "描述这张图"),
+            "模型名 trim + 大小写不敏感"
+        );
+        assert_ne!(
+            base,
+            describe_cache_key("other-hash", "qwen-vl", "描述这张图")
+        );
+        assert_ne!(
+            base,
+            describe_cache_key("img-hash", "other-model", "描述这张图")
+        );
+        assert_ne!(
+            base,
+            describe_cache_key("img-hash", "qwen-vl", "另一段提示词")
+        );
+    }
+
+    #[test]
+    fn describe_cache_round_trip_and_clear() {
+        describe_cache_clear();
+        assert_eq!(describe_cache_entry_count(), 0);
+        let key = describe_cache_key("img-hash", "qwen-vl", "p");
+        assert!(describe_cache_lookup(&key).is_none(), "未写入时不得命中");
+        describe_cache_store(key.clone(), "一只橘猫".to_string());
+        assert_eq!(describe_cache_lookup(&key).as_deref(), Some("一只橘猫"));
+        assert_eq!(describe_cache_entry_count(), 1);
+        describe_cache_clear();
+        assert!(describe_cache_lookup(&key).is_none());
+    }
+
+    #[test]
+    fn describe_cache_is_bounded() {
+        describe_cache_clear();
+        for i in 0..(DESCRIBE_CACHE_MAX_ENTRIES + 64) {
+            describe_cache_store(format!("k-{i}"), format!("v-{i}"));
+        }
+        assert_eq!(
+            describe_cache_entry_count(),
+            DESCRIBE_CACHE_MAX_ENTRIES,
+            "缓存必须有上限（LRU 淘汰最久未用）"
+        );
+        describe_cache_clear();
     }
 }

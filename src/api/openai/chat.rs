@@ -189,7 +189,17 @@ pub(crate) async fn handle_chat_completions(
     // 视觉模型未定价时 build 内自动降级回原模型）。压缩在每轮尝试发送前做。
     let image_ctx =
         crate::image_compat::RequestImageContext::build(&state, &model, body_needs.images);
-    let model = image_ctx.routing_model(&model);
+    let mut model = image_ctx.routing_model(&model);
+    // 特殊路由（compact/title）：识别 + 改写 body.model；命中后选路用新模型。
+    // 位置必须在鉴权/分组/定价校验之后——校验对象是用户请求的 source 模型
+    // （与 image switch 先校验 source 再换 routing_model 同款语义）。
+    if let Some(rewrite) = crate::route_special::apply_chat_request(&client, &headers, &mut body) {
+        model = rewrite.target.clone();
+        // 目标模型同样要求已定价（与普通请求同口径），未定价则拒绝而非免费用量。
+        if let Err(e) = ensure_model_priced(&state, &model) {
+            return e.into_response();
+        }
+    }
     let provider_filter = api_key.provider_filter();
     let candidates = resolve_bridges_with_affinity_needs(
         &state,

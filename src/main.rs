@@ -43,7 +43,6 @@ mod cache;
 mod channel;
 mod chat_session;
 mod checkin;
-mod client_config;
 mod config;
 mod continuation;
 mod cron;
@@ -75,6 +74,7 @@ mod purge;
 mod quota_monitor;
 mod ratelimit;
 mod redemption;
+mod route_special;
 mod runtime_log;
 mod sanitize;
 mod scheduled_tasks;
@@ -493,6 +493,8 @@ async fn main() -> anyhow::Result<()> {
     crate::plugin_host::script::usage::install(log_store.clone());
     // 客户端识别规则（KV 持久化 + 进程级快照；数据面逐请求只读快照）
     crate::api::client_id::install(store.clone());
+    // 特殊路由（压缩/标题）：启动时装载配置快照；数据面 chat 入口逐请求只读
+    crate::route_special::install(store.clone());
     // 在途请求登记表（进程内）：配合日志页「查看并终止正在进行的请求」
     let inflight = Arc::new(crate::log::inflight::InflightRegistry::new());
 
@@ -2263,6 +2265,28 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/routing/preview",
             post(api::admin::handle_routing_preview),
         )
+        // 路由工作台（对照 Agent2API v3.5.0-beta.1 workspace/flow/trace/replays）
+        .route(
+            "/api/routing/workspace",
+            get(api::admin::handle_get_routing_workspace),
+        )
+        .route(
+            "/api/routing/flow",
+            get(api::admin::handle_get_routing_flow),
+        )
+        .route(
+            "/api/routing/trace",
+            get(api::admin::handle_get_routing_trace),
+        )
+        .route(
+            "/api/routing/trace/request",
+            get(api::admin::handle_get_routing_trace_request),
+        )
+        // 回放列表（单条详情仍是既有 /api/routing/replay/:request_id）
+        .route(
+            "/api/routing/replays",
+            get(api::admin::handle_get_routing_replays),
+        )
         // 用户工具策略（#34 §5.1，喂 #65 UserTools 配置页）：快照读写 + 工具目录
         // （配置 100% 管理员；终端用户只消费生效结果，不新增用户侧配置端点）
         .route(
@@ -2311,6 +2335,22 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/image-compat/settings",
             get(api::admin::handle_get_image_compat_settings)
                 .put(api::admin::handle_update_image_compat_settings),
+        )
+        // 视觉兼容规则集（对照 Agent2API /api/vision-compatibility；规则集权威 + revision CAS）
+        .route(
+            "/api/vision-compatibility",
+            get(api::admin::handle_get_vision_compatibility)
+                .put(api::admin::handle_update_vision_compatibility),
+        )
+        // 特殊路由（对照 Agent2API /api/models/compact-routes 与 /title-routes：
+        // 压缩/标题改写配置；revision CAS，保存即热生效）
+        .route(
+            "/api/models/compact-routes",
+            get(api::admin::handle_get_compact_routes).put(api::admin::handle_put_compact_routes),
+        )
+        .route(
+            "/api/models/title-routes",
+            get(api::admin::handle_get_title_routes).put(api::admin::handle_put_title_routes),
         )
         // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
         .route(
@@ -2771,36 +2811,6 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/account-sessions/desktop-import",
             post(api::admin::desktop_import::handle_desktop_import),
-        )
-        // 客户端接入多配置管理（对齐 Agent2API agents 非插件段）：
-        // 四目标（Claude Code / Codex / Claude Desktop / DSH）× 多份命名
-        // 配置，预览 → 备份 → 写盘的完整闭环。路径写死、凭据加密落库，
-        // 目标文件永不由请求体指定（见 src/client_config/mod.rs 模块头）。
-        .route(
-            "/api/admin/client-configs",
-            get(api::admin::client_config::handle_list)
-                .post(api::admin::client_config::handle_create),
-        )
-        .route(
-            "/api/admin/client-configs/:id",
-            put(api::admin::client_config::handle_update)
-                .delete(api::admin::client_config::handle_delete),
-        )
-        .route(
-            "/api/admin/client-configs/:id/preview",
-            post(api::admin::client_config::handle_preview),
-        )
-        .route(
-            "/api/admin/client-configs/:id/apply",
-            post(api::admin::client_config::handle_apply),
-        )
-        .route(
-            "/api/admin/client-configs/:id/backups",
-            get(api::admin::client_config::handle_backups),
-        )
-        .route(
-            "/api/admin/client-configs/:id/restore",
-            post(api::admin::client_config::handle_restore),
         )
         // 客户端识别（对照 Agent2API core/client 非插件段）：规则 CRUD +
         // 样例预览 + Top 客户端报表。识别只读请求头，不改转发行为；

@@ -83,6 +83,14 @@ pub async fn handle_update_image_compat_settings(
     Json(body): Json<ImageCompatSettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut config = verify_admin(&state, &headers).await?;
+    // 视觉字段是否真的变了（旧面板每次保存都发全量表单；只改压缩参数时
+    // 不能顺手把新端点写入的规则集覆盖掉）。
+    let before_vision = (
+        config.image_compat.vision_enabled,
+        config.image_compat.mode.clone(),
+        config.image_compat.vision_model.clone(),
+        config.image_compat.fallback_models.clone(),
+    );
     if let Some(v) = body.enabled {
         config.image_compat.enabled = v;
     }
@@ -163,6 +171,23 @@ pub async fn handle_update_image_compat_settings(
         return Err(error_response(
             "开启图片兼容时必须选择视觉模型",
             StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 旧面板若改动了视觉字段 → 用旧扁平值重建等价的旧版形状写入 `vision`，
+    // 让 `/api/vision-compatibility` 写入的新规则集让位（最后一个写入方赢）。
+    // 视觉字段一个都没变（只改压缩参数 / 重复保存同一表单）则不碰 `vision`。
+    let after_vision = (
+        config.image_compat.vision_enabled,
+        config.image_compat.mode.clone(),
+        config.image_compat.vision_model.clone(),
+        config.image_compat.fallback_models.clone(),
+    );
+    if before_vision != after_vision {
+        config.image_compat.vision = Some(crate::image_compat::vision::legacy_from_flat(
+            config.image_compat.vision_enabled,
+            &config.image_compat.mode,
+            &config.image_compat.vision_model,
+            &config.image_compat.fallback_models,
         ));
     }
     // 生效值统一归一化后落盘（越界/脏值不写进 config.toml）
