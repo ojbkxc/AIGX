@@ -414,6 +414,12 @@ pub(crate) async fn handle_chat_completions(
         }
     }
 
+    // R4 性能：请求体从这里起用 `Arc` 共享 —— 估算、failover 守卫、流计费
+    // 快照都只 clone 指针；failover 每轮的 `attempt_req` 是唯一必要的深拷贝
+    // （model 映射 + provider 覆盖/脱敏要改字段）。guardrail/image 的原地
+    // 改写在上面，之后不再有 `&mut chat_req`。
+    let chat_req = Arc::new(chat_req);
+
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
     // 在途请求登记：管理员可在日志页看到这条请求并终止它。
@@ -436,11 +442,11 @@ pub(crate) async fn handle_chat_completions(
     // 估算：prompt 用 token 计数器精确估算；completion 跟随请求 max_tokens
     // （未指定时保守默认 256，上限 4096 防止恶意超大 max_tokens 占满配额）。
     // P1 性能：BPE 估算（纯 CPU，每 64KB 切片一次正则编码）移到阻塞线程
-    // 池执行，避免每请求阻塞 tokio worker 数毫秒到数十毫秒；
-    // chat_req.clone() 是一次 O(n) memcpy，远廉价于编码本身。
+    // 池执行，避免每请求阻塞 tokio worker 数毫秒到数十毫秒；R4：估算接口
+    // 收 `Arc`，不再为估算深拷贝整包请求。
     let estimated_prompt_tokens =
-        crate::token_estimate::count_chat_prompt_blocking(model.clone(), chat_req.clone()).await
-            as u64;
+        crate::token_estimate::count_chat_prompt_blocking_arc(model.clone(), Arc::clone(&chat_req))
+            .await as u64;
     let estimated_completion_tokens = chat_req.max_tokens.unwrap_or(256).clamp(256, 4096) as u64;
     let reservation = match reserve_usage(
         &state,
@@ -479,7 +485,7 @@ pub(crate) async fn handle_chat_completions(
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         // auto-continue：留住成功轮的桥与（映射后）请求，续写轮复用同一渠道
         let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
-        let mut cont_req: Option<ChatFormat> = None;
+        let mut cont_req: Option<Arc<ChatFormat>> = None;
         // #32 路由回放：真实上游调用计数（unpriced 跳过不计——没发请求）
         // 亲和命中判定与 resolve 同源（本渠道被粘滞置顶）
         let mut attempt_counter: u32 = 0;
@@ -498,7 +504,7 @@ pub(crate) async fn handle_chat_completions(
             channel_id: String::new(),
             channel_name: String::new(),
             model: model.clone(),
-            chat_req: chat_req.clone(),
+            chat_req: Arc::clone(&chat_req),
             request_id: request_id.clone(),
             ip: client_ip.clone(),
             user_id: api_key.user_id.clone(),
@@ -540,7 +546,7 @@ pub(crate) async fn handle_chat_completions(
                 continue;
             }
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
-            let mut attempt_req = chat_req.clone();
+            let mut attempt_req = (*chat_req).clone();
             attempt_req.model = upstream.clone();
             // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
             // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
@@ -574,7 +580,10 @@ pub(crate) async fn handle_chat_completions(
             attempt_guard.channel_name =
                 ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
             attempt_guard.model = upstream.clone();
-            attempt_guard.chat_req = attempt_req.clone();
+            // R4：本轮请求体 Arc 共享给守卫（499 兜底估算只读），
+            // 不再为守卫整包深拷贝
+            let attempt_req = Arc::new(attempt_req);
+            attempt_guard.chat_req = Arc::clone(&attempt_req);
             // T2：SSE 首事件守卫——建流成功后等第一个事件（30s 上限），
             // 上游挂起/建流后立刻断流 → 按失败处理（熔断记账 + failover）
             let attempt = match bridge.chat_stream(&attempt_req, &ctx).await {
@@ -917,9 +926,13 @@ pub(crate) async fn handle_chat_completions(
         // 关着时下发字节与接线前逐字一致（零开销）。计费/文本累积在包装的
         // 下游（map 层），天然看到跨轮拼接的整体。
         let stream = match (crate::continuation::plan(), cont_bridge, cont_req) {
-            (Some(max_rounds), Some(bridge), Some(req)) => {
-                crate::continuation::wrap_stream(stream, bridge, req, ctx.clone(), max_rounds)
-            }
+            (Some(max_rounds), Some(bridge), Some(req)) => crate::continuation::wrap_stream(
+                stream,
+                bridge,
+                ChatFormat::from_arc(req),
+                ctx.clone(),
+                max_rounds,
+            ),
             _ => stream,
         };
         // 护栏（输出侧，默认关闭）：命中输出词表时把标准错误帧作为流的最后
@@ -1117,7 +1130,7 @@ pub(crate) async fn handle_chat_completions(
                 group: billing_group.clone(),
                 // Arc 共享请求快照：final_event 的 spawn_blocking 预估算可
                 // 廉价 clone（P1 性能——BPE 估算移出 tokio worker）
-                chat_req: Arc::new(chat_req.clone()),
+                chat_req: Arc::clone(&chat_req),
                 tool_calls: tool_calls.clone(),
                 acc: acc.clone(),
                 charged: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1360,7 +1373,7 @@ pub(crate) async fn handle_chat_completions(
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         // auto-continue：留住成功轮的桥与（映射后）请求，续写轮复用同一渠道
         let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
-        let mut cont_req: Option<ChatFormat> = None;
+        let mut cont_req: Option<Arc<ChatFormat>> = None;
         // #32 路由回放：真实上游调用计数（unpriced 跳过不计——没发请求）
         let mut attempt_counter: u32 = 0;
         // 亲和命中判定与 resolve 同源（本渠道被粘滞置顶）
@@ -1377,7 +1390,7 @@ pub(crate) async fn handle_chat_completions(
             channel_id: String::new(),
             channel_name: String::new(),
             model: model.clone(),
-            chat_req: chat_req.clone(),
+            chat_req: Arc::clone(&chat_req),
             request_id: request_id.clone(),
             ip: client_ip.clone(),
             user_id: api_key.user_id.clone(),
@@ -1416,7 +1429,7 @@ pub(crate) async fn handle_chat_completions(
                 continue;
             }
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
-            let mut attempt_req = chat_req.clone();
+            let mut attempt_req = (*chat_req).clone();
             attempt_req.model = upstream.clone();
             // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
             // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
@@ -1450,7 +1463,9 @@ pub(crate) async fn handle_chat_completions(
             attempt_guard.channel_name =
                 ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
             attempt_guard.model = upstream.clone();
-            attempt_guard.chat_req = attempt_req.clone();
+            // R4：Arc 共享给守卫（同流式路径），避免每轮第二次整包深拷贝
+            let attempt_req = Arc::new(attempt_req);
+            attempt_guard.chat_req = Arc::clone(&attempt_req);
             match bridge.chat(&attempt_req, &ctx).await {
                 Ok(resp) => {
                     // #47：响应已收 → 计费接管点（下方 settle_usage 记账）
@@ -1791,8 +1806,14 @@ pub(crate) async fn handle_chat_completions(
         // 开关关着时响应原样返回。续写轮失败保留已得内容（见 continue_non_streaming）。
         let response = match (crate::continuation::plan(), cont_bridge, cont_req) {
             (Some(max_rounds), Some(bridge), Some(req)) => {
-                crate::continuation::continue_non_streaming(bridge, req, &ctx, response, max_rounds)
-                    .await
+                crate::continuation::continue_non_streaming(
+                    bridge,
+                    ChatFormat::from_arc(req),
+                    &ctx,
+                    response,
+                    max_rounds,
+                )
+                .await
             }
             _ => response,
         };

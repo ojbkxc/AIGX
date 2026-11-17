@@ -1212,8 +1212,11 @@ pub(crate) struct AttemptStartGuard {
     pub channel_id: String,
     pub channel_name: String,
     pub model: String,
-    /// prompt 估算输入（每轮请求体可能随模型映射变化）
-    pub chat_req: ChatFormat,
+    /// prompt 估算输入（每轮请求体可能随模型映射变化）。
+    ///
+    /// `Arc` 持有：failover 每轮都要更新守卫指向「本轮尝试的请求」，
+    /// 存整包会每轮多一次 O(n) 大 memcpy（messages/tools 可达数百 KB）。
+    pub chat_req: Arc<ChatFormat>,
     pub request_id: String,
     pub ip: Option<String>,
     pub user_id: Option<String>,

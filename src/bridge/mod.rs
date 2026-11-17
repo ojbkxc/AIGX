@@ -143,6 +143,13 @@ impl ChatFormat {
     pub fn anthropic_max_tokens(&self) -> u32 {
         self.max_tokens.unwrap_or(4096)
     }
+
+    /// 从共享的 `Arc` 取回 owned 副本：唯一引用时零拷贝，否则退化为
+    /// 一次深拷贝。续写（auto-continue）路径需要 owned 请求体，用它把
+    /// 数据面的 `Arc<ChatFormat>` 交接出去（R4 性能）。
+    pub fn from_arc(req: std::sync::Arc<Self>) -> Self {
+        std::sync::Arc::try_unwrap(req).unwrap_or_else(|arc| (*arc).clone())
+    }
 }
 
 /// ChatFormat 的调试序列化（log_body 快照用）。

@@ -692,13 +692,20 @@ pub async fn handle_messages(
         }
     }
 
+    // R4 性能：请求体从这里起用 `Arc` 共享（与 chat.rs 同口径）——估算、
+    // failover 守卫、流计费快照只 clone 指针；每轮 attempt_req 是唯一必要
+    // 深拷贝。guardrail/image 的原地改写在上方，之后不再有 `&mut chat_req`。
+    let chat_req = std::sync::Arc::new(chat_req);
+
     // P1 两段式计费：请求前预留配额，流式/非流式结算时多退少补。
     // 此前 Anthropic 分支未接两段式（reservation: None），余额耗尽用户可在
     // 单请求内超额消费。与 chat.rs 同口径。
     // P1 性能：BPE 估算移到阻塞线程池（纯 CPU，每 64KB 切片一次正则编码）。
-    let estimated_prompt_tokens =
-        crate::token_estimate::count_chat_prompt_blocking(model.clone(), chat_req.clone()).await
-            as u64;
+    let estimated_prompt_tokens = crate::token_estimate::count_chat_prompt_blocking_arc(
+        model.clone(),
+        std::sync::Arc::clone(&chat_req),
+    )
+    .await as u64;
     let estimated_completion_tokens = chat_req.max_tokens.unwrap_or(256).clamp(256, 4096) as u64;
     let reservation = match super::openai::reserve_usage(
         &state,
@@ -754,7 +761,7 @@ pub async fn handle_messages(
             channel_id: String::new(),
             channel_name: String::new(),
             model: model.clone(),
-            chat_req: chat_req.clone(),
+            chat_req: std::sync::Arc::clone(&chat_req),
             request_id: request_id.clone(),
             ip: client_ip.clone(),
             user_id: api_key.user_id.clone(),
@@ -804,7 +811,7 @@ pub async fn handle_messages(
                 continue;
             }
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
-            let mut attempt_req = chat_req.clone();
+            let mut attempt_req = (*chat_req).clone();
             attempt_req.model = upstream.clone();
             // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
             // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
@@ -837,7 +844,9 @@ pub async fn handle_messages(
             attempt_guard.channel_name =
                 ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
             attempt_guard.model = upstream.clone();
-            attempt_guard.chat_req = attempt_req.clone();
+            // R4：本轮请求体 Arc 共享给守卫（499 兜底估算只读）
+            let attempt_req = std::sync::Arc::new(attempt_req);
+            attempt_guard.chat_req = std::sync::Arc::clone(&attempt_req);
             let attempt_index = attempt_counter;
             if attempt_index > 1 {
                 crate::purge::record_retry();
@@ -1188,9 +1197,11 @@ pub async fn handle_messages(
             let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
             // P1 性能：估算移到阻塞线程池（纯 CPU；message_start 前缀
             // 需要回显 input_tokens，此处必须 await 后才能建流）
-            let input_tokens_est =
-                crate::token_estimate::count_chat_prompt_blocking(model.clone(), chat_req.clone())
-                    .await as u64;
+            let input_tokens_est = crate::token_estimate::count_chat_prompt_blocking_arc(
+                model.clone(),
+                std::sync::Arc::clone(&chat_req),
+            )
+            .await as u64;
             // message_start 回显映射后的上游模型名（与计费/日志口径一致）
             let model_for_prefix = used_upstream.clone().unwrap_or_else(|| model.clone());
             let prefix = futures::stream::once(async move {
@@ -1465,7 +1476,7 @@ pub async fn handle_messages(
                 group: billing_group.clone(),
                 // Arc 共享请求快照：suffix 的 spawn_blocking 预估算可廉价
                 // clone（P1 性能——BPE 估算移出 tokio worker）
-                chat_req: std::sync::Arc::new(chat_req.clone()),
+                chat_req: std::sync::Arc::clone(&chat_req),
                 tool_calls: tool_calls.clone(),
                 acc: acc.clone(),
                 charged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1669,7 +1680,7 @@ pub async fn handle_messages(
             channel_id: String::new(),
             channel_name: String::new(),
             model: model.clone(),
-            chat_req: chat_req.clone(),
+            chat_req: std::sync::Arc::clone(&chat_req),
             request_id: request_id.clone(),
             ip: client_ip.clone(),
             user_id: api_key.user_id.clone(),
@@ -1718,7 +1729,7 @@ pub async fn handle_messages(
                 continue;
             }
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
-            let mut attempt_req = chat_req.clone();
+            let mut attempt_req = (*chat_req).clone();
             attempt_req.model = upstream.clone();
             // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
             // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
@@ -1751,7 +1762,9 @@ pub async fn handle_messages(
             attempt_guard.channel_name =
                 ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
             attempt_guard.model = upstream.clone();
-            attempt_guard.chat_req = attempt_req.clone();
+            // R4：本轮请求体 Arc 共享给守卫（499 兜底估算只读）
+            let attempt_req = std::sync::Arc::new(attempt_req);
+            attempt_guard.chat_req = std::sync::Arc::clone(&attempt_req);
             let attempt_index = attempt_counter;
             if attempt_index > 1 {
                 crate::purge::record_retry();
