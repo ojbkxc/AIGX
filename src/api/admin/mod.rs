@@ -219,8 +219,6 @@ pub use redemptions::{
     handle_batch_redemptions, handle_delete_redemption, handle_list_redemptions, handle_redeem,
 };
 
-pub use playground::handle_playground_chat;
-pub use playground::handle_playground_images;
 pub use playground::handle_playground_transcriptions;
 pub use playground::handle_playground_tts;
 

@@ -1029,36 +1029,11 @@ export interface PlaygroundChatRequest {
   [key: string]: unknown;
 }
 
-export interface PlaygroundImagesRequest {
-  channel_id?: string;
-  model: string;
-  prompt: string;
-  n?: number;
-  size?: string;
-  [key: string]: unknown;
-}
-
 export interface PlaygroundChatResult {
   stream?: Array<{ content?: string }>;
   data?: { content?: string; error?: string; usage?: unknown };
   error?: string;
   success?: boolean;
-}
-
-/** /api/playground/chat 的响应 data（Playground V2） */
-export interface PlaygroundChatData {
-  content?: string;
-  model?: string;
-  usage?: unknown;
-  error?: string;
-}
-
-/** Playground V2 双栏 JSON 展示：原始响应 + 预格式化文本 */
-export interface PlaygroundRawResult {
-  data?: unknown;
-  success?: boolean;
-  error?: string;
-  message?: string;
 }
 
 /**

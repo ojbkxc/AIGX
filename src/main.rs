@@ -2476,14 +2476,6 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         // 游乐场
         .route(
-            "/api/playground/chat",
-            post(api::admin::handle_playground_chat),
-        )
-        .route(
-            "/api/playground/images",
-            post(api::admin::handle_playground_images),
-        )
-        .route(
             "/api/playground/tts",
             post(api::admin::handle_playground_tts),
         )

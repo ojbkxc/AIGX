@@ -1222,12 +1222,6 @@ fn paths_monitor_security() -> Value {
 
 fn paths_playground() -> Value {
     json!({
-        "/api/playground/chat": {
-            "post": op_body("游乐场", "管理面聊天测试（真实上游）", "model/messages 等 OpenAI 兼容请求体")
-        },
-        "/api/playground/images": {
-            "post": op_body("游乐场", "图像生成测试", "model/prompt 等 OpenAI 兼容请求体")
-        },
         "/api/playground/tts": {
             "post": op_body("游乐场", "语音合成测试", "model/input 等 OpenAI 兼容请求体")
         },
@@ -2204,8 +2198,6 @@ mod tests {
         add("/api/plans", &["get", "post"]);
         add("/api/plans/{id}", &["delete"]);
         add("/api/plans/{id}/issue", &["post"]);
-        add("/api/playground/chat", &["post"]);
-        add("/api/playground/images", &["post"]);
         add("/api/playground/transcriptions", &["post"]);
         add("/api/playground/tts", &["post"]);
         add("/api/prices", &["get", "post"]);

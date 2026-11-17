@@ -462,8 +462,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
         (
             "不给 AI 面·人工试跑与对话入口（playground 真金烧上游 / assistant 对话本身；工具回路另有条目）",
             &[
-                "/api/playground/chat",
-                "/api/playground/images",
                 "/api/playground/transcriptions",
                 "/api/playground/tts",
                 "/api/assistant/chat",

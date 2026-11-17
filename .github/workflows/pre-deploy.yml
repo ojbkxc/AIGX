@@ -54,7 +54,7 @@ jobs:
       - name: Structure verification
         run: |
           echo "验证项目结构..."
-          required_dirs=("containers" "docs" "aigx-net")
+          required_dirs=("containers" "docs")
           for dir in "${required_dirs[@]}"; do
             if [ -d "$dir" ]; then
               echo "✅ $dir 存在"

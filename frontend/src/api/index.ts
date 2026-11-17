@@ -95,9 +95,6 @@ import type {
   TotpDisableResult,
   PlaygroundChatRequest,
   PlaygroundChatResult,
-  PlaygroundChatData,
-  PlaygroundImagesRequest,
-  PlaygroundRawResult,
   ChatStreamCallback,
   UsageSummaryItem,
   TrendItem,
@@ -1497,10 +1494,6 @@ export const api = {
     request<ApiResponse<SystemMonitorItem>>('GET', `${API_BASE}/monitor/system`),
 
   // Playground
-  playgroundChat: (data: PlaygroundChatRequest): Promise<ApiResponse<PlaygroundChatData>> =>
-    request<ApiResponse<PlaygroundChatData>>('POST', `${API_BASE}/playground/chat`, data),
-  playgroundImages: (data: PlaygroundImagesRequest): Promise<ApiResponse<PlaygroundRawResult>> =>
-    request<ApiResponse<PlaygroundRawResult>>('POST', `${API_BASE}/playground/images`, data),
   /** Playground TTS：文本转语音，返回 base64 音频 */
   playgroundTts: (data: { model: string; input: string; voice?: string }): Promise<ApiResponse<{ audio_base64: string; content_type: string }>> =>
     request<ApiResponse<{ audio_base64: string; content_type: string }>>('POST', `${API_BASE}/playground/tts`, data),

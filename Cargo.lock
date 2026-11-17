@@ -139,21 +139,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aigx-net"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "dashmap",
- "parking_lot",
- "serde",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "aliasable"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

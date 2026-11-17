@@ -1,7 +1,6 @@
 # ── Workspace ────────────────────────────────────────────────────────
-# 多 crate 工作区：主网关 + 独立网络层（aigx-net）
 [workspace]
-members = [".", "aigx-net"]
+members = ["."]
 resolver = "2"
 
 [workspace.dependencies]
