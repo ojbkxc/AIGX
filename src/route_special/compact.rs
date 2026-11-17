@@ -1,7 +1,7 @@
 // Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
 //!
-//! 上下文压缩（compact）路由：ZCode 的压缩请求模板识别 + 换模型后的参数收口
-//! + 配置形状/持久化/校验。移植自 A2A `core/compact_routing/mod.rs`、
+//! 上下文压缩（compact）路由：ZCode 的压缩请求模板识别、换模型后的参数收口，
+//! 以及配置形状/持久化/校验。移植自 A2A `core/compact_routing/mod.rs`、
 //! `core/compact_routing/parameters.rs`、`config/compact_routes.rs`。
 //!
 //! 判据只匹配**当前请求末尾的完整模板**，不搜索历史里的关键词；前文至少要有

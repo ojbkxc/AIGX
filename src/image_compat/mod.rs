@@ -1768,8 +1768,16 @@ mod tests {
         );
     }
 
+    /// 缓存是**进程级单例**，测试并行跑时两个用例会互相 clear/写入 ——
+    /// 串行化，否则「上限 256」会被另一个用例的 clear 打断成随机值。
+    fn cache_test_lock() -> &'static parking_lot::Mutex<()> {
+        static LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| parking_lot::Mutex::new(()))
+    }
+
     #[test]
     fn describe_cache_round_trip_and_clear() {
+        let _guard = cache_test_lock().lock();
         describe_cache_clear();
         assert_eq!(describe_cache_entry_count(), 0);
         let key = describe_cache_key("img-hash", "qwen-vl", "p");
@@ -1783,6 +1791,7 @@ mod tests {
 
     #[test]
     fn describe_cache_is_bounded() {
+        let _guard = cache_test_lock().lock();
         describe_cache_clear();
         for i in 0..(DESCRIBE_CACHE_MAX_ENTRIES + 64) {
             describe_cache_store(format!("k-{i}"), format!("v-{i}"));

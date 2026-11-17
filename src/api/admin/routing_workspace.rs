@@ -310,11 +310,7 @@ pub async fn handle_get_routing_workspace(
     } else {
         None
     };
-    let average_duration_ms = if successful > 0 {
-        Some(duration_sum / successful)
-    } else {
-        None
-    };
+    let average_duration_ms = (successful > 0).then(|| duration_sum / successful);
 
     // 在途（进程内实时表）：只有 model/user/key 维度
     let running_entries: Vec<InflightEntry> = state
@@ -2078,7 +2074,10 @@ mod tests {
         // registry::find("") 回落默认 kind=openai —— 空归因不能被标成 OpenAI
         assert_eq!(provider_label(""), "");
         assert_eq!(provider_label("   "), "");
-        assert_eq!(provider_label("openai_compatible"), "OpenAI 兼容");
+        assert_eq!(
+            provider_label("openai_compatible"),
+            "OpenAI 兼容（自填地址）"
+        );
         assert_eq!(provider_label("cloudflare"), "Cloudflare");
         // 目录内的 provider 用目录 label
         assert_eq!(provider_label("deepseek"), "DeepSeek");

@@ -3,8 +3,7 @@
 //! 视觉兼容管理面 —— `GET/PUT /api/vision-compatibility`。
 //!
 //! 契约对齐上游 `server/api/vision_compat.rs`：
-//! - `GET` → `{ config, revision, models, sharedTarget, maxTargets, maxModels, legacyExpanded }`
-//!  （AIGX 统一包在 `{success, data}` 里，字段名一致）；
+//! - `GET` → `{ config, revision, models, sharedTarget, maxTargets, maxModels, legacyExpanded }`（AIGX 统一包在 `{success, data}` 里，字段名一致）；
 //! - `PUT` 入参 `{ config, revision?, consent? }`。
 //!
 //! ── 与旧端点 `/api/image-compat/settings` 的关系 ────────────────
@@ -343,7 +342,8 @@ mod tests {
         let a = VisionSettings::default();
         let mut b = VisionSettings::default();
         assert_eq!(revision_of(&a), revision_of(&a.clone()));
-        assert_ne!(revision_of(&a), revision_of(&b));
+        // 两份相同的默认配置必须同修订号（否则每次 GET 都会「变」，CAS 恒 409）
+        assert_eq!(revision_of(&a), revision_of(&b));
         b.rules.push(vision::VisionRule::default());
         assert_ne!(revision_of(&a), revision_of(&b));
     }

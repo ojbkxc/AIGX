@@ -700,6 +700,23 @@ pub fn validate_target(target: &VisionTarget) -> Result<(), String> {
     if !valid_name(&target.provider) || !valid_name(&target.model) {
         return Err("请选择完整的提供商与模型，名称不能超过 256 个字符或含控制字符".into());
     }
+    validate_reasoning(target)
+}
+
+/// 块级（旧扁平形状）的目标校验：**只要求模型名**。
+///
+/// 旧形状（`vision_model` / `fallback_models`）本来就只有模型名、没有 provider，
+/// `legacy_from_flat` 因此产出 `provider: ""`。这**不是脏数据**：数据面按
+/// 模型名反查承载方（`provider_for_model`），解析不到也照常接管。若按规则级的
+/// 严格口径校验，旧面板保存一次就 400 —— 那是把合法老配置判成非法。
+fn validate_block_target(target: &VisionTarget) -> Result<(), String> {
+    if !valid_name(&target.model) {
+        return Err("请选择视觉模型，名称不能超过 256 个字符或含控制字符".into());
+    }
+    validate_reasoning(target)
+}
+
+fn validate_reasoning(target: &VisionTarget) -> Result<(), String> {
     if !target.reasoning.is_empty() && !REASONING_LEVELS.contains(&target.reasoning.as_str()) {
         return Err("图片兼容的思考等级无效".into());
     }
@@ -790,14 +807,14 @@ pub fn validate(settings: &VisionSettings) -> Result<(), String> {
     validate_model_list("辅助识图", &settings.assist.models)?;
     validate_model_list("切换视觉模型", &settings.reroute.models)?;
     if let Some(target) = &settings.assist.target {
-        validate_target(target)?;
+        validate_block_target(target)?;
     }
     if let Some(target) = &settings.assist.shared_target {
-        validate_target(target)?;
+        validate_block_target(target)?;
     }
     let mut targets = HashSet::new();
     for target in &settings.reroute.targets {
-        validate_target(target)?;
+        validate_block_target(target)?;
         if !targets.insert((target.provider.to_lowercase(), target.model.to_lowercase())) {
             return Err("备选视觉模型不能重复".into());
         }
@@ -1132,8 +1149,10 @@ mod tests {
 
     #[test]
     fn timeout_bounds_are_enforced() {
-        let mut settings = VisionSettings::default();
-        settings.timeout_seconds = 4;
+        let mut settings = VisionSettings {
+            timeout_seconds: 4,
+            ..Default::default()
+        };
         assert!(validate(&settings).is_err());
         settings.timeout_seconds = 121;
         assert!(validate(&settings).is_err());
@@ -1407,7 +1426,6 @@ mod tests {
                 fallback: Fallback::Designated,
                 targets: vec![target("vision-r")],
                 prefer_current_route: false,
-                ..RerouteSettings::default()
             },
             ..VisionSettings::default()
         };

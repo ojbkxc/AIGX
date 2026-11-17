@@ -224,7 +224,7 @@ pub fn active(settings: &TitleRoutes) -> bool {
 }
 
 /// 这次请求该走哪条规则：按列表顺序取第一条命中的（顺序即优先级）。
-pub fn match_rule(settings: &TitleRoutes, client: &str) -> Option<&TitleRule> {
+pub fn match_rule<'a>(settings: &'a TitleRoutes, client: &str) -> Option<&'a TitleRule> {
     settings
         .rules
         .iter()
@@ -331,7 +331,7 @@ fn thread_source(metadata: &str) -> Option<String> {
 }
 
 fn is_codex_title_kind(kind: &str) -> bool {
-    CODEX_TITLE_KINDS.iter().any(|value| *value == kind)
+    CODEX_TITLE_KINDS.contains(&kind)
 }
 
 /// Codex 是否明确标注了这次请求是标题生成。

@@ -376,6 +376,22 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
             ],
         ),
         (
+            "v1.0.65 路由对齐批（特殊路由 + 工作台/流向/跟踪；AI 运维面尚未出工具）",
+            &[
+                // 特殊路由配置：改写数据面模型名的全局开关，AI 误改会让某类请求整体换模型
+                "/api/models/compact-routes",
+                "/api/models/title-routes",
+                // 视觉兼容规则集：同上（assist 会真的调用辅助视觉模型产生上游成本）
+                "/api/vision-compatibility",
+                // 工作台/流向/跟踪：只读投影，待出「路由排障」工具时一并覆盖
+                "/api/routing/workspace",
+                "/api/routing/flow",
+                "/api/routing/trace",
+                "/api/routing/trace/request",
+                "/api/routing/replays",
+            ],
+        ),
+        (
             "不给 AI 面·资金/权益不可逆族（出账/权益剥夺一旦发生即不可回退、且 AI 无对价判断依据；逐条判据见行内注释）",
             &[
                 // 判据1 不可逆出账：佣金余额划转
