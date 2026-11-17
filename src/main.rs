@@ -446,6 +446,8 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_body_timeout_secs(config.usage.body_timeout_secs);
     // 出站指纹脱敏开关（请求体侧；保存设置时实时更新）
     crate::config::set_sanitize_fingerprints(config.usage.sanitize_fingerprints);
+    // 第三方模型回答完自动折叠过程（Responses phase 标记；保存设置时热更新）
+    crate::config::set_third_party_reasoning_collapse(config.usage.third_party_reasoning_collapse);
     // Cline 伪装头覆盖表（对齐 Agent2API「设置 → 网关 → Cline 伪装头」）：
     // 启动时从配置恢复进程级快照；保存设置时热更新
     crate::config::set_cline_header_overrides(

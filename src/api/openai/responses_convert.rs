@@ -21,7 +21,9 @@
 //! 非 `function` 的顶层 `tools` 条目一律丢弃并 `tracing::debug!` 记类型；
 //! 连续的多条 assistant 项会合并成一条（避免严格上游拒收相邻 assistant）。
 
-use crate::bridge::{ChatChunk, ChatFormat, ChatMessage, ChatResponse, Role, ToolCall, UsageStats};
+use crate::bridge::{
+    ChatChunk, ChatFormat, ChatMessage, ChatResponse, FinishReason, Role, ToolCall, UsageStats,
+};
 use serde_json::{json, Value};
 
 /// 一次入站转换的结果：Chat 请求体 + 客户端是否要流式。
@@ -431,7 +433,15 @@ fn merge_successive_assistants(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 /// `reasoning` 存在时附 `{"type":"reasoning",…}` 于 `output` **首位**；
 /// 随后是 message 项（无工具调用或正文非空时）、每个工具调用一项。
 /// `model` 由调用方传入（客户端可见的模型名）。
-pub(crate) fn chat_to_response(resp: &ChatResponse, model: &str) -> Value {
+///
+/// `reasoning_collapse` = 「回答完自动折叠过程」开关已生效（客户端是 Codex
+/// 且管理员开启）：给 message 项补 `phase` 阶段标记。关闭时 `output` 形状
+/// 与改造前逐字一致。
+pub(crate) fn chat_to_response(
+    resp: &ChatResponse,
+    model: &str,
+    reasoning_collapse: bool,
+) -> Value {
     let mut output: Vec<Value> = Vec::new();
     if let Some(reasoning) = resp.message.reasoning.as_deref().filter(|r| !r.is_empty()) {
         output.push(json!({
@@ -443,13 +453,29 @@ pub(crate) fn chat_to_response(resp: &ChatResponse, model: &str) -> Value {
     let text = resp.message.content_str();
     let tool_calls = resp.message.tool_calls.as_deref().unwrap_or(&[]);
     if !text.is_empty() || tool_calls.is_empty() {
-        output.push(json!({
+        let mut item = json!({
             "type": "message",
             "id": format!("msg-{}", uuid::Uuid::new_v4().simple()),
             "role": "assistant",
             "status": "completed",
             "content": [{ "type": "output_text", "text": text, "annotations": [] }],
-        }));
+        });
+        if reasoning_collapse {
+            // 非流式拿到的是整段答复：finish_reason 已确定，是否有工具调用也已知。
+            // 响应级 `finish_reason` 是强类型枚举（Stop/Length/ContentFilter/ToolCalls），
+            // 这里翻成 phase 判定认的字面量。
+            let finish = match resp.finish_reason {
+                FinishReason::Stop => Some("stop"),
+                FinishReason::Length => Some("length"),
+                FinishReason::ContentFilter => Some("content_filter"),
+                FinishReason::ToolCalls => Some("tool_calls"),
+            };
+            super::responses_phase::apply(
+                &mut item,
+                super::responses_phase::message_phase(finish, !tool_calls.is_empty(), true),
+            );
+        }
+        output.push(item);
     }
     for call in tool_calls {
         let arguments = if call.arguments.is_empty() {
@@ -498,7 +524,13 @@ pub(crate) fn sse_frame(event: &Value) -> String {
 /// `type` 与 `sequence_number`。终态 `response.completed` 在 chunk 带
 /// `finish_reason` 时发出。item id 由 `chunk.id`（上游响应 id，全流稳定）
 /// 派生，保证同一 item 的 `output_item.added` 与后续 delta 引用一致。
-pub(crate) fn chat_chunk_to_response_events(chunk: &ChatChunk, seq: &mut u64) -> Vec<Value> {
+pub(crate) fn chat_chunk_to_response_events(
+    chunk: &ChatChunk,
+    seq: &mut u64,
+    // 「回答完自动折叠过程」：`Some` = 开关生效（客户端是 Codex 且管理员开启），
+    // 携带本轮已累积的正文/是否出现过工具调用/是否全程成功。关闭时 `None`。
+    phase_input: Option<StreamPhaseInput<'_>>,
+) -> Vec<Value> {
     let mut events: Vec<Value> = Vec::new();
     let response_id = format!("resp-{}", chunk.id);
     let message_id = format!("msg-{}", chunk.id);
@@ -598,6 +630,38 @@ pub(crate) fn chat_chunk_to_response_events(chunk: &ChatChunk, seq: &mut u64) ->
     if chunk.finish_reason.is_some() {
         // 终态 response 的 id 与开头 response.created 保持一致（客户端按 id 对号）
         let mut response = done_response_object(&chunk.model, chunk.usage.as_ref());
+        // 「回答完自动折叠过程」：终态 output 里补一条带 phase 的 message，
+        // 否则 Codex 端拿不到 `final_answer` 可折叠。
+        if let Some(input) = phase_input {
+            let finish = chunk.finish_reason.map(|reason| match reason {
+                FinishReason::Stop => "stop",
+                FinishReason::Length => "length",
+                FinishReason::ContentFilter => "content_filter",
+                FinishReason::ToolCalls => "tool_calls",
+            });
+            let phase = super::responses_phase::message_phase(
+                finish,
+                input.has_tool_calls,
+                input.completed,
+            );
+            if phase.is_some() {
+                let mut item = json!({
+                    "type": "message",
+                    "id": message_id,
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": input.text,
+                        "annotations": [],
+                    }],
+                });
+                super::responses_phase::apply(&mut item, phase);
+                if let Some(object) = response.as_object_mut() {
+                    object.insert("output".to_string(), Value::Array(vec![item]));
+                }
+            }
+        }
         if let Some(map) = response.as_object_mut() {
             map.insert("id".to_string(), Value::String(response_id.clone()));
         }
@@ -608,6 +672,16 @@ pub(crate) fn chat_chunk_to_response_events(chunk: &ChatChunk, seq: &mut u64) ->
         ));
     }
     events
+}
+
+/// 流式终态补齐 `phase` 需要的本轮上下文（开关生效时才构造）。
+pub(crate) struct StreamPhaseInput<'a> {
+    /// 本轮已累积的正文（不含 reasoning）。
+    pub text: &'a str,
+    /// 本轮是否出现过客户端工具调用。
+    pub has_tool_calls: bool,
+    /// 本轮全程成功（无错误帧）。
+    pub completed: bool,
 }
 
 /// 流式终态 `response.completed` 的 `response` 对象（SPEC §3.6）。
@@ -818,7 +892,7 @@ mod tests {
             finish_reason: FinishReason::ToolCalls,
             usage: UsageStats::new(10, 5),
         };
-        let out = chat_to_response(&resp, "m1");
+        let out = chat_to_response(&resp, "m1", false);
         assert_eq!(out["object"], "response");
         assert_eq!(out["status"], "completed");
         assert_eq!(out["model"], "m1");
@@ -849,7 +923,7 @@ mod tests {
         let mut seq: u64 = 0;
         let mut events: Vec<Value> = Vec::new();
         for chunk in &chunks {
-            events.extend(chat_chunk_to_response_events(chunk, &mut seq));
+            events.extend(chat_chunk_to_response_events(chunk, &mut seq, None));
         }
 
         let kinds: Vec<&str> = events

@@ -56,6 +56,10 @@ pub(crate) async fn handle_responses(
     let client_ip = extract_client_ip(&headers);
     // 客户端识别（只读请求头；不改转发/计费行为）
     let client = crate::api::client_id::identify(&headers);
+    // 「回答完自动折叠过程」：只对严格识别为 Codex 的客户端 + 管理员开启时生效。
+    // 关闭（默认）时下游转换零改动，响应形状与改造前逐字一致。
+    let reasoning_collapse = client.name.eq_ignore_ascii_case("Codex")
+        && crate::config::third_party_reasoning_collapse_enabled();
 
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
@@ -536,7 +540,7 @@ pub(crate) async fn handle_responses(
         // usage 归一口径复用 UsageStats::billing_tokens（缓存分量进 prompt）。
         ResponsesAttempt::ConvertedJson(response) => {
             let latency_ms = request_start.elapsed().as_millis() as u64;
-            let json = responses_convert::chat_to_response(&response, &model);
+            let json = responses_convert::chat_to_response(&response, &model, reasoning_collapse);
 
             state.usage_tracker.accumulate(
                 response.usage.prompt_tokens,
@@ -662,6 +666,15 @@ pub(crate) async fn handle_responses(
             let errored_for_terminal = errored.clone();
             let client_model = model.clone();
             let mut seq: u64 = 0;
+            // 「回答完自动折叠过程」：本轮累积状态（只在开关生效时使用）。
+            // text 单独累积（正文，不含 reasoning）；has_tool_calls 一旦置位不再清零；
+            // completed 初始 true，任一错误帧置 false。
+            let phase_text = Arc::new(parking_lot::Mutex::new(String::new()));
+            let phase_text_for_map = phase_text.clone();
+            let phase_has_tools = Arc::new(AtomicBool::new(false));
+            let phase_has_tools_for_map = phase_has_tools.clone();
+            let phase_completed = Arc::new(AtomicBool::new(true));
+            let phase_completed_for_map = phase_completed.clone();
             let sse_stream = chat_stream.flat_map(move |item| {
                 let mut out: Vec<Result<bytes::Bytes, BridgeError>> = Vec::new();
                 match item {
@@ -692,9 +705,34 @@ pub(crate) async fn handle_responses(
                             let (prompt, _cached) = usage.billing_tokens();
                             *billing_for_map.usage.lock() = Some((prompt, usage.completion_tokens));
                         }
-                        for mut event in
-                            responses_convert::chat_chunk_to_response_events(&chunk, &mut seq)
-                        {
+                        if reasoning_collapse {
+                            if let Some(text) = &chunk.delta.content {
+                                crate::token_estimate::push_capped(
+                                    &mut phase_text_for_map.lock(),
+                                    text,
+                                );
+                            }
+                            if chunk.delta.tool_calls.is_some() {
+                                phase_has_tools_for_map.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        // 只在终态 chunk 需要 phase 输入：中间帧不构造，避免每帧
+                        // 都克隆一遍累计正文。
+                        let phase_text = (reasoning_collapse && chunk.finish_reason.is_some())
+                            .then(|| phase_text_for_map.lock().clone());
+                        let phase_input =
+                            phase_text
+                                .as_deref()
+                                .map(|text| responses_convert::StreamPhaseInput {
+                                    text,
+                                    has_tool_calls: phase_has_tools_for_map.load(Ordering::Relaxed),
+                                    completed: phase_completed_for_map.load(Ordering::Relaxed),
+                                });
+                        for mut event in responses_convert::chat_chunk_to_response_events(
+                            &chunk,
+                            &mut seq,
+                            phase_input,
+                        ) {
                             // 终态 response 由 chunk.model（上游名）构造；对客户端
                             // 回显原始请求模型名，与透传路径的可见行为一致
                             if event.get("type").and_then(Value::as_str)
@@ -714,6 +752,7 @@ pub(crate) async fn handle_responses(
                     }
                     Err(e) => {
                         errored_for_map.store(true, Ordering::SeqCst);
+                        phase_completed_for_map.store(false, Ordering::Relaxed);
                         tracing::warn!("responses converted stream aborted: {e}");
                         let event = serde_json::json!({
                             "type": "error",

@@ -26,6 +26,9 @@ pub struct SettingsRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct LimitsRequest {
+    /// 第三方模型回答完自动折叠过程（对齐 Agent2API `thirdPartyReasoningCollapse`，
+    /// 只对识别为 Codex 的客户端生效）。
+    pub third_party_reasoning_collapse: Option<bool>,
     pub daily_limit: Option<u64>,
     pub monthly_limit: Option<u64>,
     pub register_quota: Option<i64>,
@@ -184,6 +187,7 @@ pub async fn handle_get_limits(
             "auto_continue": config.usage.auto_continue,
             "auto_continue_max_rounds": config.usage.auto_continue_max_rounds,
             "sanitize_fingerprints": config.usage.sanitize_fingerprints,
+            "thirdPartyReasoningCollapse": config.usage.third_party_reasoning_collapse,
         })
     })))
 }
@@ -324,6 +328,9 @@ pub async fn handle_update_limits(
         if let Some(v) = body.sanitize_fingerprints {
             config.usage.sanitize_fingerprints = v;
         }
+        if let Some(v) = body.third_party_reasoning_collapse {
+            config.usage.third_party_reasoning_collapse = v;
+        }
         Ok(())
     })
     .await?;
@@ -352,6 +359,7 @@ pub async fn handle_update_limits(
         usage.auto_continue_max_rounds as u64,
     );
     crate::config::set_sanitize_fingerprints(usage.sanitize_fingerprints);
+    crate::config::set_third_party_reasoning_collapse(usage.third_party_reasoning_collapse);
     // 换号重试间隔 / 状态码名单立即生效（账号池运行时读取）
     state
         .account_sessions

@@ -29,6 +29,9 @@ mod responses;
 // SPEC-1.0.49 §3（流 B）：Responses ↔ Chat 纯转换层。只在 `responses_passthrough`
 // 返回 `Err(Config)`（该上游不支持 Responses）时被 responses.rs 用作降级路径。
 mod responses_convert;
+// Responses 助手消息的 `phase` 阶段标记（Codex 桌面端「回答完折叠过程」）。
+// 开关：`[usage] third_party_reasoning_collapse`，只对识别为 Codex 的客户端生效。
+mod responses_phase;
 mod state;
 // 流式拒答前缀探测（破甲「异源递进」的流式侧补全；chat / anthropic 共用）
 mod stream_refusal;

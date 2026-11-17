@@ -663,6 +663,15 @@ pub struct UsageConfig {
     /// 1 = 单实例单次铸造，避开并发冲突与 DOM 重建竞态（SDK 同一个实例连铸两轮会互踩）。
     #[serde(default = "default_zcode_captcha_pool_max_per_round")]
     pub zcode_captcha_pool_max_per_round: u8,
+    /// 第三方模型回答完自动折叠过程（对齐 Agent2API `thirdPartyReasoningCollapse`，默认关）。
+    ///
+    /// Codex 桌面端只在最后一条助手消息带 `phase: "final_answer"` 时才把这一轮的
+    /// 过程折叠起来；网关把 Chat 转成 Responses 时默认不带该字段，于是非原生
+    /// （第三方模型）答复在 Codex 里会摊开成长条。开启后：正常结束且没有工具
+    /// 调用的非空回答补 `final_answer`，工具调用前的说明补 `commentary`；
+    /// 错误、截断与缺结束证据时不补。只对识别为 Codex 的客户端生效。
+    #[serde(default)]
+    pub third_party_reasoning_collapse: bool,
 }
 
 /// 令牌池库存目标默认值（够下一条请求立刻有得用）。
@@ -1001,6 +1010,7 @@ impl Default for UsageConfig {
             zcode_captcha_pool_target: default_zcode_captcha_pool_target(),
             zcode_captcha_pool_poll_ms: default_zcode_captcha_pool_poll_ms(),
             zcode_captcha_pool_max_per_round: default_zcode_captcha_pool_max_per_round(),
+            third_party_reasoning_collapse: false,
             billing_flat_quota: default_billing_flat_quota(),
         }
     }
@@ -1102,6 +1112,20 @@ pub fn strip_newline_keepalive() -> bool {
 /// 由 main 与 settings 更新端点写入快照。
 pub fn set_strip_newline_keepalive(v: bool) {
     STRIP_NEWLINE_KEEPALIVE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 第三方模型回答完自动折叠过程（协议重建层逐请求读取，关闭时零开销）。
+static THIRD_PARTY_REASONING_COLLAPSE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 读取「回答完自动折叠」开关。
+pub fn third_party_reasoning_collapse_enabled() -> bool {
+    THIRD_PARTY_REASONING_COLLAPSE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照。
+pub fn set_third_party_reasoning_collapse(v: bool) {
+    THIRD_PARTY_REASONING_COLLAPSE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// models.dev 元数据补齐开关（默认开；模型元信息查询与刷新协程同步读取）。
