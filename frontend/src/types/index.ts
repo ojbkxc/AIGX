@@ -1957,6 +1957,12 @@ export interface UpdateSettingsItem {
   token: string;
   tokenConfigured: boolean;
   restart_after_apply: boolean;
+  /** GitHub 加速源模式：auto（官方优先、失败回退）/ official / accelerated */
+  github_mode: 'auto' | 'official' | 'accelerated';
+  /** accelerated 模式下首选的加速源（必须在 github_mirrors 里启用） */
+  github_mirror_url: string;
+  /** 加速源列表（前缀式；最多 6 个） */
+  github_mirrors: { url: string; enabled: boolean; supports_api: boolean }[];
   supported: boolean;
   currentVersion: string;
 }

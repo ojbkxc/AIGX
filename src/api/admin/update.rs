@@ -39,6 +39,15 @@ pub struct UpdateSettingsRequest {
     pub token: Option<String>,
     #[serde(default)]
     pub restart_after_apply: Option<bool>,
+    /// GitHub 加速源模式（`auto` / `official` / `accelerated`）。
+    #[serde(default)]
+    pub github_mode: Option<crate::config::GithubAccessMode>,
+    /// `accelerated` 模式下首选加速源（必须在 `github_mirrors` 里启用）。
+    #[serde(default)]
+    pub github_mirror_url: Option<String>,
+    /// GitHub 加速源列表（最多 6 个；整表替换）。
+    #[serde(default)]
+    pub github_mirrors: Option<Vec<crate::config::GithubMirror>>,
 }
 
 /// GET /api/update/status —— 当前版本 / 最近检查结果 / 下载进度 / 是否可原地更新。
@@ -236,6 +245,46 @@ pub async fn handle_put_update_settings(
         if let Some(token) = body.token.as_deref() {
             config.update.token = token.trim().to_string();
         }
+        if let Some(mode) = body.github_mode {
+            config.update.github_mode = mode;
+        }
+        let mirrors_provided = body.github_mirrors.is_some();
+        if let Some(mirrors) = body.github_mirrors {
+            if mirrors.len() > 6 {
+                return Err("最多配置 6 个 GitHub 加速源".to_string());
+            }
+            let mut normalized: Vec<crate::config::GithubMirror> = Vec::new();
+            for mut mirror in mirrors {
+                mirror.url = crate::update::github_source::normalize_mirror_url(&mirror.url)?;
+                if normalized.iter().any(|existing| existing.url == mirror.url) {
+                    return Err(format!("GitHub 加速源重复：{}", mirror.url));
+                }
+                // 已知不代理 API 的站点强制标 false（运维填错会一直 404）
+                if ["ghproxy.net", "ghfast.top"].iter().any(|host| {
+                    url::Url::parse(&mirror.url)
+                        .ok()
+                        .and_then(|url| url.host_str().map(str::to_string))
+                        .is_some_and(|host_str| host_str == *host)
+                }) {
+                    mirror.supports_api = false;
+                }
+                normalized.push(mirror);
+            }
+            config.update.github_mirrors = normalized;
+        }
+        if let Some(preferred) = body.github_mirror_url.as_deref() {
+            let preferred = crate::update::github_source::normalize_mirror_url(preferred)?;
+            if !mirrors_provided
+                && !config
+                    .update
+                    .github_mirrors
+                    .iter()
+                    .any(|mirror| mirror.url == preferred)
+            {
+                return Err("首选加速源必须先在加速源列表里添加".to_string());
+            }
+            config.update.github_mirror_url = preferred;
+        }
         Ok(())
     })
     .await?;
@@ -259,6 +308,9 @@ fn settings_json(config: &UpdateConfig) -> Value {
         "token": crate::api::admin::channels::mask_secret(&config.token),
         "tokenConfigured": !config.token.trim().is_empty(),
         "restart_after_apply": config.restart_after_apply,
+        "github_mode": config.github_mode,
+        "github_mirror_url": config.github_mirror_url,
+        "github_mirrors": config.github_mirrors,
         "supported": crate::update::supported(),
         "currentVersion": crate::update::CURRENT_VERSION,
     })

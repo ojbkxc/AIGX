@@ -40,6 +40,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod github_source;
+
 use crate::config::UpdateConfig;
 use crate::storage::FileStore;
 
@@ -662,25 +664,56 @@ impl UpdateManager {
     }
 
     /// 流式下载更新包并返回实际 sha256（hex）。
+    ///
+    /// 走 GitHub 加速源候选链（`github_source::resource_candidates`）：按
+    /// `github_mode` 排好官方/加速顺序，逐个尝试直到拿到 2xx —— 某个加速站
+    /// 超时/限流不会让整次更新失败。
     async fn download_bundle(
         &self,
         config: &UpdateConfig,
         asset: &UpdateAsset,
         path: &Path,
     ) -> Result<String, String> {
-        assert_downloadable(&asset.url, config)?;
         let client = self.client(config)?;
-        let response = client
-            .get(&asset.url)
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
-            .header(reqwest::header::ACCEPT, "application/octet-stream")
-            .send()
-            .await
-            .map_err(|e| format!("下载更新包失败: {e}"))?;
-        let status = response.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(format!("下载更新包失败：更新源返回 HTTP {status}"));
+        let mut last_error = String::new();
+        let mut response = None;
+        for candidate in github_source::resource_candidates(config, &asset.url) {
+            // 白名单对每个候选单独判定：加速源主机来自运维显式配置，放行；
+            // 拼出来的 URL 不会绕过已有的 https / 自建源校验。
+            if let Err(e) = assert_downloadable(&candidate.url, config) {
+                last_error = e;
+                continue;
+            }
+            let attempt = client
+                .get(&candidate.url)
+                .header(reqwest::header::USER_AGENT, USER_AGENT)
+                .header(reqwest::header::ACCEPT, "application/octet-stream")
+                .send()
+                .await;
+            match attempt {
+                Ok(resp) if (200..300).contains(&resp.status().as_u16()) => {
+                    if candidate.label != "官方源" {
+                        tracing::info!(
+                            "update bundle downloaded via {} ({})",
+                            candidate.label,
+                            candidate.url
+                        );
+                    }
+                    response = Some(resp);
+                    break;
+                }
+                Ok(resp) => {
+                    last_error =
+                        format!("{} 返回 HTTP {}", candidate.label, resp.status().as_u16());
+                }
+                Err(e) => {
+                    last_error = format!("{} 请求失败: {e}", candidate.label);
+                }
+            }
         }
+        let Some(response) = response else {
+            return Err(format!("下载更新包失败：{last_error}"));
+        };
         let declared = response.content_length().unwrap_or(0);
         if declared > MAX_BUNDLE_BYTES {
             return Err(format!(
@@ -1005,23 +1038,43 @@ impl UpdateManager {
 }
 
 /// 下载一个小文本文件（.sha256）。
+///
+/// 与更新包同口径走候选链：校验文件与更新包必须能从同一个源拿到，
+/// 否则加速站只代理二进制时校验会断。
 async fn download_text(
     manager: &UpdateManager,
     config: &UpdateConfig,
     url: &str,
 ) -> Result<String, String> {
-    assert_downloadable(url, config)?;
     let client = manager.client(config)?;
-    let response = client
-        .get(url)
-        .header(reqwest::header::USER_AGENT, USER_AGENT)
-        .send()
-        .await
-        .map_err(|e| format!("下载校验文件失败: {e}"))?;
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
-        return Err(format!("下载校验文件失败：HTTP {status}"));
+    let mut last_error = String::new();
+    let mut response = None;
+    for candidate in github_source::resource_candidates(config, url) {
+        if let Err(e) = assert_downloadable(&candidate.url, config) {
+            last_error = e;
+            continue;
+        }
+        match client
+            .get(&candidate.url)
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .send()
+            .await
+        {
+            Ok(resp) if (200..300).contains(&resp.status().as_u16()) => {
+                response = Some(resp);
+                break;
+            }
+            Ok(resp) => {
+                last_error = format!("{} 返回 HTTP {}", candidate.label, resp.status().as_u16());
+            }
+            Err(e) => {
+                last_error = format!("{} 请求失败: {e}", candidate.label);
+            }
+        }
     }
+    let Some(response) = response else {
+        return Err(format!("下载校验文件失败：{last_error}"));
+    };
     let text = response
         .text()
         .await
@@ -1452,7 +1505,8 @@ fn release_info(payload: &Value, repo: &str) -> ReleaseInfo {
 }
 
 /// 下载地址白名单：默认只允许 GitHub 资产域名；配置了 `api_base` 时
-/// 额外放行该源自身的主机（显式配置才生效）。
+/// 额外放行该源自身的主机（显式配置才生效）；配置了 GitHub 加速源时
+/// 放行这些加速站的主机（同样是运维显式配置 —— 不配置就没有这条口子）。
 fn assert_downloadable(url: &str, config: &UpdateConfig) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| "下载地址不是合法 URL".to_string())?;
     let host = parsed.host_str().unwrap_or("").to_lowercase();
@@ -1470,6 +1524,20 @@ fn assert_downloadable(url: &str, config: &UpdateConfig) -> Result<(), String> {
     }
     if parsed.scheme() != "https" {
         return Err("下载地址必须是 https".to_string());
+    }
+    // GitHub 加速源：主机来自运维显式配置（`github_mirrors`）。只放行
+    // https + 精确主机名（含子域），不做通配 —— 与自建源同一条口子。
+    let mirror_allowed = config.github_mirrors.iter().any(|mirror| {
+        url::Url::parse(mirror.url.trim())
+            .ok()
+            .and_then(|base| base.host_str().map(str::to_lowercase))
+            .is_some_and(|mirror_host| {
+                !mirror_host.is_empty()
+                    && (host == mirror_host || host.ends_with(&format!(".{mirror_host}")))
+            })
+    });
+    if mirror_allowed {
+        return Ok(());
     }
     let allowed = matches!(
         host.as_str(),

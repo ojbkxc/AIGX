@@ -284,7 +284,75 @@ pub struct UpdateConfig {
     /// 应用更新后是否自动重启服务（exec 自重启），默认开启。
     #[serde(default = "default_update_restart")]
     pub restart_after_apply: bool,
+    /// GitHub 加速源选择模式（对齐 Agent2API `githubAccess.mode`）。
+    ///
+    /// - `auto`：先官方、失败或限流时按启用顺序回落加速源（默认）
+    /// - `official`：只走官方地址，不碰加速源
+    /// - `accelerated`：优先走 `mirror_url` 指定的加速源，再其余启用项，最后官方
+    #[serde(default)]
+    pub github_mode: GithubAccessMode,
+    /// `accelerated` 模式下首选的那个加速源（必须也在 `github_mirrors` 里启用）。
+    #[serde(default = "default_github_mirror")]
+    pub github_mirror_url: String,
+    /// GitHub 加速源列表（前缀式：`https://xxx/` + 原始 GitHub URL）。
+    #[serde(default = "default_github_mirrors")]
+    pub github_mirrors: Vec<GithubMirror>,
 }
+
+/// GitHub 加速源选择模式。
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GithubAccessMode {
+    #[default]
+    Auto,
+    Official,
+    Accelerated,
+}
+
+/// 一个 GitHub 加速源（前缀式）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GithubMirror {
+    /// 前缀地址（必须以 `/` 结尾，如 `https://gh-proxy.com/`）。
+    pub url: String,
+    /// 是否启用。
+    pub enabled: bool,
+    /// 是否支持 `api.github.com`（部分加速站只代理 releases/raw，不代理 API）。
+    pub supports_api: bool,
+}
+
+impl Default for GithubMirror {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            enabled: true,
+            supports_api: true,
+        }
+    }
+}
+
+/// 默认加速源（与 Agent2API 同三个；`ghproxy.net` 不代理 API）。
+fn default_github_mirrors() -> Vec<GithubMirror> {
+    [
+        (DEFAULT_GITHUB_MIRROR, true),
+        ("https://cdn.gh-proxy.org/", true),
+        ("https://ghproxy.net/", false),
+    ]
+    .into_iter()
+    .map(|(url, supports_api)| GithubMirror {
+        url: url.to_string(),
+        enabled: true,
+        supports_api,
+    })
+    .collect()
+}
+
+fn default_github_mirror() -> String {
+    DEFAULT_GITHUB_MIRROR.to_string()
+}
+
+/// 默认 GitHub 加速源前缀（与 Agent2API `DEFAULT_GITHUB_MIRROR` 同值）。
+pub const DEFAULT_GITHUB_MIRROR: &str = "https://gh-proxy.com/";
 
 fn default_update_enabled() -> bool {
     true
@@ -319,6 +387,9 @@ impl Default for UpdateConfig {
             proxy: String::new(),
             token: String::new(),
             restart_after_apply: default_update_restart(),
+            github_mode: GithubAccessMode::default(),
+            github_mirror_url: default_github_mirror(),
+            github_mirrors: default_github_mirrors(),
         }
     }
 }

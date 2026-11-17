@@ -19,6 +19,9 @@ interface SettingsForm {
   include_prerelease: boolean;
   proxy: string;
   restart_after_apply: boolean;
+  github_mode: 'auto' | 'official' | 'accelerated';
+  github_mirror_url: string;
+  github_mirrors: { url: string; enabled: boolean; supports_api: boolean }[];
   token: string;
   tokenConfigured: boolean;
 }
@@ -120,6 +123,9 @@ export default function UpdatePanel(): JSX.Element {
         include_prerelease: data.include_prerelease,
         proxy: data.proxy,
         restart_after_apply: data.restart_after_apply,
+        github_mode: data.github_mode ?? 'auto',
+        github_mirror_url: data.github_mirror_url ?? '',
+        github_mirrors: data.github_mirrors ?? [],
         token: '',
         tokenConfigured: data.tokenConfigured,
       });
@@ -270,6 +276,9 @@ export default function UpdatePanel(): JSX.Element {
         include_prerelease: settings.include_prerelease,
         proxy: settings.proxy,
         restart_after_apply: settings.restart_after_apply,
+        github_mode: settings.github_mode,
+        github_mirror_url: settings.github_mirror_url,
+        github_mirrors: settings.github_mirrors,
       };
       if (settings.token.trim()) {
         payload.token = settings.token.trim();
@@ -568,6 +577,56 @@ export default function UpdatePanel(): JSX.Element {
                   onChange={(e) => setSettings({ ...settings, api_base: e.target.value })}
                 />
               </div>
+              <div className="form-group">
+                <label>{t('GitHub 访问方式')}</label>
+                <select
+                  className="form-input"
+                  value={settings.github_mode}
+                  onChange={(e) => setSettings({
+                    ...settings,
+                    github_mode: e.target.value as SettingsForm['github_mode'],
+                  })}
+                >
+                  <option value="auto">{t('自动：官方优先，失败时回退加速源')}</option>
+                  <option value="official">{t('仅官方地址')}</option>
+                  <option value="accelerated">{t('加速源优先')}</option>
+                </select>
+              </div>
+              {settings.github_mode !== 'official' && (
+                <div className="form-group">
+                  <label>{t('GitHub 加速源（每行一个前缀地址，最多 6 个）')}</label>
+                  <textarea
+                    className="form-input"
+                    rows={4}
+                    placeholder={'https://gh-proxy.com/\nhttps://cdn.gh-proxy.org/'}
+                    value={settings.github_mirrors.map((m) => m.url).join('\n')}
+                    onChange={(e) => {
+                      const urls = e.target.value.split('\n').map((line) => line.trim()).filter(Boolean);
+                      const previous = new Map(settings.github_mirrors.map((m) => [m.url, m]));
+                      setSettings({
+                        ...settings,
+                        github_mirrors: urls.map((url) => previous.get(url) ?? {
+                          url,
+                          enabled: true,
+                          supports_api: true,
+                        }),
+                      });
+                    }}
+                  />
+                  {settings.github_mode === 'accelerated' && (
+                    <input
+                      className="form-input"
+                      style={{ marginTop: 6 }}
+                      placeholder={t('首选加速源（留空 = 按列表顺序）')}
+                      value={settings.github_mirror_url}
+                      onChange={(e) => setSettings({ ...settings, github_mirror_url: e.target.value })}
+                    />
+                  )}
+                  <p className="update-hint">
+                    {t('加速站按「前缀 + 原始 GitHub 地址」代理；只影响更新包/校验文件下载，不改变 API 请求。')}
+                  </p>
+                </div>
+              )}
               <div className="form-group">
                 <label>{t('使用代理（可选）')}</label>
                 <input
