@@ -89,6 +89,9 @@ pub(crate) async fn handle_responses(
     } else {
         None
     };
+    // 图片兼容的压缩会就地改写请求体（上游实际发送形态）；debug 快照上面已取
+    // 原始版本，日志/调试看到的仍是客户端原请求。
+    let mut body = body;
 
     // 网络层闸门：管理员关闭网络层时拒绝转发（管理面不受影响）
     if let Err(resp) = crate::api::admin::network::network_layer_gate(&state) {
@@ -132,6 +135,15 @@ pub(crate) async fn handle_responses(
     // 阶段2：亲和性 session 标识（Responses 透传：user_id 兜底）
     let session_id: Option<String> = api_key.user_id.clone();
 
+    // 图片兼容（#7）：与 chat 面同一裁决。有图请求按快照做 describe / reroute；
+    // reroute 命中时把 routing_model 换成视觉模型（选路 / 计费 / 日志归属全按
+    // 视觉模型；视觉模型未定价时 build 内自动降级回原模型）。源模型已在上面
+    // 完成鉴权 / 限流 / 分组 / 定价校验，切换只影响后续转发口径。
+    let body_needs = from_chat_body(&body);
+    let image_ctx =
+        crate::image_compat::RequestImageContext::build(&state, &model, body_needs.images);
+    let model = image_ctx.routing_model(&model);
+
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
     // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
     // #40 §1：请求体 → 能力需求（tools / images / video）在选路前推出；
@@ -142,7 +154,7 @@ pub(crate) async fn handle_responses(
         session_id.as_deref(),
         api_key.provider_filter().as_deref(),
         None,
-        from_chat_body(&body),
+        body_needs,
     );
     if candidates.is_empty() {
         return openai_error_response(
@@ -170,6 +182,14 @@ pub(crate) async fn handle_responses(
             StatusCode::BAD_REQUEST,
         )
         .into_response();
+    }
+
+    // 图片兼容数据面（#7）：压缩内联大图（纯 CPU，spawn_blocking；有图才做）。
+    // 一次处理，后续 failover 各轮的 attempt_body 都从压缩后的 body 克隆。
+    // describe（上游识图改写）需 async 上游调用，透传形态不做——降级为
+    // responses→chat 的渠道由 chat 转换路径承接时可再走 chat 侧处理。
+    if image_ctx.has_images && image_ctx.prepare_responses_body(&mut body).await {
+        tracing::debug!("image_compat: responses request image compression applied");
     }
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());

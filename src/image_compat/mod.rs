@@ -1342,26 +1342,51 @@ impl RequestImageContext {
     }
 
     /// responses 透传路径的单次尝试处理（请求体形态）。
-    pub fn prepare_responses_body(&self, body: &mut Value) -> bool {
+    ///
+    /// 压缩是纯 CPU（解码/缩放/编码），放到阻塞线程池，避免大 base64 图卡住
+    /// tokio worker（与 `prepare_attempt` 的压缩分支同款）；任务 panic/取消时
+    /// 退回压缩前请求体，绝不把空 body 发上游。
+    ///
+    /// describe 需要 async 上游识图调用，透传形态不做（由 chat 降级路径覆盖）。
+    pub async fn prepare_responses_body(&self, body: &mut Value) -> bool {
         if !self.has_images || !self.cfg.enabled {
             return false;
         }
-        // describe 需要 async 上游调用，responses 透传路径只在压缩层接线
-        //（Responses 请求体的图片描述替换由 chat 降级路径覆盖）
         if !messages_have_data_images_in_value(body) {
             return false;
         }
-        let stats = compress_responses_body(body, &self.cfg);
-        if stats.changed() {
-            tracing::debug!(
-                "image_compat: compressed {} image(s) (responses), {} -> {} bytes",
-                stats.compressed,
-                stats.bytes_before,
-                stats.bytes_after
-            );
-            return true;
+        let cfg = self.cfg.clone();
+        let owned = Arc::new(std::mem::take(body));
+        let task_owned = owned.clone();
+        match tokio::task::spawn_blocking(move || {
+            let mut work: Value = (*task_owned).clone();
+            let stats = compress_responses_body(&mut work, &cfg);
+            (work, stats)
+        })
+        .await
+        {
+            Ok((back, stats)) => {
+                *body = back;
+                if stats.changed() {
+                    tracing::debug!(
+                        "image_compat: compressed {} image(s) (responses), {} -> {} bytes",
+                        stats.compressed,
+                        stats.bytes_before,
+                        stats.bytes_after
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "image_compat: responses compression task failed: {e}, keep original"
+                );
+                *body = (*owned).clone();
+                false
+            }
         }
-        false
     }
 }
 
@@ -1743,6 +1768,42 @@ mod tests {
             .expect("url");
         assert!(next.starts_with("data:image/png;base64,"));
         assert_ne!(next, uri);
+    }
+
+    /// responses 透传的 async 压缩入口：与同步 `compress_responses_body` 同效，
+    /// 无图 / 关闭时不动 body（早退不产生语义改写）。
+    #[tokio::test]
+    async fn prepare_responses_body_async_compresses_input_images() {
+        clear_cache();
+        let uri = png_data_uri(2000, 500);
+        let mut body = serde_json::json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "看图" },
+                    { "type": "input_image", "image_url": uri },
+                ],
+            }],
+        });
+        let mut settings = cfg();
+        settings.threshold_kb = 0;
+        settings.enabled = true;
+        let ctx = RequestImageContext {
+            cfg: Arc::new(settings),
+            decision: VisionDecision::Keep,
+            has_images: true,
+        };
+        assert!(ctx.prepare_responses_body(&mut body).await);
+        let next = body["input"][0]["content"][1]["image_url"]
+            .as_str()
+            .expect("url");
+        assert_ne!(next, uri, "大图应被缩边重编码");
+
+        // 无图：早退，body 逐字不变
+        let mut plain = serde_json::json!({"input": "hi"});
+        assert!(!ctx.prepare_responses_body(&mut plain).await);
+        assert_eq!(plain, serde_json::json!({"input": "hi"}));
     }
 
     // ── 跨请求识图缓存（reuse_results 的载体）──────────────────────────
