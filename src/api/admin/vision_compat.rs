@@ -45,7 +45,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_admin};
+use super::common::verify_admin;
 use crate::image_compat::vision::{
     self, Fallback, Mode, ModelSource, VisionSettings, VisionTarget,
 };
@@ -186,98 +186,93 @@ pub async fn handle_update_vision_compatibility(
     headers: HeaderMap,
     Json(body): Json<VisionCompatSettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    // 1) 乐观并发（提供 revision 时强校验；未提供放行）
-    if let Some(expected) = body.revision.as_deref() {
-        let actual = revision_of(&current_settings(&config).0);
-        if expected != actual {
-            return Err(error_response(
-                "图片兼容已在其他位置修改，请重新读取后再改；本次改动未生效",
-                StatusCode::CONFLICT,
-            ));
-        }
-    }
+    // 鉴权（返回的快照不再当写入底稿 —— 并发写者可能已超越它）
+    verify_admin(&state, &headers).await?;
+    // 字段级读-改-写（P2）：全部校验在写锁内跑，失败即 400/409 且配置未动。
+    //
+    // 1) 乐观并发（提供 revision 时强校验；未提供放行）——判据在闭包内用
+    //    当前值现算，而不是鉴权时刻的旧快照。
     // 2) 旧界面（只有两块设置）保存 → 折成规则列表；同一种方式已有多条规则时拒绝
-    let mut settings = body.config;
-    if settings.rules.is_empty() {
-        let previous = current_settings(&config).0;
-        let count = |mode: Mode| {
-            previous
+    // 3) 结构与组合校验（上限 / 必填 / 思考等级）
+    // 4) 启用中的规则：视觉目标必须在目录里、已启用、支持图片
+    // 5) 投影两块设置后落盘（新端点从此成为视觉兼容的权威形状）
+    //
+    // 目录读取（`model_choices`）在闭包外先算好：它要走渠道/账号池，不该在
+    // 配置写锁内做。
+    let choices = model_choices(&state);
+    let shared_target = crate::image_compat::shared_vision_target(&state);
+    let config = super::common::update_admin_config(&state, &headers, move |config| {
+        if let Some(expected) = body.revision.as_deref() {
+            let actual = revision_of(&current_settings(config).0);
+            if expected != actual {
+                return Err(
+                    "图片兼容已在其他位置修改，请重新读取后再改；本次改动未生效".to_string()
+                );
+            }
+        }
+        let mut settings = body.config;
+        if settings.rules.is_empty() {
+            let previous = current_settings(config).0;
+            let count = |mode: Mode| {
+                previous
+                    .rules
+                    .iter()
+                    .filter(|rule| rule.mode == mode)
+                    .count()
+            };
+            if count(Mode::Assist) > 1 || count(Mode::Reroute) > 1 {
+                return Err(
+                    "图片兼容已改为按规则配置；这一种方式下有多条规则时，请按规则方式修改"
+                        .to_string(),
+                );
+            }
+            settings.fold_blocks();
+        }
+        // 只要有规则，旧版顶层字段（`mode` / `overrides`）就必须清掉 —— 否则
+        // `is_legacy()` 为真、`rule_for` 走旧全局分支而**忽略规则列表**。
+        // 一条规则都没有时（纯旧配置回存）才保留旧字段、按旧语义继续生效。
+        if !settings.rules.is_empty() {
+            settings.clear_legacy();
+        }
+        vision::validate(&settings)?;
+        if settings.enabled {
+            for rule in settings
                 .rules
                 .iter()
-                .filter(|rule| rule.mode == mode)
-                .count()
-        };
-        if count(Mode::Assist) > 1 || count(Mode::Reroute) > 1 {
-            return Err(error_response(
-                "图片兼容已改为按规则配置；这一种方式下有多条规则时，请按规则方式修改",
-                StatusCode::BAD_REQUEST,
-            ));
-        }
-        settings.fold_blocks();
-    }
-    // 只要有规则，旧版顶层字段（`mode` / `overrides`）就必须清掉 —— 否则
-    // `is_legacy()` 为真、`rule_for` 走旧全局分支而**忽略规则列表**。
-    // 一条规则都没有时（纯旧配置回存）才保留旧字段、按旧语义继续生效。
-    if !settings.rules.is_empty() {
-        settings.clear_legacy();
-    }
-    // 3) 结构与组合校验（上限 / 必填 / 思考等级）
-    vision::validate(&settings)
-        .map_err(|message| error_response(&message, StatusCode::BAD_REQUEST))?;
-    // 4) 启用中的规则：视觉目标必须在目录里、已启用、支持图片
-    if settings.enabled {
-        let choices = model_choices(&state);
-        for rule in settings
-            .rules
-            .iter()
-            .filter(|rule| rule.enabled && !rule.models.is_empty())
-        {
-            match rule.mode {
-                Mode::Assist => {
-                    let target = match rule.source {
-                        ModelSource::Shared => crate::image_compat::shared_vision_target(&state),
-                        ModelSource::Custom => rule.target.clone(),
+                .filter(|rule| rule.enabled && !rule.models.is_empty())
+            {
+                match rule.mode {
+                    Mode::Assist => {
+                        let target = match rule.source {
+                            ModelSource::Shared => shared_target.clone(),
+                            ModelSource::Custom => rule.target.clone(),
+                        }
+                        .ok_or_else(|| {
+                            "请先配置辅助识图的视觉模型（工具服务 → 视觉，或指定模型）".to_string()
+                        })?;
+                        validate_available(&choices, &target)?;
                     }
-                    .ok_or_else(|| {
-                        error_response(
-                            "请先配置辅助识图的视觉模型（工具服务 → 视觉，或指定模型）",
-                            StatusCode::BAD_REQUEST,
-                        )
-                    })?;
-                    validate_available(&choices, &target)
-                        .map_err(|m| error_response(&m, StatusCode::BAD_REQUEST))?;
-                }
-                Mode::Reroute => {
-                    if rule.fallback == Fallback::Designated {
-                        for target in &rule.targets {
-                            validate_available(&choices, target)
-                                .map_err(|m| error_response(&m, StatusCode::BAD_REQUEST))?;
+                    Mode::Reroute => {
+                        if rule.fallback == Fallback::Designated {
+                            for target in &rule.targets {
+                                validate_available(&choices, target)?;
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    // 5) 投影两块设置后落盘（新端点从此成为视觉兼容的权威形状）
-    settings.project_blocks();
-    config.image_compat.vision = Some(settings.clone());
-    let snapshot = config.image_compat.clone();
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            // 保存即热生效：数据面每请求读进程快照
-            crate::image_compat::set_settings(snapshot.clone());
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": view(&state, &updated),
-            })))
-        }
-        Err(e) => Err(error_response(
-            &format!("Failed to save vision compatibility settings: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+        settings.project_blocks();
+        config.image_compat.vision = Some(settings);
+        Ok(())
+    })
+    .await?;
+    // 保存即热生效：数据面每请求读进程快照（落盘成功后才热更）
+    crate::image_compat::set_settings(config.image_compat.clone());
+    Ok(Json(json!({
+        "success": true,
+        "data": view(&state, &config),
+    })))
 }
 #[cfg(test)]
 mod tests {

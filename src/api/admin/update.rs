@@ -192,68 +192,57 @@ pub async fn handle_put_update_settings(
     headers: HeaderMap,
     Json(body): Json<UpdateSettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    if let Some(enabled) = body.enabled {
-        config.update.enabled = enabled;
-    }
-    if let Some(auto_check) = body.auto_check {
-        config.update.auto_check = auto_check;
-    }
-    if let Some(auto_apply) = body.auto_apply {
-        config.update.auto_apply = auto_apply;
-    }
-    if let Some(interval) = body.interval_hours {
-        config.update.interval_hours = interval.clamp(1, 720);
-    }
-    if let Some(repo) = body.repo.as_deref() {
-        let repo = repo.trim();
-        if !valid_repo(repo) {
-            return Err(error_response(
-                "仓库格式应为 owner/repo",
-                StatusCode::BAD_REQUEST,
-            ));
+    // 字段级读-改-写（P2）：并发保存不同 tab 时不再整包覆盖；校验在写锁内跑
+    let config = super::common::update_admin_config(&state, &headers, move |config| {
+        if let Some(enabled) = body.enabled {
+            config.update.enabled = enabled;
         }
-        config.update.repo = repo.to_string();
-    }
-    if let Some(api_base) = body.api_base.as_deref() {
-        let trimmed = api_base.trim().trim_end_matches('/');
-        if !trimmed.is_empty() {
-            let parsed = url::Url::parse(trimmed)
-                .map_err(|_| error_response("更新源地址不是合法 URL", StatusCode::BAD_REQUEST))?;
-            if parsed.scheme() != "http" && parsed.scheme() != "https" {
-                return Err(error_response(
-                    "更新源地址只支持 http/https",
-                    StatusCode::BAD_REQUEST,
-                ));
+        if let Some(auto_check) = body.auto_check {
+            config.update.auto_check = auto_check;
+        }
+        if let Some(auto_apply) = body.auto_apply {
+            config.update.auto_apply = auto_apply;
+        }
+        if let Some(interval) = body.interval_hours {
+            config.update.interval_hours = interval.clamp(1, 720);
+        }
+        if let Some(repo) = body.repo.as_deref() {
+            let repo = repo.trim();
+            if !valid_repo(repo) {
+                return Err("仓库格式应为 owner/repo".to_string());
             }
+            config.update.repo = repo.to_string();
         }
-        config.update.api_base = trimmed.to_string();
-    }
-    if let Some(include_prerelease) = body.include_prerelease {
-        config.update.include_prerelease = include_prerelease;
-    }
-    if let Some(proxy) = body.proxy.as_deref() {
-        config.update.proxy = proxy.trim().to_string();
-    }
-    if let Some(restart) = body.restart_after_apply {
-        config.update.restart_after_apply = restart;
-    }
-    if let Some(token) = body.token.as_deref() {
-        config.update.token = token.trim().to_string();
-    }
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": settings_json(&updated.update),
-            })))
+        if let Some(api_base) = body.api_base.as_deref() {
+            let trimmed = api_base.trim().trim_end_matches('/');
+            if !trimmed.is_empty() {
+                let parsed =
+                    url::Url::parse(trimmed).map_err(|_| "更新源地址不是合法 URL".to_string())?;
+                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    return Err("更新源地址只支持 http/https".to_string());
+                }
+            }
+            config.update.api_base = trimmed.to_string();
         }
-        Err(e) => Err(error_response(
-            &format!("Failed to save update settings: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+        if let Some(include_prerelease) = body.include_prerelease {
+            config.update.include_prerelease = include_prerelease;
+        }
+        if let Some(proxy) = body.proxy.as_deref() {
+            config.update.proxy = proxy.trim().to_string();
+        }
+        if let Some(restart) = body.restart_after_apply {
+            config.update.restart_after_apply = restart;
+        }
+        if let Some(token) = body.token.as_deref() {
+            config.update.token = token.trim().to_string();
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": settings_json(&config.update),
+    })))
 }
 
 /// 设置视图（令牌只回脱敏值，另给 tokenConfigured 供前端显示占位符）。

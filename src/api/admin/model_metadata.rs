@@ -80,23 +80,19 @@ pub async fn handle_put_model_metadata(
     headers: HeaderMap,
     Json(body): Json<ModelMetadataRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
     let Some(enabled) = body.enabled.or(body.models_dev_enabled) else {
         return Err(error_response(
             "缺少 enabled（或 modelsDevEnabled）字段",
             StatusCode::BAD_REQUEST,
         ));
     };
-    let mut config = state.config_manager.get().await;
-    config.usage.models_dev_enabled = enabled;
-    // 快照先行：即便落盘失败，本次运行内立即生效（下一轮刷新/补值都读它）
+    // 字段级读-改-写（P2）：落盘成功后才热更进程级快照
+    super::common::update_admin_config(&state, &headers, move |config| {
+        config.usage.models_dev_enabled = enabled;
+        Ok(())
+    })
+    .await?;
     crate::config::set_models_dev_enabled(enabled);
-    if let Err(e) = state.config_manager.update(config).await {
-        return Err(error_response(
-            &format!("保存失败：{e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ));
-    }
     Ok(Json(json!({
         "success": true,
         "data": metadata_json(enabled),

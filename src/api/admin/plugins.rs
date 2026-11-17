@@ -1380,33 +1380,27 @@ pub async fn handle_save_plugin_settings(
             StatusCode::BAD_REQUEST,
         ));
     }
-    let mut config = state.config_manager.get().await;
-    if let Some(value) = patch.auto_check {
-        config.update.auto_check = value;
-    }
-    if let Some(value) = patch.auto_update {
-        config.update.auto_apply = value;
-    }
-    // `beta` 是 `include_prerelease` 的镜像：显式给值即写入
-    if let Some(beta) = patch.beta {
-        config.update.include_prerelease = beta;
-    }
-    if let Some(minutes) = patch.interval_minutes {
-        if !(60..=PLUGIN_SETTINGS_MAX_MINUTES).contains(&minutes) {
-            return Err(error_response(
-                "检查间隔必须是 60 ~ 10080 分钟（1 小时 ~ 7 天）",
-                StatusCode::BAD_REQUEST,
-            ));
+    // 字段级读-改-写（P2）：并发保存不同 tab 时不再整包覆盖
+    let config = super::common::update_admin_config(&state, &headers, move |config| {
+        if let Some(value) = patch.auto_check {
+            config.update.auto_check = value;
         }
-        config.update.interval_hours = (minutes / 60).max(1) as u64;
-    }
-    state.config_manager.update(config).await.map_err(|error| {
-        error_response(
-            &format!("保存插件设置失败: {error}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    let config = state.config_manager.get().await;
+        if let Some(value) = patch.auto_update {
+            config.update.auto_apply = value;
+        }
+        // `beta` 是 `include_prerelease` 的镜像：显式给值即写入
+        if let Some(beta) = patch.beta {
+            config.update.include_prerelease = beta;
+        }
+        if let Some(minutes) = patch.interval_minutes {
+            if !(60..=PLUGIN_SETTINGS_MAX_MINUTES).contains(&minutes) {
+                return Err("检查间隔必须是 60 ~ 10080 分钟（1 小时 ~ 7 天）".to_string());
+            }
+            config.update.interval_hours = (minutes / 60).max(1) as u64;
+        }
+        Ok(())
+    })
+    .await?;
     Ok(Json(json!({
         "success": true,
         "data": plugin_settings_view(&config.update),

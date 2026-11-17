@@ -74,7 +74,6 @@ pub async fn handle_update_cline_headers(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
     let Some(object) = payload.as_object() else {
         return Err(super::common::error_response(
             "请求体必须是 JSON 对象",
@@ -103,20 +102,21 @@ pub async fn handle_update_cline_headers(
         }
     };
 
-    // 持久化（config.toml）+ 进程级快照热更（下一请求生效）
+    // 持久化（config.toml，字段级读-改-写）+ 落盘成功后热更进程级快照
     // 配置侧是 HashMap（serde 默认宽度），校验侧用 BTreeMap（确定性遍历），
     // 这里逐对搬一次；BTreeMap 的 iter 产出 (&K, &V)，需显式解引用再克隆。
-    config.usage.cline_headers.overrides = overrides
+    // 配置侧是 HashMap（serde 默认宽度），进程级快照是 Vec（保序）。
+    let snapshot: Vec<(String, String)> = overrides
         .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    state.config_manager.update(config).await.map_err(|e| {
-        super::common::error_response(
-            &format!("Cline 伪装头持久化失败: {e}"),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    crate::config::set_cline_header_overrides(overrides.into_iter().collect());
+    let stored: std::collections::HashMap<String, String> = overrides.into_iter().collect();
+    super::common::update_admin_config(&state, &headers, move |config| {
+        config.usage.cline_headers.overrides = stored;
+        Ok(())
+    })
+    .await?;
+    crate::config::set_cline_header_overrides(snapshot);
 
     tracing::info!("Cline 伪装头覆盖表已更新（下一个 Cline 请求生效）");
     Ok(Json(json!({

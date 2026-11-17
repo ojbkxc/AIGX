@@ -203,6 +203,35 @@ pub async fn verify_user(
     Ok(user)
 }
 
+/// 管理面配置写入的**单一入口**（鉴权 + 字段级读-改-写 + 落盘失败映射）。
+///
+/// 为什么不让 handler 自己 `let mut config = verify_admin(...)?` 再
+/// `config_manager.update(config)`：`verify_admin` 返回的是鉴权时刻的**整份
+/// 快照克隆**，两个管理员同时保存不同 tab 时，后写者会把自己那份旧快照整包
+/// 覆盖上去 —— 前者的改动静默丢失（无日志、无法自诊断）。
+///
+/// `mutate` 在写锁内收到**当前**配置的 owned 副本，只改自己那段字段即可；
+/// 返回 `Err(msg)` → 400 且配置未动。成功后返回**落盘后的权威配置**，供
+/// 调用方做进程级快照热更新与构造响应。
+pub async fn update_admin_config(
+    state: &AppState,
+    headers: &HeaderMap,
+    mutate: impl FnOnce(&mut AppConfig) -> Result<(), String>,
+) -> Result<AppConfig, (StatusCode, Json<Value>)> {
+    // 鉴权（返回值不再当配置快照用 —— 它可能已被并发写者超越）
+    verify_admin(state, headers).await?;
+    match state.config_manager.try_update(mutate).await {
+        Ok(()) => Ok(state.config_manager.get().await),
+        Err(crate::config::ConfigUpdateError::Rejected(message)) => {
+            Err(error_response(&message, StatusCode::BAD_REQUEST))
+        }
+        Err(crate::config::ConfigUpdateError::Persist(error)) => Err(error_response(
+            &format!("配置保存失败: {error}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
 /// 从请求中提取会话 token
 pub fn extract_session_token(headers: &HeaderMap) -> Option<String> {
     if let Some(auth) = headers.get("authorization") {

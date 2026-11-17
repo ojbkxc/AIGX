@@ -285,41 +285,38 @@ pub async fn handle_update_zcode_captcha_pool(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
     let Some(object) = payload.as_object() else {
         return Err(error_response(
             "请求体必须是 JSON 对象",
             StatusCode::BAD_REQUEST,
         ));
     };
-    if let Some(value) = object.get("target").and_then(Value::as_u64) {
-        config.usage.zcode_captcha_pool_target =
-            value.clamp(ZCODE_POOL_TARGET_MIN as u64, ZCODE_POOL_TARGET_MAX as u64) as u8;
-    }
-    if let Some(value) = object.get("pollMs").and_then(Value::as_u64) {
-        config.usage.zcode_captcha_pool_poll_ms =
-            value.clamp(ZCODE_POOL_POLL_MIN_MS as u64, ZCODE_POOL_POLL_MAX_MS as u64) as u32;
-    }
-    if let Some(value) = object.get("maxPerRound").and_then(Value::as_u64) {
-        config.usage.zcode_captcha_pool_max_per_round = value.clamp(
-            ZCODE_POOL_PER_ROUND_MIN as u64,
-            ZCODE_POOL_PER_ROUND_MAX as u64,
-        ) as u8;
-    }
-    // 落库前先把生效值记下来：`update` 按值吃掉 config（与 cline_headers 同形），
-    // 快照热更用的这三个数不能从已移走的 config 里再读。
+    // 字段级读-改-写（P2）：并发保存不同 tab 时不再整包覆盖
+    let config = super::common::update_admin_config(&state, &headers, move |config| {
+        if let Some(value) = object.get("target").and_then(Value::as_u64) {
+            config.usage.zcode_captcha_pool_target =
+                value.clamp(ZCODE_POOL_TARGET_MIN as u64, ZCODE_POOL_TARGET_MAX as u64) as u8;
+        }
+        if let Some(value) = object.get("pollMs").and_then(Value::as_u64) {
+            config.usage.zcode_captcha_pool_poll_ms =
+                value.clamp(ZCODE_POOL_POLL_MIN_MS as u64, ZCODE_POOL_POLL_MAX_MS as u64) as u32;
+        }
+        if let Some(value) = object.get("maxPerRound").and_then(Value::as_u64) {
+            config.usage.zcode_captcha_pool_max_per_round = value.clamp(
+                ZCODE_POOL_PER_ROUND_MIN as u64,
+                ZCODE_POOL_PER_ROUND_MAX as u64,
+            ) as u8;
+        }
+        Ok(())
+    })
+    .await?;
+    // 快照热更：前端铸造器下一轮（≤ pollMs）就会读到新节奏，无需重启。
+    // 落盘成功后从权威快照读取（try_update 返回的是当前值）。
     let applied = (
         config.usage.zcode_captcha_pool_target,
         config.usage.zcode_captcha_pool_poll_ms,
         config.usage.zcode_captcha_pool_max_per_round,
     );
-    state.config_manager.update(config).await.map_err(|e| {
-        error_response(
-            &format!("验证码令牌池设置持久化失败: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    // 快照热更：前端铸造器下一轮（≤ pollMs）就会读到新节奏，无需重启
     set_zcode_captcha_pool_settings(applied.0, applied.1, applied.2);
     tracing::info!(
         "ZCode 验证码令牌池节奏已更新（target={} pollMs={} maxPerRound={}）",

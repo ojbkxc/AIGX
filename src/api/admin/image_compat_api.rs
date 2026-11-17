@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_admin};
+use super::common::verify_admin;
 
 /// PUT 请求体（缺省字段保持原值；snake_case 主导，收 camelCase 别名）。
 #[derive(Debug, Deserialize)]
@@ -82,130 +82,115 @@ pub async fn handle_update_image_compat_settings(
     headers: HeaderMap,
     Json(body): Json<ImageCompatSettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
+    // 鉴权（before 快照只读用）
+    verify_admin(&state, &headers).await?;
+    // 字段级读-改-写（P2）：全部校验在写锁内跑，失败即 400 且配置未动。
     // 视觉字段是否真的变了（旧面板每次保存都发全量表单；只改压缩参数时
-    // 不能顺手把新端点写入的规则集覆盖掉）。
+    // 不能顺手把新端点写入的规则集覆盖掉）——判据在闭包内用当前值现算。
+    let config_before = state.config_manager.get().await;
     let before_vision = (
-        config.image_compat.vision_enabled,
-        config.image_compat.mode.clone(),
-        config.image_compat.vision_model.clone(),
-        config.image_compat.fallback_models.clone(),
+        config_before.image_compat.vision_enabled,
+        config_before.image_compat.mode.clone(),
+        config_before.image_compat.vision_model.clone(),
+        config_before.image_compat.fallback_models.clone(),
     );
-    if let Some(v) = body.enabled {
-        config.image_compat.enabled = v;
-    }
-    if let Some(v) = body.max_edge {
-        if !(crate::image_compat::MAX_EDGE_MIN..=crate::image_compat::MAX_EDGE_MAX).contains(&v) {
-            return Err(error_response(
-                &format!(
+    drop(config_before);
+    let config = super::common::update_admin_config(&state, &headers, move |config| {
+        if let Some(v) = body.enabled {
+            config.image_compat.enabled = v;
+        }
+        if let Some(v) = body.max_edge {
+            if !(crate::image_compat::MAX_EDGE_MIN..=crate::image_compat::MAX_EDGE_MAX).contains(&v)
+            {
+                return Err(format!(
                     "长边上限必须在 {}~{} 之间（像素）",
                     crate::image_compat::MAX_EDGE_MIN,
                     crate::image_compat::MAX_EDGE_MAX
-                ),
-                StatusCode::BAD_REQUEST,
-            ));
+                ));
+            }
+            config.image_compat.max_edge = v;
         }
-        config.image_compat.max_edge = v;
-    }
-    if let Some(v) = body.quality {
-        if !(crate::image_compat::QUALITY_MIN..=crate::image_compat::QUALITY_MAX).contains(&v) {
-            return Err(error_response(
-                &format!(
+        if let Some(v) = body.quality {
+            if !(crate::image_compat::QUALITY_MIN..=crate::image_compat::QUALITY_MAX).contains(&v) {
+                return Err(format!(
                     "压缩质量必须在 {}~{} 之间",
                     crate::image_compat::QUALITY_MIN,
                     crate::image_compat::QUALITY_MAX
-                ),
-                StatusCode::BAD_REQUEST,
-            ));
+                ));
+            }
+            config.image_compat.quality = v;
         }
-        config.image_compat.quality = v;
-    }
-    if let Some(v) = body.threshold_kb {
-        if v > crate::image_compat::THRESHOLD_KB_MAX {
-            return Err(error_response(
-                &format!(
+        if let Some(v) = body.threshold_kb {
+            if v > crate::image_compat::THRESHOLD_KB_MAX {
+                return Err(format!(
                     "触发阈值必须在 {}~{} KB 之间（0 = 每张都尝试压缩）",
                     crate::image_compat::THRESHOLD_KB_MIN,
                     crate::image_compat::THRESHOLD_KB_MAX
-                ),
-                StatusCode::BAD_REQUEST,
-            ));
+                ));
+            }
+            config.image_compat.threshold_kb = v;
         }
-        config.image_compat.threshold_kb = v;
-    }
-    if let Some(v) = body.vision_enabled {
-        config.image_compat.vision_enabled = v;
-    }
-    if let Some(v) = body.mode.as_deref() {
-        let mode = v.trim();
-        if !mode.eq_ignore_ascii_case(crate::image_compat::MODE_DESCRIBE)
-            && !mode.eq_ignore_ascii_case(crate::image_compat::MODE_SWITCH)
-        {
-            return Err(error_response(
-                &format!(
+        if let Some(v) = body.vision_enabled {
+            config.image_compat.vision_enabled = v;
+        }
+        if let Some(v) = body.mode.as_deref() {
+            let mode = v.trim();
+            if !mode.eq_ignore_ascii_case(crate::image_compat::MODE_DESCRIBE)
+                && !mode.eq_ignore_ascii_case(crate::image_compat::MODE_SWITCH)
+            {
+                return Err(format!(
                     "模式只能是 '{}'（辅助识图）或 '{}'（切换视觉模型）",
                     crate::image_compat::MODE_DESCRIBE,
                     crate::image_compat::MODE_SWITCH
-                ),
-                StatusCode::BAD_REQUEST,
+                ));
+            }
+            config.image_compat.mode = mode.to_ascii_lowercase();
+        }
+        if let Some(v) = body.vision_model.as_deref() {
+            config.image_compat.vision_model = v.trim().to_string();
+        }
+        if let Some(v) = body.fallback_models {
+            config.image_compat.fallback_models = v
+                .iter()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect();
+        }
+        if let Some(v) = body.describe_prompt {
+            config.image_compat.describe_prompt = v;
+        }
+        // 组合校验：开启视觉兼容却没配视觉模型 = 配置无效（数据面会静默不生效，
+        // 与其让运维以为开了，不如保存时直接拒绝）。
+        if config.image_compat.vision_enabled && config.image_compat.vision_model.trim().is_empty()
+        {
+            return Err("开启图片兼容时必须选择视觉模型".to_string());
+        }
+        // 旧面板若改动了视觉字段 → 用旧扁平值重建等价的旧版形状写入 `vision`，
+        // 让 `/api/vision-compatibility` 写入的新规则集让位（最后一个写入方赢）。
+        // 视觉字段一个都没变（只改压缩参数 / 重复保存同一表单）则不碰 `vision`。
+        let after_vision = (
+            config.image_compat.vision_enabled,
+            config.image_compat.mode.clone(),
+            config.image_compat.vision_model.clone(),
+            config.image_compat.fallback_models.clone(),
+        );
+        if before_vision != after_vision {
+            config.image_compat.vision = Some(crate::image_compat::vision::legacy_from_flat(
+                config.image_compat.vision_enabled,
+                &config.image_compat.mode,
+                &config.image_compat.vision_model,
+                &config.image_compat.fallback_models,
             ));
         }
-        config.image_compat.mode = mode.to_ascii_lowercase();
-    }
-    if let Some(v) = body.vision_model.as_deref() {
-        config.image_compat.vision_model = v.trim().to_string();
-    }
-    if let Some(v) = body.fallback_models {
-        config.image_compat.fallback_models = v
-            .iter()
-            .map(|m| m.trim().to_string())
-            .filter(|m| !m.is_empty())
-            .collect();
-    }
-    if let Some(v) = body.describe_prompt {
-        config.image_compat.describe_prompt = v;
-    }
-    // 组合校验：开启视觉兼容却没配视觉模型 = 配置无效（数据面会静默不生效，
-    // 与其让运维以为开了，不如保存时直接拒绝）。
-    if config.image_compat.vision_enabled && config.image_compat.vision_model.trim().is_empty() {
-        return Err(error_response(
-            "开启图片兼容时必须选择视觉模型",
-            StatusCode::BAD_REQUEST,
-        ));
-    }
-    // 旧面板若改动了视觉字段 → 用旧扁平值重建等价的旧版形状写入 `vision`，
-    // 让 `/api/vision-compatibility` 写入的新规则集让位（最后一个写入方赢）。
-    // 视觉字段一个都没变（只改压缩参数 / 重复保存同一表单）则不碰 `vision`。
-    let after_vision = (
-        config.image_compat.vision_enabled,
-        config.image_compat.mode.clone(),
-        config.image_compat.vision_model.clone(),
-        config.image_compat.fallback_models.clone(),
-    );
-    if before_vision != after_vision {
-        config.image_compat.vision = Some(crate::image_compat::vision::legacy_from_flat(
-            config.image_compat.vision_enabled,
-            &config.image_compat.mode,
-            &config.image_compat.vision_model,
-            &config.image_compat.fallback_models,
-        ));
-    }
-    // 生效值统一归一化后落盘（越界/脏值不写进 config.toml）
-    config.image_compat = config.image_compat.normalized();
-    let snapshot = config.image_compat.clone();
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            // 保存即热生效：数据面每个请求读进程快照
-            crate::image_compat::set_settings(snapshot.clone());
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": settings_json(&updated.image_compat),
-            })))
-        }
-        Err(e) => Err(error_response(
-            &format!("Failed to save image compat settings: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+        // 生效值统一归一化后落盘（越界/脏值不写进 config.toml）
+        config.image_compat = config.image_compat.normalized();
+        Ok(())
+    })
+    .await?;
+    // 保存即热生效：数据面每个请求读进程快照（落盘成功后才热更）
+    crate::image_compat::set_settings(config.image_compat.clone());
+    Ok(Json(json!({
+        "success": true,
+        "data": settings_json(&config.image_compat),
+    })))
 }

@@ -26,7 +26,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, record_audit, verify_admin};
+use super::common::{record_audit, verify_admin};
 
 /// 品牌设置请求体（缺省字段保持原值；`favicon_url` 传空串 = 清除）。
 #[derive(Debug, Deserialize)]
@@ -105,83 +105,59 @@ pub async fn handle_update_branding(
     headers: HeaderMap,
     Json(body): Json<BrandingRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    let before = branding_payload(&config);
-
-    if let Some(raw) = &body.panel_name {
-        let name = raw.trim();
-        if name.is_empty() {
-            return Err(error_response("面板名称不能为空", StatusCode::BAD_REQUEST));
-        }
-        if name.chars().count() > PANEL_NAME_MAX_CHARS {
-            return Err(error_response(
-                &format!("面板名称过长（上限 {PANEL_NAME_MAX_CHARS} 字符）"),
-                StatusCode::BAD_REQUEST,
-            ));
-        }
-        // 控制字符会破坏日志与响应头（若将来用于 title），一律拒绝
-        if name.chars().any(char::is_control) {
-            return Err(error_response(
-                "面板名称不能包含控制字符",
-                StatusCode::BAD_REQUEST,
-            ));
-        }
-        config.admin.panel_name = name.to_string();
-    }
-
-    if let Some(raw) = &body.logo_url {
-        match crate::config::validate_brand_url(raw) {
-            Ok(url) => config.admin.logo_url = url,
-            Err(e) => {
-                return Err(error_response(
-                    &format!("Logo 地址非法：{e}"),
-                    StatusCode::BAD_REQUEST,
-                ))
+    // 审计 before 快照取自鉴权时刻（只读用，不参与写入）
+    let before = branding_payload(&verify_admin(&state, &headers).await?);
+    // 字段级读-改-写（P2）：校验在写锁内跑，失败即 400 且配置未动
+    let config = super::common::update_admin_config(&state, &headers, |config| {
+        if let Some(raw) = &body.panel_name {
+            let name = raw.trim();
+            if name.is_empty() {
+                return Err("面板名称不能为空".to_string());
             }
-        }
-    }
-
-    if let Some(raw) = &body.favicon_url {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            // 空串 = 清除 favicon（回落 logo_url）
-            config.admin.favicon_url = None;
-        } else {
-            match crate::config::validate_brand_url(trimmed) {
-                Ok(url) => config.admin.favicon_url = Some(url),
-                Err(e) => {
-                    return Err(error_response(
-                        &format!("favicon 地址非法：{e}"),
-                        StatusCode::BAD_REQUEST,
-                    ))
-                }
+            if name.chars().count() > PANEL_NAME_MAX_CHARS {
+                return Err(format!("面板名称过长（上限 {PANEL_NAME_MAX_CHARS} 字符）"));
             }
+            // 控制字符会破坏日志与响应头（若将来用于 title），一律拒绝
+            if name.chars().any(char::is_control) {
+                return Err("面板名称不能包含控制字符".to_string());
+            }
+            config.admin.panel_name = name.to_string();
         }
-    }
 
-    let after = branding_payload(&config);
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            record_audit(
-                &state,
-                &super::common::admin_id_from_session(&state, &headers).await,
-                "branding.update",
-                "branding",
-                Some(before),
-                Some(after.clone()),
-            );
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": branding_payload(&updated),
-                "restartRequired": false,
-            })))
+        if let Some(raw) = &body.logo_url {
+            config.admin.logo_url = crate::config::validate_brand_url(raw)
+                .map_err(|e| format!("Logo 地址非法：{e}"))?;
         }
-        Err(e) => Err(error_response(
-            &format!("Failed to save branding: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+
+        if let Some(raw) = &body.favicon_url {
+            let trimmed = raw.trim();
+            config.admin.favicon_url = if trimmed.is_empty() {
+                // 空串 = 清除 favicon（回落 logo_url）
+                None
+            } else {
+                Some(
+                    crate::config::validate_brand_url(trimmed)
+                        .map_err(|e| format!("favicon 地址非法：{e}"))?,
+                )
+            };
+        }
+        Ok(())
+    })
+    .await?;
+
+    record_audit(
+        &state,
+        &super::common::admin_id_from_session(&state, &headers).await,
+        "branding.update",
+        "branding",
+        Some(before),
+        Some(branding_payload(&config)),
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": branding_payload(&config),
+        "restartRequired": false,
+    })))
 }
 
 #[cfg(test)]

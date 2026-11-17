@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_admin};
+use super::common::{error_response, update_admin_config, verify_admin};
 
 #[derive(Debug, Deserialize)]
 pub struct SettingsRequest {
@@ -194,205 +194,184 @@ pub async fn handle_update_limits(
     headers: HeaderMap,
     Json(body): Json<LimitsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    if let Some(v) = body.daily_limit {
-        config.usage.daily_limit = v;
-    }
-    if let Some(v) = body.monthly_limit {
-        config.usage.monthly_limit = v;
-    }
-    if let Some(v) = body.register_quota {
-        config.usage.register_quota = v;
-    }
-    if let Some(v) = body.register_enabled {
-        config.usage.register_enabled = v;
-    }
-    if let Some(v) = body.quota_for_inviter {
-        config.usage.quota_for_inviter = v;
-    }
-    if let Some(v) = body.quota_for_invitee {
-        config.usage.quota_for_invitee = v;
-    }
-    if let Some(v) = body.email_whitelist_enable {
-        config.usage.email_whitelist_enable = v;
-    }
-    if let Some(v) = body.email_whitelist_suffix {
-        config.usage.email_whitelist_suffix = v;
-    }
-    if let Some(c) = body.checkin {
-        if let Some(v) = c.enabled {
-            config.usage.checkin.enabled = v;
+    // 字段级读-改-写（P2）：两个管理员并发保存不同 tab 时不再整包覆盖。
+    //
+    // 进程级快照（数据面每请求同步读取的那些 `AtomicBool`/`RwLock`）一律挪到
+    // **落盘成功之后**再同步 —— 原实现在 `update()` 之前就逐个热更，落盘
+    // 失败时运行期已按新值跑过、重启后配置回退（无法复现的漂移）。
+    let config = update_admin_config(&state, &headers, move |config| {
+        if let Some(v) = body.daily_limit {
+            config.usage.daily_limit = v;
         }
-        if let Some(v) = c.min_quota {
-            config.usage.checkin.min_quota = v;
+        if let Some(v) = body.monthly_limit {
+            config.usage.monthly_limit = v;
         }
-        if let Some(v) = c.max_quota {
-            config.usage.checkin.max_quota = v;
+        if let Some(v) = body.register_quota {
+            config.usage.register_quota = v;
         }
-    }
-    if let Some(v) = body.threshold {
-        config.usage.threshold = v;
-    }
-    if let Some(v) = body.api_timeout_secs {
-        config.usage.api_timeout_secs = v.clamp(1, 3_600);
-    }
-    if let Some(v) = body.connect_timeout_secs {
-        config.usage.connect_timeout_secs = v.clamp(1, 300);
-    }
-    if let Some(v) = body.headers_timeout_secs {
-        config.usage.headers_timeout_secs = v.clamp(1, 600);
-        // 首事件守卫实时生效（其余客户端超时下次启动生效，见页面提示）
-        crate::bridge::set_sse_first_event_deadline(std::time::Duration::from_secs(
-            config.usage.headers_timeout_secs,
-        ));
-    }
-    if let Some(v) = body.stream_idle_secs {
-        config.usage.stream_idle_secs = v.clamp(1, 600);
-    }
-    if let Some(v) = body.body_timeout_secs {
-        config.usage.body_timeout_secs = v.clamp(1, 3_600);
-    }
-    if let Some(v) = body.retry_self_count {
-        config.usage.retry_self_count = v.min(10);
-    }
-    if let Some(v) = body.retry_switch_count {
-        config.usage.retry_switch_count = v.min(10);
-    }
-    if let Some(v) = body.retry_interval_ms {
-        config.usage.retry_interval_ms = v.min(10_000);
-    }
-    if let Some(v) = body.retry_on_status {
-        let mut codes: Vec<u16> = Vec::new();
-        for code in v {
-            if !(100..=599).contains(&code) {
-                return Err(error_response(
-                    "直接换号状态码必须在 100-599 之间",
-                    StatusCode::BAD_REQUEST,
-                ));
+        if let Some(v) = body.register_enabled {
+            config.usage.register_enabled = v;
+        }
+        if let Some(v) = body.quota_for_inviter {
+            config.usage.quota_for_inviter = v;
+        }
+        if let Some(v) = body.quota_for_invitee {
+            config.usage.quota_for_invitee = v;
+        }
+        if let Some(v) = body.email_whitelist_enable {
+            config.usage.email_whitelist_enable = v;
+        }
+        if let Some(v) = body.email_whitelist_suffix {
+            config.usage.email_whitelist_suffix = v;
+        }
+        if let Some(c) = body.checkin {
+            if let Some(v) = c.enabled {
+                config.usage.checkin.enabled = v;
             }
-            if !codes.contains(&code) {
-                codes.push(code);
+            if let Some(v) = c.min_quota {
+                config.usage.checkin.min_quota = v;
             }
-            if codes.len() >= 50 {
-                break;
+            if let Some(v) = c.max_quota {
+                config.usage.checkin.max_quota = v;
             }
         }
-        config.usage.retry_on_status = codes;
-    }
-    if let Some(v) = body.max_retries {
-        config.usage.max_retries = v.min(10);
-    }
-    if let Some(v) = body.max_request_body_mb {
-        if v > 0 {
-            config.usage.max_request_body_mb = v;
+        if let Some(v) = body.threshold {
+            config.usage.threshold = v;
         }
-    }
-    if let Some(v) = body.log_body {
-        config.usage.log_body = v;
-        // 同步进程级快照（数据面同步路径读取，立即生效）
-        crate::config::set_log_body(v);
-    }
-    if let Some(v) = body.route_replay {
-        config.usage.route_replay = v;
-        // 同步进程级快照（resolve/选号路径读取，立即生效）
-        crate::config::set_route_replay(v);
-    }
-    if let Some(v) = body.assistant_tools {
-        config.usage.assistant_tools = v;
-        crate::config::set_assistant_tools(v);
-    }
-    if let Some(v) = body.debug_traffic {
-        config.usage.debug_traffic = v;
-        // 同步进程级快照（桥接层每个请求读取，保存即生效、无需重启）
-        crate::config::set_debug_traffic(v);
-        // 关闭时顺手清空缓冲：避免关掉开关后旧报文还留在管理页上看得到
-        // （开启前的报文同样不该在开启后突然出现）。
-        if !v {
-            crate::debug_traffic::clear();
+        if let Some(v) = body.api_timeout_secs {
+            config.usage.api_timeout_secs = v.clamp(1, 3_600);
         }
-    }
-    if let Some(v) = body.strip_newline_keepalive {
-        config.usage.strip_newline_keepalive = v;
-        // 同步进程级快照（桥接层每条 SSE 帧读取，保存即生效、无需重启）
-        crate::config::set_strip_newline_keepalive(v);
-    }
-    if let Some(v) = body.billing_flat_quota {
-        if v > 0 {
-            config.usage.billing_flat_quota = v;
-            // 同步进程级快照（数据面按次计费同步读取，立即生效）
-            crate::config::set_billing_flat_quota(v);
+        if let Some(v) = body.connect_timeout_secs {
+            config.usage.connect_timeout_secs = v.clamp(1, 300);
         }
-    }
-    if let Some(v) = body.allow_internal_upstream {
-        // SSRF 防护逃生阀：开启后允许上游地址指向内网（自托管 Ollama 等）。
-        // 保存后立即生效（渠道/账号保存时实时读配置快照）。
-        config.usage.allow_internal_upstream = v;
-    }
-    if let Some(v) = body.queue_max_waits {
-        config.usage.queue_max_waits = v.min(10);
-        crate::config::set_queue_settings(
-            config.usage.queue_max_waits as u64,
-            config.usage.queue_wait_seconds as u64,
-        );
-    }
-    if let Some(v) = body.queue_wait_seconds {
-        config.usage.queue_wait_seconds = v.min(120);
-        crate::config::set_queue_settings(
-            config.usage.queue_max_waits as u64,
-            config.usage.queue_wait_seconds as u64,
-        );
-    }
-    if body.auto_continue.is_some() || body.auto_continue_max_rounds.is_some() {
+        if let Some(v) = body.headers_timeout_secs {
+            config.usage.headers_timeout_secs = v.clamp(1, 600);
+        }
+        if let Some(v) = body.stream_idle_secs {
+            config.usage.stream_idle_secs = v.clamp(1, 600);
+        }
+        if let Some(v) = body.body_timeout_secs {
+            config.usage.body_timeout_secs = v.clamp(1, 3_600);
+        }
+        if let Some(v) = body.retry_self_count {
+            config.usage.retry_self_count = v.min(10);
+        }
+        if let Some(v) = body.retry_switch_count {
+            config.usage.retry_switch_count = v.min(10);
+        }
+        if let Some(v) = body.retry_interval_ms {
+            config.usage.retry_interval_ms = v.min(10_000);
+        }
+        if let Some(v) = body.retry_on_status {
+            let mut codes: Vec<u16> = Vec::new();
+            for code in v {
+                if !(100..=599).contains(&code) {
+                    return Err("直接换号状态码必须在 100-599 之间".to_string());
+                }
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+                if codes.len() >= 50 {
+                    break;
+                }
+            }
+            config.usage.retry_on_status = codes;
+        }
+        if let Some(v) = body.max_retries {
+            config.usage.max_retries = v.min(10);
+        }
+        if let Some(v) = body.max_request_body_mb {
+            if v > 0 {
+                config.usage.max_request_body_mb = v;
+            }
+        }
+        if let Some(v) = body.log_body {
+            config.usage.log_body = v;
+        }
+        if let Some(v) = body.route_replay {
+            config.usage.route_replay = v;
+        }
+        if let Some(v) = body.assistant_tools {
+            config.usage.assistant_tools = v;
+        }
+        if let Some(v) = body.debug_traffic {
+            config.usage.debug_traffic = v;
+        }
+        if let Some(v) = body.strip_newline_keepalive {
+            config.usage.strip_newline_keepalive = v;
+        }
+        if let Some(v) = body.billing_flat_quota {
+            if v > 0 {
+                config.usage.billing_flat_quota = v;
+            }
+        }
+        if let Some(v) = body.allow_internal_upstream {
+            // SSRF 防护逃生阀：开启后允许上游地址指向内网（自托管 Ollama 等）。
+            config.usage.allow_internal_upstream = v;
+        }
+        if let Some(v) = body.queue_max_waits {
+            config.usage.queue_max_waits = v.min(10);
+        }
+        if let Some(v) = body.queue_wait_seconds {
+            config.usage.queue_wait_seconds = v.min(120);
+        }
         if let Some(v) = body.auto_continue {
             config.usage.auto_continue = v;
         }
         if let Some(v) = body.auto_continue_max_rounds {
             config.usage.auto_continue_max_rounds = v.clamp(1, 8);
         }
-        // 同步进程级快照（数据面每个请求同步读取，立即生效）
-        crate::config::set_auto_continue_settings(
-            config.usage.auto_continue,
-            config.usage.auto_continue_max_rounds as u64,
-        );
-    }
-    if let Some(v) = body.sanitize_fingerprints {
-        config.usage.sanitize_fingerprints = v;
-        // 同步进程级快照（转发层每个请求同步读取，保存即生效、无需重启）
-        crate::config::set_sanitize_fingerprints(v);
-    }
-    // 换号重试间隔立即生效（账号池运行时读取）
-    state
-        .account_sessions
-        .set_retry_interval_ms(config.usage.retry_interval_ms);
-    state
-        .account_sessions
-        .set_retry_on_status(config.usage.retry_on_status.clone());
-    // 渠道级重试次数立即生效（选路时读取进程级快照）
-    crate::config::set_max_retries(config.usage.max_retries);
-    // 账号池「同账号重试」档与非流式响应体超时立即生效
-    crate::config::set_retry_self_count(config.usage.retry_self_count);
-    // 切换账号重试次数立即生效：映射到 RotationPolicy.max_attempts
-    // （max_attempts = retry_switch_count + 1，即「原账号 + 切换次数」）
-    crate::config::set_retry_switch_count(config.usage.retry_switch_count);
-    let mut policy = state.account_sessions.policy();
-    policy.max_attempts = (config.usage.retry_switch_count as usize + 1).clamp(1, 20);
-    let _ = state.account_sessions.set_policy(policy);
-    crate::config::set_body_timeout_secs(config.usage.body_timeout_secs);
-    // 直接换号/换渠道状态码名单立即生效
-    crate::config::set_retry_on_status_codes(config.usage.retry_on_status.clone());
-    match state.config_manager.update(config).await {
-        Ok(_) => {
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": updated.usage
-            })))
+        if let Some(v) = body.sanitize_fingerprints {
+            config.usage.sanitize_fingerprints = v;
         }
-        Err(e) => Err(error_response(
-            &format!("Failed to save limits: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
+        Ok(())
+    })
+    .await?;
+
+    // ── 落盘成功后的进程级快照同步（数据面逐请求同步读取，保存即生效）──
+    let usage = &config.usage;
+    crate::bridge::set_sse_first_event_deadline(std::time::Duration::from_secs(
+        usage.headers_timeout_secs,
+    ));
+    crate::config::set_log_body(usage.log_body);
+    crate::config::set_route_replay(usage.route_replay);
+    crate::config::set_assistant_tools(usage.assistant_tools);
+    crate::config::set_debug_traffic(usage.debug_traffic);
+    if !usage.debug_traffic {
+        // 关闭时顺手清空缓冲：避免关掉开关后旧报文还留在管理页上
+        crate::debug_traffic::clear();
     }
+    crate::config::set_strip_newline_keepalive(usage.strip_newline_keepalive);
+    crate::config::set_billing_flat_quota(usage.billing_flat_quota);
+    crate::config::set_queue_settings(
+        usage.queue_max_waits as u64,
+        usage.queue_wait_seconds as u64,
+    );
+    crate::config::set_auto_continue_settings(
+        usage.auto_continue,
+        usage.auto_continue_max_rounds as u64,
+    );
+    crate::config::set_sanitize_fingerprints(usage.sanitize_fingerprints);
+    // 换号重试间隔 / 状态码名单立即生效（账号池运行时读取）
+    state
+        .account_sessions
+        .set_retry_interval_ms(usage.retry_interval_ms);
+    state
+        .account_sessions
+        .set_retry_on_status(usage.retry_on_status.clone());
+    crate::config::set_max_retries(usage.max_retries);
+    crate::config::set_retry_self_count(usage.retry_self_count);
+    crate::config::set_retry_switch_count(usage.retry_switch_count);
+    let mut policy = state.account_sessions.policy();
+    policy.max_attempts = (usage.retry_switch_count as usize + 1).clamp(1, 20);
+    let _ = state.account_sessions.set_policy(policy);
+    crate::config::set_body_timeout_secs(usage.body_timeout_secs);
+    crate::config::set_retry_on_status_codes(usage.retry_on_status.clone());
+
+    Ok(Json(json!({
+        "success": true,
+        "data": usage,
+    })))
 }
 
 // ── AI 助手（Agent）设置 ────────────────────────────────────────
@@ -459,68 +438,58 @@ pub async fn handle_update_agent_settings(
     headers: HeaderMap,
     Json(body): Json<AgentSettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    if let Some(v) = body.enabled {
-        config.agent.enabled = v;
-    }
-    if let Some(v) = body.model.as_deref() {
-        config.agent.model = v.trim().to_string();
-    }
-    if let Some(v) = body.channel.as_deref() {
-        config.agent.channel = v.trim().to_string();
-    }
-    if let Some(v) = body.max_turns {
-        config.agent.max_turns = v.clamp(1, 50);
-    }
-    if let Some(v) = body.approval_timeout_secs {
-        config.agent.approval_timeout_secs = v.min(3_600);
-    }
-    if let Some(v) = body.max_history {
-        config.agent.max_history = v.clamp(1, 200);
-    }
-    if let Some(v) = body.reasoning_effort.as_deref() {
-        let effort = v.trim().to_ascii_lowercase();
-        config.agent.reasoning_effort = match effort.as_str() {
-            "" | "off" => None,
-            "low" | "medium" | "high" => Some(effort),
-            _ => {
-                return Err(error_response(
-                    "思考强度应为 off/low/medium/high",
-                    StatusCode::BAD_REQUEST,
-                ))
-            }
-        };
-    }
-    if let Some(v) = body.system_prompt.as_deref() {
-        config.agent.system_prompt = v.trim().to_string();
-    }
-    if let Some(v) = body.disabled_tools {
-        if v.len() > 200 {
-            return Err(error_response("禁用的工具过多", StatusCode::BAD_REQUEST));
+    // 字段级读-改-写（P2）
+    let config = update_admin_config(&state, &headers, move |config| {
+        if let Some(v) = body.enabled {
+            config.agent.enabled = v;
         }
-        config.agent.disabled_tools = v
-            .into_iter()
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty())
-            .collect();
-    }
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            let updated = state.config_manager.get().await;
-            // 运行期 Agent 配置同步（切换 enabled / 模型 / 提示词 / 工具开关都立即生效）
-            if let Some(agent) = state.agent_state.as_deref() {
-                agent.set_config(updated.agent.clone());
-            }
-            Ok(Json(json!({
-                "success": true,
-                "data": agent_settings_json(&updated.agent),
-            })))
+        if let Some(v) = body.model.as_deref() {
+            config.agent.model = v.trim().to_string();
         }
-        Err(e) => Err(error_response(
-            &format!("Failed to save agent settings: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
+        if let Some(v) = body.channel.as_deref() {
+            config.agent.channel = v.trim().to_string();
+        }
+        if let Some(v) = body.max_turns {
+            config.agent.max_turns = v.clamp(1, 50);
+        }
+        if let Some(v) = body.approval_timeout_secs {
+            config.agent.approval_timeout_secs = v.min(3_600);
+        }
+        if let Some(v) = body.max_history {
+            config.agent.max_history = v.clamp(1, 200);
+        }
+        if let Some(v) = body.reasoning_effort.as_deref() {
+            let effort = v.trim().to_ascii_lowercase();
+            config.agent.reasoning_effort = match effort.as_str() {
+                "" | "off" => None,
+                "low" | "medium" | "high" => Some(effort),
+                _ => return Err("思考强度应为 off/low/medium/high".to_string()),
+            };
+        }
+        if let Some(v) = body.system_prompt.as_deref() {
+            config.agent.system_prompt = v.trim().to_string();
+        }
+        if let Some(v) = body.disabled_tools {
+            if v.len() > 200 {
+                return Err("禁用的工具过多".to_string());
+            }
+            config.agent.disabled_tools = v
+                .into_iter()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect();
+        }
+        Ok(())
+    })
+    .await?;
+    // 运行期 Agent 配置同步（切换 enabled / 模型 / 提示词 / 工具开关都立即生效）
+    if let Some(agent) = state.agent_state.as_deref() {
+        agent.set_config(config.agent.clone());
     }
+    Ok(Json(json!({
+        "success": true,
+        "data": agent_settings_json(&config.agent),
+    })))
 }
 
 // ── 聊天设置（`[chat]` 段：LLM 自动标题）────────────────────────
@@ -573,35 +542,27 @@ pub async fn handle_update_chat_settings(
     headers: HeaderMap,
     Json(body): Json<ChatSettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    if let Some(v) = body.auto_title {
-        config.chat.auto_title = v;
-    }
-    if let Some(v) = body.title_model.as_deref() {
-        config.chat.title_model = v.trim().to_string();
-    }
-    if let Some(v) = body.title_channel.as_deref() {
-        config.chat.title_channel = v.trim().to_string();
-    }
-    if let Some(v) = body.title_prompt_chars {
-        config.chat.title_prompt_chars = v;
-    }
-    if let Err(msg) = validate_chat_combo(&config.chat) {
-        return Err(error_response(msg, StatusCode::BAD_REQUEST));
-    }
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": chat_settings_json(&updated.chat),
-            })))
+    // 字段级读-改-写（P2）：校验在写锁内跑，失败即 400 且配置未动
+    let config = update_admin_config(&state, &headers, move |config| {
+        if let Some(v) = body.auto_title {
+            config.chat.auto_title = v;
         }
-        Err(e) => Err(error_response(
-            &format!("Failed to save chat settings: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+        if let Some(v) = body.title_model.as_deref() {
+            config.chat.title_model = v.trim().to_string();
+        }
+        if let Some(v) = body.title_channel.as_deref() {
+            config.chat.title_channel = v.trim().to_string();
+        }
+        if let Some(v) = body.title_prompt_chars {
+            config.chat.title_prompt_chars = v;
+        }
+        validate_chat_combo(&config.chat).map_err(str::to_string)
+    })
+    .await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": chat_settings_json(&config.chat),
+    })))
 }
 
 // ── 报表设置（`[report]` 段：报表日界时区，#20 / 生产体检 P3-14）────────
@@ -663,36 +624,29 @@ pub async fn handle_update_report_settings(
     headers: HeaderMap,
     Json(body): Json<ReportSettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    if let Some(v) = body.timezone_offset {
+    // 字段级读-改-写（P2）：并发保存不同 tab 时不再整包覆盖
+    let config = update_admin_config(&state, &headers, move |config| {
+        let Some(v) = body.timezone_offset else {
+            return Ok(());
+        };
         if !crate::config::report_tz_offset_valid(v) {
-            return Err(error_response(
-                &format!(
-                    "报表时区偏移必须在 {}~{} 之间（整数小时，UTC 偏移）",
-                    crate::config::REPORT_TZ_OFFSET_MIN,
-                    crate::config::REPORT_TZ_OFFSET_MAX
-                ),
-                StatusCode::BAD_REQUEST,
+            return Err(format!(
+                "报表时区偏移必须在 {}~{} 之间（整数小时，UTC 偏移）",
+                crate::config::REPORT_TZ_OFFSET_MIN,
+                crate::config::REPORT_TZ_OFFSET_MAX
             ));
         }
         config.report.timezone_offset = v;
-    }
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            let updated = state.config_manager.get().await;
-            // 保存即生效：报表读路径（日键/小时桶/日窗口）全部读这个快照
-            crate::config::set_report_tz_offset(updated.report.timezone_offset);
-            let stored = state.log_store.daily.tz_marker();
-            Ok(Json(json!({
-                "success": true,
-                "data": report_settings_json(&updated.report, stored),
-            })))
-        }
-        Err(e) => Err(error_response(
-            &format!("Failed to save report settings: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+        Ok(())
+    })
+    .await?;
+    // 保存即生效：报表读路径（日键/小时桶/日窗口）全部读这个快照
+    crate::config::set_report_tz_offset(config.report.timezone_offset);
+    let stored = state.log_store.daily.tz_marker();
+    Ok(Json(json!({
+        "success": true,
+        "data": report_settings_json(&config.report, stored),
+    })))
 }
 
 // ── 网关设置（监听地址 / CORS / 反代信任）──────────────────────────
@@ -742,63 +696,55 @@ pub async fn handle_update_gateway_settings(
     headers: HeaderMap,
     Json(body): Json<GatewaySettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    if let Some(host) = body.host.as_deref() {
-        let host = host.trim();
-        if host.is_empty() || host.chars().any(char::is_whitespace) {
-            return Err(error_response(
-                "监听地址不能为空且不能包含空白字符",
-                StatusCode::BAD_REQUEST,
-            ));
-        }
-        config.server.host = host.to_string();
-    }
-    if let Some(port) = body.port {
-        if port == 0 {
-            return Err(error_response(
-                "端口必须在 1-65535 之间",
-                StatusCode::BAD_REQUEST,
-            ));
-        }
-        config.server.port = port;
-    }
-    if let Some(origins) = body.cors_origins {
-        let mut cleaned: Vec<String> = Vec::new();
-        for origin in origins {
-            let origin = origin.trim().to_string();
-            if origin.is_empty() {
-                continue;
+    // 字段级读-改-写（P2）：校验在写锁内跑，失败即 400 且配置未动
+    let config = update_admin_config(&state, &headers, move |config| {
+        if let Some(host) = body.host.as_deref() {
+            let host = host.trim();
+            if host.is_empty() || host.chars().any(char::is_whitespace) {
+                return Err("监听地址不能为空且不能包含空白字符".to_string());
             }
-            // 拒绝 `*`：CORS 层用 `AllowOrigin::list`（精确匹配），`*` 在这里
-            // 不会变成通配、只会静默不匹配任何来源，与「允许所有来源」的直觉
-            // 相反 —— 让用户以为配通了却全部被浏览器拦截。要放开就显式列出。
-            if origin == "*" {
-                return Err(error_response(
-                    "CORS 来源不支持 *（请显式列出允许的来源，如 https://example.com）",
-                    StatusCode::BAD_REQUEST,
-                ));
-            }
-            if origin.starts_with("http://") || origin.starts_with("https://") {
-                cleaned.push(origin);
-            } else {
-                return Err(error_response(
-                    "CORS 来源必须是 http(s):// 开头",
-                    StatusCode::BAD_REQUEST,
-                ));
-            }
+            config.server.host = host.to_string();
         }
-        config.cors_origins = cleaned;
-    }
-    if let Some(v) = body.trust_proxy_headers {
-        config.trust_proxy_headers = v;
-    }
-    // 目录配置（logDir / requestStatsDir / debugDir）：空串 = 清除自定义、回落默认
-    for (field, label) in [
-        (&body.log_dir, "log_dir"),
-        (&body.request_stats_dir, "request_stats_dir"),
-        (&body.debug_dir, "debug_dir"),
-    ] {
-        if let Some(raw) = field {
+        if let Some(port) = body.port {
+            if port == 0 {
+                return Err("端口必须在 1-65535 之间".to_string());
+            }
+            config.server.port = port;
+        }
+        if let Some(origins) = body.cors_origins {
+            let mut cleaned: Vec<String> = Vec::new();
+            for origin in origins {
+                let origin = origin.trim().to_string();
+                if origin.is_empty() {
+                    continue;
+                }
+                // 拒绝 `*`：CORS 层用 `AllowOrigin::list`（精确匹配），`*` 在这里
+                // 不会变成通配、只会静默不匹配任何来源，与「允许所有来源」的直觉
+                // 相反 —— 让用户以为配通了却全部被浏览器拦截。要放开就显式列出。
+                if origin == "*" {
+                    return Err(
+                        "CORS 来源不支持 *（请显式列出允许的来源，如 https://example.com）"
+                            .to_string(),
+                    );
+                }
+                if origin.starts_with("http://") || origin.starts_with("https://") {
+                    cleaned.push(origin);
+                } else {
+                    return Err("CORS 来源必须是 http(s):// 开头".to_string());
+                }
+            }
+            config.cors_origins = cleaned;
+        }
+        if let Some(v) = body.trust_proxy_headers {
+            config.trust_proxy_headers = v;
+        }
+        // 目录配置（logDir / requestStatsDir / debugDir）：空串 = 清除自定义、回落默认
+        for (field, label) in [
+            (&body.log_dir, "log_dir"),
+            (&body.request_stats_dir, "request_stats_dir"),
+            (&body.debug_dir, "debug_dir"),
+        ] {
+            let Some(raw) = field else { continue };
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 // 空串 = 清除自定义设置
@@ -809,40 +755,31 @@ pub async fn handle_update_gateway_settings(
                 } else {
                     config.server.debug_dir = None;
                 }
+                continue;
+            }
+            let path = crate::config::expand_path(trimmed);
+            if !path.is_absolute() {
+                return Err(format!("{label} 必须是绝对路径"));
+            }
+            if label == "log_dir" {
+                config.server.log_dir = Some(path.to_string_lossy().into_owned());
+            } else if label == "request_stats_dir" {
+                config.server.request_stats_dir = Some(path.to_string_lossy().into_owned());
             } else {
-                let path = crate::config::expand_path(trimmed);
-                if !path.is_absolute() {
-                    return Err(error_response(
-                        &format!("{label} 必须是绝对路径"),
-                        StatusCode::BAD_REQUEST,
-                    ));
-                }
-                if label == "log_dir" {
-                    config.server.log_dir = Some(path.to_string_lossy().into_owned());
-                } else if label == "request_stats_dir" {
-                    config.server.request_stats_dir = Some(path.to_string_lossy().into_owned());
-                } else {
-                    config.server.debug_dir = Some(path.to_string_lossy().into_owned());
-                }
+                config.server.debug_dir = Some(path.to_string_lossy().into_owned());
             }
         }
-    }
-    // 信任反代头立即生效（客户端 IP 提取走进程级快照）；
-    // 监听地址/端口/CORS 需重启服务后生效。
+        Ok(())
+    })
+    .await?;
+    // 信任反代头**落盘成功之后**才热更（P2 顺带修的一处顺序缺陷：原实现
+    // 在 `update(config)` 之前就 `set_trust_proxy_headers`，落盘失败时
+    // 运行期已按新值跑、重启后回退）。
     crate::config::set_trust_proxy_headers(config.trust_proxy_headers);
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": gateway_settings_json(&updated),
-            })))
-        }
-        Err(e) => Err(error_response(
-            &format!("Failed to save gateway settings: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+    Ok(Json(json!({
+        "success": true,
+        "data": gateway_settings_json(&config),
+    })))
 }
 
 // ── 安全策略（登录失败锁定 / 登录限流）────────────────────────────
@@ -892,23 +829,27 @@ pub async fn handle_update_security_policy(
     headers: HeaderMap,
     Json(body): Json<SecurityPolicyRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    if let Some(v) = body.lockout_enabled {
-        config.security.lockout_enabled = v;
-    }
-    if let Some(v) = body.fail_threshold {
-        config.security.fail_threshold = v;
-    }
-    if let Some(v) = body.lock_minutes {
-        config.security.lock_minutes = v;
-    }
-    if let Some(v) = body.rate_limit_per_minute {
-        config.security.rate_limit_per_minute = v;
-    }
-    if let Some(v) = body.captcha_enabled {
-        config.security.captcha_enabled = v;
-    }
-    config.security = config.security.normalized();
+    // 字段级读-改-写（P2）
+    let config = update_admin_config(&state, &headers, move |config| {
+        if let Some(v) = body.lockout_enabled {
+            config.security.lockout_enabled = v;
+        }
+        if let Some(v) = body.fail_threshold {
+            config.security.fail_threshold = v;
+        }
+        if let Some(v) = body.lock_minutes {
+            config.security.lock_minutes = v;
+        }
+        if let Some(v) = body.rate_limit_per_minute {
+            config.security.rate_limit_per_minute = v;
+        }
+        if let Some(v) = body.captcha_enabled {
+            config.security.captcha_enabled = v;
+        }
+        config.security = config.security.normalized();
+        Ok(())
+    })
+    .await?;
     // 阈值 / 限流 / 开关立即生效（登录 handler 读进程级快照）
     crate::config::set_security_policy(
         config.security.lockout_enabled,
@@ -917,19 +858,10 @@ pub async fn handle_update_security_policy(
     );
     // 机器人校验开关走进程级快照，保存即生效
     crate::config::set_security_captcha(config.security.captcha_enabled);
-    match state.config_manager.update(config).await {
-        Ok(()) => {
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": security_policy_json(&updated.security),
-            })))
-        }
-        Err(e) => Err(error_response(
-            &format!("Failed to save security policy: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+    Ok(Json(json!({
+        "success": true,
+        "data": security_policy_json(&config.security),
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -999,78 +931,73 @@ pub async fn handle_update_oauth_config(
     headers: HeaderMap,
     Json(body): Json<OauthConfigRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    if let Some(g) = body.github {
-        if let Some(v) = g.client_id {
-            config.github_oauth.client_id = v;
-        }
-        if let Some(v) = g.client_secret {
-            if !is_masked_secret(&v) {
-                config.github_oauth.client_secret = v;
+    // 字段级读-改-写（P2）
+    let config = update_admin_config(&state, &headers, move |config| {
+        if let Some(g) = body.github {
+            if let Some(v) = g.client_id {
+                config.github_oauth.client_id = v;
             }
-        }
-        if let Some(v) = g.redirect_uri {
-            config.github_oauth.redirect_uri = v;
-        }
-    }
-    if let Some(g) = body.google {
-        if let Some(v) = g.client_id {
-            config.google_oauth.client_id = v;
-        }
-        if let Some(v) = g.client_secret {
-            if !is_masked_secret(&v) {
-                config.google_oauth.client_secret = v;
-            }
-        }
-        if let Some(v) = g.redirect_uri {
-            config.google_oauth.redirect_uri = v;
-        }
-    }
-    if let Some(g) = body.linuxdo {
-        if let Some(v) = g.client_id {
-            config.linuxdo_oauth.client_id = v;
-        }
-        if let Some(v) = g.client_secret {
-            if !is_masked_secret(&v) {
-                config.linuxdo_oauth.client_secret = v;
-            }
-        }
-        if let Some(v) = g.redirect_uri {
-            config.linuxdo_oauth.redirect_uri = v;
-        }
-    }
-    match state.config_manager.update(config).await {
-        Ok(_) => {
-            let updated = state.config_manager.get().await;
-            Ok(Json(json!({
-                "success": true,
-                "data": {
-                    "github": {
-                        "client_id": updated.github_oauth.client_id,
-                        "client_secret": mask_secret(&updated.github_oauth.client_secret),
-                        "redirect_uri": updated.github_oauth.redirect_uri,
-                        "ready": updated.github_oauth.ready(),
-                    },
-                    "google": {
-                        "client_id": updated.google_oauth.client_id,
-                        "client_secret": mask_secret(&updated.google_oauth.client_secret),
-                        "redirect_uri": updated.google_oauth.redirect_uri,
-                        "ready": updated.google_oauth.ready(),
-                    },
-                    "linuxdo": {
-                        "client_id": updated.linuxdo_oauth.client_id,
-                        "client_secret": mask_secret(&updated.linuxdo_oauth.client_secret),
-                        "redirect_uri": updated.linuxdo_oauth.redirect_uri,
-                        "ready": updated.linuxdo_oauth.ready(),
-                    },
+            if let Some(v) = g.client_secret {
+                if !is_masked_secret(&v) {
+                    config.github_oauth.client_secret = v;
                 }
-            })))
+            }
+            if let Some(v) = g.redirect_uri {
+                config.github_oauth.redirect_uri = v;
+            }
         }
-        Err(e) => Err(error_response(
-            &format!("Failed to save oauth config: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
+        if let Some(g) = body.google {
+            if let Some(v) = g.client_id {
+                config.google_oauth.client_id = v;
+            }
+            if let Some(v) = g.client_secret {
+                if !is_masked_secret(&v) {
+                    config.google_oauth.client_secret = v;
+                }
+            }
+            if let Some(v) = g.redirect_uri {
+                config.google_oauth.redirect_uri = v;
+            }
+        }
+        if let Some(g) = body.linuxdo {
+            if let Some(v) = g.client_id {
+                config.linuxdo_oauth.client_id = v;
+            }
+            if let Some(v) = g.client_secret {
+                if !is_masked_secret(&v) {
+                    config.linuxdo_oauth.client_secret = v;
+                }
+            }
+            if let Some(v) = g.redirect_uri {
+                config.linuxdo_oauth.redirect_uri = v;
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "github": {
+                "client_id": config.github_oauth.client_id,
+                "client_secret": mask_secret(&config.github_oauth.client_secret),
+                "redirect_uri": config.github_oauth.redirect_uri,
+                "ready": config.github_oauth.ready(),
+            },
+            "google": {
+                "client_id": config.google_oauth.client_id,
+                "client_secret": mask_secret(&config.google_oauth.client_secret),
+                "redirect_uri": config.google_oauth.redirect_uri,
+                "ready": config.google_oauth.ready(),
+            },
+            "linuxdo": {
+                "client_id": config.linuxdo_oauth.client_id,
+                "client_secret": mask_secret(&config.linuxdo_oauth.client_secret),
+                "redirect_uri": config.linuxdo_oauth.redirect_uri,
+                "ready": config.linuxdo_oauth.ready(),
+            },
+        }
+    })))
 }
 
 /// GET /api/gateway/prompt —— 网关系统提示词（对照 Agent2API「设置 → 网关 → 系统提示词」）。

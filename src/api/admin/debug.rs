@@ -39,24 +39,22 @@ pub async fn handle_update_debug(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
     let Some(enabled) = payload.get("enabled").and_then(|v| v.as_bool()) else {
         return Err(super::common::error_response(
             "缺少 enabled 字段",
             StatusCode::BAD_REQUEST,
         ));
     };
-    config.usage.debug_traffic = enabled;
+    // 字段级读-改-写：并发保存不同 tab 时不再整包覆盖
+    super::common::update_admin_config(&state, &headers, |config| {
+        config.usage.debug_traffic = enabled;
+        Ok(())
+    })
+    .await?;
     crate::config::set_debug_traffic(enabled);
     if !enabled {
         crate::debug_traffic::clear();
     }
-    state.config_manager.update(config).await.map_err(|e| {
-        super::common::error_response(
-            &format!("调试模式更新失败: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
     Ok(Json(json!({
         "success": true,
         "data": { "enabled": enabled }

@@ -1538,9 +1538,49 @@ pub fn set_retry_on_status_codes(codes: Vec<u16>) {
     }
 }
 
+/// [`ConfigManager::try_update`] 的错误。
+///
+/// - `Rejected`：闭包（字段校验）拒绝，配置**未动、未落盘**；
+/// - `Persist`：落盘失败，**内存配置保持不变**（回滚，避免「保存失败但
+///   运行期已按新值跑过一轮」的静默漂移）。
+pub enum ConfigUpdateError<E> {
+    Rejected(E),
+    Persist(anyhow::Error),
+}
+
+impl<E> std::fmt::Display for ConfigUpdateError<E>
+where
+    E: std::fmt::Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(e) => write!(f, "rejected: {e}"),
+            Self::Persist(e) => write!(f, "persist failed: {e}"),
+        }
+    }
+}
+
+impl<E> std::fmt::Debug for ConfigUpdateError<E>
+where
+    E: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(e) => f.debug_tuple("Rejected").field(e).finish(),
+            Self::Persist(e) => f.debug_tuple("Persist").field(e).finish(),
+        }
+    }
+}
+
 pub struct ConfigManager {
     config: RwLock<AppConfig>,
     path: PathBuf,
+    /// 写入串行锁：`try_update` 的「读-改-写」必须原子。
+    ///
+    /// 此前 `update(AppConfig)` 只是整包覆盖：两个管理员同时保存不同 tab
+    /// （`/api/gateway/settings` 与 `/api/vision-compatibility`）时，后写者
+    /// 用自己那份旧快照把前者的改动盖掉，**没有日志、无法自诊断**。
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl ConfigManager {
@@ -1569,7 +1609,11 @@ impl ConfigManager {
         }
 
         let config = RwLock::new(AppConfig::default());
-        let manager = Self { config, path };
+        let manager = Self {
+            config,
+            path,
+            write_lock: tokio::sync::Mutex::new(()),
+        };
 
         // 如果配置文件已存在则加载，否则创建默认配置
         if manager.path.exists() {
@@ -1628,11 +1672,24 @@ impl ConfigManager {
     /// 数据 ⇒ tmp 文件先以 0600 落盘再 rename（rename 保留权限位）。
     /// Windows 无 POSIX 权限位，忽略。
     pub async fn save(&self) -> anyhow::Result<()> {
+        // 持读锁序列化，再交给 `save_with` 落盘（两条落盘路径共用一份实现，
+        // 避免「0600 + tmp+rename」的细节在两处漂移）。
         let content = {
             let config = self.config.read().await;
             toml::to_string_pretty(&*config)?
         };
         let tmp = self.path.with_extension("toml.tmp");
+        // `save_with` 从 `AppConfig` 序列化；这里已有一份字符串，直接复用
+        // 写盘段（见下方 `write_tmp_and_rename`）。
+        self.write_tmp_and_rename(&tmp, &content).await
+    }
+
+    /// 把已序列化的 TOML 内容原子落盘（tmp + rename，0600）。
+    async fn write_tmp_and_rename(
+        &self,
+        tmp: &std::path::Path,
+        content: &str,
+    ) -> anyhow::Result<()> {
         #[cfg(unix)]
         {
             use tokio::io::AsyncWriteExt as _;
@@ -1641,24 +1698,58 @@ impl ConfigManager {
                 .create(true)
                 .truncate(true)
                 .mode(0o600)
-                .open(&tmp)
+                .open(tmp)
                 .await?;
             f.write_all(content.as_bytes()).await?;
             f.flush().await?;
         }
         #[cfg(not(unix))]
         {
-            tokio::fs::write(&tmp, content).await?;
+            tokio::fs::write(tmp, content).await?;
         }
-        tokio::fs::rename(&tmp, &self.path).await?;
+        tokio::fs::rename(tmp, &self.path).await?;
         Ok(())
     }
 
-    /// 更新配置并持久化
+    /// 更新配置并持久化（整包覆盖）。
+    ///
+    /// ⚠️ 只适用于「调用方刚刚 `get()` 完整一份、且没有并发写者」的场景。
+    /// 管理面 handler 请改用 [`try_update`](Self::try_update)：整包覆盖会让
+    /// 两个管理员同时保存不同 tab 时互相丢更新。
     pub async fn update(&self, config: AppConfig) -> anyhow::Result<()> {
+        let _guard = self.write_lock.lock().await;
         *self.config.write().await = config;
-        self.save().await?;
-        Ok(())
+        self.save().await
+    }
+
+    /// 字段级读-改-写：在同一把写锁内取当前快照、应用闭包、落盘、发布。
+    ///
+    /// `f` 拿到的是**当前**配置的 owned 副本（不是调用方几十毫秒前 `get()`
+    /// 的旧快照），因此两个并发保存各自只改自己那段字段，互不覆盖。
+    ///
+    /// `f` 返回 `Err` 时不动配置、不落盘（校验失败即无副作用）。
+    /// 闭包内不做 IO / 不 await —— 它持着写锁。
+    pub async fn try_update<T, E>(
+        &self,
+        f: impl FnOnce(&mut AppConfig) -> Result<T, E>,
+    ) -> Result<T, ConfigUpdateError<E>> {
+        let _guard = self.write_lock.lock().await;
+        let mut next = self.config.read().await.clone();
+        let value = f(&mut next).map_err(ConfigUpdateError::Rejected)?;
+        // 落盘失败要回滚内存：否则「保存失败但热配置已变」，重启后配置回退
+        // 而运行期行为已按新值跑过一轮（无法复现的漂移）。
+        self.save_with(&next)
+            .await
+            .map_err(ConfigUpdateError::Persist)?;
+        *self.config.write().await = next;
+        Ok(value)
+    }
+
+    /// 写入给定快照（`try_update` 在发布前落盘用；`save` 是它的读锁版本）。
+    async fn save_with(&self, config: &AppConfig) -> anyhow::Result<()> {
+        let content = toml::to_string_pretty(config)?;
+        let tmp = self.path.with_extension("toml.tmp");
+        self.write_tmp_and_rename(&tmp, &content).await
     }
 
     /// 获取当前配置的只读副本
@@ -1970,6 +2061,78 @@ mod tests {
         manager.update(super::AppConfig::default()).await.unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "配置文件（含凭据）必须是 0600");
+    }
+
+    /// P2 回归：两个并发保存各自只改自己那段字段 —— `try_update` 的
+    /// 字段级读-改-写不能让后写者用旧快照覆盖前者的改动（原 `update()`
+    /// 整包覆盖时的经典丢更新）。
+    #[tokio::test]
+    async fn try_update_concurrent_writers_do_not_lose_updates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let manager =
+            std::sync::Arc::new(super::ConfigManager::new_with(Some(path.clone()), |_| None).await);
+
+        // 两个写者各改一段互不相交的字段，用 barrier 制造并发窗口
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for which in ["a", "b"] {
+            let manager = manager.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                manager
+                    .try_update(move |config| {
+                        if which == "a" {
+                            config.server.port = 1111;
+                        } else {
+                            config.report.timezone_offset = 3;
+                        }
+                        Ok::<_, std::convert::Infallible>(())
+                    })
+                    .await
+                    .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let config = manager.get().await;
+        assert_eq!(config.server.port, 1111, "A 的改动不能被 B 覆盖");
+        assert_eq!(config.report.timezone_offset, 3, "B 的改动不能被 A 覆盖");
+        // 落盘内容与内存一致（不是只改了内存）
+        let reloaded = super::ConfigManager::new_with(Some(path), |_| None)
+            .await
+            .get()
+            .await;
+        assert_eq!(reloaded.server.port, 1111);
+        assert_eq!(reloaded.report.timezone_offset, 3);
+    }
+
+    /// P2 回归：闭包拒绝（400 类）时配置既不动也不落盘。
+    #[tokio::test]
+    async fn try_update_rejection_leaves_config_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let manager = super::ConfigManager::new_with(Some(path.clone()), |_| None).await;
+        let before = manager.get().await.server.port;
+        let outcome = manager
+            .try_update(|config| {
+                config.server.port = 2222;
+                Err::<(), _>("不允许".to_string())
+            })
+            .await;
+        assert!(matches!(
+            outcome,
+            Err(super::ConfigUpdateError::Rejected(_))
+        ));
+        assert_eq!(manager.get().await.server.port, before, "内存不得被改动");
+        let reloaded = super::ConfigManager::new_with(Some(path), |_| None)
+            .await
+            .get()
+            .await;
+        assert_eq!(reloaded.server.port, before, "拒绝的写入不得落盘");
     }
 
     /// 另一条分支不能退化：文件值打底、env 覆盖，且**不重写**已有文件。

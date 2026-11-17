@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_admin};
+use super::common::verify_admin;
 
 /// PUT /api/queue 请求体。两项均可选，只传一项只更新一项。
 #[derive(Debug, Deserialize)]
@@ -42,39 +42,24 @@ pub async fn handle_update_queue(
     headers: HeaderMap,
     Json(body): Json<QueueSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
-    let mut config = verify_admin(&state, &headers).await?;
-    let mut updated = false;
-
-    if let Some(v) = body.max_waits {
-        if v > 10 {
-            return Err(error_response(
-                "queueMaxWaits 必须在 0~10 之间",
-                axum::http::StatusCode::BAD_REQUEST,
-            ));
+    // 字段级读-改-写（P2）：并发保存不同 tab 时不再整包覆盖。
+    // 两个字段都没给时闭包不改任何值 —— 落盘内容与现状相同（幂等）。
+    let config = super::common::update_admin_config(&state, &headers, |config| {
+        if let Some(v) = body.max_waits {
+            if v > 10 {
+                return Err("queueMaxWaits 必须在 0~10 之间".to_string());
+            }
+            config.usage.queue_max_waits = v;
         }
-        config.usage.queue_max_waits = v;
-        updated = true;
-    }
-    if let Some(v) = body.wait_seconds {
-        if v > 120 {
-            return Err(error_response(
-                "queueWaitSeconds 必须在 0~120 之间",
-                axum::http::StatusCode::BAD_REQUEST,
-            ));
+        if let Some(v) = body.wait_seconds {
+            if v > 120 {
+                return Err("queueWaitSeconds 必须在 0~120 之间".to_string());
+            }
+            config.usage.queue_wait_seconds = v;
         }
-        config.usage.queue_wait_seconds = v;
-        updated = true;
-    }
-
-    if updated {
-        if let Err(e) = state.config_manager.update(config).await {
-            return Err(error_response(
-                &format!("保存排队设置失败：{e}"),
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            ));
-        }
-    }
-    let config = state.config_manager.get().await;
+        Ok(())
+    })
+    .await?;
     Ok(Json(json!({
         "queueMaxWaits": config.usage.queue_max_waits,
         "queueWaitSeconds": config.usage.queue_wait_seconds,
