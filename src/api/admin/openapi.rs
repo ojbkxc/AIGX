@@ -431,6 +431,9 @@ fn paths_model_manage() -> Value {
         "/api/models/alias/reasoning": {
             "post": op_body("模型管理", "批量设置映射级思考等级", "aliases: string[], effort: string")
         },
+        "/api/models/alias/prefix": {
+            "post": op_body("模型管理", "批量新增别名前缀映射（prefix+sep+target，整批先校验后写）", "prefix: string, sep?: string, merge?: bool, targets: string[]")
+        },
         // 映射逐条读写（A2A `GET/POST /api/models/mappings`；映射弹窗只拉这一小块）
         "/api/models/mappings": {
             "get": op("模型管理", "逐条映射清单（mappings[]/dangling[]/reasoningLevels 三项，供映射弹窗直接渲染）"),
@@ -579,9 +582,21 @@ fn paths_tools_maintenance() -> Value {
         },
         // ── 工具服务：图片生成配置 ─────────────────────────────────
         "/api/tools/image-generation/config": {
-            "get": op("工具服务", "图片生成服务配置（本期只移植配置面，无任务表）"),
+            "get": op("工具服务", "图片生成服务配置（provider/模型目录/账号池校验视图）"),
             "put": op_body("工具服务", "保存图片生成配置", "{ provider?: string, upstream_model?: string, enabled?: bool }"),
             "delete": op("工具服务", "清除图片生成配置")
+        },
+        "/api/tools/image-generation/jobs": {
+            "get": op("工具服务", "图片生成任务清单（按 owner 隔离；含运行中/过期状态）")
+        },
+        "/api/tools/image-generation/jobs/{id}": {
+            "delete": op("工具服务", "删除一条图片生成任务（业务数据，不可逆）")
+        },
+        "/api/tools/image-generation/files/{id}": {
+            "get": op("工具服务", "下载图片生成结果文件（网关 Key + owner + provider/model 鉴权）")
+        },
+        "/api/tools/mcp-bridge/image-generation.cjs": {
+            "get": op("工具服务", "图片生成 MCP 桥接脚本（供客户端 MCP 配置引用；纯文本 JS）")
         },
         // ── 维护任务：凭证维护 / 模型目录刷新 ───────────────────────
         "/api/maintenance": {
@@ -641,6 +656,12 @@ fn paths_checkin_center() -> Value {
         },
         "/api/checkin-center/schedules/run": {
             "post": op_body("签到中心", "立即执行某计划的范围", "id: string")
+        },
+        "/api/checkin-center/travel": {
+            "patch": op_body("签到中心", "更新猫猫旅行巡检配置（开关 + 时刻表）", "enabled?: bool, times?: string[]")
+        },
+        "/api/checkin-center/travel/run": {
+            "post": op("签到中心", "立即巡检一轮猫猫旅行（真打上游；插件未装/未启用 503）")
         },
         "/api/checkin-center/settings": {
             "get": op("签到中心", "读取签到设置"),
@@ -890,6 +911,9 @@ fn paths_dashboard_usage() -> Value {
         },
         "/api/dashboard/channel_health": {
             "get": op_params("看板", "渠道健康看板（含断路器状态）", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/dashboard/channel-stats": {
+            "get": op("看板", "渠道概览统计（总数/启用/冷却；与渠道健康看板数据源不同）")
         },
         "/api/dashboard/realtime": {
             "get": op("看板", "近 5 分钟实时指标（QPS/错误率/延迟）")
@@ -1829,6 +1853,10 @@ mod tests {
             "/api/tools/image-generation/config",
             &["delete", "get", "put"],
         );
+        add("/api/tools/image-generation/jobs", &["get"]);
+        add("/api/tools/image-generation/jobs/{id}", &["delete"]);
+        add("/api/tools/image-generation/files/{id}", &["get"]);
+        add("/api/tools/mcp-bridge/image-generation.cjs", &["get"]);
         // ── 维护任务（T7）──────────────────────────────────────────
         add("/api/maintenance", &["get"]);
         add("/api/maintenance/records/{id}", &["get"]);
@@ -1986,6 +2014,7 @@ mod tests {
         add("/api/checkin", &["get", "post"]);
         add("/api/dashboard/cache_savings", &["get"]);
         add("/api/dashboard/channel_health", &["get"]);
+        add("/api/dashboard/channel-stats", &["get"]);
         add("/api/dashboard/consumption_trend", &["get"]);
         add("/api/dashboard/model_distribution", &["get"]);
         add("/api/dashboard/realtime", &["get"]);
@@ -2087,6 +2116,7 @@ mod tests {
         add("/api/models/alias", &["post"]);
         add("/api/models/alias/remove", &["post"]);
         add("/api/models/alias/reasoning", &["post"]);
+        add("/api/models/alias/prefix", &["post"]);
         add("/api/models/alias/state", &["post"]);
         add("/api/models/mappings", &["get", "post"]);
         add("/api/models/mappings/remove", &["post"]);
@@ -2114,6 +2144,8 @@ mod tests {
         add("/api/checkin-center/schedules", &["get", "post"]);
         add("/api/checkin-center/schedules/remove", &["post"]);
         add("/api/checkin-center/schedules/run", &["post"]);
+        add("/api/checkin-center/travel", &["patch"]);
+        add("/api/checkin-center/travel/run", &["post"]);
         add("/api/checkin-center/settings", &["get", "put"]);
         add("/api/monitor/security", &["get"]);
         add("/api/monitor/security/events", &["get"]);

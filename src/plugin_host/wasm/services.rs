@@ -196,7 +196,10 @@ impl Context {
                 }
                 self.shared
                     .accounts
-                    .settings_get(&provider, "model_catalog")
+                    .settings_get(
+                        &provider,
+                        crate::plugin_host::model_catalog::SETTING_MODEL_CATALOG,
+                    )
                     .await
             }
             "lock.acquire" => {

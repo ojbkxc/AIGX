@@ -49,18 +49,3 @@ pub async fn handle_cache_clear(
         "data": { "message": "Cache cleared" }
     })))
 }
-
-/// GET /api/cache/info - 获取缓存详细信息（未来实现）
-pub async fn handle_cache_info(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-    // 未来实现：返回详细的缓存键和 TTL 信息
-    Ok(Json(json!({
-        "success": true,
-        "data": {
-            "info": "Cache information endpoint (to be implemented)"
-        }
-    })))
-}

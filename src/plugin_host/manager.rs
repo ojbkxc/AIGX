@@ -419,6 +419,11 @@ impl PluginHostManager {
             self.account_sessions.clone(),
             self.store.clone(),
         );
+        // 目录重建要同一个账号访问面（`catalog::rebuild` 显式收注入面，
+        // 不再读进程级单例）；`from_pack` 会拿走 `access`，先留一份。
+        let rebuild_access: std::sync::Arc<
+            dyn crate::plugin_host::wasm::access::WasmAccountAccess,
+        > = access.clone();
         let egress = crate::plugin_host::wasm::TransportEgress::new(
             crate::plugin_host::script::transport::Transport::new(self.http.clone()),
         );
@@ -428,6 +433,14 @@ impl PluginHostManager {
                 self.note_wasm_error(meta, "Wasm 清单缺失".to_string())
                     .to_string()
             })?;
+        // 模型目录出口：`wasm::catalog` 的 provider 并集经 sink 落到
+        // `plugin_host::model_catalog`（= 上游 `rpc_cache` 的写入面）。
+        // 存储与本管理器其余 KV 消费者共用同一实例；`install` 幂等。
+        crate::plugin_host::model_catalog::install(self.store.clone());
+        let options = crate::plugin_host::wasm::WasmOptions {
+            catalog: Some(crate::plugin_host::model_catalog::FileCatalogSink::new()),
+            ..options
+        };
         let provider = options.manifest.provider.clone();
         let host = match crate::plugin_host::wasm::start(options).await {
             Ok(host) => host,
@@ -457,6 +470,13 @@ impl PluginHostManager {
         // 任务声明：失败只 warn，不阻断启用（插件可能没声明 tasks.v1）。
         if let Err(error) = crate::plugin_host::wasm::tasks::load(&provider).await {
             tracing::warn!("[PluginHost] Wasm 包 {} 任务声明加载失败: {error}", meta.id);
+        }
+        // 目录并集回推：账号状态里已落盘的 `host.catalog.v1`（上一次成功
+        // 刷新）在进程重启 / 重新启用后不会自动出现在目录出口 —— 与上游
+        // `bootstrap.rs` 的 `if wasm::catalog::enabled(&id) { rebuild }` 同
+        // 位置做一次重建，sink 随即发布到 `model_catalog`。
+        if crate::plugin_host::wasm::catalog::enabled(&provider) {
+            crate::plugin_host::wasm::catalog::rebuild(&rebuild_access, &provider).await;
         }
         tracing::info!(
             "[PluginHost] 已启用 Wasm 插件包 {}（provider {provider}）",

@@ -196,10 +196,20 @@ export async function dispatch(provider, method, params, call) {
     case "login.poll": return poll(provider, params.flow)
     case "login.callback": return callback(provider, params)
     case "login.cancel": return cancel(provider, params.flow)
-    case "admin.action":
-      if (params.action === "auth.methods") return methods(provider)
-      if (params.action === "auth.prompts") return resolvePrompts(provider, params.payload ?? {})
-      throw unsupported()
+    case "admin.action": {
+      const action = typeof params.action === "string" ? params.action : ""
+      if (action === "auth.methods") return methods(provider)
+      if (action === "auth.prompts") return resolvePrompts(provider, params.payload ?? {})
+      // 插件声明的其余管理动作（web-search.capabilities / web-search.search /
+      // growth.* 等）：宿主只做透传，不理解动作语义。插件通过
+      // `hooks.admin.action(action, payload, context)` 实现；未声明 = unsupported，
+      // 由网关映射成「插件不支持该能力」的稳定配置错误。
+      const handler = provider.hooks?.admin?.action
+      if (typeof handler === "function") {
+        return handler(action, params.payload ?? {}, { provider: provider.id, account: call?.account || "" })
+      }
+      throw unsupported(`Plugin does not implement admin action: ${action}`)
+    }
     case "classify": return classify(params.status, params.body)
     case "is_error_response": return params.status < 200 || params.status >= 300
     case "refusal_markers": return { finishes: [], markers: [] }

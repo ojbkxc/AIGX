@@ -26,6 +26,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::plugin_host::manager::PluginHostManager;
+use crate::plugin_host::registry::PackRegistry;
+use crate::storage::FileStore;
+
 use super::context::Context;
 use super::wire::WireError;
 
@@ -95,6 +99,172 @@ pub fn install_source(source: Arc<dyn WasmHelperSource>) {
 
 fn source() -> Option<Arc<dyn WasmHelperSource>> {
     source_slot().lock().ok()?.clone()
+}
+
+/// **授权记录的 KV 键**。
+///
+/// 上游把授权直接存进配置文件的 `pluginNativeHelpers` 字段；AIGX 的
+/// `AppConfig` 没有该键（扩配置字段要动 lead-only 的 config/main），
+/// 因此落 `FileStore` 单键。语义逐字保持：整份 JSON 对象
+/// `{provider: {helper: grant}}`，读改写由
+/// [`WasmHelperSource::mutation_guard`] 串行化。
+pub(crate) const KV_GRANTS: &str = "plugin:native_helpers";
+
+/// [`WasmHelperSource`] 的 AIGX 实现 —— 包注册表 + 原生插件进程 + FileStore。
+///
+/// ## 数据源（与上游逐条对应）
+///
+/// | trait 方法 | 上游 | AIGX |
+/// |---|---|---|
+/// | `packs` | `PackRegistry::load()` | [`PackRegistry::list`]（+ 运行期 loaded） |
+/// | `provider_pack` | `setup::owners` / `provider_pack` | [`PackRegistry::find_pack_for_provider`]（只认已启用包） |
+/// | `serves` | `registry::serves`（adapter 在册） | wasm 宿主存活 ∨ 原生插件进程在跑 |
+/// | `grants` / `set_grants` | config `pluginNativeHelpers` | FileStore [`KV_GRANTS`] |
+/// | `call_pack` | `Host::call_coded` | [`PluginHostManager::process_for_pack`] + RPC |
+///
+/// ## 已知边界（如实）
+///
+/// `call_pack` 只覆盖**原生插件包**（每包一个子进程）。脚本包由单个 Bun
+/// 宿主承载、`PackRegistry` 里也没有它们的元数据，因此不会出现在
+/// `packs()` 的候选里 —— 上游把脚本宿主也当 helper 提供方，这是本移植
+/// 的差异（报告里记录）。
+pub struct RegistryHelperSource {
+    registry: Arc<PackRegistry>,
+    manager: Arc<PluginHostManager>,
+    store: Arc<FileStore>,
+}
+
+impl RegistryHelperSource {
+    /// 由 integrator 在 `main.rs` 构造并注入：
+    ///
+    /// ```ignore
+    /// crate::plugin_host::wasm::native::install_source(
+    ///     crate::plugin_host::wasm::native::RegistryHelperSource::new(
+    ///         plugin_host.clone(), store.clone()),
+    /// );
+    /// ```
+    pub fn new(manager: Arc<PluginHostManager>, store: Arc<FileStore>) -> Arc<Self> {
+        let registry = manager.registry().clone();
+        Arc::new(Self {
+            registry,
+            manager,
+            store,
+        })
+    }
+
+    /// provider 当前是否有活着的执行体（wasm 宿主或原生插件进程）。
+    fn loaded(&self, provider: &str) -> bool {
+        super::host_for_provider(provider).is_some_and(|host| host.ready() && !host.closing())
+            || self.manager.process_for_provider(provider).is_some()
+    }
+}
+
+/// 读全部授权记录（缺失 / 非对象返回空对象，与上游 `unwrap_or_else(json!({}))` 同口径）。
+fn read_grants(store: &FileStore) -> Value {
+    store
+        .get::<Value>(KV_GRANTS)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({}))
+}
+
+/// 覆盖写全部授权记录（只接受 JSON 对象）。
+fn write_grants(store: &FileStore, grants: &Value) -> Result<(), String> {
+    if !grants.is_object() {
+        return Err("原生辅助授权记录无效".into());
+    }
+    store
+        .put(KV_GRANTS, grants)
+        .map_err(|error| format!("保存原生辅助授权失败: {error}"))
+}
+
+/// 向一个插件进程发起带超时的 RPC（`native.helpers` / `native.call` 共用）。
+///
+/// 超时映射成可读文案而不是 `RpcError`：trait 的错误出口是 `String`，
+/// 调用方（`snapshot` / `Context::native`）只需要「不可用」这一个结论。
+async fn call_with_timeout(
+    rpc: &crate::plugin_host::rpc::RpcChannel,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    match tokio::time::timeout(timeout, rpc.call(method, params)).await {
+        Err(_) => Err(format!(
+            "原生辅助调用超时（{} ms 未应答）",
+            timeout.as_millis()
+        )),
+        Ok(Err(error)) => Err(error.message),
+        Ok(Ok(value)) => Ok(value),
+    }
+}
+
+#[async_trait::async_trait]
+impl WasmHelperSource for RegistryHelperSource {
+    fn packs(&self) -> Vec<PackInfo> {
+        self.registry
+            .list()
+            .into_iter()
+            .map(|meta| PackInfo {
+                id: meta.id,
+                version: meta.version,
+                sha256: meta.sha256.unwrap_or_default(),
+                enabled: meta.enabled,
+                providers: meta
+                    .providers
+                    .into_iter()
+                    .map(|provider| PackProviderInfo {
+                        loaded: self.loaded(&provider.id),
+                        id: provider.id,
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn provider_pack(&self, provider: &str) -> Option<String> {
+        self.registry.find_pack_for_provider(provider)
+    }
+
+    fn serves(&self, provider: &str) -> bool {
+        super::owns(provider) || self.manager.process_for_provider(provider).is_some()
+    }
+
+    fn grants(&self) -> Value {
+        read_grants(&self.store)
+    }
+
+    fn set_grants(&self, grants: Value) -> Result<(), String> {
+        write_grants(&self.store, &grants)
+    }
+
+    async fn call_pack(
+        &self,
+        pack_id: &str,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let process = self
+            .manager
+            .process_for_pack(pack_id)
+            .ok_or_else(|| format!("原生插件包「{pack_id}」未运行"))?;
+        call_with_timeout(&process.rpc, method, params, timeout).await
+    }
+}
+
+/// 测试专用：清空注入的宿主（进程级 static，用例之间必须显式复位）。
+#[cfg(test)]
+pub(crate) fn reset_source_for_test() {
+    *source_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+}
+
+/// 测试专用：串行化「安装/复位全局 source」的用例（跨模块共享同一把锁）。
+#[cfg(test)]
+pub(crate) fn source_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
 }
 
 /// 一条 helper 声明（目标包自报）。
@@ -427,6 +597,7 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn parses_and_validates_helpers() {
@@ -447,8 +618,71 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_without_source_is_empty() {
+        let _guard = source_test_lock().lock().await;
+        reset_source_for_test();
         let value = snapshot(None).await;
         assert!(value["requested"].as_array().unwrap().is_empty());
         assert!(value["candidates"].as_array().unwrap().is_empty());
+    }
+
+    /// `grants` / `set_grants` 的 FileStore 往返（跨实例读回，证落盘）。
+    #[test]
+    fn grants_roundtrip_through_file_store() {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aigx-native-grants-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = FileStore::new(dir.clone());
+        assert_eq!(read_grants(&store), json!({}), "缺省为空对象");
+        let grants = json!({
+            "kiro": { "keychain": {
+                "pack": "native-pack", "version": "1.0.0", "digest": "abc",
+                "provider": "native-prov", "id": "keychain", "operations": ["read"],
+                "callerPack": "wasm-pack", "callerDigest": "def"
+            }}
+        });
+        write_grants(&store, &grants).unwrap();
+        // 新建同目录实例读回（证明确实落盘）
+        let reopened = FileStore::new(dir);
+        assert_eq!(read_grants(&reopened), grants);
+        // 非对象拒绝（反向对照：对象写成功，非对象必须失败）
+        let error = write_grants(&store, &json!([1, 2])).unwrap_err();
+        assert!(error.contains("无效"), "{error}");
+        assert_eq!(read_grants(&store), grants, "失败写入不得破坏既有记录");
+    }
+
+    /// 超时出口：对面不应答时必须在 `timeout` 后返回可读错误（真跑 RPC 通道）。
+    #[tokio::test]
+    async fn call_with_timeout_times_out() {
+        use crate::plugin_host::rpc::{NoopCallbacks, RpcChannel};
+        use tokio::io::AsyncRead;
+
+        type BoxReader = Box<dyn AsyncRead + Send + Unpin>;
+        type BoxStream = Box<dyn tokio::io::AsyncWrite + Send + Unpin>;
+        let (client_out, plugin_in) = tokio::io::duplex(1 << 16);
+        let (plugin_out, client_in) = tokio::io::duplex(1 << 16);
+        let rpc = RpcChannel::new(
+            Box::new(client_in) as BoxReader,
+            Box::new(client_out) as BoxStream,
+            Arc::new(NoopCallbacks),
+        );
+        // 插件端持着两个句柄但**不应答**：模拟原生包卡死
+        let _hold = (plugin_in, plugin_out);
+        let started = std::time::Instant::now();
+        let error = call_with_timeout(
+            &rpc,
+            "native.helpers",
+            json!({}),
+            Duration::from_millis(120),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("超时"), "{error}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "必须真的等满超时"
+        );
+        rpc.shutdown();
     }
 }

@@ -139,6 +139,14 @@ impl Bridge for AntigravityBridge {
 
         let id = format!("antigravity-{}", uuid::Uuid::new_v4());
         let model = req.model.clone();
+        // 本次响应所属会话的信封 sessionId（签名缓存两档键的 session 维度；
+        // build_envelope 必写该键，拿不到给空串——空 session 只损失缓存，
+        // 不影响请求本身）。
+        let session = body
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let bytes = resp.bytes_stream();
 
         let stream = futures::stream::unfold(
@@ -149,6 +157,8 @@ impl Bridge for AntigravityBridge {
                 Flow {
                     id,
                     model,
+                    session,
+                    pending_signature: None,
                     ended: false,
                 },
             ),
@@ -164,7 +174,13 @@ impl Bridge for AntigravityBridge {
                         Some(Ok(chunk)) => {
                             let events = decoder.feed(chunk.as_ref());
                             for event in events {
-                                match decode_event(&event, &flow.id, &flow.model) {
+                                match decode_event(
+                                    &event,
+                                    &flow.id,
+                                    &flow.model,
+                                    &flow.session,
+                                    &mut flow.pending_signature,
+                                ) {
                                     Decoded::Nothing => {}
                                     Decoded::Chunk(chunk) => pending.push_back(Ok(chunk)),
                                     Decoded::Usage(usage) => {
@@ -195,9 +211,13 @@ impl Bridge for AntigravityBridge {
                         }
                         None => {
                             if let Some(event) = decoder.finish() {
-                                if let Decoded::Chunk(chunk) =
-                                    decode_event(&event, &flow.id, &flow.model)
-                                {
+                                if let Decoded::Chunk(chunk) = decode_event(
+                                    &event,
+                                    &flow.id,
+                                    &flow.model,
+                                    &flow.session,
+                                    &mut flow.pending_signature,
+                                ) {
                                     pending.push_back(Ok(chunk));
                                 }
                             }
@@ -223,6 +243,11 @@ impl Bridge for AntigravityBridge {
 struct Flow {
     id: String,
     model: String,
+    /// 本次信封的 `sessionId`（签名缓存两档键的 session 维度）。
+    session: String,
+    /// 独占一个 part / 事件、留给紧随其后 `functionCall` 的签名
+    /// （上游/9router 的 `pendingThoughtSignature` 同款语义）。
+    pending_signature: Option<String>,
     ended: bool,
 }
 
@@ -233,7 +258,13 @@ enum Decoded {
     Done(FinishReason, Option<UsageStats>),
 }
 
-fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
+fn decode_event(
+    event: &SseEvent,
+    id: &str,
+    model: &str,
+    session: &str,
+    pending_signature: &mut Option<String>,
+) -> Decoded {
     match event {
         SseEvent::Done => Decoded::Done(FinishReason::Stop, None),
         SseEvent::Data(payload) => {
@@ -260,20 +291,46 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                 let mut calls: Vec<ToolCallDelta> = Vec::new();
                 let (mut text, mut thought) = (String::new(), String::new());
                 for part in parts {
+                    // 签名可能是独占一个 part / 事件的（9router 的
+                    // `pendingThoughtSignature` 同款）：先记住，留给紧随其后的
+                    // functionCall 消费；同一 part 里的签名也走这条路径。
+                    // 字段位置容忍 camelCase / snake_case（上游同口径）。
+                    let signature = part
+                        .get("thoughtSignature")
+                        .or_else(|| part.get("thought_signature"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|sig| !sig.is_empty())
+                        .map(str::to_string);
+                    if let Some(signature) = signature {
+                        *pending_signature = Some(signature);
+                    }
                     if let Some(fc) = part.get("functionCall") {
+                        let call_id = fc
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+                        let name = fc.get("name").and_then(Value::as_str).map(str::to_string);
+                        let signature = pending_signature.take();
+                        // 写侧（响应→缓存）：两档键都按本次信封的 session 隔离，
+                        // 客户端下一轮不回带非标字段时由请求侧按同键回填。
+                        if let (Some(call_id), Some(signature)) = (&call_id, &signature) {
+                            super::antigravity_signature_cache::remember_call(
+                                session, call_id, signature,
+                            );
+                            if let Some(name) = name.as_deref().filter(|name| !name.is_empty()) {
+                                super::antigravity_signature_cache::remember_for_session(
+                                    session, name, signature,
+                                );
+                            }
+                        }
                         calls.push(ToolCallDelta {
                             index: calls.len(),
-                            id: fc
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                                .or_else(|| Some(uuid::Uuid::new_v4().to_string())),
-                            function_name: fc
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+                            id: call_id,
+                            function_name: name,
                             arguments: fc.get("args").map(|a| a.to_string()),
-                            signature: None,
+                            signature,
                         });
                         continue;
                     }
@@ -376,7 +433,7 @@ pub fn build_envelope(req: &ChatFormat) -> Value {
                     // model 轮的工具调用：text part + 每个 functionCall 一个 part。
                     // thoughtSignature 是 part 层级字段（Gemini Part 形态）。
                     // 客户端带回的签名最优先（最忠实的一份，位置容忍三种写法），
-                    // 没带时留给 backfill_signatures 按缓存回填。
+                    // 没带时留给信封组装末尾的 fill_cached 按缓存回填。
                     let mut parts: Vec<Value> = Vec::new();
                     if !text.trim().is_empty() {
                         parts.push(json!({ "text": text }));
@@ -441,8 +498,6 @@ pub fn build_envelope(req: &ChatFormat) -> Value {
     let mut request = Map::new();
     // sessionId：会话稳定键（缓存兜底档的写入/读取键，见 antigravity_signature_cache）
     let session = antigravity_session_id(&system, &req.model);
-    // 客户端没带回签名时按服务端缓存回填（客户端带回的签名在下方 tool 轮处理中最优先）
-    backfill_signatures(&mut contents, &session);
     request.insert("contents".to_string(), Value::Array(contents));
     if !system.is_empty() {
         request.insert(
@@ -478,7 +533,15 @@ pub fn build_envelope(req: &ChatFormat) -> Value {
     {
         envelope.insert("project".to_string(), project.clone());
     }
-    Value::Object(envelope)
+    // 请求构造点的服务端回填（上游 `plugin_host/gemini_signatures::fill_cached`
+    // 在网关请求路径上的同一职责）：客户端没带回签名时按缓存
+    // （session + call id 主键档）补进历史 functionCall parts。
+    let mut envelope = Value::Object(envelope);
+    let filled = super::antigravity_signature_cache::fill_cached(&mut envelope);
+    if filled > 0 {
+        tracing::debug!("antigravity: 按服务端缓存回填 {filled} 处 functionCall 思考签名");
+    }
+    envelope
 }
 
 /// 从客户端带回的 tool_call 中取思考签名（三种容忍位置：
@@ -506,62 +569,6 @@ fn antigravity_session_id(system: &str, model: &str) -> String {
     let mut out = String::new();
     let _ = write!(out, "sess-{h:016x}");
     out
-}
-
-/// 历史回放里缺签名的 `functionCall` part → 按服务端缓存回填。
-///
-/// 优先级：客户端带回的签名（在下方 tool 轮构建时已挂 part 层级）→
-/// call id 缓存 → 会话 + 函数名缓存。只扫 model 轮（functionCall 只长在
-/// model 轮上）。签名是 **part 层级**字段（与 functionCall 平级），插错
-/// 层级上游会报 `Unknown name "thoughtSignature" at …function_call`。
-fn backfill_signatures(contents: &mut [Value], session: &str) {
-    let mut backfilled = 0usize;
-    for turn in contents.iter_mut() {
-        if turn.get("role").and_then(Value::as_str) != Some("model") {
-            continue;
-        }
-        let Some(parts) = turn.get_mut("parts").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for part in parts.iter_mut() {
-            let Some(part_object) = part.as_object_mut() else {
-                continue;
-            };
-            let Some(call) = part_object.get("functionCall").and_then(Value::as_object) else {
-                continue;
-            };
-            let has_signature = part_object
-                .get("thoughtSignature")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_some();
-            if has_signature {
-                continue;
-            }
-            let id = call
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("");
-            let name = call
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("");
-            let signature = super::antigravity_signature_cache::lookup_call(id)
-                .or_else(|| super::antigravity_signature_cache::lookup_for_session(session, name));
-            if let Some(signature) = signature {
-                part_object.insert("thoughtSignature".to_string(), Value::String(signature));
-                backfilled += 1;
-            }
-        }
-    }
-    if backfilled > 0 {
-        tracing::debug!(
-            "antigravity: 客户端未回带思考签名，按服务端缓存回填 {backfilled} 处 functionCall"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -623,5 +630,111 @@ mod tests {
         assert_eq!(map_finish_reason("MAX_TOKENS"), FinishReason::Length);
         assert_eq!(map_finish_reason("SAFETY"), FinishReason::ContentFilter);
         assert_eq!(map_finish_reason("STOP"), FinishReason::Stop);
+    }
+
+    fn decode_json(payload: serde_json::Value, session: &str) -> (Decoded, Option<String>) {
+        let mut pending = None;
+        let decoded = decode_event(
+            &SseEvent::Data(payload.to_string()),
+            "id",
+            "gemini-pro-agent",
+            session,
+            &mut pending,
+        );
+        (decoded, pending)
+    }
+
+    /// 写侧：同一个 part 里的 thoughtSignature 必须入两档缓存，并随
+    /// ToolCallDelta 的 `signature` 字段带出。
+    #[test]
+    fn decode_records_signature_into_two_tier_cache() {
+        let session = "sess-write-two-tier";
+        let (decoded, _) = decode_json(
+            serde_json::json!({
+                "candidates": [{ "content": { "parts": [{
+                    "functionCall": { "id": "call-write-1", "name": "read_file", "args": {"p": "a"} },
+                    "thoughtSignature": "sig-real-1"
+                }]}}]
+            }),
+            session,
+        );
+        let Decoded::Chunk(chunk) = decoded else {
+            panic!("应产出 chunk");
+        };
+        let calls = chunk.delta.tool_calls.expect("应带 tool_calls 增量");
+        assert_eq!(calls[0].signature.as_deref(), Some("sig-real-1"));
+        assert_eq!(
+            super::super::antigravity_signature_cache::lookup_call(session, "call-write-1")
+                .as_deref(),
+            Some("sig-real-1"),
+            "主键档（session + call id）必须命中"
+        );
+        assert_eq!(
+            super::super::antigravity_signature_cache::lookup_for_session(session, "read_file")
+                .as_deref(),
+            Some("sig-real-1"),
+            "兜底档（session + 函数名）必须命中"
+        );
+    }
+
+    /// 签名独占一个 part / 一个事件时，要暂存给紧随其后的 functionCall。
+    #[test]
+    fn decode_pending_signature_on_separate_part() {
+        let session = "sess-write-pending";
+        let (_, pending) = decode_json(
+            serde_json::json!({
+                "candidates": [{ "content": { "parts": [
+                    { "thoughtSignature": "sig-pending-1" }
+                ]}}]
+            }),
+            session,
+        );
+        let mut pending = pending;
+        assert_eq!(pending.as_deref(), Some("sig-pending-1"));
+        let decoded = decode_event(
+            &SseEvent::Data(
+                serde_json::json!({
+                    "candidates": [{ "content": { "parts": [{
+                        "functionCall": { "id": "call-pending-1", "name": "write_file", "args": {} }
+                    }]}}]
+                })
+                .to_string(),
+            ),
+            "id",
+            "gemini-pro-agent",
+            session,
+            &mut pending,
+        );
+        let Decoded::Chunk(chunk) = decoded else {
+            panic!("应产出 chunk");
+        };
+        let calls = chunk.delta.tool_calls.expect("应带 tool_calls 增量");
+        assert_eq!(calls[0].signature.as_deref(), Some("sig-pending-1"));
+        assert!(pending.is_none(), "签名只能被消费一次");
+    }
+
+    /// 请求构造点（build_envelope）：同 session 回填缓存签名；缓存未命中
+    /// 时保持「客户端带回的签名」原样。
+    #[test]
+    fn envelope_fills_cached_signature_for_same_session() {
+        let mut assistant = user("调工具");
+        assistant.role = Role::Assistant;
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call-fill-1".into(),
+            function_name: "read_file".into(),
+            arguments: "{}".into(),
+        }]);
+        let probe = build_envelope(&format(vec![user("查文件"), assistant.clone()]));
+        let session = probe["sessionId"].as_str().unwrap().to_string();
+        // 用 build_envelope 派生出的同 session 键写缓存
+        super::super::antigravity_signature_cache::remember_call(
+            &session,
+            "call-fill-1",
+            "sig-fill-1",
+        );
+        let envelope = build_envelope(&format(vec![user("查文件"), assistant]));
+        let parts = &envelope["request"]["contents"][1]["parts"];
+        // parts[0] 是 text part，parts[1] 是带签名的 functionCall part
+        assert_eq!(parts[1]["thoughtSignature"], "sig-fill-1");
     }
 }

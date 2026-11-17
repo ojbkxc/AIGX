@@ -304,6 +304,9 @@ fn package_view(p: &ScriptPackage, routed_providers: &HashSet<String>) -> Value 
         "enabled": p.enabled,
         "trusted": p.trusted,
         "options": { "values": p.options.values },
+        // 宿主 `script.packages` 回填的包级设置声明（`settings` 原样），
+        // 管理面「提供商设置 / 包配置」表单据此渲染。
+        "settingsSchema": p.settings_schema,
         "providerRouted": provider_routed,
     })
 }
@@ -489,7 +492,11 @@ pub async fn handle_script_change(
 /// POST /api/plugins/scripts/settings —— A2A 设置入口。
 ///
 /// 三个字段都可选：`options` / `providerOptions` 是补丁；都不带 = 只读
-/// （返回当前设置视图，含包声明的 settings_schema）。
+/// （返回当前设置视图，含宿主回填的 settings_schema）。
+///
+/// 写入走 [`crate::plugin_host::script::runtime::ScriptHostManager::configure_settings`]：
+/// 只改 providerOptions 时经 `script.settings` 在**运行中的宿主**上应用并
+/// 回最新 schema（不重启 Bun）；options 变化才落盘 + 重建宿主。
 pub async fn handle_script_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -517,15 +524,16 @@ pub async fn handle_script_settings(
         })));
     }
     let _write = WRITE_LOCK.lock().await;
-    let package = operations::update_settings(
-        &state.script_host,
-        &id,
-        body.version.as_deref(),
-        body.options,
-        body.provider_options,
-    )
-    .await
-    .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
+    let package = state
+        .script_host
+        .configure_settings(
+            &id,
+            body.version.as_deref(),
+            body.options,
+            body.provider_options,
+        )
+        .await
+        .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
     let routed: HashSet<String> = state.script_host.routed_providers().into_iter().collect();
     Ok(Json(json!({
         "success": true,
@@ -745,6 +753,11 @@ mod tests {
         // 路由表为空 → providerRouted=false
         let v = package_view(&sample_package(), &HashSet::new());
         assert_eq!(v["providerRouted"], false);
+        // 宿主回填的 settings_schema 必须透出给前端（设置页表单数据源）
+        let mut with_schema = sample_package();
+        with_schema.settings_schema = json!({ "version": 1, "providerOptions": {} });
+        let v = package_view(&with_schema, &routed);
+        assert_eq!(v["settingsSchema"]["version"], 1);
     }
 
     #[test]

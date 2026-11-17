@@ -15,6 +15,11 @@
 //! 因此它只能验证 **init 握手 + 装载/卸载链路**；`conversation` 的真实
 //! SSE、`tasks.list` 的任务数组都**无法**用它模拟（那需要在 wasm 里解析
 //! 方法名字符串，超出「最小夹具」的范围）。
+//!
+//! 需要**真实流式**的用例（数据面 `conversation` 分支）用
+//! [`streaming_wasm_module`]：它真导入宿主 `agent2api.call`，按请求 JSON
+//! 的 method 首字符分派 init / conversation，并在 conversation 分支里
+//! 主动下发 `stream.head` + 每段 `stream.chunk`（零 mock、真跑 wasmtime）。
 
 /// 生成一个最小可装载的 Wasm 模块。
 ///
@@ -124,6 +129,162 @@ pub(crate) fn module_with_two_len_dispatch(
         body.extend_from_slice(&[0x0b, 0x0b, 0x0b]); // end(if) * 2 + end(function)
         body
     })
+}
+
+/// **流式对话夹具** —— 真导入宿主 `agent2api.call`，按请求 JSON 的 method
+/// 首字符分派：
+///
+/// - `i`（init）→ 返回 providers 应答（含 `capabilities.chat = true`）
+/// - `c`（conversation）→ 依次经宿主导入调用 `stream.head`、每段
+///   `stream.chunk`，最后返回 `{"result":null}`；宿主据此正常收尾并给
+///   消费方下发 `StreamEvent::End`
+///
+/// ## 为什么可以只比首字符
+///
+/// 宿主把请求编码成 `serde_json::to_vec(&json!({"method": ..., "params": ...}))`；
+/// serde_json 的 Map 按键排序（`method` < `params`），请求固定以
+/// `{"method":"` 开头（12 字节），偏移 11 就是 method 值的首字符。夹具只
+/// 需要区分 init / conversation 两条路（它不声明 `tasks.v1`，启用期不会
+/// 出现第三种调用），因此 `i32.load8_u(ptr + 11)` 与 `'c'` 比较即分派。
+///
+/// 本函数产出的模块会真的导出 `a2a_call` 并调用导入的 `agent2api.call`
+/// —— 这正是「零 mock、真跑 wasmtime」证据链的一环：host 的
+/// `stream.head` / `stream.chunk` 由 wasm 主动发起，而不是宿主替它发。
+///
+/// `chunks` 是**已解码正文**（通常是一段 OpenAI SSE 字节）；编码器负责
+/// base64 后写进 `stream.chunk` 的参数。三段以上应答的落点依次为
+/// 8192 + n*2048，全部避开 `a2a_alloc` 的输入缓冲区（4096）与 init 回包
+/// 区（0/2048）。
+pub(crate) fn streaming_wasm_module(provider: &str, label: &str, chunks: &[&[u8]]) -> Vec<u8> {
+    use base64::Engine as _;
+
+    let init = serde_json::json!({
+        "result": {
+            "providers": [{
+                "id": provider,
+                "label": label,
+                "capabilities": { "chat": true }
+            }]
+        }
+    })
+    .to_string();
+    // 宿主 `open_stream` 的 Ok 分支要求 `{"result": ...}` 信封（errors::decode）
+    let done = r#"{"result":null}"#.to_string();
+    // 宿主 `stream.head` 的参数形状（headers 是 [[name, value]]）
+    let head = r#"{"method":"stream.head","params":{"status":200,"headers":[["content-type","text/event-stream"]]}}"#.to_string();
+    let mut texts: Vec<String> = vec![init, done, head];
+    for chunk in chunks {
+        let data = base64::engine::general_purpose::STANDARD.encode(chunk);
+        texts.push(
+            serde_json::json!({ "method": "stream.chunk", "params": { "data": data } }).to_string(),
+        );
+    }
+    let offsets: Vec<usize> = (0..texts.len())
+        .map(|index| match index {
+            0 => 0,
+            1 => 2048,
+            _ => 8192 + (index - 2) * 2048,
+        })
+        .collect();
+    for (offset, text) in offsets.iter().zip(&texts) {
+        assert!(text.len() < 2048, "夹具应答必须落在预分配的 2 KiB 区间内");
+        assert!(
+            offset + text.len() <= 131_072,
+            "夹具应答 {offset}+{} 超出 2 页内存",
+            text.len()
+        );
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"\0asm\x01\0\0\0");
+
+    // ── Type 段：4 个签名（第 4 个给宿主导入 call）──
+    let mut types = leb_u32(4);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]); // () -> i32
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]); // (i32) -> i32
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7e]); // (i32,i32) -> i64
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f]); // (i32,i32) -> i32
+    out.extend(section(1, types));
+
+    // ── Import 段：agent2api.call（函数索引 0）──
+    let mut imports = leb_u32(1);
+    imports.extend(name("agent2api"));
+    imports.extend(name("call"));
+    imports.push(0x00); // 函数导入
+    imports.extend(leb_u32(3)); // (i32,i32) -> i32
+    out.extend(section(2, imports));
+
+    // ── Function 段：3 个本模块函数（索引 1..=3）──
+    let mut funcs = leb_u32(3);
+    funcs.extend(leb_u32(0));
+    funcs.extend(leb_u32(1));
+    funcs.extend(leb_u32(2));
+    out.extend(section(3, funcs));
+
+    // ── Memory 段：1 个内存，2 页 ──
+    let mut memory = leb_u32(1);
+    memory.extend_from_slice(&[0x00, 0x02]);
+    out.extend(section(5, memory));
+
+    // ── Export 段（导入函数占索引 0，故本模块函数从 1 起）──
+    let mut exports = leb_u32(4);
+    for (field, kind, index) in [
+        ("memory", 0x02u8, 0u32),
+        ("a2a_abi_version", 0x00, 1),
+        ("a2a_alloc", 0x00, 2),
+        ("a2a_call", 0x00, 3),
+    ] {
+        exports.extend(name(field));
+        exports.push(kind);
+        exports.extend(leb_u32(index));
+    }
+    out.extend(section(7, exports));
+
+    // ── Code 段 ──
+    let mut call_body: Vec<u8> = Vec::new();
+    // load8_u(ptr + 11) == 'c'
+    call_body.extend_from_slice(&[0x20, 0x00]); // local.get 0
+    call_body.extend_from_slice(&[0x41, 0x0b]); // i32.const 11
+    call_body.push(0x6a); // i32.add
+    call_body.extend_from_slice(&[0x2d, 0x00, 0x00]); // i32.load8_u align=1 offset=0
+    call_body.push(0x41); // i32.const 'c'（有符号 LEB：0x63 需补 0x00，否则解成 -29）
+    call_body.extend_from_slice(&leb_i64(b'c' as i64));
+    call_body.push(0x46); // i32.eq
+    call_body.extend_from_slice(&[0x04, 0x7e]); // if (result i64)；conversation 逐段调宿主导入
+    for (index, text) in texts.iter().enumerate().skip(2) {
+        call_body.push(0x41); // i32.const <payload ptr>
+        call_body.extend_from_slice(&leb_i64(offsets[index] as i64));
+        call_body.push(0x41); // i32.const <payload len>
+        call_body.extend_from_slice(&leb_i64(text.len() as i64));
+        call_body.extend_from_slice(&[0x10, 0x00]); // call 0（agent2api.call）
+        call_body.push(0x1a); // drop（reply 留在宿主，本夹具不读回）
+    }
+    call_body.push(0x42); // i64.const packed(done)
+    call_body.extend_from_slice(&leb_i64(packed(texts[1].len(), offsets[1])));
+    call_body.push(0x05); // else
+    call_body.push(0x42); // i64.const packed(init)
+    call_body.extend_from_slice(&leb_i64(packed(texts[0].len(), offsets[0])));
+    call_body.extend_from_slice(&[0x0b, 0x0b]); // end(if) + end(function)
+
+    let mut code = leb_u32(3);
+    code.extend(body(&[0x41, 0x01, 0x0b])); // ABI = 1
+    code.extend(body(&[0x41, 0x80, 0x20, 0x0b])); // 4096（输入缓冲区）
+    code.extend(body(&call_body));
+    out.extend(section(10, code));
+
+    // ── Data 段 ──
+    let mut data_section = leb_u32(texts.len() as u32);
+    for (index, text) in texts.iter().enumerate() {
+        data_section.extend(leb_u32(0)); // 活动段，内存 0
+        data_section.push(0x41); // i32.const offset
+        data_section.extend(leb_i64(offsets[index] as i64));
+        data_section.push(0x0b);
+        data_section.extend(leb_u32(text.len() as u32));
+        data_section.extend_from_slice(text.as_bytes());
+    }
+    out.extend(section(11, data_section));
+
+    out
 }
 
 /// `(len << 32) | ptr` —— 宿主按此解包应答地址。
@@ -280,6 +441,46 @@ fn leb_i64(mut n: i64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// e2e 夹具制品常量 —— **必须与 `tests/wasm_data_plane_e2e.rs` 逐字一致**。
+    pub(crate) const E2E_PROVIDER: &str = "wasm-e2e-provider";
+    pub(crate) const E2E_LABEL: &str = "Wasm E2E";
+    pub(crate) const E2E_CHUNK_1: &[u8] = b"data: {\"id\":\"chatcmpl-wasm-e2e\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"wasm-e2e-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel\"},\"finish_reason\":null}]}\n\n";
+    pub(crate) const E2E_CHUNK_2: &[u8] = b"data: {\"id\":\"chatcmpl-wasm-e2e\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"wasm-e2e-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\",\"finish_reason\":\"stop\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\ndata: [DONE]\n\n";
+
+    /// 结构自证：流式夹具必须真的**导入**宿主的 `agent2api.call` 且内嵌
+    /// head / chunk 载荷（否则「真跑流式」就退化成宿主替插件发事件）。
+    #[test]
+    fn streaming_module_imports_host_call() {
+        let bytes = streaming_wasm_module(E2E_PROVIDER, E2E_LABEL, &[E2E_CHUNK_1, E2E_CHUNK_2]);
+        assert!(bytes.starts_with(b"\0asm\x01\0\0\0"));
+        // 导入段：模块名与字段名都以长度前缀 + UTF-8 出现
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("agent2api") && text.contains("call"));
+        assert!(text.contains("stream.head"));
+        assert!(text.contains("stream.chunk"));
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(E2E_CHUNK_1);
+        assert!(
+            text.contains(&encoded),
+            "chunk 载荷必须 base64 后写进数据段"
+        );
+    }
+
+    /// **e2e 制品一致性**：`tests/e2e/fixtures/stream_plugin.wasm.b64` 是
+    /// `tests/wasm_data_plane_e2e.rs` 装包用的模块字节。改夹具 = 必须同步
+    /// 重生成该制品，否则这里立即红（防「夹具与 e2e 制品漂移」）。
+    #[test]
+    fn streaming_module_matches_checked_in_e2e_artifact() {
+        use base64::Engine as _;
+        let bytes = streaming_wasm_module(E2E_PROVIDER, E2E_LABEL, &[E2E_CHUNK_1, E2E_CHUNK_2]);
+        let expected = include_str!("../../../tests/e2e/fixtures/stream_plugin.wasm.b64");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            expected.trim(),
+            "夹具变更必须同步 tests/e2e/fixtures/stream_plugin.wasm.b64"
+        );
+    }
 
     #[test]
     fn encodes_leb128() {

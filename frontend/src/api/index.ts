@@ -386,12 +386,8 @@ export const api = {
     request<ApiResponse<Record<string, unknown>>>('DELETE', `${API_BASE}/ip/whitelist/${encodeURIComponent(pattern)}`),
   removeIpBlacklist: (pattern: string): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('DELETE', `${API_BASE}/ip/blacklist/${encodeURIComponent(pattern)}`),
-  listKeys: (): Promise<ApiList<TokenItem>> =>
-    request<ApiList<TokenItem>>('GET', `${API_BASE}/keys`),
   getRequestLogs: (): Promise<ApiResponse<DashboardItem[]>> =>
     request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/logs/requests`),
-  getModelMappings: (): Promise<ApiResponse<SettingsItem>> =>
-    request<ApiResponse<SettingsItem>>('GET', `${API_BASE}/settings`),
   saveModelMapping: (mapping: unknown): Promise<ApiResponse<SettingsItem>> =>
     request<ApiResponse<SettingsItem>>('PUT', `${API_BASE}/settings`, { mappings: mapping, replace_all: false }),
   deleteModelMapping: (_id: string): Promise<ApiResponse<SettingsItem>> =>
@@ -497,7 +493,8 @@ export const api = {
     }),
   removeModelAlias: (alias: string): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/remove`, { alias }),
-  // 批量映射前缀（对齐 Agent2API 批量加映射：前缀 + 同名合并到多家；后端端点待实现，调用失败时页面报错兜底）
+  // 批量映射前缀（对齐 Agent2API 批量加映射：前缀 + 同名合并到多家）
+  // 契约锚点：src/api/admin/model_manage.rs::handle_add_alias_prefix（POST /api/models/alias/prefix）
   batchAddAliasPrefix: (
     prefix: string,
     opts: { sep?: string; merge?: boolean; targets?: string[] }
@@ -1438,9 +1435,6 @@ export const api = {
   /** 刷新发布目录（返回 catalog 快照） */
   refreshPluginRelease: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/release`),
-  /** 在途操作进度（安装/更新任务的阶段与字节读数） */
-  getPluginProgress: (): Promise<ApiResponse<Record<string, unknown>>> =>
-    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/progress`),
 
   // ── 脚本插件管理（Magpie 脚本包；一个 Bun 宿主承载全部 npm 风格脚本）──
   // 契约锚点：src/api/admin/script_plugins.rs

@@ -582,6 +582,15 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(account_sessions.clone()),
         store.clone(),
     ));
+    // wasm 辅助程序宿主：注入包注册表 + 原生插件进程 + FileStore 授权源。
+    // 未接线时 `native.snapshot` 恒返回空表、helper 调用回落 Unavailable
+    // （「编译绿但功能半死」形态），故显式接线。
+    crate::plugin_host::wasm::native::install_source(
+        crate::plugin_host::wasm::native::RegistryHelperSource::new(
+            plugin_host.clone(),
+            store.clone(),
+        ),
+    );
 
     // 脚本插件宿主（一个 Bun 进程承载全部 npm 风格脚本包，对齐 A2A 3.5
     // 的 Magpie 脚本插件体系）：目录刷新任务在 Catalog::spawn 里启动，
@@ -830,6 +839,18 @@ async fn main() -> anyhow::Result<()> {
     crate::tool_services::init(state.alert_store.clone());
     crate::maintenance::init(state.alert_store.clone());
 
+    // 账号型搜索运行时：把插件宿主的 provider 搜索能力接进工具服务。
+    // 未接线时账号型搜索返回稳定的 `configuration("当前插件宿主未接线")`，
+    // 不会 panic；接的是三级路由桥（native → script → wasm，同 resolve.rs 顺序）。
+    state
+        .tool_services
+        .set_account_search_host(std::sync::Arc::new(
+            crate::tool_services::PluginHostSearchBridge::new(
+                plugin_host.clone(),
+                state.script_host.clone(),
+            ),
+        ));
+
     tracing::info!(
         "Configuration loaded: {}:{} | Accounts: {} | API Keys: {} | Users: {} | EpayReady: {} | SeaORM: {}",
         config.server.host,
@@ -953,6 +974,13 @@ async fn main() -> anyhow::Result<()> {
             let sessions = state.account_sessions.clone();
             let egress = state.account_sessions.egress().clone();
             crate::checkin::scheduler::spawn(store, sessions, egress);
+        }
+        // 猫猫旅行巡检调度：30 秒 tick，按排程时刻真打上游；无插件时稳定跳过、
+        // 不落当日标记（装插件后补跑当天）。
+        {
+            let store = state.upstream_checkin.clone();
+            let executor = api::admin::checkin_center::travel_executor(&state);
+            crate::checkin::travel::spawn(store, executor);
         }
         // 账号池周期维护：清理到期冷却记录 + 凭证过期状态同步（每 60s 一轮）
         {
@@ -1781,6 +1809,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/checkin-center/schedules/run",
             post(api::admin::handle_run_checkin_schedule),
         )
+        // 猫猫旅行巡检：PATCH 改开关/时刻，POST 立即真跑一轮
+        .route(
+            "/api/checkin-center/travel",
+            patch(api::admin::handle_patch_checkin_travel),
+        )
+        .route(
+            "/api/checkin-center/travel/run",
+            post(api::admin::handle_run_checkin_travel),
+        )
         // 一次性 / 限时福利通道（新手礼 / 保活 / 成长任务 / 限时套餐 / UMID）
         .route(
             "/api/checkin-center/benefits",
@@ -1912,6 +1949,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/models/alias/reasoning",
             post(api::admin::handle_set_alias_reasoning),
+        )
+        // 批量新增别名前缀映射（`prefix+sep+target` 全局映射，整批先校验后写）
+        .route(
+            "/api/models/alias/prefix",
+            post(api::admin::model_manage::handle_add_alias_prefix),
         )
         // 映射逐条读写（A2A `GET/POST /api/models/mappings`；映射弹窗只拉这一小块）
         .route(
@@ -2049,6 +2091,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/dashboard/channel_health",
             get(api::admin::handle_channel_health),
+        )
+        // 渠道概览统计（渠道数 / 启用 / 冷却；数据源与 channel_health 不同）
+        .route(
+            "/api/dashboard/channel-stats",
+            get(api::admin::dashboard::handle_channel_stats),
         )
         .route("/api/dashboard/realtime", get(api::admin::handle_realtime))
         .route(

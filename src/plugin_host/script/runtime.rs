@@ -61,6 +61,8 @@ use super::callbacks::ScriptCallbacks;
 use super::catalog::Catalog;
 use super::host_rs::{self, build_init_payload, ScriptHost};
 use super::protocol::ProtocolRegistry;
+use super::rpc::admin as host_admin;
+use super::settings;
 use super::storage;
 use super::transport::Transport;
 use super::types::{script_plugins_root, ScriptPackage, ScriptProviderInfo};
@@ -269,6 +271,50 @@ impl ScriptHostManager {
         }
     }
 
+    /// 当前宿主句柄快照（`None` = 不在跑）。
+    fn current_host(&self) -> Option<Arc<ScriptHost>> {
+        self.host.read().as_ref().cloned()
+    }
+
+    /// 更新包级 / provider 级设置（A2A `POST /api/plugins/scripts/settings`
+    /// 的数据面语义）。
+    ///
+    /// 对齐上游 `script/settings.rs::configure`：
+    /// - **options 未变**（只改 `providerOptions`）：不重启宿主，改走
+    ///   `script.settings` 让宿主应用开关并回最新设置声明（`schema`）；
+    /// - 保存失败时用旧 `providerOptions` 反向调 `script.settings`，把宿主
+    ///   内存态回滚到保存前的值；
+    /// - `options` 变化仍走「落盘 + 重建宿主」（包级参数只在 init 载荷下发）。
+    ///
+    /// 宿主不在跑（崩溃窗口）时无法刷新 schema，但仍保存（与上游对
+    /// `host()` 为 None 的处理一致：下次重建会从 `script.packages` 回填）。
+    pub async fn configure_settings(
+        self: &Arc<Self>,
+        package_id: &str,
+        version: Option<&str>,
+        options: Option<serde_json::Map<String, Value>>,
+        provider_options: Option<serde_json::Map<String, Value>>,
+    ) -> Result<ScriptPackage, String> {
+        // 先加载包记录决定是否需要在线宿主，再走可注入宿主的纯逻辑
+        // （单测用桩宿主的通道验证 script.settings 调用与回滚）。
+        let packages = storage::load_packages(&self.store);
+        let enabled = packages
+            .iter()
+            .rfind(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
+            .is_some_and(|p| p.enabled);
+        let host = if enabled { self.current_host() } else { None };
+        let channel = host.as_ref().map(|host| host.rpc());
+        configure_settings_with(
+            self,
+            channel.as_deref(),
+            package_id,
+            version,
+            options,
+            provider_options,
+        )
+        .await
+    }
+
     /// 数据面路由（**同步**）。未接管 / 宿主不在跑 → `None`。
     ///
     /// `provider` 接受声明 id 或实际 id；返回值里的 `provider` 是实际 id。
@@ -371,7 +417,7 @@ impl ScriptHostManager {
             return Err("网关正在关闭，拒绝重建脚本宿主".to_string());
         }
 
-        let packages: Vec<ScriptPackage> = storage::load_packages(&self.store)
+        let mut packages: Vec<ScriptPackage> = storage::load_packages(&self.store)
             .into_iter()
             .filter(|p| p.enabled)
             .collect();
@@ -458,6 +504,27 @@ impl ScriptHostManager {
             }
         };
 
+        // 宿主包清单（`script.packages`）：init 应答只给 providers/identities，
+        // 每包自报的 `settings`（设置 schema）/ 图标 / 别名 / 加载错误只有这份
+        // 清单带回。拉取失败不拆宿主（脚本包少一份设置声明不该拖垮数据面），
+        // 只 warn 并保留既有字段。
+        //
+        // **落盘必须写全表**：`packages` 只是启用子集，直接用它会从 KV 里
+        // 抹掉未启用的包——合并回完整清单再写。
+        match fetch_package_list(&new_host).await {
+            Some(list) => {
+                apply_package_list(&mut packages, &list);
+                let mut stored = storage::load_packages(&self.store);
+                apply_package_list(&mut stored, &list);
+                if let Err(e) = storage::replace_all(&self.store, &self.data_dir, &stored) {
+                    tracing::warn!("[Script] 回填宿主包清单失败（路由不受影响）：{e:#}");
+                }
+            }
+            None => {
+                tracing::warn!("[Script] 宿主未返回 script.packages 清单（设置声明/图标回填跳过）")
+            }
+        }
+
         // 路由表：声明 id → 实际 id（identities 映射；无冲突同名）
         let (owners, aliases, providers) = self.build_routing(&packages, &new_host, &reserved);
 
@@ -475,8 +542,20 @@ impl ScriptHostManager {
 
         // 别名表落盘（KV `plugin:script-identities` + 投影）：宿主重启后
         // JS 侧从 registry.json 读到的 identities 与网关路由同源。
+        // init 应答的 identities 为主，`script.packages` 的 per-package
+        // aliases 作补充（上游以包清单的 aliases 为权威）。
         // 失败只 warn——路由表在内存里已就位，落盘只是给宿主读。
-        let persisted = identities_from_host(new_host.identities());
+        let mut persisted = identities_from_host(new_host.identities());
+        for package in &packages {
+            for (declared, actual) in &package.provider_aliases {
+                if let Some(actual) = actual.as_str() {
+                    persisted
+                        .entry(package.id.clone())
+                        .or_default()
+                        .insert(declared.clone(), actual.to_string());
+                }
+            }
+        }
         if let Err(e) = storage::save_identities(&self.store, &self.data_dir, persisted) {
             tracing::warn!("[Script] 落盘 identities 失败（路由不受影响）：{e:#}");
         }
@@ -872,6 +951,203 @@ fn identities_from_host(raw: &serde_json::Map<String, serde_json::Value>) -> sto
     out
 }
 
+/// 对一个宿主句柄调一次管理面方法（超时 + 错误文案归一）。
+async fn call_host_on(
+    host: &ScriptHost,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    call_channel(&host.rpc(), method, params, timeout).await
+}
+
+/// 对一个宿主 RPC 通道调一次管理面方法（超时 + 错误文案归一）。
+///
+/// 单独抽出来是为了单测能注入桩通道（后台任务应答 `script.settings`）。
+async fn call_channel(
+    channel: &RpcChannel,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    match tokio::time::timeout(timeout, channel.call(method, params)).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(e.message),
+        Err(_) => Err(format!("脚本宿主 {method} 超时")),
+    }
+}
+
+/// [`ScriptHostManager::configure_settings`] 的核心逻辑（宿主通道可注入）。
+///
+/// `host` 为 `None` = 宿主不在跑（或包未启用）：跳过 `script.settings`，
+/// 只落盘。对齐上游 `script/settings.rs::configure`：
+/// - options 未变 → `script.settings` 应用 providerOptions 并回最新 schema；
+///   保存失败时反向调用回滚宿主内存态；
+/// - options 变化 → 委托 `operations::update_settings`（落盘 + 重建宿主）。
+async fn configure_settings_with(
+    manager: &Arc<ScriptHostManager>,
+    host: Option<&RpcChannel>,
+    package_id: &str,
+    version: Option<&str>,
+    options: Option<serde_json::Map<String, Value>>,
+    provider_options: Option<serde_json::Map<String, Value>>,
+) -> Result<ScriptPackage, String> {
+    let mut packages = storage::load_packages(manager.store());
+    let index = packages
+        .iter()
+        .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
+        .ok_or_else(|| format!("包未安装：{package_id}"))?;
+    let before = packages[index].clone();
+    if let Some(values) = &options {
+        settings::validate_values(values)?;
+    }
+    if let Some(map) = &provider_options {
+        let declared: Vec<&str> = before.providers.iter().map(|p| p.id.as_str()).collect();
+        for (provider, values) in map {
+            if !declared.contains(&provider.as_str()) {
+                return Err(format!("开关不属于当前插件：{provider}"));
+            }
+            let values = values
+                .as_object()
+                .ok_or_else(|| "提供商开关必须是对象".to_string())?;
+            if values.values().any(|v| !v.is_boolean()) {
+                return Err("提供商开关必须是布尔值".into());
+            }
+        }
+    }
+
+    let options_changed = options
+        .as_ref()
+        .is_some_and(|values| values != &before.options.values);
+    let mut next = before.clone();
+    if let Some(values) = options {
+        next.options.values = values;
+    }
+    if let Some(map) = provider_options {
+        next.provider_options = map;
+    }
+
+    // options 变化：包级参数只在 init 载荷下发 → 走既有「落盘 + 重建」，
+    // 复用 `operations::update_settings` 的同一套校验与错误文案。
+    if options_changed {
+        return super::operations::update_settings(
+            manager,
+            package_id,
+            version,
+            Some(next.options.values),
+            Some(next.provider_options),
+        )
+        .await;
+    }
+
+    // 只改 providerOptions（或纯读回 schema）：宿主在线则应用并回最新设置
+    // 声明（不重启 Bun）。与上游口径一致——未变化也照样拉一次，保证返回的
+    // schema 是最新的。
+    if let Some(channel) = host {
+        let schema = call_channel(
+            channel,
+            host_admin::SETTINGS,
+            serde_json::json!({
+                "package": package_id,
+                "providerOptions": next.provider_options,
+            }),
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(|e| format!("宿主拒绝设置更新：{e}"))?;
+        next.settings_schema = schema;
+    }
+    packages[index] = next.clone();
+    if let Err(e) = storage::replace_all(manager.store(), manager.data_dir(), &packages) {
+        // 保存失败：把宿主内存态回滚到旧 providerOptions（尽力而为）
+        if let Some(channel) = host {
+            let _ = call_channel(
+                channel,
+                host_admin::SETTINGS,
+                serde_json::json!({
+                    "package": package_id,
+                    "providerOptions": before.provider_options,
+                }),
+                Duration::from_secs(10),
+            )
+            .await;
+        }
+        return Err(format!("保存脚本包状态失败：{e:#}"));
+    }
+    Ok(next)
+}
+
+/// 拉宿主包清单（`script.packages`，10s——与上游 `call_coded` 同预算）。
+///
+/// 失败 / 形状不对返回 `None`（**非致命**：清单只带每包自报的设置声明、
+/// 图标与加载错误，缺它们不影响数据面路由；上游把失败当致命，AIGX 选择
+/// 「设置页少一条声明」而不是「整台宿主起不来」的保守方向）。
+async fn fetch_package_list(host: &ScriptHost) -> Option<Vec<Value>> {
+    match call_host_on(
+        host,
+        host_admin::PACKAGES,
+        serde_json::json!({}),
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(value) => match value.as_array() {
+            Some(list) => Some(list.clone()),
+            None => {
+                tracing::warn!("[Script] script.packages 应答不是数组，忽略");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!("[Script] 拉取 script.packages 失败：{e}");
+            None
+        }
+    }
+}
+
+/// 把 `script.packages` 清单回填到包记录。
+///
+/// 只覆盖宿主自报的字段：`error` / `settings`（设置声明）/ `icon` /
+/// `providerIcons` / `aliases`。`providers` 保持网关侧声明（label/models
+/// 是徽标与模型页的数据源，宿主清单只回 id 列表）。
+fn apply_package_list(packages: &mut [ScriptPackage], list: &[Value]) {
+    for item in list {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(package) = packages.iter_mut().find(|package| package.id == id) else {
+            continue;
+        };
+        package.error = item
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(schema) = item.get("settings").filter(|value| value.is_object()) {
+            package.settings_schema = schema.clone();
+        }
+        // 图标：显式 null 表示宿主撤下图标（清空）；键缺失时保留旧值
+        if let Some(icon) = item.get("icon") {
+            package.icon = icon.as_str().map(str::to_string);
+        }
+        if let Some(icons) = item.get("providerIcons").and_then(Value::as_object) {
+            package.provider_icons = icons
+                .iter()
+                .filter_map(|(provider, icon)| {
+                    icon.as_str()
+                        .map(|icon| (provider.clone(), Value::String(icon.to_string())))
+                })
+                .collect();
+        }
+        if let Some(aliases) = item.get("aliases").and_then(Value::as_object) {
+            package.provider_aliases = aliases
+                .iter()
+                .filter(|(_, actual)| actual.is_string())
+                .map(|(declared, actual)| (declared.clone(), actual.clone()))
+                .collect();
+        }
+    }
+}
+
 /// 把宿主上报的 provider 设置声明注册到全局表（供管理面「提供商设置」页）。
 ///
 /// A2A 的脚本宿主在 `script.packages` 里回 `settings`（`packageSettings`
@@ -905,6 +1181,16 @@ fn register_provider_settings(
                     .extra
                     .get("settings")
                     .and_then(|s| s.get("providerOptions"))
+                    .and_then(|opts| opts.get(&provider.id))
+                    .and_then(|options| synthesize_schema(&provider.label, options))
+            })
+            // 宿主 `script.packages` 回填的包级设置声明（A2A 权威形态：
+            // `settings.providerOptions.{provider}` 是选项清单）
+            .or_else(|| {
+                packages
+                    .iter()
+                    .find(|package| package.providers.iter().any(|pr| pr.id == provider.id))
+                    .and_then(|package| package.settings_schema.get("providerOptions"))
                     .and_then(|opts| opts.get(&provider.id))
                     .and_then(|options| synthesize_schema(&provider.label, options))
             });
@@ -968,6 +1254,7 @@ fn synthesize_schema(label: &str, options: &serde_json::Value) -> Option<serde_j
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Mutex as StdMutex;
 
     #[test]
     fn backoff_table_is_monotonic() {
@@ -1171,5 +1458,295 @@ mod tests {
             ids.get("@a/kiro").and_then(|m| m.get("bad")).is_none(),
             "非字符串值应丢弃"
         );
+    }
+
+    /// `script.packages` 清单回填：宿主自报的设置声明 / 图标 / 别名 /
+    /// 加载错误进包记录；形状不符的字段忽略、未知包忽略。
+    #[test]
+    fn apply_package_list_backfills_host_reported_fields() {
+        let mut packages = vec![pkg("@a/kiro", &["kiro"])];
+        let list = vec![
+            json!({
+                "id": "@a/kiro",
+                "providers": ["kiro-2"],
+                "aliases": { "kiro": "kiro-2", "bad": 7 },
+                "icon": "data:image/png;base64,zz",
+                "providerIcons": { "kiro-2": "https://example.invalid/i.png", "bad": 7 },
+                "error": "load failed",
+                "settings": {
+                    "id": "@a/kiro",
+                    "providerOptions": { "kiro-2": [{ "key": "fast", "label": "Fast" }] }
+                }
+            }),
+            json!({ "id": "not-installed", "settings": {} }),
+            json!("garbage"),
+        ];
+        apply_package_list(&mut packages, &list);
+        let package = &packages[0];
+        assert_eq!(package.error.as_deref(), Some("load failed"));
+        assert_eq!(package.icon.as_deref(), Some("data:image/png;base64,zz"));
+        assert_eq!(package.provider_icons.len(), 1, "非字符串图标应丢弃");
+        assert_eq!(
+            package
+                .provider_aliases
+                .get("kiro")
+                .and_then(|v| v.as_str()),
+            Some("kiro-2")
+        );
+        assert!(package.provider_aliases.get("bad").is_none());
+        assert_eq!(
+            package.settings_schema["providerOptions"]["kiro-2"][0]["key"],
+            "fast"
+        );
+        // providers 保持网关侧声明（label/models 是徽标与模型页数据源）
+        assert_eq!(package.providers[0].id, "kiro");
+    }
+
+    #[test]
+    fn apply_package_list_keeps_fields_when_absent() {
+        let mut package = pkg("@a/kiro", &["kiro"]);
+        package.settings_schema = json!({ "version": 1 });
+        package.icon = Some("https://example.invalid/old.png".into());
+        let mut packages = vec![package];
+        apply_package_list(&mut packages, &[json!({ "id": "@a/kiro" })]);
+        assert_eq!(packages[0].settings_schema, json!({ "version": 1 }));
+        assert_eq!(
+            packages[0].icon.as_deref(),
+            Some("https://example.invalid/old.png")
+        );
+        assert!(packages[0].error.is_none());
+        // 显式 null 图标 = 宿主撤下图标（清空）
+        apply_package_list(&mut packages, &[json!({ "id": "@a/kiro", "icon": null })]);
+        assert!(packages[0].icon.is_none());
+    }
+
+    // ── configure_settings（桩宿主 RPC 通道）─────────────────────────
+
+    /// 桩宿主：后台应答 `script.settings`（回显收到的 providerOptions），
+    /// 记录每次调用的 params 供断言。
+    fn stub_host(
+        expected_calls: usize,
+    ) -> (
+        Arc<RpcChannel>,
+        Arc<StdMutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        stub_host_with(expected_calls, false)
+    }
+
+    /// 同上；`reply_error=true` 时宿主对每次调用回错误帧（拒绝路径）。
+    fn stub_host_with(
+        expected_calls: usize,
+        reply_error: bool,
+    ) -> (
+        Arc<RpcChannel>,
+        Arc<StdMutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use crate::plugin_host::rpc::CallbackHandler;
+        struct NoCallbacks;
+        impl CallbackHandler for NoCallbacks {
+            fn handle(
+                &self,
+                method: &str,
+                _params: Value,
+            ) -> Result<Value, crate::plugin_host::rpc::RpcError> {
+                Err(crate::plugin_host::rpc::RpcError {
+                    message: format!("stub unsupported: {method}"),
+                    code: Some("unsupported".into()),
+                })
+            }
+        }
+        let (client_out, host_in) = tokio::io::duplex(64 * 1024);
+        let (host_out, client_in) = tokio::io::duplex(64 * 1024);
+        let channel = Arc::new(RpcChannel::new(
+            Box::new(client_in),
+            Box::new(client_out),
+            Arc::new(NoCallbacks),
+        ));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let seen_task = seen.clone();
+        let handle = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(host_in);
+            let mut writer = host_out;
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            for _ in 0..expected_calls {
+                let mut buf = Vec::new();
+                let Ok(read) = reader.read_until(b'\n', &mut buf).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                let Ok(frame) =
+                    crate::plugin_host::rpc::decode_frame(String::from_utf8_lossy(&buf).trim())
+                else {
+                    return;
+                };
+                if let Ok(mut items) = seen_task.lock() {
+                    items.push(frame.params.clone().unwrap_or(Value::Null));
+                }
+                // 回最新设置声明（A2A 形状：{id, optionsExample, providerOptions}）；
+                // `reply_error` 时回错误帧（宿主拒绝路径）。
+                let reply = if reply_error {
+                    json!({
+                        "id": frame.id,
+                        "error": { "code": "internal", "message": "stub host rejected settings" },
+                    })
+                } else {
+                    json!({
+                        "id": frame.id,
+                        "result": {
+                            "id": "stub",
+                            "optionsExample": {},
+                            "providerOptions": frame.params.as_ref()
+                                .and_then(|p| p.get("providerOptions"))
+                                .cloned()
+                                .unwrap_or_else(|| json!({})),
+                        },
+                    })
+                };
+                let mut line = reply.to_string();
+                line.push('\n');
+                if writer.write_all(line.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        (channel, seen, handle)
+    }
+
+    fn manager_with_store(
+        store: Arc<crate::storage::FileStore>,
+        data_dir: &Path,
+    ) -> Arc<ScriptHostManager> {
+        // Catalog::spawn 会启动后台网络刷新（首刷立即打网络）。测试不需要
+        // 目录——首刷失败只落错误状态，不 panic；但为免并行测试互相拖慢，
+        // 用一次性 tempdir 作 script_root 即可（每次独立目录）。
+        let catalog = Catalog::spawn(&script_plugins_root(data_dir));
+        // 账号池 / 原生包注册表只要求「存在且不抛错」，用 data_dir 下的独立
+        // 子目录（不能共享进程级临时目录——并行测试会互相污染 SQLite）。
+        let sessions_dir = data_dir.join("account-sessions");
+        let registry_dir = data_dir.join("native-registry");
+        ScriptHostManager::new(
+            data_dir.to_path_buf(),
+            store,
+            Arc::new(AccountSessionStore::new(Arc::new(
+                crate::storage::FileStore::new(sessions_dir),
+            ))),
+            crate::test_http_client(),
+            catalog,
+            Arc::new(PackRegistry::new(Arc::new(crate::storage::FileStore::new(
+                registry_dir,
+            )))),
+        )
+    }
+
+    /// 只改 providerOptions 且宿主在线：走 `script.settings`（不重建），
+    /// 返回的 schema 回填到包记录并落盘。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configure_settings_applies_provider_options_via_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::storage::FileStore::new(dir.path().to_path_buf()));
+        let manager = manager_with_store(store.clone(), dir.path());
+        let mut package = pkg("@a/kiro", &["kiro"]);
+        package.enabled = true;
+        storage::replace_all(&store, dir.path(), &[package]).unwrap();
+
+        let (channel, seen, task) = stub_host(1);
+        let updated = configure_settings_with(
+            &manager,
+            Some(channel.as_ref()),
+            "@a/kiro",
+            None,
+            None,
+            Some(
+                [("kiro".to_string(), json!({"fast": true}))]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .await
+        .unwrap();
+        task.await.unwrap();
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["package"], "@a/kiro");
+        assert_eq!(calls[0]["providerOptions"]["kiro"]["fast"], true);
+        assert_eq!(updated.provider_options["kiro"]["fast"], true);
+        // schema 由宿主应答回填（stub 回显 providerOptions）
+        assert_eq!(
+            updated.settings_schema["providerOptions"]["kiro"]["fast"],
+            true
+        );
+        // 落盘（KV）
+        let stored = storage::load_packages(&store);
+        assert_eq!(stored[0].provider_options["kiro"]["fast"], true);
+    }
+
+    /// providerOptions 不属于该包声明的 provider / 非布尔值：拒绝且不打宿主。
+    #[tokio::test]
+    async fn configure_settings_rejects_unknown_provider_and_non_boolean() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::storage::FileStore::new(dir.path().to_path_buf()));
+        let manager = manager_with_store(store.clone(), dir.path());
+        storage::replace_all(&store, dir.path(), &[pkg("@a/kiro", &["kiro"])]).unwrap();
+        let (channel, seen, _task) = stub_host(0);
+        for map in [
+            [("other".to_string(), json!({"fast": true}))]
+                .into_iter()
+                .collect(),
+            [("kiro".to_string(), json!({"fast": "yes"}))]
+                .into_iter()
+                .collect(),
+        ] {
+            let err = configure_settings_with(
+                &manager,
+                Some(channel.as_ref()),
+                "@a/kiro",
+                None,
+                None,
+                Some(map),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.contains("开关不属于当前插件") || err.contains("布尔值"),
+                "got: {err}"
+            );
+        }
+        assert!(seen.lock().unwrap().is_empty(), "校验失败不得打宿主");
+    }
+
+    /// 宿主拒绝设置更新：错误如实上报且不落盘。
+    #[tokio::test]
+    async fn configure_settings_reports_host_rejection_without_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::storage::FileStore::new(dir.path().to_path_buf()));
+        let manager = manager_with_store(store.clone(), dir.path());
+        let mut package = pkg("@a/kiro", &["kiro"]);
+        package.enabled = true;
+        storage::replace_all(&store, dir.path(), &[package]).unwrap();
+        // 桩：每次调用回错误帧（确定性的拒绝路径，不依赖通道关闭竞态）
+        let (channel, _seen, task) = stub_host_with(1, true);
+        let err = configure_settings_with(
+            &manager,
+            Some(channel.as_ref()),
+            "@a/kiro",
+            None,
+            None,
+            Some(
+                [("kiro".to_string(), json!({"fast": true}))]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .await
+        .unwrap_err();
+        task.await.unwrap();
+        assert!(err.contains("宿主拒绝设置更新"), "got: {err}");
+        // 未落盘：providerOptions 仍为空
+        let stored = storage::load_packages(&store);
+        assert!(stored[0].provider_options.is_empty());
     }
 }

@@ -484,6 +484,14 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/plugins/scripts/prompts",
                 "/api/plugins/scripts/check",
                 "/api/plugins/scripts/catalog/refresh",
+                // v1.0.64 遗留收尾波：新增管理面（工具面尚未规划）
+                // 别名前缀批量映射（写侧模型映射族，与 /api/models/mappings 同性质）
+                "/api/models/alias/prefix",
+                // 渠道概览统计（只读大盘视图，现有 aigx_dashboard_stats 未开该 view）
+                "/api/dashboard/channel-stats",
+                // 猫猫旅行巡检（改排程 + 真打上游的运维动作，须人确认时刻表）
+                "/api/checkin-center/travel",
+                "/api/checkin-center/travel/run",
             ],
         ),
     ];

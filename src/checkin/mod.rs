@@ -38,6 +38,10 @@ pub mod claim;
 pub mod scheduler;
 pub mod schedules;
 pub mod store;
+// 猫猫旅行巡检（对齐上游 core/growth_scheduler + api/growth_schedule）：
+// 配置 {enabled,times} 落 `checkin:travel`，执行走插件 `admin.action
+// "growth.travel"`。随签到调度一起启动，接线在 main.rs（报告见交付说明）。
+pub mod travel;
 
 #[cfg(test)]
 mod runtime_tests;

@@ -14,6 +14,7 @@
 //! - `POST /api/models/price/remove` 删除定价 `{model}`
 //! - `POST /api/models/alias`     别名映射 `{alias, target}`（旧入口，写全局条目）
 //! - `POST /api/models/alias/remove` 删除别名 `{alias}`
+//! - `POST /api/models/alias/prefix` 批量前缀别名 `{prefix, sep?, merge?, targets[]}`
 //!
 //! 所有写接口返回最新的完整视图，前端就地重绘、不必再拉一次 —— 与
 //! Agent2API `model_manage.rs` 的「写接口回读视图」约定一致。
@@ -650,6 +651,134 @@ pub async fn handle_set_alias_reasoning(
     })))
 }
 
+/// 批量前缀别名请求体（`POST /api/models/alias/prefix`）。
+#[derive(Debug, Deserialize)]
+pub struct AliasPrefixBody {
+    /// 前缀（`{prefix}{sep}{target}` 拼出对外名）。
+    pub prefix: String,
+    /// 分隔符（默认 `-`；允许空串，即前缀直接贴模型 id）。
+    #[serde(default = "default_alias_sep")]
+    pub sep: String,
+    /// `true` = 同别名已有映射时追加（合并到多家）；`false` = 冲突报错。
+    #[serde(default = "default_merge")]
+    pub merge: bool,
+    /// 要加别名的模型 id 列表。
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+fn default_alias_sep() -> String {
+    "-".to_string()
+}
+
+fn default_merge() -> bool {
+    true
+}
+
+/// 计算前缀别名计划（纯函数，便于单测）。
+///
+/// 对每个 target 生成 `alias = prefix + sep + target`：
+/// - 别名已是同一 target → 幂等跳过（重复点「批量添加」不报错）；
+/// - 别名已映射到别的 target（同别名多家）：
+///   `merge=true` → 追加一条（数据面按写入顺序取第一条，既有映射保持优先）；
+///   `merge=false` → 报冲突，整批不落盘（先算完再写，避免半批成功）；
+/// - 返回待写入的 `(alias, target)` 列表（已去重、保持 targets 顺序）。
+fn plan_alias_prefix(
+    existing: &[crate::model::Mapping],
+    prefix: &str,
+    sep: &str,
+    merge: bool,
+    targets: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return Err("前缀不能为空".to_string());
+    }
+    let mut planned: Vec<(String, String)> = Vec::new();
+    for raw in targets {
+        let target = raw.trim();
+        if target.is_empty() {
+            return Err("目标模型不能为空".to_string());
+        }
+        if !crate::model::alias_valid(target) {
+            return Err(format!(
+                "目标模型「{target}」只能包含字母、数字与 - _ . / :，且不超过 128 个字符"
+            ));
+        }
+        let alias = format!("{prefix}{sep}{target}");
+        if !crate::model::alias_name_valid(&alias) {
+            return Err(format!(
+                "生成的别名「{alias}」不合法（不能含空白/控制字符，且不超过 128 个字符）"
+            ));
+        }
+        if planned.iter().any(|(a, _)| a == &alias) {
+            continue;
+        }
+        let existing_targets: Vec<&str> = existing
+            .iter()
+            // 只与**全局条目**比对：本接口写的是全局条目；provider 维度条目
+            // 是另一条轴（只对某一家生效），不构成同名冲突。
+            .filter(|m| m.provider.is_none() && m.alias == alias)
+            .map(|m| m.target.as_str())
+            .collect();
+        if existing_targets.contains(&target) {
+            continue; // 幂等：这条绑定已经在了
+        }
+        if !existing_targets.is_empty() && !merge {
+            return Err(format!(
+                "别名「{alias}」已被映射到 {}（merge=false 时不覆盖）",
+                existing_targets.join(", ")
+            ));
+        }
+        planned.push((alias, target.to_string()));
+    }
+    Ok(planned)
+}
+
+/// POST /api/models/alias/prefix —— 批量生成「前缀 + 模型 id」别名。
+///
+/// 前端模型管理页多选后调用（`batchAddAliasPrefix`）：`{prefix, sep, merge,
+/// targets}`。全部校验/冲突判定先算完再落盘，保证「要么整批成功、要么一条
+/// 都不写」。返回最新完整视图（与其它写接口一致）。
+pub async fn handle_add_alias_prefix(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AliasPrefixBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let existing = state.model_mapper.all_mapping_entries();
+    let planned = plan_alias_prefix(
+        &existing,
+        &body.prefix,
+        &body.sep,
+        body.merge,
+        &body.targets,
+    )
+    .map_err(|message| {
+        let status = if message.starts_with("别名「") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        error_response(&message, status)
+    })?;
+    for (alias, target) in &planned {
+        state
+            .model_mapper
+            .upsert_mapping(alias, target, None, None, None, None)
+            .map_err(|e| {
+                error_response(
+                    &format!("保存别名失败：{e}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?;
+    }
+    if !planned.is_empty() {
+        tracing::info!("[Models] 批量添加前缀别名 {} 条", planned.len());
+    }
+    Ok(ok_view(&current_view(&state)))
+}
+
 /// POST /api/models/capabilities —— 覆盖某条模型对下游声明的能力位。
 ///
 /// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
@@ -922,7 +1051,81 @@ pub async fn handle_remove_custom_model(
 #[cfg(test)]
 mod tests {
     use super::alias_valid;
-    use super::{host_row_exists, normalize_reasoning, valid_capability, ManageView};
+    use super::{
+        host_row_exists, normalize_reasoning, plan_alias_prefix, valid_capability, ManageView,
+    };
+    use crate::model::Mapping;
+
+    fn mapping(alias: &str, target: &str) -> Mapping {
+        Mapping {
+            alias: alias.into(),
+            target: target.into(),
+            provider: None,
+            reasoning: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn alias_prefix_plans_each_target() {
+        let planned = plan_alias_prefix(
+            &[],
+            "team-",
+            "-",
+            true,
+            &["gpt-4o".into(), "claude-3".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            planned,
+            vec![
+                ("team--gpt-4o".to_string(), "gpt-4o".to_string()),
+                ("team--claude-3".to_string(), "claude-3".to_string()),
+            ]
+        );
+        // 空 sep = 前缀直接贴 id
+        let planned = plan_alias_prefix(&[], "p_", "", true, &["m1".into()]).unwrap();
+        assert_eq!(planned, vec![("p_m1".to_string(), "m1".to_string())]);
+    }
+
+    #[test]
+    fn alias_prefix_is_idempotent() {
+        let existing = vec![mapping("team--gpt-4o", "gpt-4o")];
+        let planned = plan_alias_prefix(&existing, "team-", "-", true, &["gpt-4o".into()]).unwrap();
+        assert!(planned.is_empty(), "已存在的同一绑定不重复写");
+    }
+
+    #[test]
+    fn alias_prefix_conflict_without_merge() {
+        let existing = vec![mapping("team--gpt-4o", "other-model")];
+        let err =
+            plan_alias_prefix(&existing, "team-", "-", false, &["gpt-4o".into()]).unwrap_err();
+        assert!(err.contains("已被映射到 other-model"), "{err}");
+    }
+
+    #[test]
+    fn alias_prefix_merges_into_existing_alias() {
+        // merge=true：同别名已映射到别家 → 追加一条（同别名多家）
+        let existing = vec![mapping("team--gpt-4o", "other-model")];
+        let planned = plan_alias_prefix(&existing, "team-", "-", true, &["gpt-4o".into()]).unwrap();
+        assert_eq!(
+            planned,
+            vec![("team--gpt-4o".to_string(), "gpt-4o".to_string())]
+        );
+    }
+
+    #[test]
+    fn alias_prefix_rejects_bad_input() {
+        assert!(plan_alias_prefix(&[], "  ", "-", true, &["m".into()]).is_err());
+        assert!(plan_alias_prefix(&[], "p-", "-", true, &["  ".into()]).is_err());
+        assert!(
+            plan_alias_prefix(&[], "p-", "-", true, &["has space".into()]).is_err(),
+            "上游 id 字符集口径"
+        );
+        // 去重：同一 target 重复出现只写一条
+        let planned = plan_alias_prefix(&[], "p-", "-", true, &["m".into(), "m".into()]).unwrap();
+        assert_eq!(planned.len(), 1);
+    }
 
     #[test]
     fn alias_rules() {

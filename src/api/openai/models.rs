@@ -103,6 +103,19 @@ pub(crate) async fn collect_available_models(
             }
             continue;
         }
+        // 插件渠道：provider 维度 = `plugin_provider`（不是字面量 "plugin"）。
+        // 模型优先渠道声明，留空回落插件目录（`model_catalog` 的 provider
+        // 并集，由 `wasm::catalog` 的 sink 发布）。目录未命中时不贡献模型：
+        // 插件没给过的模型不出现（不猜、不编造）。
+        if ch.channel_type == crate::channel::ChannelType::Plugin {
+            for m in plugin_channel_contributions(ch, &state.model_rules) {
+                if !seen.insert(m.to_ascii_lowercase()) {
+                    continue;
+                }
+                model_list.push((m, None));
+            }
+            continue;
+        }
         let channel_owned_by =
             crate::model::metadata::owned_by_for_channel_type(ch.channel_type.as_str());
         // models 非空 = 白名单（只暴露声明部分）；空 = 全部（用发现快照兜底）
@@ -140,8 +153,11 @@ pub(crate) async fn collect_available_models(
             .cloned()
             .collect();
         for ch in &empty_channels {
-            // 账号型渠道无渠道级凭证，模型发现按账号走管理面账号测试
-            if ch.channel_type == crate::channel::ChannelType::Account {
+            // 账号型渠道无渠道级凭证，模型发现按账号走管理面账号测试；
+            // 插件渠道的上游由插件进程构造，网关无从拉 `/models`。
+            if ch.channel_type == crate::channel::ChannelType::Account
+                || ch.channel_type == crate::channel::ChannelType::Plugin
+            {
                 continue;
             }
             let key = ch.decode_api_key();
@@ -203,6 +219,27 @@ pub(crate) async fn collect_available_models(
         model_list.push((entry.id, owned_by));
     }
     model_list
+}
+
+/// 插件渠道对模型清单的贡献（去空、按 `model_rules` 关闭项过滤）。
+///
+/// 三态与其它渠道同口径：统一模型管理里按 `(provider, model)` 关掉的模型
+/// 不对外暴露；provider 取 `plugin_provider`（空则回落渠道类型串，仅作
+/// 规则键，不会广告任何模型 —— `plugin_channel_source` 已返回空列表）。
+fn plugin_channel_contributions(
+    channel: &crate::channel::Channel,
+    rules: &crate::model::manage::ModelRules,
+) -> Vec<String> {
+    let (provider, models, _) = crate::plugin_host::model_catalog::plugin_channel_source(channel);
+    let rule_provider = if provider.is_empty() {
+        channel.channel_type.as_str()
+    } else {
+        provider.as_str()
+    };
+    models
+        .into_iter()
+        .filter(|model| !model.trim().is_empty() && !rules.is_disabled(rule_provider, model))
+        .collect()
 }
 
 /// 一条模型在 `/v1/models` 里的条目（A2A `list_item` 的字段形状 + AIGX 既有键）。
@@ -394,6 +431,18 @@ pub(crate) fn model_owner_index(
                         .entry(model.to_ascii_lowercase())
                         .or_insert_with(|| (provider.clone(), refreshed_at));
                 }
+            }
+            continue;
+        }
+        // 插件渠道：provider 维度 = `plugin_provider`；时刻取目录刷新时刻
+        // （与 `collect_available_models` 同源，见 `plugin_channel_source`）。
+        if ch.channel_type == crate::channel::ChannelType::Plugin {
+            let (provider, _, refreshed_at) =
+                crate::plugin_host::model_catalog::plugin_channel_source(ch);
+            for model in plugin_channel_contributions(ch, &state.model_rules) {
+                index
+                    .entry(model.to_ascii_lowercase())
+                    .or_insert_with(|| (provider.clone(), refreshed_at));
             }
             continue;
         }
@@ -630,7 +679,12 @@ mod shared_catalog_tests {
         );
         // 反向断言：目录缓存键格式只应存在于 catalog.rs（唯一实现），调用点
         // 不得内联该键 —— 否则又是一份影子实现。（针尖 `concat!` 拆写理由见模块头）
-        let cache_key = concat!("model_", "catalog:");
+        //
+        // 针尖必须带 `{`：`model_catalog` 也是插件模型目录**模块名**，调用点
+        // 合法地写着 `model_catalog::plugin_channel_source(...)`，裸冒号会被
+        // 模块路径误伤（2026-11-17 遗留收尾波实测）；真实内联键的前缀之后紧跟
+        // 花括号占位。
+        let cache_key = concat!("model_", "catalog:{");
         for (name, src) in [("models.rs", MODELS_SRC), ("model/manage.rs", MANAGE_SRC)] {
             assert!(!src.contains(cache_key), "{name} 内联了账号目录缓存键");
         }
@@ -774,5 +828,118 @@ mod shapes_tests {
             HeaderValue::from_static("Bearer sk-xxx"),
         );
         assert!(!wants_anthropic_shape(&headers));
+    }
+}
+
+#[cfg(test)]
+mod plugin_catalog_tests {
+    //! 插件渠道的模型可见性（「真实落点」测试：目录发布后进列表，未发布
+    //! 时消失）。不构造 `AppState`：贡献函数就是
+    //! `collect_available_models` / `model_owner_index` 共用的那一段。
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    fn rules(tag: &str) -> crate::model::manage::ModelRules {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "aigx-plugin-visible-{tag}-{}-{seq}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::storage::FileStore::new(dir);
+        let rules = crate::model::manage::ModelRules::new(Arc::new(store));
+        rules.load().unwrap();
+        rules
+    }
+
+    fn channel(provider: &str, models: Vec<&str>) -> crate::channel::Channel {
+        serde_json::from_value(json!({
+            "id": "ch-plugin-unit",
+            "name": "plugin-unit",
+            "channel_type": "plugin",
+            "plugin_provider": provider,
+            "status": "enabled",
+            "models": models,
+        }))
+        .unwrap()
+    }
+
+    fn unique(tag: &str) -> String {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        format!("unit-vis-{tag}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// 无 catalog 时 Plugin 渠道不出现在模型列表（不编造）。
+    #[test]
+    fn plugin_channel_without_catalog_contributes_nothing() {
+        let provider = unique("absent");
+        let rules = rules("absent");
+        let ch = channel(&provider, Vec::new());
+        assert!(plugin_channel_contributions(&ch, &rules).is_empty());
+    }
+
+    /// 有 catalog 时出现在列表里（id 列表原样，去空）。
+    #[test]
+    fn plugin_channel_with_catalog_is_listed() {
+        let provider = unique("listed");
+        crate::plugin_host::model_catalog::set_remote(
+            &provider,
+            vec![json!({ "id": "cat-m1" }), json!({ "id": " " })],
+            7,
+        );
+        let rules = rules("listed");
+        let ch = channel(&provider, Vec::new());
+        assert_eq!(
+            plugin_channel_contributions(&ch, &rules),
+            vec!["cat-m1".to_string()]
+        );
+        // 渠道声明非空时优先声明（目录不再覆盖）
+        let declared = channel(&provider, vec!["declared-m"]);
+        assert_eq!(
+            plugin_channel_contributions(&declared, &rules),
+            vec!["declared-m".to_string()]
+        );
+    }
+
+    /// 统一模型管理关掉的 `(provider, model)` 不对外（provider = plugin_provider）。
+    #[test]
+    fn plugin_channel_respects_model_rules_by_plugin_provider() {
+        let provider = unique("rules");
+        crate::plugin_host::model_catalog::set_remote(
+            &provider,
+            vec![json!({ "id": "cat-m1" }), json!({ "id": "cat-m2" })],
+            7,
+        );
+        let rules = rules("rules");
+        let ch = channel(&provider, Vec::new());
+        rules.set_enabled(&provider, "cat-m1", false).unwrap();
+        assert_eq!(
+            plugin_channel_contributions(&ch, &rules),
+            vec!["cat-m2".to_string()]
+        );
+    }
+
+    /// 归属：`plugin_channel_source` 的 provider 与时刻（`model_owner_index`
+    /// 用它填 owner/created），空 provider 不贡献。
+    #[test]
+    fn plugin_owner_is_plugin_provider() {
+        let provider = unique("owner");
+        crate::plugin_host::model_catalog::set_remote(
+            &provider,
+            vec![json!({ "id": "cat-m1" })],
+            99,
+        );
+        let ch = channel(&provider, Vec::new());
+        let (owner, models, refreshed_at) =
+            crate::plugin_host::model_catalog::plugin_channel_source(&ch);
+        assert_eq!(owner, provider);
+        assert_eq!(models, vec!["cat-m1".to_string()]);
+        assert_eq!(refreshed_at, 99);
+        let empty = channel("", Vec::new());
+        let (_, models, _) = crate::plugin_host::model_catalog::plugin_channel_source(&empty);
+        assert!(models.is_empty());
     }
 }

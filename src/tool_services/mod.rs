@@ -22,14 +22,19 @@
 //! 解密。管理 API 只回 `configured` 与 `key_hint`，不回明文。
 //!
 //! ── 账号型来源（workbuddy / workbuddy-intl / kiro）──────────
-//! 上游靠提供商插件的 `admin.action`（`web-search.capabilities` /
-//! `web-search.search`）执行搜索，凭证留给账号库与插件。AIGX 的插件宿主
-//! 目前未暴露该 action（T1 ABI 范围），本模块保留完整的配置/绑定/校验面，
-//! 运行时返回稳定的 `configuration` 错误（见 `account_search.rs` 顶部说明）。
+//! 与上游一致，靠提供商插件的 `admin.action`（`web-search.capabilities` /
+//! `web-search.search`）执行搜索，凭证留给账号库与插件。插件宿主桥由
+//! [`ToolServices::set_account_search_host`] 注入（生产实现见
+//! [`PluginHostSearchBridge`]；接线点在 `main.rs`）。未注入 / 无插件时返回
+//! 稳定的 `configuration` 错误（见 `account_search.rs` 顶部说明）。
 
 mod account_search;
 mod bridge;
+pub(crate) mod image_bridge;
 pub(crate) mod image_config;
+pub(crate) mod image_jobs;
+pub(crate) mod image_mcp;
+pub(crate) mod image_runtime;
 mod install;
 mod mcp;
 mod normalize;
@@ -48,9 +53,10 @@ use crate::account_session::AccountSessionStore;
 use crate::api::openai::AppState;
 use crate::storage::FileStore;
 
-pub use account_search::test_provider;
+pub use account_search::{test_provider, AccountSearchHost, PluginHostSearchBridge};
 pub use bridge::VISION_BRIDGE_SCRIPT;
-pub use image_config::{ImageConfig, ImageTarget};
+pub use image_bridge::IMAGE_BRIDGE_SCRIPT;
+pub use image_config::{ImageConfig, ImageOperation, ImageTarget};
 pub use install::{
     install_mcp, install_skill, mcp_targets, skill_targets, uninstall_mcp, uninstall_skill,
     InstallOutcome,
@@ -66,8 +72,9 @@ pub use skill_package::{
 };
 pub use vision::{
     clear_vision_config, is_reasoning_level, is_usable_key, mask_key, run_vision,
-    save_vision_config, test_vision, vision_config, vision_key_options, VisionConfig,
-    VISION_MAX_IMAGES, VISION_MAX_PROMPT_LENGTH, VISION_SERVICE_NAME, VISION_SERVICE_VERSION,
+    save_vision_config, test_vision, vision_config, vision_key_options, VisionCatalogModel,
+    VisionConfig, VISION_MAX_IMAGES, VISION_MAX_PROMPT_LENGTH, VISION_SERVICE_NAME,
+    VISION_SERVICE_VERSION,
 };
 
 /// 配置在 `FileStore` 里的键名（与 Agent2API 的网关配置键同名）。
@@ -172,12 +179,15 @@ pub fn version(service: &str) -> &'static str {
     }
 }
 
-/// 工具服务运行时句柄：底层 KV 存储 + 进程内读改写锁。
+/// 工具服务运行时句柄：底层 KV 存储 + 进程内读改写锁 + 账号搜索的插件宿主桥。
 pub struct ToolServices {
     /// 底层 KV 存储（工具服务配置落盘用）。
     pub store: Arc<FileStore>,
     /// 配置读改写串行锁（单实例语义：避免两个页面同时保存时互相覆盖）。
     lock: parking_lot::Mutex<()>,
+    /// 账号型搜索的插件宿主桥（`main.rs` 在 AppState 就绪后注入；
+    /// `None` = 未接线，运行时回稳定的 configuration 错误）。
+    account_search_host: parking_lot::RwLock<Option<Arc<dyn AccountSearchHost>>>,
 }
 
 impl ToolServices {
@@ -185,7 +195,21 @@ impl ToolServices {
         Self {
             store,
             lock: parking_lot::Mutex::new(()),
+            account_search_host: parking_lot::RwLock::new(None),
         }
+    }
+
+    /// 注入（或替换）账号型搜索的插件宿主桥。
+    ///
+    /// 生产：`main.rs` 用 `PluginHostSearchBridge::new(plugin_host, script_host)`
+    /// 注入；测试：注入桩。只影响账号型来源，密钥型搜索路径不经过它。
+    pub fn set_account_search_host(&self, host: Arc<dyn AccountSearchHost>) {
+        *self.account_search_host.write() = Some(host);
+    }
+
+    /// 当前宿主桥快照（`None` = 未接线）。
+    pub fn account_search_host(&self) -> Option<Arc<dyn AccountSearchHost>> {
+        self.account_search_host.read().clone()
     }
 
     /// 读取整份配置（自动补齐缺省项）。
@@ -507,9 +531,7 @@ pub async fn list_providers(services: &ToolServices, sessions: &AccountSessionSt
             .get(provider)
             .cloned()
             .unwrap_or_default();
-        rows.push(account_search::provider_row(
-            services, sessions, provider, entry,
-        ));
+        rows.push(account_search::provider_row(services, sessions, provider, entry).await);
     }
     Value::Array(rows)
 }

@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
@@ -400,6 +400,7 @@ async fn mcp_post(
     let service = match kind {
         McpServerKind::WebSearch => tool_services::WEB_SEARCH_SERVICE_ID,
         McpServerKind::Vision => tool_services::VISION_SERVICE_ID,
+        McpServerKind::ImageGeneration => tool_services::IMAGE_GENERATION_SERVICE_ID,
     };
     if !tool_services::is_enabled(services(state), service, "mcp") {
         return json_response(
@@ -424,7 +425,9 @@ async fn mcp_post(
         client: tool_client(),
         base_url: base_url(&headers),
         allowed_providers: allowed_providers(&api_key),
-        owner: api_key.id.clone(),
+        allowed_models: api_key.allowed_models.clone(),
+        owner: tool_services::image_runtime::owner_of(&api_key),
+        state,
     };
     match tool_services::mcp_dispatch(&payload, kind, &context).await {
         Some(response) => json_response(StatusCode::OK, response),
@@ -450,6 +453,48 @@ pub async fn mcp_vision(
     mcp_post(&state, headers, body, McpServerKind::Vision).await
 }
 
+/// `POST /mcp/image-generation`
+pub async fn mcp_image_generation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    mcp_post(&state, headers, body, McpServerKind::ImageGeneration).await
+}
+
+/// `GET /mcp/image-generation/files/{id}` —— 生成图片下载。
+///
+/// 鉴权：网关 Key（同 MCP 调用）+ 任务归属（owner = Key id）+ Key 的
+/// provider/model 白名单；网页来源（Origin）必须与网关同源。
+pub async fn mcp_image_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = tool_services::image_runtime::validate_origin(&headers) {
+        return tool_services::image_runtime::error_response(error);
+    }
+    let api_key = match authenticate(&state, &headers) {
+        Ok(key) => key,
+        Err(response) => return *response,
+    };
+    let jobs = tool_services::image_runtime::jobs_for(&state);
+    match jobs.read_file(&id) {
+        Ok((job, file)) => {
+            if let Err(error) = tool_services::image_runtime::authorize_job(
+                &job,
+                &tool_services::image_runtime::owner_of(&api_key),
+                api_key.allowed_providers.as_deref(),
+                api_key.allowed_models.as_deref(),
+            ) {
+                return tool_services::image_runtime::error_response(error);
+            }
+            tool_services::image_runtime::file_response(file)
+        }
+        Err(error) => tool_services::image_runtime::error_response(error),
+    }
+}
+
 /// `GET/DELETE /mcp/*`：按规范用 405 明确告知（本类服务不提供服务端主动推流）。
 pub async fn mcp_unsupported() -> Response {
     tool_services::mcp_unsupported().await
@@ -467,6 +512,11 @@ pub fn router() -> axum::Router<AppState> {
         .route("/api/web-search/fetch", post(api_fetch))
         .route("/mcp/web-search", post(mcp_web_search).get(mcp_unsupported))
         .route("/mcp/vision", post(mcp_vision).get(mcp_unsupported))
+        .route(
+            "/mcp/image-generation",
+            post(mcp_image_generation).get(mcp_unsupported),
+        )
+        .route("/mcp/image-generation/files/:id", get(mcp_image_file))
 }
 
 /// 便于测试与文档引用：错误码 → HTTP 状态。

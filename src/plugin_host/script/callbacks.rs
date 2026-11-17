@@ -31,8 +31,9 @@
 //! 本身按 provider 归属存储），不额外做「这个 provider 是否属于当前包」
 //! 的判定——脚本拿到的 secret 只可能是它自己 provider 名下的账号。
 
+use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::Value;
@@ -42,7 +43,7 @@ use crate::plugin_host::callbacks::PluginCallbacks;
 use crate::plugin_host::rpc::{CallbackHandler, RpcError};
 use crate::storage::FileStore;
 
-use super::http::SessionMap;
+use super::http::{ProxyTransports, SessionMap};
 use super::protocol::ProtocolRegistry;
 use super::transport::Transport;
 use super::usage;
@@ -56,8 +57,25 @@ pub struct ScriptCallbacks {
     protocol: Arc<ProtocolRegistry>,
     /// `script.http.*` 的「客户端 id → Transport session」映射。
     http_sessions: SessionMap,
+    /// `script.http.*` 的按代理 Transport 池（不同代理各自一份 client）。
+    proxy_transports: ProxyTransports,
+    /// Gemini 流式响应的签名扫描状态（`script.stream.*` 写侧缓存）。
+    ///
+    /// 键是 `ProtocolRegistry` 生成的转换器 id；会话键来自
+    /// `script.stream.open` 的 `session`（A2A 宿主 `signatureScope` 派生）。
+    signature_streams: StdMutex<HashMap<String, GeminiSignatureState>>,
     /// 同步回调（store/settings/ledger/log/notify）的既有实现。
     inner: PluginCallbacks,
+}
+
+/// 一路 Gemini 上游流里「签名 → functionCall」的关联状态。
+struct GeminiSignatureState {
+    /// 本次响应所属会话的稳定键（写侧两档缓存的 session 维度）。
+    session: String,
+    /// 跨 chunk 的半行缓冲。
+    buf: Vec<u8>,
+    /// 独占 part/事件、留给紧随其后 functionCall 的签名（9router 同款）。
+    pending: Option<String>,
 }
 
 impl ScriptCallbacks {
@@ -71,6 +89,8 @@ impl ScriptCallbacks {
             transport,
             protocol,
             http_sessions: SessionMap::new(),
+            proxy_transports: ProxyTransports::new(),
+            signature_streams: StdMutex::new(HashMap::new()),
             inner: PluginCallbacks::new(PACK_NS.to_string(), sessions, store),
         })
     }
@@ -78,21 +98,62 @@ impl ScriptCallbacks {
     /// 宿主重建/关闭时清空会话表（HTTP/WS/转换器）。
     pub fn clear_sessions(&self) {
         self.http_sessions.clear();
+        if let Ok(mut map) = self.signature_streams.lock() {
+            map.clear();
+        }
         super::websocket::clear();
+    }
+
+    /// 登记一路 Gemini 流的签名扫描（`script.stream.open` 成功后调）。
+    fn track_signature_stream(&self, id: &str, session: &str) {
+        if let Ok(mut map) = self.signature_streams.lock() {
+            map.insert(
+                id.to_string(),
+                GeminiSignatureState {
+                    session: session.to_string(),
+                    buf: Vec::new(),
+                    pending: None,
+                },
+            );
+        }
+    }
+
+    /// 喂一段上游原始字节给签名扫描器（写侧缓存）。
+    fn scan_signature_stream(&self, id: &str, bytes: &[u8], finish: bool) {
+        let mut map = match self.signature_streams.lock() {
+            Ok(map) => map,
+            Err(_) => return,
+        };
+        let Some(state) = map.get_mut(id) else {
+            return;
+        };
+        scan_gemini_signatures(state, bytes, finish);
+        if finish {
+            map.remove(id);
+        }
+    }
+
+    /// 注销一路扫描（close / finish 后调；幂等）。
+    fn forget_signature_stream(&self, id: &str) {
+        if let Ok(mut map) = self.signature_streams.lock() {
+            map.remove(id);
+        }
     }
 
     async fn handle_script(&self, method: &str, params: Value) -> Option<Result<Value, RpcError>> {
         Some(match method {
             // ── HTTP egress（A2A 形状）────────────────────────────────
             "script.http.open" => {
-                super::http::open(&self.transport, &self.http_sessions, &params).await
+                super::http::open(
+                    &self.proxy_transports,
+                    &self.transport,
+                    &self.http_sessions,
+                    &params,
+                )
+                .await
             }
-            "script.http.read" => {
-                super::http::read(&self.transport, &self.http_sessions, &params).await
-            }
-            "script.http.close" => {
-                super::http::close(&self.transport, &self.http_sessions, &params).await
-            }
+            "script.http.read" => super::http::read(&self.http_sessions, &params).await,
+            "script.http.close" => super::http::close(&self.http_sessions, &params).await,
             // ── 旧 AIGX transport 形状（保留向后兼容）─────────────────
             "script.transport.request" => self.transport.request(&params).await,
             "script.transport.read" => {
@@ -117,7 +178,19 @@ impl ScriptCallbacks {
                     .get("protocol")
                     .and_then(Value::as_str)
                     .unwrap_or("chat");
-                self.protocol.open_named(protocol).await
+                let session = params.get("session").and_then(Value::as_str).unwrap_or("");
+                let opened = match self.protocol.open_named(protocol).await {
+                    Ok(opened) => opened,
+                    Err(e) => return Some(Err(e)),
+                };
+                // Gemini 流：按转换器 id 登记签名扫描（写侧缓存）。session
+                // 为空时只跳过缓存（主键档需要会话隔离，空键会串签名）。
+                if protocol == "gemini" && !session.is_empty() {
+                    if let Some(id) = opened.get("id").and_then(Value::as_str) {
+                        self.track_signature_stream(id, session);
+                    }
+                }
+                Ok(opened)
             }
             "script.stream.push" => {
                 let id = params.get("id").and_then(Value::as_str).unwrap_or("");
@@ -127,7 +200,12 @@ impl ScriptCallbacks {
                     .unwrap_or(false);
                 let encoded = params.get("data").and_then(Value::as_str).unwrap_or("");
                 match STANDARD.decode(encoded.as_bytes()) {
-                    Ok(bytes) => self.protocol.push_named(id, &bytes, finish).await,
+                    Ok(bytes) => {
+                        // 先扫原始上游字节（转换前的 Gemini SSE），把
+                        // thoughtSignature 写进两档缓存；转换器本身不感知签名。
+                        self.scan_signature_stream(id, &bytes, finish);
+                        self.protocol.push_named(id, &bytes, finish).await
+                    }
                     Err(e) => Err(bad_request(format!(
                         "script.stream.push: invalid base64: {e}"
                     ))),
@@ -135,6 +213,7 @@ impl ScriptCallbacks {
             }
             "script.stream.close" => {
                 let id = params.get("id").and_then(Value::as_str).unwrap_or("");
+                self.forget_signature_stream(id);
                 self.protocol.close_named(id).await;
                 Ok(Value::Null)
             }
@@ -167,16 +246,13 @@ impl ScriptCallbacks {
             "script.proxy.resolve" => super::transport::resolve_proxy(&params),
             "script.signature" => {
                 // Antigravity 的调用签名缓存（A2A `gemini.mjs` 用）：按
-                // `{session, call}` 查回签名字符串，查不到返回 null。
+                // `{session, call}` 主键档查回签名字符串（与上游
+                // callbacks.rs 的 `lookup_call(session, call)` 同口径），
+                // 查不到返回 null（脚本保留官方哨兵/上游自行决定 400）。
                 let session = params.get("session").and_then(Value::as_str).unwrap_or("");
                 let call = params.get("call").and_then(Value::as_str).unwrap_or("");
                 let found =
-                    crate::bridge::session::antigravity_signature_cache::lookup_for_session(
-                        session, call,
-                    )
-                    .or_else(|| {
-                        crate::bridge::session::antigravity_signature_cache::lookup_call(call)
-                    });
+                    crate::bridge::session::antigravity_signature_cache::lookup_call(session, call);
                 Ok(found.map(Value::String).unwrap_or(Value::Null))
             }
             "script.usage" => usage::record(&params),
@@ -226,6 +302,109 @@ fn bad_request(message: impl Into<String>) -> RpcError {
     RpcError {
         message: message.into(),
         code: Some("bad_request".into()),
+    }
+}
+
+// ── Gemini 签名扫描（`script.stream.*` 写侧缓存）────────────────────
+
+/// 扫描器的半行缓冲上限：Gemini SSE 正常单帧远小于 1MiB；超限即丢弃
+/// （签名缓存可丢弃，不能让异常上游把宿主内存撑爆）。
+const MAX_SIGNATURE_SCAN_BYTES: usize = 1 << 20;
+
+/// 喂一段 Gemini 上游原始字节：解析出 `thoughtSignature` 并写两档缓存。
+///
+/// 语义与 `bridge/session/antigravity.rs::decode_event` 的写侧一致：
+/// - 签名可能独占一个 part/事件 → 暂存 `pending`，给紧随的 functionCall；
+/// - 同一 part 同时带签名与 functionCall 也走同一条路径；
+/// - 只记主键档（session + call id）与非空函数名兜底档。
+fn scan_gemini_signatures(state: &mut GeminiSignatureState, bytes: &[u8], finish: bool) {
+    if state.buf.len() + bytes.len() > MAX_SIGNATURE_SCAN_BYTES {
+        state.buf.clear();
+        state.pending = None;
+        return;
+    }
+    state.buf.extend_from_slice(bytes);
+    while let Some(pos) = state.buf.iter().position(|&b| b == b'\n') {
+        let line = String::from_utf8_lossy(&state.buf[..pos]).to_string();
+        state.buf.drain(..=pos);
+        scan_gemini_line(state, line.trim_end_matches('\r'));
+    }
+    if finish && !state.buf.is_empty() {
+        let tail = String::from_utf8_lossy(&state.buf).trim().to_string();
+        state.buf.clear();
+        scan_gemini_line(state, &tail);
+    }
+}
+
+fn scan_gemini_line(state: &mut GeminiSignatureState, line: &str) {
+    let payload = match line.strip_prefix("data:") {
+        Some(payload) => payload.trim(),
+        None => {
+            // 兼容自定义 conversation 钩子直接推的纯 JSON 行
+            let trimmed = line.trim();
+            if !trimmed.starts_with('{') {
+                return;
+            }
+            trimmed
+        }
+    };
+    if payload.is_empty() || payload == "[DONE]" {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        return;
+    };
+    let response = value
+        .get("response")
+        .filter(|value| value.is_object())
+        .unwrap_or(&value);
+    let Some(parts) = response
+        .pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for part in parts {
+        // 与上游同口径：签名可能出现在 `thoughtSignature` / `thought_signature`
+        let signature = part
+            .get("thoughtSignature")
+            .or_else(|| part.get("thought_signature"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|signature| !signature.is_empty());
+        if let Some(signature) = signature {
+            state.pending = Some(signature.to_string());
+        }
+        let Some(call) = part.get("functionCall").and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(signature) = state.pending.take() else {
+            continue;
+        };
+        let id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        let name = call
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        if !id.is_empty() {
+            crate::bridge::session::antigravity_signature_cache::remember_call(
+                &state.session,
+                id,
+                &signature,
+            );
+        }
+        if !name.is_empty() {
+            crate::bridge::session::antigravity_signature_cache::remember_for_session(
+                &state.session,
+                name,
+                &signature,
+            );
+        }
     }
 }
 
@@ -498,6 +677,135 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, Value::Null);
+    }
+
+    /// `script.signature` 必须按 **session + call id** 主键档命中：
+    /// 不同会话的同一个 call id 不得串签名（上游两档键的硬约束）。
+    #[tokio::test]
+    async fn signature_callback_is_session_scoped() {
+        let store = Arc::new(FileStore::new(
+            tempfile::TempDir::new().unwrap().path().to_path_buf(),
+        ));
+        let cb = callbacks(store);
+        let session = "sess-cb-scope";
+        crate::bridge::session::antigravity_signature_cache::remember_call(
+            session,
+            "call-cb-1",
+            "sig-cb-1",
+        );
+        let hit = cb
+            .handle_async(
+                "script.signature",
+                json!({"session": session, "call": "call-cb-1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hit, json!("sig-cb-1"));
+        let other = cb
+            .handle_async(
+                "script.signature",
+                json!({"session": "sess-cb-other", "call": "call-cb-1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other, Value::Null, "跨 session 不得命中");
+    }
+
+    /// 插件流式路径的**写侧**：Gemini 上游 SSE 里的 thoughtSignature 经
+    /// `script.stream.push` 后必须以 `{session, call}` 为键进入缓存，
+    /// 之后宿主的 `script.signature`（gemini.mjs 请求构造点）能命中。
+    #[tokio::test]
+    async fn gemini_stream_push_feeds_signature_cache() {
+        let store = Arc::new(FileStore::new(
+            tempfile::TempDir::new().unwrap().path().to_path_buf(),
+        ));
+        let cb = callbacks(store);
+        let session = "sess-cb-stream";
+        let opened = cb
+            .handle_async(
+                "script.stream.open",
+                json!({"protocol": "gemini", "model": "gemini-2.0-pro", "session": session}),
+            )
+            .await
+            .unwrap();
+        let id = opened["id"].as_str().expect("应返回转换器 id").to_string();
+        let event = json!({
+            "candidates": [{ "content": { "parts": [{
+                "functionCall": { "id": "call-stream-1", "name": "read_file", "args": {"p": "a"} },
+                "thoughtSignature": "sig-stream-1"
+            }]}}]
+        });
+        let line = format!("data: {event}\n\n");
+        cb.handle_async(
+            "script.stream.push",
+            json!({"id": id, "data": STANDARD.encode(line.as_bytes())}),
+        )
+        .await
+        .unwrap();
+        // 请求构造点（宿主 gemini.mjs）回查：主键档命中
+        let hit = cb
+            .handle_async(
+                "script.signature",
+                json!({"session": session, "call": "call-stream-1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hit, json!("sig-stream-1"));
+        // 兜底档（session + 函数名）也写入
+        assert_eq!(
+            crate::bridge::session::antigravity_signature_cache::lookup_for_session(
+                session,
+                "read_file",
+            )
+            .as_deref(),
+            Some("sig-stream-1")
+        );
+        // 另一会话查不到
+        let miss = cb
+            .handle_async(
+                "script.signature",
+                json!({"session": "sess-cb-stream-other", "call": "call-stream-1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(miss, Value::Null);
+        cb.handle_async("script.stream.close", json!({"id": id}))
+            .await
+            .unwrap();
+    }
+
+    /// 扫描器跨 chunk 拼行 + 签名独占一个 part（pending）两种形态。
+    #[test]
+    fn gemini_signature_scanner_handles_split_lines_and_pending_part() {
+        let mut state = GeminiSignatureState {
+            session: "sess-cb-scan".into(),
+            buf: Vec::new(),
+            pending: None,
+        };
+        // 签名独占 part（与 functionCall 不同事件/不同 chunk）
+        let sign_line = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[",
+            "{\"thoughtSignature\":\"sig-scan-1\"}]}}]}\n"
+        );
+        scan_gemini_signatures(&mut state, sign_line.as_bytes(), false);
+        assert_eq!(state.pending.as_deref(), Some("sig-scan-1"));
+        // 半行跨 chunk：先给前半段
+        let call_line = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[",
+            "{\"functionCall\":{\"id\":\"call-scan-1\",\"name\":\"write_file\",\"args\":{}}}]}}]}\n"
+        );
+        let (head, tail) = call_line.split_at(call_line.len() / 2);
+        scan_gemini_signatures(&mut state, head.as_bytes(), false);
+        scan_gemini_signatures(&mut state, tail.as_bytes(), true);
+        assert!(state.pending.is_none(), "签名应被 functionCall 消费");
+        assert_eq!(
+            crate::bridge::session::antigravity_signature_cache::lookup_call(
+                "sess-cb-scan",
+                "call-scan-1"
+            )
+            .as_deref(),
+            Some("sig-scan-1")
+        );
     }
 
     #[test]

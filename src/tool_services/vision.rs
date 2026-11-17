@@ -61,6 +61,58 @@ pub fn is_reasoning_level(value: &str) -> bool {
     value.is_empty() || REASONING_LEVELS.contains(&value)
 }
 
+/// 模型目录里的一行（视觉保存/解析校验用）。
+///
+/// 由 API 层从模型管理视图投影（`model::manage::build_view`），
+/// `tool_services` 因此不依赖渠道 / 账号存储，纯逻辑可单测。
+#[derive(Clone, Debug)]
+pub struct VisionCatalogModel {
+    pub provider: String,
+    pub provider_label: String,
+    pub id: String,
+    /// 目录行是否启用（上游 `manage_view.models[].enabled`）。
+    pub enabled: bool,
+    /// 能力三态：`None` = 目录未声明（与上游「能力未声明 ≠ 支持」同口径）。
+    pub supports_images: Option<bool>,
+    /// 目录把该模型标成图片生成（上游 `api/tools.rs` 的 `kind != "image"` 口径）。
+    pub image_model: bool,
+}
+
+/// 校验并解析视觉目标。
+///
+/// 语义基准 = 上游 `api/tools.rs` 的保存路径 + `api/vision_compat.rs` 的
+/// `validate_available`：provider+model 必须在模型目录中、该行已启用、
+/// 不是图片生成模型、且 `supportsImages = true`；返回
+/// `(provider 展示名, 匹配的目录模型 id)`，后者用作 `downstream_model`。
+pub fn resolve_vision_target(
+    models: &[VisionCatalogModel],
+    provider: &str,
+    upstream_model: &str,
+) -> Result<(String, String), String> {
+    let matched = models
+        .iter()
+        .find(|item| item.provider == provider && item.id == upstream_model)
+        .ok_or_else(|| "该提供商下没有这个模型，请先在模型管理页确认".to_string())?;
+    if !matched.enabled {
+        return Err("所选视觉模型尚未启用，请先在模型管理中启用".into());
+    }
+    if matched.image_model {
+        return Err("图片生成模型不能作为视觉模型，请选择支持图片输入的对话模型".into());
+    }
+    match matched.supports_images {
+        Some(true) => {
+            let label = if matched.provider_label.trim().is_empty() {
+                provider.to_string()
+            } else {
+                matched.provider_label.clone()
+            };
+            Ok((label, matched.id.clone()))
+        }
+        Some(false) => Err("所选模型未声明支持图片输入，请选择视觉模型".into()),
+        None => Err("所选模型未声明图片能力，请先在模型管理中确认支持图片".into()),
+    }
+}
+
 /// 网关 Key 是否可用（A2A `is_usable` 的 AIGX 口径：启用且未过期）。
 pub fn is_usable_key(key: &ApiKey) -> bool {
     key.is_enabled() && !key.is_expired()
@@ -116,6 +168,7 @@ pub fn save_vision_config(
     services: &ToolServices,
     keys: &ApiKeyStore,
     config: VisionConfig,
+    catalog: &[VisionCatalogModel],
 ) -> Result<Value, String> {
     if config.provider.trim().is_empty() || config.upstream_model.trim().is_empty() {
         return Err("请选择提供商与上游模型".into());
@@ -123,6 +176,12 @@ pub fn save_vision_config(
     if !is_reasoning_level(config.reasoning.trim()) {
         return Err("思考等级无效".into());
     }
+    // 与上游一致：目录校验先于保存，provider + model 必须是「这家、这个
+    // 已启用、支持图片输入的模型」，downstream_model 由匹配到的目录 id
+    // 决定（请求体里的值不再生效，防止旧配置写进未知模型）。
+    let provider = config.provider.trim().to_string();
+    let upstream_model = config.upstream_model.trim().to_string();
+    let (catalog_label, model_id) = resolve_vision_target(catalog, &provider, &upstream_model)?;
     if config.api_key_id.trim().is_empty() {
         return Err("请选择内部调用 API Key".into());
     }
@@ -135,21 +194,12 @@ pub fn save_vision_config(
         return Err("API Key 已停用或不可用，请重新选择".into());
     }
     let mut config = config;
-    config.provider = config.provider.trim().to_string();
-    config.provider_label = if config.provider_label.trim().is_empty() {
-        config.provider.clone()
-    } else {
-        config.provider_label.trim().to_string()
-    };
-    config.upstream_model = config.upstream_model.trim().to_string();
+    config.provider = provider;
+    // 展示名以模型目录为准（上游保存路径不采用请求体里的快照）。
+    config.provider_label = catalog_label;
+    config.upstream_model = upstream_model;
     config.reasoning = config.reasoning.trim().to_string();
-    if config.downstream_model.trim().is_empty() {
-        // AIGX 的模型映射是「别名 → 渠道」，视觉服务直接使用上游模型名；
-        // 上游 A2A 需要 downstream_model 是映射后的对外名，这里同一口径：
-        // 保存时确定，运行时不再解析。
-        config.downstream_model = config.upstream_model.clone();
-    }
-    config.downstream_model = config.downstream_model.trim().to_string();
+    config.downstream_model = model_id;
     config.api_key_name = available.name.clone();
     services.update(|value| value.vision = Some(config.clone()))?;
     vision_config(services, keys).ok_or_else(|| "视觉配置保存后读取失败".into())
@@ -436,6 +486,50 @@ mod tests {
         }
     }
 
+    fn config_with_model(api_key_id: &str, model: &str) -> VisionConfig {
+        let mut value = config(api_key_id);
+        value.upstream_model = model.to_string();
+        value
+    }
+
+    /// 模型目录桩：`glm-5v` 是唯一「已启用 + 支持图片」的对话模型。
+    fn vision_catalog() -> Vec<VisionCatalogModel> {
+        vec![
+            VisionCatalogModel {
+                provider: "workbuddy".into(),
+                provider_label: "WorkBuddy 国内版".into(),
+                id: "glm-5v".into(),
+                enabled: true,
+                supports_images: Some(true),
+                image_model: false,
+            },
+            VisionCatalogModel {
+                provider: "workbuddy".into(),
+                provider_label: "WorkBuddy 国内版".into(),
+                id: "text-only".into(),
+                enabled: true,
+                supports_images: Some(false),
+                image_model: false,
+            },
+            VisionCatalogModel {
+                provider: "workbuddy".into(),
+                provider_label: "WorkBuddy 国内版".into(),
+                id: "img-gen".into(),
+                enabled: true,
+                supports_images: None,
+                image_model: true,
+            },
+            VisionCatalogModel {
+                provider: "workbuddy".into(),
+                provider_label: "WorkBuddy 国内版".into(),
+                id: "disabled-vision".into(),
+                enabled: false,
+                supports_images: Some(true),
+                image_model: false,
+            },
+        ]
+    }
+
     #[test]
     fn reasoning_levels_validation() {
         assert!(is_reasoning_level(""));
@@ -449,27 +543,90 @@ mod tests {
     fn save_rejects_missing_fields_and_unknown_key() {
         let (services, keys, _dir) = harness();
         let mut bad = config("");
-        assert!(save_vision_config(&services, &keys, bad.clone()).is_err());
+        assert!(save_vision_config(&services, &keys, bad.clone(), &vision_catalog()).is_err());
         bad = config("no-such-key");
-        assert!(save_vision_config(&services, &keys, bad.clone()).is_err());
+        assert!(save_vision_config(&services, &keys, bad.clone(), &vision_catalog()).is_err());
         bad = config("");
         bad.provider = String::new();
-        assert!(save_vision_config(&services, &keys, bad).is_err());
+        assert!(save_vision_config(&services, &keys, bad, &vision_catalog()).is_err());
     }
 
     #[test]
     fn save_sets_downstream_model_and_key_snapshot() {
         let (services, keys, _dir) = harness();
         let key = keys.generate("vision-internal").unwrap();
-        let saved = save_vision_config(&services, &keys, config(&key.id)).unwrap();
+        let saved =
+            save_vision_config(&services, &keys, config(&key.id), &vision_catalog()).unwrap();
         assert_eq!(saved["downstreamModel"], "glm-5v");
         assert_eq!(saved["apiKeyName"], "vision-internal");
         assert_eq!(saved["configured"], true);
+        // provider_label 来自模型目录（请求体里的快照不再作为权威）
+        assert_eq!(saved["providerLabel"], "WorkBuddy 国内版");
         // 与上游同口径：动态补充的两个字段用 snake_case
         assert_eq!(saved["key_available"], true);
         // 清除
         clear_vision_config(&services);
         assert!(vision_config(&services, &keys).is_none());
+    }
+
+    /// 目录里不存在的模型 → 拒绝（下游模型不能靠请求体自说自话）。
+    #[test]
+    fn save_rejects_unknown_model() {
+        let (services, keys, _dir) = harness();
+        let key = keys.generate("vision-internal").unwrap();
+        let error = save_vision_config(
+            &services,
+            &keys,
+            config_with_model(&key.id, "ghost-model"),
+            &vision_catalog(),
+        )
+        .unwrap_err();
+        assert!(error.contains("没有这个模型"), "{error}");
+        let mut foreign = config(&key.id);
+        foreign.provider = "other-provider".into();
+        assert!(save_vision_config(&services, &keys, foreign, &vision_catalog()).is_err());
+    }
+
+    /// 非视觉模型（能力位 false）/ 图片生成模型 / 未启用行 → 拒绝。
+    #[test]
+    fn save_rejects_non_vision_and_disabled_models() {
+        let (services, keys, _dir) = harness();
+        let key = keys.generate("vision-internal").unwrap();
+        let error = save_vision_config(
+            &services,
+            &keys,
+            config_with_model(&key.id, "text-only"),
+            &vision_catalog(),
+        )
+        .unwrap_err();
+        assert!(error.contains("未声明支持图片"), "{error}");
+        let error = save_vision_config(
+            &services,
+            &keys,
+            config_with_model(&key.id, "img-gen"),
+            &vision_catalog(),
+        )
+        .unwrap_err();
+        assert!(error.contains("图片生成模型"), "{error}");
+        let error = save_vision_config(
+            &services,
+            &keys,
+            config_with_model(&key.id, "disabled-vision"),
+            &vision_catalog(),
+        )
+        .unwrap_err();
+        assert!(error.contains("尚未启用"), "{error}");
+    }
+
+    /// 接受视觉模型并以匹配到的目录 id 填 downstream_model（请求体给的值被覆盖）。
+    #[test]
+    fn save_accepts_vision_model_and_fills_downstream_id() {
+        let (services, keys, _dir) = harness();
+        let key = keys.generate("vision-internal").unwrap();
+        let mut requested = config(&key.id);
+        requested.downstream_model = "spoofed-model".into();
+        let saved = save_vision_config(&services, &keys, requested, &vision_catalog()).unwrap();
+        assert_eq!(saved["downstreamModel"], "glm-5v");
     }
 
     #[test]
@@ -482,7 +639,7 @@ mod tests {
             k.status = "disabled".to_string();
         })
         .unwrap();
-        assert!(save_vision_config(&services, &keys, config(&key.id)).is_err());
+        assert!(save_vision_config(&services, &keys, config(&key.id), &vision_catalog()).is_err());
     }
 
     #[test]

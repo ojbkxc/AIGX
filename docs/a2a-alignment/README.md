@@ -188,68 +188,75 @@ ALTCHA 解题，结束后清理进程与目录）：
 | 模型管理（映射/能力三态/`/v1/models`） | 完成 | 真实探针 200 + 重启后 KV 有值；`/v1/models` 双形态输出 |
 | 账号池与插件账号 | 完成（插件账号登录桥部分靠单测） | CRUD/导入/排序/usage jobs 路由通；登录交互走 T2 的 plugin_login |
 | 签到中心 | 完成（活动福利仅 ZCode 两地有链路） | 台账/计划/调度/补签/活动 API 全注册；`streak_days` 修复 |
-| 工具服务 | 部分对齐 | 管理面完成；**账号型搜索运行时 / 图片生成运行时 / 视觉模型目录校验未移植**（§六.2） |
+| 工具服务 | 完成（附偏离） | 管理面 + 账号型搜索运行时 + 图片生成运行时 + 视觉模型目录校验均已移植（§六.2）；偏离见该条 |
 | 维护任务明细 | 完成 | 管理面 + 记录分页 |
-| Wasm 沙箱 | 部分对齐 | 21 文件 + 79 测试全绿（含 8 个真跑 wasmtime 的行为探针）；运行期接线已做（`manager`/`PluginBackend` 可走 wasm 包、`main.rs` 三行任务接线）；**未验证的是「真实第三方 .wasm 发布包」的安装→启用→数据面转发全链路**（仓库无此类包），`native.install_source` 延后（§六.3/§六.10） |
+| Wasm 沙箱 | 部分对齐 | 21 文件 + 79 测试全绿（含 8 个真跑 wasmtime 的行为探针）；运行期接线已做（`manager`/`PluginBackend` 可走 wasm 包、`main.rs` 三行任务接线）；自建真 wasm 包的 install→enable→数据面转发已由 e2e 走通（§六.10）；`native.install_source` 已接线（§六.3）。**仍不可验证的是真实第三方 atomcode wasm 包**（仓库无此类包） |
 | 前端六页 | 完成 | tsc/lint/i18n **4057** 键/vitest 20 files/149 tests 全绿（须 `cd frontend` 跑） |
 
-## 六、未完成项（如实清单）
+## 六、未完成项（v1.0.64 遗留收尾波处置结果）
 
-1. **`wasm::catalog` 整块未接线**：删除 `src/plugin_host/wasm/mod.rs` 的
-   `#![allow(dead_code)]` 后该块仍报 dead_code（预期：本期不接线的公开面）。
-   不得以「N 个符号」这类旧数字当判据，以删 allow 后的真实输出为准（见 T9 报告）。
-2. **T7 未移植三项**：① 账号型搜索运行时（`core/tool_services/account_search.rs` 的执行体
-   只接了配置面）；② 图片生成运行时（`image_jobs/image_mcp/image_bridge` 未移植）；③ 视觉
-   分析未接「模型目录校验」（上游会校验所选模型在目录中支持视觉）。
-3. **Wasm `native.install_source` 延后**：不注入时 `native.snapshot` 为空表、
-   `native.call` 返回 `native_helper_not_authorized`（报错不 panic），native helper 快照
-   链路未做。
-4. **`script.ws.*` proxy 参数被忽略**：A2A 的 ws 桥走宿主 Bun 侧代理配置；AIGX 用
-   `tokio-tungstenite` 直连，`proxy` 参数解析但不生效（多数场景无感，代理出口场景有差）。
-5. **`script.signature` 复用 antigravity 缓存**：语义对齐，但缓存键与刷新策略沿用 AIGX
-   既有实现，未按上游逐字段比对。
-6. **`script.packages` / `script.settings` 无 host→gateway RPC 封装**：目前这两类调用由宿主
-   mjs 直接读本地文件/环境变量完成，没有走上游的 RPC 回环（行为等价，形态不同）。
-7. **原生插件包缺 provider 级开关**：`PackMeta` 无 provider 级字段，只支持整包启停；
-   前端「三层开关」的 provider 粒度对原生包呈只读。
-8. **`getPluginProgress`**（`frontend/src/api/index.ts`）零调用点 —— HEAD 存量函数，非本波
-   新增，保留未删。
-9. **`account_sessions.rs` 若将来挪进 `router()`**：必须同步加进 `tools/extract_routes.py` 的
-   `ROUTE_FILES`（当前 handler 逐个在 main.rs 注册，不在白名单扫描面；`check_router_coverage()`
-   会在挪动后自动抓白名单缺口）。
-10. **未验证「真实第三方 `.wasm` 包」的安装→启用→数据面转发全链路**：**单测层已真跑 wasmtime**
-    ——`wasm/probe.rs` 有 **8 个行为探针**（`cargo test --lib plugin_host::wasm` → 79 passed），
-    用手写合法 wasm 二进制（`fixture.rs` 生成：`\0asm` 头 + 真实段/导出函数）走
-    「装配 → 加载 → `instantiate_async` → 调用 → 关停」全链，**零 mock**（注入的 `WasmAccountAccess`
-    等只是宿主侧回调桩，wasm 执行是真的）。**未验证的是仓库没有的「真实发布包」端到端**
-    （AIGX 不打包分发 AGPL 二进制，也无此类包可装）。隔离证据：`Store::new` 每调用重建
-    （`runtime.rs:263`）、`instantiate_async`（`:314`）、`trap_on_grow_failure(true)`（`:257`）、
-    `ENGINE: OnceLock`（`:46`）。
-11. **存量「handler 有、路由无」（非本轮引入，只记录不修）**：
-    - `cache.rs::handle_cache_info`（`GET /api/cache/info`）—— 函数体自称「未来实现」，返回
-      `"Cache information endpoint (to be implemented)"` 的占位文案。
-    - `security.rs::handle_reset_security`（`POST /api/security/reset`）—— 函数体自称「未来实现」，
-      直接返回 `data: null`。
-    - `dashboard.rs::handle_channel_stats`（预期 `GET /api/dashboard/channel-stats`）—— 实现完整
-      （逐渠道统计行 + 冷却渠道数），但无路由注册；与已注册的 `/api/dashboard/channel_health`
-      数据源不同（后者是健康巡检记录，前者是渠道配置统计），不构成重复端点。
-    - 三条都属 HEAD 存量，本波次未触碰，留待后续波次决定接线或删除。
-12. **前端死封装（调用了不存在的后端端点，全部静默降级）**：
+> 本节原为 v1.0.63 结束时的 12 条未完成项。v1.0.64 收尾波逐条处置：**已修**给修复方式，
+> **如实记录**给本环境不可验证的原因。
 
-    | 前端函数（`api/index.ts`） | 指向 | 后端现状 | 引入 | 表现 |
-    |---|---|---|---|---|
-    | `listKeys` | `GET /api/keys` | legacy 已删（1.0.x 收敛到 `/api/tokens`） | 存量 | 零调用点 |
-    | `getModelMappings` | `GET/PUT /api/settings` | 旧封装 | 存量 | 零调用点（新映射弹窗走 `/api/models/mappings`） |
-    | `batchAddAliasPrefix` | `POST /api/models/alias/prefix` | 无此路由（注释自称「待实现」） | 存量 | 报错兜底 |
-    | `updateCheckinTravel` / `runCheckinTravelNow` | `PATCH/POST /api/checkin-center/travel[/run]` | 无此路由（A2A `growth_scheduler` 未移植） | 存量 | 404 → 降级（注释自称 be-fix #16-B 契约） |
-    | `startPluginInstall` | `POST /api/plugins/install-from-release` | 无此路由（A2A `install_from_release` 的 operations 机制未移植） | **本波 T8** | 404 → 回落 url 直装 |
-    | `startPluginUpdate` | `POST /api/plugins/update` | 该 path 只注册了 GET（`handle_check_plugin_updates`） | **本波 T8** | 405 → 回落 url 直装 |
+1. **`wasm::catalog` 整块未接线 → 已修**：provider 级模型目录落地 `plugin_host/model_catalog.rs`
+   （KV `plugin_catalog:{provider}`），`manager.install/enable` 注入 `WasmOptions.catalog` 并在
+   enable 后 rebuild；`wasm/catalog.rs::forget` → `model_catalog::remove`；wasm `settings.get`
+   拦截 `modelCatalog` → 快照；`provider_settings/schema.rs` 拒绝声明保留键；`api/openai/models.rs`
+   与 `model/manage.rs` 的 Plugin 分支改读目录（声明优先、目录回落）。`wasm/mod.rs` 的 catalog
+   `#[allow(dead_code)]` 已删除；`cargo clippy --lib -D warnings` 绿 = catalog 无残留死码。
+   残留偏离：上游的 `models.refresh` / checkin RPC 未移植，AIGX 当前无目录生产者，插件 provider
+   缺省只显渠道声明（空目录按 `remote:true` 存，不编造）。
+2. **T7 未移植三项 → 已修**：① 账号型搜索运行时（`AccountSearchHost` +
+   `PluginHostSearchBridge`，三级路由与 `resolve.rs` 同序：原生进程 → 脚本宿主 → wasm；
+   `main.rs` 已注入）；② 图片生成运行时（`image_jobs` / `image_runtime` / `image_mcp` /
+   `image_bridge(.cjs)`，FileStore 任务层 + MCP 三工具 + 文件下载鉴权）；③ 视觉模型目录校验
+   （`resolve_vision_target`：未知 / 未启用 / 图片生成模型 / `supportsImages≠true` 拒绝）。
+   偏离：账号搜索依赖插件新增的 `hooks.admin.action` 通用透传（上游 v3.5.0-beta.1 的
+   `provider.mjs` 只分发 `auth.*`，无 web-search 契约；插件未实现 = `configuration`，不伪造）；
+   图片运行时无 `KeyScope::restrict_image_target` / `routing_snapshot`，`account_id` 只做存在性
+   与 provider 匹配校验；`install.rs` 的图片本地桥安装（Node 探测 / 客户端 env）仍未移植，
+   本波只提供脚本下载端点 `GET /api/tools/mcp-bridge/image-generation.cjs`。
+3. **Wasm `native.install_source` 延后 → 已修**：`RegistryHelperSource`（`packs` / `grants` /
+   `call_pack`）实现 `WasmHelperSource`，`main.rs` 一行注入。反向自证：删 native 分区 allow →
+   `clippy --lib` 精确报 7 条、全部在 `native.rs`。残留偏离：`call_pack` 仅覆盖原生插件包
+   （脚本包在 `PackRegistry` 无元数据、无每包进程，上游可调脚本宿主）。
+4. **`script.ws.*` proxy 被忽略 → 已修**：http 手写 CONNECT 隧道（Basic）、socks5/socks5h
+   手写握手（socks5 本地解析 / socks5h 交代理解析）、每会话独立出口、本机环回绕过代理。
+   **仍不支持**：https 代理（TLS-to-proxy，需 CA roots 直接依赖）——显式报错，不静默直连。
+5. **`script.signature` 未逐字段对齐 → 已修**：两档键 `c|session|call_id` / `s|session|name`
+   （2048 两代、无 TTL）；`script.stream.open` 对转换前原始字节写两档缓存（跨 chunk 拼行 +
+   pending 签名）；写侧 `decode_event` 调 `remember_*` 并带出 `ToolCallDelta.signature`；
+   `fill_cached` 在请求构造点回填（哨兵可覆盖、客户端签名优先）。
+6. **`script.packages` / `script.settings` 无 host→gateway RPC 封装 → 已修**：rebuild 后拉
+   `script.packages` 回填 `settings_schema` / `icon` / `providerIcons` / `aliases` / `error`
+   （合并全量 KV，防抹未启用包）；`configure_settings` 走 `script.settings` 取 schema 并落盘
+   （失败反向回滚）。残留：`models.refresh` / checkin 类 RPC 仍未移植（见第 1 条）。
+7. **原生插件包缺 provider 级开关 → 已修**：外置原生包的 provider 停用写入
+   `PackMeta.disabled_providers`（调用返回 200），内置包行为不变；`/api/plugins/provider`
+   路由未动。
+8. **`getPluginProgress` 零调用点 → 如实记录**：HEAD 存量前端函数，本波未新增也未删。
+9. **`account_sessions.rs` 挪 router 的白名单约束 → 守卫在位**：仍未挪进 `router()`；
+   `tools/extract_routes.py::check_router_coverage()` 会在挪动后自动抓白名单缺口。
+10. **真实第三方 `.wasm` 包端到端 → 已补证（自建真 wasm 包）**：`plugin-wasm` 用自建真 wasm 包
+    完成「本地 zip → 管理面 install → enable（真 wasmtime 编译 + init）→ 建 plugin 渠道 →
+    真实 `/v1/chat/completions`」：非流式聚合 `hello`、流式 SSE 含 `hel` / `lo`、未声明模型非 200
+    （`tests/wasm_data_plane_e2e.rs`，Windows 打印 SKIP、CI linux 执行）；`probe_6/7/8` 分别覆盖
+    流式下发、`tasks::run` 真实账号选择、30s tick 第二轮。**仍不可验证**：仓库无真实第三方
+    atomcode wasm 包（无账号不可对话，不做假验证）。
+11. **存量「handler 有、路由无」→ 已处置**：
+    - `cache.rs::handle_cache_info`、`security.rs::handle_reset_security`：两处「未来实现」占位
+      handler 已删除（全仓 grep 零引用）。
+    - `dashboard.rs::handle_channel_stats`：已注册 `GET /api/dashboard/channel-stats` + openapi
+      登记；与 `/api/dashboard/channel_health` 数据源不同（配置统计 vs 健康巡检），不重复。
+12. **前端死封装 → 已处置**：
 
-    「后台任务式插件安装/更新」在 AIGX 是空壳（`GET /api/plugins/progress` 恒返回
-    `{operations: []}`），实际全走 url 直装回落，不报错给用户但「任务已启动」toast 永不出现。
-    **处置：两个死封装已删**（T8 跟进），`handleInstall`/`handleUpdate` 改纯 url 直装，
-    无匹配平台时报「该插件不提供当前平台（{{target}}）的安装包」；`PluginStartOperation` 类型
-    与两条 i18n key 一并清除。`GET /api/plugins/progress` 保留（A2A 契约形状）。
+    | 前端函数 | 指向 | v1.0.64 状态 |
+    |---|---|---|
+    | `batchAddAliasPrefix` | `POST /api/models/alias/prefix` | **已修**：后端 handler + 路由 + openapi 已补；整批先校验后写（merge=false 冲突 409、非法 400、同 target 幂等） |
+    | `updateCheckinTravel` / `runCheckinTravelNow` | `PATCH/POST /api/checkin-center/travel[/run]` | **已修**：travel 排程移植（30s tick、按计划时刻去重、无插件稳定跳过不落标记） |
+    | `listKeys` | `GET /api/keys` | 如实记录：legacy 存量，零调用点 |
+    | `getModelMappings` | `GET/PUT /api/settings` | 如实记录：存量零调用点（新弹窗走 `/api/models/mappings`） |
+    | `startPluginInstall` / `startPluginUpdate` | install-from-release / update | v1.0.63 已删（改 url 直装） |
 
 ## 六·五、本轮新补的「handler 有、路由无」（已修）
 
@@ -261,18 +268,20 @@ ALTCHA 解题，结束后清理进程与目录）：
 - 配套说明：前端 `getModelMappings`（`api/index.ts`）指向旧 `${API_BASE}/settings`，是**零调用点**
   的存量死封装；新映射弹窗走 `POST /api/models/mappings` 族。二者并存，未删旧封装。
 
-## 六·六、T12（Wasm 数据面）四项无法验证（如实记录）
+## 六·六、T12（Wasm 数据面）四项无法验证 → v1.0.64 已补证
 
-plugin-wasm 报告以下四点在本环境无法端到端验证，**不改变 §三 的 wasm「unverified」状态**：
+v1.0.63 结束时的四点已在 v1.0.64 用「自建真 wasm 包 + 真实二进制 e2e」补证（详见 §六.10）：
 
-1. **`resolve.rs` 的 wasm 路由分支无 `AppState` 构造器**：`resolve.rs:439` 加了三级路由，
-   但单测里没有能构造完整 `AppState`（含 wasm 宿主）的夹具 → 分支逻辑只有编译级保证。
-2. **真实 SSE / `tasks.list` 数组无法夹具模拟**：需要真实 wasm 包返回流式响应，手写字节夹具
-   只能覆盖非流式。
-3. **生产 `tasks::run` 走 `active_accounts()` 未直测**：`tasks::run` 的账号选择依赖运行时
-   账号池状态，单测用的是注入的 mock，未验证真实 `active_accounts()` 路径。
-4. **30s 循环到点判定未直测**：`spawn()` 的 tick 到点逻辑靠时钟推进，单测用 `spawn_with`
-   注入令牌但不真正等 30s，到点边界未覆盖。
+1. **`resolve.rs` wasm 路由分支**：`tests/wasm_data_plane_e2e.rs` 经真实 `/v1/chat/completions`
+   走通 wasm 包分支（`registry().is_plugin_owned` 闸门在位）；单测夹具构造完整 `AppState` 的空白
+   由 e2e 实际替代。
+2. **真实 SSE / 流式**：`fixture::streaming_wasm_module` 真导入 `agent2api.call`，经宿主导入面
+   下发 `stream.head` + 分段 `stream.chunk`；`probe_6` 断言 head + 2 chunk，e2e 断言 SSE 含
+   `hel` / `lo`。
+3. **生产 `tasks::run` 走 `active_accounts()`**：`probe_7` 用真实 `AccountSessionStore::upsert`
+   种子账号，断言选中真实账号（异家账号反向对照）。
+4. **30s 循环到点判定**：`probe_8` 用 `start_paused` + `advance(30s)` 验证第二轮真实执行
+   （真实墙钟等过 claim 的 `min_gap=1000ms`，`schedule_now` 排下一拍）。
 
 ## 六·七、本轮发现并修复的缺口总表（7 类）
 
@@ -314,72 +323,51 @@ cd frontend && npx tsc --noEmit && npm run lint && npm run i18n:check && npx vit
 > L-1 中间态），宣布树静止须同时满足 task 全 completed、`git status` 哈希与行数稳定、
 > 两次 check 间隔 ≥90s 且 error/warning 数一致、`src/` 最新 mtime 未变。
 
-## 八·五、T9 门禁实测结果（2026-11-17 07:00，停手后）
+## 八·五、门禁实测结果（v1.0.64 遗留收尾波，2026-11-17）
 
-所有命令重定向取码（`cmd > log 2>&1; echo EXIT=$?`），不用管道。
+树静止口径：t1–t7 + t11 全 completed、integrator 停手后按序跑；命令一律
+`cmd > log 2>&1; echo EXIT=$?`，不用管道吞码。
 
 | 步 | 命令 | 结果 |
 |---|---|---|
-| 1 | `cargo fmt --all -- --check` | **EXIT=0 / 0 diff**（先跑过一次 `cargo fmt --all`，格式化了 45 个成员新增文件；`main.rs`/`lib.rs`/`openapi.rs` 三文件 mtime 未变，证明 fmt 未动我的文件） |
+| 1 | `cargo fmt --all -- --check` | **EXIT=0 / 0 diff** |
 | 2 | `cargo check --lib --tests` | **EXIT=0 / 0 error / 0 warning** |
-| 3 | `cargo clippy --workspace --all-targets -- -D warnings` | **EXIT=0 / 0 error**（覆盖 `aigx-net` 成员与 bins） |
-| 4a | `cargo test --lib`（第一次） | 2010 passed / **1 failed** / 0 ignored |
-| 4b | `cargo test --lib`（第二次） | 2010 passed / **1 failed** / 0 ignored |
-| 4c | 失败集比对 | **完全一致**（同一用例 `log::tests::tz_migrate_zero_to_eight_rewrites_old_keys`） |
-| 5 | 分区 allow 确认 + 反向自证 | `wasm/mod.rs` 的**模块级** `#![allow(dead_code)]` **已无**；catalog/native/tasks 三处子模块各带理由 allow + 6 处逐项 allow（见下）。**反向自证**：临时删 tasks 的 allow → `cargo clippy --lib -D warnings` **精确报出 8 条，全部在 `wasm/tasks.rs`，零其它文件混入** → 已恢复（md5 与备份一致）。恢复后 `--lib` 与 `--workspace --all-targets` 两口径均 **EXIT=0** |
+| 3 | `cargo clippy --workspace --all-targets -- -D warnings` | **EXIT=0 / 0 error** |
+| 4a | `cargo test --lib`（第一次） | **2106 passed / 1 failed / 0 ignored** |
+| 4b | `cargo test --lib`（第二次） | **2106 passed / 1 failed / 0 ignored** |
+| 4c | 失败集比对 | **完全一致**（唯一 `log::tests::tz_migrate_zero_to_eight_rewrites_old_keys`） |
+| 5 | 分区 allow 反向自证 | 见下 |
+| 6 | `python tools/extract_routes.py .` | **EXIT=0**；真实 409 / 文档 405 / 豁免 5；[A]–[G] 全 0 |
 
-**附加门禁（同样实测）**
+**前端（cwd=frontend）**
 
 | 项 | 命令 | 结果 |
 |---|---|---|
-| 路由闸门 | `python tools/extract_routes.py .` | **EXIT=0**；真实 401 / 文档 397 / 豁免 5；[A]–[G] 全 0；`router_coverage_gap` 空 |
-| 前端 tsc | `npx tsc --noEmit` | **EXIT=0** |
-| 前端 lint | `npm run lint` | **EXIT=0**（max-warnings 0） |
-| 前端 i18n | `npm run i18n:check` | **EXIT=0**；zh=en=**4057**；缺失 0；集合一致 |
-| 前端 i18n todo | `npm run i18n:check-todo` | **EXIT=0**；en.json 无 `[TODO en]` |
-| 前端单测 | `npx vitest run` | **EXIT=0**；20 files / 149 tests passed |
-| static 重建 | `npm run build` | **EXIT=0**；`index.html` md5 `78bcfbd2…` → **`6482fdd7d9a59502959de78d491f45b9`**（变了=重建成功；assets 99→103） |
+| tsc | `npx tsc --noEmit` | **EXIT=0** |
+| lint | `npm run lint` | **EXIT=0**（max-warnings 0） |
+| i18n | `npm run i18n:check` | **EXIT=0**；zh=en=**4057**；缺失 0；集合一致 |
+| i18n todo | `npm run i18n:check-todo` | **EXIT=0**；en.json 无 `[TODO en]` |
+| 单测 | `npx vitest run` | **EXIT=0**；20 files / 149 tests passed |
+| static 重建 | `npm run build` | **EXIT=0**；`index.html` md5 `6482fdd7…` → **`b9e060dbe3571953baf14d15254c088b`**；`static/version.json`=1.0.64 |
 
-### 唯一失败测试的定性（`log::tests::tz_migrate_zero_to_eight_rewrites_old_keys`）
+### 唯一失败测试（沿用既有裁决）
 
-- **`src/log/` 与 HEAD 字节一致**（`git status` 零改动）——**存量测试，非本波引入**。
-- **根因是测试没考虑开发者时区**：`date_key_at(t, 0)` 用 `report_tz_of(0)` → `chrono::Local`
-  系统偏移；`date_key_at(t, 8)` 用 +8。**UTC+8 开发机上两者相等** → 迁移是 no-op → 断言
-  `old_b == new_a`（「20:00Z 在 +8 归次日」的错位前提）不成立 → 崩（`left "2026-11-15"
-  right "2026-11-14"`）。
-- 测试注释声称「只有在 UTC+9 及以东的机器上跑才会退化」——**这句是错的，UTC+8 也退化**。
-  **中国时区开发机上此测试必红。** CI runner=UTC 时应绿。
-- Windows 上 `TZ=UTC cargo test` 无效（`chrono::Local` 不读 `TZ`），已实测仍失败。
-- **处置：如实记录、不改代码**（lead 裁决）。这不是「环境特殊」而是「测试假设了开发者时区」。
+`log::tests::tz_migrate_zero_to_eight_rewrites_old_keys`：**`src/log/` 与 HEAD 字节一致**
+（`git diff HEAD -- src/log` 为空），UTC+8 开发机 `chrono::Local` 使断言前提失效，CI runner=UTC
+应绿；属于存量测试假设问题，不改。
 
-### dead_code 分区 allow 的实测数字（三区反向自证）
+### dead_code 分区 allow 反向自证（v1.0.64）
 
-`cargo clippy --lib` 视角（lib target 看不到 bin 的 `main.rs` 调用点）下，**逐区删 allow 反向自证**
-（每区删 allow → 跑 `cargo clippy --lib -D warnings` → 记录 → 恢复 → `touch`）：
-
-| 区 | 删 allow 后报出 | 位置 | 说明 |
-|---|---|---|---|
-| `tasks` | **8 条** | 全部 `wasm/tasks.rs`，零其它文件混入 | `StoreSettings`/`install_store_settings`/`install_settings`/`scheduler_token`/`scheduler_started`/`spawn`/`shutdown` + `new/key`。9 处接线只在 bin 侧生效（lib target 结构上看不到 `main.rs` 调用者）+ `checkin_time`/`spawn_with` |
-| `catalog` | **15 条** | 全部 `wasm/catalog.rs`，零其它文件混入 | 本期不接（计划内唯一残留） |
-| `native` | **1 条** | 全部 `wasm/native.rs` | `install_source`，deferred |
-
-另有 **6 处逐项 allow**（`WasmOptions::dir`、`http::MultipartPart::is_text`、`host::hosts`、
-`mod::loaded_providers`、`tasks::checkin_time` 待签到中心接 wasm 签到窗口、`tasks::spawn_with`
-仅测试用）+ **1 处 `#[cfg(test)]` 专用**（`fixture.rs::module_with_len_dispatch`，夹具辅助）。
-三区反向自证证明**分区 allow 没有掩盖其它文件的接线遗漏**。恢复后三口径（`--lib` /
-`--lib --tests` / `--workspace --all-targets`）clippy 均 **EXIT=0**。
-
-> **allow 总账**：`grep -rn '#\[allow(dead_code)\]' src/plugin_host/wasm/*.rs` = **10 行** =
-> **3 分区**（catalog/native/tasks，`mod.rs:45/58/67`）+ **6 逐项**（`host.rs:46/515`、
-> `http.rs:26`、`mod.rs:333`、`tasks.rs:287/608`）+ **1 test-only**（`fixture.rs:62`）。
-
-> 全仓**模块级** `#![allow(dead_code)]` 实测共 **3 处**（`src/main.rs:6`、`src/api/openai/mod.rs:11`、
-> `src/image_compat/mod.rs:29`），均为存量、与本波无关；`src/plugin_host/wasm/mod.rs` 的模块级
-> allow 已在本波删除（改为上述分区形态）。
-
-> **坑**：`cp` 恢复文件后 mtime 落在同一秒时，cargo 可能复用旧编译指纹给出**假红**（报错与
-> 探针阶段逐字相同）。判别法：把报错位置集合与探针 log 做 diff，逐字相同=指纹复用。
-> 恢复后 `touch` 广播新 mtime 即可。本表数字均在 `touch` 后复测。
+- 本波**新增 0 处** `#[allow(dead_code)]`；净删除 3 处（`wasm/mod.rs` 的 catalog 分区、
+  `account_search.rs` 两处）。
+- `native` 分区（删 allow → `cargo clippy --lib -D warnings`）：**7 条**，全部
+  `wasm/native.rs`，零其它文件混入。`tasks` 分区：**8 条**，全部 `wasm/tasks.rs`
+  （`StoreSettings` / `install_*` / `scheduler_*` / `spawn` / `shutdown` 等），零其它文件。
+  恢复后三口径 clippy **EXIT=0**。
+- `catalog` 分区 allow 已删除且 clippy 绿 = 目录接线后无残留死码。
+- 新增 3 处非 dead_code 定向 allow：`double_must_use` ×2（`travel.rs` / `account_search.rs`
+  的 `async_trait` trait，repo 内既有先例 `account_login/mod.rs`）、`result_large_err` ×1
+  （`script/websocket.rs::Socket::send` 透传 tungstenite 错误）。
 
 ## 八·六、改动文件清单（分组）
 

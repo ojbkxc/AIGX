@@ -390,7 +390,34 @@ pub async fn put_vision_config(
         api_key_id: text_field(&object, "api_key_id").to_string(),
         api_key_name: String::new(),
     };
-    match tool_services::save_vision_config(services(&state), &state.api_key_store, config) {
+    // 模型目录投影（对齐上游保存路径：provider + model 必须在这家目录里、
+    // 已启用、非图片生成且 supportsImages=true；downstream_model 由匹配 id
+    // 决定）。能力三态取用户覆盖后的生效值（ManageModel.capability_flags）。
+    let view = super::model_manage::current_view(&state);
+    let catalog: Vec<tool_services::VisionCatalogModel> = view
+        .models
+        .iter()
+        .map(|model| tool_services::VisionCatalogModel {
+            provider: model.provider.clone(),
+            provider_label: model.provider_label.clone(),
+            id: model.id.clone(),
+            enabled: model.enabled,
+            supports_images: model
+                .capability_flags
+                .get("supportsImages")
+                .and_then(Value::as_bool),
+            image_model: model
+                .capabilities
+                .iter()
+                .any(|cap| cap.eq_ignore_ascii_case("image")),
+        })
+        .collect();
+    match tool_services::save_vision_config(
+        services(&state),
+        &state.api_key_store,
+        config,
+        &catalog,
+    ) {
         Ok(value) => Ok(Json(value).into_response()),
         Err(error) => Err(error_response(&error, StatusCode::BAD_REQUEST)),
     }
@@ -465,6 +492,9 @@ pub async fn install_info(
     let tools: Vec<&str> = match service {
         tool_services::WEB_SEARCH_SERVICE_ID => vec!["web_search", "web_fetch"],
         tool_services::VISION_SERVICE_ID => vec!["image_analyze"],
+        tool_services::IMAGE_GENERATION_SERVICE_ID => {
+            vec!["generate_images", "edit_images", "get_image_result"]
+        }
         _ => Vec::new(),
     };
     let mut value = json!({
@@ -473,13 +503,14 @@ pub async fn install_info(
         "name": tool_services::package_name(service),
         "version": tool_services::version(service),
         "timeout_seconds": tool_services::timeout_seconds(services(&state), service),
-        "runtime_available": service != tool_services::IMAGE_GENERATION_SERVICE_ID,
+        "runtime_available": true,
         "mcp": {
             "server_name": tool_services::package_name(service),
             "url": format!("{}{}", base.trim_end_matches('/'), tool_services::endpoint(service, "mcp")),
             "tools": tools,
             "bridge_url": match service {
                 tool_services::VISION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/vision.js", base.trim_end_matches('/')),
+                tool_services::IMAGE_GENERATION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/image-generation.cjs", base.trim_end_matches('/')),
                 _ => String::new(),
             },
         },

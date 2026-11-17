@@ -105,11 +105,14 @@ pub fn text(value: &Value, optional: bool) -> bool {
     }
 }
 
-/// 字段键是否允许（拒绝 `host.` 前缀与凭据词）。
+/// 字段键是否允许（拒绝 `host.` 前缀、网关保留键与凭据词）。
 fn setting_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase().replace(['_', '-', '.'], "");
     identifier(key)
         && !key.starts_with("host.")
+        // 网关保留键：插件问它是「读网关持有的目录」，不是自己的可写设置
+        //（= 上游 `schema.rs` 的保留键组，AIGX 现只有 modelCatalog）。
+        && key != crate::plugin_host::model_catalog::SETTING_MODEL_CATALOG
         && normalized != "key"
         && ![
             "token",
@@ -346,6 +349,19 @@ mod tests {
             let s = schema(json!([{ "key": key, "label": "x", "type": "string" }]));
             assert!(parse("kiro", &s).is_err(), "键 {key} 应被拒绝");
         }
+    }
+
+    /// 网关保留键 `modelCatalog` 不得出现在插件设置声明里（上游
+    /// `schema.rs` 同一组保留键）：它是「读网关持有的目录」的通道，
+    /// 不是插件自己的可写设置。正向对照：同形状的普通键可被接受。
+    #[test]
+    fn parse_rejects_reserved_model_catalog_key() {
+        let reserved: &str = crate::plugin_host::model_catalog::SETTING_MODEL_CATALOG;
+        let s = schema(json!([{ "key": reserved, "label": "目录", "type": "string" }]));
+        assert!(parse("kiro", &s).is_err(), "保留键应被拒绝");
+        // 正向对照：同形状但非保留键可接受
+        let ok = schema(json!([{ "key": "catalogRegion", "label": "目录", "type": "string" }]));
+        assert!(parse("kiro", &ok).unwrap().is_some());
     }
 
     #[test]

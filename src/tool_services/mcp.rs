@@ -38,6 +38,7 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub enum McpServerKind {
     WebSearch,
     Vision,
+    ImageGeneration,
 }
 
 /// 一次 MCP 请求的上下文（由 `api::tool_runtime` 组装）。
@@ -52,8 +53,12 @@ pub struct McpRequestContext<'a> {
     pub base_url: String,
     /// 网关 Key 的 provider 白名单（`None` = 不限）
     pub allowed_providers: Option<Vec<String>>,
-    /// 调用者标识（日志/审计用；不参与鉴权）
+    /// 网关 Key 的模型白名单（图片任务鉴权用；`None`/空 = 不限）
+    pub allowed_models: Option<Vec<String>>,
+    /// 调用者标识（日志/审计用；图片任务作为 owner 参与归属鉴权）
     pub owner: String,
+    /// 图片生成运行时所需的应用状态（web-search / vision 不使用）。
+    pub state: &'a crate::api::openai::AppState,
 }
 
 pub struct McpSpec {
@@ -148,10 +153,11 @@ pub fn vision_spec() -> McpSpec {
     }
 }
 
-pub fn spec(kind: McpServerKind) -> McpSpec {
+pub fn spec(kind: McpServerKind, services: &ToolServices) -> McpSpec {
     match kind {
         McpServerKind::WebSearch => web_search_spec(),
         McpServerKind::Vision => vision_spec(),
+        McpServerKind::ImageGeneration => super::image_mcp::spec(services),
     }
 }
 
@@ -275,6 +281,10 @@ async fn call_tool(
                 Err(error) => Ok(tool_error(error)),
             }
         }
+        McpServerKind::ImageGeneration => match super::image_runtime::call(name, args, ctx).await {
+            Ok(result) => Ok(result),
+            Err(error) => Ok(super::image_runtime::error_result(&error, args)),
+        },
     }
 }
 
@@ -309,7 +319,7 @@ async fn dispatch_one(
     if id.is_null() {
         return None;
     }
-    let spec = spec(kind);
+    let spec = spec(kind, ctx.services);
     let params = message.get("params").cloned().unwrap_or(Value::Null);
 
     match method {

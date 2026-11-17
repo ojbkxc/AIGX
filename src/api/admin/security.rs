@@ -90,13 +90,3 @@ pub async fn handle_security_events(
         }
     })))
 }
-
-/// POST /api/security/reset
-pub async fn handle_reset_security(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-    // 未来实现：重置安全日志
-    Ok(Json(json!({ "success": true, "data": null })))
-}

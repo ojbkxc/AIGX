@@ -42,7 +42,6 @@
 // allow 只会报出 tasks 的条目），后者会连带掩盖真正的接线遗漏。
 pub(crate) mod access;
 pub(crate) mod account_access;
-#[allow(dead_code)] // 本期不接（见 docs/a2a-alignment/README.md 未完成项）
 pub(crate) mod catalog;
 mod context;
 pub(crate) mod egress;
@@ -323,6 +322,9 @@ pub(crate) fn forget(provider: &str) {
     tasks::forget(provider);
     state::forget_provider(provider);
     catalog::forget(provider);
+    // provider 维度的模型目录（`catalog` 并集的出口）同步摘除 ——
+    // 宿主都没了，目录不能继续对外广告（= 上游 `rpc_cache::forget`）。
+    crate::plugin_host::model_catalog::remove(provider);
     unregister_provider(provider);
 }
 

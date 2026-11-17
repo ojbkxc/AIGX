@@ -11,15 +11,42 @@
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
     use serde_json::{json, Value};
 
-    use super::super::access::{WasmAccountAccess, WasmEgress, WasmStreamSink};
+    use super::super::access::{WasmAccountAccess, WasmEgress};
     use super::super::fixture::minimal_wasm_module;
     use super::super::wire::WireError;
     use super::super::{host_for_provider, WasmOptions};
+    use crate::account_session::model::AccountSession;
+    use crate::account_session::AccountSessionStore;
+    use crate::plugin_host::manager::PluginHostManager;
+    use crate::plugin_host::process::HostEnv;
+    use crate::plugin_host::registry::PackRegistry;
+    use crate::plugin_host::wasm::access::WasmStreamSink;
+    use crate::storage::FileStore;
+
+    /// 本模块所有会 `start()` 的用例共享一把串行锁。
+    ///
+    /// `install_accounts` 是进程级「首次注入保留」单例（`mod.rs` 语义），
+    /// 并行测试下「谁先 start 谁占坑」会让依赖真实账号面的用例顺序敏感。
+    /// 串行化后，每个需要特定账号面的用例先 `reset_accounts()` 再 `start()`，
+    /// 结果与执行顺序无关。
+    fn wasm_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        &LOCK
+    }
+
+    /// 复位进程级账号访问面（仅测试；生产语义「首次注入保留」不变）。
+    fn reset_accounts() {
+        if let Ok(mut slot) = super::super::accounts().lock() {
+            *slot = None;
+        }
+    }
 
     /// 最小注入面：所有能力都返回「未就绪」。
     ///
@@ -145,6 +172,7 @@ mod tests {
     /// **探针 1**：装载 → `host_for_provider` 可见 → 关停后不可见。
     #[tokio::test]
     async fn probe_1_load_call_and_shutdown() {
+        let _guard = wasm_test_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let provider = "probe-provider-1";
         write_probe_pack(tmp.path(), provider);
@@ -195,6 +223,7 @@ mod tests {
     /// 与探针 1 配对，证明「装载成功」不是因为校验形同虚设。
     #[tokio::test]
     async fn probe_1_negative_invalid_manifest_rejected() {
+        let _guard = wasm_test_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
         write_probe_pack(tmp.path(), "probe-provider-2");
         // ABI 不匹配
@@ -219,6 +248,7 @@ mod tests {
     /// 宿主注册表在 wasm 加载失败时不留残留（`start` 中途失败的清理语义）。
     #[tokio::test]
     async fn probe_1_failed_start_leaves_no_registration() {
+        let _guard = wasm_test_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let provider = "probe-provider-3";
         write_probe_pack(tmp.path(), provider);
@@ -253,6 +283,7 @@ mod tests {
     /// 由 `cargo check` 保证形状正确（无法在单测里跑：见报告「无法验证项」）。
     #[tokio::test]
     async fn probe_2_bridge_routes_to_wasm_backend() {
+        let _guard = wasm_test_lock().lock().await;
         use std::time::Duration;
 
         use crate::bridge::plugin::{ConversationStream, PluginBridge};
@@ -314,6 +345,7 @@ mod tests {
     /// `Some(Err(..))` 而不是 `None`（这正是 T3 里的静默吞错缺陷）。
     #[tokio::test]
     async fn probe_3_handshake_error_is_not_silent() {
+        let _guard = wasm_test_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let provider = "probe-provider-error";
         std::fs::create_dir_all(tmp.path()).unwrap();
@@ -402,6 +434,7 @@ mod tests {
     ///   由 `spawn_with` 的可停止性单测覆盖）
     #[tokio::test]
     async fn probe_5_tasks_run_through_host() {
+        let _guard = wasm_test_lock().lock().await;
         use crate::plugin_host::wasm::tasks;
         use crate::scheduled_tasks::task_state;
         use crate::storage::FileStore;
@@ -654,5 +687,658 @@ mod tests {
             Value::Null,
             "非白名单键即使存在也必须读不到"
         );
+    }
+
+    // ────────────── 真实 wasm 包端到端（§六.10 / §六·六.1/.2） ──────────────
+
+    /// 夹具包的 id（固定值，便于断言）。
+    const STREAM_PACK_ID: &str = "wasm-stream-probe";
+
+    /// 两段 OpenAI SSE 正文（`stream.chunk` 的 data，夹具负责 base64）。
+    const STREAM_CHUNK_1: &[u8] = b"data: {\"id\":\"chatcmpl-wasm\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"probe-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel\"},\"finish_reason\":null}]}\n\n";
+    const STREAM_CHUNK_2: &[u8] = b"data: {\"id\":\"chatcmpl-wasm\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"probe-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+    /// 打包一个**真流式** Wasm 插件包（`pack.json` + `wasm.json` + `plugin.wasm`）。
+    ///
+    /// `plugin.wasm` 由 [`fixture::streaming_wasm_module`] 生成 —— 它真导入
+    /// `agent2api.call` 并在 conversation 分支里主动下发 head + 每段 chunk
+    /// （宿主侧零 mock）。
+    fn stream_pack_zip(provider: &str, chunks: &[&[u8]]) -> Vec<u8> {
+        let pack = json!({
+            "id": STREAM_PACK_ID,
+            "name": "Wasm Stream Probe",
+            "version": "0.0.1",
+            "protocol": crate::plugin_host::rpc::PROTOCOL_VERSION,
+            "entry": { super::super::TARGET: "plugin.wasm" },
+            "providers": [{ "id": provider, "label": "Wasm Stream Probe" }],
+        });
+        let wasm = json!({
+            "abi": super::super::ABI,
+            "requires": ["chat.stream.v1", "accounts.cas.v1", "native.helpers.v1"],
+            "helpers": ["keychain"],
+            "origins": [],
+            "memory_mib": 16,
+            "concurrency": 2,
+        });
+        let module =
+            super::super::fixture::streaming_wasm_module(provider, "Wasm Stream Probe", chunks);
+        let mut out = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut out));
+            let options: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, data) in [
+                ("pack.json", pack.to_string().into_bytes()),
+                ("wasm.json", wasm.to_string().into_bytes()),
+                ("plugin.wasm", module),
+            ] {
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&data).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        out
+    }
+
+    /// 起一个真实 `PluginHostManager`（临时注册表 / 插件根 / 账号池 / 存储）。
+    fn probe_manager(
+        tmp: &std::path::Path,
+        store: Arc<FileStore>,
+    ) -> (Arc<PluginHostManager>, Arc<PackRegistry>) {
+        let registry = Arc::new(PackRegistry::new(store.clone()));
+        registry.load().unwrap();
+        let manager = Arc::new(PluginHostManager::new(
+            registry.clone(),
+            tmp.join("plugins"),
+            crate::test_http_client(),
+            HostEnv {
+                data_dir: tmp.to_string_lossy().into_owned(),
+                host_version: "test".into(),
+                target: crate::plugin_host::host_target_triple(),
+                proxy: String::new(),
+                debug_traffic: false,
+                loopback_port: 0,
+            },
+            Arc::new(AccountSessionStore::new(store.clone())),
+            store,
+        ));
+        (manager, registry)
+    }
+
+    /// 假的 helper 数据源：把一个「原生包」摆成候选，验证 snapshot / grant
+    /// 的聚合与指纹钉死（真实 wasm 宿主参与 available 判定）。
+    struct FakeHelpers {
+        provider: String,
+        caller_pack: String,
+        caller_version: String,
+        caller_digest: String,
+        grants: std::sync::Mutex<Value>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::native::WasmHelperSource for FakeHelpers {
+        fn packs(&self) -> Vec<super::super::native::PackInfo> {
+            vec![
+                super::super::native::PackInfo {
+                    id: self.caller_pack.clone(),
+                    version: self.caller_version.clone(),
+                    sha256: self.caller_digest.clone(),
+                    enabled: true,
+                    providers: vec![super::super::native::PackProviderInfo {
+                        id: self.provider.clone(),
+                        loaded: true,
+                    }],
+                },
+                super::super::native::PackInfo {
+                    id: "native-pack".into(),
+                    version: "1.0.0".into(),
+                    sha256: "digest-native".into(),
+                    enabled: true,
+                    providers: vec![super::super::native::PackProviderInfo {
+                        id: "native-prov".into(),
+                        loaded: true,
+                    }],
+                },
+            ]
+        }
+
+        fn provider_pack(&self, provider: &str) -> Option<String> {
+            (provider == self.provider).then_some(self.caller_pack.clone())
+        }
+
+        fn serves(&self, provider: &str) -> bool {
+            provider == self.provider
+        }
+
+        fn grants(&self) -> Value {
+            self.grants
+                .lock()
+                .map(|grants| grants.clone())
+                .unwrap_or_else(|error| error.into_inner().clone())
+        }
+
+        fn set_grants(&self, grants: Value) -> Result<(), String> {
+            if !grants.is_object() {
+                return Err("原生辅助授权记录无效".into());
+            }
+            *self.grants.lock().unwrap_or_else(|e| e.into_inner()) = grants;
+            Ok(())
+        }
+
+        async fn call_pack(
+            &self,
+            pack_id: &str,
+            method: &str,
+            _params: Value,
+            _timeout: Duration,
+        ) -> Result<Value, String> {
+            if pack_id == "native-pack" && method == "native.helpers" {
+                return Ok(json!([{ "id": "keychain", "operations": ["read", "write"] }]));
+            }
+            Err("no such helper".into())
+        }
+    }
+
+    /// **探针 6**：真实 zip 包 → `manager.install_bytes` → `enable` → init
+    /// 回 provider → `PluginBridge` 收到 head + ≥2 chunk；随后验证
+    /// `native.snapshot` / `grant` 的聚合（helper 指纹钉死）。
+    ///
+    /// **零 mock**：wasmtime 真编译/实例化；head 与 chunk 由 wasm 经
+    /// `agent2api.call` 主动发起。
+    #[tokio::test]
+    async fn probe_6_real_pack_install_enable_stream_and_helpers() {
+        let _guard = wasm_test_lock().lock().await;
+        use crate::bridge::plugin::{ConversationStream, PluginBridge};
+        use crate::bridge::{ChatFormat, ChatMessage};
+        use crate::plugin_host::rpc::StreamEvent;
+        use crate::plugin_host::wasm::native;
+
+        let provider = "probe-stream-provider";
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileStore::new(tmp.path().join("data")));
+        let (manager, _registry) = probe_manager(tmp.path(), store.clone());
+
+        let zip = stream_pack_zip(provider, &[STREAM_CHUNK_1, STREAM_CHUNK_2]);
+        let meta = manager.install_bytes(&zip, None).expect("install_bytes");
+        assert_eq!(meta.id, STREAM_PACK_ID);
+        assert!(!meta.enabled, "新装包默认停用");
+        // 入口二进制摘要 = helper 指纹的数据源（install.rs 安装时现算）
+        let digest = meta.sha256.clone().expect("入口摘要必须落库");
+        assert_eq!(
+            digest,
+            crate::plugin_host::install::sha256_hex(&super::super::fixture::streaming_wasm_module(
+                provider,
+                "Wasm Stream Probe",
+                &[STREAM_CHUNK_1, STREAM_CHUNK_2],
+            )),
+            "sha256 必须是入口二进制摘要"
+        );
+
+        // enable → init 握手回 provider（wasm 真跑）
+        let providers = manager.enable(&meta.id).await.expect("enable");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, provider);
+        let host = host_for_provider(provider).expect("wasm 宿主必须登记");
+        assert!(host.ready(), "init 成功后必须 ready");
+
+        // PluginBridge：head + ≥2 chunk（wasm 主动调用 stream.head/chunk）
+        let bridge = PluginBridge::new_wasm(host.clone(), provider.to_string());
+        let req = ChatFormat {
+            model: "probe-model".into(),
+            messages: vec![ChatMessage::assistant("hi")],
+            tools: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
+        };
+        let mut stream = bridge
+            .open_conversation_for_test(&req)
+            .await
+            .expect("open_conversation");
+        assert!(
+            matches!(stream, ConversationStream::Wasm { .. }),
+            "wasm provider 必须产出 Wasm 分支"
+        );
+        let mut head = false;
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        loop {
+            match stream.next().await {
+                Some(Ok(StreamEvent::Head { status, .. })) => {
+                    assert_eq!(status, 200);
+                    head = true;
+                }
+                Some(Ok(StreamEvent::Chunk(bytes))) => chunks.push(bytes),
+                Some(Ok(StreamEvent::End)) => {}
+                Some(Err(error)) => panic!("wasm 流错误: {}", error.message),
+                None => break,
+            }
+        }
+        assert!(head, "必须收到 head");
+        assert!(
+            chunks.len() >= 2,
+            "PluginBridge 必须收到 ≥2 个 chunk，实际 {}",
+            chunks.len()
+        );
+        let body = String::from_utf8_lossy(&chunks.concat()).to_string();
+        assert!(body.contains("\"content\":\"hel\""), "{body}");
+        assert!(body.contains("\"content\":\"lo\""), "{body}");
+
+        // ── native.snapshot / grant：真实宿主 + 假数据源 ──
+        let _source_guard = native::source_test_lock().lock().await;
+        native::reset_source_for_test();
+        native::install_source(Arc::new(FakeHelpers {
+            provider: provider.to_string(),
+            caller_pack: STREAM_PACK_ID.to_string(),
+            caller_version: meta.version.clone(),
+            caller_digest: digest.clone(),
+            grants: std::sync::Mutex::new(json!({})),
+        }));
+        let snapshot = native::snapshot(None).await;
+        let requested = snapshot["requested"].as_array().expect("requested");
+        let entry = requested
+            .iter()
+            .find(|item| item["provider"] == provider && item["id"] == "keychain")
+            .expect("requested 必须含已申报的 helper");
+        assert_eq!(entry["available"], true, "活宿主 + serves → available");
+        assert_eq!(entry["callerDigest"], digest);
+        let candidates = snapshot["candidates"].as_array().expect("candidates");
+        let candidate = candidates
+            .iter()
+            .find(|item| item["pack"] == "native-pack" && item["id"] == "keychain")
+            .expect("候选必须来自非 wasm 的启用包");
+        assert_eq!(candidate["provider"], "native-prov");
+        assert_eq!(candidate["digest"], "digest-native");
+        assert_eq!(candidate["operations"], json!(["read", "write"]));
+
+        // grant：选中候选后落授权（含 callerPack / callerDigest 钉死）
+        let granted = native::grant(provider, "keychain", candidate, None)
+            .await
+            .expect("grant");
+        assert_eq!(granted["granted"], true);
+        let scoped = native::snapshot(None).await;
+        assert_eq!(
+            scoped["grants"][provider]["keychain"]["callerPack"],
+            STREAM_PACK_ID
+        );
+        assert_eq!(
+            scoped["grants"][provider]["keychain"]["callerDigest"],
+            digest
+        );
+        native::reset_source_for_test();
+
+        // 停用：宿主摘除、路由不再可见（反向对照）
+        manager.disable(&meta.id).await.expect("disable");
+        assert!(host_for_provider(provider).is_none(), "停用后宿主必须摘除");
+    }
+
+    /// **探针 7**：`tasks::run` 生产入口（`active_accounts()` 单例）→ 真实
+    /// `AccountSessionStore::upsert` 种子账号 → 账号选择走到真实账号。
+    ///
+    /// 进程级单例防污染：本模块所有 `start()` 用例由 [`wasm_test_lock`]
+    /// 串行，进入用例先 [`reset_accounts`]（生产「首次注入保留」语义不变）。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // 与 account_access 测试同款例外：current-thread 运行时
+    async fn probe_7_tasks_run_uses_real_account_store() {
+        let _guard = wasm_test_lock().lock().await;
+        let _secret = crate::account_session::secret::test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        use crate::plugin_host::wasm::tasks;
+        use crate::plugin_host::wasm::AccountSessionAccess;
+        use crate::scheduled_tasks::task_state;
+
+        let provider = "probe-real-account-prov";
+        let tmp = tempfile::tempdir().unwrap();
+        crate::account_session::secret::set_data_dir(tmp.path());
+        let store = Arc::new(FileStore::new(tmp.path().join("data")));
+        let sessions = Arc::new(AccountSessionStore::new(store.clone()));
+
+        // 真实账号池：种子一条本 provider 账号（+ 一条异家账号做反向对照）
+        let mut seeded = AccountSession::new("ch-wasm", "acct-real");
+        seeded.id = "acct-real".into();
+        seeded.provider = provider.to_string();
+        seeded.credential.secret = "sk-real-secret".into();
+        let seeded = sessions.upsert(seeded).expect("upsert 真实账号");
+        let mut other = AccountSession::new("ch-other", "acct-other");
+        other.id = "acct-other".into();
+        other.provider = "probe-other-prov".into();
+        other.credential.secret = "sk-other".into();
+        sessions.upsert(other).expect("upsert 异家账号");
+        assert_eq!(sessions.len(), 2);
+
+        // 两路长度分派夹具：tasks.list 声明 / tasks.run 应答 / init 兜底
+        let dir = tmp.path().join("pack");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pack.json"),
+            json!({
+                "id": "probe-real-account-pack",
+                "entry": { super::super::TARGET: "probe.wasm" },
+                "providers": [{ "id": provider, "label": "Probe" }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("wasm.json"),
+            json!({
+                "abi": super::super::ABI,
+                "requires": ["tasks.v1", "accounts.cas.v1"],
+                "origins": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let init_reply =
+            json!({ "result": { "providers": [{ "id": provider, "label": "Probe" }] } })
+                .to_string();
+        let declared = json!({ "result": [
+            { "id": "growth", "label": "Growth", "enabled": true, "interval_ms": 60000 }
+        ] })
+        .to_string();
+        let tasks_list_len = serde_json::to_vec(&json!({
+            "method": "tasks.list",
+            "params": { "provider": provider }
+        }))
+        .unwrap()
+        .len();
+        let run_reply = json!({ "result": {
+            "success": true, "message": format!("ran {seeded_id}", seeded_id = seeded.id)
+        } })
+        .to_string();
+        let run_len = serde_json::to_vec(&json!({
+            "method": "tasks.run",
+            "params": {
+                "provider": provider,
+                "account": seeded.id,
+                "task": "growth",
+                "manual": true,
+                "scheduled_at": 0
+            }
+        }))
+        .unwrap()
+        .len();
+        assert_ne!(run_len, tasks_list_len);
+        std::fs::write(
+            dir.join("probe.wasm"),
+            super::super::fixture::module_with_two_len_dispatch(
+                tasks_list_len,
+                &declared,
+                run_len,
+                &run_reply,
+                &init_reply,
+            ),
+        )
+        .unwrap();
+
+        let pack: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("pack.json")).unwrap()).unwrap();
+        let access =
+            AccountSessionAccess::new("probe-real-account-pack", sessions.clone(), store.clone());
+        let options = WasmOptions::from_pack(&dir, &pack, access, Arc::new(NullEgress))
+            .unwrap()
+            .unwrap();
+        reset_accounts();
+        let _host = super::super::start(options).await.expect("start");
+        tasks::load(provider).await.expect("tasks::load");
+        task_state::install(Arc::new(FileStore::new(tmp.path().join("state"))));
+
+        // 生产入口：走 active_accounts() 单例（start 时登记的真实账号面）
+        let outcome = tasks::run(provider, "growth", true)
+            .await
+            .expect("tasks::run 必须跑通真实账号选择");
+        let results = outcome["results"].as_array().expect("results");
+        assert_eq!(results.len(), 1, "只能选中本 provider 的账号: {outcome}");
+        assert_eq!(results[0]["account"], seeded.id.as_str());
+        assert_eq!(results[0]["success"], true, "{outcome}");
+        assert!(
+            results[0]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains(&seeded.id),
+            "插件应答必须来自真实执行: {outcome}"
+        );
+
+        super::super::stop(provider).await;
+        tasks::forget(provider);
+    }
+
+    /// 账号访问面计数器包装（委托真实 `AccountSessionAccess`）。
+    struct CountingAccess {
+        inner: Arc<dyn WasmAccountAccess>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl WasmAccountAccess for CountingAccess {
+        fn provider_allowed(&self, provider: &str) -> bool {
+            self.inner.provider_allowed(provider)
+        }
+        fn account_provider(&self, account: &str) -> Option<String> {
+            self.inner.account_provider(account)
+        }
+        async fn store_get(&self, provider: &str, account: &str) -> Result<Value, WireError> {
+            self.inner.store_get(provider, account).await
+        }
+        async fn store_update_with_public(
+            &self,
+            account: &str,
+            expect: Value,
+            secret: Value,
+            public: Value,
+        ) -> Result<Value, WireError> {
+            self.inner
+                .store_update_with_public(account, expect, secret, public)
+                .await
+        }
+        async fn ledger_get(&self, account: &str, kind: &str) -> Result<Value, WireError> {
+            self.inner.ledger_get(account, kind).await
+        }
+        async fn ledger_put(
+            &self,
+            account: &str,
+            kind: &str,
+            value: Value,
+        ) -> Result<(), WireError> {
+            self.inner.ledger_put(account, kind, value).await
+        }
+        async fn settings_get(&self, provider: &str, key: &str) -> Result<Value, WireError> {
+            self.inner.settings_get(provider, key).await
+        }
+        async fn plugin_state(
+            &self,
+            provider: &str,
+            account: &str,
+            key: &str,
+        ) -> Result<Value, WireError> {
+            self.inner.plugin_state(provider, account, key).await
+        }
+        async fn plugin_state_compare_exchange(
+            &self,
+            provider: &str,
+            account: &str,
+            key: &str,
+            revision: u64,
+            schema: u32,
+            value: Value,
+        ) -> Result<Value, WireError> {
+            self.inner
+                .plugin_state_compare_exchange(provider, account, key, revision, schema, value)
+                .await
+        }
+        fn accounts_for_provider(&self, provider: &str) -> Vec<Value> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.accounts_for_provider(provider)
+        }
+    }
+
+    /// **探针 8**：30s tick —— `spawn_with` + `start_paused` + `advance(30s)`
+    /// 驱动**第二轮**真实执行（`task_state::last_run_at` 前进）。
+    ///
+    /// 为什么不靠暂停时钟本身：`task_state` / `interval()` 用的是墙钟
+    /// （`chrono::Utc::now`），`advance` 只推动 tokio 定时器。因此流程是：
+    /// 第一拍执行 → **真实**等过 `min_gap_ms=1000` → `schedule_now` 把下一拍
+    /// 排到「现在」→ `advance(30s)` 唤醒 tick → 第二轮真正执行。
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::await_holding_lock)] // 同 probe_7：current-thread 运行时例外
+    async fn probe_8_scheduler_second_round_after_advance() {
+        let _guard = wasm_test_lock().lock().await;
+        let _secret = crate::account_session::secret::test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        use crate::plugin_host::wasm::tasks;
+        use crate::scheduled_tasks::task_state;
+
+        let provider = "probe-tick-prov";
+        let tmp = tempfile::tempdir().unwrap();
+        crate::account_session::secret::set_data_dir(tmp.path());
+        let store = Arc::new(FileStore::new(tmp.path().join("data")));
+        let sessions = Arc::new(AccountSessionStore::new(store.clone()));
+        let mut seeded = AccountSession::new("ch-tick", "acct-tick");
+        seeded.id = "acct-tick".into();
+        seeded.provider = provider.to_string();
+        seeded.credential.secret = "sk-tick".into();
+        sessions.upsert(seeded).expect("upsert");
+
+        let dir = tmp.path().join("pack");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pack.json"),
+            json!({
+                "id": "probe-tick-pack",
+                "entry": { super::super::TARGET: "probe.wasm" },
+                "providers": [{ "id": provider, "label": "Probe" }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("wasm.json"),
+            json!({
+                "abi": super::super::ABI,
+                "requires": ["tasks.v1", "accounts.cas.v1"],
+                "origins": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let init_reply =
+            json!({ "result": { "providers": [{ "id": provider, "label": "Probe" }] } })
+                .to_string();
+        let declared = json!({ "result": [
+            { "id": "growth", "label": "Growth", "enabled": true, "interval_ms": 60000 }
+        ] })
+        .to_string();
+        let tasks_list_len = serde_json::to_vec(&json!({
+            "method": "tasks.list",
+            "params": { "provider": provider }
+        }))
+        .unwrap()
+        .len();
+        let run_reply = json!({ "result": { "success": true, "message": "ran tick" } }).to_string();
+        let run_len = serde_json::to_vec(&json!({
+            "method": "tasks.run",
+            "params": {
+                "provider": provider,
+                "account": "acct-tick",
+                "task": "growth",
+                "manual": false,
+                "scheduled_at": 0
+            }
+        }))
+        .unwrap()
+        .len();
+        assert_ne!(run_len, tasks_list_len);
+        std::fs::write(
+            dir.join("probe.wasm"),
+            super::super::fixture::module_with_two_len_dispatch(
+                tasks_list_len,
+                &declared,
+                run_len,
+                &run_reply,
+                &init_reply,
+            ),
+        )
+        .unwrap();
+
+        let pack: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("pack.json")).unwrap()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inner = crate::plugin_host::wasm::AccountSessionAccess::new(
+            "probe-tick-pack",
+            sessions.clone(),
+            store.clone(),
+        );
+        let access: Arc<dyn WasmAccountAccess> = Arc::new(CountingAccess {
+            inner,
+            calls: calls.clone(),
+        });
+        let options = WasmOptions::from_pack(&dir, &pack, access, Arc::new(NullEgress))
+            .unwrap()
+            .unwrap();
+        reset_accounts();
+        let _host = super::super::start(options).await.expect("start");
+        tasks::load(provider).await.expect("tasks::load");
+        task_state::install(Arc::new(FileStore::new(tmp.path().join("state"))));
+        let key = format!("pluginTask:{provider}:growth:acct-tick");
+
+        let token = crate::plugin_host::wasm::Cancel::new();
+        tasks::spawn_with(token.clone());
+
+        // 第一轮：循环第一拍不打盹，spawn 后立即执行
+        let first = {
+            let mut last = 0;
+            for _ in 0..20_000 {
+                last = task_state::read(&key)
+                    .map(|state| state.last_run_at)
+                    .unwrap_or(0);
+                if last > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(last > 0, "第一轮必须执行（last_run_at）");
+            last
+        };
+        assert!(calls.load(Ordering::Relaxed) >= 1, "第一轮必须枚举真实账号");
+
+        // 真实墙钟等过 claim 的 min_gap_ms=1000（暂停时钟不推动 chrono）
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1100)))
+            .await
+            .unwrap();
+        // 把下一拍排到「现在」并推进 30s，唤醒 tick 进入第二轮
+        task_state::schedule_now(&key).expect("schedule_now");
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let mut second = 0;
+        for _ in 0..2_000 {
+            second = task_state::read(&key)
+                .map(|state| state.last_run_at)
+                .unwrap_or(0);
+            if second > first {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            second > first,
+            "advance(30s) 后第二轮必须真正执行（{first} → {second}）"
+        );
+        assert!(
+            calls.load(Ordering::Relaxed) >= 2,
+            "第二轮必须再次枚举真实账号"
+        );
+
+        token.cancel();
+        tokio::task::yield_now().await;
+        super::super::stop(provider).await;
+        tasks::forget(provider);
     }
 }

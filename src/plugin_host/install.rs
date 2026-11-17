@@ -326,6 +326,12 @@ pub fn install_from_zip(
         });
     }
     let entry = resolve_entry(&content, &manifest)?;
+    // 入口二进制摘要（上游 `InstalledPack.sha256` 同义）：native helper 用它做包指纹。
+    // 与整包摘要 `actual` 不同：同一入口的包重打包（改图标/文案）仍视为同一实现。
+    let entry_sha256 = match std::fs::read(content.join(&entry)) {
+        Ok(bytes) => Some(sha256_hex(&bytes)),
+        Err(_) => None,
+    };
     // 4) 移到版本目录
     let dest = plugins_root.join(&manifest.id).join(&manifest.version);
     if let Some(parent) = dest.parent() {
@@ -348,9 +354,11 @@ pub fn install_from_zip(
         providers: manifest.providers,
         entry,
         signature: manifest.signature.map(|v| v.to_string()),
+        sha256: entry_sha256,
         signed,
         installed_at: now_unix(),
         enabled: false,
+        disabled_providers: Vec::new(),
     })
 }
 

@@ -194,9 +194,9 @@ fn all_provider_kinds() -> Vec<&'static str> {
 
 /// 一家 provider 的启用/加载态（前端 `PluginPackProvider` 契约）。
 ///
-/// `toggle` 是前端开关能力标志（前端按值渲染）：`"global"` = 本家开关写
-/// 全局 `ProviderGates`（内置目录包）；`"none"` = 无 provider 级开关
-/// （原生插件包只有整包启停）。
+/// `toggle` 是前端开关能力标志（前端按值渲染）：`"global"` = 本家开关为
+/// 真实逐家启停（内置目录包写全局 `ProviderGates`；外置原生包写
+/// `PackMeta.disabled_providers`）。`"none"` 目前无使用方，保留契约值。
 fn provider_view(kind: &str, disabled: &HashSet<String>) -> Value {
     let label = crate::model::manage::provider_label(kind);
     json!({
@@ -434,7 +434,8 @@ fn ui_entry_ok(entry: &str) -> bool {
 /// - `entryPresent` 实测磁盘（入口被手工删过 = false，前端提示重装）；
 /// - `host.crashes` 取监督循环的崩溃计数（重新启用清零）；
 /// - `startup` / `providerEnabled` 是 A2A 对齐字段：宿主状态投影与逐家启停
-///   （外置包的 provider 级开关与包级同源，真实语义见 `providers[].enabled`）。
+///   （`providers[].enabled` 与 `providerEnabled` 同源 = 包级 `enabled` ∧
+///   该家不在 `disabled_providers`，与上游 `provider_enabled` 同口径）。
 fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
     let rt = host.runtime_of(&meta.id);
     let version_dir = meta.version_dir(host.plugins_root());
@@ -444,23 +445,23 @@ fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
         .providers
         .iter()
         .map(|pp| {
+            let enabled = meta.provider_enabled(&pp.id);
             let loaded = rt.providers.iter().any(|p| p.id == pp.id);
             json!({
                 "id": pp.id,
                 "label": pp.label,
-                "enabled": meta.enabled,
-                "loaded": meta.enabled && loaded,
-                // 原生插件包没有 provider 级字段（PackMeta 只有包级 enabled）：
-                // 前端据此把开关渲染成「随包启停」的只读徽标，不调开关接口。
-                "toggle": "none",
+                "enabled": enabled,
+                "loaded": enabled && loaded,
+                // 逐家开关写 `PackMeta.disabled_providers`（与内置包同为
+                // "global" 语义：改完数据面归属即时生效）
+                "toggle": "global",
             })
         })
         .collect();
-    // `providerEnabled`：包级启停展平（外置包不支持逐家单独开关，
-    // 全部随包级 —— 与 `providers[].enabled` 同源，前端两处读一致）
+    // `providerEnabled`：与 `providers[].enabled` 同源（前端两处读一致）
     let mut provider_enabled = serde_json::Map::new();
     for pp in &meta.providers {
-        provider_enabled.insert(pp.id.clone(), Value::Bool(meta.enabled));
+        provider_enabled.insert(pp.id.clone(), Value::Bool(meta.provider_enabled(&pp.id)));
     }
     let startup = json!({
         "phase": if !meta.enabled {
@@ -1192,23 +1193,38 @@ pub async fn handle_set_plugin_provider_enabled(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     if body.id != BUILTIN_PACK_ID {
-        // 包存在 ≠ 支持 provider 级开关：原生插件包（PackMeta）只有包级
-        // enabled，本轮不提供逐家开关——回 400 说明，而不是 404「不存在」
-        // （那会让前端以为要重装）。脚本插件走「脚本插件（Magpie）」页。
-        if state.plugin_host.registry().get(&body.id).is_some() {
-            return Err(error_response(
-                &format!(
-                    "插件包「{}」的提供商级开关暂未提供（原生插件包只支持整包启停）；\
-                     脚本插件请在「脚本插件（Magpie）」页按家启停",
-                    body.id
-                ),
-                StatusCode::BAD_REQUEST,
-            ));
+        // 外置（原生）插件包：逐家开关写 `PackMeta.disabled_providers` 并
+        // 持久化（上游 `set_provider_enabled` 同义）。包不存在 → 404；
+        // 家不在包声明里 → 400（不造幽灵开关）。
+        let changed = state
+            .plugin_host
+            .registry()
+            .set_provider_enabled(&body.id, &body.provider, body.enabled)
+            .map_err(|e| {
+                let status = if e.contains("不存在") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                error_response(&e, status)
+            })?;
+        if changed {
+            tracing::info!(
+                "[Plugins] 插件包「{}」的 provider「{}」已{}（数据面归属即时生效）",
+                body.id,
+                body.provider,
+                if body.enabled { "启用" } else { "停用" }
+            );
         }
-        return Err(error_response(
-            &format!("插件包「{}」不存在", body.id),
-            StatusCode::NOT_FOUND,
-        ));
+        return Ok(Json(json!({
+            "success": true,
+            "data": {
+                "id": body.provider,
+                "pack": body.id,
+                "enabled": body.enabled,
+                "changed": changed
+            }
+        })));
     }
     if !all_provider_kinds().contains(&body.provider.as_str()) {
         return Err(error_response(
@@ -1652,13 +1668,29 @@ mod tests {
         assert_eq!(provs[0]["label"], "Kiro");
         assert_eq!(provs[0]["enabled"], true);
         assert_eq!(provs[0]["loaded"], false);
-        // 原生插件包没有 provider 级开关（前端渲染「随包启停」只读徽标）
-        assert_eq!(provs[0]["toggle"], "none");
+        // 原生插件包现已支持 provider 级开关（写 PackMeta.disabled_providers）
+        assert_eq!(provs[0]["toggle"], "global");
+        assert_eq!(view["providerEnabled"]["kiro"], true);
         // 入口落盘后 entryPresent=true
         let entry = meta.entry_path(&root);
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::fs::write(&entry, b"x").unwrap();
         assert_eq!(external_pack_view(&meta, &mgr)["entryPresent"], true);
+
+        // 逐家停用：view 与 providerEnabled 同步反映（与上游 provider_enabled 同口径）
+        let mut off = meta.clone();
+        off.disabled_providers = vec!["kiro".into()];
+        let off_view = external_pack_view(&off, &mgr);
+        assert_eq!(off_view["providers"][0]["enabled"], false);
+        assert_eq!(off_view["providers"][0]["loaded"], false);
+        assert_eq!(off_view["providerEnabled"]["kiro"], false);
+        // 包级停用 = 全部停用
+        let mut pack_off = meta.clone();
+        pack_off.enabled = false;
+        assert_eq!(
+            external_pack_view(&pack_off, &mgr)["providerEnabled"]["kiro"],
+            false
+        );
     }
 
     #[test]

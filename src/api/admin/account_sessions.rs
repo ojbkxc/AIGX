@@ -2665,6 +2665,83 @@ pub struct CatalogSyncRequest {
 }
 // `default_true` 定义在文件前部（AutoChannelSpec 附近），此处复用
 
+/// 插件账号目录刷新的宿主选择（纯判定，便于单测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginCatalogTarget {
+    /// wasm 宿主接管且声明 `catalog.accounts.v1`（`models.refresh`）。
+    Wasm,
+    /// 脚本宿主接管（`models.refresh`，与 wasm 同名契约）。
+    Script,
+    /// 归属注册表明确由插件接管，但宿主不在跑 / 未声明目录能力。
+    Unavailable,
+    /// 非插件账号（或未归属插件）→ 网关自带目录探测。
+    Gateway,
+}
+
+/// 按「账号是不是插件账号 + 哪种宿主接管」决定目录刷新路径。
+///
+/// wasm 优先（`catalog.accounts.v1` 是显式能力声明）；脚本宿主按路由表；
+/// 两者都不在跑但注册表仍归插件所有 → [`PluginCatalogTarget::Unavailable`]
+/// （稳定错误：网页探测对插件账号没有可用凭证，不能拿它冒充插件目录）。
+fn plugin_catalog_target(
+    plugin_account: bool,
+    wasm_catalog_capable: bool,
+    script_routed: bool,
+    plugin_owned: bool,
+) -> PluginCatalogTarget {
+    if !plugin_account {
+        return PluginCatalogTarget::Gateway;
+    }
+    if wasm_catalog_capable {
+        return PluginCatalogTarget::Wasm;
+    }
+    if script_routed {
+        return PluginCatalogTarget::Script;
+    }
+    if plugin_owned {
+        return PluginCatalogTarget::Unavailable;
+    }
+    PluginCatalogTarget::Gateway
+}
+
+/// 调插件宿主刷新一个账号的目录并落盘（返回真实写入的模型快照）。
+///
+/// wasm：`host.call("models.refresh", {provider, account, force})`；
+/// 脚本：`script_host.call_provider` 同一方法名。应答形状与校验见
+/// `wasm::catalog::save_refresh`（`refreshed=true` + `count` 与 `models`
+/// 一致 + `meta.remote=true`，否则拒写）。
+async fn refresh_plugin_account_catalog(
+    state: &AppState,
+    session: &crate::account_session::model::AccountSession,
+    force: bool,
+    wasm: bool,
+    access: &std::sync::Arc<dyn crate::plugin_host::wasm::access::WasmAccountAccess>,
+) -> Result<crate::plugin_host::wasm::catalog::SavedCatalog, String> {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let provider = session.provider.clone();
+    let params = json!({
+        "provider": provider,
+        "account": session.id,
+        "force": force,
+    });
+    let reply = if wasm {
+        let host = crate::plugin_host::wasm::host_for_provider(&provider)
+            .ok_or_else(|| format!("提供商插件未运行，无法刷新 {provider} 的模型目录"))?;
+        tokio::time::timeout(TIMEOUT, host.call("models.refresh", params, TIMEOUT))
+            .await
+            .map_err(|_| format!("刷新 {provider} 的模型目录超时"))?
+            .map_err(|error| error.message)?
+    } else {
+        state
+            .script_host
+            .call_provider(&provider, "models.refresh", params, TIMEOUT)
+            .await?
+    };
+    crate::plugin_host::wasm::catalog::save_refresh(access, &provider, &session.id, &reply)
+        .await
+        .map_err(|error| error.message)
+}
+
 /// POST /api/account-sessions/catalog/sync —— 同步上游模型目录。
 ///
 /// 单个账号失败不影响其他账号：逐账号返回结果，前端展示成表格。
@@ -2721,12 +2798,145 @@ pub async fn handle_sync_account_catalog(
         return Err(error_response("没有匹配的账号", StatusCode::NOT_FOUND));
     }
 
+    // 插件账号的目录由插件宿主自己刷新（wasm `catalog.accounts.v1` 走
+    // `models.refresh`；脚本宿主同方法名），落盘与并集回推走
+    // `wasm::catalog::save`。访问面在此显式构造 —— 不再依赖「本进程曾有
+    // wasm 宿主启动过」的进程级单例，脚本宿主部署也能落目录。
+    let catalog_access: std::sync::Arc<dyn crate::plugin_host::wasm::access::WasmAccountAccess> =
+        crate::plugin_host::wasm::AccountSessionAccess::new(
+            "account-catalog-sync",
+            std::sync::Arc::new(sessions.clone()),
+            sessions.store().clone(),
+        );
+
     for session in targets {
         let name = if session.name.is_empty() {
             session.id.clone()
         } else {
             session.name.clone()
         };
+        // 插件归属判定（纯函数，见 `plugin_catalog_target` 的说明）。
+        let target_kind = plugin_catalog_target(
+            session.is_plugin_account(),
+            crate::plugin_host::wasm::has_capability(&session.provider, "catalog.accounts.v1"),
+            state
+                .script_host
+                .route_for_provider(&session.provider)
+                .is_some(),
+            state
+                .plugin_host
+                .registry()
+                .is_plugin_owned(&session.provider),
+        );
+        if matches!(
+            target_kind,
+            PluginCatalogTarget::Wasm | PluginCatalogTarget::Script
+        ) {
+            match refresh_plugin_account_catalog(
+                &state,
+                &session,
+                body.force,
+                target_kind == PluginCatalogTarget::Wasm,
+                &catalog_access,
+            )
+            .await
+            {
+                Ok(saved) => {
+                    let ids: Vec<String> = saved
+                        .models
+                        .iter()
+                        .filter_map(|model| model["id"].as_str())
+                        .filter(|id| !id.trim().is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    let mut applied = false;
+                    let mut apply_error: Option<String> = None;
+                    if body.apply {
+                        match crate::account_session::catalog::apply_catalog_to_session(
+                            &sessions,
+                            &session.id,
+                            &ids,
+                            body.replace,
+                        ) {
+                            Ok(()) => applied = true,
+                            Err(e) => apply_error = Some(e),
+                        }
+                    }
+                    // 成功落盘 = 插件确认过的远程目录（`save_refresh` 已验
+                    // `meta.remote = true`）；空目录不清映射（与既有闸门同口径）。
+                    crate::account_session::catalog::record_catalog_error(
+                        &sessions,
+                        &session.provider,
+                        &session.id,
+                        None,
+                    );
+                    if !saved.models.is_empty() {
+                        remote_ok_accounts += 1;
+                        for model in &saved.models {
+                            if let Some(id) = model["id"].as_str() {
+                                fresh_catalog.insert(id.to_string());
+                            }
+                            if let Some(upstream) = model["upstream"].as_str() {
+                                fresh_catalog.insert(upstream.to_string());
+                            }
+                        }
+                    }
+                    let fetched_at = if saved.refreshed_at > 0 {
+                        saved.refreshed_at / 1000
+                    } else {
+                        chrono::Utc::now().timestamp()
+                    };
+                    results.push(json!({
+                        "account_id": session.id,
+                        "name": name,
+                        "provider": session.provider,
+                        "source": "remote",
+                        "fetched_at": fetched_at,
+                        "count": saved.models.len(),
+                        "models": saved.models,
+                        "applied": applied,
+                        "apply_error": apply_error,
+                    }));
+                }
+                Err(error) => {
+                    // 宿主不在跑 / 应答不合格：稳定错误，不拿旧目录冒充。
+                    crate::account_session::catalog::record_catalog_error(
+                        &sessions,
+                        &session.provider,
+                        &session.id,
+                        Some(&error),
+                    );
+                    errors.push(json!({
+                        "account_id": session.id,
+                        "name": name,
+                        "provider": session.provider,
+                        "error": error,
+                    }));
+                }
+            }
+            continue;
+        }
+        if target_kind == PluginCatalogTarget::Unavailable {
+            // 归属注册表明确由插件接管，但宿主不在跑且未声明目录能力：
+            // 网关探测对插件账号无凭证可用，直接给稳定错误。
+            let error = format!(
+                "提供商插件未运行或不支持模型目录刷新，无法同步 {} 的模型目录",
+                session.provider
+            );
+            crate::account_session::catalog::record_catalog_error(
+                &sessions,
+                &session.provider,
+                &session.id,
+                Some(&error),
+            );
+            errors.push(json!({
+                "account_id": session.id,
+                "name": name,
+                "provider": session.provider,
+                "error": error,
+            }));
+            continue;
+        }
         match crate::account_session::catalog::sync_account_catalog(&sessions, &session, body.force)
             .await
         {
@@ -3649,8 +3859,7 @@ fn apply_sorting_rules(
         }
         Some(value) => {
             let inputs: Vec<crate::account_session::sorting::SortRuleInput> =
-                serde_json::from_value(value)
-                    .map_err(|e| format!("账号排序规则格式错误: {e}"))?;
+                serde_json::from_value(value).map_err(|e| format!("账号排序规则格式错误: {e}"))?;
             let rules: Vec<crate::channel::routing_policy::AccountSortRule> =
                 inputs.into_iter().map(Into::into).collect();
             crate::account_session::sorting::validate_rules(&rules)?;
@@ -4855,8 +5064,7 @@ mod sorting_request_tests {
     /// 缺字段仍保持 `None`（防手滑清空保护的输入侧）。
     #[test]
     fn missing_field_deserializes_to_none() {
-        let body: AccountSortingRequest =
-            serde_json::from_str(r#"{"provider":"openai"}"#).unwrap();
+        let body: AccountSortingRequest = serde_json::from_str(r#"{"provider":"openai"}"#).unwrap();
         assert_eq!(body.rules, None);
     }
 
@@ -4921,5 +5129,26 @@ mod sorting_request_tests {
                 dir: crate::channel::routing_policy::SortDir::Asc,
             }]
         );
+    }
+}
+
+#[cfg(test)]
+mod catalog_sync_target_tests {
+    use super::plugin_catalog_target;
+    use super::PluginCatalogTarget::{Gateway, Script, Unavailable, Wasm};
+
+    /// 宿主选择：wasm 能力优先、脚本其次、插件归属但无宿主 → 稳定错误档，
+    /// 非插件账号一律走网关探测（不改变既有行为）。
+    #[test]
+    fn routes_by_host_kind() {
+        assert_eq!(plugin_catalog_target(false, true, true, true), Gateway);
+        assert_eq!(plugin_catalog_target(true, true, true, true), Wasm);
+        assert_eq!(plugin_catalog_target(true, false, true, true), Script);
+        // wasm 能力 + 脚本路由同时在：wasm 的显式能力声明优先
+        assert_eq!(plugin_catalog_target(true, true, false, false), Wasm);
+        // 插件归属但两种宿主都不在跑 → 稳定错误（不回落到网关探测）
+        assert_eq!(plugin_catalog_target(true, false, false, true), Unavailable);
+        // 未知来源的普通账号 → 网关探测
+        assert_eq!(plugin_catalog_target(true, false, false, false), Gateway);
     }
 }

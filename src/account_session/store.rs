@@ -91,6 +91,9 @@ pub struct SkipReasons {
     pub expired: usize,
     /// 模型不在账号白名单（models 为空 = 全支持，不计）
     pub model_mismatch: usize,
+    /// 账号目录（`host.catalog.v1` 快照）**明确不含**请求模型（插件选号
+    /// 权限门）。无目录 / 非远程快照按「未知放行」，不计本档。
+    pub model_permission: usize,
     /// 模型能力位不满足请求需求（#40 §1：图/工具/视频）。**只计有证据的拒否**
     /// —— 能力标签缺失（老账号目录快照）按放行处理，不计入本档。
     pub capability: usize,
@@ -127,6 +130,9 @@ impl SkipReasons {
         }
         if self.model_mismatch > 0 {
             parts.push(format!("{} 个不在模型白名单", self.model_mismatch));
+        }
+        if self.model_permission > 0 {
+            parts.push(format!("{} 个账号目录不含请求模型", self.model_permission));
         }
         if self.capability > 0 {
             parts.push(format!("{} 个不支持请求能力", self.capability));
@@ -746,6 +752,22 @@ impl AccountSessionStore {
                 reasons.model_mismatch += 1;
                 if let Some(cap) = detail.as_mut() {
                     cap.push(self.skip_detail(session, "model_mismatch"));
+                }
+                continue;
+            }
+            // 插件目录权限门（wasm `catalog.accounts.v1`）：账号目录快照
+            // **明确不含**该模型才裁号；无目录 / 非远程快照（`None`）按
+            // 「未知放行」，与能力索引同一三态口径。只查插件账号 ——
+            // 非插件账号 `plugin_state` 恒为 None，零锁零分配。
+            if session.is_plugin_account()
+                && crate::plugin_host::wasm::catalog::route_allowed(
+                    session.plugin_state.as_ref(),
+                    model,
+                ) == Some(false)
+            {
+                reasons.model_permission += 1;
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "account_model_unavailable"));
                 }
                 continue;
             }
@@ -1620,7 +1642,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mixed.summary(), "2 个冷却中、1 个余额低于阈值");
-        // 顺序稳定（禁用 → 需重登 → provider → 过期 → 白名单 → 能力 → 名单 → 冷却 → 余额 → 限制 → 并发）
+        // 顺序稳定（禁用 → 需重登 → provider → 过期 → 白名单 → 目录 → 能力 → 名单 → 冷却 → 余额 → 限制 → 并发）
         let full = SkipReasons {
             no_accounts: false,
             disabled: 1,
@@ -1628,6 +1650,7 @@ mod tests {
             provider_off: 1,
             expired: 1,
             model_mismatch: 1,
+            model_permission: 1,
             capability: 1,
             scope_excluded: 1,
             cooling: 1,
@@ -1637,7 +1660,7 @@ mod tests {
         };
         assert_eq!(
             full.summary(),
-            "1 个已禁用、1 个需重新登录、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个不支持请求能力、1 个被参与名单排除、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
+            "1 个已禁用、1 个需重新登录、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个账号目录不含请求模型、1 个不支持请求能力、1 个被参与名单排除、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
         );
     }
 
@@ -1669,6 +1692,55 @@ mod tests {
             let (lease, reasons) = pool.acquire_with_reasons("other", "m", None, |_| true);
             assert!(lease.is_none());
             assert!(reasons.no_accounts);
+        });
+    }
+
+    /// 插件目录权限门：目录明确不含 → 裁号并计 `model_permission`；
+    /// 目录含 / 无目录（未知）→ 放行。
+    #[test]
+    fn plugin_catalog_gate_skips_only_known_missing_models() {
+        with_secret_dir("catalog-gate", || {
+            let pool = pool();
+            let mut plugin = session("ch", "plug", 0);
+            plugin.plugin_secret = Some(serde_json::json!({ "secret": "sk-plugin" }));
+            plugin.plugin_state = Some(serde_json::json!({
+                "host.catalog.v1": {
+                    "revision": 1,
+                    "schema": 1,
+                    "value": {
+                        "models": [{ "id": "known-model" }],
+                        "meta": { "remote": true, "refreshed_at": 10 }
+                    }
+                }
+            }));
+            let _plugin = pool.upsert(plugin).unwrap();
+            // 目录含该模型 → 放行
+            let (lease, reasons) = pool.acquire_with_reasons("ch", "known-model", None, |_| true);
+            assert!(lease.is_some(), "{reasons:?}");
+            // 目录明确不含 → 裁号（有证据的拒否）
+            let (lease, reasons) = pool.acquire_with_reasons("ch", "other-model", None, |_| true);
+            assert!(lease.is_none());
+            assert_eq!(reasons.model_permission, 1);
+            assert!(reasons.summary().contains("目录"));
+            // 无目录的普通账号（`plugin_state = None`）→ 未知放行
+            pool.upsert(session("ch", "plain", 0)).unwrap();
+            let (lease, _) = pool.acquire_with_reasons("ch", "other-model", None, |_| true);
+            assert!(lease.is_some());
+            // 非远程快照（本地/兜底目录）同样不算证据 → 放行（单独渠道，避免
+            // 被其它账号的「有证据拒否」掩蔽）
+            let mut local = session("ch-local", "local", 0);
+            local.plugin_secret = Some(serde_json::json!({ "secret": "sk-local" }));
+            local.plugin_state = Some(serde_json::json!({
+                "host.catalog.v1": {
+                    "value": {
+                        "models": [{ "id": "another-model" }],
+                        "meta": { "remote": false }
+                    }
+                }
+            }));
+            let _local = pool.upsert(local).unwrap();
+            let (lease, _) = pool.acquire_with_reasons("ch-local", "other-model", None, |_| true);
+            assert!(lease.is_some());
         });
     }
 

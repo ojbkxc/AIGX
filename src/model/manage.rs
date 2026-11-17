@@ -394,6 +394,35 @@ pub fn build_view(
             continue;
         }
 
+        if channel.channel_type == ChannelType::Plugin {
+            // 插件渠道：provider 用 `plugin_provider`（不显示字面量 "plugin"）；
+            // 模型优先渠道声明，留空回落插件目录（与 `collect_available_models`
+            // 同源，见 `model_catalog::plugin_channel_source`）。
+            let (plugin_provider, models, _) =
+                crate::plugin_host::model_catalog::plugin_channel_source(channel);
+            let provider = if plugin_provider.is_empty() {
+                channel.channel_type.as_str()
+            } else {
+                plugin_provider.as_str()
+            };
+            for model in models {
+                if model.is_empty() {
+                    continue;
+                }
+                let row = rows
+                    .entry((provider.to_string(), model.clone()))
+                    .or_insert_with(|| new_row(provider, &model, metadata, pricing, mapper));
+                if !row.sources.iter().any(|s| s.channel_id == channel.id) {
+                    row.sources.push(ModelSource {
+                        kind: "channel".to_string(),
+                        channel_id: channel.id.clone(),
+                        name: channel.name.clone(),
+                        account_id: None,
+                    });
+                }
+            }
+            continue;
+        }
         let provider = channel.channel_type.as_str();
         for model in channel.effective_models() {
             if model.is_empty() {
@@ -474,6 +503,33 @@ pub fn build_view(
                     })
                     .or_insert((source, refreshed_at));
             }
+        } else if channel.channel_type == ChannelType::Plugin {
+            // 插件渠道：source/时刻用插件目录的 meta（与模型行走同一份口径；
+            // 渠道声明非空 = builtin，空 + 目录命中 = remote + 目录刷新时刻）。
+            let (plugin_provider, _, refreshed_at) =
+                crate::plugin_host::model_catalog::plugin_channel_source(channel);
+            let provider = if plugin_provider.is_empty() {
+                channel.channel_type.as_str().to_string()
+            } else {
+                plugin_provider
+            };
+            let (source, at) = if !channel.effective_models().is_empty() {
+                ("builtin".to_string(), 0)
+            } else if refreshed_at > 0 {
+                ("remote".to_string(), refreshed_at)
+            } else {
+                ("builtin".to_string(), 0)
+            };
+            provider_meta
+                .entry(provider)
+                .and_modify(|slot| {
+                    if source == "remote" && slot.0 != "remote" {
+                        *slot = (source.clone(), at);
+                    } else if at > slot.1 {
+                        slot.1 = at;
+                    }
+                })
+                .or_insert((source, at));
         } else {
             provider_meta
                 .entry(channel.channel_type.as_str().to_string())
@@ -1021,5 +1077,74 @@ mod tests {
         );
         // registry 里的 provider 用中文展示名
         assert!(!provider_label("deepseek").is_empty());
+    }
+
+    /// 插件渠道的 `build_view`：provider 用 `plugin_provider` 而非字面量
+    /// "plugin"；模型回落目录；provider 分组的 source/refreshedAt 取目录 meta。
+    #[test]
+    fn plugin_channel_rows_use_plugin_provider_and_catalog() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let provider = format!("unit-manage-plugin-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        crate::plugin_host::model_catalog::set_remote(
+            &provider,
+            vec![serde_json::json!({ "id": "cat-a" })],
+            123,
+        );
+        let channel: Channel = serde_json::from_value(serde_json::json!({
+            "id": "ch-plugin-view",
+            "name": "plugin-view",
+            "channel_type": "plugin",
+            "plugin_provider": provider,
+            "status": "enabled",
+            "models": [],
+        }))
+        .unwrap();
+        let store = temp_store("plugin-view");
+        let sessions = AccountSessionStore::new(store.clone());
+        let rules = ModelRules::new(store.clone());
+        rules.load().unwrap();
+        let metadata = ModelMetadataRegistry::new(store.clone());
+        let pricing = PricingStore::new(store.clone());
+        let mapper = ModelMapper::new(store);
+        let view = build_view(
+            std::slice::from_ref(&channel),
+            &sessions,
+            &rules,
+            &metadata,
+            &pricing,
+            &mapper,
+        );
+        // 行：provider = plugin_provider（不出现 "plugin" 字面量）
+        assert_eq!(view.models.len(), 1);
+        assert_eq!(view.models[0].provider, provider);
+        assert_eq!(view.models[0].id, "cat-a");
+        // 分组：id/label 同样用 plugin_provider，source = remote + 目录时刻
+        assert_eq!(view.providers.len(), 1);
+        assert_eq!(view.providers[0].id, provider);
+        assert_eq!(view.providers[0].source, "remote");
+        assert_eq!(view.providers[0].refreshed_at, 123);
+        crate::plugin_host::model_catalog::remove(&provider);
+
+        // 无目录、无声明 → 不出现任何行（不编造）
+        let empty: Channel = serde_json::from_value(serde_json::json!({
+            "id": "ch-plugin-empty",
+            "name": "plugin-empty",
+            "channel_type": "plugin",
+            "plugin_provider": "unit-manage-absent",
+            "status": "enabled",
+            "models": [],
+        }))
+        .unwrap();
+        let view = build_view(
+            std::slice::from_ref(&empty),
+            &sessions,
+            &rules,
+            &metadata,
+            &pricing,
+            &mapper,
+        );
+        assert!(view.models.is_empty());
+        assert!(view.providers.is_empty());
     }
 }

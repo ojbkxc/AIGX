@@ -11,13 +11,112 @@
 //!
 //! ── 与上游的差异 ────────────────────────────────────────────
 //! 上游保存时会校验「提供商 × 模型 × 账号」在模型目录/账号池里真实可用；
-//! AIGX 的模型目录（T5）与账号池（T4）正在并行改造，本模块只做**形状校验**
-//! （非空、数量/并发/保留期/存储上限），把目录校验留到运行时接入时补。
+//! AIGX 没有 `supports_image_generation` / `supports_image_editing` 两个能力位，
+//! 本模块用模型元信息里的 **`image` 标签**（`model::metadata` 的内置推断 /
+//! models.dev / 管理员覆盖三档合并结果）代替：两个操作共用同一标签（编辑
+//! 能力无法单独表达 —— 报告中列为偏离）。账号校验对照账号池
+//! （`AccountSessionStore`）中 provider 匹配且启用的账号；`account_id` 为空
+//! 时不强制存在账号（渠道型 provider 没有账号，账号型 provider 由
+//! `AccountBridge` 按优先级选号，见 image_runtime 的偏离说明）。
+//!
+//! 目录快照由 [`catalog`] 从 `api::admin::model_manage::current_view`（与
+//! 「统一模型管理」页同一份聚合视图）+ 账号池构造，读写接口共用。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::ToolServices;
+use crate::api::openai::AppState;
+
+/// 图片操作（上游 `providers::images::ImageOperation` 的 AIGX 对应物）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageOperation {
+    Generate,
+    Edit,
+}
+
+impl ImageOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generate => "generate",
+            Self::Edit => "edit",
+        }
+    }
+}
+
+/// 管理面「可选模型」一行。
+#[derive(Clone, Debug, Serialize)]
+pub struct ImageModelRow {
+    pub id: String,
+    pub provider: String,
+    pub provider_label: String,
+    pub enabled: bool,
+    pub generation: bool,
+    pub editing: bool,
+}
+
+/// 管理面「可选账号」一行。
+#[derive(Clone, Debug, Serialize)]
+pub struct ImageAccountRow {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub enabled: bool,
+}
+
+/// 目标校验用的目录快照（与上游 `catalog::manage_view` + 账号池同职责）。
+#[derive(Clone, Debug, Default)]
+pub struct ImageCatalog {
+    pub models: Vec<ImageModelRow>,
+    pub accounts: Vec<ImageAccountRow>,
+}
+
+/// 构造目录快照：模型来自统一模型管理视图（能力标签含 `image` 且启用），
+/// 账号来自账号池（启用 + provider 命中任一图片模型）。
+pub fn catalog(state: &AppState) -> ImageCatalog {
+    let view = crate::api::admin::model_manage::current_view(state);
+    let models: Vec<ImageModelRow> = view
+        .models
+        .into_iter()
+        .filter(|model| {
+            model.enabled
+                && model
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.eq_ignore_ascii_case("image"))
+        })
+        .map(|model| ImageModelRow {
+            id: model.id,
+            provider: model.provider,
+            provider_label: model.provider_label,
+            enabled: model.enabled,
+            // AIGX 无独立编辑能力位：同一 `image` 标签同时视为可编辑。
+            generation: true,
+            editing: true,
+        })
+        .collect();
+    let providers: std::collections::HashSet<&str> =
+        models.iter().map(|model| model.provider.as_str()).collect();
+    let accounts: Vec<ImageAccountRow> = state
+        .account_sessions
+        .all()
+        .into_iter()
+        .filter(|session| {
+            session.status == "enabled" && providers.contains(session.provider.as_str())
+        })
+        .map(|session| ImageAccountRow {
+            name: if session.name.is_empty() {
+                session.id.clone()
+            } else {
+                session.name
+            },
+            provider: session.provider,
+            id: session.id,
+            enabled: true,
+        })
+        .collect();
+    ImageCatalog { models, accounts }
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -75,14 +174,80 @@ fn invalid(message: impl Into<String>) -> String {
     message.into()
 }
 
-fn validate_target(target: &ImageTarget, label: &str) -> Result<(), String> {
+/// 形状校验（非空 + 能力标签），上游 `validate_target` 的 AIGX 对应物。
+///
+/// `catalog` 为空（尚未配置渠道/账号）时只做非空校验 —— 与上游「配置保存
+/// 失败」方向相反，这里选择**放行形状**、由运行时返回可读的 no-bridge
+/// 错误：AIGX 的渠道可能后于工具服务配置，严格拒绝会让首次配置无法落盘。
+pub fn validate_target(
+    catalog: &ImageCatalog,
+    target: &ImageTarget,
+    operation: ImageOperation,
+) -> Result<(), String> {
+    let label = match operation {
+        ImageOperation::Generate => "生图",
+        ImageOperation::Edit => "参考图编辑",
+    };
     if target.provider.trim().is_empty() || target.model.trim().is_empty() {
         return Err(invalid(format!("请选择{label}提供商与模型")));
+    }
+    if catalog.models.is_empty() {
+        return Ok(());
+    }
+    let model = catalog.models.iter().find(|model| {
+        model.provider == target.provider
+            && model.id == target.model
+            && model.enabled
+            && match operation {
+                ImageOperation::Generate => model.generation,
+                ImageOperation::Edit => model.editing,
+            }
+    });
+    if model.is_none() {
+        return Err(invalid(
+            "所选图片模型已停用或不支持该能力，请检查渠道、账号与模型目录",
+        ));
+    }
+    if !target.account_id.is_empty()
+        && !catalog
+            .accounts
+            .iter()
+            .any(|account| account.id == target.account_id && account.provider == target.provider)
+    {
+        return Err(invalid("所选生图账号不存在、已停用或与所选提供商不匹配"));
     }
     Ok(())
 }
 
-pub fn save(services: &ToolServices, mut config: ImageConfig) -> Result<Value, String> {
+/// 运行前校验（与保存时同一口径；返回可读配置错误）。
+pub fn validate_target_or_error(
+    catalog: &ImageCatalog,
+    target: &ImageTarget,
+    operation: ImageOperation,
+) -> Result<(), super::image_jobs::ImageToolError> {
+    validate_target(catalog, target, operation).map_err(|message| {
+        super::image_jobs::ImageToolError::new(400, "image_configuration", message)
+    })
+}
+
+/// 取某个操作的目标（编辑未启用 → `image_configuration`）。
+pub fn target(
+    config: &ImageConfig,
+    operation: ImageOperation,
+) -> Result<&ImageTarget, super::image_jobs::ImageToolError> {
+    match operation {
+        ImageOperation::Generate => Ok(&config.generation),
+        ImageOperation::Edit => config.editing.as_ref().ok_or_else(|| {
+            super::image_jobs::ImageToolError::new(400, "image_configuration", "尚未启用参考图编辑")
+        }),
+    }
+}
+
+pub fn save(
+    services: &ToolServices,
+    catalog: &ImageCatalog,
+    mut config: ImageConfig,
+) -> Result<Value, String> {
     for item in std::iter::once(&mut config.generation).chain(config.editing.iter_mut()) {
         item.provider = item.provider.trim().to_string();
         item.model = item.model.trim().to_string();
@@ -97,12 +262,12 @@ pub fn save(services: &ToolServices, mut config: ImageConfig) -> Result<Value, S
             "数量须为 1–10，并发须为 1–8，保留时间须为 1–168 小时，存储须为 64–4096 MiB",
         ));
     }
-    validate_target(&config.generation, "生图")?;
+    validate_target(catalog, &config.generation, ImageOperation::Generate)?;
     if let Some(editing) = &config.editing {
-        validate_target(editing, "参考图编辑")?;
+        validate_target(catalog, editing, ImageOperation::Edit)?;
     }
     services.update(|value| value.image_generation = Some(config))?;
-    Ok(management_view(services))
+    Ok(management_view(services, catalog))
 }
 
 pub fn clear(services: &ToolServices) -> Result<(), String> {
@@ -111,29 +276,26 @@ pub fn clear(services: &ToolServices) -> Result<(), String> {
         .map(|_| ())
 }
 
-/// 管理视图：配置 + 默认值 + 形状校验错误 + 服务超时。
-///
-/// `models` / `accounts` 两个下拉数组本波恒为空（模型目录/账号池未接线），
-/// 前端按空数组渲染「暂不可用」即可，不需要为空值特判。
-pub fn management_view(services: &ToolServices) -> Value {
+/// 管理视图：配置 + 默认值 + 校验错误 + 可选模型/账号 + 服务超时。
+pub fn management_view(services: &ToolServices, catalog: &ImageCatalog) -> Value {
     let config = load(services);
-    let generation_error = config
-        .as_ref()
-        .and_then(|value| validate_target(&value.generation, "生图").err());
+    let generation_error = config.as_ref().and_then(|value| {
+        validate_target(catalog, &value.generation, ImageOperation::Generate).err()
+    });
     let editing_error = config
         .as_ref()
         .and_then(|value| value.editing.as_ref())
-        .and_then(|value| validate_target(value, "参考图编辑").err());
+        .and_then(|value| validate_target(catalog, value, ImageOperation::Edit).err());
     json!({
         "config": config,
         "defaults": ImageConfig::default(),
-        "models": [],
-        "accounts": [],
+        "models": &catalog.models,
+        "accounts": &catalog.accounts,
         "generation_error": generation_error,
         "editing_error": editing_error,
         "timeout_seconds": super::timeout_seconds(services, super::IMAGE_GENERATION_SERVICE_ID),
-        "runtime_available": false,
-        "runtime_note": "生图运行时（任务/文件面/MCP/本地桥接）未移植；本接口仅提供配置面",
+        "runtime_available": true,
+        "runtime_note": "任务/文件面/MCP/本地桥接脚本已接线；模型目录能力位用 image 标签代替上游 supports_image_generation/supports_image_editing（编辑能力无法单独表达）",
     })
 }
 
@@ -148,7 +310,7 @@ mod tests {
         (ToolServices::new(store), dir)
     }
 
-    fn target() -> ImageConfig {
+    fn sample_config() -> ImageConfig {
         ImageConfig {
             generation: ImageTarget {
                 provider: "workbuddy".into(),
@@ -160,6 +322,35 @@ mod tests {
             max_concurrency: 2,
             retention_hours: 24,
             storage_mb: 512,
+        }
+    }
+
+    fn sample_catalog() -> ImageCatalog {
+        ImageCatalog {
+            models: vec![
+                ImageModelRow {
+                    id: "glm-image".into(),
+                    provider: "workbuddy".into(),
+                    provider_label: "WorkBuddy".into(),
+                    enabled: true,
+                    generation: true,
+                    editing: true,
+                },
+                ImageModelRow {
+                    id: "dall-e-3".into(),
+                    provider: "openai_compatible".into(),
+                    provider_label: "OpenAI 兼容".into(),
+                    enabled: true,
+                    generation: true,
+                    editing: true,
+                },
+            ],
+            accounts: vec![ImageAccountRow {
+                id: "acc-1".into(),
+                name: "WorkBuddy A".into(),
+                provider: "workbuddy".into(),
+                enabled: true,
+            }],
         }
     }
 
@@ -175,24 +366,48 @@ mod tests {
     #[test]
     fn save_rejects_out_of_range_and_empty_target() {
         let (svc, _dir) = services();
-        let mut bad = target();
+        let cat = sample_catalog();
+        let mut bad = sample_config();
         bad.max_images = 11;
-        assert!(save(&svc, bad).is_err());
-        let mut bad = target();
+        assert!(save(&svc, &cat, bad).is_err());
+        let mut bad = sample_config();
         bad.generation.provider = "  ".into();
-        assert!(save(&svc, bad).is_err());
-        let mut bad = target();
+        assert!(save(&svc, &cat, bad).is_err());
+        let mut bad = sample_config();
         bad.editing = Some(ImageTarget::default());
-        assert!(save(&svc, bad).is_err());
+        assert!(save(&svc, &cat, bad).is_err());
+    }
+
+    /// 上游语义校验：模型必须在目录里且带 image 能力、账号必须存在。
+    #[test]
+    fn save_rejects_uncatalogued_model_and_account() {
+        let (svc, _dir) = services();
+        let cat = sample_catalog();
+        let mut bad = sample_config();
+        bad.generation.model = "text-embedding-3-small".into();
+        let error = save(&svc, &cat, bad).unwrap_err();
+        assert!(error.contains("模型已停用或不支持"));
+
+        let mut bad = sample_config();
+        bad.generation.account_id = "missing-account".into();
+        let error = save(&svc, &cat, bad).unwrap_err();
+        assert!(error.contains("账号不存在"));
+
+        // 空目录：只做形状校验（首次配置可落盘）
+        let empty = ImageCatalog::default();
+        assert!(save(&svc, &empty, sample_config()).is_ok());
     }
 
     #[test]
     fn save_and_clear_roundtrip() {
         let (svc, _dir) = services();
-        let view = save(&svc, target()).unwrap();
+        let cat = sample_catalog();
+        let view = save(&svc, &cat, sample_config()).unwrap();
         assert_eq!(view["config"]["max_images"], 2);
-        assert_eq!(view["runtime_available"], false);
+        assert_eq!(view["runtime_available"], true);
         assert_eq!(view["timeout_seconds"], 300);
+        assert_eq!(view["models"].as_array().unwrap().len(), 2);
+        assert_eq!(view["accounts"].as_array().unwrap().len(), 1);
         clear(&svc).unwrap();
         assert!(load(&svc).is_none());
     }

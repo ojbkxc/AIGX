@@ -8,6 +8,8 @@
 //! - `GET/POST /api/checkin-center/schedules` 计划列表 / 新增更新
 //! - `POST /api/checkin-center/schedules/remove` 删除计划
 //! - `POST /api/checkin-center/schedules/run` 立即执行某计划
+//! - `PATCH /api/checkin-center/travel`   猫猫旅行巡检配置 `{enabled?, times?}`
+//! - `POST /api/checkin-center/travel/run` 立即巡检一轮（真打上游）
 //!
 //! ## 与 `/api/checkin` 的区别
 //!
@@ -28,6 +30,7 @@ use super::common::{error_response, verify_admin};
 use crate::checkin::claim::{self, supports_checkin};
 use crate::checkin::scheduler;
 use crate::checkin::store::{CheckinOutcome, CheckinRecord, CheckinSchedule, CheckinSettings};
+use crate::checkin::travel::{self, RunOutcome, TravelActionError, TravelExecutor};
 
 /// GET /api/checkin-center —— 总览快照（零上游请求）。
 pub async fn handle_checkin_center(
@@ -118,6 +121,9 @@ pub async fn handle_checkin_center(
             // 活动预览的空形状（对齐 A2A CampaignPreview：campaigns / monthlyGifts /
             // riskNote / redemption）——AIGX 暂无 provider 活动链路，返回空集但形状不变
             "campaign_preview": crate::checkin::center::campaign_preview_shape(),
+            // 猫猫旅行巡检（growth_scheduler；前端 CheckinCenter.tsx 读 data.travel，
+            // 缺省 = 不渲染该卡）。零上游请求：只读 `checkin:travel` 与本轮 running 位。
+            "travel": travel_state(&state),
             // 台账按 outcome 的统计卡（成功 / 已领 / 待重试 / 需验证 / 失败）
             "records_stats": {
                 "success": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Success), None).map(|r| r.len()).unwrap_or(0),
@@ -730,6 +736,217 @@ pub async fn handle_run_checkin_schedule(
             "failed": outcome.failed,
         }
     })))
+}
+
+// ── 猫猫旅行巡检（对照上游 core/growth_scheduler + api/growth_schedule）──
+//
+// 与每日签到分开：旅行是独立排程，配置落 `checkin:travel`（见
+// `checkin::travel` 模块头）。执行体在提供商插件里，网关只转发
+// `admin.action {action: "growth.travel"}`——与上游 `api/growth.rs` 的
+// `call_action("growth.travel")` 同名同形（`account` 空串 = 该家全部账号）。
+
+/// 插件调用超时：这些动作要真打上游（任务树查询 / 领奖），用网络面档位
+/// （对齐上游 `network` 档，不用控制面 10s）。
+const TRAVEL_ACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `AppState` 上的旅行执行器：原生包进程 → 脚本宿主 → Wasm 沙箱（与数据面
+/// `resolve.rs` 的三级查找同顺序、同判据）。
+pub struct StateTravelExecutor {
+    state: AppState,
+}
+
+impl StateTravelExecutor {
+    pub fn new(state: &AppState) -> Self {
+        Self {
+            state: state.clone(),
+        }
+    }
+
+    /// 当前该走哪个宿主（None = 插件未装/未启用/崩溃退避中）。
+    fn route(&self) -> Option<TravelRoute> {
+        let provider = travel::TRAVEL_PROVIDER;
+        if let Some(process) = self.state.plugin_host.process_for_provider(provider) {
+            return Some(TravelRoute::Native(process));
+        }
+        if let Some(route) = self.state.script_host.route_for_provider(provider) {
+            return Some(TravelRoute::Script(route));
+        }
+        crate::plugin_host::wasm::host_for_provider(provider).map(TravelRoute::Wasm)
+    }
+}
+
+/// 执行链路的三种后端（句柄快照）。
+enum TravelRoute {
+    Native(std::sync::Arc<crate::plugin_host::process::PluginProcess>),
+    Script(crate::plugin_host::script::runtime::ScriptRoute),
+    Wasm(std::sync::Arc<crate::plugin_host::wasm::WasmHost>),
+}
+
+/// 插件 `admin.action` 的参数形状（与脚本宿主 `provider.mjs` 的
+/// `{provider, account, action, payload}`、wasm 的 `params.provider`
+/// 校验逐字对齐）。
+fn travel_action_params() -> Value {
+    json!({
+        "provider": travel::TRAVEL_PROVIDER,
+        "account": "",
+        "action": travel::ACTION,
+        "payload": Value::Null,
+    })
+}
+
+#[async_trait::async_trait]
+impl TravelExecutor for StateTravelExecutor {
+    fn pause_reason(&self) -> Option<String> {
+        if self.route().is_some() {
+            return None;
+        }
+        Some(format!(
+            "{} 提供商插件未安装或未启用（旅行巡检需要插件 admin.action 支持）",
+            travel::TRAVEL_PROVIDER
+        ))
+    }
+
+    async fn run(&self) -> Result<Value, TravelActionError> {
+        let Some(route) = self.route() else {
+            return Err(TravelActionError {
+                message: self.pause_reason().unwrap_or_default(),
+                code: Some("configuration".to_string()),
+            });
+        };
+        let params = travel_action_params();
+        match route {
+            TravelRoute::Native(process) => {
+                match tokio::time::timeout(
+                    TRAVEL_ACTION_TIMEOUT,
+                    process.rpc.call("admin.action", params),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(error)) => Err(TravelActionError {
+                        message: error.message,
+                        code: error.code,
+                    }),
+                    Err(_) => Err(TravelActionError {
+                        message: "旅行巡检超时（插件 120 秒未返回）".to_string(),
+                        code: Some("timeout".to_string()),
+                    }),
+                }
+            }
+            TravelRoute::Script(route) => {
+                // 直连通道（不经 `call_provider`）：后者只保留 message，
+                // 丢弃 `unsupported` 等 code —— handler 靠它映射 501 口径。
+                match tokio::time::timeout(
+                    TRAVEL_ACTION_TIMEOUT,
+                    route.channel.call("admin.action", params),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(error)) => Err(TravelActionError {
+                        message: error.message,
+                        code: error.code,
+                    }),
+                    Err(_) => Err(TravelActionError {
+                        message: "旅行巡检超时（脚本插件 120 秒未返回）".to_string(),
+                        code: Some("timeout".to_string()),
+                    }),
+                }
+            }
+            TravelRoute::Wasm(host) => {
+                match host
+                    .call("admin.action", params, TRAVEL_ACTION_TIMEOUT)
+                    .await
+                {
+                    Ok(value) => Ok(value),
+                    Err(error) => Err(TravelActionError {
+                        message: error.message,
+                        code: error.code,
+                    }),
+                }
+            }
+        }
+    }
+}
+
+/// 调度器的执行器句柄（main.rs 接线：`checkin::travel::spawn(store, executor)`）。
+pub fn travel_executor(state: &AppState) -> std::sync::Arc<dyn TravelExecutor> {
+    std::sync::Arc::new(StateTravelExecutor::new(state))
+}
+
+/// `data.travel` 视图（前端 `CheckinTravelState` 字段逐字对齐；零上游请求）。
+fn travel_state(state: &AppState) -> Value {
+    let executor = StateTravelExecutor::new(state);
+    travel::state(&state.upstream_checkin, &executor)
+}
+
+/// PATCH /api/checkin-center/travel —— 部分更新 `{enabled?, times?}`。
+///
+/// 校验口径见 [`travel::patch`]：非法 HH:MM / 空时刻表 / 超过上限 → 400，
+/// 不落半截配置。响应给刷新后的完整状态（前端就地重绘）。
+pub async fn handle_patch_checkin_travel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let config = travel::patch(&state.upstream_checkin, &body)
+        .map_err(|message| error_response(&message, StatusCode::BAD_REQUEST))?;
+    tracing::info!(
+        "[Travel] 排程已{}，时刻 {:?}",
+        if config.enabled { "开启" } else { "关闭" },
+        config.times
+    );
+    Ok(Json(
+        json!({ "success": true, "data": travel_state(&state) }),
+    ))
+}
+
+/// POST /api/checkin-center/travel/run —— 立即巡检一轮（真跑，不伪造）。
+///
+/// - 成功 → `{summary, ok, failed}`
+/// - 能力不可用（插件未装/未启用）→ 503 + 可读原因（不落任何标记）
+/// - 插件没实现该动作（`unsupported`）→ 501
+/// - 上游失败 → 502 + 失败原文
+/// - 已有一轮在跑 → 409
+pub async fn handle_run_checkin_travel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let executor = StateTravelExecutor::new(&state);
+    match travel::run_now(&state.upstream_checkin, &executor).await {
+        RunOutcome::Completed {
+            summary,
+            ok,
+            failed,
+        } => Ok(Json(json!({
+            "success": true,
+            "data": { "summary": summary, "ok": ok, "failed": failed }
+        }))),
+        RunOutcome::Skipped(message) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "success": false, "error": message })),
+        )),
+        RunOutcome::Busy => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "success": false,
+                "error": "旅行巡检正在执行中，请稍候"
+            })),
+        )),
+        RunOutcome::Failed(error) => {
+            let status = match error.code.as_deref() {
+                Some("unsupported") => StatusCode::NOT_IMPLEMENTED,
+                Some("configuration") => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            Err((
+                status,
+                Json(json!({ "success": false, "error": error.message })),
+            ))
+        }
+    }
 }
 
 // ── 一次性 / 限时福利通道（对照 Agent2API 的 onboarding/keepalive/growth/claim）──

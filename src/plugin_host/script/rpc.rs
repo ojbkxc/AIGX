@@ -94,6 +94,21 @@ pub fn timeout_for(method: &str) -> Duration {
     CONTROL_TIMEOUT
 }
 
+/// 网关 → 宿主的**管理面**方法（不在能力面 dispatch 表里）。
+///
+/// `host/main.mjs` 的 `handle()` 在 `dispatch(item, …)` 之前用
+/// `frame.method === "<name>"` 分支处理这两个方法（与 provider 能力方法
+/// 的 `switch case` 分开）——网关侧在这里钉常量，测试与宿主 JS 逐字对表。
+pub mod admin {
+    /// 宿主包清单（`loader.mjs::packageList()`）：
+    /// `[{id,providers,aliases,icon,providerIcons,error,settings}]`。
+    /// rebuild 成功后由网关拉取并回填 `settings_schema` / provider 别名等。
+    pub const PACKAGES: &str = "script.packages";
+    /// 应用 `providerOptions` 并回最新设置声明（`environment.mjs::updateSettings`）。
+    /// `{package, providerOptions}` → `{id, optionsExample, providerOptions}`。
+    pub const SETTINGS: &str = "script.settings";
+}
+
 /// 网关 → 宿主的回调方法族（这些由网关的 `ScriptCallbacks` 实现，脚本侧
 /// 按偶数 id 发起请求）。清单来自 `host/*.mjs` 里全部 `rpc("<name>")` 调用。
 pub mod callbacks {
@@ -223,6 +238,20 @@ mod tests {
             assert!(
                 js_contains(&format!("rpc(\"{name}\"")),
                 "回调方法 {name} 必须被宿主 JS 以 rpc(\"{name}\", …) 调用"
+            );
+        }
+    }
+
+    /// 管理面方法（网关 → 宿主）：`main.mjs` 的 `handle()` 必须在
+    /// `dispatch()` 之前显式分支处理；否则网关调用会落进 provider 能力
+    /// 分派并报 unsupported。
+    #[test]
+    fn admin_methods_are_branched_in_host_main() {
+        let js = include_str!("host/main.mjs");
+        for method in [admin::PACKAGES, admin::SETTINGS] {
+            assert!(
+                js.contains(&format!("frame.method === \"{method}\"")),
+                "管理面方法 {method} 必须在 host/main.mjs 的 handle() 中分支处理"
             );
         }
     }

@@ -24,6 +24,8 @@
 pub mod callbacks;
 pub mod install;
 pub mod manager;
+/// provider 维度的插件模型目录（`wasm::catalog` 并集的落点与读取面）。
+pub mod model_catalog;
 pub mod process;
 pub mod provider_settings;
 pub mod registry;

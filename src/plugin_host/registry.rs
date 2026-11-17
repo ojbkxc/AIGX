@@ -3,7 +3,7 @@
 //! ## 归属规则（插件优先，2026-11 修订）
 //!
 //! ```text
-//! is_plugin_owned(p) = 已装且启用的插件声明了 p  &&  !is_hard_reserved(p)
+//! is_plugin_owned(p) = 已装且启用的插件声明了 p  &&  该家未被逐家停用  &&  !is_hard_reserved(p)
 //! ```
 //!
 //! **插件优先**：已装并启用的插件声明了某个 provider，就由插件接管——
@@ -49,8 +49,16 @@ pub struct PackMeta {
     pub entry: String,
     /// 包自带的签名（原样保留，是否可信由验签决定）。
     pub signature: Option<String>,
+    /// 入口二进制的 sha256（安装时现算；上游 `InstalledPack.sha256` 同义）。
+    pub sha256: Option<String>,
     /// 是否通过验签（未签名 = false，允许装但界面标黄）。
     pub signed: bool,
+    /// 运维按 provider 停用的名单（空 = 全部按包级 `enabled` 生效）。
+    ///
+    /// 上游原生包用 `providers: BTreeMap<String,bool>` 表达同一语义；AIGX 的
+    /// [`Self::providers`] 已是声明列表，故沿用上游**脚本包**的
+    /// `disabled_providers` 形态，语义一一对应（名单内 = 停用）。
+    pub disabled_providers: Vec<String>,
     /// 安装时刻（unix 秒）。
     pub installed_at: i64,
     /// 运维是否启用这个包（默认停用：装了不等于要跑）。
@@ -66,6 +74,11 @@ impl PackMeta {
     /// 入口二进制的绝对路径。
     pub fn entry_path(&self, plugins_root: &std::path::Path) -> std::path::PathBuf {
         self.version_dir(plugins_root).join(&self.entry)
+    }
+
+    /// 包声明的某 provider 是否处于启用态（包级启用 ∧ 不在停用名单）。
+    pub fn provider_enabled(&self, provider: &str) -> bool {
+        self.enabled && !self.disabled_providers.iter().any(|id| id == provider)
     }
 }
 
@@ -127,8 +140,9 @@ impl PackRegistry {
             let mut packs = self.inner.packs.write();
             match packs.iter_mut().find(|p| p.id == meta.id) {
                 Some(existing) => {
-                    // 保留既有 enabled（重装不应重置运维的选择）
+                    // 保留既有 enabled 与 provider 停用名单（重装不应重置运维的选择）
                     meta.enabled = existing.enabled;
+                    meta.disabled_providers = existing.disabled_providers.clone();
                     *existing = meta;
                 }
                 None => packs.push(meta),
@@ -169,20 +183,67 @@ impl PackRegistry {
         Ok(changed)
     }
 
-    /// 找到声明了某 provider 且**已启用**的包 id。
+    /// 单独启停包内某一家 provider（持久化；上游 `set_provider_enabled` 同义）。
+    ///
+    /// 只改 `disabled_providers`，不动包级 `enabled`：包停用时仍可预配置逐家
+    /// 开关，等包启用后按这份名单生效。provider 必须由该包声明，否则报错
+    /// （静默写入一条不存在的家只会在界面造出幽灵开关）。
+    ///
+    /// 返回 `true` = 状态确有变化（调用方据此决定是否记日志）。
+    pub fn set_provider_enabled(
+        &self,
+        pack_id: &str,
+        provider: &str,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        let changed = {
+            let mut packs = self.inner.packs.write();
+            let pack = packs
+                .iter_mut()
+                .find(|p| p.id == pack_id)
+                .ok_or_else(|| format!("插件包「{pack_id}」不存在"))?;
+            if !pack.providers.iter().any(|pp| pp.id == provider) {
+                return Err(format!("插件包「{pack_id}」未声明提供商「{provider}」"));
+            }
+            let listed = pack.disabled_providers.iter().any(|id| id == provider);
+            match (enabled, listed) {
+                (true, true) => {
+                    pack.disabled_providers.retain(|id| id != provider);
+                    true
+                }
+                (false, false) => {
+                    pack.disabled_providers.push(provider.to_string());
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.persist()?;
+        }
+        Ok(changed)
+    }
+
+    /// 找到声明了某 provider 且**该家处于启用态**的包 id。
+    ///
+    /// 「启用态」= 包级 `enabled` ∧ 该家不在 `disabled_providers`（见
+    /// [`PackMeta::provider_enabled`]）。逐家停用后数据面立即回落原生/无桥。
     pub fn find_pack_for_provider(&self, provider: &str) -> Option<String> {
         self.inner
             .packs
             .read()
             .iter()
-            .find(|p| p.enabled && p.providers.iter().any(|pp| pp.id == provider))
+            .find(|p| {
+                p.provider_enabled(provider) && p.providers.iter().any(|pp| pp.id == provider)
+            })
             .map(|p| p.id.clone())
     }
 
     /// 是否由插件接管该 provider（**插件优先**）。
     ///
-    /// 已装且启用的包声明了 `provider` 即接管；唯一例外是硬保留集合
-    /// （[`HARD_RESERVED`]，AIGX 内部虚拟 id）。
+    /// 已装且启用的包声明了 `provider` 即接管；**逐家停用**（`disabled_providers`
+    /// 名单内）即视为未接管——与上游 `provider_enabled` 同口径。唯一例外是硬
+    /// 保留集合（[`HARD_RESERVED`]，AIGX 内部虚拟 id）。
     ///
     /// **插件加载失败的兜底不在这里**：本方法只看「声明 + 启用」这一静态
     /// 事实。数据面的 `PluginHostManager::process_for_provider` 与
@@ -321,6 +382,94 @@ mod tests {
         assert_eq!(reg.find_pack_for_provider("kiro"), Some("p".into()));
         assert_eq!(reg.find_pack_for_provider("astudio"), Some("p".into()));
         assert_eq!(reg.find_pack_for_provider("nope"), None);
+    }
+
+    #[test]
+    fn provider_enabled_three_states() {
+        let m = meta("p", &["kiro"], true);
+        assert!(m.provider_enabled("kiro"), "包启用且未停用该家 = 启用");
+        let mut off = meta("p", &["kiro"], true);
+        off.disabled_providers = vec!["kiro".into()];
+        assert!(!off.provider_enabled("kiro"), "停用名单内 = 停用");
+        let mut pack_off = meta("p", &["kiro"], false);
+        pack_off.disabled_providers.clear();
+        assert!(!pack_off.provider_enabled("kiro"), "包级停用 = 全部停用");
+        // 「是否声明」是另一条判据（find_pack_for_provider 同时校验）：
+        // provider_enabled 只看启停名单，未声明的家不会被逐个列进名单。
+    }
+
+    #[test]
+    fn find_pack_skips_disabled_provider() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        reg.upsert(meta("p", &["kiro", "astudio"], true)).unwrap();
+        assert_eq!(reg.find_pack_for_provider("kiro"), Some("p".into()));
+        reg.set_provider_enabled("p", "kiro", false).unwrap();
+        assert_eq!(
+            reg.find_pack_for_provider("kiro"),
+            None,
+            "逐家停用后不再归插件"
+        );
+        assert!(
+            !reg.is_plugin_owned("kiro"),
+            "is_plugin_owned 同样过滤停用家"
+        );
+        assert_eq!(
+            reg.find_pack_for_provider("astudio"),
+            Some("p".into()),
+            "同包其它家不受影响"
+        );
+    }
+
+    #[test]
+    fn set_provider_enabled_persists() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        reg.upsert(meta("p", &["kiro", "astudio"], true)).unwrap();
+        assert!(reg.set_provider_enabled("p", "kiro", false).unwrap());
+        // 重复设置同值 = 无变化（调用方据此免记日志）
+        assert!(!reg.set_provider_enabled("p", "kiro", false).unwrap());
+
+        // 重启：新实例从 KV 恢复停用名单
+        let store = reg.inner.store.clone();
+        let reg2 = PackRegistry::new(store);
+        reg2.load().unwrap();
+        let m = reg2.get("p").unwrap();
+        assert_eq!(m.disabled_providers, vec!["kiro".to_string()]);
+
+        // 重新启用 = 从名单移除并落盘
+        assert!(reg2.set_provider_enabled("p", "kiro", true).unwrap());
+        assert!(reg2.get("p").unwrap().disabled_providers.is_empty());
+    }
+
+    #[test]
+    fn set_provider_enabled_rejects_unknown() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        reg.upsert(meta("p", &["kiro"], true)).unwrap();
+        assert!(reg.set_provider_enabled("nope", "kiro", false).is_err());
+        assert!(
+            reg.set_provider_enabled("p", "astudio", false).is_err(),
+            "未声明的家不能写入停用名单"
+        );
+    }
+
+    #[test]
+    fn reinstall_inherits_disabled_providers() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        reg.upsert(meta("p", &["kiro", "astudio"], true)).unwrap();
+        reg.set_provider_enabled("p", "kiro", false).unwrap();
+        // 重装（新元数据名单为空）应继承运维的逐家选择
+        reg.upsert(meta("p", &["kiro", "astudio"], true)).unwrap();
+        let m = reg.get("p").unwrap();
+        assert_eq!(
+            m.disabled_providers,
+            vec!["kiro".to_string()],
+            "重装应保留既有 provider 停用名单"
+        );
+        assert!(!m.provider_enabled("kiro"));
+        assert!(m.provider_enabled("astudio"));
     }
 
     #[test]

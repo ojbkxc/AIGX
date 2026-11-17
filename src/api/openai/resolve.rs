@@ -436,7 +436,18 @@ pub(crate) fn resolve_bridges_needs(
                         Some(ch.id.clone()),
                         Some(ch.clone()),
                     ));
-                } else if let Some(host) = crate::plugin_host::wasm::host_for_provider(&provider) {
+                } else if let Some(host) = crate::plugin_host::wasm::host_for_provider(&provider)
+                    .filter(|_| state.plugin_host.registry().is_plugin_owned(&provider))
+                {
+                    // 归属表闸门：wasm 宿主表只按「已启动」登记，逐家停用
+                    // （`disabled_providers`）后宿主可能仍在跑；不查归属会让
+                    // 「已停用的 provider」继续被数据面转发（与上游「停用即不
+                    // 登记 adapter」不符）。原生路径已在
+                    // `manager::process_for_provider` 内过滤、脚本路径在
+                    // `runtime::route_for_provider` 内过滤，这里是第三条兜底。
+                    // **不影响脚本托管的 provider**：脚本包不在 `PackRegistry`
+                    // 里，但这类 provider 的 `host_for_provider` 本来就是 None
+                    //（且脚本分支在上一步已 return），条件对其无副作用。
                     result.push((
                         Arc::new(crate::bridge::plugin::PluginBridge::new_wasm(
                             host, provider,

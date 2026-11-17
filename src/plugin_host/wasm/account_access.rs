@@ -141,6 +141,14 @@ impl WasmAccountAccess for AccountSessionAccess {
     }
 
     async fn settings_get(&self, provider: &str, key: &str) -> Result<Value, WireError> {
+        // ── 网关已持有的约定键（不是插件自己的设置）────────────────────
+        // `modelCatalog` = 本 provider 的模型目录快照（上游 `rpc_cache` 的
+        // `SETTING_MODEL_CATALOG` 同语义，见 `bootstrap.rs::settings_get`）。
+        // 插件装配/刷新时问它要「这家现在有哪些模型」，网关只回答这一项；
+        // 其余键仍走 pack 私有设置存储（行为不变）。
+        if key == crate::plugin_host::model_catalog::SETTING_MODEL_CATALOG {
+            return Ok(crate::plugin_host::model_catalog::snapshot(provider));
+        }
         self.callback("settings.get", json!({ "provider": provider, "key": key }))
     }
 
@@ -273,6 +281,47 @@ mod tests {
         // 缺失返回 null（不是错误）
         let absent = access.settings_get("kiro", "absent").await.unwrap();
         assert_eq!(absent, Value::Null);
+    }
+
+    /// `settings.get("modelCatalog")` 拦截为 provider 目录快照；其余键仍
+    /// 走 pack 私有设置（= 上游 `bootstrap.rs::settings_get` 的两段行为）。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn settings_get_intercepts_model_catalog_only() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let _guard = with_secret_dir("model-catalog");
+        let (_sessions, access) = harness("pack-cat");
+        let provider = format!("unit-access-cat-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        // 目录未发布 → null（与普通缺失键同形，但不落存储）
+        let before = access
+            .settings_get(
+                &provider,
+                crate::plugin_host::model_catalog::SETTING_MODEL_CATALOG,
+            )
+            .await
+            .unwrap();
+        assert!(before.is_null());
+        // 发布后 → 快照形状
+        crate::plugin_host::model_catalog::set_remote(
+            &provider,
+            vec![json!({ "id": "cat-m" })],
+            77,
+        );
+        let snap = access
+            .settings_get(
+                &provider,
+                crate::plugin_host::model_catalog::SETTING_MODEL_CATALOG,
+            )
+            .await
+            .unwrap();
+        assert_eq!(snap["meta"]["remote"], true);
+        assert_eq!(snap["meta"]["refreshed_at"], 77);
+        assert_eq!(snap["models"][0]["id"], "cat-m");
+        // 普通键不受影响：仍读 pack 私有设置（此处为 null）
+        let plain = access.settings_get(&provider, "region").await.unwrap();
+        assert!(plain.is_null());
+        crate::plugin_host::model_catalog::remove(&provider);
     }
 
     /// `account_provider` / `accounts_for_provider` 的归属判定。
