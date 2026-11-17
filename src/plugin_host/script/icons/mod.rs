@@ -48,9 +48,14 @@ fn worker() -> &'static Worker {
     })
 }
 
-/// 注入缓存根（`{script_root}/icons`）；main.rs 启动时调一次。
+/// 注入缓存根（`{script_root}/icons`）；main.rs 启动段调一次。
 pub fn install(root: std::path::PathBuf) {
     cache::install(root);
+}
+
+/// 缓存根是否已注入（启动装配自检用；与按包查图标的 [`installed`] 区分）。
+pub fn cache_installed() -> bool {
+    cache::installed()
 }
 
 /// 触发一次图标刷新（`force` = 忽略 TTL 重拉）。

@@ -35,6 +35,11 @@ pub fn install(store: Arc<LogStore>) {
     let _ = LOG_STORE.set(store);
 }
 
+/// 是否已装入日志存储（启动装配自检用）。
+pub fn installed() -> bool {
+    LOG_STORE.get().is_some()
+}
+
 fn bad_params(message: impl Into<String>) -> RpcError {
     RpcError {
         message: message.into(),

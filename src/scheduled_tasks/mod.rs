@@ -627,6 +627,7 @@ pub(crate) async fn model_refresh_work(state: &AppState) -> (String, bool, usize
 /// 每 tick 读一次**全部**任务的状态（而不是逐条各读一次）：一次读库换三条任务
 /// 的判定。存储不可用时整轮跳过 —— 那时发不出任何可信的判定，宁可这一轮什么都不做。
 pub fn spawn(state: AppState) {
+    // 启动段（main.rs）已显式装填；这里保留兜底（幂等，缺装配时仍可用）。
     task_state::install(state.scheduled_task_store.clone());
     tokio::spawn(async move {
         // 首轮先按持久化状态恢复排期：从未跑过的任务排到「现在」（于是全新安装

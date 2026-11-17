@@ -56,9 +56,14 @@ struct Index {
 /// 缓存根（注入）。
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 
-/// 注入缓存根目录（main.rs 或 runtime 启动时调一次）。
+/// 注入缓存根目录（main.rs 启动段调一次；重复调用忽略）。
 pub fn install(root: PathBuf) {
     let _ = ROOT.set(root);
+}
+
+/// 缓存根是否已注入（启动装配自检用）。
+pub fn installed() -> bool {
+    ROOT.get().is_some()
 }
 
 fn root() -> Option<PathBuf> {

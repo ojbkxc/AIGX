@@ -67,9 +67,18 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// 注入 `FileStore`（由 `scheduled_tasks::spawn` 在启动时调用一次）。
+/// 注入 `FileStore`（`main.rs` 启动段调用一次；重复调用忽略）。
+///
+/// 此前唯一装填点是 `scheduled_tasks::spawn`，即「调度循环起得来才有存储」——
+/// 顺序依赖只写在 `main.rs` 注释里。启动段显式装填后，claim/finish 不再依赖
+/// 谁先跑。
 pub fn install(store: Arc<FileStore>) {
     let _ = STORE.set(Some(store));
+}
+
+/// 是否已装入存储（启动装配自检用）。
+pub fn installed() -> bool {
+    STORE.get().is_some_and(Option::is_some)
 }
 
 fn store() -> Result<&'static Arc<FileStore>, String> {

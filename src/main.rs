@@ -495,6 +495,14 @@ async fn main() -> anyhow::Result<()> {
     crate::api::client_id::install(store.clone());
     // 特殊路由（压缩/标题）：启动时装载配置快照；数据面 chat 入口逐请求只读
     crate::route_special::install(store.clone());
+    // 插件 provider 模型目录的落盘底座：不装时 `set_remote` 只写内存，重启后
+    // 目录全丢（静默）。此前只在 `enable_wasm` 里装 = 从不启用 Wasm 插件的
+    // 实例永远落不了盘。
+    crate::plugin_host::model_catalog::install(store.clone());
+    // 定时任务排期存储（含 wasm 任务循环与云同步的 claim/finish）：不装时
+    // 那些循环整轮「存储不可用」跳过。此前靠 `scheduled_tasks::spawn` 内部
+    // 装填，顺序依赖只写在注释里。
+    crate::scheduled_tasks::task_state::install(store.clone());
     // 在途请求登记表（进程内）：配合日志页「查看并终止正在进行的请求」
     let inflight = Arc::new(crate::log::inflight::InflightRegistry::new());
 
@@ -612,6 +620,10 @@ async fn main() -> anyhow::Result<()> {
     // 脚本包 init 载荷的 `env` 会是空串（data_dir=""/target=""），Bun 宿主
     // 会按空目录跑。这是「编译绿但功能不可用」的半死形态，必须显式接线。
     script_host.set_host_env(host_env);
+    // 脚本插件图标的缓存根：此前只经 `script_host.start()`（后台任务里的
+    // `icons::spawn`）注入 —— 路由先于该任务可服务时，图标读出口恒
+    // 「缓存根未就绪」。启动段同步注入消除这个窗口（install 幂等）。
+    crate::plugin_host::script::icons::install(script_host.script_root().join("icons"));
 
     // 初始化公开注册速率限制器（per-IP，60s 窗口，最多 10000 个 IP 条目）
     // 使用基于 dashmap 的 AsyncCache 替代 moka（离线环境 moka 不可得，行为等效）
@@ -1277,6 +1289,36 @@ async fn main() -> anyhow::Result<()> {
     // 复用 scheduled_tasks::task_state（键 cloudSync），失败退避跨重启保留。
     crate::sync::spawn(state.clone());
     tracing::info!("cloud sync loop started (WebDAV / S3)");
+
+    // 启动装配自检：进程级单例类底座必须已在启动段装好，漏一处就是一类
+    // 「功能第一次被触发才初始化」的历史复发 bug（route_special 的模块头
+    // 记录过同类事故：管理面 500、数据面不生效，且不报错）。
+    // `debug_assert` 而非 `assert`：release 不 panic，但 debug/CIS 构建会
+    // 立刻暴露漏装。
+    debug_assert!(
+        crate::api::client_id::installed(),
+        "client_id 未在启动段装填"
+    );
+    debug_assert!(
+        crate::route_special::installed(),
+        "route_special 未在启动段装填"
+    );
+    debug_assert!(
+        crate::plugin_host::model_catalog::installed(),
+        "plugin_host::model_catalog 未在启动段装填"
+    );
+    debug_assert!(
+        crate::scheduled_tasks::task_state::installed(),
+        "scheduled_tasks::task_state 未在启动段装填"
+    );
+    debug_assert!(
+        crate::plugin_host::script::usage::installed(),
+        "script::usage 未在启动段装填"
+    );
+    debug_assert!(
+        crate::plugin_host::script::icons::cache_installed(),
+        "script::icons 未在启动段装填"
+    );
 
     // 关停时要 flush 日志队列，故先取出 Arc（state 随后被 build_router 消费）。
     let log_store = state.log_store.clone();

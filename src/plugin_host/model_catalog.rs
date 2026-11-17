@@ -105,15 +105,24 @@ impl CatalogSink for FileCatalogSink {
     }
 }
 
-/// 进程级存储单例（`manager::enable_wasm` 装入；重复调用忽略）。
-fn installed() -> &'static OnceLock<Arc<FileStore>> {
+/// 进程级存储单例（`main.rs` 启动时装入；重复调用忽略）。
+fn store_slot() -> &'static OnceLock<Arc<FileStore>> {
     static STORE: OnceLock<Arc<FileStore>> = OnceLock::new();
     &STORE
 }
 
-/// 装入落盘底座（= `manager::enable_wasm` 的接线点；重复调用忽略）。
+/// 装入落盘底座（`main.rs` 启动段调用；`enable_wasm` 里的调用是幂等兜底）。
+///
+/// **为什么必须在启动阶段装**：此前唯一调用点是 `manager::enable_wasm`，
+/// 即「第一次启用某个 Wasm 插件」时才装 —— 从不启用插件的实例上
+/// [`set_remote`] 只写内存，重启后目录全丢（静默，不报错）。
 pub fn install(store: Arc<FileStore>) {
-    let _ = installed().set(store);
+    let _ = store_slot().set(store);
+}
+
+/// 是否已装入存储（启动装配自检用）。
+pub fn installed() -> bool {
+    store_slot().get().is_some()
 }
 
 fn entry(models: Vec<Value>, refreshed_at: i64) -> Option<Arc<Entry>> {
@@ -142,7 +151,7 @@ pub fn set_remote(provider: &str, models: Vec<Value>, refreshed_at: i64) {
     let Some(entry) = entry(models, refreshed_at) else {
         return;
     };
-    if let Some(store) = installed().get() {
+    if let Some(store) = store_slot().get() {
         // 落盘失败不影响本次读数（目录是可重建的展示数据，与
         // `account_session::catalog::save_cache` 同取向）。
         let _ = store.put(&key(provider), &entry.snapshot());
@@ -198,7 +207,7 @@ pub fn remove(provider: &str) {
     if let Ok(mut table) = table().lock() {
         table.remove(provider);
     }
-    if let (true, Some(store)) = (had, installed().get()) {
+    if let (true, Some(store)) = (had, store_slot().get()) {
         let _ = store.delete(&key(provider));
     }
 }
