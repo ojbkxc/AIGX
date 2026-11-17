@@ -1,17 +1,21 @@
-// lib+bin 双 target 共享 src/*.rs：lib 将模块 pub 导出（视为对外 API 不报 dead），
-// bin 以私有 mod 引入同一批文件，内部未直接调用的预留 API 会被 dead_code 误报。
-// 此处统一豁免 bin 视角的结构性 dead_code 与 unused_imports（模块里的
-// `pub use` 重导出是给 lib 用的对外 API，bin 视角看不到消费者），
-// lib 视角的警告已单独清理干净。
+// 单一 target（原 lib+bin 双编译已于 P1 收口时删除 src/lib.rs）：
+// 全部 62 个模块在这里以私有 mod 声明，测试也跑在 bin target 上
+// （`cargo test --bin aigx`）。编译单元减半 —— 此前同一批模块要分别编进
+// lib 与 bin 两个 crate，两个 crate root 还各复制了一份 rustls provider
+// 安装逻辑。
+//
+// ⚠️ 下面两条 allow 是**双 target 时代的遗留遮罩**，现在已无 lib 视角可
+// 辩解：`cargo check --all-targets` 实测暴露 374 处 never-used（多为预留
+// API 与只被测试用到的辅助函数）。拆除遮罩需要逐项判定「删掉 / 补调用 /
+// 标 cfg(test)」，是独立的一次清理波次，不在本次结构收口内混做。
 #![allow(dead_code)]
 #![allow(unused_imports)]
-// 与 lib.rs 一致：openapi.rs 的深层 `json!` 需要更大的宏递归上限。
+// openapi.rs 的深层 `json!` 需要更大的宏递归上限。
 #![recursion_limit = "512"]
 
 // ── reqwest 0.13 测试侧 provider 安装（波次2）──────────────────────
-// 与 lib.rs 的同名函数一致：bin target 以私有 mod 复用 src/*.rs 的测试
-// 模块（cfg(test)），其 crate root 是本文件——`crate::test_http_client`
-// 在 bin 视角必须在此可见，否则 bin 测试编译 E0425。
+// 单 target 后本函数是全进程唯一一份（原 lib.rs 的同名副本已随 lib 删除）；
+// 各模块的 `#[cfg(test)]` 测试统一走 `crate::test_http_client`。
 
 /// 单元测试内构建 reqwest Client 的统一入口：先装 provider 再建客户端。
 #[cfg(test)]

@@ -56,11 +56,10 @@ AIGX/
 │   ├── db/                 # SeaORM entity / migration
 │   ├── storage/            # FileStore / SQLite KV
 │   ├── agent/              # AI 运维 Agent
-│   └── ...                 # 其余见 lib.rs 模块声明
+│   └── ...                 # 其余见 main.rs 模块声明
 ├── frontend/               # React 18 + TypeScript + Vite 前端
 │   ├── src/               # 页面 / 组件 / hooks / i18n
 │   └── package.json
-├── aigx-net/               # 独立网络层 crate（workspace 成员）
 ├── static/                 # 前端构建产物（由 frontend build 生成，提交入库）
 ├── tests/e2e/             # Playwright 端到端测试
 ├── tools/                 # 可入库工具脚本（如 newapi_sync.py）
