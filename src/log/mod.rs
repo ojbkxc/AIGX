@@ -979,6 +979,40 @@ impl RequestLogStore {
         keys
     }
 
+    /// 时间窗 `[from_ts, to_ts]` 内**最新**的至多 `limit` 条键（倒序）。
+    ///
+    /// 与 [`Self::list_window`] 的差别：那个升序取前 N（超限丢最新），这个
+    /// 倒序取最新 N（超限丢最旧），且**键区间 + LIMIT 在存储层完成**，
+    /// 不再先枚举全前缀键。窗口类聚合（routing flow/trace/workspace）用它。
+    pub fn list_range_desc(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        if from_ts > to_ts {
+            return Ok(Vec::new());
+        }
+        let from = format!("reqlog:{from_ts}");
+        let to = format!("reqlog:{}", to_ts.saturating_add(1));
+        self.store.list_range_desc(&from, &to, limit)
+    }
+
+    /// 时间窗 `[from_ts, to_ts]` 内的日志条数（`COUNT(*)`，不物化键）。
+    pub fn count_window(&self, from_ts: i64, to_ts: i64) -> anyhow::Result<usize> {
+        if from_ts > to_ts {
+            return Ok(0);
+        }
+        let from = format!("reqlog:{from_ts}");
+        let to = format!("reqlog:{}", to_ts.saturating_add(1));
+        self.store.count_range(&from, &to)
+    }
+
+    /// 全部 reqlog 条数（`COUNT(*)`，不物化键）。
+    pub fn count_all(&self) -> usize {
+        self.store.count_prefix("reqlog:").unwrap_or(0)
+    }
+
     /// 按 key 批量反序列化请求日志（缺失/损坏静默跳过）。
     pub fn logs_by_keys(&self, keys: &[String]) -> Vec<RequestLog> {
         keys.iter()
@@ -1052,10 +1086,7 @@ impl RequestLogStore {
             || end.is_some();
 
         if !has_filter {
-            let total = match self.store.list("reqlog:") {
-                Ok(keys) => keys.len(),
-                Err(_) => 0,
-            };
+            let total = self.count_all();
             // 取「前 page*size 条最新键」后在内存中切出第 page 页的 size 条，
             // 与原全量切片语义一致（页码越界返回空）。
             let limit = page.saturating_mul(size);

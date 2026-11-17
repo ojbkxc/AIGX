@@ -148,6 +148,15 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// 前缀匹配的上界：`prefix + U+10FFFF`。
+    ///
+    /// 拿它代替 `LIKE 'prefix%'`：SQLite 的 LIKE 是否被改写索引范围取决于
+    /// 大小写折叠配置，而 `key >= prefix AND key < prefix+\u{10FFFF}` 是**纯主键
+    /// 范围扫**，行为确定（任何以 prefix 开头的键都落在区间内，且不含其它键）。
+    fn prefix_upper(prefix: &str) -> String {
+        format!("{prefix}\u{10FFFF}")
+    }
+
     /// 列出所有键（支持前缀匹配；空前缀 = 全部键）
     pub fn list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
@@ -159,10 +168,11 @@ impl SqliteStore {
                 .collect();
             return Ok(keys);
         }
-        let pattern = format!("{prefix}%");
-        let mut stmt = conn.prepare_cached("SELECT key FROM kv WHERE key LIKE ?1 ORDER BY key")?;
+        let upper = Self::prefix_upper(prefix);
+        let mut stmt =
+            conn.prepare_cached("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")?;
         let keys: Vec<String> = stmt
-            .query_map([&pattern], |row| row.get(0))?
+            .query_map(rusqlite::params![prefix, &upper], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(keys)
@@ -175,14 +185,15 @@ impl SqliteStore {
     /// 不必全表列键。LIMIT 已在调用方钳制 ≤ page*100，不会负数化。
     pub fn list_latest_keys(&self, prefix: &str, limit: usize) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
-        let pattern = format!("{prefix}%");
+        let upper = Self::prefix_upper(prefix);
         // limit 钳到 i64 正区间：usize::MAX as i64 = -1，SQLite 负 LIMIT
         // 语义为"无限制"，会把快路径优化反转成全表扫描。
         let limit = (limit as i64).clamp(1, 10_000_000);
-        let mut stmt =
-            conn.prepare_cached("SELECT key FROM kv WHERE key LIKE ?1 ORDER BY key DESC LIMIT ?2")?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT ?3",
+        )?;
         let keys: Vec<String> = stmt
-            .query_map(rusqlite::params![&pattern, limit], |row| row.get(0))?
+            .query_map(rusqlite::params![prefix, &upper, limit], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(keys)
@@ -192,17 +203,58 @@ impl SqliteStore {
     ///
     /// key 的时间戳/日期中段定长，字典序等价数值序；`key >= ? AND key < ?`
     /// 直接吃主键 autoindex 的范围扫描，把「窗口类读」从全表降为近窗。
-    pub fn list_range(&self, prefix: &str, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+    pub fn list_range(&self, _prefix: &str, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
-        let pattern = format!("{prefix}%");
-        let mut stmt = conn.prepare_cached(
-            "SELECT key FROM kv WHERE key LIKE ?1 AND key >= ?2 AND key < ?3 ORDER BY key",
-        )?;
+        let mut stmt =
+            conn.prepare_cached("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")?;
         let keys: Vec<String> = stmt
-            .query_map(rusqlite::params![&pattern, from, to], |row| row.get(0))?
+            .query_map(rusqlite::params![from, to], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(keys)
+    }
+
+    /// 键区间 `[from, to)` 内**倒序**取前 `limit` 个键。
+    ///
+    /// 日志类读的「最新 N 条」用它：`ORDER BY key DESC LIMIT ?` 让 SQLite
+    /// 在索引上倒着走、凑够 limit 就停，不再把整个前缀的键物化成 Vec。
+    /// 区间直接作用于主键（无需 LIKE），确保吃的是主键索引范围扫。
+    pub fn list_range_desc(
+        &self,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock();
+        // 与 list_latest_keys 同口径：负 LIMIT 在 SQLite 里是「无限制」。
+        let limit = (limit as i64).clamp(1, 10_000_000);
+        let mut stmt = conn.prepare_cached(
+            "SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT ?3",
+        )?;
+        let keys: Vec<String> = stmt
+            .query_map(rusqlite::params![from, to, limit], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
+    }
+
+    /// 键区间 `[from, to)` 内的键数量（`COUNT(*)` 走索引，不物化键）。
+    pub fn count_range(&self, from: &str, to: &str) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare_cached("SELECT COUNT(*) FROM kv WHERE key >= ?1 AND key < ?2")?;
+        let count: i64 = stmt.query_row(rusqlite::params![from, to], |row| row.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// 前缀内的键数量（`COUNT(*)`，不物化键；同样用主键区间而非 LIKE）。
+    pub fn count_prefix(&self, prefix: &str) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        let upper = Self::prefix_upper(prefix);
+        let mut stmt =
+            conn.prepare_cached("SELECT COUNT(*) FROM kv WHERE key >= ?1 AND key < ?2")?;
+        let count: i64 = stmt.query_row(rusqlite::params![prefix, &upper], |row| row.get(0))?;
+        Ok(count.max(0) as usize)
     }
 
     /// 列出所有键值对（支持前缀匹配）

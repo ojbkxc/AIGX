@@ -213,6 +213,37 @@ impl JsonFileStore {
         })
     }
 
+    /// 键区间 `[from, to)` 倒序取前 `limit` 个（JSON 后端 list + filter 降级）。
+    pub fn list_range_desc(
+        &self,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut keys: Vec<String> = self
+            .list("")?
+            .into_iter()
+            .filter(|k| k.as_str() >= from && k.as_str() < to)
+            .collect();
+        keys.reverse();
+        keys.truncate(limit);
+        Ok(keys)
+    }
+
+    /// 键区间 `[from, to)` 的键数量（JSON 后端降级为过滤后计数）。
+    pub fn count_range(&self, from: &str, to: &str) -> anyhow::Result<usize> {
+        Ok(self
+            .list("")?
+            .into_iter()
+            .filter(|k| k.as_str() >= from && k.as_str() < to)
+            .count())
+    }
+
+    /// 前缀内的键数量（JSON 后端降级为 list().len()）。
+    pub fn count_prefix(&self, prefix: &str) -> anyhow::Result<usize> {
+        Ok(self.list(prefix)?.len())
+    }
+
     /// 原子插入（key 已存在返回 false）。JSON 后端用写锁近似 CAS：
     /// 非默认 feature，仅保证单进程内的互斥（跨进程靠文件系统，尽力而为）。
     pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
@@ -391,6 +422,46 @@ impl FileStore {
             FileStoreInner::Sqlite(s) => s.list_range(prefix, from, to),
             #[cfg(feature = "postgres")]
             FileStoreInner::Postgres(p) => p.list_range(prefix, from, to),
+        }
+    }
+
+    /// 键区间 `[from, to)` 倒序取前 `limit` 个键。
+    ///
+    /// 日志类读的「最新 N 条」专用：SQLite 后端用 `ORDER BY key DESC LIMIT`
+    /// 在索引上倒走、凑够即停；Postgres 后端降级为取区间后反转截断。
+    pub fn list_range_desc(
+        &self,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.list_range_desc(from, to, limit),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => {
+                let mut keys = p.list_range("", from, to)?;
+                keys.reverse();
+                keys.truncate(limit);
+                Ok(keys)
+            }
+        }
+    }
+
+    /// 键区间 `[from, to)` 的键数量（SQLite 走 `COUNT(*)`，不物化键）。
+    pub fn count_range(&self, from: &str, to: &str) -> anyhow::Result<usize> {
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.count_range(from, to),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => Ok(p.list_range("", from, to)?.len()),
+        }
+    }
+
+    /// 前缀内的键数量（SQLite 走 `COUNT(*)`，不物化键）。
+    pub fn count_prefix(&self, prefix: &str) -> anyhow::Result<usize> {
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.count_prefix(prefix),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => Ok(p.list(prefix)?.len()),
         }
     }
 

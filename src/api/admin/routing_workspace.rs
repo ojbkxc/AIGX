@@ -95,16 +95,6 @@ pub(crate) fn today_start_ts(now: i64) -> i64 {
 
 // ── 日志扫描（键范围裁剪 + 有界反序列化）──────────────────────────────
 
-/// `reqlog:{created_at}:{id}` 的时间戳前缀。
-fn key_ts(key: &str) -> Option<i64> {
-    key.strip_prefix("reqlog:")
-        .or_else(|| key.strip_prefix("reqlog/"))?
-        .split(':')
-        .next()?
-        .parse::<i64>()
-        .ok()
-}
-
 /// 时间窗 `[start, end]` 内**最新**的至多 `cap` 条日志（倒序）+ 窗口内
 /// 键总数 + 是否截断。
 ///
@@ -119,14 +109,11 @@ pub(crate) fn window_logs_desc(
     end: i64,
     cap: usize,
 ) -> WindowScan {
-    let keys = store.all_keys_asc();
-    let in_range: Vec<&String> = keys
-        .iter()
-        .filter(|key| key_ts(key.as_str()).is_some_and(|ts| ts >= start && ts <= end))
-        .collect();
-    let total = in_range.len();
+    // 键区间 + DESC + LIMIT 全部在存储层完成：不再先枚举全部 reqlog 键
+    // （日志保留量 10 万时那是 10 万个 String + 一次全表扫）。
+    let total = store.count_window(start, end).unwrap_or(0);
     let truncated = total > cap;
-    let picked: Vec<String> = in_range.into_iter().rev().take(cap).cloned().collect();
+    let picked = store.list_range_desc(start, end, cap).unwrap_or_default();
     let mut logs = store.logs_by_keys(&picked);
     logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
     WindowScan {
