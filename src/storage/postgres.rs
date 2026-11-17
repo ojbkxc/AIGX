@@ -53,6 +53,13 @@ enum Cmd {
         to: String,
         reply: SyncSender<anyhow::Result<Vec<String>>>,
     },
+    ListRangeAsc {
+        prefix: String,
+        from: String,
+        to: String,
+        limit: usize,
+        reply: SyncSender<anyhow::Result<Vec<String>>>,
+    },
 }
 
 /// PostgreSQL 持久化 KV 存储（同步接口，内部桥接 sqlx）
@@ -187,6 +194,28 @@ impl PgStore {
             prefix: prefix.to_string(),
             from: from.to_string(),
             to: to.to_string(),
+            reply,
+        })?;
+        rx.recv()?
+    }
+
+    /// 前缀内字典序 `[from, to)` 区间**升序**取前 `limit` 个键（索引范围扫描）。
+    ///
+    /// 容量裁剪用：`ORDER BY key ASC LIMIT` 在索引上正走、凑够即停，
+    /// 不再把整个前缀的键物化后排序。
+    pub fn list_range_asc(
+        &self,
+        prefix: &str,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let (reply, rx) = sync_channel(1);
+        self.send(Cmd::ListRangeAsc {
+            prefix: prefix.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            limit,
             reply,
         })?;
         rx.recv()?
@@ -334,6 +363,33 @@ fn pg_worker(rx: Receiver<Cmd>, url: &str, max_conn: u32) -> anyhow::Result<()> 
                         .fetch_all(&pool)
                         .await
                         .map_err(|e| anyhow::anyhow!("pg list_range: {e}"))?;
+                        Ok::<Vec<String>, anyhow::Error>(
+                            rows.into_iter().map(|r| r.get::<String, _>(0)).collect(),
+                        )
+                    }
+                    .await;
+                    let _ = reply.send(r);
+                }
+                Cmd::ListRangeAsc {
+                    prefix,
+                    from,
+                    to,
+                    limit,
+                    reply,
+                } => {
+                    let pattern = format!("{prefix}%");
+                    let limit = (limit as i64).clamp(1, 10_000_000);
+                    let r = async {
+                        let rows = sqlx::query(
+                            "SELECT key FROM kv WHERE key LIKE $1 AND key >= $2 AND key < $3 ORDER BY key ASC LIMIT $4",
+                        )
+                        .bind(&pattern)
+                        .bind(&from)
+                        .bind(&to)
+                        .bind(limit)
+                        .fetch_all(&pool)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("pg list_range_asc: {e}"))?;
                         Ok::<Vec<String>, anyhow::Error>(
                             rows.into_iter().map(|r| r.get::<String, _>(0)).collect(),
                         )

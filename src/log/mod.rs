@@ -1514,11 +1514,17 @@ fn csv_escape(s: &str) -> String {
 
 /// B13：请求日志容量兜底——超限时删除最旧一批。
 ///
-/// key 中 created_at 为数字字符串，字典序与数值序不一致
-///（如 "999" > "1000"），需 parse 后按数值排序再取最旧。
-///
 /// 容量上限优先读运维保留配置（LogRetention 页设置），未配置时
 /// 回退默认 10 万——原先硬编码 MAX_LOGS，管理员配置的容量被静默忽略。
+///
+/// R6：不再 `list("reqlog:")` 全键 + parse + 排序（10 万键 = 10 万 String
+/// + 排序 + 逐条 DELETE）。改为：
+/// 1. `count_prefix` 走 `COUNT(*)` 判是否超限（不物化键）；
+/// 2. `list_range_asc` 键区间升序 + LIMIT 只取最旧 `excess` 个键。
+///
+/// 定宽前提：`reqlog:{ts}:{id}` 的 ts 是 10 位 unix 秒（2001@1e9 –
+/// 2286@9.9e9），字典序等价时间序 ⇒ 升序最前 = 最旧。无法解析的脏键
+/// 字典序排在数字之后（原实现 parse 失败记为 `i64::MAX`），同样最后才裁。
 ///
 /// 抽成自由函数：写入路径（`RequestLogStore::add`）与异步批量写旁路
 ///（[`writer::LogWriter`] 的消费者）共用，避免两处实现漂移。
@@ -1534,25 +1540,15 @@ pub(crate) fn purge_request_overflow(store: &FileStore) -> anyhow::Result<()> {
         .flatten()
         .and_then(|r| r.max_capacity);
     let max_logs = capacity.unwrap_or(RequestLogStore::MAX_LOGS);
-    let keys = store.list("reqlog:")?;
-    if keys.len() < max_logs {
+    let total = store.count_prefix("reqlog:")?;
+    if total < max_logs {
         return Ok(());
     }
-    let mut timed: Vec<(i64, String)> = keys
-        .into_iter()
-        .map(|k| {
-            let ts = k
-                .strip_prefix("reqlog:")
-                .and_then(|rest| rest.split(':').next())
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(i64::MAX);
-            (ts, k)
-        })
-        .collect();
-    timed.sort_by_key(|(ts, _)| *ts);
-    let excess =
-        (timed.len().saturating_sub(max_logs) + RequestLogStore::PURGE_BATCH).min(timed.len());
-    for (_, k) in timed.into_iter().take(excess) {
+    // 与旧实现同口径：超出的部分再多裁一批（批量摊薄，避免每次写都裁）。
+    let excess = (total.saturating_sub(max_logs) + RequestLogStore::PURGE_BATCH).min(total);
+    let upper = format!("reqlog:{}", '\u{10FFFF}');
+    let doomed = store.list_range_asc("reqlog:", "reqlog:", &upper, excess)?;
+    for k in doomed {
         if let Some(id) = k.rsplit(':').next().filter(|id| !id.is_empty()) {
             let index =
                 RequestLogStore::index_key(&RequestLogStore::escape_index_component(id), &k);
@@ -2281,6 +2277,92 @@ mod tests {
     /// 造一个「昨天」时间戳（now−86400：同钟点前一天，必落在昨日日历）。
     fn yesterday_ts() -> i64 {
         chrono::Utc::now().timestamp() - 86_400
+    }
+
+    /// R6：容量裁剪按「键区间升序 + LIMIT」取最旧一批，不再 list 全键再排序。
+    ///
+    /// 容量上限必须大于 PURGE_BATCH，否则 `excess` 被 min(total) 钳成「全删」，
+    /// 测不出「裁最旧、留最新」。这里容量 = 10001、灌 10006 条 → 裁 10005 留 1。
+    #[test]
+    fn purge_overflow_trims_oldest_and_keeps_newest() {
+        let s = store();
+        s.requests.set_retention(None, Some(10_001)).unwrap();
+        const N: usize = 10_006;
+        let base = 1_700_000_000i64; // 10 位定宽时间戳（字典序 = 时间序）
+        let entries: Vec<(String, serde_json::Value)> = (0..N)
+            .map(|i| {
+                let mut log = RequestLog::new();
+                log.id = format!("p{i:05}");
+                log.created_at = base + i as i64;
+                log.model = "m".to_string();
+                let key = format!("reqlog:{}:{}", log.created_at, log.id);
+                (key, serde_json::to_value(&log).unwrap())
+            })
+            .collect();
+        let refs: Vec<(&str, serde_json::Value)> = entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        // 单事务灌入（逐条 put 会慢一个量级）
+        s.requests.store.write_batch(&refs).unwrap();
+        // 最旧那条的二级索引也必须被连带清理（悬空索引 = 越权读旧日志）
+        let oldest_key = entries[0].0.as_str();
+        let index = RequestLogStore::index_key(
+            &RequestLogStore::escape_index_component("p00000"),
+            oldest_key,
+        );
+        s.requests.store.put(&index, &oldest_key).unwrap();
+
+        purge_request_overflow(&s.requests.store).unwrap();
+
+        // 登录后剩余恰好 1 条，且是最新那条
+        let left = s.requests.list_all();
+        assert_eq!(left.len(), 1, "裁掉 10005 条，只留最新");
+        assert_eq!(left[0].id, format!("p{:05}", N - 1));
+        // 二级索引同步清掉
+        assert!(s.requests.store.get::<String>(&index).unwrap().is_none());
+        // COUNT(*) 与剩余键一致（无残留）
+        assert_eq!(s.requests.store.count_prefix("reqlog:").unwrap(), 1);
+    }
+
+    /// 未达容量上限时不裁剪（COUNT(*) 早退，且一条不删）。
+    #[test]
+    fn purge_overflow_noop_below_capacity() {
+        let s = store();
+        s.requests.set_retention(None, Some(5)).unwrap();
+        for i in 0..3i64 {
+            let mut log = RequestLog::new();
+            log.id = format!("k{i}");
+            log.created_at = 1_700_000_000 + i;
+            s.requests.add(log).unwrap();
+        }
+        purge_request_overflow(&s.requests.store).unwrap();
+        assert_eq!(s.requests.list_all().len(), 3);
+    }
+
+    /// 键区间升序限量扫描：字典序最前 = 时间最旧，LIMIT 控制物化数量。
+    #[test]
+    fn list_range_asc_returns_oldest_first() {
+        let s = store();
+        let store = &s.requests.store;
+        for i in [5i64, 2, 9, 1, 7] {
+            store
+                .put(&format!("reqlog:{}:x{i}", 1_700_000_000 + i), &i)
+                .unwrap();
+        }
+        let upper = format!("reqlog:{}", '\u{10FFFF}');
+        let keys = store
+            .list_range_asc("reqlog:", "reqlog:", &upper, 3)
+            .unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                "reqlog:1700000001:x1".to_string(),
+                "reqlog:1700000002:x2".to_string(),
+                "reqlog:1700000005:x5".to_string(),
+            ],
+            "升序最前三个 = 时间最旧的三个"
+        );
     }
 
     #[test]

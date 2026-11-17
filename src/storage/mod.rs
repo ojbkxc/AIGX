@@ -447,6 +447,24 @@ impl FileStore {
         }
     }
 
+    /// 键区间 `[from, to)` **升序**取前 `limit` 个键。
+    ///
+    /// 容量裁剪专用：最旧的键天然排在最前（定宽时间戳前缀使字典序=时间序），
+    /// 两个后端都是索引范围扫 + LIMIT，不物化整个前缀的键。
+    pub fn list_range_asc(
+        &self,
+        _prefix: &str,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.list_range_asc(from, to, limit),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.list_range_asc(_prefix, from, to, limit),
+        }
+    }
+
     /// 键区间 `[from, to)` 的键数量（SQLite 走 `COUNT(*)`，不物化键）。
     pub fn count_range(&self, from: &str, to: &str) -> anyhow::Result<usize> {
         match &self.inner {

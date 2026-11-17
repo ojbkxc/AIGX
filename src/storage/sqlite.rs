@@ -238,6 +238,30 @@ impl SqliteStore {
         Ok(keys)
     }
 
+    /// 键区间 `[from, to)` 内**升序**取前 `limit` 个键。
+    ///
+    /// 容量裁剪专用：`reqlog:{ts}:{id}` 定宽时间戳使字典序等于时间序，
+    /// 升序 + LIMIT 让 SQLite 在索引上正走、凑够 `limit` 即停，不再把
+    /// 整个前缀的键物化后排序（原实现 10 万键 = 10 万 String + 排序）。
+    pub fn list_range_asc(
+        &self,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock();
+        // 与 list_range_desc 同口径：负 LIMIT 在 SQLite 里是「无限制」。
+        let limit = (limit as i64).clamp(1, 10_000_000);
+        let mut stmt = conn.prepare_cached(
+            "SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key ASC LIMIT ?3",
+        )?;
+        let keys: Vec<String> = stmt
+            .query_map(rusqlite::params![from, to, limit], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
+    }
+
     /// 键区间 `[from, to)` 内的键数量（`COUNT(*)` 走索引，不物化键）。
     pub fn count_range(&self, from: &str, to: &str) -> anyhow::Result<usize> {
         let conn = self.conn.lock();
