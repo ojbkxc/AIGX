@@ -572,6 +572,11 @@ impl AccountSessionStore {
             }
             sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         }
+        if credential_replaced {
+            // 凭证变更 = 重新登录：进行中的余额查询任务带的是旧凭据，作废
+            //（A2A `invalidateAccount` 同语义；见 usage_jobs 模块注释）。
+            super::usage_jobs::invalidate_account(&next.id);
+        }
         Ok(next)
     }
 
@@ -588,6 +593,8 @@ impl AccountSessionStore {
             .store
             .delete(&Self::key_of(&removed.channel_id, &removed.id))?;
         self.inner.persisted_at.remove(&removed.id);
+        // 账号已删除：在跑的余额查询任务必须停，否则会持续写已不存在账号的读数
+        super::usage_jobs::invalidate_account(&removed.id);
         Ok(Some(removed))
     }
 
@@ -1354,6 +1361,8 @@ impl AccountSessionStore {
         if let Err(e) = self.persist(&snapshot) {
             tracing::warn!("persist account session {} credential: {e}", snapshot.id);
         }
+        // 插件（或外部写者）换凭证：进行中的余额查询任务作废
+        super::usage_jobs::invalidate_account(&snapshot.id);
         CasOutcome::Updated
     }
 

@@ -965,20 +965,6 @@ fn enrich_from_native(plugin: &mut Value, native: &Value) {
     plugin.insert("native_fallback".to_string(), Value::Bool(true));
 }
 
-/// 判断某 provider 是否由插件接管（原生包或脚本包）。
-///
-/// 数据面路由的权威判据在 `plugin_host`/`script_host`；本函数只给管理面
-/// 「这个 provider 该不该走插件账号流程」一个同步答案。
-pub fn provider_is_plugin_owned(state: &crate::api::openai::AppState, provider: &str) -> bool {
-    state.plugin_host.registry().is_plugin_owned(provider)
-        || state.script_host.route_for_provider(provider).is_some()
-        || state
-            .script_host
-            .routed_providers()
-            .iter()
-            .any(|id| id == provider)
-}
-
 /// 插件 provider 的承载渠道：隐藏 `ChannelType::Plugin`（每 provider 一个）。
 pub fn plugin_channel_for(
     state: &crate::api::openai::AppState,

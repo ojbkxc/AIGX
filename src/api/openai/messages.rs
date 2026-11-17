@@ -1,6 +1,5 @@
 use axum::{http::StatusCode, Json};
 
-use super::*;
 use crate::bridge::{ChatMessage, FinishReason, Role};
 use serde_json::Value;
 
@@ -113,15 +112,70 @@ pub(crate) fn finish_reason_str(fr: &FinishReason) -> &'static str {
     }
 }
 /// 将 BridgeError 转换为 HTTP 响应
+///
+/// 走 [`crate::error_translate::render_openai_error`] 做跨协议错误翻译：
+/// Anthropic / Bedrock / Vertex / Azure 的上游错误码会推导成统一的 OpenAI
+/// `error.code`（如 `rate_limit_exceeded` / `invalid_api_key`），客户端可按
+/// code 统一重试与提示；`type`/`param` 同步透出。原实现把 `type` 恒写成
+/// `invalid_request_error`、`code` 恒写成变体名，上游语义全部丢失。
+///
+/// 安全边界不变：发给客户端的 message 先脱敏（截断 + 凭据遮蔽）；日志侧仍是
+/// 未脱敏原文供排障。
 pub(crate) fn bridge_error_response(e: crate::bridge::BridgeError) -> (StatusCode, Json<Value>) {
-    let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
-    // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
-    // 原文（未脱敏）落服务端日志供排障；客户端只收脱敏版。
     tracing::warn!("bridge error (raw, ops): {e}");
-    openai_error_response(
-        e.error_type(),
-        &crate::error_translate::sanitize_error_message(&e.to_string()),
+    let (status_u16, body) = crate::error_translate::render_openai_error(&e);
+    let status = StatusCode::from_u16(status_u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let message = crate::error_translate::sanitize_error_message(&body.message);
+    (
         status,
+        Json(serde_json::json!({
+            "error": {
+                "message": message,
+                "type": body.kind,
+                "param": body.param,
+                "code": body.code,
+            }
+        })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::{BridgeError, UpstreamErrorView, UpstreamWire};
+
+    /// Anthropic 上游鉴权失败：kind 推导成 `invalid_api_key`，客户端消息脱敏。
+    #[test]
+    fn bridge_error_response_translates_upstream_codes_and_sanitizes() {
+        let e = BridgeError::UpstreamStatus {
+            status: 400,
+            message: "anthropic 400".into(),
+            parsed: Some(Box::new(UpstreamErrorView {
+                kind: Some("authentication_error".into()),
+                message: Some("bad key sk-ant-api03-SECRETSECRET".into()),
+                code: None,
+                param: None,
+            })),
+            wire: UpstreamWire::Anthropic,
+            retry_after: None,
+        };
+        let (status, Json(body)) = bridge_error_response(e);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["type"], "upstream_error");
+        assert_eq!(body["error"]["code"], "invalid_api_key");
+        assert!(
+            body["error"]["message"].as_str().unwrap().contains("***"),
+            "客户端消息必须脱敏：{body}"
+        );
+    }
+
+    /// 非上游变体：type/code/status 与变体语义一致（原实现 type 恒为
+    /// invalid_request_error）。
+    #[test]
+    fn bridge_error_response_uses_variant_type_and_status() {
+        let (status, Json(body)) = bridge_error_response(BridgeError::RateLimited);
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+    }
 }
