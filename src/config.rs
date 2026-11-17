@@ -734,6 +734,14 @@ pub struct UsageConfig {
     /// 1 = 单实例单次铸造，避开并发冲突与 DOM 重建竞态（SDK 同一个实例连铸两轮会互踩）。
     #[serde(default = "default_zcode_captcha_pool_max_per_round")]
     pub zcode_captcha_pool_max_per_round: u8,
+    /// 缺省模型（对齐 Agent2API `defaultModel`，默认空 = 不回落）。
+    ///
+    /// 仅当请求体**完全没带 `model`** 时用它：把「客户端没指定模型」从 400
+    /// 变成走一个运维选定的低成本/默认模型。显式传了 model（哪怕空串）一律
+    /// 以请求为准，不做静默改写 —— 计费与模型映射必须能解析这个名字，否则
+    /// 回落本身会失败（报「模型未定价」），这比静默换模型更好排障。
+    #[serde(default)]
+    pub default_model: String,
     /// 第三方模型回答完自动折叠过程（对齐 Agent2API `thirdPartyReasoningCollapse`，默认关）。
     ///
     /// Codex 桌面端只在最后一条助手消息带 `phase: "final_answer"` 时才把这一轮的
@@ -1081,6 +1089,7 @@ impl Default for UsageConfig {
             zcode_captcha_pool_target: default_zcode_captcha_pool_target(),
             zcode_captcha_pool_poll_ms: default_zcode_captcha_pool_poll_ms(),
             zcode_captcha_pool_max_per_round: default_zcode_captcha_pool_max_per_round(),
+            default_model: String::new(),
             third_party_reasoning_collapse: false,
             billing_flat_quota: default_billing_flat_quota(),
         }
@@ -1183,6 +1192,24 @@ pub fn strip_newline_keepalive() -> bool {
 /// 由 main 与 settings 更新端点写入快照。
 pub fn set_strip_newline_keepalive(v: bool) {
     STRIP_NEWLINE_KEEPALIVE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 缺省模型快照（数据面各协议入口在请求未带 model 时读取）。
+static DEFAULT_MODEL: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// 读取缺省模型（空串 = 不回落）。
+pub fn default_model() -> String {
+    DEFAULT_MODEL
+        .read()
+        .map(|value| value.clone())
+        .unwrap_or_default()
+}
+
+/// 由 main 与 settings 更新端点写入快照。
+pub fn set_default_model(value: &str) {
+    if let Ok(mut slot) = DEFAULT_MODEL.write() {
+        *slot = value.trim().to_string();
+    }
 }
 
 /// 第三方模型回答完自动折叠过程（协议重建层逐请求读取，关闭时零开销）。

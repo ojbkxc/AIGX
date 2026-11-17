@@ -448,6 +448,8 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_sanitize_fingerprints(config.usage.sanitize_fingerprints);
     // 第三方模型回答完自动折叠过程（Responses phase 标记；保存设置时热更新）
     crate::config::set_third_party_reasoning_collapse(config.usage.third_party_reasoning_collapse);
+    // 缺省模型回落（请求未带 model 时的默认值；保存设置时热更新）
+    crate::config::set_default_model(&config.usage.default_model);
     // Cline 伪装头覆盖表（对齐 Agent2API「设置 → 网关 → Cline 伪装头」）：
     // 启动时从配置恢复进程级快照；保存设置时热更新
     crate::config::set_cline_header_overrides(

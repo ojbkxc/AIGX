@@ -36,6 +36,7 @@ import PromptPanel from '../components/PromptPanel';
 import BrandingSettingsPanel from '../components/BrandingSettingsPanel';
 import DebugTrafficPanel from '../components/DebugTrafficPanel';
 import StreamCompatPanel from '../components/StreamCompatPanel';
+import ClientCompatPanel from '../components/ClientCompatPanel';
 import QueuePanel from '../components/QueuePanel';
 import AutoContinuePanel from '../components/AutoContinuePanel';
 import ModelMetadataPanel from '../components/ModelMetadataPanel';
@@ -1198,6 +1199,9 @@ export default function Settings() {
           </div>
           <div style={{ marginTop: 16 }}>
             <StreamCompatPanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <ClientCompatPanel />
           </div>
           <div style={{ marginTop: 16 }}>
             <QueuePanel />

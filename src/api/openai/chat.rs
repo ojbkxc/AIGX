@@ -108,14 +108,19 @@ pub(crate) async fn handle_chat_completions(
 
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
-        None => {
-            return openai_error_response(
-                "invalid_model",
-                "Missing model field",
-                StatusCode::BAD_REQUEST,
-            )
-            .into_response()
-        }
+        // 缺省模型回落（对齐 A2A `defaultModel`）：只在请求**完全没带** model 时
+        // 生效；显式空串仍按缺失处理（与改造前一致）。
+        None => match crate::config::default_model() {
+            fallback if !fallback.is_empty() => fallback,
+            _ => {
+                return openai_error_response(
+                    "invalid_model",
+                    "Missing model field",
+                    StatusCode::BAD_REQUEST,
+                )
+                .into_response()
+            }
+        },
     };
 
     // 完整鉴权：校验状态/过期/模型白名单/额度/IP（参照 new-api token.go）

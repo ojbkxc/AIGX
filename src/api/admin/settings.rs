@@ -26,6 +26,8 @@ pub struct SettingsRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct LimitsRequest {
+    /// 缺省模型（请求未带 model 时的回落值；空串 = 不回落）。
+    pub default_model: Option<String>,
     /// 第三方模型回答完自动折叠过程（对齐 Agent2API `thirdPartyReasoningCollapse`，
     /// 只对识别为 Codex 的客户端生效）。
     pub third_party_reasoning_collapse: Option<bool>,
@@ -188,6 +190,7 @@ pub async fn handle_get_limits(
             "auto_continue_max_rounds": config.usage.auto_continue_max_rounds,
             "sanitize_fingerprints": config.usage.sanitize_fingerprints,
             "thirdPartyReasoningCollapse": config.usage.third_party_reasoning_collapse,
+            "defaultModel": config.usage.default_model,
         })
     })))
 }
@@ -331,6 +334,9 @@ pub async fn handle_update_limits(
         if let Some(v) = body.third_party_reasoning_collapse {
             config.usage.third_party_reasoning_collapse = v;
         }
+        if let Some(v) = body.default_model.as_deref() {
+            config.usage.default_model = v.trim().to_string();
+        }
         Ok(())
     })
     .await?;
@@ -360,6 +366,7 @@ pub async fn handle_update_limits(
     );
     crate::config::set_sanitize_fingerprints(usage.sanitize_fingerprints);
     crate::config::set_third_party_reasoning_collapse(usage.third_party_reasoning_collapse);
+    crate::config::set_default_model(&usage.default_model);
     // 换号重试间隔 / 状态码名单立即生效（账号池运行时读取）
     state
         .account_sessions
