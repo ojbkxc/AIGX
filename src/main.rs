@@ -4,13 +4,19 @@
 // lib 与 bin 两个 crate，两个 crate root 还各复制了一份 rustls provider
 // 安装逻辑。
 //
-// ⚠️ dead_code 仍是 crate 级 allow（双 target 遮罩的最后一层）：摘掉后实测
-// 377 处 never-used。unused_imports 遮罩已**永久删除**（未用 import 清零，
-// 顺带清掉一批无人消费的 re-export）。剩余项多为「预留 API vs 半死钩子」
-// 两类，需逐项判定 —— 例如 `invalidate_account` 是缺失的凭证变更钩子、
-// `provider_is_plugin_owned` 疑似未接线路由，盲删会把线索一起删掉。清理
-// 完成前保留 dead_code allow；新增代码需要预留符号时在**项级**标注并在
-// 注释写明消费方（协议线表 / 宿主 JS 等编译器不可见的契约）。
+// ⚠️ dead_code 仍是 crate 级 allow（双 target 遮罩的最后一层）：清理波次
+// 1/2 已把实测数从 377 降到 **347**（unused_imports 遮罩已永久删除；凭证
+// 变更钩子 invalidate_account、上游错误翻译 render_openai_error 已接线，
+// provider_is_plugin_owned 已删）。剩余项按性质分三类，需逐项判定：
+// ① 整块未接线子系统（channel/rate_budget 19、pricing/video_billing 15、
+//    channel/response_quality 9、ratelimit/aimd_limiter 8、semantic/hub 等，
+//    引入于 `afc95617 router 阶段3`，产品上「接线 or 删除」待裁决）；
+// ② 编译器不可见的线表契约（plugin_host/script/rpc 26：宿主 JS 的
+//    dispatch/callback 名，只有测试对表）；
+// ③ 已注明「未接入」的移植件（bridge/session/chatglm_stream 12：请求侧
+//    端点在闭源插件包里，AIGX 不自创）。
+// 清理完成前保留 dead_code allow；新增代码需要预留符号时在**项级**标注并在
+// 注释写明消费方，不要再扩大遮挡范围。
 #![allow(dead_code)]
 #![recursion_limit = "512"]
 
