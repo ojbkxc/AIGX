@@ -1265,6 +1265,44 @@ impl AccountSessionStore {
         CasOutcome::Updated
     }
 
+    // ── 插件账号合同的事务入口（A2A v3.5.0-beta.1）────────────────────
+    //
+    // 插件的身份归并 + 凭证写入必须相对其他写者原子：先读「有没有同身份
+    // 旧账号」再写，两个并发请求都读到「没有」就会各自建一条。A2A 用
+    // SQLite Immediate 事务收口；AIGX 的权威状态是本模块的内存表，因此
+    // 把「读-判-写」整段放进写锁，落盘在锁外（与 update_*_cas 同形态）。
+
+    /// 在写锁内执行一次插件合同事务：闭包可读写全部账号，返回
+    /// `(结果, 需落盘快照列表)`。快照在释放锁后逐条落盘。
+    pub(crate) fn plugin_tx<R>(
+        &self,
+        f: impl FnOnce(&mut Vec<AccountSession>, i64) -> (R, Vec<AccountSession>),
+    ) -> R {
+        let now = chrono::Utc::now().timestamp();
+        let (result, dirty) = {
+            let mut sessions = self.inner.sessions.write();
+            f(&mut sessions, now)
+        };
+        for session in &dirty {
+            if let Err(e) = self.persist(session) {
+                tracing::warn!("persist plugin account {}: {e}", session.id);
+            }
+        }
+        result
+    }
+
+    /// 按排序规则比较两个账号（`Less` = a 先试）。
+    ///
+    /// 管理面「排序预览」与选号阶段共用同一个比较器 —— 界面显示的顺序
+    /// 必须就是数据面实际先试的顺序，两处各写一份迟早漂移。
+    pub fn compare_sessions_by_rules(
+        a: &AccountSession,
+        b: &AccountSession,
+        rules: &[crate::channel::routing_policy::AccountSortRule],
+    ) -> std::cmp::Ordering {
+        cmp_by_rules(a, b, rules)
+    }
+
     /// 上游明确拒了这枚凭据（401/403）：把 `expires_at` 拉到现在。
     ///
     /// 两个后果，都是我们要的：

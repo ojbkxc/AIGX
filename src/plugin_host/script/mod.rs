@@ -65,20 +65,25 @@ pub mod callbacks;
 pub mod catalog;
 pub mod dependencies;
 pub mod host_rs;
+pub mod http;
+pub mod icons;
 pub mod install;
 pub mod operations;
 pub mod packages;
 pub mod protocol;
+pub mod rpc;
 pub mod runtime;
 pub mod settings;
 pub mod source;
 pub mod storage;
 pub mod transport;
 pub mod types;
+pub mod usage;
+pub mod websocket;
 
 pub use runtime::ScriptHostManager;
 pub use types::{
-    script_plugins_root, ScriptCatalogEntry, ScriptInitPayload, ScriptPackage, ScriptProviderInfo,
-    ScriptPublisher, ScriptSettingField, ScriptSettingsOptions, ScriptSource, MAX_SCRIPT_PACKAGES,
-    MAX_SETTINGS_BYTES, SCRIPT_PLUGINS_DIR,
+    script_plugins_root, ScriptCatalogEntry, ScriptInitPayload, ScriptPackage, ScriptPackageEntry,
+    ScriptProviderInfo, ScriptPublisher, ScriptSettingField, ScriptSettingsOptions, ScriptSource,
+    MAX_SCRIPT_PACKAGES, MAX_SETTINGS_BYTES, SCRIPT_PLUGINS_DIR,
 };

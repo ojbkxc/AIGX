@@ -724,3 +724,187 @@
   align-items: center;
   gap: 8px;
 }
+
+/* ── T8 对齐新增：提供商 rail / 补签页 / 连登列 ── */
+
+.ck-center-layout {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .ck-center-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ck-provider-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  position: sticky;
+  top: 12px;
+}
+
+.ck-rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 4px 6px;
+}
+
+.ck-rail-head h3 {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.ck-rail-head span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ck-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease;
+}
+
+.ck-rail-item:hover {
+  background: var(--btn-secondary-bg);
+}
+
+.ck-rail-item.is-active {
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+  font-weight: 600;
+}
+
+.ck-rail-logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.ck-rail-letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+}
+
+.ck-rail-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ck-rail-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.ck-rail-count.pending {
+  color: var(--warning-text, #d97706);
+  font-weight: 600;
+}
+
+.ck-rail-note {
+  margin: 6px 4px 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.ck-center-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 连登列 */
+.ck-streak {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+}
+
+/* 补签页 */
+.ck-makeup-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ck-makeup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ck-makeup-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.04));
+}
+
+.ck-makeup-row.is-off {
+  opacity: 0.72;
+}
+
+.ck-makeup-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ck-makeup-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ck-makeup-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ck-makeup-ops {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ck-gap-unit {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}

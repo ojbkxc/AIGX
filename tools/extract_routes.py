@@ -46,7 +46,41 @@ HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options")
 ROUTE_FILES = [
     "src/main.rs",
     "src/agent/api.rs",
+    # ── 子模块 router（A2A 对齐波 v1.0.63 起）───────────────────────
+    # 这些模块的 `pub fn router()` 由 main.rs `.merge(...)` 接进主 Router。
+    # 静态提取必须逐文件扫，否则「真实路由」侧会漏掉它们 —— 那会让这些
+    # 路由**既不进闸门也不进文档核对**，等于静默失去保护。
+    "src/api/admin/plugin_provider_settings.rs",
+    "src/api/admin/plugin_icons.rs",
+    "src/api/admin/plugin_theme.rs",
+    "src/api/admin/plugin_ui.rs",
+    "src/api/admin/plugin_login.rs",
+    "src/api/admin/plugin_tasks.rs",
+    "src/api/admin/plugin_helpers.rs",
+    # plugins.rs 的 `router()` 只装**新增**的 startup/settings/reload 三条；
+    # 老的平铺 `/api/plugins*` 仍在 main.rs（两边路由不重叠）
+    "src/api/admin/plugins.rs",
+    # ── 工具服务 / 维护（T7 交付）─────────────────────────────────
+    # 之前漏登记：这些 router() 的 25 条 /api 路由既不进「真实」侧也不进
+    # 「文档」侧，闸门对它们完全失明（[A]=0 只是假象）。
+    "src/api/tool_runtime.rs",
+    "src/api/admin/tools.rs",
+    "src/api/admin/maintenance.rs",
+    "src/api/admin/tool_image_admin.rs",
+    # ── 签到台账 / 计划（T6 交付）─────────────────────────────────
+    # 同上：10 条 /api 路由（含 campaigns 双路径）此前对闸门失明。
+    "src/api/admin/checkin_records.rs",
+    "src/api/admin/checkin_schedules.rs",
 ]
+
+# 未登记白名单的说明（由 check_router_coverage() 兜底校验）：
+# - `src/tool_services/mod.rs` / `src/maintenance/mod.rs` 也有 `pub fn router()`，
+#   但都是空 `Router::new()`（T0 占位入口，真实管理面在 api/admin/tools.rs 与
+#   api/admin/maintenance.rs），登记只会让白名单躺两个永空文件。
+# - `src/api/admin/account_sessions.rs` 目前**没有** `pub fn router()`（handler 是
+#   裸函数，11 条路由在 main.rs 平铺注册），故无需登记。**若将来把路由挪进
+#   account_sessions::router()，必须同步加进本白名单**，否则那 11 条账号路由
+#   会立刻失明；check_router_coverage() 会自动挡住这种遗漏。
 
 OPENAPI_RS = "src/api/admin/openapi.rs"
 
@@ -175,6 +209,9 @@ def extract_file(path: Path) -> dict[str, set[str]]:
         handler = args[1] if len(args) > 1 else ""
         methods = {mm.group(1) for mm in METHOD_RE.finditer(handler)}
         if not methods:
+            # `any(handler)` / 裸 handler：axum 的 `any()` 匹配**全部**方法。
+            # 记作通配符 `?`，[F] 方法比对时跳过（见 collect()），否则会逼文档
+            # 写出一个并不存在的 `?` 方法。
             methods = {"?"}
         out.setdefault(p, set()).update(methods)
     return out
@@ -190,6 +227,73 @@ def extract_repo(root: Path) -> dict[str, set[str]]:
         for p, ms in extract_file(f).items():
             total.setdefault(p, set()).update(ms)
     return total
+
+
+# ── 闸门覆盖自查：所有带 `pub fn router()` 的文件必须在 ROUTE_FILES 里 ──
+#
+# 为什么需要：ROUTE_FILES 是**白名单**。新增的 `xxx::router()` 若没登记，
+# 它的路由既不进「真实」侧（不被扫描）也不进「文档」侧（不会被报缺失）——
+# 闸门对它**结构性失明**，而 `[A]=0` 看起来仍是绿的。2026-11-17 实测有
+# 6 个文件（35 条 /api 路由）处于这种失明状态。
+#
+# 两类假阳性需排除：
+#   ① 空 router（函数体只有 `Router::new()`，无 `.route(`）——T0 占位入口
+#   ② 主文件（main.rs 无 router()，按 `.route()` 直接扫）
+_ROUTER_DEF_RE = re.compile(r"pub\s+fn\s+router\s*\(\s*\)\s*->\s*[^{]+\{")
+_ROUTE_CALL_RE = re.compile(r"\.route\s*\(")
+
+
+def _router_body_is_empty(src: str) -> bool:
+    m = _ROUTER_DEF_RE.search(src)
+    if not m:
+        return False
+    # 从 `{` 起做括号配对，取函数体，看有没有 `.route(`
+    i = src.index("{", m.start())
+    depth, j = 0, i
+    while j < len(src):
+        c = src[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    body = src[i : j + 1]
+    return not _ROUTE_CALL_RE.search(body)
+
+
+def check_router_coverage(root: Path) -> list[str]:
+    """返回「有非空 router() 但不在 ROUTE_FILES」的相对路径列表。
+
+    注意：**非空即报**，不做「是否真的有 /api 路由」的二次判断。所以看到
+    非空差集时，正确处置是**先确认那个文件确实对外暴露路由**，再决定：
+
+    - 真的有路由 → 加进 ROUTE_FILES（意味着承认「该被扫」），然后按 gate
+      报出的 [A] 逐条补 openapi + paths（或 EXEMPT）。
+    - 只有内部/非 /api 路由（如只服务静态资源） → 仍需加进白名单，让 gate
+      自己判定它们不进 `/api` 宇宙（`real_api` 只取 `/api` 前缀）。
+    - 是**空** router（`Router::new()` 无 `.route(`） → 已被 `_router_body_is_empty`
+      过滤，不会报。若误报，说明该函数体解析出错，先修解析而非加白名单。
+
+    **不要**为了让 gate 变绿而盲目加白名单 —— 那等于放弃对它的保护。
+    """
+    listed = set(ROUTE_FILES)
+    missing: list[str] = []
+    for f in sorted((root / "src").rglob("*.rs")):
+        try:
+            src = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if not _ROUTER_DEF_RE.search(src):
+            continue
+        rel = f.relative_to(root).as_posix()
+        if rel in listed:
+            continue
+        if _router_body_is_empty(src):
+            continue  # 假阳性①：空 router（占位入口）
+        missing.append(rel)
+    return missing
 
 
 def _fn_body(src: str, header_re: str) -> str | None:
@@ -332,7 +436,10 @@ def collect(root: Path) -> dict:
     method_mismatch = {
         p: {"real": sorted(real_api[p]), "doc": sorted(decl[p])}
         for p in sorted(set(real_api) & set(decl))
-        if real_api[p] != decl[p]
+        # 通配符 `?`（axum `any()`）与文档的具体方法集**不可比**：`any` 接受
+        # 全部方法，文档只需列出对外承诺的那些。跳过这类路径的方法比对，
+        # 否则会逼文档写一个不存在的 `?` 方法。
+        if "?" not in real_api[p] and real_api[p] != decl[p]
     }
 
     # 工具 covers ⊆ 真实路由（口径 = gate_universe，与单测
@@ -440,16 +547,35 @@ def main() -> int:
 
     res = collect(root)
 
+    # 覆盖自查：有非空 router() 却没登记进 ROUTE_FILES → 闸门对它是失明的。
+    # 这是**结构性**缺陷（不是偶发漏登记），所以并入 FAIL 判定。
+    uncovered = check_router_coverage(root)
+    res["router_coverage_gap"] = uncovered
+
     if as_json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
         return 0
 
     report_human(res)
 
+    if uncovered:
+        print(
+            f"\n[COVERAGE] 有 {len(uncovered)} 个带非空 router() 的文件未登记进 "
+            f"ROUTE_FILES，其路由对闸门**完全失明**（既不校验也未登记）：",
+            file=sys.stderr,
+        )
+        for rel in uncovered:
+            print(f"    {rel}", file=sys.stderr)
+        print(
+            "  修法：把上述文件加进 tools/extract_routes.py 的 ROUTE_FILES。\n"
+            "        空 router（只有 Router::new()）与 main.rs 不会被计入。",
+            file=sys.stderr,
+        )
+
     if as_report:
         return 0
 
-    if has_violation(res):
+    if has_violation(res) or uncovered:
         msg = (
             "\nROUTE-GATE FAIL：真实路由 / 文档清单 / 豁免表 / 工具 covers 不一致（见上 A–G）。\n"
             "  修法：新路由 → 加进 openapi.rs 的 real_admin_routes() 与 paths_* 文档；\n"

@@ -49,6 +49,7 @@ use std::time::Duration;
 
 use parking_lot::RwLock as PlRwLock;
 use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::account_session::AccountSessionStore;
@@ -129,10 +130,20 @@ pub struct ScriptHostManager {
     catalog: Arc<Catalog>,
     /// 原生插件包注册表（reserved 集合的补充来源）。
     native_registry: Arc<PackRegistry>,
+    /// 传给脚本宿主的 `HostEnv`（init 载荷的 `env` 字段）。
+    ///
+    /// 构造时给一份由 `data_dir` 推导的缺省值；`main.rs` 构造完
+    /// [`crate::plugin_host::PluginHostManager`] 后应调 [`Self::set_host_env`]
+    /// 注入与原生插件同源的真实值（debug_traffic / loopback_port 等）。
+    /// 用 `PlRwLock` 而非构造参数：脚本宿主与原生宿主在 main.rs 里是两个
+    /// 独立对象，注入顺序与构造顺序解耦。
+    host_env: PlRwLock<crate::plugin_host::process::HostEnv>,
     /// 出站代理（script.transport.*）。
     transport: Arc<Transport>,
     /// 当前宿主（`Some` = Running；崩溃/关闭立即清空）。
     host: PlRwLock<Option<Arc<ScriptHost>>>,
+    /// 当前宿主的回调句柄（关闭/热切换时清会话表用；与 `host` 同生命周期）。
+    callbacks: PlRwLock<Option<Arc<ScriptCallbacks>>>,
     /// provider（声明 id 与实际 id 都在表里）→ 包 id。
     owners: PlRwLock<HashMap<String, String>>,
     /// 声明 id → 实际接管 id（无冲突时两者相同）。
@@ -165,6 +176,14 @@ impl ScriptHostManager {
     ) -> Arc<Self> {
         let script_root = script_plugins_root(&data_dir);
         let transport = Transport::new(http.clone());
+        let host_env = crate::plugin_host::process::HostEnv {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            host_version: env!("CARGO_PKG_VERSION").to_string(),
+            target: crate::plugin_host::host_target_triple(),
+            proxy: String::new(),
+            debug_traffic: false,
+            loopback_port: 0,
+        };
         Arc::new(Self {
             data_dir,
             script_root,
@@ -173,8 +192,10 @@ impl ScriptHostManager {
             http,
             catalog,
             native_registry,
+            host_env: PlRwLock::new(host_env),
             transport,
             host: PlRwLock::new(None),
+            callbacks: PlRwLock::new(None),
             owners: PlRwLock::new(HashMap::new()),
             aliases: PlRwLock::new(HashMap::new()),
             runtime: PlRwLock::new(ScriptHostStatus::default()),
@@ -204,6 +225,16 @@ impl ScriptHostManager {
         &self.http
     }
 
+    /// 注入宿主环境（init 载荷的 `env`）。main.rs 在构造后调用一次。
+    pub fn set_host_env(&self, env: crate::plugin_host::process::HostEnv) {
+        *self.host_env.write() = env;
+    }
+
+    /// 当前宿主环境快照。
+    pub fn host_env(&self) -> crate::plugin_host::process::HostEnv {
+        self.host_env.read().clone()
+    }
+
     /// 状态快照。
     pub fn status(&self) -> ScriptHostStatus {
         self.runtime.read().clone()
@@ -214,6 +245,28 @@ impl ScriptHostManager {
         let mut v: Vec<String> = self.owners.read().keys().cloned().collect();
         v.sort();
         v
+    }
+
+    /// 运维面调用一个 provider 的能力方法（`admin.action` / `login.*` 等）。
+    ///
+    /// 与数据面 `route_for_provider` 同一路由判据：未接管 / 宿主不在跑 →
+    /// `Err`（调用方按 503 处理）。`method` 是 provider 契约方法名（如
+    /// `admin.action`），`params` 由调用方构造。
+    pub async fn call_provider(
+        &self,
+        provider: &str,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let route = self
+            .route_for_provider(provider)
+            .ok_or_else(|| format!("provider {provider} 未由脚本宿主接管"))?;
+        match tokio::time::timeout(timeout, route.channel.call(method, params)).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => Err(e.message),
+            Err(_) => Err(format!("provider {provider} 的 {method} 超时")),
+        }
     }
 
     /// 数据面路由（**同步**）。未接管 / 宿主不在跑 → `None`。
@@ -257,6 +310,8 @@ impl ScriptHostManager {
 
     /// 启动时恢复：有已启用包就拉起宿主，否则什么都不做。
     pub async fn start(self: &Arc<Self>) {
+        // 图标刷新 worker（进程内单例；无启用包也会启动，随 wake 拉取）
+        super::icons::spawn(self.script_root.clone(), self.store.clone());
         let packages = storage::load_packages(&self.store);
         if !packages.iter().any(|p| p.enabled) {
             tracing::info!("[Script] 无已启用脚本包，宿主不启动");
@@ -265,6 +320,8 @@ impl ScriptHostManager {
         if let Err(e) = self.rebuild("startup").await {
             tracing::warn!("[Script] 启动恢复失败: {e}");
         }
+        // 首轮图标（后台，不阻塞启动）
+        super::icons::wake(false);
     }
 
     /// 重建宿主（启停包 / 改配置 / 崩溃重启共用）。
@@ -347,6 +404,8 @@ impl ScriptHostManager {
             if let Some(old) = old {
                 self.spawn_drain(old);
             }
+            // 无启用包：清掉设置声明（管理面不再显示已停用 provider 的设置）
+            crate::plugin_host::provider_settings::clear_host_schemas();
             tracing::info!("[Script] 无已启用包（{reason}），宿主已停");
             return Ok(self.status());
         }
@@ -360,18 +419,36 @@ impl ScriptHostManager {
             self.account_sessions.clone(),
             self.store.clone(),
         );
-        let reserved = self.reserved_providers();
+        let reserved = self.reserved_providers(&packages);
+        // claimed：{providerId: packageId}（A2A allocateProvider 的判据）。
+        // 多个包声明同一 id 时先登记者赢（BTreeMap::or_insert 语义），与
+        // A2A prepare_inner 一致。
+        let mut claimed: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for pkg in &packages {
+            for provider in &pkg.providers {
+                // 包内 provider 级停用：不参与 claimed（宿主不会加载它）
+                if pkg.disabled_providers.contains(&provider.id) {
+                    continue;
+                }
+                claimed
+                    .entry(provider.id.clone())
+                    .or_insert_with(|| pkg.id.clone());
+            }
+        }
         let payload = build_init_payload(
             &self.script_root,
             &packages,
             reserved.iter().cloned().collect(),
+            claimed,
+            self.host_env(),
             Some(self.catalog.catalog_path().to_string_lossy().into_owned()),
         );
 
         // 先 spawn 新宿主再动任何状态：失败时旧宿主/旧代际原样保留
         //（否则新宿主没起来、旧监督循环却被代际失效，崩溃后无人接管）。
         // 失败同时写 last_error：状态快照的契约是「最近一次启动失败」可见。
-        let new_host = match host_rs::spawn_host(&self.data_dir, payload, callbacks).await {
+        let new_host = match host_rs::spawn_host(&self.data_dir, payload, callbacks.clone()).await {
             Ok(host) => host,
             Err(e) => {
                 let msg = format!("启动脚本宿主失败: {e}");
@@ -383,6 +460,18 @@ impl ScriptHostManager {
 
         // 路由表：声明 id → 实际 id（identities 映射；无冲突同名）
         let (owners, aliases, providers) = self.build_routing(&packages, &new_host, &reserved);
+
+        // 提供商设置声明（A2A `settings.schema.v1` 的脚本形态）：宿主在
+        // provider 元数据的 `settings` 字段里回声明。注册到全局表供管理面
+        // 「提供商设置」页读取（plugin-api 的 handler 只调
+        // `provider_settings::snapshot/configure`，不直接接触宿主）。
+        // generation 用「当前代际 + 1」——与下方提交点升代际同值，重建后
+        // 旧 revision 自然失效。
+        register_provider_settings(
+            &packages,
+            new_host.providers(),
+            self.generation.load(Ordering::Relaxed) + 1,
+        );
 
         // 别名表落盘（KV `plugin:script-identities` + 投影）：宿主重启后
         // JS 侧从 registry.json 读到的 identities 与网关路由同源。
@@ -434,8 +523,11 @@ impl ScriptHostManager {
             }
         }
         if let Some(old) = old {
+            // 旧宿主的 HTTP/WS 会话表随旧回调一起清空（新宿主用新表）
+            self.callbacks.write().take();
             self.spawn_drain(old);
         }
+        *self.callbacks.write() = Some(callbacks.clone());
         // 监督循环：意外退出 → 退避重启（代际过期的旧循环自行退出）
         let manager = Arc::clone(self);
         let host = new_host;
@@ -459,6 +551,11 @@ impl ScriptHostManager {
     /// 的宿主；已提交的宿主由这里的 take 关闭。两条路径都不会留下孤儿进程。
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        crate::plugin_host::provider_settings::clear_host_schemas();
+        // 清空 HTTP/WS 会话表（关闭前断掉脚本遗留的 egress 会话）
+        if let Some(cb) = self.callbacks.write().take() {
+            cb.clear_sessions();
+        }
         let old = {
             let mut slot = self.host.write();
             let mut owners = self.owners.write();
@@ -480,8 +577,16 @@ impl ScriptHostManager {
         }
     }
 
-    /// reserved 集合：内置 provider + 原生插件包声明。
-    fn reserved_providers(&self) -> BTreeSet<String> {
+    /// reserved 集合：**插件优先**（2026-11 修订）。
+    ///
+    /// 起点是「内置原生 provider + 原生插件包声明的 provider」，再**减去**
+    /// 已启用脚本包声明的 provider——脚本也是插件，同样优先于原生实现。
+    /// 例外（保留不放）：
+    /// - 硬保留集合（[`crate::plugin_host::registry::HARD_RESERVED`]）——
+    ///   网关内部虚拟 id，谁都不能接管；
+    /// - 已启用**原生插件包**声明的 provider——两类插件都声明时原生包优先
+    ///   （与 A2A `prepare_inner` 的 `native_owners` 口径一致）。
+    fn reserved_providers(&self, packages: &[ScriptPackage]) -> BTreeSet<String> {
         let mut set: BTreeSet<String> = crate::account_session::registry::PROVIDERS
             .iter()
             .map(|s| s.kind.to_string())
@@ -491,9 +596,30 @@ impl ScriptHostManager {
                 .iter()
                 .map(|(kind, _)| kind.to_string()),
         );
+        // 原生插件包声明的 provider（这些不因脚本声明而让位）
+        let mut native_pack_owned: BTreeSet<String> = BTreeSet::new();
         for pack in self.native_registry.list() {
+            if !pack.enabled {
+                continue;
+            }
             for provider in pack.providers {
-                set.insert(provider.id);
+                native_pack_owned.insert(provider.id);
+            }
+        }
+        set.extend(native_pack_owned.iter().cloned());
+        // 插件优先：已启用脚本包声明的 provider 从 reserved 移除（原生降为兜底）。
+        // 包内 provider 级停用（`disabled_providers`）不解除 reserved——宿主不
+        // 加载它，让位给原生实现才是正确语义。
+        for pkg in packages.iter().filter(|p| p.enabled) {
+            for provider in &pkg.providers {
+                if pkg.disabled_providers.contains(&provider.id) {
+                    continue;
+                }
+                if !native_pack_owned.contains(&provider.id)
+                    && !crate::plugin_host::registry::is_hard_reserved(&provider.id)
+                {
+                    set.remove(&provider.id);
+                }
             }
         }
         set
@@ -682,6 +808,10 @@ fn compute_routing(
     // 2) 兜底：包清单声明的 provider（identities 缺失时按同名登记）
     for pkg in packages {
         for declared in &pkg.providers {
+            // 包内 provider 级停用：宿主不加载它，路由表不登记
+            if pkg.disabled_providers.contains(&declared.id) {
+                continue;
+            }
             if reserved.contains(&declared.id) {
                 continue;
             }
@@ -703,8 +833,16 @@ fn compute_routing(
 ///
 /// 数据面热路径也会走到这里，`is_plugin_owned` 只做列表扫描 + 一次 id
 /// clone，没有分配放大。
+/// 数据面让位判据（脚本侧）：provider 由**已启用的原生插件包**声明，
+/// 或属于硬保留集合 → 脚本不接管。
+///
+/// **不再判 `is_native_provider`**：插件优先（2026-11 修订）——脚本包
+/// 声明了某个有原生实现的 provider，就由脚本接管，原生降为兜底。这与
+/// `registry::is_plugin_owned` 同立场。
+///
+/// 热路径：`is_plugin_owned` 只做列表扫描 + 一次 id clone，无分配放大。
 fn script_takeover_blocked(native_registry: &PackRegistry, provider: &str) -> bool {
-    crate::plugin_host::registry::is_native_provider(provider)
+    crate::plugin_host::registry::is_hard_reserved(provider)
         || native_registry.is_plugin_owned(provider)
 }
 
@@ -717,9 +855,6 @@ fn backoff_delay(crashes: u32, attempt: u32) -> Duration {
 }
 
 /// 宿主上报的 identities JSON → 落盘用的强类型表。
-///
-/// JS 形状 `{pkgId: {声明 id → 实际 id}}`；形状不符的条目静默丢弃
-/// （映射缺失只影响冲突包的别名翻译，不值得中断启动流程）。
 fn identities_from_host(raw: &serde_json::Map<String, serde_json::Value>) -> storage::Identities {
     let mut out = storage::Identities::new();
     for (pkg_id, mapping) in raw {
@@ -737,6 +872,98 @@ fn identities_from_host(raw: &serde_json::Map<String, serde_json::Value>) -> sto
     out
 }
 
+/// 把宿主上报的 provider 设置声明注册到全局表（供管理面「提供商设置」页）。
+///
+/// A2A 的脚本宿主在 `script.packages` 里回 `settings`（`packageSettings`
+/// 形状：`{id, optionsExample, providerOptions:{provider:[{key,label,…}]}}`）；
+/// AIGX 走原生握手形态时 provider 元数据里也可能带 `settings_schema`。
+/// 两处都试：优先 `settings_schema`（完整 Schema），否则从
+/// `providerOptions` 的选项清单合成一份「boolean 开关」Schema。
+///
+/// 解析失败只 warn——设置页少一个 provider 不影响数据面。
+fn register_provider_settings(
+    packages: &[ScriptPackage],
+    providers: &[ScriptProviderInfo],
+    generation: u64,
+) {
+    let package_of = |provider_id: &str| {
+        packages
+            .iter()
+            .find(|p| p.providers.iter().any(|pr| pr.id == provider_id))
+            .map(|p| p.id.clone())
+            .unwrap_or_default()
+    };
+    let mut entries = Vec::new();
+    for provider in providers {
+        let schema_value = provider
+            .extra
+            .get("settings_schema")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .or_else(|| {
+                provider
+                    .extra
+                    .get("settings")
+                    .and_then(|s| s.get("providerOptions"))
+                    .and_then(|opts| opts.get(&provider.id))
+                    .and_then(|options| synthesize_schema(&provider.label, options))
+            });
+        let Some(schema_value) = schema_value else {
+            continue;
+        };
+        match crate::plugin_host::provider_settings::schema::parse(&provider.id, &schema_value) {
+            Ok(Some(schema)) => entries.push((
+                provider.id.clone(),
+                crate::plugin_host::provider_settings::RegisteredSchema {
+                    schema,
+                    package: package_of(&provider.id),
+                    label: provider.label.clone(),
+                    generation,
+                },
+            )),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "[Script] provider {} 的设置声明无效，已忽略：{e}",
+                    provider.id
+                );
+            }
+        }
+    }
+    crate::plugin_host::provider_settings::register_host_schemas(entries);
+}
+
+/// 从 A2A `providerOptions` 的选项清单合成一份 boolean 开关 Schema。
+///
+/// 选项形状 `[{key, label, description?, default?}]`（见 `environment.mjs`
+/// 的 `optionDefinitions`）；每项 → 一个 `boolean` 字段。
+fn synthesize_schema(label: &str, options: &serde_json::Value) -> Option<serde_json::Value> {
+    let list = options.as_array()?;
+    let fields: Vec<serde_json::Value> = list
+        .iter()
+        .filter_map(|option| {
+            let key = option.get("key").and_then(serde_json::Value::as_str)?;
+            Some(serde_json::json!({
+                "key": key,
+                "label": option
+                    .get("label")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::Value::String(key.to_string())),
+                "type": "boolean",
+                "default": option.get("default").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            }))
+        })
+        .collect();
+    if fields.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "version": 1,
+        "title": if label.is_empty() { "设置" } else { label },
+        "fields": fields,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,12 +979,7 @@ mod tests {
     }
 
     fn provider(id: &str) -> ScriptProviderInfo {
-        ScriptProviderInfo {
-            id: id.to_string(),
-            label: id.to_string(),
-            upstream: None,
-            models: Vec::new(),
-        }
+        ScriptProviderInfo::new(id, id)
     }
 
     fn pkg(id: &str, providers: &[&str]) -> ScriptPackage {
@@ -859,6 +1081,25 @@ mod tests {
     }
 
     #[test]
+    fn routing_skips_provider_disabled_inside_package() {
+        // 包内 provider 级停用（`disabled_providers`）：宿主不加载它，
+        // 兜底路由也不得登记（否则会留一条指向不存在 provider 的死路由）。
+        let mut package = pkg("@a/kiro", &["kiro", "astudio"]);
+        package.disabled_providers = vec!["kiro".into()];
+        let packages = vec![package];
+        let providers = vec![provider("kiro"), provider("astudio")];
+        let (owners, _aliases, actuals) = compute_routing(
+            &packages,
+            &providers,
+            &serde_json::Map::new(),
+            &BTreeSet::new(),
+        );
+        assert!(!owners.contains_key("kiro"), "包内停用的 provider 不得登记");
+        assert_eq!(owners.get("astudio"), Some(&"@a/kiro".to_string()));
+        assert_eq!(actuals, vec!["astudio".to_string()]);
+    }
+
+    #[test]
     fn backoff_escalates_with_consecutive_crashes() {
         // 首次崩溃首次重拉 = 1s；崩溃数与失败数都按档位后移；钳到 60s。
         assert_eq!(backoff_delay(1, 0), Duration::from_secs(1));
@@ -875,14 +1116,19 @@ mod tests {
         use crate::plugin_host::registry::{PackMeta, PackProvider, PackRegistry};
         use crate::storage::FileStore;
 
-        // 内置原生实现永远让位
+        // 插件优先：内置原生实现（openai）**不再**让位——脚本声明了就能接管
         let dir = tempfile::TempDir::new().unwrap();
         let registry = PackRegistry::new(Arc::new(FileStore::new(dir.path().to_path_buf())));
-        assert!(script_takeover_blocked(&registry, "openai"));
+        assert!(
+            !script_takeover_blocked(&registry, "openai"),
+            "插件优先：无原生插件包声明时，内置原生实现也允许脚本接管"
+        );
+        // 硬保留集合（内部虚拟 id）永远让位
+        assert!(script_takeover_blocked(&registry, "cloudflare"));
+        assert!(script_takeover_blocked(&registry, "hub"));
+        assert!(script_takeover_blocked(&registry, "custom-abc"));
 
-        // 原生插件包声明的 provider 同样让位（仅当包已启用）。
-        // 用一个明确的「非内置」id：workbuddy/qoder 等是内置原生实现，
-        // 会命中断言里的第一条判据，掩盖本用例要验的插件包分支。
+        // 已启用的原生插件包声明的 provider 让位（两类插件都声明时原生包优先）。
         const PACK_PROVIDER: &str = "script-demo-provider";
         let meta = PackMeta {
             id: "native-pack".into(),

@@ -1,8 +1,8 @@
 import { cloneElement, Fragment, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ChevronsDownUp, ChevronsUpDown, Columns3, Download, Eye, EyeOff, FlaskConical, Gift, Globe, GripVertical,
-  KeyRound, ListChecks, Loader2, MoreHorizontal, Pencil, Plus, Power, RotateCcw, SlidersHorizontal,
+  ArrowUpDown, ChevronsDownUp, ChevronsUpDown, Columns3, Download, Eye, EyeOff, FlaskConical, Gift, Globe, GripVertical,
+  KeyRound, ListChecks, Loader2, MoreHorizontal, Package, Pencil, Plus, Power, RefreshCcw, RotateCcw, SlidersHorizontal,
   Trash2, Upload, User, Wallet, Wrench,
 } from 'lucide-react';
 import { api } from '../api';
@@ -12,6 +12,7 @@ import { CHECKIN_PROVIDERS } from '../lib/checkinProviders';
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import AccountBatchDialog from '../components/AccountBatchDialog';
+import AccountSortDialog from '../components/AccountSortDialog';
 import LimiterGroupEditor from '../components/LimiterGroupEditor';
 import { describeGroup, flatToGroups } from '../lib/limiterGroups';
 import ProxySelector from '../components/ProxySelector';
@@ -38,6 +39,7 @@ import type {
   AccountUsageWindow,
   CatalogSyncAccount,
   ChannelItem,
+  HiddenAccountsSummary,
   ImportSourceEntry,
   ProxyPoolItem,
 } from '../types';
@@ -414,6 +416,23 @@ const LS_FILTER = 'aigx-as-filter';
 /** 每页条数（SPEC §2.1：与全站 aigx-tbl-pagesize.<page> 命名一致） */
 const LS_PSZ = 'aigx-tbl-pagesize.accounts';
 
+/**
+ * 隐藏账号原因 → 中文（对齐 A2A core/account_store/hidden_accounts.rs 的 HiddenReason）。
+ * 账号本身还在库里，只是它所属插件此刻不可见 —— 提示条据此说明「为什么看不到」。
+ */
+function hiddenReasonLabel(t: (s: string) => string, reason: string): string {
+  switch (reason) {
+    case 'not_installed': return t('插件未安装');
+    case 'pack_disabled': return t('插件包已停用');
+    case 'provider_disabled': return t('插件内该提供商已停用');
+    case 'not_loaded': return t('插件未加载该提供商');
+    case 'loading': return t('插件加载中');
+    case 'load_failed': return t('插件加载失败');
+    case 'load_timeout': return t('插件加载超时');
+    default: return reason;
+  }
+}
+
 type StatusSeg = 'all' | 'enabled' | 'disabled' | 'cooling';
 type LimitSeg = 'all' | 'normal' | 'limited';
 
@@ -488,6 +507,12 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
 
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<AccountSessionItem | null>(null);
+  /** 服务端排序规则弹窗（对齐 A2A accounts-sort：决定调度选路，与展示序无关） */
+  const [sortDialogOpen, setSortDialogOpen] = useState(false);
+  /** 隐藏账号摘要（后端账号快照 hiddenAccounts：插件没装/停用导致列表里看不到的账号） */
+  const [hiddenAccounts, setHiddenAccounts] = useState<HiddenAccountsSummary | null>(null);
+  /** refresh-expiring 一键刷新中 */
+  const [expiringBusy, setExpiringBusy] = useState(false);
   const [form, setForm] = useState<SessionFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
 
@@ -642,6 +667,10 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         api.accountSessionStats(),
       ]);
       setSessions(sessionsRes.data ?? []);
+      // 隐藏账号摘要随账号快照下发（A2A list_visible_accounts 的 hiddenAccounts）；
+      // 旧后端不带该字段 → 清除，不渲染提示条
+      const hiddenRaw = (sessionsRes as unknown as { hiddenAccounts?: HiddenAccountsSummary }).hiddenAccounts;
+      setHiddenAccounts(hiddenRaw && hiddenRaw.total > 0 ? hiddenRaw : null);
       cooldownLoadedAt.current = Date.now();
       const channels = channelsRes.data ?? [];
       setAccountChannels(channels.filter((c) => c.channel_type === 'account'));
@@ -1687,6 +1716,55 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   };
 
   /** 导出全部账号为 JSON（含明文凭证；浏览器触发下载） */
+  /** 一键刷新全部已过期/临期凭证（A2A POST /api/accounts/refresh-expiring） */
+  const handleRefreshExpiring = async (): Promise<void> => {
+    if (expiringBusy) return;
+    setExpiringBusy(true);
+    try {
+      const res = await api.refreshExpiringAccounts();
+      const data = (res?.data ?? {}) as Record<string, unknown>;
+      const refreshed = Number(data.refreshed ?? data.ok ?? 0);
+      const failed = Number(data.failed ?? 0);
+      if (failed > 0) {
+        addToast(t('已刷新 {{ok}} 个账号，{{failed}} 个失败', { ok: refreshed, failed }), 'error');
+      } else {
+        addToast(t('已刷新 {{ok}} 个临期账号', { ok: refreshed }));
+      }
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setExpiringBusy(false);
+    }
+  };
+
+  /** 导单文件：按 provider 分组导出逐账号凭证文件（A2A POST /api/accounts/export-files） */
+  const handleExportFiles = async (): Promise<void> => {
+    setError('');
+    try {
+      const provider = providerFilter || '';
+      if (!provider) {
+        addToast(t('请先在供应商筛选里选定一家，再导出该组的凭证文件'), 'error');
+        return;
+      }
+      const res = await api.exportAccountFiles({ provider });
+      const payload = res?.data;
+      const files = payload?.files ?? [];
+      if (files.length === 0) throw new Error(t('导出数据为空'));
+      const bundle = JSON.stringify({ format: payload?.format ?? 'a2a-account-files', files }, null, 2);
+      const blob = new Blob([bundle], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `aigx-account-files-${provider}-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      addToast(t('已导出 {{count}} 个凭证文件（含明文凭证，请妥善保管）', { count: files.length }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleExport = async (): Promise<void> => {
     setError('');
     try {
@@ -2886,6 +2964,25 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         </div>
       )}
 
+      {hiddenAccounts && hiddenAccounts.total > 0 && (
+        <div className="as-hidden-notice" role="status">
+          <span className="as-hidden-icon">🔌</span>
+          <div className="as-hidden-body">
+            <strong>
+              {t('有 {{n}} 个账号当前不可见（所属插件未安装 / 已停用 / 未加载）', { n: hiddenAccounts.total })}
+            </strong>
+            <span className="as-hidden-detail">
+              {hiddenAccounts.providers
+                .map((p) => `${p.label || p.id} × ${p.count}（${hiddenReasonLabel(t, p.reason)}）`)
+                .join(' · ')}
+            </span>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => void load()}>
+            {t('刷新')}
+          </Button>
+        </div>
+      )}
+
       {stats.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
           {stats.map((st) => (
@@ -2928,9 +3025,24 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             <Button variant="outline" onClick={() => void queryAllBalances(visible)}>
               <Wallet size={14} /> {t('查询全部余额')}
             </Button>
+            <Tooltip label={t('批量刷新所有已过期 / 临期账号的凭证（只刷确实需要刷的）')}>
+              <Button variant="outline" onClick={() => void handleRefreshExpiring()} disabled={expiringBusy}>
+                {expiringBusy ? <Loader2 size={14} className="as-spin" /> : <RefreshCcw size={14} />} {t('刷新临期凭证')}
+              </Button>
+            </Tooltip>
+            <Tooltip label={t('按提供商配置服务端排序规则（决定调度优先选谁）')}>
+              <Button variant="outline" onClick={() => setSortDialogOpen(true)}>
+                <ArrowUpDown size={14} /> {t('排序规则')}
+              </Button>
+            </Tooltip>
             <Button variant="outline" onClick={() => void handleExport()} disabled={sessions.length === 0}>
               <Download size={14} /> {t('导出')}
             </Button>
+            <Tooltip label={t('按当前供应商筛选导出逐账号凭证文件（导单）')}>
+              <Button variant="outline" onClick={() => void handleExportFiles()} disabled={sessions.length === 0}>
+                <Package size={14} /> {t('导单文件')}
+              </Button>
+            </Tooltip>
             <Button
               variant="outline"
               onClick={() => importFileRef.current?.click()}
@@ -3287,6 +3399,9 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                                 <img className="provider-card-logo" src={providerIcon(g.provider) as string} alt="" />
                               ) : null}
                               <span className="as-group-label">{providerLabel(g.provider)}</span>
+                              {providers.find((p) => p.kind === g.provider)?.native_fallback === true ? (
+                                <span className="add-card-badge is-fallback">{t('原生备选')}</span>
+                              ) : null}
                               <span className="as-group-count">{groupRows.length}</span>
                               <span className="as-group-stat">
                                 {t('启用 {{n}}', { n: gEnabled })}
@@ -3536,6 +3651,33 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                 {/* ── 凭证：对话路径 / 抓包导入 / 凭证 / 额外请求头 ── */}
                 {dlgSeg === 'credential' && (
                   <>
+                    {/* 插件账号：public 只读回显 + secret 只写（后端不回明文） */}
+                    {editing?.public && Object.keys(editing.public).length > 0 ? (
+                      <div className="form-group as-plugin-public">
+                        <label>{t('公开信息（只读，由插件回报）')}</label>
+                        <ul className="as-public-list">
+                          {Object.entries(editing.public).map(([key, value]) => (
+                            <li key={key}>
+                              <span className="as-public-key">{key}</span>
+                              <span className="as-public-value">
+                                {value == null
+                                  ? '—'
+                                  : typeof value === 'object'
+                                    ? JSON.stringify(value)
+                                    : String(value)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {selectedProvider?.source === 'plugin' ? (
+                      <div className="form-hint">
+                        {t('该账号由插件提供（{{pack}}）：secret 只写不回，编辑时留空即保持原值。', {
+                          pack: selectedProvider.pack_id || t('插件'),
+                        })}
+                      </div>
+                    ) : null}
                     {selectedProvider?.kind === 'trae' ? (
                       <div className="form-hint">
                         {t('Trae 还要 X-Uid / X-Machine-Id / X-Device-Id：从抓包复制后填在下方「额外请求头」。')}
@@ -4334,6 +4476,11 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       <ConfirmDialog
         state={confirmState}
         onClose={() => setConfirmState(null)}
+      />
+      <AccountSortDialog
+        open={sortDialogOpen}
+        onClose={() => setSortDialogOpen(false)}
+        providers={providers}
       />
     </div>
   );

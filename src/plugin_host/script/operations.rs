@@ -72,8 +72,7 @@ pub async fn install(
                 .map(|id| ScriptProviderInfo {
                     id: id.clone(),
                     label: String::new(),
-                    upstream: None,
-                    models: Vec::new(),
+                    ..Default::default()
                 })
                 .collect();
             (resolved, declared, Some(contract))
@@ -146,8 +145,7 @@ pub async fn install(
                 .map(|id| ScriptProviderInfo {
                     id: id.clone(),
                     label: String::new(),
-                    upstream: None,
-                    models: Vec::new(),
+                    ..Default::default()
                 })
                 .collect();
         }
@@ -357,6 +355,133 @@ pub fn list(manager: &ScriptHostManager) -> Vec<ScriptPackage> {
     storage::load_packages(manager.store())
 }
 
+/// 更新包级 + provider 级设置（A2A `/api/plugins/scripts/settings`）。
+///
+/// - `options`（包级参数，≤256KiB）与 `provider_options`（`{provider:
+///   {option: bool}}` 开关）都是**可选补丁**：缺省字段保持原值；
+/// - 校验：options 字节上限；provider_options 的键必须是该包已声明的
+///   provider，值必须是布尔（或对象形态时逐项布尔）；
+/// - 落盘后若包在启用中，重建宿主让脚本读到新值（重建失败不算保存失败
+///   ——配置已落盘，错误文案如实说明）。
+pub async fn update_settings(
+    manager: &Arc<ScriptHostManager>,
+    package_id: &str,
+    version: Option<&str>,
+    options: Option<serde_json::Map<String, serde_json::Value>>,
+    provider_options: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<ScriptPackage, String> {
+    let mut packages = storage::load_packages(manager.store());
+    let index = packages
+        .iter()
+        .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
+        .ok_or_else(|| format!("包未安装：{package_id}"))?;
+    if let Some(values) = options {
+        settings::validate_values(&values)?;
+        packages[index].options.values = values;
+    }
+    if let Some(map) = provider_options {
+        let declared: Vec<String> = packages[index]
+            .providers
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+        for (provider, values) in &map {
+            if !declared.iter().any(|id| id == provider) {
+                return Err(format!("开关不属于当前插件：{provider}"));
+            }
+            let values = values
+                .as_object()
+                .ok_or_else(|| "提供商开关必须是对象".to_string())?;
+            if values.values().any(|v| !v.is_boolean()) {
+                return Err("提供商开关必须是布尔值".into());
+            }
+        }
+        packages[index].provider_options = map;
+    }
+    let package = packages[index].clone();
+    persist_packages(manager, &packages)?;
+    if package.enabled {
+        if let Err(e) = manager.rebuild("settings").await {
+            return Err(format!("配置已保存，但宿主重建失败（下次重启生效）：{e}"));
+        }
+    }
+    Ok(package)
+}
+
+/// 单独启停包内某一家 provider（A2A `change action=provider`）。
+///
+/// 不改包启用状态，只把 provider 加/减到 `disabled_providers`；启用中的
+/// 包会重建宿主（脚本侧 `script.packages` 不再报这家 → 路由表撤掉它）。
+pub async fn set_provider_enabled(
+    manager: &Arc<ScriptHostManager>,
+    package_id: &str,
+    provider: &str,
+    enabled: bool,
+) -> Result<ScriptPackage, String> {
+    let mut packages = storage::load_packages(manager.store());
+    let index = packages
+        .iter()
+        .position(|p| p.id == package_id)
+        .ok_or_else(|| format!("包未安装：{package_id}"))?;
+    if !packages[index].providers.iter().any(|p| p.id == provider) {
+        return Err(format!("提供商不属于该脚本插件：{provider}"));
+    }
+    if enabled {
+        packages[index]
+            .disabled_providers
+            .retain(|id| id != provider);
+    } else if !packages[index]
+        .disabled_providers
+        .iter()
+        .any(|id| id == provider)
+    {
+        packages[index]
+            .disabled_providers
+            .push(provider.to_string());
+    }
+    let package = packages[index].clone();
+    persist_packages(manager, &packages)?;
+    if package.enabled {
+        if let Err(e) = manager.rebuild("provider-toggle").await {
+            return Err(format!("已保存，但宿主重建失败（下次重启生效）：{e}"));
+        }
+    }
+    Ok(package)
+}
+
+/// 检查更新（A2A `GET /api/plugins/scripts/check`）。
+///
+/// 对照 Magpie 目录：只报「目录里有、且版本与已装不同」的包。目录未
+/// 刷新时返回空表 + `catalog` 状态（前端负责提示）。
+pub async fn check_updates(manager: &ScriptHostManager) -> serde_json::Value {
+    let installed = storage::load_packages(manager.store());
+    let mut updates = Vec::new();
+    for package in &installed {
+        // 只有 magpie 来源的包有目录版本可比
+        if package.source != ScriptSource::Magpie {
+            continue;
+        }
+        let Some(entry) = manager.catalog().package_metadata(&package.id).await else {
+            continue;
+        };
+        let Some(latest) = entry.version.clone().filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        if latest != package.version {
+            updates.push(serde_json::json!({
+                "id": package.id,
+                "name": package.label,
+                "current": package.version,
+                "latest": latest,
+            }));
+        }
+    }
+    serde_json::json!({
+        "updates": updates,
+        "catalog": manager.catalog().status().await,
+    })
+}
+
 fn persist_packages(manager: &ScriptHostManager, packages: &[ScriptPackage]) -> Result<(), String> {
     // 走 storage 的 KV + 投影语义：禁止直接 store.put，否则 registry.json
     // 投影不会刷新，脚本侧读到的 options/enabled 会滞后。
@@ -391,8 +516,7 @@ fn scan_declared_providers(package_dir: &Path, entry: &str) -> Vec<ScriptProvide
         Some(id) => vec![ScriptProviderInfo {
             id,
             label: oc.label.unwrap_or_default(),
-            upstream: None,
-            models: Vec::new(),
+            ..Default::default()
         }],
         None => Vec::new(),
     }

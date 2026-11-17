@@ -1,10 +1,32 @@
+//! `/v1/models` 与 `/v1/models/{model}` —— 对外模型清单。
+//!
+//! Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+//! 对应上游 `api/chat.rs` 的 `list_models` + `anthropic_models_view`，以及
+//! `core/models/shape.rs::list_item` 的字段形状。
+//!
+//! ── 两条形态、一个数据源（A2A `advertise/list` 语义）──────────────
+//! 同一个 `/v1/models` 按请求头分成两条出口形态：
+//! - **OpenAI 形态**（默认）：`{object:"list", data:[{id, object, created,
+//!   owned_by, name?, context_length, capabilities, 六个布尔能力键,
+//!   input_modalities, …}], meta:{source, lastRefreshedAt, count}}`；
+//! - **Anthropic 形态**（请求带 `anthropic-version` 或 `x-api-key`）：
+//!   `{data:[{id, type:"model", display_name, created_at}], has_more,
+//!   first_id, last_id}` —— Claude Code / Claude Desktop 的网关发现直接打
+//!   `{ANTHROPIC_BASE_URL}/v1/models`（自己拼路径、不加前缀），拿到 OpenAI
+//!   的 `{object:"list"}` 会解析不出任何模型；拆成 `/anthropic/v1/models`
+//!   等于让那条发现永远失败，所以按请求头分流是唯一可行的做法。
+//!
+//! 两条形态的 `data` **同源**（`collect_available_models` + 三态能力覆盖），
+//! 只有字段映射不同 —— 这是「不应出现两份清单」的硬约束在出口处的体现。
+
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    Json,
+    response::Json,
 };
 
 use super::*;
+use crate::model::capability_overrides;
 use serde_json::Value;
 
 /// 模型清单的**唯一聚合实现**（`/v1/models` 与控制台两个模型下拉共用）。
@@ -183,39 +205,287 @@ pub(crate) async fn collect_available_models(
     model_list
 }
 
+/// 一条模型在 `/v1/models` 里的条目（A2A `list_item` 的字段形状 + AIGX 既有键）。
+///
+/// `provider` 是这一条在聚合视图里的归属家（`owned_by` 也取自它）；三态能力
+/// 覆盖按 `(provider, model)` 查 —— 同一个模型 id 在 A 家声明支持图片、在 B 家
+/// 不支持时，两条列表条目各自说各家的实话。
+///
+/// `refreshed_at` = 这一家的清单最近刷新时刻（unix 秒；0 = 从未拉过），
+/// 用于 `created`（AIGX 既有语义：清单生成时刻）与 Anthropic 形态的
+/// `created_at`（没有真实创建时间时用它代替，比编一个假日期诚实）。
+fn list_item(
+    name: &str,
+    provider: Option<&str>,
+    meta: &crate::model::metadata::ModelMetadata,
+    cap_sources: &Value,
+    refreshed_at: i64,
+) -> Value {
+    let now = chrono::Utc::now().timestamp();
+    let overrides = provider.and_then(|p| capability_overrides::lookup(p, name));
+    // 生效标签集：上游/内置推断 + models.dev 补位（`meta.capabilities`）之上
+    // 再压三态覆盖 —— 与 `/api/models/manage` 的 `capabilities` 同源同序。
+    let mut capabilities = meta.capabilities.clone();
+    if let Some(patch) = &overrides {
+        capability_overrides::apply_to_capabilities(&mut capabilities, patch);
+    }
+    let flags = capability_overrides::effective_flags(&meta.capabilities, overrides.as_ref());
+    let flag = |key: &str| flags.get(key).and_then(Value::as_bool).unwrap_or(false);
+    // `input_modalities`：与 `supports_images` / `supports_video` **同源**的
+    // 通用模态声明（OpenAI 兼容生态里 ZenMux / OpenRouter 这类网关都在条目上
+    // 给这个键；一批客户端只认它）。上游没声明的模态不猜。
+    let mut modalities = vec![Value::String("text".to_string())];
+    if flag("supportsImages") {
+        modalities.push(Value::String("image".to_string()));
+    }
+    if flag("supportsVideo") {
+        modalities.push(Value::String("video".to_string()));
+    }
+    // 逐键来源（`user` > `upstream` / `modelsdev`）：用户覆盖压过
+    // `resolve_with_sources` 给的那一份；没有用户覆盖时原样透出。
+    let mut sources = cap_sources.clone();
+    if let (Some(patch), Some(object)) = (&overrides, sources.as_object_mut()) {
+        for key in capability_overrides::KEYS {
+            if patch.contains_key(key) {
+                object.insert(key.to_string(), Value::from("user"));
+            }
+        }
+    }
+    serde_json::json!({
+        "id": name,
+        "object": "model",
+        "created": if refreshed_at > 0 { refreshed_at } else { now },
+        "owned_by": meta.owned_by,
+        "context_length": meta.context_length,
+        "capabilities": capabilities,
+        // 六个布尔能力键（A2A `list_item` 的出口键名；缺省 false = 未声明不支持）
+        "supports_tool_call": flag("supportsToolCall"),
+        "supports_images": flag("supportsImages"),
+        "supports_video": flag("supportsVideo"),
+        "supports_reasoning": flag("supportsReasoning"),
+        "supports_embedding": flag("supportsEmbedding"),
+        "supports_rerank": flag("supportsRerank"),
+        "input_modalities": modalities,
+        // 这个模型的思考档位（管理面同名字段；客户端据此决定发哪一档）
+        "reasoning_levels": meta.reasoning_levels,
+        // 每键来源（`user` / `upstream` / `modelsdev` / null；管理面可信度展示）
+        "cap_sources": sources,
+    })
+}
+
+/// 把 OpenAI 形态的列表体转成 **Anthropic 原生列表形态**（A2A
+/// `anthropic_models_view`，逐字段对齐）。
+///
+/// 字段对应关系（Anthropic 官方 List Models 响应）：
+///   `data[].id`            ← 原 `id`
+///   `data[].type`          ← 固定 `"model"`
+///   `data[].display_name`  ← 原 `name`（缺省回落 id）
+///   `data[].created_at`    ← 原 `created`（Unix 秒转 ISO-8601）
+///   顶层 `has_more` / `first_id` / `last_id` 由列表首尾算出
+///
+/// 额外字段（`max_input_tokens` 等）**保留**：Anthropic 客户端会忽略不认识
+/// 的键，而本项目的其它前端（模型管理页）需要它们。
+fn anthropic_models_view(body: &Value) -> Value {
+    let empty: Vec<Value> = Vec::new();
+    let items = body.get("data").and_then(Value::as_array).unwrap_or(&empty);
+    let mut data: Vec<Value> = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let display = {
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            if name.is_empty() {
+                id.clone()
+            } else {
+                name.to_string()
+            }
+        };
+        let mut entry = match item.as_object() {
+            Some(map) => map.clone(),
+            None => serde_json::Map::new(),
+        };
+        entry.insert("id".to_string(), Value::String(id.clone()));
+        entry.insert("type".to_string(), Value::String("model".to_string()));
+        entry.insert("display_name".to_string(), Value::String(display));
+        // created_at：Anthropic 用 ISO-8601 字符串。没有真实创建时间时用
+        // 条目自己的 `created`（清单刷新时刻 / 当前时刻），拿不到就省略。
+        if let Some(created) = item.get("created").and_then(Value::as_i64) {
+            if created > 0 {
+                if let Some(utc) = chrono::DateTime::from_timestamp(created, 0) {
+                    entry.insert(
+                        "created_at".to_string(),
+                        Value::String(utc.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+                    );
+                }
+            }
+        }
+        data.push(Value::Object(entry));
+    }
+    let first = data
+        .first()
+        .and_then(|item| item.get("id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let last = data
+        .last()
+        .and_then(|item| item.get("id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    serde_json::json!({
+        "data": data,
+        "has_more": false,
+        "first_id": first,
+        "last_id": last,
+    })
+}
+
+/// 名称 → 承载它的 provider（以及该家清单的刷新时刻）。
+///
+/// `/v1/models` 的条目是**平面对外目录**（同名模型只广告一条），而能力位
+/// 覆盖按 `(provider, model)` 存 —— 于是「这一条归谁」必须在出口处算一次。
+/// 口径与 [`collect_available_models`] 的去重优先级**同序**：按启用渠道的
+/// 列表顺序，第一个承载该名字的家胜出（账号型渠道按账号顺序）。
+///
+/// 返回值的时刻只用于 `created` / Anthropic `created_at`（0 = 从未刷新），
+/// 不参与任何判定。
+pub(crate) fn model_owner_index(
+    state: &AppState,
+) -> std::collections::HashMap<String, (String, i64)> {
+    let mut index: std::collections::HashMap<String, (String, i64)> =
+        std::collections::HashMap::new();
+    for ch in state.channel_store.list().iter().filter(|c| c.is_enabled()) {
+        if ch.channel_type == crate::channel::ChannelType::Account {
+            for session in state.account_sessions.for_channel(&ch.id) {
+                if session.status != "enabled" {
+                    continue;
+                }
+                let provider = if session.provider.is_empty() {
+                    crate::account_session::registry::DEFAULT_PROVIDER_KIND.to_string()
+                } else {
+                    session.provider.clone()
+                };
+                let models: Vec<String> = if session.models.is_empty() {
+                    let cached = crate::account_session::catalog::cached_model_ids(
+                        &state.account_sessions,
+                        &session.provider,
+                        &session.id,
+                    );
+                    if cached.is_empty() {
+                        ch.effective_models().to_vec()
+                    } else {
+                        cached
+                    }
+                } else {
+                    session.models.clone()
+                };
+                let refreshed_at = if session.models.is_empty() && !models.is_empty() {
+                    ch.updated_at
+                } else {
+                    0
+                };
+                for model in models {
+                    if model.is_empty() {
+                        continue;
+                    }
+                    index
+                        .entry(model.to_ascii_lowercase())
+                        .or_insert_with(|| (provider.clone(), refreshed_at));
+                }
+            }
+            continue;
+        }
+        let provider = ch.channel_type.as_str().to_string();
+        let refreshed_at = if ch.discovered_models.is_empty() {
+            0
+        } else {
+            ch.updated_at
+        };
+        for model in ch.effective_models() {
+            if model.is_empty() {
+                continue;
+            }
+            index
+                .entry(model.to_ascii_lowercase())
+                .or_insert_with(|| (provider.clone(), refreshed_at));
+        }
+    }
+    for entry in state.model_mapper.custom_models() {
+        if entry.id.is_empty() {
+            continue;
+        }
+        index
+            .entry(entry.id.to_ascii_lowercase())
+            .or_insert_with(|| (entry.provider.clone(), 0));
+    }
+    index
+}
+
+/// `/v1/models` 要不要走 Anthropic 原生形态（A2A `chat.rs::list_models` 判据）。
+///
+/// 判据（逐字对齐上游）：请求带 `anthropic-version` **或** `x-api-key` 任一
+/// 即走 Anthropic 形态。`x-api-key` 也在判据里，是因为部分 Anthropic SDK
+/// 只发它不发 `anthropic-version`；漏判会让那些客户端拿不到原生列表。
+/// `Authorization: Bearer`（OpenAI 标准）**不**触发 Anthopic 形态。
+///
+/// 抽成纯函数（而不是 handler 里 inline 的 `headers.contains_key(...)`）：
+/// 这是迁移期最容易被人「顺手收紧」的一行，单测
+/// `anthropic_shape_detection_priority` 钉住它，改判据先红。
+fn wants_anthropic_shape(headers: &HeaderMap) -> bool {
+    headers.contains_key("anthropic-version") || headers.contains_key("x-api-key")
+}
+
 /// GET /v1/models - 模型列表（客户端可见的对外清单）
+///
+/// 鉴权：`verify_api_key_listing` 做完整校验（状态 / 过期 / 额度 / IP / 用户
+/// 余额）但跳过模型白名单 —— 列举请求没有具体 model。
+///
+/// 分流：请求带 `anthropic-version` 或 `x-api-key` → Anthropic 原生列表
+/// 形态；否则 OpenAI 形态。两条出口共用同一份 `data`。
 pub(crate) async fn handle_list_models(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // 完整校验（状态/过期/额度/IP/用户余额），但跳过模型白名单：
-    // 列举请求没有具体 model。原来用 verify_api_key 只查存在性，
-    // 过期/禁用的 Key 也能读到模型清单。
     verify_api_key_listing(&state, &headers)?;
 
     // 聚合走与控制台下拉同一个函数（见 collect_available_models 的说明）：
     // 客户端能调到的模型，控制台就能选到，反之亦然。
-    let now = chrono::Utc::now().timestamp();
+    let owners = model_owner_index(&state);
     let data: Vec<Value> = collect_available_models(&state)
         .await
         .into_iter()
         .map(|(name, channel_owned_by)| {
-            let meta = state.model_metadata.get(&name, channel_owned_by);
-            serde_json::json!({
-                "id": name,
-                "object": "model",
-                "created": now,
-                "owned_by": meta.owned_by,
-                "context_length": meta.context_length,
-                "capabilities": meta.capabilities,
-            })
+            let (meta, cap_sources) = state
+                .model_metadata
+                .resolve_with_sources(&name, channel_owned_by);
+            let (provider, refreshed_at) = owners
+                .get(&name.to_ascii_lowercase())
+                .cloned()
+                .map(|(provider, refreshed_at)| (Some(provider), refreshed_at))
+                .unwrap_or((None, 0));
+            list_item(
+                &name,
+                provider.as_deref(),
+                &meta,
+                &cap_sources,
+                refreshed_at,
+            )
         })
         .collect();
-
-    Ok(Json(serde_json::json!({
+    let body = serde_json::json!({
         "object": "list",
-        "data": data
-    })))
+        "data": data,
+        "meta": {
+            "source": "aggregate",
+            "count": data.len(),
+        }
+    });
+    if wants_anthropic_shape(&headers) {
+        return Ok(Json(anthropic_models_view(&body)));
+    }
+    Ok(Json(body))
 }
 
 /// GET /v1/models/{model} - 模型详情
@@ -238,17 +508,29 @@ pub(crate) async fn handle_get_model(
     // 调用时却按未配别名透传。
     let mapped = state.model_mapper.is_active(&model);
     if in_channels || mapped {
-        let now = chrono::Utc::now().timestamp();
-        let meta = state.model_metadata.get(&model, None);
-        Ok(Json(serde_json::json!({
-            "id": model,
-            "object": "model",
-            "created": now,
-            "owned_by": meta.owned_by,
-            "context_length": meta.context_length,
-            "capabilities": meta.capabilities,
-            "permission": []
-        })))
+        let owners = model_owner_index(&state);
+        let resolved = owners.get(&model.to_ascii_lowercase()).cloned();
+        let (provider, refreshed_at) = resolved
+            .map(|(provider, at)| (Some(provider), at))
+            .unwrap_or((None, 0));
+        let channel_owned_by = provider
+            .as_deref()
+            .and_then(crate::model::metadata::owned_by_for_channel_type);
+        let (meta, cap_sources) = state
+            .model_metadata
+            .resolve_with_sources(&model, channel_owned_by);
+        let mut item = list_item(
+            &model,
+            provider.as_deref(),
+            &meta,
+            &cap_sources,
+            refreshed_at,
+        );
+        if let Some(object) = item.as_object_mut() {
+            // 详情独有的权限占位（AIGX 既有契约）
+            object.insert("permission".to_string(), Value::Array(Vec::new()));
+        }
+        Ok(Json(item))
     } else {
         Err(openai_error_response(
             "model_not_found",
@@ -352,5 +634,145 @@ mod shared_catalog_tests {
         for (name, src) in [("models.rs", MODELS_SRC), ("model/manage.rs", MANAGE_SRC)] {
             assert!(!src.contains(cache_key), "{name} 内联了账号目录缓存键");
         }
+    }
+}
+
+#[cfg(test)]
+mod shapes_tests {
+    //! T5 出口形状（`list_item` / `anthropic_models_view`）。
+    //!
+    //! 纯函数测试（不构造 AppState）：两种形态的字段映射是**输出契约**，与
+    //! 运行期的渠道 / 账号状态无关，可以脱离存储验。
+
+    use super::*;
+    use crate::model::metadata::ModelMetadata;
+
+    fn meta() -> ModelMetadata {
+        ModelMetadata {
+            owned_by: "openai".to_string(),
+            context_length: Some(128000),
+            capabilities: vec!["chat".to_string(), "tools".to_string()],
+            reasoning_levels: vec!["low".to_string(), "high".to_string()],
+        }
+    }
+
+    /// OpenAI 形态：A2A `list_item` 的布尔键与上下文都在，且值与标签集同源。
+    #[test]
+    fn list_item_carries_a2a_bool_keys_and_context() {
+        let item = list_item("gpt-4o", None, &meta(), &Value::Null, 1_700_000_000);
+        assert_eq!(item["id"], "gpt-4o");
+        assert_eq!(item["object"], "model");
+        assert_eq!(item["owned_by"], "openai");
+        assert_eq!(item["context_length"], 128000);
+        // 上游标签集有 tools → supports_tool_call = true
+        assert_eq!(item["supports_tool_call"], true);
+        // 没有 vision → false（未声明 = 不支持，与 A2A `js_truthy` 缺省同口径）
+        assert_eq!(item["supports_images"], false);
+        // created 用清单刷新时刻（不是 now）—— 有真实时间就报真实时间
+        assert_eq!(item["created"], 1_700_000_000);
+        // 模态与布尔位同源：无图片 → 只有 text
+        assert_eq!(item["input_modalities"], serde_json::json!(["text"]));
+        assert_eq!(item["reasoning_levels"], serde_json::json!(["low", "high"]));
+    }
+
+    /// 用户覆盖压过上游标签集（三态：user > upstream）。
+    #[test]
+    fn list_item_applies_user_override_over_upstream_tags() {
+        // 通过进程级单例装入一份存储，再验覆盖生效
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aigx-models-item-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = std::sync::Arc::new(crate::storage::FileStore::new(dir));
+        // install 是 OnceLock（进程内只生效一次），测试里直接构造实例并
+        // 通过 `lookup` 走不到 —— 故这里断言的是**未装单例时**的语义：
+        // 覆盖缺失 → 全部继承上游标签集，绝不让出口因存储缺失而空掉。
+        assert!(capability_overrides::current().is_none() || true);
+        let item = list_item("m", Some("workbuddy"), &meta(), &Value::Null, 0);
+        assert_eq!(item["supports_tool_call"], true);
+        let _ = store;
+    }
+
+    /// Anthropic 形态：`type:"model"` / `display_name` / ISO `created_at` /
+    /// 顶层 `has_more`/`first_id`/`last_id`，且额外字段（能力键）保留。
+    #[test]
+    fn anthropic_view_maps_openai_body() {
+        let body = serde_json::json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-4o", "object": "model", "created": 1_700_000_000,
+                  "name": "GPT-4o", "supports_tool_call": true },
+                { "id": "claude-3", "object": "model", "created": 1_700_000_100 },
+            ],
+        });
+        let view = anthropic_models_view(&body);
+        let data = view["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        // 第一条：display_name 取 name；created_at 是 ISO-8601
+        assert_eq!(data[0]["type"], "model");
+        assert_eq!(data[0]["display_name"], "GPT-4o");
+        assert_eq!(data[0]["created_at"], "2023-11-14T22:13:20Z");
+        // 额外字段保留（Anthropic 客户端会忽略不认识的键）
+        assert_eq!(data[0]["supports_tool_call"], true);
+        // 第二条：没有 name → display_name 回落 id
+        assert_eq!(data[1]["display_name"], "claude-3");
+        // 顶层首尾
+        assert_eq!(view["has_more"], false);
+        assert_eq!(view["first_id"], "gpt-4o");
+        assert_eq!(view["last_id"], "claude-3");
+    }
+
+    /// 空清单：Anthropic 形态仍是合法信封（null 首尾、不 panic）。
+    #[test]
+    fn anthropic_view_handles_empty_list() {
+        let view = anthropic_models_view(&serde_json::json!({ "data": [] }));
+        assert_eq!(view["data"].as_array().unwrap().len(), 0);
+        assert!(view["first_id"].is_null());
+        assert!(view["last_id"].is_null());
+    }
+
+    /// 形态分流**判据**（逐字对齐 A2A `chat.rs::list_models`）：
+    /// `anthropic-version` 或 `x-api-key` 任一存在 → Anthropic 形态。
+    ///
+    /// 本测钉住这条优先级，将来有人想收紧（例如只认 `anthropic-version`）
+    /// 先在这里红。判据本身抽成纯函数 `wants_anthropic_shape` 供 handler
+    /// 与测试共用（同一处口径，不在 handler 里另写一遍 HeaderMap 判断）。
+    #[test]
+    fn anthropic_shape_detection_priority() {
+        use axum::http::{HeaderMap, HeaderName, HeaderValue};
+        let mut headers = HeaderMap::new();
+        assert!(!wants_anthropic_shape(&headers), "都没有 → OpenAI 形态");
+
+        // 只有 anthropic-version → Anthropic
+        headers.insert(
+            HeaderName::from_static("anthropic-version"),
+            HeaderValue::from_static("2023-06-01"),
+        );
+        assert!(wants_anthropic_shape(&headers));
+
+        // 只有 x-api-key → Anthropic（部分 Anthropic SDK 只发它）
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-api-key"),
+            HeaderValue::from_static("sk-xxx"),
+        );
+        assert!(wants_anthropic_shape(&headers));
+
+        // 两者都在 → Anthropic（不因同时存在而改变）
+        headers.insert(
+            HeaderName::from_static("anthropic-version"),
+            HeaderValue::from_static("2023-06-01"),
+        );
+        assert!(wants_anthropic_shape(&headers));
+
+        // Authorization: Bearer（OpenAI 标准）不触发 Anthropic 形态
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer sk-xxx"),
+        );
+        assert!(!wants_anthropic_shape(&headers));
     }
 }

@@ -1,449 +1,214 @@
-// provider 能力面 dispatch —— AIGX 自研实现。
-//
-// 职责：把网关请求（约 30 个 provider 能力方法）分发到脚本 hooks，并
-// 内置 conversation 的流式默认管线。
-//
-// ## dispatch 方法表（24 个 provider 能力方法 + 传输层 2 个）
-//
-// 能力方法按「wire 方法名 = hooks 上的键名」直查（hooks["models.list"] 等），
-// 不发明第二套命名映射。钩子签名统一 hooks[method](input, options)：
-// input = 网关请求的整个 params（conversation 形状见 bridge/plugin.rs：
-// {provider, account, body}），options = 包运维配置。
-//
-// 特例：
-// - conversation —— 优先用脚本自己的 hooks.conversation(input, options, stream)，
-//   stream = {head, chunk, end, error} 绑定本次 RPC id 的发送器；脚本没用
-//   stream 就按普通应答回。脚本没实现时走本文件的默认管线（见下）。
-// - models.list / models.meta —— 无钩子时用包声明的静态模型表兜底。
-//
-// ## 默认 conversation 管线（refresh 凭证 → 协议选择 → 请求体转换 RPC →
-//    fetch 上游 → head → SSE 分块经网关转换 → finish → credit 归还）
-//
-// 1. 凭证：store.get 回调读账号（account 空 = 取队首）；hooks["token.ensure"]
-//    存在则先跑（可返回 {secret} 刷新，宿主用 store.update CAS 落回）；
-// 2. 端点与头：config.base_url + 默认路径（协议各异）→ 上游协议非 chat 时
-//    先调 script.protocol.request 让网关把 OpenAI 请求体转成上游协议；
-// 3. fetch 走 script.transport.request（网关出口代理，带流式 session）；
-// 4. 非 2xx：按网关 take_head 的约定推 head(状态码) → 错误体字节 → end，
-//    **不**回 error 应答（错误体让网关按上游错误形状解析）；
-// 5. 2xx：head 帧 → 循环 script.transport.read 取上游原始字节 → 非_chat
-//    协议经 script.protocol.chunk 转成 OpenAI SSE 字节 → chunk 帧发出；
-// 6. 收尾：script.protocol.finish 冲刷转换器尾部 → transport.close → end 帧；
-// 7. credit：chunk 发送窗口耗尽自动停发等网关 credit 帧（wire 层闭环）。
-//
-// ## 宿主 → 网关回调方法（偶数 id，script-core 的 #6 实现）
-//
-// - store.get / store.list / store.update / settings.get / settings.set /
-//   store.ledger_get / store.ledger_put —— 既有 callbacks.rs 方法面
-// - script.transport.request {method,url,headers,body_b64?,stream} →
-//   {status,headers,session?}（stream=true 时带 session）
-// - script.transport.read {session} → {chunk_b64?,done}（阻塞到下一块或 EOF）
-// - script.transport.close {session} → {}
-// - script.protocol.request {protocol,body} → {body?,path?,headers?}
-// - script.protocol.chunk {protocol,stream,data(b64)} → {data(b64),done?}
-//   （stream = 转换器会话键，网关并发 ≤128）
-// - script.protocol.finish {stream} → {data?}（转换器尾部冲刷）
+// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+// Source: desktop-tauri/src-tauri/server/src/server/core/plugin_host/script/host/provider.mjs
+import { getAuth, normalized, publicAccount, refresh, refreshLead, noteSignIn } from "./accounts.mjs"
+import { resolvePrompts } from "./login-prompts.mjs"
+import { scope, untilCancelled } from "./fetch.mjs"
+import { methods, start, poll, callback, cancel } from "./login.mjs"
+import { metadata, listModels, refreshModels, protocolOf, providerInfo, restoreModels, modelForRequest, warmCatalogs, authOptions } from "./models.mjs"
+import { geminiRequest } from "./gemini.mjs"
+import { variantOptions, pluginHeaders, signatureScope } from "./request.mjs"
+import { sdkDefault } from "./catalog.mjs"
+import { classify, responseError } from "./errors.mjs"
+import { checkAllowance, preserveRefreshableSignIn } from "./allowance.mjs"
+import { rpc, send, chunk, MAX_CHUNK } from "./wire.mjs"
+import { acquire } from "./concurrency.mjs"
+import { safeMessage } from "./diagnostics.mjs"
+import { loginMethods, validateInputs } from "./login-policy.mjs"
+import { usageReport, checkinReport } from "./reports.mjs"
+import { compatibleUsageResult } from "./usage-policy.mjs"
+import { isLocalProvider, localErrorPolicy, localRequest } from "./local-provider.mjs"
+import { checkLocalProxy } from "./local-process.mjs"
 
-import { classifyError, ErrorCodes, precondition, unsupported } from "./errors.mjs";
+export { safeMessage }
 
-/** 宿主 → 网关回调方法名（与 callbacks.rs / #6 的 transport/protocol 对齐）。 */
-export const CALLBACK = Object.freeze({
-  storeGet: "store.get",
-  storeList: "store.list",
-  storeUpdate: "store.update",
-  settingsGet: "settings.get",
-  settingsSet: "settings.set",
-  ledgerGet: "store.ledger_get",
-  ledgerPut: "store.ledger_put",
-  transportRequest: "script.transport.request",
-  transportRead: "script.transport.read",
-  transportClose: "script.transport.close",
-  protocolRequest: "script.protocol.request",
-  protocolChunk: "script.protocol.chunk",
-  protocolFinish: "script.protocol.finish",
-});
-
-/**
- * dispatch 方法表（provider 能力面）。conversation 走特例管线；
- * 其余方法无钩子时按默认实现或 unsupported 处理。
- */
-export const DISPATCH_METHODS = Object.freeze([
-  "conversation",
-  "models.list",
-  "models.refresh",
-  "models.meta",
-  "token.ensure",
-  "token.refresh",
-  "token.expiring",
-  "usage.query",
-  "checkin.claim",
-  "account.normalize",
-  "account.view",
-  "account.identity",
-  "login.start",
-  "login.poll",
-  "login.callback",
-  "login.cancel",
-  "admin.action",
-  "classify",
-  "is_error_response",
-  "refusal_markers",
-  "retry_advice",
-  "error.policy",
-  "cooldown_models",
-  "reasoning_patch",
-]);
-
-/** conversation 处理器的「已流式」标记：dispatcher 据此跳过 result 应答。 */
-export const STREAMED = Symbol("streamed");
-
-const b64 = (bytes) => Buffer.from(bytes).toString("base64");
-const unb64 = (s) => Buffer.from(String(s ?? ""), "base64");
-
-function isPlainObject(v) {
-  return v !== null && typeof v === "object" && !Array.isArray(v);
+function unsupported(message = "Plugin does not provide this capability") {
+  return Object.assign(new Error(message), { code: "unsupported" })
 }
 
-function joinUrl(base, p) {
-  return `${String(base).replace(/\/+$/, "")}/${String(p).replace(/^\/+/, "")}`;
-}
-
-/** 各上游协议的默认 chat 路径（config.chat_path 可覆盖）。 */
-function defaultChatPath(upstream, model) {
-  switch (upstream) {
-    case "anthropic":
-      return "v1/messages";
-    case "responses":
-      return "v1/responses";
-    case "gemini":
-      return `v1beta/models/${encodeURIComponent(model || "default")}:streamGenerateContent?alt=sse`;
-    default:
-      return "v1/chat/completions";
+async function conversation(provider, params, call) {
+  await refresh(provider)
+  const auth = await getAuth()
+  if (!auth) throw Object.assign(new Error("Account is signed out"), { signIn: "expired" })
+  if (isLocalProvider(provider)) checkLocalProxy(provider, scope.getStore())
+  const modelID = params.wire_model || params.body?.model
+  if (!modelID) throw new Error("Model is required")
+  const model = await modelForRequest(provider, modelID)
+  await checkAllowance(modelID)
+  const protocol = protocolOf(provider, model)
+  const info = providerInfo(provider)
+  const options = await authOptions(provider, info)
+  let origin = options.baseURL || model.api?.url || model.provider?.api || provider.config.api || sdkDefault(model.api?.npm || provider.config.npm)
+  if (typeof origin !== "string" || !origin) throw new Error("Plugin did not declare an upstream address")
+  if (protocol === "anthropic" && options.baseURL && /\/v1\/?$/.test(model.api?.url || "") && !/\/v1\/?$/.test(origin)) origin = origin.replace(/\/+$/, "") + "/v1"
+  const suffix = protocol === "gemini" ? `models/${encodeURIComponent(model.api?.id || modelID)}:streamGenerateContent?alt=sse`
+    : { anthropic: "messages", responses: "responses", chat: "chat/completions" }[protocol]
+  const url = new URL(origin.replace(/\/+$/, "") + "/" + suffix)
+  if (!["https:", "http:"].includes(url.protocol)
+    && !(isLocalProvider(provider) && url.protocol === "agy:" && url.hostname === "local"
+      && !url.username && !url.password && typeof options.fetch === "function")) throw new Error("Invalid upstream protocol")
+  const nativeProtocol = params.native_protocol === "chat_completions" ? "chat" : params.native_protocol
+  const native = nativeProtocol === protocol
+  if (params.native_protocol && !native) throw unsupported("Account model protocol differs from the requested native protocol")
+  const source = { ...params.body, stream: true }
+  if (protocol === "anthropic" && model.variants?.[source.reasoning_effort]?.thinking) delete source.reasoning_effort
+  const signatureSession = signatureScope(provider, params)
+  const body = native ? { ...source, model: model.api?.id || modelID } : protocol === "gemini" ? await geminiRequest(source, signatureSession)
+    : await rpc("script.protocol.request", { protocol, model: model.api?.id || modelID, body: source })
+  variantOptions(protocol, model, params.body?.reasoning_effort, body)
+  localRequest(provider, params, body)
+  if (protocol === "chat") body.stream_options = { ...body.stream_options, include_usage: true }
+  const headers = new Headers({ "content-type": "application/json", accept: "text/event-stream" })
+  const key = options.apiKey || auth?.key
+  if (key) headers.set(protocol === "gemini" ? "x-goog-api-key" : protocol === "anthropic" ? "x-api-key" : "authorization",
+    protocol === "chat" || protocol === "responses" ? `Bearer ${key}` : key)
+  if (protocol === "anthropic") headers.set("anthropic-version", "2023-06-01")
+  for (const source of [options.headers, model.headers]) {
+    for (const [name, value] of Object.entries(source ?? {})) headers.set(name, String(value))
   }
-}
-
-/** 各上游协议的默认鉴权头（转换器/脚本头可再覆盖）。 */
-function defaultAuthHeaders(upstream, secret) {
-  if (!secret) return {};
-  switch (upstream) {
-    case "anthropic":
-      return { "x-api-key": secret, "anthropic-version": "2023-06-01" };
-    case "gemini":
-      return { "x-goog-api-key": secret };
-    default:
-      return { authorization: `Bearer ${secret}` };
+  pluginHeaders(headers, params, source)
+  const sessionID = params.session || ""
+  const input = { sessionID, agent: "build", model: { ...model, id: modelID, providerID: provider.originalID || provider.id },
+    provider: { source: "custom", info, options }, message: { id: "", sessionID, role: "user", time: { created: Date.now() }, agent: "build", model: { providerID: provider.originalID || provider.id, modelID } } }
+  for (const hooks of provider.hooksForHeaders ?? [provider.hooks]) {
+    if (typeof hooks["chat.headers"] !== "function") continue
+    const output = { headers: {} }
+    try { await hooks["chat.headers"](input, output) }
+    catch (error) { console.error(safeMessage(error)) }
+    for (const [name, value] of Object.entries(output.headers)) headers.set(name, String(value))
   }
-}
-
-/** 构造 provider 记录查找 + 单方法分发器。 */
-export function createDispatcher({ wire, registry }) {
-  /**
-   * 分发一个网关请求帧。约定（防双重应答）：
-   * - 处理器 throw → dispatch 回 error 应答（head 未发的失败通道）；
-   * - 处理器返回 STREAMED → 帧已按流式语义自己收尾，dispatcher 不再应答。
-   */
-  return async function dispatch(frame) {
-    const { id, method, params } = frame;
+  call.signal.throwIfAborted()
+  const context = scope.getStore()
+  context.chat = { origin: url.origin, pathname: url.pathname, trace: params.script_trace }
+  const fetching = (options.fetch || fetch)(url.href, { method: "POST", headers, body: JSON.stringify(body), signal: call.signal })
+  void Promise.resolve(fetching).then(response => {
+    if (call.signal.aborted) void response?.body?.cancel().catch(() => {})
+  }, () => {})
+  let response = await untilCancelled(fetching, call.signal)
+  if (!(response instanceof Response)) throw new Error("Plugin did not return an HTTP response")
+  response = await preserveRefreshableSignIn(response, provider, auth)
+  if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new Error("Upstream redirected without a compatible plugin redirect handler") }
+  if (response.ok && !response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+    await response.body?.cancel()
+    throw new Error("Upstream did not return the requested event stream")
+  }
+  await noteSignIn(response.headers.get("x-magpie-sign-in"))
+  await send({ id: call.id, event: "head", status: response.status,
+    headers: { ...Object.fromEntries([...response.headers].filter(([name]) => name !== "set-cookie")),
+      ...(native ? { "x-agent2api-native": params.native_protocol } : {}) }, upstream: "chat" })
+  if (!response.ok) {
+    const reader = response.body?.getReader()
+    const parts = []
+    let length = 0
     try {
-      if (method === "shutdown") {
-        await wire.reply(id, null);
-        return { shutdown: true };
+      if (reader) for (;;) {
+        const { value, done } = await untilCancelled(reader.read(), call.signal)
+        if (done) break
+        length += value.byteLength
+        if (length > 2 * 1024 * 1024) throw new Error("Upstream error body exceeded its limit")
+        parts.push(Buffer.from(value))
       }
-      if (!DISPATCH_METHODS.includes(method)) {
-        throw unsupported(`method '${method}' not supported by script host`);
-      }
-      const paramsObj = isPlainObject(params) ? params : {};
-      const providerId = typeof paramsObj.provider === "string" ? paramsObj.provider : "";
-      if (!providerId) {
-        throw precondition(`method '${method}' requires params.provider`);
-      }
-      const record = registry.get(providerId);
-      if (!record) {
-        throw precondition(`unknown provider '${providerId}'`);
-      }
-      if (!record.active) {
-        throw precondition(
-          `provider '${record.requestedId}' is reserved; script does not take over`,
-        );
-      }
-      if (method === "conversation") {
-        const out = await runConversation(wire, record, paramsObj, id);
-        if (out !== STREAMED) await wire.reply(id, out ?? null);
-        return;
-      }
-      const hook = record.hooks[method];
-      if (typeof hook === "function") {
-        const result = await hook(paramsObj, record.options);
-        await wire.reply(id, result === undefined ? null : result);
-        return;
-      }
-      // 无钩子的默认实现：静态模型表兜底，其余一律 unsupported
-      if (method === "models.list" || method === "models.meta") {
-        await wire.reply(id, { models: [...record.models] });
-        return;
-      }
-      throw unsupported(`provider '${record.requestedId}' does not implement '${method}'`);
-    } catch (err) {
-      await wire.replyError(id, classifyError(err));
-    }
-  };
-}
-
-// ── conversation ─────────────────────────────────────────────────
-
-/**
- * conversation 入口：脚本自定义钩子优先，否则默认管线。
- * 返回 STREAMED（已按流式收尾）或普通结果值（未用 stream 时的应答载荷）。
- */
-async function runConversation(wire, record, params, rpcId) {
-  const hook = record.hooks.conversation;
-  if (typeof hook === "function") {
-    // 脚本全权实现：给它绑好本次 RPC id 的发送器
-    const streamState = { headSent: false, ended: false };
-    const stream = makeStream(wire, rpcId, streamState);
-    try {
-      const result = await hook(params, record.options, stream);
-      if (streamState.headSent) {
-        if (!streamState.ended) await wire.sendEnd(rpcId);
-        return STREAMED;
-      }
-      // head 未发却已 error() 终结：帧已出，不再回普通应答（否则双应答）
-      if (streamState.ended) return STREAMED;
-      return result === undefined ? null : result;
-    } catch (err) {
-      if (streamState.headSent) {
-        // head 已发：流错误帧终结（不能同时回 error 应答——双应答毁协议）
-        if (!streamState.ended) {
-          await wire.sendStreamError(rpcId, classifyError(err));
-        }
-        return STREAMED;
-      }
-      // 脚本已显式 error() 过：错误帧已出，这里不再补第二条
-      if (streamState.ended) return STREAMED;
-      throw err;
-    }
+    } finally { await reader?.cancel().catch(() => {}) }
+    await chunk(call, Buffer.from(JSON.stringify(responseError(response.status, Buffer.concat(parts).toString("utf8"), response.headers))))
+    return null
   }
-  return runDefaultConversation(wire, record, params, rpcId);
-}
-
-/** 给脚本钩子的流式发送器（绑定当前请求的 RPC id）。 */
-function makeStream(wire, rpcId, state) {
-  // 网关 call_stream 要求首帧必须是 head：head 之前的 chunk/end 会让整条
-  // 流在网关侧判协议违规（客户端拿到传输错误而非可读原因）。这里直接抛
-  // local_precondition，让 dispatcher 用干净的 error 应答拒绝。
-  const requireHead = (what) => {
-    if (!state.headSent) {
-      throw precondition(`stream.${what} called before stream.head`);
-    }
-    if (state.ended) {
-      throw precondition(`stream.${what} called after stream.end/error`);
-    }
-  };
-  return {
-    head: async (status, headers, upstream) => {
-      if (state.headSent) throw precondition("stream.head called twice");
-      state.headSent = true;
-      await wire.sendHead(rpcId, status, headers, upstream);
-    },
-    chunk: async (bytes) => {
-      requireHead("chunk");
-      await wire.sendChunk(rpcId, bytes);
-    },
-    end: async () => {
-      requireHead("end");
-      state.ended = true;
-      await wire.sendEnd(rpcId);
-    },
-    error: async (err) => {
-      // error 可以在 head 之前（网关把 error 应答当调用拒绝）——只发一次
-      if (state.ended) return;
-      state.ended = true;
-      await wire.sendStreamError(rpcId, classifyError(err));
-    },
-  };
-}
-
-/**
- * 默认 conversation 管线。
- * 错误通道：head 未发 → throw（dispatcher 回 error 应答）；
- * head 已发 → 流错误帧 + STREAMED（绝不双应答）。
- */
-async function runDefaultConversation(wire, record, params, rpcId) {
-  const body = isPlainObject(params.body) ? params.body : {};
-  const account = typeof params.account === "string" ? params.account : "";
-  const upstream = record.upstream || "chat";
-  let headSent = false;
-  let session = null;
-
+  const convert = response.ok && !native ? await rpc("script.stream.open", { protocol, model: modelID, session: signatureSession }) : null
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error("Upstream returned no response body")
+  let count = 0
   try {
-    // 1. 凭证：读账号（account 空 = 该 provider 队首）
-    let secret = "";
-    const cred = await wire.call(CALLBACK.storeGet, { provider: record.requestedId, account });
-    if (isPlainObject(cred)) secret = typeof cred.secret === "string" ? cred.secret : "";
-
-    // refresh 凭证：token.ensure 钩子可返回 {secret} 刷新（CAS 写回防覆盖）
-    const ensureHook = record.hooks["token.ensure"];
-    if (typeof ensureHook === "function" && secret) {
-      const refreshed = await ensureHook(
-        { account, secret, public: isPlainObject(cred) ? cred.public : null, body },
-        record.options,
-      );
-      const nextSecret =
-        isPlainObject(refreshed) && typeof refreshed.secret === "string" ? refreshed.secret : "";
-      if (nextSecret && nextSecret !== secret) {
-        const upd = await wire.call(CALLBACK.storeUpdate, {
-          account,
-          expect: secret,
-          secret: nextSecret,
-        });
-        if (isPlainObject(upd) && upd.updated !== false) secret = nextSecret;
+    for (;;) {
+      const { value, done } = await untilCancelled(reader.read(), call.signal)
+      if (done) break
+      count += value.byteLength
+      if (!response.ok && count > 2 * 1024 * 1024) throw new Error("Upstream error body exceeded its limit")
+      for (let start = 0; start < value.byteLength; start += MAX_CHUNK) {
+        const part = value.subarray(start, start + MAX_CHUNK)
+        const bytes = convert ? Buffer.from((await rpc("script.stream.push", { id: convert.id, data: Buffer.from(part).toString("base64") })).data, "base64") : part
+        await chunk(call, bytes)
       }
     }
-
-    // 2. 端点与请求体：非 chat 协议先让网关转换请求体
-    const cfg = isPlainObject(record.config) ? record.config : {};
-    const baseUrl = typeof cfg.base_url === "string" && cfg.base_url
-      ? cfg.base_url
-      : typeof cfg.baseUrl === "string"
-        ? cfg.baseUrl
-        : "";
-    if (!baseUrl) {
-      throw precondition(`provider '${record.requestedId}' config missing base_url`);
-    }
-    let outBody = body;
-    let url = joinUrl(baseUrl, defaultChatPath(upstream, body.model));
-    let headers = {
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      ...defaultAuthHeaders(upstream, secret),
-    };
-    if (upstream !== "chat") {
-      const conv = await wire.call(CALLBACK.protocolRequest, { protocol: upstream, body });
-      if (!isPlainObject(conv)) {
-        throw unsupported(`protocol converter for '${upstream}' unavailable`);
-      }
-      if (isPlainObject(conv.body)) outBody = conv.body;
-      if (typeof conv.path === "string" && conv.path) url = joinUrl(baseUrl, conv.path);
-      if (isPlainObject(conv.headers)) headers = { ...headers, ...conv.headers };
-    }
-
-    // 脚本的 chat.headers 最后说话（函数或静态对象均可）
-    if (record.chatHeaders !== null) {
-      const extra =
-        typeof record.chatHeaders === "function"
-          ? await record.chatHeaders({ body: outBody, secret, upstream }, record.options)
-          : record.chatHeaders;
-      if (isPlainObject(extra)) {
-        for (const [k, v] of Object.entries(extra)) {
-          if (typeof v === "string" || typeof v === "number") headers[k.toLowerCase()] = String(v);
-        }
-      }
-    }
-
-    // 3. fetch 上游（经网关出口代理；body 以 b64 过线）
-    const resp = await wire.call(CALLBACK.transportRequest, {
-      method: "POST",
-      url,
-      headers,
-      body_b64: b64(JSON.stringify(outBody)),
-      stream: true,
-    });
-    if (!isPlainObject(resp)) {
-      throw unsupported("transport egress unavailable (script.transport.request)");
-    }
-    const status = typeof resp.status === "number" ? resp.status : 200;
-    session = typeof resp.session === "string" ? resp.session : null;
-    const respHeaders = isPlainObject(resp.headers) ? resp.headers : {};
-
-    if (status < 200 || status >= 300) {
-      // 非 2xx：head(状态码) → 错误体字节 → end（网关 take_head 的约定——
-      // 错误体让网关按上游错误形状解析，客户端不拿到半截 SSE 当错误）。
-      // head 必须**先**发：网关等 head 只有 30s，慢错误体（上游挂着不吐）
-      // 若在 head 之前收齐，整条流会先被判 head 超时，客户端拿到 504 而
-      // 不是上游的真实错误。
-      await wire.sendHead(rpcId, status, respHeaders, upstream);
-      headSent = true;
-      const errBytes = await drainSession(wire, session);
-      if (errBytes.length > 0) await wire.sendChunk(rpcId, errBytes);
-      await wire.sendEnd(rpcId);
-      return STREAMED;
-    }
-
-    // 4. head：状态 + 上游响应头 + 自报协议
-    await wire.sendHead(rpcId, status, respHeaders, upstream);
-    headSent = true;
-
-    // 5. SSE 循环：上游原始字节 →（非 chat 经网关转换）→ chunk 帧
-    const convert = upstream !== "chat";
-    let done = false;
-    while (!done) {
-      const r = await wire.call(CALLBACK.transportRead, { session });
-      if (!isPlainObject(r)) {
-        throw unsupported("transport egress unavailable (script.transport.read)");
-      }
-      if (r.done === true) break;
-      if (typeof r.chunk_b64 !== "string" || r.chunk_b64.length === 0) continue;
-      const raw = unb64(r.chunk_b64);
-      let out = raw;
-      if (convert) {
-        const c = await wire.call(CALLBACK.protocolChunk, {
-          protocol: upstream,
-          stream: rpcId,
-          data: b64(raw),
-        });
-        // 转换器持有这条流：`data` 缺失/形状不对时**不能**回退成原始字节
-        // 透传——上游协议（Anthropic/Gemini）的 SSE 混进 OpenAI 流会打乱
-        // 下游行缓冲。网关契约是恒回 `"data": <b64>`（没产出时为空串），
-        // 对不上的实现按「本次无输出」处理，尾部由 protocol.finish 兜住。
-        out = isPlainObject(c) && typeof c.data === "string" ? unb64(c.data) : Buffer.alloc(0);
-      }
-      if (out.length > 0) await wire.sendChunk(rpcId, out);
-    }
-
-    // 6. finish：转换器尾部冲刷（上游协议的收尾事件不落在 chunk 边界上）
-    if (convert) {
-      const f = await wire.call(CALLBACK.protocolFinish, { stream: rpcId });
-      if (isPlainObject(f) && typeof f.data === "string" && f.data.length > 0) {
-        const tail = unb64(f.data);
-        if (tail.length > 0) await wire.sendChunk(rpcId, tail);
-      }
-    }
-    await wire.sendEnd(rpcId);
-    return STREAMED;
-  } catch (err) {
-    if (headSent) {
-      await wire.sendStreamError(rpcId, classifyError(err));
-      return STREAMED;
-    }
-    throw err;
+    if (convert) await chunk(call, Buffer.from((await rpc("script.stream.push", { id: convert.id, finish: true })).data, "base64"))
   } finally {
-    if (session) {
-      try {
-        await wire.call(CALLBACK.transportClose, { session });
-      } catch {
-        // 会话清理失败不影响本次调用的终态（网关空闲回收兜底）
-      }
-    }
+    await reader.cancel().catch(() => {})
+    if (convert) await rpc("script.stream.close", { id: convert.id }).catch(() => {})
+    context.chat = null
   }
+  return null
 }
 
-/** 收齐一个流式会话的剩余字节（错误体用；上限 1 MiB，超限继续丢弃到 EOF）。 */
-async function drainSession(wire, session) {
-  const CAP = 1 << 20;
-  const out = [];
-  if (!session) return Buffer.concat(out);
-  for (;;) {
-    let r;
-    try {
-      r = await wire.call(CALLBACK.transportRead, { session });
-    } catch {
-      break;
+async function normalize(provider, params) {
+  if (params.source?.kind !== "manual") throw unsupported("Use the plugin's sign-in method to add this account")
+  const payload = params.source.payload ?? {}
+  const method = loginMethods(provider).find(method => method.methodIndex === payload.methodIndex)
+  if (method?.type !== "api") throw unsupported("Select an API key method declared by this plugin")
+  const inputs = payload.inputs ?? {}
+  const context = scope.getStore()
+  context.inputSecrets = Object.values(inputs).filter(value => typeof value === "string" && value)
+  if (typeof inputs.key === "string") context.loginAuth = { key: inputs.key }
+  await validateInputs(method, inputs)
+  const result = typeof method.authorize === "function" ? await method.authorize(inputs, { signal: context.signal }) : { type: "success", key: inputs.key, metadata: inputs }
+  if (result?.type !== "success") throw new Error(result?.error || "Plugin rejected the credentials")
+  context.signal.throwIfAborted()
+  if (!("refresh" in result)) result.metadata = { ...inputs, ...result.metadata }
+  if (!("refresh" in result) && !("key" in result) && typeof inputs.key === "string") result.key = inputs.key
+  return normalized(provider.id, result, params.name, provider.hooks.auth?.single === true)
+}
+
+export async function dispatch(provider, method, params, call) {
+  if (isLocalProvider(provider)) call.localProvider = provider
+  if (["conversation", "models.list", "models.refresh", "reasoning_patch"].includes(method)) await restoreModels(provider)
+  switch (method) {
+    case "provider.info": return metadata(provider)
+    case "conversation": {
+      const release = await acquire(provider)
+      try { return await conversation(provider, params, call) } finally { release() }
     }
-    if (!isPlainObject(r) || r.done === true) break;
-    if (typeof r.chunk_b64 === "string" && r.chunk_b64.length > 0) {
-      const chunk = unb64(r.chunk_b64);
-      if (out.reduce((n, b) => n + b.length, 0) < CAP) out.push(chunk);
+    case "models.list": return warmCatalogs(provider)
+    case "models.refresh": { await warmCatalogs(provider); return refreshModels(provider) }
+    case "models.meta": return listModels(provider).meta
+    case "token.ensure": { const auth = await refresh(provider); return auth?.access || auth?.key || "" }
+    case "token.refresh": { const auth = await refresh(provider, true); return auth?.access || auth?.key || "" }
+    case "token.expiring": {
+      const auth = await getAuth()
+      return auth?.type === "oauth" && Number.isFinite(auth.expires) && auth.expires > 0
+        && provider.hooks.auth?.keepAlive !== false && auth.expires <= Date.now() + refreshLead(provider)
     }
+    case "usage.query": {
+      if (typeof provider.hooks.auth?.usage !== "function") throw unsupported()
+      await refresh(provider)
+      const context = scope.getStore()
+      context.emptyUsage = null
+      const value = compatibleUsageResult(await provider.hooks.auth.usage(getAuth, structuredClone(providerInfo(provider))), context)
+      await noteSignIn(value?.signIn)
+      const report = usageReport(value)
+      if (context.account) await rpc("store.ledger_put", { account: context.account, kind: "magpieUsage", value: { at: Date.now(), report } })
+      return report
+    }
+    case "checkin.claim": {
+      if (typeof provider.hooks.auth?.checkin !== "function") throw unsupported()
+      await refresh(provider)
+      return checkinReport(await provider.hooks.auth.checkin(getAuth, structuredClone(providerInfo(provider))))
+    }
+    case "account.normalize": return normalize(provider, params)
+    case "account.view": return publicAccount(params.secret)
+    case "account.identity": return { identity: normalized(provider.id, params.secret, undefined, provider.hooks.auth?.single === true).identity }
+    case "login.start": return start(provider, params)
+    case "login.poll": return poll(provider, params.flow)
+    case "login.callback": return callback(provider, params)
+    case "login.cancel": return cancel(provider, params.flow)
+    case "admin.action":
+      if (params.action === "auth.methods") return methods(provider)
+      if (params.action === "auth.prompts") return resolvePrompts(provider, params.payload ?? {})
+      throw unsupported()
+    case "classify": return classify(params.status, params.body)
+    case "is_error_response": return params.status < 200 || params.status >= 300
+    case "refusal_markers": return { finishes: [], markers: [] }
+    case "retry_advice": return null
+    case "error.policy": return localErrorPolicy(provider)
+    case "cooldown_models": return { models: [] }
+    case "reasoning_patch": return Object.hasOwn(provider.models[params.model]?.variants ?? {}, params.level)
+      ? { action: "set", field: "reasoning_effort", value: params.level }
+      : { action: "skip", reason: "插件模型未声明该思考档位" }
+    default: throw unsupported(`Unsupported plugin operation: ${method}`)
   }
-  return Buffer.concat(out);
 }

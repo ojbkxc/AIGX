@@ -169,12 +169,14 @@ function InstalledScriptCard({
   pkg,
   busy,
   onToggleEnabled,
+  onProviderEnabled,
   onUninstall,
   onEditOptions,
 }: {
   pkg: ScriptPackageView;
   busy: boolean;
   onToggleEnabled: (pkg: ScriptPackageView, enabled: boolean) => void;
+  onProviderEnabled: (pkg: ScriptPackageView, provider: string, enabled: boolean) => void;
   onUninstall: (pkg: ScriptPackageView) => void;
   onEditOptions: (pkg: ScriptPackageView) => void;
 }): JSX.Element {
@@ -212,6 +214,13 @@ function InstalledScriptCard({
             <li key={p.id} className="pl-provider-row">
               <span className="pl-provider-name" title={p.id}>{p.label || p.id}</span>
               <span className="pl-provider-dot" title={p.id} />
+              {/* provider 级开关：包内 disabled_providers（后端补 enabled 前按 true 兜底） */}
+              <Switch
+                checked={p.enabled ?? true}
+                disabled={busy}
+                onChange={(v) => onProviderEnabled(pkg, p.id, v)}
+                ariaLabel={`${t('启用')} ${p.label || p.id}`}
+              />
             </li>
           ))}
         </ul>
@@ -532,6 +541,21 @@ export default function ScriptPluginsPanel(): JSX.Element {
     });
   };
 
+  /**
+   * 包内单家 provider 启停（`/plugins/scripts/change` action=provider）。
+   *
+   * 与内置包的 `/plugins/provider` 分开：脚本包的开关落 `disabled_providers`，
+   * 启用中的包会触发宿主重建。错误文案由 runMutation 统一 toast（后端会说
+   * 「提供商不属于该脚本插件」这类原因）；成功后 runMutation 的 finally 里
+   * 已 `load()` 回读，开关状态以服务端为准。
+   */
+  const handleProviderEnabled = (pkg: ScriptPackageView, provider: string, enabled: boolean): void => {
+    void runMutation(`provider:${pkg.id}@${pkg.version}:${provider}`, async () => {
+      await api.setScriptProviderEnabled(pkg.id, provider, enabled, pkg.version);
+      addToast(enabled ? t('该提供商已启用') : t('该提供商已停用'));
+    });
+  };
+
   const handleUninstall = (pkg: ScriptPackageView): void => {
     const name = pkg.label || pkg.id;
     // Local 来源是「本机目录原地登记」，卸载不删运行者的源码目录；
@@ -718,6 +742,7 @@ export default function ScriptPluginsPanel(): JSX.Element {
                       pkg={pkg}
                       busy={busy}
                       onToggleEnabled={handleToggleEnabled}
+                      onProviderEnabled={handleProviderEnabled}
                       onUninstall={handleUninstall}
                       onEditOptions={(p) => setEditingPkg(p)}
                     />

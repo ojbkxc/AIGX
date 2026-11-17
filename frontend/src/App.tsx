@@ -52,6 +52,8 @@ const Prompts = lazyPage(() => import('./pages/Prompts'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
 const Plugins = lazyPage(() => import('./pages/Plugins'));
+// 工具服务（A2A v3.5.0-beta.1 对齐）：Skill / MCP 接入、搜索提供商密钥、视觉分析绑定
+const ToolsPage = lazyPage(() => import('./pages/ToolsPage'));
 // 客户端接入多配置管理（#3）：四客户端 × 多份命名配置 + 预览/备份/恢复
 const ClientConfig = lazyPage(() => import('./pages/ClientConfig'));
 
@@ -257,6 +259,8 @@ export default function App(): JSX.Element {
           <Route path="/docs" element={<Navigate to="/keys?tab=docs" replace />} />
           {/* 插件管理（契约对齐 Agent2API；后端建设中整页降级空态） */}
           <Route path="/plugins" element={<AdminRoute><Plugins /></AdminRoute>} />
+          {/* 工具服务（MCP & Skills / 搜索提供商 / 视觉分析绑定） */}
+          <Route path="/tools" element={<AdminRoute><ToolsPage /></AdminRoute>} />
           <Route path="/client-config" element={<AdminRoute><ClientConfig /></AdminRoute>} />
           <Route path="/tickets" element={<ProtectedLayout><Tickets /></ProtectedLayout>} />
           <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />

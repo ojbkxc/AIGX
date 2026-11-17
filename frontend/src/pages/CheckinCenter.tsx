@@ -18,11 +18,12 @@ import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { Tooltip } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import BenefitsPanel from '../components/BenefitsPanel';
+import CheckinCampaignCard from '../components/CheckinCampaignCard';
 import { useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 import type { CheckinCenterData, CheckinRecord, CheckinRunResult, CheckinSchedule } from '../types';
 import './CheckinCenter.css';
 
-type TabKey = 'center' | 'schedule' | 'records' | 'benefits';
+type TabKey = 'center' | 'schedule' | 'makeup' | 'records' | 'benefits';
 
 const TAB_STORAGE_KEY = 'aigx-checkin-tab';
 
@@ -193,7 +194,9 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
 
   const [tab, setTab] = useState<TabKey>(() => {
     const saved = localStorage.getItem(TAB_STORAGE_KEY);
-    return saved === 'schedule' || saved === 'records' || saved === 'benefits' ? saved : 'center';
+    return saved === 'schedule' || saved === 'makeup' || saved === 'records' || saved === 'benefits'
+      ? saved
+      : 'center';
   });
   const [data, setData] = useState<CheckinCenterData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -226,6 +229,10 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
   const [keepDaysEdit, setKeepDaysEdit] = useState('');
   const [advSaving, setAdvSaving] = useState(false);
 
+  /** 提供商分类栏（A2A checkin-provider-rail）：'' = 全部；只影响「每日签到」Tab 的列表 */
+  const [railProvider, setRailProvider] = useState('');
+  /** 活动福利卡的当前账号（默认第一个带 campaigns 动作的账号） */
+  const [campaignAccountId, setCampaignAccountId] = useState('');
   // 记录
   const [records, setRecords] = useState<CheckinRecord[]>([]);
   const [recordsLoading, setRecordsLoading] = useState(false);
@@ -637,6 +644,35 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
   const unsupported = useMemo(() => data?.unsupported_providers ?? [], [data?.unsupported_providers]);
   const unsupportedSet = useMemo(() => new Set(unsupported), [unsupported]);
 
+  /** 提供商分类栏过滤后的分组（'' = 全部；只影响「每日签到」Tab 的列表渲染） */
+  const railGroups = useMemo(
+    () => (railProvider ? providers.filter((g) => g.provider === railProvider) : providers),
+    [providers, railProvider],
+  );
+
+  /** 活动福利卡的目标账号清单（A2A：campaigns 由插件申报；这里按「可签家」保守给出） */
+  const campaignAccounts = useMemo(
+    () =>
+      providers.flatMap((g) =>
+        g.accounts.map((a) => ({ id: a.id, name: a.name || a.id, provider: g.provider })),
+      ),
+    [providers],
+  );
+
+  /** 默认活动账号：清单变化时兜底选第一个，避免卡里空挂 */
+  useEffect(() => {
+    if (!campaignAccountId && campaignAccounts.length > 0) {
+      setCampaignAccountId(campaignAccounts[0].id);
+    } else if (campaignAccountId && !campaignAccounts.some((a) => a.id === campaignAccountId)) {
+      setCampaignAccountId(campaignAccounts[0]?.id ?? '');
+    }
+  }, [campaignAccounts, campaignAccountId]);
+
+  const campaignTarget = useMemo(
+    () => campaignAccounts.find((a) => a.id === campaignAccountId),
+    [campaignAccounts, campaignAccountId],
+  );
+
   const totals = useMemo(() => {
     let done = 0;
     let total = 0;
@@ -699,9 +735,12 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     });
   };
 
+  // 四个一级 Tab 对齐 A2A checkin-page（center / schedule / makeup / records）；
+  // AIGX 保留「福利通道」作为第五个（A2A 的 activity 卡片并入此处）
   const tabs = [
     { key: 'center' as TabKey, label: t('签到中心') },
     { key: 'schedule' as TabKey, label: t('定时签到') },
+    { key: 'makeup' as TabKey, label: t('定时补签') },
     { key: 'records' as TabKey, label: t('签到记录') },
     { key: 'benefits' as TabKey, label: t('福利通道') },
   ];
@@ -1087,6 +1126,45 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
             </button>
           </div>
 
+          <div className="ck-center-layout">
+          {/* 提供商分类栏（A2A checkin-provider-rail）：只列当前有账号的家 */}
+          {providers.length > 0 && (
+            <aside className="ck-provider-rail" aria-label={t('提供商')}>
+              <div className="ck-rail-head">
+                <h3>{t('提供商')}</h3>
+                <span>{t('{{n}} 家', { n: providers.length })}</span>
+              </div>
+              <button
+                type="button"
+                className={`ck-rail-item${railProvider === '' ? ' is-active' : ''}`}
+                onClick={() => setRailProvider('')}
+              >
+                <span className="ck-rail-name">{t('全部提供商')}</span>
+                <span className="ck-rail-count">{totals.done}/{totals.total}</span>
+              </button>
+              {providers.map((group) => (
+                <button
+                  key={group.provider}
+                  type="button"
+                  className={`ck-rail-item${railProvider === group.provider ? ' is-active' : ''}`}
+                  onClick={() => setRailProvider(group.provider)}
+                >
+                  {providerIcon(group.provider) ? (
+                    <img className="ck-rail-logo" src={providerIcon(group.provider) as string} alt="" />
+                  ) : (
+                    <span className="ck-rail-logo ck-rail-letter">{(group.label || group.provider).slice(0, 1).toUpperCase()}</span>
+                  )}
+                  <span className="ck-rail-name">{group.label || group.provider}</span>
+                  <span className={`ck-rail-count${group.today_done < group.today_total ? ' pending' : ''}`}>
+                    {group.today_done}/{group.today_total}
+                  </span>
+                </button>
+              ))}
+              <p className="ck-rail-note">{t('只列当前任务里有账号的提供商。')}</p>
+            </aside>
+          )}
+
+          <div className="ck-center-main">
           <Card
             title={t('每日签到')}
             actions={
@@ -1109,7 +1187,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                 )}
               />
             ) : (
-              <div className="ck-prov-list">                {providers.map((group) => {
+              <div className="ck-prov-list">                {railGroups.map((group) => {
                   const open = expanded.has(group.provider);
                   const icon = providerIcon(group.provider);
                   return (
@@ -1167,6 +1245,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                               <tr>
                                 <th>{t('账号')}</th>
                                 <th style={{ width: 90 }}>{t('今日')}</th>
+                                <th style={{ width: 90 }}>{t('连登')}</th>
                                 <th style={{ width: 150 }}>{t('上次签到')}</th>
                                 <th>{t('最近结果')}</th>
                                 <th style={{ width: 90 }}>{t('操作')}</th>
@@ -1177,11 +1256,19 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                                 <tr key={account.id}>
                                   <td>{account.name || account.id}</td>
                                   <td>
-                                    {account.checked_in_today ? (
+                                    {account.available === false ? (
+                                      <Badge tone="warning">{t('不可用')}</Badge>
+                                    ) : account.checked_in_today ? (
                                       <Badge tone="success">{t('已签')}</Badge>
                                     ) : (
                                       <Badge tone="info">{t('待签')}</Badge>
                                     )}
+                                  </td>
+                                  {/* 连登天数（A2A streakDays；旧后端不下发 → 0 显示「—」） */}
+                                  <td className="ck-streak">
+                                    {(account.streak_days ?? 0) > 0
+                                      ? t('{{n}} 天', { n: account.streak_days })
+                                      : '—'}
                                   </td>
                                   <td className="ck-time-subtle">
                                     {account.last_ts
@@ -1255,6 +1342,20 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               </div>
             </div>
           )}
+
+          {/* 活动福利 / 月度赠送（A2A checkin-campaign-rewards）：按账号逐张读，
+              活动不进每日调度，只在这里手动领 */}
+          {campaignTarget && (
+            <CheckinCampaignCard
+              accountId={campaignTarget.id}
+              accountName={campaignTarget.name}
+              provider={campaignTarget.provider}
+              accounts={campaignAccounts}
+              onAccountChange={(id) => setCampaignAccountId(id)}
+            />
+          )}
+          </div>
+          </div>
         </>
       ) : tab === 'schedule' ? (
         <>
@@ -1541,6 +1642,159 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               )}
             </Card>
           )}
+        </>
+      ) : tab === 'makeup' ? (
+        <>
+          {/* 定时补签（A2A checkin-makeup-tab）：每个签到条目一条，补签时刻即条目
+              的 makeup_time；这里只读总览 + 立即执行入口，编辑仍在「定时签到」条目里 */}
+          <Card
+            title={t('定时补签')}
+            actions={
+              <span className="ck-makeup-hint">
+                {t('只补当天未签上的账号；补签轮在指定时刻兜底一次。')}
+              </span>
+            }
+          >
+            {(data?.schedules ?? []).length === 0 ? (
+              <EmptyState icon="🌙" message={t('还没有签到计划——先在「定时签到」里建一条。')} />
+            ) : (
+              <div className="ck-makeup-list">
+                {(data?.schedules ?? []).map((schedule) => {
+                  const enabled = !!schedule.makeup_time;
+                  const paused = !data?.settings.enabled || !schedule.enabled;
+                  const scope =
+                    schedule.providers.length === 0 ||
+                    schedule.providers.length >= supported.length
+                      ? t('全部 {{n}} 家', { n: supported.length })
+                      : schedule.providers.join('、');
+                  return (
+                    <div key={schedule.id} className={`ck-makeup-row${enabled ? '' : ' is-off'}`}>
+                      <div className="ck-makeup-main">
+                        <div className="ck-makeup-name">
+                          {schedule.label}
+                          <Badge tone={enabled ? 'success' : 'neutral'}>
+                            {enabled ? t('补签已开启') : t('补签已关闭')}
+                          </Badge>
+                          {paused && enabled && <Badge tone="neutral">{t('随签到计划暂停')}</Badge>}
+                        </div>
+                        <div className="ck-makeup-desc">
+                          {enabled
+                            ? t('补签时刻 {{time}} · 主签到 {{main}} · {{scope}}', {
+                                time: schedule.makeup_time,
+                                main: schedule.time,
+                                scope,
+                              })
+                            : t('主签到 {{main}} · {{scope}}；未设补签时刻', {
+                                main: schedule.time,
+                                scope,
+                              })}
+                        </div>
+                        <div className="ck-makeup-desc ck-sched-last">
+                          {schedule.last_fired_date
+                            ? t('上次执行：{{d}} · 成功 {{ok}}·保活 {{ka}}·失败 {{f}}', {
+                                d: schedule.last_fired_date,
+                                ok: schedule.last_ok,
+                                ka: schedule.last_keepalive,
+                                f: schedule.last_failed,
+                              })
+                            : t('从未执行')}
+                        </div>
+                      </div>
+                      <div className="ck-makeup-ops">
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          onClick={() => {
+                            openEditSchedule(schedule);
+                            setTab('schedule');
+                          }}
+                        >
+                          {t('设置补签')}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          onClick={() => void runSchedule(schedule)}
+                          disabled={busyKey !== null}
+                          title={t('立即执行这一条的补签轮（只处理当天未签上的账号）')}
+                        >
+                          {busyKey === `sched:${schedule.id}` ? t('执行中...') : t('立即补签')}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+
+          {/* 重试规则总览（A2A activity-retry：每账号每天最多重试 N 次，间隔 M 分钟） */}
+          <Card title={t('活动窗口重试')}>
+            <div className="ck-setting-row">
+              <div>
+                <div className="ck-setting-label">{t('全局重试间隔')}</div>
+                <div className="ck-setting-hint">
+                  {t('等待窗口或活动下发的账号按此间隔自动重试；0 = 关闭全局重试，仅靠条目自身的重试设置。')}
+                </div>
+              </div>
+              <div className="ck-gap-edit">
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  className="form-input ck-gap-input"
+                  value={retryMinEdit}
+                  onChange={(e) => setRetryMinEdit(e.target.value)}
+                  aria-label={t('全局重试间隔（分钟）')}
+                />
+                <span className="ck-gap-unit">{t('分钟')}</span>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  onClick={() => void saveAdvanced()}
+                  disabled={advSaving}
+                >
+                  {advSaving ? t('保存中...') : t('保存')}
+                </button>
+              </div>
+            </div>
+            <div className="ck-setting-row">
+              <div>
+                <div className="ck-setting-label">{t('每条目的重试上限 / 补签时刻')}</div>
+                <div className="ck-setting-hint">
+                  {t('在「定时签到」编辑条目里逐条设置；下面只列当前值。')}
+                </div>
+              </div>
+            </div>
+            <table className="ck-table">
+              <thead>
+                <tr>
+                  <th>{t('条目')}</th>
+                  <th style={{ width: 120 }}>{t('每账号每天重试')}</th>
+                  <th style={{ width: 120 }}>{t('重试间隔')}</th>
+                  <th style={{ width: 120 }}>{t('补签时刻')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.schedules ?? []).map((schedule) => (
+                  <tr key={schedule.id}>
+                    <td>{schedule.label}</td>
+                    <td className="ck-time-subtle">
+                      {(schedule.retry_limit ?? 3) > 0
+                        ? t('{{n}} 次', { n: schedule.retry_limit ?? 3 })
+                        : t('关闭')}
+                    </td>
+                    <td className="ck-time-subtle">
+                      {(schedule.retry_gap_minutes ?? 5) > 0
+                        ? t('{{n}} 分钟', { n: schedule.retry_gap_minutes ?? 5 })
+                        : t('回落全局')}
+                    </td>
+                    <td className="ck-time-subtle">{schedule.makeup_time || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
         </>
       ) : tab === 'benefits' ? (
         <BenefitsPanel />

@@ -315,12 +315,23 @@ pub async fn handle_login_paste(
 }
 
 /// POST /api/account-sessions/login/start
+///
+/// 原生登录态家走 `account_login` 引擎；插件 provider 转交宿主
+/// `login.start`（A2A v3.5.0-beta.1 口径），网关只登记任务与落库。
 pub async fn handle_login_start(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<LoginStartRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
+    let provider = crate::account_session::registry::normalize_kind(&body.provider);
+    if super::account_sessions::should_use_plugin_login(&state, &provider) {
+        let started =
+            super::account_sessions::plugin_login_start(&state, &provider, &body.channel_id)
+                .await
+                .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+        return Ok(Json(json!({ "success": true, "data": started })));
+    }
     let started = account_login::start(&state, &body.provider, &body.channel_id)
         .await
         .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
@@ -335,6 +346,18 @@ pub async fn handle_login_wait(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let task_state = params.get("state").map(String::as_str).unwrap_or("");
+    if super::account_sessions::plugin_login_state_known(task_state) {
+        match super::account_sessions::plugin_login_poll(&state, task_state).await {
+            Ok(Some(data)) => return Ok(Json(json!({ "success": true, "data": data }))),
+            Ok(None) => {
+                return Err(error_response(
+                    "登录任务不存在或已过期",
+                    StatusCode::NOT_FOUND,
+                ))
+            }
+            Err(error) => return Err(error_response(&error, StatusCode::BAD_REQUEST)),
+        }
+    }
     let Some(task) = account_login::snapshot(task_state) else {
         return Err(error_response(
             "登录任务不存在或已过期",
@@ -354,6 +377,14 @@ pub async fn handle_login_cancel(
     Json(body): Json<LoginStateRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
+    if super::account_sessions::plugin_login_state_known(body.state.trim()) {
+        let canceled = super::account_sessions::plugin_login_cancel(&state, body.state.trim())
+            .await
+            .unwrap_or(false);
+        return Ok(Json(
+            json!({ "success": true, "data": { "canceled": canceled } }),
+        ));
+    }
     let canceled = account_login::cancel(body.state.trim());
     Ok(Json(
         json!({ "success": true, "data": { "canceled": canceled } }),
@@ -372,6 +403,24 @@ pub async fn handle_login_callback(
             "缺少 callback_url（登录回调地址）",
             StatusCode::BAD_REQUEST,
         ));
+    }
+    if super::account_sessions::plugin_login_state_known(body.state.trim()) {
+        let account_id = super::account_sessions::plugin_login_callback(
+            &state,
+            body.state.trim(),
+            body.callback_url.trim(),
+        )
+        .await
+        .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+        return match account_id {
+            Some(account_id) => Ok(Json(
+                json!({ "success": true, "data": { "accountId": account_id } }),
+            )),
+            None => Err(error_response(
+                "登录任务不存在或已过期",
+                StatusCode::NOT_FOUND,
+            )),
+        };
     }
     let account_id =
         account_login::submit_callback(&state, body.state.trim(), body.callback_url.trim())

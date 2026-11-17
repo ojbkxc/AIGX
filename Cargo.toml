@@ -17,7 +17,7 @@ parking_lot = "0.12"
 
 [package]
 name = "aigx"
-version = "1.0.62"
+version = "1.0.63"
 description = "AIGX — OpenAI-compatible AI gateway with multi-account Cloudflare Workers AI and Epay support"
 edition = "2021"
 license-file = "LICENSE"
@@ -125,6 +125,9 @@ futures = "0.3"
 tokio-stream = "0.1"
 # 插件宿主：解压插件包（zip），并做 zip-slip 防护
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Wasm 插件沙箱：与 Agent2API v3.5.0-beta.1 同版本同特性集
+# （cranelift JIT + async + 仅 runtime/std，不带 wasi/wat 等额外面）。
+wasmtime = { version = "36.0.19", default-features = false, features = ["async", "cranelift", "runtime", "std"] }
 
 # Async
 async-trait = "0.1"

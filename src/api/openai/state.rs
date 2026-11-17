@@ -195,6 +195,13 @@ pub struct AppState {
     /// 数据面经 `route_for_provider` 同步路由，管理面走
     /// `/api/plugins/scripts*`）。
     pub script_host: Arc<crate::plugin_host::script::ScriptHostManager>,
+    /// 工具服务运行时（「工具服务」页的配置存储与执行入口；对齐 A2A
+    /// `core::tool_services`）。管理面在 `api::admin::tools`，数据面在
+    /// `api::tool_runtime`。
+    pub tool_services: Arc<crate::tool_services::ToolServices>,
+    /// 维护任务运行时（凭证维护 / 模型目录刷新的执行记录与排期；对齐
+    /// A2A `core::maintenance`）。
+    pub maintenance: Arc<crate::maintenance::Maintenance>,
 }
 impl AppState {
     /// 返回是否启用了 SeaORM 后端。

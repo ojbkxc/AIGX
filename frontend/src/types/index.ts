@@ -883,6 +883,15 @@ export interface CheckinAccountRow {
   last_outcome?: string;
   last_message?: string;
   last_ts?: number;
+  /* ── A2A checkin-center 行扩展（旧后端不下发，逐项按可选容错）── */
+  /** 成长中心连登天数（签到后回读落库；0 = 还没读到过） */
+  streak_days?: number;
+  /** dailyCheckin 原始快照（插件申报的当天逐项完成状态） */
+  daily_checkin?: unknown;
+  /** 版本档（cn / intl），按钮文案据此区分「签到 / 领日活」 */
+  edition?: string | null;
+  /** 账号当前是否可用（false = 凭证失效等，仍列出但降级展示） */
+  available?: boolean;
 }
 
 export interface CheckinProviderGroup {
@@ -1409,6 +1418,14 @@ export interface AccountSessionItem {
     skip_models: string[];
     disable: boolean;
   };
+  /* ── 插件账号字段（A2A 对齐：secret 只写 / public 只读）── */
+  /**
+   * 只读公开字段（插件申报的公开账号信息：昵称 / uid / 版本 / 到期时间等）。
+   * 后端**永不**回 secret；编辑时按只读展示，前端不参与写。
+   */
+  public?: Record<string, unknown> | null;
+  /** 是否有插件 secret（只回布尔，不回内容；编辑时 `secret` 输入框留空 = 不修改） */
+  has_secret?: boolean;
   /** 登录态推算的「需要重新登录」提醒时刻（unix 秒；仅登录态型账号有，后端 relogin_due_at） */
   relogin_due_at?: number | null;
   created_at?: number;
@@ -1530,6 +1547,16 @@ export interface AccountProviderItem {
   /** 供应商形态分类（后端 C1）：agent = 客户端登录态、web = 网页形态、
    *  api = API Key 型；旧后端不带该字段（前端回退 auth 判据） */
   category?: string | null;
+  /** 来源（A2A 对齐）：builtin = 网关内置 / plugin = 插件提供；旧后端不带 → 视为内置 */
+  source?: 'builtin' | 'plugin' | null;
+  /** 提供该 provider 的插件包 id（source=plugin 时有值） */
+  pack_id?: string | null;
+  /** 登录方式摘要（plugin 提供时后端下发：oauth / paste / sms / desktop / guest） */
+  login?: string | null;
+  /** 插件接管了原生家：true = 这家既有 AIGX 原生实现、又被插件声明，
+   *  插件接管后原生降为兜底（`source=plugin` 且 `native_fallback=true`）。
+   *  插件独占家 / 内置家为 false 或不下发；旧后端不带 → 视为 false。 */
+  native_fallback?: boolean | null;
 }
 
 /** 账号池按渠道聚合统计 */
@@ -2101,6 +2128,11 @@ export interface PluginPackProvider {
   enabled: boolean;
   /** 包进程已把该家适配加载进内存（未加载 = 启用但进程没起/加载失败） */
   loaded: boolean;
+  /** 已由其他插件接管（对齐 A2A PackProvider.overriddenBy；未下发 = null） */
+  overriddenBy?: string | null;
+  /** provider 级开关能力：global = 有独立开关；none = 随包启停（原生插件包）。
+   *  旧后端不带该字段 → 前端按 global 兜底（避免升级顺序问题）。 */
+  toggle?: 'global' | 'none';
 }
 
 /** 插件宿主进程状态（一包 = 一进程；后端未做进程化时恒 null） */
@@ -2132,7 +2164,8 @@ export interface PluginPackSummary {
   icon?: string | null;
   providers: PluginPackProvider[];
   host?: PluginHostState | null;
-  providerCategory?: 'agent' | 'web';
+  /** 供应商形态（agent = 登录态型 / web = 网页形态 / wasm = Wasm 沙箱包） */
+  providerCategory?: 'agent' | 'web' | 'wasm';
 }
 
 /** 商店（发布目录）里的一个插件发布条目 */
@@ -2228,6 +2261,9 @@ export interface ScriptProviderView {
   label: string;
   upstream?: string | null;
   models: string[];
+  /** 包内该家是否启用（后端按 disabled_providers 反推）。
+   *  当前后端未下发（plugin-abi 并行补）；缺失时前端按 true 兜底。 */
+  enabled?: boolean;
 }
 
 /** 已安装脚本包（GET /api/plugins/scripts 的 packages[]） */
@@ -2439,3 +2475,41 @@ export interface BrandingAdminData {
     favicon_url: string;
   };
 }
+
+// ==================== A2A v3.5.0-beta.1 对齐新增类型（见 ./a2a.ts） ====================
+// 拆到独立文件以保持本文件可读；这里统一再导出，调用方仍从 '@/types' / '../types' 取。
+export type {
+  PluginSettingsField,
+  PluginProviderSettingsRow,
+  PluginProviderSettingsPayload,
+  AccountSortRule,
+  AccountSortSettings,
+  HiddenAccountProviderItem,
+  HiddenAccountsSummary,
+  AccountFileExportResult,
+  CheckinCampaignReward,
+  CheckinMonthlyGift,
+  CheckinCampaignPreview,
+  CheckinCampaignClaimResult,
+  ToolProtocol,
+  ToolServiceItem,
+  ToolVariantItem,
+  ToolProviderRow,
+  ToolProviderSelection,
+  ToolProviderTestResult,
+  ToolVisionConfig,
+  ToolVisionKeyOption,
+  ToolVisionPayload,
+  ToolInstallTarget,
+  ToolInstallOutcome,
+  ToolApiKeyOption,
+  ToolInstallInfo,
+  MaintenanceTaskId,
+  MaintenanceRunStatus,
+  MaintenanceTaskView,
+  MaintenanceItemView,
+  MaintenanceRunView,
+  MaintenanceDetailView,
+  MaintenanceOverviewView,
+  MaintenanceQueryParams,
+} from './a2a';

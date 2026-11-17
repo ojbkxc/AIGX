@@ -125,6 +125,22 @@ pub fn stats() -> (Option<i64>, usize, String) {
     (guard.generated_at, guard.models.len(), guard.source.clone())
 }
 
+/// 归一后的来源标记（A2A `model_meta::status().source` 的四档口径）：
+/// `builtin`（内嵌快照）/ `cache`（库里上一份刷新结果）/ `network`
+/// （本次联网刚拉到的）/ `user`（用户手动指定，见 `set_user_source`）。
+///
+/// AIGX 内部的原始 `source` 字符串（`embedded` / `cache` / `https://models.dev`）
+/// 保留在 [`stats`] 的第三项里（旧前端读它）；本函数是给对齐 A2A 形状的
+/// `/api/models/metadata` 用的归一出口。
+pub fn source_kind() -> &'static str {
+    match catalog().read().source.as_str() {
+        "embedded" | "builtin" => "builtin",
+        "cache" => "cache",
+        "user" => "user",
+        _ => "network",
+    }
+}
+
 /// 内嵌快照的 `{generatedAt, source, models:{...}}` 结构解析。
 fn parse_snapshot(raw: &str) -> Option<Catalog> {
     let value: Value = serde_json::from_str(raw).ok()?;
@@ -259,6 +275,22 @@ pub async fn manual_refresh(client: &Client, store: &FileStore) -> (String, Opti
         Ok(count) => ("refreshed".to_string(), None, count),
         Err(message) => ("failed".to_string(), Some(message), 0),
     }
+}
+
+/// 归一后的管理面状态（A2A `model_meta::status()` 形状 + AIGX 原有键）。
+///
+/// `{source, updatedAt(毫秒), count, enabled, rawSource}`：
+/// - `source` 是四档归一口径（builtin / cache / network / user）；
+/// - `rawSource` 是 AIGX 原有的原始字符串（旧前端读它，保留不动）；
+/// - `enabled` 由调用方（管理面，读 config）填 —— 本层不依赖 config。
+pub fn status() -> Value {
+    let (updated_at, count, raw_source) = stats();
+    serde_json::json!({
+        "source": source_kind(),
+        "rawSource": raw_source,
+        "updatedAt": updated_at,
+        "count": count,
+    })
 }
 
 #[cfg(test)]

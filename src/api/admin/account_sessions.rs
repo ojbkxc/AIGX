@@ -165,6 +165,41 @@ pub struct AccountSessionRequest {
     /// `channel_id` 仍优先；`auto_channel` 缺省 = 现行为不变。
     #[serde(default)]
     pub auto_channel: Option<AutoChannelSpec>,
+
+    // ── 插件账号 / 账号文件（A2A v3.5.0-beta.1）───────────────────
+    /// 账号文件文本（JSON 导出记录 / 某家 auth 文件 / 纯 token）。
+    #[serde(default, alias = "authFileContent")]
+    pub auth_file_content: Option<String>,
+    /// 账号文件 base64（二进制文件走它：Cookies 的 SQLite 库等）。
+    #[serde(default, alias = "authFileB64")]
+    pub auth_file_b64: Option<String>,
+    /// 账号文件名（只用于错误文案与扩展名提示）。
+    #[serde(default, alias = "authFileName")]
+    pub auth_file_name: Option<String>,
+    /// 直接给出插件不透明凭证（高级形态；一般不传，走登录或 authFile）。
+    #[serde(default, alias = "pluginSecret")]
+    pub plugin_secret: Option<Value>,
+    /// 插件公开视图补充字段（与 `plugin_secret` 配对）。
+    #[serde(default, alias = "pluginPublic")]
+    pub plugin_public: Option<Value>,
+    /// 插件身份提示（A2A `pluginIdentity`；空 = 按身份字段派生）。
+    #[serde(default, alias = "pluginIdentity")]
+    pub plugin_identity: Option<String>,
+    /// 账号是否在管理面列表默认隐藏。
+    #[serde(default)]
+    pub hidden: Option<bool>,
+    /// 是否允许选路跳过（缺省 true）。
+    #[serde(default, alias = "allowRouteSkip")]
+    pub allow_route_skip: Option<bool>,
+    /// 插件账号出站 User-Agent 覆盖。
+    #[serde(default, alias = "userAgent")]
+    pub user_agent: Option<String>,
+    /// 余额查询执行参数 `{retries, timeout_seconds}`。
+    #[serde(default, alias = "usageQuery")]
+    pub usage_query: Option<crate::account_session::model::UsageQuerySettings>,
+    /// 逐模型限流标记（A2A `rateLimits`）。
+    #[serde(default, alias = "rateLimits")]
+    pub rate_limits: Option<serde_json::Map<String, Value>>,
 }
 
 /// 「预置 API」一键建号的渠道规格（随 `AccountSessionRequest.auto_channel`）。
@@ -226,6 +261,21 @@ pub struct AccountSessionPatch {
     /// 为改一个代理拉整份表单走 PUT。
     #[serde(default)]
     pub proxy: Option<String>,
+    /// 是否在管理面列表默认隐藏。
+    #[serde(default)]
+    pub hidden: Option<bool>,
+    /// 是否允许选路跳过。
+    #[serde(default, alias = "allowRouteSkip")]
+    pub allow_route_skip: Option<bool>,
+    /// 出站 User-Agent 覆盖（空串 = 清除）。
+    #[serde(default, alias = "userAgent")]
+    pub user_agent: Option<String>,
+    /// 余额查询执行参数。
+    #[serde(default, alias = "usageQuery")]
+    pub usage_query: Option<crate::account_session::model::UsageQuerySettings>,
+    /// 逐模型限流标记（整块替换；空对象 = 清空）。
+    #[serde(default, alias = "rateLimits")]
+    pub rate_limits: Option<serde_json::Map<String, Value>>,
 }
 
 impl AccountSessionPatch {
@@ -260,6 +310,26 @@ pub struct BulkImportRequest {
     pub models: Vec<String>,
     /// 每行一条凭证：`名称,Key` 或仅 `Key`；`#` 开头与空行忽略。
     pub credentials: String,
+    /// 账号文件列表（A2A 口径）：每项一份 authFileContent/B64，按 provider
+    /// 解析后落插件账号（`credentials` 与它可同时给出，互不影响）。
+    #[serde(default)]
+    pub auth_files: Vec<BulkAuthFile>,
+}
+
+/// 批量导入里的单个账号文件（A2A `authFileContent` 家族）。
+#[derive(Debug, Default, Deserialize)]
+pub struct BulkAuthFile {
+    /// 文件对应的 provider（空 = 用批量请求的 provider）。
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, alias = "authFileContent")]
+    pub content: Option<String>,
+    #[serde(default, alias = "authFileB64")]
+    pub b64: Option<String>,
+    #[serde(default, alias = "authFileName")]
+    pub file_name: Option<String>,
 }
 
 // ── 辅助 ────────────────────────────────────────────────────────────
@@ -291,6 +361,70 @@ fn ensure_account_channel(
         ));
     }
     Ok(channel)
+}
+
+/// 该 provider 是否走插件账号流程（**声明层**判定，不要求宿主进程在跑）。
+///
+/// 判据 = 「包已安装且声明了该 provider」且不在硬保留集合
+/// （[`crate::plugin_host::registry::is_hard_reserved`]：cloudflare / hub /
+/// custom-* 这些网关内部虚拟 id）。
+///
+/// 与 `plugin_host::registry::is_plugin_owned` **同口径**（插件优先：原生家
+/// 有插件声明时同样由插件接管，AIGX 原生实现降为兜底——2026-11 修订），
+/// 但**不要求包已启用**：管理面「能不能用插件账号流程建号」在安装并声明时
+/// 就该成立，宿主崩溃或包暂未启用不应让账号页失去添加能力（登录会明确报
+/// 宿主未运行）。
+fn provider_is_plugin_provider(state: &AppState, provider: &str) -> bool {
+    let provider = registry::normalize_kind(provider);
+    let native_declared = state
+        .plugin_host
+        .registry()
+        .list()
+        .iter()
+        .any(|pack| pack.providers.iter().any(|item| item.id == provider));
+    let script_declared = crate::plugin_host::script::operations::list(&state.script_host)
+        .iter()
+        .any(|pack| pack.providers.iter().any(|info| info.id == provider));
+    plugin_provider_decision(&provider, native_declared, script_declared)
+}
+
+/// 声明层裁决（纯函数，便于单测）：硬保留集合一律否；任一包声明即真。
+///
+/// **不判 `is_native_provider`**（2026-11 修订：插件优先，原生家被插件声明
+/// 时同样走插件流程，原生实现降为兜底）。
+fn plugin_provider_decision(
+    provider: &str,
+    declared_by_native_pack: bool,
+    declared_by_script: bool,
+) -> bool {
+    let provider = registry::normalize_kind(provider);
+    if crate::plugin_host::registry::is_hard_reserved(&provider) {
+        return false;
+    }
+    declared_by_native_pack || declared_by_script
+}
+
+/// 解析账号的承载渠道：账号型渠道，或（插件 provider 专属的）插件型渠道。
+fn ensure_session_channel(
+    state: &AppState,
+    channel_id: &str,
+    provider: &str,
+) -> Result<Channel, (StatusCode, Json<Value>)> {
+    let channel = state
+        .channel_store
+        .get(channel_id)
+        .ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
+    match channel.channel_type {
+        ChannelType::Account => Ok(channel),
+        // 插件 provider 的账号挂在隐藏的插件承载渠道下（每 provider 一个）
+        ChannelType::Plugin if channel.plugin_provider.eq_ignore_ascii_case(provider) => {
+            Ok(channel)
+        }
+        _ => Err(error_response(
+            "目标渠道不能承载该 provider 的账号（需账号型渠道或对应的插件渠道）",
+            StatusCode::BAD_REQUEST,
+        )),
+    }
 }
 
 /// 「预置 API」一键建号的渠道解析：幂等复用或新建账号型渠道。
@@ -475,6 +609,32 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
     // 条件组整块替换（Phase1-A2；缺省 = 保持原值，空数组 = 清空回落扁平双读）
     if let Some(groups) = &body.limiter_groups {
         session.limiter_groups = groups.clone();
+    }
+    // 插件账号元数据（A2A 口径）：三态 = 缺省保持 / 显式值覆盖
+    if let Some(hidden) = body.hidden {
+        session.hidden = hidden;
+    }
+    if let Some(allow) = body.allow_route_skip {
+        session.allow_route_skip = allow;
+    }
+    if let Some(agent) = &body.user_agent {
+        session.user_agent = agent.trim().to_string();
+    }
+    if let Some(usage_query) = &body.usage_query {
+        session.usage_query = usage_query.normalized();
+    }
+    if let Some(rate_limits) = &body.rate_limits {
+        session.rate_limits = rate_limits.clone();
+    }
+    // 插件不透明凭证 / 公开视图 / 身份提示：三态（缺省 = 保持原值）
+    if let Some(secret) = &body.plugin_secret {
+        session.plugin_secret = Some(secret.clone());
+    }
+    if let Some(public) = &body.plugin_public {
+        session.plugin_public = Some(public.clone());
+    }
+    if let Some(identity) = &body.plugin_identity {
+        session.identity_key = identity.trim().to_string();
     }
     session.models = Vec::new();
     for model in &body.models {
@@ -727,6 +887,24 @@ fn session_json(
         "last_balance_at": session.last_balance_at,
         "last_balance": session.last_balance,
         "last_balance_error": session.last_balance_error,
+        // ── 插件账号契约（A2A v3.5.0-beta.1）─────────────────────
+        // 插件自报的展示字段（已过私密键白名单）与网关事实合并后的投影；
+        // 非插件账号为 null（前端按 provider 目录决定是否渲染插件字段）。
+        "is_plugin_account": session.is_plugin_account(),
+        "plugin": if session.is_plugin_account() {
+            crate::account_session::plugin::plugin_account_view(session)
+        } else {
+            Value::Null
+        },
+        "identity_key": session.identity_key,
+        "hidden": session.hidden,
+        // 合并语义（status=needs_relogin 或插件自报位），与 model 方法同源
+        "needs_relogin": session.needs_relogin(),
+        "plugin_needs_relogin": session.needs_relogin,
+        "allow_route_skip": session.allow_route_skip,
+        "user_agent": session.user_agent,
+        "usage_query": session.usage_query,
+        "rate_limits": session.rate_limits,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     })
@@ -781,7 +959,12 @@ pub async fn handle_list_account_sessions(
     let mut sessions = state.account_sessions.all();
     sort_sessions_for_list(&mut sessions);
     let now = chrono::Utc::now().timestamp();
-    let mut data: Vec<Value> = Vec::with_capacity(sessions.len());
+    let include_hidden = params
+        .get("include_hidden")
+        .or_else(|| params.get("includeHidden"))
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    let mut visible: Vec<AccountSession> = Vec::with_capacity(sessions.len());
+    let mut hidden: Vec<AccountSession> = Vec::new();
     for session in &sessions {
         if !channel_filter.is_empty() && session.channel_id != channel_filter {
             continue;
@@ -792,6 +975,14 @@ pub async fn handle_list_account_sessions(
                 continue;
             }
         }
+        if session.hidden {
+            hidden.push(session.clone());
+        } else {
+            visible.push(session.clone());
+        }
+    }
+    let mut data: Vec<Value> = Vec::with_capacity(visible.len());
+    for session in &visible {
         data.push(session_json(
             &state.account_sessions,
             &channels,
@@ -799,10 +990,27 @@ pub async fn handle_list_account_sessions(
             now,
         ));
     }
+    if include_hidden {
+        for session in &hidden {
+            data.push(session_json(
+                &state.account_sessions,
+                &channels,
+                session,
+                now,
+            ));
+        }
+    }
     let total = data.len();
-    Ok(Json(
-        json!({ "success": true, "data": data, "total": total }),
-    ))
+    Ok(Json(json!({
+        "success": true,
+        "data": data,
+        "total": total,
+        // A2A 快照三件套：分组摘要 / 逐家当前账号 / 隐藏账号摘要。
+        // 前端不用为这三个视图再发额外请求（账号页一屏内要用）。
+        "providers": crate::account_session::plugin::provider_summary(&visible),
+        "currentAccountIds": crate::account_session::plugin::current_account_ids(&visible),
+        "hiddenAccounts": crate::account_session::plugin::hidden_accounts_summary(&hidden),
+    })))
 }
 
 // ── 排序 / 置顶（SPEC 1.0.49 §9）────────────────────────────────────
@@ -942,41 +1150,167 @@ pub async fn handle_create_account_session(
             }
         }
     }
-    // auto_channel：channel_id 为空时原子「建/复用渠道 + 建账号」，替代
-    // 前端两段式；channel_id 优先，同时给出以 channel_id 为准。
-    let channel = if body.channel_id.trim().is_empty() {
-        match &body.auto_channel {
-            Some(spec) => resolve_or_create_auto_channel(&state, &body.provider, spec)?,
-            None => {
-                return Err(error_response(
-                    "需要指定 channel_id 或 auto_channel",
-                    StatusCode::BAD_REQUEST,
-                ))
-            }
-        }
+    // 插件 provider / 账号文件：走插件账号合同（不透明 secret + 隐藏插件渠道）
+    let provider_kind = if body.provider.trim().is_empty() {
+        registry::DEFAULT_PROVIDER_KIND.to_string()
     } else {
-        ensure_account_channel(&state, body.channel_id.trim())?
+        registry::normalize_kind(&body.provider)
     };
-    // 限制规则先校验再应用：非法就整单拒绝，不产生「存了一半」的账号
-    validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
-    let mut session = AccountSession::new(channel.id.clone(), String::new());
-    session = apply_request(session, &body);
-    // 登录态型供应商：凭证形态标记为 session（Cookie/JWT），与 API Key 区分。
-    // 显式 credential_kind 入参优先（apply_request 已应用），不覆盖。
-    if body.credential_kind.is_none() && registry::session_meta(&session.provider).is_some() {
-        session.credential.kind =
-            crate::account_session::model::CREDENTIAL_KIND_SESSION.to_string();
+    let has_auth_file = body
+        .auth_file_content
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || body
+            .auth_file_b64
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    let plugin_provider = provider_is_plugin_provider(&state, &provider_kind);
+    let has_plugin_material = has_auth_file || body.plugin_secret.is_some();
+    if !plugin_provider && has_plugin_material {
+        return Err(error_response(
+            "账号文件 / pluginSecret 仅支持插件 provider（原生 provider 请用粘贴凭证或网页登录）",
+            StatusCode::BAD_REQUEST,
+        ));
     }
-    if session.name.is_empty() {
-        let count = state.account_sessions.for_channel(&channel.id).len();
-        session.name = format!("{}#{}", provider_label(&session.provider), count + 1);
-    }
-    let created = state.account_sessions.upsert(session).map_err(|e| {
-        error_response(
-            &format!("Failed to save account session: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
+    let plugin_flow = plugin_provider;
+
+    let created = if plugin_flow {
+        // 承载渠道：显式 channel_id 优先（须是账号型或该 provider 的插件渠道），
+        // 否则幂等复用/创建隐藏插件渠道（每 provider 一个）。
+        let channel = if body.channel_id.trim().is_empty() {
+            crate::account_session::plugin::plugin_channel_for(&state, &provider_kind)
+                .map_err(|e| error_response(&e, StatusCode::INTERNAL_SERVER_ERROR))?
+        } else {
+            ensure_session_channel(&state, body.channel_id.trim(), &provider_kind)?
+        };
+        validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
+        let (secret, public, identity_hint, file_name) = if has_auth_file {
+            let parsed = crate::account_session::auth_file::parse_auth_file(
+                &provider_kind,
+                &body.name,
+                body.auth_file_content.as_deref(),
+                body.auth_file_b64.as_deref(),
+                body.auth_file_name.as_deref(),
+            )
+            .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+            (parsed.secret, parsed.public, parsed.identity, parsed.name)
+        } else if let Some(secret) = &body.plugin_secret {
+            (
+                secret.clone(),
+                body.plugin_public.clone().unwrap_or_else(|| json!({})),
+                body.plugin_identity.clone().unwrap_or_default(),
+                String::new(),
+            )
+        } else if let Some(key) = body
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+        {
+            // 插件 provider 的「填写凭证」表单：api_key 形态统一放进不透明
+            // secret 的 `apiKey` 槽（各家插件自己解释）
+            (
+                json!({ "apiKey": key }),
+                json!({}),
+                body.plugin_identity.clone().unwrap_or_default(),
+                String::new(),
+            )
+        } else {
+            return Err(error_response(
+                "插件 provider 需要登录、账号文件或 api_key 其中之一",
+                StatusCode::BAD_REQUEST,
+            ));
+        };
+        if !secret.is_object() {
+            return Err(error_response(
+                "插件凭证必须是不透明 JSON 对象",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        let hint = body
+            .plugin_identity
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&identity_hint)
+            .to_string();
+        let name = if !body.name.trim().is_empty() {
+            body.name.trim().to_string()
+        } else if !file_name.trim().is_empty() {
+            file_name
+        } else {
+            let count = state
+                .account_sessions
+                .plugin_accounts_for_provider(&provider_kind)
+                .len();
+            format!("{}#{}", provider_kind, count + 1)
+        };
+        let upserted = state
+            .account_sessions
+            .plugin_upsert_account_with_source_and_proxy(
+                crate::account_session::plugin::PluginUpsertInput {
+                    channel_id: &channel.id,
+                    provider: &provider_kind,
+                    identity: &hint,
+                    name: &name,
+                    secret: &secret,
+                    public: &public,
+                    source: "plugin",
+                    proxy: body.proxy.as_deref(),
+                    hidden: body.hidden.unwrap_or(false),
+                },
+            )
+            .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+        // 其余管理面字段（base_url / models / limiters / usage_query…）按
+        // 既有三态规则应用；插件 secret/public 不在 apply_request 的作用域内。
+        let mut session = apply_request(upserted.session, &body);
+        session.provider = provider_kind.clone();
+        if session.name.is_empty() {
+            session.name = name;
+        }
+        state.account_sessions.upsert(session).map_err(|e| {
+            error_response(
+                &format!("Failed to save account session: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?
+    } else {
+        // auto_channel：channel_id 为空时原子「建/复用渠道 + 建账号」，替代
+        // 前端两段式；channel_id 优先，同时给出以 channel_id 为准。
+        let channel = if body.channel_id.trim().is_empty() {
+            match &body.auto_channel {
+                Some(spec) => resolve_or_create_auto_channel(&state, &body.provider, spec)?,
+                None => {
+                    return Err(error_response(
+                        "需要指定 channel_id 或 auto_channel",
+                        StatusCode::BAD_REQUEST,
+                    ))
+                }
+            }
+        } else {
+            ensure_account_channel(&state, body.channel_id.trim())?
+        };
+        // 限制规则先校验再应用：非法就整单拒绝，不产生「存了一半」的账号
+        validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
+        let mut session = AccountSession::new(channel.id.clone(), String::new());
+        session = apply_request(session, &body);
+        // 登录态型供应商：凭证形态标记为 session（Cookie/JWT），与 API Key 区分。
+        // 显式 credential_kind 入参优先（apply_request 已应用），不覆盖。
+        if body.credential_kind.is_none() && registry::session_meta(&session.provider).is_some() {
+            session.credential.kind =
+                crate::account_session::model::CREDENTIAL_KIND_SESSION.to_string();
+        }
+        if session.name.is_empty() {
+            let count = state.account_sessions.for_channel(&channel.id).len();
+            session.name = format!("{}#{}", provider_label(&session.provider), count + 1);
+        }
+        state.account_sessions.upsert(session).map_err(|e| {
+            error_response(
+                &format!("Failed to save account session: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?
+    };
     let admin_id = admin_id_from_session(&state, &headers).await;
     record_audit(
         &state,
@@ -987,16 +1321,15 @@ pub async fn handle_create_account_session(
         Some(json!({
             "name": created.name,
             "provider": created.provider,
+            "plugin": created.is_plugin_account(),
             // auto_channel 建号时记录渠道来源（新建 or 复用），便于排查碎片渠道
             "auto_channel": body.channel_id.trim().is_empty() && body.auto_channel.is_some(),
         })),
     );
-    // 新账号没填模型白名单时，模型管理里就一行都看不到（账号型渠道的模型
+    // 原生账号没填模型白名单时，模型管理里就一行都看不到（账号型渠道的模型
     // 只来自 `session.models`，落回 `channel.effective_models()` 也是空）。
-    // 这里异步补一次目录，让「加完账号就能在模型管理右栏筛出来」成立；
-    // 后台跑：探测失败只记 `failed` 态、不让建号请求失败（离线/限流都可能）。
-    // 与登录型建号共用同一个 `spawn_catalog_probe`（唯一实现）。
-    if created.models.is_empty() {
+    // 插件账号的目录由插件自己的 `models.list` 提供，不走网关探测。
+    if created.models.is_empty() && !created.is_plugin_account() {
         crate::account_session::catalog::spawn_catalog_probe(
             state.account_sessions.clone(),
             created.id.clone(),
@@ -1045,10 +1378,23 @@ pub async fn handle_update_account_session(
             StatusCode::BAD_REQUEST,
         ));
     }
-    ensure_account_channel(&state, &prev.channel_id)?;
+    // 插件账号可能挂在隐藏的插件承载渠道下；原生账号仍只允许账号型渠道
+    ensure_session_channel(&state, &prev.channel_id, &prev.provider)?;
     // 限制规则先校验再应用（与新增同口径）
     validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
     let mut session = apply_request(prev.clone(), &body);
+    // 原生 ↔ 插件归属不可在原账号上切换：凭证 KV 以 channel_id 为键，跨界
+    // 迁移必须删旧建新（否则重启后旧渠道键复活成副本）。
+    let normalized_provider = registry::normalize_kind(&session.provider);
+    if normalized_provider != prev.provider
+        && provider_is_plugin_provider(&state, &prev.provider)
+            != provider_is_plugin_provider(&state, &normalized_provider)
+    {
+        return Err(error_response(
+            "不能在原生 provider 与插件 provider 之间切换归属，请删除后重建",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
     // 切换供应商时凭证形态跟随：登录态型标 session，其余回到 api_key
     session.credential.kind = if registry::session_meta(&session.provider).is_some() {
         crate::account_session::model::CREDENTIAL_KIND_SESSION.to_string()
@@ -1166,6 +1512,22 @@ pub async fn handle_patch_account_session(
                 .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
             next.proxy = Some(trimmed.to_string());
         }
+    }
+    // 插件账号元数据（A2A 口径）：缺省 = 保持原值
+    if let Some(hidden) = body.hidden {
+        next.hidden = hidden;
+    }
+    if let Some(allow) = body.allow_route_skip {
+        next.allow_route_skip = allow;
+    }
+    if let Some(agent) = body.user_agent.as_deref() {
+        next.user_agent = agent.trim().to_string();
+    }
+    if let Some(usage_query) = &body.usage_query {
+        next.usage_query = usage_query.normalized();
+    }
+    if let Some(rate_limits) = &body.rate_limits {
+        next.rate_limits = rate_limits.clone();
     }
     let saved = state.account_sessions.upsert(next).map_err(|e| {
         error_response(
@@ -1488,12 +1850,24 @@ pub async fn handle_bulk_import_account_sessions(
     Json(body): Json<BulkImportRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = verify_admin(&state, &headers).await?;
-    let channel = ensure_account_channel(&state, body.channel_id.trim())?;
     let provider = if body.provider.trim().is_empty() {
         registry::DEFAULT_PROVIDER_KIND.to_string()
     } else {
         registry::normalize_kind(&body.provider)
     };
+    // channel_id 允许为空：纯账号文件批量（auth_files）会按 provider 自动
+    // 落到隐藏插件渠道；纯凭证行（credentials）仍必须有渠道。
+    let channel = if body.channel_id.trim().is_empty() {
+        None
+    } else {
+        Some(ensure_account_channel(&state, body.channel_id.trim())?)
+    };
+    if channel.is_none() && !body.credentials.trim().is_empty() {
+        return Err(error_response(
+            "批量粘贴凭证需要指定 channel_id（账号文件批量可省略）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
     let proxy = body
         .proxy
         .as_ref()
@@ -1510,10 +1884,17 @@ pub async fn handle_bulk_import_account_sessions(
     if !base_url_allowed {
         tracing::warn!("bulk import base_url rejected by SSRF guard: {base_url}");
     }
-    let base_count = state.account_sessions.for_channel(&channel.id).len();
+    let base_count = channel
+        .as_ref()
+        .map(|channel| state.account_sessions.for_channel(&channel.id).len())
+        .unwrap_or(0);
     let mut created: Vec<Value> = Vec::new();
     let mut skipped = 0usize;
     for line in body.credentials.lines() {
+        let Some(channel) = channel.as_ref() else {
+            skipped += 1;
+            continue;
+        };
         let raw = line.trim();
         if raw.is_empty() || raw.starts_with('#') {
             continue;
@@ -1565,12 +1946,81 @@ pub async fn handle_bulk_import_account_sessions(
             }
         }
     }
+    // 账号文件批量：逐份走 create 的插件合同路径（authFileContent/B64 解析 +
+    // 身份归并 + 隐藏插件渠道）。provider 以文件自报为准，缺省用批量 provider。
+    for file in &body.auth_files {
+        if created.len() >= MAX_BULK_IMPORT {
+            skipped += 1;
+            continue;
+        }
+        let file_provider = if file.provider.trim().is_empty() {
+            provider.clone()
+        } else {
+            registry::normalize_kind(&file.provider)
+        };
+        let req = AccountSessionRequest {
+            channel_id: body.channel_id.trim().to_string(),
+            name: file.name.clone(),
+            provider: file_provider,
+            base_url: String::new(),
+            chat_path: None,
+            api_key: None,
+            proxy: body.proxy.clone(),
+            status: "enabled".to_string(),
+            priority: Some(body.priority),
+            weight: Some(body.weight),
+            max_concurrency: Some(body.max_concurrency),
+            models: body.models.clone(),
+            extra_headers: None,
+            refresh_token: None,
+            credential_kind: None,
+            expires_at: None,
+            usage_query_interval_secs: None,
+            limiters: None,
+            limiter_groups: None,
+            auto_channel: None,
+            auth_file_content: file.content.clone(),
+            auth_file_b64: file.b64.clone(),
+            auth_file_name: file.file_name.clone(),
+            plugin_secret: None,
+            plugin_public: None,
+            plugin_identity: None,
+            hidden: None,
+            allow_route_skip: None,
+            user_agent: None,
+            usage_query: None,
+            rate_limits: None,
+        };
+        match handle_create_account_session(State(state.clone()), headers.clone(), Json(req)).await
+        {
+            Ok(Json(response)) => {
+                let data = &response["data"];
+                created.push(json!({
+                    "id": data.get("id").cloned().unwrap_or(Value::Null),
+                    "name": data.get("name").cloned().unwrap_or(Value::Null),
+                }));
+            }
+            Err((_, Json(error))) => {
+                skipped += 1;
+                tracing::warn!(
+                    "bulk import auth file rejected: {}",
+                    error
+                        .get("error")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown")
+                );
+            }
+        }
+    }
     let admin_id = admin_id_from_session(&state, &headers).await;
     record_audit(
         &state,
         &admin_id,
         "bulk_import_account_sessions",
-        &format!("channel={}", channel.id),
+        &format!(
+            "channel={}",
+            channel.as_ref().map(|c| c.id.as_str()).unwrap_or("")
+        ),
         None,
         Some(json!({ "created": created.len(), "skipped": skipped })),
     );
@@ -1906,16 +2356,30 @@ pub async fn handle_account_session_connections(
     ))
 }
 
-/// GET /api/account-sessions/providers
+/// GET /api/account-sessions/providers —— provider 目录（原生 + 插件）。
+///
+/// 原生条目来自 `account_session::registry`（既有字段一个不少，追加
+/// `source/login`）；插件条目来自两条来源：
+/// - 原生插件包注册表（`plugin_host::registry()`，已安装的包声明）；
+/// - 脚本插件包（`plugin_host::script::operations::list`，已安装的包声明）。
+///
+/// 合并**插件优先**（与 `is_plugin_owned` 同口径，2026-11 修订）：插件声明了
+/// 原生家 → 只出一行 `source = "plugin"` + `native_fallback = true`（原生展示
+/// 元数据补进空位）；插件独占家 `native_supported = false`。判据只在
+/// `account_session::plugin::merge_provider_rows` 一处。
+///
+/// 插件 entry 的 `source = "plugin"`、`category = "plugin"`、`login.methods`
+/// 含 `"plugin"`；新建账号时账号页据此走宿主登录/账号文件导入与隐藏插件渠道。
 pub async fn handle_list_account_providers(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    let mut data: Vec<Value> = Vec::new();
+    let mut native_rows: Vec<Value> = Vec::new();
     for spec in registry::all() {
         let session = registry::session_meta(spec.kind);
-        data.push(json!({
+        let login_supported = session.is_some();
+        native_rows.push(json!({
             "kind": spec.kind,
             "label": spec.label,
             "protocol": spec.protocol.as_str(),
@@ -1935,8 +2399,96 @@ pub async fn handle_list_account_providers(
                 .map(|m| !m.openai_compatible && crate::bridge::session::supports(spec.kind)),
             // 无默认地址 = 必须由账号自己填写上游地址
             "requires_base_url": spec.default_base_url.is_empty(),
+            // ── A2A provider 目录口径（新增字段）──────────────────
+            "source": "native",
+            // 图标：前端按 kind 映射 `/providers/<file>`（providerIcons.ts），
+            // 后端不复制这份映射；插件可在将来提供自有 icon URL。
+            "icon": Value::Null,
+            // 登录方式标记：网页登录（登录态家）+ 粘贴凭证（全部原生家）
+            "login": {
+                "supported": login_supported,
+                "methods": if login_supported {
+                    json!(["web", "paste"])
+                } else {
+                    json!(["paste"])
+                },
+            },
         }));
     }
+
+    // 已安装的 provider 去重集合（插件行内部去重；与原生家的去重交给
+    // `merge_provider_rows`——原生优先的判据只有那一处）
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut plugin_rows: Vec<Value> = Vec::new();
+    let mut push_plugin = |kind: &str,
+                           label: &str,
+                           category: &str,
+                           protocol: Option<&str>,
+                           models: &[String],
+                           pack_id: &str,
+                           pack_label: &str,
+                           installed_from: &str| {
+        // 归属判据只在 `merge_provider_rows`（插件优先）一处；此处仅做
+        // 插件行内部去重，不再判 `is_native_provider`（2026-11 修订：
+        // 原生实现已降为兜底，展示层不得再按「原生优先」筛掉插件行）。
+        if kind.trim().is_empty() || known.contains(kind) {
+            return;
+        }
+        known.insert(kind.to_string());
+        plugin_rows.push(json!({
+            "kind": kind,
+            "label": if label.trim().is_empty() { kind } else { label },
+            "protocol": protocol.unwrap_or(""),
+            "default_base_url": "",
+            "category": category,
+            "auth": Value::Null,
+            "credential_hint": "由插件接管：登录或导入账号文件",
+            "chat_path": Value::Null,
+            "openai_compatible": Value::Null,
+            "native_supported": true,
+            "requires_base_url": false,
+            "source": "plugin",
+            "icon": Value::Null,
+            "login": { "supported": true, "methods": ["plugin"] },
+            "models": models,
+            "pack_id": pack_id,
+            "pack_label": pack_label,
+            "installed_from": installed_from,
+        }));
+    };
+
+    // ① 原生插件包（已安装；启用与否都展示——「装了但停用」需要能看见）
+    for pack in state.plugin_host.registry().list() {
+        for provider in &pack.providers {
+            push_plugin(
+                &provider.id,
+                &provider.label,
+                "plugin",
+                None,
+                &[],
+                &pack.id,
+                &pack.name,
+                "native-pack",
+            );
+        }
+    }
+    // ② 脚本插件包（Bun 宿主的 npm 风格包）
+    for package in crate::plugin_host::script::operations::list(&state.script_host) {
+        for provider in &package.providers {
+            push_plugin(
+                &provider.id,
+                &provider.label,
+                "plugin",
+                provider.upstream.as_deref(),
+                &provider.models,
+                &package.id,
+                &package.label,
+                "script",
+            );
+        }
+    }
+    // 合并（原生优先 + 跨包去重；判据在 account_session::plugin）
+    let data = crate::account_session::plugin::merge_provider_rows(native_rows, plugin_rows);
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -2710,6 +3262,38 @@ pub async fn handle_import_account_sessions_json(
             .unwrap_or("")
             .trim()
             .to_string();
+        let entry_provider = entry
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        // 插件 provider / 账号文件：交给 create 的插件合同路径（隐藏插件渠道 +
+        // 身份归并），导入循环不再自作渠道/重名判定（幂等由身份摘要负责）。
+        let plugin_entry = provider_is_plugin_provider(&state, &entry_provider);
+        let has_plugin_material = entry
+            .get("plugin_secret")
+            .or_else(|| entry.get("pluginSecret"))
+            .is_some()
+            || [
+                "authFileContent",
+                "auth_file_content",
+                "authFileB64",
+                "auth_file_b64",
+            ]
+            .iter()
+            .any(|key| {
+                entry
+                    .get(*key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|text| !text.trim().is_empty())
+            });
+        if !plugin_entry && has_plugin_material {
+            errors.push(format!(
+                "{name}: 账号文件 / pluginSecret 仅支持插件 provider"
+            ));
+            continue;
+        }
         // 目标渠道解析：统一落点 > entry 内 channel_id > channel_name 匹配
         let entry_channel_id = entry
             .get("channel_id")
@@ -2741,26 +3325,36 @@ pub async fn handle_import_account_sessions_json(
         } else {
             String::new()
         };
-        if channel_id.is_empty() {
+        if !plugin_entry && channel_id.is_empty() {
             skipped += 1;
             continue;
         }
-        let channel = match ensure_account_channel(&state, &channel_id) {
-            Ok(c) => c,
-            Err(_) => {
+        let channel = if plugin_entry {
+            None
+        } else {
+            match ensure_account_channel(&state, &channel_id) {
+                Ok(c) => Some(c),
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            }
+        };
+        let channel_id_for_req = channel
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| channel_id.clone());
+        // 幂等：同渠道同名跳过（原生账号的既有语义；插件账号按身份摘要归并）
+        if !plugin_entry {
+            let dup = state
+                .account_sessions
+                .for_channel(&channel_id_for_req)
+                .iter()
+                .any(|s| !name.is_empty() && s.name == name);
+            if dup {
                 skipped += 1;
                 continue;
             }
-        };
-        // 幂等：同渠道同名跳过
-        let dup = state
-            .account_sessions
-            .for_channel(&channel.id)
-            .iter()
-            .any(|s| !name.is_empty() && s.name == name);
-        if dup {
-            skipped += 1;
-            continue;
         }
         // SSRF 防护与 create 一致
         let base_url = entry
@@ -2802,13 +3396,9 @@ pub async fn handle_import_account_sessions_json(
         };
         // 复用 create 的字段归一化：构造 AccountSessionRequest 走 apply_request
         let req = AccountSessionRequest {
-            channel_id: channel.id.clone(),
+            channel_id: channel_id_for_req.clone(),
             name: name.clone(),
-            provider: entry
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            provider: entry_provider.clone(),
             base_url,
             chat_path: entry
                 .get("chat_path")
@@ -2867,7 +3457,81 @@ pub async fn handle_import_account_sessions_json(
             limiter_groups: None,
             // Agent2API 导入不走自动建渠道（导入流程自己管理渠道归属）
             auto_channel: None,
+            // 账号文件（文本 / base64 / 文件名）：插件与原生导入共用同一解析
+            auth_file_content: entry
+                .get("authFileContent")
+                .or_else(|| entry.get("auth_file_content"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            auth_file_b64: entry
+                .get("authFileB64")
+                .or_else(|| entry.get("auth_file_b64"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            auth_file_name: entry
+                .get("authFileName")
+                .or_else(|| entry.get("auth_file_name"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            // 插件账号直给形态（备份回流）
+            plugin_secret: entry
+                .get("plugin_secret")
+                .or_else(|| entry.get("pluginSecret"))
+                .filter(|v| v.is_object())
+                .cloned(),
+            plugin_public: entry
+                .get("plugin_public")
+                .or_else(|| entry.get("pluginPublic"))
+                .filter(|v| v.is_object())
+                .cloned(),
+            plugin_identity: entry
+                .get("plugin_identity")
+                .or_else(|| entry.get("pluginIdentity"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            hidden: entry.get("hidden").and_then(|v| v.as_bool()),
+            allow_route_skip: entry
+                .get("allow_route_skip")
+                .or_else(|| entry.get("allowRouteSkip"))
+                .and_then(|v| v.as_bool()),
+            user_agent: entry
+                .get("user_agent")
+                .or_else(|| entry.get("userAgent"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            usage_query: entry
+                .get("usage_query")
+                .or_else(|| entry.get("usageQuery"))
+                .cloned()
+                .and_then(|value| {
+                    serde_json::from_value::<crate::account_session::model::UsageQuerySettings>(
+                        value,
+                    )
+                    .ok()
+                }),
+            rate_limits: entry
+                .get("rate_limits")
+                .or_else(|| entry.get("rateLimits"))
+                .and_then(|v| v.as_object())
+                .cloned(),
         };
+        // 插件条目：统一走 create 的插件合同路径（隐藏插件渠道 + 身份归并）
+        if plugin_entry {
+            match handle_create_account_session(State(state.clone()), headers.clone(), Json(req))
+                .await
+            {
+                Ok(_) => created += 1,
+                Err((_, Json(error))) => errors.push(format!(
+                    "{name}: {}",
+                    error
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("创建失败")
+                )),
+            }
+            continue;
+        }
+        let channel = channel.expect("非插件条目已在上面解析渠道");
         let mut session = AccountSession::new(channel.id.clone(), String::new());
         session = apply_request(session, &req);
         // 具名凭证逐名落库（set_field 内部按口径编码）
@@ -2904,6 +3568,898 @@ pub async fn handle_import_account_sessions_json(
         "success": true,
         "data": { "created": created, "skipped": skipped, "errors": errors },
     })))
+}
+
+// ── A2A 账号池 API 补齐（v3.5.0-beta.1）──────────────────────────────
+//
+// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+//
+// 本段包含：服务端排序规则 / 批量临期刷新 / 余额查询异步任务 /
+// 按账号或 provider 导出单文件 / 清除限流标记 / 插件 provider 登录桥。
+
+/// GET /api/account-sessions/sorting —— 服务端排序规则 + 实际先试次序。
+pub async fn handle_get_account_sorting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let settings =
+        crate::account_session::sorting::AccountSortSettings::load(&state.account_sessions);
+    let sorting = crate::account_session::sorting::AccountSorting::build(
+        &state.account_sessions.all(),
+        settings,
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": sorting.to_json(chrono::Utc::now().timestamp()),
+    })))
+}
+
+/// PUT /api/account-sessions/sorting 请求体。
+#[derive(Debug, Deserialize)]
+pub struct AccountSortingRequest {
+    pub provider: String,
+    /// 规则数组；显式 `null` = 恢复默认；缺字段 = 400（防手滑清空）。
+    ///
+    /// 双层 `Option` 是**必需的**：单层 `Option<Value>` 会被 serde 把
+    /// 「显式 `null`」与「缺字段」都解成 `None`，二者不可区分——那样
+    /// `{"rules":null}` 会命中「缺字段」分支返回 400，前端「恢复默认」
+    /// 按钮永远失败。`deserialize_some` 把任意出现的值（含 `null`）包成
+    /// `Some(...)`，只有键缺失才保持 `#[serde(default)]` 的 `None`。
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub rules: Option<Option<Value>>,
+    /// true = 仅在该 provider 尚未配置时写入（前端「初始化默认」用）。
+    #[serde(default, alias = "onlyIfUnset")]
+    pub only_if_unset: bool,
+}
+
+/// 把「字段出现」与「字段缺失」区分开：出现即 `Some(值)`（值可以是 `null`）。
+fn deserialize_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// 三态应用排序规则（handler 的纯逻辑部分，便于行为测试）：
+///
+/// - `None`（缺字段）= 错误（防手滑清空）；
+/// - `Some(None)`（显式 `null`）= 移除该 provider 的规则 → 回落默认；
+/// - `Some(Some(数组))` = 校验后写入。
+///
+/// 注意内层还有 `Value::Null` 兜底：某些客户端/序列化器可能把 `null` 落成
+/// `Value::Null` 而不是 Rust 的 `None`，两者都按「恢复默认」处理。
+fn apply_sorting_rules(
+    settings: &mut crate::account_session::sorting::AccountSortSettings,
+    provider: &str,
+    rules_slot: Option<Option<Value>>,
+) -> Result<(), String> {
+    let Some(rules_slot) = rules_slot else {
+        return Err("缺少 rules 字段，恢复默认请传 null".to_string());
+    };
+    match rules_slot {
+        // 显式 `null` = 恢复默认（前端「清空规则」/「恢复默认」按钮）
+        None => {
+            settings.rules.remove(provider);
+        }
+        // 防御性兜底：`null` 被解成 `Value::Null` 的形态，语义同上
+        Some(Value::Null) => {
+            settings.rules.remove(provider);
+        }
+        Some(value) => {
+            let inputs: Vec<crate::account_session::sorting::SortRuleInput> =
+                serde_json::from_value(value)
+                    .map_err(|e| format!("账号排序规则格式错误: {e}"))?;
+            let rules: Vec<crate::channel::routing_policy::AccountSortRule> =
+                inputs.into_iter().map(Into::into).collect();
+            crate::account_session::sorting::validate_rules(&rules)?;
+            settings.rules.insert(provider.to_string(), rules);
+        }
+    }
+    Ok(())
+}
+
+/// PUT /api/account-sessions/sorting —— 保存某 provider 的排序规则。
+pub async fn handle_set_account_sorting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AccountSortingRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let provider = registry::normalize_kind(&body.provider);
+    if provider.trim().is_empty() {
+        return Err(error_response(
+            "缺少 provider 字段",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let mut settings =
+        crate::account_session::sorting::AccountSortSettings::load(&state.account_sessions);
+    if body.only_if_unset && settings.rules.contains_key(&provider) {
+        let sorting = crate::account_session::sorting::AccountSorting::build(
+            &state.account_sessions.all(),
+            settings,
+        );
+        return Ok(Json(json!({
+            "success": true,
+            "data": sorting.to_json(chrono::Utc::now().timestamp()),
+        })));
+    }
+    apply_sorting_rules(&mut settings, &provider, body.rules)
+        .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+    settings
+        .save(&state.account_sessions)
+        .map_err(|e| error_response(&e, StatusCode::INTERNAL_SERVER_ERROR))?;
+    let sorting = crate::account_session::sorting::AccountSorting::build(
+        &state.account_sessions.all(),
+        settings,
+    );
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "save_account_sorting",
+        &format!("provider={provider}"),
+        None,
+        None,
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": sorting.to_json(chrono::Utc::now().timestamp()),
+    })))
+}
+
+/// POST /api/account-sessions/refresh-expiring —— 批量刷新全部临期账号。
+///
+/// 复用 `account_session::refresh::refresh_expiring`（与后台巡检同一实现）：
+/// 串行刷新、单飞收口、失败不写凭据。逐项计数返回（有失败不等于整轮失败）。
+pub async fn handle_refresh_expiring(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let summary = crate::account_session::refresh::refresh_expiring(
+        &state.account_sessions,
+        &state.http_client,
+    )
+    .await;
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "refresh_expiring_account_sessions",
+        "account-session",
+        None,
+        Some(json!({
+            "refreshed": summary.refreshed,
+            "failed": summary.failed,
+            "invalid": summary.invalid,
+        })),
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "refreshed": summary.refreshed,
+            "failed": summary.failed,
+            "invalid": summary.invalid,
+            "message": summary.summary_text(),
+        }
+    })))
+}
+
+/// POST /api/account-sessions/usage/start 请求体。
+#[derive(Debug, Default, Deserialize)]
+pub struct UsageStartRequest {
+    /// 单账号（缺省 = 全部支持查询的账号）。
+    #[serde(default)]
+    pub id: Option<String>,
+    /// true = 替换同账号进行中的任务（缺省复用）。
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// POST /api/account-sessions/usage/start —— 异步起查询任务，立刻返回任务号。
+pub async fn handle_usage_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<UsageStartRequest>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let data = crate::account_session::usage_jobs::start(
+        &state.account_sessions,
+        &state.http_client,
+        body.id.as_deref(),
+        body.replace,
+    );
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// POST /api/account-sessions/usage/cancel 请求体。
+#[derive(Debug, Default, Deserialize)]
+pub struct UsageCancelRequest {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, alias = "requestId")]
+    pub request_id: String,
+}
+
+/// POST /api/account-sessions/usage/cancel —— 取消指定账号的查询任务。
+pub async fn handle_usage_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UsageCancelRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    if body.id.trim().is_empty() || body.request_id.trim().is_empty() {
+        return Err(error_response(
+            "缺少账号或查询任务编号",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let cancelled = crate::account_session::usage_jobs::cancel(&body.id, &body.request_id);
+    Ok(Json(
+        json!({ "success": true, "data": { "cancelled": cancelled } }),
+    ))
+}
+
+/// GET /api/account-sessions/usage/states —— 异步查询任务状态 + 最近读数快照。
+///
+/// 与既有两条的分工（三条都保留，语义不同）：
+/// - `POST /api/account-sessions/usage`：**同步**手动查询（阻塞到查完，直接
+///   返回 results；账号页「查询余额」按钮用它）；
+/// - `GET /api/account-sessions/usage/snapshot`：各账号**最近一次结论**的
+///   只读快照（不含进行中任务）；
+/// - `GET /api/account-sessions/usage/states`（本端点）：**异步任务态**
+///   （`start` 起的任务进度/取消结果 + 最近读数快照一份）。
+///
+/// A2A 的 `GET /api/accounts/usage` 兼顾后两者；AIGX 拆成两条是因为同步
+/// 查询的响应形状（results）与任务态（jobs）消费方不同，合并会让前端
+/// 每次轮询都带上当前读数。
+pub async fn handle_usage_states(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let data = crate::account_session::usage_jobs::states(&state.account_sessions);
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// POST /api/account-sessions/export-files 请求体。
+#[derive(Debug, Default, Deserialize)]
+pub struct ExportFilesRequest {
+    /// 单个账号 id（与 provider 二选一）。
+    #[serde(default)]
+    pub id: Option<String>,
+    /// 按 provider 导出全部账号（与 id 二选一）。
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// 单账号导出内容（明文凭证，导出即备份语义；接口仅管理员可用）。
+fn export_file_content(session: &AccountSession) -> Value {
+    let data_dir = crate::account_session::secret::data_dir();
+    let mut credential_fields = Map::new();
+    for name in session.credential.field_names() {
+        credential_fields.insert(
+            name.to_string(),
+            json!(session.credential.field_plain(name)),
+        );
+    }
+    let refresh_token = if session.refresh_secret.is_empty() {
+        String::new()
+    } else {
+        crate::account_session::secret::open_secret(&session.refresh_secret, &data_dir)
+    };
+    let mut content = Map::new();
+    content.insert(
+        "format".to_string(),
+        json!(crate::account_session::auth_file::ACCOUNT_FILE_FORMAT),
+    );
+    content.insert("version".to_string(), json!(1));
+    content.insert("id".to_string(), json!(session.id));
+    content.insert("provider".to_string(), json!(session.provider));
+    content.insert("name".to_string(), json!(session.name));
+    content.insert("base_url".to_string(), json!(session.base_url));
+    content.insert("chat_path".to_string(), json!(session.chat_path));
+    content.insert("proxy".to_string(), json!(session.proxy));
+    content.insert("status".to_string(), json!(session.status));
+    content.insert("priority".to_string(), json!(session.priority));
+    content.insert("weight".to_string(), json!(session.weight));
+    content.insert(
+        "max_concurrency".to_string(),
+        json!(session.max_concurrency),
+    );
+    content.insert("models".to_string(), json!(session.models));
+    content.insert("extra_headers".to_string(), json!(session.extra_headers));
+    content.insert("expires_at".to_string(), json!(session.expires_at));
+    content.insert(
+        "credential_kind".to_string(),
+        json!(session.credential.kind),
+    );
+    content.insert(
+        "api_key".to_string(),
+        json!(session.credential.secret_plain()),
+    );
+    content.insert(
+        "credential_fields".to_string(),
+        Value::Object(credential_fields),
+    );
+    content.insert("refresh_token".to_string(), json!(refresh_token));
+    if let Some(secret) = &session.plugin_secret {
+        content.insert("secret".to_string(), secret.clone());
+        // 顶层镜像身份字段：与 A2A 导出记录同形，导入端两种读法都认
+        if let Some(object) = secret.as_object() {
+            for key in [
+                "uid",
+                "email",
+                "accountId",
+                "edition",
+                "endpoint",
+                "platform",
+            ] {
+                if let Some(value) = object.get(key) {
+                    content.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+    if let Some(public) = &session.plugin_public {
+        content.insert("public".to_string(), public.clone());
+    }
+    Value::Object(content)
+}
+
+/// 文件名安全化（provider / 名称 → 文件名字符集）。
+fn safe_file_stem(text: &str) -> String {
+    // 保留 Unicode 字母数字（中文账号名仍可读）；路径分隔符/空白/符号一律
+    // 换成连字符 —— 结果用于文件名，不能带 `/` `\` `:` 或控制字符。
+    let mut out: String = text
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "account".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// POST /api/account-sessions/export-files —— 按 id 或 provider 导出单文件。
+///
+/// 形状对齐 A2A：`{total, files: [{id,name,file_name,content}], failed: [...]}`。
+pub async fn handle_export_account_files(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ExportFilesRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let id = body
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let provider = body
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
+    let (selected, failed): (Vec<AccountSession>, Vec<Value>) = match (id, provider) {
+        (Some(id), _) => match state.account_sessions.get(id) {
+            Some(session) => (vec![session], Vec::new()),
+            None => (
+                Vec::new(),
+                vec![json!({ "id": id, "name": "", "error": "账号不存在" })],
+            ),
+        },
+        (None, Some(provider)) => {
+            let provider = registry::normalize_kind(provider);
+            let mut sessions = state
+                .account_sessions
+                .plugin_accounts_for_provider(&provider);
+            sessions.sort_by(|a, b| {
+                b.priority
+                    .cmp(&a.priority)
+                    .then(a.created_at.cmp(&b.created_at))
+                    .then(a.id.cmp(&b.id))
+            });
+            (sessions, Vec::new())
+        }
+        _ => {
+            return Err(error_response(
+                "请指定一个账号 id 或一个提供商分组",
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    };
+    let files: Vec<Value> = selected
+        .iter()
+        .map(|session| {
+            let stem = safe_file_stem(if session.name.trim().is_empty() {
+                &session.id
+            } else {
+                &session.name
+            });
+            json!({
+                "id": session.id,
+                "name": session.name,
+                "file_name": format!("{}-{stem}.json", safe_file_stem(&session.provider)),
+                "content": export_file_content(session),
+            })
+        })
+        .collect();
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "export_account_files",
+        &format!("files={} failed={}", files.len(), failed.len()),
+        None,
+        None,
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "total": files.len() + failed.len(),
+            "files": files,
+            "failed": failed,
+        }
+    })))
+}
+
+/// POST /api/account-sessions/:id/rate-limits/clear 请求体。
+#[derive(Debug, Default, Deserialize)]
+pub struct RateLimitsClearRequest {
+    /// 只清这一个模型的标记；缺省 = 清全部。
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// POST /api/account-sessions/:id/rate-limits/clear —— 清除插件限流标记。
+pub async fn handle_clear_rate_limits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Option<Json<RateLimitsClearRequest>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let Some(mut session) = state.account_sessions.get(&id) else {
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    let model = body
+        .and_then(|Json(body)| body.model)
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty());
+    let cleared = match &model {
+        Some(model) => usize::from(session.rate_limits.remove(model).is_some()),
+        None => {
+            let count = session.rate_limits.len();
+            session.rate_limits.clear();
+            count
+        }
+    };
+    if cleared > 0 {
+        state.account_sessions.upsert(session).map_err(|e| {
+            error_response(
+                &format!("Failed to clear rate limits: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    }
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "clear_account_rate_limits",
+        &format!("id={id} cleared={cleared}"),
+        None,
+        None,
+    );
+    Ok(Json(
+        json!({ "success": true, "data": { "cleared": cleared } }),
+    ))
+}
+
+// ── 插件 provider 登录桥（login.start / poll / callback / cancel）─────
+//
+// 插件宿主的 `login.*` 能力已存在（见 `script/rpc.rs` 的方法表与上游
+// Magpie 的登录实现）；本段只做**网关侧任务登记与落库**：
+// 1. `start` 调插件拿授权地址与 flow，登记 `plugin:<uuid>` 网关任务；
+// 2. `wait` 轮询 `login.poll`，`state=done` 时把插件返回的
+//    `{secret, public}` 按插件账号合同落库（隐藏插件渠道）；
+// 3. `callback` 把浏览器回调地址转交 `login.callback`；
+// 4. `cancel` 转交 `login.cancel` 并丢弃任务。
+
+#[derive(Clone)]
+struct PluginLoginTask {
+    provider: String,
+    flow: String,
+    channel_id: String,
+}
+
+fn plugin_login_tasks(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, PluginLoginTask>> {
+    static TASKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, PluginLoginTask>>,
+    > = std::sync::OnceLock::new();
+    TASKS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+/// 该 provider 是否该走插件登录（声明层或运行期任一成立）。
+pub(crate) fn should_use_plugin_login(state: &AppState, provider: &str) -> bool {
+    provider_is_plugin_provider(state, provider)
+        || state.script_host.route_for_provider(provider).is_some()
+        || state.plugin_host.process_for_provider(provider).is_some()
+}
+
+/// 向接管该 provider 的插件发起一次能力调用。
+async fn plugin_login_call(
+    state: &AppState,
+    provider: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    if let Some(route) = state.script_host.route_for_provider(provider) {
+        return route.channel.call(method, params).await.map_err(|error| {
+            match error.code.as_deref() {
+                Some(code) if !code.is_empty() => {
+                    format!("插件 {method} 失败[{code}]：{}", error.message)
+                }
+                _ => format!("插件 {method} 失败：{}", error.message),
+            }
+        });
+    }
+    if let Some(process) = state.plugin_host.process_for_provider(provider) {
+        return process.rpc.call(method, params).await.map_err(|error| {
+            match error.code.as_deref() {
+                Some(code) if !code.is_empty() => {
+                    format!("插件 {method} 失败[{code}]：{}", error.message)
+                }
+                _ => format!("插件 {method} 失败：{}", error.message),
+            }
+        });
+    }
+    Err(format!(
+        "「{provider}」的插件宿主未运行，无法发起登录（请先在插件页启用对应插件包）"
+    ))
+}
+
+fn resolve_plugin_login_channel(
+    state: &AppState,
+    provider: &str,
+    channel_id: &str,
+) -> Result<Channel, String> {
+    let channel_id = channel_id.trim();
+    if channel_id.is_empty() {
+        return crate::account_session::plugin::plugin_channel_for(state, provider);
+    }
+    let channel = state
+        .channel_store
+        .get(channel_id)
+        .ok_or_else(|| "目标渠道不存在".to_string())?;
+    match channel.channel_type {
+        ChannelType::Account => Ok(channel),
+        ChannelType::Plugin if channel.plugin_provider.eq_ignore_ascii_case(provider) => {
+            Ok(channel)
+        }
+        _ => Err("目标渠道不能承载该插件 provider 的账号".to_string()),
+    }
+}
+
+/// 插件登录成功 → 落插件账号（`plugin_secret` 原样保存）。
+fn land_plugin_login_account(
+    state: &AppState,
+    provider: &str,
+    channel_id: &str,
+    account: &Value,
+) -> Result<String, String> {
+    let inner = account.get("account").filter(|value| value.is_object());
+    let pick = |key: &str| -> Option<Value> {
+        account
+            .get(key)
+            .or_else(|| inner.and_then(|value| value.get(key)))
+            .cloned()
+    };
+    let secret = pick("secret")
+        .filter(Value::is_object)
+        .ok_or_else(|| "插件登录结果缺少 secret（不透明 JSON）".to_string())?;
+    let public = pick("public")
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let identity = pick("identity")
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let name = pick("name")
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let channel = resolve_plugin_login_channel(state, provider, channel_id)?;
+    let name = if name.trim().is_empty() {
+        let count = state
+            .account_sessions
+            .plugin_accounts_for_provider(provider)
+            .len();
+        format!("{provider}#{}", count + 1)
+    } else {
+        name
+    };
+    let upserted = state
+        .account_sessions
+        .plugin_upsert_account_with_source_and_proxy(
+            crate::account_session::plugin::PluginUpsertInput {
+                channel_id: &channel.id,
+                provider,
+                identity: &identity,
+                name: &name,
+                secret: &secret,
+                public: &public,
+                source: "plugin",
+                proxy: None,
+                hidden: false,
+            },
+        )?;
+    Ok(upserted.session.id)
+}
+
+/// 插件登录发起：登记 `plugin:<uuid>` 网关任务，返回授权地址。
+pub(crate) async fn plugin_login_start(
+    state: &AppState,
+    provider: &str,
+    channel_id: &str,
+) -> Result<Value, String> {
+    let provider = registry::normalize_kind(provider);
+    let started = plugin_login_call(
+        state,
+        &provider,
+        "login.start",
+        json!({ "provider": provider, "payload": {} }),
+    )
+    .await?;
+    let flow = started
+        .get("flow")
+        .and_then(Value::as_str)
+        .or_else(|| started.get("state").and_then(Value::as_str))
+        .filter(|flow| !flow.trim().is_empty())
+        .ok_or_else(|| "插件 login.start 未返回登录流程编号".to_string())?
+        .to_string();
+    let gateway_state = format!("plugin:{}", uuid::Uuid::new_v4());
+    plugin_login_tasks().insert(
+        gateway_state.clone(),
+        PluginLoginTask {
+            provider: provider.clone(),
+            flow,
+            channel_id: channel_id.trim().to_string(),
+        },
+    );
+    Ok(json!({
+        "state": gateway_state,
+        "authUrl": started.get("url").cloned().unwrap_or(Value::Null),
+        "provider": provider,
+        "instructions": started.get("instructions").cloned().unwrap_or(Value::Null),
+        "pollIntervalMs": started.get("poll_interval_ms").cloned().unwrap_or(json!(1500)),
+        "externalBrowser": started.get("external_browser").cloned().unwrap_or(Value::Bool(false)),
+    }))
+}
+
+/// 该网关登录任务是否属于插件桥。
+pub(crate) fn plugin_login_state_known(state: &str) -> bool {
+    plugin_login_tasks().contains_key(state)
+}
+
+/// 轮询插件登录：`None` = 不是插件任务；`Some(payload)` = 网关侧 wait 响应。
+pub(crate) async fn plugin_login_poll(
+    state: &AppState,
+    gateway_state: &str,
+) -> Result<Option<Value>, String> {
+    let task = match plugin_login_tasks().get(gateway_state).cloned() {
+        Some(task) => task,
+        None => return Ok(None),
+    };
+    let polled = plugin_login_call(
+        state,
+        &task.provider,
+        "login.poll",
+        json!({ "provider": task.provider, "flow": task.flow }),
+    )
+    .await?;
+    match polled.get("state").and_then(Value::as_str) {
+        Some("done") => {
+            plugin_login_tasks().remove(gateway_state);
+            let account = polled.get("account").cloned().unwrap_or_else(|| json!({}));
+            match land_plugin_login_account(state, &task.provider, &task.channel_id, &account) {
+                Ok(account_id) => Ok(Some(json!({
+                    "pending": false,
+                    "done": true,
+                    "provider": task.provider,
+                    "accountId": account_id,
+                }))),
+                Err(error) => Ok(Some(json!({
+                    "pending": false,
+                    "done": true,
+                    "provider": task.provider,
+                    "error": error,
+                }))),
+            }
+        }
+        Some("failed") => {
+            plugin_login_tasks().remove(gateway_state);
+            let message = polled
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("插件登录失败");
+            Ok(Some(json!({
+                "pending": false,
+                "done": true,
+                "provider": task.provider,
+                "error": message,
+            })))
+        }
+        _ => Ok(Some(json!({
+            "pending": true,
+            "provider": task.provider,
+            "hint": polled.get("hint").cloned().unwrap_or(Value::Null),
+            "instructions": polled.get("instructions").cloned().unwrap_or(Value::Null),
+        }))),
+    }
+}
+
+/// 提交浏览器回调地址给插件（`login.callback`），成功即落账号。
+pub(crate) async fn plugin_login_callback(
+    state: &AppState,
+    gateway_state: &str,
+    callback_url: &str,
+) -> Result<Option<String>, String> {
+    let task = match plugin_login_tasks().get(gateway_state).cloned() {
+        Some(task) => task,
+        None => return Ok(None),
+    };
+    let polled = plugin_login_call(
+        state,
+        &task.provider,
+        "login.callback",
+        json!({ "provider": task.provider, "flow": task.flow, "url": callback_url }),
+    )
+    .await?;
+    match polled.get("state").and_then(Value::as_str) {
+        Some("done") => {
+            plugin_login_tasks().remove(gateway_state);
+            let account = polled.get("account").cloned().unwrap_or_else(|| json!({}));
+            land_plugin_login_account(state, &task.provider, &task.channel_id, &account).map(Some)
+        }
+        Some("failed") => {
+            plugin_login_tasks().remove(gateway_state);
+            Err(polled
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("插件登录回调失败")
+                .to_string())
+        }
+        _ => Err("插件尚未完成登录回调，请稍候轮询".to_string()),
+    }
+}
+
+/// 读当前交互步骤（插件 `login.interaction`）。
+///
+/// 返回：
+/// - `Ok(None)` = 网关任务不存在 / 已过期（调用方回 404）；
+/// - `Ok(Some(Value::Null))` = 该插件不声明交互能力（调用方回 `{interaction:null}`）；
+/// - `Ok(Some(obj))` = 待填步骤（表单/验证码）。
+pub(crate) async fn plugin_login_interaction(
+    state: &AppState,
+    gateway_state: &str,
+) -> Result<Option<Value>, String> {
+    let task = match plugin_login_tasks().get(gateway_state).cloned() {
+        Some(task) => task,
+        None => return Ok(None),
+    };
+    match plugin_login_call(
+        state,
+        &task.provider,
+        "login.interaction",
+        json!({ "provider": task.provider, "flow": task.flow }),
+    )
+    .await
+    {
+        Ok(value) => Ok(Some(value)),
+        // 「插件不声明该能力」按 `RpcError.code` 判定（T1 修正）：脚本宿主对
+        // 未实现的方法回 `code:"unsupported"`（见 script/host/main.mjs 的
+        // 错误码白名单与 provider.mjs 的 `unsupported()`），其 message 是
+        // "Plugin does not provide this capability" / "Unsupported plugin
+        // operation: …"——不含旧的三条子串（且大写 S 不匹配大小写敏感的
+        // `contains`）。`plugin_login_call` 已把 code 以 `[code]` 形式拼进
+        // 错误串；下面三条 message 匹配保留，作 wasm 宿主/老路径的兜底。
+        // 语义与 A2A 的 `{interaction: null}` 一致（不是错误）。
+        Err(error)
+            if error.contains("[unsupported]")
+                || error.contains("unsupported")
+                || error.contains("not support")
+                || error.contains("未知") =>
+        {
+            Ok(Some(Value::Null))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 提交一步交互输入（插件 `login.submit`）。
+///
+/// 插件可能返回三种结果：
+/// 1. 下一步交互 → `{accepted:true, interaction:<obj>, hint}`；
+/// 2. `state=done` → 按插件账号合同落库 → `{accepted:true, accountId}`；
+/// 3. `state=failed` → `Err(message)`。
+pub(crate) async fn plugin_login_submit(
+    state: &AppState,
+    gateway_state: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    let task = plugin_login_tasks()
+        .get(gateway_state)
+        .cloned()
+        .ok_or_else(|| "登录任务不存在或已过期".to_string())?;
+    let polled = plugin_login_call(
+        state,
+        &task.provider,
+        "login.submit",
+        json!({
+            "provider": task.provider,
+            "flow": task.flow,
+            "interaction": body.get("interaction").cloned().unwrap_or(Value::Null),
+            "inputs": body.get("inputs").cloned().unwrap_or(Value::Null),
+            "captcha": body.get("captcha").cloned().unwrap_or(Value::Null),
+        }),
+    )
+    .await?;
+    match polled.get("state").and_then(|value| value.as_str()) {
+        Some("done") => {
+            plugin_login_tasks().remove(gateway_state);
+            let account = polled.get("account").cloned().unwrap_or_else(|| json!({}));
+            let account_id =
+                land_plugin_login_account(state, &task.provider, &task.channel_id, &account)?;
+            Ok(json!({ "accepted": true, "accountId": account_id }))
+        }
+        Some("failed") => {
+            plugin_login_tasks().remove(gateway_state);
+            Err(polled
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("插件登录失败")
+                .to_string())
+        }
+        _ => Ok(json!({
+            "accepted": true,
+            "interaction": polled.get("interaction").cloned().unwrap_or(Value::Null),
+            "hint": polled.get("hint").cloned().unwrap_or(Value::Null),
+        })),
+    }
+}
+
+/// 取消插件登录任务；`None` = 不是插件任务。
+pub(crate) async fn plugin_login_cancel(state: &AppState, gateway_state: &str) -> Option<bool> {
+    let task = plugin_login_tasks().remove(gateway_state)?;
+    let _ = plugin_login_call(
+        state,
+        &task.provider,
+        "login.cancel",
+        json!({ "provider": task.provider, "flow": task.flow }),
+    )
+    .await;
+    Some(true)
 }
 
 #[cfg(test)]
@@ -3172,5 +4728,198 @@ mod proxy_state_tests {
         let v = limiter_state_of(&s);
         assert_eq!(v["account_skip"], true);
         assert_eq!(v["disable"], false);
+    }
+}
+
+#[cfg(test)]
+mod plugin_export_tests {
+    use super::*;
+
+    /// 导出单文件形状（A2A 口径）：format/provider/id/secret 齐备，
+    /// 插件凭证以 `secret` 段原样带回（导入端双段读法的依据）。
+    #[test]
+    fn export_file_content_carries_plugin_contract() {
+        let mut session = AccountSession::new("ch-plugin", "kiro-1");
+        session.id = "kiro-account-abc".to_string();
+        session.provider = "kiro".to_string();
+        session.plugin_secret = Some(json!({ "accessToken": "tok", "uid": "u-1" }));
+        session.plugin_public = Some(json!({ "edition": "intl" }));
+        let content = export_file_content(&session);
+        assert_eq!(
+            content["format"],
+            crate::account_session::auth_file::ACCOUNT_FILE_FORMAT
+        );
+        assert_eq!(content["provider"], "kiro");
+        assert_eq!(content["id"], "kiro-account-abc");
+        assert_eq!(content["secret"]["accessToken"], "tok");
+        assert_eq!(content["public"]["edition"], "intl");
+        // 身份字段顶层镜像（与 A2A 导出记录同形）
+        assert_eq!(content["uid"], "u-1");
+    }
+
+    /// 文件名安全化：中文/空格/斜杠 → 连字符，不产生路径分隔符。
+    #[test]
+    fn file_stem_is_safe() {
+        assert_eq!(safe_file_stem("kiro/团队 A"), "kiro-团队-A");
+        assert_eq!(safe_file_stem("   "), "account");
+        assert!(!safe_file_stem("a/b\\c").contains('/'));
+    }
+
+    /// 插件账号的会话视图带 hasAccessToken/canRefresh 等派生标量，
+    /// 且公开投影里没有凭证明文。
+    #[test]
+    fn plugin_session_view_exposes_derived_flags_only() {
+        let mut session = AccountSession::new("ch-plugin", "kiro-1");
+        session.provider = "kiro".to_string();
+        session.plugin_secret = Some(json!({ "accessToken": "secret-token" }));
+        let sessions = {
+            let dir = std::env::temp_dir().join(format!("aigx-view-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            crate::account_session::AccountSessionStore::new(std::sync::Arc::new(
+                crate::storage::FileStore::new(dir),
+            ))
+        };
+        let view = session_json(&sessions, &[], &session, 1_700_000_000);
+        assert_eq!(view["is_plugin_account"], true);
+        assert_eq!(view["plugin"]["hasAccessToken"], true);
+        assert_eq!(view["plugin"]["canRefresh"], false);
+        assert!(!view.to_string().contains("secret-token"));
+        // 非插件账号：plugin 段为 null（前端零特判）
+        let mut native = AccountSession::new("ch", "plain");
+        native.provider = "openai".to_string();
+        let view = session_json(&sessions, &[], &native, 1_700_000_000);
+        assert!(view["plugin"].is_null());
+        assert_eq!(view["is_plugin_account"], false);
+    }
+}
+
+#[cfg(test)]
+mod plugin_first_tests {
+    use super::*;
+
+    /// 原生家 + 插件声明 → 走插件流程（插件优先，2026-11 修订）。
+    #[test]
+    fn native_provider_declared_by_plugin_is_plugin_flow() {
+        assert!(
+            plugin_provider_decision("workbuddy", true, false),
+            "workbuddy 有原生实现，但插件声明后应走插件流程"
+        );
+        assert!(plugin_provider_decision("atomcode", true, false));
+        assert!(plugin_provider_decision("kiro", false, true));
+    }
+
+    /// 未声明的原生家仍走原生流程（插件未装时账号页行为不变）。
+    #[test]
+    fn undeclared_native_provider_stays_native() {
+        assert!(!plugin_provider_decision("openai", false, false));
+        assert!(!plugin_provider_decision("workbuddy", false, false));
+    }
+
+    /// 硬保留集合（网关内部虚拟 id）即使被声明也不接管。
+    #[test]
+    fn hard_reserved_providers_never_use_plugin_flow() {
+        for provider in ["cloudflare", "hub", "custom-abc"] {
+            assert!(
+                !plugin_provider_decision(provider, true, true),
+                "{provider} 是硬保留 id，插件不得接管"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sorting_request_tests {
+    use super::*;
+    use crate::account_session::sorting::AccountSortSettings;
+
+    fn configured() -> AccountSortSettings {
+        let mut settings = AccountSortSettings::default();
+        settings.rules.insert(
+            "openai".to_string(),
+            vec![crate::channel::routing_policy::AccountSortRule::Balance {
+                dir: crate::channel::routing_policy::SortDir::Desc,
+            }],
+        );
+        settings
+    }
+
+    /// 缺陷本体：显式 `{"rules":null}` 必须解成 `Some(None)`（出现但为空），
+    /// 而不是被 serde 的 `default` 吃掉成「缺字段」。
+    #[test]
+    fn explicit_null_deserializes_to_some_none() {
+        let body: AccountSortingRequest =
+            serde_json::from_str(r#"{"provider":"openai","rules":null}"#).unwrap();
+        assert_eq!(body.rules, Some(None));
+    }
+
+    /// 缺字段仍保持 `None`（防手滑清空保护的输入侧）。
+    #[test]
+    fn missing_field_deserializes_to_none() {
+        let body: AccountSortingRequest =
+            serde_json::from_str(r#"{"provider":"openai"}"#).unwrap();
+        assert_eq!(body.rules, None);
+    }
+
+    /// 合法数组解成 `Some(Some(array))`。
+    #[test]
+    fn array_deserializes_to_some_some() {
+        let body: AccountSortingRequest = serde_json::from_str(
+            r#"{"provider":"openai","rules":[{"on":"balance","dir":"desc"}]}"#,
+        )
+        .unwrap();
+        match body.rules {
+            Some(Some(value)) => assert!(value.is_array()),
+            other => panic!("expected Some(Some(array)), got {other:?}"),
+        }
+    }
+
+    /// 行为验证 1：显式 null → 该 provider 规则被移除（回落默认）。
+    #[test]
+    fn explicit_null_removes_configured_rules() {
+        let mut settings = configured();
+        apply_sorting_rules(&mut settings, "openai", Some(None)).unwrap();
+        assert!(!settings.rules.contains_key("openai"));
+        // 回落默认：effective = expires asc 单条
+        assert_eq!(
+            crate::account_session::sorting::effective_rules("openai", &settings),
+            vec![crate::channel::routing_policy::AccountSortRule::Expires {
+                dir: crate::channel::routing_policy::SortDir::Asc,
+            }]
+        );
+    }
+
+    /// 行为验证 2：缺字段 → 400（返回错误，且不改动既有规则）。
+    #[test]
+    fn missing_rules_is_rejected_and_leaves_state_untouched() {
+        let mut settings = configured();
+        let error = apply_sorting_rules(&mut settings, "openai", None).unwrap_err();
+        assert!(error.contains("缺少 rules 字段"), "{error}");
+        assert!(settings.rules.contains_key("openai"));
+    }
+
+    /// 兼容形态：内层 `Value::Null`（非 Rust None）同样按恢复默认处理。
+    #[test]
+    fn inner_value_null_also_removes_rules() {
+        let mut settings = configured();
+        apply_sorting_rules(&mut settings, "openai", Some(Some(Value::Null))).unwrap();
+        assert!(!settings.rules.contains_key("openai"));
+    }
+
+    /// 合法数组写入：覆盖既有规则。
+    #[test]
+    fn array_replaces_rules() {
+        let mut settings = configured();
+        apply_sorting_rules(
+            &mut settings,
+            "openai",
+            Some(Some(json!([{"on": "added", "dir": "asc"}]))),
+        )
+        .unwrap();
+        assert_eq!(
+            settings.rules["openai"],
+            vec![crate::channel::routing_policy::AccountSortRule::Added {
+                dir: crate::channel::routing_policy::SortDir::Asc,
+            }]
+        );
     }
 }

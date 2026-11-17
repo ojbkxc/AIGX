@@ -457,6 +457,35 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/assistant/chat",
             ],
         ),
+        (
+            "批 3·A2A 对齐波新增管理面（2026-11 波次：账号池运维动作 / 模型映射增删改 / 脚本插件管理；\
+             工具面尚未规划，非「有意不给」——补齐后删掉本组）",
+            &[
+                // T4 账号池：导出文件、刷新临期、服务端排序（都在账号页运维面板里点）
+                "/api/account-sessions/export-files",
+                "/api/account-sessions/refresh-expiring",
+                "/api/account-sessions/sorting",
+                // T4 用量异步查询任务（start/cancel/states 三件套，轮询式）
+                "/api/account-sessions/usage/start",
+                "/api/account-sessions/usage/cancel",
+                "/api/account-sessions/usage/states",
+                // T4 单账号限流清零
+                "/api/account-sessions/{id}/rate-limits/clear",
+                // T4 `/api/accounts/*` 影子路由（与 account-sessions 同一 handler 的别名）
+                "/api/accounts/export-files",
+                "/api/accounts/refresh-expiring",
+                "/api/accounts/sorting",
+                // T5 模型映射三元组增删改（早前只有 /api/models/manage 整表视图）
+                "/api/models/mappings",
+                "/api/models/mappings/remove",
+                // T1 脚本插件（Magpie）管理：热切换/设置/提示词/检查更新/目录刷新
+                "/api/plugins/scripts/change",
+                "/api/plugins/scripts/settings",
+                "/api/plugins/scripts/prompts",
+                "/api/plugins/scripts/check",
+                "/api/plugins/scripts/catalog/refresh",
+            ],
+        ),
     ];
 
 /// 方法级欠债台账：路径有写方法（POST/PUT/PATCH/DELETE），但 owns 它的工具**全是**

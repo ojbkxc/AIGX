@@ -8,6 +8,8 @@ pub mod branding;
 pub mod cache;
 pub mod channels;
 pub mod checkin_center;
+pub mod checkin_records; // 签到台账（对齐 A2A api/checkin_records.rs；T6 填充）
+pub mod checkin_schedules; // 签到计划（对齐 A2A api/checkin_schedules.rs；T6 填充）
 pub mod client_config;
 pub mod client_id;
 pub mod cline_headers;
@@ -19,6 +21,7 @@ pub mod diagnostics;
 pub mod guardrail;
 pub mod image_compat_api; // 图片压缩与视觉兼容设置面（对照 Agent2API /api/image-compat/settings）
 pub mod logs;
+pub mod maintenance; // 维护任务管理面（对齐 A2A api/maintenance.rs；T7 填充）
 pub mod mcp;
 pub mod model_manage;
 pub mod model_metadata;
@@ -30,6 +33,14 @@ pub mod openapi;
 pub mod orders;
 pub mod plans;
 pub mod playground;
+// 插件管理面新增子页（对齐 A2A api/plugin_*.rs；T2 填充）
+pub mod plugin_helpers;
+pub mod plugin_icons;
+pub mod plugin_login;
+pub mod plugin_provider_settings;
+pub mod plugin_tasks;
+pub mod plugin_theme;
+pub mod plugin_ui;
 pub mod plugins; // 插件管理面（对照 Agent2API /api/plugins*，契约化不进程化）
 pub mod pricing;
 pub mod prompts;
@@ -46,6 +57,9 @@ pub mod subscriptions;
 pub mod sync;
 pub mod tickets;
 pub mod tokens;
+// 工具服务管理面（对齐 A2A api/tools.rs、api/tool_image_admin.rs；T7 填充）
+pub mod tool_image_admin;
+pub mod tools;
 pub mod update;
 pub mod upgrade; // 数据升级端点（对照 Agent2API /api/upgrade）
 pub mod user_tools; // 用户工具策略管理面（#34 §5.1：GET/PUT policy + GET catalog）

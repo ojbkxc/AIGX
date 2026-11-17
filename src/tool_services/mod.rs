@@ -1,0 +1,793 @@
+// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+//
+//! 工具服务（「工具服务」页）：网络搜索与视觉分析的配置存储与服务清单。
+//!
+//! ── 这是什么 ────────────────────────────────────────────────
+//! 对外提供两种可选能力，客户端可以按两种可管理协议接入：
+//!   · Skill：打包成 Agent Skill，由面板一次性安装到本机各客户端的 skills 目录；
+//!   · MCP：Streamable HTTP 远程服务，在客户端 MCP 配置里填地址即可。
+//! 两种协议共享同一份上游配置，开关与执行超时按「服务 × 协议」各自独立。
+//! 网络搜索另有一个固定的 REST 接口（`/api/web-search/*`），它是接口而不是
+//! 可管理协议，运行时见 `api::tool_runtime`。
+//!
+//! ── 配置存在哪（AIGX 适配）──────────────────────────────────
+//! 上游存在网关配置 `toolServices` 键；AIGX 的通用配置是 TOML 且不接受任意
+//! 结构，因此本模块把同一份 JSON 形状落到 `FileStore` 的 `toolServices` 键
+//! （与上游同名）。写入口只有 [`ToolServices::update`]，进程内加锁做串行
+//! 「读改写」，两个页面同时保存不会互相覆盖。
+//!
+//! ── 密钥 ────────────────────────────────────────────────────
+//! 四家搜索提供商的 API Key 落盘前用 `account_session::secret`（AES-256-GCM，
+//! `enc1:` 信封，与账号凭证同一套密钥文件）加密；读取路径只在真正发请求时
+//! 解密。管理 API 只回 `configured` 与 `key_hint`，不回明文。
+//!
+//! ── 账号型来源（workbuddy / workbuddy-intl / kiro）──────────
+//! 上游靠提供商插件的 `admin.action`（`web-search.capabilities` /
+//! `web-search.search`）执行搜索，凭证留给账号库与插件。AIGX 的插件宿主
+//! 目前未暴露该 action（T1 ABI 范围），本模块保留完整的配置/绑定/校验面，
+//! 运行时返回稳定的 `configuration` 错误（见 `account_search.rs` 顶部说明）。
+
+mod account_search;
+mod bridge;
+pub(crate) mod image_config;
+mod install;
+mod mcp;
+mod normalize;
+mod providers;
+mod search;
+mod skill_package;
+mod vision;
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::account_session::AccountSessionStore;
+use crate::api::openai::AppState;
+use crate::storage::FileStore;
+
+pub use account_search::test_provider;
+pub use bridge::VISION_BRIDGE_SCRIPT;
+pub use image_config::{ImageConfig, ImageTarget};
+pub use install::{
+    install_mcp, install_skill, mcp_targets, skill_targets, uninstall_mcp, uninstall_skill,
+    InstallOutcome,
+};
+pub use mcp::{
+    dispatch as mcp_dispatch, unsupported as mcp_unsupported, McpRequestContext, McpServerKind,
+    McpSpec,
+};
+pub use search::{batch_items, run_fetch, run_search, SearchError, SearchErrorCode};
+pub use skill_package::{
+    build_skill_files, is_skill_variant, recommended_skill_variant, skill_variants, SkillFile,
+    SkillVariant, WEB_SEARCH_SKILL_NAME, WEB_SEARCH_SKILL_VERSION,
+};
+pub use vision::{
+    clear_vision_config, is_reasoning_level, is_usable_key, mask_key, run_vision,
+    save_vision_config, test_vision, vision_config, vision_key_options, VisionConfig,
+    VISION_MAX_IMAGES, VISION_MAX_PROMPT_LENGTH, VISION_SERVICE_NAME, VISION_SERVICE_VERSION,
+};
+
+/// 配置在 `FileStore` 里的键名（与 Agent2API 的网关配置键同名）。
+pub const KEY_TOOL_SERVICES: &str = "toolServices";
+
+/// 固定服务 id（顺序即界面展示顺序）。
+pub const SERVICE_IDS: [&str; 3] = [
+    WEB_SEARCH_SERVICE_ID,
+    VISION_SERVICE_ID,
+    IMAGE_GENERATION_SERVICE_ID,
+];
+pub const WEB_SEARCH_SERVICE_ID: &str = "web-search";
+pub const VISION_SERVICE_ID: &str = "vision";
+pub const IMAGE_GENERATION_SERVICE_ID: &str = "image-generation";
+pub const IMAGE_GENERATION_VERSION: &str = "1.0.0";
+
+/// 接入协议（顺序即界面展示顺序）。
+///
+/// API 不在这里：它是固定的对外工具接口（`/api/web-search/*`），不参与
+/// 「工具服务」页的协议开关，只在「文档」页说明；运行时仍由 [`endpoint`]
+/// 与 `api::tool_runtime` 提供。
+pub const PROTOCOLS: [&str; 2] = ["skill", "mcp"];
+
+/// 密钥型来源同时支持搜索与抓取；账号型来源只支持搜索，默认不选中。
+pub const API_KEY_PROVIDERS: [&str; 4] = ["tavily", "querit", "firecrawl", "ollama"];
+pub const ACCOUNT_PROVIDERS: [&str; 3] = ["workbuddy", "workbuddy-intl", "kiro"];
+pub const SEARCH_PROVIDERS: [&str; 7] = [
+    "tavily",
+    "querit",
+    "firecrawl",
+    "ollama",
+    "workbuddy",
+    "workbuddy-intl",
+    "kiro",
+];
+
+/// 服务固定元数据（文案由前端按 id 映射，后端只回数据）。
+pub const WEB_SEARCH_PACKAGE: &str = WEB_SEARCH_SKILL_NAME;
+pub const VISION_PACKAGE: &str = VISION_SERVICE_NAME;
+pub const WEB_SEARCH_VERSION: &str = WEB_SEARCH_SKILL_VERSION;
+pub const VISION_VERSION: &str = VISION_SERVICE_VERSION;
+
+pub const CAPABILITY_COUNTS: [(&str, u32); 2] =
+    [(WEB_SEARCH_SERVICE_ID, 2), (VISION_SERVICE_ID, 1)];
+
+/// 工具执行超时（秒）：同一服务各协议共用；服务端强制上限，装 MCP 时写进客户端。
+pub const TIMEOUT_MIN_SECONDS: u64 = 5;
+pub const TIMEOUT_MAX_SECONDS: u64 = 600;
+pub const DEFAULT_TIMEOUTS: [(&str, u64); 3] = [
+    (WEB_SEARCH_SERVICE_ID, 30),
+    (VISION_SERVICE_ID, 60),
+    (IMAGE_GENERATION_SERVICE_ID, 300),
+];
+
+/// 端点路径（写死：改动会影响已接入的客户端）。
+///
+/// `"api"` 不进 [`PROTOCOLS`]，但这里保留映射：REST 工具接口是固定入口，
+/// 由 `tool_runtime` 直接使用，不是可管理的「服务 × 协议」。
+pub fn endpoint(service: &str, protocol: &str) -> &'static str {
+    match (service, protocol) {
+        (WEB_SEARCH_SERVICE_ID, "skill") => "/skill/web-search",
+        (WEB_SEARCH_SERVICE_ID, "mcp") => "/mcp/web-search",
+        (WEB_SEARCH_SERVICE_ID, "api") => "/api/web-search",
+        (VISION_SERVICE_ID, "mcp") => "/mcp/vision",
+        (IMAGE_GENERATION_SERVICE_ID, "mcp") => "/mcp/image-generation",
+        _ => "",
+    }
+}
+
+pub fn is_service(value: &str) -> bool {
+    SERVICE_IDS.contains(&value)
+}
+
+pub fn is_protocol(value: &str) -> bool {
+    PROTOCOLS.contains(&value)
+}
+
+/// 该服务支持的协议（保持 PROTOCOLS 顺序）。
+pub fn service_protocols(service: &str) -> Vec<&'static str> {
+    PROTOCOLS
+        .iter()
+        .copied()
+        .filter(|protocol| !endpoint(service, protocol).is_empty())
+        .collect()
+}
+
+pub fn package_name(service: &str) -> &'static str {
+    match service {
+        WEB_SEARCH_SERVICE_ID => WEB_SEARCH_PACKAGE,
+        VISION_SERVICE_ID => VISION_PACKAGE,
+        IMAGE_GENERATION_SERVICE_ID => "agent2api-image-generation",
+        _ => "",
+    }
+}
+
+pub fn version(service: &str) -> &'static str {
+    match service {
+        WEB_SEARCH_SERVICE_ID => WEB_SEARCH_VERSION,
+        VISION_SERVICE_ID => VISION_VERSION,
+        IMAGE_GENERATION_SERVICE_ID => IMAGE_GENERATION_VERSION,
+        _ => "",
+    }
+}
+
+/// 工具服务运行时句柄：底层 KV 存储 + 进程内读改写锁。
+pub struct ToolServices {
+    /// 底层 KV 存储（工具服务配置落盘用）。
+    pub store: Arc<FileStore>,
+    /// 配置读改写串行锁（单实例语义：避免两个页面同时保存时互相覆盖）。
+    lock: parking_lot::Mutex<()>,
+}
+
+impl ToolServices {
+    pub fn new(store: Arc<FileStore>) -> Self {
+        Self {
+            store,
+            lock: parking_lot::Mutex::new(()),
+        }
+    }
+
+    /// 读取整份配置（自动补齐缺省项）。
+    pub fn load(&self) -> ToolConfig {
+        match self.store.get::<Value>(KEY_TOOL_SERVICES) {
+            Ok(Some(value)) => parse_stored(&value),
+            Ok(None) => ToolConfig::default().normalized(),
+            Err(error) => {
+                tracing::warn!("[ToolServices] 读取配置失败，回退默认值：{error}");
+                ToolConfig::default().normalized()
+            }
+        }
+    }
+
+    /// 在锁内做一次读改写（两个页面同时保存时后写者基于前写者的结果）。
+    pub fn update(&self, mutate: impl FnOnce(&mut ToolConfig)) -> Result<ToolConfig, String> {
+        let _guard = self.lock.lock();
+        let mut current = self.load();
+        mutate(&mut current);
+        let current = current.normalized();
+        let value = serde_json::to_value(&current)
+            .map_err(|error| format!("工具服务配置序列化失败：{error}"))?;
+        self.store
+            .put(KEY_TOOL_SERVICES, &value)
+            .map_err(|error| format!("工具服务配置写入失败：{error}"))?;
+        Ok(current)
+    }
+}
+
+/// 启动期初始化（校验配置可读；无残留任务，仅记录状态）。
+pub fn init(store: Arc<FileStore>) {
+    let services = ToolServices::new(store);
+    let config = services.load();
+    tracing::debug!(
+        "[ToolServices] init：{} 个服务 / {} 家提供商配置",
+        SERVICE_IDS.len(),
+        config.providers.len()
+    );
+}
+
+/// 工具服务模块自带路由（数据面路由统一在 `api::tool_runtime::router()`，
+/// 安装脚本下载等管理面在 `api::admin::tools::router()`）。
+pub fn router() -> axum::Router<AppState> {
+    axum::Router::new()
+}
+
+/* ─── 配置形状 ─────────────────────────────────────────────── */
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProviderConfig {
+    /// `enc1:` 信封；空串 = 未配置
+    pub encrypted_key: String,
+    pub key_hint: String,
+    /// 账号型来源只保存账号引用，凭证仍由账号库与插件管理。
+    pub account_id: String,
+    pub enabled: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Selection {
+    pub search: Vec<String>,
+    pub fetch: String,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            search: API_KEY_PROVIDERS
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
+            fetch: "tavily".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ToolConfig {
+    /// service → protocol → 开关
+    pub enabled: BTreeMap<String, BTreeMap<String, bool>>,
+    /// service → 超时秒数
+    pub timeouts: BTreeMap<String, u64>,
+    /// provider → 密钥与启用状态
+    pub providers: BTreeMap<String, ProviderConfig>,
+    pub selection: Selection,
+    pub vision: Option<VisionConfig>,
+    #[serde(default, deserialize_with = "image_config::deserialize_stored")]
+    pub image_generation: Option<ImageConfig>,
+}
+
+impl ToolConfig {
+    /// 补齐缺省项（旧版本写入的配置 / 手工改过的 JSON 都走这一层）。
+    fn normalized(mut self) -> Self {
+        for service in SERVICE_IDS {
+            let entry = self.enabled.entry(service.to_string()).or_default();
+            for protocol in service_protocols(service) {
+                entry
+                    .entry(protocol.to_string())
+                    .or_insert(service != IMAGE_GENERATION_SERVICE_ID);
+            }
+            let fallback = DEFAULT_TIMEOUTS
+                .iter()
+                .find(|(id, _)| *id == service)
+                .map(|(_, value)| *value)
+                .unwrap_or(30);
+            self.timeouts.entry(service.to_string()).or_insert(fallback);
+        }
+        for provider in SEARCH_PROVIDERS {
+            self.providers.entry(provider.to_string()).or_default();
+        }
+        self.selection
+            .search
+            .retain(|item| is_search_provider(item));
+        if self.selection.search.is_empty() {
+            self.selection.search = Selection::default().search;
+        }
+        if !is_fetch_provider(&self.selection.fetch) {
+            self.selection.fetch = "tavily".into();
+        }
+        self
+    }
+}
+
+fn parse_stored(value: &Value) -> ToolConfig {
+    if value.is_null() {
+        return ToolConfig::default().normalized();
+    }
+    serde_json::from_value::<ToolConfig>(value.clone())
+        .unwrap_or_default()
+        .normalized()
+}
+
+/* ─── 开关与超时 ───────────────────────────────────────────── */
+
+pub fn is_enabled(services: &ToolServices, service: &str, protocol: &str) -> bool {
+    if endpoint(service, protocol).is_empty() {
+        return false;
+    }
+    // API 是固定的对外工具接口，不再是「工具服务」页里可开关的协议；
+    // 保留 endpoint 与运行时路由，旧配置里的 api 开关一律不再生效。
+    if protocol == "api" {
+        return true;
+    }
+    services
+        .load()
+        .enabled
+        .get(service)
+        .and_then(|entry| entry.get(protocol))
+        .copied()
+        .unwrap_or(service != IMAGE_GENERATION_SERVICE_ID)
+}
+
+pub fn set_enabled(
+    services: &ToolServices,
+    service: &str,
+    protocol: &str,
+    enabled: bool,
+) -> Result<Value, String> {
+    if endpoint(service, protocol).is_empty() {
+        return Err(format!("服务 {service} 不支持 {protocol} 协议"));
+    }
+    services.update(|config_value| {
+        config_value
+            .enabled
+            .entry(service.to_string())
+            .or_default()
+            .insert(protocol.to_string(), enabled);
+    })?;
+    Ok(service_info(services, service, protocol))
+}
+
+pub fn timeout_seconds(services: &ToolServices, service: &str) -> u64 {
+    let value = services.load().timeouts.get(service).copied().unwrap_or(30);
+    value.clamp(TIMEOUT_MIN_SECONDS, TIMEOUT_MAX_SECONDS)
+}
+
+pub fn set_timeout(services: &ToolServices, service: &str, seconds: u64) -> Result<Value, String> {
+    if !is_service(service) {
+        return Err("未知的工具服务".into());
+    }
+    if !(TIMEOUT_MIN_SECONDS..=TIMEOUT_MAX_SECONDS).contains(&seconds) {
+        return Err(format!(
+            "超时必须是 {TIMEOUT_MIN_SECONDS}~{TIMEOUT_MAX_SECONDS} 秒之间的整数"
+        ));
+    }
+    services.update(|config_value| {
+        config_value.timeouts.insert(service.to_string(), seconds);
+    })?;
+    Ok(service_info(
+        services,
+        service,
+        service_protocols(service)[0],
+    ))
+}
+
+/* ─── 服务清单 ─────────────────────────────────────────────── */
+
+pub fn capability_count(services: &ToolServices, service: &str) -> u32 {
+    if service == IMAGE_GENERATION_SERVICE_ID {
+        return if services
+            .load()
+            .image_generation
+            .as_ref()
+            .is_some_and(|config| config.editing.is_some())
+        {
+            3
+        } else {
+            2
+        };
+    }
+    CAPABILITY_COUNTS
+        .iter()
+        .find(|(id, _)| *id == service)
+        .map(|(_, count)| *count)
+        .unwrap_or(0)
+}
+
+pub fn service_info(services: &ToolServices, service: &str, protocol: &str) -> Value {
+    let mut info = json!({
+        "id": service,
+        "protocol": protocol,
+        "key": format!("{service}:{protocol}"),
+        "enabled": is_enabled(services, service, protocol),
+        "capability_count": capability_count(services, service),
+        "endpoint": endpoint(service, protocol),
+        "package_name": package_name(service),
+        "version": version(service),
+        "timeout_seconds": timeout_seconds(services, service),
+    });
+    if service == WEB_SEARCH_SERVICE_ID && protocol == "skill" {
+        info["recommended_variant"] = json!(recommended_skill_variant());
+        info["variants"] = serde_json::to_value(skill_variants()).unwrap_or(Value::Null);
+    }
+    info
+}
+
+pub fn list_services(services: &ToolServices, protocol: Option<&str>) -> Vec<Value> {
+    let mut rows = Vec::new();
+    for service in SERVICE_IDS {
+        for supported in service_protocols(service) {
+            if protocol.is_none() || protocol == Some(supported) {
+                rows.push(service_info(services, service, supported));
+            }
+        }
+    }
+    rows
+}
+
+/* ─── 搜索提供商 ───────────────────────────────────────────── */
+
+pub fn is_search_provider(value: &str) -> bool {
+    SEARCH_PROVIDERS.contains(&value)
+}
+
+pub fn is_account_provider(value: &str) -> bool {
+    ACCOUNT_PROVIDERS.contains(&value)
+}
+
+pub fn is_fetch_provider(value: &str) -> bool {
+    API_KEY_PROVIDERS.contains(&value)
+}
+
+pub fn provider_display_name(provider: &str) -> &'static str {
+    match provider {
+        "tavily" => "Tavily",
+        "querit" => "Querit",
+        "firecrawl" => "Firecrawl",
+        "ollama" => "Ollama Web Search",
+        "workbuddy" => "WorkBuddy 国内版",
+        "workbuddy-intl" => "WorkBuddy 国际版",
+        "kiro" => "Kiro",
+        _ => "",
+    }
+}
+
+pub fn key_hint(value: &str) -> String {
+    if value.chars().count() <= 12 {
+        return format!("{}••••", value.chars().take(4).collect::<String>());
+    }
+    let head: String = value.chars().take(7).collect();
+    let tail: String = value
+        .chars()
+        .skip(value.chars().count().saturating_sub(4))
+        .collect();
+    format!("{head}••••{tail}")
+}
+
+pub async fn list_providers(services: &ToolServices, sessions: &AccountSessionStore) -> Value {
+    let config_value = services.load();
+    let mut rows: Vec<Value> = API_KEY_PROVIDERS
+        .iter()
+        .map(|provider| {
+            let entry = config_value
+                .providers
+                .get(*provider)
+                .cloned()
+                .unwrap_or_default();
+            json!({
+                "provider": provider,
+                "display_name": provider_display_name(provider),
+                "auth_type": "api_key",
+                "supports_search": true,
+                "supports_fetch": true,
+                "available": true,
+                "configured": !entry.encrypted_key.is_empty(),
+                "key_hint": if entry.key_hint.is_empty() { Value::Null } else { json!(entry.key_hint) },
+                "enabled": entry.enabled,
+                "updated_at": if entry.updated_at > 0 { json!(entry.updated_at) } else { Value::Null },
+            })
+        })
+        .collect();
+    for provider in ACCOUNT_PROVIDERS {
+        let entry = config_value
+            .providers
+            .get(provider)
+            .cloned()
+            .unwrap_or_default();
+        rows.push(account_search::provider_row(
+            services, sessions, provider, entry,
+        ));
+    }
+    Value::Array(rows)
+}
+
+pub fn provider_selection(services: &ToolServices) -> Value {
+    let config_value = services.load();
+    json!({
+        "search_providers": config_value.selection.search,
+        "fetch_provider": config_value.selection.fetch,
+    })
+}
+
+pub fn update_provider(
+    services: &ToolServices,
+    sessions: &AccountSessionStore,
+    provider: &str,
+    api_key: Option<&str>,
+    enabled: Option<bool>,
+    account_id: Option<&str>,
+) -> Result<Value, String> {
+    if !is_search_provider(provider) {
+        return Err("未知的搜索提供商".into());
+    }
+    if is_account_provider(provider) {
+        if api_key.is_some_and(|key| !key.trim().is_empty()) {
+            return Err("该搜索来源使用已有账号，不接受 API Key".into());
+        }
+        let account_id = account_id.map(str::trim);
+        if let Some(id) = account_id.filter(|id| !id.is_empty()) {
+            account_search::validate_account(sessions, provider, id)
+                .map_err(|error| error.message)?;
+        }
+        let config_value = services.update(|config_value| {
+            let entry = config_value
+                .providers
+                .entry(provider.to_string())
+                .or_default();
+            if let Some(id) = account_id {
+                entry.account_id = id.to_string();
+            }
+            if let Some(enabled) = enabled {
+                entry.enabled = enabled;
+            }
+            entry.updated_at = now_ms();
+        })?;
+        let entry = config_value
+            .providers
+            .get(provider)
+            .cloned()
+            .unwrap_or_default();
+        return Ok(json!({
+            "success": true,
+            "provider": provider,
+            "account_id": entry.account_id,
+        }));
+    }
+    if account_id.is_some() {
+        return Err("该搜索来源使用 API Key，不接受账号绑定".into());
+    }
+    let api_key = api_key.map(str::trim).filter(|value| !value.is_empty());
+    let encrypted = match api_key {
+        Some(key) => {
+            let sealed = crate::account_session::secret::seal_secret(
+                key,
+                &crate::account_session::secret::data_dir(),
+            )
+            .map_err(|_| "无法加密 API Key".to_string())?;
+            Some((sealed, key_hint(key)))
+        }
+        None => None,
+    };
+    let config_value = services.update(|config_value| {
+        let entry = config_value
+            .providers
+            .entry(provider.to_string())
+            .or_default();
+        if let Some((sealed, hint)) = encrypted {
+            entry.encrypted_key = sealed;
+            entry.key_hint = hint;
+            entry.updated_at = now_ms();
+        }
+        if let Some(enabled) = enabled {
+            entry.enabled = enabled;
+        }
+    })?;
+    let entry = config_value
+        .providers
+        .get(provider)
+        .cloned()
+        .unwrap_or_default();
+    Ok(json!({
+        "success": true,
+        "provider": provider,
+        "configured": !entry.encrypted_key.is_empty(),
+        "key_hint": if entry.key_hint.is_empty() { Value::Null } else { json!(entry.key_hint) },
+    }))
+}
+
+pub fn clear_provider_key(services: &ToolServices, provider: &str) -> bool {
+    if !API_KEY_PROVIDERS.contains(&provider) {
+        return false;
+    }
+    services
+        .update(|config_value| {
+            let entry = config_value
+                .providers
+                .entry(provider.to_string())
+                .or_default();
+            entry.encrypted_key.clear();
+            entry.key_hint.clear();
+            entry.updated_at = now_ms();
+        })
+        .is_ok()
+}
+
+/// 读取某家当前配置（含解密后的密钥；仅服务端内部使用，禁止出现在日志/响应中）。
+pub fn provider_key(services: &ToolServices, provider: &str) -> Option<String> {
+    decrypt_provider_key(services.load().providers.get(provider)?)
+}
+
+pub(crate) fn decrypt_provider_key(entry: &ProviderConfig) -> Option<String> {
+    if entry.encrypted_key.is_empty() {
+        return None;
+    }
+    let value = crate::account_session::secret::open_secret(
+        &entry.encrypted_key,
+        &crate::account_session::secret::data_dir(),
+    );
+    Some(value).filter(|text| !text.is_empty())
+}
+
+pub fn configured_provider(services: &ToolServices, provider: &str) -> bool {
+    services
+        .load()
+        .providers
+        .get(provider)
+        .is_some_and(|entry| !entry.encrypted_key.is_empty() && entry.enabled)
+}
+
+/// 已启用且已配置好的提供商（密钥型看密钥，账号型看绑定账号是否存在）。
+pub fn ready_providers(
+    services: &ToolServices,
+    sessions: &AccountSessionStore,
+) -> Vec<&'static str> {
+    let config_value = services.load();
+    SEARCH_PROVIDERS
+        .iter()
+        .copied()
+        .filter(|provider| {
+            let Some(entry) = config_value.providers.get(*provider) else {
+                return false;
+            };
+            if !entry.enabled {
+                return false;
+            }
+            if is_account_provider(provider) {
+                account_search::validate_account(sessions, provider, &entry.account_id).is_ok()
+            } else {
+                !entry.encrypted_key.is_empty()
+            }
+        })
+        .collect()
+}
+
+/// 已选择但未启用或未配置的提供商（展示名，供运行时返回可读配置错误）。
+pub fn missing_selected_providers(
+    services: &ToolServices,
+    sessions: &AccountSessionStore,
+) -> Vec<&'static str> {
+    let selected = services.load().selection.search;
+    let ready = ready_providers(services, sessions);
+    selected
+        .iter()
+        .filter(|provider| !ready.contains(&provider.as_str()))
+        .map(|provider| provider_display_name(provider))
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+pub fn update_selection(
+    services: &ToolServices,
+    search: Option<Vec<String>>,
+    fetch: Option<String>,
+) -> Result<Value, String> {
+    let mut next_search = None;
+    if let Some(items) = search {
+        if items.is_empty() {
+            return Err("批量网页搜索至少选择一个提供商".into());
+        }
+        if items.iter().any(|item| !is_search_provider(item)) {
+            return Err("搜索提供商包含未知项".into());
+        }
+        let mut seen = Vec::new();
+        for item in items {
+            if !seen.contains(&item) {
+                seen.push(item);
+            }
+        }
+        next_search = Some(seen);
+    }
+    if let Some(provider) = fetch.as_deref() {
+        if !is_fetch_provider(provider) {
+            return Err("该提供商不支持网页抓取".into());
+        }
+    }
+    services.update(|config_value| {
+        if let Some(items) = next_search {
+            config_value.selection.search = items;
+        }
+        if let Some(provider) = fetch {
+            config_value.selection.fetch = provider;
+        }
+    })?;
+    Ok(provider_selection(services))
+}
+
+/// 毫秒时间戳（与账号/维护模块同口径）。
+pub(crate) fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn temp_services() -> (ToolServices, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+        (ToolServices::new(store), dir)
+    }
+
+    #[test]
+    fn config_defaults_and_normalization() {
+        let (services, _dir) = temp_services();
+        let config = services.load();
+        // 默认选中四家密钥型；web-search skill/mcp 默认开、image-generation 默认关
+        assert_eq!(config.selection.search.len(), 4);
+        assert_eq!(config.selection.fetch, "tavily");
+        assert!(config.enabled["web-search"]["skill"]);
+        assert!(config.enabled["web-search"]["mcp"]);
+        assert!(!config.enabled["image-generation"]["mcp"]);
+        assert_eq!(config.timeouts["web-search"], 30);
+        assert_eq!(config.providers.len(), 7);
+    }
+
+    #[test]
+    fn update_is_normalized_and_persisted() {
+        let (services, _dir) = temp_services();
+        services
+            .update(|config| {
+                config
+                    .enabled
+                    .entry("vision".into())
+                    .or_default()
+                    .insert("mcp".into(), false);
+                config.selection.search = vec!["unknown".into()];
+            })
+            .unwrap();
+        let config = services.load();
+        assert!(!config.enabled["vision"]["mcp"]);
+        // 未知项被过滤后为空 → 回落到默认集合
+        assert_eq!(config.selection.search.len(), 4);
+    }
+
+    #[test]
+    fn service_protocol_matrix() {
+        assert_eq!(service_protocols("web-search"), vec!["skill", "mcp"]);
+        assert_eq!(service_protocols("vision"), vec!["mcp"]);
+        assert_eq!(service_protocols("image-generation"), vec!["mcp"]);
+        assert_eq!(endpoint("web-search", "api"), "/api/web-search");
+        assert_eq!(endpoint("vision", "skill"), "");
+        assert!(!is_service("nope"));
+    }
+
+    #[test]
+    fn key_hint_shape() {
+        assert_eq!(key_hint("shortkey"), "shor••••");
+        assert_eq!(key_hint("tvly-abcdefghijklmnop"), "tvly-ab••••mnop");
+    }
+}

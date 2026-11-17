@@ -56,10 +56,26 @@ pub async fn handle_checkin_center(
                 "id": session.id,
                 "name": session.name,
                 "channel_id": session.channel_id,
+                // available = 账号是否可用（与签到中心「不可用」徽标同口径：
+                // `status == "enabled"` 且凭证未过期）。语义对应 A2A 账号快照的
+                // `available`（false = 凭证失效等，仍列出但降级展示）。
+                "available": session.is_enabled() && !session.is_expired(chrono::Utc::now().timestamp()),
                 "checked_in_today": last.as_ref().map(|r| r.ok).unwrap_or(false),
                 "last_outcome": last.as_ref().map(|r| r.outcome.as_str()),
                 "last_message": last.as_ref().map(|r| r.message.clone()),
                 "last_ts": last.as_ref().map(|r| r.ts),
+                // 版本档（cn / intl，缺失 null）：国际版按钮文案是「领日活」而非「签到」
+                "edition": session.extra_headers.get("edition").cloned().unwrap_or_else(|| {
+                    if session.provider.ends_with("-intl") { "intl".to_string() } else { "cn".to_string() }
+                }),
+                // 成长中心连登天数（snake_case，与前端 types/index.ts 的
+                // `streak_days` 对齐；camelCase 会让连登天数永远显示「—」）
+                "streak_days": state.upstream_checkin.streak_days(&session.id),
+                // 当日签到台账（对齐 A2A dailyCheckin：只有 ok/already 才带 claimAt）
+                "daily_checkin": state
+                    .upstream_checkin
+                    .daily_checkin(&session.id, &scheduler::today())
+                    .unwrap_or(serde_json::Value::Null),
             }));
     }
 
@@ -89,6 +105,27 @@ pub async fn handle_checkin_center(
             "providers": providers,
             "schedules": state.upstream_checkin.schedules(),
             "records_total": records_total,
+            // 多条目自动签到状态（对齐 A2A `auto` 块）：总开关 + 条目数组 + 提供商清单
+            "auto": crate::checkin::center::auto_state(
+                &state.upstream_checkin,
+                &state.account_sessions,
+            ),
+            // 活动 / 月度赠送 / 限时套餐的账号清单（本地领取台账，零上游请求）
+            "campaigns": crate::checkin::center::campaign_rows(
+                &state.upstream_checkin,
+                &state.account_sessions,
+            ),
+            // 活动预览的空形状（对齐 A2A CampaignPreview：campaigns / monthlyGifts /
+            // riskNote / redemption）——AIGX 暂无 provider 活动链路，返回空集但形状不变
+            "campaign_preview": crate::checkin::center::campaign_preview_shape(),
+            // 台账按 outcome 的统计卡（成功 / 已领 / 待重试 / 需验证 / 失败）
+            "records_stats": {
+                "success": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Success), None).map(|r| r.len()).unwrap_or(0),
+                "already": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Already), None).map(|r| r.len()).unwrap_or(0),
+                "pending": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Pending), None).map(|r| r.len()).unwrap_or(0),
+                "captcha": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Captcha), None).map(|r| r.len()).unwrap_or(0),
+                "failed": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Failed), None).map(|r| r.len()).unwrap_or(0),
+            },
             "today_summary": summary.iter().map(|(k, (done, total))| json!({
                 "provider": k, "done": done, "total": total
             })).collect::<Vec<_>>(),
@@ -547,20 +584,30 @@ pub async fn handle_upsert_checkin_schedule(
     // 保存计划只改配置：运行状态（上次触发/结果/成功·保活·失败计数）必须从现有
     // 计划继承，否则编辑一次就把界面「上次执行」清空，且空 last_fired_date 会让
     // 调度器当天重复触发签到（浪费上游日配额）。
-    let (last_fired_date, last_result, last_ok, last_keepalive, last_failed, last_fired_providers) =
-        existing
-            .as_ref()
-            .map(|s| {
-                (
-                    s.last_fired_date.clone(),
-                    s.last_result.clone(),
-                    s.last_ok,
-                    s.last_keepalive,
-                    s.last_failed,
-                    s.last_fired_providers.clone(),
-                )
-            })
-            .unwrap_or_default();
+    let (
+        last_fired_date,
+        last_result,
+        last_ok,
+        last_keepalive,
+        last_failed,
+        last_fired_providers,
+        last_retried_providers,
+        account_plan,
+    ) = existing
+        .as_ref()
+        .map(|s| {
+            (
+                s.last_fired_date.clone(),
+                s.last_result.clone(),
+                s.last_ok,
+                s.last_keepalive,
+                s.last_failed,
+                s.last_fired_providers.clone(),
+                s.last_retried_providers.clone(),
+                s.account_plan.clone(),
+            )
+        })
+        .unwrap_or_default();
     // 逐家时刻覆盖：前端未传时沿用存量；传了则按三档语义归一（只认签到白名单
     // 里的家 + HH:MM 格式，非法值丢弃 —— 宁可回落条目时刻也不带脏数据进调度）。
     let provider_times = match body.provider_times {
@@ -601,6 +648,8 @@ pub async fn handle_upsert_checkin_schedule(
             provider_times,
             last_fired_date,
             last_fired_providers,
+            last_retried_providers,
+            account_plan,
             last_result,
             last_ok,
             last_keepalive,
@@ -841,6 +890,215 @@ pub async fn handle_put_keepalive(
     Ok(Json(json!({ "success": true, "data": view })))
 }
 
+// ─── 活动福利 / 月度赠送（对齐 Agent2API checkin-campaign-* 契约）────────
+//
+// 前端 `AccountSessions.tsx` 的活动福利卡片按 A2A 口径写：**只有「HTTP 400 +
+// 文案含『活动福利』」才判 notSupported → 显示空态**。因此这里的「该家没有活动
+// 链路」一律回 400（不是 404）：404 在 AIGX 语义里是「路由不存在」，混用会让
+// 用户看到红错而不是空态。404 只保留给「账号 id 不存在」。
+//
+// 目前只有 ZCode 两地有「限时套餐」活动链路（`checkin::benefits::zcode_claim`）；
+// 其余家如实回 400。
+
+/// 该 provider 是否有活动福利链路（目前只有 ZCode 两地的限时套餐）。
+fn has_campaign_rewards(provider: &str) -> bool {
+    matches!(provider, "zcode" | "zcode-intl")
+}
+
+/// 取账号；不存在 → 404（真正的资源缺失）。
+fn campaign_account(
+    state: &AppState,
+    id: &str,
+) -> Result<crate::account_session::model::AccountSession, (StatusCode, Json<Value>)> {
+    state
+        .account_sessions
+        .get(id)
+        .ok_or_else(|| error_response("账号不存在", StatusCode::NOT_FOUND))
+}
+
+/// 把 ZCode 的原始套餐映射成 A2A `CampaignReward` 形状（尽力读取，缺字段给 null）。
+fn zcode_plan_to_campaign(plan: &Value, claimed: &[Value]) -> Value {
+    let plan_id = plan
+        .get("planId")
+        .or_else(|| plan.get("plan_id"))
+        .or_else(|| plan.get("id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let id_text = plan_id.as_str().unwrap_or("").to_string();
+    let is_claimed = claimed.iter().any(|item| {
+        item == &plan_id
+            || item.as_str() == Some(id_text.as_str())
+            || item.get("id").and_then(Value::as_str) == Some(id_text.as_str())
+    });
+    let title = plan
+        .get("name")
+        .or_else(|| plan.get("title"))
+        .and_then(Value::as_str)
+        .unwrap_or("ZCode 限时套餐");
+    json!({
+        "campaignId": plan_id,
+        "title": title,
+        "titleEn": title,
+        "description": plan.get("desc").or_else(|| plan.get("description")).cloned().unwrap_or(Value::Null),
+        "descriptionEn": plan.get("desc").or_else(|| plan.get("description")).cloned().unwrap_or(Value::Null),
+        "amount": plan.get("amount").or_else(|| plan.get("credits")).cloned().unwrap_or(Value::Null),
+        "unit": "credits",
+        // claimed / claimable / inactive / ineligible / confirming
+        "status": if is_claimed { "claimed" } else { "claimable" },
+        "startsAt": plan.get("startsAt").or_else(|| plan.get("start_at")).cloned().unwrap_or(Value::Null),
+        "endsAt": plan.get("endsAt").or_else(|| plan.get("end_at")).cloned().unwrap_or(Value::Null),
+        "claimedAt": Value::Null,
+        "expiresAt": Value::Null,
+        "validDays": plan.get("validDays").or_else(|| plan.get("valid_days")).cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// GET /api/accounts/:id/campaigns —— 活动福利预览（对齐 A2A `CampaignPreview`）。
+///
+/// 该家没有活动链路 → 400 + 文案含「活动福利」（前端据此显示空态）。
+/// ZCode 两地：上游 preview 查一次套餐，映射成 `campaigns[]`（含本地已领标记）。
+pub async fn handle_get_campaigns(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let session = campaign_account(&state, &id)?;
+    if !has_campaign_rewards(&session.provider) {
+        return Err(error_response(
+            "该提供商未提供活动福利",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 出口走 `client_for`（与数据面/签到同链路）
+    let client = state
+        .account_sessions
+        .client_for(&session)
+        .map_err(|e| error_response(&format!("出口配置错误：{e}"), StatusCode::BAD_REQUEST))?;
+    let preview = crate::checkin::benefits::run(
+        &state.account_sessions,
+        &state.alert_store,
+        &client,
+        &session,
+        "plan",
+        &json!({ "mode": "preview" }),
+    )
+    .await;
+    if !preview.ok
+        && matches!(
+            preview.outcome,
+            crate::checkin::benefits::BenefitOutcome::Failed
+        )
+    {
+        return Err(error_response(&preview.message, StatusCode::BAD_GATEWAY));
+    }
+    let plans = preview
+        .data
+        .get("plans")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let claimed = preview
+        .data
+        .get("claimed")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let campaigns: Vec<Value> = plans
+        .iter()
+        .map(|plan| zcode_plan_to_campaign(plan, &claimed))
+        .collect();
+    Ok(Json(json!({
+        "campaigns": campaigns,
+        "riskNote": Value::Null,
+        "notice": Value::Null,
+        "monthlyGifts": [],
+        "redemption": { "supported": false },
+    })))
+}
+
+/// POST /api/accounts/:id/campaigns/claim —— 领取一份活动福利。
+///
+/// 该家没有活动链路 → 400 + 「活动福利」；账号不存在 → 404。
+/// 响应对齐 A2A `CampaignClaimResult`：`{campaignId, outcome, campaign}`，
+/// `outcome` 取 `claimed/already_claimed/inactive/ineligible/confirming/failed`。
+pub async fn handle_claim_campaign(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let session = campaign_account(&state, &id)?;
+    if !has_campaign_rewards(&session.provider) {
+        return Err(error_response(
+            "该提供商未提供活动福利",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let campaign_id = payload
+        .get("campaignId")
+        .or_else(|| payload.get("planId"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    if campaign_id.is_null() {
+        return Err(error_response("缺少 campaignId", StatusCode::BAD_REQUEST));
+    }
+    let client = state
+        .account_sessions
+        .client_for(&session)
+        .map_err(|e| error_response(&format!("出口配置错误：{e}"), StatusCode::BAD_REQUEST))?;
+    // 前端当场求解的验证码参数（有就带上，没令牌池也能领）
+    let mut params = json!({ "mode": "claim", "plan_id": campaign_id.clone() });
+    if let Some(object) = params.as_object_mut() {
+        if let Some(param) = payload.get("captchaVerifyParam").and_then(Value::as_str) {
+            object.insert("captcha_verify_param".to_string(), Value::from(param));
+        }
+        if let Some(region) = payload.get("captchaVerifyRegion").and_then(Value::as_str) {
+            object.insert("captcha_verify_region".to_string(), Value::from(region));
+        }
+    }
+    let result = crate::checkin::benefits::run(
+        &state.account_sessions,
+        &state.alert_store,
+        &client,
+        &session,
+        "plan",
+        &params,
+    )
+    .await;
+    let outcome = match result.outcome {
+        crate::checkin::benefits::BenefitOutcome::Done => "claimed",
+        crate::checkin::benefits::BenefitOutcome::Already => "already_claimed",
+        crate::checkin::benefits::BenefitOutcome::Pending => "confirming",
+        crate::checkin::benefits::BenefitOutcome::Skipped => "ineligible",
+        crate::checkin::benefits::BenefitOutcome::Failed => "failed",
+    };
+    // 落当日台账 + 明细（与签到同一份判据）
+    let checkin_outcome = match outcome {
+        "claimed" => CheckinOutcome::Success,
+        "already_claimed" => CheckinOutcome::Already,
+        "confirming" => CheckinOutcome::Pending,
+        _ => CheckinOutcome::Failed,
+    };
+    crate::checkin::scheduler::record_with_reason(
+        &state.upstream_checkin,
+        &session,
+        "activity",
+        checkin_outcome,
+        &result.message,
+        false,
+        "手动领取活动（活动福利）",
+        0,
+    );
+    Ok(Json(json!({
+        "campaignId": campaign_id,
+        "outcome": outcome,
+        "campaign": Value::Null,
+        "message": result.message,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,9 +1112,11 @@ mod tests {
             provider: "loomy".into(),
             source: source.into(),
             kind: kind.into(),
+            reason: String::new(),
             outcome: CheckinOutcome::Success,
             ok: true,
             kept_active: false,
+            streak_days: 0,
             message: String::new(),
             error: String::new(),
         }

@@ -409,11 +409,15 @@ pub(crate) fn resolve_bridges_needs(
                 }
             }
             crate::channel::ChannelType::Plugin => {
-                // 插件渠道：转发由插件子进程构造并发出（网关不实现上游
+                // 插件渠道：转发由插件构造并发出（网关不实现上游
                 // 伪装头/签名）。plugin_provider 指明插件里的哪一家；
-                // 两级查找：原生插件进程优先（每包一进程），否则脚本宿主
-                // （一个 Bun 承载全部脚本包）。两者都未接管（未装/未启用/
-                // 崩溃退避窗口）→ 不 push，调用方按 no_bridge 处理。
+                // 三级查找：原生插件进程（每包一进程）→ 脚本宿主（一个 Bun
+                // 承载全部脚本包）→ Wasm 沙箱宿主（进程内 wasmtime）。
+                // 三者互斥：wasm 包的 provider 会进 `PackRegistry` 的归属表，
+                // 因此 `script_takeover_blocked` 会挡住脚本宿主接管；而 wasm
+                // 包不占 `processes` 表，`process_for_provider` 对它返回 None。
+                // 都未接管（未装/未启用/崩溃退避窗口）→ 不 push，调用方按
+                // no_bridge 处理。
                 let provider = ch.plugin_provider.clone();
                 if provider.is_empty() {
                     tracing::warn!("[Plugin] 渠道 {} 未配置 plugin_provider，跳过", ch.id);
@@ -428,6 +432,14 @@ pub(crate) fn resolve_bridges_needs(
                         Arc::new(crate::bridge::plugin::PluginBridge::new_script(
                             route.channel,
                             route.provider,
+                        )),
+                        Some(ch.id.clone()),
+                        Some(ch.clone()),
+                    ));
+                } else if let Some(host) = crate::plugin_host::wasm::host_for_provider(&provider) {
+                    result.push((
+                        Arc::new(crate::bridge::plugin::PluginBridge::new_wasm(
+                            host, provider,
                         )),
                         Some(ch.id.clone()),
                         Some(ch.clone()),

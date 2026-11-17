@@ -340,3 +340,60 @@ impl Drop for RunGuard {
         self.heartbeat.abort();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// 租约 / 冷却 / 成败收尾的端到端语义（全局 STORE 只安装一次）。
+    #[tokio::test]
+    async fn lease_claim_and_backoff_semantics() {
+        let dir = tempfile::TempDir::new().unwrap();
+        install(Arc::new(FileStore::new(dir.path().to_path_buf())));
+        let key = "test:lease";
+
+        // 首次 claim：拿到租约
+        let guard = match claim(key, 60_000, true, ManualBackoff::Bypass, 0).unwrap() {
+            Claim::Acquired(guard) => guard,
+            Claim::Deferred(state) => panic!("首次 claim 应拿到租约：{}", state.waiting_message()),
+        };
+        assert!(
+            read(key).unwrap().running(),
+            "租约期间 running() 必须为 true"
+        );
+
+        // 在途占位：第二次 claim 必须 Deferred（手动也不越过）
+        match claim(key, 60_000, true, ManualBackoff::Bypass, 0).unwrap() {
+            Claim::Acquired(_) => panic!("在途占位期间不应再次取得租约"),
+            Claim::Deferred(state) => assert!(state.running()),
+        }
+
+        // 正常收尾：成功 → 冷却清空、下一次可立即再领（min_gap=0）
+        guard.finish(true, "ok".into(), None, 0, 60_000).unwrap();
+        let state = read(key).unwrap();
+        assert!(!state.running());
+        assert_eq!(state.failures, 0);
+        assert_eq!(state.last_success_at, state.last_run_at);
+
+        // 失败 → 指数退避；Respect 拒绝、Bypass 越过
+        let guard = match claim(key, 60_000, true, ManualBackoff::Bypass, 0).unwrap() {
+            Claim::Acquired(guard) => guard,
+            Claim::Deferred(_) => panic!("成功后应可立即再领"),
+        };
+        guard.finish(false, "boom".into(), None, 0, 60_000).unwrap();
+        let state = read(key).unwrap();
+        assert_eq!(state.failures, 1);
+        assert!(state.retry_at > now_ms(), "失败必须产生冷却");
+        match claim(key, 60_000, true, ManualBackoff::Respect, 0).unwrap() {
+            Claim::Acquired(_) => panic!("冷却期内 Respect 不应取得租约"),
+            Claim::Deferred(_) => {}
+        }
+        let guard = match claim(key, 60_000, true, ManualBackoff::Bypass, 0).unwrap() {
+            Claim::Acquired(guard) => guard,
+            Claim::Deferred(_) => panic!("Bypass 应越过失败冷却"),
+        };
+        drop(guard); // 中途取消：Drop 释放占位
+        assert!(!read(key).unwrap().running(), "Drop 必须释放租约");
+    }
+}

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
 import { useToast } from '../components/Toast';
+import MaintenancePanel from '../components/MaintenancePanel';
 import {
   Button, Card, Input, Switch, Badge, Loading, EmptyState, SectionCard,
 } from '../components/ui';
@@ -300,6 +301,10 @@ export default function ScheduledTasks({ embedded = false }: ScheduledTasksProps
           {frontendTasks.map(renderTask)}
         </SectionCard>
       )}
+
+      {/* 维护任务明细（A2A maintenance-panel：两类维护任务的执行记录 / 明细 / 重试）。
+          凭证维护与模型刷新就是上面 backendTasks 里的两条，这里补「上次跑了什么」。 */}
+      <MaintenancePanel embedded />
     </div>
   );
 }

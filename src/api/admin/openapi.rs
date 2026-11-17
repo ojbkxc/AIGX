@@ -64,6 +64,7 @@ pub fn build_openapi_document() -> Value {
         paths_guardrail(),
         paths_branding_image_compat(),
         paths_mcp(),
+        paths_tools_maintenance(),
     ] {
         if let Value::Object(m) = part {
             for (k, v) in m {
@@ -430,11 +431,177 @@ fn paths_model_manage() -> Value {
         "/api/models/alias/reasoning": {
             "post": op_body("模型管理", "批量设置映射级思考等级", "aliases: string[], effort: string")
         },
+        // 映射逐条读写（A2A `GET/POST /api/models/mappings`；映射弹窗只拉这一小块）
+        "/api/models/mappings": {
+            "get": op("模型管理", "逐条映射清单（mappings[]/dangling[]/reasoningLevels 三项，供映射弹窗直接渲染）"),
+            "post": op_body("模型管理", "新增/更新一条映射（create=true 只新增，已存在 409；create=false 只编辑，不存在 404；缺省=有则改无则建）", "alias/target: string, provider?: string, reasoning?: string, enabled?: bool, create?: bool")
+        },
+        "/api/models/mappings/remove": {
+            "post": op_body("模型管理", "删除一条映射（三元组精确定位；自映射仅在模型行已不存在时可删）", "alias/target: string, provider?: string")
+        },
         "/api/models/custom": {
             "post": op_body("模型管理", "添加自定义模型登记", "provider: string, id: string")
         },
         "/api/models/custom/remove": {
             "post": op_body("模型管理", "删除自定义模型登记", "provider: string, id: string")
+        },
+    })
+}
+
+/// 工具服务 + 维护任务（对齐 Agent2API v3.5.0-beta.1）。
+///
+/// 单独成函数而非并入 `paths_settings_ops`：那个函数已接近 `json!` 宏展开
+/// 深度上限，本波新增端点较多，独立成函数避免递归深度风险。
+///
+/// `/api/web-search*` 三条**不在**这里：它们是面向客户端 Skill/MCP 的运行时
+/// 端点（网关 Key 鉴权、不面向管理面板），走 `EXEMPT` 放行，理由见该表。
+fn paths_tools_maintenance() -> Value {
+    json!({
+        // ── 签到台账 / 计划 / 活动福利（T6，A2A 对齐波新增）────────
+        // 前四条是 `any(handler)` 单入口按 method+path 分发；文档列对外承诺
+        // 的方法，闸门对 `any` 通配跳过方法比对（见 extract_routes.py）。
+        "/api/checkin-records": {
+            "get": op_params("签到中心", "签到台账查询（按天分桶、分页）", &[
+                query_param("days", "integer", "回溯天数"),
+                query_param("provider", "string", "按上游过滤"),
+                query_param("outcome", "string", "结果过滤（success/already/pending/failed）"),
+                query_param("offset", "integer", "分页偏移"),
+                query_param("limit", "integer", "每页条数"),
+            ]),
+            "delete": op("签到中心", "清空签到台账")
+        },
+        "/api/checkin-schedules": {
+            "get": op("签到中心", "签到计划清单（逐 provider 时刻 + 窗口随机）"),
+            "post": op_body("签到中心", "新增或更新一条签到计划",
+                "{ id?: string, provider: string, times: string[], enabled: bool, ... }")
+        },
+        "/api/checkin-schedules/{id}/delete": {
+            "delete": op("签到中心", "删除签到计划"),
+            "post": op("签到中心", "删除签到计划（POST 别名）")
+        },
+        "/api/checkin-schedules/{id}/run": {
+            "post": op("签到中心", "立即执行一条签到计划")
+        },
+        "/api/auto-checkin": {
+            "get": op("签到中心", "自动签到总开关与计划快照"),
+            "post": op_body("签到中心", "保存自动签到总开关与全局参数",
+                "{ master_enabled: bool, ... }")
+        },
+        "/api/auto-checkin/run": {
+            "post": op("签到中心", "立即跑一轮自动签到")
+        },
+        "/api/zcode/claim-verification": {
+            "post": op_body("签到中心", "ZCode 人工验证桥：poll 查状态 / complete 提交验证结果",
+                "{ action: string, accountId: string, ... }")
+        },
+        // 活动福利：主路径 + A2A 兼容影子（同一对 handler）
+        "/api/accounts/{id}/campaigns": {
+            "get": op("签到中心", "活动福利预览（CampaignPreview：campaigns / monthlyGifts / riskNote / redemption）")
+        },
+        "/api/accounts/{id}/campaigns/claim": {
+            "post": op_body("签到中心", "领取一份活动福利",
+                "{ campaignId: string, captchaVerifyParam?: string, captchaVerifyRegion?: string }")
+        },
+        "/api/account-sessions/{id}/campaigns": {
+            "get": op("签到中心", "A2A 兼容影子：同 /api/accounts/{id}/campaigns")
+        },
+        "/api/account-sessions/{id}/campaigns/claim": {
+            "post": op_body("签到中心", "A2A 兼容影子：同 /api/accounts/{id}/campaigns/claim",
+                "{ campaignId: string, captchaVerifyParam?: string, captchaVerifyRegion?: string }")
+        },
+        // ── 工具服务：服务清单与协议开关 ───────────────────────────
+        "/api/tools/servers": {
+            "get": op("工具服务", "服务清单（可按 protocol=skill|mcp 过滤）：开关/能力数/超时/入口")
+        },
+        "/api/tools/servers/{id}": {
+            "patch": op_body("工具服务", "改单个服务的启用状态与执行超时",
+                "{ protocol: string, enabled?: bool, timeout_seconds?: number }")
+        },
+        // ── 工具服务：搜索提供商与选择 ─────────────────────────────
+        "/api/tools/providers": {
+            "get": op("工具服务", "搜索/抓取提供商清单：configured / key_hint / 能力位（不返回明文 Key）")
+        },
+        "/api/tools/provider-selection": {
+            "get": op("工具服务", "当前选中的搜索引擎集合与抓取提供商"),
+            "put": op_body("工具服务", "保存搜索提供商多选与抓取提供商",
+                "{ search_providers: string[], fetch_provider: string }")
+        },
+        "/api/tools/providers/{provider}": {
+            "put": op_body("工具服务", "写单个提供商的 Key / 账号 / 启用位（Key 只写不回显）",
+                "{ api_key?: string, account_id?: string, enabled?: bool }")
+        },
+        "/api/tools/providers/{provider}/key": {
+            "delete": op("工具服务", "清除该提供商已保存的 Key")
+        },
+        "/api/tools/providers/{provider}/test": {
+            "post": op("工具服务", "用已保存的配置试跑一次（返回 code/result_count/duration_ms）")
+        },
+        // ── 工具服务：视觉分析 ─────────────────────────────────────
+        "/api/tools/vision/config": {
+            "get": op("工具服务", "视觉分析绑定：provider / upstream_model / 思考等级 / 内部 Key"),
+            "put": op_body("工具服务", "保存视觉分析绑定",
+                "{ provider: string, upstream_model: string, reasoning_effort?: string, api_key_id: string }"),
+            "delete": op("工具服务", "清除视觉分析绑定")
+        },
+        "/api/tools/vision/config/test": {
+            "post": op("工具服务", "按当前绑定试跑一次视觉分析")
+        },
+        // ── 工具服务：安装目标 / Skill / MCP ───────────────────────
+        "/api/tools/api-keys": {
+            "get": op("工具服务", "可选的内部调用 Key 清单（掩码展示）")
+        },
+        "/api/tools/install-targets": {
+            "get": op_params("工具服务", "本机可安装目标（客户端探测结果）", &[
+                query_param("service", "string", "服务 id"),
+                query_param("protocol", "string", "skill | mcp"),
+            ])
+        },
+        "/api/tools/install-info": {
+            "get": op_params("工具服务", "安装信息：网关基址 / MCP 端点 / 桥接脚本 / 工具清单",
+                &[query_param("service", "string", "服务 id")])
+        },
+        "/api/tools/install-skill": {
+            "post": op_body("工具服务", "把服务打包成 Agent Skill 装到选定客户端",
+                "{ service: string, clients: string[], variant?: string, gateway_key?: string, output_dir?: string }")
+        },
+        "/api/tools/install-mcp": {
+            "post": op_body("工具服务", "把服务注册为客户端 MCP server",
+                "{ service: string, clients: string[], mode?: string, gateway_key?: string }")
+        },
+        "/api/tools/uninstall-skill": {
+            "post": op_body("工具服务", "卸载已装的 Skill", "{ service: string, clients: string[] }")
+        },
+        "/api/tools/uninstall-mcp": {
+            "post": op_body("工具服务", "卸载已注册的 MCP server", "{ service: string, clients: string[] }")
+        },
+        "/api/tools/mcp-bridge/vision.js": {
+            "get": op("工具服务", "视觉桥接脚本（供客户端 MCP 配置引用；纯文本 JS）")
+        },
+        // ── 工具服务：图片生成配置 ─────────────────────────────────
+        "/api/tools/image-generation/config": {
+            "get": op("工具服务", "图片生成服务配置（本期只移植配置面，无任务表）"),
+            "put": op_body("工具服务", "保存图片生成配置", "{ provider?: string, upstream_model?: string, enabled?: bool }"),
+            "delete": op("工具服务", "清除图片生成配置")
+        },
+        // ── 维护任务：凭证维护 / 模型目录刷新 ───────────────────────
+        "/api/maintenance": {
+            "get": op_params("维护", "维护任务总览 + 执行记录（可按任务/来源/状态/关键词筛选、分页）", &[
+                query_param("taskId", "string", "credentialMaintenance | modelRefresh"),
+                query_param("source", "string", "manual | automatic"),
+                query_param("status", "string", "执行状态过滤"),
+                query_param("keyword", "string", "关键词"),
+                query_param("offset", "integer", "分页偏移"),
+                query_param("limit", "integer", "每页条数"),
+            ])
+        },
+        "/api/maintenance/records/{id}": {
+            "get": op("维护", "单次执行明细：逐账号结果 + 耗时 + 错误")
+        },
+        "/api/maintenance/run/{task}": {
+            "post": op("维护", "立即执行一次维护任务（credentialMaintenance | modelRefresh）")
+        },
+        "/api/maintenance/records/{id}/retry": {
+            "post": op_body("维护", "重试一次执行（可只重试单条账号）", "{ itemId?: string }")
         },
     })
 }
@@ -1141,6 +1308,73 @@ fn paths_accounts_network() -> Value {
         "/api/plugins/progress": {
             "get": op("插件", "在途安装/更新操作（当前恒空）")
         },
+        // ── A2A 对齐波（v1.0.63）：插件管理面子页 ────────────────────
+        // 这些路由注册在子模块的 `router()` 里（plugin_*.rs），由 main.rs
+        // `.merge(...)` 接进主 Router；清单在这里登记（route gate 的单测
+        // 只保证「文档 ↔ 清单」，main.rs 侧由 tools/extract_routes.py 兜）。
+        "/api/plugins/startup": {
+            "get": op("插件", "启动/加载阶段快照（各外置包一行：阶段/是否在跑/错误 + 脚本宿主摘要）")
+        },
+        "/api/plugins/settings": {
+            "get": op("插件", "插件更新通道与检查计划（`[update]` 段的 A2A 形状投影）"),
+            "patch": op_body(
+                "插件",
+                "保存插件更新设置（写回 `[update]`；与设置页同一份数据）",
+                "{ autoCheck?, intervalMinutes?, stable?, beta?, autoUpdate?, channelMode?, checkMode? }",
+            )
+        },
+        "/api/plugins/reload": {
+            "post": op_body("插件", "热重启一个已启用的外置包（停→启，不改变 enabled 选择）", "{ id }")
+        },
+        "/api/plugins/tasks": {
+            "get": op("插件", "插件后台任务快照（每项 {provider, task, runs}；只含已加载的 wasm provider）"),
+            "patch": op_body(
+                "插件",
+                "保存单个任务的设置（启用 / 时刻表；保存后回全量快照）",
+                "{ provider, task, settings }",
+            )
+        },
+        "/api/plugins/tasks/run": {
+            "post": op_body("插件", "立即跑一轮任务（手动触发，跳过启用与排期判定）", "{ provider, task }")
+        },
+        "/api/plugins/helpers": {
+            "get": op("插件", "原生辅助程序候选 + 已授权记录（`?pack=` 可过滤）"),
+            "patch": op_body(
+                "插件",
+                "授权 / 撤销原生辅助程序（授权须 confirmed=true；target=null 为撤销）",
+                "{ provider, helper, target, pack?, confirmed? }",
+            )
+        },
+        "/api/plugins/provider-settings": {
+            "get": op("插件", "provider 设置快照（schema + 当前值 + 修订号）"),
+            "patch": op_body(
+                "插件",
+                "保存 provider 设置（CAS：revision 不符 → 409）",
+                "{ provider, revision, values }",
+            )
+        },
+        "/api/provider-settings": {
+            "get": op("插件", "provider 设置快照（与 /api/plugins/provider-settings 同一 handler，旧名别名）"),
+            "patch": op_body(
+                "插件",
+                "保存 provider 设置（与 /api/plugins/provider-settings 同一 handler，旧名别名）",
+                "{ provider, revision, values }",
+            )
+        },
+        "/api/session/login/interaction": {
+            "get": op("账号", "读当前登录交互步骤（`?state=`；无待填步骤回 {interaction:null}）"),
+            "post": op_body(
+                "账号",
+                "提交一步登录交互输入（表单 / 验证码；完成时落账号并回 accountId）",
+                "{ state, interaction, inputs?, captcha? }",
+            )
+        },
+        "/api/session/login/wasm-callback": {
+            "get": op(
+                "账号",
+                "浏览器 OAuth 回调（免鉴权：安全性由一次性 state 承担；返回人读文案）",
+            )
+        },
         "/api/plugins/scripts": {
             "get": op("插件", "脚本插件列表（Magpie 脚本包：宿主状态 + 已装包，含 providerRouted）")
         },
@@ -1176,6 +1410,22 @@ fn paths_accounts_network() -> Value {
         },
         "/api/plugins/scripts/rebuild": {
             "post": op("插件", "手动重启脚本宿主（排障用；无已启用包时等于关停宿主）")
+        },
+        "/api/plugins/scripts/change": {
+            "post": op_body("插件", "脚本包变更：包级设置 / 包内 provider 启停 / 别名",
+                "{ id, action, ... }")
+        },
+        "/api/plugins/scripts/settings": {
+            "post": op_body("插件", "保存脚本包设置（A2A 兼容入口）", "{ id, values }")
+        },
+        "/api/plugins/scripts/prompts": {
+            "post": op_body("插件", "脚本包声明的提示词/模版清单", "{ id }")
+        },
+        "/api/plugins/scripts/check": {
+            "get": op("插件", "检查脚本包更新（返回可更新版本清单）")
+        },
+        "/api/plugins/scripts/catalog/refresh": {
+            "post": op("插件", "刷新脚本插件目录（重新拉取市场源）")
         },
         "/api/public/geo-lang": {
             "get": op("公开", "按 IP 推断语言")
@@ -1231,6 +1481,38 @@ fn paths_accounts_network() -> Value {
         },
         "/api/account-sessions/{id}/promote": {
             "post": op_params("账号池", "账号置顶（提到同渠道同优先级队首，sort_order = 组内最小 - 1）", &[path_param("id")])
+        },
+        "/api/account-sessions/sorting": {
+            "get": op("账号池", "服务端排序规则 + 逐 provider 实际先试次序（configured/rules/account_order/credit_expires_at/balances）"),
+            "put": op_body("账号池", "保存某 provider 的账号排序规则（credit|expires|balance|added|quota_reset；null=恢复默认）", "{ provider, rules: array|null, onlyIfUnset? }")
+        },
+        "/api/account-sessions/refresh-expiring": {
+            "post": op("账号池", "批量刷新全部临期账号凭证（复用后台巡检的串行刷新与单飞；返回逐项计数）")
+        },
+        "/api/account-sessions/usage/start": {
+            "post": op_body("账号池", "异步发起余额查询任务（立刻返回任务号；同账号 pending 默认复用）", "{ id?, replace? }")
+        },
+        "/api/account-sessions/usage/cancel": {
+            "post": op_body("账号池", "取消指定账号的查询任务（requestId 必须与当前任务一致）", "{ id, requestId }")
+        },
+        "/api/account-sessions/usage/states": {
+            "get": op("账号池", "异步查询任务状态 + 最近读数快照（与 POST /usage 同步查询、GET /usage/snapshot 只读快照分工）")
+        },
+        "/api/account-sessions/export-files": {
+            "post": op_body("账号池", "按账号 id 或 provider 导出单文件（含明文凭证，仅管理员）", "{ id } 或 { provider }")
+        },
+        "/api/account-sessions/{id}/rate-limits/clear": {
+            "post": op_params("账号池", "清除插件账号的逐模型限流标记（缺省全部）", &[path_param("id")])
+        },
+        "/api/accounts/sorting": {
+            "get": op("账号池", "A2A 兼容影子：同 /api/account-sessions/sorting"),
+            "put": op_body("账号池", "A2A 兼容影子：同 /api/account-sessions/sorting", "{ provider, rules: array|null, onlyIfUnset? }")
+        },
+        "/api/accounts/refresh-expiring": {
+            "post": op("账号池", "A2A 兼容影子：同 /api/account-sessions/refresh-expiring")
+        },
+        "/api/accounts/export-files": {
+            "post": op_body("账号池", "A2A 兼容影子：同 /api/account-sessions/export-files", "{ id } 或 { provider }")
         },
         "/api/account-sessions/order": {
             "put": op_body("账号池", "账号整队重排（按给定 id 数组顺序重写 sort_order，未知/重复 id 计入 skipped）", "order: 从队首到队尾的账号 id 数组")
@@ -1499,6 +1781,59 @@ mod tests {
         add("/api/account-sessions/batch", &["post"]);
         add("/api/account-sessions/usage", &["post"]);
         add("/api/account-sessions/usage/snapshot", &["get"]);
+        add("/api/account-sessions/usage/start", &["post"]);
+        add("/api/account-sessions/usage/cancel", &["post"]);
+        add("/api/account-sessions/usage/states", &["get"]);
+        add("/api/account-sessions/sorting", &["get", "put"]);
+        add("/api/account-sessions/refresh-expiring", &["post"]);
+        add("/api/account-sessions/export-files", &["post"]);
+        add("/api/account-sessions/{id}/rate-limits/clear", &["post"]);
+        // A2A 兼容影子注册（前端按上游路径调用，handler 同上）
+        add("/api/accounts/sorting", &["get", "put"]);
+        add("/api/accounts/refresh-expiring", &["post"]);
+        add("/api/accounts/export-files", &["post"]);
+        // ── 签到台账 / 计划 / 活动福利（T6）─────────────────────────
+        // 前三者是 `any(handler)` 单入口按 method+path 分发，对外承诺的方法
+        // 见 handler 内部分支；文档列具体方法，闸门对 `any` 跳过方法比对。
+        add("/api/checkin-records", &["delete", "get"]);
+        add("/api/checkin-schedules", &["get", "post"]);
+        add("/api/checkin-schedules/{id}/delete", &["delete", "post"]);
+        add("/api/checkin-schedules/{id}/run", &["post"]);
+        add("/api/auto-checkin", &["get", "post"]);
+        add("/api/auto-checkin/run", &["post"]);
+        add("/api/zcode/claim-verification", &["post"]);
+        // 活动福利：主路径 + A2A 影子（同一对 handler）
+        add("/api/accounts/{id}/campaigns", &["get"]);
+        add("/api/accounts/{id}/campaigns/claim", &["post"]);
+        add("/api/account-sessions/{id}/campaigns", &["get"]);
+        add("/api/account-sessions/{id}/campaigns/claim", &["post"]);
+        // ── 工具服务（T7）──────────────────────────────────────────
+        add("/api/tools/servers", &["get"]);
+        add("/api/tools/servers/{id}", &["patch"]);
+        add("/api/tools/providers", &["get"]);
+        add("/api/tools/provider-selection", &["get", "put"]);
+        add("/api/tools/providers/{provider}", &["put"]);
+        add("/api/tools/providers/{provider}/key", &["delete"]);
+        add("/api/tools/providers/{provider}/test", &["post"]);
+        add("/api/tools/vision/config", &["delete", "get", "put"]);
+        add("/api/tools/vision/config/test", &["post"]);
+        add("/api/tools/api-keys", &["get"]);
+        add("/api/tools/install-targets", &["get"]);
+        add("/api/tools/install-info", &["get"]);
+        add("/api/tools/install-skill", &["post"]);
+        add("/api/tools/install-mcp", &["post"]);
+        add("/api/tools/uninstall-skill", &["post"]);
+        add("/api/tools/uninstall-mcp", &["post"]);
+        add("/api/tools/mcp-bridge/vision.js", &["get"]);
+        add(
+            "/api/tools/image-generation/config",
+            &["delete", "get", "put"],
+        );
+        // ── 维护任务（T7）──────────────────────────────────────────
+        add("/api/maintenance", &["get"]);
+        add("/api/maintenance/records/{id}", &["get"]);
+        add("/api/maintenance/run/{task}", &["post"]);
+        add("/api/maintenance/records/{id}/retry", &["post"]);
         add("/api/account-sessions/desktop/sources", &["get"]);
         add("/api/account-sessions/desktop-import", &["post"]);
         add("/api/account-sessions/export", &["get"]);
@@ -1547,6 +1882,26 @@ mod tests {
         add("/api/plugins/scripts/uninstall", &["post"]);
         add("/api/plugins/scripts/options", &["post"]);
         add("/api/plugins/scripts/rebuild", &["post"]);
+        // 脚本插件 A2A 对齐补全（T1 交付，注册在 main.rs 平铺块）
+        add("/api/plugins/scripts/change", &["post"]);
+        add("/api/plugins/scripts/settings", &["post"]);
+        add("/api/plugins/scripts/prompts", &["post"]);
+        add("/api/plugins/scripts/check", &["get"]);
+        add("/api/plugins/scripts/catalog/refresh", &["post"]);
+        // ── A2A 对齐波（v1.0.63）：插件管理面子页 ────────────────────
+        // 这些路由注册在子模块 `plugin_*.rs` 的 `router()` 里（main.rs 逐个
+        // `.merge(...)`）。tools/extract_routes.py 的 ROUTE_FILES 已同步收录
+        // 这 7 个文件，静态提取能看到它们，闸门两侧口径一致。
+        add("/api/plugins/startup", &["get"]);
+        add("/api/plugins/settings", &["get", "patch"]);
+        add("/api/plugins/reload", &["post"]);
+        add("/api/plugins/tasks", &["get", "patch"]);
+        add("/api/plugins/tasks/run", &["post"]);
+        add("/api/plugins/helpers", &["get", "patch"]);
+        add("/api/plugins/provider-settings", &["get", "patch"]);
+        add("/api/provider-settings", &["get", "patch"]);
+        add("/api/session/login/interaction", &["get", "post"]);
+        add("/api/session/login/wasm-callback", &["get"]);
         add("/api/public/geo-lang", &["get"]);
         add("/api/tickets", &["get", "post"]);
         add("/api/tickets/close", &["post"]);
@@ -1733,6 +2088,8 @@ mod tests {
         add("/api/models/alias/remove", &["post"]);
         add("/api/models/alias/reasoning", &["post"]);
         add("/api/models/alias/state", &["post"]);
+        add("/api/models/mappings", &["get", "post"]);
+        add("/api/models/mappings/remove", &["post"]);
         add("/api/models/capabilities", &["post"]);
         add("/api/models/available", &["get"]);
         add("/api/models/custom", &["post"]);
@@ -1874,6 +2231,18 @@ mod tests {
         (
             "/api/debug/traffic",
             "返回上游原始报文，含 Authorization / API key 等凭据残留，不自描述",
+        ),
+        (
+            "/api/web-search",
+            "面向客户端 Skill/MCP 的运行时端点（网关 Key 鉴权），不面向管理面板，故不进管理面自描述文档",
+        ),
+        (
+            "/api/web-search/search",
+            "面向客户端 Skill/MCP 的运行时端点（网关 Key 鉴权），不面向管理面板，故不进管理面自描述文档",
+        ),
+        (
+            "/api/web-search/fetch",
+            "面向客户端 Skill/MCP 的运行时端点（网关 Key 鉴权），不面向管理面板，故不进管理面自描述文档",
         ),
     ];
 

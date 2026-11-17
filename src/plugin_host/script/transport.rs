@@ -445,6 +445,117 @@ pub(crate) fn next_slice(buf: &mut Vec<u8>, eof: bool) -> Option<Vec<u8>> {
     Some(buf.drain(..take).collect())
 }
 
+// ── script.proxy.resolve / 代理 wire 形状 ────────────────────────────
+
+/// A2A 代理 wire 形状：`{protocol,host,port,username,password}`。
+///
+/// 解析一条代理 URL（`http://u:p@h:8080` / `socks5h://h:1080`）成该形状。
+/// 无端口时按 scheme 给缺省（http 80 / https 443 / socks5 1080）。解析失败
+/// 返回 `None`（调用方按「代理不可用」处理，不静默直连——与 A2A 立场一致）。
+pub(crate) fn proxy_wire(url: &str) -> Option<Value> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_string();
+    let protocol = parsed.scheme().to_string();
+    if !matches!(protocol.as_str(), "http" | "https" | "socks5" | "socks5h") {
+        return None;
+    }
+    let port = parsed.port_or_known_default().unwrap_or_else(|| {
+        if protocol.starts_with("socks5") {
+            1080
+        } else {
+            80
+        }
+    });
+    Some(json!({
+        "protocol": protocol,
+        "host": host,
+        "port": port,
+        "username": parsed.username(),
+        "password": parsed.password().unwrap_or(""),
+    }))
+}
+
+/// `script.proxy.resolve {config}` → 代理 wire 形状 或 `null`（直连）。
+///
+/// `config` 三态（与 A2A `proxies::resolve_account_proxy` 同口径）：
+/// - `{source:"direct"}` → `null`
+/// - `{url|proxy|address|server: "…"}` → 直接解析该 URL
+/// - `{source:"pool"|"rotate"|…, id?: "…"}` → 经 [`crate::proxy_pool`] 解析
+///
+/// 解析失败返回 `internal` 错误（**不静默直连**：账号配了代理却走了直连
+/// 会让流量从错误出口发出，是安全问题）。
+pub(crate) fn resolve_proxy(params: &Value) -> Result<Value, RpcError> {
+    let config = params.get("config").cloned().unwrap_or(Value::Null);
+    if config.is_null() {
+        return Ok(Value::Null);
+    }
+    // 直连声明
+    if config.get("source").and_then(Value::as_str) == Some("direct") {
+        return Ok(Value::Null);
+    }
+    // 静态 URL 形态
+    for key in ["url", "proxy", "address", "server"] {
+        if let Some(raw) = config.get(key).and_then(Value::as_str) {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            // 字符串形态可能是 `pool:<id>` / `rotate` / 裸 URL——统一走 proxy_pool
+            return match crate::proxy_pool::resolve_proxy(Some(raw), "") {
+                Ok(None) => Ok(Value::Null),
+                Ok(Some(url)) => proxy_wire(&url).map(Ok).unwrap_or_else(|| {
+                    Err(rpc_error(
+                        "internal",
+                        format!("script.proxy.resolve: unparsable proxy '{url}'"),
+                    ))
+                }),
+                Err(reason) => Err(rpc_error("internal", reason)),
+            };
+        }
+    }
+    // 引用形态：`{source:"pool", id:"…"}` / `{source:"rotate", ids:[…]}`
+    let source = config.get("source").and_then(Value::as_str).unwrap_or("");
+    let spec = match source {
+        "pool" => config
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| format!("pool:{id}"))
+            .unwrap_or_default(),
+        "rotate" | "clash" | "system" => {
+            let ids = config
+                .get("ids")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                "rotate".to_string()
+            } else {
+                format!("rotate:{ids}")
+            }
+        }
+        _ => String::new(),
+    };
+    if spec.is_empty() {
+        return Ok(Value::Null);
+    }
+    match crate::proxy_pool::resolve_proxy(Some(&spec), "") {
+        Ok(None) => Ok(Value::Null),
+        Ok(Some(url)) => proxy_wire(&url).map(Ok).unwrap_or_else(|| {
+            Err(rpc_error(
+                "internal",
+                format!("script.proxy.resolve: unparsable proxy '{url}'"),
+            ))
+        }),
+        Err(reason) => Err(rpc_error("internal", reason)),
+    }
+}
+
 /// 一个 chunk 帧的应答载荷（done 由调用方在终结分支单独给，永不并载）。
 fn chunk_frame(bytes: &[u8]) -> Value {
     json!({ "chunk_b64": STANDARD.encode(bytes), "done": false })

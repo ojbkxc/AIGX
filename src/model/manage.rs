@@ -20,6 +20,21 @@
 //!
 //! 需求原话：「渠道管理里启用的才在模型管理里跟账号池的一起显示」。
 //! 禁用渠道的模型不进视图 —— 它们本来就不可路由，列出来只会让人误以为在售。
+//!
+//! ## T5：A2A v3.5.0-beta.1 视图形状（`{models, mappings, providers, dangling, …}`）
+//!
+//! 移植自 `core/providers/catalog/view.rs::manage_view`。新增三块：
+//! - `mappings[]`：**逐条**映射（`{alias, target, provider, enabled, reasoning,
+//!   isDefault, dangling, carried}`），含关闭条目与未挂载条目；
+//!   旧的 `mappings: {alias: target}` 平表保留（老前端 / 老调用点继续用）。
+//! - `providers[].source / refreshedAt`：这一家的清单是「内置静态」还是
+//!   「远程拉回」、什么时候拉到的（管理页两列徽章的数据源）。
+//! - `dangling[]`：`provider` 指向的家**不在视图里**（无可用账号 / 渠道被删）
+//!   的映射 —— 页面上没有那一行可以挂，但用户仍需要一个入口看见并删掉它们。
+//!
+//! 模型行另带 `capOverrides`（被用户覆盖的能力键）与 `capSources`
+//! （逐键来源 `user` / `upstream` / `modelsdev`），见
+//! `model::capability_overrides`。
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -29,6 +44,7 @@ use std::sync::Arc;
 
 use crate::account_session::AccountSessionStore;
 use crate::channel::{Channel, ChannelType};
+use crate::model::capability_overrides;
 use crate::model::metadata::ModelMetadataRegistry;
 use crate::model::ModelMapper;
 use crate::pricing::{ModelPrice, PricingStore};
@@ -167,6 +183,13 @@ pub struct ManageModel {
     /// builtin；null = 该字段无读数）。前端可信度展示用。
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub cap_sources: serde_json::Value,
+    /// 能力三态出口（T5，A2A `capability::effective` 形状）：六键齐全，
+    /// 未声明为 null（「不知道」≠「不支持」）。带用户覆盖的生效值。
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub capability_flags: serde_json::Value,
+    /// 被用户覆盖的能力键（管理页「已改」标记；空数组 = 全部继承）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cap_overrides: Vec<String>,
     /// 定价条目（未定价为 null，前端据此高亮）
     pub price: Option<ModelPrice>,
     /// 模型倍率（`ratio_config.model_ratio`，缺省 1.0）
@@ -188,6 +211,9 @@ pub struct ManageModel {
 pub struct AliasEntry {
     pub alias: String,
     pub target: String,
+    /// provider 维度（None = 全局条目，对所有家生效）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// 是否启用（关掉的别名仍出现在清单里，但不参与改名）
     pub enabled: bool,
     /// 映射级思考等级（`reasoning_for` 的快照）。None = 未设置。
@@ -204,6 +230,13 @@ pub struct ProviderGroup {
     pub enabled: usize,
     /// 是否来自账号池（前端用于区分图标/提示）
     pub account: bool,
+    /// 清单来源：`builtin`（内置静态 / 渠道声明）/ `remote`（上游目录拉回）
+    /// / `none`（这家没有可用模型）。对齐 A2A `manage_view` 的 `source` 三态。
+    #[serde(default)]
+    pub source: String,
+    /// 该家清单最近一次刷新时刻（unix 秒；0 = 从未拉过）。
+    #[serde(default)]
+    pub refreshed_at: i64,
 }
 
 /// 完整视图。
@@ -211,10 +244,40 @@ pub struct ProviderGroup {
 pub struct ManageView {
     pub providers: Vec<ProviderGroup>,
     pub models: Vec<ManageModel>,
-    /// 全局别名映射（alias → target）
+    /// 全局别名映射（alias → target；老前端 / 老调用点的扁平形态，只含全局条目）
     pub mappings: HashMap<String, String>,
+    /// **逐条**映射（A2A `manage_view.mappings` 形状）：含 provider 维度、
+    /// 关闭条目与未挂载（dangling）条目。新前端按这一份渲染 chip 与开关。
+    pub mapping_entries: Vec<MappingView>,
+    /// 未挂载的映射（`provider` 指向的家不在视图里）；前端「未挂载的映射」区块。
+    pub dangling: Vec<MappingView>,
+    /// 能力三态存储是否已初始化（`capability_overrides::install` 是否被调用）。
+    ///
+    /// **不静默降级**：未初始化时所有三态覆盖都不生效 —— 管理页必须把这件事
+    /// 显示出来（否则运维改了能力位、页面按无覆盖渲染，误以为改成功了）。
+    /// 写入路径（`POST /api/models/capabilities` 新形态）在未初始化时返回 500。
+    pub capability_store_ready: bool,
     /// 未定价的模型数（顶部统计）
     pub unpriced: usize,
+}
+
+/// 一条映射的管理视图条目（A2A `catalog::manage_view` 的 `mappings[]` 一项）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MappingView {
+    pub alias: String,
+    pub target: String,
+    /// provider 维度（None = 全局条目）
+    #[serde(default)]
+    pub provider: Option<String>,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// 是否自映射（`alias == target` = 模型行的默认绑定，不可删除、只能关）
+    pub is_default: bool,
+    /// 是否悬空（挂不到任何模型行）
+    pub dangling: bool,
+    /// 目标模型是否仍被这家承载（false = 上游已下线 / 这家没这个模型）
+    pub carried: bool,
 }
 
 // ── provider 展示名 ─────────────────────────────────────────────────
@@ -365,6 +428,65 @@ pub fn build_view(
     let mut groups: BTreeMap<String, ProviderGroup> = BTreeMap::new();
     let mut models: Vec<ManageModel> = Vec::with_capacity(rows.len());
     let mut unpriced = 0usize;
+    // 各家清单的来源 / 刷新时刻（A2A `manage_view.providers[].source/refreshedAt`）。
+    //
+    // 口径（只用公开 API：`catalog::cached_model_ids` + `Channel.updated_at`，
+    // 不碰 account-pool 的私有缓存结构）：
+    // - 账号白名单非空 → `builtin`（管理员声明）；
+    // - 账号白名单为空但目录缓存有内容 → `remote`（上游拉回），时刻取渠道的
+    //   `updated_at`（渠道维度最近一次落盘，含目录写回）；
+    // - 其余 → `builtin`，时刻 0（从未成功拉过）。
+    let mut provider_meta: HashMap<String, (String, i64)> = HashMap::new();
+    for channel in channels.iter().filter(|c| c.is_enabled()) {
+        if is_account_channel(channel) {
+            for session in sessions
+                .all()
+                .iter()
+                .filter(|s| s.channel_id == channel.id && s.status == "enabled")
+            {
+                let provider = if session.provider.is_empty() {
+                    crate::account_session::registry::DEFAULT_PROVIDER_KIND.to_string()
+                } else {
+                    session.provider.clone()
+                };
+                let (source, refreshed_at) = if !session.models.is_empty() {
+                    ("builtin".to_string(), 0)
+                } else if !crate::account_session::catalog::cached_model_ids(
+                    sessions,
+                    &session.provider,
+                    &session.id,
+                )
+                .is_empty()
+                {
+                    ("remote".to_string(), channel.updated_at)
+                } else {
+                    ("builtin".to_string(), 0)
+                };
+                provider_meta
+                    .entry(provider)
+                    .and_modify(|slot| {
+                        // 远程来源优先（有真实刷新时刻的一家代表这一家）
+                        if source == "remote" && slot.0 != "remote" {
+                            *slot = (source.clone(), refreshed_at);
+                        } else if refreshed_at > slot.1 {
+                            slot.1 = refreshed_at;
+                        }
+                    })
+                    .or_insert((source, refreshed_at));
+            }
+        } else {
+            provider_meta
+                .entry(channel.channel_type.as_str().to_string())
+                .or_insert((
+                    if channel.discovered_models.is_empty() {
+                        "builtin".to_string()
+                    } else {
+                        "remote".to_string()
+                    },
+                    channel.updated_at,
+                ));
+        }
+    }
 
     for ((provider, _id), mut row) in rows {
         // 行启用 = 默认绑定开着，**或**任一条别名开着（SPEC §2.1 派生语义，
@@ -384,6 +506,8 @@ pub fn build_view(
                 total: 0,
                 enabled: 0,
                 account: account_providers.contains(&provider),
+                source: "none".to_string(),
+                refreshed_at: 0,
             });
         group.total += 1;
         if row.enabled {
@@ -400,12 +524,160 @@ pub fn build_view(
             .then(a.id.cmp(&b.id))
     });
 
+    // provider 分组补 source / refreshedAt（A2A 两列徽章的数据源）
+    for group in groups.values_mut() {
+        if let Some((source, refreshed_at)) = provider_meta.get(&group.id) {
+            group.source = source.clone();
+            group.refreshed_at = *refreshed_at;
+        }
+    }
+
+    // ── mappings[] / dangling[]（T5：A2A `manage_view` 形状）──────────────
+    let (mapping_entries, dangling) = compose_mapping_views(&models, &mapper.all_mapping_entries());
+
     ManageView {
         providers: groups.into_values().collect(),
         models,
         mappings: mapper.all_mappings(),
+        mapping_entries,
+        dangling,
+        capability_store_ready: capability_overrides::current().is_some(),
         unpriced,
     }
+}
+
+/// 由模型行 + 映射条目合成 `mappings[]` / `dangling[]`（纯函数，可单测）。
+///
+/// 规则（与 A2A `manage_view` 同构）：
+/// 1. **每条模型行先放一条默认绑定**（`id → id`）：真实条目存在就用它的
+///    reasoning / provider，开关 = `model_rules` 的 default_enabled AND 条目
+///    enabled；条目不存在（关闭的模型行 / 内建模型行）就合成一条虚拟
+///    默认绑定（`provider` 填行自己的家）。
+/// 2. 其余条目挂到 `target` 命中的行上（provider 维度的条目只挂自己家；
+///    全局条目挂任何承载 target 的行）。同一行上一个 alias 只渲染一次。
+/// 3. 剩下没挂上的条目：**全局条目 target 不在任何行** = dangling；
+///    **provider 条目那一家不在视图里**（无可用账号 / 渠道被删）= dangling。
+///    都进 `dangling[]`（同时也进全量 `mappings[]` —— 前端两处都拿得到）。
+fn compose_mapping_views(
+    models: &[ManageModel],
+    entries: &[crate::model::Mapping],
+) -> (Vec<MappingView>, Vec<MappingView>) {
+    let mut attached: HashSet<usize> = HashSet::new();
+    let mut mapping_views: Vec<MappingView> = Vec::new();
+    for row in models {
+        let default = entries.iter().enumerate().find(|(_, m)| {
+            m.alias == row.id
+                && m.target == row.id
+                && match &m.provider {
+                    None => true,
+                    Some(owner) => owner.eq_ignore_ascii_case(&row.provider),
+                }
+        });
+        match default {
+            Some((index, mapping)) => {
+                attached.insert(index);
+                mapping_views.push(MappingView {
+                    alias: mapping.alias.clone(),
+                    target: mapping.target.clone(),
+                    provider: mapping.provider.clone(),
+                    enabled: row.default_enabled && mapping.enabled,
+                    reasoning: mapping.reasoning.clone(),
+                    is_default: true,
+                    dangling: false,
+                    carried: true,
+                });
+            }
+            None => {
+                // 关闭的模型行也有一条「虚拟默认绑定」：开关状态来自 model_rules
+                mapping_views.push(MappingView {
+                    alias: row.id.clone(),
+                    target: row.id.clone(),
+                    provider: Some(row.provider.clone()),
+                    enabled: row.default_enabled,
+                    reasoning: None,
+                    is_default: true,
+                    dangling: false,
+                    carried: true,
+                });
+            }
+        }
+        for (index, mapping) in entries.iter().enumerate() {
+            if attached.contains(&index) {
+                continue;
+            }
+            if !mapping.target.eq_ignore_ascii_case(&row.id) {
+                continue;
+            }
+            if let Some(owner) = &mapping.provider {
+                if !owner.eq_ignore_ascii_case(&row.provider) {
+                    continue;
+                }
+            }
+            attached.insert(index);
+            if mapping.alias == row.id {
+                continue; // 自映射已经渲染为默认绑定
+            }
+            mapping_views.push(MappingView {
+                alias: mapping.alias.clone(),
+                target: mapping.target.clone(),
+                provider: mapping.provider.clone(),
+                enabled: mapping.enabled,
+                reasoning: mapping.reasoning.clone(),
+                is_default: false,
+                dangling: false,
+                carried: true,
+            });
+        }
+    }
+    // 未挂到任何行的条目 → dangling（页面「未挂载的映射」区块的入口）
+    let managed_providers: HashSet<String> = models
+        .iter()
+        .map(|row| row.provider.to_lowercase())
+        .collect();
+    for (index, mapping) in entries.iter().enumerate() {
+        if attached.contains(&index) {
+            continue;
+        }
+        let (dangling, carried) = match &mapping.provider {
+            Some(owner) => {
+                let carried = models.iter().any(|row| {
+                    row.provider.eq_ignore_ascii_case(owner) && row.id == mapping.target
+                });
+                // 家不在视图里 → 没有行可挂（悬空）；家还在但 target 已下线 → 也悬空
+                (
+                    !managed_providers.contains(&owner.to_lowercase()) || !carried,
+                    carried,
+                )
+            }
+            // 全局条目：target 不在任何模型行里 = 悬空
+            None => {
+                let carried = models.iter().any(|row| row.id == mapping.target);
+                (!carried, carried)
+            }
+        };
+        mapping_views.push(MappingView {
+            alias: mapping.alias.clone(),
+            target: mapping.target.clone(),
+            provider: mapping.provider.clone(),
+            enabled: mapping.enabled,
+            reasoning: mapping.reasoning.clone(),
+            is_default: mapping.alias == mapping.target,
+            dangling,
+            carried,
+        });
+    }
+    let dangling: Vec<MappingView> = mapping_views
+        .iter()
+        .filter(|v| v.dangling)
+        .cloned()
+        .collect();
+    mapping_views.sort_by(|a, b| {
+        a.is_default
+            .cmp(&b.is_default)
+            .then_with(|| a.alias.cmp(&b.alias))
+            .then_with(|| a.provider.cmp(&b.provider))
+    });
+    (mapping_views, dangling)
 }
 
 fn new_row(
@@ -419,23 +691,47 @@ fn new_row(
     let (meta, cap_sources) = metadata.resolve_with_sources(model, channel_owned_by);
     let price = pricing.get_price(model);
     let model_ratio = pricing.get_ratios().model_ratio(model);
-    let all_mappings = mapper.all_mappings();
-    let disabled = mapper.disabled_aliases();
-    let all_reasoning = mapper.all_reasoning();
-    let alias_entries: Vec<AliasEntry> = all_mappings
+    let entries = mapper.all_mapping_entries();
+    // 别名明细：只收**挂到这一家**的条目（provider 维度条目只出现在自己家
+    // 的行上；全局条目在所有承载 target 的行上都出现 —— 与 A2A `aliases_of`
+    // 同口径）。刻意不过滤 disabled：管理页的 chip 要能看见并再打开。
+    let alias_entries: Vec<AliasEntry> = entries
         .iter()
-        .filter(|(_, target)| *target == model)
-        .map(|(alias, target)| AliasEntry {
-            alias: alias.clone(),
-            target: target.clone(),
-            enabled: !disabled.contains(alias),
-            reasoning_effort: all_reasoning.get(alias).cloned(),
+        .filter(|mapping| mapping.target == model)
+        .filter(|mapping| {
+            mapping
+                .provider
+                .as_deref()
+                .is_none_or(|owner| owner.eq_ignore_ascii_case(provider))
+        })
+        .map(|mapping| AliasEntry {
+            alias: mapping.alias.clone(),
+            target: mapping.target.clone(),
+            provider: mapping.provider.clone(),
+            enabled: mapping.enabled,
+            reasoning_effort: mapping.reasoning.clone(),
         })
         .collect();
     let mut aliases: Vec<String> = alias_entries.iter().map(|e| e.alias.clone()).collect();
     aliases.sort_unstable();
     let mut alias_entries = alias_entries;
     alias_entries.sort_by(|a, b| a.alias.cmp(&b.alias));
+
+    // ── 能力三态（T5）：用户覆盖 > 上游声明 > models.dev ───────────────
+    //
+    // 上游那一档是 `metadata` 合并后的标签集（内置推断 + 渠道类型 +
+    // models.dev 只填空位的产物）；三态覆盖层再压在上面，且**出口标签集
+    // 同步重算**（`apply_to_capabilities`）—— 于是「管理页看到的」与
+    // 「/v1/models 声明的」是同一份值。
+    let overrides = capability_overrides::lookup(provider, model);
+    let mut capabilities = meta.capabilities.clone();
+    if let Some(patch) = &overrides {
+        capability_overrides::apply_to_capabilities(&mut capabilities, patch);
+    }
+    let capability_flags =
+        capability_overrides::effective_object(&meta.capabilities, overrides.as_ref());
+    let cap_overrides = override_keys(&overrides);
+
     ManageModel {
         provider: provider.to_string(),
         provider_label: provider_label(provider),
@@ -445,8 +741,10 @@ fn new_row(
         sources: Vec::new(),
         owned_by: meta.owned_by,
         context_length: meta.context_length,
-        capabilities: meta.capabilities,
+        capabilities,
         cap_sources,
+        capability_flags,
+        cap_overrides,
         price,
         model_ratio,
         aliases,
@@ -454,12 +752,48 @@ fn new_row(
     }
 }
 
+/// 覆盖表 → 被改的键清单（按固定顺序，管理页「已改」标记用）。
+fn override_keys(overrides: &Option<serde_json::Map<String, Value>>) -> Vec<String> {
+    let Some(patch) = overrides else {
+        return Vec::new();
+    };
+    capability_overrides::KEYS
+        .iter()
+        .copied()
+        .chain([capability_overrides::AUDIO_KEY])
+        .filter(|key| patch.contains_key(*key))
+        .map(str::to_string)
+        .collect()
+}
+
 /// 视图序列化为管理面响应信封里的 `data`。
+///
+/// 形状按 **Agent2API `manage_view`**（T5 任务要求 «增加 `mappings[]`、
+/// `providers[].source/refreshedAt`、`dangling[]`»）：
+/// - `mappings` = **逐条数组**（含 provider / reasoning / enabled / isDefault /
+///   dangling / carried）；
+/// - `dangling` = 未挂载条目数组；
+/// - `providers[]` 自带 `source` / `refreshedAt`（结构体字段，自动透出）。
+///
+/// 旧扁平表 `{alias: target}` 改名 `mappingsFlat` 保留：老前端（ModelManage /
+/// RatioPanel）此前读 `mappings` 的对象形态，改成数组后它们的
+/// `Object.entries/keys` 会拿到下标串 —— 前端对齐（T8）把读取点切换到
+/// `mappings`（数组）或 `mappingsFlat`（对象）后即可删除后者。
+/// `dangling_mappings` 同样保留旧名，供旧前端直接走后端事实分支。
 pub fn view_json(view: &ManageView) -> Value {
+    let legacy_dangling: Vec<Value> = view
+        .dangling
+        .iter()
+        .map(|m| json!({ "alias": m.alias, "target": m.target, "provider": m.provider }))
+        .collect();
     json!({
         "providers": view.providers,
         "models": view.models,
-        "mappings": view.mappings,
+        "mappings": view.mapping_entries,
+        "mappingsFlat": view.mappings,
+        "dangling": view.dangling,
+        "dangling_mappings": legacy_dangling,
+        "capabilityStoreReady": view.capability_store_ready,
         "unpriced": view.unpriced,
     })
 }
@@ -505,6 +839,140 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         Arc::new(FileStore::new(dir))
+    }
+
+    /// 造一行最小可用的模型（`compose_mapping_views` 只读 provider / id /
+    /// default_enabled，其余字段给空值）。
+    fn row(provider: &str, id: &str, default_enabled: bool) -> ManageModel {
+        ManageModel {
+            provider: provider.to_string(),
+            provider_label: provider.to_string(),
+            id: id.to_string(),
+            enabled: default_enabled,
+            default_enabled,
+            sources: Vec::new(),
+            owned_by: "test".to_string(),
+            context_length: None,
+            capabilities: Vec::new(),
+            cap_sources: Value::Null,
+            capability_flags: Value::Null,
+            cap_overrides: Vec::new(),
+            price: None,
+            model_ratio: 1.0,
+            aliases: Vec::new(),
+            alias_entries: Vec::new(),
+        }
+    }
+
+    fn mapping(
+        alias: &str,
+        target: &str,
+        provider: Option<&str>,
+        enabled: bool,
+    ) -> crate::model::Mapping {
+        crate::model::Mapping {
+            alias: alias.to_string(),
+            target: target.to_string(),
+            provider: provider.map(str::to_string),
+            reasoning: None,
+            enabled,
+        }
+    }
+
+    /// 正常映射挂到行上，不进 dangling。
+    #[test]
+    fn compose_attaches_alias_to_row() {
+        let models = vec![row("workbuddy", "deepseek-v4-pro", true)];
+        let entries = vec![mapping(
+            "ds-pro",
+            "deepseek-v4-pro",
+            Some("workbuddy"),
+            true,
+        )];
+        let (all, dangling) = compose_mapping_views(&models, &entries);
+        assert!(dangling.is_empty(), "正常映射不该悬空: {dangling:?}");
+        assert_eq!(all.len(), 2, "默认绑定 + 别名");
+        assert!(all
+            .iter()
+            .any(|m| m.alias == "ds-pro" && !m.dangling && m.carried));
+    }
+
+    /// target 已下线的全局映射 → dangling（页面「未挂载的映射」入口）。
+    #[test]
+    fn compose_marks_dangling_when_target_missing() {
+        let models = vec![row("workbuddy", "deepseek-v4-pro", true)];
+        let entries = vec![
+            mapping("ds-pro", "deepseek-v4-pro", Some("workbuddy"), true),
+            mapping("ghost", "retired-model", None, true),
+        ];
+        let (_, dangling) = compose_mapping_views(&models, &entries);
+        assert_eq!(dangling.len(), 1);
+        assert_eq!(dangling[0].alias, "ghost");
+        assert!(!dangling[0].carried, "目标不在清单 = carried=false");
+    }
+
+    /// provider 指向的家不在视图（无可用账号 / 渠道被删）→ dangling。
+    #[test]
+    fn compose_marks_dangling_when_provider_absent() {
+        let models = vec![row("workbuddy", "deepseek-v4-pro", true)];
+        // catpaw 这家不在视图里
+        let entries = vec![mapping("x", "kimi-k3", Some("catpaw"), true)];
+        let (_, dangling) = compose_mapping_views(&models, &entries);
+        assert_eq!(dangling.len(), 1);
+        assert_eq!(dangling[0].provider.as_deref(), Some("catpaw"));
+        assert!(!dangling[0].carried);
+    }
+
+    /// 关闭的模型行仍有一条虚拟默认绑定（开关关着，但页面看得见）。
+    #[test]
+    fn compose_synthesizes_default_binding_for_disabled_row() {
+        let models = vec![row("workbuddy", "deepseek-v4-pro", false)];
+        let (all, dangling) = compose_mapping_views(&models, &[]);
+        assert!(dangling.is_empty());
+        assert_eq!(all.len(), 1);
+        assert!(all[0].is_default);
+        assert!(!all[0].enabled, "默认绑定跟随 model_rules 的关停状态");
+        assert_eq!(all[0].provider.as_deref(), Some("workbuddy"));
+    }
+
+    /// provider 维度条目只挂自己家；别家行上看不到它。
+    #[test]
+    fn compose_provider_entry_attaches_only_to_own_row() {
+        let models = vec![
+            row("workbuddy", "kimi-k3", true),
+            row("catpaw", "kimi-k3", true),
+        ];
+        let entries = vec![mapping("k3", "kimi-k3", Some("catpaw"), true)];
+        let (all, dangling) = compose_mapping_views(&models, &entries);
+        assert!(dangling.is_empty());
+        let alias_views: Vec<&MappingView> = all.iter().filter(|m| m.alias == "k3").collect();
+        assert_eq!(alias_views.len(), 1, "同一条映射不能在两行上各渲染一次");
+        assert_eq!(alias_views[0].provider.as_deref(), Some("catpaw"));
+    }
+
+    /// 三态覆盖的出口：用户覆盖压过上游标签集（user > upstream），
+    /// 未覆盖的键沿用上游 / models.dev 的合并结果。
+    #[test]
+    fn capability_override_priority_is_user_then_upstream() {
+        // 上游声明（model）→ 模拟 `meta.capabilities`
+        let upstream_tags = vec!["chat".to_string(), "tools".to_string()];
+        let user_patch = serde_json::json!({
+            "supportsToolCall": false,
+            "supportsImages": true,
+        });
+        let patch = user_patch.as_object().unwrap().clone();
+        let mut effective_tags = upstream_tags.clone();
+        capability_overrides::apply_to_capabilities(&mut effective_tags, &patch);
+        let flags = capability_overrides::effective_flags(&upstream_tags, Some(&patch));
+        // 用户关掉工具调用：即使上游说支持，出口也是 false
+        assert_eq!(flags["supportsToolCall"], serde_json::json!(false));
+        // 用户打开图片：上游没说，出口 true
+        assert_eq!(flags["supportsImages"], serde_json::json!(true));
+        // 未覆盖的键沿用上游
+        assert_eq!(flags["supportsChat"], serde_json::json!(true));
+        // 标签集同源：tools 被移除、vision 被加上
+        assert!(!effective_tags.iter().any(|t| t == "tools"));
+        assert!(effective_tags.iter().any(|t| t == "vision"));
     }
 
     #[test]

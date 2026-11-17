@@ -40,23 +40,99 @@ use crate::plugin_host::{PluginProcess, RpcError, StreamCall, StreamEvent};
 /// call_stream 等 head 的超时（与 rpc.rs 的 HEAD_TIMEOUT 一致）。
 const HEAD_WAIT_MS: u64 = 30_000;
 
-/// 插件后端：原生二进制进程或脚本宿主的 RPC 通道。
+/// 插件后端：原生二进制进程 / 脚本宿主 RPC 通道 / Wasm 沙箱宿主。
 ///
-/// 两者的 wire 契约完全相同（`conversation` → head/chunk/end），差异只在
-/// 「谁持有通道」：原生包每包一个进程，脚本包共用一个 Bun 进程（通道随
-/// 宿主热切换替换）。桥只依赖 `&RpcChannel`，两个变体行为一致。
+/// 三个变体的 wire 契约完全相同（`conversation` → head/chunk/end），差异只在
+/// 「谁产出事件流」：原生包每包一个进程，脚本包共用一个 Bun 进程（通道随
+/// 宿主热切换替换），Wasm 包是没有 RPC 通道的进程内沙箱。
 pub enum PluginBackend {
     /// 原生插件子进程。
     Native(Arc<PluginProcess>),
     /// 脚本宿主（一个 Bun 承载全部脚本包）。
     Script(Arc<RpcChannel>),
+    /// Wasm 沙箱宿主（每次调用独立实例，见 `plugin_host::wasm`）。
+    ///
+    /// **没有 `RpcChannel`** —— 事件流由 `WasmHost::open_stream` 产出，本桥用
+    /// [`ConversationStream`] 把两条后端的事件序列归一。
+    Wasm(Arc<crate::plugin_host::wasm::WasmHost>),
 }
 
-impl PluginBackend {
-    fn rpc(&self) -> &RpcChannel {
+/// 一次 conversation 的事件流 —— 两种后端产出形状的归一。
+///
+/// 原生/脚本后端的 [`StreamCall`] 字段私有、只能在 `rpc.rs` 内构造；Wasm
+/// 后端则产出 `mpsc<StreamEvent>` + 一个 sink。两者对消费者的契约完全一致：
+/// `Some(Ok(ev))` / `Some(Err(e))` / `None`（正常结束），因此 `chat` /
+/// `chat_stream` 里的 4 个消费点不需要区分后端。
+pub enum ConversationStream {
+    /// 原生包 / 脚本宿主的 RPC 流。
+    Rpc(StreamCall),
+    /// Wasm 沙箱流。
+    Wasm {
+        rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+        sink: Arc<crate::plugin_host::wasm::ChannelSink>,
+        host: Arc<crate::plugin_host::wasm::WasmHost>,
+        /// 流 id（中途放弃时 `host.abort_stream(id)`）。
+        id: i64,
+        /// 已产出错误后停止再读（错误只交付一次）。
+        failed: bool,
+        /// 已产出 `End` 后返回 `None`。
+        ended: bool,
+    },
+}
+
+impl ConversationStream {
+    /// 取下一个事件。
+    ///
+    /// 与 `StreamCall::next` 的返回值语义逐字对齐：
+    /// - `Some(Ok(ev))` —— 一个事件
+    /// - `Some(Err(e))` —— 中途失败（含 Wasm 沙箱的终结错误）
+    /// - `None` —— 流已终态
+    pub(crate) async fn next(&mut self) -> Option<Result<StreamEvent, RpcError>> {
         match self {
-            Self::Native(process) => &process.rpc,
-            Self::Script(channel) => channel,
+            Self::Rpc(call) => call.next().await,
+            Self::Wasm {
+                rx,
+                sink,
+                failed,
+                ended,
+                ..
+            } => {
+                if *ended || *failed {
+                    return None;
+                }
+                match rx.recv().await {
+                    Some(event) => {
+                        if matches!(event, StreamEvent::End) {
+                            *ended = true;
+                        }
+                        Some(Ok(event))
+                    }
+                    None => {
+                        // 通道关闭：先查沙箱是否留下终结错误。**不查这一步会把
+                        // 「插件失败」伪装成「正常空回复」**，failover 失效。
+                        if let Some(error) = sink.take_error() {
+                            *failed = true;
+                            return Some(Err(RpcError {
+                                message: error.message,
+                                code: error.code,
+                            }));
+                        }
+                        *ended = true;
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ConversationStream {
+    fn drop(&mut self) {
+        // 消费方中途放弃（流未读完就被丢弃）：Wasm 侧要显式取消，
+        // 否则沙箱会跑到调用超时（3600s）。Rpc 分支的 `StreamCall::drop`
+        // 自己会摘除登记，无需处理。
+        if let Self::Wasm { host, id, .. } = self {
+            let _ = host.abort_stream(*id);
         }
     }
 }
@@ -91,22 +167,69 @@ impl PluginBridge {
         }
     }
 
+    /// Wasm 沙箱桥（`provider` 是 `wasm.json` 声明的 provider id）。
+    pub fn new_wasm(host: Arc<crate::plugin_host::wasm::WasmHost>, provider: String) -> Self {
+        Self {
+            backend: PluginBackend::Wasm(host),
+            provider,
+        }
+    }
+
+    /// 测试入口：暴露私有 `open_conversation`（仅 `cfg(test)`）。
+    #[cfg(test)]
+    pub async fn open_conversation_for_test(
+        &self,
+        req: &ChatFormat,
+    ) -> Result<ConversationStream, BridgeError> {
+        self.open_conversation(req).await
+    }
+
     /// 发起一次 conversation 流式调用。
     ///
     /// body 恒带 `stream: true`（见模块头说明）；`account` 传空串——
     /// 插件渠道的账号语义由插件侧 provider 自己管理（插件契约里
     /// account 是账号库主键，渠道级桥没有账号上下文）。
-    async fn open_conversation(&self, req: &ChatFormat) -> Result<StreamCall, BridgeError> {
+    ///
+    /// 三个后端在此分派：Native/Script 走 RPC `call_stream`，Wasm 走
+    /// `WasmHost::open_stream` + `ChannelSink`。产出的 [`ConversationStream`]
+    /// 对上层完全同形。
+    async fn open_conversation(&self, req: &ChatFormat) -> Result<ConversationStream, BridgeError> {
         let params = json!({
             "provider": self.provider,
             "account": "",
             "body": build_openai_body(req),
         });
-        self.backend
-            .rpc()
-            .call_stream("conversation", params)
-            .await
-            .map_err(|e| map_rpc_error(&e))
+        match &self.backend {
+            PluginBackend::Native(process) => process
+                .rpc
+                .call_stream("conversation", params)
+                .await
+                .map(ConversationStream::Rpc)
+                .map_err(|e| map_rpc_error(&e)),
+            PluginBackend::Script(channel) => channel
+                .call_stream("conversation", params)
+                .await
+                .map(ConversationStream::Rpc)
+                .map_err(|e| map_rpc_error(&e)),
+            PluginBackend::Wasm(host) => {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                let sink = crate::plugin_host::wasm::ChannelSink::new(tx);
+                let handle = host
+                    .open_stream(params, sink.clone())
+                    .await
+                    .map_err(|error| {
+                        BridgeError::Transport(format!("Wasm 插件启动失败: {error}"))
+                    })?;
+                Ok(ConversationStream::Wasm {
+                    rx,
+                    sink,
+                    host: host.clone(),
+                    id: handle.id,
+                    failed: false,
+                    ended: false,
+                })
+            }
+        }
     }
 }
 
@@ -133,7 +256,7 @@ fn map_rpc_error(err: &RpcError) -> BridgeError {
 /// finish_stream 的同款约定），先收齐再按上游错误形状解析，不让客户端
 /// 拿到一段 SSE 当错误。插件违规先发正文时按 200 继续（少一帧头不把
 /// 整条流作废，正文字节随 `pending` 交回调用方）。
-async fn take_head(call: &mut StreamCall) -> Result<(u16, Option<Vec<u8>>), BridgeError> {
+async fn take_head(call: &mut ConversationStream) -> Result<(u16, Option<Vec<u8>>), BridgeError> {
     match call.next().await {
         Some(Ok(StreamEvent::Head { status, .. })) => {
             if (200..300).contains(&status) {
@@ -151,7 +274,7 @@ async fn take_head(call: &mut StreamCall) -> Result<(u16, Option<Vec<u8>>), Brid
 
 /// 收齐流剩余字节（失败状态的错误体用）。上限 1 MiB，超限后继续丢弃
 /// 直到流走完——不提前丢句柄，否则插件侧发送窗口悬挂到自己超时。
-async fn drain_stream(call: &mut StreamCall) -> Result<Vec<u8>, BridgeError> {
+async fn drain_stream(call: &mut ConversationStream) -> Result<Vec<u8>, BridgeError> {
     const CAP: usize = 1 << 20;
     let mut out = Vec::new();
     loop {

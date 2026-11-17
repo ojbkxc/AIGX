@@ -47,8 +47,16 @@ const IDLE_EVICT: Duration = Duration::from_secs(600);
 
 /// 转换器注册表（每个宿主进程一份——`stream` 键是该宿主的 RPC id，
 /// 跨宿主重启会复用，不能全局共享）。
+///
+/// 两张表：
+/// - `streams`：**数字键**（`script.protocol.chunk/finish`，键 = 宿主 RPC id）；
+/// - `named`：**字符串键**（`script.stream.open/push/close`，键 = 网关 uuid）
+///   ——A2A 宿主 `provider.mjs` 走的是这一族。
+///
+/// 两个方法族各管一张表，互不影响（同一宿主可同时跑两种消费方）。
 pub struct ProtocolRegistry {
     streams: Mutex<HashMap<i64, ConverterEntry>>,
+    named: Mutex<HashMap<String, ConverterEntry>>,
 }
 
 struct ConverterEntry {
@@ -96,7 +104,64 @@ impl ProtocolRegistry {
     pub fn new() -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             streams: Mutex::new(HashMap::new()),
+            named: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// `script.stream.open {protocol, model, session?}` → `{id}`。
+    ///
+    /// 字符串键的转换器（A2A `provider.mjs` 的 `script.stream.*` 族）：
+    /// 网关生成 uuid 作 id，宿主后续用 `push/close` 指认。
+    pub async fn open_named(&self, protocol: &str) -> Result<Value, RpcError> {
+        let now = Instant::now();
+        let mut map = self.named.lock().await;
+        map.retain(|_, e| now.duration_since(e.last_used) < IDLE_EVICT);
+        if map.len() >= MAX_CONVERTERS {
+            return Err(RpcError {
+                message: format!("too many protocol converters (max {MAX_CONVERTERS})"),
+                code: Some("too_many".into()),
+            });
+        }
+        let converter = Converter::new(protocol)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        map.insert(
+            id.clone(),
+            ConverterEntry {
+                converter,
+                last_used: now,
+            },
+        );
+        Ok(json!({ "id": id }))
+    }
+
+    /// `script.stream.push {id, data(b64), finish?}` → `{data(b64)}`。
+    ///
+    /// `finish=true` 时把尾巴一并冲刷并移除会话（与 A2A `push` 同语义）。
+    pub async fn push_named(&self, id: &str, data: &[u8], finish: bool) -> Result<Value, RpcError> {
+        let now = Instant::now();
+        let mut map = self.named.lock().await;
+        let entry = map.get_mut(id).ok_or_else(|| RpcError {
+            message: format!("stream converter '{id}' is closed"),
+            code: Some("not_found".into()),
+        })?;
+        entry.last_used = now;
+        let mut out = entry.converter.push(data);
+        if finish {
+            out.extend(entry.converter.finish());
+            map.remove(id);
+        }
+        Ok(json!({ "data": STANDARD.encode(&out) }))
+    }
+
+    /// `script.stream.close {id}`：移除会话（幂等）。
+    pub async fn close_named(&self, id: &str) {
+        self.named.lock().await.remove(id);
+    }
+
+    /// 清空全部转换器（宿主重建/关闭时调）。
+    pub async fn clear(&self) {
+        self.streams.lock().await.clear();
+        self.named.lock().await.clear();
     }
 
     /// `script.protocol.chunk`：喂一段上游字节，返回 OpenAI SSE 字节（b64）。

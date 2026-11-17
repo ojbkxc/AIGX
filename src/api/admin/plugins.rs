@@ -13,6 +13,17 @@
 //!
 //! 列表/安装的 JSON 形状对齐前端 `PluginPackSummary` / `PluginsPayload`
 //! / `StorePlugin`（见 `frontend/src/types/index.ts`），**形状不要改**。
+//! A2A 对齐波（v1.0.63）只做**加字段**：包视图补 `icons` / `ui` / `homepage` /
+//! `providerCategory` / `providerEnabled` / `startup`，顶层补 `maxPackBytes` /
+//! `scripts` / `startup`。既有键一个不动。
+//!
+//! ## pack.json 扩展字段怎么读
+//!
+//! `icons`（图标**目录**相对路径）/ `ui`（页面清单）/ `homepage` /
+//! `provider_category` 是上游 3.5 清单新增的键。本文件**直接读 `pack.json`
+//! 的 JSON**（不依赖 `install::PackManifest` 的结构体字段），理由：
+//! 清单格式是插件的对外契约、可随上游演进，网关只消费其中几把键；
+//! 绑上结构体反而要求每加一个键就改一次解包类型。
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -27,6 +38,7 @@ use serde_json::{json, Value};
 
 use super::common::{error_response, verify_admin};
 use crate::api::openai::AppState;
+use crate::plugin_host::install::MAX_PACK_BYTES;
 use crate::plugin_host::{PackMeta, PluginHostManager};
 use crate::storage::FileStore;
 
@@ -110,6 +122,30 @@ impl ProviderGates {
     }
 }
 
+// ── 路由 ────────────────────────────────────────────────────────────
+
+/// 本文件**自己接管**的那几条路由（`/api/plugins/startup|settings|reload`）。
+///
+/// 为什么单独出一个 `router()`：`main.rs` 的 `/api/plugins*` 那一段是
+/// admin_routes 里的**平铺 `.route(...)`** 写法（历史原因），而 T2 新增的
+/// 三个端点要跟同一段共存。把新端点收进这里，integrator 只需在
+/// `.merge(...)` 区加一行；老的平铺行不用动（路由不重叠）。
+pub fn router() -> axum::Router<AppState> {
+    axum::Router::new()
+        .route(
+            "/api/plugins/startup",
+            axum::routing::get(handle_plugin_startup),
+        )
+        .route(
+            "/api/plugins/settings",
+            axum::routing::get(handle_plugin_settings).patch(handle_save_plugin_settings),
+        )
+        .route(
+            "/api/plugins/reload",
+            axum::routing::post(handle_reload_plugin),
+        )
+}
+
 // ── 请求体 ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +193,10 @@ fn all_provider_kinds() -> Vec<&'static str> {
 }
 
 /// 一家 provider 的启用/加载态（前端 `PluginPackProvider` 契约）。
+///
+/// `toggle` 是前端开关能力标志（前端按值渲染）：`"global"` = 本家开关写
+/// 全局 `ProviderGates`（内置目录包）；`"none"` = 无 provider 级开关
+/// （原生插件包只有整包启停）。
 fn provider_view(kind: &str, disabled: &HashSet<String>) -> Value {
     let label = crate::model::manage::provider_label(kind);
     json!({
@@ -166,6 +206,8 @@ fn provider_view(kind: &str, disabled: &HashSet<String>) -> Value {
         "enabled": !disabled.contains(kind),
         // 内置实现：启用的家随进程常驻（registry 静态表），恒 loaded=enabled
         "loaded": !disabled.contains(kind),
+        // 开关写入全局 ProviderGates（数据面选号即时生效）
+        "toggle": "global",
     })
 }
 
@@ -195,7 +237,193 @@ fn builtin_pack_view(disabled: &HashSet<String>) -> Value {
         "host": null,
         // 内置包混装各家，providerCategory 留空（前端只对外置包分色）
         "providerCategory": null,
+        // A2A 对齐字段：内置目录无独立图标目录 / 页面 / 清单主页
+        "icons": null,
+        "ui": [],
+        "providerEnabled": builtin_provider_enabled(disabled),
+        "startup": null,
     })
+}
+
+/// 内置目录的包级 provider 启停展平（A2A `providerEnabled`：`{provider: bool}`）。
+///
+/// 内置包的 provider 级开关是 `ProviderGates` 的停用名单，逐个 provider
+/// 表达成 `enabled` 布尔；没有记录 = 启用。
+fn builtin_provider_enabled(disabled: &HashSet<String>) -> Value {
+    let mut map = serde_json::Map::new();
+    for kind in all_provider_kinds() {
+        map.insert(kind.to_string(), Value::Bool(!disabled.contains(kind)));
+    }
+    Value::Object(map)
+}
+
+/// 外置包的 `pack.json` 清单子集（A2A 3.5 清单扩展键）。
+///
+/// 只读这几把键；读不到 / 解析失败一律返回 `None`（视图回落默认值，
+/// 不报错——清单损坏由 `entryPresent` 与安装日志体现）。
+#[derive(Debug, Default, Clone)]
+struct PackManifestExtras {
+    description: Option<String>,
+    homepage: Option<String>,
+    provider_category: Option<String>,
+    /// 图标**目录**相对路径（清单 `icons` 键）。
+    icons: Option<String>,
+    /// 页面清单（清单 `ui` 键）。
+    ui: Vec<Value>,
+}
+
+/// 读包版本目录里的 `pack.json` 扩展键。
+fn manifest_extras(version_dir: &std::path::Path) -> PackManifestExtras {
+    let text = match std::fs::read_to_string(version_dir.join("pack.json")) {
+        Ok(text) => text,
+        Err(_) => return PackManifestExtras::default(),
+    };
+    let value: Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(_) => return PackManifestExtras::default(),
+    };
+    let string = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    PackManifestExtras {
+        description: string("description"),
+        homepage: string("homepage"),
+        provider_category: string("provider_category"),
+        icons: string("icons"),
+        ui: value
+            .get("ui")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+/// 图标文件体积上限（2MB，A2A 同值）。
+///
+/// 包里图标是界面用的 44px 徽章，正常几十 KB。超过这个量级多半是把整张
+/// 4K 原图塞进了包 —— 内联进列表响应会让面板每次刷新拖几 MB，宁可不显示
+/// 图标（回落字母）。
+const ICON_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 从版本目录读出包图标，转成 data URI。
+///
+/// 优先顺序 `logo.*` → `icon.*` → 目录内任意一张图（排序稳定）。任何一步
+/// 失败返回 `None`（装饰性字段不该让列表失败）。路径校验：目录键不得是
+/// 绝对路径 / 盘符 / 含 `..`；命中文件 canonicalize 后必须仍在版本目录内。
+fn pack_icon(version_dir: &std::path::Path, icons_dir: Option<&str>) -> Option<String> {
+    let icons_dir = icons_dir?;
+    if icons_dir.starts_with(['/', '\\'])
+        || icons_dir.contains(':')
+        || icons_dir.split(['/', '\\']).any(|part| part == "..")
+    {
+        return None;
+    }
+    let icons_dir = version_dir.join(icons_dir);
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for stem in ["logo", "icon"] {
+        for ext in ["png", "webp", "jpg", "jpeg", "svg"] {
+            candidates.push(icons_dir.join(format!("{stem}.{ext}")));
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&icons_dir) {
+        let mut rest: Vec<std::path::PathBuf> = entries
+            .filter_map(|item| item.ok())
+            .map(|item| item.path())
+            .filter(|path| path.is_file() && is_image_path(path))
+            .collect();
+        rest.sort();
+        candidates.extend(rest);
+    }
+    let path = candidates
+        .into_iter()
+        .find(|path| path.is_file())?
+        .canonicalize()
+        .ok()?;
+    if !path.starts_with(version_dir.canonicalize().ok()?) {
+        return None;
+    }
+    if std::fs::metadata(&path).ok()?.len() > ICON_MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let mime = match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "jpg" | "jpeg" => "image/jpeg",
+        "svg" => "image/svg+xml",
+        _ => return None,
+    };
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:{mime};base64,{encoded}"))
+}
+
+/// 扩展名是不是界面能显示的图片。
+fn is_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "png" | "webp" | "jpg" | "jpeg" | "svg"
+    )
+}
+
+/// 把包清单里的 UI 页面展开成客户端能直接用的形态（`url` 指向网关托管地址）。
+///
+/// `entry` 是包自己写的字符串。不校验的话，一个包可以写
+/// `../../../../etc/passwd` 让托管端点去读包外的文件 —— 那是路径穿越。
+/// 这里在**声明侧**就挡掉：必须是相对路径、不含 `..`、以 `.html` 结尾。
+/// 托管端点（`plugin_ui::resolve_ui_file`）那边还会再挡一次（纵深防御）。
+fn pack_ui_pages(pack_id: &str, pages: &[Value]) -> Vec<Value> {
+    pages
+        .iter()
+        .filter_map(|page| {
+            let entry = page.get("entry").and_then(Value::as_str)?;
+            if !ui_entry_ok(entry) {
+                return None;
+            }
+            let id = page
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .unwrap_or(entry);
+            Some(json!({
+                "id": id,
+                "title": page.get("title").and_then(Value::as_str).unwrap_or(id),
+                "icon": page.get("icon").and_then(Value::as_str),
+                // 包 id 与入口都进 URL；前者安装期已限 `[a-z0-9-]`，后者上面已校验
+                "url": format!("/plugins/{pack_id}/ui/{}", entry.replace('\\', "/")),
+                // 原样转出插件申报的默认分组：分组 id 是客户端的事实，网关不解释
+                "group": page.get("group").and_then(Value::as_str),
+                "order": page.get("order").and_then(Value::as_i64).unwrap_or(0),
+            }))
+        })
+        .collect()
+}
+
+/// UI 页面入口是否合法（相对、不含 `..`、以 `.html` 结尾）。
+fn ui_entry_ok(entry: &str) -> bool {
+    let normalized = entry.replace('\\', "/");
+    if normalized.is_empty() || normalized.starts_with('/') || normalized.contains(':') {
+        return false;
+    }
+    if normalized.split('/').any(|segment| segment == "..") {
+        return false;
+    }
+    normalized.to_ascii_lowercase().ends_with(".html")
 }
 
 /// 外置插件包视图（前端 `PluginPackSummary` 契约）。
@@ -204,10 +432,14 @@ fn builtin_pack_view(disabled: &HashSet<String>) -> Value {
 ///   `default_enabled` 只是建议，网关不据此裁剪——包启用即全部申报；
 /// - `loaded` = 包启用 **且** 握手申报了该家（进程真的在跑）；
 /// - `entryPresent` 实测磁盘（入口被手工删过 = false，前端提示重装）；
-/// - `host.crashes` 取监督循环的崩溃计数（重新启用清零）。
+/// - `host.crashes` 取监督循环的崩溃计数（重新启用清零）；
+/// - `startup` / `providerEnabled` 是 A2A 对齐字段：宿主状态投影与逐家启停
+///   （外置包的 provider 级开关与包级同源，真实语义见 `providers[].enabled`）。
 fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
     let rt = host.runtime_of(&meta.id);
+    let version_dir = meta.version_dir(host.plugins_root());
     let entry_present = meta.entry_path(host.plugins_root()).is_file();
+    let extras = manifest_extras(&version_dir);
     let providers: Vec<Value> = meta
         .providers
         .iter()
@@ -218,13 +450,36 @@ fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
                 "label": pp.label,
                 "enabled": meta.enabled,
                 "loaded": meta.enabled && loaded,
+                // 原生插件包没有 provider 级字段（PackMeta 只有包级 enabled）：
+                // 前端据此把开关渲染成「随包启停」的只读徽标，不调开关接口。
+                "toggle": "none",
             })
         })
         .collect();
+    // `providerEnabled`：包级启停展平（外置包不支持逐家单独开关，
+    // 全部随包级 —— 与 `providers[].enabled` 同源，前端两处读一致）
+    let mut provider_enabled = serde_json::Map::new();
+    for pp in &meta.providers {
+        provider_enabled.insert(pp.id.clone(), Value::Bool(meta.enabled));
+    }
+    let startup = json!({
+        "phase": if !meta.enabled {
+            "disabled"
+        } else if rt.running {
+            "ready"
+        } else if rt.last_error.is_some() {
+            "failed"
+        } else {
+            "queued"
+        },
+        "running": rt.running,
+        "crashes": rt.crashes,
+        "error": rt.last_error,
+    });
     json!({
         "id": meta.id,
         "name": meta.name,
-        "description": null,
+        "description": extras.description,
         "version": meta.version,
         "requiredVersion": null,
         "updateRequired": false,
@@ -234,8 +489,8 @@ fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
         "installedAt": meta.installed_at,
         "protocol": meta.protocol,
         "entryPresent": entry_present,
-        "homepage": null,
-        "icon": null,
+        "homepage": extras.homepage,
+        "icon": pack_icon(&version_dir, extras.icons.as_deref()),
         "providers": providers,
         "host": {
             "running": rt.running,
@@ -244,7 +499,12 @@ fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
             "disabled": !meta.enabled,
             "lastError": rt.last_error,
         },
-        "providerCategory": null,
+        "providerCategory": extras.provider_category,
+        // A2A 对齐字段
+        "icons": extras.icons,
+        "ui": pack_ui_pages(&meta.id, &extras.ui),
+        "providerEnabled": Value::Object(provider_enabled),
+        "startup": startup,
     })
 }
 
@@ -275,10 +535,81 @@ pub async fn handle_list_plugins(
             "target": std::env::consts::OS,
             "protocol": 1,
             "pluginsDir": state.plugin_host.plugins_root().display().to_string(),
+            // A2A 对齐字段（v1.0.63）：上传上限 / 脚本宿主快照 / 任务启动快照
+            "maxPackBytes": MAX_PACK_BYTES,
+            "scripts": script_snapshot(&state),
+            "startup": startup_snapshot(&state, &packs),
             "catalog": catalog,
             "updates": [],
             "operations": [],
         }
+    })))
+}
+
+/// 脚本插件宿主快照（A2A 顶层 `scripts`：脚本包与 provider 归属）。
+///
+/// 与 `/api/plugins/scripts` 同一数据源，这里只出**摘要**：状态 + 接管的
+/// provider id 清单（列表页判「哪家由脚本接管」够用，详情走专用端点）。
+fn script_snapshot(state: &AppState) -> Value {
+    let status = state.script_host.status();
+    json!({
+        "running": status.running,
+        "packages": status.packages,
+        "providers": status.providers,
+        "crashes": status.crashes,
+        "lastError": status.last_error,
+    })
+}
+
+/// 启动总览（A2A `plugin_host::startup::snapshot()` 的 AIGX 投影）。
+///
+/// 由包视图聚合：`packs` 里每包一行（阶段 + 错误 + 是否在跑），
+/// `pending` = 有启用包但进程还没就绪（前端据此轮询列表）。
+fn startup_snapshot(state: &AppState, packs: &[Value]) -> Value {
+    let mut entries = Vec::new();
+    let mut pending = false;
+    for pack in packs {
+        let id = pack["id"].as_str().unwrap_or("");
+        if id == BUILTIN_PACK_ID {
+            continue;
+        }
+        let enabled = pack["enabled"].as_bool().unwrap_or(false);
+        let running = pack["host"]["running"].as_bool().unwrap_or(false);
+        let phase = pack["startup"]["phase"].as_str().unwrap_or("queued");
+        let error = pack["startup"]["error"].clone();
+        if enabled && !running && phase != "failed" {
+            pending = true;
+        }
+        entries.push(json!({
+            "id": id,
+            "enabled": enabled,
+            "running": running,
+            "phase": phase,
+            "error": error,
+        }));
+    }
+    json!({
+        "packs": entries,
+        "pending": pending,
+        "script": script_snapshot(state),
+        "now": chrono::Utc::now().timestamp_millis(),
+    })
+}
+
+/// GET /api/plugins/startup —— 启动/加载阶段快照（各包一行）。
+pub async fn handle_plugin_startup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let disabled = state.provider_gates.disabled_set();
+    let mut packs = vec![builtin_pack_view(&disabled)];
+    for meta in state.plugin_host.registry().list() {
+        packs.push(external_pack_view(&meta, &state.plugin_host));
+    }
+    Ok(Json(json!({
+        "success": true,
+        "data": startup_snapshot(&state, &packs),
     })))
 }
 
@@ -861,8 +1192,21 @@ pub async fn handle_set_plugin_provider_enabled(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     if body.id != BUILTIN_PACK_ID {
+        // 包存在 ≠ 支持 provider 级开关：原生插件包（PackMeta）只有包级
+        // enabled，本轮不提供逐家开关——回 400 说明，而不是 404「不存在」
+        // （那会让前端以为要重装）。脚本插件走「脚本插件（Magpie）」页。
+        if state.plugin_host.registry().get(&body.id).is_some() {
+            return Err(error_response(
+                &format!(
+                    "插件包「{}」的提供商级开关暂未提供（原生插件包只支持整包启停）；\
+                     脚本插件请在「脚本插件（Magpie）」页按家启停",
+                    body.id
+                ),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
         return Err(error_response(
-            &format!("插件包「{}」不存在（AIGX 当前只有内置目录包）", body.id),
+            &format!("插件包「{}」不存在", body.id),
             StatusCode::NOT_FOUND,
         ));
     }
@@ -886,6 +1230,219 @@ pub async fn handle_set_plugin_provider_enabled(
     Ok(Json(json!({
         "success": true,
         "data": { "id": body.provider, "enabled": body.enabled, "changed": changed }
+    })))
+}
+
+/// ── 包级设置（`/api/plugins/settings`）────────────────────────────
+///
+/// A2A 的这份设置是「插件更新通道与检查计划」（通道跟随软件 / 自定义、
+/// 自动检查、间隔、正式/beta）。AIGX 的对应事实源是 `[update]` 段
+/// （`auto_check` / `include_prerelease` / `interval_hours`），所以这里做
+/// **投影**而不是另存一份：GET 出 `[update]` 的插件相关子集（含 `mode`
+/// 标记它来自全局），PATCH 写回 `[update]`。这样「插件页改了更新策略」
+/// 与「设置页改了更新策略」是同一份数据，不会分叉。
+///
+/// 键名用 A2A 的 camelCase（前端契约）：`autoCheck` / `intervalMinutes` /
+/// `beta` / `autoUpdate` / `stable` / `channelMode` / `checkMode`。
+///
+/// 设置键白名单（PATCH 只收这些）。`interval` 是 `intervalMinutes` 的
+/// 兼容别名（A2A 历史上两种拼法都出现过）。
+const PLUGIN_SETTINGS_KEYS: &[&str] = &[
+    "autoCheck",
+    "intervalMinutes",
+    "interval",
+    "beta",
+    "stable",
+    "autoUpdate",
+    "channelMode",
+    "checkMode",
+];
+
+/// `[update]` → A2A 形状的插件设置。
+fn plugin_settings_view(config: &crate::config::UpdateConfig) -> Value {
+    json!({
+        // 通道与检查计划都「跟随软件」：AIGX 的更新设置是全局一份，
+        // 没有独立的插件通道/计划，如实报 follow
+        "channelMode": "follow",
+        "checkMode": "follow",
+        "autoCheck": config.auto_check,
+        // A2A 单位是分钟；AIGX `[update]` 是小时
+        "interval": config.interval_hours.saturating_mul(60),
+        "stable": !config.include_prerelease,
+        "beta": config.include_prerelease,
+        // AIGX 的「自动应用」比「自动下载」激进一档：如实映射到 auto_update
+        "autoUpdate": config.auto_apply,
+    })
+}
+
+/// GET /api/plugins/settings
+pub async fn handle_plugin_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let config = state.config_manager.get().await;
+    Ok(Json(json!({
+        "success": true,
+        "data": plugin_settings_view(&config.update),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PluginSettingsPatch {
+    #[serde(default, rename = "autoCheck")]
+    pub auto_check: Option<bool>,
+    /// 分钟（A2A 口径）；写回时换算成小时（最小 1 小时）。
+    #[serde(default, rename = "intervalMinutes", alias = "interval")]
+    pub interval_minutes: Option<i64>,
+    #[serde(default)]
+    pub beta: Option<bool>,
+    #[serde(default)]
+    pub stable: Option<bool>,
+    #[serde(default, rename = "autoUpdate")]
+    pub auto_update: Option<bool>,
+    #[serde(default, rename = "channelMode")]
+    pub channel_mode: Option<String>,
+    #[serde(default, rename = "checkMode")]
+    pub check_mode: Option<String>,
+}
+
+/// PATCH /api/plugins/settings —— 写回 `[update]`（与设置页同一份数据）。
+pub async fn handle_save_plugin_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    // 键白名单先过一遍：拼错的键要明确 400，不能静默吞掉
+    if let Some(object) = body.as_object() {
+        if let Some(unknown) = object
+            .keys()
+            .find(|key| !PLUGIN_SETTINGS_KEYS.contains(&key.as_str()))
+        {
+            return Err(error_response(
+                &format!("未知的插件设置：{unknown}"),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    } else {
+        return Err(error_response(
+            "插件设置必须是 JSON 对象",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let patch: PluginSettingsPatch = match serde_json::from_value(body) {
+        Ok(patch) => patch,
+        Err(_) => {
+            return Err(error_response(
+                "插件设置字段类型无效",
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    };
+    // 显式「自定义」模式：AIGX 没有独立通道/计划，只有 follow 一种事实；
+    // 报错引导而不是假装接受（接受了却还是全局值，用户会以为设置生效了）
+    for (key, value) in [
+        ("channelMode", patch.channel_mode.as_deref()),
+        ("checkMode", patch.check_mode.as_deref()),
+    ] {
+        if let Some(mode) = value {
+            if mode != "follow" {
+                return Err(error_response(
+                    &format!(
+                        "{key} 只支持 follow（AIGX 的更新通道与检查计划跟随全局 [update] 段）"
+                    ),
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+        }
+    }
+    // 通道至少留一个（A2A 同口径）：两个都显式关掉 = 没有任何更新源
+    if patch.beta == Some(false) && patch.stable == Some(false) {
+        return Err(error_response(
+            "至少需要关注正式版或 beta 版中的一个通道",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let mut config = state.config_manager.get().await;
+    if let Some(value) = patch.auto_check {
+        config.update.auto_check = value;
+    }
+    if let Some(value) = patch.auto_update {
+        config.update.auto_apply = value;
+    }
+    // `beta` 是 `include_prerelease` 的镜像：显式给值即写入
+    if let Some(beta) = patch.beta {
+        config.update.include_prerelease = beta;
+    }
+    if let Some(minutes) = patch.interval_minutes {
+        if !(60..=PLUGIN_SETTINGS_MAX_MINUTES).contains(&minutes) {
+            return Err(error_response(
+                "检查间隔必须是 60 ~ 10080 分钟（1 小时 ~ 7 天）",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        config.update.interval_hours = (minutes / 60).max(1) as u64;
+    }
+    state.config_manager.update(config).await.map_err(|error| {
+        error_response(
+            &format!("保存插件设置失败: {error}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    let config = state.config_manager.get().await;
+    Ok(Json(json!({
+        "success": true,
+        "data": plugin_settings_view(&config.update),
+    })))
+}
+
+/// 间隔上限（分钟）：7 天（与 A2A `INTERVAL_MAX_MINUTES` 同量级）。
+const PLUGIN_SETTINGS_MAX_MINUTES: i64 = 7 * 24 * 60;
+
+/// POST /api/plugins/reload —— 热重启一个外置包（停 → 启）。
+///
+/// 与「停用再启用」的差别只在**最终状态**：reload 不改变 `enabled`
+/// 选择（启用中的包重启后仍启用；停用中的包 reload = 直接报错引导）。
+pub async fn handle_reload_plugin(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PackIdBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    if body.id == BUILTIN_PACK_ID {
+        return Err(error_response(
+            "内置供应商目录编译在二进制里，没有可重启的宿主进程",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let Some(meta) = state.plugin_host.registry().get(&body.id) else {
+        return Err(error_response(
+            &format!("插件包「{}」不存在", body.id),
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    if !meta.enabled {
+        return Err(error_response(
+            "该插件包处于停用状态；请先启用（reload 只重启已启用包的宿主进程）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    state
+        .plugin_host
+        .disable(&body.id)
+        .await
+        .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+    state
+        .plugin_host
+        .enable(&body.id)
+        .await
+        .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+    tracing::info!("[Plugins] 插件包「{}」已重载", body.id);
+    let meta = state.plugin_host.registry().get(&body.id).unwrap_or(meta);
+    Ok(Json(json!({
+        "success": true,
+        "data": { "pack": external_pack_view(&meta, &state.plugin_host) }
     })))
 }
 
@@ -1000,6 +1557,9 @@ mod tests {
         let disabled_view = provider_view("qoder", &disabled);
         assert_eq!(disabled_view["enabled"], false);
         assert_eq!(disabled_view["loaded"], false);
+        // 开关能力标志：内置目录包的开关写全局 ProviderGates
+        assert_eq!(enabled_view["toggle"], "global");
+        assert_eq!(disabled_view["toggle"], "global");
         // 标签来自 registry
         assert!(enabled_view["label"].is_string());
     }
@@ -1092,6 +1652,8 @@ mod tests {
         assert_eq!(provs[0]["label"], "Kiro");
         assert_eq!(provs[0]["enabled"], true);
         assert_eq!(provs[0]["loaded"], false);
+        // 原生插件包没有 provider 级开关（前端渲染「随包启停」只读徽标）
+        assert_eq!(provs[0]["toggle"], "none");
         // 入口落盘后 entryPresent=true
         let entry = meta.entry_path(&root);
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
@@ -1245,6 +1807,117 @@ mod tests {
                 BUILTIN_RELEASES.iter().any(|r| r.id == *id),
                 "UPSTREAM_ASSETS 有未声明的包 {id}"
             );
+        }
+    }
+
+    /// A2A 对齐字段：内置包视图必须带齐新键（前端按存在性读，缺键会显示空白）。
+    #[test]
+    fn builtin_pack_view_carries_a2a_alignment_fields() {
+        let mut disabled = HashSet::new();
+        disabled.insert("qoder".to_string());
+        let pack = builtin_pack_view(&disabled);
+        // 原有键不回归
+        assert_eq!(pack["id"], BUILTIN_PACK_ID);
+        assert_eq!(pack["enabled"], true);
+        assert!(pack["host"].is_null());
+        // 新键
+        assert_eq!(pack["icons"], Value::Null);
+        assert!(pack["ui"].as_array().unwrap().is_empty());
+        assert_eq!(pack["providerEnabled"]["qoder"], false);
+        assert_eq!(pack["providerEnabled"]["loomy"], true);
+        assert!(pack["startup"].is_null());
+        // providers 已按停用名单投影（与 providerEnabled 同源）
+        let qoder = pack["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "qoder")
+            .expect("内置包应含 qoder");
+        assert_eq!(qoder["enabled"], false);
+        // 内置包的 provider 开关走全局 gates（前端按 toggle 判可点）
+        assert_eq!(qoder["toggle"], "global");
+        assert_eq!(
+            pack["providerEnabled"]["qoder"], qoder["enabled"],
+            "providerEnabled 与 providers[].enabled 必须同源"
+        );
+    }
+
+    /// UI 页面声明侧校验：路径穿越在**声明期**就要挡掉（托管端点还会再挡一次）。
+    #[test]
+    fn pack_ui_pages_reject_traversal_entries() {
+        let pages = vec![
+            json!({ "id": "checkin", "title": "签到中心", "entry": "index.html", "order": 1 }),
+            json!({ "id": "bad1", "title": "越界", "entry": "../../etc/passwd" }),
+            json!({ "id": "bad2", "title": "绝对", "entry": "/etc/passwd.html" }),
+            json!({ "id": "bad3", "title": "非 HTML", "entry": "page.js" }),
+            json!({ "id": "bad4", "title": "盘符", "entry": "C:/x.html" }),
+        ];
+        let out = pack_ui_pages("p1", &pages);
+        assert_eq!(out.len(), 1, "只有合法页应留下: {out:?}");
+        assert_eq!(out[0]["id"], "checkin");
+        assert_eq!(out[0]["url"], "/plugins/p1/ui/index.html");
+        assert_eq!(out[0]["order"], 1);
+        // 反斜杠分隔的相对路径要归一成 `/`
+        let win = pack_ui_pages(
+            "p2",
+            &[json!({ "id": "w", "title": "W", "entry": "pages\\a.html" })],
+        );
+        assert_eq!(win[0]["url"], "/plugins/p2/ui/pages/a.html");
+    }
+
+    /// `ui_entry_ok` 的逐条边界（与 pack_ui_pages 共用同一判据）。
+    #[test]
+    fn ui_entry_validation_boundaries() {
+        assert!(ui_entry_ok("index.html"));
+        assert!(ui_entry_ok("pages/checkin.HTML"));
+        assert!(!ui_entry_ok(""));
+        assert!(!ui_entry_ok("/index.html"));
+        assert!(!ui_entry_ok("../index.html"));
+        assert!(!ui_entry_ok("a/../b.html"));
+        assert!(!ui_entry_ok("C:/index.html"));
+        assert!(!ui_entry_ok("index.js"));
+    }
+
+    /// 图标目录键校验：绝对路径 / 盘符 / `..` 一律不读。
+    #[test]
+    fn pack_icon_rejects_unsafe_dirs() {
+        let dir = std::env::temp_dir();
+        for bad in ["/etc", "C:\\icons", "../icons", "a/../../b"] {
+            assert!(pack_icon(&dir, Some(bad)).is_none(), "{bad} 应被拒绝");
+        }
+        // 不存在的目录如实回落 None（装饰字段不该失败）
+        assert!(pack_icon(&dir, Some("no-such-icons-dir")).is_none());
+    }
+
+    /// 设置投影形状：A2A camelCase 键齐、单位换算正确（小时 → 分钟）。
+    #[test]
+    fn plugin_settings_view_shape() {
+        let config = crate::config::UpdateConfig {
+            auto_check: true,
+            auto_apply: false,
+            interval_hours: 24,
+            include_prerelease: false,
+            ..Default::default()
+        };
+        let view = plugin_settings_view(&config);
+        assert_eq!(view["autoCheck"], true);
+        assert_eq!(view["autoUpdate"], false);
+        assert_eq!(view["interval"], 1440);
+        assert_eq!(view["stable"], true);
+        assert_eq!(view["beta"], false);
+        assert_eq!(view["channelMode"], "follow");
+        assert_eq!(view["checkMode"], "follow");
+        // 白名单覆盖面
+        for key in [
+            "autoCheck",
+            "intervalMinutes",
+            "beta",
+            "stable",
+            "autoUpdate",
+            "channelMode",
+            "checkMode",
+        ] {
+            assert!(PLUGIN_SETTINGS_KEYS.contains(&key), "白名单缺 {key}");
         }
     }
 }

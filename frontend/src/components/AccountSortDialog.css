@@ -1,0 +1,165 @@
+/* 账号排序规则弹窗（对齐 A2A accounts-sort 的服务端规则语义） */
+
+.asort-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.asort-panel {
+  width: min(600px, 100%);
+  max-height: min(80vh, 820px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--card-bg, var(--bg-color));
+  overflow: hidden;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+
+.asort-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.asort-head h2 {
+  margin: 0 0 2px;
+  font-size: 15px;
+}
+
+.asort-head p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.asort-head-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.asort-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.asort-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.asort-pick span {
+  color: var(--text-muted);
+}
+
+.asort-pick Select,
+.asort-pick .form-group {
+  flex: 1;
+  min-width: 0;
+}
+
+.asort-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.asort-rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.04));
+  opacity: 0.72;
+}
+
+.asort-rule.is-on {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--primary-color) 35%, var(--border-color));
+}
+
+.asort-rule-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.asort-rule-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.asort-rule-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.asort-rule .form-group {
+  width: 148px;
+  flex: 0 0 auto;
+}
+
+.asort-save {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.asort-save-hint {
+  flex: 1;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.asort-empty {
+  margin: 0;
+  padding: 12px 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.asort-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+}
+
+.asort-summary-title {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.asort-spin {
+  animation: asort-spin 1s linear infinite;
+}
+
+@keyframes asort-spin {
+  to { transform: rotate(360deg); }
+}

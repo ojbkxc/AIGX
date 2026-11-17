@@ -29,6 +29,9 @@ pub mod hub;
 pub mod image_compat;
 pub mod ip;
 pub mod log;
+// 工具服务与维护（对齐 Agent2API v3.5.0-beta.1：core/tool_services、core/maintenance）。
+// lib target 必须同步声明，否则成员在这些模块里写的单元测试不进 `cargo test --lib`。
+pub mod maintenance;
 pub mod metrics;
 pub mod model;
 pub mod monitor;
@@ -56,6 +59,7 @@ pub mod storage;
 pub mod sync;
 pub mod ticket;
 pub mod token_estimate;
+pub mod tool_services;
 pub mod update;
 pub mod usage;
 pub mod user;

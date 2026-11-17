@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronUp,
   Download,
+  DownloadCloud,
   FlaskConical,
   Image as ImageIcon,
   Lightbulb,
@@ -28,6 +29,7 @@ import { useToast } from '../components/Toast';
 import { Button, Loading, EmptyState, Switch, Tabs, Combobox, Tooltip } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ModelTestDialog from '../components/ModelTestDialog';
+import ModelCapabilityDialog from '../components/ModelCapabilityDialog';
 import RatioPanel from '../components/RatioPanel';
 import { fmtCompact } from '../lib/utils';
 import { getFilter, setFilter } from '../lib/filterMemory';
@@ -150,6 +152,8 @@ const SOURCE_DOTS: Record<string, { label: string; className: string }> = {
   remote: { label: '远程拉取', className: 'mm-src-dot remote' },
   builtin: { label: '内置', className: 'mm-src-dot builtin' },
   manual: { label: '手动', className: 'mm-src-dot manual' },
+  // models.dev 社区目录补齐（A2A models-cells 的独立来源档：能力/上下文由社区目录回填）
+  modelsdev: { label: 'models.dev 社区目录', className: 'mm-src-dot modelsdev' },
 };
 
 /** 来源列色点：有 kind 细分时按三态取色，否则按承载方（account=琥珀）兜底 */
@@ -338,6 +342,36 @@ export default function ModelManage(): JSX.Element {
   const [view, setView] = useState<ManageView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  /** 「刷新模型目录」按钮在途（A2A POST /api/models/refresh） */
+  const [refreshingModels, setRefreshingModels] = useState(false);
+  /** 能力位三态弹窗（provider × model） */
+  const [capTarget, setCapTarget] = useState<ManagedModel | null>(null);
+
+  /** 手动全量刷新模型清单（上游目录 / models.dev）；刷新后回读视图 */
+  const refreshCatalog = async (): Promise<void> => {
+    setRefreshingModels(true);
+    try {
+      const res = await api.refreshModels();
+      const data = res?.data;
+      if (data) {
+        const refreshed = Number(data.refreshed ?? 0);
+        const failed = Number(data.failed ?? 0);
+        const message = data.message || '';
+        if (failed > 0) {
+          addToast(t('刷新完成：成功 {{ok}}，失败 {{failed}}', { ok: refreshed, failed }), 'error');
+        } else if (message) {
+          addToast(message);
+        } else {
+          addToast(t('模型目录已刷新（{{n}} 批）', { n: refreshed }));
+        }
+      }
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setRefreshingModels(false);
+    }
+  };
 
   /** 全量模型 ID 候选（别名弹窗目标模型下拉）：目录 id ∪ 别名，大小写不敏感去重 */
   const modelIdOptions = useMemo(() => {
@@ -1507,6 +1541,18 @@ export default function ModelManage(): JSX.Element {
                 </span>
               </Tooltip>
             </button>
+            {/* 三态编辑入口：按 (provider, model) 显式声明能力位，
+                与上面的「元信息覆盖」（按模型 id 的目录级声明）并存 —— 前者管
+                这一条链，后者管该模型在所有链上的默认展示 */}
+            <button
+              type="button"
+              className="mm-cap-edit"
+              title={t('按提供商编辑能力位（继承 / 是 / 否 三态）')}
+              onClick={() => setCapTarget(row)}
+              aria-label={t('按提供商编辑能力位')}
+            >
+              <SlidersHorizontal size={11} />
+            </button>
           </td>
         );
       case 'alias': {
@@ -1719,10 +1765,24 @@ export default function ModelManage(): JSX.Element {
           <h1>{t('模型管理')}</h1>
           <p>{t('供应商与账号池的模型统一在此管理：测试、启停、定价、映射。')}</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
-          <RefreshCw size={13} />
-          {loading ? t('加载中...') : t('刷新')}
-        </Button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Tooltip label={t('从上游目录 / models.dev 重新拉取模型清单（不影响已保存的映射与定价）')}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void refreshCatalog()}
+              disabled={refreshingModels || loading}
+              style={{ gap: 6 }}
+            >
+              {refreshingModels ? <Loader2 size={13} className="spin" /> : <DownloadCloud size={13} />}
+              {t('刷新模型目录')}
+            </Button>
+          </Tooltip>
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
+            <RefreshCw size={13} />
+            {loading ? t('加载中...') : t('刷新')}
+          </Button>
+        </div>
       </div>
 
       {error && <div className="error-message">{error}</div>}
@@ -2985,6 +3045,15 @@ export default function ModelManage(): JSX.Element {
         <ModelTestDialog
           target={{ provider: testTarget.provider, providerLabel: testTarget.provider_label, model: testTarget }}
           onClose={() => setTestTarget(null)}
+        />
+      )}
+
+      {/* ── 能力位三态弹窗（provider × model，A2A model-capability）── */}
+      {capTarget && (
+        <ModelCapabilityDialog
+          model={capTarget}
+          onClose={() => setCapTarget(null)}
+          onSaved={() => void load()}
         />
       )}
 

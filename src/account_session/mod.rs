@@ -13,8 +13,13 @@
 //! - [`usage_query`]：余额自动查询巡检（按账号独立间隔，抄 A2A 的 usageQuery）
 //! - [`secret`]：凭证的 AES-256-GCM 真加密（抄 Agent2API 的 crypto.rs）
 //! - [`import`]：从本机其他 AI 客户端（cc-switch）导入账号
+//! - [`plugin`]：插件账号合同（不透明凭证 / 公开投影 / 身份归并 / 状态 CAS）
+//! - [`auth_file`]：账号文件导入（authFileContent / b64 / Cookies SQLite）
+//! - [`sorting`]：服务端账号排序规则（credit / balance / added）
+//! - [`usage_jobs`]：余额查询异步任务（start / cancel / 状态）
 
 pub mod adapter;
+pub mod auth_file;
 pub mod balance;
 pub mod catalog;
 pub mod flight;
@@ -22,11 +27,15 @@ pub mod import;
 pub mod limiter;
 pub mod maintenance;
 pub mod model;
+pub mod plugin;
 pub mod refresh;
 pub mod registry;
 pub mod rotate;
 pub mod secret;
+pub mod sorting;
 pub mod store;
+pub mod usage_jobs;
 pub mod usage_query;
 
+pub use model::AccountSession;
 pub use store::AccountSessionStore;

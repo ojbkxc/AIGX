@@ -261,6 +261,18 @@ pub async fn handle_desktop_import(
             model_mapping: Default::default(),
             cost_pricing: Default::default(),
         }),
+        // 插件账号 / 账号文件字段：桌面导入是原生粘贴链，全部缺省
+        auth_file_content: None,
+        auth_file_b64: None,
+        auth_file_name: None,
+        plugin_secret: None,
+        plugin_public: None,
+        plugin_identity: None,
+        hidden: None,
+        allow_route_skip: None,
+        user_agent: None,
+        usage_query: None,
+        rate_limits: None,
     };
     // 走与前端创建账号**完全相同的入口**（SSRF 校验/审计/自动建渠道/
     // 目录回填同链）——直接调 handle_create_account_session（axum 提取器

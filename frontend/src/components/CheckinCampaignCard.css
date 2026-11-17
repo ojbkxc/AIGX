@@ -1,0 +1,147 @@
+/* 签到中心活动福利卡 */
+
+.cc-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cc-account-name {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.cc-account-pick {
+  max-width: 180px;
+}
+
+.cc-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.cc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cc-notice,
+.cc-claimable-hint {
+  margin: 0;
+  font-size: 12px;
+}
+
+.cc-claimable-hint {
+  color: var(--primary-color);
+  font-weight: 500;
+}
+
+.cc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.cc-table th {
+  text-align: left;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.cc-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--hairline, var(--border-color));
+  vertical-align: top;
+}
+
+.cc-title {
+  font-weight: 600;
+}
+
+.cc-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+.cc-amount {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cc-time {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cc-gifts {
+  border-top: 1px dashed var(--border-color);
+  padding-top: 8px;
+}
+
+.cc-gifts h4 {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+}
+
+.cc-gifts ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cc-gifts li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.cc-gift-period {
+  font-weight: 500;
+}
+
+.cc-gift-amount {
+  font-variant-numeric: tabular-nums;
+}
+
+.cc-risk {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--warning-text, #d97706);
+}
+
+.cc-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.cc-hint-muted {
+  opacity: 0.75;
+}
+
+.cc-spin {
+  animation: cc-spin 1s linear infinite;
+}
+
+@keyframes cc-spin {
+  to { transform: rotate(360deg); }
+}

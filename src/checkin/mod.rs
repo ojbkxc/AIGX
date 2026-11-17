@@ -9,8 +9,9 @@
 //! ## 结构
 //!
 //! - [`store`]：签到记录台账（KV）+ 定时计划（KV）+ 设置
+//! - [`schedules`]：多条目配置的入口层（upsert / remove 校验与归一，对齐 A2A）
 //! - [`claim`]：各 provider 的执行体，统一 `{success, msg}` 契约
-//! - [`scheduler`]：30 秒轮询，按计划时刻触发，当天去重
+//! - [`scheduler`]：10 秒轮询，逐家判定时刻，当天逐家去重 + 窗口随机 + 重试/补签
 //!
 //! ## 统一契约
 //!
@@ -32,14 +33,16 @@
 //! 白名单同一取向 —— 用白名单而非黑名单，避免新增 provider 时静默漏签。
 
 pub mod benefits;
+pub mod center;
 pub mod claim;
 pub mod scheduler;
+pub mod schedules;
 pub mod store;
 
 #[cfg(test)]
 mod runtime_tests;
 
-pub use store::{CheckinOutcome, CheckinStore};
+pub use store::{AccountPlan, CheckinOutcome, CheckinRecord, CheckinSchedule, CheckinStore};
 
 /// 一次签到的结果（各家 claim 的统一返回）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -1,15 +1,20 @@
 //! 插件包元数据与 provider 归属路由。
 //!
-//! ## 归属规则（硬约束）
-//!
-//! 插件**只接管**「插件声明了、且 AIGX 无原生实现」的 provider：
+//! ## 归属规则（插件优先，2026-11 修订）
 //!
 //! ```text
-//! is_plugin_owned(p) = 已装插件声明了 p  &&  !is_native_provider(p)
+//! is_plugin_owned(p) = 已装且启用的插件声明了 p  &&  !is_hard_reserved(p)
 //! ```
 //!
-//! 原生已有的家（workbuddy / qoder / atomcode …）一律走原生 bridge，
-//! 插件不覆盖——避免「装了个插件反而把能用的家换掉」。
+//! **插件优先**：已装并启用的插件声明了某个 provider，就由插件接管——
+//! 即使 AIGX 有原生实现。原生实现只在「插件未装 / 已停用 / 加载失败」时
+//! 兜底（由数据面 `resolve.rs` 的两级查找实现：先查插件进程/脚本宿主，
+//! 拿不到再走原生 bridge）。
+//!
+//! **硬保留集合**（[`HARD_RESERVED`]）是唯一的例外：AIGX 内部虚拟 id
+//! （不指向真实上游的本地能力，如 `hub`/`cloudflare` 这类由网关自身
+//! 实现的转发目标）不允许插件接管——插件即使声明也无效。集合极小且
+//! 显式，改它要同步单测。
 //!
 //! ## 持久化
 //!
@@ -174,9 +179,22 @@ impl PackRegistry {
             .map(|p| p.id.clone())
     }
 
-    /// 是否由插件接管该 provider（插件声明 && 非原生）。
+    /// 是否由插件接管该 provider（**插件优先**）。
+    ///
+    /// 已装且启用的包声明了 `provider` 即接管；唯一例外是硬保留集合
+    /// （[`HARD_RESERVED`]，AIGX 内部虚拟 id）。
+    ///
+    /// **插件加载失败的兜底不在这里**：本方法只看「声明 + 启用」这一静态
+    /// 事实。数据面的 `PluginHostManager::process_for_provider` 与
+    /// `ScriptHostManager::route_for_provider` 还会再查「进程是否在跑」——
+    /// 插件崩了/在退避窗口 → 返回 `None` → `resolve.rs` 回落原生 bridge。
+    /// 这样 `is_plugin_owned` 保持为纯静态判据（无运行期状态依赖），
+    /// 单测稳定；「加载失败回落原生」由运行期两级查找保证。
     pub fn is_plugin_owned(&self, provider: &str) -> bool {
-        !is_native_provider(provider) && self.find_pack_for_provider(provider).is_some()
+        if is_hard_reserved(provider) {
+            return false;
+        }
+        self.find_pack_for_provider(provider).is_some()
     }
 
     fn persist(&self) -> Result<(), String> {
@@ -190,7 +208,9 @@ impl PackRegistry {
 
 /// 该 provider 是否已有 AIGX 原生实现（`PROVIDERS` ∪ `SESSION_PROVIDERS`）。
 ///
-/// 原生实现存在时，插件不接管——避免「装插件反而换掉能用的家」。
+/// **2026-11 起不再是归属判据**：插件优先，原生实现只在插件未装/停用/
+/// 加载失败时兜底。保留本函数供数据面「原生兜底」路径与管理面展示用
+/// （「这家有原生实现，插件接管后原生降为兜底」）。
 pub fn is_native_provider(provider: &str) -> bool {
     crate::account_session::registry::PROVIDERS
         .iter()
@@ -198,6 +218,24 @@ pub fn is_native_provider(provider: &str) -> bool {
         || crate::account_session::registry::SESSION_PROVIDERS
             .iter()
             .any(|(kind, _)| *kind == provider)
+}
+
+/// 硬保留集合：AIGX **内部虚拟 id**，插件不得接管（声明了也无效）。
+///
+/// 这些不是「有原生实现的家」（那些已改为插件优先），而是**不指向真实
+/// 上游**的网关自身转发目标：
+/// - `cloudflare`：CF Worker 专用桥（`hub.get_specialized("cloudflare")`），
+///   请求由网关按 Worker 协议构造，插件没有对等实现；
+/// - `hub`：Hub 虚拟提供商标识（无独立上游）；
+/// - `custom-*` 前缀：运维自定义渠道的保留前缀（`identity.mjs` 也禁止插件
+///   产出该前缀）。
+///
+/// 集合刻意极小：每加一项都要问「插件真的没法接管吗」。
+pub const HARD_RESERVED: &[&str] = &["cloudflare", "hub"];
+
+/// provider 是否属于硬保留集合（含 `custom-` 前缀）。
+pub fn is_hard_reserved(provider: &str) -> bool {
+    HARD_RESERVED.contains(&provider) || provider.starts_with("custom-")
 }
 
 #[cfg(test)]
@@ -287,7 +325,8 @@ mod tests {
 
     #[test]
     fn native_providers_are_recognized() {
-        // 这几家 AIGX 有原生实现
+        // 这几家 AIGX 有原生实现（原生实现降为「插件未装时的兜底」，
+        // 但 is_native_provider 的识别能力保留）
         assert!(is_native_provider("workbuddy"));
         assert!(is_native_provider("atomcode"));
         assert!(is_native_provider("cline"));
@@ -297,19 +336,66 @@ mod tests {
         assert!(!is_native_provider("tabbit"));
     }
 
+    /// **插件优先**：已启用的插件声明了原生家，就由插件接管（原生降为兜底）。
     #[test]
-    fn plugin_owned_requires_non_native_and_enabled() {
+    fn plugin_owned_is_plugin_first() {
         let reg = temp_registry();
         reg.load().unwrap();
         // 插件声明了原生家 workbuddy 与插件专属家 kiro
         reg.upsert(meta("p", &["workbuddy", "kiro"], true)).unwrap();
-        // 原生家不被接管
-        assert!(!reg.is_plugin_owned("workbuddy"), "原生家应走原生 bridge");
-        // 插件专属家被接管
+        assert!(
+            reg.is_plugin_owned("workbuddy"),
+            "插件优先：已启用插件声明了原生家也接管"
+        );
         assert!(reg.is_plugin_owned("kiro"));
-        // 停用后不再接管
+        // 停用后不再接管（数据面回落原生）
         reg.set_enabled("p", false).unwrap();
         assert!(!reg.is_plugin_owned("kiro"));
+        assert!(!reg.is_plugin_owned("workbuddy"));
+    }
+
+    /// 硬保留集合（内部虚拟 id）即使被插件声明也不接管。
+    #[test]
+    fn hard_reserved_is_never_plugin_owned() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        reg.upsert(meta(
+            "p",
+            &["cloudflare", "hub", "custom-abc", "kiro"],
+            true,
+        ))
+        .unwrap();
+        assert!(!reg.is_plugin_owned("cloudflare"), "CF 桥是网关内部实现");
+        assert!(!reg.is_plugin_owned("hub"), "Hub 是虚拟标识");
+        assert!(
+            !reg.is_plugin_owned("custom-abc"),
+            "custom- 前缀是运维自定义渠道保留前缀"
+        );
+        assert!(reg.is_plugin_owned("kiro"), "普通 provider 正常接管");
+    }
+
+    #[test]
+    fn hard_reserved_set_is_small_and_explicit() {
+        // 集合刻意极小：改它必须同步本测试（防止悄悄扩大保留面）
+        assert_eq!(HARD_RESERVED, &["cloudflare", "hub"]);
+        assert!(is_hard_reserved("cloudflare"));
+        assert!(is_hard_reserved("hub"));
+        assert!(is_hard_reserved("custom-xyz"));
+        assert!(!is_hard_reserved("openai"));
+        assert!(!is_hard_reserved("workbuddy"));
+    }
+
+    /// 插件**未装**时：任何 provider 都不归插件（数据面走原生/无桥）。
+    #[test]
+    fn no_pack_means_not_plugin_owned() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        for provider in ["kiro", "workbuddy", "openai"] {
+            assert!(
+                !reg.is_plugin_owned(provider),
+                "未装插件时 {provider} 不归插件"
+            );
+        }
     }
 
     #[test]

@@ -148,6 +148,30 @@ pub struct ScriptPackage {
     pub trusted: bool,
     /// 运维配置（options，逐键对照 settings_schema；≤ MAX_SETTINGS_BYTES）。
     pub options: ScriptSettingsOptions,
+    /// 包级 provider 开关（A2A `providerOptions`：`{provider: {option: bool}}`）。
+    ///
+    /// 由 `script.settings` 握手回填、经管理面「提供商设置」编辑；随 init
+    /// 载荷下发给宿主（`providerOptions`），脚本侧 `environment.option()` 读它。
+    #[serde(default)]
+    pub provider_options: serde_json::Map<String, serde_json::Value>,
+    /// 包声明但被运维单独停用的 provider（不影响包启用）。
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
+    /// 声明 id → 实际接管 id（宿主 `script.packages` 回填，冲突加缀时不同）。
+    #[serde(default)]
+    pub provider_aliases: serde_json::Map<String, serde_json::Value>,
+    /// 包自报的设置 schema（`script.packages` 的 `settings` 字段原样保留）。
+    #[serde(default)]
+    pub settings_schema: serde_json::Value,
+    /// 包图标（`package.json` 的 `magpie.icon`，宿主回填）。
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// provider 级图标（`script.packages` 的 `providerIcons`）。
+    #[serde(default)]
+    pub provider_icons: serde_json::Map<String, serde_json::Value>,
+    /// 宿主上报的加载错误（`script.packages` 的 `error`）。
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 impl ScriptPackage {
@@ -227,6 +251,11 @@ impl ScriptPackage {
 }
 
 /// 包声明的一家 provider（OpenCode v1 `auth.provider` 的网关侧投影）。
+///
+/// A2A 宿主的 `metadata()` 还会回 `capabilities` / `account_features` /
+/// `default_models` / `checkin` / `login_methods` 等字段——本结构只钉
+/// 网关**直接消费**的四项，其余原样收进 [`Self::extra`]（不丢信息，
+/// 供模型管理/签到等下游读取，避免为每个字段加一次结构改动）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct ScriptProviderInfo {
@@ -238,6 +267,32 @@ pub struct ScriptProviderInfo {
     pub upstream: Option<String>,
     /// 该家支持的模型（可空——运行期 `models.list` 动态拉）。
     pub models: Vec<String>,
+    /// 宿主上报的其余元数据（capabilities / account_features / default_models
+    /// / checkin / login_methods / order / needs_proxy …）原样保留。
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ScriptProviderInfo {
+    /// 便捷构造（id + label，其余缺省）。
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 宿主上报的默认模型清单（`default_models`，A2A `provider.records` 形态）。
+    ///
+    /// 元素是模型记录对象；网关侧只在「运行期 models.list 尚未刷新」时用。
+    pub fn default_models(&self) -> Vec<serde_json::Value> {
+        self.extra
+            .get("default_models")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 /// 一个脚本包的运维配置。
@@ -310,22 +365,55 @@ pub struct ScriptCatalogEntry {
     pub integrity: Option<String>,
 }
 
-/// Bun 进程握手载荷（runtime 发 `init` 时的 `params.init`）。
+/// Bun 进程握手载荷（runtime 发 `init` 时的 **params**，A2A 平铺形状）。
 ///
-/// 字段名是 wire 契约：js-host 侧按 `packages` / `reserved` / `claimed` /
-/// `catalog_path` 四个键读取，改名 = 断协议。
+/// **不是** `{"protocol":1,"init":{…}}` 嵌套——A2A v3.5.0-beta.1 的宿主
+/// `main.mjs` 直接读 `params.packages` / `params.env` / `params.reserved` /
+/// `params.claimed` / `params.catalogPath`。字段名是 wire 契约，改名 = 断协议。
+///
+/// `claimed` 是 `{providerId: packageId}`（A2A `allocateProvider` 用它判
+/// 「这个 id 是不是本包已声明的」，冲突加缀时据此复用而非新造）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ScriptInitPayload {
-    /// 全部已启用脚本包的包目录绝对路径（Bun 逐个加载）。
-    pub packages: Vec<String>,
+    /// 宿主环境（`{data_dir, host_version, target, proxy, debug_traffic,
+    /// loopback_port}`，与原生插件握手同款 `HostEnv`）。
+    pub env: crate::plugin_host::process::HostEnv,
+    /// 全部已启用脚本包的加载条目（Bun 逐个 import）。
+    pub packages: Vec<ScriptPackageEntry>,
     /// 保留集合：原生 provider + 内置订阅 + 所有非脚本宿主已声明 provider。
     /// 脚本对这些家**没有**接管权（与原生包 `is_plugin_owned` 同立场）。
     pub reserved: Vec<String>,
-    /// 声明集合：已启用脚本包声明的 provider（含与 reserved 的交集——
-    /// 交集部分实际由保留方接管，脚本侧据此自知让位）。
-    pub claimed: Vec<String>,
+    /// 声明集合：`{providerId: packageId}`（已启用脚本包声明的 provider）。
+    pub claimed: std::collections::BTreeMap<String, String>,
     /// Magpie 目录缓存文件路径（Bun 侧市场查询用；可为空 = 目录未拉取）。
+    #[serde(rename = "catalogPath")]
     pub catalog_path: Option<String>,
+}
+
+/// init 载荷里的一个包加载条目（A2A `prepare_inner` 的 `entries` 元素）。
+///
+/// 键名是 wire 契约（camelCase：`displayName` / `providerOptions`）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ScriptPackageEntry {
+    /// 包 id（npm 包名）。
+    pub id: String,
+    /// 包版本目录的绝对路径（Bun 从这里的 `package.json` 找入口）。
+    pub directory: String,
+    /// 展示名。
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    /// 包级 options（脚本读它做初始化）。
+    #[serde(default)]
+    pub options: serde_json::Value,
+    /// 包声明的 provider id 列表。
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// provider 级开关（`{provider: {option: bool}}`）。
+    #[serde(rename = "providerOptions", default)]
+    pub provider_options: serde_json::Value,
+    /// 声明 id → 实际接管 id（冲突加缀后的历史别名）。
+    #[serde(default)]
+    pub aliases: serde_json::Map<String, serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -445,18 +533,42 @@ mod tests {
 
     #[test]
     fn init_payload_wire_keys() {
-        // wire 契约：Bun 侧按这四个键读，字段名不可改
+        // wire 契约（A2A 平铺形状）：Bun 侧按 env/packages/reserved/claimed/
+        // catalogPath 读，字段名不可改
         let payload = ScriptInitPayload {
-            packages: vec!["/data/script-plugins/packages/p/1.0.0".into()],
+            env: crate::plugin_host::process::HostEnv::default(),
+            packages: vec![ScriptPackageEntry {
+                id: "@magpie-community/kiro".into(),
+                directory: "/data/script-plugins/packages/p/1.0.0".into(),
+                display_name: "Kiro".into(),
+                options: serde_json::json!({}),
+                providers: vec!["kiro".into()],
+                provider_options: serde_json::json!({}),
+                aliases: serde_json::Map::new(),
+            }],
             reserved: vec!["workbuddy".into()],
-            claimed: vec!["kiro".into()],
+            claimed: [("kiro".to_string(), "@magpie-community/kiro".to_string())]
+                .into_iter()
+                .collect(),
             catalog_path: Some("/data/script-plugins/catalog.json".into()),
         };
         let json = serde_json::to_value(&payload).unwrap();
-        assert!(json.get("packages").is_some());
-        assert!(json.get("reserved").is_some());
-        assert!(json.get("claimed").is_some());
-        assert!(json.get("catalog_path").is_some());
+        for key in ["env", "packages", "reserved", "claimed", "catalogPath"] {
+            assert!(json.get(key).is_some(), "平铺键 {key} 必须存在");
+        }
+        // 嵌套 {"init": …} 是旧 AIGX 形状，A2A 宿主不认
+        assert!(json.get("init").is_none(), "不得出现嵌套 init 键");
+        assert!(
+            json.get("catalog_path").is_none(),
+            "catalog_path 是 snake_case 事故，wire 用 catalogPath"
+        );
+        // 包条目是对象（含 directory/displayName），不是裸路径字符串
+        let entry = &json["packages"][0];
+        assert_eq!(entry["directory"], "/data/script-plugins/packages/p/1.0.0");
+        assert_eq!(entry["displayName"], "Kiro");
+        assert!(entry.get("display_name").is_none(), "wire 用 displayName");
+        // claimed 是 {id: packId} 映射
+        assert_eq!(json["claimed"]["kiro"], "@magpie-community/kiro");
     }
 
     #[test]

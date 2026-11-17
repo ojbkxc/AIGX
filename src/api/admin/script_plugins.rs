@@ -120,12 +120,69 @@ pub fn summarize_error(raw: &str) -> String {
 
 /// 安装请求体。`trusted` 必须由前端二次确认弹窗后显式传 true——
 /// 脚本不是沙箱，将以 Bun 进程权限运行（operations 强制，缺省 false）。
+///
+/// 兼容两套字段名：
+/// - AIGX 原生：`{selector, trusted}`；
+/// - A2A（`POST /api/plugins/scripts/install`）：`{source|name, version,
+///   trusted, id}`。`id` 是「更新已装包」的期望 id（防止装成别的包）。
 #[derive(Debug, Deserialize)]
 pub struct ScriptInstallBody {
     /// 安装指示串：`magpie:{name}` / 裸 npm 名 / `github:{owner/repo}` / `file:{路径}`。
+    #[serde(default)]
     pub selector: String,
+    /// A2A 字段：来源/包名（与 `selector` 同义，二选一）。
+    #[serde(default)]
+    pub source: Option<String>,
+    /// A2A 字段：包名（`source` 的别名）。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// A2A 字段：显式版本（缺省 = 目录/npm 的 latest）。
+    #[serde(default)]
+    pub version: Option<String>,
+    /// A2A 字段：期望包 id（更新场景的防呆；与下载结果不一致时拒绝）。
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub trusted: bool,
+}
+
+impl ScriptInstallBody {
+    /// 归一成 `(selector, version)`；`selector` 为空时报错。
+    fn resolve(&self) -> Result<(String, Option<String>), &'static str> {
+        let raw = if !self.selector.trim().is_empty() {
+            self.selector.trim().to_string()
+        } else if let Some(source) = self
+            .source
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            source.to_string()
+        } else if let Some(name) = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            name.to_string()
+        } else {
+            return Err("安装指示串（selector/source/name）不能为空");
+        };
+        // selector 已带 `@版本` 时以 selector 为准（A2A 的 version 字段只
+        // 在 selector 无版本时附加）
+        let version = match self
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            Some(version) if !raw.contains('@') || raw.starts_with('@') => {
+                Some(version.to_string())
+            }
+            _ => None,
+        };
+        Ok((raw, version))
+    }
 }
 
 /// 启停请求体。多版本共存时按 `version` 选中，缺省取最后登记的同 id 包。
@@ -135,6 +192,47 @@ pub struct ScriptEnableBody {
     #[serde(default)]
     pub version: Option<String>,
     pub enabled: bool,
+}
+
+/// A2A 通用变更请求体（`POST /api/plugins/scripts/change`）。
+///
+/// `action`：`enable`（配 `enabled`）/ `reload` / `provider`（配
+/// `provider` + `enabled`，单独启停包内一家）/ `remove` / `checkin`（no-op，
+/// 签到在签到中心管理）。
+#[derive(Debug, Deserialize)]
+pub struct ScriptChangeBody {
+    pub id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    pub action: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// A2A 设置请求体（`POST /api/plugins/scripts/settings`）。
+///
+/// 三个字段都可选：`options`（包级参数）/ `providerOptions`（provider 开关）
+/// 是补丁；都不带 = 只读（返回当前设置视图）。
+#[derive(Debug, Deserialize)]
+pub struct ScriptSettingsBody {
+    pub id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub options: Option<serde_json::Map<String, Value>>,
+    #[serde(default, rename = "providerOptions")]
+    pub provider_options: Option<serde_json::Map<String, Value>>,
+}
+
+/// A2A prompts 请求体（`POST /api/plugins/scripts/prompts`）。
+#[derive(Debug, Deserialize)]
+pub struct ScriptPromptsBody {
+    pub provider: String,
+    /// 透传给插件 `admin.action` 的 payload（动态 prompts 的输入）。
+    #[serde(default)]
+    pub payload: Value,
 }
 
 /// 卸载请求体（卸载 = 先停用再删元数据与磁盘目录；Local 来源不删本机目录）。
@@ -192,6 +290,10 @@ fn package_view(p: &ScriptPackage, routed_providers: &HashSet<String>) -> Value 
                 "label": pp.label,
                 "upstream": pp.upstream,
                 "models": pp.models,
+                // 包内 provider 级启停的投影（`disabled_providers`，由
+                // `handle_script_change(action=provider)` 写入；视图不反映
+                // 会让前端开关「点了停用刷新又变回启用」的假象）
+                "enabled": !p.disabled_providers.iter().any(|id| id == &pp.id),
             }))
             .collect::<Vec<_>>(),
         "entry": p.entry,
@@ -265,23 +367,42 @@ pub async fn handle_script_refresh(
 
 /// POST /api/plugins/scripts/install —— 安装脚本包（下载/解包/依赖安装，
 /// 可能几十秒；axum handler 直 await）。成功返回装好的包视图（未启用）。
+///
+/// 兼容 AIGX `{selector}` 与 A2A `{source|name, version, id}` 两套字段。
 pub async fn handle_script_install(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<ScriptInstallBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    let selector = body.selector.trim().to_string();
-    if selector.is_empty() {
-        return Err(error_response(
-            "安装指示串（selector）不能为空",
-            StatusCode::BAD_REQUEST,
-        ));
-    }
+    let (selector, version) = body
+        .resolve()
+        .map_err(|e| error_response(e, StatusCode::BAD_REQUEST))?;
+    // A2A 的 `version` 字段：selector 不带版本时附加（`name@version` 形态
+    // 由 source::parse 解析；magpie 走 `magpie:{name}@{version}`）
+    let selector = match version {
+        Some(version) if !selector.contains('@') || selector.starts_with('@') => {
+            format!("{selector}@{version}")
+        }
+        _ => selector,
+    };
     let _write = WRITE_LOCK.lock().await;
     let package = operations::install(&state.script_host, &selector, body.trusted)
         .await
         .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
+    // A2A 的 `id` 是「更新已装包」的防呆：下载结果与期望不一致时保留原
+    // 元数据不动（install 已落盘 → 需要显式提示，不静默覆盖）
+    if let Some(expected) = body.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if expected != package.id {
+            return Err(error_response(
+                &format!(
+                    "下载的脚本插件包名（{}）与待更新插件（{expected}）不一致，已安装为独立包，请手工卸载",
+                    package.id
+                ),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    }
     tracing::info!(
         "[Script] 管理面安装脚本包 {}（v{}，来源 {}）",
         package.id,
@@ -293,6 +414,176 @@ pub async fn handle_script_install(
         "success": true,
         "data": { "package": package_view(&package, &routed) }
     })))
+}
+
+/// POST /api/plugins/scripts/change —— A2A 通用变更入口。
+///
+/// `action`：
+/// - `enable`：启停整个包（配 `enabled`，等价 `/enable`）；
+/// - `reload`：重建宿主（等价 `/rebuild`，要求包已启用）；
+/// - `provider`：单独启停包内某一家（配 `provider` + `enabled`）；
+/// - `remove`：卸载（等价 `/uninstall`）；
+/// - `checkin`：no-op（签到在签到中心管理，A2A 同口径）。
+pub async fn handle_script_change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ScriptChangeBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let id = body.id.trim().to_string();
+    if id.is_empty() {
+        return Err(error_response("包 id 不能为空", StatusCode::BAD_REQUEST));
+    }
+    let _write = WRITE_LOCK.lock().await;
+    match body.action.as_str() {
+        "enable" => {
+            let enabled = body
+                .enabled
+                .ok_or_else(|| error_response("缺少 enabled", StatusCode::BAD_REQUEST))?;
+            operations::set_enabled(&state.script_host, &id, body.version.as_deref(), enabled)
+                .await
+                .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
+        }
+        "reload" => {
+            state
+                .script_host
+                .rebuild("manual")
+                .await
+                .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
+        }
+        "provider" => {
+            let provider = body
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| error_response("缺少 provider", StatusCode::BAD_REQUEST))?;
+            let enabled = body
+                .enabled
+                .ok_or_else(|| error_response("缺少 enabled", StatusCode::BAD_REQUEST))?;
+            operations::set_provider_enabled(&state.script_host, &id, provider, enabled)
+                .await
+                .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
+        }
+        "remove" => {
+            operations::uninstall(&state.script_host, &id, body.version.as_deref())
+                .await
+                .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
+        }
+        // 签到及附带任务默认允许，统一在签到中心管理（A2A 同文案）
+        "checkin" => {}
+        other => {
+            return Err(error_response(
+                &format!("未知的脚本插件操作：{other}"),
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    }
+    tracing::info!("[Script] 管理面变更脚本包 {id}（action={}）", body.action);
+    Ok(Json(json!({
+        "success": true,
+        "data": { "host": host_view(&state.script_host.status()) }
+    })))
+}
+
+/// POST /api/plugins/scripts/settings —— A2A 设置入口。
+///
+/// 三个字段都可选：`options` / `providerOptions` 是补丁；都不带 = 只读
+/// （返回当前设置视图，含包声明的 settings_schema）。
+pub async fn handle_script_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ScriptSettingsBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let id = body.id.trim().to_string();
+    if id.is_empty() {
+        return Err(error_response("包 id 不能为空", StatusCode::BAD_REQUEST));
+    }
+    if body.options.is_none() && body.provider_options.is_none() {
+        // 只读：返回当前设置视图
+        let package = operations::list(&state.script_host)
+            .into_iter()
+            .rfind(|p| p.id == id && body.version.as_deref().is_none_or(|v| p.version == v))
+            .ok_or_else(|| error_response("包未安装", StatusCode::NOT_FOUND))?;
+        return Ok(Json(json!({
+            "success": true,
+            "data": {
+                "id": package.id,
+                "options": package.options.values,
+                "providerOptions": package.provider_options,
+                "schema": package.settings_schema,
+            }
+        })));
+    }
+    let _write = WRITE_LOCK.lock().await;
+    let package = operations::update_settings(
+        &state.script_host,
+        &id,
+        body.version.as_deref(),
+        body.options,
+        body.provider_options,
+    )
+    .await
+    .map_err(|e| error_response(&summarize_error(&e), StatusCode::BAD_REQUEST))?;
+    let routed: HashSet<String> = state.script_host.routed_providers().into_iter().collect();
+    Ok(Json(json!({
+        "success": true,
+        "data": { "package": package_view(&package, &routed) }
+    })))
+}
+
+/// POST /api/plugins/scripts/prompts —— A2A 登录提示词入口。
+///
+/// 透传插件 `admin.action`（`action = "auth.prompts"`）：插件按自身登录
+/// 方式返回动态 prompts（`login-prompts.mjs` 的 `resolvePrompts`）。
+pub async fn handle_script_prompts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ScriptPromptsBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let provider = body.provider.trim().to_string();
+    if provider.is_empty() {
+        return Err(error_response("provider 不能为空", StatusCode::BAD_REQUEST));
+    }
+    let value = state
+        .script_host
+        .call_provider(
+            &provider,
+            "admin.action",
+            json!({
+                "provider": provider,
+                "action": "auth.prompts",
+                "payload": body.payload,
+            }),
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .map_err(|e| error_response(&summarize_error(&e), StatusCode::SERVICE_UNAVAILABLE))?;
+    Ok(Json(json!({ "success": true, "data": value })))
+}
+
+/// GET /api/plugins/scripts/check —— A2A 检查更新入口。
+pub async fn handle_script_check(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let result = operations::check_updates(&state.script_host).await;
+    Ok(Json(json!({ "success": true, "data": result })))
+}
+
+/// POST /api/plugins/scripts/catalog/refresh —— A2A 目录刷新别名
+/// （等价 `/refresh`）。
+pub async fn handle_script_catalog_refresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    state.script_host.catalog().wake(true);
+    tracing::info!("[Script] 手动刷新 Magpie 目录（A2A catalog/refresh）");
+    Ok(Json(json!({ "success": true, "data": { "ok": true } })))
 }
 
 /// POST /api/plugins/scripts/enable —— 启停脚本包（rebuild 失败自动回滚）。
@@ -414,6 +705,7 @@ mod tests {
                 label: "Kiro".into(),
                 upstream: Some("anthropic".into()),
                 models: vec![],
+                ..Default::default()
             }],
             options: ScriptSettingsOptions::default(),
             ..Default::default()
@@ -437,7 +729,19 @@ mod tests {
         assert_eq!(v["sourceRef"], "@magpie-community/kiro");
         assert_eq!(v["providers"][0]["id"], "kiro");
         assert_eq!(v["providers"][0]["upstream"], "anthropic");
+        assert_eq!(
+            v["providers"][0]["enabled"], true,
+            "未停用的 provider 默认 enabled"
+        );
         assert!(v["options"]["values"].is_object());
+        // 包内 provider 级停用 → 视图投影 enabled=false（前端开关据此显示）
+        let mut disabled = sample_package();
+        disabled.disabled_providers = vec!["kiro".into()];
+        let v = package_view(&disabled, &routed);
+        assert_eq!(
+            v["providers"][0]["enabled"], false,
+            "disabled_providers 必须投影到视图"
+        );
         // 路由表为空 → providerRouted=false
         let v = package_view(&sample_package(), &HashSet::new());
         assert_eq!(v["providerRouted"], false);

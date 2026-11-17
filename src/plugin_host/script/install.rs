@@ -386,6 +386,7 @@ pub fn to_package(
         enabled: false,
         trusted: false,
         options: Default::default(),
+        ..Default::default()
     }
 }
 

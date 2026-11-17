@@ -457,6 +457,24 @@ pub async fn handle_list_channels(
             .map(|ch| mask_channel(ch, id_to_seq.get(ch.id.as_str()).copied()))
             .collect()
     };
+    // T4：账号池自动创建的「隐藏插件承载渠道」只打标、不过滤（是否展示由调用方
+    // 决定）。名单在账号池 KV 里，列表是低频管理面接口 —— 进函数读一次存局部
+    // 变量，不在逐行循环里反复读 FileStore。分页/不分页两条路径共用此处。
+    let hidden_ids = state.account_sessions.hidden_plugin_channel_ids();
+    let mut channels = channels;
+    for row in channels.iter_mut() {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(object) = row.as_object_mut() {
+            object.insert(
+                "hidden".to_string(),
+                Value::Bool(!id.is_empty() && hidden_ids.contains(&id)),
+            );
+        }
+    }
     Ok(Json(json!({
         "success": true,
         "data": channels,

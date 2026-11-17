@@ -547,6 +547,11 @@
 .mm-src-dot.manual {
   background: var(--warning-color, #f59e0b);
 }
+/* models.dev 社区目录补齐（A2A 的独立来源档：环形描边，区别于三种实心点） */
+.mm-src-dot.modelsdev {
+  background: transparent;
+  border: 1.5px solid var(--primary-color);
+}
 
 .mm-src-more {
   font-size: 10.5px;
@@ -1681,4 +1686,24 @@ body.mm-colset-dragging {
 
 .mm-dg-item .mm-act-btn {
   margin-left: auto;
+}
+
+/* 能力位三态编辑入口（caps 列右侧小按钮，与圆点区并列） */
+.mm-cap-edit {
+  margin-left: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.mm-cap-edit:hover {
+  border-color: var(--border-color);
+  color: var(--primary-color);
 }

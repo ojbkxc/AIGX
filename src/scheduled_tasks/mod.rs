@@ -324,315 +324,299 @@ pub async fn run_now(state: &AppState, id: &str) -> Result<String, String> {
     run_backend(state, task, true).await
 }
 
-/// 维护轮成败判定（C-6，对齐 A2A `round_succeeded` 的**意图**）。
-///
-/// 上游判据 `failed == 0 || succeeded > 0`（core/scheduled_tasks.rs:306-308）：
-/// 部分成功说明链路是好的，不整轮退避——否则一个长期失效的账号（如长期
-/// 401）会让每轮都判失败、退避顶到 24h，其余能刷的账号跟着停摆（上游
-/// :397-406 明确警告过这个反模式）。全失败才保留退避：那通常是更上游的
-/// 问题（断网、出口被挡），别按原间隔反复打上游。
-///
-/// 与上游字面公式的差异：上游没有独立的失效桶，dead token 计入 failed；
-/// AIGX 的 `invalid` 不进 `failed`（refresh.rs:160「重试无意义，只能重新
-/// 登录」），因此这里把 invalid 排除在判定外——「仅失效」轮说明请求打到了
-/// 上游并拿到确定性拒绝，链路是好的，不退避（与上游意图一致，仅当
-/// refreshed==0 && failed==0 && invalid>0 时与上游字面行为不同）。
-fn maintenance_round_succeeded(stats: &crate::account_session::refresh::RefreshSummary) -> bool {
-    stats.failed == 0 || stats.refreshed > 0
+/// 某条任务的排期间隔（毫秒）。维护模块 claim 时与本循环共用同一口径。
+pub(crate) fn task_interval_ms(settings: &ScheduledSettings, id: &str) -> i64 {
+    find(id)
+        .map(|task| interval_ms(task, settings))
+        .unwrap_or(60_000)
 }
 
 async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<String, String> {
-    let settings = state.config_manager.get().await.scheduled_tasks;
-
-    // 更新开关关闭时不占位直接跳过：占位是为了防并发与排期推进，开关关闭本就不该跑。
-    if task.id == TASK_UPDATE_CHECK && !state.config_manager.get().await.update.enabled {
-        return Ok("软件更新开关已关闭，跳过".to_string());
+    // 维护型任务（凭证 / 模型目录）：完整执行记录由 maintenance 模块负责，
+    // 本函数只把结果摘要回给调用方（scheduled_tasks 仍负责「何时做」）。
+    if matches!(task.id, TASK_CREDENTIAL_MAINTENANCE | TASK_MODEL_REFRESH) {
+        let detail =
+            crate::maintenance::execute(state, crate::maintenance::Request::full(task.id, manual))
+                .await?;
+        return Ok(crate::maintenance::summary(&detail));
+    }
+    if task.id != TASK_UPDATE_CHECK {
+        return Err("未知后端任务".to_string());
     }
 
-    // 手动执行越不越过失败冷却：按**冷却记的是什么**分两类。
-    let backoff = match task.id {
-        TASK_MODEL_REFRESH | TASK_CREDENTIAL_MAINTENANCE => task_state::ManualBackoff::Bypass,
-        _ => task_state::ManualBackoff::Respect,
-    };
+    // 更新开关关闭时不占位直接跳过：占位是为了防并发与排期推进，开关关闭本就不该跑。
+    if !state.config_manager.get().await.update.enabled {
+        return Ok("软件更新开关已关闭，跳过".to_string());
+    }
+    let settings = state.config_manager.get().await.scheduled_tasks;
     let interval = interval_ms(task, &settings);
-    let guard = match task_state::claim(task.id, interval, manual, backoff, 1_000)? {
+    let guard = match task_state::claim(
+        task.id,
+        interval,
+        manual,
+        task_state::ManualBackoff::Respect,
+        1_000,
+    )? {
         task_state::Claim::Acquired(guard) => guard,
         task_state::Claim::Deferred(state_state) => return Err(state_state.waiting_message()),
     };
-    let (summary, success) = match task.id {
-        TASK_UPDATE_CHECK => {
-            let config = state.config_manager.get().await;
-            // check 内部有冷却保护；失败记退避（连续失败按间隔指数退避，避免打爆限额）。
-            match state.update.check(&config.update).await {
-                Ok(info) => {
-                    if config.update.auto_apply
-                        && info.get("hasUpdate").and_then(Value::as_bool) == Some(true)
-                    {
-                        if let Err(e) = state.update.start_apply(&config.update, false) {
-                            tracing::warn!("[Update] 自动应用失败：{e}");
-                        }
-                    }
-                    if info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
-                        let summary = format!(
-                            "发现新版本 {}（当前 {}）",
-                            info["latestVersion"].as_str().unwrap_or(""),
-                            crate::update::CURRENT_VERSION
-                        );
-                        tracing::info!("[Update] {summary}");
-                        (summary, true)
-                    } else {
-                        ("已完成版本检查".to_string(), true)
-                    }
-                }
-                Err(error) => {
-                    let summary = format!("版本检查失败（{error}）");
-                    tracing::warn!("[Tasks] {summary}");
-                    (summary, false)
-                }
-            }
-        }
-        TASK_CREDENTIAL_MAINTENANCE => {
-            let stats = crate::account_session::refresh::refresh_expiring(
-                &state.account_sessions,
-                &state.http_client,
-            )
-            .await;
-            let summary = format!("凭证维护：{}", stats.summary_text());
-            if stats.is_empty() {
-                tracing::debug!("[Maintenance] {summary}");
-            } else {
-                tracing::info!("[Maintenance] {summary}");
-            }
-            // 成败判定抽成 [`maintenance_round_succeeded`]（C-6）：部分成功不退避、
-            // 无动作不退避、全失败才退避；invalid 不参与判定（见 helper 文档）
-            let success = maintenance_round_succeeded(&stats);
-            (summary, success)
-        }
-        TASK_MODEL_REFRESH => {
-            if !crate::config::models_dev_enabled() {
-                ("models.dev 元数据开关已关闭，跳过".to_string(), true)
-            } else {
-                let (count, catalog_ok, catalog_note) = match crate::model::models_dev::refresh(
-                    &state.http_client,
-                    &state.scheduled_task_store,
-                )
-                .await
+    let (summary, success) = {
+        let config = state.config_manager.get().await;
+        // check 内部有冷却保护；失败记退避（连续失败按间隔指数退避，避免打爆限额）。
+        match state.update.check(&config.update).await {
+            Ok(info) => {
+                if config.update.auto_apply
+                    && info.get("hasUpdate").and_then(Value::as_bool) == Some(true)
                 {
-                    Ok(count) => (count, true, String::new()),
-                    Err(error) => (0, false, format!("models.dev 元数据刷新失败（{error}）")),
-                };
-                // 顺带刷一遍渠道模型清单（对齐 A2A catalog_refresh：上游
-                // 关模型后本地目录要等下次发现才收敛，期间请求吃 404/502——
-                // 生产实证见 08-prod「目录漂移」）。只刷启用且带渠道级凭证的
-                // openai_compat 渠道；逐渠道失败不判整轮失败（各渠道独立）。
-                let mut refreshed_channels = 0usize;
-                // 目录对账（P2-6②）：声明 vs 发现差异 + 渠道级悬空映射统计（只读）
-                let mut drift_channels: Vec<Value> = Vec::new();
-                // 阶段2：清理候选（与对账同口径组装；守卫判定全在 plan_channel_prune）
-                let mut prune_candidates: Vec<crate::channel::PruneCandidate> = Vec::new();
-                for ch in state.channel_store.list() {
-                    if !ch.is_enabled()
-                        || ch.channel_type != crate::channel::ChannelType::OpenaiCompatible
-                        || ch.base_url.trim().is_empty()
-                    {
-                        continue;
-                    }
-                    let api_key = ch.decode_api_key();
-                    match crate::api::admin::fetch_upstream_models(
-                        state,
-                        ch.channel_type,
-                        &ch.base_url,
-                        &api_key,
-                        &ch.quirks,
-                    )
-                    .await
-                    {
-                        Ok((_, models)) => {
-                            if !models.is_empty() {
-                                // 对账（P2-6②）：有效清单 = models 非空用白名单，空用本轮发现快照。
-                                // 必须先于 save_discovered_models（其 move 掉 models）。
-                                // 直接吃循环里 ch 的 model_mapping（无现取窗口，避免并发删改静默少报）。
-                                // 阶段2：对账同时组「清理候选」——`alive_source` 与 `alive` 与判定
-                                // 同口径；守卫判定（仅白名单源、单轮限量）在 plan_channel_prune。
-                                if let Some(drift) =
-                                    crate::channel::reconcile_channel_drift(&ch, &models)
-                                {
-                                    let stale: Vec<(String, String)> = drift["stale_mappings"]
-                                        .as_array()
-                                        .map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|m| {
-                                                    Some((
-                                                        m["alias"].as_str()?.to_string(),
-                                                        m["target"].as_str()?.to_string(),
-                                                    ))
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default();
-                                    if !stale.is_empty() {
-                                        let whitelist = !ch.models.is_empty();
-                                        prune_candidates.push(crate::channel::PruneCandidate {
-                                            channel_id: ch.id.clone(),
-                                            channel_name: ch.name.clone(),
-                                            alive_source: if whitelist {
-                                                "whitelist"
-                                            } else {
-                                                "discovered"
-                                            },
-                                            alive: if whitelist {
-                                                ch.models.clone()
-                                            } else {
-                                                models.clone()
-                                            },
-                                            stale_mappings: stale,
-                                        });
-                                    }
-                                    drift_channels.push(drift);
-                                }
-                                let _ = state.channel_store.save_discovered_models(&ch.id, models);
-                                refreshed_channels += 1;
-                            }
-                        }
-                        Err((status, body)) => {
-                            let message = body
-                                .get("message")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default();
-                            tracing::warn!(
-                                "[Tasks] 渠道「{}」模型清单刷新失败：HTTP {status} {message}",
-                                ch.name
-                            );
-                        }
+                    if let Err(e) = state.update.start_apply(&config.update, false) {
+                        tracing::warn!("[Update] 自动应用失败：{e}");
                     }
                 }
-                // ── #33 阶段2：渠道级悬空映射清理 ──
-                // 守卫1 白名单源 / 守卫2 删前快照 / 守卫3 单轮限量 / 守卫4 幂等 /
-                // 守卫5 留痕 / 守卫6 待修清单；判定全在 plan_channel_prune。
-                // 本轮时刻取一次复用：快照/日志/drift 报告同一 `at`，三者可精确互证。
-                let round_at = chrono::Utc::now().timestamp();
-                let prune_plan = crate::channel::plan_channel_prune(
-                    prune_candidates,
-                    crate::channel::CHANNEL_PRUNE_LIMIT,
-                );
-                if prune_plan.over_limit {
-                    tracing::warn!(
-                        "[Tasks] 悬空映射清理本轮超限量（{} 条 > 上限 {}），只报告不删",
-                        prune_plan.total_stale,
-                        crate::channel::CHANNEL_PRUNE_LIMIT
+                if info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
+                    let summary = format!(
+                        "发现新版本 {}（当前 {}）",
+                        info["latestVersion"].as_str().unwrap_or(""),
+                        crate::update::CURRENT_VERSION
                     );
-                }
-                let pruned = crate::channel::execute_channel_prune(
-                    &state.channel_store,
-                    &prune_plan.deletions,
-                );
-                // 守卫2+守卫5：删除明细落 KV 快照（可回填）+ 日志留痕，绝不静默删
-                if crate::channel::should_persist_prune_snapshot(&pruned) {
-                    let snapshot = crate::channel::build_prune_snapshot(&pruned, round_at);
-                    if let Err(e) = state
-                        .scheduled_task_store
-                        .put("catalog:prune:last", &snapshot)
-                    {
-                        tracing::warn!("[Tasks] 悬空映射清理快照写入失败：{e}");
-                    }
-                    tracing::info!(
-                        "[Tasks] 悬空映射清理：删除 {} 条（快照 catalog:prune:last，可据 restore 回填；触发轮次 at={round_at}）",
-                        pruned.len()
-                    );
-                }
-                // 守卫6：待修清单（已删的「若本意保留请按正确大小写回填」+ 只报不删的）
-                let mut pending_fix: Vec<Value> = Vec::new();
-                for item in &pruned {
-                    pending_fix.push(json!({
-                        "channel_id": item.channel_id,
-                        "channel_name": item.channel_name,
-                        "alive_source": "whitelist",
-                        "alias": item.alias,
-                        "target": item.target,
-                        "action": "deleted",
-                    }));
-                }
-                for candidate in &prune_plan.deferred {
-                    for (alias, target) in &candidate.stale_mappings {
-                        pending_fix.push(json!({
-                            "channel_id": candidate.channel_id,
-                            "channel_name": candidate.channel_name,
-                            "alive_source": candidate.alive_source,
-                            "alias": alias,
-                            "target": target,
-                            "action": "deferred",
-                            "reason": if prune_plan.over_limit { "over_limit" } else { "discovered_source" },
-                        }));
-                    }
-                }
-                // 对账报告落 KV（catalog:drift:latest）——诊断页/健康页可读
-                let n_drift = drift_channels.len();
-                let n_gone: usize = drift_channels
-                    .iter()
-                    .map(|c| {
-                        c["declared_not_found"]
-                            .as_array()
-                            .map(|a| a.len())
-                            .unwrap_or(0)
-                    })
-                    .sum();
-                let n_stale: usize = drift_channels
-                    .iter()
-                    .map(|c| c["stale_mappings"].as_array().map(|a| a.len()).unwrap_or(0))
-                    .sum();
-                if n_drift > 0 {
-                    let report = json!({
-                        "at": round_at,
-                        "channels": drift_channels,
-                        "prune": {
-                            "limit": crate::channel::CHANNEL_PRUNE_LIMIT,
-                            "over_limit": prune_plan.over_limit,
-                            "deleted_count": pruned.len(),
-                            "snapshot_key": "catalog:prune:last",
-                            "pending_fix": pending_fix,
-                        },
-                    });
-                    if let Err(e) = state
-                        .scheduled_task_store
-                        .put("catalog:drift:latest", &report)
-                    {
-                        tracing::warn!("[Tasks] 目录对账报告写入失败：{e}");
-                    }
-                }
-                let mut summary = format!("models.dev 元数据已更新 {count} 条");
-                if refreshed_channels > 0 {
-                    summary.push_str(&format!("，刷新 {refreshed_channels} 个渠道清单"));
-                }
-                if n_drift > 0 {
-                    tracing::info!(
-                        "[Tasks] 目录对账：{n_drift} 个渠道有漂移迹象（{n_gone} 条疑似下线模型，{n_stale} 条悬空映射，详情见 catalog:drift:latest）"
-                    );
-                    summary.push_str(&format!(
-                        "，目录对账 {n_drift} 渠道有漂移迹象（{n_gone} 条疑似下线，{n_stale} 条悬空映射）"
-                    ));
-                }
-                if !pruned.is_empty() {
-                    summary.push_str(&format!("，悬空映射清理 {} 条", pruned.len()));
-                } else if prune_plan.over_limit {
-                    summary.push_str(&format!(
-                        "，悬空映射 {} 条超限量只报告",
-                        prune_plan.total_stale
-                    ));
-                }
-                if !catalog_ok {
-                    summary.push_str(&format!("；{catalog_note}"));
-                    tracing::warn!("[Tasks] {summary}");
-                    (summary, false)
-                } else {
-                    tracing::info!("[Tasks] {summary}");
+                    tracing::info!("[Update] {summary}");
                     (summary, true)
+                } else {
+                    ("已完成版本检查".to_string(), true)
                 }
             }
+            Err(error) => {
+                let summary = format!("版本检查失败（{error}）");
+                tracing::warn!("[Tasks] {summary}");
+                (summary, false)
+            }
         }
-        _ => return Err("未知后端任务".to_string()),
     };
     guard.finish(success, summary.clone(), None, 0, interval)?;
     Ok(summary)
+}
+
+/// 模型目录刷新的一轮工作（models.dev + 渠道清单 + 目录对账）。
+///
+/// 由 `maintenance::execute`（自动 / 手动 / 重试）调用；返回值：
+/// `(summary, ok, models_dev_count)`。抽出来是为了让「维护明细」与
+/// 「定时任务循环」共用同一份实现，而不是两边各写一遍。
+pub(crate) async fn model_refresh_work(state: &AppState) -> (String, bool, usize) {
+    if !crate::config::models_dev_enabled() {
+        return ("models.dev 元数据开关已关闭，跳过".to_string(), true, 0);
+    }
+    {
+        let (count, catalog_ok, catalog_note) = match crate::model::models_dev::refresh(
+            &state.http_client,
+            &state.scheduled_task_store,
+        )
+        .await
+        {
+            Ok(count) => (count, true, String::new()),
+            Err(error) => (0, false, format!("models.dev 元数据刷新失败（{error}）")),
+        };
+        // 顺带刷一遍渠道模型清单（对齐 A2A catalog_refresh：上游
+        // 关模型后本地目录要等下次发现才收敛，期间请求吃 404/502——
+        // 生产实证见 08-prod「目录漂移」）。只刷启用且带渠道级凭证的
+        // openai_compat 渠道；逐渠道失败不判整轮失败（各渠道独立）。
+        let mut refreshed_channels = 0usize;
+        // 目录对账（P2-6②）：声明 vs 发现差异 + 渠道级悬空映射统计（只读）
+        let mut drift_channels: Vec<Value> = Vec::new();
+        // 阶段2：清理候选（与对账同口径组装；守卫判定全在 plan_channel_prune）
+        let mut prune_candidates: Vec<crate::channel::PruneCandidate> = Vec::new();
+        for ch in state.channel_store.list() {
+            if !ch.is_enabled()
+                || ch.channel_type != crate::channel::ChannelType::OpenaiCompatible
+                || ch.base_url.trim().is_empty()
+            {
+                continue;
+            }
+            let api_key = ch.decode_api_key();
+            match crate::api::admin::fetch_upstream_models(
+                state,
+                ch.channel_type,
+                &ch.base_url,
+                &api_key,
+                &ch.quirks,
+            )
+            .await
+            {
+                Ok((_, models)) => {
+                    if !models.is_empty() {
+                        // 对账（P2-6②）：有效清单 = models 非空用白名单，空用本轮发现快照。
+                        // 必须先于 save_discovered_models（其 move 掉 models）。
+                        // 直接吃循环里 ch 的 model_mapping（无现取窗口，避免并发删改静默少报）。
+                        // 阶段2：对账同时组「清理候选」——`alive_source` 与 `alive` 与判定
+                        // 同口径；守卫判定（仅白名单源、单轮限量）在 plan_channel_prune。
+                        if let Some(drift) = crate::channel::reconcile_channel_drift(&ch, &models) {
+                            let stale: Vec<(String, String)> = drift["stale_mappings"]
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|m| {
+                                            Some((
+                                                m["alias"].as_str()?.to_string(),
+                                                m["target"].as_str()?.to_string(),
+                                            ))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if !stale.is_empty() {
+                                let whitelist = !ch.models.is_empty();
+                                prune_candidates.push(crate::channel::PruneCandidate {
+                                    channel_id: ch.id.clone(),
+                                    channel_name: ch.name.clone(),
+                                    alive_source: if whitelist {
+                                        "whitelist"
+                                    } else {
+                                        "discovered"
+                                    },
+                                    alive: if whitelist {
+                                        ch.models.clone()
+                                    } else {
+                                        models.clone()
+                                    },
+                                    stale_mappings: stale,
+                                });
+                            }
+                            drift_channels.push(drift);
+                        }
+                        let _ = state.channel_store.save_discovered_models(&ch.id, models);
+                        refreshed_channels += 1;
+                    }
+                }
+                Err((status, body)) => {
+                    let message = body
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        "[Tasks] 渠道「{}」模型清单刷新失败：HTTP {status} {message}",
+                        ch.name
+                    );
+                }
+            }
+        }
+        // ── #33 阶段2：渠道级悬空映射清理 ──
+        // 守卫1 白名单源 / 守卫2 删前快照 / 守卫3 单轮限量 / 守卫4 幂等 /
+        // 守卫5 留痕 / 守卫6 待修清单；判定全在 plan_channel_prune。
+        // 本轮时刻取一次复用：快照/日志/drift 报告同一 `at`，三者可精确互证。
+        let round_at = chrono::Utc::now().timestamp();
+        let prune_plan = crate::channel::plan_channel_prune(
+            prune_candidates,
+            crate::channel::CHANNEL_PRUNE_LIMIT,
+        );
+        if prune_plan.over_limit {
+            tracing::warn!(
+                "[Tasks] 悬空映射清理本轮超限量（{} 条 > 上限 {}），只报告不删",
+                prune_plan.total_stale,
+                crate::channel::CHANNEL_PRUNE_LIMIT
+            );
+        }
+        let pruned =
+            crate::channel::execute_channel_prune(&state.channel_store, &prune_plan.deletions);
+        // 守卫2+守卫5：删除明细落 KV 快照（可回填）+ 日志留痕，绝不静默删
+        if crate::channel::should_persist_prune_snapshot(&pruned) {
+            let snapshot = crate::channel::build_prune_snapshot(&pruned, round_at);
+            if let Err(e) = state
+                .scheduled_task_store
+                .put("catalog:prune:last", &snapshot)
+            {
+                tracing::warn!("[Tasks] 悬空映射清理快照写入失败：{e}");
+            }
+            tracing::info!(
+                "[Tasks] 悬空映射清理：删除 {} 条（快照 catalog:prune:last，可据 restore 回填；触发轮次 at={round_at}）",
+                pruned.len()
+            );
+        }
+        // 守卫6：待修清单（已删的「若本意保留请按正确大小写回填」+ 只报不删的）
+        let mut pending_fix: Vec<Value> = Vec::new();
+        for item in &pruned {
+            pending_fix.push(json!({
+                "channel_id": item.channel_id,
+                "channel_name": item.channel_name,
+                "alive_source": "whitelist",
+                "alias": item.alias,
+                "target": item.target,
+                "action": "deleted",
+            }));
+        }
+        for candidate in &prune_plan.deferred {
+            for (alias, target) in &candidate.stale_mappings {
+                pending_fix.push(json!({
+                    "channel_id": candidate.channel_id,
+                    "channel_name": candidate.channel_name,
+                    "alive_source": candidate.alive_source,
+                    "alias": alias,
+                    "target": target,
+                    "action": "deferred",
+                    "reason": if prune_plan.over_limit { "over_limit" } else { "discovered_source" },
+                }));
+            }
+        }
+        // 对账报告落 KV（catalog:drift:latest）——诊断页/健康页可读
+        let n_drift = drift_channels.len();
+        let n_gone: usize = drift_channels
+            .iter()
+            .map(|c| {
+                c["declared_not_found"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            })
+            .sum();
+        let n_stale: usize = drift_channels
+            .iter()
+            .map(|c| c["stale_mappings"].as_array().map(|a| a.len()).unwrap_or(0))
+            .sum();
+        if n_drift > 0 {
+            let report = json!({
+                "at": round_at,
+                "channels": drift_channels,
+                "prune": {
+                    "limit": crate::channel::CHANNEL_PRUNE_LIMIT,
+                    "over_limit": prune_plan.over_limit,
+                    "deleted_count": pruned.len(),
+                    "snapshot_key": "catalog:prune:last",
+                    "pending_fix": pending_fix,
+                },
+            });
+            if let Err(e) = state
+                .scheduled_task_store
+                .put("catalog:drift:latest", &report)
+            {
+                tracing::warn!("[Tasks] 目录对账报告写入失败：{e}");
+            }
+        }
+        let mut summary = format!("models.dev 元数据已更新 {count} 条");
+        if refreshed_channels > 0 {
+            summary.push_str(&format!("，刷新 {refreshed_channels} 个渠道清单"));
+        }
+        if n_drift > 0 {
+            tracing::info!(
+                "[Tasks] 目录对账：{n_drift} 个渠道有漂移迹象（{n_gone} 条疑似下线模型，{n_stale} 条悬空映射，详情见 catalog:drift:latest）"
+            );
+            summary.push_str(&format!(
+                "，目录对账 {n_drift} 渠道有漂移迹象（{n_gone} 条疑似下线，{n_stale} 条悬空映射）"
+            ));
+        }
+        if !pruned.is_empty() {
+            summary.push_str(&format!("，悬空映射清理 {} 条", pruned.len()));
+        } else if prune_plan.over_limit {
+            summary.push_str(&format!(
+                "，悬空映射 {} 条超限量只报告",
+                prune_plan.total_stale
+            ));
+        }
+        if !catalog_ok {
+            summary.push_str(&format!("；{catalog_note}"));
+            tracing::warn!("[Tasks] {summary}");
+            (summary, false, count)
+        } else {
+            tracing::info!("[Tasks] {summary}");
+            (summary, true, count)
+        }
+    }
 }
 
 /// 调度循环：把后端任务按各自配置的间隔重复执行（由 `main` 起一次，进程内只有这一个循环）。
@@ -694,29 +678,28 @@ pub fn spawn(state: AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::maintenance_round_succeeded;
-    use crate::account_session::refresh::RefreshSummary;
+    use super::{
+        task_interval_ms, TASK_CREDENTIAL_MAINTENANCE, TASK_MODEL_REFRESH, TASK_UPDATE_CHECK,
+    };
+    use crate::scheduled_tasks::types::ScheduledSettings;
 
-    fn summary(refreshed: u64, failed: u64, invalid: u64) -> RefreshSummary {
-        RefreshSummary {
-            refreshed,
-            failed,
-            invalid,
-        }
-    }
-
-    /// C-6：维护轮成败判定语义（对齐 A2A round_succeeded 意图，见 helper 文档）。
+    /// 维护模块 claim 与调度循环共用同一排期口径。
     #[test]
-    fn maintenance_round_succeeded_semantics() {
-        // 无临期账号：无动作不算失败，不退避
-        assert!(maintenance_round_succeeded(&summary(0, 0, 0)));
-        // 部分成功（含失败/失效并存）：链路是好的，不整轮退避——C-6 修复点
-        assert!(maintenance_round_succeeded(&summary(3, 2, 1)));
-        assert!(maintenance_round_succeeded(&summary(1, 5, 0)));
-        // 全失败：保留退避（更上游问题的信号）
-        assert!(!maintenance_round_succeeded(&summary(0, 4, 0)));
-        // 仅失效：请求打到了上游（拿到确定性拒绝），链路是好的，不退避
-        //（与上游字面行为的唯一分歧点，理由见 helper 文档）
-        assert!(maintenance_round_succeeded(&summary(0, 0, 2)));
+    fn task_interval_ms_matches_units() {
+        let settings = ScheduledSettings::default();
+        assert_eq!(
+            task_interval_ms(&settings, TASK_CREDENTIAL_MAINTENANCE),
+            settings.credential_maintenance.interval * 60_000
+        );
+        assert_eq!(
+            task_interval_ms(&settings, TASK_MODEL_REFRESH),
+            settings.model_refresh.interval * 60_000
+        );
+        assert_eq!(
+            task_interval_ms(&settings, TASK_UPDATE_CHECK),
+            settings.update_check.interval * 60_000
+        );
+        // 未知任务：1 分钟兜底（claim 不会因未知 id 卡死）
+        assert_eq!(task_interval_ms(&settings, "nope"), 60_000);
     }
 }

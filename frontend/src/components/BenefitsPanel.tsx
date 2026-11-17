@@ -7,6 +7,7 @@ import { providerIcon } from '../lib/providerIcons';
 import { useToast } from '../components/Toast';
 import { Badge, Button, Card, EmptyState, Input, Loading } from '../components/ui';
 import type { BenefitResult, CheckinBenefitsData } from '../types';
+import CheckinVerificationNotice, { type VerificationNoticeState } from './CheckinVerificationNotice';
 import './BenefitsPanel.css';
 
 /**
@@ -98,6 +99,8 @@ export default function BenefitsPanel(): JSX.Element {
     null,
   );
   const [claimingKey, setClaimingKey] = useState('');
+  /** 验证提示卡（A2A checkin-verification-notice 的信息结构：等滑块 / 提交中） */
+  const [verification, setVerification] = useState<VerificationNoticeState | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -174,7 +177,12 @@ export default function BenefitsPanel(): JSX.Element {
     try {
       const configRes = await api.getZcodeCaptchaConfig(accountId);
       const captcha = configRes?.data?.captcha;
+      // 提示卡的目标名：账号展示名 + 套餐标题（拿不到就退到套餐 id）
+      const accountName =
+        data?.accounts.find((a) => a.id === accountId)?.name ?? accountId;
+      const planName = plan.name || plan.title || planId;
       if (captcha?.enabled && captcha.sceneId) {
+        setVerification({ accountName, planName, phase: 'pending' });
         await solve(
           {
             sceneId: captcha.sceneId,
@@ -202,6 +210,7 @@ export default function BenefitsPanel(): JSX.Element {
             return { captchaResult: accepted, bizResult: Boolean(result?.ok) };
           },
         );
+        setVerification(null);
       } else {
         const res = await api.runCheckinBenefit(accountId, 'plan', { mode: 'claim', plan_id: planId });
         const result = res?.data;
@@ -213,10 +222,14 @@ export default function BenefitsPanel(): JSX.Element {
       setPlanPicker(null);
       await load();
     } catch (err) {
-      if (err instanceof CaptchaCancelledError) return;
+      if (err instanceof CaptchaCancelledError) {
+        setVerification(null);
+        return;
+      }
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
       setClaimingKey('');
+      setVerification(null);
     }
   };
 
@@ -541,6 +554,9 @@ export default function BenefitsPanel(): JSX.Element {
           </Button>
         </div>
       </Card>
+
+      {/* 验证提示卡（A2A checkin-verification-notice：等滑块/提交中如实展示，可取消） */}
+      <CheckinVerificationNotice state={verification} onCancel={() => setVerification(null)} />
     </>
   );
 }

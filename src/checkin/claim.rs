@@ -1019,6 +1019,58 @@ async fn workbuddy(client: &Client, session: &AccountSession, secret: &str) -> C
     }
 }
 
+/// 签到后回读**成长中心连登天数**（WorkBuddy 国内版；对齐 A2A 的
+/// `streakDays` 回读落账号）。
+///
+/// 为什么单独回读而不是从签到响应的 `continuousDays` 拿：那个字段只在「真领到」
+/// 的那一次响应里有，而「今天已签到」/「活动未开启」等分支拿不到 —— 连登天数
+/// 是账号级事实，应当从成长中心的只读端点稳定读到。读失败给 `None`（不影响
+/// 签到结果，下次签到再读）。
+///
+/// 端点与 `benefits::growth` 的只读盘点同一处（`GET {base}/activity/growth/streak`）；
+/// 返回形状兼容 `{data: N}` 与 `{data: {streak: N}}` 两种。
+pub async fn fetch_streak_days(client: &Client, session: &AccountSession) -> Option<u32> {
+    if session.provider != "workbuddy" {
+        return None;
+    }
+    let secret = session.credential.secret_plain();
+    if secret.trim().is_empty() {
+        return None;
+    }
+    let base = crate::account_session::adapter::effective_base_url(session)
+        .unwrap_or_else(|_| "https://copilot.tencent.com".to_string());
+    let base = base.trim_end_matches('/');
+    let mut headers = vec![
+        ("Authorization".to_string(), format!("Bearer {secret}")),
+        ("Accept".to_string(), "application/json".to_string()),
+    ];
+    if let Some(uid) = jwt_subject(&secret) {
+        if !uid.is_empty() {
+            headers.push(("X-User-Id".to_string(), uid));
+        }
+    }
+    let (status, body) = send_json(
+        client,
+        reqwest::Method::GET,
+        &format!("{base}/activity/growth/streak"),
+        &headers,
+        None,
+        None,
+    )
+    .await
+    .ok()?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let data = body.get("data").cloned().unwrap_or(body);
+    let number = data
+        .as_u64()
+        .or_else(|| data.get("streak").and_then(Value::as_u64))
+        .or_else(|| data.get("streakDays").and_then(Value::as_u64))
+        .or_else(|| data.get("continuousDays").and_then(Value::as_u64))?;
+    Some(number.min(u32::MAX as u64) as u32)
+}
+
 // ── Trae ─────────────────────────────────────────────────────────────
 //
 // 来源：Agent2API `providers/trae/checkin.rs`（MIT + 使用声明）。
@@ -2234,47 +2286,16 @@ mod tests {
         // chatglm / atomcode / lobsterai 的端点在闭源插件仓：claim_for
         // 必须如实报错，不落虚假成功台账。
         for provider in ["chatglm", "atomcode", "lobsterai"] {
-            let session = crate::account_session::model::AccountSession {
-                id: "t".to_string(),
-                channel_id: "c".to_string(),
-                name: "n".to_string(),
-                provider: provider.to_string(),
-                base_url: String::new(),
-                chat_path: None,
-                credential: crate::account_session::model::Credential {
-                    kind: CREDENTIAL_KIND_SESSION.to_string(),
-                    secret: "token".to_string(),
-                    fields: std::collections::HashMap::new(),
-                },
-                proxy: None,
-                status: "enabled".to_string(),
-                priority: 0,
-                weight: 1,
-                sort_order: 0,
-                max_concurrency: 0,
-                models: Vec::new(),
-                extra_headers: std::collections::HashMap::new(),
-                refresh_secret: String::new(),
-                cooldowns: std::collections::HashMap::new(),
-                last_used_at: None,
-                last_error: None,
-                success_count: 0,
-                error_count: 0,
-                consecutive_errors: 0,
-                total_latency_ms: 0,
-                expires_at: None,
-                consecutive_rejections: 0,
-                logged_in_at: None,
-                relogin_notified_at: None,
-                in_flight: 0,
-                usage_query_interval_secs: None,
-                limiters: Vec::new(),
-                limiter_groups: Vec::new(),
-                last_balance_at: None,
-                last_balance: None,
-                last_balance_error: None,
-                created_at: 0,
-                updated_at: 0,
+            // 用构造器而不是全字段字面量：`AccountSession` 会随上游不断加字段
+            // （T4 已加 11 个），字面量构造点每次都要跟着补，构造器加 serde(default)
+            // 是免维护形态。
+            let mut session = crate::account_session::model::AccountSession::new("c", "n");
+            session.id = "t".to_string();
+            session.provider = provider.to_string();
+            session.credential = crate::account_session::model::Credential {
+                kind: CREDENTIAL_KIND_SESSION.to_string(),
+                secret: "token".to_string(),
+                fields: std::collections::HashMap::new(),
             };
             let result = tokio::runtime::Runtime::new()
                 .unwrap()

@@ -1,3 +1,5 @@
+//! 部分逻辑移植自 Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+//!
 //! 签到台账 + 定时计划 + 设置（KV 持久化）。
 //!
 //! ## 为什么台账与计划分开存
@@ -67,17 +69,27 @@ pub struct CheckinRecord {
     pub account_id: String,
     pub account_name: String,
     pub provider: String,
-    /// 触发来源：schedule / manual
+    /// 触发来源：schedule / makeup / startup / manual / single / activity
+    /// （字面集合对齐 Agent2API `core/checkin_records.rs` 的 `source` 列）。
     pub source: String,
     /// 记录类型：manual | schedule | makeup | retry —— 与 `source` **同值双写**
     /// （旧读端只认 `source`，新读端用 `kind`），存量记录缺省为空串。
     #[serde(default)]
     pub kind: String,
+    /// 触发原因（人话，界面的「来源/说明」列直读）：如「区间随机签到（条目 · 09:00–09:09）」
+    /// 「补签（条目）」「手动触发」「手动保活」。对齐 A2A 的 `reason` 列。
+    /// 存量记录缺省为空串（读侧回落到 `message`）。
+    #[serde(default)]
+    pub reason: String,
     pub outcome: CheckinOutcome,
     pub ok: bool,
     /// 本次执行链是否附带保活动作（签到后自动链对国际版账号顺带保活时置真）
     #[serde(default)]
     pub kept_active: bool,
+    /// 签到后回读的成长中心连登天数（WorkBuddy 系；0 = 未读到 / 该家无成长中心）。
+    /// 对齐 A2A 账号行的 `streakDays` —— 记录页与签到中心分组直接展示。
+    #[serde(default)]
+    pub streak_days: u32,
     pub message: String,
     /// 失败原文（成功 / 今日已领时为空）—— 供台账「失败原因」列直读。
     #[serde(default)]
@@ -126,6 +138,14 @@ pub struct CheckinSchedule {
     /// （否则升级当天会把已签过的家全部重签一遍）。
     #[serde(default)]
     pub last_fired_providers: HashMap<String, String>,
+    /// 逐家补签轮已跑标记（`{provider: date}`，对齐 A2A `lastRetriedProviders`）。
+    /// 同一家一天只补一轮；跨天自动作废。
+    #[serde(default)]
+    pub last_retried_providers: HashMap<String, String>,
+    /// 逐账号随机排程（对齐 A2A `accountPlan`）：当天每个账号落在区间内的
+    /// 确定性随机时刻 + 尝试标记，重启后沿用（不重排、不重复主轮）。
+    #[serde(default)]
+    pub account_plan: AccountPlan,
     /// 上次结果摘要
     #[serde(default)]
     pub last_result: String,
@@ -144,6 +164,68 @@ pub struct ScheduleCounts {
     pub ok: usize,
     pub keepalive: usize,
     pub failed: usize,
+}
+
+/// 某账号在某条目里的当日排程（对齐 A2A `checkin_schedules::account_plan::PlannedAccount`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PlannedAccount {
+    /// 该账号的 provider（执行时按它分派 claim）。
+    pub provider: String,
+    /// 当天排定的执行时刻（unix 毫秒）。
+    pub at: i64,
+    /// 已尝试时刻（unix 毫秒）；Some = 今天这一轮已跑过，不再重复主轮。
+    pub attempted_at: Option<i64>,
+}
+
+/// 条目当天的逐账号随机排程（对齐 A2A `account_plan::AccountPlan`）。
+///
+/// 为什么需要它：区间随机签到要保证「同一账号当天只在一个随机时刻跑一次」，
+/// 而调度器每 30 秒重读一次墙上时钟 —— 没有持久化的排程，每次 tick 都会重新
+/// 随机、导致账号在窗口内被反复签到。这里按账号落一次当日时刻，重启沿用。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AccountPlan {
+    /// 排程所属日期（YYYY-MM-DD）；跨天自动作废重排。
+    pub date: String,
+    /// `{account_id: PlannedAccount}`
+    pub accounts: std::collections::BTreeMap<String, PlannedAccount>,
+    /// `{provider: (window_start_ms, window_end_ms)}`：当天的窗口快照，
+    /// 窗口变了（改了时刻）要重排。
+    pub windows: std::collections::BTreeMap<String, (i64, i64)>,
+}
+
+impl AccountPlan {
+    /// 今天该跑的账号（到点且未尝试），按时刻升序。
+    pub fn due(&self, now_ms: i64, today: &str) -> Vec<String> {
+        if self.date != today {
+            return Vec::new();
+        }
+        let mut due: Vec<(i64, String)> = self
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.at <= now_ms && account.attempted_at.is_none())
+            .map(|(id, account)| (account.at, id.clone()))
+            .collect();
+        due.sort();
+        due.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// 该 provider 今天是否还有未尝试的账号（用于「主轮是否跑完」判定）。
+    pub fn pending_for(&self, provider: &str) -> bool {
+        self.accounts
+            .values()
+            .any(|account| account.provider == provider && account.attempted_at.is_none())
+    }
+
+    /// 下一次还会发生的时刻（unix 毫秒）：未尝试账号里最早的 `at`。
+    pub fn next_at(&self) -> Option<i64> {
+        self.accounts
+            .values()
+            .filter(|account| account.attempted_at.is_none())
+            .map(|account| account.at)
+            .min()
+    }
 }
 
 /// 签到总设置。
@@ -213,8 +295,15 @@ struct ScheduleFile {
 const SCHEDULE_KEY: &str = "checkin:schedules";
 /// 台账按日分桶的键前缀
 const RECORD_PREFIX: &str = "checkin:rec:";
-/// 台账最多保留的天数（按日桶删除）
-const KEEP_DAYS: i64 = 90;
+/// 台账「扫多少天」的**查询**上限（不是保留期）：一次查询最多回溯这么多天。
+/// 台账本身**全量保留**（对齐 A2A：不按天数裁、也没有条数上限），要清历史
+/// 走记录页的「清空 / 按筛选删除」。
+pub const MAX_QUERY_DAYS: i64 = 3650;
+/// 按账号落盘的成长中心连登天数键前缀（签到后回读落盘，对齐 A2A 的
+/// `AccountStore::mark_streak_days`；AIGX 侧不塞进账号结构，单独一格）。
+const STREAK_PREFIX: &str = "checkin:streak:";
+/// 按账号 + 日期落盘的当日签到台账键前缀（`dailyCheckin`）。
+const DAILY_PREFIX: &str = "checkin:daily:";
 
 /// 签到存储。
 pub struct CheckinStore {
@@ -325,16 +414,93 @@ impl CheckinStore {
     /// 记下某计划的某家 provider 今天已跑（逐家去重）。执行前调用——
     /// 中途被杀也不会在重启后重跑整条计划（对齐 A2A「先落标记再执行」）。
     pub fn mark_fired_provider(&self, id: &str, provider: &str, date: &str) -> Result<()> {
+        self.mark_fired_providers(id, std::slice::from_ref(&provider.to_string()), date)
+    }
+
+    /// 批量记下某计划的几家 provider 今天已跑（对齐 A2A `mark_fired_providers`）。
+    pub fn mark_fired_providers(&self, id: &str, providers: &[String], date: &str) -> Result<()> {
+        if providers.is_empty() {
+            return Ok(());
+        }
         {
             let mut guard = self.schedules.write();
             if let Some(schedule) = guard.schedules.iter_mut().find(|s| s.id == id) {
-                schedule
-                    .last_fired_providers
-                    .insert(provider.to_string(), date.to_string());
+                for provider in providers {
+                    schedule
+                        .last_fired_providers
+                        .insert(provider.clone(), date.to_string());
+                }
                 schedule.last_fired_date = date.to_string();
             }
         }
         self.persist_schedules()
+    }
+
+    /// 记下某计划的几家 provider 今天补签轮已跑（对齐 A2A `mark_retried_providers`）。
+    pub fn mark_retried_providers(&self, id: &str, providers: &[String], date: &str) -> Result<()> {
+        if providers.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut guard = self.schedules.write();
+            if let Some(schedule) = guard.schedules.iter_mut().find(|s| s.id == id) {
+                for provider in providers {
+                    schedule
+                        .last_retried_providers
+                        .insert(provider.clone(), date.to_string());
+                }
+            }
+        }
+        self.persist_schedules()
+    }
+
+    /// 改写某条目的当日逐账号排程（对齐 A2A `account_plan::prepare_saved`）。
+    /// `apply` 收到当前排程的克隆，返回 `None` = 不改动（避免无谓落盘）。
+    pub fn patch_account_plan<F>(&self, id: &str, apply: F) -> Result<()>
+    where
+        F: FnOnce(&mut AccountPlan),
+    {
+        let mut changed = false;
+        {
+            let mut guard = self.schedules.write();
+            if let Some(schedule) = guard.schedules.iter_mut().find(|s| s.id == id) {
+                let mut plan = schedule.account_plan.clone();
+                apply(&mut plan);
+                if plan != schedule.account_plan {
+                    schedule.account_plan = plan;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.persist_schedules()?;
+        }
+        Ok(())
+    }
+
+    /// 标记某账号在某条目当日已尝试（执行前落，避免重复主轮）。
+    pub fn mark_attempted(&self, id: &str, account_ids: &[String], date: &str) -> Result<()> {
+        self.patch_account_plan(id, |plan| {
+            if plan.date != date {
+                return;
+            }
+            for account_id in account_ids {
+                if let Some(account) = plan.accounts.get_mut(account_id) {
+                    account.attempted_at = Some(chrono::Utc::now().timestamp_millis());
+                }
+            }
+        })
+    }
+
+    /// 读某条目的排程快照（调度判定用，克隆一份避免长时间持锁）。
+    pub fn account_plan_of(&self, id: &str) -> AccountPlan {
+        self.schedules
+            .read()
+            .schedules
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.account_plan.clone())
+            .unwrap_or_default()
     }
 
     // ── 台账 ──
@@ -359,7 +525,10 @@ impl CheckinStore {
     /// 读最近 `days` 天的记录，按时间倒序。
     ///
     /// `provider` / `account_id` / `outcome` / `keyword` 为空表示不过滤
-    /// （`keyword` 对账号名、账号 id、上游、说明做大小写不敏感包含匹配）。
+    /// （`keyword` 对账号名、账号 id、上游、说明、失败原因做大小写不敏感包含匹配）。
+    ///
+    /// `days` 只是**扫描窗口**（默认由调用方给；上限 [`MAX_QUERY_DAYS`]），
+    /// 不代表台账保留期 —— 台账全量保留，见模块头。
     pub fn recent_records(
         &self,
         days: u32,
@@ -368,7 +537,7 @@ impl CheckinStore {
         outcome: Option<CheckinOutcome>,
         keyword: Option<&str>,
     ) -> Result<Vec<CheckinRecord>> {
-        let days = days.clamp(1, KEEP_DAYS as u32) as i64;
+        let days = (days.max(1) as i64).min(MAX_QUERY_DAYS);
         let today = Self::now_tz();
         let keyword = keyword
             .map(|k| k.trim().to_lowercase())
@@ -391,6 +560,8 @@ impl CheckinStore {
                             || r.account_id.to_lowercase().contains(k)
                             || r.provider.to_lowercase().contains(k)
                             || r.message.to_lowercase().contains(k)
+                            || r.reason.to_lowercase().contains(k)
+                            || r.error.to_lowercase().contains(k)
                     })
             }));
         }
@@ -428,9 +599,9 @@ impl CheckinStore {
         Ok(())
     }
 
-    /// 清空台账（`days` 天前的桶一并删除，保留窗口外的不动）。
+    /// 清空台账最近 `days` 天的记录（按日桶删除，保留窗口外的不动）。
     pub fn clear_records(&self, days: u32) -> Result<usize> {
-        let days = days.clamp(1, KEEP_DAYS as u32) as i64;
+        let days = (days.max(1) as i64).min(MAX_QUERY_DAYS);
         let today = Self::now_tz();
         let mut removed = 0usize;
         for offset in 0..days {
@@ -459,6 +630,26 @@ impl CheckinStore {
             self.store.delete(&key)?;
         }
         Ok(removed)
+    }
+
+    /// 读某一天桶的全部记录（删除前的精确定位用；不存在给空）。
+    pub fn records_of_date(&self, date: &str) -> Result<Vec<CheckinRecord>> {
+        Ok(self
+            .store
+            .get::<Vec<CheckinRecord>>(&Self::record_key(date))?
+            .unwrap_or_default())
+    }
+
+    /// 覆写某一天桶（空桶直接删除）。删除链用：调用方先 `records_of_date` 过滤，
+    /// 再回写剩下的 —— 与 `remove_matching` 同性质，但支持任意谓词（kind / 时间
+    /// 区间这类 store 签名不带的维度）。
+    pub fn replace_records_of_date(&self, date: &str, records: Vec<CheckinRecord>) -> Result<()> {
+        let key = Self::record_key(date);
+        if records.is_empty() {
+            self.store.delete(&key)
+        } else {
+            self.store.put(&key, &records)
+        }
     }
 
     /// 按筛选条件删除匹配的记录（逐条删除，不删整个日桶）。
@@ -512,7 +703,9 @@ impl CheckinStore {
     /// 存储会随天数无限增长。调度每轮顺手调一次（30 秒一次，代价只是列一次
     /// 键前缀），保证长时间运行也不膨胀。
     ///
-    /// `keep_days = 0`（默认）= 永久保留，不 prune。
+    /// `keep_days = 0`（**默认**）= 永久保留，不 prune —— 与 Agent2API 的
+    /// 「台账全量保留、清历史走记录页」同一取向。只有管理员显式把
+    /// `keep_days` 配成正数时才自动裁剪。
     pub fn prune_records(&self) -> Result<usize> {
         let keep_days = self.settings().keep_days;
         if keep_days <= 0 {
@@ -538,6 +731,65 @@ impl CheckinStore {
     pub fn last_today(&self, account_id: &str, provider: &str) -> Result<Option<CheckinRecord>> {
         let records = self.recent_records(1, Some(provider), Some(account_id), None, None)?;
         Ok(records.into_iter().next())
+    }
+
+    // ── 成长中心连登天数（签到后回读落盘）──
+
+    /// 落某账号的成长中心连登天数（`0` = 清掉；对齐 A2A 的 `streakDays`）。
+    ///
+    /// 存在独立的 KV 格（`checkin:streak:{account_id}`）而不是塞进账号结构：
+    /// 这是签到链的产物、读侧只有签到中心与记录页，不该让账号模型背负它。
+    pub fn mark_streak_days(&self, account_id: &str, days: u32) -> Result<()> {
+        let key = format!("{STREAK_PREFIX}{account_id}");
+        if days == 0 {
+            self.store.delete(&key)
+        } else {
+            self.store.put(&key, &days)
+        }
+    }
+
+    /// 当日签到台账（对齐 A2A 账号的 `dailyCheckin`）：`{date, status, claimAt,
+    /// message}`。**只有 `ok` / `already` 才写 `claimAt`** —— 窗口未开（pending）
+    /// 与失败不是「今天领到了」，写了会让界面把没到账的一天标成已领、并挡住
+    /// 后续重试。
+    pub fn mark_daily_checkin(
+        &self,
+        account_id: &str,
+        date: &str,
+        status: &str,
+        claim_at: Option<i64>,
+        message: &str,
+    ) -> Result<()> {
+        let key = format!("{DAILY_PREFIX}{account_id}");
+        let value = serde_json::json!({
+            "date": date,
+            "status": status,
+            "claimAt": claim_at,
+            "message": message,
+        });
+        self.store.put(&key, &value)
+    }
+
+    /// 读某账号的当日签到台账；跨天或从未写过给 `None`。
+    pub fn daily_checkin(&self, account_id: &str, today: &str) -> Option<serde_json::Value> {
+        let value = self
+            .store
+            .get::<serde_json::Value>(&format!("{DAILY_PREFIX}{account_id}"))
+            .ok()
+            .flatten()?;
+        if value.get("date").and_then(serde_json::Value::as_str) != Some(today) {
+            return None;
+        }
+        Some(value)
+    }
+
+    /// 读某账号的成长中心连登天数（未读到过给 0）。
+    pub fn streak_days(&self, account_id: &str) -> u32 {
+        self.store
+            .get::<u32>(&format!("{STREAK_PREFIX}{account_id}"))
+            .ok()
+            .flatten()
+            .unwrap_or(0)
     }
 
     /// 台账按 provider 汇总（今日）：`provider → (完成数, 总数)`。
@@ -596,6 +848,8 @@ mod tests {
                 provider_times: HashMap::new(),
                 last_fired_date: String::new(),
                 last_fired_providers: HashMap::new(),
+                last_retried_providers: HashMap::new(),
+                account_plan: AccountPlan::default(),
                 last_result: String::new(),
                 last_ok: 0,
                 last_keepalive: 0,
@@ -631,6 +885,7 @@ mod tests {
                     provider: provider.into(),
                     source: "manual".into(),
                     kind: "manual".into(),
+                    reason: String::new(),
                     outcome: if ok {
                         CheckinOutcome::Success
                     } else {
@@ -638,6 +893,7 @@ mod tests {
                     },
                     ok,
                     kept_active: false,
+                    streak_days: 0,
                     message: String::new(),
                     error: String::new(),
                 })
@@ -704,6 +960,129 @@ mod tests {
     }
 
     #[test]
+    fn account_plan_due_pending_and_next_at() {
+        let mut plan = AccountPlan {
+            date: "2026-11-17".into(),
+            ..Default::default()
+        };
+        plan.accounts.insert(
+            "a1".into(),
+            PlannedAccount {
+                provider: "loomy".into(),
+                at: 1000,
+                attempted_at: None,
+            },
+        );
+        plan.accounts.insert(
+            "a2".into(),
+            PlannedAccount {
+                provider: "loomy".into(),
+                at: 500,
+                attempted_at: None,
+            },
+        );
+        plan.accounts.insert(
+            "a3".into(),
+            PlannedAccount {
+                provider: "loomy".into(),
+                at: 2000,
+                attempted_at: Some(1),
+            },
+        );
+        // 到点的两个，按时刻升序；已尝试的不再出现
+        assert_eq!(
+            plan.due(1500, "2026-11-17"),
+            vec!["a2".to_string(), "a1".to_string()]
+        );
+        // 跨天作废
+        assert!(plan.due(1500, "2026-11-18").is_empty());
+        // pending / next_at 只看未尝试
+        assert!(plan.pending_for("loomy"));
+        assert_eq!(plan.next_at(), Some(500));
+        plan.accounts.get_mut("a2").unwrap().attempted_at = Some(99);
+        assert_eq!(plan.next_at(), Some(1000));
+    }
+
+    #[test]
+    fn mark_attempted_and_mark_retried_providers() {
+        let store = CheckinStore::new(temp_store());
+        store.load().unwrap();
+        let list = store
+            .upsert_schedule(CheckinSchedule {
+                id: "s1".into(),
+                label: String::new(),
+                enabled: true,
+                time: "09:00".into(),
+                time_end: String::new(),
+                randomize: false,
+                retry_limit: 3,
+                retry_gap_minutes: 5,
+                makeup_time: String::new(),
+                providers: vec!["loomy".into()],
+                provider_times: HashMap::new(),
+                last_fired_date: String::new(),
+                last_fired_providers: HashMap::new(),
+                last_retried_providers: HashMap::new(),
+                account_plan: AccountPlan::default(),
+                last_result: String::new(),
+                last_ok: 0,
+                last_keepalive: 0,
+                last_failed: 0,
+            })
+            .unwrap();
+        assert_eq!(list.len(), 1);
+        // 排程：今天 + a1 未尝试
+        store
+            .patch_account_plan("s1", |plan| {
+                plan.date = "2026-11-17".into();
+                plan.accounts.insert(
+                    "a1".into(),
+                    PlannedAccount {
+                        provider: "loomy".into(),
+                        at: 0,
+                        attempted_at: None,
+                    },
+                );
+            })
+            .unwrap();
+        store
+            .mark_attempted("s1", &["a1".into()], "2026-11-17")
+            .unwrap();
+        assert!(
+            store.account_plan_of("s1").accounts["a1"]
+                .attempted_at
+                .is_some(),
+            "执行后应标记已尝试（主轮不重跑）"
+        );
+        // 逐家补签标记
+        store
+            .mark_retried_providers("s1", &["loomy".into()], "2026-11-17")
+            .unwrap();
+        assert_eq!(
+            store.schedules()[0]
+                .last_retried_providers
+                .get("loomy")
+                .map(String::as_str),
+            Some("2026-11-17")
+        );
+    }
+
+    #[test]
+    fn streak_days_round_trip_and_clear() {
+        let store = CheckinStore::new(temp_store());
+        assert_eq!(store.streak_days("a1"), 0);
+        store.mark_streak_days("a1", 7).unwrap();
+        assert_eq!(store.streak_days("a1"), 7);
+        // 0 = 清除
+        store.mark_streak_days("a1", 0).unwrap();
+        assert_eq!(store.streak_days("a1"), 0);
+        // 按账号隔离
+        store.mark_streak_days("a2", 3).unwrap();
+        assert_eq!(store.streak_days("a1"), 0);
+        assert_eq!(store.streak_days("a2"), 3);
+    }
+
+    #[test]
     fn record_kind_and_error_serde_default_and_double_write() {
         // 存量记录没有 kind/error 两个键 → 反序列化回落空串（零迁移）
         let legacy: CheckinRecord = serde_json::from_str(
@@ -714,6 +1093,8 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.kind, "");
         assert_eq!(legacy.error, "");
+        assert_eq!(legacy.reason, "");
+        assert_eq!(legacy.streak_days, 0);
         // 新写：kind 与 source 同值双写，error 记失败原文
         let rec = CheckinRecord {
             ts: 1,
@@ -723,9 +1104,11 @@ mod tests {
             provider: "loomy".into(),
             source: "makeup".into(),
             kind: "makeup".into(),
+            reason: "补签".into(),
             outcome: CheckinOutcome::Captcha,
             ok: false,
             kept_active: false,
+            streak_days: 0,
             message: "需要验证码".into(),
             error: "需要验证码".into(),
         };

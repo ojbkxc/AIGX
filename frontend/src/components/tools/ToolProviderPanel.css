@@ -1,0 +1,164 @@
+/* 工具服务页 —— 搜索提供商面板 */
+
+.tpp-listing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tpp-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.tpp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tpp-row {
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.04));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tpp-row.is-off {
+  opacity: 0.72;
+}
+
+.tpp-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tpp-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.tpp-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.tpp-row-meta code {
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+
+.tpp-row-meta a {
+  color: var(--primary-color);
+  text-decoration: none;
+}
+
+.tpp-row-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tpp-row-edit .form-group {
+  flex: 1;
+  min-width: 200px;
+}
+
+.tpp-test {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+}
+
+.tpp-test.is-ok {
+  color: var(--success-color, #2e9e5b);
+}
+
+.tpp-test.is-fail {
+  color: var(--danger-color);
+}
+
+.tpp-selection {
+  margin-top: 12px;
+  border-top: 1px dashed var(--border-color);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tpp-selection h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.tpp-selection-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.tpp-selection-label {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  min-width: 96px;
+}
+
+.tpp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tpp-chip {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.tpp-chip.is-on {
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+  color: var(--primary-color);
+  font-weight: 600;
+}
+
+.tpp-fetch-select {
+  max-width: 220px;
+}
+
+.tpp-selection-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tpp-spin {
+  animation: tpp-spin 1s linear infinite;
+}
+
+@keyframes tpp-spin {
+  to { transform: rotate(360deg); }
+}

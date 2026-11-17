@@ -2406,3 +2406,99 @@ tr[draggable="true"]:active .as-grip {
   color: var(--text-muted);
   cursor: not-allowed;
 }
+
+/* ── T8 对齐新增：隐藏账号提示条 / 旋转图标 ── */
+
+.as-hidden-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-color, #d97706) 35%, var(--border-color));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning-color, #d97706) 7%, transparent);
+}
+
+.as-hidden-icon {
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.as-hidden-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.as-hidden-body strong {
+  font-size: 12.5px;
+}
+
+.as-hidden-detail {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.as-spin {
+  animation: as-spin 1s linear infinite;
+}
+
+@keyframes as-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 插件来源徽标：与内置徽标同形，换个色以免和「登录态」混为一谈 */
+.add-card-badge.is-plugin {
+  color: var(--info-color, #2f7fd1);
+  border-color: var(--info-color, #2f7fd1);
+  background: color-mix(in srgb, var(--info-color, #2f7fd1) 10%, transparent);
+}
+
+/* 原生备选徽标：插件接管原生家时提示「原生实现仍在、降为兜底」（中性色，不抢插件徽标） */
+.add-card-badge.is-fallback {
+  color: var(--text-muted);
+  border-color: var(--border-color);
+  background: transparent;
+}
+
+/* 插件账号：public 只读回显（A2A accounts：secret 只写 / public 只读） */
+.as-plugin-public {
+  margin-bottom: 10px;
+}
+
+.as-public-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.04));
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.as-public-list li {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.as-public-key {
+  min-width: 120px;
+  color: var(--text-muted);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.as-public-value {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}

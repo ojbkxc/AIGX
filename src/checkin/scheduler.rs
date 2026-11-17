@@ -1,4 +1,6 @@
-//! 签到调度 —— 30 秒轮询，逐家判定时刻，当天逐家去重 + 失败重试。
+//! 部分逻辑移植自 Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+//!
+//! 签到调度 —— 10 秒轮询，逐家判定时刻，当天逐家去重 + 窗口随机 + 重试/补签。
 //!
 //! ## 为什么是轮询而不是 cron
 //!
@@ -54,11 +56,12 @@ use super::claim::{self, supports_checkin};
 use super::store::{CheckinOutcome, CheckinRecord, CheckinSchedule, CheckinStore, ScheduleCounts};
 use crate::account_session::AccountSessionStore;
 
-const TICK: Duration = Duration::from_secs(30);
+/// 轮询间隔：10 秒（对齐 Agent2API `TICK_MS` 的量级——精确到分钟又不显得忙）。
+const TICK: Duration = Duration::from_secs(10);
 
 /// 逐家内置生效时刻（窗口开启后 1 分钟——正好卡在开启那一秒时上游可能
 /// 还没下发活动）。**只登记有实测依据的窗口**（对齐 A2A `PROVIDER_TIMES`）。
-const PROVIDER_TIMES: [(&str, &str); 4] = [
+pub const PROVIDER_TIMES: [(&str, &str); 4] = [
     ("qoder", "10:01"),
     ("qoder-intl", "10:01"),
     ("zcode", "19:01"),
@@ -249,10 +252,30 @@ pub fn spawn(
         // 启动时先跑一轮：进程在计划时刻之后才启动时，当天还能补上
         run_due(&store, &sessions, &egress).await;
         loop {
-            tokio::time::sleep(TICK).await;
+            tokio::time::sleep(next_sleep(&store)).await;
             run_due(&store, &sessions, &egress).await;
         }
     });
+}
+
+/// 自适应 tick 间隔（对齐 A2A scheduler 的 `delay = min(next_at - now, TICK)`）：
+/// 有当日排程时睡到最近一个未执行账号的时刻（夹在 `[250ms, TICK]`），否则睡满
+/// 一个 TICK。既保证「到点即跑」的精度，又不会在空转时每 10 秒醒来查一遍。
+fn next_sleep(store: &CheckinStore) -> Duration {
+    let now_ms = Utc::now().timestamp_millis();
+    let earliest = store
+        .schedules()
+        .into_iter()
+        .filter(|schedule| schedule.enabled)
+        .filter_map(|schedule| schedule.account_plan.next_at())
+        .min();
+    match earliest {
+        Some(at) => {
+            let wait = (at - now_ms).clamp(250, TICK.as_millis() as i64) as u64;
+            Duration::from_millis(wait)
+        }
+        None => TICK,
+    }
 }
 
 /// 跑一轮到期的计划。
@@ -291,13 +314,18 @@ async fn run_due(
                     // 无随机窗口（或专属时刻）：一次性全量跑，回到原有行为
                     let _ = store.mark_fired_provider(&schedule.id, &provider, &date);
                     let targets = collect_targets(sessions, std::slice::from_ref(&provider));
-                    let outcome = run_targets(
+                    let reason = format!(
+                        "定时签到（{} · {}）",
+                        schedule.label.trim(),
+                        effective_time(&schedule, &provider)
+                    );
+                    let outcome = run_targets_with_reason(
                         store,
                         sessions,
-                        egress,
                         targets,
                         "schedule",
                         settings.gap_ms,
+                        &reason,
                     )
                     .await;
                     let counts = ScheduleCounts {
@@ -311,15 +339,22 @@ async fn run_due(
                     // 区间窗：逐 tick 只跑「自己那刻已到」且今天还没落账的账号。
                     // 走到这里时窗口内的账号按各自随机时刻陆续到点（窗口已过则
                     // 全数到点，进程曾错过窗口也能自愈）。
-                    let targets = window_due_targets(store, sessions, &schedule, &provider, &now);
+                    let targets = window_due_targets(store, sessions, &schedule, &provider);
                     if !targets.is_empty() {
-                        let outcome = run_targets(
+                        let reason = format!(
+                            "区间随机签到（{} · {}–{}）",
+                            schedule.label.trim(),
+                            effective_time(&schedule, &provider),
+                            end
+                        );
+                        let ran: Vec<String> = targets.iter().map(|s| s.id.clone()).collect();
+                        let outcome = run_targets_with_reason(
                             store,
                             sessions,
-                            egress,
                             targets,
                             "schedule",
                             settings.gap_ms,
+                            &reason,
                         )
                         .await;
                         let counts = ScheduleCounts {
@@ -327,7 +362,11 @@ async fn run_due(
                             keepalive: outcome.keepalive,
                             failed: outcome.failed,
                         };
+                        // 逐家「已跑」标记只在窗口结束时落（见下面那段）——这里
+                        // 只落条目级结果摘要，供界面「上次执行」。
                         let _ = store.mark_fired(&schedule.id, &date, &outcome.summary, &counts);
+                        // 本轮跑过的账号标为已尝试（排程层去重）
+                        let _ = store.mark_attempted(&schedule.id, &ran, &date);
                     }
                     if now.as_str() >= end.as_str() {
                         // 窗口结束：本家今天到此为止（未签上的账号交给重试/补签轮）
@@ -347,26 +386,129 @@ async fn run_due(
     }
 }
 
-/// 窗口进行中该跑的账号：逐账号生效时刻（区间随机）已到，且今天这家**还没
-/// 落过账**的账号。今天已有记录的账号（含失败的）主轮不再重复 —— 失败交给
-/// 重试轮收尾。
-fn window_due_targets(
+/// 今天的窗口毫秒区间 `(start_ms, end_ms)`（按配置时区解释 HH:MM）。
+/// 非法时刻 / 跨天区间给 None。
+fn window_ms(start: &str, end: &str) -> Option<(i64, i64)> {
+    use chrono::TimeZone;
+    if !is_hhmm(start) || !is_hhmm(end) {
+        return None;
+    }
+    let today = Utc::now().with_timezone(&beijing()).date_naive();
+    let make = |hhmm: &str| -> Option<i64> {
+        let h = hhmm[0..2].parse::<u32>().ok()?;
+        let m = hhmm[3..5].parse::<u32>().ok()?;
+        beijing()
+            .from_local_datetime(&today.and_hms_opt(h, m, 0)?)
+            .single()
+            .map(|dt| dt.timestamp_millis())
+    };
+    let start_ms = make(start)?;
+    let end_ms = make(end)?;
+    (end_ms >= start_ms).then_some((start_ms, end_ms))
+}
+
+/// 区间随机时刻（`[start_ms, end_ms]` 闭区间；用系统熵源，避免 rand 特性变更）。
+fn random_instant(start_ms: i64, end_ms: i64) -> i64 {
+    let slots = (end_ms - start_ms).max(0) as u64 + 1;
+    let mut bytes = [0u8; 8];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        return start_ms;
+    }
+    start_ms + (u64::from_le_bytes(bytes) % slots) as i64
+}
+
+/// 准备某条目的当日逐账号排程（对齐 A2A `account_plan::prepare`）：为每个
+/// 账号在**该家窗口内**取一个随机时刻并落盘，重启沿用。已尝试 / 已完成 /
+/// 今天已落账的账号直接标记 `attempted_at`，不再参与主轮。
+///
+/// 只在**有随机窗口**的家上调用（无窗口的家走一次性全量，不需要排程）。
+fn prepare_account_plan(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
     schedule: &CheckinSchedule,
     provider: &str,
-    now: &str,
-) -> Vec<crate::account_session::model::AccountSession> {
+) {
+    let Some((start_ms, end_ms)) = effective_window(schedule, provider)
+        .1
+        .as_deref()
+        .and_then(|end| window_ms(&effective_time(schedule, provider), end))
+    else {
+        return;
+    };
+    let date = today();
+    let now_ms = Utc::now().timestamp_millis();
+    // 今天这家已有落账的账号（成功/已领都算完成；失败留给重试轮）
     let ran: std::collections::HashSet<String> = store
         .recent_records(1, Some(provider), None, None, None)
         .unwrap_or_default()
         .into_iter()
         .map(|r| r.account_id)
         .collect();
+    let targets = collect_targets(sessions, std::slice::from_ref(&provider.to_string()));
+    let _ = store.patch_account_plan(&schedule.id, |plan| {
+        if plan.date != date {
+            *plan = crate::checkin::store::AccountPlan {
+                date: date.clone(),
+                ..Default::default()
+            };
+        }
+        let window_changed = plan.windows.get(provider).copied() != Some((start_ms, end_ms));
+        plan.windows
+            .insert(provider.to_string(), (start_ms, end_ms));
+        for session in &targets {
+            if ran.contains(&session.id) {
+                // 今天已签上：直接标为已尝试，主轮不再重跑
+                plan.accounts.insert(
+                    session.id.clone(),
+                    crate::checkin::store::PlannedAccount {
+                        provider: provider.to_string(),
+                        at: start_ms,
+                        attempted_at: Some(now_ms),
+                    },
+                );
+                continue;
+            }
+            if let Some(existing) = plan.accounts.get_mut(&session.id) {
+                if existing.provider == provider
+                    && !window_changed
+                    && (start_ms..=end_ms).contains(&existing.at)
+                {
+                    continue; // 沿用当日已排定的时刻
+                }
+            }
+            // 新加入 / 窗口变了的账号：在剩余窗口内重新分配，避免集中执行
+            let lower = start_ms.max(now_ms.min(end_ms));
+            plan.accounts.insert(
+                session.id.clone(),
+                crate::checkin::store::PlannedAccount {
+                    provider: provider.to_string(),
+                    at: random_instant(lower, end_ms),
+                    attempted_at: None,
+                },
+            );
+        }
+        let ids: std::collections::HashSet<&str> = targets.iter().map(|s| s.id.as_str()).collect();
+        plan.accounts.retain(|id, account| {
+            (ids.contains(id.as_str()) && account.provider == provider)
+                || account.attempted_at.is_some()
+        });
+    });
+}
+
+/// 窗口进行中该跑的账号：**当日排程**里到点且未尝试的账号（区间随机）。
+/// 与 A2A 同一口径 —— 排程持久化，重启沿用，不会在窗口内反复签到同一账号。
+fn window_due_targets(
+    store: &CheckinStore,
+    sessions: &AccountSessionStore,
+    schedule: &CheckinSchedule,
+    provider: &str,
+) -> Vec<crate::account_session::model::AccountSession> {
+    prepare_account_plan(store, sessions, schedule, provider);
+    let plan = store.account_plan_of(&schedule.id);
+    let due = plan.due(Utc::now().timestamp_millis(), &today());
     collect_targets(sessions, std::slice::from_ref(&provider.to_string()))
         .into_iter()
-        .filter(|s| !ran.contains(&s.id))
-        .filter(|s| account_instant(schedule, provider, &s.id).as_str() <= now)
+        .filter(|s| due.iter().any(|id| id == &s.id))
         .collect()
 }
 
@@ -575,6 +717,64 @@ fn schedule_provider_scope(schedule: &CheckinSchedule) -> Vec<String> {
     }
 }
 
+/// 今天还没跑的家（**含还没到点的**）—— 给界面的「今天跑完了吗」用。
+///
+/// 与 [`due_providers`] 的差别只在「不看时刻」：那个是调度判据（到点才跑），
+/// 这个是状态判据（今天是否都跑过了）。条目整体完成 = 这个返回空。
+pub fn pending_providers(schedule: &CheckinSchedule, today: &str) -> Vec<String> {
+    schedule
+        .providers
+        .iter()
+        .filter(|p| !main_fired(schedule, p, today))
+        .cloned()
+        .collect()
+}
+
+/// 条目里下一次还会发生的时刻（unix 毫秒）—— 界面「下次执行」用。
+///
+/// 主轮逐家算：今天还没跑且时刻未到 → 今天；已跑 / 时刻已过 → 明天。
+/// 有当日逐账号排程时，取排程里最早未尝试的时刻（区间随机的真实「下次」）。
+/// 补签轮时刻也纳入（取最早）。
+pub fn next_run_at(schedule: &CheckinSchedule, today: &str) -> Option<i64> {
+    use chrono::TimeZone;
+    let now = Utc::now().with_timezone(&beijing());
+    let now_ms = now.timestamp_millis();
+    let mut earliest: Option<i64> = if schedule.account_plan.date == today {
+        schedule.account_plan.next_at().map(|at| at.max(now_ms))
+    } else {
+        None
+    };
+    let today_naive = now.date_naive();
+    let next_occurrence = |hhmm: &str, fired: bool| -> Option<i64> {
+        let (h, m) = (
+            hhmm.get(0..2)?.parse::<u32>().ok()?,
+            hhmm.get(3..5)?.parse::<u32>().ok()?,
+        );
+        let today_at = beijing()
+            .from_local_datetime(&today_naive.and_hms_opt(h, m, 0)?)
+            .single()?
+            .timestamp_millis();
+        Some(if fired || today_at <= now_ms {
+            today_at + 86_400_000
+        } else {
+            today_at
+        })
+    };
+    for provider in &schedule.providers {
+        if !supports_checkin(provider) {
+            continue;
+        }
+        let fired = main_fired(schedule, provider, today);
+        if !fired && schedule.account_plan.date == today {
+            continue; // 当日排程已覆盖
+        }
+        if let Some(at) = next_occurrence(&effective_time(schedule, provider), fired) {
+            earliest = Some(earliest.map_or(at, |cur| cur.min(at)));
+        }
+    }
+    earliest
+}
+
 /// 补签轮的账号：该条目 provider 范围内，今天**还没签上**（末次记录非 ok，
 /// 或今天压根没跑过）的账号。今天已 ok 的账号不再补签。
 pub(super) fn makeup_targets(
@@ -609,7 +809,7 @@ pub(super) fn makeup_targets(
 async fn run_makeup_round(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
-    egress: &crate::egress::EgressCache,
+    _egress: &crate::egress::EgressCache,
     schedule: &CheckinSchedule,
     settings: &super::store::CheckinSettings,
 ) {
@@ -632,7 +832,9 @@ async fn run_makeup_round(
     if targets.is_empty() {
         return;
     }
-    let outcome = run_targets(store, sessions, egress, targets, "makeup", settings.gap_ms).await;
+    let reason = format!("补签（{}）", schedule.label.trim());
+    let outcome =
+        run_targets_with_reason(store, sessions, targets, "makeup", settings.gap_ms, &reason).await;
     let _ = store.mark_fired(
         &schedule.id,
         &date,
@@ -684,6 +886,9 @@ pub async fn run_schedule(
 
 /// 跑一批账号并落台账。`source` 同时写进 `source` 与 `kind`（manual / schedule /
 /// makeup / retry）——主轮传 `"schedule"`、补签轮传 `"makeup"`。
+///
+/// `reason` 是**人话触发原因**（对齐 A2A `checkin_records.reason`，记录页的
+/// 「来源/说明」列直读）。空串 = 读侧回落 `message`。
 pub(crate) async fn run_targets(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
@@ -691,6 +896,18 @@ pub(crate) async fn run_targets(
     targets: Vec<crate::account_session::model::AccountSession>,
     source: &str,
     gap_ms: u64,
+) -> ScheduleOutcome {
+    run_targets_with_reason(store, sessions, targets, source, gap_ms, "").await
+}
+
+/// [`run_targets`] 的带 `reason` 版本（调度/补签/手动各给一句话说明）。
+pub(crate) async fn run_targets_with_reason(
+    store: &CheckinStore,
+    sessions: &AccountSessionStore,
+    targets: Vec<crate::account_session::model::AccountSession>,
+    source: &str,
+    gap_ms: u64,
+    reason: &str,
 ) -> ScheduleOutcome {
     if targets.is_empty() {
         return ScheduleOutcome {
@@ -710,13 +927,15 @@ pub(crate) async fn run_targets(
         let client = match sessions.client_for(&session) {
             Ok(client) => client,
             Err(e) => {
-                record(
+                record_with_reason(
                     store,
                     &session,
                     source,
                     CheckinOutcome::Failed,
                     &format!("出口配置错误：{e}"),
                     false,
+                    reason,
+                    0,
                 );
                 failed += 1;
                 continue;
@@ -742,7 +961,26 @@ pub(crate) async fn run_targets(
         } else if outcome == CheckinOutcome::Failed {
             failed += 1;
         }
-        record(store, &session, source, outcome, &message, kept_active);
+        // 签到后回读成长中心连登天数并落账号（WorkBuddy 国内版；对齐 A2A
+        // 「签到后回读成长中心连登并落账号」）。只在成功/已签时读 —— 失败时
+        // 上游多半也不让读，白打一次请求。读失败不影响签到结果。
+        let mut streak_days = store.streak_days(&session.id);
+        if outcome.is_ok() {
+            if let Some(days) = claim::fetch_streak_days(&client, &session).await {
+                streak_days = days;
+                let _ = store.mark_streak_days(&session.id, days);
+            }
+        }
+        record_with_reason(
+            store,
+            &session,
+            source,
+            outcome,
+            &message,
+            kept_active,
+            reason,
+            streak_days,
+        );
         if gap_ms > 0 {
             tokio::time::sleep(Duration::from_millis(gap_ms)).await;
         }
@@ -812,17 +1050,45 @@ pub fn record(
     message: &str,
     kept_active: bool,
 ) {
+    record_with_reason(store, session, source, outcome, message, kept_active, "", 0);
+}
+
+/// [`record`] 的完整形态：带上触发原因 `reason`（对齐 A2A `checkin_records.reason`）
+/// 与签到后回读的连登天数 `streak_days`。
+#[allow(clippy::too_many_arguments)]
+pub fn record_with_reason(
+    store: &CheckinStore,
+    session: &crate::account_session::model::AccountSession,
+    source: &str,
+    outcome: CheckinOutcome,
+    message: &str,
+    kept_active: bool,
+    reason: &str,
+    streak_days: u32,
+) {
+    let date = today();
+    // 当日签到台账（`dailyCheckin`）：只有 ok / already 才写 claimAt
+    // （对齐 A2A：窗口未开与失败不落 claimed，否则会挡住后续重试）。
+    let _ = store.mark_daily_checkin(
+        &session.id,
+        &date,
+        outcome.as_str(),
+        outcome.is_ok().then(|| Utc::now().timestamp_millis()),
+        message,
+    );
     let _ = store.append_record(CheckinRecord {
         ts: Utc::now().timestamp(),
-        date: today(),
+        date: date.clone(),
         account_id: session.id.clone(),
         account_name: session.name.clone(),
         provider: session.provider.clone(),
         source: source.to_string(),
         kind: source.to_string(),
+        reason: reason.to_string(),
         outcome,
         ok: outcome.is_ok(),
         kept_active,
+        streak_days,
         message: message.to_string(),
         error: if outcome.is_ok() {
             String::new()
@@ -851,6 +1117,8 @@ mod tests {
             provider_times: HashMap::new(),
             last_fired_date: String::new(),
             last_fired_providers: HashMap::new(),
+            last_retried_providers: HashMap::new(),
+            account_plan: super::super::store::AccountPlan::default(),
             last_result: String::new(),
             last_ok: 0,
             last_keepalive: 0,
@@ -984,6 +1252,46 @@ mod tests {
         // FNV-1a 64 位对 "a" = 0xaf63dc4c8601ec8c。
         assert_eq!(stable_hash("a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(stable_hash(""), 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn pending_providers_and_next_run_are_distinct_from_due() {
+        let mut s = schedule("00:01", &["qoder", "zcode", "loomy"]);
+        let today = "2026-11-07";
+        // 早上 08:00：只有 loomy 到点，其余两家在等窗口 —— 「待执行」不等于「今天没跑」
+        assert_eq!(pending_providers(&s, today).len(), 3);
+        // 逐家标记后 pending 减少
+        s.last_fired_providers
+            .insert("loomy".to_string(), today.to_string());
+        assert_eq!(pending_providers(&s, today).len(), 2);
+        // next_run_at 必须给出一个未来时刻（qoder 10:01 / zcode 19:01 的相对最近）
+        assert!(next_run_at(&s, today).is_some());
+        // 关掉后（未尝试的排程清掉 + 全部已跑）仍会给出「明天」的时刻
+        for provider in ["qoder", "zcode"] {
+            s.last_fired_providers
+                .insert(provider.to_string(), today.to_string());
+        }
+        assert!(pending_providers(&s, today).is_empty());
+        assert!(
+            next_run_at(&s, today).is_some(),
+            "明天还要跑，下次执行不应为 None"
+        );
+    }
+
+    #[test]
+    fn window_ms_and_random_instant_bounds() {
+        let (start, end) = window_ms("09:00", "09:10").expect("合法窗口");
+        assert!(end > start);
+        // 非法 / 倒序给 None
+        assert!(window_ms("9:00", "09:10").is_none());
+        assert!(window_ms("09:10", "09:00").is_none());
+        // 随机时刻落在闭区间内
+        for _ in 0..20 {
+            let at = random_instant(start, end);
+            assert!(at >= start && at <= end, "越界：{at}");
+        }
+        // 单点窗口恒等于该点
+        assert_eq!(random_instant(start, start), start);
     }
 
     #[test]

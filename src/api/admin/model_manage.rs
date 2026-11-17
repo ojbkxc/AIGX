@@ -1,11 +1,18 @@
-//! 统一模型管理 API —— `GET /api/models/manage` 与三个写接口。
+//! 统一模型管理 API —— `GET /api/models/manage` 与写接口。
+//!
+//! Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+//! 对应上游 `api/model_manage.rs`（映射三元组 / 能力位覆盖 / 自定义模型）。
 //!
 //! 读：把渠道模型 + 账号池模型按 provider 聚合成一张表（见 `model::manage`）。
 //! 写：
 //! - `POST /api/models/state`     启停 `{provider, id, enabled}`
+//! - `GET  /api/models/mappings`  逐条映射清单（`{mappings, dangling, reasoningLevels}`）
+//! - `POST /api/models/mappings`  新增 / 更新映射 `{alias, target, provider?, reasoning?, enabled?, create?}`
+//! - `POST /api/models/mappings/remove` 删除映射 `{alias, target, provider?}`
+//! - `POST /api/models/capabilities` 能力位三态覆盖 `{provider, id, capabilities: {key: bool|null}}`
 //! - `POST /api/models/price`     定价 `{model, input_price, output_price, cache_price?, price_type?, model_ratio?}`
 //! - `POST /api/models/price/remove` 删除定价 `{model}`
-//! - `POST /api/models/alias`     别名映射 `{alias, target}`（写入全局 `model_custom_map`）
+//! - `POST /api/models/alias`     别名映射 `{alias, target}`（旧入口，写全局条目）
 //! - `POST /api/models/alias/remove` 删除别名 `{alias}`
 //!
 //! 所有写接口返回最新的完整视图，前端就地重绘、不必再拉一次 —— 与
@@ -15,6 +22,16 @@
 //!
 //! 同一个 `gpt-4o` 可能同时由 openai 直连渠道和某个中转账号承载。按模型名
 //! 关停会连带关掉另一家 —— 管理员想表达的通常是「这家别再用这个模型了」。
+//!
+//! ## T5：映射的 provider 维度与三态协议
+//!
+//! 映射是 `{alias, target, provider(可空), reasoning(可空), enabled}`（见
+//! `model::Mapping`）。存量 `alias → target` 在装载时迁成 `provider = None`
+//! （= `*`，对所有承载 target 的家生效），行为逐字不变。
+//!
+//! `reasoning` / `enabled` / `create` 三个字段都是**三态**（键缺失 ≠ 显式值）：
+//! 键缺失 = 不动；给值 = 显式设置。理由见各 handler 的注释 —— 两个三态字段
+//! 各管各的，改等级不会顺手把开关打开，切开关不会顺手清掉等级。
 
 use axum::{
     extract::State,
@@ -22,12 +39,34 @@ use axum::{
     response::Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::super::openai::AppState;
 use super::common::{error_response, verify_admin, verify_user};
+use crate::model::capability_overrides;
 use crate::model::manage::{build_view, view_json, ManageView};
 use crate::pricing::{ModelPrice, RatioConfig};
+
+/// 思考等级候选表（与 A2A `model_rules::REASONING_LEVELS` 逐字一致；
+/// 随 manage 响应一并发给前端，前端不自己抄一份）。
+pub const REASONING_LEVELS: [&str; 8] = [
+    "off", "none", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+/// 思考等级的长度上限（自定义等级也走这里，与 A2A `REASONING_MAX_CHARS` 同值）。
+const REASONING_MAX_CHARS: usize = 32;
+
+/// 归一一个思考等级：trim → 空 / 超长返回 None（= 不覆盖）。
+///
+/// **不校验是否在候选表里**：界面有「自定义输入」入口（与 A2A 同取向——
+/// 表外值合法地存在于配置与界面里，只是转发侧另有闸门）。
+fn normalize_reasoning(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > REASONING_MAX_CHARS {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
 
 /// 构建当前视图（所有读写接口共用）。
 pub(crate) fn current_view(state: &AppState) -> ManageView {
@@ -85,6 +124,8 @@ pub async fn handle_manage_view(
                     total: 0,
                     enabled: 0,
                     account: false,
+                    source: "none".to_string(),
+                    refreshed_at: 0,
                 }
             });
             g.total += 1;
@@ -92,6 +133,10 @@ pub async fn handle_manage_view(
         }
         view.providers = groups.into_values().collect();
         view.unpriced = view.models.iter().filter(|m| m.price.is_none()).count();
+        // 客户页看不到映射（它们是运营配置），两个映射区块一并清空
+        view.mapping_entries.clear();
+        view.dangling.clear();
+        view.mappings.clear();
         return Ok(ok_view(&view));
     }
     Ok(ok_view(&current_view(&state)))
@@ -126,6 +171,213 @@ pub async fn handle_set_state(
         ));
     }
     Ok(ok_view(&current_view(&state)))
+}
+
+/// GET /api/models/mappings —— 逐条映射清单（A2A `GET /api/models/mappings`）。
+///
+/// 响应 `{success, data: {mappings, dangling, reasoningLevels}}`：
+/// - `mappings[]`：全量条目（含关闭条目；`dangling` / `carried` 标记）；
+/// - `dangling[]`：未挂载条目（与 manage 视图同源）；
+/// - `reasoningLevels`：候选档位表（前端下拉用，不自己抄一份）。
+///
+/// 为什么不复用 `/api/models/manage`：映射编辑弹窗只需要这一小块，
+/// manage 视图要遍历全部渠道 + 账号（含目录缓存读），重拉一次太贵。
+pub async fn handle_list_mappings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let view = current_view(&state);
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "mappings": view.mapping_entries,
+            "dangling": view.dangling,
+            "reasoningLevels": REASONING_LEVELS,
+        }
+    })))
+}
+
+/// POST /api/models/mappings —— 新增 / 更新一条映射。
+///
+/// 请求体：`{alias, target, provider?, reasoning?, enabled?, create?}`。
+///
+/// ── `create` 三态（A2A `add_mapping` 同口径）──────────────────
+/// - `true`：只新增；同三元组已存在 → 409「已绑定」（避免「加两次」的静默重复）；
+/// - `false`：只编辑；三元组不存在 → 404；
+/// - 缺失：兼容旧调用方的保存语义（有则改、无则建）。
+///
+/// ── `reasoning` / `enabled` 三态（键缺失 = 不动）────────────────
+/// 管理页切开关只传 `(alias, target, provider, enabled)`，改等级只传
+/// `(alias, target, provider, reasoning)` —— 若把「没传」当成「清空」，
+/// 每次切开关都会顺手清掉思考等级（静默数据丢失）。
+pub async fn handle_upsert_mapping(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<MappingBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let alias = body.alias.trim();
+    let target = body.target.trim();
+    if alias.is_empty() {
+        return Err(error_response("别名不能为空", StatusCode::BAD_REQUEST));
+    }
+    if target.is_empty() {
+        return Err(error_response(
+            "目标上游模型不能为空",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 新建的对外名走「宽松合法性」（允许中文等非 ASCII：千问办公的上游 id
+    // 就是 `高级`）；target 走上游 id 字符集口径
+    if body.create == Some(true) && !crate::model::alias_name_valid(alias) {
+        return Err(error_response(
+            "对外名称不能为空、不能含空白或控制字符，且不超过 128 个字符",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if !crate::model::alias_valid(target) {
+        return Err(error_response(
+            "目标模型 ID 只能包含字母、数字与 - _ . / :，且不超过 128 个字符",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let provider = body
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    // 思考等级：超长值在落盘前拒掉（读侧容错会丢弃它 —— 不留一条读回来
+    // 就消失的脏数据）
+    let reasoning: Option<Option<&str>> = match body.reasoning.as_deref() {
+        None => None,
+        Some(text) if text.trim().is_empty() => Some(None),
+        Some(text) => {
+            if normalize_reasoning(text).is_none() {
+                return Err(error_response(
+                    "思考等级过长（最多 32 个字符）",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+            Some(Some(text))
+        }
+    };
+    match state.model_mapper.upsert_mapping(
+        alias,
+        target,
+        provider,
+        reasoning,
+        body.enabled,
+        body.create,
+    ) {
+        Ok(result) => {
+            if result.changed {
+                let subject = match provider {
+                    Some(name) => format!("{alias} → {target}（{name}）"),
+                    None => format!("{alias} → {target}"),
+                };
+                tracing::info!("[Models] 保存映射 {subject}");
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let status = if message.starts_with("模型 ID") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            return Err(error_response(&message, status));
+        }
+    }
+    Ok(ok_view(&current_view(&state)))
+}
+
+/// POST /api/models/mappings/remove —— 删除一条映射（三元组精确定位）。
+///
+/// 自映射（`alias == target`）正常不能删 —— 它跟着模型行存在，要停用请关
+/// 开关。例外是**模型行已经不在了**（上游下线 / 那家被移除或没有可用账号）：
+/// 这时开关没有落点，删除是唯一出路（管理页「未挂载的映射」正是给这批条目
+/// 留的入口）。判据与视图里标 `dangling` 的那一处同源（`host_row_exists`）。
+pub async fn handle_remove_mapping(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<MappingRemoveBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let alias = body.alias.trim();
+    let target = body.target.trim();
+    if alias.is_empty() || target.is_empty() {
+        return Err(error_response(
+            "缺少映射名或目标上游模型",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let provider = body
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    if alias == target && host_row_exists(&current_view(&state), provider, target) {
+        return Err(error_response(
+            "原始 ID 的默认绑定不能删除，请关闭它的开关",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let removed = match state.model_mapper.remove_mapping(alias, target, provider) {
+        Ok(removed) => removed,
+        Err(error) => {
+            return Err(error_response(
+                &format!("删除映射失败：{error}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
+    };
+    if !removed {
+        return Err(error_response(
+            &format!("映射不存在: {alias} → {target}"),
+            StatusCode::NOT_FOUND,
+        ));
+    }
+    tracing::info!("[Models] 删除映射 {alias} → {target}");
+    Ok(ok_view(&current_view(&state)))
+}
+
+/// `(provider, target)` 是否还能在管理视图里落到一行模型行。
+///
+/// 与 `model::manage::build_view` 把映射标成 `dangling` 的路径同源：
+/// 有行 = 这家仍承载这个模型（含自定义登记）。
+fn host_row_exists(view: &ManageView, provider: Option<&str>, target: &str) -> bool {
+    view.models.iter().any(|row| {
+        row.id == target && provider.is_none_or(|owner| row.provider.eq_ignore_ascii_case(owner))
+    })
+}
+
+/// 一条映射请求体（POST /api/models/mappings）。
+#[derive(Debug, Deserialize)]
+pub struct MappingBody {
+    pub alias: String,
+    pub target: String,
+    /// `None` = 全局条目（对所有承载 target 的家生效）
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 三态：键缺失 = 不动；null / 空串 = 清除；字符串 = 设置
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    /// 三态：键缺失 = 不动；bool = 显式开 / 关
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// 三态：true = 只新增（已存在 → 409）；false = 只编辑（不存在 → 404）
+    #[serde(default)]
+    pub create: Option<bool>,
+}
+
+/// 删除一条映射的请求体（POST /api/models/mappings/remove）。
+#[derive(Debug, Deserialize)]
+pub struct MappingRemoveBody {
+    pub alias: String,
+    pub target: String,
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,20 +650,38 @@ pub async fn handle_set_alias_reasoning(
     })))
 }
 
-/// POST /api/models/capabilities —— 手动覆盖某模型的能力标签。
+/// POST /api/models/capabilities —— 覆盖某条模型对下游声明的能力位。
 ///
-/// 对照 Agent2API `POST /api/models/capabilities`（基线是 6 键类型化模型）。
-/// AIGX 的 `capabilities` 是 `Vec<String>` 标签集（chat / vision / tools /
-/// reasoning / embedding / image / audio / video / rerank），语义更轻。
+/// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+/// 对应上游 `api/model_manage.rs::set_capabilities`。
 ///
-/// 覆盖写入 `ModelMetadataRegistry`（FileStore 持久化），优先级高于内置推断
-/// 与 models.dev 补空位。只改 capabilities，保留现有 owned_by / context_length。
-/// 空数组合法（表示「该模型无任何能力标签」，前端据此禁用）。
+/// ── 两种请求形状并存 ────────────────────────────────────────
+/// 1. **新（A2A 口径，三态）**：`{provider, id, capabilities: {键: bool|null}}`
+///    —— 按 `(provider, id)` 逐键保存，`null` = 清除这一项（回到 inherit）。
+///    存储是 `model::capability_overrides`，出口（`/v1/models` / Anthropic
+///    列表 / 管理视图）统一应用，优先级 user > upstream > models.dev。
+///    键名见 `capability_overrides::KEYS`（supportsToolCall /
+///    supportsImages / supportsVideo / supportsReasoning /
+///    supportsEmbedding / supportsRerank + supportsAudio / supportsChat）。
+/// 2. **旧（标签集形态）**：`{model, capabilities: Vec<String>}`
+///    —— 行为不变（写 `ModelMetadataRegistry`，整份替换该模型的标签集）。
+///    旧前端 / 脚本继续走这条，不被新形状破坏。
+///
+/// 判据：请求体带 `provider` 键 → 新形态；否则旧形态。
 #[derive(Debug, Deserialize)]
 pub struct CapabilitiesBody {
-    pub model: String,
+    /// 旧形态：按模型名（无 provider 维度）。
     #[serde(default)]
-    pub capabilities: Vec<String>,
+    pub model: Option<String>,
+    /// 新形态：provider 维度。
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 新形态：模型 id。
+    #[serde(default)]
+    pub id: Option<String>,
+    /// 旧形态：标签集（字符串数组）。
+    #[serde(default)]
+    pub capabilities: Option<Value>,
 }
 
 /// 合法能力标签白名单（与 `infer_capabilities` / `CAPABILITY_HINTS` 同源）。
@@ -437,18 +707,117 @@ pub async fn handle_set_capabilities(
     Json(body): Json<CapabilitiesBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    let model = body.model.trim();
+    match (body.provider.as_deref(), body.capabilities.as_ref()) {
+        (Some(provider), Some(Value::Object(patch))) => {
+            set_capability_overrides(provider, body.id.as_deref(), patch)
+        }
+        (Some(_), _) => Err(error_response(
+            "capabilities 必须是对象（键 → bool|null）",
+            StatusCode::BAD_REQUEST,
+        )),
+        (None, Some(capabilities)) => {
+            set_legacy_capabilities(&state, body.model.as_deref(), capabilities)
+        }
+        (None, None) => Err(error_response(
+            "缺少 capabilities 字段",
+            StatusCode::BAD_REQUEST,
+        )),
+    }
+}
+
+/// 新形态：`(provider, id)` 三态覆盖。
+fn set_capability_overrides(
+    provider: &str,
+    id: Option<&str>,
+    patch: &Map<String, Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let provider = provider.trim();
+    let id = id.map(str::trim).unwrap_or("");
+    if provider.is_empty() || id.is_empty() {
+        return Err(error_response(
+            "provider 与 id 不能为空",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 值校验在这里就拦掉：不留一条读回来会被归一丢弃的脏数据。
+    // `null` 是合法的「清除」信号（restore），不算非法值。
+    for (key, value) in patch {
+        if !capability_overrides::is_known_key(key) {
+            return Err(error_response(
+                &format!("未知的能力字段: {key}"),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        if !value.is_null() && capability_overrides::normalize_value(key, value).is_none() {
+            return Err(error_response(
+                &format!("能力字段 {key} 取值非法（能力开关要布尔，清除用 null）"),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    }
+    let Some(store) = capability_overrides::current() else {
+        return Err(error_response(
+            "能力覆盖存储未初始化（服务启动接线缺失）",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    };
+    if let Err(error) = store.set(provider, id, patch) {
+        return Err(error_response(
+            &format!("保存能力覆盖失败：{error}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    }
+    let summary = patch
+        .iter()
+        .map(|(key, value)| match value {
+            Value::Null => format!("{key}=恢复"),
+            other => format!("{key}={other}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::info!("[Models] 保存模型能力 [{provider}] {id}: {summary}");
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "provider": provider,
+            "id": id,
+            "capabilities": store.get(provider, id).map(Value::Object).unwrap_or(Value::Null),
+            "overriddenKeys": store.overridden_keys(provider, id),
+        }
+    })))
+}
+
+/// 旧形态：整份替换 `ModelMetadataRegistry` 的标签集（行为不变）。
+fn set_legacy_capabilities(
+    state: &AppState,
+    model: Option<&str>,
+    capabilities: &Value,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let model = model.map(str::trim).unwrap_or("");
     if model.is_empty() {
         return Err(error_response("model 不能为空", StatusCode::BAD_REQUEST));
     }
-    // 校验能力标签合法性
-    for cap in &body.capabilities {
+    let Some(list) = capabilities.as_array() else {
+        return Err(error_response(
+            "缺少 capabilities 字段（或它不是数组）",
+            StatusCode::BAD_REQUEST,
+        ));
+    };
+    let mut tags: Vec<String> = Vec::with_capacity(list.len());
+    for item in list {
+        let Some(cap) = item.as_str() else {
+            return Err(error_response(
+                "能力标签必须是字符串",
+                StatusCode::BAD_REQUEST,
+            ));
+        };
         if !valid_capability(cap) {
             return Err(error_response(
                 &format!("未知的能力标签: {cap}"),
                 StatusCode::BAD_REQUEST,
             ));
         }
+        tags.push(cap.to_string());
     }
     let owned_by = state.model_metadata.get(model, None).owned_by;
     let context_length = state.model_metadata.get(model, None).context_length;
@@ -464,7 +833,7 @@ pub async fn handle_set_capabilities(
     let meta = crate::model::metadata::ModelMetadata {
         owned_by,
         context_length,
-        capabilities: body.capabilities.clone(),
+        capabilities: tags.clone(),
         reasoning_levels,
     };
     if let Err(e) = state.model_metadata.set_override(model.to_string(), meta) {
@@ -475,7 +844,7 @@ pub async fn handle_set_capabilities(
     }
     Ok(Json(json!({
         "success": true,
-        "data": { "model": model, "capabilities": body.capabilities }
+        "data": { "model": model, "capabilities": tags }
     })))
 }
 
@@ -540,12 +909,20 @@ pub async fn handle_remove_custom_model(
             StatusCode::INTERNAL_SERVER_ERROR,
         ));
     }
+    // 连带清掉针对这条模型的能力覆盖（与 A2A `remove_custom` 的
+    // `capabilities.retain` 同语义）—— 留着就是一条永远读不回来的孤儿。
+    if let Some(store) = capability_overrides::current() {
+        if let Err(e) = store.remove_all_for(provider, id) {
+            tracing::warn!("[Models] 清理自定义模型能力覆盖失败 [{provider}] {id}: {e}");
+        }
+    }
     Ok(ok_view(&current_view(&state)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::alias_valid;
+    use super::{host_row_exists, normalize_reasoning, valid_capability, ManageView};
 
     #[test]
     fn alias_rules() {
@@ -555,5 +932,57 @@ mod tests {
         assert!(!alias_valid(""));
         assert!(!alias_valid("has space"));
         assert!(!alias_valid(&"x".repeat(129)));
+    }
+
+    /// 思考等级归一：空 / 超长 → None（= 不覆盖），其余 trim 后原样保留。
+    /// 表外自定义值放行（A2A 同口径：界面有自定义输入入口）。
+    #[test]
+    fn reasoning_normalization() {
+        assert_eq!(normalize_reasoning("  high ").as_deref(), Some("high"));
+        assert_eq!(normalize_reasoning(""), None);
+        assert_eq!(normalize_reasoning("   "), None);
+        assert_eq!(
+            normalize_reasoning("custom-level").as_deref(),
+            Some("custom-level"),
+            "表外值放行（能不能注入由转发侧另判）"
+        );
+        assert_eq!(normalize_reasoning(&"x".repeat(33)), None, "超 32 字符拒绝");
+        assert!(normalize_reasoning(&"x".repeat(32)).is_some());
+    }
+
+    /// 自映射可删判据：模型行还在 → 不能删（请关开关）；行不在了 → 可删。
+    #[test]
+    fn default_binding_removal_guard() {
+        let view = ManageView {
+            providers: Vec::new(),
+            models: Vec::new(),
+            mappings: Default::default(),
+            mapping_entries: Vec::new(),
+            dangling: Vec::new(),
+            capability_store_ready: true,
+            unpriced: 0,
+        };
+        // 没有任何模型行 → 允许删（悬空映射的出口）
+        assert!(!host_row_exists(&view, Some("catpaw"), "kimi-k3"));
+        assert!(!host_row_exists(&view, None, "kimi-k3"));
+    }
+
+    #[test]
+    fn capability_tag_whitelist() {
+        for tag in [
+            "chat",
+            "vision",
+            "video",
+            "tools",
+            "tool",
+            "reasoning",
+            "embedding",
+            "rerank",
+            "image",
+            "audio",
+        ] {
+            assert!(valid_capability(tag), "{tag} 应合法");
+        }
+        assert!(!valid_capability("bogus"));
     }
 }

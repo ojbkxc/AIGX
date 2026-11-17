@@ -35,6 +35,16 @@ use super::install::{self, InstallError};
 use super::process::{self, HostEnv, PluginProcess, ProcessState, ProviderInfo};
 use super::registry::{PackMeta, PackRegistry};
 
+/// 读包目录的 `pack.json`（原始 JSON —— wasm 判据与校验都按 JSON 形状走）。
+fn read_pack_json(dir: &Path) -> Result<serde_json::Value, InstallError> {
+    let path = dir.join("pack.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        InstallError::Manifest(format!("读不到 pack.json（{}）: {e}", path.display()))
+    })?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|e| InstallError::Manifest(format!("pack.json 解析失败: {e}")))
+}
+
 /// 崩溃退避表：第 n 次重试（0 基）前的等待时长。
 const RESTART_BACKOFF: [Duration; 7] = [
     Duration::from_secs(1),
@@ -147,6 +157,13 @@ impl PluginHostManager {
             .registry
             .get(pack_id)
             .ok_or_else(|| format!("插件包「{pack_id}」不存在"))?;
+        // Wasm 包与原生包走**完全不同**的启停路径：没有子进程、没有
+        // spawn/握手/崩溃退避，而是进程内加载 wasmtime 模块。判据是
+        // `pack.json` 的 `entry` 是否声明 `wasm32-unknown-unknown` 目标
+        // （与 `wasm::manifest::read_manifest` 同一判据，二者互斥）。
+        if let Some(providers) = self.enable_wasm(&meta).await? {
+            return Ok(providers);
+        }
         // 已在跑：直接返回。判定用 runtime.running（权威标记，崩溃即置
         // false）+ 进程句柄状态——只看 proc.state 会在「崩溃后退避窗口」
         // 里误判在跑（state 停在 Running，没人改它）。
@@ -233,6 +250,17 @@ impl PluginHostManager {
 
     /// 停用一个包：关进程 + 落 enabled=false。
     pub async fn disable(&self, pack_id: &str) -> Result<(), String> {
+        // Wasm 包：关宿主 + 摘清单 + 清任务/目录状态，然后落 enabled=false。
+        if let Some(provider) = self.provider_of_wasm_pack(pack_id) {
+            crate::plugin_host::wasm::stop(&provider).await;
+            crate::plugin_host::wasm::forget(&provider);
+            self.registry.set_enabled(pack_id, false)?;
+            if let Some(slot) = self.runtime.write().get_mut(pack_id) {
+                slot.running = false;
+            }
+            tracing::info!("[PluginHost] 已停用 Wasm 插件包 {pack_id}（provider {provider}）");
+            return Ok(());
+        }
         let proc = self.processes.write().remove(pack_id);
         if let Some(p) = proc {
             process::shutdown(&p).await;
@@ -300,6 +328,16 @@ impl PluginHostManager {
         self.processes.read().get(&pack_id).cloned()
     }
 
+    /// 按包 id 直接取插件进程（不经过 provider 归属判定）。
+    ///
+    /// Wasm 沙箱的「原生辅助调用」需要向**指定包**发 RPC（`native.call`），
+    /// 此时手里只有包 id、没有 provider，且不应受 provider 级闸门影响——
+    /// 授权判定由调用方（`wasm::native`）自己做。`processes` 是私有字段，
+    /// 除本方法外没有别的读取入口，故单独暴露。
+    pub fn process_for_pack(&self, pack_id: &str) -> Option<Arc<PluginProcess>> {
+        self.processes.read().get(pack_id).cloned()
+    }
+
     /// 启动时恢复：把「已启用」的包重新拉起来（best effort）。
     ///
     /// 单个包起不来不影响网关启动，只记错误。
@@ -320,15 +358,133 @@ impl PluginHostManager {
     }
 
     /// 网关关闭：全部优雅关闭。
+    ///
+    /// Wasm 宿主也要一并关停 —— 它们不占子进程表，`processes` 里没有它们。
     pub async fn shutdown_all(&self) {
         let procs: Vec<Arc<PluginProcess>> =
             self.processes.write().drain().map(|(_, p)| p).collect();
         for p in procs {
             process::shutdown(&p).await;
         }
+        // Wasm 宿主：取消在途调用 + 排空 + 摘清单。
+        crate::plugin_host::wasm::stop_all().await;
         for slot in self.runtime.write().values_mut() {
             slot.running = false;
         }
+    }
+
+    /// Wasm 包的启用路径（返回 `None` 表示这不是 wasm 包，交给原生路径）。
+    ///
+    /// 判据是包目录的 `pack.json` 是否把入口声明在
+    /// `wasm32-unknown-unknown` 目标下（`wasm::manifest::is_wasm`）。
+    async fn enable_wasm(&self, meta: &PackMeta) -> Result<Option<Vec<ProviderInfo>>, String> {
+        let dir = meta.version_dir(&self.plugins_root);
+        let pack = match read_pack_json(&dir) {
+            Ok(pack) => pack,
+            // 没有 pack.json 说明不是（或损坏的）插件包：交给原生路径，
+            // 由它报「入口不存在」——不在 here 抢报错口径。
+            Err(_) => return Ok(None),
+        };
+        if !crate::plugin_host::wasm::manifest::is_wasm(&pack) {
+            return Ok(None);
+        }
+        // 已装载：直接返回当前 provider（重复 enable 幂等）。
+        let provider = crate::plugin_host::wasm::read_manifest(&dir, &pack)
+            .map_err(|error| self.note_wasm_error(meta, error))?
+            .ok_or_else(|| {
+                self.note_wasm_error(meta, "Wasm 清单缺失".to_string())
+                    .to_string()
+            })?
+            .provider;
+        if let Some(host) = crate::plugin_host::wasm::host_for_provider(&provider) {
+            let providers: Vec<ProviderInfo> = host
+                .providers()
+                .into_iter()
+                .map(|info| ProviderInfo {
+                    id: info.id,
+                    label: info.label,
+                })
+                .collect();
+            let mut rt = self.runtime.write();
+            let slot = rt.entry(meta.id.clone()).or_default();
+            slot.running = true;
+            slot.providers = providers.clone();
+            return Ok(Some(providers));
+        }
+        // 构造注入面：账号访问 + 出站（复用脚本宿主的 Transport 实例）。
+        // `Transport` 由每实例自建——wasm 包的出站与脚本宿主不共享会话表
+        // 反而更安全（一个 wasm 包的最大连接数不会挤占脚本包）。
+        let access = crate::plugin_host::wasm::AccountSessionAccess::new(
+            meta.id.clone(),
+            self.account_sessions.clone(),
+            self.store.clone(),
+        );
+        let egress = crate::plugin_host::wasm::TransportEgress::new(
+            crate::plugin_host::script::transport::Transport::new(self.http.clone()),
+        );
+        let options = crate::plugin_host::wasm::WasmOptions::from_pack(&dir, &pack, access, egress)
+            .map_err(|error| self.note_wasm_error(meta, error))?
+            .ok_or_else(|| {
+                self.note_wasm_error(meta, "Wasm 清单缺失".to_string())
+                    .to_string()
+            })?;
+        let provider = options.manifest.provider.clone();
+        let host = match crate::plugin_host::wasm::start(options).await {
+            Ok(host) => host,
+            Err(error) => {
+                // 失败不留半成品：start 内部已自行清理，这里只落 last_error。
+                self.registry.set_enabled(&meta.id, false).ok();
+                return Err(self.note_wasm_error(meta, error));
+            }
+        };
+        let providers: Vec<ProviderInfo> = host
+            .providers()
+            .into_iter()
+            .map(|info| ProviderInfo {
+                id: info.id,
+                label: info.label,
+            })
+            .collect();
+        self.registry.set_enabled(&meta.id, true)?;
+        {
+            let mut rt = self.runtime.write();
+            let slot = rt.entry(meta.id.clone()).or_default();
+            slot.running = true;
+            slot.providers = providers.clone();
+            slot.last_error = None;
+            slot.crashes = 0;
+        }
+        // 任务声明：失败只 warn，不阻断启用（插件可能没声明 tasks.v1）。
+        if let Err(error) = crate::plugin_host::wasm::tasks::load(&provider).await {
+            tracing::warn!("[PluginHost] Wasm 包 {} 任务声明加载失败: {error}", meta.id);
+        }
+        tracing::info!(
+            "[PluginHost] 已启用 Wasm 插件包 {}（provider {provider}）",
+            meta.id
+        );
+        Ok(Some(providers))
+    }
+
+    /// 记录 wasm 启用失败的 last_error 并返回原错误文案。
+    fn note_wasm_error(&self, meta: &PackMeta, error: String) -> String {
+        {
+            let mut rt = self.runtime.write();
+            let slot = rt.entry(meta.id.clone()).or_default();
+            slot.running = false;
+            slot.last_error = Some(error.clone());
+        }
+        error
+    }
+
+    /// 该包若是 wasm 包，返回它声明的 provider id（`disable` / 诊断用）。
+    fn provider_of_wasm_pack(&self, pack_id: &str) -> Option<String> {
+        let meta = self.registry.get(pack_id)?;
+        let dir = meta.version_dir(&self.plugins_root);
+        let pack = read_pack_json(&dir).ok()?;
+        crate::plugin_host::wasm::read_manifest(&dir, &pack)
+            .ok()
+            .flatten()
+            .map(|manifest| manifest.provider)
     }
 
     fn set_error(&self, pack_id: &str, err: Option<String>) {

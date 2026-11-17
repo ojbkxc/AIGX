@@ -142,48 +142,18 @@ async fn handle(
 
 /// 造一个账号池账号（base_url 指向替身）。
 fn account(provider: &str, base_url: &str) -> AccountSession {
-    AccountSession {
-        id: "test-account".to_string(),
-        channel_id: "test-channel".to_string(),
-        name: "测试账号".to_string(),
-        provider: provider.to_string(),
-        base_url: base_url.to_string(),
-        chat_path: None,
-        credential: Credential {
-            kind: "session".to_string(),
-            secret: "test-token".to_string(),
-            fields: std::collections::HashMap::new(),
-        },
-        proxy: None,
-        status: "enabled".to_string(),
-        priority: 0,
-        weight: 1,
-        sort_order: 0,
-        max_concurrency: 0,
-        models: Vec::new(),
-        extra_headers: HashMap::new(),
-        refresh_secret: String::new(),
-        cooldowns: HashMap::new(),
-        last_used_at: None,
-        last_error: None,
-        success_count: 0,
-        error_count: 0,
-        consecutive_errors: 0,
-        total_latency_ms: 0,
-        expires_at: None,
-        consecutive_rejections: 0,
-        logged_in_at: None,
-        relogin_notified_at: None,
-        in_flight: 0,
-        usage_query_interval_secs: None,
-        limiters: Vec::new(),
-        limiter_groups: Vec::new(),
-        last_balance_at: None,
-        last_balance: None,
-        last_balance_error: None,
-        created_at: 0,
-        updated_at: 0,
-    }
+    // 构造器 + 赋值：`AccountSession` 新增字段时字面量构造点会 E0063，
+    // 构造器（`AccountSession::new`）把这些默认值集中在一处。
+    let mut session = AccountSession::new("test-channel", "测试账号");
+    session.id = "test-account".to_string();
+    session.provider = provider.to_string();
+    session.base_url = base_url.to_string();
+    session.credential = Credential {
+        kind: "session".to_string(),
+        secret: "test-token".to_string(),
+        fields: std::collections::HashMap::new(),
+    };
+    session
 }
 
 /// 断言替身收到的请求用了某个 HTTP 方法。
@@ -1097,6 +1067,8 @@ fn makeup_targets_only_picks_unsucceeded_accounts() {
         provider_times: HashMap::new(),
         last_fired_date: String::new(),
         last_fired_providers: HashMap::new(),
+        last_retried_providers: HashMap::new(),
+        account_plan: Default::default(),
         last_result: String::new(),
         last_ok: 0,
         last_keepalive: 0,

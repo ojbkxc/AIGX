@@ -57,6 +57,7 @@ mod hub;
 mod image_compat;
 mod ip;
 mod log;
+mod maintenance;
 mod metrics;
 mod model;
 mod monitor;
@@ -84,6 +85,7 @@ mod storage;
 mod sync;
 mod ticket;
 mod token_estimate;
+mod tool_services;
 mod update;
 mod usage;
 mod user;
@@ -274,6 +276,15 @@ async fn main() -> anyhow::Result<()> {
         let (source, count) = model::models_dev::init(&store);
         tracing::info!("models.dev metadata catalog loaded: {count} entries from {source}");
     }
+
+    // 插件「提供商设置」持久化存储：单例注入（未注入时读写一律 503「设置存储
+    // 尚未就绪」——声明仍能注册，所以前端能看到字段却存不进去，是典型的
+    // 「编译绿 ∧ 路由通 ∧ 功能不可用」半死形态）。
+    crate::plugin_host::provider_settings::install(store.clone());
+
+    // 模型能力三态覆盖存储：单例注入（未注入时管理面写入返回 500，数据面
+    // `/v1/models` 静默按「无覆盖」降级）。
+    crate::model::capability_overrides::install(store.clone());
 
     // 初始化统一模型管理的启停规则（provider × model）
     let model_rules = Arc::new(model::manage::ModelRules::new(store.clone()));
@@ -477,6 +488,9 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化日志与审计存储（功能 1）
     let log_store = Arc::new(LogStore::new(store.clone()));
+    // 脚本插件 `script.usage` 回调的日志存储注入：不注入时回调恒返回
+    // 「用量日志存储未就绪」，插件上报的用量静默丢失（无报错、无日志）。
+    crate::plugin_host::script::usage::install(log_store.clone());
     // 客户端识别规则（KV 持久化 + 进程级快照；数据面逐请求只读快照）
     crate::api::client_id::install(store.clone());
     // 在途请求登记表（进程内）：配合日志页「查看并终止正在进行的请求」
@@ -564,7 +578,7 @@ async fn main() -> anyhow::Result<()> {
         pack_registry.clone(),
         plugins_root,
         http_client.as_ref().clone(),
-        host_env,
+        host_env.clone(),
         Arc::new(account_sessions.clone()),
         store.clone(),
     ));
@@ -583,6 +597,10 @@ async fn main() -> anyhow::Result<()> {
         script_catalog,
         pack_registry,
     );
+    // 注入宿主环境：不注入时 `script_host.host_env()` 返回 default()，
+    // 脚本包 init 载荷的 `env` 会是空串（data_dir=""/target=""），Bun 宿主
+    // 会按空目录跑。这是「编译绿但功能不可用」的半死形态，必须显式接线。
+    script_host.set_host_env(host_env);
 
     // 初始化公开注册速率限制器（per-IP，60s 窗口，最多 10000 个 IP 条目）
     // 使用基于 dashmap 的 AsyncCache 替代 moka（离线环境 moka 不可得，行为等效）
@@ -802,7 +820,15 @@ async fn main() -> anyhow::Result<()> {
         },
         plugin_host: plugin_host.clone(),
         script_host: script_host.clone(),
+        // 工具服务 / 维护运行时（对齐 A2A core::tool_services / core::maintenance；
+        // 当前为 T0 stub，实现由 T7 填充）
+        tool_services: std::sync::Arc::new(crate::tool_services::ToolServices::new(store.clone())),
+        maintenance: std::sync::Arc::new(crate::maintenance::Maintenance::new(store.clone())),
     };
+
+    // 工具服务 / 维护启动期初始化（stub 期仅记日志）
+    crate::tool_services::init(state.alert_store.clone());
+    crate::maintenance::init(state.alert_store.clone());
 
     tracing::info!(
         "Configuration loaded: {}:{} | Accounts: {} | API Keys: {} | Users: {} | EpayReady: {} | SeaORM: {}",
@@ -1209,6 +1235,14 @@ async fn main() -> anyhow::Result<()> {
         "scheduled task loop started (credential maintenance / model refresh / update check)"
     );
 
+    // wasm 插件任务：① 配置持久化（不注入时管理面改的开关/时刻只在内存，重启即丢）；
+    // ② 30s 调度循环 —— **必须**在 `scheduled_tasks::spawn` 之后：后者内部做
+    // `task_state::install(store)`，而 wasm 任务循环的 claim/finish 依赖它，放前面
+    // 会「存储不可用」整轮跳过。两处都是「编译绿但功能不可用」的半死形态。
+    crate::plugin_host::wasm::tasks::install_store_settings(state.scheduled_task_store.clone());
+    crate::plugin_host::wasm::tasks::spawn();
+    tracing::info!("wasm plugin task loop started (30s tick)");
+
     // 云同步调度循环（WebDAV / S3）：开关与间隔在 SyncConfig（KV）里，排期状态
     // 复用 scheduled_tasks::task_state（键 cloudSync），失败退避跨重启保留。
     crate::sync::spawn(state.clone());
@@ -1240,6 +1274,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
         plugin_host.shutdown_all().await;
+        crate::plugin_host::wasm::tasks::shutdown();
         log_store.flush();
         tracing::info!("Graceful shutdown complete");
         return Ok(());
@@ -1296,6 +1331,8 @@ async fn main() -> anyhow::Result<()> {
     // 插件宿主：优雅关闭全部插件子进程（先 RPC shutdown 等 5s，超时 kill，
     // 不留孤儿进程；崩溃退避监督循环见到 shutdown_requested 标记即退出）。
     plugin_host.shutdown_all().await;
+    // wasm 插件任务调度循环：取消后本轮 tick 立即返回、在跑任务在下个边界退出。
+    crate::plugin_host::wasm::tasks::shutdown();
     // 脚本宿主：先 RPC shutdown 等宿主自行退出，5s 超时 kill Bun。
     script_host.shutdown().await;
 
@@ -1875,6 +1912,16 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/models/alias/reasoning",
             post(api::admin::handle_set_alias_reasoning),
+        )
+        // 映射逐条读写（A2A `GET/POST /api/models/mappings`；映射弹窗只拉这一小块）
+        .route(
+            "/api/models/mappings",
+            get(api::admin::model_manage::handle_list_mappings)
+                .post(api::admin::model_manage::handle_upsert_mapping),
+        )
+        .route(
+            "/api/models/mappings/remove",
+            post(api::admin::model_manage::handle_remove_mapping),
         )
         .route(
             "/api/models/capabilities",
@@ -2746,6 +2793,52 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/usage",
             post(api::admin::account_sessions::handle_usage_query),
         )
+        // 账号池 A2A 对齐新增端点（T4 交付）：服务端排序 / 临期凭证批量刷新 /
+        // 逐账号凭证导出 / 异步余额查询任务 / 单账号限速清零。
+        // 影子路径 `/api/accounts/*` 与 A2A 上游同口径（前端按上游路径调用），
+        // 主前缀仍是 `/api/account-sessions/*`（既有 33 条路由一致）。
+        .route(
+            "/api/account-sessions/sorting",
+            get(api::admin::account_sessions::handle_get_account_sorting)
+                .put(api::admin::account_sessions::handle_set_account_sorting),
+        )
+        .route(
+            "/api/account-sessions/refresh-expiring",
+            post(api::admin::account_sessions::handle_refresh_expiring),
+        )
+        .route(
+            "/api/account-sessions/export-files",
+            post(api::admin::account_sessions::handle_export_account_files),
+        )
+        .route(
+            "/api/account-sessions/usage/start",
+            post(api::admin::account_sessions::handle_usage_start),
+        )
+        .route(
+            "/api/account-sessions/usage/cancel",
+            post(api::admin::account_sessions::handle_usage_cancel),
+        )
+        .route(
+            "/api/account-sessions/usage/states",
+            get(api::admin::account_sessions::handle_usage_states),
+        )
+        .route(
+            "/api/account-sessions/:id/rate-limits/clear",
+            post(api::admin::account_sessions::handle_clear_rate_limits),
+        )
+        .route(
+            "/api/accounts/sorting",
+            get(api::admin::account_sessions::handle_get_account_sorting)
+                .put(api::admin::account_sessions::handle_set_account_sorting),
+        )
+        .route(
+            "/api/accounts/refresh-expiring",
+            post(api::admin::account_sessions::handle_refresh_expiring),
+        )
+        .route(
+            "/api/accounts/export-files",
+            post(api::admin::account_sessions::handle_export_account_files),
+        )
         // 上游模型目录发现（抄 Agent2API 的 provider 模型目录）
         .route(
             "/api/account-sessions/catalog/sync",
@@ -2865,6 +2958,28 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/plugins/scripts/rebuild",
             post(api::admin::script_plugins::handle_script_rebuild),
+        )
+        // 脚本插件 A2A 对齐补全（T1 交付）：改设置 / 改 provider 启停 /
+        // 提示词清单 / 更新检查 / 目录刷新。
+        .route(
+            "/api/plugins/scripts/change",
+            post(api::admin::script_plugins::handle_script_change),
+        )
+        .route(
+            "/api/plugins/scripts/settings",
+            post(api::admin::script_plugins::handle_script_settings),
+        )
+        .route(
+            "/api/plugins/scripts/prompts",
+            post(api::admin::script_plugins::handle_script_prompts),
+        )
+        .route(
+            "/api/plugins/scripts/check",
+            get(api::admin::script_plugins::handle_script_check),
+        )
+        .route(
+            "/api/plugins/scripts/catalog/refresh",
+            post(api::admin::script_plugins::handle_script_catalog_refresh),
         )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
         .route(
@@ -3008,6 +3123,27 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .merge(openai_routes)
         .merge(anthropic_routes)
         .merge(crate::agent::api::router())
+        // 工具服务数据面（/api/web-search/*、MCP 分发；对齐 A2A api/tool_runtime.rs）
+        .merge(crate::api::tool_runtime::router())
+        // 工具服务 / 维护管理面（T0 stub，实现由 T7 填充）
+        .merge(crate::api::admin::tools::router())
+        .merge(crate::api::admin::tool_image_admin::router())
+        .merge(crate::api::admin::maintenance::router())
+        .merge(crate::tool_services::router())
+        .merge(crate::maintenance::router())
+        // 签到台账 / 计划（T0 stub，实现由 T6 填充）
+        .merge(crate::api::admin::checkin_records::router())
+        .merge(crate::api::admin::checkin_schedules::router())
+        // 插件管理面子页（T0 stub，实现由 T2 填充）
+        .merge(crate::api::admin::plugin_provider_settings::router())
+        .merge(crate::api::admin::plugin_icons::router())
+        .merge(crate::api::admin::plugin_theme::router())
+        .merge(crate::api::admin::plugin_ui::router())
+        .merge(crate::api::admin::plugin_login::router())
+        .merge(crate::api::admin::plugin_tasks::router())
+        .merge(crate::api::admin::plugin_helpers::router())
+        // 插件管理面新增子路由（startup / settings / reload；T2 交付）
+        .merge(crate::api::admin::plugins::router())
         // AutoClaw OAuth 浏览器回调（免鉴权）
         .route(
             "/auth/callback-zai",

@@ -833,6 +833,38 @@ export default function AddAccountDialog({
 
   const cardIcon = (kind: string): string | null => providerIcon(kind);
 
+  /** 插件来源徽标（A2A add-provider-pick：插件家与内置家同列但标来源） */
+  const sourceBadge = (p: AccountProviderItem): JSX.Element | null => {
+    if (p.source === 'plugin') {
+      return (
+        <span className="add-card-badge is-plugin" title={p.pack_id ? t('由插件 {{pack}} 提供', { pack: p.pack_id }) : t('由插件提供')}>
+          {t('插件')}
+        </span>
+      );
+    }
+    if (p.source === 'builtin') return null;
+    // 旧后端不带 source：登录态 / 网页形态视为内置插件家
+    return null;
+  };
+
+  /** 原生备选徽标：该家既有原生实现又被插件声明，插件接管后原生降为兜底 */
+  const fallbackBadge = (p: AccountProviderItem): JSX.Element | null =>
+    p.native_fallback === true ? (
+      <span className="add-card-badge is-fallback">{t('原生备选')}</span>
+    ) : null;
+
+  /** 登录方式摘要（插件下发 login 字段；内置家不给） */
+  const loginLabel = (p: AccountProviderItem): string | null => {
+    switch (p.login) {
+      case 'oauth': return t('OAuth 授权');
+      case 'paste': return t('粘贴凭证');
+      case 'sms': return t('短信验证');
+      case 'desktop': return t('客户端导入');
+      case 'guest': return t('访客登录');
+      default: return null;
+    }
+  };
+
   const methods: AddMethodId[] = addConfig?.methods?.length ? addConfig.methods : ['manual'];
   // file 段（#22）：有粘贴/手填能力的家统一追加「凭证文件」入口——文件内容
   // 读入粘贴域后走同一校验链（后端 #23：前端解析 + 既有创建端点，无独立端点）
@@ -867,8 +899,11 @@ export default function AddAccountDialog({
           <span className="add-card-info">
             <span className="add-card-name">
               {providerLabel(p)}
+              {sourceBadge(p)}
+              {fallbackBadge(p)}
               {p.auth ? <span className="add-card-badge">{t('登录态')}</span> : null}
               {p.native_supported ? <span className="add-card-badge">{t('专用适配')}</span> : null}
+              {loginLabel(p) ? <span className="add-card-badge">{loginLabel(p)}</span> : null}
             </span>
             <span className="add-card-meta">{p.default_base_url || t('需自填地址')}</span>
           </span>

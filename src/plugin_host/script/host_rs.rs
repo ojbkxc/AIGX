@@ -23,16 +23,18 @@
 //!
 //! ## init 握手（60s）
 //!
-//! 脚本宿主要动态 import 全部 npm 包（远比原生插件的 10s 宽）。请求形状：
+//! 脚本宿主要动态 import 全部 npm 包（远比原生插件的 10s 宽）。请求形状是
+//! **A2A 平铺载荷**（不是 `{"protocol":1,"init":{…}}` 嵌套）：
 //!
 //! ```json
-//! {"id":1,"method":"init","params":{"protocol":1,"init":{…}}}
+//! {"id":1,"method":"init","params":{"env":{…},"packages":[{id,directory,
+//!   displayName,options,providers,providerOptions,aliases}],
+//!   "reserved":[…],"claimed":{providerId:packageId},"catalogPath":"…"}}
 //! ```
 //!
-//! `init` 载荷是 [`ScriptInitPayload`]（snake_case 四键 packages / reserved /
-//! claimed / catalog_path，wire 契约不可改）。应答取
-//! `{"providers":[{id,label,upstream,models}], "identities":{pkgId:{声明id:实际id}}}`
-//! （providers 兼容裸数组形状，与原生握手同款宽容；identities 缺失整段忽略）。
+//! `init` 载荷是 [`ScriptInitPayload`]（见 types.rs）。应答取
+//! `{"providers":[{id,label,upstream,models,…}], "identities":{pkgId:{声明id:实际id}}}`
+//! （providers 兼容裸数组形状；identities 缺失整段忽略）。
 //!
 //! ## 生命周期
 //!
@@ -54,11 +56,13 @@ use tokio::process::{Child, ChildStderr};
 use tokio::sync::{Mutex, RwLock};
 
 use super::bun;
-use super::types::{script_plugins_root, ScriptInitPayload, ScriptPackage, ScriptProviderInfo};
-// 协议内核（RpcChannel/CallbackHandler/PROTOCOL_VERSION）在 plugin_host::rpc——
-// 与原生插件同一套。注意 `super::rpc` 是 script 模块下另一个文件（#6 的
-// provider 方法名常量），两者并存、含义不同，不能混用路径。
-use crate::plugin_host::rpc::{CallbackHandler, RpcChannel, RpcError, PROTOCOL_VERSION};
+use super::types::{
+    script_plugins_root, ScriptInitPayload, ScriptPackage, ScriptPackageEntry, ScriptProviderInfo,
+};
+// 协议内核（RpcChannel/CallbackHandler）在 plugin_host::rpc——与原生插件
+// 同一套。注意 `super::rpc` 是 script 模块下另一个文件（provider 方法名
+// 常量），两者并存、含义不同，不能混用路径。
+use crate::plugin_host::rpc::{CallbackHandler, RpcChannel, RpcError};
 
 /// init 握手超时：脚本宿主要动态 import 全部 npm 包（冷盘 + 首次编译），
 /// 比原生插件的 10s 宽一个量级。
@@ -80,16 +84,44 @@ const STDERR_TAIL_BYTES: usize = 8 << 10;
 /// supervise 的退出轮询间隔（同原生插件）。
 const SUPERVISE_POLL: Duration = Duration::from_millis(500);
 
-/// 嵌入二进制的宿主文件（AIGX 自研 JS，许可随本仓）。
+/// 嵌入二进制的宿主文件（A2A v3.5.0-beta.1 宿主，AGPL，见各文件头注释）。
 ///
-/// 入口恒为 `main.mjs`；`wire`/`loader`/`provider`/`errors` 是它的同目录
-/// 相对 import——落盘时五个文件必须在同一个 host_dir 里。
+/// 入口恒为 `main.mjs`；其余 28 个是它的同目录相对 import——落盘时全部
+/// 文件必须在同一个 host_dir 里（少一个 = Bun 启动即 ModuleNotFound）。
+/// 清单与 A2A `script/mod.rs::script_files()` 逐字对齐（29 个 mjs）。
 const HOST_FILES: &[(&str, &str)] = &[
     ("main.mjs", include_str!("host/main.mjs")),
     ("wire.mjs", include_str!("host/wire.mjs")),
     ("loader.mjs", include_str!("host/loader.mjs")),
+    ("entries.mjs", include_str!("host/entries.mjs")),
+    ("identity.mjs", include_str!("host/identity.mjs")),
+    ("catalog.mjs", include_str!("host/catalog.mjs")),
+    ("environment.mjs", include_str!("host/environment.mjs")),
+    ("model-records.mjs", include_str!("host/model-records.mjs")),
+    ("models.mjs", include_str!("host/models.mjs")),
     ("provider.mjs", include_str!("host/provider.mjs")),
+    ("request.mjs", include_str!("host/request.mjs")),
     ("errors.mjs", include_str!("host/errors.mjs")),
+    ("diagnostics.mjs", include_str!("host/diagnostics.mjs")),
+    ("gemini.mjs", include_str!("host/gemini.mjs")),
+    ("fetch.mjs", include_str!("host/fetch.mjs")),
+    ("http2.mjs", include_str!("host/http2.mjs")),
+    ("websocket.mjs", include_str!("host/websocket.mjs")),
+    ("accounts.mjs", include_str!("host/accounts.mjs")),
+    ("auth-record.mjs", include_str!("host/auth-record.mjs")),
+    ("login.mjs", include_str!("host/login.mjs")),
+    ("login-policy.mjs", include_str!("host/login-policy.mjs")),
+    ("login-prompts.mjs", include_str!("host/login-prompts.mjs")),
+    ("login-network.mjs", include_str!("host/login-network.mjs")),
+    ("allowance.mjs", include_str!("host/allowance.mjs")),
+    ("reports.mjs", include_str!("host/reports.mjs")),
+    ("usage-policy.mjs", include_str!("host/usage-policy.mjs")),
+    ("concurrency.mjs", include_str!("host/concurrency.mjs")),
+    (
+        "local-provider.mjs",
+        include_str!("host/local-provider.mjs"),
+    ),
+    ("local-process.mjs", include_str!("host/local-process.mjs")),
 ];
 
 /// spawn / 握手错误。
@@ -219,29 +251,47 @@ fn materialize_host_files(data_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// 由已启用脚本包集合构造 init 载荷。
+/// 由已启用脚本包集合构造 init 载荷（A2A 平铺形状）。
 ///
-/// `packages` 取包版本目录的**绝对路径**——路径只能经
-/// [`ScriptPackage::version_dir`] 产生（目录名是 `script-{hash}`，scoped
-/// 包名的 `/` 不会进文件系统），不要自己拼 `packages/{包名}`。
-/// `claimed` 取各包声明的 provider id 集合（与 reserved 的交集由网关侧
-/// 让位逻辑处理，这里原样上报）。
+/// `packages` 取包版本目录的**绝对路径**（只能经 [`ScriptPackage::version_dir`]
+/// 产生，目录名是 `script-{hash}`，scoped 包名的 `/` 不会进文件系统）。
+/// `claimed` 是 `{providerId: packageId}`（A2A `allocateProvider` 用）。
 pub fn build_init_payload(
     script_root: &Path,
     packages: &[ScriptPackage],
     reserved: Vec<String>,
+    claimed: std::collections::BTreeMap<String, String>,
+    env: crate::plugin_host::process::HostEnv,
     catalog_path: Option<String>,
 ) -> ScriptInitPayload {
     ScriptInitPayload {
+        env,
         packages: packages
             .iter()
-            .map(|p| p.version_dir(script_root).to_string_lossy().into_owned())
+            .map(|p| ScriptPackageEntry {
+                id: p.id.clone(),
+                directory: p.version_dir(script_root).to_string_lossy().into_owned(),
+                display_name: if p.label.is_empty() {
+                    p.id.clone()
+                } else {
+                    p.label.clone()
+                },
+                options: serde_json::to_value(&p.options.values).unwrap_or_default(),
+                // 包内 provider 级停用（`disabled_providers`）在此剔除：宿主
+                // 根本不加载这些家，路由表自然不会有它们（A2A 同口径——
+                // `active_ids` 过滤掉 disabled）。
+                providers: p
+                    .providers
+                    .iter()
+                    .map(|pr| pr.id.clone())
+                    .filter(|id| !p.disabled_providers.contains(id))
+                    .collect(),
+                provider_options: serde_json::Value::Object(p.provider_options.clone()),
+                aliases: p.provider_aliases.clone(),
+            })
             .collect(),
         reserved,
-        claimed: packages
-            .iter()
-            .flat_map(|p| p.providers.iter().map(|pr| pr.id.clone()))
-            .collect(),
+        claimed,
         catalog_path,
     }
 }
@@ -264,12 +314,11 @@ pub async fn spawn_host(
 
     // init 载荷先序列化再 spawn：反序列化不会失败也不能失败，但「spawn 后
     // 才可能出错的步骤」越少越好——早退路径上的子进程没人 kill。
-    let init = serde_json::to_value(&payload)
+    //
+    // **平铺形状**（A2A v3.5.0-beta.1）：宿主 main.mjs 直接读
+    // `params.packages` / `params.env` / …，不再包 `{"protocol":1,"init":{…}}`。
+    let params = serde_json::to_value(&payload)
         .map_err(|e| ScriptHostError::Serde(format!("init payload: {e}")))?;
-    let params = serde_json::json!({
-        "protocol": PROTOCOL_VERSION,
-        "init": init,
-    });
 
     let mut cmd = bun::run_command(&bun_exe, &host_dir);
     // spawn_host 的 future 被 drop（调用方取消 / 任务 abort）时兜底杀子进程：
@@ -542,17 +591,59 @@ mod tests {
 
     #[test]
     fn host_files_all_embedded() {
-        // 入口 + 全部相对 import 必须齐：少一个 = Bun 启动即 ModuleNotFound
+        // 嵌入集合必须**闭合**：从入口 main.mjs 出发，所有相对
+        // `from "./x.mjs"` / `import "./x.mjs"` 都能在 HOST_FILES 里找到
+        // （少一个 = Bun 启动即 ModuleNotFound）；反方向也查——没有孤儿。
         assert_eq!(HOST_FILES[0].0, "main.mjs", "入口必须排第一（文档约定）");
         for (name, content) in HOST_FILES {
             assert!(name.ends_with(".mjs"), "{name} 应是 .mjs");
             assert!(!content.trim().is_empty(), "{name} 不应为空");
         }
-        for (name, _) in HOST_FILES.iter().skip(1) {
-            let main = HOST_FILES.iter().find(|(n, _)| *n == "main.mjs").unwrap().1;
+        // 一行内所有相对模块引用（`from "./x.mjs"` 与 `import "./x.mjs"`）
+        fn relative_imports(content: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !(trimmed.starts_with("import ") || trimmed.contains("from \"./")) {
+                    continue;
+                }
+                let mut rest = line;
+                while let Some(pos) = rest.find("\"./") {
+                    let tail = &rest[pos + 3..];
+                    let end = tail.find('"').unwrap_or(0);
+                    if end > 0 {
+                        out.push(tail[..end].to_string());
+                    }
+                    rest = &tail[end.min(tail.len())..];
+                }
+            }
+            out
+        }
+        // 可达性遍历（上游 main.mjs 只直接 import 一部分，其余传递引入）
+        let mut reachable: Vec<String> = vec!["main.mjs".to_string()];
+        let mut index = 0;
+        while index < reachable.len() {
+            let name = reachable[index].clone();
+            index += 1;
+            let content = HOST_FILES
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, c)| *c)
+                .unwrap_or_else(|| panic!("{name} 不在 HOST_FILES"));
+            for target in relative_imports(content) {
+                assert!(
+                    HOST_FILES.iter().any(|(n, _)| *n == target),
+                    "{name} 引用了未嵌入的 {target}"
+                );
+                if !reachable.contains(&target) {
+                    reachable.push(target);
+                }
+            }
+        }
+        for (name, _) in HOST_FILES {
             assert!(
-                main.contains(&format!("./{}", name.trim_end_matches(".mjs"))),
-                "main.mjs 应相对 import {name}"
+                reachable.iter().any(|r| r == name),
+                "{name} 应从 main.mjs 可达（反之是孤儿）"
             );
         }
     }
@@ -576,22 +667,33 @@ mod tests {
     }
 
     #[test]
-    fn init_payload_serializes_snake_case_wire_keys() {
-        // wire 契约：JS 侧按 packages/reserved/claimed/catalog_path 读
+    fn init_payload_serializes_flat_wire_keys() {
+        // wire 契约（A2A 平铺）：env/packages/reserved/claimed/catalogPath
         let payload = ScriptInitPayload {
-            packages: vec!["/data/x".into()],
+            env: crate::plugin_host::process::HostEnv::default(),
+            packages: vec![ScriptPackageEntry {
+                id: "p".into(),
+                directory: "/data/x".into(),
+                display_name: "P".into(),
+                ..Default::default()
+            }],
             reserved: vec!["native".into()],
-            claimed: vec!["kiro".into()],
+            claimed: [("kiro".to_string(), "p".to_string())]
+                .into_iter()
+                .collect(),
             catalog_path: Some("/data/catalog.json".into()),
         };
         let v = serde_json::to_value(&payload).unwrap();
-        for key in ["packages", "reserved", "claimed", "catalog_path"] {
-            assert!(v.get(key).is_some(), "wire 键 {key} 必须存在（snake_case）");
+        for key in ["env", "packages", "reserved", "claimed", "catalogPath"] {
+            assert!(v.get(key).is_some(), "wire 键 {key} 必须存在");
         }
+        assert!(v.get("init").is_none(), "不得出现嵌套 init 键");
         assert!(
-            v.get("catalogPath").is_none(),
-            "camelCase 键是契约事故，不允许出现"
+            v.get("catalog_path").is_none(),
+            "wire 用 catalogPath，snake_case 是契约事故"
         );
+        // claimed 是映射而不是数组
+        assert!(v["claimed"].is_object());
     }
 
     #[test]
@@ -620,35 +722,51 @@ mod tests {
     fn build_init_payload_uses_hash_version_dir() {
         let pkg = ScriptPackage {
             id: "@magpie-community/kiro".into(),
+            label: "Kiro".into(),
             version: "1.2.0".into(),
             providers: vec![ScriptProviderInfo {
                 id: "kiro".into(),
                 label: "Kiro".into(),
                 upstream: Some("anthropic".into()),
                 models: vec![],
+                ..Default::default()
             }],
             ..Default::default()
         };
         let root = Path::new("/data/script-plugins");
+        let claimed = [("kiro".to_string(), "@magpie-community/kiro".to_string())]
+            .into_iter()
+            .collect();
         let payload = build_init_payload(
             root,
             std::slice::from_ref(&pkg),
             vec!["native".into()],
+            claimed,
+            crate::plugin_host::process::HostEnv::default(),
             Some("/c.json".into()),
         );
-        // packages 必须是 version_dir 的绝对路径（hash 目录形态）
+        // packages 条目 directory 必须是 version_dir 的绝对路径（hash 形态）
         assert_eq!(
-            payload.packages,
-            vec![pkg.version_dir(root).to_string_lossy().into_owned()]
+            payload.packages[0].directory,
+            pkg.version_dir(root).to_string_lossy().into_owned()
+        );
+        assert_eq!(payload.packages[0].id, "@magpie-community/kiro");
+        assert_eq!(payload.packages[0].display_name, "Kiro");
+        assert_eq!(payload.packages[0].providers, vec!["kiro".to_string()]);
+        assert!(
+            payload.packages[0].directory.contains("script-"),
+            "目录名应是 hash 形态：{}",
+            payload.packages[0].directory
         );
         assert!(
-            payload.packages[0].contains("script-"),
-            "目录名应是 hash 形态：{}",
-            payload.packages[0]
+            !payload.packages[0].directory.contains('@'),
+            "scoped 包名不得进路径"
         );
-        assert!(!payload.packages[0].contains('@'), "scoped 包名不得进路径");
-        // claimed 取包声明的 provider id
-        assert_eq!(payload.claimed, vec!["kiro".to_string()]);
+        // claimed 是 {providerId: packageId}
+        assert_eq!(
+            payload.claimed.get("kiro"),
+            Some(&"@magpie-community/kiro".to_string())
+        );
         assert_eq!(payload.reserved, vec!["native".to_string()]);
         assert_eq!(payload.catalog_path.as_deref(), Some("/c.json"));
     }

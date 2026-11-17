@@ -332,3 +332,192 @@ pub async fn handle_update_zcode_captcha_pool(
         "data": pool_settings_view()
     })))
 }
+
+// ─── 人工验证桥（对齐 Agent2API api/zcode_claim_verification.rs）─────────
+
+/// POST /api/zcode/claim-verification —— 定时领取的界面验证桥。
+///
+/// A2A 的形态是把 `poll` / `complete` 两个动作转给**插件**的
+/// `claim.verification.*` 管理动作（任务在插件内关联账号与套餐，网关只转发
+/// 已认证的管理请求）。AIGX 的 ZCode 领取链在**主仓**（`checkin::benefits::
+/// zcode_claim`），验证码令牌由前端铸造器推进令牌池，因此这里的语义对齐为：
+///
+/// - `action="poll"`：回报「当前有没有待求解的验证」——即令牌池是否为空、
+///   以及该账号是否已有可领套餐。有令牌 → `{supported:true, task:null}`；
+///   没令牌 → `{supported:true, task:{accountId, kind:"captcha"}}`，前端据此
+///   弹滑块并把求解结果推回令牌池（`POST /api/zcode/captcha`）。
+/// - `action="complete"`：前端求解完一枚令牌后**直接带回**（`param`/`region`），
+///   本端点把它入池并（可选）立即为指定账号领取一份套餐（`planId`）。
+///   完成后回 `{supported:true, task:{..., outcome}}`。
+///
+/// 状态机与 A2A 的 `confirming` 对齐：`complete` 提交但上游未确认到账时
+/// （`1005 当日额度已用尽` 之外的 pending 分支）回 `outcome:"confirming"`，
+/// 前端据此显示「等待确认」而不是「失败」。
+pub async fn handle_claim_verification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let action = match payload.get("action").and_then(Value::as_str) {
+        Some("poll") => "poll",
+        Some("complete") => "complete",
+        _ => {
+            return Err(error_response(
+                "领取验证操作无效（action 取 poll / complete）",
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    };
+    // 输入两种键都认（A2A 客户端发 accountId，AIGX 前端习惯 account_id）
+    let account_id = payload
+        .get("accountId")
+        .or_else(|| payload.get("account_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if action == "poll" {
+        // 待求解 = 令牌池空且确有 zcode 账号（没有账号就没有待办）
+        let has_account = any_zcode_account(&state).is_some();
+        let ready = zcode_captcha::ready();
+        let task = if has_account && ready == 0 {
+            json!({
+                "account_id": account_id,
+                "kind": "captcha",
+                "message": "ZCode 领取需要一枚阿里云验证码令牌，请在前端求解后提交",
+            })
+        } else {
+            Value::Null
+        };
+        return Ok(Json(json!({
+            "supported": true,
+            "ready": ready,
+            "task": task,
+        })));
+    }
+
+    // complete：校验账号属于 ZCode 两地
+    let Some(session) = state.account_sessions.get(&account_id) else {
+        return Err(error_response(
+            "领取账号已不存在，验证结果未提交",
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    if !is_zcode_provider(&session.provider) {
+        return Err(error_response(
+            "该账号不是 ZCode 账号",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 把前端求解出的令牌入池（若有）
+    if let Some(param) = payload
+        .get("param")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        if param.len() > MAX_PARAM_LEN {
+            return Err(error_response("param 过长", StatusCode::BAD_REQUEST));
+        }
+        let region = payload
+            .get("region")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if region.len() > MAX_REGION_LEN {
+            return Err(error_response("region 过长", StatusCode::BAD_REQUEST));
+        }
+        zcode_captcha::push(param, &region);
+    }
+    // 防重复领取：今天这份当日台账已经是 claimed / already（ok 两档）时直接回
+    // `already_claimed`，不再打一次上游（上游幂等但重复请求本身就是浪费且招风控）。
+    let today = crate::checkin::scheduler::today();
+    if let Some(daily) = state.upstream_checkin.daily_checkin(&account_id, &today) {
+        let status = daily.get("status").and_then(Value::as_str).unwrap_or("");
+        if matches!(status, "success" | "already") {
+            return Ok(Json(json!({
+                "supported": true,
+                "task": {
+                    "account_id": account_id,
+                    "outcome": "already_claimed",
+                    "message": daily.get("message").cloned().unwrap_or(Value::Null),
+                    "claim_at": daily.get("claimAt").cloned().unwrap_or(Value::Null),
+                },
+                "ready": zcode_captcha::ready(),
+            })));
+        }
+    }
+    // 可选：立即为这个账号领取一份套餐（带 planId 时）
+    let plan_id = payload
+        .get("planId")
+        .or_else(|| payload.get("plan_id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    if plan_id.is_null() {
+        return Ok(Json(json!({
+            "supported": true,
+            "task": { "account_id": account_id, "outcome": "confirming" },
+            "ready": zcode_captcha::ready(),
+        })));
+    }
+    let client = state
+        .account_sessions
+        .client_for(&session)
+        .map_err(|e| error_response(&format!("出口配置错误：{e}"), StatusCode::BAD_REQUEST))?;
+    let mut params = json!({ "mode": "claim", "plan_id": plan_id });
+    if let Some(param) = payload.get("param").and_then(Value::as_str) {
+        if let Some(object) = params.as_object_mut() {
+            object.insert("captcha_verify_param".to_string(), Value::from(param));
+            if let Some(region) = payload.get("region").and_then(Value::as_str) {
+                object.insert("captcha_verify_region".to_string(), Value::from(region));
+            }
+        }
+    }
+    let result = crate::checkin::benefits::run(
+        &state.account_sessions,
+        &state.alert_store,
+        &client,
+        &session,
+        "plan",
+        &params,
+    )
+    .await;
+    // BenefitOutcome → 前端状态机：Done=claimed / Already=already_claimed /
+    // Pending=confirming / 其余=failed
+    let outcome = match result.outcome {
+        crate::checkin::benefits::BenefitOutcome::Done => "claimed",
+        crate::checkin::benefits::BenefitOutcome::Already => "already_claimed",
+        crate::checkin::benefits::BenefitOutcome::Pending => "confirming",
+        _ => "failed",
+    };
+    // 落当日签到台账 + 明细记录（与定时/手动签到同一份判据与落点）：
+    // 只有 claimed / already_claimed 才写 claimAt —— 与 A2A 的 dailyCheckin 同口径。
+    let checkin_outcome = match outcome {
+        "claimed" => crate::checkin::CheckinOutcome::Success,
+        "already_claimed" => crate::checkin::CheckinOutcome::Already,
+        "confirming" => crate::checkin::CheckinOutcome::Pending,
+        _ => crate::checkin::CheckinOutcome::Failed,
+    };
+    crate::checkin::scheduler::record_with_reason(
+        &state.upstream_checkin,
+        &session,
+        "activity",
+        checkin_outcome,
+        &result.message,
+        false,
+        "手动领取活动（ZCode 套餐）",
+        0,
+    );
+    Ok(Json(json!({
+        "supported": true,
+        "task": {
+            "account_id": account_id,
+            "outcome": outcome,
+            "message": result.message,
+        },
+        "ready": zcode_captcha::ready(),
+    })))
+}

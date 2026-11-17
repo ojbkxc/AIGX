@@ -74,6 +74,90 @@ pub fn relogin_ttl_secs(provider: &str) -> Option<i64> {
         .map(|(_, secs)| *secs)
 }
 
+// ── 插件账号契约（对齐 Agent2API v3.5.0-beta.1）────────────────────
+//
+// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+//
+// 账号池里的一行现在有两种形态：
+// 1. **原生账号**：凭证在 `credential`（AIGX 既有形态，加密落盘）；
+// 2. **插件账号**：凭证是插件自己产出的**不透明 JSON**（`plugin_secret`），
+//    展示字段是插件自报的 `plugin_public`，插件私有状态在 `plugin_state`
+//    （带 CAS revision）。网关不理解 secret 的内部结构，只按白名单派生
+//    公开标量（hasAccessToken / canRefresh / expiresAt）。
+
+/// 插件状态表的总量上限（2 MiB，与 A2A `plugin_state_compare_exchange` 同口径）。
+pub const PLUGIN_STATE_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// 单账号插件状态的键数上限。
+pub const PLUGIN_STATE_MAX_KEYS: usize = 128;
+/// 插件状态键长度上限。
+pub const PLUGIN_STATE_MAX_KEY_LEN: usize = 160;
+
+/// 余额自动查询的执行参数（对齐 A2A 的 per-account `usageQuery`）。
+///
+/// `AccountSession.usage_query_interval_secs` 负责「多久查一次」；本结构
+/// 负责「这一次查询怎么跑」：失败重试次数与单次超时。缺省值与 A2A 相同
+/// （retries=3、timeout=60s），`None` 字段在应用处按缺省补齐。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageQuerySettings {
+    /// 失败重试次数（0 = 不重试；上限 [`MAX_USAGE_QUERY_RETRIES`]）。
+    #[serde(default = "default_usage_retries")]
+    pub retries: u32,
+    /// 单次查询超时（秒，15..=[`MAX_USAGE_QUERY_TIMEOUT_SECS`]）。
+    ///
+    /// 接收 A2A 的 `timeoutSeconds` 写法（导入 A2A 账号时该键是驼峰）。
+    #[serde(default = "default_usage_timeout", alias = "timeoutSeconds")]
+    pub timeout_seconds: u64,
+}
+
+/// A2A `DEFAULT_QUERY_RETRIES`。
+pub const DEFAULT_USAGE_QUERY_RETRIES: u32 = 3;
+/// A2A `MAX_QUERY_RETRIES`。
+pub const MAX_USAGE_QUERY_RETRIES: u32 = 10;
+/// A2A `DEFAULT_QUERY_TIMEOUT_SECONDS`。
+pub const DEFAULT_USAGE_QUERY_TIMEOUT_SECS: u64 = 60;
+/// A2A `MAX_QUERY_TIMEOUT_SECONDS`。
+pub const MAX_USAGE_QUERY_TIMEOUT_SECS: u64 = 180;
+/// A2A 超时下限。
+pub const MIN_USAGE_QUERY_TIMEOUT_SECS: u64 = 15;
+
+fn default_usage_retries() -> u32 {
+    DEFAULT_USAGE_QUERY_RETRIES
+}
+
+fn default_usage_timeout() -> u64 {
+    DEFAULT_USAGE_QUERY_TIMEOUT_SECS
+}
+
+impl Default for UsageQuerySettings {
+    fn default() -> Self {
+        Self {
+            retries: DEFAULT_USAGE_QUERY_RETRIES,
+            timeout_seconds: DEFAULT_USAGE_QUERY_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl UsageQuerySettings {
+    /// 归一化：越界值收进合法区间（与 A2A `query_retries_of` /
+    /// `query_timeout_of` 的过滤口径一致——越界回落缺省，不 clamp）。
+    pub fn normalized(&self) -> Self {
+        Self {
+            retries: if self.retries <= MAX_USAGE_QUERY_RETRIES {
+                self.retries
+            } else {
+                DEFAULT_USAGE_QUERY_RETRIES
+            },
+            timeout_seconds: if (MIN_USAGE_QUERY_TIMEOUT_SECS..=MAX_USAGE_QUERY_TIMEOUT_SECS)
+                .contains(&self.timeout_seconds)
+            {
+                self.timeout_seconds
+            } else {
+                DEFAULT_USAGE_QUERY_TIMEOUT_SECS
+            },
+        }
+    }
+}
+
 /// 一条账号限制规则（余额 / Token 两类，对齐前端 `LimiterRule` 与 Agent2API
 /// 的 `accounts-dialog-limiter`；JSON 字段名与 Agent2API `LimiterRule::to_json`
 /// 同名：`type` / `action` / `threshold` / `reset` / `period` / `enabled`）。
@@ -422,10 +506,68 @@ pub struct AccountSession {
     /// 上次余额查询失败原因（成功后清空）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_balance_error: Option<String>,
+
+    // ── 插件账号契约（A2A v3.5.0-beta.1）────────────────────────────
+    //
+    // 全部 `serde(default)`：存量账号 JSON 没有这些键，读回来落在
+    // 「非插件账号」的零值上，调度行为与改造前逐字节等价。
+    /// 插件凭证（**不透明 JSON**，密钥由插件自己定义；网关不解析其结构）。
+    ///
+    /// 与 `credential` 并存：原生账号走 `credential`，插件账号走本字段；
+    /// 两者都不进日志与公开投影。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_secret: Option<serde_json::Value>,
+    /// 插件公开视图（插件 `account.view` / 登录结果的展示字段）。
+    ///
+    /// 公开出口前会过滤敏感键（见 [`crate::account_session::plugin`]），
+    /// 但**写入时**原样保存——插件可能需要私有字段参与自己的展示逻辑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_public: Option<serde_json::Value>,
+    /// 插件私有状态表：`{key: {revision, schema, value}}`。
+    ///
+    /// 读写走比较-交换（[`crate::account_session::plugin`] 的 CAS 方法），
+    /// 总量 ≤ [`PLUGIN_STATE_MAX_BYTES`]、键数 ≤ [`PLUGIN_STATE_MAX_KEYS`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_state: Option<serde_json::Value>,
+    /// 插件身份提示（A2A `pluginIdentity`）：插件自报的稳定身份串。
+    ///
+    /// 主键归并不信任它单独成立——与 provider + 身份字段摘要（uid/email/
+    /// accountId…）联合判定，见 `plugin::derive_account_id`。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub identity_key: String,
+    /// 插件账号「需重新登录」标记（A2A 顶层 `needsRelogin`）。
+    ///
+    /// 与 [`Self::status`] 的 `needs_relogin` 是同一语义的两个来源：原生
+    /// 账号由连续 401/403 计数翻转 status，插件账号由插件自报本字段。
+    /// [`Self::needs_relogin`] 方法把两者合并成一个问法。
+    #[serde(default)]
+    pub needs_relogin: bool,
+    /// 账号是否在管理面列表默认隐藏（A2A `hiddenAccounts` 的逐账号来源）。
+    #[serde(default)]
+    pub hidden: bool,
+    /// 插件账号的逐模型限流标记（A2A `rateLimits`：`{model: {...}}`）。
+    #[serde(default)]
+    pub rate_limits: serde_json::Map<String, serde_json::Value>,
+    /// 是否允许选路跳过该账号（A2A `allowRouteSkip`，缺省 true）。
+    ///
+    /// `false` = 该账号只允许「显式指定」时使用，自动选路跳过。选路消费
+    /// 由后续任务接入；本波先保证字段与导入/导出/回显闭环。
+    #[serde(default = "default_allow_route_skip")]
+    pub allow_route_skip: bool,
+    /// 插件账号的出站 User-Agent 覆盖（空 = 用 provider 默认）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_agent: String,
+    /// 余额查询的执行参数（重试 / 超时）；缺省 = A2A 默认值。
+    #[serde(default)]
+    pub usage_query: UsageQuerySettings,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
     pub updated_at: i64,
+}
+
+fn default_allow_route_skip() -> bool {
+    true
 }
 
 fn default_provider() -> String {
@@ -483,9 +625,24 @@ impl AccountSession {
             last_balance_at: None,
             last_balance: None,
             last_balance_error: None,
+            plugin_secret: None,
+            plugin_public: None,
+            plugin_state: None,
+            identity_key: String::new(),
+            needs_relogin: false,
+            hidden: false,
+            rate_limits: serde_json::Map::new(),
+            allow_route_skip: default_allow_route_skip(),
+            user_agent: String::new(),
+            usage_query: UsageQuerySettings::default(),
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// 是否插件账号（凭证在 `plugin_secret`，网关不解析结构）。
+    pub fn is_plugin_account(&self) -> bool {
+        self.plugin_secret.is_some()
     }
 
     /// 配置态是否启用。
@@ -497,8 +654,12 @@ impl AccountSession {
     ///
     /// 单独成问而不写 `session.status == "needs_relogin"`：这个值同时出现在
     /// 选路跳过、502 计数、管理面徽标与提醒巡检四处，拼写漂移就是静默失效。
+    ///
+    /// 插件账号另有插件自报的 [`Self::needs_relogin`] 布尔位（A2A 同名字段），
+    /// 两个来源任一为真即「需要重登」——插件不懂 AIGX 的 status 字面量，
+    /// 反过来 AIGX 的拒绝计数也不会替插件写它的字段。
     pub fn needs_relogin(&self) -> bool {
-        self.status == STATUS_NEEDS_RELOGIN
+        self.status == STATUS_NEEDS_RELOGIN || self.needs_relogin
     }
 
     /// 本轮登录态的确证到期时刻（unix 秒）；`None` = 无确证寿命 / 无登录锚点。
@@ -567,7 +728,9 @@ impl AccountSession {
     /// 调用点：上游接受了一次请求（记成功）、凭据被换（重登成功）。
     pub fn reset_relogin_signal(&mut self) {
         self.consecutive_rejections = 0;
-        if self.needs_relogin() {
+        // 插件自报的重登位同属「换凭据即恢复」语义（重登/重新粘贴成功时清）
+        self.needs_relogin = false;
+        if self.status == STATUS_NEEDS_RELOGIN {
             self.status = "enabled".to_string();
         }
     }
