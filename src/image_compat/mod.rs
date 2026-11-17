@@ -1343,16 +1343,40 @@ impl RequestImageContext {
 
     /// responses 透传路径的单次尝试处理（请求体形态）。
     ///
+    /// 与 chat 面 `prepare_attempt` 同序：
+    /// 1. `describe` 模式：把 `input[].content[]` 的内联图替换为辅助识图文本
+    ///    （去重/缓存/超时/上限逻辑复用 [`describe_images`]）；
+    /// 2. 压缩：把剩余内联大图缩边重编码（受 `cfg.enabled` 控制）。
+    ///
     /// 压缩是纯 CPU（解码/缩放/编码），放到阻塞线程池，避免大 base64 图卡住
     /// tokio worker（与 `prepare_attempt` 的压缩分支同款）；任务 panic/取消时
     /// 退回压缩前请求体，绝不把空 body 发上游。
-    ///
-    /// describe 需要 async 上游识图调用，透传形态不做（由 chat 降级路径覆盖）。
-    pub async fn prepare_responses_body(&self, body: &mut Value) -> bool {
-        if !self.has_images || !self.cfg.enabled {
+    pub async fn prepare_responses_body(
+        &self,
+        state: &crate::api::openai::AppState,
+        body: &mut Value,
+    ) -> bool {
+        if !self.has_images {
             return false;
         }
-        if !messages_have_data_images_in_value(body) {
+        let mut changed = false;
+        if let VisionDecision::Describe(plan) = &self.decision {
+            let prompt = self.cfg.effective_describe_prompt().to_string();
+            let replaced = describe_responses_body(state, body, plan, &prompt).await;
+            if replaced > 0 {
+                tracing::info!("image_compat: {replaced} image(s) described (responses)");
+                changed = true;
+            }
+        }
+        if self.compress_responses_body_async(body).await {
+            changed = true;
+        }
+        changed
+    }
+
+    /// 压缩分支（无上游调用，单测可直接驱动）：受 `cfg.enabled` 控制。
+    async fn compress_responses_body_async(&self, body: &mut Value) -> bool {
+        if !self.cfg.enabled || !messages_have_data_images_in_value(body) {
             return false;
         }
         let cfg = self.cfg.clone();
@@ -1388,6 +1412,86 @@ impl RequestImageContext {
             }
         }
     }
+}
+
+/// responses 透传路径的 describe（识图改写）：把 `input[].content[]` 的内联图
+/// 替换为 `[图片内容描述] …` 文本块（Responses 形态用 `input_text`）。
+///
+/// 复用 [`describe_images`] 的去重/缓存/超时/上限逻辑：把每个图片块临时包成
+/// 一条单图消息交给它处理，再按槽位把文本块写回。识图失败的部分保留原图。
+pub async fn describe_responses_body(
+    state: &crate::api::openai::AppState,
+    body: &mut Value,
+    plan: &DescribePlan,
+    prompt: &str,
+) -> usize {
+    let mut slots: Vec<(usize, usize)> = Vec::new();
+    let mut msgs: Vec<ChatMessage> = Vec::new();
+    if let Some(items) = body.get("input").and_then(Value::as_array) {
+        for (ii, item) in items.iter().enumerate() {
+            let Some(blocks) = item.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for (bi, block) in blocks.iter().enumerate() {
+                if image_uri_of(block).is_none() {
+                    continue;
+                }
+                slots.push((ii, bi));
+                msgs.push(ChatMessage {
+                    role: Role::User,
+                    content: None,
+                    content_blocks: Some(vec![block.clone()]),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    reasoning: None,
+                });
+            }
+        }
+    }
+    if slots.is_empty() {
+        return 0;
+    }
+    describe_images(state, &mut msgs, plan, prompt).await;
+    write_back_descriptions(body, &slots, &msgs)
+}
+
+/// 把 `describe_images` 处理后的单图消息写回 responses 请求体对应槽位。
+///
+/// 成功换出的块是 `{type:"text",text:"[图片内容描述] …"}`；失败保留原图
+/// （块仍是 image），这里据此判成功并改写为 Responses 形态的 `input_text`。
+fn write_back_descriptions(
+    body: &mut Value,
+    slots: &[(usize, usize)],
+    msgs: &[ChatMessage],
+) -> usize {
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut replaced = 0usize;
+    for ((ii, bi), msg) in slots.iter().zip(msgs.iter()) {
+        let Some(text) = msg
+            .content_blocks
+            .as_ref()
+            .and_then(|blocks| blocks.first())
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .and_then(|block| block.get("text"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(block) = items
+            .get_mut(*ii)
+            .and_then(|item| item.get_mut("content"))
+            .and_then(Value::as_array_mut)
+            .and_then(|blocks| blocks.get_mut(*bi))
+        else {
+            continue;
+        };
+        *block = serde_json::json!({ "type": "input_text", "text": text });
+        replaced += 1;
+    }
+    replaced
 }
 
 /// `input[].content[]` 里是否有可压的内联图（只读早退，避免无谓深拷贝）。
@@ -1794,7 +1898,10 @@ mod tests {
             decision: VisionDecision::Keep,
             has_images: true,
         };
-        assert!(ctx.prepare_responses_body(&mut body).await);
+        assert!(
+            ctx.compress_responses_body_async(&mut body).await,
+            "大图应被压缩"
+        );
         let next = body["input"][0]["content"][1]["image_url"]
             .as_str()
             .expect("url");
@@ -1802,8 +1909,61 @@ mod tests {
 
         // 无图：早退，body 逐字不变
         let mut plain = serde_json::json!({"input": "hi"});
-        assert!(!ctx.prepare_responses_body(&mut plain).await);
+        assert!(!ctx.compress_responses_body_async(&mut plain).await);
         assert_eq!(plain, serde_json::json!({"input": "hi"}));
+    }
+
+    /// describe 回写：成功槽位换成 `input_text`，失败槽位保留原图，同条消息
+    /// 的其它文本块不受影响（Responses 形态块类型是 input_text，不是 text）。
+    #[test]
+    fn write_back_descriptions_replaces_only_described_slots() {
+        let mut body = serde_json::json!({
+            "input": [
+                {"content": [
+                    {"type": "input_text", "text": "看图"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAA"}
+                ]},
+                {"content": [
+                    {"type": "input_image", "image_url": "data:image/png;base64,BBB"}
+                ]},
+            ]
+        });
+        let described = ChatMessage {
+            role: Role::User,
+            content: None,
+            content_blocks: Some(vec![
+                serde_json::json!({"type":"text","text":"[图片内容描述] 一只猫"}),
+            ]),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning: None,
+        };
+        let kept = ChatMessage {
+            role: Role::User,
+            content: None,
+            content_blocks: Some(vec![
+                serde_json::json!({"type":"input_image","image_url":"data:image/png;base64,BBB"}),
+            ]),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning: None,
+        };
+        let replaced = write_back_descriptions(&mut body, &[(0, 1), (1, 0)], &[described, kept]);
+        assert_eq!(replaced, 1);
+        assert_eq!(
+            body["input"][0]["content"][1],
+            serde_json::json!({"type":"input_text","text":"[图片内容描述] 一只猫"})
+        );
+        assert_eq!(
+            body["input"][1]["content"][0]["type"], "input_image",
+            "识图失败槽位保留原图"
+        );
+        assert_eq!(
+            body["input"][0]["content"][0]["text"], "看图",
+            "同条消息其它块不动"
+        );
     }
 
     // ── 跨请求识图缓存（reuse_results 的载体）──────────────────────────

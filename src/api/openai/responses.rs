@@ -184,12 +184,11 @@ pub(crate) async fn handle_responses(
         .into_response();
     }
 
-    // 图片兼容数据面（#7）：压缩内联大图（纯 CPU，spawn_blocking；有图才做）。
-    // 一次处理，后续 failover 各轮的 attempt_body 都从压缩后的 body 克隆。
-    // describe（上游识图改写）需 async 上游调用，透传形态不做——降级为
-    // responses→chat 的渠道由 chat 转换路径承接时可再走 chat 侧处理。
-    if image_ctx.has_images && image_ctx.prepare_responses_body(&mut body).await {
-        tracing::debug!("image_compat: responses request image compression applied");
+    // 图片兼容数据面（#7）：describe（识图改写）+ 压缩（纯 CPU，spawn_blocking；
+    // 有图才做）。一次处理，后续 failover 各轮的 attempt_body 都从改写后的
+    // body 克隆。describe 失败/超上限的图保留原样，不阻断请求。
+    if image_ctx.has_images && image_ctx.prepare_responses_body(&state, &mut body).await {
+        tracing::debug!("image_compat: responses request image processing applied");
     }
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
