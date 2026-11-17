@@ -414,12 +414,6 @@ fn default_pending() -> String {
     "pending".into()
 }
 
-impl TopUpOrder {
-    pub fn is_pending(&self) -> bool {
-        self.status == "pending"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,13 +11,11 @@
 //!     └─────────[any success]─────────┴───────────────────────────────┘
 //! ```
 
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Duration;
-
 use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-type-options");
 static NOSNIFF: HeaderValue = HeaderValue::from_static("nosniff");
@@ -248,15 +246,6 @@ impl HealthTracker {
             .iter()
             .map(|e| (e.key().clone(), e.value().level()))
             .collect()
-    }
-}
-
-/// 判断配置可用性是否阻塞就绪检查。
-/// `last_apply_age` 是自上次配置应用以来的时间；`None` 表示尚未应用。
-pub fn config_readiness_block(last_apply_age: Option<Duration>) -> Option<&'static str> {
-    match last_apply_age {
-        None => Some("config not yet applied"),
-        Some(_) => None,
     }
 }
 

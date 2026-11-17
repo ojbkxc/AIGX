@@ -56,9 +56,6 @@ const MAX_USER_LENGTH: usize = 200;
 /// 密码长度上限。
 const MAX_PASSWORD_LENGTH: usize = 200;
 
-/// 轮询指定条目的 id 数上限（照 A2A `proxy_rotate::MAX_IDS`）。
-pub const MAX_ROTATE_IDS: usize = 64;
-
 /// 轮询游标表的大小上限（超出时整表清空；键是账号 id，几十个是正常规模）。
 const MAX_CURSORS: usize = 512;
 

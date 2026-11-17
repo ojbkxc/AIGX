@@ -28,9 +28,7 @@ use serde_json::{json, Value};
 use crate::api::auth::{ApiKey, ApiKeyError};
 use crate::api::common::{extract_api_key_bearer_first, extract_client_ip};
 use crate::api::openai::AppState;
-use crate::tool_services::{
-    self, McpRequestContext, McpServerKind, SearchError, SearchErrorCode, ToolServices,
-};
+use crate::tool_services::{self, McpRequestContext, McpServerKind, SearchError, ToolServices};
 
 /// 工具数据面共用 HTTP 客户端。
 ///
@@ -517,11 +515,6 @@ pub fn router() -> axum::Router<AppState> {
             post(mcp_image_generation).get(mcp_unsupported),
         )
         .route("/mcp/image-generation/files/:id", get(mcp_image_file))
-}
-
-/// 便于测试与文档引用：错误码 → HTTP 状态。
-pub fn status_for(code: SearchErrorCode) -> u16 {
-    code.http_status()
 }
 
 #[cfg(test)]

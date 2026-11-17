@@ -729,21 +729,6 @@ pub async fn read_body_capped(resp: reqwest::Response, limit: usize) -> bytes::B
     buf.freeze()
 }
 
-/// Content-Type 是否为 application/json
-pub fn content_type_is_json(ct: &str) -> bool {
-    let ct = ct.trim_start();
-    ct.starts_with("application/json")
-}
-
-/// 响应是否为 JSON 类型
-pub fn response_is_json(resp: &reqwest::Response) -> bool {
-    resp.headers()
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| content_type_is_json(&ct.to_ascii_lowercase()))
-        .unwrap_or(false)
-}
-
 /// 从上游错误响应中捕获并解析错误体，返回 BridgeError::UpstreamStatus
 ///
 /// 参考 aisix 的 `capture_upstream_error_http` 设计。

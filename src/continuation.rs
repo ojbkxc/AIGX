@@ -201,12 +201,6 @@ pub fn parts_of_response(resp: &ChatResponse) -> TurnParts {
     }
 }
 
-/// 把各轮的**可见正文**接成一条（`concat` 不加分隔：上游被腰斩处没有换行，
-/// 插空格或换行会改坏 markdown 与代码块的拼接位置）。
-pub fn join_text(rounds: &[String]) -> String {
-    rounds.concat()
-}
-
 /// 把「到目前为止、客户端会看到的整体」组装成判据输入。
 ///
 /// `finish` 与 `has_tool_calls` 取**本轮**（本轮的事实），text/reasoning 用

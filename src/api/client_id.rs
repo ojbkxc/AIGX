@@ -299,10 +299,6 @@ impl ClientIdentity {
             source: "unknown",
         }
     }
-
-    pub fn is_unknown(&self) -> bool {
-        self.source == "unknown"
-    }
 }
 
 /// 把识别结果写入请求日志。

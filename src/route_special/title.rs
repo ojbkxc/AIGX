@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 
 use crate::storage::FileStore;
 
-use super::{client_label, CLIENTS, CLIENT_CLAUDE_CODE, CLIENT_CODEX, CLIENT_ZCODE};
+use super::{client_label, CLIENT_CLAUDE_CODE, CLIENT_CODEX, CLIENT_ZCODE};
 
 /// FileStore 持久化键（整块读写）。
 pub const KEY_TITLE_ROUTES: &str = "title_model_routes";
@@ -453,11 +453,6 @@ pub fn resolve(client: &str, headers: &HeaderMap, body: &Value) -> Option<(Strin
         return None;
     }
     find_target(settings, client, headers, body)
-}
-
-/// 支持的客户端 id 是否合法。
-pub fn is_supported_client(id: &str) -> bool {
-    CLIENTS.iter().any(|(key, _)| *key == id)
 }
 
 #[cfg(test)]

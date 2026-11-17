@@ -31,16 +31,6 @@ pub const TOOL_FILE_SEARCH: &str = "file_search";
 pub const TOOL_GOOGLE_SEARCH: &str = "google_search";
 pub const TOOL_IMAGE_GENERATION: &str = "image_generation";
 
-/// 内置工具保留名集合——这些名字不计入自定义工具按次计费
-///（对齐 new-api `reservedBillableToolNames`）。
-const RESERVED_TOOL_NAMES: &[&str] = &[
-    TOOL_WEB_SEARCH,
-    TOOL_WEB_SEARCH_PREVIEW,
-    TOOL_FILE_SEARCH,
-    TOOL_GOOGLE_SEARCH,
-    TOOL_IMAGE_GENERATION,
-];
-
 // ── ModelPrice ──────────────────────────────────────────────────────
 
 /// 单模型定价条目。
@@ -697,11 +687,6 @@ impl PricingStore {
         }
         (total + 0.999999) as i64
     }
-}
-
-/// 工具名是否属于内置保留名（这些名字不计入自定义工具按次计费）。
-pub fn is_reserved_tool_name(name: &str) -> bool {
-    RESERVED_TOOL_NAMES.contains(&name)
 }
 
 /// 工具价格是否合法（>=0 且非 NaN/Inf）。

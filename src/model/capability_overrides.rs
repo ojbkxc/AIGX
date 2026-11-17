@@ -92,10 +92,6 @@ const KEY_TO_TAG: &[(&str, &str)] = &[
 pub const AUDIO_KEY: &str = "supportsAudio";
 pub const CHAT_KEY: &str = "supportsChat";
 
-/// token 数值键的上限（1 亿）：再大就是手滑多敲了几个零，而虚高的窗口会让
-/// 下游按错误量级堆历史 —— 那正是这层覆盖要修的毛病。下限 1。
-pub const MAX_TOKEN_VALUE: f64 = 100_000_000.0;
-
 /// 合法键名（六键 + audio / chat；A2A 的 token 键在这里不单列，
 /// AIGX 的上下文长度走既有 `ModelMetadata.context_length`）。
 pub fn is_known_key(key: &str) -> bool {

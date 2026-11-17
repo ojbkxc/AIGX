@@ -271,11 +271,6 @@ impl AlertRuleEvaluator {
         &self.history
     }
 
-    pub fn add_rule(&mut self, rule: AlertRule) {
-        tracing::info!(rule = %rule.name, "alert rule added");
-        self.rules.push(rule);
-    }
-
     pub fn rules(&self) -> &[AlertRule] {
         &self.rules
     }
