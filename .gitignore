@@ -66,3 +66,7 @@ test-results/
 frontend/test-results/
 frontend/playwright-report/
 .e2e-shots/
+
+# Python 缓存（tools/ 下脚本运行产生）
+__pycache__/
+*.pyc
