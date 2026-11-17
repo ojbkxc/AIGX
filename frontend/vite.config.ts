@@ -11,6 +11,19 @@ import { resolve } from 'node:path';
 // 靠它判「磁盘上的前端与二进制是否同版」（versionMismatch）。没有这个文件，
 // 「手动换过二进制 / 半更新」在生产上永远检测不出来。
 // 输出必须逐字节确定（无时间戳），否则 CI 的 static 同步闸门永远过不了。
+// 当前构建版本：`AIGX_VERSION` 优先，否则读仓库根 `VERSION`。
+// 两处都拿不到时返回 null —— 宁可没有版本号，也不要写一个假的。
+function readVersion(): string | null {
+  const fromEnv = process.env.AIGX_VERSION?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const raw = readFileSync(resolve(__dirname, '../VERSION'), 'utf8').trim();
+    return raw || null;
+  } catch {
+    return null;
+  }
+}
+
 function emitStaticVersion(): import('vite').Plugin {
   return {
     name: 'emit-static-version',
@@ -18,15 +31,7 @@ function emitStaticVersion(): import('vite').Plugin {
     closeBundle() {
       const outDir = resolve(__dirname, '../static');
       mkdirSync(outDir, { recursive: true });
-      let version: string | null = process.env.AIGX_VERSION ?? null;
-      if (!version) {
-        try {
-          const raw = readFileSync(resolve(__dirname, '../VERSION'), 'utf8').trim();
-          version = raw || null;
-        } catch {
-          version = null;
-        }
-      }
+      const version = readVersion();
       // 内容必须确定性：不写时间戳（否则 CI 的 static 同步闸门永远红）
       const manifest = { version };
       writeFileSync(
@@ -40,6 +45,11 @@ function emitStaticVersion(): import('vite').Plugin {
 
 export default defineConfig({
   plugins: [react(), emitStaticVersion()],
+  // 把版本号烧进 bundle：`useVersionGuard` 用它和部署产物里的 version.json 比对，
+  // 检测「浏览器还跑着旧 JS、后端已升级」。
+  define: {
+    __APP_VERSION__: JSON.stringify(readVersion() ?? ''),
+  },
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],

@@ -2,6 +2,7 @@ import React, { lazy, Suspense, useEffect } from 'react';
 import { Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import StatusLine from './components/StatusLine';
+import VersionGuardBanner from './components/VersionGuardBanner';
 import ErrorBoundary from './components/ErrorBoundary';
 import RouteErrorPage from './components/RouteErrorPage';
 import PermissionDenied from './components/PermissionDenied';
@@ -197,6 +198,7 @@ export default function App(): JSX.Element {
     <ErrorBoundary>
       <ToastProvider>
         <CaptchaPoolRunner />
+        <VersionGuardBanner />
         <Routes>
           <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
           <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />

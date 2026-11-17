@@ -2947,3 +2947,42 @@ td.align-right, th.align-right { text-align: right; }
     overflow-x: hidden;
   }
 }
+
+/* ── 版本握手提示条（旧 JS 仍在前台时）─────────────────────────
+ * 固定底栏、不自动消失：这是「继续用会出错」的状态，不能像 toast 一样淡出。 */
+.version-guard-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(680px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border, rgb(255 255 255 / 0.14));
+  background: var(--card-bg, #1f2430);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.version-guard-banner button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--glass-border, rgb(255 255 255 / 0.14));
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.version-guard-banner button:hover {
+  background: rgb(255 255 255 / 0.08);
+}

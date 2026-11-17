@@ -66,6 +66,12 @@ const RESTART_EPOCH_KEY: &str = "update:restart_epoch";
 const RESTART_ERROR_KEY: &str = "update:restart_error";
 /// 「已应用待重启」标记（持久化：exec 失败/被外部重启后状态不丢）。
 const PENDING_RESTART_KEY: &str = "update:pending_restart";
+/// 新前端产物已铺到 `<static>.new`、等待新进程启动时切换的标记。
+///
+/// **为什么不在旧进程里直接换 static**：静态文件由 `ServeDir` 按请求读盘，
+/// 换目录的瞬间旧进程就开始吐新前端了，而新后端要等 2 秒后的 exec 才起来
+/// —— 那 2 秒（以及 exec 失败时的整个残留期）就是前后端错配窗口。
+const STATIC_STAGED_KEY: &str = "update:static_staged";
 /// 两次检查之间的最短间隔（秒）：手动按钮连点会重复消耗 GitHub 匿名限额。
 const MIN_CHECK_GAP: i64 = 60;
 
@@ -241,6 +247,34 @@ impl UpdateManager {
                     let _ = store.put(RESTART_ERROR_KEY, &message);
                     tracing::error!("pending rollback failed: {e}");
                 }
+            }
+        }
+        // 新进程启动时切换 staged 前端产物 —— **必须在 router 构建之前**
+        // （`web::serve_static_files()` 在构造时就把目录定下）。这样旧进程
+        // 存活期间始终服务旧 static，前后端只在这次启动瞬间一起切到新版。
+        {
+            let static_dir = static_dir_path(&consume_exe);
+            let staged = staged_static_dir(&static_dir);
+            if staged.is_dir() {
+                match consume_staged_static(&static_dir) {
+                    Ok(()) => {
+                        let _ = store.delete(STATIC_STAGED_KEY);
+                        tracing::warn!("staged static swapped in at startup");
+                    }
+                    Err(e) => {
+                        // 切换失败不阻塞启动：保留 `.new` 供下次重试，服务旧 static
+                        let _ = store.put(RESTART_ERROR_KEY, &format!("static staged failed: {e}"));
+                        tracing::error!("staged static swap failed: {e}");
+                    }
+                }
+            } else if store
+                .get::<bool>(STATIC_STAGED_KEY)
+                .ok()
+                .flatten()
+                .unwrap_or(false)
+            {
+                // 标记在但目录没了（被运维手工清理）：清标记，别永久挂着
+                let _ = store.delete(STATIC_STAGED_KEY);
             }
         }
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aigx"));
@@ -698,7 +732,12 @@ impl UpdateManager {
         Ok(hex::encode(hasher.finalize()))
     }
 
-    /// 原地替换二进制与 static 目录（失败自动回滚）。
+    /// 替换二进制，并把新 static **暂存**到 `<static>.new`（失败自动回滚二进制）。
+    ///
+    /// **不在这一步动正式 static 目录**：静态文件由 `ServeDir` 按请求读盘，
+    /// 旧进程存活期间换目录会立刻让浏览器拿到新前端、却仍对着旧后端 —— 那正是
+    /// 「前端先升、后端后升」的错配窗口。正式切换推迟到新进程启动时
+    /// （[`consume_staged_static`]，在 router 构建前），前后端由此同时生效。
     fn install_staged(&self, staging: &Path) -> Result<(), String> {
         let new_exe = staging.join("aigx");
         let new_static = staging.join("static");
@@ -710,9 +749,7 @@ impl UpdateManager {
         }
         let static_dir = static_dir_path(&self.exe);
         let exe_bak = backup_path(&self.exe);
-        let static_bak = backup_path(&static_dir);
         let _ = std::fs::remove_file(&exe_bak);
-        remove_dir(&static_bak);
         // 1) 当前程序改名做备份（Linux 允许重命名运行中的可执行文件）
         std::fs::rename(&self.exe, &exe_bak).map_err(|e| format!("备份当前程序失败: {e}"))?;
         // 2) 写入新程序
@@ -723,22 +760,15 @@ impl UpdateManager {
             let _ = std::fs::rename(&exe_bak, &self.exe);
             return Err(e);
         }
-        // 3) 替换 static 目录（失败时把程序与目录一起回滚）
-        let static_result = (|| -> Result<(), String> {
-            if static_dir.exists() {
-                std::fs::rename(&static_dir, &static_bak)
-                    .map_err(|e| format!("备份静态目录失败: {e}"))?;
-            }
-            copy_dir(&new_static, &static_dir).map_err(|e| format!("写入静态目录失败: {e}"))
-        })();
-        if let Err(e) = static_result {
-            remove_dir(&static_dir);
-            if static_bak.exists() {
-                let _ = std::fs::rename(&static_bak, &static_dir);
-            }
+        // 3) 新 static 铺到暂存目录（正式目录保持不动，旧前端继续可用）
+        let staged = staged_static_dir(&static_dir);
+        remove_dir(&staged);
+        if let Err(e) = copy_dir(&new_static, &staged) {
+            remove_dir(&staged);
             let _ = std::fs::rename(&exe_bak, &self.exe);
-            return Err(e);
+            return Err(format!("暂存静态目录失败: {e}"));
         }
+        let _ = self.store.put(STATIC_STAGED_KEY, &true);
         Ok(())
     }
 
@@ -1140,6 +1170,40 @@ fn consume_rollback_pending(exe: &Path) -> Result<(), String> {
 fn backup_path(path: &Path) -> PathBuf {
     let name = file_name_of(path).unwrap_or("aigx");
     path.with_file_name(format!("{name}.bak"))
+}
+
+/// 新前端产物的暂存目录：`<static>.new`（与正式目录同卷，rename 才原子）。
+fn staged_static_dir(static_dir: &Path) -> PathBuf {
+    let name = file_name_of(static_dir).unwrap_or("static");
+    static_dir.with_file_name(format!("{name}.new"))
+}
+
+/// 把暂存的 `<static>.new` 切换到正式目录（**新进程启动时调用**）。
+///
+/// 顺序：旧 static → `.bak`（保留作回滚目标）→ `.new` → 正式目录。
+/// 任何一步失败都把旧目录放回原位、`.new` 留着下次重试。
+fn consume_staged_static(static_dir: &Path) -> Result<(), String> {
+    let staged = staged_static_dir(static_dir);
+    if !staged.is_dir() {
+        return Ok(());
+    }
+    let backup = backup_path(static_dir);
+    // 上一轮的 .bak 不再需要（本次切换会产生新的回滚目标）
+    remove_dir(&backup);
+    let had_old = static_dir.exists();
+    if had_old {
+        std::fs::rename(static_dir, &backup).map_err(|e| format!("备份旧 static 失败: {e}"))?;
+    }
+    match std::fs::rename(&staged, static_dir) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // 放回旧目录，别让服务裸奔（.new 保留供下次重试）
+            if had_old {
+                let _ = std::fs::rename(&backup, static_dir);
+            }
+            Err(format!("切换新 static 失败: {e}"))
+        }
+    }
 }
 
 fn file_name_of(path: &Path) -> Option<&str> {
@@ -1593,6 +1657,42 @@ mod tests {
         assert_eq!(compare_versions("1.2.3-beta.1", "1.2.3"), Some(-1));
         assert_eq!(compare_versions("1.2.3-beta.2", "1.2.3-beta.1"), Some(1));
         assert_eq!(compare_versions("not-a-version", "1.2.3"), None);
+    }
+
+    /// 升级时 static 必须「新进程启动才切换」：旧进程存活期间正式目录不动，
+    /// `.new` 只在启动时顶替 —— 否则会出现「新前端 + 旧后端」的错配窗口。
+    #[test]
+    fn staged_static_swaps_only_on_consume() {
+        let root = std::env::temp_dir().join(format!("aigx-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let live = root.join("static");
+        let staged = staged_static_dir(&live);
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("index.html"), "old").unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("index.html"), "new").unwrap();
+
+        // 暂存之后、消费之前：正式目录仍是旧内容（旧进程照常服务旧前端）
+        assert_eq!(
+            std::fs::read_to_string(live.join("index.html")).unwrap(),
+            "old"
+        );
+
+        consume_staged_static(&live).expect("切换应成功");
+        assert_eq!(
+            std::fs::read_to_string(live.join("index.html")).unwrap(),
+            "new"
+        );
+        assert!(!staged.exists(), "暂存目录应已被 rename 走");
+        // 旧目录成为回滚目标
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&live).join("index.html")).unwrap(),
+            "old"
+        );
+
+        // 无暂存目录时是幂等空操作
+        consume_staged_static(&live).expect("无暂存时应直接返回 Ok");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -283,5 +283,7 @@
   "该提供商已启用": "Provedor ativado",
   "该提供商已停用": "Provedor desativado",
   "该插件不提供当前平台（{{target}}）的安装包": "Este plugin não tem pacote para a plataforma atual ({{target}})",
-  "该插件不在发布目录中，无法更新": "Este plugin não está no catálogo de releases e não pode ser atualizado"
+  "该插件不在发布目录中，无法更新": "Este plugin não está no catálogo de releases e não pode ser atualizado",
+  "系统已升级到 v{{version}}，当前页面仍是旧版本，请刷新": "O sistema foi atualizado para v{{version}}; esta página ainda está na versão antiga — atualize",
+  "刷新页面": "Atualizar página"
 }

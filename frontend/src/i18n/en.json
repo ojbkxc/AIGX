@@ -4136,5 +4136,7 @@
   "跟踪筛选": "Trace filters",
   "AIGX 的视觉兼容在选路前裁决，拿不到「当前路由内的视觉模型」——整体接管必须指定接管模型（按顺序尝试）。": "AIGX decides vision compatibility before routing, so “vision models in the current route” is unavailable — full takeover must name its takeover models (tried in order).",
   "备选按顺序尝试；至少需要一个接管模型（后端要求 fallback=designated 且 targets 非空）。": "Backups are tried in order; at least one takeover model is required (the backend requires fallback=designated with a non-empty targets list).",
-  "备选按顺序尝试；至少需要一个接管模型。": "Backups are tried in order; at least one takeover model is required."
+  "备选按顺序尝试；至少需要一个接管模型。": "Backups are tried in order; at least one takeover model is required.",
+  "系统已升级到 v{{version}}，当前页面仍是旧版本，请刷新": "System upgraded to v{{version}}; this page is still on the old build — please refresh",
+  "刷新页面": "Refresh page"
 }
