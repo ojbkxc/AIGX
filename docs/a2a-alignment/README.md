@@ -204,8 +204,10 @@ ALTCHA 解题，结束后清理进程与目录）：
    拦截 `modelCatalog` → 快照；`provider_settings/schema.rs` 拒绝声明保留键；`api/openai/models.rs`
    与 `model/manage.rs` 的 Plugin 分支改读目录（声明优先、目录回落）。`wasm/mod.rs` 的 catalog
    `#[allow(dead_code)]` 已删除；`cargo clippy --lib -D warnings` 绿 = catalog 无残留死码。
-   残留偏离：上游的 `models.refresh` / checkin RPC 未移植，AIGX 当前无目录生产者，插件 provider
-   缺省只显渠道声明（空目录按 `remote:true` 存，不编造）。
+   残留偏离：目录生产者**已接**（`account_sessions.rs::refresh_plugin_account_catalog` 走
+   `models.refresh` → `wasm::catalog::save_refresh` 校验后 CAS，管理员「同步模型」触发）；
+   未移植的是上游「签到 claim 成功后自动刷新目录」这条路径，因此**不会自动刷新，需人工触发**。
+   插件 provider 缺省只显渠道声明（空目录按 `remote:true` 存，不编造）。
 2. **T7 未移植三项 → 已修**：① 账号型搜索运行时（`AccountSearchHost` +
    `PluginHostSearchBridge`，三级路由与 `resolve.rs` 同序：原生进程 → 脚本宿主 → wasm；
    `main.rs` 已注入）；② 图片生成运行时（`image_jobs` / `image_runtime` / `image_mcp` /
@@ -234,7 +236,8 @@ ALTCHA 解题，结束后清理进程与目录）：
 7. **原生插件包缺 provider 级开关 → 已修**：外置原生包的 provider 停用写入
    `PackMeta.disabled_providers`（调用返回 200），内置包行为不变；`/api/plugins/provider`
    路由未动。
-8. **`getPluginProgress` 零调用点 → 如实记录**：HEAD 存量前端函数，本波未新增也未删。
+8. **`getPluginProgress` / `listKeys` / `getModelMappings` → 已删**：三个零调用点前端封装
+   在 v1.0.64 一并删除（`git diff` 可见三条 `-` 行；`frontend/src` 现零命中）。
 9. **`account_sessions.rs` 挪 router 的白名单约束 → 守卫在位**：仍未挪进 `router()`；
    `tools/extract_routes.py::check_router_coverage()` 会在挪动后自动抓白名单缺口。
 10. **真实第三方 `.wasm` 包端到端 → 已补证（自建真 wasm 包）**：`plugin-wasm` 用自建真 wasm 包
@@ -254,8 +257,8 @@ ALTCHA 解题，结束后清理进程与目录）：
     |---|---|---|
     | `batchAddAliasPrefix` | `POST /api/models/alias/prefix` | **已修**：后端 handler + 路由 + openapi 已补；整批先校验后写（merge=false 冲突 409、非法 400、同 target 幂等） |
     | `updateCheckinTravel` / `runCheckinTravelNow` | `PATCH/POST /api/checkin-center/travel[/run]` | **已修**：travel 排程移植（30s tick、按计划时刻去重、无插件稳定跳过不落标记） |
-    | `listKeys` | `GET /api/keys` | 如实记录：legacy 存量，零调用点 |
-    | `getModelMappings` | `GET/PUT /api/settings` | 如实记录：存量零调用点（新弹窗走 `/api/models/mappings`） |
+    | `listKeys` | `GET /api/keys` | **已删**：legacy 存量、零调用点，v1.0.64 删除封装 |
+    | `getModelMappings` | `GET/PUT /api/settings` | **已删**：存量零调用点，v1.0.64 删除封装（新弹窗走 `/api/models/mappings`） |
     | `startPluginInstall` / `startPluginUpdate` | install-from-release / update | v1.0.63 已删（改 url 直装） |
 
 ## 六·五、本轮新补的「handler 有、路由无」（已修）
@@ -265,8 +268,8 @@ ALTCHA 解题，结束后清理进程与目录）：
   （真实侧不扫、文档侧不报）。已注册 `GET|POST /api/models/mappings` 与
   `POST /api/models/mappings/remove`，并补 openapi 文档。路由闸门数字随之 399→**401 真实 /
   395→397 文档**（GET+POST 同 path 记一条 path，故 3 handler = +2 path）。
-- 配套说明：前端 `getModelMappings`（`api/index.ts`）指向旧 `${API_BASE}/settings`，是**零调用点**
-  的存量死封装；新映射弹窗走 `POST /api/models/mappings` 族。二者并存，未删旧封装。
+- 配套说明：前端 `getModelMappings`（`api/index.ts`）原指向旧 `${API_BASE}/settings`，是
+  **零调用点**的存量死封装；v1.0.64 已删除，新映射弹窗走 `POST /api/models/mappings` 族。
 
 ## 六·六、T12（Wasm 数据面）四项无法验证 → v1.0.64 已补证
 
@@ -333,11 +336,16 @@ cd frontend && npx tsc --noEmit && npm run lint && npm run i18n:check && npx vit
 | 1 | `cargo fmt --all -- --check` | **EXIT=0 / 0 diff** |
 | 2 | `cargo check --lib --tests` | **EXIT=0 / 0 error / 0 warning** |
 | 3 | `cargo clippy --workspace --all-targets -- -D warnings` | **EXIT=0 / 0 error** |
-| 4a | `cargo test --lib`（第一次） | **2106 passed / 1 failed / 0 ignored** |
-| 4b | `cargo test --lib`（第二次） | **2106 passed / 1 failed / 0 ignored** |
-| 4c | 失败集比对 | **完全一致**（唯一 `log::tests::tz_migrate_zero_to_eight_rewrites_old_keys`） |
+| 4a | `cargo test --lib`（integrator 第一次） | **2106 passed / 1 failed / 0 ignored** |
+| 4b | `cargo test --lib`（integrator 第二次） | **2106 passed / 1 failed / 0 ignored** |
+| 4c | 失败集比对 | integrator 两次一致（唯一 `log::tests::tz_migrate_zero_to_eight_rewrites_old_keys`）；**verifier 复跑第二次多出 1 条 flaky**，见下 |
 | 5 | 分区 allow 反向自证 | 见下 |
 | 6 | `python tools/extract_routes.py .` | **EXIT=0**；真实 409 / 文档 405 / 豁免 5；[A]–[G] 全 0 |
+
+**verifier 独立复跑（t10）**：run1 = 2106 passed / 1 failed；run2 = 2105 passed / **2 failed**
+（多出 `channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`，
+`balance_refresh.rs:398` 的 50ms 时序前提）。该文件本波未改动，判为**环境 flaky、不阻塞交付**；
+但「两次失败集完全一致」这一条**不成立**，如实记录（需 Linux CI 复跑确认）。
 
 **前端（cwd=frontend）**
 
