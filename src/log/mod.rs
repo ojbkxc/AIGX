@@ -1250,6 +1250,46 @@ impl RequestLogStore {
         self.store.count_prefix("reqlog:").unwrap_or(0)
     }
 
+    /// 窗口内条数与首尾时间戳（`created_at ∈ [from_ts, to_ts]`，含两端）。
+    ///
+    /// 「清空预览」要的是「会删多少条、最早/最新是哪天」——原先为此
+    /// `all_sorted_asc()` 全键 + 全量反序列化。这里只碰键：`COUNT(*)` 取
+    /// 条数，`list_range_asc/desc(limit 1)` 各取首尾一个键再解析时间戳
+    /// （键前缀定宽 10 位 → 键序 = 时间序）。返回
+    /// `(total_all, window_count, oldest, newest)`；窗口为空时后两项为 None。
+    pub fn window_bounds(
+        &self,
+        from_ts: Option<i64>,
+        to_ts: Option<i64>,
+    ) -> anyhow::Result<(usize, usize, Option<i64>, Option<i64>)> {
+        let total_all = self.store.count_prefix("reqlog:")?;
+        let lower = match from_ts {
+            Some(t) => format!("reqlog:{t}"),
+            None => "reqlog:".to_string(),
+        };
+        let upper = match to_ts {
+            Some(t) => format!("reqlog:{}", t.saturating_add(1)),
+            None => format!("reqlog:{}", '\u{10FFFF}'),
+        };
+        let window_count = self.store.count_range(&lower, &upper)?;
+        if window_count == 0 {
+            return Ok((total_all, 0, None, None));
+        }
+        let ts_of = |k: &str| -> Option<i64> {
+            k.strip_prefix("reqlog:")
+                .and_then(|rest| rest.split(':').next())
+                .and_then(|s| s.parse::<i64>().ok())
+        };
+        let first = self.store.list_range_asc("reqlog:", &lower, &upper, 1)?;
+        let last = self.store.list_range_desc(&lower, &upper, 1)?;
+        Ok((
+            total_all,
+            window_count,
+            first.first().and_then(|k| ts_of(k)),
+            last.first().and_then(|k| ts_of(k)),
+        ))
+    }
+
     /// 按 key 批量反序列化请求日志（缺失/损坏静默跳过）。
     pub fn logs_by_keys(&self, keys: &[String]) -> Vec<RequestLog> {
         keys.iter()
@@ -2402,6 +2442,39 @@ mod tests {
         LogStore::new(Arc::new(FileStore::new(
             TempDir::new().unwrap().path().to_path_buf(),
         )))
+    }
+
+    /// `window_bounds`：条数走 COUNT(*)、首尾各取一个键，不反序列化全量。
+    /// 与旧「全量 list_all + 过滤」口径逐项对照。
+    #[test]
+    fn window_bounds_matches_full_scan_semantics() {
+        let s = store();
+        const BASE: i64 = 1_700_000_000;
+        for i in 0..5i64 {
+            let mut log = RequestLog::new();
+            log.id = format!("w{i}");
+            log.created_at = BASE + i * 100;
+            log.model = "m".into();
+            s.requests.add(log).unwrap();
+        }
+        // 无下界：全部 5 条，oldest/newest = 首尾时间戳
+        let (total, count, oldest, newest) = s.requests.window_bounds(None, None).unwrap();
+        assert_eq!((total, count), (5, 5));
+        assert_eq!((oldest, newest), (Some(BASE), Some(BASE + 400)));
+
+        // 含两端的窗口（与旧 `created_at >= from` 一致）
+        let (total, count, oldest, newest) = s
+            .requests
+            .window_bounds(Some(BASE + 100), Some(BASE + 300))
+            .unwrap();
+        assert_eq!((total, count), (5, 3), "全部 5，窗口内 3");
+        assert_eq!((oldest, newest), (Some(BASE + 100), Some(BASE + 300)));
+
+        // 空窗口：计数 0 且不返回首尾
+        let (_, count, oldest, newest) =
+            s.requests.window_bounds(Some(BASE + 10_000), None).unwrap();
+        assert_eq!(count, 0);
+        assert_eq!((oldest, newest), (None, None));
     }
 
     #[test]

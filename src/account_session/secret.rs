@@ -295,6 +295,10 @@ mod tests {
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let dir =
             std::env::temp_dir().join(format!("aigx-secret-{tag}-{}-{seq}", std::process::id()));
+        // 目录从不清扫、Windows 会复用 PID：上一轮残留的同名目录会让
+        // `key_fingerprint` 的「纯读不生成」断言假红（全量并发跑实测偶发）。
+        // 建之前先清空，保证每次都是干净目录。
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

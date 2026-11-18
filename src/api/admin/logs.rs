@@ -681,21 +681,25 @@ pub async fn handle_clear_preview(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let days = q.days.unwrap_or(0);
-    let cutoff = if days > 0 {
-        chrono::Utc::now().timestamp() - (days as i64) * 86_400
-    } else {
-        i64::MIN
-    };
-    let all = state.log_store.requests.all_sorted_asc();
-    let matched: Vec<_> = all.iter().filter(|l| l.created_at >= cutoff).collect();
-    let oldest = matched.first().map(|l| l.created_at);
-    let newest = matched.last().map(|l| l.created_at);
+    let cutoff = (days > 0).then(|| chrono::Utc::now().timestamp() - (days as i64) * 86_400);
+    // 走键区间（COUNT(*) + 首尾各取一个键）：原实现全键枚举 + 全量反序列化，
+    // 10 万保留量下每次点开「清空预览」都是秒级。
+    let (total_all, would_remove, oldest, newest) = state
+        .log_store
+        .requests
+        .window_bounds(cutoff, None)
+        .map_err(|e| {
+            error_response(
+                &format!("统计日志窗口失败: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
             "days": days,
-            "total_all": all.len(),
-            "would_remove": matched.len(),
+            "total_all": total_all,
+            "would_remove": would_remove,
             "oldest": oldest,
             "newest": newest,
         }

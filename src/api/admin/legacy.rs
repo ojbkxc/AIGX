@@ -2288,11 +2288,21 @@ pub async fn handle_realtime(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let logs = state.log_store.requests.list_all();
     let now = chrono::Utc::now().timestamp();
     let window_secs = 5 * 60;
     let start = now - window_secs;
-    let recent: Vec<_> = logs.into_iter().filter(|l| l.created_at >= start).collect();
+    // 键区间读近 5 分钟（含两端）：原实现 `list_all()` 全键枚举 + 全量
+    // 反序列化，只为筛出窗口内的几十/几百条 —— 保留量 10 万时是纯浪费。
+    let (recent, _sampled) = state
+        .log_store
+        .requests
+        .list_window(start, now, usize::MAX)
+        .map_err(|e| {
+            error_response(
+                &format!("读取实时窗口失败: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
     let total = recent.len() as u64;
     let errors = recent.iter().filter(|l| l.status_code >= 400).count() as u64;
     let total_latency: u64 = recent.iter().map(|l| l.latency_ms).sum();
