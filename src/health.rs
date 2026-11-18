@@ -231,7 +231,6 @@ impl HealthTracker {
 
     /// 记录一次失败
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn on_failure(&self, model: &str) {
         let entry = self.entries.entry(model.to_string()).or_default();
         entry.on_failure();

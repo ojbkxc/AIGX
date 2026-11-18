@@ -168,11 +168,13 @@ test.describe('IA 整合 · 供应商页', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('签到 Tab 嵌入后保留 4 个二级 Tab', async ({ page, pageErrors }) => {
+  test('签到 Tab 嵌入后保留 5 个二级 Tab', async ({ page, pageErrors }) => {
     await page.goto('/channels?tab=checkin');
     const subTabs = page.locator('.ck-sub-tabs .sub-tab');
-    await expect(subTabs).toHaveCount(4);
-    for (const name of ['签到中心', '定时签到', '签到记录', '福利通道']) {
+    // 二级 Tab 由 CheckinCenter.tabs 驱动（签到中心/定时签到/定时补签/
+    // 签到记录/福利通道）；「定时补签」后加，断言需跟源码同步。
+    await expect(subTabs).toHaveCount(5);
+    for (const name of ['签到中心', '定时签到', '定时补签', '签到记录', '福利通道']) {
       await expect(page.locator('.ck-sub-tabs .sub-tab', { hasText: name })).toHaveCount(1);
     }
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);

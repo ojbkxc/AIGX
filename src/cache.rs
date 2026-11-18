@@ -269,7 +269,6 @@ where
     /// - `max_capacity`: 最大条目数
     /// - `ttl`: 条目存活时间
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn new(max_capacity: u64, ttl: Duration) -> Self {
         Self {
             inner: AsyncCache::<K, V>::builder()
@@ -280,7 +279,6 @@ where
     }
 
     /// 获取或插入。如果 key 不存在，调用 init 函数生成值并缓存。
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub async fn get_or_insert(&self, key: K, init: impl std::future::Future<Output = V>) -> V {
         self.inner.get_with(key, init).await

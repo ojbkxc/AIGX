@@ -336,7 +336,6 @@ impl SqliteStore {
 
     /// 返回数据库中总条目数
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn count(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock();
         // rusqlite 0.41 的 FromSql 未实现 u64（仅 u16 等），COUNT(*) 在 SQLite

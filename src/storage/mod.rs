@@ -168,7 +168,6 @@ impl JsonFileStore {
 
     /// 删除键
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn delete(&self, key: &str) -> anyhow::Result<()> {
         let path = self.path_of(key);
         if path.exists() {

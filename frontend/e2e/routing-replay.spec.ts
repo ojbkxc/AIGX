@@ -95,10 +95,12 @@ async function openReplayPanel(page: import('@playwright/test').Page, requestId:
   await loginAsAdmin(page);
   // 路由域已从「系统设置 → 路由」独立成页（#40）：/routing 单页多模式
   await page.goto('/routing');
-  await page.getByRole('tab', { name: '回放', exact: true }).click();
+  // v1.0.65 起路由页 rail 用 button.rt-nav-item（不再是 role=tab）
+  await page.locator('.rt-shell-rail .rt-nav-item', { hasText: '回放' }).click();
   await expect(page.locator('.rr-panel h2', { hasText: '路由回放' })).toBeVisible();
   await page.getByPlaceholder('粘贴请求日志里的请求 ID').fill(requestId);
-  await page.getByRole('button', { name: '回放', exact: true }).click();
+  // rail 也有一个「回放」按钮，限定到回放面板内避免 strict mode 歧义
+  await page.locator('.rr-panel').getByRole('button', { name: '回放', exact: true }).click();
 }
 
 test.describe('路由回放', () => {

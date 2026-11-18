@@ -22,7 +22,9 @@ async function openStickyPanel(page: import('@playwright/test').Page): Promise<v
   await loginAsAdmin(page);
   // 路由域已从「系统设置 → 路由」独立成页（#40）：/routing 单页多模式（配置/回放/粘滞）
   await page.goto('/routing');
-  await page.getByRole('tab', { name: '粘滞会话', exact: true }).click();
+  // v1.0.65 路由页改成左 rail（配置/回放/压缩/标题/视觉）+ 右内容区；
+  // 粘滞会话不再是独立 tab，而是「配置」视图内的一个卡（默认视图即它）。
+  await expect(page.locator('h2', { hasText: '粘滞会话' })).toBeVisible();
   // RouteSticky 卡（h2 粘滞会话）
   await expect(page.locator('h2', { hasText: '粘滞会话' })).toBeVisible();
 }

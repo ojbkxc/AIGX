@@ -36,7 +36,9 @@ test.describe('插件管理页', () => {
 
   test('提供商设置展开：单家启停开关 + 加载态圆点', async ({ page, pageErrors }) => {
     const card = page.locator('.pl-card.is-installed');
-    await card.locator('button', { hasText: /提供商设置/ }).click();
+    // 卡片上的按钮现为「提供商（{{n}}）」折叠区（设置弹窗改由工具栏
+    // 「全部插件设置」打开，形状不同）；.pl-provider-row 在折叠区里。
+    await card.locator('button', { hasText: /^提供商/ }).click();
     const rows = page.locator('.pl-provider-row');
     await expect(rows).toHaveCount(2);
     await expect(rows.filter({ hasText: 'MonkeyCode' })).toBeVisible();

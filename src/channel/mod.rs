@@ -1708,7 +1708,6 @@ impl ChannelStore {
     /// passthrough（按 weight 排序），不阻断请求。
     ///
     /// `pricing_store` 用于成本因子（渠道级 cost_pricing 优先，缺失回落全局价）；
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     /// rpm 因子取自各渠道的 AIMD 快照。
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn select_for_model_ranked(

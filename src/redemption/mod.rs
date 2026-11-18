@@ -96,7 +96,6 @@ impl Redemption {
 
     /// 是否已过期
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn is_expired(&self) -> bool {
         self.expires_at > 0 && chrono::Utc::now().timestamp() >= self.expires_at
     }

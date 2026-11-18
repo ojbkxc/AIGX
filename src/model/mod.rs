@@ -338,7 +338,6 @@ impl ModelMapper {
     ///
     /// 无 provider 上下文：只认全局条目。配过但被关掉返回 false。
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn is_enabled(&self, source: &str) -> bool {
         self.mappings
             .read()
@@ -349,7 +348,6 @@ impl ModelMapper {
     }
 
     /// 被关掉的别名清单（前端渲染开关状态用；只含全局条目）。
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn disabled_aliases(&self) -> HashSet<String> {
         self.mappings

@@ -62,6 +62,14 @@ jobs:
             #   （4 条修复线均 >= 9.0.0，升级跨 7 个大版本，本窗口不升）
             RUSTSEC-2026-0429 RUSTSEC-2026-0367 RUSTSEC-2026-0369
             RUSTSEC-2026-0368
+            # 组3b ×2（2026-11-18 新增，同为 zip 2.6.1）：
+            #   -0548 ZipStreamReader 用本地头文件名与中央目录不一致 ——
+            #     本仓从不使用 ZipStreamReader（只用 ZipArchive::by_index
+            #     读中央目录名，且 safe_join 再兜一道）
+            #   -0545 AES 条目未校验证书 —— 本仓 zip 关闭默认 feature
+            #     （default-features=false, features=["deflate"]），
+            #     无 aes-crypto，AES 解密路径根本不参与编译
+            RUSTSEC-2026-0548 RUSTSEC-2026-0545
             # 组4 ×1：unsafe-libyaml（serde_yaml_ng 0.10 传递依赖，仍
             #   unmaintained）；唯一使用点 proxy_pool/clash.rs 仅 Value+
             #   from_str 纯数据反序列化，迁移超本窗口

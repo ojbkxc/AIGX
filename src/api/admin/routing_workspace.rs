@@ -791,14 +791,10 @@ pub(crate) fn filter_flow_logs<'a>(
                 }
             }
             // AIGX RequestLog 无 account_id：account 维度恒不命中（不造假数据）
-            if filters
+            !filters
                 .account
                 .as_deref()
                 .is_some_and(|value| !value.is_empty())
-            {
-                return false;
-            }
-            true
         })
         .collect()
 }

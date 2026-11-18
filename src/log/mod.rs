@@ -1569,7 +1569,6 @@ impl RequestLogStore {
 
     /// 导出为 CSV 字符串（无 user 过滤 ⇒ 全量，管理员视角）
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn export_csv(&self) -> String {
         self.export_csv_filtered(None, None, None, None, None, true)
     }
