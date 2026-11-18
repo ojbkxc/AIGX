@@ -333,10 +333,16 @@ fn apply_ops(store: &FileStore, lock: &Mutex<()>, ops: &[LogOp]) -> Result<u64, 
     for op in ops {
         match op {
             LogOp::Request(l) => {
+                let primary = format!("reqlog:{}:{}", l.created_at, l.id);
                 match serde_json::to_value(l) {
-                    Ok(v) => entries.push((format!("reqlog:{}:{}", l.created_at, l.id), v)),
+                    Ok(v) => entries.push((primary.clone(), v)),
                     Err(e) => tracing::warn!("请求日志序列化失败，丢弃：{e}"),
                 }
+                // 二级索引（`reqlog_id:{id}={主键}`）必须与主键同批写：
+                // 数据面真实流量全走这条批量路径，漏写会让
+                // `get_by_request_id` 永远走全扫回退（管理面同步 `add()`
+                // 是另一条路径，见 `RequestLogStore::index_entries`）。
+                entries.extend(super::RequestLogStore::index_entries(l, &primary));
                 reqlog_count += 1;
                 group_log(&mut by_day, &mut by_uid_day, l);
             }
@@ -475,6 +481,35 @@ mod tests {
         assert_eq!(row.count, 7);
         // 明细也逐条落库
         assert_eq!(store.list("reqlog:").unwrap().len(), 7);
+    }
+
+    /// 1b) 批量路径必须与同步 `add()` 一样写二级索引 —— 数据面真实流量全走
+    /// 这条路径，漏写会让 `get_by_request_id` 永远落到全扫回退。
+    #[test]
+    fn batch_flush_writes_request_id_index() {
+        let store = make_store();
+        let lock = Mutex::new(());
+        let mut l = log(Some("u1"), "gpt", 10, DAY0);
+        l.id = "log-1".to_string();
+        l.request_id = Some("req-abc".to_string());
+        let ops = vec![LogOp::Request(l.clone())];
+        apply_ops(&store, &lock, &ops).unwrap();
+
+        let primary = format!("reqlog:{}:{}", DAY0, l.id);
+        for candidate in ["log-1", "req-abc"] {
+            let idx = crate::log::RequestLogStore::index_key(
+                &crate::log::RequestLogStore::escape_index_component(candidate),
+                &primary,
+            );
+            assert_eq!(
+                store.get::<bool>(&idx).unwrap(),
+                Some(true),
+                "批量路径必须写 {candidate} 的索引"
+            );
+        }
+        // 与同步路径等价：同一份日志经 `add()` 走出的索引键集合一致。
+        let sync_entries = crate::log::RequestLogStore::index_entries(&l, &primary);
+        assert_eq!(sync_entries.len(), 2, "id 与 request_id 各一条");
     }
 
     /// 2) 队列满时 try_send 失败被吞、不 panic（无消费者模式填满）。
