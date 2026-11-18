@@ -863,12 +863,12 @@ async fn main() -> anyhow::Result<()> {
         plugin_host: plugin_host.clone(),
         script_host: script_host.clone(),
         // 工具服务 / 维护运行时（对齐 A2A core::tool_services / core::maintenance；
-        // 当前为 T0 stub，实现由 T7 填充）
+        // 配置存储 + 排期记录 + 执行入口均已接线，管理面见 api::admin::{tools,maintenance}）
         tool_services: std::sync::Arc::new(crate::tool_services::ToolServices::new(store.clone())),
         maintenance: std::sync::Arc::new(crate::maintenance::Maintenance::new(store.clone())),
     };
 
-    // 工具服务 / 维护启动期初始化（stub 期仅记日志）
+    // 工具服务 / 维护启动期初始化（装载已存配置；未配置时用内置默认）
     crate::tool_services::init(state.alert_store.clone());
     crate::maintenance::init(state.alert_store.clone());
 
@@ -3234,16 +3234,16 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .merge(crate::agent::api::router())
         // 工具服务数据面（/api/web-search/*、MCP 分发；对齐 A2A api/tool_runtime.rs）
         .merge(crate::api::tool_runtime::router())
-        // 工具服务 / 维护管理面（T0 stub，实现由 T7 填充）
+        // 工具服务 / 维护管理面（配置、执行与记录；见 api::admin::{tools,maintenance}）
         .merge(crate::api::admin::tools::router())
         .merge(crate::api::admin::tool_image_admin::router())
         .merge(crate::api::admin::maintenance::router())
         .merge(crate::tool_services::router())
         .merge(crate::maintenance::router())
-        // 签到台账 / 计划（T0 stub，实现由 T6 填充）
+        // 签到台账 / 计划（见 api::admin::{checkin_records,checkin_schedules}）
         .merge(crate::api::admin::checkin_records::router())
         .merge(crate::api::admin::checkin_schedules::router())
-        // 插件管理面子页（T0 stub，实现由 T2 填充）
+        // 插件管理面子页（provider 设置 / 图标 / 主题 / UI / 登录 / 任务 / helpers）
         .merge(crate::api::admin::plugin_provider_settings::router())
         .merge(crate::api::admin::plugin_icons::router())
         .merge(crate::api::admin::plugin_theme::router())
