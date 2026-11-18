@@ -62,6 +62,7 @@
 //! - [`Catalog::catalog_path`] —— 缓存文件绝对路径（runtime 塞进
 //!   ScriptInitPayload.catalog_path 交给 js-host）。
 
+#![allow(dead_code)] // 脚本目录推荐/排行（预留，未接线）
 mod cache;
 mod github;
 mod market;

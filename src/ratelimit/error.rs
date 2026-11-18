@@ -38,6 +38,7 @@ pub enum RateLimitError {
 }
 
 impl RateLimitError {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn scope(&self) -> RateLimitScope {
         match self {
             RateLimitError::Requests { scope, .. } => *scope,

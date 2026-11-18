@@ -429,6 +429,7 @@ pub fn detail(store: &FileStore, id: &str) -> Result<Detail, String> {
 }
 
 /// 删除一轮记录（管理面删除能力的最小实现；上游在记录页提供同样的入口）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn remove(store: &FileStore, id: &str) -> Result<(), String> {
     change_runs(store, |runs| {
         runs.retain(|run| run.id != id);

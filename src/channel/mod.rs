@@ -849,6 +849,7 @@ pub fn should_persist_prune_snapshot(deleted: &[PrunedMapping]) -> bool {
     !deleted.is_empty()
 }
 
+#[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
 impl ChannelStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         let s = Self {
@@ -1018,6 +1019,7 @@ impl ChannelStore {
     /// 不影响既有行为；仅在 `record_channel_failure` 累计达阈值后才生效。
     ///
     /// 批次3增强：过滤阶段额外跳过 AIMD 冷却中的渠道（`aimd_allows`）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn select_for_model(&self, model: &str) -> Vec<Channel> {
         self.select_for_model_filtered(model, None)
     }
@@ -1289,6 +1291,7 @@ impl ChannelStore {
     ///
     /// 覆盖 `discovered_models` 并持久化。仅在渠道未显式配置 models 时，
     /// 调度才会参考该快照（见 `select_for_model`）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn save_discovered_models(&self, id: &str, models: Vec<String>) -> anyhow::Result<()> {
         let snapshot = {
             let mut channels = self.channels.write();
@@ -1314,6 +1317,7 @@ impl ChannelStore {
     ///
     /// 两阶段流程（lead 裁定）：第一阶段对账只用本方法（只报告），
     /// 第二阶段等报告数字确认后才用 [`Self::prune_stale_channel_mappings`] 删除。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn report_stale_channel_mappings(
         &self,
         id: &str,
@@ -1389,6 +1393,7 @@ impl ChannelStore {
     }
 
     /// 保存最近一次查询到的上游余额（balance/credit），持久化。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn save_balance(&self, id: &str, balance: Option<f64>, credit: Option<f64>) {
         self.save_balance_with_unit(id, balance, credit, None);
     }
@@ -1703,7 +1708,9 @@ impl ChannelStore {
     /// passthrough（按 weight 排序），不阻断请求。
     ///
     /// `pricing_store` 用于成本因子（渠道级 cost_pricing 优先，缺失回落全局价）；
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     /// rpm 因子取自各渠道的 AIMD 快照。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn select_for_model_ranked(
         &self,
         model: &str,
@@ -1776,6 +1783,7 @@ impl ChannelStore {
     ///
     /// 返回的列表与 `select_for_model` 同样按 priority/weight 排序，仅当亲和命中时
     /// 把命中渠道移到列表首位（若该渠道仍在候选池中）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     ///
     /// `session_id` 为 None 时退化为 `select_for_model`。
     pub fn select_for_model_with_affinity(

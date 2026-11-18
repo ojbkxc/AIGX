@@ -48,6 +48,7 @@ impl OrderStore {
         self.by_no.read().get(trade_no).cloned()
     }
 
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn complete(&self, trade_no: &str) -> Result<Option<TopUpOrder>> {
         let mut by_no = self.by_no.write();
         let order = match by_no.get_mut(trade_no) {
@@ -175,6 +176,7 @@ impl OrderStore {
     }
 
     /// 用户自己的订单分页 + 关键字搜索。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn list_paged_by_user(
         &self,
         user_id: &str,

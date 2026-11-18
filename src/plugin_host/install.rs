@@ -81,6 +81,7 @@ impl PackEntry {
     }
 
     /// 清单是否完全没声明入口。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn is_unset(&self) -> bool {
         self.single.is_empty() && self.per_target.is_empty()
     }

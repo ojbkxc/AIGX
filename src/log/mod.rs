@@ -210,6 +210,7 @@ impl LogConversation {
     /// - 字符串（最常见）
     /// - 内容块数组（多模态：`[{type:"text",text},{type:"image_url",...}]`）
     /// - 缺少 content 的工具调用消息
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn from_messages(messages: &[serde_json::Value]) -> Self {
         let mut out = Self::default();
         // 先统计 system 提示长度（正文不入库）
@@ -354,6 +355,7 @@ fn truncate_chars(s: &str, max: usize) -> (String, bool) {
 }
 
 /// 从一条 OpenAI 消息里抽取可读文本。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 fn text_of(m: &serde_json::Value) -> String {
     match m.get("content") {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -746,6 +748,7 @@ pub struct RequestLogStore {
     writes: std::sync::atomic::AtomicU64,
 }
 
+#[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
 impl RequestLogStore {
     /// B13：请求日志容量上限
     const MAX_LOGS: usize = 100_000;
@@ -867,6 +870,7 @@ impl RequestLogStore {
     ///
     /// key 格式 `reqlog:{created_at}:{id}` 时间戳前缀 + `auditlog:{ts}:{id}`，
     /// 按天清理直接对前缀范围扫描即可，无需遍历解析值。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn set_retention(
         &self,
         max_age_days: Option<u64>,
@@ -908,6 +912,7 @@ impl RequestLogStore {
     }
 
     /// 读取日志保留配置（无记录返回 None/None = 默认策略：不限天数、容量 10 万）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn retention(&self) -> (Option<u64>, Option<usize>) {
         let (days, capacity, _audit, _daily) = self.retention_full();
         (days, capacity)
@@ -1287,11 +1292,13 @@ impl RequestLogStore {
     }
 
     /// 导出全部（或按过滤条件）为 JSON 字符串（管理员视角，含全部字段）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn export_json(&self) -> String {
         self.export_json_filtered(None, None, None, None, None, true)
     }
 
     /// 导出按 user_id 过滤后的 JSON（普通用户导出自己的记录，剥离敏感字段）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn export_json_for_user(&self, user_id: &str) -> String {
         self.export_json_filtered(Some(user_id), None, None, None, None, false)
     }
@@ -1339,6 +1346,7 @@ impl RequestLogStore {
 
     /// 单条日志是否匹配筛选条件（列表与导出共用，保证语义一致）
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     fn matches(
         l: &RequestLog,
         user_id: Option<&str>,
@@ -1376,6 +1384,8 @@ impl RequestLogStore {
     }
 
     /// 导出为 CSV 字符串（无 user 过滤 ⇒ 全量，管理员视角）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn export_csv(&self) -> String {
         self.export_csv_filtered(None, None, None, None, None, true)
     }
@@ -1979,6 +1989,7 @@ impl LogStore {
     }
 
     /// 非阻塞尽力 flush：唤醒后台任务立即处理，不等待。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn try_flush(&self) {
         self.writer.try_flush();
     }

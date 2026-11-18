@@ -95,6 +95,7 @@ fn minutes_of(hhmm: &str) -> Option<i64> {
 }
 
 /// 分钟数 → `HH:MM`（跨天回绕到 24h 内）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 fn hhmm_of(minutes: i64) -> String {
     let m = minutes.rem_euclid(24 * 60);
     format!("{:02}:{:02}", m / 60, m % 60)
@@ -110,6 +111,7 @@ fn window_minutes(start: &str, end: &str) -> Option<i64> {
 ///
 /// **不能用 `std::hash::DefaultHasher`**：std 文档明说其算法不保证跨版本稳定，
 /// 换一个 Rust 版本重启就会让随机时刻漂移 —— 与「重启不漂」的契约冲突。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 fn stable_hash(s: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in s.as_bytes() {
@@ -148,6 +150,7 @@ pub fn effective_window(schedule: &CheckinSchedule, provider: &str) -> (String, 
 /// - 无窗口（未开启随机 / 有专属时刻）→ 窗口 start；
 /// - 有窗口 → `start + hash(account_id) % 窗口分钟数`（**确定性**：同账号同日
 ///   同刻、重启不漂；不同账号可落在窗口内不同分钟）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn account_instant(schedule: &CheckinSchedule, provider: &str, account_id: &str) -> String {
     let (start, end) = effective_window(schedule, provider);
     let Some(end) = end else {

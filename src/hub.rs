@@ -17,6 +17,7 @@ use crate::bridge::Bridge;
 ///
 /// 表示上游传输协议族（wire-shape），用于 family_bridges 的查找。
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum Adapter {
     /// OpenAI 兼容协议
     Openai,

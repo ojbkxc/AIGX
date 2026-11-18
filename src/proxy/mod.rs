@@ -1,3 +1,4 @@
+#![allow(dead_code)] // CF 代理解析辅助（预留，未接线）
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use reqwest::Client;

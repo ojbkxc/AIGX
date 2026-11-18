@@ -10,6 +10,7 @@
 //! 与 `circuit_breaker` 互补：断路器管"故障熔断"（5xx/认证/超时），
 //! AIMD 管"限速适应"（429/速率）。
 
+#![allow(dead_code)] // per-channel AIMD（预留）
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};

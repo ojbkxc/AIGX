@@ -9,6 +9,7 @@
 //! `record_empty`；非零则调用 `reset`。`record_empty` 返回 `true` 时，
 //! 调用方应把该渠道置入冷却或记入断路器失败（`FailureType::EmptyResponse`）。
 
+#![allow(dead_code)] // 空响应计数（预留）
 use parking_lot::RwLock;
 use std::collections::HashMap;
 

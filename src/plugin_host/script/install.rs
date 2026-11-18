@@ -34,6 +34,7 @@ const MAX_DOWNLOAD_BYTES: usize = 32 * 1024 * 1024;
 
 /// 安装结果：落盘后的包元数据（未写 KV——由 operations 决定何时登记）。
 #[derive(Debug)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct InstalledPackage {
     /// 目录名（`script-{hash}`）。
     pub dir_name: String,

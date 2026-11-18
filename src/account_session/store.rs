@@ -268,8 +268,10 @@ pub struct AcquireFilters<'a> {
     pub sort_rules: &'a [crate::channel::routing_policy::AccountSortRule],
 }
 
+#[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
 impl AccountSessionStore {
     /// 打开账号池（内部自建出口 Client 池）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn new(store: Arc<FileStore>) -> Self {
         Self::with_egress(store, Arc::new(EgressCache::new()))
     }
@@ -495,6 +497,7 @@ impl AccountSessionStore {
     }
 
     /// 是否为空。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -642,6 +645,7 @@ impl AccountSessionStore {
     }
 
     /// 直接换号状态码名单（命中时不给指数退避冷却）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn retry_on_status(&self) -> Vec<u16> {
         self.inner.retry_on_status.read().clone()
     }
@@ -671,6 +675,7 @@ impl AccountSessionStore {
     ///（见 `crate::proxy_pool::resolve_proxy`）：池条目被删/被禁用时返回
     /// 配置错误，**不静默直连**——否则账号流量会从错误的出口 IP 发出。
     /// 轮询游标按账号 id 前进（逐请求换出口）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn client_for(
         &self,
         session: &AccountSession,
@@ -689,6 +694,7 @@ impl AccountSessionStore {
     /// 配置的场景；冷却键始终是 `model`（上游真名）。
     ///
     /// 返回 `None` 表示该渠道下当前没有可用账号（全部冷却/并发占满/禁用）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn acquire(
         &self,
         channel_id: &str,
@@ -1092,6 +1098,7 @@ impl AccountSessionStore {
         secs
     }
 
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     /// 清除该账号的全部冷却与最近错误（手动恢复）。返回是否命中账号。
     pub fn reset_cooldowns(&self, id: &str) -> bool {
         let snapshot = {

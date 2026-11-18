@@ -3,6 +3,7 @@
 //! 固定窗口计数器只需要秒级精度。生产环境用 SystemClock 委托给
 //! SystemTime::now(); 测试环境用 TestClock 手动推进。
 
+#![allow(dead_code)] // 限流测试时钟（仅测试）
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

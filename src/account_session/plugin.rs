@@ -411,6 +411,7 @@ pub struct PluginUpsertInput<'a> {
 
 /// upsert 结果。
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct PluginUpserted {
     pub session: AccountSession,
     pub created: bool,
@@ -760,6 +761,7 @@ impl AccountSessionStore {
     }
 
     /// 按 provider 找持有某状态键的账号（A2A `plugin_states_for_provider`）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn plugin_states_for_provider(&self, provider: &str, key: &str) -> Vec<(String, Value)> {
         self.plugin_accounts_for_provider(provider)
             .into_iter()

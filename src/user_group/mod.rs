@@ -152,6 +152,7 @@ impl UserGroupStore {
     }
 
     /// 获取分组的计费倍率（不存在返回 1.0）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn ratio(&self, name: &str) -> f64 {
         self.groups.read().get(name).map(|g| g.ratio).unwrap_or(1.0)
     }

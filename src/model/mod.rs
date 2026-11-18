@@ -106,6 +106,7 @@ pub struct MappingUpsert {
     pub changed: bool,
 }
 
+#[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
 impl ModelMapper {
     pub fn new(store: Arc<FileStore>) -> Self {
         Self {
@@ -328,6 +329,7 @@ impl ModelMapper {
     }
 
     /// 获取自定义映射（`all_mappings` 的别名，老调用点兼容）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn custom_mappings(&self) -> HashMap<String, String> {
         self.all_mappings()
     }
@@ -335,6 +337,8 @@ impl ModelMapper {
     /// 某条别名当前是否启用（未配过映射也返回 true —— 「没有」不是「关掉」）。
     ///
     /// 无 provider 上下文：只认全局条目。配过但被关掉返回 false。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn is_enabled(&self, source: &str) -> bool {
         self.mappings
             .read()
@@ -345,6 +349,8 @@ impl ModelMapper {
     }
 
     /// 被关掉的别名清单（前端渲染开关状态用；只含全局条目）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn disabled_aliases(&self) -> HashSet<String> {
         self.mappings
             .read()

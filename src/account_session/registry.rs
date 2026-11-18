@@ -55,6 +55,7 @@ pub const DEFAULT_PROVIDER_KIND: &str = "openai_compatible";
 /// 1. 把它加进本表；
 /// 2. 在 `PROVIDERS`（API Key 型）或 `SESSION_PROVIDERS`（登录态型）补条目；
 /// 3. 登录态型还要确认 `account_login` 有对应的登录实现，否则账号加不进来。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const AGENT2API_PROVIDERS: &[&str] = &[
     "workbuddy",
     "workbuddy-intl",
@@ -549,6 +550,7 @@ impl SessionAuth {
 ///
 /// 值抄自 Agent2API 的各家 adapter（默认端点、身份头、鉴权形态）。
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct SessionMeta {
     pub auth: SessionAuth,
     /// 默认上游地址（空 = 由账号自填）

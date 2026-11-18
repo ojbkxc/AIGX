@@ -16,6 +16,7 @@
 //!   （AIGX 断路器 HalfOpen 成功即恢复，无独立 success_threshold，不强造）
 //! - 调度权重：A2A 无此项；AIGX 把闲置的 `set_scheduler_config()` 接上
 
+#![allow(dead_code)] // 路由策略表（预留，数据面未接线）
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};

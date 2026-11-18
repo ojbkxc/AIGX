@@ -24,6 +24,7 @@
 //! `id=0` 保留给通知/日志（无应答）。这样两个方向的 id 空间不冲突，
 //! 不需要跨方向协调 id 分配。
 
+#![allow(dead_code)] // 原生插件 RPC 辅助与线表（仅测试/对表用）
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;

@@ -4,18 +4,24 @@
 // lib 与 bin 两个 crate，两个 crate root 还各复制了一份 rustls provider
 // 安装逻辑。
 //
-// ⚠️ dead_code 仍是 crate 级 allow（双 target 遮罩的最后一层）：清理波次
-// 1/2/3 与「六块零消费方子系统删除」（rate_budget / video_billing /
-// response_quality / aimd_limiter / semantic / 整块、hub 只留专用桥）之后，
-// 实测 never-used 从 377 降到 **274**。剩余项按性质分两类，需逐项判定：
-// ① 编译器不可见的线表契约（plugin_host/script/rpc 26：宿主 JS 的
-//    dispatch/callback 名，只有测试对表）；
-// ② 已注明「未接入」或「预留」的移植件 / 未接线的调度与 CF 代理解析
-//    （chatglm_stream 12、scheduler 10、proxy 7、script/source 5 等），
-//    接线需要上游协议或产品决策。
-// 清理完成前保留 dead_code allow；新增代码需要预留符号时在**项级**标注并在
-// 注释写明消费方，不要再扩大遮挡范围。
-#![allow(dead_code)]
+// ── lint 遮罩状态（双 target 时代的两条 crate 级 allow 均已拆除）──────
+// 1. `#![allow(unused_imports)]`：清理波次 1 删除（同时清掉 19 处真实未用
+//    import 与 6 个无人消费的 re-export）。
+// 2. `#![allow(dead_code)]`：清理波次 1/2/3 与「六块零消费方子系统删除」
+//    （rate_budget / video_billing / response_quality / aimd_limiter /
+//    semantic 整块、hub 只留专用桥）把 never-used 从 377 压到 274 后，
+//    剩余项**全部落到项级或模块级**显式登记，crate 级遮罩已删除。
+//    两类剩余，逐项都带注释说明：
+//    ① 编译器不可见的线表契约（plugin_host/script/rpc：宿主 JS 的
+//       dispatch/callback 名，只有测试对表）；
+//    ② 已注明「未接入」或「预留」的移植件 / 未接线的调度与 CF 代理解析
+//       （chatglm_stream / scheduler / proxy / script/source 等整块模块级；
+//       其余零散项级）。
+//
+// 纪律：**不得再加 crate 级 lint 遮罩**。新增代码需要预留符号时，必须在
+// `#[allow(dead_code)]` 后写一行注释注明「为什么未接线 + 计划消费方」，
+// 并同步本清单；`cargo check --all-targets` 与
+// `cargo clippy --workspace --all-targets -- -D warnings` 必须保持 0 warning。
 #![recursion_limit = "512"]
 
 // ── reqwest 0.13 测试侧 provider 安装（波次2）──────────────────────

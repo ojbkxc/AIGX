@@ -159,6 +159,7 @@ impl ProtocolRegistry {
     }
 
     /// 清空全部转换器（宿主重建/关闭时调）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub async fn clear(&self) {
         self.streams.lock().await.clear();
         self.named.lock().await.clear();
@@ -211,6 +212,7 @@ impl ProtocolRegistry {
     }
 
     /// 当前在途转换器数（测试 / 诊断）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub async fn active(&self) -> usize {
         self.streams.lock().await.len()
     }

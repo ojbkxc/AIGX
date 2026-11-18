@@ -29,6 +29,7 @@ struct GithubTokenResponse {
 
 /// GitHub user info
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct GithubUserInfo {
     pub id: i64,
     pub login: String,

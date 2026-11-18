@@ -15,6 +15,7 @@ use crate::account_session::model::AccountSession;
 /// 新人礼活动类型。
 const NEWBIE_KIND: &str = "NEW_USER_REGISTER";
 /// 每日福利活动类型（只在日志/说明里对照用）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 const DAILY_KIND: &str = "USER_LOGIN";
 
 /// 领取新人礼。
@@ -161,4 +162,5 @@ async fn signed(
 }
 
 /// 导出每日链用的活动类型常量（供契约测试对照，避免两处写死不同的字符串）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const DAILY_ACTIVITY: &str = DAILY_KIND;

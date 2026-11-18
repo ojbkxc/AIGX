@@ -272,6 +272,7 @@ impl PackRegistry {
 /// **2026-11 起不再是归属判据**：插件优先，原生实现只在插件未装/停用/
 /// 加载失败时兜底。保留本函数供数据面「原生兜底」路径与管理面展示用
 /// （「这家有原生实现，插件接管后原生降为兜底」）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn is_native_provider(provider: &str) -> bool {
     crate::account_session::registry::PROVIDERS
         .iter()

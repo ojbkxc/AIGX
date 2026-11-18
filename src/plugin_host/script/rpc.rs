@@ -41,19 +41,24 @@
 use std::time::Duration;
 
 /// 控制面方法超时（元数据/账号管理类）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 网络面方法超时（conversation 主链路）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// conversation（流式；走 `call_stream`，head 30s / chunk 循环无总限）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const M_CONVERSATION: &str = "conversation";
 
 /// provider 元数据查询（`metadata(provider)`；控制面）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const M_PROVIDER_INFO: &str = "provider.info";
 
 /// 能力面方法表（`provider.info` / `conversation` 之外的 23 个；与
 /// `host/provider.mjs` 的 `dispatch()` switch 逐字一致，顺序也保持同源）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const CAPABILITY_METHODS: &[&str] = &[
     "models.list",
     "models.refresh",
@@ -81,6 +86,7 @@ pub const CAPABILITY_METHODS: &[&str] = &[
 ];
 
 /// 全量方法表（25 个 = provider.info + conversation + 能力面）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn all_methods() -> impl Iterator<Item = &'static str> {
     std::iter::once(M_PROVIDER_INFO)
         .chain(std::iter::once(M_CONVERSATION))
@@ -89,6 +95,7 @@ pub fn all_methods() -> impl Iterator<Item = &'static str> {
 
 /// 方法属于哪一档超时。conversation 走流式路径不进本表（head/chunk 各自
 /// 的预算在 `plugin_host::rpc` / bridge 层）；其余全部按控制面 10s。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn timeout_for(method: &str) -> Duration {
     let _ = method;
     CONTROL_TIMEOUT
@@ -113,44 +120,63 @@ pub mod admin {
 /// 按偶数 id 发起请求）。清单来自 `host/*.mjs` 里全部 `rpc("<name>")` 调用。
 pub mod callbacks {
     /// HTTP egress：开一个请求会话（返回 `{id,status,headers,url}`）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const HTTP_OPEN: &str = "script.http.open";
     /// HTTP egress：读下一块（阻塞到下一块或 EOF，`{data(b64),done}`）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const HTTP_READ: &str = "script.http.read";
     /// HTTP egress：关闭会话。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const HTTP_CLOSE: &str = "script.http.close";
     /// WebSocket egress：建立连接。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const WS_OPEN: &str = "script.ws.open";
     /// WebSocket egress：读一条消息。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const WS_READ: &str = "script.ws.read";
     /// WebSocket egress：发一条消息。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const WS_SEND: &str = "script.ws.send";
     /// WebSocket egress：中止连接。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const WS_ABORT: &str = "script.ws.abort";
     /// 上游 SSE → OpenAI SSE：开转换器（字符串 id）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const STREAM_OPEN: &str = "script.stream.open";
     /// 上游 SSE → OpenAI SSE：推一块字节。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const STREAM_PUSH: &str = "script.stream.push";
     /// 上游 SSE → OpenAI SSE：收尾。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const STREAM_CLOSE: &str = "script.stream.close";
     /// OpenAI 请求体 → 上游协议请求体（网关转换）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const PROTOCOL_REQUEST: &str = "script.protocol.request";
     /// 代理解析（`{source:"direct"}` / 池条目 / 静态 URL）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const PROXY_RESOLVE: &str = "script.proxy.resolve";
     /// 会话签名缓存查询（antigravity 等）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const SIGNATURE: &str = "script.signature";
     /// 用量上报（拼 `RequestLog` 入日志存储）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const USAGE: &str = "script.usage";
 
     /// ── 旧 AIGX transport / protocol 形状（向后兼容，仍由 callbacks 分发）──
     /// HTTP egress（旧形状；新脚本用 `script.http.*`）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const TRANSPORT_REQUEST: &str = "script.transport.request";
     /// HTTP egress 读下一块（旧形状）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const TRANSPORT_READ: &str = "script.transport.read";
     /// HTTP egress 关闭会话（旧形状）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const TRANSPORT_CLOSE: &str = "script.transport.close";
     /// 转换器推块（旧形状；新脚本用 `script.stream.push`）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const PROTOCOL_CHUNK: &str = "script.protocol.chunk";
     /// 转换器收尾（旧形状；新脚本用 `script.stream.close`）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub const PROTOCOL_FINISH: &str = "script.protocol.finish";
 }
 

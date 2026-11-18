@@ -137,6 +137,7 @@ impl Plan {
     }
 
     /// 订阅是否按次计费（count = 每次固定扣额度）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn is_count_billing(&self) -> bool {
         self.billing_mode == "count"
     }

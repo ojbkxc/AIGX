@@ -271,6 +271,7 @@ pub async fn shutdown(process: &PluginProcess) {
 ///
 /// 用 `try_wait` 轮询（不长期持有 `child` 锁，避免与 `shutdown` 死锁），
 /// 每 500ms 探一次。崩溃重启（退避）在 M4 扩展。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub async fn supervise(process: Arc<PluginProcess>) {
     loop {
         let exited = {

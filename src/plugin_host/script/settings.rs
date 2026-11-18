@@ -42,6 +42,7 @@ pub fn validate_values(values: &Map<String, Value>) -> Result<(), String> {
 /// 按包声明的 schema 逐键对照（类型 / 必填 / select 候选）。
 ///
 /// 未在 schema 里的键放行（见模块注释「未知键不拒绝」）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn validate_against_schema(
     values: &Map<String, Value>,
     schema: &[ScriptSettingField],

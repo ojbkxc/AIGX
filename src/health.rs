@@ -195,10 +195,12 @@ impl Entry {
         }
     }
 
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     fn on_success(&self) {
         self.consecutive_failures.store(0, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     fn on_failure(&self) {
         let prev = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         if prev > DOWN_THRESHOLD {
@@ -220,6 +222,7 @@ impl HealthTracker {
     }
 
     /// 记录一次成功
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn on_success(&self, model: &str) {
         if let Some(entry) = self.entries.get(model) {
             entry.on_success();
@@ -227,12 +230,15 @@ impl HealthTracker {
     }
 
     /// 记录一次失败
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn on_failure(&self, model: &str) {
         let entry = self.entries.entry(model.to_string()).or_default();
         entry.on_failure();
     }
 
     /// 查询模型健康状态
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn health(&self, model: &str) -> HealthLevel {
         self.entries
             .get(model)

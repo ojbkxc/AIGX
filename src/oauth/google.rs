@@ -72,6 +72,7 @@ struct GoogleTokenResponse {
 
 /// Google 用户信息（OpenID Connect userinfo 端点）
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct GoogleUserInfo {
     /// Google 用户唯一 ID（sub）
     pub sub: String,

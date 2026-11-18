@@ -167,6 +167,7 @@ where
     ///
     /// 注意：与 moka 不同，并发重复调用时 `init` 可能被多个 future 同时执行
     ///（moka 会去重只执行一次）。缓存场景下此差异无害。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub async fn get_with(&self, key: K, init: impl std::future::Future<Output = V>) -> V {
         // 先查未过期
         if let Some(entry) = self.inner.get(&key) {
@@ -247,6 +248,7 @@ where
 // ── MemoryCache：对 AsyncCache 的薄包装，保持原有公开 API 不变 ──────
 
 /// 内存缓存包装器
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct MemoryCache<K, V>
 where
     K: Hash + Eq + Send + Sync + 'static,
@@ -255,6 +257,7 @@ where
     inner: AsyncCache<K, V>,
 }
 
+#[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
 impl<K, V> MemoryCache<K, V>
 where
     K: Hash + Eq + Send + Sync + 'static + std::fmt::Debug,
@@ -265,6 +268,8 @@ where
     /// # 参数
     /// - `max_capacity`: 最大条目数
     /// - `ttl`: 条目存活时间
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn new(max_capacity: u64, ttl: Duration) -> Self {
         Self {
             inner: AsyncCache::<K, V>::builder()
@@ -275,6 +280,8 @@ where
     }
 
     /// 获取或插入。如果 key 不存在，调用 init 函数生成值并缓存。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub async fn get_or_insert(&self, key: K, init: impl std::future::Future<Output = V>) -> V {
         self.inner.get_with(key, init).await
     }
@@ -295,6 +302,7 @@ where
     }
 
     /// 清空缓存
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn invalidate_all(&self) {
         self.inner.invalidate_all();
     }
@@ -305,6 +313,7 @@ where
     }
 
     /// 命中率（0.0~1.0）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn hit_rate(&self) -> f64 {
         self.inner.hit_rate()
     }

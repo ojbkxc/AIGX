@@ -243,6 +243,7 @@ impl ScriptPackage {
     }
 
     /// 入口绝对路径（entry 未声明时返回 None，由 js-host 推导）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn entry_path(&self, script_root: &Path) -> Option<PathBuf> {
         self.entry
             .as_deref()
@@ -275,6 +276,7 @@ pub struct ScriptProviderInfo {
 
 impl ScriptProviderInfo {
     /// 便捷构造（id + label，其余缺省）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -286,6 +288,7 @@ impl ScriptProviderInfo {
     /// 宿主上报的默认模型清单（`default_models`，A2A `provider.records` 形态）。
     ///
     /// 元素是模型记录对象；网关侧只在「运行期 models.list 尚未刷新」时用。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn default_models(&self) -> Vec<serde_json::Value> {
         self.extra
             .get("default_models")
@@ -308,6 +311,7 @@ pub struct ScriptSettingsOptions {
 /// 设置 schema 里的一个字段声明（包自报，管理面据此渲染表单）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct ScriptSettingField {
     /// 字段键名。
     pub key: String,

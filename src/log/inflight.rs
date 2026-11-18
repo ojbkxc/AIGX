@@ -66,6 +66,7 @@ impl CancelSignal {
     }
 
     /// 等待取消（可放进 `tokio::select!`）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub async fn cancelled(&self) {
         if self.is_cancelled() {
             return;
@@ -181,6 +182,7 @@ impl InflightRegistry {
         self.entries.len()
     }
 
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -198,6 +200,7 @@ pub struct InflightGuard {
 }
 
 impl InflightGuard {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -208,6 +211,7 @@ impl InflightGuard {
     }
 
     /// 选路完成后回填渠道信息（供列表展示）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn set_channel(
         &self,
         registry: &InflightRegistry,

@@ -9,6 +9,7 @@
 //! 适配 AIGX 单 crate + FileStore 架构：远程 JSON 解析为 `RemotePricingConfig`，
 //! 逐条 upsert 到 `PricingStore`（不引入 burncloud 的多币种/分层定价复杂度）。
 
+#![allow(dead_code)] // 价格周期同步（预留，未启动）
 use std::path::PathBuf;
 use std::sync::Arc;
 

@@ -56,6 +56,7 @@ type ExecFuture<'a> = Pin<Box<dyn Future<Output = ExecResult> + Send + 'a>>;
 pub type ExecFn = for<'a> fn(&'a AppState, &'a HeaderMap, &'a Value) -> ExecFuture<'a>;
 
 /// 一条工具的完整声明（spec + exec 同处，杜绝两处漂移）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct ToolDef {
     /// 全局唯一，`aigx_` 前缀。
     pub name: &'static str,

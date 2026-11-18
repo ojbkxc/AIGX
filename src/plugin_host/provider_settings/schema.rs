@@ -258,6 +258,7 @@ impl Schema {
     }
 
     /// 声明的字段键集合（`configure` 用来拒绝未声明字段）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn has_field(&self, key: &str) -> bool {
         self.fields.iter().any(|field| field.key == key)
     }

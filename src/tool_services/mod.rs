@@ -663,6 +663,7 @@ pub(crate) fn decrypt_provider_key(entry: &ProviderConfig) -> Option<String> {
     Some(value).filter(|text| !text.is_empty())
 }
 
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn configured_provider(services: &ToolServices, provider: &str) -> bool {
     services
         .load()
@@ -697,6 +698,7 @@ pub fn ready_providers(
 }
 
 /// 已选择但未启用或未配置的提供商（展示名，供运行时返回可读配置错误）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn missing_selected_providers(
     services: &ToolServices,
     sessions: &AccountSessionStore,

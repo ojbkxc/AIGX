@@ -49,6 +49,7 @@
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap / expect / panic。
 
+#![allow(dead_code)] // chatglm 网页版响应翻译器：请求侧端点在闭源插件包，AIGX 不臆造 → 未接入
 use serde_json::Value;
 
 /// 上游每帧的 `parts[*].content[*]` 里，哪些 `type` 算正文 / 思考。

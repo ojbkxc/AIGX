@@ -142,6 +142,7 @@ fn create_key_file(path: &Path) -> Result<[u8; KEY_LEN], String> {
 /// **纯读**：密钥文件不存在时返回 `None`，**绝不生成** —— 一个「只是看看
 /// 现在用哪把钥匙」的导出动作顺手造出 `account.key`，等于悄悄改变了本机的
 /// 加密状态（下次保存账号用的就是这把「导出时生出来的」钥匙，语义错位）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn key_fingerprint(data_dir: &Path) -> Option<String> {
     if let Some(key) = env_key() {
         return Some(short_fingerprint(&key));
@@ -156,6 +157,7 @@ pub fn key_fingerprint(data_dir: &Path) -> Option<String> {
 }
 
 /// `sha256(bytes)` 的十六进制前 16 位。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 fn short_fingerprint(bytes: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
     let digest = Sha256::digest(bytes);

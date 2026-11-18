@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::tools::RiskLevel;
 
 /// 事件名（流式响应按此 `type` 分支；前端据此弹确认卡）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const CONFIRM_EVENT: &str = "confirm_request";
 
 /// 确认超时（秒）。远短于审批矩阵的 300s。**常量，不可配置放宽**。
@@ -33,6 +34,7 @@ pub const CONFIRM_TIMEOUT_SECS: u64 = 30;
 /// 确认结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum ConfirmDecision {
     /// 用户确认执行。
     Approved,
@@ -44,6 +46,7 @@ pub enum ConfirmDecision {
 
 impl ConfirmDecision {
     /// 稳定字符串（审计/日志依赖，改动视为契约变更）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Approved => "approved",
@@ -53,6 +56,7 @@ impl ConfirmDecision {
     }
 
     /// 是否放行执行。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn approved(&self) -> bool {
         matches!(self, Self::Approved)
     }
@@ -93,6 +97,7 @@ impl ConfirmRequest {
     }
 
     /// 等待超时（供回灌层 `tokio::time::timeout` 使用）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout_secs)
     }

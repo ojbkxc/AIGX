@@ -191,6 +191,7 @@ fn write_projection(
 }
 
 /// 读磁盘投影（js-host 侧或排障用）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn read_projection(data_dir: &Path) -> Result<RegistryProjection> {
     let path = root(data_dir).join(REGISTRY_FILE);
     let bytes = std::fs::read(&path).with_context(|| format!("读取失败：{}", path.display()))?;

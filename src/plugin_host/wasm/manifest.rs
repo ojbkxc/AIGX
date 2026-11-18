@@ -91,6 +91,7 @@ fn concurrency_default() -> usize {
 ///
 /// `provider` 来自包清单的 `providers[0].id`；其余来自 `wasm.json`。
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct WasmManifest {
     pub provider: String,
     pub abi: u32,

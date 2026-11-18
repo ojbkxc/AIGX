@@ -196,6 +196,7 @@ pub struct PurgeStore {
 }
 
 impl PurgeStore {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn in_memory(cfg: PurgeSettings) -> Self {
         Self {
             current: parking_lot::RwLock::new(Arc::new(cfg)),
@@ -240,6 +241,7 @@ pub enum FailureCategory {
 }
 
 impl FailureCategory {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Refusal => "refusal",

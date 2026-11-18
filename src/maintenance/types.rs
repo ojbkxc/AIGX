@@ -177,6 +177,7 @@ pub fn status(refreshed: usize, failed: usize, metadata: Option<&Item>) -> &'sta
     }
 }
 
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn report(detail: &Detail) -> Value {
     json!({
         "results": detail.results.iter().map(|item| json!({

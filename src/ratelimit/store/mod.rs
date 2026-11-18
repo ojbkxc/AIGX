@@ -71,6 +71,7 @@ pub trait RateStore: Send + Sync + 'static {
 
     /// 流式事后 token 记账：只加 tpm/tpd（不改变并发）。同步，
     /// 可从同步 SSE 完成回调运行。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     fn add_tokens(&self, key: &str, tokens: u64);
 
     /// 只读快照，用于 x-ratelimit-* 响应头。返回 None 表示无有意义数据。

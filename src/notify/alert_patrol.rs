@@ -23,6 +23,7 @@ use crate::notify::NotifyService;
 pub type SharedAlertEvaluator = Arc<Mutex<AlertRuleEvaluator>>;
 
 /// 创建默认评估器（AlertRule::defaults 规则集，不持久化——测试用）
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn shared_evaluator() -> SharedAlertEvaluator {
     Arc::new(Mutex::new(AlertRuleEvaluator::new(AlertRule::defaults())))
 }

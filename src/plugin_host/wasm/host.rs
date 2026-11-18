@@ -110,6 +110,7 @@ pub struct WasmProviderInfo {
 }
 
 /// 一个已启动的 Wasm 宿主。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct WasmHost {
     pub manifest: WasmManifest,
     pub(crate) embedded: Embedded,
@@ -138,6 +139,7 @@ impl WasmHost {
     }
 
     /// 插件自报的设置 schema（原样，未解析）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn settings(&self) -> Value {
         self.settings
             .lock()
@@ -153,6 +155,7 @@ impl WasmHost {
         self.closing.load(Ordering::Acquire)
     }
 
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
@@ -398,6 +401,7 @@ impl WasmHost {
     }
 
     /// 取消一条流（`stream.abort`）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn abort_stream(&self, id: i64) -> bool {
         let streams = self
             .embedded
@@ -414,6 +418,7 @@ impl WasmHost {
     }
 
     /// 归还流式 credit（消费方读完一段后调用）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn credit_stream(&self, id: i64, count: usize) {
         let streams = self
             .embedded

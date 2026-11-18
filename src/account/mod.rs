@@ -140,6 +140,7 @@ impl AccountPool {
     }
 
     /// 获取一个可用账号（空闲最久优先，最大化每次使用间隔，绕免费 API 会话级限速）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn acquire(&self) -> Option<CfAccount> {
         let now = chrono::Utc::now().timestamp();
         self.accounts

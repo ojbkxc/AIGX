@@ -37,6 +37,7 @@ use crate::storage::FileStore;
 /// - `approvals`：高危写审批 pending 表（阶段二接入 runner）。
 /// - `session_store`：会话/消息持久化。
 #[derive(Clone)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct AgentState {
     /// 会话持久化用的 KV 存储（与业务共用的 FileStore）。
     pub store: Arc<FileStore>,

@@ -92,6 +92,7 @@ pub fn lookup_call(session: &str, call_id: &str) -> Option<String> {
 }
 
 /// 按「会话 + 函数名」取回签名（请求侧回填的兜底档）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn lookup_for_session(session: &str, name: &str) -> Option<String> {
     if session.is_empty() || name.is_empty() {
         return None;

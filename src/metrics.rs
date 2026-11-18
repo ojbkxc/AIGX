@@ -293,6 +293,7 @@ impl Metrics {
     }
 
     /// 模型健康等级（0/1/2）快照，由健康追踪层刷新。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn set_health(&self, model: &str, level: u8) {
         self.health.lock().insert(model.to_string(), level.min(2));
     }

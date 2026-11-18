@@ -126,6 +126,7 @@ pub fn count_chat_prompt(model: &str, req: &ChatFormat) -> u32 {
 /// 本身）。join 失败（运行时关闭边缘）回退 0，与 `enc` 内部 catch_unwind
 /// 的防御口径一致。持有 Arc<ChatFormat> 的调用方走
 /// [`count_chat_prompt_blocking_arc`] 只 clone Arc。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub async fn count_chat_prompt_blocking(model: String, req: ChatFormat) -> u32 {
     tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req))
         .await
@@ -149,6 +150,7 @@ pub async fn count_text_blocking(model: String, text: String) -> u32 {
 
 /// 逐字段 or 填充：上游值非零时优先，零值用本地计数替换。
 /// `output_text: None` 禁用完成侧（无交付内容或未累积）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn fill_missing(
     model: &str,
     upstream_prompt: u32,

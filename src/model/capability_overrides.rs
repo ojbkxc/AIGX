@@ -117,6 +117,7 @@ pub fn normalize_value(key: &str, value: &Value) -> Option<Value> {
 /// 从任意 JSON 对象里挑出合法覆盖键，返回**稀疏表**。
 ///
 /// 非法键名 / 非法值 / null 一律丢弃；空对象 = 没有覆盖。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn normalize_object(value: Option<&Value>) -> Map<String, Value> {
     let mut result = Map::new();
     let Some(object) = value.and_then(Value::as_object) else {
@@ -408,6 +409,7 @@ pub fn effective_object(tags: &[String], overrides: Option<&Map<String, Value>>)
 ///
 /// 三态优先级在上层合并（见 `model::metadata` 与出口应用点），这里只把
 /// 「有没有覆盖」翻译成来源，供管理页把「用户改的」与「上游说的」分开显示。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn sources_object(
     flags_upstream: &Map<String, Value>,
     flags_modelsdev: &Map<String, Value>,

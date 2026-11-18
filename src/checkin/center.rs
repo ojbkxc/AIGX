@@ -320,6 +320,7 @@ pub fn campaign_preview_shape() -> Value {
 ///
 /// 与 `checkin_center::handle_checkin_center` 的行形状保持一致：`checkedInToday`
 /// 读台账当日末条记录，`streakDays` 读签到后回读落盘的连登天数。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn account_row(
     store: &CheckinStore,
     session: &crate::account_session::model::AccountSession,

@@ -231,6 +231,7 @@ fn default_max_connections() -> u32 {
 
 impl DatabaseConfig {
     /// 是否启用 SeaORM 后端（url 非空时启用）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn is_enabled(&self) -> bool {
         !self.url.trim().is_empty()
     }
@@ -1670,6 +1671,7 @@ pub fn set_retry_self_count(v: u32) {
 static RETRY_SWITCH_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
 
 /// 读取切换账号重试次数（0~10）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn retry_switch_count() -> u32 {
     RETRY_SWITCH_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -1804,6 +1806,7 @@ impl ConfigManager {
     }
 
     /// 从磁盘加载配置
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub async fn load(&self) -> AppConfig {
         self.load_with(|key| std::env::var(key).ok()).await
     }
@@ -1992,6 +1995,7 @@ pub fn storage_dirs(config: &AppConfig) -> StorageDirs {
 ///
 /// `postgres://user:pass@host:5432/db` → `postgres://***@host:5432/db`；
 /// 非法 URL 一律返回占位串，绝不把原文写进日志（原文可能含生产密码）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn redact_url_credentials(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

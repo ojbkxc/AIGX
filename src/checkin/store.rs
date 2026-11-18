@@ -437,6 +437,7 @@ impl CheckinStore {
     }
 
     /// 记下某计划的几家 provider 今天补签轮已跑（对齐 A2A `mark_retried_providers`）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn mark_retried_providers(&self, id: &str, providers: &[String], date: &str) -> Result<()> {
         if providers.is_empty() {
             return Ok(());

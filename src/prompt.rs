@@ -157,6 +157,7 @@ pub struct GatewayPromptStore {
 }
 
 impl GatewayPromptStore {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn in_memory(cfg: GatewayPrompt) -> Self {
         Self {
             current: parking_lot::RwLock::new(Arc::new(cfg)),
@@ -209,6 +210,7 @@ pub fn snapshot() -> Option<Arc<GatewayPrompt>> {
     GATEWAY_PROMPT_SNAPSHOT.read().clone()
 }
 
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn apply_prompt(messages: &[ChatMessage], cfg: &GatewayPrompt) -> Option<Vec<ChatMessage>> {
     apply_prompt_for("", messages, cfg)
 }
@@ -236,6 +238,7 @@ pub fn apply_prompt_for(
 /// **为什么在逐次尝试里而不是入口**：同一请求可能 failover 到不同 provider
 /// 的渠道，每换一家都要按那一家的覆盖重新套一遍；入口那次（无 provider）
 /// 的结果不能复用。见 chat/anthropic 两个 failover 循环的调用点。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn apply_prompt_selected(
     model: &str,
     provider: &str,

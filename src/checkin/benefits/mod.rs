@@ -121,6 +121,7 @@ impl BenefitResult {
 /// 与 `checkin::claim::CHECKIN_CONTRACTS` 同样只起两个作用：契约测试断言
 /// 「表里每家都有实现分派」，以及上游改路径时有**一处**会对红。真正的请求
 /// 构造在各自实现里，不从这里取。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct BenefitContract {
     /// provider id（与账号池 registry 一致）
     pub provider: &'static str,

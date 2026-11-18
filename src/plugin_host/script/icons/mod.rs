@@ -120,11 +120,13 @@ async fn refresh(
 }
 
 /// 一个包的图标 URL 片段（`/plugins/script-icons/{file}`）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn installed(package: &crate::plugin_host::script::types::ScriptPackage) -> Option<String> {
     cache::card(&package.id)
 }
 
 /// 一个 provider 的图标 URL 片段。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn provider(
     package: &crate::plugin_host::script::types::ScriptPackage,
     id: &str,
@@ -133,6 +135,7 @@ pub fn provider(
 }
 
 /// 归一一个图标声明（管理面展示前用）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn declaration(value: &str) -> Option<String> {
     formats::own(value)
 }

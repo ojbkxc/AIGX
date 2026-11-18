@@ -14,6 +14,7 @@
 //! - cost：`pricing_store` 输入+输出单价倒数（1/price，越便宜分越高）
 //! - rpm：AIMD `current_limit`（Learning=1.0，Cooldown=0.1）
 
+#![allow(dead_code)] // 多因子调度器（批次3 预留，数据面未接线）
 use std::collections::HashMap;
 
 /// 单候选的调度因子。

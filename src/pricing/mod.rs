@@ -428,6 +428,7 @@ impl PricingStore {
     /// 计价键经 `resolve_priced_name` 解析（对外名优先、上游名兜底），价格与
     /// 模型倍率使用同一个命中名，保证口径自洽。两个名字都未定价时返回
     /// `Err(PricingError(requested))`，与单名版一致由调用方处理。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn calculate_cost_with_cache_aliased(
         &self,
         requested: &str,
@@ -588,6 +589,7 @@ impl PricingStore {
     }
 
     /// 双名感知版配额计费（向上取整，最低 1 配额单位）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn calculate_cost_quoted_with_cache_aliased(
         &self,
         requested: &str,
@@ -646,6 +648,7 @@ impl PricingStore {
     }
 
     /// 更新工具价格表（覆盖式，与 new-api `LoadToolPricesFromJSONString` 对齐）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn set_tool_prices(&self, prices: HashMap<String, f64>) -> anyhow::Result<()> {
         let mut merged = Self::hardcoded_tool_prices();
         for (k, v) in prices {

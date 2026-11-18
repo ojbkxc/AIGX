@@ -45,6 +45,7 @@ const PURGE_CHECK_EVERY: u64 = 1000;
 const REQUEUE_BACKOFF_MS: u64 = 500;
 
 /// 一条待落库的日志操作。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum LogOp {
     /// 请求明细：落 `reqlog` 行，并折进按天聚合（记账主路径）。
     Request(RequestLog),
@@ -170,11 +171,13 @@ impl LogWriter {
     }
 
     /// 已入队但尚未落库的条数（测试与健康检查用）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn pending(&self) -> usize {
         self.pending.load(Ordering::Acquire)
     }
 
     /// 非阻塞尽力 flush：只唤醒后台任务立即处理，不等待。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn try_flush(&self) {
         if self.tx.is_some() {
             self.flush_now.notify_one();

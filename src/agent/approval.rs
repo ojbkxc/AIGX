@@ -69,6 +69,7 @@ pub struct AgentApprovals {
 
 impl AgentApprovals {
     /// 纯内存模式（测试）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn new() -> Self {
         Self::default()
     }

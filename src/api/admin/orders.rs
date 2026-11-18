@@ -303,6 +303,7 @@ pub async fn handle_complete_order(
 /// 前端充值页实时显示「支付金额/到账配额」：amount × discount 折后
 /// pay_money，配额按下单锁定的 topup_quota 公式。Epay 未配置时 400。
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct AmountRequest {
     pub amount: i64,
     #[serde(default)]

@@ -38,6 +38,7 @@ pub const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 
 /// 从 package.json 里读出的必要信息。
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct Manifest {
     /// 包名（npm 口径）。
     pub name: String,

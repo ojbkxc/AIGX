@@ -150,6 +150,7 @@ fn alternate_asset(primary: &Asset) -> Option<Asset> {
 /// 目录叶子取资产文件名（去掉 `.zip`）而非 env 派生的 platform-key：换资产
 /// 重试时主/备资产必须落到**不同**目录，否则 glibc 版会写进 musl 版的路径、
 /// 互相覆盖。资产名天然唯一且与内容一一对应。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn install_dir(data_dir: &Path) -> Result<PathBuf> {
     install_dir_for(data_dir, &asset_for_current_platform()?)
 }
@@ -162,6 +163,7 @@ fn install_dir_for(data_dir: &Path, asset: &Asset) -> Result<PathBuf> {
 }
 
 /// 可执行文件路径。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn binary_path(data_dir: &Path) -> Result<PathBuf> {
     binary_path_for(data_dir, &asset_for_current_platform()?)
 }

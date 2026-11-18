@@ -105,6 +105,7 @@ impl Scheduler {
     }
 
     /// 某任务累计执行轮数（测试/监控用）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn tick_count(&self, name: &str) -> u64 {
         self.ticks.get(name).map(|t| *t).unwrap_or(0)
     }

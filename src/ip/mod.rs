@@ -59,6 +59,7 @@ impl IpFilter {
     /// 2. 白名单非空 → 必须匹配白名单
     /// 3. 黑名单非空 → 不能匹配黑名单
     /// 4. 同时存在 → 先白名单（允许），再黑名单（拒绝）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn allows_ip(&self, ip: &str) -> bool {
         if !self.enabled {
             return true;
@@ -222,6 +223,7 @@ impl IpFilterStore {
     }
 
     /// 检查 IP 是否允许访问
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn allows_ip(&self, ip: &str) -> bool {
         self.filter.read().allows_ip(ip)
     }
@@ -271,6 +273,7 @@ impl IpFilterStore {
     }
 
     /// 替换整个过滤配置（管理 API 用）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn replace(&self, filter: IpFilter) -> Result<(), anyhow::Error> {
         *self.filter.write() = filter;
         self.save()

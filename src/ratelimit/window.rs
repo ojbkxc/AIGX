@@ -76,6 +76,7 @@ impl FixedWindowCounter {
         self.count = self.count.saturating_sub(delta);
     }
 
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn current(&mut self, now_secs: u64) -> u64 {
         self.roll_if_stale(now_secs);
         self.count

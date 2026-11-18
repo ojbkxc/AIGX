@@ -9,6 +9,7 @@
 //! HRW（Highest Random Weight）算法：score = hash(key, channel_id) × weight × health，
 //! 选 score 最大的渠道。相比一致性哈希更适合候选集小且频繁变更的场景。
 
+#![allow(dead_code)] // 亲和性哈希（预留）
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};

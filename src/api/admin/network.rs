@@ -543,6 +543,7 @@ pub async fn restart_network(
 /// 与 `api/admin/common.rs::error_response` 同壳（`{"success": false, "error"}`）
 /// —— 两处返回形状必须一致，否则前端同一段解析会在不同端点行为分叉。
 #[derive(Debug)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum ApiError {
     NetworkLayerDisabled,
     NetworkLayerNotStarted,
@@ -554,6 +555,7 @@ pub enum ApiError {
 
 impl ApiError {
     /// 对应的 HTTP 状态与文案。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     fn parts(&self) -> (StatusCode, String) {
         match self {
             Self::NetworkLayerDisabled => (

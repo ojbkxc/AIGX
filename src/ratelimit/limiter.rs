@@ -12,6 +12,7 @@
 //! 返回的 Reservation 句柄在未调用 commit_tokens 就 drop 时自动释放
 //! 并发槽位，确保错误路径不会泄漏。
 
+#![allow(dead_code)] // 限流辅助读数（预留）
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 

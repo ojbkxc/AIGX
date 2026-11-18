@@ -118,6 +118,7 @@ impl ApiKey {
     /// 是否允许使用指定 provider 域的渠道/账号。
     ///
     /// `None` 与 `Some(vec![])` 均表示不限（与 allows_model 同语义：空=全部放行）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn allows_provider(&self, provider: &str) -> bool {
         match &self.allowed_providers {
             None => true,
@@ -300,6 +301,7 @@ impl ApiKeyStore {
     }
 
     /// 生成新密钥（简化版，默认分组、无限制）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn generate(&self, name: &str) -> Result<ApiKey, anyhow::Error> {
         self.generate_with_options(CreateApiKeyOptions {
             name: name.to_string(),
@@ -684,6 +686,7 @@ impl ApiKeyStore {
     /// 「可用」口径与数据面 `validate_request` 的准入一致：仅 `is_active &&
     /// status == "active"` 不够——过期 Key 实际无法鉴权，不应计入「至少保留
     /// 一把可用 Key」的保护名额（否则会逼管理员保留一把已失效的钥匙）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn enabled_count(&self) -> usize {
         self.keys
             .read()
@@ -715,6 +718,7 @@ impl ApiKeyStore {
         self.keys.read().len()
     }
 
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn is_empty(&self) -> bool {
         self.keys.read().is_empty()
     }
@@ -829,6 +833,7 @@ impl SessionRegistry {
     }
 
     /// 某用户当前活跃会话数。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn active_count(&self, email: &str) -> usize {
         self.active.get(email).map(|s| s.len()).unwrap_or(0)
     }
@@ -844,6 +849,7 @@ impl SessionRegistry {
     }
 
     /// 注册表规模（测试/监控用）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn revoked_len(&self) -> usize {
         self.revoked.len()
     }

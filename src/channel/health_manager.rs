@@ -9,6 +9,7 @@
 //! 与 `circuit_breaker` 互补：断路器管"是否放行"，健康管理器管"健康分与诊断信息"。
 //! 调度器可用健康分做加权排序，运维可通过 `get_health` 查看渠道健康汇总。
 
+#![allow(dead_code)] // 健康追踪（预留）
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

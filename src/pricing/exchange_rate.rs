@@ -8,6 +8,7 @@
 //! 适配 AIGX 单 crate + FileStore：持久化用 `FileStore`（key=`exchange_rate:{from}:{to}`），
 //! 不依赖 burncloud_database::Database / sqlx。
 
+#![allow(dead_code)] // 汇率同步任务（预留，未启动）
 use std::str::FromStr;
 use std::sync::Arc;
 

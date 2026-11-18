@@ -105,6 +105,7 @@ pub const UNSUPPORTED_PROVIDERS: &[&str] = &["chatglm", "atomcode", "lobsterai"]
 /// 端点在闭源插件仓的家（`note` 非空）：网关侧没有端点可登记，契约表
 /// 只登记机制说明；claim 分支如实报错，不落虚假成功台账。
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct CheckinContract {
     /// provider kind（与 `CHECKIN_PROVIDERS` 同口径）。
     pub provider: &'static str,
@@ -129,6 +130,7 @@ pub struct CheckinContract {
 /// 套餐端点；`chatglm` / `atomcode` / `lobsterai` 的实现随上游搬进
 /// 闭源插件仓（404 不可得），契约表只登记机制说明（`note`），
 /// claim 分支如实报错。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const CHECKIN_CONTRACTS: &[CheckinContract] = &[
     CheckinContract {
         provider: "loomy",
@@ -276,6 +278,7 @@ pub const CHECKIN_CONTRACTS: &[CheckinContract] = &[
 ];
 
 /// 查某家的签到端点契约。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn contract_for(provider: &str) -> Option<&'static CheckinContract> {
     CHECKIN_CONTRACTS.iter().find(|c| c.provider == provider)
 }

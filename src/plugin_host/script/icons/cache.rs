@@ -194,6 +194,7 @@ fn persist(cache: &mut Cache) {
 }
 
 /// 引用摘要 → 缓存文件 URL 片段（`/plugins/script-icons/{file}`）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn source(value: &str) -> Option<String> {
     let mut guard = cache().lock().ok()?;
     load(&mut guard);
@@ -208,6 +209,7 @@ pub fn source(value: &str) -> Option<String> {
 }
 
 /// 卡片键 → 缓存文件 URL 片段。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn card(key: &str) -> Option<String> {
     let mut guard = cache().lock().ok()?;
     load(&mut guard);

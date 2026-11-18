@@ -19,6 +19,7 @@ use crate::storage::FileStore;
 /// 兑换码状态。
 pub const STATUS_UNUSED: i32 = 1;
 pub const STATUS_USED: i32 = 2;
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const STATUS_DISABLED: i32 = 3;
 
 /// 兑换码记录。
@@ -82,6 +83,7 @@ impl Redemption {
     }
 
     /// 是否可兑换（未使用 + 未禁用 + 未过期）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn is_redeemable(&self) -> bool {
         if self.status != STATUS_UNUSED {
             return false;
@@ -93,11 +95,14 @@ impl Redemption {
     }
 
     /// 是否已过期
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn is_expired(&self) -> bool {
         self.expires_at > 0 && chrono::Utc::now().timestamp() >= self.expires_at
     }
 
     /// 状态文本
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn status_text(&self) -> &'static str {
         match self.status {
             STATUS_UNUSED => {
@@ -237,6 +242,7 @@ impl RedemptionStore {
     }
 
     /// 按 code 查找
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn get_by_code(&self, code: &str) -> Option<Redemption> {
         let id = self.by_code.read().get(code)?.clone();
         self.by_id.read().get(&id).cloned()

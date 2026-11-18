@@ -64,6 +64,7 @@ pub enum Fallback {
 }
 
 impl Fallback {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Original => "original",

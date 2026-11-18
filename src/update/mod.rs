@@ -954,6 +954,7 @@ impl UpdateManager {
     }
 
     /// 定时任务入口：按配置的间隔检查，必要时自动应用并重启。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub async fn tick(&self, config: &UpdateConfig) {
         if !config.enabled || !config.auto_check {
             return;

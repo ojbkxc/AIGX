@@ -30,6 +30,7 @@ pub const ACCOUNT_FILE_FORMAT: &str = "agent2api-account";
 
 /// 解析结果（直接喂给 `plugin_upsert_account_with_source_and_proxy`）。
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct ParsedAuthFile {
     /// provider（导出记录里自带时与选择项核对过）。
     pub provider: String,

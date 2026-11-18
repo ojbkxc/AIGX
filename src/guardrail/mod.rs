@@ -26,6 +26,7 @@ pub use settings::{
 
 /// 护栏裁决结果
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum GuardrailVerdict {
     /// 放行
     Allow,
@@ -34,12 +35,14 @@ pub enum GuardrailVerdict {
 }
 
 impl GuardrailVerdict {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn block(reason: impl Into<String>) -> Self {
         Self::Block {
             reason: reason.into(),
         }
     }
 
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn is_block(&self) -> bool {
         matches!(self, Self::Block { .. })
     }
@@ -53,8 +56,10 @@ impl GuardrailVerdict {
 /// 与 Future 自带 must_use 重复（宏生成无法手改）。
 #[allow(clippy::double_must_use)]
 #[async_trait]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub trait Guardrail: Send + Sync + 'static {
     /// 护栏名称，用于日志和指标
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     fn name(&self) -> &'static str;
 
     /// 是否检查输出内容。输入检查总是执行；输出检查仅当返回 true 时执行。

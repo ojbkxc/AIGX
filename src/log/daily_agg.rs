@@ -303,6 +303,7 @@ pub fn report_tz_of(offset: i32) -> chrono::FixedOffset {
 /// 存在理由：以前测试用 `Utc::now().naive_utc().date() - days(n)` 造键再与
 /// [`today_key`] 比，缺省偏移从隐式 UTC 变成 8 之后，这种写法在 UTC runner 的
 /// 16:00-23:59 区间必红（约 1/3 概率的间歇假红）。统一走本函数 = 与生产同源。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn day_key_back(days_back: i64) -> String {
     let offset = crate::config::report_tz_offset();
     let now = chrono::Utc::now().timestamp();
@@ -664,6 +665,7 @@ where
 
 /// 从一批明细日志构建「日 → 主档」映射（回填/重建端点用；与记账共用
 /// [`fold_request`]，口径同一条代码路径）。只产出数据，不做写库。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn aggregate_logs(logs: &[RequestLog]) -> BTreeMap<String, DailyAgg> {
     let mut out: BTreeMap<String, DailyAgg> = BTreeMap::new();
     for log in logs {
@@ -681,6 +683,7 @@ pub fn aggregate_logs(logs: &[RequestLog]) -> BTreeMap<String, DailyAgg> {
 }
 
 /// 同一批明细构建「uid → 日 → 用户行」。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn aggregate_user_rows(
     logs: &[RequestLog],
 ) -> BTreeMap<String, BTreeMap<String, UserDailyRow>> {
@@ -832,6 +835,7 @@ impl DailyAggStore {
     /// 合并；本方法保留同步的单条语义，供测试与需要立即落库的调用点使用。
     /// 主档与用户行的两次写合并为一次 `write_batch`（SQLite 单事务），
     /// 少一次 commit。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn record(&self, log: &RequestLog) {
         let day = date_key(log.created_at);
         if day.is_empty() {
@@ -936,6 +940,7 @@ impl DailyAggStore {
     }
 
     /// 主档是否已有任何数据（回填前判空）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn has_master_data(&self) -> bool {
         self.store
             .list(MASTER_PREFIX)

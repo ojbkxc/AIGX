@@ -139,6 +139,7 @@ const BARE_HDR_REPLACEMENT: &str = "x-anthropic-billing-hdr";
 
 /// 单段文本净化（保留原签名）。provider / role 缺省为空 → 仅无作用域的用户
 /// 规则会生效；缺省（未配置用户词表）时走内置规则，行为与改造前完全一致。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn sanitize_text(text: &str) -> String {
     sanitize_text_scoped("", "", text)
 }
@@ -236,6 +237,7 @@ fn sanitize_content_scoped(provider: &str, role: &str, value: &mut serde_json::V
 }
 
 /// 净化整个请求体（保留原签名；provider 缺省为空）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn strip(body: &mut serde_json::Value) {
     strip_for_provider("", body);
 }
@@ -289,6 +291,7 @@ pub fn strip_for_provider(provider: &str, body: &mut serde_json::Value) {
 }
 
 /// 净化归一化消息列表（保留原签名；provider 缺省为空）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn strip_chat_messages(messages: &mut [ChatMessage]) {
     sanitize_messages_for_provider("", messages);
 }

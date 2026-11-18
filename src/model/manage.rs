@@ -128,6 +128,7 @@ impl ModelRules {
     }
 
     /// 全部禁用项（管理面回读 / 调试用）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn all_disabled(&self) -> Vec<RuleEntry> {
         let mut list: Vec<RuleEntry> = self.disabled.read().iter().cloned().collect();
         list.sort();
@@ -138,6 +139,7 @@ impl ModelRules {
     ///
     /// 数据面用它做入口拦截（不知道最终会走哪个 provider）。只要还有一家开着
     /// 就放行 —— 精确到渠道的过滤交给调度器，这里只挡「全关」的模型。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn fully_disabled(&self, providers: &[String], model: &str) -> bool {
         if providers.is_empty() {
             return false;

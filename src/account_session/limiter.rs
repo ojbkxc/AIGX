@@ -443,6 +443,7 @@ pub fn evaluate_groups(groups: &[LimiterGroup], balance: Option<&Value>) -> Limi
 /// 把存量扁平 `AccountLimiterRule` 降维成单条件组（与上游
 /// `groups_from_rules` 同一映射）：balance 规则 → remaining<阈值（整号），
 /// token 规则 → tokens>=阈值（整号，fixed/daily 窗口）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn groups_from_flat(
     rules: &[crate::account_session::model::AccountLimiterRule],
 ) -> Vec<LimiterGroup> {

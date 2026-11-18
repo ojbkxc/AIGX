@@ -291,6 +291,7 @@ impl TurnAccumulator {
     }
 
     /// 本轮 token 数（没有 usage 帧时全 0：宁可不记也不猜）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn usage(&self) -> UsageStats {
         self.usage.unwrap_or_default()
     }
@@ -335,6 +336,7 @@ pub fn wants_another_round(
 }
 
 /// 非流式续写的同类判断（判据输入与流式完全同源，见 [`verdict_of`]）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn wants_another_round_response(parts: &TurnParts, previous_round_text: Option<&str>) -> bool {
     if parts.has_tool_calls {
         return false;

@@ -107,6 +107,7 @@ pub enum DenyReason {
 }
 
 impl DenyReason {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::GloballyDisabled => "user_tools_disabled",
@@ -165,6 +166,7 @@ pub struct UserToolPolicyStore {
 
 impl UserToolPolicyStore {
     /// 无持久化构建（测试用；配置不落盘）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn in_memory(policy: UserToolPolicy) -> Self {
         Self {
             current: parking_lot::RwLock::new(Arc::new(policy)),

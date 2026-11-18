@@ -387,6 +387,7 @@ pub enum ResponsesPassthrough {
 
 /// 桥接上下文，参考 aisix BridgeContext 设计
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct BridgeContext {
     pub request_id: String,
     pub model: String,
@@ -430,6 +431,7 @@ pub struct UpstreamErrorView {
 
 /// 上游响应使用的传输协议格式，参考 aisix UpstreamWire 设计
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum UpstreamWire {
     /// OpenAI 兼容协议：`{error:{message,type,code,param}}`
     OpenAI,
@@ -447,6 +449,7 @@ pub enum UpstreamWire {
 
 /// 桥接错误，参考 aisix BridgeError 设计
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum BridgeError {
     #[error("upstream request timed out after {elapsed_ms}ms")]
     Timeout { elapsed_ms: u64, cause: String },
@@ -507,6 +510,7 @@ impl BridgeError {
 
     /// Convenience constructor for synthesised upstream errors that
     /// carry a parsed `Retry-After` hint.
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn upstream_status_with_retry_after(
         status: u16,
         message: impl Into<String>,
@@ -898,6 +902,7 @@ pub enum ImageEditFormPart {
 #[async_trait]
 pub trait Bridge: Send + Sync + 'static {
     /// 人类可读的 Bridge 名称，用于日志和指标
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     fn name(&self) -> &'static str;
 
     /// 非流式聊天补全

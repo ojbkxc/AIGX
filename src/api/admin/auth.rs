@@ -64,6 +64,7 @@ pub struct RegisterRequest {
 
 /// OAuth 登录回调处理
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct OAuthCallback {
     pub code: String,
     pub state: Option<String>,

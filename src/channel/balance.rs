@@ -99,6 +99,7 @@ fn credential_hint(scheme: &str) -> &'static str {
 
 /// 查询结果：主读数 + 展示单位 + 明细（缺键不写，`None` 不是 0）
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct BalanceReading {
     pub available: Option<f64>,
     pub unit: String,
@@ -109,6 +110,7 @@ pub struct BalanceReading {
 
 impl BalanceReading {
     /// 转成对外的 JSON（前端表格只读 available/unit/wallets）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn to_json(&self) -> Value {
         json!({
             "available": self.available,

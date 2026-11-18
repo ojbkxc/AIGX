@@ -79,6 +79,7 @@ impl EpayConfig {
 
 /// 支付设备类型
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum Device {
     PC,
     Mobile,
@@ -124,6 +125,7 @@ pub struct PurchaseResult {
 
 /// 验签结果
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct VerifyResult {
     pub verify_status: bool,
     pub trade_status: String,

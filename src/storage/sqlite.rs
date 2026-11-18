@@ -282,6 +282,7 @@ impl SqliteStore {
     }
 
     /// 列出所有键值对（支持前缀匹配）
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn list_pairs<T: DeserializeOwned>(
         &self,
         prefix: &str,
@@ -334,6 +335,8 @@ impl SqliteStore {
     }
 
     /// 返回数据库中总条目数
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn count(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock();
         // rusqlite 0.41 的 FromSql 未实现 u64（仅 u16 等），COUNT(*) 在 SQLite
@@ -343,6 +346,7 @@ impl SqliteStore {
     }
 
     /// 压缩数据库（回收空间）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn vacuum(&self) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute("VACUUM", [])?;

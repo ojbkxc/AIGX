@@ -188,6 +188,7 @@ impl User {
     }
 
     /// 显示名称：优先用 username，否则用 email
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn display_name(&self) -> &str {
         if self.username.is_empty() {
             &self.email
@@ -446,6 +447,7 @@ impl UserStore {
     /// 某 provider 身份是否已被「别的用户」占用（绑定冲突检测）。
     /// `self_email` 允许为空（新绑定场景），只要有任何用户的该身份槽位
     /// 等于 identity 且 email 不同即视为冲突。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn oauth_taken_by_other(&self, provider: &str, identity: &str, self_email: &str) -> bool {
         if identity.is_empty() {
             return false;
@@ -841,6 +843,7 @@ impl UserStore {
     }
 
     /// 生成随机默认密码 (8 位)
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn random_password() -> String {
         let mut rng = rand::thread_rng();
         (0..8)

@@ -321,6 +321,7 @@ pub fn mark(body: &mut Value, rewrite: &Rewrite) {
 }
 
 /// 取走请求体痕迹字段（若某转发路径会原样透传 body，则发送前应调用）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn take_route(body: &mut Value) -> Option<Value> {
     body.as_object_mut()?.remove(ROUTE_FIELD)
 }

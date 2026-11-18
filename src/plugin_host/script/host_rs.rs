@@ -191,6 +191,7 @@ impl ScriptHost {
     }
 
     /// 当前状态快照。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub async fn state(&self) -> ScriptHostState {
         self.state.read().await.clone()
     }

@@ -108,8 +108,10 @@ fn harden_file_perms(path: &Path) {
     }
 }
 
+#[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
 impl JsonFileStore {
     /// 创建一个新的 JSON 文件存储，数据存储在 `dir` 目录下。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn new(dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&dir);
         Self {
@@ -123,6 +125,7 @@ impl JsonFileStore {
     /// 存在的意义是**签名一致**：调用方（main.rs 的启动路径、proxy_pool 的
     /// 测试）对 `FileStore::open(dir)` 的使用在两种后端下都是合法的，不该
     /// 因为换了 feature 组合就编译不过。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn open(dir: PathBuf) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         Ok(Self::new(dir))
@@ -151,6 +154,7 @@ impl JsonFileStore {
     }
 
     /// 写入 JSON 值
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
         let path = self.path_of(key);
         if let Some(parent) = path.parent() {
@@ -163,6 +167,8 @@ impl JsonFileStore {
     }
 
     /// 删除键
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn delete(&self, key: &str) -> anyhow::Result<()> {
         let path = self.path_of(key);
         if path.exists() {
@@ -345,6 +351,7 @@ impl FileStore {
     }
 
     /// 兼容旧调用：无法失败时 panic。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn new(dir: PathBuf) -> Self {
         Self::open(dir).expect("failed to open SQLite storage")
     }

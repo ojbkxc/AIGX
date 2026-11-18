@@ -80,6 +80,7 @@ impl EgressCache {
     }
 
     /// 使某个代理的缓存失效（代理地址变更或排查代理故障时调用）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn invalidate(&self, proxy: Option<&str>) {
         self.clients.remove(&normalize_proxy(proxy));
     }

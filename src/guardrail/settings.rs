@@ -45,6 +45,7 @@ pub enum GuardrailAction {
 }
 
 impl GuardrailAction {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Degrade => "degrade",
@@ -76,6 +77,7 @@ pub struct GuardrailRuleSpec {
 }
 
 impl GuardrailRuleSpec {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn keyword(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
@@ -83,6 +85,7 @@ impl GuardrailRuleSpec {
         }
     }
 
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn regex(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
@@ -185,6 +188,7 @@ impl GuardrailRuntime {
         self.settings.enabled
     }
 
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn action(&self) -> GuardrailAction {
         self.settings.action
     }
@@ -203,6 +207,7 @@ impl GuardrailRuntime {
         self.input.is_some()
     }
 
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn output_enabled(&self) -> bool {
         self.output.is_some()
     }
@@ -347,6 +352,7 @@ impl OutputScanner {
         }
     }
 
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn blocked(&self) -> bool {
         self.blocked
     }

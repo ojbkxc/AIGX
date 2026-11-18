@@ -294,11 +294,13 @@ pub async fn configure(
 }
 
 /// 某 provider 是否有可编辑的设置（管理面据此决定是否显示「设置」入口）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn available(provider: &str) -> bool {
     schemas().read().contains_key(provider)
 }
 
 /// provider 的字段键集合（供 `settings.set` 拒绝覆盖用户声明字段）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn user_owned(provider: &str, field: &str) -> bool {
     schemas()
         .read()
@@ -307,6 +309,7 @@ pub fn user_owned(provider: &str, field: &str) -> bool {
 }
 
 /// 存储命名空间（多个 provider 共用 `storage_provider` 时同键）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn storage_provider(provider: &str, field: &str) -> String {
     schemas()
         .read()

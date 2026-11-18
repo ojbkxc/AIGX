@@ -194,6 +194,7 @@ pub(crate) fn record_playground_failure(
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct PlaygroundChatRequest {
     pub channel_id: Option<String>,
     pub model: String,

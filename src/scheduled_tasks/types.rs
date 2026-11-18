@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 整份定时任务配置在 `AppConfig` 里的键（仅文档用途，实际由 `AppConfig.scheduled_tasks` 承载）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub const KEY_SCHEDULED_TASKS: &str = "scheduledTasks";
 
 /// 凭证自动维护（后端任务）。

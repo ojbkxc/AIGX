@@ -209,6 +209,7 @@ impl StripeObject {
             .map(String::from)
     }
 
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn user_id(&self) -> Option<String> {
         self.metadata
             .get("user_id")
@@ -216,6 +217,7 @@ impl StripeObject {
             .map(String::from)
     }
 
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn quota(&self) -> Option<i64> {
         self.metadata
             .get("quota")

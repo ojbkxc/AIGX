@@ -86,6 +86,7 @@ impl RateLimitScope {
 /// - `RateLimited`：记录限流到期时间，期间拒绝请求
 /// - 其他类型：累加失败计数，达到阈值后打开断路器
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub enum FailureType {
     /// 认证失败（401）
     AuthFailed,
@@ -519,6 +520,7 @@ impl CircuitBreaker {
     /// 紧急熔断：强制所有已知渠道进入 Open 状态。
     ///
     /// 返回被熔断的渠道 ID 列表。用于全局故障（如所有上游不可达）场景。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn trip_all(&self) -> Vec<String> {
         let mut tripped = Vec::new();
         for mut entry in self.states.iter_mut() {
@@ -650,6 +652,7 @@ impl CircuitBreaker {
     }
 
     /// 返回人类可读的状态描述（含剩余冷却秒数，供日志/调试）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn get_status_human(&self, channel_id: &str) -> String {
         match self.get_state(channel_id) {
             "open" => {
@@ -671,6 +674,7 @@ impl CircuitBreaker {
     }
 
     /// 手动重置指定渠道的断路器（管理面用）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn reset(&self, channel_id: &str) {
         if let Some(mut entry) = self.states.get_mut(channel_id) {
             entry.failure_count.store(0, Ordering::Relaxed);
@@ -683,6 +687,7 @@ impl CircuitBreaker {
     }
 
     /// 当前正在被断路器阻断的渠道数量（监控用）。
+    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn open_count(&self) -> usize {
         self.states
             .iter()

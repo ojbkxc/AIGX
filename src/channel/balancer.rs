@@ -12,6 +12,7 @@
 //! 加权 RoundRobin：把每个渠道按 weight 展开成 weight 个槽位，按槽位轮询。
 //! 例如权重 `[2, 1]` 展开为 `[A, A, B]`，轮询序列 `A, A, B, A, A, B, ...`。
 
+#![allow(dead_code)] // RoundRobin 均衡（预留）
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

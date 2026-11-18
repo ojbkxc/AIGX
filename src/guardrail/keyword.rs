@@ -46,6 +46,7 @@ impl KeywordRule {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub struct KeywordBlocklist {
     rules: Vec<KeywordRule>,
     /// 是否对输入消息启用检查
@@ -55,6 +56,7 @@ pub struct KeywordBlocklist {
 }
 
 impl KeywordBlocklist {
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn new(rules: Vec<KeywordRule>) -> Self {
         Self {
             rules,
@@ -92,6 +94,7 @@ impl KeywordBlocklist {
     }
 
     /// 规则条数（诊断/管理面展示用）。
+    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }
