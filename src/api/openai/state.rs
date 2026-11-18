@@ -150,7 +150,6 @@ pub struct AppState {
     /// 避免重复计费与上游调用；命中时旁路计费与渠道调度。
     pub response_cache: Arc<crate::cache::AsyncCache<String, Value>>,
     /// Semantic routing (prompt embedding match)
-    pub semantic_router: Arc<crate::semantic::SemanticRouter>,
     /// OAuth state 参数缓存（CSRF 防护）。
     ///
     /// authorize 时生成随机 state 存入，callback 时校验并一次性消费。

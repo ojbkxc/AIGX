@@ -22,7 +22,6 @@ use tracing::error;
 // 各模块自包含、可独立测试，由调用方按需集成。
 pub mod exchange_rate;
 pub mod price_sync;
-pub mod video_billing;
 
 /// 内置工具名（与 new-api `dto.BuildInTool*` 对齐）
 pub const TOOL_WEB_SEARCH: &str = "web_search";

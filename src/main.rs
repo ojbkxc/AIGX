@@ -5,16 +5,14 @@
 // 安装逻辑。
 //
 // ⚠️ dead_code 仍是 crate 级 allow（双 target 遮罩的最后一层）：清理波次
-// 1/2 已把实测数从 377 降到 **347**（unused_imports 遮罩已永久删除；凭证
-// 变更钩子 invalidate_account、上游错误翻译 render_openai_error 已接线，
-// provider_is_plugin_owned 已删）。剩余项按性质分三类，需逐项判定：
-// ① 整块未接线子系统（channel/rate_budget 19、pricing/video_billing 15、
-//    channel/response_quality 9、ratelimit/aimd_limiter 8、semantic/hub 等，
-//    引入于 `afc95617 router 阶段3`，产品上「接线 or 删除」待裁决）；
-// ② 编译器不可见的线表契约（plugin_host/script/rpc 26：宿主 JS 的
+// 1/2/3 与「六块零消费方子系统删除」（rate_budget / video_billing /
+// response_quality / aimd_limiter / semantic / 整块、hub 只留专用桥）之后，
+// 实测 never-used 从 377 降到 **274**。剩余项按性质分两类，需逐项判定：
+// ① 编译器不可见的线表契约（plugin_host/script/rpc 26：宿主 JS 的
 //    dispatch/callback 名，只有测试对表）；
-// ③ 已注明「未接入」的移植件（bridge/session/chatglm_stream 12：请求侧
-//    端点在闭源插件包里，AIGX 不自创）。
+// ② 已注明「未接入」或「预留」的移植件 / 未接线的调度与 CF 代理解析
+//    （chatglm_stream 12、scheduler 10、proxy 7、script/source 5 等），
+//    接线需要上游协议或产品决策。
 // 清理完成前保留 dead_code allow；新增代码需要预留符号时在**项级**标注并在
 // 注释写明消费方，不要再扩大遮挡范围。
 #![allow(dead_code)]
@@ -89,7 +87,6 @@ mod route_special;
 mod runtime_log;
 mod sanitize;
 mod scheduled_tasks;
-mod semantic;
 mod server_planes;
 mod sse;
 mod storage;
@@ -750,7 +747,6 @@ async fn main() -> anyhow::Result<()> {
     // hub.register_family(Adapter::Openai, cf_openai_bridge);
 
     // 构建应用状态
-    let semantic_router = std::sync::Arc::new(crate::semantic::SemanticRouter::new());
 
     let response_cache = crate::cache::AsyncCache::<String, serde_json::Value>::builder()
         .max_capacity(1000)
@@ -835,7 +831,6 @@ async fn main() -> anyhow::Result<()> {
         session_registry,
         http_client,
         response_cache,
-        semantic_router,
         oauth_state_cache,
         oauth_bind_state,
         oauth_ticket,

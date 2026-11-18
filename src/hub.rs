@@ -45,26 +45,6 @@ impl std::str::FromStr for Adapter {
     }
 }
 
-/// 路由信息，参考 aisix ProviderKey 的 provider + adapter 字段设计
-///
-/// 组合了提供商标识符和适配器族，用于 dispatch_two_tier 查找。
-#[derive(Debug, Clone)]
-pub struct ProviderRoute {
-    /// 提供商标识符（如 "cloudflare"、"openai"、"deepseek"）
-    pub provider: String,
-    /// 适配器族（可选），当没有专用提供商时使用适配器族兜底
-    pub adapter: Option<Adapter>,
-}
-
-impl ProviderRoute {
-    pub fn new(provider: impl Into<String>, adapter: Option<Adapter>) -> Self {
-        Self {
-            provider: provider.into(),
-            adapter,
-        }
-    }
-}
-
 /// Hub 分发器
 ///
 /// 持有所有已注册的 Bridge 实现，通过提供商名称或适配器族进行分发。
@@ -77,15 +57,12 @@ impl ProviderRoute {
 pub struct Hub {
     /// 专用提供商 bridge
     specialized_bridges: DashMap<String, Arc<dyn Bridge>>,
-    /// 适配器族 bridge（使用 Adapter 枚举键）
-    family_bridges: DashMap<Adapter, Arc<dyn Bridge>>,
 }
 
 impl Hub {
     pub fn new() -> Self {
         Self {
             specialized_bridges: DashMap::new(),
-            family_bridges: DashMap::new(),
         }
     }
 
@@ -94,43 +71,9 @@ impl Hub {
         self.specialized_bridges.insert(provider.into(), bridge);
     }
 
-    /// 注册适配器族 bridge
-    pub fn register_family(&self, adapter: Adapter, bridge: Arc<dyn Bridge>) {
-        self.family_bridges.insert(adapter, bridge);
-    }
-
     /// 获取专用提供商 bridge
     pub fn get_specialized(&self, provider: &str) -> Option<Arc<dyn Bridge>> {
         self.specialized_bridges.get(provider).map(|r| r.clone())
-    }
-
-    /// 获取适配器族 bridge
-    pub fn get_family(&self, adapter: Adapter) -> Option<Arc<dyn Bridge>> {
-        self.family_bridges.get(&adapter).map(|r| r.clone())
-    }
-
-    /// 两级分发：先查专用提供商，再查适配器族
-    ///
-    /// 参考 aisix 的 dispatch_two_tier 模式：
-    /// 1. 第一级：专用提供商 bridge（如 cloudflare）
-    /// 2. 第二级：适配器族 bridge（如 openai、anthropic）
-    ///
-    /// 接受 ProviderRoute 作为参数，该结构组合了 provider 和 adapter 字段。
-    /// 返回 None 表示两者均未注册，由调用方决定如何报告。
-    ///
-    /// 参考 aisix 的 dispatch_two_tier(&self, pk: &ProviderKey) -> Option<Arc<dyn Bridge>>。
-    pub fn dispatch_two_tier(&self, route: &ProviderRoute) -> Option<Arc<dyn Bridge>> {
-        // 第一级：专用提供商 bridge
-        if let Some(b) = self.specialized_bridges.get(&route.provider) {
-            return Some(b.clone());
-        }
-        // 第二级：适配器族 bridge
-        if let Some(adapter) = &route.adapter {
-            if let Some(b) = self.family_bridges.get(adapter) {
-                return Some(b.clone());
-            }
-        }
-        None
     }
 }
 

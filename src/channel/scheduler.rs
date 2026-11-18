@@ -508,19 +508,6 @@ pub fn build_context(
     SchedulingContext { factors }
 }
 
-/// 把 AIMD 状态转为 rpm 因子（供 `build_context` 用）。
-pub fn aimd_state_to_rpm_factor(
-    state: &crate::ratelimit::aimd_limiter::RateLimitState,
-    current_limit: u32,
-) -> f64 {
-    use crate::ratelimit::aimd_limiter::RateLimitState;
-    match state {
-        RateLimitState::Stable => current_limit as f64,
-        RateLimitState::Learning => RPM_FACTOR_LEARNING,
-        RateLimitState::Cooldown => RPM_FACTOR_COOLDOWN,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,23 +873,6 @@ mod scheduler_trait_tests {
             session_id: None,
         };
         assert_eq!(req2.affinity_key(), Some("u1"));
-    }
-
-    #[test]
-    fn aimd_state_to_rpm_factor_mapping() {
-        use crate::ratelimit::aimd_limiter::RateLimitState;
-        assert_eq!(
-            aimd_state_to_rpm_factor(&RateLimitState::Stable, 100),
-            100.0
-        );
-        assert_eq!(
-            aimd_state_to_rpm_factor(&RateLimitState::Learning, 50),
-            RPM_FACTOR_LEARNING
-        );
-        assert_eq!(
-            aimd_state_to_rpm_factor(&RateLimitState::Cooldown, 50),
-            RPM_FACTOR_COOLDOWN
-        );
     }
 
     /// 环境变量测试互斥锁：并行测试下 set_var/remove_var 竞态

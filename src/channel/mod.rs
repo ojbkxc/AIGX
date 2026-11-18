@@ -41,14 +41,11 @@ pub mod emulation;
 pub mod health_archive;
 pub mod health_manager;
 pub mod prober;
-pub mod rate_budget;
 /// 路由策略配置（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重可配）
 pub mod routing_policy;
 // ── 阶段3：响应质量分级（喂给断路器/调度器）──────────────────────────
 //
-// 参照 burncloud `crates/router/src/response_quality.rs`，评估上游响应质量
 // （延迟/错误率/吞吐量），用于渠道选择。
-pub mod response_quality;
 pub mod scheduler;
 
 // ── 渠道类型 ─────────────────────────────────────────────────────────
@@ -600,7 +597,6 @@ pub struct ChannelTestResult {
 /// - `empty_response_counter`：连续空响应计数，超阈值由调用方触发故障处理
 /// - `balancer`：RoundRobin 负载均衡，`select_for_model_round_robin` 使用
 /// - `aimd`：per-channel AIMD 自适应限速（批次3）
-/// - `rate_budget`：per-channel 三色令牌桶预算（批次3）
 /// - `scheduler`：CombinedScheduler 多因子调度（批次3）
 pub struct ChannelStore {
     channels: RwLock<Vec<Channel>>,
@@ -640,7 +636,6 @@ pub struct ChannelStore {
     /// 5 秒内同渠道不重复拉上游 /models，避免并发首启放大请求
     lazy_discover_inflight: dashmap::DashMap<String, std::sync::atomic::AtomicI64>,
     /// 三色令牌桶预算（批次3）
-    rate_budget: rate_budget::InMemoryBudget,
     /// 组合调度器（批次3）
     scheduler: parking_lot::RwLock<scheduler::CombinedScheduler>,
     /// 调度器权重配置缓存（读取用）
@@ -871,7 +866,6 @@ impl ChannelStore {
             balancer: balancer::RoundRobinBalancer::new(),
             aimd: dashmap::DashMap::new(),
             lazy_discover_inflight: dashmap::DashMap::new(),
-            rate_budget: rate_budget::InMemoryBudget::new(),
             scheduler: parking_lot::RwLock::new(scheduler::CombinedScheduler::default()),
             scheduler_config_cache: parking_lot::RwLock::new(
                 scheduler::SchedulerPolicyConfig::default(),
@@ -2084,10 +2078,6 @@ impl ChannelStore {
     }
 
     /// 三色预算引用（try_consume/refund/配置）。
-    pub fn rate_budget(&self) -> &rate_budget::InMemoryBudget {
-        &self.rate_budget
-    }
-
     /// 更新调度器权重配置。
     pub fn set_scheduler_config(&self, config: scheduler::SchedulerPolicyConfig) {
         *self.scheduler_config_cache.write() = config.clone();
