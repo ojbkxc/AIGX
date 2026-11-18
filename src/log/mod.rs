@@ -750,6 +750,12 @@ pub struct RequestLogStore {
 
 #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
 impl RequestLogStore {
+    /// 用户索引完备性标记：存在 = 历史日志已全部补建 `reqlogu:` 索引。
+    ///
+    /// 缺它时 `list_by_user` 一律走全扫（与改造前等价）；`backfill_user_index`
+    /// 成功后写入。没有这道闸门，混合态（新日志有索引、历史没有）下按
+    /// 区间读会静默漏数据。
+    const USER_INDEX_MARKER: &'static str = "reqlogu:backfill_done";
     /// B13：请求日志容量上限
     const MAX_LOGS: usize = 100_000;
     /// B13：超限时每批清理的最旧日志条数
@@ -788,7 +794,8 @@ impl RequestLogStore {
         value.replace('%', "%25").replace('=', "%3D")
     }
 
-    /// 一条日志要写的二级索引条目（`id` 与 `request_id` 各一条，去重）。
+    /// 一条日志要写的二级索引条目（`id` 与 `request_id` 各一条，去重），
+    /// 外加**用户索引**（有 `user_id` 时一条）。
     ///
     /// **两条写入路径必须共用本函数**：管理面同步 [`Self::add`]（逐条
     /// `put`）与数据面批量 `writer::apply_ops`（并入同一次 `write_batch`
@@ -811,7 +818,29 @@ impl RequestLogStore {
                 Value::Bool(true),
             ));
         }
+        if let Some(uid) = log.user_id.as_deref().filter(|u| !u.is_empty()) {
+            out.push((
+                Self::user_index_key(uid, log.created_at, log.id.as_str()),
+                Value::Bool(true),
+            ));
+        }
         out
+    }
+
+    /// 用户索引键：`reqlogu:{uid}:{created_at:010}:{id}`。
+    ///
+    /// 时间戳零填充到 10 位：今天所有 `created_at` 本就 10 位（与主键
+    /// `reqlog:{ts}:{id}` 的字符串完全一致），这次补零是 no-op；2286 年后
+    /// 仍保持「键字典序 = 时间序」，区间读才不会错位。
+    ///
+    /// **主键可由本键直接推导**（去掉 `reqlogu:{uid}:` 前缀后前补
+    /// `reqlog:`），所以索引值只存 `true` —— 用户流水读 N 条只花一次区间
+    /// 扫描，不必再为每条索引做一次点查。
+    pub(crate) fn user_index_key(uid: &str, created_at: i64, id: &str) -> String {
+        format!(
+            "reqlogu:{}:{created_at:010}:{id}",
+            Self::escape_index_component(uid)
+        )
     }
 
     /// 写入某条日志的索引（`id` 与 `request_id` 各一条，重复的不重复写）。
@@ -829,12 +858,16 @@ impl RequestLogStore {
     /// 主键的悬空索引（`get_by_request_id` 命中它只会白跑一次 get）。
     fn delete_indexes_by_primary(&self, primary: &str) {
         let mut candidates: Vec<String> = Vec::new();
+        let mut user_key: Option<String> = None;
         if let Ok(Some(log)) = self.store.get::<RequestLog>(primary) {
             if !log.id.is_empty() {
-                candidates.push(log.id);
+                candidates.push(log.id.clone());
             }
-            if let Some(request_id) = log.request_id.filter(|value| !value.is_empty()) {
+            if let Some(request_id) = log.request_id.clone().filter(|value| !value.is_empty()) {
                 candidates.push(request_id);
+            }
+            if let Some(uid) = log.user_id.as_deref().filter(|u| !u.is_empty()) {
+                user_key = Some(Self::user_index_key(uid, log.created_at, log.id.as_str()));
             }
         }
         if candidates.is_empty() {
@@ -848,6 +881,14 @@ impl RequestLogStore {
             let key = Self::index_key(&Self::escape_index_component(&candidate), primary);
             if let Err(e) = self.store.delete(&key) {
                 tracing::warn!("request log index delete failed for {key}: {e}");
+            }
+        }
+        // 用户索引从主键推导不出来（主键里没有 uid）；只有在读得到整条日志
+        // 时才清得掉。读不到时这条索引会残留到下次全量重建（可接受：它只
+        // 影响该用户的流水多一条悬空键，`get` 落空后自然被跳过）。
+        if let Some(key) = user_key {
+            if let Err(e) = self.store.delete(&key) {
+                tracing::warn!("request log user index delete failed for {key}: {e}");
             }
         }
     }
@@ -1004,13 +1045,49 @@ impl RequestLogStore {
     ///
     /// 给用户侧积分流水用：与签到奖励合并成时间线后分页，不能走
     /// `list_with_filter`（它按页截断，会漏掉第 N+1 页之后的内容）。
-    /// 单用户日志量可控，全量载入内存再过滤可接受。
+    ///
+    /// **优先走用户索引**（`reqlogu:{uid}:{ts}:{id}`）：时间窗直接转成键
+    /// 区间，只扫该用户、只扫窗口内的键；主键由索引键去掉前缀、前补
+    /// `reqlog:` 直接推导，无需额外点查。索引缺失（历史数据、索引被手工
+    /// 清过）时回退旧的全扫，行为不变、只是慢。
+    ///
+    /// **只有回填完成之后才能走索引快路径**：索引是本次才补建的，库里
+    /// 可能同时存在「有索引的新日志」与「无索引的历史日志」。若按「区间
+    /// 命中就返回」实现，混合态下会静默漏掉历史行 —— 这类静默少数据比
+    /// 慢更糟。故用 `USER_INDEX_MARKER` 做完备性闸门：未回填 = 一律全扫
+    /// （与改造前逐字等价）；回填完成后才允许键区间读。
     pub fn list_by_user(
         &self,
         user_id: &str,
         start: Option<i64>,
         end: Option<i64>,
     ) -> Vec<RequestLog> {
+        if self.user_index_ready() {
+            let uid = Self::escape_index_component(user_id);
+            let from = format!("reqlogu:{uid}:{:010}", start.unwrap_or(i64::MIN));
+            let to = match end {
+                // `to` 设为 end+1 的 10 位表示（含两端）；10 位溢出到 11 位时
+                // 字典序仍大于所有 10 位键，仍是正确上界。
+                Some(e) => format!("reqlogu:{uid}:{:010}", e.saturating_add(1)),
+                None => format!("reqlogu:{uid};"),
+            };
+            if let Ok(keys) = self.store.list_range("reqlogu:", &from, &to) {
+                let prefix = format!("reqlogu:{uid}:");
+                let mut logs: Vec<RequestLog> = keys
+                    .iter()
+                    .filter_map(|k| k.strip_prefix(&prefix))
+                    .filter_map(|rest| {
+                        self.store
+                            .get::<RequestLog>(&format!("reqlog:{rest}"))
+                            .ok()
+                            .flatten()
+                    })
+                    .collect();
+                logs.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+                return logs;
+            }
+        }
+        // 回退：索引未就绪（历史数据未建索引）/ 该用户确实无日志
         self.list_all()
             .into_iter()
             .filter(|l| {
@@ -1019,6 +1096,56 @@ impl RequestLogStore {
                     && end.is_none_or(|e| l.created_at <= e)
             })
             .collect()
+    }
+
+    /// 用户索引是否已覆盖全部历史日志（回填 marker 存在）。
+    fn user_index_ready(&self) -> bool {
+        matches!(
+            self.store.get::<bool>(Self::USER_INDEX_MARKER),
+            Ok(Some(true))
+        )
+    }
+
+    /// 一次性回填用户索引：扫描全部 reqlog 明细，按
+    /// [`Self::user_index_key`] 补写缺失的索引键，成功后落 marker。
+    ///
+    /// 幂等：重复调用只会重复 `put` 同样的 `true`。返回补写条数。
+    /// 与日聚合回填（`backfill_history`）分开：那个只管聚合、会吞掉
+    /// 用户索引语义；这里只补键，不改任何聚合值。
+    pub fn backfill_user_index(&self) -> anyhow::Result<usize> {
+        if self.user_index_ready() {
+            return Ok(0);
+        }
+        let keys = self.store.list("reqlog:")?;
+        let mut written = 0usize;
+        let mut batch: Vec<(String, Value)> = Vec::with_capacity(512);
+        for k in keys {
+            let Ok(Some(log)) = self.store.get::<RequestLog>(&k) else {
+                continue;
+            };
+            let Some(uid) = log.user_id.as_deref().filter(|u| !u.is_empty()) else {
+                continue;
+            };
+            let idx = Self::user_index_key(uid, log.created_at, log.id.as_str());
+            if matches!(self.store.get::<bool>(&idx), Ok(Some(true))) {
+                continue;
+            }
+            batch.push((idx, Value::Bool(true)));
+            written += 1;
+            if batch.len() >= 512 {
+                let refs: Vec<(&str, Value)> =
+                    batch.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                self.store.write_batch(&refs)?;
+                batch.clear();
+            }
+        }
+        if !batch.is_empty() {
+            let refs: Vec<(&str, Value)> =
+                batch.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+            self.store.write_batch(&refs)?;
+        }
+        self.store.put(Self::USER_INDEX_MARKER, &true)?;
+        Ok(written)
     }
 
     /// Phase1-B 路由回放：按 request_id（或日志 id）取单条请求日志。
@@ -1585,12 +1712,20 @@ pub(crate) fn purge_request_overflow(store: &FileStore) -> anyhow::Result<()> {
         // 所以先读出整条日志拿回两个候选值；读不到（已损坏/已删）时退回
         // 主键尾段的 `id` 兜底，与 `delete_indexes_by_primary` 同口径。
         let mut candidates: Vec<String> = Vec::new();
+        let mut user_key: Option<String> = None;
         if let Ok(Some(log)) = store.get::<RequestLog>(&k) {
             if !log.id.is_empty() {
-                candidates.push(log.id);
+                candidates.push(log.id.clone());
             }
-            if let Some(request_id) = log.request_id.filter(|v| !v.is_empty()) {
+            if let Some(request_id) = log.request_id.clone().filter(|v| !v.is_empty()) {
                 candidates.push(request_id);
+            }
+            if let Some(uid) = log.user_id.as_deref().filter(|u| !u.is_empty()) {
+                user_key = Some(RequestLogStore::user_index_key(
+                    uid,
+                    log.created_at,
+                    log.id.as_str(),
+                ));
             }
         }
         if candidates.is_empty() {
@@ -1604,6 +1739,9 @@ pub(crate) fn purge_request_overflow(store: &FileStore) -> anyhow::Result<()> {
                 &RequestLogStore::escape_index_component(&candidate),
                 &k,
             );
+            let _ = store.delete(&index);
+        }
+        if let Some(index) = user_key {
             let _ = store.delete(&index);
         }
         if let Err(e) = store.delete(&k) {
@@ -2308,6 +2446,93 @@ mod tests {
         s.requests.delete_by_id("log-abc").unwrap();
         assert!(s.requests.get_by_request_id("log-abc").is_none());
         assert!(s.requests.get_by_request_id("req/with=special").is_none());
+    }
+
+    /// R2 第二档：`list_by_user` 走用户索引（`reqlogu:{uid}:{ts}:{id}`）。
+    ///
+    /// 断言语义：marker 未落前一律全扫（与改造前等价）；回填后走区间
+    /// 读且结果与全扫一致；窗口两端含；删除后索引同步清。
+    #[test]
+    fn list_by_user_uses_user_index_and_falls_back() {
+        let s = store();
+        const BASE: i64 = 1_700_000_000;
+        for i in 0..4i64 {
+            let mut log = RequestLog::new();
+            log.id = format!("u{i}");
+            log.user_id = Some("u1".into());
+            log.created_at = BASE + i * 10;
+            log.model = format!("m{i}");
+            s.requests.add(log).unwrap();
+        }
+        let mut other = RequestLog::new();
+        other.id = "x1".into();
+        other.user_id = Some("u2".into());
+        other.created_at = BASE + 5;
+        other.model = "mx".into();
+        s.requests.add(other).unwrap();
+
+        // 无 marker：全扫路径（与改造前逐字等价）
+        let all = s.requests.list_by_user("u1", None, None);
+        assert_eq!(all.len(), 4, "只命中该用户的日志");
+        assert!(all.windows(2).all(|w| w[0].created_at >= w[1].created_at));
+
+        // 回填：新写入的日志在 `add()` 时已建用户索引，故补写 0 条；
+        // 但 marker 必须落位（闸门从「全扫」切到「索引路径」）。
+        let written = s.requests.backfill_user_index().unwrap();
+        assert_eq!(written, 0, "新日志的索引已在写入时建好");
+        assert!(
+            matches!(
+                s.requests.store.get::<bool>("reqlogu:backfill_done"),
+                Ok(Some(true))
+            ),
+            "回填后 marker 必须落位"
+        );
+        assert_eq!(s.requests.backfill_user_index().unwrap(), 0, "幂等");
+
+        // 索引路径与全扫结果逐条一致
+        let indexed = s.requests.list_by_user("u1", None, None);
+        assert_eq!(
+            indexed.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+            vec!["u3", "u2", "u1", "u0"]
+        );
+        // 窗口过滤与旧语义一致（含两端）
+        let win = s
+            .requests
+            .list_by_user("u1", Some(BASE + 10), Some(BASE + 20));
+        assert_eq!(win.len(), 2, "窗口 [BASE+10, BASE+20] 含两端共 2 条");
+        assert_eq!(
+            win.iter().map(|l| l.model.as_str()).collect::<Vec<_>>(),
+            vec!["m2", "m1"]
+        );
+
+        // 删除后用户索引被连带清理（再读只剩 3 条）
+        s.requests.delete_by_id("u2").unwrap();
+        let after = s.requests.list_by_user("u1", None, None);
+        assert_eq!(after.len(), 3, "删一条后用户索引同步更新");
+        assert!(after.iter().all(|l| l.id != "u2"));
+    }
+
+    /// 回填前的历史日志（无索引）也必须能被读到 —— 闸门保证这一点。
+    #[test]
+    fn list_by_user_reads_legacy_rows_before_backfill() {
+        let s = store();
+        let mut legacy = RequestLog::new();
+        legacy.id = "legacy".into();
+        legacy.user_id = Some("u9".into());
+        legacy.created_at = 1_700_000_000;
+        legacy.model = "old".into();
+        s.requests
+            .store
+            .put(
+                &format!("reqlog:{}:{}", legacy.created_at, legacy.id),
+                &legacy,
+            )
+            .unwrap();
+        // marker 未落 = 全扫，能读到；若误走索引会漏（区间为空）
+        assert_eq!(s.requests.list_by_user("u9", None, None).len(), 1);
+        // 回填把历史行补上索引后，索引路径同样能读到
+        assert_eq!(s.requests.backfill_user_index().unwrap(), 1);
+        assert_eq!(s.requests.list_by_user("u9", None, None).len(), 1);
     }
 
     #[test]

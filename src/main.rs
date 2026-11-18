@@ -1210,7 +1210,34 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
-        // #85 订阅周期任务：到期置 expired + 分组回退；周期重置点清零用量。
+        // 用户日志索引一次性回填：`list_by_user`（用户积分流水 / 管理面用户
+        // 日志）原先全表扫，加 `reqlogu:` 索引后要先把历史日志补齐再开快路径
+        // （`RequestLogStore::USER_INDEX_MARKER` 闸门）。幂等：标记在即空转，
+        // 24h 周期只为兜住「首次失败」的补跑。
+        {
+            let log_store = state.log_store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "reqlog-user-index-backfill",
+                interval: Duration::from_secs(86400),
+                first_run_delay: Duration::from_secs(90),
+                run: Box::new(move || {
+                    let ls = log_store.clone();
+                    Box::pin(async move {
+                        match ls.requests.backfill_user_index() {
+                            Ok(0) => 0,
+                            Ok(n) => {
+                                tracing::info!("用户日志索引回填完成: 补写 {n} 条");
+                                n as u64
+                            }
+                            Err(e) => {
+                                tracing::warn!("用户日志索引回填失败（下一周期重试）: {e}");
+                                0
+                            }
+                        }
+                    })
+                }),
+            });
+        }
         // 读侧（find_active/try_charge）已做动态过期判断，此处落库保证
         // 用户订阅列表与分组权益最终一致。
         {
@@ -1284,7 +1311,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, channel-balance-refresh, account-session-relogin-notice, log-retention-sweep, daily-agg-backfill, subscription-expire-reset)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, channel-balance-refresh, account-session-relogin-notice, log-retention-sweep, daily-agg-backfill, reqlog-user-index-backfill, subscription-expire-reset)",
             scheduler.task_count()
         );
     }

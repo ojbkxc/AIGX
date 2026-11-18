@@ -507,9 +507,10 @@ mod tests {
                 "批量路径必须写 {candidate} 的索引"
             );
         }
-        // 与同步路径等价：同一份日志经 `add()` 走出的索引键集合一致。
+        // 与同步路径等价：同一份日志经 `add()` 走出的索引键集合一致
+        // （id / request_id / 用户索引共 3 条）。
         let sync_entries = crate::log::RequestLogStore::index_entries(&l, &primary);
-        assert_eq!(sync_entries.len(), 2, "id 与 request_id 各一条");
+        assert_eq!(sync_entries.len(), 3, "id + request_id + 用户索引各一条");
     }
 
     /// 2) 队列满时 try_send 失败被吞、不 panic（无消费者模式填满）。
