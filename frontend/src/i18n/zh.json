@@ -4167,5 +4167,14 @@
   "secret 只存放于网关 KV（不写配置文件），接口只返回是否已设置。": "secret 只存放于网关 KV（不写配置文件），接口只返回是否已设置。",
   "Turnstile secret 已清除": "Turnstile secret 已清除",
   "Turnstile secret key（仅存网关，不回显）": "Turnstile secret key（仅存网关，不回显）",
-  "Turnstile site key（公开）": "Turnstile site key（公开）"
+  "Turnstile site key（公开）": "Turnstile site key（公开）",
+  "安装网关内置段": "安装网关内置段",
+  "动态段（dynamic，支持 {cwd}/{platform}/{model} 等占位符）": "动态段（dynamic，支持 {cwd}/{platform}/{model} 等占位符）",
+  "身份段（identity，留空 = 官方原文）": "身份段（identity，留空 = 官方原文）",
+  "提供商 id（如 zcode）": "提供商 id（如 zcode）",
+  "添加提供商": "添加提供商",
+  "网关内置的身份段（如 ZCode 活动套餐通道的官方三段）由提供商实现提供；这里只控制「装不装」与「正文覆盖」。三段留空 = 用官方原文；取消勾选 = 该提供商不装。": "网关内置的身份段（如 ZCode 活动套餐通道的官方三段）由提供商实现提供；这里只控制「装不装」与「正文覆盖」。三段留空 = 用官方原文；取消勾选 = 该提供商不装。",
+  "网关自带提示词（按提供商）": "网关自带提示词（按提供商）",
+  "稳定段（stable，留空 = 官方原文）": "稳定段（stable，留空 = 官方原文）",
+  "暂无逐家配置，全部使用官方默认（装）": "暂无逐家配置，全部使用官方默认（装）"
 }

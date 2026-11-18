@@ -394,6 +394,7 @@ async fn main() -> anyhow::Result<()> {
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // passthrough/custom/append 三模式，保存即生效
     let gateway_prompt = Arc::new(crate::prompt::GatewayPromptStore::with_store(store.clone()));
+    crate::prompt::install_snapshot(gateway_prompt.snapshot());
     // 破甲控制台：配置热更新；启动时刻只用于页面展示运行时长
     let purge = Arc::new(crate::purge::PurgeStore::with_store(store.clone()));
     crate::purge::init_started_at();

@@ -1064,6 +1064,8 @@ pub async fn handle_get_gateway_prompt(
             "models": cfg.models,
             "providers": cfg.providers,
             "developer_role_compat": cfg.developer_role_compat,
+            "gateway": cfg.gateway,
+            "gateway_text": cfg.gateway_text,
         }
     })))
 }
@@ -1149,6 +1151,68 @@ pub async fn handle_update_gateway_prompt(
         cfg.providers = parse_prompt_overrides(providers, "providers")
             .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
     }
+    // 网关自带提示词（A2A promptGateway / promptGatewayText）：整表替换；
+    // 值为 null = 删除该家（回到默认）。三段每段可缺省（= 官方原文）。
+    if let Some(value) = body.get("gateway") {
+        let map = value
+            .as_object()
+            .ok_or_else(|| error_response("gateway 必须是对象", StatusCode::BAD_REQUEST))?;
+        let mut next = std::collections::BTreeMap::new();
+        for (key, item) in map {
+            if item.is_null() {
+                continue;
+            }
+            let Some(flag) = item.as_bool() else {
+                return Err(error_response(
+                    &format!("gateway.{key} 必须是布尔值"),
+                    StatusCode::BAD_REQUEST,
+                ));
+            };
+            next.insert(key.clone(), flag);
+        }
+        cfg.gateway = next;
+    }
+    if let Some(value) = body.get("gateway_text") {
+        let map = value
+            .as_object()
+            .ok_or_else(|| error_response("gateway_text 必须是对象", StatusCode::BAD_REQUEST))?;
+        let mut next = std::collections::BTreeMap::new();
+        for (key, item) in map {
+            if item.is_null() {
+                continue;
+            }
+            let section = |name: &str| -> Result<Option<String>, (StatusCode, Json<Value>)> {
+                let Some(v) = item.get(name) else {
+                    return Ok(None);
+                };
+                if v.is_null() {
+                    return Ok(None);
+                }
+                let text = v.as_str().ok_or_else(|| {
+                    error_response(
+                        &format!("gateway_text.{key}.{name} 必须是字符串"),
+                        StatusCode::BAD_REQUEST,
+                    )
+                })?;
+                if text.chars().count() > 64_000 {
+                    return Err(error_response(
+                        &format!("gateway_text.{key}.{name} 过长（上限 64000 字符）"),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+                Ok(Some(text.to_string()))
+            };
+            next.insert(
+                key.clone(),
+                crate::prompt::GatewayTextBlocks {
+                    identity: section("identity")?,
+                    stable: section("stable")?,
+                    dynamic: section("dynamic")?,
+                },
+            );
+        }
+        cfg.gateway_text = next;
+    }
 
     state.gateway_prompt.update(cfg.clone()).map_err(|e| {
         error_response(
@@ -1156,6 +1220,8 @@ pub async fn handle_update_gateway_prompt(
             StatusCode::INTERNAL_SERVER_ERROR,
         )
     })?;
+    // 进程级快照（插件 settings.get 的 gatewayPrompt* 读它），保存即生效
+    crate::prompt::install_snapshot(std::sync::Arc::new(cfg.clone()));
 
     tracing::info!(
         "网关系统提示词已更新: mode={} 长度 {}（模型覆盖 {} 条 / 提供商覆盖 {} 条）",
@@ -1173,6 +1239,8 @@ pub async fn handle_update_gateway_prompt(
             "developer_role_compat": cfg.developer_role_compat,
             "models": cfg.models,
             "providers": cfg.providers,
+            "gateway": cfg.gateway,
+            "gateway_text": cfg.gateway_text,
         }
     })))
 }

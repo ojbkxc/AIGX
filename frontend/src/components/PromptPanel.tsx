@@ -52,6 +52,51 @@ interface ProviderOverrideRow {
   text: string;
 }
 
+/** 单条「网关自带提示词」草稿（A2A promptGateway / promptGatewayText）。 */
+interface GatewayRow {
+  provider: string;
+  /** 是否安装网关内置段（缺省/true = 装） */
+  enabled: boolean;
+  identity: string;
+  stable: string;
+  dynamic: string;
+}
+
+/** 把后端两张表（开关 + 三段覆盖）合并成一行草稿。 */
+function collectGatewayRows(
+  gateway: Record<string, boolean>,
+  gatewayText: Record<string, { identity?: string; stable?: string; dynamic?: string }>,
+): GatewayRow[] {
+  const providers = Array.from(new Set([...Object.keys(gateway), ...Object.keys(gatewayText)])).sort();
+  return providers.map((provider) => ({
+    provider,
+    enabled: gateway[provider] !== false,
+    identity: gatewayText[provider]?.identity ?? '',
+    stable: gatewayText[provider]?.stable ?? '',
+    dynamic: gatewayText[provider]?.dynamic ?? '',
+  }));
+}
+
+/** 草稿行 → 后端两张表（空名行丢弃；三段空串 = 不覆盖，交给官方原文）。 */
+function serializeGatewayRows(rows: GatewayRow[]): {
+  gateway: Record<string, boolean>;
+  gateway_text: Record<string, { identity?: string; stable?: string; dynamic?: string }>;
+} {
+  const gateway: Record<string, boolean> = {};
+  const gateway_text: Record<string, { identity?: string; stable?: string; dynamic?: string }> = {};
+  for (const row of rows) {
+    const name = row.provider.trim();
+    if (!name || gateway[name] !== undefined) continue;
+    gateway[name] = row.enabled;
+    const blocks: { identity?: string; stable?: string; dynamic?: string } = {};
+    if (row.identity.trim()) blocks.identity = row.identity;
+    if (row.stable.trim()) blocks.stable = row.stable;
+    if (row.dynamic.trim()) blocks.dynamic = row.dynamic;
+    if (Object.keys(blocks).length > 0) gateway_text[name] = blocks;
+  }
+  return { gateway, gateway_text };
+}
+
 export default function PromptPanel(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -63,6 +108,7 @@ export default function PromptPanel(): JSX.Element {
   const [devCompat, setDevCompat] = useState(true);
   const [rows, setRows] = useState<ModelOverrideRow[]>([]);
   const [providerRows, setProviderRows] = useState<ProviderOverrideRow[]>([]);
+  const [gatewayRows, setGatewayRows] = useState<GatewayRow[]>([]);
 
   useEffect(() => {
     void (async () => {
@@ -87,6 +133,7 @@ export default function PromptPanel(): JSX.Element {
               text: over.text ?? '',
             })),
           );
+          setGatewayRows(collectGatewayRows(d.gateway ?? {}, d.gateway_text ?? {}));
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -113,12 +160,15 @@ export default function PromptPanel(): JSX.Element {
         if (!name || providers[name]) continue;
         providers[name] = { mode: row.mode, text: row.text };
       }
+      const { gateway, gateway_text } = serializeGatewayRows(gatewayRows);
       const res = await api.saveGatewayPrompt({
         mode,
         text,
         developer_role_compat: devCompat,
         models,
         providers,
+        gateway,
+        gateway_text,
       });
       const d = res?.data;
       if (d) {
@@ -139,6 +189,7 @@ export default function PromptPanel(): JSX.Element {
             text: over.text ?? '',
           })),
         );
+        setGatewayRows(collectGatewayRows(d.gateway ?? {}, d.gateway_text ?? {}));
       }
       addToast(t('系统提示词已保存（下一请求即生效）'));
     } catch (err) {
@@ -154,6 +205,10 @@ export default function PromptPanel(): JSX.Element {
 
   const updateProviderRow = (index: number, patch: Partial<ProviderOverrideRow>): void => {
     setProviderRows(providerRows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  };
+
+  const updateGatewayRow = (index: number, patch: Partial<GatewayRow>): void => {
+    setGatewayRows(gatewayRows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   };
 
   if (loading) {
@@ -348,6 +403,89 @@ export default function PromptPanel(): JSX.Element {
                 onClick={() => setProviderRows([...providerRows, { provider: '', mode: 'append', text: '' }])}
               >
                 {t('添加提供商覆盖')}
+              </button>
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>{t('网关自带提示词（按提供商）')}</label>
+            <div className="form-hint" style={{ marginBottom: 8 }}>
+              {t('网关内置的身份段（如 ZCode 活动套餐通道的官方三段）由提供商实现提供；这里只控制「装不装」与「正文覆盖」。三段留空 = 用官方原文；取消勾选 = 该提供商不装。')}
+            </div>
+            {gatewayRows.length === 0 ? (
+              <div className="empty-state">
+                <p>{t('暂无逐家配置，全部使用官方默认（装）')}</p>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {gatewayRows.map((row, i) => (
+                  <div
+                    key={`${row.provider}-${i}`}
+                    style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 12 }}
+                  >
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                      <input
+                        className="form-input"
+                        style={{ flex: 2 }}
+                        placeholder={t('提供商 id（如 zcode）')}
+                        value={row.provider}
+                        onChange={(e) => updateGatewayRow(i, { provider: e.target.value })}
+                      />
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                        <input
+                          type="checkbox"
+                          checked={row.enabled}
+                          onChange={(e) => updateGatewayRow(i, { enabled: e.target.checked })}
+                        />
+                        <span>{t('安装网关内置段')}</span>
+                      </label>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => setGatewayRows(gatewayRows.filter((_, idx) => idx !== i))}
+                      >
+                        {t('删除')}
+                      </button>
+                    </div>
+                    <textarea
+                      className="form-input"
+                      rows={2}
+                      placeholder={t('身份段（identity，留空 = 官方原文）')}
+                      value={row.identity}
+                      onChange={(e) => updateGatewayRow(i, { identity: e.target.value })}
+                    />
+                    <textarea
+                      className="form-input"
+                      rows={2}
+                      style={{ marginTop: 6 }}
+                      placeholder={t('稳定段（stable，留空 = 官方原文）')}
+                      value={row.stable}
+                      onChange={(e) => updateGatewayRow(i, { stable: e.target.value })}
+                    />
+                    <textarea
+                      className="form-input"
+                      rows={2}
+                      style={{ marginTop: 6 }}
+                      placeholder={t('动态段（dynamic，支持 {cwd}/{platform}/{model} 等占位符）')}
+                      value={row.dynamic}
+                      onChange={(e) => updateGatewayRow(i, { dynamic: e.target.value })}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() =>
+                  setGatewayRows([
+                    ...gatewayRows,
+                    { provider: '', enabled: true, identity: '', stable: '', dynamic: '' },
+                  ])
+                }
+              >
+                {t('添加提供商')}
               </button>
             </div>
           </div>

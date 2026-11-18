@@ -109,6 +109,27 @@ pub struct GatewayPrompt {
     /// 样丢弃未知角色（引入该开关前的行为）。
     #[serde(default = "default_developer_role_compat")]
     pub developer_role_compat: bool,
+    /// 网关自带提示词逐家开关（A2A `promptGateway`）：`{"<providerId>": false}`
+    /// = 这一家不装网关内置段。键缺失 = 默认（装）。网关只存开关与正文，
+    /// 真正的拼装/注入在 provider 实现侧（A2A 2026-10 已插件化；AIGX 原生
+    /// zcode 目前只注入用户覆盖文本，官方原文属于闭源插件知识）。
+    #[serde(default)]
+    pub gateway: std::collections::BTreeMap<String, bool>,
+    /// 网关自带提示词正文覆盖（A2A `promptGatewayText`）：三段各自可覆盖，
+    /// 缺段 = 用官方原文（由 provider 实现提供）。空表 = 全部官方原文。
+    #[serde(default)]
+    pub gateway_text: std::collections::BTreeMap<String, GatewayTextBlocks>,
+}
+
+/// 网关自带提示词的三段正文（A2A `{identity, stable, dynamic}`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GatewayTextBlocks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<String>,
 }
 
 fn default_developer_role_compat() -> bool {
@@ -123,6 +144,8 @@ impl Default for GatewayPrompt {
             models: std::collections::BTreeMap::new(),
             providers: std::collections::BTreeMap::new(),
             developer_role_compat: default_developer_role_compat(),
+            gateway: std::collections::BTreeMap::new(),
+            gateway_text: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -170,6 +193,22 @@ impl GatewayPromptStore {
 ///
 /// 返回 `Some(新列表)` = 改动过（调用方用返回值替换）；`None` = 不动
 /// （passthrough 或文本为空——默认路径零开销，连 Vec 都不分配）。
+/// 进程级网关提示词快照（插件回调 `settings.get` 读 gatewayPrompt* 用）。
+///
+/// 与安全策略快照同构：启动/保存时 install 一次，读侧无锁读 Arc。
+static GATEWAY_PROMPT_SNAPSHOT: parking_lot::RwLock<Option<Arc<GatewayPrompt>>> =
+    parking_lot::RwLock::new(None);
+
+/// 安装/刷新进程级快照（main 启动与 `/api/gateway/prompt` 保存后调用）。
+pub fn install_snapshot(cfg: Arc<GatewayPrompt>) {
+    *GATEWAY_PROMPT_SNAPSHOT.write() = Some(cfg);
+}
+
+/// 读进程级快照（未安装时返回 None）。
+pub fn snapshot() -> Option<Arc<GatewayPrompt>> {
+    GATEWAY_PROMPT_SNAPSHOT.read().clone()
+}
+
 pub fn apply_prompt(messages: &[ChatMessage], cfg: &GatewayPrompt) -> Option<Vec<ChatMessage>> {
     apply_prompt_for("", messages, cfg)
 }
@@ -651,5 +690,40 @@ mod tests {
         let raw2 = serde_json::to_value(&body2).unwrap();
         let msgs = crate::api::openai::parse_messages_with_dev(Some(&raw2), false).unwrap();
         assert_eq!(msgs.len(), 2);
+    }
+
+    /// promptGateway 快照：缺省（键缺失）= 装；显式 false = 不装；正文覆盖只
+    /// 透出用户写过的段（缺段 = 官方原文，序列化时省略字段）。
+    #[test]
+    fn gateway_snapshot_defaults_and_text_blocks() {
+        let mut cfg = GatewayPrompt::default();
+        cfg.gateway.insert("zcode".to_string(), false);
+        cfg.gateway_text.insert(
+            "zcode".to_string(),
+            GatewayTextBlocks {
+                identity: Some("你是助手".to_string()),
+                stable: None,
+                dynamic: Some("cwd={cwd}".to_string()),
+            },
+        );
+        install_snapshot(std::sync::Arc::new(cfg));
+
+        let snap = snapshot().expect("snapshot installed");
+        // 键缺失 = 默认装；显式 false = 不装
+        assert_eq!(snap.gateway.get("zcode"), Some(&false));
+        assert_eq!(snap.gateway.get("other"), None);
+
+        let blocks = serde_json::to_value(snap.gateway_text.get("zcode").unwrap()).unwrap();
+        assert_eq!(blocks["identity"], "你是助手");
+        assert_eq!(blocks["dynamic"], "cwd={cwd}");
+        assert!(
+            blocks.get("stable").is_none(),
+            "未覆盖的段不出现（= 官方原文）：{blocks}"
+        );
+
+        // 默认配置：空表、无覆盖（数据面零额外分配）
+        let default = GatewayPrompt::default();
+        assert!(default.gateway.is_empty());
+        assert!(default.gateway_text.is_empty());
     }
 }

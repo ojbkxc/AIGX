@@ -141,9 +141,31 @@ impl PluginCallbacks {
     }
 
     /// `settings.get`：读 pack 私有设置；缺失返回 `null`。
+    ///
+    /// 两个**网关专用键**（A2A `PLUGIN_SETTING_GATEWAY_PROMPT*` 同口径）：
+    /// - `gatewayPrompt`：这一家要不要装网关自带提示词（键缺失 = true）；
+    /// - `gatewayPromptText`：三段正文覆盖（只含用户改过的段，缺段为 null，
+    ///   未配置整家返回 null）。
     fn settings_get(&self, provider: &str, key: &str) -> Result<Value, RpcError> {
         if key.is_empty() {
             return Err(bad_request("settings.get: key is required"));
+        }
+        if key == "gatewayPrompt" {
+            let enabled = crate::prompt::snapshot()
+                .and_then(|cfg| cfg.gateway.get(provider).copied())
+                .unwrap_or(true);
+            return Ok(Value::Bool(enabled));
+        }
+        if key == "gatewayPromptText" {
+            let Some(blocks) =
+                crate::prompt::snapshot().and_then(|cfg| cfg.gateway_text.get(provider).cloned())
+            else {
+                return Ok(Value::Null);
+            };
+            return serde_json::to_value(blocks).map_err(|e| RpcError {
+                message: format!("settings.get gatewayPromptText: {e}"),
+                code: Some("internal".into()),
+            });
         }
         match self.store.get::<Value>(&self.settings_key(provider, key)) {
             Ok(Some(value)) => Ok(value),

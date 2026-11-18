@@ -4167,5 +4167,14 @@
   "secret 只存放于网关 KV（不写配置文件），接口只返回是否已设置。": "The secret is stored only in the gateway KV (not in the config file); the API only reports whether it is set.",
   "Turnstile secret 已清除": "Turnstile secret cleared",
   "Turnstile secret key（仅存网关，不回显）": "Turnstile secret key (gateway-only, never echoed)",
-  "Turnstile site key（公开）": "Turnstile site key (public)"
+  "Turnstile site key（公开）": "Turnstile site key (public)",
+  "安装网关内置段": "Install gateway built-in block",
+  "动态段（dynamic，支持 {cwd}/{platform}/{model} 等占位符）": "Dynamic block (dynamic; supports {cwd}/{platform}/{model} placeholders)",
+  "身份段（identity，留空 = 官方原文）": "Identity block (identity; empty = official text)",
+  "提供商 id（如 zcode）": "Provider id (e.g. zcode)",
+  "添加提供商": "Add provider",
+  "网关内置的身份段（如 ZCode 活动套餐通道的官方三段）由提供商实现提供；这里只控制「装不装」与「正文覆盖」。三段留空 = 用官方原文；取消勾选 = 该提供商不装。": "Built-in identity blocks (e.g. the official three-part block of the ZCode campaign channel) come from the provider implementation; this only controls “install or not” and “text overrides”. Empty section = use the official text; unchecked = do not install for that provider.",
+  "网关自带提示词（按提供商）": "Gateway built-in prompt (per provider)",
+  "稳定段（stable，留空 = 官方原文）": "Stable block (stable; empty = official text)",
+  "暂无逐家配置，全部使用官方默认（装）": "No per-provider overrides; all use the official default (installed)"
 }

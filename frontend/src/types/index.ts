@@ -1800,6 +1800,10 @@ export interface GatewayPromptItem {
   /** 按提供商覆盖（键 = 账号 provider 名或渠道类型名；优先级：模型 > 提供商 > 全局） */
   providers?: Record<string, { mode: PromptMode; text: string }>;
   developer_role_compat?: boolean;
+  /** 网关自带提示词逐家开关（键 = provider id；缺省 = 装） */
+  gateway?: Record<string, boolean>;
+  /** 网关自带提示词三段正文覆盖（缺段 = 官方原文） */
+  gateway_text?: Record<string, { identity?: string; stable?: string; dynamic?: string }>;
 }
 
 /** 指纹脱敏命中统计（随 GET /api/sanitize 下发；进程内计数，重启归零） */
