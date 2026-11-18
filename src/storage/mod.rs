@@ -219,6 +219,24 @@ impl JsonFileStore {
         })
     }
 
+    /// 键区间 `[from, to)` 升序取前 `limit` 个（JSON 后端 list + filter 降级，
+    /// 与 `SqliteStore::list_range_asc` 同语义）。
+    pub fn list_range_asc(
+        &self,
+        _prefix: &str,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut keys: Vec<String> = self
+            .list("")?
+            .into_iter()
+            .filter(|k| k.as_str() >= from && k.as_str() < to)
+            .collect();
+        keys.truncate(limit);
+        Ok(keys)
+    }
+
     /// 键区间 `[from, to)` 倒序取前 `limit` 个（JSON 后端 list + filter 降级）。
     pub fn list_range_desc(
         &self,
