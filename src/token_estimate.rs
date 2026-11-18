@@ -122,59 +122,21 @@ pub fn count_chat_prompt(model: &str, req: &ChatFormat) -> u32 {
 ///
 /// `count_chat_prompt` 是纯 CPU（每 64KB 切片一次正则编码，1MiB 提示
 /// ≈ 16 切片）：在 async 上下文同步调用会阻塞当前 worker 数毫秒到数十
-/// 毫秒。输入按值传入（调用方克隆为一次 O(n) memcpy，远廉价于 BPE 编码
-/// 本身）。join 失败（运行时关闭边缘）回退 0，与 `enc` 内部 catch_unwind
-/// 的防御口径一致。持有 Arc<ChatFormat> 的调用方走
-/// [`count_chat_prompt_blocking_arc`] 只 clone Arc。
-#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
-pub async fn count_chat_prompt_blocking(model: String, req: ChatFormat) -> u32 {
-    tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req))
-        .await
-        .unwrap_or_default()
-}
-
-/// Arc 版本：请求快照为 Arc<ChatFormat> 时用（spawn_blocking 输入只
-/// clone Arc，不深拷贝消息树）。
+/// 毫秒。输入用请求快照 `Arc<ChatFormat>`：spawn_blocking 只 clone Arc，
+/// 不深拷贝消息树（此前还有一个按值传 `ChatFormat` 的重载，除自测外无
+/// 消费方，已删）。join 失败（运行时关闭边缘）回退 0，与 `enc` 内部
+/// catch_unwind 的防御口径一致。
 pub async fn count_chat_prompt_blocking_arc(model: String, req: Arc<ChatFormat>) -> u32 {
     tokio::task::spawn_blocking(move || count_chat_prompt(&model, &req))
         .await
         .unwrap_or_default()
 }
 
-/// 在阻塞线程池执行纯文本估算（同 [`count_chat_prompt_blocking`]）。
+/// 在阻塞线程池执行纯文本估算（同 [`count_chat_prompt_blocking_arc`]）。
 pub async fn count_text_blocking(model: String, text: String) -> u32 {
     tokio::task::spawn_blocking(move || count_text(&model, &text))
         .await
         .unwrap_or_default()
-}
-
-/// 逐字段 or 填充：上游值非零时优先，零值用本地计数替换。
-/// `output_text: None` 禁用完成侧（无交付内容或未累积）。
-#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
-pub fn fill_missing(
-    model: &str,
-    upstream_prompt: u32,
-    upstream_completion: u32,
-    output_text: Option<&str>,
-) -> (u32, u32, bool) {
-    let prompt = upstream_prompt;
-    let mut completion = upstream_completion;
-    let mut estimated = false;
-
-    if upstream_prompt == 0 {
-        // 需要请求体才能估算 prompt，这里只能返回 0
-        // 调用方应使用 count_chat_prompt 预先估算
-    }
-    if upstream_completion == 0 {
-        if let Some(text) = output_text {
-            let n = count_text(model, text);
-            if n > 0 {
-                completion = n;
-                estimated = true;
-            }
-        }
-    }
-    (prompt, completion, estimated)
 }
 
 #[cfg(test)]
@@ -270,9 +232,6 @@ mod tests {
             extra: None,
         };
         let sync_n = count_chat_prompt("gpt-4", &req);
-        let blocking_n = count_chat_prompt_blocking("gpt-4".into(), req.clone()).await;
-        assert_eq!(sync_n, blocking_n, "prompt 估算必须逐字一致");
-        // Arc 变体同样逐字一致（finalize 路径的输入形态）
         let blocking_arc = count_chat_prompt_blocking_arc("gpt-4".into(), Arc::new(req)).await;
         assert_eq!(sync_n, blocking_arc, "Arc 变体估算必须逐字一致");
 

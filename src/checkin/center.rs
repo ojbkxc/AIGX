@@ -316,36 +316,12 @@ pub fn campaign_preview_shape() -> Value {
     })
 }
 
-/// 一条账号的签到状态行（签到中心「每日签到」分组用）。
-///
-/// 与 `checkin_center::handle_checkin_center` 的行形状保持一致：`checkedInToday`
-/// 读台账当日末条记录，`streakDays` 读签到后回读落盘的连登天数。
-#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
-pub fn account_row(
-    store: &CheckinStore,
-    session: &crate::account_session::model::AccountSession,
-) -> Value {
-    let last = store
-        .last_today(&session.id, &session.provider)
-        .ok()
-        .flatten();
-    // 与签到中心的账号行同口径：snake_case（前端 `CheckinAccountRow` 逐字段对应）
-    json!({
-        "id": session.id,
-        "name": session.name,
-        "channel_id": session.channel_id,
-        "available": session.is_enabled(),
-        "checked_in_today": last.as_ref().map(|r| r.ok).unwrap_or(false),
-        "last_outcome": last.as_ref().map(|r| r.outcome.as_str()),
-        "last_message": last.as_ref().map(|r| r.message.clone()),
-        "last_ts": last.as_ref().map(|r| r.ts),
-        "streak_days": store.streak_days(&session.id),
-        // 当日签到台账（对齐 A2A dailyCheckin；只有 ok/already 才带 claim_at）
-        "daily_checkin": store
-            .daily_checkin(&session.id, &scheduler::today())
-            .unwrap_or(Value::Null),
-    })
-}
+// 已删除（2026-11-18）：此处原有一份 `account_row()`，是
+// `checkin_center::handle_checkin_center` 内联 `json!` 的**副本**。核账时
+// 发现它已与 handler 漂移：缺 `edition` 字段、`available` 少了
+// `!is_expired(now)` 判据、且 handler 消费的是 `collect_targets`（已过滤
+// 停用/过期账号）后的列表。接线会改变输出形状，保留则必然误导 —— 故整块
+// 删除；行形状的权威定义只保留 handler 一处。
 
 #[cfg(test)]
 mod tests {
