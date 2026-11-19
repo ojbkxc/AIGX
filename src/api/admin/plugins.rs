@@ -25,7 +25,7 @@
 //! 清单格式是插件的对外契约、可随上游演进，网关只消费其中几把键；
 //! 绑上结构体反而要求每加一个键就改一次解包类型。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +44,11 @@ use crate::storage::FileStore;
 
 /// KV 键：provider 级停用名单（`Vec<provider kind>`）。
 const DISABLED_PROVIDERS_KEY: &str = "plugins:disabled_providers";
+
+/// 24 MiB zip 的 base64 长度上界（仅本地安装路由使用）。
+const MAX_PACK_BASE64_BYTES: usize = MAX_PACK_BYTES.div_ceil(3) * 4;
+/// 本地安装路由的请求体上限：base64 + 有限 JSON 开销（对齐 A2A）。
+const MAX_PACK_UPLOAD_BYTES: usize = MAX_PACK_BASE64_BYTES + 1024 * 1024;
 
 /// 发布目录拉取超时（`[plugins] source_url`）。目录是小 JSON，
 /// 10s 足够；超时即降级为「插件源不可用」而不是拖住整个列表接口。
@@ -143,6 +148,20 @@ pub fn router() -> axum::Router<AppState> {
         .route(
             "/api/plugins/reload",
             axum::routing::post(handle_reload_plugin),
+        )
+        // 从发布目录安装/更新（A2A `install-from-release` / `POST /update`）：
+        // 服务端解析当前平台的下载地址，起后台 Operation，进度走 /progress。
+        .route(
+            "/api/plugins/install-from-release",
+            axum::routing::post(handle_install_from_release),
+        )
+        // 本地 zip 安装（A2A `/api/plugins/install` 的文件上传形态）。
+        // 原始 zip 最大 24 MiB / base64 JSON 更大，路由级放大 body 上限，
+        // 不影响全局 DefaultBodyLimit（无需改 main.rs）。
+        .route(
+            "/api/plugins/install-file",
+            axum::routing::post(handle_install_file)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_PACK_UPLOAD_BYTES)),
         )
     // beta.2 的 `/api/plugins/batch` 与 `/api/plugins/managed-task` 以平铺
     // `.route(...)` 注册在 `main.rs`（与 install/enable/progress 同一段），
@@ -429,6 +448,155 @@ fn ui_entry_ok(entry: &str) -> bool {
     normalized.to_ascii_lowercase().ends_with(".html")
 }
 
+/// 某 provider 当前归属的已启用包 id（A2A `ownership::owners` 投影）。
+///
+/// 口径与数据面一致：包级 `enabled` ∧ 该家不在 `disabled_providers` 才算
+/// 接管（[`PackMeta::provider_enabled`]）。用于在包视图里给「由别的插件
+/// 接管」的家打标（前端据此禁掉逐家开关、显示接管方）。
+fn provider_owner(host: &PluginHostManager, provider: &str) -> Option<String> {
+    host.registry()
+        .list()
+        .into_iter()
+        .find(|pack| {
+            pack.provider_enabled(provider) && pack.providers.iter().any(|pp| pp.id == provider)
+        })
+        .map(|pack| pack.id)
+}
+
+/// 已装外置包相对当前发布目录的可用更新（对齐 A2A `catalog::updates_with_packs`）。
+///
+/// 每个「已安装 且 目录里收录」的外置包出一行：
+/// `available` = 目录版本 **高于** 已装版本 **且** 当前平台有安装包；
+/// `asset` 是当前平台那一份（供一键升级用）。目录不可用 / 未收录该包 →
+/// 不出行（前端按「无更新」处理，不虚构「可更新」徽标）。
+fn compute_updates(metas: &[PackMeta], catalog: &Value) -> Vec<Value> {
+    let Some(plugins) = catalog.get("plugins").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let os = std::env::consts::OS;
+    let mut rows = Vec::new();
+    for meta in metas.iter().filter(|m| m.id != BUILTIN_PACK_ID) {
+        let Some(entry) = plugins
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(meta.id.as_str()))
+        else {
+            continue;
+        };
+        let latest = entry.get("version").and_then(Value::as_str).unwrap_or("");
+        let platform = entry
+            .get("platforms")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|p| p.get("target").and_then(Value::as_str) == Some(os))
+            });
+        let newer =
+            !latest.is_empty() && crate::update::compare_versions(latest, &meta.version) == Some(1);
+        let available = newer && platform.is_some();
+        let reason = if available {
+            Value::Null
+        } else if platform.is_none() {
+            json!("当前平台暂无可用安装包")
+        } else {
+            json!("已经是最新版本")
+        };
+        let asset = match platform {
+            Some(p) => json!({
+                "target": p.get("target").cloned().unwrap_or(Value::Null),
+                "size": p.get("size").cloned().unwrap_or_else(|| json!(0)),
+                "url": p.get("url").cloned().unwrap_or(Value::Null),
+                "current": false,
+                "sha256": p.get("sha256").cloned().unwrap_or(Value::Null),
+            }),
+            None => Value::Null,
+        };
+        rows.push(json!({
+            "id": meta.id,
+            "available": available,
+            "checked": true,
+            "current": meta.version,
+            "latest": if latest.is_empty() { Value::Null } else { json!(latest) },
+            "notes": entry.get("notes").cloned().unwrap_or(Value::Null),
+            "publishedAt": entry.get("publishedAt").cloned().unwrap_or(Value::Null),
+            "prerelease": entry.get("prerelease").and_then(Value::as_bool).unwrap_or(false),
+            // page 缺失时回落 homepage：两者在目录条目里指向同一发布页
+            "page": entry.get("page").cloned()
+                .or_else(|| entry.get("homepage").cloned())
+                .unwrap_or(Value::Null),
+            "asset": asset,
+            "error": false,
+            "reason": reason,
+        }));
+    }
+    rows
+}
+
+/// 插件账号摘要（对齐 A2A `account_store::plugin_account_summary`）。
+///
+/// 返回 `(counts, hiddenAccounts)`：
+/// - `counts` = `{provider: 账号数}`（前端批量条目的账号计数）；
+/// - `hiddenAccounts` = `{total, byProvider, providers:[{id,label,count,reason,packId}]}`
+///   —— 只含被管理面隐藏的账号（AIGX `AccountSession.hidden`）。`reason` 用
+///   A2A 的 snake_case 口径（`not_installed` / `pack_disabled` /
+///   `provider_disabled` / `not_loaded`），前端缺失插件横幅据此过滤。
+fn plugin_account_summary(state: &AppState) -> (Value, Value) {
+    let sessions = state.account_sessions.all();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut hidden: BTreeMap<String, usize> = BTreeMap::new();
+    for session in &sessions {
+        *counts.entry(session.provider.clone()).or_insert(0) += 1;
+        if session.hidden {
+            *hidden.entry(session.provider.clone()).or_insert(0) += 1;
+        }
+    }
+    let registry = state.plugin_host.registry();
+    let providers: Vec<Value> = hidden
+        .iter()
+        .map(|(provider, count)| {
+            json!({
+                "id": provider,
+                "label": crate::model::manage::provider_label(provider),
+                "count": count,
+                "reason": hidden_provider_reason(state, provider),
+                "packId": registry.find_pack_for_provider(provider),
+            })
+        })
+        .collect();
+    let total: usize = hidden.values().sum();
+    (
+        json!(counts),
+        json!({
+            "total": total,
+            "byProvider": hidden,
+            "providers": providers,
+        }),
+    )
+}
+
+/// 隐藏账号的归属原因（A2A `HiddenReason` 的 AIGX 投影）。
+fn hidden_provider_reason(state: &AppState, provider: &str) -> &'static str {
+    if let Some(pack) = state
+        .plugin_host
+        .registry()
+        .list()
+        .into_iter()
+        .find(|pack| pack.providers.iter().any(|pp| pp.id == provider))
+    {
+        if !pack.enabled {
+            return "pack_disabled";
+        }
+        if !pack.provider_enabled(provider) {
+            return "provider_disabled";
+        }
+        return "not_loaded";
+    }
+    if state.provider_gates.is_disabled(provider) {
+        return "provider_disabled";
+    }
+    "not_installed"
+}
+
 /// 外置插件包视图（前端 `PluginPackSummary` 契约）。
 ///
 /// - `enabled` 以 `PackMeta.enabled` 为准（包级开关）：包声明里的
@@ -438,7 +606,9 @@ fn ui_entry_ok(entry: &str) -> bool {
 /// - `host.crashes` 取监督循环的崩溃计数（重新启用清零）；
 /// - `startup` / `providerEnabled` 是 A2A 对齐字段：宿主状态投影与逐家启停
 ///   （`providers[].enabled` 与 `providerEnabled` 同源 = 包级 `enabled` ∧
-///   该家不在 `disabled_providers`，与上游 `provider_enabled` 同口径）。
+///   该家不在 `disabled_providers`，与上游 `provider_enabled` 同口径）；
+/// - `providers[].overriddenBy`：该家实际归属的**另一个**已启用包（A2A
+///   `PackProviderSummary.overriddenBy`），前端据此显示接管方并禁掉开关。
 fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
     let rt = host.runtime_of(&meta.id);
     let version_dir = meta.version_dir(host.plugins_root());
@@ -450,11 +620,14 @@ fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
         .map(|pp| {
             let enabled = meta.provider_enabled(&pp.id);
             let loaded = rt.providers.iter().any(|p| p.id == pp.id);
+            // 归属：另有已启用包声明了这家 = 本包被接管（不是本包自己）
+            let overridden_by = provider_owner(host, &pp.id).filter(|owner| owner != &meta.id);
             json!({
                 "id": pp.id,
                 "label": pp.label,
                 "enabled": enabled,
                 "loaded": enabled && loaded,
+                "overriddenBy": overridden_by,
                 // 逐家开关写 `PackMeta.disabled_providers`（与内置包同为
                 // "global" 语义：改完数据面归属即时生效）
                 "toggle": "global",
@@ -519,12 +692,18 @@ pub async fn handle_list_plugins(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let disabled = state.provider_gates.disabled_set();
+    let metas = state.plugin_host.registry().list();
     // 内置目录包 + 注册表里的全部外置包
     let mut packs = vec![builtin_pack_view(&disabled)];
-    for meta in state.plugin_host.registry().list() {
-        packs.push(external_pack_view(&meta, &state.plugin_host));
+    for meta in &metas {
+        packs.push(external_pack_view(meta, &state.plugin_host));
     }
     let catalog = fetch_catalog(&state).await;
+    // 更新检查：已装外置包 vs 当前目录（同一份 catalog，不额外请求）
+    let updates = compute_updates(&metas, &catalog);
+    // 账号摘要（A2A `accountCounts` / `hiddenAccounts`）：前端「补全缺失插件」
+    // 横幅与批量条目的账号计数据此渲染。
+    let (account_counts, hidden_accounts) = plugin_account_summary(&state);
     Ok(Json(json!({
         "success": true,
         "data": {
@@ -541,10 +720,12 @@ pub async fn handle_list_plugins(
             "pluginsDir": state.plugin_host.plugins_root().display().to_string(),
             // A2A 对齐字段（v1.0.63）：上传上限 / 脚本宿主快照 / 任务启动快照
             "maxPackBytes": MAX_PACK_BYTES,
+            "accountCounts": account_counts,
+            "hiddenAccounts": hidden_accounts,
             "scripts": script_snapshot(&state),
             "startup": startup_snapshot(&state, &packs),
             "catalog": catalog,
-            "updates": [],
+            "updates": updates,
             // 在途/近期操作（Operation 异步进度模型；含持久化的历史条目）
             "operations": plugin_operations(&state),
             // Wasm 宿主能力契约（beta.2：capabilities/limits/compute/scheduling/
@@ -694,6 +875,230 @@ pub async fn handle_install_plugin(
         "success": true,
         "data": { "pack": external_pack_view(&pack, &state.plugin_host) }
     })))
+}
+
+/// 从发布目录安装/更新的请求体（前端 `runPluginInstallFromRelease`）。
+#[derive(Debug, Deserialize)]
+pub struct ReleaseInstallBody {
+    pub id: String,
+    /// `install`（缺省）或 `update`：`update` 会先校验目录版本确实更高。
+    #[serde(default)]
+    pub action: Option<String>,
+    /// 可选 sha256（缺省取目录平台条目的 sha256）。
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// 目标平台名（缺省 = 当前 OS；AIGX 目录的 `target` 就是 OS 名）。
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+/// POST /api/plugins/install-from-release —— 从发布目录起一次后台安装/更新操作。
+///
+/// 对齐 A2A `api::plugins::install_from_release` / `run_update`：
+/// 服务端从当前目录解析「目标版本 + 当前平台下载地址 + sha256」，
+/// 校验平台/版本后启动 `operations::start_install`，立即返回初始 Operation；
+/// 下载/校验/安装与逐字节进度经 `GET /api/plugins/progress` 轮询。
+/// 目录里没有该包 / 平台无包 / 更新时已是最高版 → 400（不进后台任务）。
+pub async fn handle_install_from_release(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ReleaseInstallBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let id = body.id.trim();
+    if id.is_empty() {
+        return Err(error_response("缺少插件包 id", StatusCode::BAD_REQUEST));
+    }
+    let action = body.action.as_deref().unwrap_or("install");
+    if !matches!(action, "install" | "update") {
+        return Err(error_response(
+            &format!("未知的安装动作：{action}（只支持 install / update）"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let catalog = fetch_catalog(&state).await;
+    let entry = catalog
+        .get("plugins")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            error_response(
+                &format!("发布目录里没有这个插件包：{id}"),
+                StatusCode::NOT_FOUND,
+            )
+        })?;
+    if entry.get("error").and_then(Value::as_bool) == Some(true) {
+        return Err(error_response(
+            entry
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("该插件在当前目录中不可用"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let target = body.target.as_deref().unwrap_or(std::env::consts::OS);
+    let platform = entry
+        .get("platforms")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|p| p.get("target").and_then(Value::as_str) == Some(target))
+        })
+        .ok_or_else(|| {
+            error_response(
+                &format!("该插件不提供当前平台（{target}）的安装包"),
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
+    let url = platform
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| error_response("目录条目缺少下载地址", StatusCode::BAD_REQUEST))?
+        .to_string();
+    let version = entry.get("version").and_then(Value::as_str).unwrap_or("");
+    if action == "update" {
+        let Some(installed) = state.plugin_host.registry().get(id) else {
+            return Err(error_response(
+                "还没有安装这个插件包，无法更新",
+                StatusCode::NOT_FOUND,
+            ));
+        };
+        if crate::update::compare_versions(version, &installed.version) != Some(1) {
+            return Err(error_response("已经是最新版本", StatusCode::BAD_REQUEST));
+        }
+    }
+    let sha256 = body
+        .sha256
+        .clone()
+        .or_else(|| {
+            platform
+                .get("sha256")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty());
+    let operation = crate::plugin_host::operations::start_install(
+        state.plugin_host.clone(),
+        state.plugin_host.store(),
+        id.to_string(),
+        action.to_string(),
+        url,
+        sha256,
+    )
+    .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+    tracing::info!(
+        "[Plugins] 已受理插件「{}」{}操作（后台执行，进度见 /api/plugins/progress）",
+        id,
+        if action == "update" {
+            "更新"
+        } else {
+            "安装"
+        }
+    );
+    Ok(Json(
+        json!({ "success": true, "data": { "operation": operation } }),
+    ))
+}
+
+/// 本地安装的查询参数（`?sha256=…`；A2A 的 expected_* 在无预览模式下降级为明文校验）。
+#[derive(Debug, Deserialize, Default)]
+pub struct InstallFileQuery {
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// POST /api/plugins/install-file —— 本地 zip 安装（A2A `install` 的文件上传形态）。
+///
+/// 请求体两种形态（与 A2A `pack_bytes` 同口径）：
+/// - 原始 zip 字节（`Content-Type: application/octet-stream`，以 `PK` 开头）；
+/// - JSON `{ "packB64": "..." }`（可带 `data:…;base64,` 前缀）。
+///
+/// 与 URL 安装共用 `PluginHostManager::install_bytes` 的校验链路（zip 结构、
+/// 清单、入口、协议、sha256）。安装完成返回装好的包视图；失败 400 + 中文原因。
+/// 本地安装是同步的（文件已在客户端，无下载阶段），不需要 Operation。
+pub async fn handle_install_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<InstallFileQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let bytes =
+        pack_upload_bytes(&body).map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+    let manager = state.plugin_host.clone();
+    let sha = query.sha256.clone();
+    let meta = tokio::task::spawn_blocking(move || manager.install_bytes(&bytes, sha.as_deref()))
+        .await
+        .map_err(|e| {
+            error_response(
+                &format!("安装任务中断：{e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?
+        .map_err(|e| error_response(&e.to_string(), StatusCode::BAD_REQUEST))?;
+    tracing::info!(
+        "[Plugins] 已从本地文件安装插件包 {}（v{}，{} 家 provider）",
+        meta.id,
+        meta.version,
+        meta.providers.len()
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": { "pack": external_pack_view(&meta, &state.plugin_host) }
+    })))
+}
+
+/// 解析本地安装请求体：原始 zip 或 base64 JSON，带与安装链路一致的体积上限。
+fn pack_upload_bytes(body: &[u8]) -> Result<Vec<u8>, String> {
+    if body.is_empty() {
+        return Err("请求体是空的：请选择插件包 zip 后重试".to_string());
+    }
+    let size_error = || {
+        format!(
+            "插件包必须为非空且不超过 {} MiB 的 zip",
+            MAX_PACK_BYTES / (1024 * 1024)
+        )
+    };
+    if body.starts_with(b"PK") {
+        if body.len() > MAX_PACK_BYTES {
+            return Err(size_error());
+        }
+        return Ok(body.to_vec());
+    }
+    if body.len() > MAX_PACK_UPLOAD_BYTES {
+        return Err(size_error());
+    }
+    let payload: Value =
+        serde_json::from_slice(body).map_err(|_| "请求体既不是 zip 也不是 JSON".to_string())?;
+    let encoded = payload
+        .get("packB64")
+        .or_else(|| payload.get("fileB64"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "缺少 packB64".to_string())?;
+    let encoded = encoded
+        .split_once("base64,")
+        .map(|(_, text)| text)
+        .unwrap_or(encoded)
+        .trim();
+    if encoded.len() > MAX_PACK_BASE64_BYTES {
+        return Err(size_error());
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("插件包内容不是合法 base64：{error}"))?;
+    if bytes.is_empty() || bytes.len() > MAX_PACK_BYTES {
+        return Err(size_error());
+    }
+    Ok(bytes)
 }
 
 /// ── 内置发布目录：上游 Agent2API 插件索引快照 ──────────────────────────
@@ -892,6 +1297,8 @@ fn builtin_catalog() -> Value {
                 "platforms": platforms,
                 "homepage": rel.homepage,
                 "icon": null,
+                // 内置快照不附带清单 provider 列表（动态索引才有）
+                "providers": [],
             })
         })
         .collect();
@@ -992,6 +1399,8 @@ async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
             "homepage": manifest.get("homepage").and_then(Value::as_str),
             "icon": entry.get("icon").and_then(Value::as_str),
             "platforms": platforms,
+            // 清单声明的 provider（缺失插件横幅用来把隐藏账号映射到可安装包）
+            "providers": manifest.get("providers").cloned().unwrap_or(Value::Array(Vec::new())),
         });
         items.push(item);
     }
@@ -1153,6 +1562,20 @@ fn normalize_store_plugin(item: &Value, target_os: &str) -> Option<Value> {
             }
         }
     };
+    // 清单 provider 列表（可选）：`[{id,label}]`；缺失 = 空表（前端按 id 猜测兜底）
+    let providers: Vec<Value> = item
+        .get("providers")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|provider| {
+                    let id = provider.get("id").and_then(Value::as_str)?;
+                    let label = provider.get("label").and_then(Value::as_str).unwrap_or(id);
+                    Some(json!({ "id": id, "label": label }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(json!({
         "id": id,
         "name": name,
@@ -1168,6 +1591,7 @@ fn normalize_store_plugin(item: &Value, target_os: &str) -> Option<Value> {
         "homepage": str_field("homepage"),
         "icon": str_field("icon"),
         "platforms": platforms,
+        "providers": providers,
     }))
 }
 
@@ -1527,17 +1951,41 @@ pub async fn handle_uninstall_plugin(
     })))
 }
 
-/// GET /api/plugins/update —— 更新检查（内置实现：返回空 + 说明）。
+/// GET /api/plugins/update —— 更新检查：拉当前发布目录，逐包比对已装版本。
+///
+/// 对齐 A2A `api::plugins::check_update`：一次请求即刷新目录并算出
+/// `updates[]`（每包 `available / current / latest / asset / reason`）。
+/// 目录不可用时不报 5xx —— 如实返回空 updates + `error/reason`，前端据此
+/// 提示「检查失败」而不是把整页打挂。
 pub async fn handle_check_plugin_updates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
+    let catalog = fetch_catalog(&state).await;
+    let updates = compute_updates(&state.plugin_host.registry().list(), &catalog);
+    let available = catalog
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (error, reason) = if available {
+        (false, Value::Null)
+    } else {
+        (
+            true,
+            catalog
+                .get("reason")
+                .cloned()
+                .unwrap_or_else(|| json!("插件目录暂不可用")),
+        )
+    };
     Ok(Json(json!({
         "success": true,
         "data": {
-            "updates": [],
-            "note": "内置 provider 目录随网关版本发布（无独立插件包更新渠道）",
+            "updates": updates,
+            "checked": true,
+            "error": error,
+            "reason": reason,
         }
     })))
 }
@@ -2127,5 +2575,99 @@ mod tests {
         ] {
             assert!(PLUGIN_SETTINGS_KEYS.contains(&key), "白名单缺 {key}");
         }
+    }
+
+    /// 更新检查：目录新版本 + 当前平台有包 → available；同版本 → 不可更新。
+    #[test]
+    fn compute_updates_marks_newer_with_platform() {
+        let os = std::env::consts::OS;
+        let metas = vec![
+            PackMeta {
+                id: "pack-a".into(),
+                version: "1.0.0".into(),
+                ..Default::default()
+            },
+            PackMeta {
+                id: "pack-b".into(),
+                version: "2.0.0".into(),
+                ..Default::default()
+            },
+        ];
+        let catalog = json!({
+            "plugins": [
+                { "id": "pack-a", "version": "1.1.0",
+                  "platforms": [{ "target": os, "url": "https://x/a.zip", "size": 5, "sha256": "abc" }] },
+                { "id": "pack-b", "version": "2.0.0",
+                  "platforms": [{ "target": os, "url": "https://x/b.zip" }] },
+            ]
+        });
+        let rows = compute_updates(&metas, &catalog);
+        let a = rows.iter().find(|r| r["id"] == "pack-a").unwrap();
+        assert_eq!(a["available"], true);
+        assert_eq!(a["latest"], "1.1.0");
+        assert_eq!(a["current"], "1.0.0");
+        assert_eq!(a["asset"]["url"], "https://x/a.zip");
+        assert_eq!(a["asset"]["sha256"], "abc");
+        let b = rows.iter().find(|r| r["id"] == "pack-b").unwrap();
+        assert_eq!(b["available"], false, "同版本不算可更新");
+        assert_eq!(b["reason"], "已经是最新版本");
+    }
+
+    /// 更新检查：目录未收录的包不出行；平台无包 → available=false + 无 asset。
+    #[test]
+    fn compute_updates_skips_missing_platform_and_unknown() {
+        let os = std::env::consts::OS;
+        let other = if os == "linux" { "windows" } else { "linux" };
+        let metas = vec![
+            PackMeta {
+                id: "pack-a".into(),
+                version: "1.0.0".into(),
+                ..Default::default()
+            },
+            PackMeta {
+                id: "pack-unknown".into(),
+                version: "1.0.0".into(),
+                ..Default::default()
+            },
+        ];
+        let catalog = json!({
+            "plugins": [
+                { "id": "pack-a", "version": "9.9.9",
+                  "platforms": [{ "target": other, "url": "https://x/a.zip" }] },
+            ]
+        });
+        let rows = compute_updates(&metas, &catalog);
+        assert!(
+            rows.iter().all(|r| r["id"] != "pack-unknown"),
+            "未收录包不应出行"
+        );
+        let a = rows.iter().find(|r| r["id"] == "pack-a").unwrap();
+        assert_eq!(a["available"], false);
+        assert!(a["asset"].is_null());
+    }
+
+    /// 更新检查：目录不可用（无 plugins 数组）→ 空表，不 panic。
+    #[test]
+    fn compute_updates_empty_when_catalog_unavailable() {
+        let metas = vec![PackMeta {
+            id: "pack-a".into(),
+            version: "1.0.0".into(),
+            ..Default::default()
+        }];
+        assert!(compute_updates(&metas, &json!({ "plugins": [] })).is_empty());
+        assert!(compute_updates(&metas, &json!({})).is_empty());
+    }
+
+    /// 内置包（id=builtin）不参与更新检查。
+    #[test]
+    fn compute_updates_ignores_builtin_pack() {
+        let metas = vec![PackMeta {
+            id: BUILTIN_PACK_ID.into(),
+            version: "1.0".into(),
+            ..Default::default()
+        }];
+        let catalog =
+            json!({ "plugins": [{ "id": BUILTIN_PACK_ID, "version": "9.9", "platforms": [] }] });
+        assert!(compute_updates(&metas, &catalog).is_empty());
     }
 }

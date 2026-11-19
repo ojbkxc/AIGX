@@ -370,7 +370,15 @@ function OptionsDialog({
  * 双数据源：`/api/plugins/scripts`（宿主 + 已装包）与
  * `/api/plugins/scripts/catalog`（目录三分类）。
  */
-export default function ScriptPluginsPanel(): JSX.Element {
+export default function ScriptPluginsPanel({
+  query: pageQuery,
+  status: pageStatus,
+}: {
+  /** 页面级搜索关键词（A2A plugins-page 把搜索透传给脚本面板） */
+  query?: string;
+  /** 页面级状态筛选（missing = 未安装） */
+  status?: 'all' | 'updatable' | 'installed' | 'missing';
+} = {}): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
   const mounted = useRef(true);
@@ -398,6 +406,15 @@ export default function ScriptPluginsPanel(): JSX.Element {
   const [query, setQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'magpie' | 'npm' | 'github'>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'installed' | 'notInstalled' | 'updatable'>('all');
+
+  // 页面级筛选联动：搜索框与状态筛选由插件页统一驱动（A2A 同口径）
+  useEffect(() => {
+    if (pageQuery !== undefined) setQuery(pageQuery);
+  }, [pageQuery]);
+  useEffect(() => {
+    if (!pageStatus) return;
+    setStatusFilter(pageStatus === 'missing' ? 'notInstalled' : pageStatus);
+  }, [pageStatus]);
 
   useEffect(() => {
     mounted.current = true;

@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Trash2, Eraser, EyeOff, Eye, Search, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin, fmtCompact } from '../lib/utils';
-import { fmtCost } from '../lib/format';
+import { fmtCost, toCsv } from '../lib/format';
 import { getFilter, setFilter } from '../lib/filterMemory';
 import {
   applyTableColumns,
@@ -106,7 +106,37 @@ export const sourceLabel = (keyId: string | undefined): string | null =>
   (keyId && SOURCE_LABELS[keyId]) ||
   (keyId?.startsWith('playground:') ? keyId.slice('playground:'.length) : null);
 
+/**
+ * 状态码归类：`0`/缺省视为「未记录」（中性），`<400` 成功，其余失败。
+ *
+ * 后端 `RequestLog.status_code` 是 `u16` 且 `#[serde(default)]` —— 未完成/被中断的
+ * 老日志会落成 0。旧实现把 `0` 当成功（`<400`）并渲染成绿色「成功」，属于误导；
+ * 这里把「无状态码」单独归为 unknown，表格与时间线都按中性处理。
+ */
+export const statusKind = (code?: number | null): 'ok' | 'error' | 'unknown' =>
+  code == null || code === 0 ? 'unknown' : code < 400 ? 'ok' : 'error';
+
+/** 服务端导出不支持 status/keyword（ExportQuery 无此二参），
+ *  这两项生效时前端改走列表接口逐页取全量后本地生成，保证导出与所见一致。 */
+const EXPORT_CLIENT_MAX_ROWS = 50_000;
+/** 与后端 export_csv_filtered 的表头逐列对齐，保证两种导出口径一致 */
+const EXPORT_CSV_COLUMNS = [
+  'id', 'created_at', 'user_id', 'key_id', 'channel_id', 'channel_name',
+  'model', 'origin_model', 'input_tokens', 'output_tokens', 'cost',
+  'channel_cost', 'latency_ms', 'status_code', 'error_msg', 'ip',
+] as const;
+
 type LogItem = RequestLogItem | AuditLogItem;
+
+/** 触发浏览器下载（Safari/Firefox 同帧 revoke 会取消下载，延迟释放） */
+function triggerDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 interface Filters {
   user: string;
@@ -276,7 +306,10 @@ export default function Logs(): JSX.Element {
 
   // 请求序号：快速翻页/切筛选时旧响应晚到不覆盖新数据
   const loadSeq = useRef(0);
-  const load = async (silent = false) => {
+  // override：状态分段控件这类「离散选择」点击即查询时，需用尚未提交的新筛选值
+  // 发请求（setFilters 的 state 更新是异步的，闭包里的 filters 还是旧值）。
+  const load = async (silent = false, override?: Filters) => {
+    const f = override ?? filters;
     const seq = ++loadSeq.current;
     if (!silent) {
       setLoading(true);
@@ -286,14 +319,14 @@ export default function Logs(): JSX.Element {
       let resTotal = 0;
       if (tab === 'requests') {
         const params: Record<string, string | number> = { page, size };
-        if (filters.user) params.user = filters.user;
-        if (filters.model) params.model = filters.model;
-        if (filters.channel) params.channel = filters.channel;
-        if (filters.status) params.status = filters.status;
-        if (filters.keyword.trim()) params.keyword = filters.keyword.trim();
+        if (f.user) params.user = f.user;
+        if (f.model) params.model = f.model;
+        if (f.channel) params.channel = f.channel;
+        if (f.status) params.status = f.status;
+        if (f.keyword.trim()) params.keyword = f.keyword.trim();
         // 时间范围筛选：datetime-local 值（本地时区）→ unix 秒
-        if (filters.start) params.start = Math.floor(new Date(filters.start).getTime() / 1000);
-        if (filters.end) params.end = Math.floor(new Date(filters.end).getTime() / 1000);
+        if (f.start) params.start = Math.floor(new Date(f.start).getTime() / 1000);
+        if (f.end) params.end = Math.floor(new Date(f.end).getTime() / 1000);
         const res = await api.listRequestLogs(params);
         if (seq !== loadSeq.current) return; // 已被更新的请求取代
         setLogs(Array.isArray(res?.data) ? (res.data as unknown as LogItem[]) : []);
@@ -331,7 +364,8 @@ export default function Logs(): JSX.Element {
 
   const handleBatchDelete = () => {
     if (selected.size === 0) return;
-    const ids = Array.from(selected);
+    // 后端 DeleteLogsBody.ids 是 Vec<String>：混入数字 id 会反序列化失败（400）。
+    const ids = Array.from(selected).map(String);
     const targetLabel = tab === 'requests' ? t('请求日志') : t('审计日志');
     setConfirmState({
       title: t('删除日志'),
@@ -435,13 +469,60 @@ export default function Logs(): JSX.Element {
   const handleExport = async (format: 'json' | 'csv') => {
     try {
       setExporting(format);
-      // 拼接当前生效的筛选参数，保证导出与页面筛选结果一致
-    const qs = new URLSearchParams({ format });
-    if (filters.user) qs.set('user', filters.user);
-    if (filters.model) qs.set('model', filters.model);
-    if (filters.channel) qs.set('channel', filters.channel);
-    if (filters.start) qs.set('start', String(Math.floor(new Date(filters.start).getTime() / 1000)));
-    if (filters.end) qs.set('end', String(Math.floor(new Date(filters.end).getTime() / 1000)));
+      // 服务端导出（ExportQuery）只认 user/model/channel/start/end，不含 status/keyword。
+      // 这两项生效时改走列表接口逐页取全量、本地生成文件，确保「导出 == 页面所见」。
+      const needsClientFilter = Boolean(filters.status) || Boolean(filters.keyword.trim());
+      if (needsClientFilter) {
+        const rows: Record<string, unknown>[] = [];
+        const pageSize = 500;
+        for (let p = 1; ; p += 1) {
+          const params: Record<string, string | number> = { page: p, size: pageSize };
+          if (filters.user) params.user = filters.user;
+          if (filters.model) params.model = filters.model;
+          if (filters.channel) params.channel = filters.channel;
+          if (filters.status) params.status = filters.status;
+          if (filters.keyword.trim()) params.keyword = filters.keyword.trim();
+          if (filters.start) params.start = Math.floor(new Date(filters.start).getTime() / 1000);
+          if (filters.end) params.end = Math.floor(new Date(filters.end).getTime() / 1000);
+          const res = await api.listRequestLogs(params);
+          const chunk = Array.isArray(res?.data) ? (res.data as Record<string, unknown>[]) : [];
+          rows.push(...chunk);
+          const totalN = Number(res?.total) || 0;
+          if (chunk.length === 0 || rows.length >= totalN) break;
+          if (rows.length >= EXPORT_CLIENT_MAX_ROWS) {
+            throw new Error(
+              t('导出条数超过 {{n}} 条上限，请缩小筛选范围后再导出', { n: EXPORT_CLIENT_MAX_ROWS }),
+            );
+          }
+        }
+        if (format === 'json') {
+          triggerDownload(
+            new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json;charset=utf-8' }),
+            'request_logs.json',
+          );
+        } else {
+          const ordered = rows.map((r) => {
+            const o: Record<string, unknown> = {};
+            for (const col of EXPORT_CSV_COLUMNS) o[col] = r[col] ?? '';
+            return o;
+          });
+          // 与 lib/format.downloadText 一致加 BOM，Excel 才能正确识别 UTF-8
+          triggerDownload(
+            new Blob(['\uFEFF' + toCsv(ordered)], { type: 'text/csv;charset=utf-8' }),
+            'request_logs.csv',
+          );
+        }
+        addToast(t('导出成功'));
+        return;
+      }
+
+      // 常规路径：服务端流式导出（大结果集无需逐页拉取）
+      const qs = new URLSearchParams({ format });
+      if (filters.user) qs.set('user', filters.user);
+      if (filters.model) qs.set('model', filters.model);
+      if (filters.channel) qs.set('channel', filters.channel);
+      if (filters.start) qs.set('start', String(Math.floor(new Date(filters.start).getTime() / 1000)));
+      if (filters.end) qs.set('end', String(Math.floor(new Date(filters.end).getTime() / 1000)));
       const token = localStorage.getItem('token');
       const res = await fetch(`/api/logs/requests/export?${qs.toString()}`, {
         headers: { 'Authorization': `Bearer ${token}` },
@@ -451,13 +532,7 @@ export default function Logs(): JSX.Element {
         throw new Error(errData?.error || errData?.message || `${t('导出失败')} (${res.status})`);
       }
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `request_logs.${format}`;
-      a.click();
-      // Safari/Firefox 在同一帧内 revoke 会导致下载被取消，延迟到下一帧再释放
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      triggerDownload(blob, `request_logs.${format}`);
       addToast(t('导出成功'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -476,8 +551,22 @@ export default function Logs(): JSX.Element {
     }
   };
 
+  // 状态分段控件是离散选择：点击即查询。setFilters 的 state 更新是异步的，
+  // 闭包里的 filters 仍是旧值，故用 override 显式传入新筛选值。
+  // （文本/时间输入仍走「查询」按钮，避免每键一请求。）
+  const applyStatus = (status: string): void => {
+    const next: Filters = { ...filters, status };
+    setFilters(next);
+    if (page === 1) {
+      void load(false, next);
+    } else {
+      setPage(1); // useEffect 重新加载，届时已拿到新 filters
+    }
+  };
+
   const fmtTime = (ts: number | undefined): string => (ts ? new Date(ts * 1000).toLocaleString() : '—');
-  const totalPages = Math.ceil(total / size);
+  // 分页组件在 totalPages<=1 时不渲染；这里仍至少为 1，避免「0 页」出现
+  const totalPages = Math.max(1, Math.ceil(total / size));
   const loadInflight = async (): Promise<void> => {
     setInflightLoading(true);
     try {
@@ -516,6 +605,16 @@ export default function Logs(): JSX.Element {
     if (masked) return mask(email ?? id);
     return email || id || '—';
   };
+  /** 状态徽标：成功 / 失败 / 未记录（status_code=0 或缺失 → 中性） */
+  const renderStatusBadge = (code: number | undefined, small = false): JSX.Element => {
+    const k = statusKind(code);
+    const cls = k === 'ok' ? 'badge badge-success' : k === 'error' ? 'badge badge-danger' : 'badge badge-neutral';
+    return (
+      <span className={cls} style={small ? { fontSize: 10 } : undefined}>
+        {k === 'ok' ? t('成功') : k === 'error' ? t('失败') : '—'}
+      </span>
+    );
+  };
 
   // ── 时间线聚合：当前页日志按小时分桶（成功/失败计数 + 总费用） ──
   const timelineBuckets = (() => {
@@ -524,8 +623,10 @@ export default function Logs(): JSX.Element {
       if (!isRequest(l) || !l.created_at) continue;
       const hour = Math.floor(l.created_at / 3600) * 3600;
       const b = map.get(hour) || { ok: 0, fail: 0, cost: 0, models: new Set<string>() };
-      if ((l.status_code ?? 0) < 400) b.ok += 1;
-      else b.fail += 1;
+      // 无状态码（0/缺省）不计入成功也不计入失败，避免把「未记录」误报成成功
+      const kind = statusKind(l.status_code);
+      if (kind === 'ok') b.ok += 1;
+      else if (kind === 'error') b.fail += 1;
       b.cost += l.cost ?? 0;
       if (l.model) b.models.add(l.model);
       map.set(hour, b);
@@ -725,44 +826,72 @@ export default function Logs(): JSX.Element {
         </Card>
       )}
 
-      {tab === 'requests' && (
-        <div className="lg-filters">
-          {/* 状态：分段控件（对齐模型管理 / 供应商页） */}
-          <div className="lg-seg" role="tablist" aria-label={t('状态筛选')}>
-            {(
-              [
-                ['', t('全部')],
-                ['ok', t('成功')],
-                ['error', t('失败')],
-              ] as Array<[string, string]>
-            ).map(([v, label]) => (
-              <button
-                key={v || 'all'}
-                type="button"
-                className={`lg-seg-btn${filters.status === v ? ' active' : ''}`}
-                onClick={() => setFilters({ ...filters, status: v })}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {admin ? (
-            <>
+      {/* 筛选/操作条：请求筛选控件仅 requests Tab 显示；删除/清空/计数两个 Tab
+          都要有（审计日志同样支持批量删除与清空，此前这些按钮被整体包在
+          requests 分支里，导致审计 Tab 勾选后无处可删）。 */}
+      <div className="lg-filters">
+        {tab === 'requests' && (
+          <>
+            {/* 状态：分段控件（对齐模型管理 / 供应商页） */}
+            <div className="lg-seg" role="tablist" aria-label={t('状态筛选')}>
+              {(
+                [
+                  ['', t('全部')],
+                  ['ok', t('成功')],
+                  ['error', t('失败')],
+                ] as Array<[string, string]>
+              ).map(([v, label]) => (
+                <button
+                  key={v || 'all'}
+                  type="button"
+                  className={`lg-seg-btn${filters.status === v ? ' active' : ''}`}
+                  onClick={() => applyStatus(v)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {admin ? (
+              <>
+                <div className="lg-search">
+                  <Search size={13} className="lg-search-icon" />
+                  <input
+                    ref={searchRef}
+                    className="form-input"
+                    value={filters.user}
+                    onChange={(e) => setFilters({ ...filters, user: e.target.value })}
+                    placeholder={t('按用户 ID 或邮箱过滤')}
+                    title={t('用户')}
+                    aria-label={t('用户')}
+                  />
+                </div>
+                <div className="lg-search">
+                  <Search size={13} className="lg-search-icon" />
+                  <input
+                    className="form-input"
+                    value={filters.model}
+                    onChange={(e) => setFilters({ ...filters, model: e.target.value })}
+                    placeholder={t('按模型过滤')}
+                    title={t('模型')}
+                    aria-label={t('模型')}
+                  />
+                </div>
+                <div className="lg-search">
+                  <input
+                    className="form-input"
+                    value={filters.channel}
+                    onChange={(e) => setFilters({ ...filters, channel: e.target.value })}
+                    placeholder={t('按供应商过滤')}
+                    title={t('供应商 ID')}
+                    aria-label={t('供应商 ID')}
+                  />
+                </div>
+              </>
+            ) : (
               <div className="lg-search">
                 <Search size={13} className="lg-search-icon" />
                 <input
                   ref={searchRef}
-                  className="form-input"
-                  value={filters.user}
-                  onChange={(e) => setFilters({ ...filters, user: e.target.value })}
-                  placeholder={t('按用户 ID 或邮箱过滤')}
-                  title={t('用户')}
-                  aria-label={t('用户')}
-                />
-              </div>
-              <div className="lg-search">
-                <Search size={13} className="lg-search-icon" />
-                <input
                   className="form-input"
                   value={filters.model}
                   onChange={(e) => setFilters({ ...filters, model: e.target.value })}
@@ -771,90 +900,67 @@ export default function Logs(): JSX.Element {
                   aria-label={t('模型')}
                 />
               </div>
-              <div className="lg-search">
-                <input
-                  className="form-input"
-                  value={filters.channel}
-                  onChange={(e) => setFilters({ ...filters, channel: e.target.value })}
-                  placeholder={t('按供应商过滤')}
-                  title={t('供应商 ID')}
-                  aria-label={t('供应商 ID')}
-                />
-              </div>
-            </>
-          ) : (
+            )}
+            {/* 关键词：Enter 即查询（与「查询」按钮同口径） */}
             <div className="lg-search">
-              <Search size={13} className="lg-search-icon" />
               <input
-                ref={searchRef}
                 className="form-input"
-                value={filters.model}
-                onChange={(e) => setFilters({ ...filters, model: e.target.value })}
-                placeholder={t('按模型过滤')}
-                title={t('模型')}
-                aria-label={t('模型')}
+                value={filters.keyword}
+                onChange={(e) => setFilters({ ...filters, keyword: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    if (page === 1) void load();
+                    else setPage(1);
+                  }
+                }}
+                placeholder={t('模型 / 供应商 / 错误信息')}
+                title={t('关键词')}
+                aria-label={t('关键词')}
               />
             </div>
-          )}
-          {/* 关键词：Enter 即查询（与「查询」按钮同口径） */}
-          <div className="lg-search">
             <input
-              className="form-input"
-              value={filters.keyword}
-              onChange={(e) => setFilters({ ...filters, keyword: e.target.value })}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  if (page === 1) void load();
-                  else setPage(1);
-                }
-              }}
-              placeholder={t('模型 / 供应商 / 错误信息')}
-              title={t('关键词')}
-              aria-label={t('关键词')}
+              type="datetime-local"
+              className="form-input lg-time"
+              value={filters.start}
+              onChange={(e) => setFilters({ ...filters, start: e.target.value })}
+              aria-label={t('开始时间')}
             />
-          </div>
-          <input
-            type="datetime-local"
-            className="form-input lg-time"
-            value={filters.start}
-            onChange={(e) => setFilters({ ...filters, start: e.target.value })}
-            aria-label={t('开始时间')}
-          />
-          <span className="lg-range-sep">~</span>
-          <input
-            type="datetime-local"
-            className="form-input lg-time"
-            value={filters.end}
-            onChange={(e) => setFilters({ ...filters, end: e.target.value })}
-            aria-label={t('结束时间')}
-          />
-          <Button size="sm" onClick={handleSearch}>{t('查询')}</Button>
-          {admin && (
-            <>
-              <Button
-                variant="danger"
-                size="sm"
-                onClick={handleBatchDelete}
-                disabled={selected.size === 0 || batchDeleting}
-              >
-                <Trash2 size={14} style={{ marginRight: 4 }} />
-                {t('删除选中')} {selected.size > 0 ? `(${selected.size})` : ''}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void handleClearAll()}
-                disabled={batchDeleting || total === 0}
-              >
-                <Eraser size={14} style={{ marginRight: 4 }} />
-                {t('清空全部')}
-              </Button>
-            </>
-          )}
-          {!admin && <span className="lg-hint">{t('仅显示你自己的请求记录')}</span>}
-          <span className="lg-filters-count">{t('共 {{count}} 条', { count: total })}</span>
-        </div>
-      )}
+            <span className="lg-range-sep">~</span>
+            <input
+              type="datetime-local"
+              className="form-input lg-time"
+              value={filters.end}
+              onChange={(e) => setFilters({ ...filters, end: e.target.value })}
+              aria-label={t('结束时间')}
+            />
+            <Button size="sm" onClick={handleSearch}>{t('查询')}</Button>
+            {!admin && <span className="lg-hint">{t('仅显示你自己的请求记录')}</span>}
+          </>
+        )}
+        {admin && (
+          <>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleBatchDelete}
+              disabled={selected.size === 0 || batchDeleting}
+            >
+              <Trash2 size={14} style={{ marginRight: 4 }} />
+              {t('删除选中')} {selected.size > 0 ? `(${selected.size})` : ''}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void handleClearAll()}
+              disabled={batchDeleting}
+            >
+              <Eraser size={14} style={{ marginRight: 4 }} />
+              {t('清空全部')}
+            </Button>
+          </>
+        )}
+        <span className="lg-filters-count">{t('共 {{count}} 条', { count: total })}</span>
+      </div>
 
       <Card title={`${tab === 'requests' ? t('请求日志') : t('审计日志')} (${total})`}>
         {loading ? (
@@ -982,9 +1088,7 @@ export default function Logs(): JSX.Element {
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {fmtTime(l.created_at)}
                         <div>
-                          <span className={(l.status_code ?? 0) < 400 ? 'badge badge-success' : 'badge badge-danger'} style={{ fontSize: 10 }}>
-                            {(l.status_code ?? 0) < 400 ? t('成功') : t('失败')}
-                          </span>
+                          {renderStatusBadge(l.status_code, true)}
                           {sourceLabel(l.key_id) && (
                             <span className="badge badge-info" style={{ fontSize: 10, marginLeft: 4 }} title={l.key_id}>
                               {sourceLabel(l.key_id)}
@@ -1035,11 +1139,17 @@ export default function Logs(): JSX.Element {
                       <td style={{ whiteSpace: 'nowrap' }}>{fmtCost(l.cost, lang)}</td>
                       )}
                       {visibleKeySet.has('latency') && (
-                      <td style={{ whiteSpace: 'nowrap' }}>{l.latency_ms}ms</td>
+                      <td style={{ whiteSpace: 'nowrap' }}>{l.latency_ms != null ? `${l.latency_ms}ms` : '—'}</td>
                       )}
                       {visibleKeySet.has('status') && (
                       <td>
-                        <span className={(l.status_code ?? 0) < 400 ? 'badge badge-success' : 'badge badge-danger'}>{l.status_code}</span>
+                        {l.status_code ? (
+                          <span className={statusKind(l.status_code) === 'ok' ? 'badge badge-success' : 'badge badge-danger'}>
+                            {l.status_code}
+                          </span>
+                        ) : (
+                          <span className="badge badge-neutral">—</span>
+                        )}
                       </td>
                       )}
                     </tr>
@@ -1092,17 +1202,17 @@ export default function Logs(): JSX.Element {
           </div>
         )}
 
-        {view === 'table' && (
-          <TablePaginationFooter
-            total={total}
-            page={page}
-            totalPages={totalPages}
-            size={pageSize}
-            sizes={SERVER_PAGE_SIZES}
-            onSizeChange={(n) => { setPageSize(n); setPage(1); }}
-            onPageChange={setPage}
-          />
-        )}
+        {/* 分页页脚两个视图都保留：时间线聚合的是「当前页」，页脚是翻页的唯一入口
+            （此前只在表格视图渲染，时间线视图无法翻页，只能看到第 1 页）。 */}
+        <TablePaginationFooter
+          total={total}
+          page={page}
+          totalPages={totalPages}
+          size={pageSize}
+          sizes={SERVER_PAGE_SIZES}
+          onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+          onPageChange={setPage}
+        />
       </Card>
 
       {/* 行点击详情弹窗 */}

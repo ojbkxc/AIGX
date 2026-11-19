@@ -2175,6 +2175,8 @@ export interface StorePlugin {
   platforms: Array<{ target: string; size: number; url: string; current: boolean; sha256?: string | null }>;
   homepage?: string | null;
   icon?: string | null;
+  /** 清单声明的 provider（动态索引才有；缺失插件横幅据此把隐藏账号映射到包） */
+  providers?: Array<{ id: string; label?: string }>;
 }
 
 /** 发布目录刷新态 */
@@ -2205,7 +2207,8 @@ export interface PluginUpdate {
   page?: string | null;
   publishedAt?: string | null;
   prerelease?: boolean;
-  asset: { target: string; size: number; url: string; current: boolean } | null;
+  /** 当前平台资产（sha256 供本地安装前的显式校验） */
+  asset: { target: string; size: number; url: string; current: boolean; sha256?: string | null } | null;
   reason: string | null;
   error: boolean;
 }
@@ -2228,6 +2231,23 @@ export interface PluginOperation {
   updatedAt: number;
 }
 
+/** 被管理面隐藏的账号所属 provider（对齐 A2A `hiddenAccounts.providers`） */
+export interface PluginHiddenAccountProvider {
+  id: string;
+  label: string;
+  count: number;
+  /** `not_installed` / `pack_disabled` / `provider_disabled` / `not_loaded` */
+  reason: string;
+  packId?: string | null;
+}
+
+/** 隐藏账号摘要（GET /api/plugins 的 `hiddenAccounts`） */
+export interface PluginHiddenAccounts {
+  total: number;
+  byProvider: Record<string, number>;
+  providers: PluginHiddenAccountProvider[];
+}
+
 /** GET /api/plugins 响应 data */
 export interface PluginsPayload {
   packs: PluginPackSummary[];
@@ -2240,6 +2260,12 @@ export interface PluginsPayload {
   catalog: PluginReleaseState;
   updates: PluginUpdate[];
   operations: PluginOperation[];
+  /** 上传上限（本地安装用；缺省 24 MiB） */
+  maxPackBytes?: number;
+  /** provider → 账号数（批量条目的账号计数） */
+  accountCounts?: Record<string, number>;
+  /** 隐藏账号摘要（缺失插件横幅的数据源） */
+  hiddenAccounts?: PluginHiddenAccounts;
 }
 
 // ── 脚本插件（Magpie；/api/plugins/scripts*）─────────────────────────

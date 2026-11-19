@@ -85,7 +85,7 @@ export default function Agent(): JSX.Element {
     return saved === 'low' || saved === 'medium' || saved === 'high' ? (saved as Effort) : 'off';
   });
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [role, setRole] = useState<'observer' | 'operator'>('observer');
+  const [role, setRole] = useState<'observer' | 'operator'>('operator');
   /** sessionId 的 ref 镜像：配置加载竞态保护用（恢复历史后禁止被配置初值覆盖模型） */
   const sessionIdRef = useRef<string | null>(null);
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
@@ -545,14 +545,10 @@ export default function Agent(): JSX.Element {
                   disabled={busy}
                   onClick={() => {
                     setRole((r) => (r === 'observer' ? 'operator' : 'observer'));
-                    // 切到运维员时顺手请求桌面通知授权：切走标签页时审批挂起才能提醒
-                    if (typeof Notification !== 'undefined') {
-                      if (Notification.permission === 'default') {
-                        void Notification.requestPermission();
-                      } else if (Notification.permission === 'denied') {
-                        // 通知被拒：引导用户到浏览器站点设置里手动开启
-                        setError(t('浏览器通知已被拒绝，请在浏览器站点设置中开启通知后重试'));
-                      }
+                    // 切到运维员时顺手请求桌面通知授权：切走标签页时审批挂起才能提醒。
+                    // 通知是增强能力：被拒不影响角色切换，静默降级（绝不 setError 污染页面错误态）。
+                    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+                      void Notification.requestPermission();
                     }
                   }}
                   title={role === 'observer' ? t('观察员：只读工具。点击切换为运维员') : t('运维员：可执行写工具（高危仍需审批）。点击切回观察员')}

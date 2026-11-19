@@ -45,6 +45,42 @@ export const endpoints = {
   /** 在线安装（下载）商店里的插件包：body {url, sha256?} → data:{pack} */
   installPlugin: (url: string, sha256?: string): Promise<ApiResponse<{ pack: PluginPackSummary }>> =>
     request<ApiResponse<{ pack: PluginPackSummary }>>('POST', `${API_BASE}/plugins/install`, { url, ...(sha256 ? { sha256 } : {}) }),
+  /**
+   * 从发布目录起一次后台安装/更新（对齐 A2A `install-from-release`）：
+   * 服务端解析当前平台下载地址与版本，立即返回初始 Operation（stage=waiting），
+   * 进度经 getPluginProgress / 列表 operations 轮询。
+   */
+  runPluginInstallFromRelease: (body: {
+    id: string;
+    action?: 'install' | 'update';
+    sha256?: string;
+    target?: string;
+  }): Promise<ApiResponse<{ operation: PluginOperation }>> =>
+    request<ApiResponse<{ operation: PluginOperation }>>('POST', `${API_BASE}/plugins/install-from-release`, body),
+  /**
+   * 从本地 zip 安装（`POST /api/plugins/install-file`，原始字节上传）。
+   * 体积上限由后端的路由级 body limit 兜底（`payload.maxPackBytes`，默认 24 MiB）。
+   */
+  installPluginFile: (file: File): Promise<ApiResponse<{ pack: PluginPackSummary }>> =>
+    (async () => {
+      const res = await fetch(`${API_BASE}/plugins/install-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', ...authHeaders() },
+        body: file,
+      });
+      const text = await res.text();
+      let json: { success?: boolean; data?: { pack: PluginPackSummary }; message?: string; error?: string } | null = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      if (!res.ok || json?.success === false) {
+        const message = json?.message || json?.error || text.slice(0, 200) || `安装失败 (HTTP ${res.status})`;
+        throw new Error(message);
+      }
+      return json as ApiResponse<{ pack: PluginPackSummary }>;
+    })(),
   /** 检查插件更新（返回 updates 快照） */
   checkPluginUpdates: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/update`),

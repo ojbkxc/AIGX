@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
@@ -26,23 +26,52 @@ export default function LogRetention(): JSX.Element {
   /** 日聚合保留天数（空串 = 永久）。聚合是报表数据源，寿命独立于明细。 */
   const [dailyDays, setDailyDays] = useState('');
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  /** 读取失败：不能静默吞掉——否则表单显示空值，用户一保存就把原配置覆盖了 */
+  const [loadError, setLoadError] = useState('');
+  /** 已保存的快照（用于判定「有未保存更改」，清理必须按已保存策略执行） */
+  const [saved, setSaved] = useState<{
+    days: string; capacity: string; auditDays: string; dailyDays: string;
+  } | null>(null);
+
+  const load = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoadError('');
+    try {
+      const res = await api.getLogRetention();
+      const d = res?.data;
+      const next = {
+        days: d?.max_age_days != null ? String(d.max_age_days) : '',
+        capacity: d?.max_capacity != null ? String(d.max_capacity) : '',
+        auditDays: d?.audit_max_age_days != null ? String(d.audit_max_age_days) : '',
+        dailyDays: d?.daily_max_age_days != null ? String(d.daily_max_age_days) : '',
+      };
+      setDays(next.days);
+      setCapacity(next.capacity);
+      setAuditDays(next.auditDays);
+      setDailyDays(next.dailyDays);
+      setSaved(next);
+    } catch (err) {
+      // 静默刷新（保存成功后回读）失败不覆盖页面；首次加载失败则进入错误态
+      if (!silent) setLoadError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
 
   useEffect(() => {
     void (async () => {
       try {
-        const res = await api.getLogRetention();
-        const d = res?.data;
-        setDays(d?.max_age_days != null ? String(d.max_age_days) : '');
-        setCapacity(d?.max_capacity != null ? String(d.max_capacity) : '');
-        setAuditDays(d?.audit_max_age_days != null ? String(d.audit_max_age_days) : '');
-        setDailyDays(d?.daily_max_age_days != null ? String(d.daily_max_age_days) : '');
-      } catch {
-        // 读取失败保持默认空值
+        await load();
       } finally {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [load]);
+
+  /** 表单与已保存值是否存在差异（有差异时「立即清理」会按旧配置执行，需先保存） */
+  const dirty = saved != null && (
+    days !== saved.days
+    || capacity !== saved.capacity
+    || auditDays !== saved.auditDays
+    || dailyDays !== saved.dailyDays
+  );
 
   const save = async (): Promise<void> => {
     setSaving(true);
@@ -64,6 +93,9 @@ export default function LogRetention(): JSX.Element {
           ? `${t('日志保留配置已保存（每日自动清理）')} · ${t('已裁掉')} ${pruned} ${t('个更早的聚合日')}`
           : t('日志保留配置已保存（每日自动清理）'),
       );
+      // 回读一次：把输入框规整成后端实际保存的值（如 "090" → "90"），
+      // 并刷新 saved 快照，避免「保存后仍显示未保存」的假脏状态。
+      await load(true);
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -72,7 +104,13 @@ export default function LogRetention(): JSX.Element {
   };
 
   const cleanupNow = (): void => {
-    if (days.trim() === '' && auditDays.trim() === '' && dailyDays.trim() === '') {
+    // 立即清理走的是后端「已保存」的保留策略（body 不带 days）。表单有未保存改动时
+    // 若照常清理，会按旧配置删数据，与用户眼前看到的天数不符——先要求保存。
+    if (dirty) {
+      addToast(t('有未保存的更改，请先保存配置；立即清理按已保存的保留策略执行'), 'error');
+      return;
+    }
+    if (!saved || (saved.days.trim() === '' && saved.auditDays.trim() === '' && saved.dailyDays.trim() === '')) {
       addToast(t('请先设置保留天数'), 'error');
       return;
     }
@@ -98,6 +136,28 @@ export default function LogRetention(): JSX.Element {
 
   if (loading) {
     return <div className="loading">{t('加载中')}</div>;
+  }
+
+  // 读取失败：不能当作「空配置」让用户保存覆盖。给出错误与重试入口。
+  if (loadError) {
+    return (
+      <div className="card">
+        <div className="card-header">
+          <h2>{t('日志保留')}</h2>
+        </div>
+        <div className="card-body">
+          <div className="error-message">{t('日志保留配置加载失败：{{msg}}', { msg: loadError })}</div>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            style={{ marginTop: 12 }}
+            onClick={() => { setLoading(true); void load().finally(() => setLoading(false)); }}
+          >
+            {t('重试')}
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -169,10 +229,21 @@ export default function LogRetention(): JSX.Element {
             <button type="button" className="btn btn-primary btn-sm" onClick={() => void save()} disabled={saving}>
               {saving ? t('保存中…') : t('保存配置')}
             </button>
-            <button type="button" className="btn btn-outline btn-sm" onClick={cleanupNow} disabled={cleaning}>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={cleanupNow}
+              disabled={cleaning || dirty}
+              title={dirty ? t('有未保存的更改，请先保存配置') : undefined}
+            >
               {cleaning ? t('清理中…') : t('立即清理')}
             </button>
           </div>
+          {dirty && (
+            <div className="form-hint" style={{ marginTop: 8, color: 'var(--warning-text, var(--text-muted))' }}>
+              {t('有未保存的更改：请先保存配置，立即清理按已保存的保留策略执行。')}
+            </div>
+          )}
         </div>
       </div>
     </div>

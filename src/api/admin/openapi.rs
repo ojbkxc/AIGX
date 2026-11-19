@@ -1402,6 +1402,20 @@ fn paths_accounts_network() -> Value {
                 "{ url, sha256? }",
             )
         },
+        "/api/plugins/install-from-release": {
+            "post": op_body(
+                "插件",
+                "从发布目录后台安装/更新（服务端解析当前平台地址，返回 Operation 进度）",
+                "{ id, action?, sha256?, target? }",
+            )
+        },
+        "/api/plugins/install-file": {
+            "post": op_body(
+                "插件",
+                "从本地 zip 安装插件包（原始字节或 {packB64}，可选 ?sha256=）",
+                "zip bytes | { packB64 }",
+            )
+        },
         "/api/plugins/enable": {
             "post": op_body(
                 "插件",
@@ -1994,6 +2008,8 @@ mod tests {
         add("/api/proxy-pool/update", &["post"]);
         add("/api/plugins", &["get"]);
         add("/api/plugins/install", &["post"]);
+        add("/api/plugins/install-from-release", &["post"]);
+        add("/api/plugins/install-file", &["post"]);
         add("/api/plugins/enable", &["post"]);
         add("/api/plugins/provider", &["post"]);
         add("/api/plugins/uninstall", &["post"]);

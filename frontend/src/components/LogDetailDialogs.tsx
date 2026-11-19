@@ -15,7 +15,8 @@ export function RequestLogDetail({ log, admin, onClose }: {
   admin: boolean;
   onClose: () => void;
 }): JSX.Element {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [tab, setTab] = useState<DetailTab>('overview');
 
   useEffect(() => {
@@ -38,10 +39,10 @@ export function RequestLogDetail({ log, admin, onClose }: {
     ...(admin ? [{ label: t('供应商'), value: log.channel_name ? `${log.channel_name}${log.channel_id ? ` (#${log.channel_id})` : ''}` : (log.channel_id ? `#${log.channel_id}` : '—') }] : []),
     { label: t('输入 Tokens'), value: String(log.input_tokens ?? 0) },
     { label: t('输出 Tokens'), value: String(log.output_tokens ?? 0) },
-    { label: t('费用'), value: fmtCost(log.cost ?? 0) },
+    { label: t('费用'), value: fmtCost(log.cost ?? 0, lang) },
     ...(admin ? [
-      { label: t('供应商成本'), value: fmtCost(log.channel_cost ?? log.cost ?? 0) },
-      { label: t('利润'), value: log.channel_cost != null ? fmtCost((log.cost ?? 0) - log.channel_cost) : '—' },
+      { label: t('供应商成本'), value: fmtCost(log.channel_cost ?? log.cost ?? 0, lang) },
+      { label: t('利润'), value: log.channel_cost != null ? fmtCost((log.cost ?? 0) - log.channel_cost, lang) : '—' },
     ] : []),
     { label: t('延迟'), value: `${log.latency_ms ?? 0}ms` },
     { label: t('状态码'), value: String(log.status_code ?? '—') },
