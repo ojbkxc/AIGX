@@ -238,6 +238,11 @@ impl PluginBridge {
 /// `timeout`（等 head 30s 未到）映射为可重试的 Timeout；`eof`（进程
 /// 退出导致流截断）映射为 StreamAborted；其余（插件拒绝、写失败）按
 /// 传输层失败处理——failover 都会换下一渠道。
+///
+/// `plugin_request_too_large`（对齐 A2A beta.3 rpc_error）：正文/图片超过
+/// 插件单次调用上限 → 413 原样透传。换渠道/换号不会让请求变小，编排层
+/// 对 4xx 不重试（resolve::is_retryable_bridge_error），直接把可读的尺寸
+/// 说明交回客户端。
 fn map_rpc_error(err: &RpcError) -> BridgeError {
     match err.code.as_deref() {
         Some("timeout") => BridgeError::Timeout {
@@ -245,6 +250,7 @@ fn map_rpc_error(err: &RpcError) -> BridgeError {
             cause: err.message.clone(),
         },
         Some("eof") => BridgeError::StreamAborted,
+        Some("plugin_request_too_large") => BridgeError::upstream_status(413, err.message.clone()),
         _ => BridgeError::Transport(format!("插件调用失败: {}", err.message)),
     }
 }
@@ -820,6 +826,35 @@ mod tests {
 
     fn parse_line(line: &str) -> LineOutcome {
         parse_sse_line(line, "fb-id", "fb-model")
+    }
+
+    /// beta.3：正文/图片超插件上限 → 413 透传（UpstreamStatus），不折成
+    /// 可重试的 Transport；消息原文保留（含尺寸说明）。
+    #[test]
+    fn rpc_oversize_maps_to_413_and_keeps_message() {
+        let err = map_rpc_error(&RpcError {
+            message: "本次请求约 12.3 MiB，超过插件单次调用上限 8 MiB".into(),
+            code: Some("plugin_request_too_large".into()),
+        });
+        match err {
+            BridgeError::UpstreamStatus {
+                status, message, ..
+            } => {
+                assert_eq!(status, 413);
+                assert!(message.contains("12.3 MiB"));
+            }
+            other => panic!("应映射为 UpstreamStatus(413): {other:?}"),
+        }
+    }
+
+    /// 其余未知 code 仍走 Transport（可重试 failover）。
+    #[test]
+    fn rpc_unknown_code_stays_transport() {
+        let err = map_rpc_error(&RpcError {
+            message: "boom".into(),
+            code: Some("whatever".into()),
+        });
+        assert!(matches!(err, BridgeError::Transport(_)));
     }
 
     /// `data: {...}` SSE 行 → ChatChunk（delta.content / id / model）。
