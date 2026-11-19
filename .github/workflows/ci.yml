@@ -74,6 +74,20 @@ jobs:
             #   unmaintained）；唯一使用点 proxy_pool/clash.rs 仅 Value+
             #   from_str 纯数据反序列化，迁移超本窗口
             RUSTSEC-2024-0449
+            # 组5 ×5（2026-11-19 新增，wasmtime 36.0.20，均为 2026-11-16
+            #   发布的 advisory-db 新公告，非本仓代码引入）。本仓 wasmtime
+            #   仅用于受控 wasm 插件运行时（只加载运维自下载的受信插件，
+            #   不跑不可信 wasm），且逐条触达分析均不成立：
+            #   -0566 wasi AsyncWriteStream 空写内存增长 —— 未启用 wasi
+            #     feature，该代码不参与编译
+            #   -0571 wasi-http 空 Body 无界堆 —— 未启用 wasi-http feature
+            #   -0573 GC heap 页大小 abort —— 未启用 gc feature
+            #   -0569 Caller::get_module_export panic —— 全仓 0 处调用该 API
+            #   -0567 无 threads feature 构建 abort —— 36.x 线无补丁
+            #     （patched 仅 >=48.0.9，跨 12 大版本不可行）；需特定
+            #     wasm 模块触发，受控插件场景不成立
+            RUSTSEC-2026-0566 RUSTSEC-2026-0567 RUSTSEC-2026-0569
+            RUSTSEC-2026-0571 RUSTSEC-2026-0573
           )
           args=()
           for i in "${ignores[@]}"; do args+=(--ignore "$i"); done
