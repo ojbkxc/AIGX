@@ -121,7 +121,7 @@ dependencies = [
  "sha2 0.10.9",
  "tar",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "tiktoken-rs",
  "tokio",
  "tokio-rustls",
