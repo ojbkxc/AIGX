@@ -15,7 +15,8 @@
 //! 1. **curated**（market）：registry + dist join + npm 回退；
 //! 2. **tagged**（github）：topic 搜索 + 逐仓验证（依赖 market 的条目名
 //!    集合做补集判定，**必须在 market 之后**）；
-//! 3. **stars**：第三方条目的星数刷新（独立 6h TTL；失败不影响前两阶段）。
+//! 3. **stars**：第三方条目的星数刷新（独立 12h TTL，每客户端 12~18h 错开；
+//!    失败不影响前两阶段）。
 //!
 //! 每阶段独立 TTL + 独立重试闸门（cache.rs）：某阶段被闸门拦住就跳过，
 //! 不重打限流源；force=true 绕过 TTL 但**不绕过重试闸门**——限流退避
@@ -32,6 +33,42 @@ use super::types::{merge, ScriptPublisher};
 
 /// 空闲轮询间隔。
 const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 失败重试的随机抖动范围（秒）：避免同一批客户端在同一秒一起重试
+///（对齐 A2A beta.3 的 RETRY_JITTER_MS）。
+const RETRY_JITTER_SECS: i64 = 5 * 60;
+
+/// 进程内稳定的随机值：每个客户端各错开一段，重试和刷新不会挤在同一时刻。
+///
+/// 用进程启动时刻做 seed（`OnceLock` 只算一次），后续调用稳定——保证
+/// 「同一进程内多次抖动一致」，而不是每次都跳到新值。
+fn noise(max: i64) -> i64 {
+    use std::sync::OnceLock;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEED: OnceLock<i64> = OnceLock::new();
+    let seed = *SEED.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos() as i64)
+            .unwrap_or(0)
+    });
+    if max <= 0 {
+        0
+    } else {
+        seed.wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407)
+            .rotate_left(17)
+            .rem_euclid(max)
+    }
+}
+
+/// 在 base 之上再加一段随时间变化的抖动，保证多客户端与多次重试都错开。
+fn spread(base: i64, range: i64) -> i64 {
+    if range <= 0 {
+        return base;
+    }
+    base + (noise(range) + network::now_unix().rem_euclid(range)).rem_euclid(range)
+}
 
 /// 目录刷新器（对外 API 在 [`super::Catalog`]）。
 pub struct Refresher {
@@ -168,16 +205,21 @@ async fn refresh_cycle(r: &Refresher, force: bool) {
             }
             Err(f) => {
                 let mut c = r.cache.lock().await;
-                c.record_failure(Stage::Market, f.message, f.retry_at);
+                // 失败重试加抖动（对齐 A2A beta.3）：retry_at 至少 now+60s，
+                // 再叠一段随机错开，避免重试挤在同一时刻。
+                let retry_at = f
+                    .retry_at
+                    .max(spread(network::now_unix() + 60, RETRY_JITTER_SECS));
+                c.record_failure(Stage::Market, f.message, retry_at);
                 let _ = c.save(&r.path);
-                tracing::warn!(retry_at = f.retry_at, "market 刷新失败，进入重试退避");
+                tracing::warn!(retry_at, "market 刷新失败，进入重试退避");
             }
         }
     }
 
     // ---------- 阶段 2：tagged（github；依赖 market 条目名做补集）----------
     let now = network::now_unix();
-    let (do_github, market_names, ignored) = {
+    let (do_github, market_names, ignored, previous) = {
         let c = r.cache.lock().await;
         let names: std::collections::HashSet<String> =
             c.market.iter().map(|e| e.name.to_lowercase()).collect();
@@ -185,10 +227,11 @@ async fn refresh_cycle(r: &Refresher, force: bool) {
             force || (c.github_stale(now) && !c.github_blocked(now)),
             names,
             c.ignored.clone(),
+            c.github.clone(),
         )
     };
     if do_github {
-        match super::github::fetch_github(client, &market_names, &ignored).await {
+        match super::github::fetch_github(client, &market_names, &ignored, &previous).await {
             Ok((entries, new_ignored)) => {
                 let mut c = r.cache.lock().await;
                 // 新忽略名单合并：旧记录保留（repo 可能本轮没搜到），新的覆盖同 repo
@@ -213,9 +256,12 @@ async fn refresh_cycle(r: &Refresher, force: bool) {
             }
             Err(f) => {
                 let mut c = r.cache.lock().await;
-                c.record_failure(Stage::Github, f.message, f.retry_at);
+                let retry_at = f
+                    .retry_at
+                    .max(spread(network::now_unix() + 60, RETRY_JITTER_SECS));
+                c.record_failure(Stage::Github, f.message, retry_at);
                 let _ = c.save(&r.path);
-                tracing::warn!(retry_at = f.retry_at, "github 刷新失败，进入重试退避");
+                tracing::warn!(retry_at, "github 刷新失败，进入重试退避");
             }
         }
     }
@@ -233,12 +279,26 @@ async fn refresh_cycle(r: &Refresher, force: bool) {
             let c = r.cache.lock().await;
             c.github.clone()
         };
-        let updated = super::github::refresh_stars(client, &mut working).await;
+        // 每个客户端在 12~18 小时之间错开刷新（STARS_TTL + noise(6h)），
+        // 避免同一时刻一起请求仓库信息。
+        let threshold = super::cache::TTL_STARS_SECS + noise(6 * 3_600);
+        let (updated, attempted) =
+            super::github::refresh_stars(client, &mut working, threshold).await;
         let mut c = r.cache.lock().await;
         c.github = working;
-        c.record_success(Stage::Stars, network::now_unix());
+        if attempted > updated {
+            // 有仓读取失败：推进 stars 重试闸门（30min + 抖动），保留旧值。
+            let retry_at = spread(network::now_unix() + 30 * 60, RETRY_JITTER_SECS);
+            c.record_failure(
+                Stage::Stars,
+                format!("{attempted} 个仓库星数暂时未能刷新"),
+                retry_at,
+            );
+        } else {
+            c.record_success(Stage::Stars, network::now_unix());
+        }
         let _ = c.save(&r.path);
-        tracing::info!(updated, "stars 刷新完成");
+        tracing::info!(updated, attempted, "stars 刷新完成");
     }
 }
 

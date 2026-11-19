@@ -8,6 +8,7 @@ import {
 import { api } from '../api';
 import { providerIcon } from '../lib/providerIcons';
 import { addConfigOf, cardKindOf, isCardHidden } from '../lib/addAccountConfigs';
+import { balanceWalletOf } from '../lib/balanceWallet';
 import { CHECKIN_PROVIDERS } from '../lib/checkinProviders';
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
@@ -193,11 +194,13 @@ interface UsagePoolView {
   low: boolean;
 }
 
-/** 从余额读数提取主额度桶：优先取第一个给出总额的桶，否则第一个桶 / 顶层 available */
+/** 从余额读数提取主额度桶：取第一个真正代表余额的钱包，否则顶层 available
+ *  （对齐 A2A balanceWalletOf：跳过 SOLO 并发/套餐等非余额维度，
+ *  避免「SOLO 并发 2 路」被显示成「2 积分」） */
 function usagePoolOf(bal: AccountBalance | null | undefined): UsagePoolView | null {
   if (!bal) return null;
   const wallets = Array.isArray(bal.wallets) ? bal.wallets : [];
-  const main = wallets.find((w) => Number(w?.total) > 0) || wallets[0] || null;
+  const main = balanceWalletOf(wallets);
   const available = main != null && main.balance != null ? Number(main.balance) : bal.available;
   if (available == null || !Number.isFinite(available)) return null;
   const total = main ? Number(main.total) || 0 : 0;

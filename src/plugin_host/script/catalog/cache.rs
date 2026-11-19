@@ -2,13 +2,14 @@
 //!
 //! ## 为什么 TTL 三个阶段不一样
 //!
-//! - **market 6h**：registry.json 是人工策展清单（magpie-community 仓库
-//!   main 分支），变化频率是「有人提交 PR」的节奏——小时级足够新鲜；
-//! - **github 10min**：topic:magpie-plugin 搜索结果随时可能冒出新仓，
-//!   第三方发现是「越快看到越好」的软实时需求；但搜索 API 匿名配额只有
-//!   10 次/分钟，不能更频繁；
-//! - **stars 6h**：星数是排序参考不是事实数据，没必要跟着 github 阶段
-//!   每次都拉——stars 单独成阶段（refresh.rs），失败不影响列表可用性。
+//! - **market 30min**：registry.json 是人工策展清单（magpie-community 仓库
+//!   main 分支），变化频率是「有人提交 PR」的节奏——半小时足够新鲜；
+//! - **github 60min**：topic:magpie-plugin 搜索结果随时可能冒出新仓，但
+//!   搜索返回的 pushed_at 决定哪些仓需要重读，TTL 只影响「发现新仓库」的
+//!   速度，不再触发全量重扫；
+//! - **stars 12h**：星数是排序参考不是事实数据，没必要跟着 github 阶段
+//!   每次都拉——stars 单独成阶段（refresh.rs），且每个客户端在 12~18h 之间
+//!   错开刷新（STARS_TTL + noise(6h)），失败不影响列表可用性。
 //!
 //! ## 重试闸门（market_retry / github_retry / stars_retry）
 //!
@@ -38,10 +39,13 @@ pub const CACHE_VERSION: u32 = 1;
 /// 超限说明缓存已坏，按空缓存处理。
 pub const MAX_CACHE_BYTES: usize = 16 << 20;
 
-/// TTL（秒）：market 6h / github 10min / stars 6h。
-pub const TTL_MARKET_SECS: i64 = 6 * 3600;
-pub const TTL_GITHUB_SECS: i64 = 600;
-pub const TTL_STARS_SECS: i64 = 6 * 3600;
+/// TTL（秒）：market 30min / github 60min / stars 12h。
+///
+/// 对齐 A2A beta.3：market 与 github 的发现节奏放慢（pushed_at 决定重读，
+/// TTL 只影响「发现新仓」速度）；stars 12h 且带 12~18h 抖动（见 refresh.rs）。
+pub const TTL_MARKET_SECS: i64 = 30 * 60;
+pub const TTL_GITHUB_SECS: i64 = 60 * 60;
+pub const TTL_STARS_SECS: i64 = 12 * 3600;
 
 /// 目录缓存（落盘形态；字段名 snake_case，js-host 侧按同名键读）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -171,7 +175,24 @@ impl Cache {
             return Cache::empty();
         }
         match serde_json::from_slice::<Cache>(&bytes) {
-            Ok(c) if c.version == CACHE_VERSION => c,
+            Ok(c) if c.version == CACHE_VERSION => {
+                let mut c = c;
+                // 旧版本可能留下非提供商条目（kind 明确为 middleware/agent/…），
+                // 直接丢弃即可；但**不要**顺带把 github_at 清零——否则升级后的
+                // 第一次启动会立刻重扫全部仓库（搜索配额白烧一遍）。
+                //
+                // AIGX 口径：kind 缺省（None）视为 provider（见 market.rs 实测
+                // 口径），因此只丢弃 kind 明确非 provider 的条目，kind=None 的
+                // GitHub 发现条目全部保留。
+                if c.github
+                    .iter()
+                    .any(|e| e.kind.as_deref().is_some_and(|k| k != "provider"))
+                {
+                    c.github
+                        .retain(|e| e.kind.as_deref().is_none_or(|k| k == "provider"));
+                }
+                c
+            }
             Ok(c) => {
                 tracing::warn!(
                     got = c.version,

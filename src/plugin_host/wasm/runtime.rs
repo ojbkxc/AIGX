@@ -30,9 +30,15 @@ use wasmtime::{Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimit
 use super::context::{Context, Shared, Sink};
 use super::wire::WireError;
 
+/// 1 MiB 的字节数（对齐上游 `capacity::MIB`）。
+const MIB: usize = 1024 * 1024;
+
 struct State {
     context: Context,
     limits: super::limits::Limits,
+    input_bytes: usize,
+    // 入站消息超过单次调用上限时在这里留下尺寸；不借用文案判断。
+    input_oversize: Option<(usize, usize)>,
     reply: Vec<u8>,
 }
 
@@ -265,6 +271,8 @@ impl Runtime {
                 State {
                     context,
                     limits,
+                    input_bytes: 0,
+                    input_oversize: None,
                     reply: Vec::new(),
                 },
             );
@@ -276,6 +284,20 @@ impl Runtime {
                 .fuel_async_yield_interval(Some(100_000))
                 .map_err(|_| super::wire::error("Wasm 调度配置失败"))?;
             let result = self.execute(&mut store, method, params).await;
+            if let Some((size, limit)) = store.data().input_oversize {
+                // 消息在实例化前就放不下：明确告诉调用方尺寸，而不是折成笼统的资源错误。
+                let hint = if method == super::methods::gateway::CONVERSATION {
+                    "；请新建会话或减少图片后重试"
+                } else {
+                    ""
+                };
+                let message = format!(
+                    "本次请求约 {:.1} MiB，超过插件单次调用上限 {:.0} MiB{hint}",
+                    size as f64 / MIB as f64,
+                    limit as f64 / MIB as f64
+                );
+                return Err(WireError::with_code(message, "plugin_request_too_large"));
+            }
             match result {
                 Ok(mut value) => {
                     if matches!(method, "images.generate" | "images.edit") {
@@ -287,10 +309,28 @@ impl Runtime {
                     }
                     Ok(value)
                 }
-                Err(_) if store.data().limits.exhausted => Err(WireError::with_code(
-                    "Wasm 插件超过内存或表容量限制",
-                    "plugin_resource_limit",
-                )),
+                Err(_) if store.data().limits.exhausted => {
+                    // AIGX 的 Limits（beta.1 形状）不记录 table/host_memory 细分；
+                    // 对话方法撞上内存上限时，真正原因是正文/图片太大。给出尺寸与
+                    // 下一步，既便于用户处理，也避免被通用策略当成服务故障去换号重试。
+                    let limit_mib = self.shared.manifest.memory_mib;
+                    let input = store.data().input_bytes;
+                    let (message, code) = if method == super::methods::gateway::CONVERSATION {
+                        (
+                            format!(
+                                "本次对话上下文或图片过大：请求约 {:.1} MiB，插件内存上限 {limit_mib} MiB；请新建会话或减少图片后重试",
+                                input as f64 / MIB as f64
+                            ),
+                            "plugin_request_too_large",
+                        )
+                    } else {
+                        (
+                            "Wasm 插件超过内存或表容量限制".to_string(),
+                            "plugin_resource_limit",
+                        )
+                    };
+                    Err(WireError::with_code(message, code))
+                }
                 Err(error) => Err(super::errors::interrupted(&error)),
             }
         };
@@ -309,6 +349,13 @@ impl Runtime {
         method: &str,
         params: Value,
     ) -> wasmtime::Result<Value> {
+        let bytes = serde_json::to_vec(&json!({ "method": method, "params": params }))?;
+        store.data_mut().input_bytes = bytes.len();
+        if bytes.len() > super::MAX_MESSAGE {
+            // 先记下真实尺寸，由 invoke() 统一折成可读的 413 文案。
+            store.data_mut().input_oversize = Some((bytes.len(), super::MAX_MESSAGE));
+            return Err(wasmtime::Error::msg("Wasm 输入消息过大"));
+        }
         let instance = self
             .linker
             .instantiate_async(&mut *store, &self.module)
@@ -322,10 +369,6 @@ impl Runtime {
         let memory = instance
             .get_memory(&mut *store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("Wasm 内存导出缺失"))?;
-        let bytes = serde_json::to_vec(&json!({ "method": method, "params": params }))?;
-        if bytes.len() > super::MAX_MESSAGE {
-            return Err(wasmtime::Error::msg("Wasm 输入消息过大"));
-        }
         let pointer = allocate.call_async(&mut *store, bytes.len() as i32).await?;
         if pointer < 0 {
             return Err(wasmtime::Error::msg("Wasm 分配地址无效"));

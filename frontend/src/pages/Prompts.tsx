@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, Textarea, Badge, EmptyState } from '../components/ui';
 import { api, translatePrompts } from '../api';
+import { newId } from '../lib/ids';
 import type { PromptSource } from '../types';
 import './Prompts.css';
 
@@ -36,14 +37,6 @@ function looksEnglish(text: string): boolean {
   const hasLetter = /[a-zA-Z]/.test(text);
   const hasCjk = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(text);
   return hasLetter && !hasCjk;
-}
-
-/** 行 ID：secure context 用 crypto.randomUUID，http 环境回退时间戳随机串 */
-function genId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function loadPrompts(): PromptItem[] {
@@ -163,7 +156,7 @@ export default function Prompts(): JSX.Element {
       addToast(t('提示词已保存'));
     } else {
       const item: PromptItem = {
-        id: genId(),
+        id: newId(),
         name: form.name.trim(),
         content: form.content,
         tags,
@@ -321,7 +314,7 @@ export default function Prompts(): JSX.Element {
       }
       const now = Date.now();
       const items: PromptItem[] = list.map((x) => ({
-        id: genId(),
+        id: newId(),
         name: x.name || t('未命名提示词'),
         content: x.content || '',
         tags: Array.isArray(x.tags) ? x.tags : [],
@@ -401,7 +394,7 @@ export default function Prompts(): JSX.Element {
         const items: PromptItem[] = parsed
           .filter((x): x is Record<string, unknown> => Boolean(x && typeof x === 'object'))
           .map((x) => ({
-            id: typeof x.id === 'string' ? x.id : genId(),
+            id: typeof x.id === 'string' ? x.id : newId(),
             name: typeof x.name === 'string' && x.name ? x.name : t('未命名提示词'),
             content: typeof x.content === 'string' ? x.content : '',
             tags: Array.isArray(x.tags) ? x.tags.filter((s): s is string => typeof s === 'string') : [],

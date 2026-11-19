@@ -21,6 +21,61 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use serde_json::Value;
+
+/// 清单里明确声明的入口（`exports["./server"]` / `main` / `exports["."]` /
+/// `exports` 字符串或对象里的 default/import/require/bun），不含任何猜测
+/// 出来的兜底路径。
+///
+/// 对齐 A2A beta.3 的 `dependencies::declared_entries`：目录扫描时用它判断
+/// 「清单是否声明了入口」——有声明就不再铺根目录一排 `index.*` 兜底。
+pub(super) fn declared_entries(package: &Value) -> Vec<String> {
+    fn pick(value: &Value) -> Option<&str> {
+        value.as_str().or_else(|| {
+            ["import", "default", "node", "require", "bun"]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(pick))
+        })
+    }
+    [
+        package
+            .get("exports")
+            .and_then(|exports| exports.get("./server"))
+            .and_then(pick),
+        package["main"].as_str(),
+        package
+            .get("exports")
+            .and_then(|exports| exports.get("."))
+            .and_then(pick),
+        package.get("exports").and_then(pick),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_string)
+    .collect()
+}
+
+/// `declared_entries` + 根目录 `index.*` 兜底（清单未声明入口时的常见形态）。
+///
+/// 对齐 A2A beta.3 的 `dependencies::entries`：仅在清单**没有**声明入口时
+/// 作为回退候选。AIGX 额外纳入 `src/index.*`（有些包把源码入口放在 src/ 下）。
+pub(super) fn entries(package: &Value) -> Vec<String> {
+    let mut paths = declared_entries(package);
+    paths.extend(
+        [
+            "index.ts",
+            "index.tsx",
+            "index.js",
+            "index.mjs",
+            "index.cjs",
+            "src/index.ts",
+            "src/index.js",
+        ]
+        .iter()
+        .map(|path| path.to_string()),
+    );
+    paths
+}
 
 /// 安装超时。
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);

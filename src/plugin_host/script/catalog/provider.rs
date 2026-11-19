@@ -31,7 +31,7 @@
 //! 只跟随 `./` `../` 相对导入，包名导入（`node:fs`、`npm-pkg`）不解析。
 //! 到达边界即停——没扫到就算没验证（provider_verified=None/false）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// 单个文件源码上限（256KB：真实插件入口远小于此，超限按无效文件跳过）。
@@ -463,6 +463,57 @@ fn build_const_env(root: &Path, file: &Path, toks: &[Tok]) -> HashMap<String, St
     env
 }
 
+/// 清单自己声明的提供商。有声明就不再读源码，未声明才回退到入口文件扫描。
+///
+/// 读取口径（对齐 A2A beta.3）：
+/// - `magpie.providers`：数组，元素可为字符串或 `{id}` 对象；也收单字符串；
+/// - `magpie.provider`：字符串或 `{id}` 对象；
+/// - 每个 id 校验非空、≤128 字符、仅 `[A-Za-z0-9-_./]`，非法值静默丢弃；
+/// - `magpie.kind=="provider"` 时即使没有列表也返回 `Some(空)`（自声明即提供商）；
+/// - 其余情况返回 `None`（未自声明，交给源码扫描）。
+pub(super) fn declared_providers(manifest: &serde_json::Value) -> Option<Vec<String>> {
+    fn valid(value: &str) -> bool {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || b"-_./".contains(&ch))
+    }
+    fn push(providers: &mut BTreeSet<String>, value: &str) {
+        if valid(value) {
+            providers.insert(value.to_string());
+        }
+    }
+    let magpie = &manifest["magpie"];
+    let mut providers = BTreeSet::new();
+    match &magpie["providers"] {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(value) = item.as_str() {
+                    push(&mut providers, value);
+                } else if let Some(value) = item.get("id").and_then(serde_json::Value::as_str) {
+                    push(&mut providers, value);
+                }
+            }
+        }
+        serde_json::Value::String(value) => push(&mut providers, value),
+        _ => {}
+    }
+    match &magpie["provider"] {
+        serde_json::Value::String(value) => push(&mut providers, value),
+        serde_json::Value::Object(value) => {
+            if let Some(id) = value.get("id").and_then(serde_json::Value::as_str) {
+                push(&mut providers, id);
+            }
+        }
+        _ => {}
+    }
+    if providers.is_empty() && magpie["kind"].as_str() != Some("provider") {
+        return None;
+    }
+    Some(providers.into_iter().collect())
+}
+
 /// 解析一个 JS/TS 文件里的相对导入说明符（`./` `../` 开头）。
 ///
 /// 公开给 github.rs：深扫要把相对导入链拉下来才能本地 BFS。
@@ -722,5 +773,33 @@ mod tests {
     #[test]
     fn missing_entry_is_none() {
         assert!(scan_entry(Path::new("/nonexistent"), Path::new("x.js")).is_none());
+    }
+
+    #[test]
+    fn declared_providers_reads_manifest_forms() {
+        // 数组：字符串 + {id} 对象混合，非法 id 丢弃。
+        let m = serde_json::json!({"magpie": {"providers": ["kiro", {"id": "wps-lingxi"}, "", "bad id!"]}});
+        assert_eq!(
+            declared_providers(&m),
+            Some(vec!["kiro".to_string(), "wps-lingxi".to_string()])
+        );
+        // 单字符串 providers。
+        let m = serde_json::json!({"magpie": {"providers": "solo"}});
+        assert_eq!(declared_providers(&m), Some(vec!["solo".to_string()]));
+        // magpie.provider 字符串 / {id}。
+        let m = serde_json::json!({"magpie": {"provider": "one"}});
+        assert_eq!(declared_providers(&m), Some(vec!["one".to_string()]));
+        let m = serde_json::json!({"magpie": {"provider": {"id": "two"}}});
+        assert_eq!(declared_providers(&m), Some(vec!["two".to_string()]));
+        // kind==provider 无列表 → Some(空)。
+        let m = serde_json::json!({"magpie": {"kind": "provider"}});
+        assert_eq!(declared_providers(&m), Some(vec![]));
+        // 未自声明 → None。
+        let m = serde_json::json!({"name": "x"});
+        assert_eq!(declared_providers(&m), None);
+        // id 超 128 字符被丢弃 → 无有效 id 且非 kind=provider → None。
+        let long = "a".repeat(129);
+        let m = serde_json::json!({"magpie": {"providers": [long]}});
+        assert_eq!(declared_providers(&m), None);
     }
 }

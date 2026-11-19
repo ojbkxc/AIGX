@@ -14,6 +14,8 @@
 //!
 //! - `plugin_busy` → 503（插件正在处理其他操作，等待超时）
 //! - `plugin_resource_limit` → 503（Wasm 计算额度/栈/内存超限）
+//! - `plugin_request_too_large` → 413（beta.3：正文/图片超过插件可处理尺寸，
+//!   编排层应停止重试）
 //! - `account_origin_authorization_required` → 403（账号来源需授权）
 //! - `account_origin_proxy_unsupported` → 409（账号来源不支持代理）
 
@@ -104,6 +106,9 @@ pub fn http_status_for_code(code: &str) -> Option<u16> {
         "plugin_unavailable" => Some(503),
         WireError::PLUGIN_BUSY => Some(503),
         WireError::PLUGIN_RESOURCE_LIMIT => Some(503),
+        // beta.3：正文/图片超过插件能处理的尺寸：换个账号或重试都不会变好。
+        // 413 让编排层直接停下，并把可读的尺寸说明交给调用方。
+        "plugin_request_too_large" => Some(413),
         "forbidden" | WireError::ACCOUNT_ORIGIN_AUTH_REQUIRED => Some(403),
         WireError::ACCOUNT_ORIGIN_PROXY_UNSUPPORTED => Some(409),
         "bad_params" => Some(400),
@@ -155,5 +160,11 @@ mod tests {
         assert_eq!(http_status_for_code("forbidden"), Some(403));
         assert_eq!(http_status_for_code("bad_params"), Some(400));
         assert_eq!(http_status_for_code("unknown"), None);
+    }
+
+    #[test]
+    fn http_status_for_beta3_codes() {
+        // 正文/图片超限：413 让编排层停止重试（对齐上游 rpc_error）。
+        assert_eq!(http_status_for_code("plugin_request_too_large"), Some(413));
     }
 }

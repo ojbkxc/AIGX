@@ -10,25 +10,29 @@
 //! ## 验证流水线（每仓 2+N 个请求，全部**不执行代码**）
 //!
 //! 1. 搜索结果自带 pushed_at / stars / description（不用再调 GET /repos）；
-//!    **6h 内未 push 的仓直接进 ignored**——老仓大概率不是活跃 magpie
-//!    插件，跳过深扫省配额；仓一旦重新 push（新搜索结果 pushed_at 变新）
-//!    会自动退出 ignored 重新验证，见 cache::is_ignored；
+//!    **pushed_at 未变**的仓直接复用旧条目（内容不会变，见 `MANIFEST_TTL`
+//!    兜底回看）——仓一旦重新 push（新搜索结果 pushed_at 变新）会重新验证，
+//!    见 cache::is_ignored；
 //! 2. raw 拉 `package.json`：没有 → 非 npm 形态，ignored；
-//! 3. `magpie` 键 / main / exports 定位入口候选，raw 拉入口源码，连同
-//!    相对导入链（BFS ≤16 文件 / ≤6MB）写进**临时目录**，复用
+//! 3. **清单自声明 provider（`magpie.providers` / `magpie.provider` /
+//!    `magpie.kind=="provider"`）时不再读源码**——直接产出第三方条目；
+//!    未声明才回退到 `magpie` 键 / main / exports 定位入口候选，raw 拉入口
+//!    源码，连同相对导入链（BFS ≤16 文件 / ≤6MB）写进**临时目录**，复用
 //!    [`provider::scan_entry`] 的 tokenizer 找 `auth.provider` 字面量。
 //!    没有证据 → ignored（这是「搜到但不是 magpie 插件」的绝大多数）。
 //!
 //! 有证据 → 第三方条目（publisher=ThirdParty）。selector=`github:{repo}`，
-//! pkg-installer 走 zip/tarball 安装。npm 源升级判定（同名 npm 包且 repo
-//! 匹配）留给后续波次——GitHub zip 直装已可安装，不阻塞目录可用性。
+//! pkg-installer 走 zip/tarball 安装。**列表阶段不再为每个仓库额外查 npm**
+//! （那样只会放大请求量）：版本以仓库清单为准，入口缺失时改为
+//! `source=npm / selector=version`，安装时按清单里的版本直接走 npm 下载。
 //!
 //! ## stars（第三阶段独立刷）
 //!
-//! 搜索阶段抓到的 stars 随条目落缓存；此后 stars 阶段每 6h 对已收录的
-//! 第三方仓逐个 GET /repos/{repo} 刷新。单仓失败保留旧值（星数缺新不删旧）。
+//! 搜索阶段抓到的 stars 随条目落缓存；此后 stars 阶段对已收录的第三方仓
+//! 逐个 GET /repos/{repo} 刷新（12~18h 错开，见 refresh.rs）。单仓失败保留
+//! 旧值（星数缺新不删旧）。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -54,8 +58,8 @@ pub const PUSH_IGNORE_WINDOW_SECS: i64 = 6 * 3600;
 /// 每轮深扫仓数上限。
 ///
 /// 每个仓 2+N 个 raw 请求；GitHub 匿名配额 60 req/h，带 token 5000/h。
-/// 30 个仓 ≈ 90+ raw 请求/轮（TTL 10min，带 token 完全够，匿名则会触发
-/// 限流退避——此时 cache 的重试闸门会自动降频，不会烧穿）。
+/// 30 个仓 ≈ 90+ raw 请求/轮（GITHUB_TTL 60min，带 token 完全够，匿名则会
+/// 触发限流退避——此时 cache 的重试闸门会自动降频，不会烧穿）。
 pub const MAX_VERIFY_PER_CYCLE: usize = 30;
 /// 搜索响应大小上限（100 条 repo JSON ~200KB，给 10 倍余量）。
 const SEARCH_MAX_BYTES: usize = 2 << 20;
@@ -67,6 +71,15 @@ const SCAN_CONCURRENCY: usize = 4;
 const MAX_ENTRY_CANDIDATES: usize = 8;
 /// raw 拉取超时。
 const RAW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// 清单兜底回看周期（对齐 A2A beta.3 的 MANIFEST_TTL，7 天）。
+///
+/// 搜索里已经带了 pushed_at：仓库没推新提交时内容不会变，没必要按固定
+/// 周期重扫——pushed_at 未变即复用旧条目（`fetch_github` 的 `previous`
+/// 命中路径）。这里只作为「一次都没推送过、但内容可能被改写」的兜底：
+/// 距上次 manifest 读取超过该周期即强制重扫。
+///
+/// 单位**秒**（AIGX 目录统一用 unix 秒；上游是毫秒，勿照抄数值）。
+const MANIFEST_TTL: i64 = 7 * 24 * 3_600;
 
 /// GitHub 搜索结果条目（裁剪形状，只留验证要用的字段）。
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -119,54 +132,48 @@ fn raw_url(repo: &str, branch: &str, path: &str) -> String {
     format!("https://raw.githubusercontent.com/{repo}/{branch}/{path}")
 }
 
-/// 从 magpie 键 / main / exports 提取入口候选（相对包根的路径，去掉 ./）。
+/// 入口候选：`(相对路径, 是否为清单声明入口)`。
 ///
-/// magpie 值可能是字符串或 `{provider: {path: "..."}}` 形态，宽容解析；
-/// exports 的 "." 键可能是字符串或 `{import/default/require: "..."}`。
-/// 兜底追加 index.js / index.ts（多数单文件插件入口长这样）。
-fn entry_candidates(pj: &RepoPackageJson) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut push = |s: &str| {
+/// 声明入口来自 [`super::super::dependencies::declared_entries`]（`exports` /
+/// `main`），排在前且 `declared=true`；根目录 / `src/` 的 `index.*` 是兜底
+/// 猜测，`declared=false`。
+///
+/// **兜底收敛（对齐 A2A beta.3 inspect 的 fallback）**：清单已声明入口时
+/// 只试两个最常见的源码入口（`src/index.ts`、`src/index.js`）——有些包把
+/// `main` 指向构建后未提交的 dist，源码入口在 `src/` 下；无声明时才试
+/// [`super::super::dependencies::entries`] 给出的一排 `index.*`。`declared`
+/// 标记让调用方判断「读到的入口是不是清单声明的那个」，据此决定安装走
+/// GitHub 还是 npm。
+fn entry_candidates(pj: &RepoPackageJson) -> Vec<(String, bool)> {
+    // 组装最小清单（只挑入口相关字段）交给 dependencies 解析。
+    let mut m = serde_json::Map::new();
+    if let Some(main) = &pj.main {
+        m.insert("main".into(), serde_json::Value::String(main.clone()));
+    }
+    if let Some(exports) = &pj.exports {
+        m.insert("exports".into(), exports.clone());
+    }
+    let manifest = serde_json::Value::Object(m);
+    let declared = super::super::dependencies::declared_entries(&manifest);
+
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let push = |out: &mut Vec<(String, bool)>, s: &str, declared_flag: bool| {
         let t = s.trim_start_matches("./");
-        if !t.is_empty() && !out.contains(&t.to_string()) {
-            out.push(t.to_string());
+        if !t.is_empty() && !out.iter().any(|(p, _)| p == t) {
+            out.push((t.to_string(), declared_flag));
         }
     };
-    if let Some(serde_json::Value::Object(m)) = &pj.magpie {
-        for (_, v) in m {
-            match v {
-                serde_json::Value::String(s) => push(s),
-                serde_json::Value::Object(o) => {
-                    for val in o.values() {
-                        if let serde_json::Value::String(s) = val {
-                            push(s);
-                        }
-                    }
-                }
-                _ => {}
-            }
+    if declared.is_empty() {
+        for path in super::super::dependencies::entries(&manifest) {
+            push(&mut out, &path, false);
         }
-    }
-    if let Some(m) = &pj.main {
-        push(m);
-    }
-    if let Some(serde_json::Value::Object(m)) = &pj.exports {
-        if let Some(dot) = m.get(".") {
-            match dot {
-                serde_json::Value::String(s) => push(s),
-                serde_json::Value::Object(o) => {
-                    for key in ["import", "default", "require"] {
-                        if let Some(serde_json::Value::String(s)) = o.get(key) {
-                            push(s);
-                        }
-                    }
-                }
-                _ => {}
-            }
+    } else {
+        for path in &declared {
+            push(&mut out, path, true);
         }
-    }
-    for guess in ["index.js", "index.ts"] {
-        push(guess);
+        for path in ["src/index.ts", "src/index.js"] {
+            push(&mut out, path, false);
+        }
     }
     out.truncate(MAX_ENTRY_CANDIDATES);
     out
@@ -185,8 +192,25 @@ pub struct RepoVerdict {
     pub pushed_at: i64,
 }
 
-/// 验证一个仓：package.json → 入口扫描（临时目录 + 本地 BFS）。
-async fn verify_repo(client: &reqwest::Client, item: &RepoItem) -> RepoVerdict {
+/// 由 `RepoPackageJson` 组装一个 serde_json::Value，供 [`provider::declared_providers`]
+/// 读取（该函数收 `&Value`）。只挑清单自声明相关字段，避免整包克隆。
+fn manifest_value(pj: &RepoPackageJson) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    if let Some(v) = &pj.magpie {
+        m.insert("magpie".into(), v.clone());
+    }
+    serde_json::Value::Object(m)
+}
+
+/// 验证一个仓：package.json → （自声明 / 入口扫描）→ 第三方条目。
+///
+/// `previous`：上一轮已收录的同仓条目。pushed_at 未变且未超过 `MANIFEST_TTL`
+/// 时直接复用（只刷新 stars/description 等搜索侧字段），不重读源码。
+async fn verify_repo(
+    client: &reqwest::Client,
+    item: &RepoItem,
+    previous: Option<&Entry>,
+) -> RepoVerdict {
     let mut verdict = RepoVerdict {
         repo: item.repo.clone(),
         ..Default::default()
@@ -200,6 +224,26 @@ async fn verify_repo(client: &reqwest::Client, item: &RepoItem) -> RepoVerdict {
 
     // 活跃度不再是硬闸门：新鲜度只在 fetch_github 里决定扫描优先级与
     // 每轮配额（MAX_VERIFY_PER_CYCLE）。这里直接进深扫。
+
+    // 1) 复用：pushed_at 未变 + manifest 仍在回看周期内 → 内容不会变。
+    //    只把搜索侧的新鲜字段（stars / description）回填，省一次深扫。
+    let now = network::now_unix();
+    if let Some(prev) = previous.filter(|e| {
+        e.pushed_at == (pushed > 0).then_some(pushed)
+            && e.manifest_at
+                .is_some_and(|at| now.saturating_sub(at) < MANIFEST_TTL)
+    }) {
+        let mut entry = prev.clone();
+        entry.stars = Some(item.stargazers_count);
+        entry.stars_at = Some(now);
+        if let Some(d) = &item.description {
+            if entry.summary.is_empty() {
+                entry.summary.insert("en".into(), d.clone());
+            }
+        }
+        verdict.entry = Some(entry);
+        return verdict;
+    }
 
     // 2) package.json（main 404 时 master 兜底一次）
     let branch = "main";
@@ -218,65 +262,95 @@ async fn verify_repo(client: &reqwest::Client, item: &RepoItem) -> RepoVerdict {
         return verdict;
     };
 
-    // 3) 入口源码
-    let mut entry_src: Option<String> = None;
-    let mut entry_rel: Option<String> = None;
-    for cand in entry_candidates(&pj) {
-        if let Ok(bytes) = fetch_raw(client, &item.repo, branch, &cand).await {
-            if let Ok(s) = String::from_utf8(bytes) {
-                entry_src = Some(s);
-                entry_rel = Some(cand);
-                break;
+    let (repo_short, repo_url) = super::market::normalize_repository(pj.repository.as_ref());
+    let desc = pj.description.clone().or_else(|| item.description.clone());
+
+    // 3) 清单自声明 provider → 不读源码，直接产出（对齐 A2A beta.3）。
+    //    同时据「清单是否声明入口」判定安装通道：自声明/有入口 → GitHub 直装；
+    //    清单声明了入口但仓库里读不到（常见 main 指向未提交的 dist）→ 走 npm。
+    let declared = provider::declared_providers(&manifest_value(&pj));
+    let (providers, entry_present): (Vec<String>, bool) = if let Some(providers) = declared {
+        // 自声明即视为入口存在（不读源码，安装走 GitHub 或 npm 由下方版本判定）。
+        (providers, true)
+    } else {
+        // 4) 入口扫描（收敛后的候选集；declared 标记决定命中路径是否清单声明）
+        let mut entry_src: Option<String> = None;
+        let mut entry_rel: Option<String> = None;
+        let mut entry_declared = false;
+        for (cand, is_declared) in entry_candidates(&pj) {
+            if let Ok(bytes) = fetch_raw(client, &item.repo, branch, &cand).await {
+                if let Ok(s) = String::from_utf8(bytes) {
+                    entry_src = Some(s);
+                    entry_rel = Some(cand);
+                    entry_declared = is_declared;
+                    break;
+                }
             }
         }
-    }
-    let (Some(src), Some(rel)) = (entry_src, entry_rel) else {
-        verdict.ignore_reason = Some("找不到可读的入口文件".into());
-        return verdict;
-    };
+        let (Some(src), Some(rel)) = (entry_src, entry_rel) else {
+            verdict.ignore_reason = Some("找不到可读的入口文件".into());
+            return verdict;
+        };
 
-    // 4) 写临时目录复用 provider::scan_entry 的本地 BFS（相对导入链）
-    let tmp_root = std::env::temp_dir().join(format!(
-        "aigx-magpie-scan-{}",
-        item.repo.replace(['/', '\\'], "-")
-    ));
-    let scanned = if write_scan_tree(&tmp_root, &rel, &src, client, &item.repo, branch).await {
-        let oc = provider::scan_entry(&tmp_root.join("pkg"), Path::new(&rel));
-        let _ = std::fs::remove_dir_all(&tmp_root);
-        oc
-    } else {
-        let _ = std::fs::remove_dir_all(&tmp_root);
-        None
-    };
-    let Some(oc) = scanned else {
-        verdict.ignore_reason = Some("入口扫描失败".into());
-        return verdict;
-    };
-    let Some(pid) = oc.provider_id else {
-        verdict.ignore_reason = Some("入口源码没有 auth.provider 证据".into());
-        return verdict;
+        // 5) 写临时目录复用 provider::scan_entry 的本地 BFS（相对导入链）
+        let tmp_root = std::env::temp_dir().join(format!(
+            "aigx-magpie-scan-{}",
+            item.repo.replace(['/', '\\'], "-")
+        ));
+        let scanned = if write_scan_tree(&tmp_root, &rel, &src, client, &item.repo, branch).await {
+            let oc = provider::scan_entry(&tmp_root.join("pkg"), Path::new(&rel));
+            let _ = std::fs::remove_dir_all(&tmp_root);
+            oc
+        } else {
+            let _ = std::fs::remove_dir_all(&tmp_root);
+            None
+        };
+        let Some(oc) = scanned else {
+            verdict.ignore_reason = Some("入口扫描失败".into());
+            return verdict;
+        };
+        let Some(pid) = oc.provider_id else {
+            verdict.ignore_reason = Some("入口源码没有 auth.provider 证据".into());
+            return verdict;
+        };
+        (vec![pid], entry_declared)
     };
 
     // 通过 → 第三方条目
-    let (repo_short, repo_url) = super::market::normalize_repository(pj.repository.as_ref());
-    let desc = pj.description.clone().or_else(|| item.description.clone());
     let mut summary = BTreeMap::new();
     if let Some(d) = &desc {
         summary.insert("en".into(), d.clone());
     }
+    let label = desc
+        .clone()
+        .unwrap_or_else(|| providers.first().cloned().unwrap_or_default());
+    let name = pj.name.clone().unwrap_or_else(|| item.repo.clone());
+    let version = pj.version.clone();
+    // 版本以仓库清单为准，安装时直接按 GitHub 仓库下载；列表阶段不查 npm。
+    // 入口缺失（清单声明了入口但仓库读不到，常见 main 指向构建后的 dist）时
+    // 改为走 npm：source=npm，selector=`{name}@{version}`——AIGX 的安装只吃
+    // 一个 selector 串（source::parse），故把「包名+版本」合成 `name@version`
+    //（等价于 A2A 的 source=name / selector=version 两参数），安装时按清单
+    // 里的版本直接下载。
+    let (source, selector) = if !entry_present && version.is_some() {
+        let v = version.clone().unwrap_or_default();
+        (ScriptSource::Npm, format!("{name}@{v}"))
+    } else {
+        (ScriptSource::Github, format!("github:{}", item.repo))
+    };
     verdict.entry = Some(Entry {
-        name: pj.name.clone().unwrap_or_else(|| item.repo.clone()),
-        label: desc.clone().unwrap_or_else(|| pid.clone()),
-        version: pj.version.clone(),
-        providers: vec![pid],
-        source: ScriptSource::Github,
-        selector: format!("github:{}", item.repo),
+        name,
+        label,
+        version,
+        providers,
+        source,
+        selector,
         publisher: ScriptPublisher::ThirdParty,
         summary,
         repository: repo_short.or_else(|| Some(item.repo.clone())),
         repository_url: repo_url.or_else(|| Some(item.html_url.clone())),
         stars: Some(item.stargazers_count),
-        stars_at: Some(network::now_unix()),
+        stars_at: Some(now),
         icon_sources: vec![],
         kind: None,
         installable: true,
@@ -286,7 +360,8 @@ async fn verify_repo(client: &reqwest::Client, item: &RepoItem) -> RepoVerdict {
         archive_url: None,
         integrity: None,
         pushed_at: (pushed > 0).then_some(pushed),
-        manifest_at: None,
+        // 记下本轮读取清单的时刻，作为 MANIFEST_TTL 复用判据。
+        manifest_at: Some(now),
         provider_verified: Some(true),
     });
     verdict
@@ -469,22 +544,35 @@ pub async fn search_repos(client: &reqwest::Client) -> Result<Vec<RepoItem>, Fai
 /// github 阶段全流程：搜索 → 逐仓验证 → 产出（条目, 忽略仓）。
 ///
 /// - 与 market 同名（小写包名集合 `market_names`）的候选直接跳过；
-/// - 已在 `ignored` 且 push 时间没变新的候选跳过深扫（活跃度闸门的缓存面）。
+/// - 已在 `ignored` 且 push 时间没变新的候选跳过深扫（活跃度闸门的缓存面）；
+/// - `previous`：上一轮已收录的第三方条目。pushed_at 未变且未超 `MANIFEST_TTL`
+///   的仓直接复用（只刷新 stars/description），不重读源码。
 pub async fn fetch_github(
     client: &reqwest::Client,
     market_names: &HashSet<String>,
     ignored: &[IgnoredRepo],
+    previous: &[Entry],
 ) -> Result<(Vec<Entry>, Vec<IgnoredRepo>), Failure> {
     let items = search_repos(client).await?;
     let candidates = select_candidates(&items, market_names, ignored, MAX_VERIFY_PER_CYCLE);
+    // 旧条目按 repository（小写）索引，供 verify_repo 复用判定。
+    let before: HashMap<String, Entry> = previous
+        .iter()
+        .filter_map(|e| Some((e.repository.as_ref()?.to_lowercase(), e.clone())))
+        .collect();
 
     let client2 = std::sync::Arc::new(client.clone());
+    let before = std::sync::Arc::new(before);
     let verdicts = network::map_limited(SCAN_CONCURRENCY, candidates, move |it| {
         // Arc 捕获：map_limited 的闭包要求 'static，借 &client2 活不过
         //（E0373）；每任务 clone 一个 reqwest::Client（内部连接池 Arc，
         // clone 廉价）。
         let client = client2.clone();
-        async move { verify_repo(&client, &it).await }
+        let before = before.clone();
+        async move {
+            let prev = before.get(&it.repo.to_lowercase()).cloned();
+            verify_repo(&client, &it, prev.as_ref()).await
+        }
     })
     .await;
 
@@ -564,16 +652,33 @@ fn select_candidates(
     cands
 }
 
-/// 对已收录的第三方条目刷新 stars（第三阶段；6h TTL）。
+/// 对已收录的第三方条目刷新 stars（第三阶段）。
 ///
 /// 逐仓 GET /repos/{repo}；单仓失败保留旧值（stars 缺新不删旧）。
-pub async fn refresh_stars(client: &reqwest::Client, entries: &mut [Entry]) -> usize {
+///
+/// `min_age_secs`：只刷 `stars_at` 距现在 ≥ 该阈值的条目（`stars_at` 缺失
+/// 视为必刷）。阈值由 refresh.rs 传入（`TTL_STARS_SECS + noise(6h)`，即
+/// 12~18h 错开），避免所有客户端同一时刻一起请求仓库信息。
+///
+/// 返回 `(updated, attempted)`：attempted 为本次真正发请求的仓数，调用方
+/// 据 `attempted > updated` 判断有失败、进而推进 stars 重试闸门。
+pub async fn refresh_stars(
+    client: &reqwest::Client,
+    entries: &mut [Entry],
+    min_age_secs: i64,
+) -> (usize, usize) {
+    let now = network::now_unix();
     let targets: Vec<(usize, String)> = entries
         .iter()
         .enumerate()
         .filter(|(_, e)| e.publisher == ScriptPublisher::ThirdParty && e.repository.is_some())
+        .filter(|(_, e)| match e.stars_at {
+            Some(at) => now.saturating_sub(at) >= min_age_secs,
+            None => true,
+        })
         .map(|(i, e)| (i, e.repository.clone().unwrap_or_default()))
         .collect();
+    let attempted = targets.len();
     let client2 = std::sync::Arc::new(client.clone());
     let infos = network::map_limited(SCAN_CONCURRENCY, targets, move |(i, repo)| {
         // Arc 捕获（同 fetch_github：闭包要求 'static）
@@ -603,7 +708,7 @@ pub async fn refresh_stars(client: &reqwest::Client, entries: &mut [Entry]) -> u
         entries[i].stars_at = Some(network::now_unix());
         updated += 1;
     }
-    updated
+    (updated, attempted)
 }
 
 #[cfg(test)]
@@ -611,23 +716,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn entry_candidates_prefer_magpie_key_and_dedupe() {
+    fn entry_candidates_prefer_declared_and_converge_fallback() {
+        // 有声明：只保留声明入口 + 两个 src/ 兜底，不再铺根目录 index.*。
         let pj: RepoPackageJson = serde_json::from_str(
-            r#"{"name":"x","main":"./lib/main.js","magpie":{"provider":"./x.provider.js"},
+            r#"{"name":"x","main":"./lib/main.js",
                 "exports":{".":"./dist/idx.js"}}"#,
         )
         .unwrap();
         let c = entry_candidates(&pj);
-        assert_eq!(c[0], "x.provider.js");
-        assert!(c.contains(&"lib/main.js".to_string()));
-        assert!(c.contains(&"dist/idx.js".to_string()));
-        assert!(c.contains(&"index.js".to_string()));
+        let paths: Vec<&str> = c.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths[0], "lib/main.js");
+        assert!(paths.contains(&"dist/idx.js"));
+        // 声明入口标记为 declared=true
+        assert!(
+            c.iter()
+                .find(|(p, _)| p.as_str() == "lib/main.js")
+                .unwrap()
+                .1
+        );
+        // 兜底收敛到 src/index.*，且为 declared=false
+        assert!(paths.contains(&"src/index.ts"));
+        assert!(paths.contains(&"src/index.js"));
+        assert!(!paths.contains(&"index.ts"), "有声明时不再试根目录 index.*");
         assert!(c.len() <= MAX_ENTRY_CANDIDATES);
         // 去重：main 与 exports 同路径只留一份
         let pj2: RepoPackageJson =
             serde_json::from_str(r#"{"main":"./index.js","exports":{".":"./index.js"}}"#).unwrap();
         let c2 = entry_candidates(&pj2);
-        assert_eq!(c2.iter().filter(|s| *s == "index.js").count(), 1);
+        assert_eq!(
+            c2.iter().filter(|(p, _)| p.as_str() == "index.js").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn entry_candidates_no_declared_tries_root_index() {
+        // 无声明：回退到根目录一排 index.*（declared=false）。
+        let pj: RepoPackageJson = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+        let paths: Vec<String> = entry_candidates(&pj).into_iter().map(|(p, _)| p).collect();
+        assert!(paths.contains(&"index.ts".to_string()));
+        assert!(paths.contains(&"index.js".to_string()));
+        assert!(paths.contains(&"src/index.ts".to_string()));
     }
 
     #[test]
