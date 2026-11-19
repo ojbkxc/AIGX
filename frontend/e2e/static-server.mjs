@@ -298,8 +298,10 @@ const PLUGINS_PAYLOAD = {
       },
       {
         id: 'aigx-web-pack', name: '网页提供商包', description: '网页形态提供商扩展（智谱清言等）。',
-        official: true, version: null, page: null, prerelease: true,
+        official: true, version: '0.9.0', page: null, prerelease: true,
         platforms: [{ target: 'x86_64-unknown-linux-gnu', size: 1048576, url: 'https://example.com/web-pack.zip', current: true }],
+        // 清单声明的 provider：缺失插件横幅据此把隐藏账号映射到可安装包
+        providers: [{ id: 'web-glm', label: '智谱清言' }],
       },
     ],
   },
@@ -307,6 +309,18 @@ const PLUGINS_PAYLOAD = {
     { id: 'aigx-provider-pack', available: false, checked: true, current: '1.2.0', latest: '1.2.0', reason: null, error: false, asset: null },
   ],
   operations: [],
+  // 本地安装上限（FileInstallDialog 用）
+  maxPackBytes: 24 * 1024 * 1024,
+  // provider → 账号数（批量条目账号计数）
+  accountCounts: { monkeyCode: 1, 'orca-term': 1, 'web-glm': 2 },
+  // 隐藏账号摘要：web-glm 的 2 个账号因插件未安装而隐藏（缺失插件横幅数据源）
+  hiddenAccounts: {
+    total: 2,
+    byProvider: { 'web-glm': 2 },
+    providers: [
+      { id: 'web-glm', label: '智谱清言', count: 2, reason: 'not_installed', packId: null },
+    ],
+  },
 };
 
 /** 插件桩复位种子：桌面/移动两个 project 串行共用进程，写操作会跨 project 残留。
@@ -1231,6 +1245,8 @@ function handle(req, res, p, bodyText) {
       PLUGINS_PAYLOAD.catalog = JSON.parse(JSON.stringify(PLUGINS_SEED.catalog));
       PLUGINS_PAYLOAD.updates = JSON.parse(JSON.stringify(PLUGINS_SEED.updates));
       PLUGINS_PAYLOAD.operations = JSON.parse(JSON.stringify(PLUGINS_SEED.operations));
+      PLUGINS_PAYLOAD.accountCounts = JSON.parse(JSON.stringify(PLUGINS_SEED.accountCounts));
+      PLUGINS_PAYLOAD.hiddenAccounts = JSON.parse(JSON.stringify(PLUGINS_SEED.hiddenAccounts));
       return sendJson(res, { success: true, data: null });
     }
 
@@ -1373,8 +1389,39 @@ function handle(req, res, p, bodyText) {
       PLUGINS_PAYLOAD.catalog.plugins = PLUGINS_PAYLOAD.catalog.plugins.filter((it) => it.id !== entry.id);
       return sendJson(res, { success: true, data: { pack: installedPack } });
     }
+    // 从发布目录后台安装/更新（前端单包下载走这里）：桩同步完成安装并直接回
+    // 一个已完成 Operation（页面随后回读列表即可看到新包与 toast）。
+    if (p === '/api/plugins/install-from-release' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
+      const entry = PLUGINS_PAYLOAD.catalog.plugins.find((it) => it.id === body.id);
+      if (!entry) return sendJson(res, { success: false, error: '发布目录里没有这个插件包' }, 404);
+      const installedPack = {
+        id: entry.id, name: entry.name, description: entry.description,
+        version: entry.version || '0.0.0', requiredVersion: null, updateRequired: false,
+        compatibilityError: null, enabled: true, signed: false,
+        installedAt: Math.floor(Date.now() / 1000), entryPresent: true, protocol: 3,
+        homepage: entry.homepage ?? null, icon: entry.icon ?? null,
+        providers: [], host: { running: false, providers: [], crashes: 0, disabled: false, lastError: null },
+      };
+      PLUGINS_PAYLOAD.packs.push(installedPack);
+      PLUGINS_PAYLOAD.catalog.plugins = PLUGINS_PAYLOAD.catalog.plugins.filter((it) => it.id !== entry.id);
+      return sendJson(res, {
+        success: true,
+        data: {
+          operation: {
+            id: entry.id, action: body.action || 'install', stage: 'done', active: false, done: true,
+            received: 0, total: 0, percent: 100, version: installedPack.version, updatedAt: Date.now(),
+          },
+        },
+      });
+    }
     if (p === '/api/plugins/update' || p === '/api/plugins/release') {
       return sendJson(res, { success: true, data: { error: false, reason: null } });
+    }
+    // 本 spec 不覆盖脚本插件：显式 404 让页面「Magpie 插件」源如实显示不可用
+    // （否则落到 EMPTY_LIST 兜底会被误判为「脚本后端已就绪」）。
+    if (p === '/api/plugins/scripts' || p === '/api/plugins/scripts/catalog') {
+      return sendJson(res, { success: false, error: 'not found' }, 404);
     }
 
     // 签到中心
