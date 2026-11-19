@@ -111,7 +111,7 @@ impl ApiKey {
     pub fn allows_model(&self, model: &str) -> bool {
         match &self.allowed_models {
             None => true,
-            Some(list) => list.is_empty() || list.iter().any(|m| m == model),
+            Some(list) => list.is_empty() || list.iter().any(|m| m.eq_ignore_ascii_case(model)),
         }
     }
 

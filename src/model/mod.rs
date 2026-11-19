@@ -759,8 +759,9 @@ fn sort_mappings(mappings: &mut [Mapping]) {
 /// 共用的唯一命中口径）。
 ///
 /// 命中顺序：先精确到家的条目，再全局条目；两步都只认 `enabled` 的条目。
-/// 大小写：alias 与 provider 均忽略大小写（下游请求大小写不敏感，与
-/// A2A `ModelRules::binding` 同口径）。
+/// 大小写：alias 与 provider 都忽略大小写（与 A2A `ModelRules::binding`
+/// 同口径——下游请求 `Deepseek-v4.1-Flash` 与 `deepseek-v4.1-flash` 必须
+/// 命中同一条映射，规范化后的 target 才是发给上游的名字）。
 fn find_mapping<'a>(
     mappings: &'a [Mapping],
     provider: Option<&str>,
@@ -833,7 +834,9 @@ pub fn prune_stale_channel_mappings(
     if mapping.is_empty() || alive.is_empty() {
         return Vec::new();
     }
-    // 存活集初始 = 清单内且出现在映射表里的 alias
+    // 存活集初始 = 清单内且出现在映射表里的 alias（大小写不敏感比对，
+    // 与下游请求归一语义一致：清单写 `Deepseek-v4.1-Flash`、映射 key 写
+    // `deepseek-v4.1-flash` 时不能误判为悬空）
     let mut protected: HashSet<&String> = HashSet::new();
     for alias in mapping.keys() {
         if alive.iter().any(|m| m.eq_ignore_ascii_case(alias)) {
@@ -1405,25 +1408,43 @@ mod tests {
 
     #[test]
     fn channel_prune_case_insensitive() {
-        // 大小写不敏感口径：存活集比较忽略大小写，与 resolve_channel_mapping 一致
+        // 大小写不敏感口径（与 resolve_channel_mapping / 请求归一一致）：
+        // 映射 key `GPT-4` 与上游清单 `gpt-4` 是同一模型，不能当死链清理
+        // —— 否则上游清单大小写一变（`Deepseek-v4.1-Flash`）就会误删
+        // 仍在生效的映射条目。
         let mapping = channel_mapping(&[("GPT-4", "t1")]);
         let removed = prune_stale_channel_mappings(&mapping, &channel_alive(&["gpt-4"]));
-        assert!(removed.is_empty());
+        assert!(
+            removed.is_empty(),
+            "大小写变体不应被判为悬空映射，实际移除：{removed:?}"
+        );
     }
 
+    /// 下游请求大小写不敏感：`Deepseek-v4.1-Flash` / `deepseek-v4.1-flash`
+    /// 命中同一条映射并归一为同一个 target（与 A2A `ModelRules::binding` 同口径）。
     #[test]
     fn mapping_alias_match_is_case_insensitive() {
-        // 下游请求大小写不敏感：find_mapping 的 alias 忽略大小写匹配
-        let mapping = Mapping {
-            alias: "DeepSeek-v4.1-flash".to_string(),
-            target: "deepseek-v4.1-flash".to_string(),
-            provider: None,
-            reasoning: None,
-            enabled: true,
-        };
-        let mappings = [mapping];
-        let hit = find_mapping(&mappings, None, "DeepSeek-v4.1-FLASH");
-        assert!(hit.is_some());
-        assert_eq!(hit.unwrap().alias, "DeepSeek-v4.1-flash");
+        let m = mapper();
+        m.upsert_mapping(
+            "deepseek-v4.1-flash",
+            "upstream-real",
+            Some("openai_compatible"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            m.resolve_for(Some("openai_compatible"), "deepseek-v4.1-flash"),
+            "upstream-real"
+        );
+        assert_eq!(
+            m.resolve_for(Some("openai_compatible"), "Deepseek-v4.1-Flash"),
+            "upstream-real"
+        );
+        assert_eq!(
+            m.resolve_for(Some("OpenAI_Compatible"), "DEEPSEEK-V4.1-FLASH"),
+            "upstream-real"
+        );
     }
 }

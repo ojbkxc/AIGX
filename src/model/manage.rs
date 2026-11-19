@@ -99,7 +99,10 @@ impl ModelRules {
         self.store.put(RULES_KEY, &RulesFile { disabled })
     }
 
-    /// 该 `(provider, model)` 是否被管理员关闭（大小写不敏感）。
+    /// 该 `(provider, model)` 是否被管理员关闭。
+    ///
+    /// 大小写不敏感（与 A2A `RuleEntry::matches` 同口径）：下游请求
+    /// `Deepseek-v4.1-Flash` 与模型清单里的 `deepseek-v4.1-flash` 视为同一模型。
     pub fn is_disabled(&self, provider: &str, model: &str) -> bool {
         self.disabled
             .read()
@@ -107,7 +110,9 @@ impl ModelRules {
             .any(|e| e.provider.eq_ignore_ascii_case(provider) && e.id.eq_ignore_ascii_case(model))
     }
 
-    /// 设置启停；返回是否有变化（大小写不敏感，不产生重复条目）。
+    /// 设置启停；返回是否有变化。
+    ///
+    /// 大小写不敏感：命中已有条目（任意大小写写法）即更新，不产生重复条目。
     pub fn set_enabled(&self, provider: &str, model: &str, enabled: bool) -> anyhow::Result<bool> {
         let entry = RuleEntry {
             provider: provider.to_string(),
@@ -784,7 +789,7 @@ fn new_row(
     // 同口径）。刻意不过滤 disabled：管理页的 chip 要能看见并再打开。
     let alias_entries: Vec<AliasEntry> = entries
         .iter()
-        .filter(|mapping| mapping.target == model)
+        .filter(|mapping| mapping.target.eq_ignore_ascii_case(model))
         .filter(|mapping| {
             mapping
                 .provider
@@ -1181,23 +1186,27 @@ mod tests {
         assert!(view.providers.is_empty());
     }
 
+    /// 启停规则大小写不敏感（与 A2A `RuleEntry::matches` 同口径）：
+    /// 任意大小写写法视为同一 `(provider, id)`，不产生重复条目。
     #[test]
     fn disabled_rule_match_is_case_insensitive() {
-        // 启停规则大小写不敏感：查询命中大小写变体，且不产生重复条目
-        let rules = ModelRules::new(temp_store("case-insensitive"));
-        rules
-            .set_enabled("workbuddy", "DeepSeek-v4.1-flash", false)
-            .unwrap();
-        // 大小写变体查询应命中
-        assert!(rules.is_disabled("workbuddy", "deepseek-v4.1-FLASH"));
-        // 再次以不同大小写关闭，不产生重复条目（无变化）
-        assert!(!rules
-            .set_enabled("workbuddy", "deepseek-v4.1-FLASH", false)
-            .unwrap());
-        // 启用后，大小写变体也应被移除
+        let store = temp_store("case");
+        let rules = ModelRules::new(store);
+        rules.load().unwrap();
         assert!(rules
-            .set_enabled("workbuddy", "DeepSeek-v4.1-FLASH", true)
+            .set_enabled("openai_compatible", "deepseek-v4.1-flash", false)
             .unwrap());
-        assert!(!rules.is_disabled("workbuddy", "deepseek-v4.1-flash"));
+        assert!(rules.is_disabled("openai_compatible", "deepseek-v4.1-flash"));
+        assert!(rules.is_disabled("OpenAI_Compatible", "Deepseek-v4.1-Flash"));
+        // 大小写不同写法再次关闭：无变化，不产生第二条记录
+        assert!(!rules
+            .set_enabled("openai_compatible", "Deepseek-v4.1-Flash", false)
+            .unwrap());
+        assert_eq!(rules.all_disabled().len(), 1);
+        // 任意大小写写法启用一次即清掉
+        assert!(rules
+            .set_enabled("openai_compatible", "DEEPSEEK-V4.1-FLASH", true)
+            .unwrap());
+        assert!(!rules.is_disabled("openai_compatible", "deepseek-v4.1-flash"));
     }
 }

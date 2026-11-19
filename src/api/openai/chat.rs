@@ -958,6 +958,11 @@ pub(crate) async fn handle_chat_completions(
             // metrics 记 error、日志 status_code 记 500（此前出错仍按成功处理）
             let stream_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let stream_errored_for_map = stream_errored.clone();
+            // 下游响应里的 model 一律回显**请求的对外名**（A2A
+            // `rewrite_response_model` 同口径）：上游清单的实际大小写
+            // （如 `Deepseek-v4.1-Flash`）只在内部路由/日志使用，
+            // 不泄漏给客户端。
+            let downstream_model = model.clone();
 
             let sse_stream = stream.flat_map(move |chunk_result| match chunk_result {
                 Ok(chunk) => {
@@ -1032,7 +1037,7 @@ pub(crate) async fn handle_chat_completions(
                         id: &chunk.id,
                         object: "chat.completion.chunk",
                         created: chrono::Utc::now().timestamp(),
-                        model: &chunk.model,
+                        model: &downstream_model,
                         choices: [SseChoiceFrame {
                             index: 0,
                             delta,
@@ -1053,7 +1058,7 @@ pub(crate) async fn handle_chat_completions(
                             "id": chunk.id,
                             "object": "chat.completion.chunk",
                             "created": chrono::Utc::now().timestamp(),
-                            "model": chunk.model,
+                            "model": downstream_model.as_str(),
                             "choices": [],
                             "usage": {
                                 "prompt_tokens": usage.prompt_tokens,
@@ -1976,7 +1981,7 @@ pub(crate) async fn handle_chat_completions(
                 "id": response.id,
                 "object": "chat.completion",
                 "created": chrono::Utc::now().timestamp(),
-                "model": response.model,
+                "model": model.clone(),
                 "choices": [{
                     "index": 0,
                     "message": message,

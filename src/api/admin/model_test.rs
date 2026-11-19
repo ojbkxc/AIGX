@@ -404,7 +404,11 @@ fn account_matches(session: &AccountSession, provider: &str, model: &str) -> boo
     if sp != provider {
         return false;
     }
-    session.models.is_empty() || session.models.iter().any(|m| m.as_str() == model)
+    session.models.is_empty()
+        || session
+            .models
+            .iter()
+            .any(|m| m.as_str().eq_ignore_ascii_case(model))
 }
 
 fn channel_matches(channel: &Channel, provider: &str, model: &str) -> bool {
@@ -414,7 +418,7 @@ fn channel_matches(channel: &Channel, provider: &str, model: &str) -> bool {
         && channel
             .effective_models()
             .iter()
-            .any(|m| m.as_str() == model)
+            .any(|m| m.as_str().eq_ignore_ascii_case(model))
 }
 
 fn pick_account(

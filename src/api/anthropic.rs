@@ -1214,8 +1214,10 @@ pub async fn handle_messages(
                 std::sync::Arc::clone(&chat_req),
             )
             .await as u64;
-            // message_start 回显映射后的上游模型名（与计费/日志口径一致）
-            let model_for_prefix = used_upstream.clone().unwrap_or_else(|| model.clone());
+            // message_start 对客户端回显**请求的对外模型名**（A2A
+            // `rewrite_response_model` 同口径）：上游映射后的实际模型名
+            // 只在内部计费/日志使用，不泄漏给下游。
+            let model_for_prefix = model.clone();
             let prefix = futures::stream::once(async move {
                 Ok::<_, Infallible>(
                     Event::default().event("message_start").data(
@@ -2271,7 +2273,7 @@ pub async fn handle_messages(
                 "type": "message",
                 "role": "assistant",
                 "content": content_blocks,
-                "model": response.model,
+                "model": model.clone(),
                 "stop_reason": to_anthropic_stop_reason(&response.finish_reason),
                 "stop_sequence": null,
                 "usage": {

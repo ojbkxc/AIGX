@@ -762,7 +762,9 @@ impl AccountSession {
         }
     }
 
-    /// 是否支持指定模型（`models` 为空 = 全部支持；大小写不敏感）。
+    /// 是否支持指定模型（`models` 为空 = 全部支持）。
+    ///
+    /// 大小写不敏感（下游请求大小写归一，与 A2A `entry_id_in_manifest` 同口径）。
     pub fn supports_model(&self, model: &str) -> bool {
         self.models.is_empty() || self.models.iter().any(|m| m.eq_ignore_ascii_case(model))
     }

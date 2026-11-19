@@ -494,8 +494,12 @@ pub(crate) fn resolve_bridges_needs(
 }
 /// 把原始模型名解析为上游真实模型名（= 价格表里的名）。
 ///
-/// 优先级：渠道级映射（链式）> 全局映射 > 原名透传。
+/// 优先级：渠道级映射（链式）> 全局映射 > **渠道清单实际写法** > 原名透传。
 /// 仿 new-api ModelMappedHelper：渠道级支持链式重定向 + 循环检测。
+///
+/// 「渠道清单实际写法」这层对齐 A2A `entry_id_in_manifest`：下游请求大小写
+/// 一律接受，但发给上游的名字必须与上游清单一一对应——上游清单是
+/// `Deepseek-v4.1-Flash` 就发那个写法，不是请求里的大小写。
 pub(crate) fn resolve_upstream_model(
     origin: &str,
     channel: Option<&crate::channel::Channel>,
@@ -506,7 +510,22 @@ pub(crate) fn resolve_upstream_model(
             return m;
         }
     }
-    global_mapper.resolve(origin)
+    let mapped = global_mapper.resolve(origin);
+    if mapped.as_str() != origin {
+        // 映射命中：target 即上游真名（配置口径），原样使用
+        return mapped;
+    }
+    // 未命中映射：按渠道清单里的实际写法一一对应上游（大小写不敏感命中）
+    if let Some(ch) = channel {
+        if let Some(actual) = ch
+            .effective_models()
+            .iter()
+            .find(|m| m.eq_ignore_ascii_case(origin))
+        {
+            return actual.clone();
+        }
+    }
+    mapped
 }
 /// 判断桥接错误是否值得切换到下一个渠道重试（B06）。
 ///

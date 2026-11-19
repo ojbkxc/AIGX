@@ -98,7 +98,7 @@ pub(crate) async fn collect_available_models(
                     {
                         continue;
                     }
-                    model_list.push((m, None));
+                    model_list.push((m.to_ascii_lowercase(), None));
                 }
             }
             continue;
@@ -112,7 +112,7 @@ pub(crate) async fn collect_available_models(
                 if !seen.insert(m.to_ascii_lowercase()) {
                     continue;
                 }
-                model_list.push((m, None));
+                model_list.push((m.to_ascii_lowercase(), None));
             }
             continue;
         }
@@ -131,7 +131,7 @@ pub(crate) async fn collect_available_models(
             if !seen.insert(m.to_ascii_lowercase()) {
                 continue;
             }
-            model_list.push((m.clone(), channel_owned_by));
+            model_list.push((m.to_ascii_lowercase(), channel_owned_by));
         }
     }
 
@@ -196,7 +196,7 @@ pub(crate) async fn collect_available_models(
                             if m.is_empty() || !seen.insert(m.to_ascii_lowercase()) {
                                 continue;
                             }
-                            model_list.push((m.clone(), channel_owned_by));
+                            model_list.push((m.to_ascii_lowercase(), channel_owned_by));
                         }
                     }
                 }
@@ -208,7 +208,7 @@ pub(crate) async fn collect_available_models(
     // 用 active_mappings：关掉的别名不参与改名，列出来会让客户端「看得到调不通」。
     for name in state.model_mapper.active_mappings().keys() {
         if seen.insert(name.to_ascii_lowercase()) {
-            model_list.push((name.clone(), None));
+            model_list.push((name.to_ascii_lowercase(), None));
         }
     }
     for entry in state.model_mapper.custom_models() {
@@ -216,7 +216,7 @@ pub(crate) async fn collect_available_models(
             continue;
         }
         let owned_by = crate::model::metadata::owned_by_for_channel_type(&entry.provider);
-        model_list.push((entry.id, owned_by));
+        model_list.push((entry.id.to_ascii_lowercase(), owned_by));
     }
     model_list
 }
@@ -557,11 +557,13 @@ pub(crate) async fn handle_get_model(
 
     // 通用语义：渠道声明或映射可解析即认为存在
     // （models 非空 = 白名单；空 = 全部时以发现快照为准）
-    let in_channels = state
-        .channel_store
-        .list()
-        .iter()
-        .any(|ch| ch.is_enabled() && ch.effective_models().iter().any(|m| m == &model));
+    let in_channels = state.channel_store.list().iter().any(|ch| {
+        ch.is_enabled()
+            && ch
+                .effective_models()
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(&model))
+    });
     // 关掉的别名不算「存在」：与 resolve/list 口径一致，否则详情说存在、
     // 调用时却按未配别名透传。
     let mapped = state.model_mapper.is_active(&model);

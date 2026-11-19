@@ -389,6 +389,7 @@ pub(crate) async fn handle_responses(
         ResponsesAttempt::Passthrough(ResponsesPassthrough::Json(json)) => {
             // 非流式：上游 JSON body 原样转回客户端，
             // usage 为 Responses 格式（input_tokens/output_tokens）
+            let mut json = json;
             let latency_ms = request_start.elapsed().as_millis() as u64;
             let usage = json.get("usage");
             let mut prompt_tokens = usage
@@ -492,6 +493,9 @@ pub(crate) async fn handle_responses(
             crate::metrics::global().record_tokens(billing_model, "prompt", prompt_tokens);
             crate::metrics::global().record_tokens(billing_model, "completion", completion_tokens);
 
+            // 对客户端回显请求的对外模型名（A2A `rewrite_response_model`
+            // 同口径）：上游清单的实际大小写只在内部路由/日志使用
+            json["model"] = Value::String(model.clone());
             Json(json).into_response()
         }
         ResponsesAttempt::Passthrough(ResponsesPassthrough::Stream(byte_stream)) => {

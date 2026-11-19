@@ -455,7 +455,10 @@ impl Channel {
         out
     }
 
-    /// 是否支持指定模型（models 为空视为全支持；大小写不敏感）
+    /// 是否支持指定模型（models 为空视为全支持）。
+    ///
+    /// 大小写不敏感（下游请求 `Deepseek-v4.1-Flash` 须命中清单里的
+    /// `deepseek-v4.1-flash`，与 A2A `entry_id_in_manifest` 同口径）。
     pub fn supports_model(&self, model: &str) -> bool {
         if self.models.is_empty() {
             return true;
@@ -539,33 +542,37 @@ impl Channel {
     ///
     /// `gpt-4 → gpt-4-0613 → gpt-4-turbo`：沿链走到尾，循环检测避免死循环。
     /// 命中返回 `Some(最终名)`，未命中返回 `None`（调用方 fallback 全局/原名）。
+    ///
+    /// key 查找**大小写不敏感**：下游请求 `Deepseek-v4.1-Flash` 与映射 key
+    /// `deepseek-v4.1-flash` 视为同一条链（与全局映射/清单匹配同口径）。
     pub fn resolve_channel_mapping(&self, model: &str) -> Option<String> {
         if self.model_mapping.is_empty() {
             return None;
         }
+        let lookup = |name: &str| -> Option<String> {
+            self.model_mapping
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+        };
         let mut current = model.to_string();
         let mut visited = std::collections::HashSet::new();
         visited.insert(current.to_ascii_lowercase());
         let mut mapped = false;
         loop {
-            // 大小写不敏感查找：找与 current 忽略大小写匹配的键
-            let next = self
-                .model_mapping
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(&current))
-                .map(|(_, v)| v.clone());
-            match next {
+            match lookup(&current) {
                 Some(next) if !next.is_empty() => {
-                    if visited.contains(&next.to_ascii_lowercase()) {
-                        // 检测到循环：next 已访问过（按小写判环）
-                        if next.eq_ignore_ascii_case(&current) {
+                    let next_lower = next.to_ascii_lowercase();
+                    if visited.contains(&next_lower) {
+                        // 检测到循环：next 已访问过
+                        if next_lower == current.to_ascii_lowercase() {
                             // 自环 a→a：视为无映射
                             return if mapped { Some(current) } else { None };
                         }
                         // a→b→a 真循环：返回当前已映射结果，不再追
                         return Some(current);
                     }
-                    visited.insert(next.to_ascii_lowercase());
+                    visited.insert(next_lower);
                     current = next;
                     mapped = true;
                 }
@@ -2994,12 +3001,20 @@ mod tests {
         assert!(bare.trusted_backup_base_urls().is_empty());
     }
 
+    /// 模型匹配大小写不敏感：下游请求 `Deepseek-v4.1-Flash` 命中清单里的
+    /// `deepseek-v4.1-flash`（渠道白名单与发现快照同口径）。
     #[test]
     fn supports_model_is_case_insensitive() {
-        // 渠道模型清单大小写不敏感
-        let ch = sample("case", 1, vec!["DeepSeek-v4.1-flash"]);
-        assert!(ch.supports_model("deepseek-v4.1-FLASH"));
-        assert!(ch.supports_model("DeepSeek-v4.1-flash"));
-        assert!(!ch.supports_model("deepseek-v3"));
+        let ch = sample("a", 0, vec!["deepseek-v4.1-flash"]);
+        assert!(ch.supports_model("deepseek-v4.1-flash"));
+        assert!(ch.supports_model("Deepseek-v4.1-Flash"));
+        assert!(ch.supports_model("DEEPSEEK-V4.1-FLASH"));
+        assert!(ch.auto_pick_supports("Deepseek-v4.1-Flash"));
+        // 发现快照也按大小写不敏感匹配
+        let mut ch2 = sample("b", 0, vec![]);
+        ch2.discovered_models = vec!["Deepseek-v4.1-Flash".into()];
+        assert!(ch2.auto_pick_supports("deepseek-v4.1-flash"));
+        // 不存在的模型仍为 false
+        assert!(!ch.supports_model("deepseek-v4.1-flash-max"));
     }
 }

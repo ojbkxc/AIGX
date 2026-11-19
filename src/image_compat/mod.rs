@@ -789,7 +789,7 @@ fn vision_override(model: &str, provider: Option<&str>) -> Option<bool> {
     store
         .all()
         .into_iter()
-        .find(|entry| entry.id == model)
+        .find(|entry| entry.id.eq_ignore_ascii_case(model))
         .and_then(|entry| entry.values.get("supportsImages").and_then(Value::as_bool))
 }
 
