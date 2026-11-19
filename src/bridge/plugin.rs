@@ -257,18 +257,22 @@ fn map_rpc_error(err: &RpcError) -> BridgeError {
 /// 拿到一段 SSE 当错误。插件违规先发正文时按 200 继续（少一帧头不把
 /// 整条流作废，正文字节随 `pending` 交回调用方）。
 async fn take_head(call: &mut ConversationStream) -> Result<(u16, Option<Vec<u8>>), BridgeError> {
-    match call.next().await {
-        Some(Ok(StreamEvent::Head { status, .. })) => {
-            if (200..300).contains(&status) {
-                return Ok((status, None));
+    loop {
+        match call.next().await {
+            Some(Ok(StreamEvent::Head { status, .. })) => {
+                if (200..300).contains(&status) {
+                    return Ok((status, None));
+                }
+                let body = drain_stream(call).await?;
+                return Err(error_body_to_bridge(status, &body));
             }
-            let body = drain_stream(call).await?;
-            Err(error_body_to_bridge(status, &body))
+            Some(Ok(StreamEvent::Chunk(bytes))) => return Ok((200, Some(bytes))),
+            Some(Ok(StreamEvent::End)) => return Ok((200, None)),
+            // 测试用日志事件：忽略，继续等响应头。
+            Some(Ok(StreamEvent::Log { .. })) => continue,
+            Some(Err(e)) => return Err(map_rpc_error(&e)),
+            None => return Err(BridgeError::Transport("插件流在响应头前结束".into())),
         }
-        Some(Ok(StreamEvent::Chunk(bytes))) => Ok((200, Some(bytes))),
-        Some(Ok(StreamEvent::End)) => Ok((200, None)),
-        Some(Err(e)) => Err(map_rpc_error(&e)),
-        None => Err(BridgeError::Transport("插件流在响应头前结束".into())),
     }
 }
 
@@ -286,6 +290,7 @@ async fn drain_stream(call: &mut ConversationStream) -> Result<Vec<u8>, BridgeEr
                 }
             }
             Some(Ok(StreamEvent::Head { .. })) => {}
+            Some(Ok(StreamEvent::Log { .. })) => {}
             Some(Ok(StreamEvent::End)) | None => return Ok(out),
             Some(Err(e)) => return Err(map_rpc_error(&e)),
         }
@@ -736,6 +741,7 @@ impl Bridge for PluginBridge {
             match call.next().await {
                 Some(Ok(StreamEvent::Chunk(bytes))) => parser.feed(&bytes, &id, &model),
                 Some(Ok(StreamEvent::Head { .. })) => {}
+                Some(Ok(StreamEvent::Log { .. })) => {}
                 Some(Ok(StreamEvent::End)) => {
                     parser.finish(&id, &model);
                     break;
@@ -786,6 +792,8 @@ impl Bridge for PluginBridge {
                         Some(Ok(StreamEvent::Chunk(bytes))) => parser.feed(&bytes, &id, &model),
                         // 重复 head（协议违规）：丢弃，不毁正文
                         Some(Ok(StreamEvent::Head { .. })) => {}
+                        // 测试用日志事件：丢弃。
+                        Some(Ok(StreamEvent::Log { .. })) => {}
                         Some(Ok(StreamEvent::End)) => {
                             ended = true;
                             parser.finish(&id, &model);

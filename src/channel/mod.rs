@@ -455,12 +455,12 @@ impl Channel {
         out
     }
 
-    /// 是否支持指定模型（models 为空视为全支持）
+    /// 是否支持指定模型（models 为空视为全支持；大小写不敏感）
     pub fn supports_model(&self, model: &str) -> bool {
         if self.models.is_empty() {
             return true;
         }
-        self.models.iter().any(|m| m == model)
+        self.models.iter().any(|m| m.eq_ignore_ascii_case(model))
     }
 
     /// 调试/Playground 自动选路口径。
@@ -471,9 +471,13 @@ impl Channel {
     /// 快照也为空（尚未拉取过模型列表）时保持全支持兜底。
     pub fn auto_pick_supports(&self, model: &str) -> bool {
         if !self.models.is_empty() {
-            return self.models.iter().any(|m| m == model);
+            return self.models.iter().any(|m| m.eq_ignore_ascii_case(model));
         }
-        self.discovered_models.is_empty() || self.discovered_models.iter().any(|m| m == model)
+        self.discovered_models.is_empty()
+            || self
+                .discovered_models
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(model))
     }
 
     /// 对外暴露的有效模型清单（列表聚合 / 声明校验共用口径）。
@@ -541,22 +545,28 @@ impl Channel {
         }
         let mut current = model.to_string();
         let mut visited = std::collections::HashSet::new();
-        visited.insert(current.clone());
+        visited.insert(current.to_ascii_lowercase());
         let mut mapped = false;
         loop {
-            match self.model_mapping.get(&current) {
+            // 大小写不敏感查找：找与 current 忽略大小写匹配的键
+            let next = self
+                .model_mapping
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&current))
+                .map(|(_, v)| v.clone());
+            match next {
                 Some(next) if !next.is_empty() => {
-                    if visited.contains(next) {
-                        // 检测到循环：next 已访问过
-                        if next == &current {
+                    if visited.contains(&next.to_ascii_lowercase()) {
+                        // 检测到循环：next 已访问过（按小写判环）
+                        if next.eq_ignore_ascii_case(&current) {
                             // 自环 a→a：视为无映射
                             return if mapped { Some(current) } else { None };
                         }
                         // a→b→a 真循环：返回当前已映射结果，不再追
                         return Some(current);
                     }
-                    visited.insert(next.clone());
-                    current = next.clone();
+                    visited.insert(next.to_ascii_lowercase());
+                    current = next;
                     mapped = true;
                 }
                 _ => break,
@@ -2982,5 +2992,14 @@ mod tests {
         // 默认（空列表）= 空结果，调用方据此零开销走原路径
         let bare = sample("bare", 1, vec!["m"]);
         assert!(bare.trusted_backup_base_urls().is_empty());
+    }
+
+    #[test]
+    fn supports_model_is_case_insensitive() {
+        // 渠道模型清单大小写不敏感
+        let ch = sample("case", 1, vec!["DeepSeek-v4.1-flash"]);
+        assert!(ch.supports_model("deepseek-v4.1-FLASH"));
+        assert!(ch.supports_model("DeepSeek-v4.1-flash"));
+        assert!(!ch.supports_model("deepseek-v3"));
     }
 }

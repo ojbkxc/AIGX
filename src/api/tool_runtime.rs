@@ -180,6 +180,8 @@ pub async fn skill_metadata(State(state): State<AppState>, headers: HeaderMap) -
             "version": tool_services::WEB_SEARCH_SKILL_VERSION,
             "recommended_variant": tool_services::recommended_skill_variant(),
             "variants": tool_services::skill_variants(),
+            // webToolEmulation 开关：关闭时不对外宣称模拟契约（对齐 beta.2 缺省开启）。
+            "emulation": crate::config::web_tool_emulation_enabled(),
             "endpoints": {
                 "search": format!("{}/skill/web-search/search", base.trim_end_matches('/')),
                 "fetch": format!("{}/skill/web-search/fetch", base.trim_end_matches('/')),

@@ -342,6 +342,9 @@ pub struct ModelMetaRequest {
     /// `model::metadata::ModelMetadata::reasoning_levels` 的契约修复说明）。
     #[serde(default)]
     pub reasoning_levels: Vec<String>,
+    /// 工具调用模式（A2A beta.2 对齐；管理员可显式设置）。
+    #[serde(default)]
+    pub tool_calling_mode: Option<String>,
 }
 
 /// GET /api/models/meta - 全部模型元信息覆盖项
@@ -367,6 +370,7 @@ pub async fn handle_model_meta_set(
         context_length: body.context_length,
         capabilities: body.capabilities,
         reasoning_levels: body.reasoning_levels,
+        tool_calling_mode: body.tool_calling_mode,
     };
     match state
         .model_metadata

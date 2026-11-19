@@ -193,10 +193,19 @@ impl Context {
                 use sha2::{Digest, Sha256};
                 let identity = format!("{:x}", Sha256::digest(self.identity.as_bytes()));
                 let namespace = format!("{provider}\0{account}\0{identity}\0{session}");
-                conversations()
+                let result = conversations()
                     .lock()
                     .map_err(|_| super::wire::error("会话状态不可用"))?
-                    .invoke(method, &namespace, key, params, 86_400_000, 32)
+                    .invoke(method, &namespace, key, params, 86_400_000, 32)?;
+                // 租约事务：一次绑定了租约的写成功即消费该租约；CAS 失败
+                // （updated=false）不消费，留给下一次重试。
+                if method == "state.compare_exchange" {
+                    if let Some(lease) = params["lease"].as_str() {
+                        let updated = result["updated"] == serde_json::Value::Bool(true);
+                        super::verification::on_state_commit(self, lease, updated);
+                    }
+                }
+                Ok(result)
             }
             Some("account") => {
                 let account = self.account()?.to_string();

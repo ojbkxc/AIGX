@@ -99,15 +99,15 @@ impl ModelRules {
         self.store.put(RULES_KEY, &RulesFile { disabled })
     }
 
-    /// 该 `(provider, model)` 是否被管理员关闭。
+    /// 该 `(provider, model)` 是否被管理员关闭（大小写不敏感）。
     pub fn is_disabled(&self, provider: &str, model: &str) -> bool {
-        self.disabled.read().contains(&RuleEntry {
-            provider: provider.to_string(),
-            id: model.to_string(),
-        })
+        self.disabled
+            .read()
+            .iter()
+            .any(|e| e.provider.eq_ignore_ascii_case(provider) && e.id.eq_ignore_ascii_case(model))
     }
 
-    /// 设置启停；返回是否有变化。
+    /// 设置启停；返回是否有变化（大小写不敏感，不产生重复条目）。
     pub fn set_enabled(&self, provider: &str, model: &str, enabled: bool) -> anyhow::Result<bool> {
         let entry = RuleEntry {
             provider: provider.to_string(),
@@ -116,9 +116,31 @@ impl ModelRules {
         let changed = {
             let mut set = self.disabled.write();
             if enabled {
-                set.remove(&entry)
+                // 大小写不敏感地移除所有匹配项，避免残留大小写变体
+                let matched: Vec<RuleEntry> = set
+                    .iter()
+                    .filter(|e| {
+                        e.provider.eq_ignore_ascii_case(&entry.provider)
+                            && e.id.eq_ignore_ascii_case(&entry.id)
+                    })
+                    .cloned()
+                    .collect();
+                let n = matched.len();
+                for e in matched {
+                    set.remove(&e);
+                }
+                n > 0
             } else {
-                set.insert(entry)
+                // 大小写不敏感：已有匹配则不重复插入
+                if set.iter().any(|e| {
+                    e.provider.eq_ignore_ascii_case(&entry.provider)
+                        && e.id.eq_ignore_ascii_case(&entry.id)
+                }) {
+                    false
+                } else {
+                    set.insert(entry);
+                    true
+                }
             }
         };
         if changed {
@@ -189,6 +211,13 @@ pub struct ManageModel {
     /// 未声明为 null（「不知道」≠「不支持」）。带用户覆盖的生效值。
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub capability_flags: serde_json::Value,
+    /// 工具调用模式（A2A beta.2 `catalog/view.rs` 的 `toolCallingMode`）。
+    ///
+    /// 与 `/v1/models` 条目的 `tool_calling_mode` 同源。管理页据此展示
+    /// 模型的工具调用模式（如 `"emulated"` / `"disabled"` / `"native"`）。
+    /// `None` = 未声明，不输出键。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calling_mode: Option<String>,
     /// 被用户覆盖的能力键（管理页「已改」标记；空数组 = 全部继承）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cap_overrides: Vec<String>,
@@ -803,6 +832,7 @@ fn new_row(
         cap_sources,
         capability_flags,
         cap_overrides,
+        tool_calling_mode: meta.tool_calling_mode,
         price,
         model_ratio,
         aliases,
@@ -915,6 +945,7 @@ mod tests {
             cap_sources: Value::Null,
             capability_flags: Value::Null,
             cap_overrides: Vec::new(),
+            tool_calling_mode: None,
             price: None,
             model_ratio: 1.0,
             aliases: Vec::new(),
@@ -1148,5 +1179,25 @@ mod tests {
         );
         assert!(view.models.is_empty());
         assert!(view.providers.is_empty());
+    }
+
+    #[test]
+    fn disabled_rule_match_is_case_insensitive() {
+        // 启停规则大小写不敏感：查询命中大小写变体，且不产生重复条目
+        let rules = ModelRules::new(temp_store("case-insensitive"));
+        rules
+            .set_enabled("workbuddy", "DeepSeek-v4.1-flash", false)
+            .unwrap();
+        // 大小写变体查询应命中
+        assert!(rules.is_disabled("workbuddy", "deepseek-v4.1-FLASH"));
+        // 再次以不同大小写关闭，不产生重复条目（无变化）
+        assert!(!rules
+            .set_enabled("workbuddy", "deepseek-v4.1-FLASH", false)
+            .unwrap());
+        // 启用后，大小写变体也应被移除
+        assert!(rules
+            .set_enabled("workbuddy", "DeepSeek-v4.1-FLASH", true)
+            .unwrap());
+        assert!(!rules.is_disabled("workbuddy", "deepseek-v4.1-flash"));
     }
 }

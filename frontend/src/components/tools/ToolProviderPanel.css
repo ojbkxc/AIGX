@@ -162,3 +162,120 @@
 @keyframes tpp-spin {
   to { transform: rotate(360deg); }
 }
+/* ── beta.2 多密钥：清单 / 状态 / 编辑器 ─────────────────────── */
+.tpp-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.03));
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.tpp-keys-head {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.tpp-key-row {
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.04));
+}
+
+.tpp-key-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tpp-key-hint {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  word-break: break-all;
+  color: var(--text-main);
+}
+
+.tpp-key-status {
+  font-size: 11.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tpp-key-status.is-ok {
+  color: var(--text-muted);
+}
+
+.tpp-key-status.is-warn {
+  color: var(--warning-color, #c98a00);
+}
+
+.tpp-key-recovery {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.tpp-key-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--border-color);
+  padding-top: 8px;
+}
+
+.tpp-key-help {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.tpp-key-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+.tpp-key-draft-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tpp-key-prio {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tpp-key-draft-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.tpp-key-test-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tpp-key-editor-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

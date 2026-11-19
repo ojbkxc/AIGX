@@ -4233,6 +4233,13 @@ pub struct RateLimitsClearRequest {
     /// 只清这一个模型的标记；缺省 = 清全部。
     #[serde(default)]
     pub model: Option<String>,
+    /// 是否同时清除 provider 级别的策略冷却（对齐上游 `includeProvider`）。
+    ///
+    /// `true` 时在清完账号级 `rate_limits` 后，还把该账号归属渠道的
+    /// provider 级冷却（`cooldowns` 中的 `"*"` 整号键）一并清零。
+    /// 缺省 `false` = 只清账号级。
+    #[serde(default)]
+    pub include_provider: bool,
 }
 
 /// POST /api/account-sessions/:id/rate-limits/clear —— 清除插件限流标记。
@@ -4249,8 +4256,10 @@ pub async fn handle_clear_rate_limits(
             StatusCode::NOT_FOUND,
         ));
     };
-    let model = body
-        .and_then(|Json(body)| body.model)
+    let (model, include_provider) = body
+        .map(|Json(b)| (b.model, b.include_provider))
+        .unwrap_or((None, false));
+    let model = model
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty());
     let cleared = match &model {
@@ -4261,7 +4270,14 @@ pub async fn handle_clear_rate_limits(
             count
         }
     };
-    if cleared > 0 {
+    // includeProvider: 同时清 provider 级整号冷却（`cooldowns["*"]`）。
+    let provider_cleared = if include_provider {
+        usize::from(session.cooldowns.remove("*").is_some())
+    } else {
+        0
+    };
+    let total_cleared = cleared + provider_cleared;
+    if total_cleared > 0 {
         state.account_sessions.upsert(session).map_err(|e| {
             error_response(
                 &format!("Failed to clear rate limits: {e}"),
@@ -4274,12 +4290,12 @@ pub async fn handle_clear_rate_limits(
         &state,
         &admin_id,
         "clear_account_rate_limits",
-        &format!("id={id} cleared={cleared}"),
+        &format!("id={id} cleared={cleared} provider_cleared={provider_cleared}"),
         None,
         None,
     );
     Ok(Json(
-        json!({ "success": true, "data": { "cleared": cleared } }),
+        json!({ "success": true, "data": { "cleared": cleared, "providerCleared": provider_cleared } }),
     ))
 }
 

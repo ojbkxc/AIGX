@@ -14,6 +14,7 @@ import type {
   SystemMonitorItem,
   PluginPackSummary,
   PluginsPayload,
+  PluginOperation,
   ScriptCatalogPayload,
   ScriptPackageView,
   ScriptPackagesPayload,
@@ -50,6 +51,25 @@ export const endpoints = {
   /** 刷新发布目录（返回 catalog 快照） */
   refreshPluginRelease: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/release`),
+
+  /**
+   * 批量生命周期（beta.2 Operation 异步进度模型）：POST /api/plugins/batch。
+   *
+   * 两种请求体：
+   * - `{items: [{id, action, url?, sha256?, catalog?}]}` —— 逐条完整（install 必须带 url）；
+   * - `{action: 'update'|'enable'|'disable'|'uninstall', ids: [...]}` —— 批量简写
+   *   （update 时后端从当前目录快照按 id 解析下载地址）。
+   * 立即返回初始操作快照（stage=waiting），进度经 getPluginProgress 轮询。
+   */
+  batchPlugins: (body: {
+    items?: Array<{ id: string; action: string; url?: string; sha256?: string; catalog?: unknown }>;
+    action?: string;
+    ids?: string[];
+  }): Promise<ApiResponse<{ operations: PluginOperation[] }>> =>
+    request<ApiResponse<{ operations: PluginOperation[] }>>('POST', `${API_BASE}/plugins/batch`, body),
+  /** 批量操作进度（GET /api/plugins/progress）—— operations[] 同源快照 */
+  getPluginProgress: (): Promise<ApiResponse<{ operations: PluginOperation[] }>> =>
+    request<ApiResponse<{ operations: PluginOperation[] }>>('GET', `${API_BASE}/plugins/progress`),
 
   // ── 脚本插件管理（Magpie 脚本包；一个 Bun 宿主承载全部 npm 风格脚本）──
   // 契约锚点：src/api/admin/script_plugins.rs

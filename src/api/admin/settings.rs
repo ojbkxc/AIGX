@@ -1439,6 +1439,523 @@ pub async fn handle_update_sanitize(
     })))
 }
 
+// ── 统一错误处理策略（routingErrorPolicy，对齐 beta.2 /api/routing/errors）───
+
+/// 错误策略视图（对齐参考树 `routing_errors::view`）：
+/// `settings/defaults/revision/configured/legacy/providers`。
+fn error_policy_view(snapshot: &crate::error_policy::ErrorPolicySnapshot) -> Value {
+    let providers: Vec<Value> = crate::account_session::registry::all()
+        .iter()
+        .map(|spec| json!({ "id": spec.kind, "label": spec.label }))
+        .collect();
+    json!({
+        "settings": snapshot.settings,
+        "defaults": crate::error_policy::ErrorPolicyConfig::default(),
+        "revision": crate::error_policy::revision(snapshot),
+        "configured": snapshot.configured,
+        "legacy": snapshot.legacy,
+        "providers": providers,
+    })
+}
+
+/// GET /api/routing/errors —— 统一错误处理策略（含默认值/版本/提供商选项）。
+pub async fn handle_get_error_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let snapshot = crate::error_policy::snapshot();
+    Ok(Json(json!({
+        "success": true,
+        "data": error_policy_view(&snapshot),
+    })))
+}
+
+/// PUT /api/routing/errors —— body `{settings, revision}`（beta.2 形状）。
+///
+/// `revision` 与当前快照不符 → 409（拒绝静默整表覆盖）；缺 revision → 400。
+pub async fn handle_update_error_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let settings_value = body
+        .get("settings")
+        .cloned()
+        .ok_or_else(|| error_response("缺少错误处理设置", StatusCode::BAD_REQUEST))?;
+    let settings = serde_json::from_value::<crate::error_policy::ErrorPolicyConfig>(settings_value)
+        .map_err(|e| {
+            error_response(
+                &format!("错误处理设置格式不正确：{e}"),
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
+    settings.validate().map_err(|e| {
+        error_response(
+            &format!("错误处理设置校验失败：{e}"),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
+    let revision = body
+        .get("revision")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| error_response("缺少设置版本，请重新读取", StatusCode::BAD_REQUEST))?
+        .to_string();
+    // CAS：在写锁内比对，避免并发覆盖。
+    let current_revision = crate::error_policy::revision(&crate::error_policy::snapshot());
+    if current_revision != revision {
+        return Err(error_response(
+            "错误处理设置已在其他窗口修改，请重新读取后保存",
+            StatusCode::CONFLICT,
+        ));
+    }
+    let config = update_admin_config(&state, &headers, move |config| {
+        config.error_policy = Some(settings);
+        Ok(())
+    })
+    .await?;
+    let snapshot = crate::error_policy::build_snapshot(&config);
+    crate::error_policy::install_snapshot(std::sync::Arc::new(snapshot.clone()));
+    Ok(Json(json!({
+        "success": true,
+        "data": error_policy_view(&snapshot),
+    })))
+}
+
+// ── 运行容量管理（runtimeCapacity，对齐 beta.2 /api/plugins/capacity）──────
+
+/// GET /api/plugins/capacity —— 容量配置 + 生效上限 + 实时占用（含 revision）。
+pub async fn handle_get_runtime_capacity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": crate::runtime_capacity::snapshot(),
+    })))
+}
+
+/// PATCH /api/plugins/capacity —— body `{settings, revision}`（beta.2 形状）。
+///
+/// `revision` 与当前设置不符 → 409。
+pub async fn handle_update_runtime_capacity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if let Some(fields) = body.as_object() {
+        if fields
+            .keys()
+            .any(|key| !matches!(key.as_str(), "settings" | "revision"))
+        {
+            return Err(error_response(
+                "运行容量请求格式无效",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    } else {
+        return Err(error_response(
+            "运行容量请求格式无效",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let revision = body
+        .get("revision")
+        .and_then(|v| v.as_str())
+        .filter(|rev| rev.len() == 64)
+        .ok_or_else(|| error_response("保存运行容量需要当前修订号", StatusCode::BAD_REQUEST))?
+        .to_string();
+    let settings = serde_json::from_value::<crate::runtime_capacity::CapacitySettings>(
+        body.get("settings")
+            .cloned()
+            .ok_or_else(|| error_response("缺少运行容量设置", StatusCode::BAD_REQUEST))?,
+    )
+    .map_err(|e| {
+        error_response(
+            &format!("运行容量配置格式无效：{e}"),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
+    settings.validate().map_err(|e| {
+        error_response(
+            &format!("运行容量设置校验失败：{e}"),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
+    let current =
+        crate::runtime_capacity::revision_of(&crate::runtime_capacity::current_settings());
+    if current != revision {
+        return Err(error_response(
+            "运行容量已在其他位置修改，请重新读取后再保存",
+            StatusCode::CONFLICT,
+        ));
+    }
+    let config = update_admin_config(&state, &headers, move |config| {
+        config.runtime_capacity = settings;
+        Ok(())
+    })
+    .await?;
+    crate::runtime_capacity::install_settings(config.runtime_capacity.clone());
+    crate::runtime_capacity::changed();
+    Ok(Json(json!({
+        "success": true,
+        "data": crate::runtime_capacity::snapshot(),
+    })))
+}
+
+// ── 网页工具调用模拟（webToolEmulation，对齐 beta.2 /api/web-tool-emulation）──
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebToolsRequest {
+    pub enabled: bool,
+}
+
+/// 网页工具模拟视图（对齐参考树 `web_tools::view`：`{enabled, providers[]}`）。
+fn web_tool_view(enabled: bool) -> Value {
+    // 逐提供商列出条目（AIGX 的 provider 目录不带模型清单，模型由渠道/账号
+    // 各自声明；这里给出 provider 选项供前端展示，`models` 留空数组）。
+    let providers: Vec<Value> = crate::account_session::registry::all()
+        .iter()
+        .map(|spec| {
+            json!({
+                "id": spec.kind,
+                "label": spec.label,
+                "models": Vec::<Value>::new(),
+            })
+        })
+        .collect();
+    json!({ "enabled": enabled, "providers": providers })
+}
+
+/// GET /api/web-tool-emulation —— 网页工具调用模拟开关（缺省开启）。
+pub async fn handle_get_web_tools(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": web_tool_view(config.web_tools.emulation),
+    })))
+}
+
+/// PUT /api/web-tool-emulation —— body `{enabled}`（deny_unknown_fields）。
+pub async fn handle_update_web_tools(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<WebToolsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let enabled = body.enabled;
+    let config = update_admin_config(&state, &headers, move |config| {
+        config.web_tools.emulation = enabled;
+        Ok(())
+    })
+    .await?;
+    crate::config::set_web_tool_emulation(config.web_tools.emulation);
+    Ok(Json(json!({
+        "success": true,
+        "data": web_tool_view(config.web_tools.emulation),
+    })))
+}
+
+// ── 系统提示词规则引擎（promptRules，对齐 beta.2 /api/prompt/rules）──────
+
+/// 提示词规则的 config 载荷（对齐参考树 `Settings`：`{rules, fallback}`）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptRulesConfig {
+    #[serde(default)]
+    pub rules: Vec<crate::prompt::PromptRule>,
+    pub fallback: PromptRulesFallback,
+}
+
+/// 兜底内容（mode / file / text）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptRulesFallback {
+    #[serde(default)]
+    pub mode: crate::prompt::PromptMode,
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// 保存请求（`{config, revision}`）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptRulesSave {
+    pub config: PromptRulesConfig,
+    pub revision: String,
+}
+
+/// 命中预览请求（`{config, sample}`）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptRulesPreview {
+    pub config: PromptRulesConfig,
+    pub sample: PromptRulesSample,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptRulesSample {
+    pub provider: String,
+    pub client: String,
+    pub model: String,
+}
+
+fn prompt_rules_config_json(cfg: &crate::prompt::GatewayPrompt) -> Value {
+    json!({
+        "rules": cfg.rules,
+        "fallback": {
+            "mode": cfg.mode,
+            "file": "",
+            "text": cfg.text,
+        },
+    })
+}
+
+/// 提示词规则视图（对齐参考树 `prompt_rules::view`）。
+fn prompt_rules_view(cfg: &crate::prompt::GatewayPrompt) -> Value {
+    let providers: Vec<Value> = crate::account_session::registry::all()
+        .iter()
+        .map(|spec| json!({ "id": spec.kind, "label": spec.label }))
+        .collect();
+    // AIGX 无独立客户端识别目录，提供常见客户端 + 未识别兜底。
+    let clients: Vec<Value> = vec![
+        json!({ "id": "claude_code", "label": "Claude Code" }),
+        json!({ "id": "cline", "label": "Cline" }),
+        json!({ "id": "codex", "label": "Codex" }),
+        json!({ "id": "other", "label": "未识别客户端" }),
+    ];
+    json!({
+        "config": prompt_rules_config_json(cfg),
+        "revision": crate::prompt::revision(cfg),
+        "providers": providers,
+        "clients": clients,
+        "models": Vec::<String>::new(),
+        "maxRules": crate::prompt::MAX_PROMPT_RULES,
+        "maxConditions": crate::prompt::MAX_PROMPT_CONDITIONS,
+        "maxValues": crate::prompt::MAX_PROMPT_VALUES,
+        "maxTextBytes": crate::prompt::MAX_PROMPT_TEXT_BYTES,
+        "configError": Value::Null,
+    })
+}
+
+/// GET /api/prompt/rules —— 系统提示词规则引擎视图。
+pub async fn handle_get_prompt_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let cfg = state.gateway_prompt.snapshot();
+    Ok(Json(json!({
+        "success": true,
+        "data": prompt_rules_view(&cfg),
+    })))
+}
+
+/// PUT /api/prompt/rules —— body `{config, revision}`；revision 过期 → 409。
+///
+/// 只更新规则表与兜底（mode/text），其余提示词字段（models/providers/gateway）
+/// 原样保留。
+pub async fn handle_update_prompt_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PromptRulesSave>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let mut cfg = state.gateway_prompt.snapshot().as_ref().clone();
+    if crate::prompt::revision(&cfg) != body.revision {
+        return Err(error_response(
+            "系统提示词已在其他位置修改，请刷新后再保存",
+            StatusCode::CONFLICT,
+        ));
+    }
+    crate::prompt::validate_prompt_rules(&body.config.rules)
+        .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
+    // 兜底 `file` 对齐参考树校验（AIGX 只消费内联 text，文件路径仅入参校验）。
+    if body.config.fallback.file.len() > 4096
+        || body.config.fallback.file.chars().any(char::is_control)
+    {
+        return Err(error_response(
+            "提示词文件路径无效或过长",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if body.config.fallback.text.chars().count() > 64_000 {
+        return Err(error_response(
+            "提示词过长（上限 64000 字符）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    cfg.rules = body.config.rules;
+    cfg.mode = body.config.fallback.mode;
+    cfg.text = body.config.fallback.text;
+    state.gateway_prompt.update(cfg.clone()).map_err(|e| {
+        error_response(
+            &format!("提示词持久化失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    crate::prompt::install_snapshot(std::sync::Arc::new(cfg.clone()));
+    Ok(Json(json!({
+        "success": true,
+        "data": prompt_rules_view(&cfg),
+    })))
+}
+
+/// POST /api/prompt/rules/preview —— 用给定条件预演第一条命中的规则。
+pub async fn handle_preview_prompt_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PromptRulesPreview>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    crate::prompt::validate_prompt_rules(&body.config.rules)
+        .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
+    let sample = &body.sample;
+    if sample.provider.len() > 128
+        || sample.client.len() > 128
+        || sample.model.len() > 4096
+        || [&sample.provider, &sample.client, &sample.model]
+            .iter()
+            .any(|value| value.chars().any(char::is_control))
+    {
+        return Err(error_response(
+            "命中测试的请求条件无效或过长",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if let Some(rule) = crate::prompt::first_matching_rule(
+        &body.config.rules,
+        &sample.provider,
+        &sample.client,
+        &sample.model,
+    ) {
+        let index = body
+            .config
+            .rules
+            .iter()
+            .position(|r| r.id == rule.id)
+            .unwrap_or(0);
+        return Ok(Json(json!({
+            "success": true,
+            "data": {
+                "ruleId": rule.id,
+                "index": index,
+                "name": rule.name,
+                "mode": rule.mode,
+            }
+        })));
+    }
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "ruleId": Value::Null,
+            "index": Value::Null,
+            "name": Value::Null,
+            "mode": body.config.fallback.mode,
+        }
+    })))
+}
+
+// ── 插件受控任务授权（pluginManagedTaskGrants，对齐 beta.2）──────────
+
+#[derive(Debug, Deserialize)]
+pub struct PluginTaskGrantsRequest {
+    /// 键 = 受控任务标识，值 = 是否授权。整表替换。
+    #[serde(default)]
+    pub grants: std::collections::BTreeMap<String, bool>,
+}
+
+/// GET /api/plugin-task-grants —— 插件受控任务授权边界。
+pub async fn handle_get_plugin_task_grants(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    let granted = config
+        .plugin_task_grants
+        .grants
+        .keys()
+        .filter(|task| config.plugin_task_grants.is_granted(task))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "grants": config.plugin_task_grants.grants,
+            "grantedTasks": granted,
+        },
+    })))
+}
+
+/// PUT /api/plugin-task-grants —— 整表替换受控任务授权。
+pub async fn handle_update_plugin_task_grants(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PluginTaskGrantsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if body.grants.len() > 1024 {
+        return Err(error_response(
+            "受控任务授权最多 1024 条",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let config = update_admin_config(&state, &headers, move |config| {
+        config.plugin_task_grants.grants = body.grants;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": { "grants": config.plugin_task_grants.grants },
+    })))
+}
+
+/// GET /api/model-key-source —— 进程内 Key 权威状态（代次/修订/已发布 Key 数）。
+pub async fn handle_get_model_key_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": crate::model_key_source::status(),
+    })))
+}
+
+/// POST /api/model-key-source/refresh —— 用当前 Key 存储重建权威代。
+///
+/// 运维删除/停用/新增 Key 后调用，令撤销闸立即按最新定义工作。
+pub async fn handle_refresh_model_key_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let definitions: Vec<crate::model_key_source::KeyDefinition> = state
+        .api_key_store
+        .list()
+        .into_iter()
+        .map(|key| crate::model_key_source::KeyDefinition {
+            id: key.id,
+            name: key.name,
+            key: key.key,
+            enabled: key.is_active && key.status == "active",
+            allowed_providers: key.allowed_providers.unwrap_or_default(),
+        })
+        .collect();
+    crate::model_key_source::publish_keys(definitions, true);
+    Ok(Json(json!({
+        "success": true,
+        "data": crate::model_key_source::status(),
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

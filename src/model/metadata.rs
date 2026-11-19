@@ -37,6 +37,14 @@ pub struct ModelMetadata {
     /// 空数组，零迁移。
     #[serde(default)]
     pub reasoning_levels: Vec<String>,
+    /// 工具调用模式（对齐 A2A beta.2 `shape.rs::list_item` 的 `tool_calling_mode`）。
+    ///
+    /// 来源：插件 / provider 目录条目的 `toolCallingMode` 字段（如 web_tools
+    /// 设 `"emulated"` / `"disabled"`）。AIGX 暂无 web_tools，此字段为预留
+    /// 透传通道——管理员覆盖或未来功能可设置，`/v1/models` 条目原样透出。
+    /// `None` = 未声明，`list_item` 不输出该键（与上游 `shape.rs` 同判据）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calling_mode: Option<String>,
 }
 
 // ── 内置推断表 ──────────────────────────────────────────────────────
@@ -316,6 +324,7 @@ impl ModelMetadataRegistry {
                 capabilities,
                 // 内置推断路径不产出思考等级：由覆盖项 / 前端声明提供
                 reasoning_levels: Vec::new(),
+                tool_calling_mode: None,
             },
             sources,
         )
@@ -411,6 +420,7 @@ mod tests {
                 context_length: Some(2000),
                 capabilities: vec!["chat".into()],
                 reasoning_levels: vec!["low".into(), "high".into()],
+                tool_calling_mode: None,
             },
         )
         .unwrap();
@@ -446,6 +456,7 @@ mod tests {
                 context_length: Some(2_000_000),
                 capabilities: vec!["chat".into(), "vision".into()],
                 reasoning_levels: vec![],
+                tool_calling_mode: None,
             },
         )
         .unwrap();

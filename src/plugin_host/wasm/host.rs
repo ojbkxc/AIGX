@@ -98,15 +98,62 @@ pub struct ProviderCapabilities {
     pub web_login: bool,
     pub anonymous_default_session: bool,
     pub env_credentials: bool,
+    /// beta.2：系统代理回退（未显式配置时代理）。
+    pub system_proxy_when_unset: bool,
+}
+
+/// 登录方式声明（对齐 beta.2 `proto::LoginMethod`）。
+///
+/// beta.2 的 `RpcAdapter` 用 `login_methods` 中是否有 `Sms` 变体来设 `sms_login` 位。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase", tag = "type")]
+pub enum LoginMethod {
+    #[default]
+    Api,
+    Oauth,
+    Sms {
+        #[serde(default)]
+        region: String,
+    },
 }
 
 /// `init` 应答里的 provider 条目。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct WasmProviderInfo {
     pub id: String,
     pub label: String,
     pub capabilities: ProviderCapabilities,
+    /// beta.2：插件声明的默认模型列表（用于推导 `web_tool_emulation` 位）。
+    #[serde(default)]
+    pub default_models: Vec<String>,
+    /// beta.2：插件支持的登录方式（用于推导 `sms_login` 位）。
+    #[serde(default)]
+    pub login_methods: Vec<LoginMethod>,
+}
+
+impl WasmProviderInfo {
+    /// beta.2：是否支持短信登录。
+    ///
+    /// 当前无内部调用方（beta.2 形状 API，待登录闸门接线后移除 allow）。
+    #[allow(dead_code)]
+    pub fn sms_login(&self) -> bool {
+        self.login_methods
+            .iter()
+            .any(|method| matches!(method, LoginMethod::Sms { .. }))
+    }
+
+    /// beta.2：是否需要 web tool 模拟（模型名命中 web tool profile 时为 true）。
+    ///
+    /// AIGX 不实现上游的 `web_tools::Profile::from_model`，但保留接口形状；
+    /// 默认返回 `false`，上层可按模型名自行判定。
+    /// 当前无内部调用方（beta.2 形状 API，待接线后移除 allow）。
+    #[allow(dead_code)]
+    pub fn web_tool_emulation(&self) -> bool {
+        // 对齐上游：`info.default_models.iter().any(|model| web_tools::Profile::from_model(model).is_some())`
+        // AIGX 暂无 web tool profile 表，返回 false。
+        false
+    }
 }
 
 /// 一个已启动的 Wasm 宿主。
@@ -660,6 +707,36 @@ mod tests {
     }
 
     #[test]
+    fn beta2_sms_login_from_login_methods() {
+        let info: WasmProviderInfo = serde_json::from_value(json!({
+            "id": "test", "label": "Test",
+            "loginMethods": [{"type": "sms", "region": "cn"}]
+        }))
+        .unwrap();
+        assert!(info.sms_login());
+    }
+
+    #[test]
+    fn beta2_sms_login_false_for_api_only() {
+        let info: WasmProviderInfo = serde_json::from_value(json!({
+            "id": "test", "label": "Test",
+            "loginMethods": [{"type": "api"}]
+        }))
+        .unwrap();
+        assert!(!info.sms_login());
+    }
+
+    #[test]
+    fn beta2_web_tool_emulation_default_false() {
+        let info: WasmProviderInfo = serde_json::from_value(json!({
+            "id": "test", "label": "Test",
+            "defaultModels": ["gpt-4"]
+        }))
+        .unwrap();
+        assert!(!info.web_tool_emulation());
+    }
+
+    #[test]
     fn identity_validation_only_when_capability_declared() {
         let manifest = WasmManifest {
             provider: "p".into(),
@@ -670,6 +747,11 @@ mod tests {
             memory_mib: 64,
             concurrency: 8,
             verified: false,
+            account_origin: None,
+            desktop_launch: None,
+            managed_login: None,
+            managed_task: None,
+            concurrency_hard_limit: None,
         };
         assert!(validate_identity(&manifest, &json!({})).is_err());
         assert!(validate_identity(&manifest, &json!({ "identity": "  " })).is_err());

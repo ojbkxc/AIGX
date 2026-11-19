@@ -279,6 +279,21 @@ pub async fn put_provider(
             ))
         }
     };
+    let keys = match object.get("keys") {
+        None | Some(Value::Null) => None,
+        Some(value @ Value::Array(_)) => Some(
+            serde_json::from_value::<Vec<tool_services::ProviderKeyUpdate>>(value.clone())
+                .map_err(|error| {
+                    error_response(&format!("keys 格式无效：{error}"), StatusCode::BAD_REQUEST)
+                })?,
+        ),
+        Some(_) => {
+            return Err(error_response(
+                "keys 必须是对象数组",
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    };
     match tool_services::update_provider(
         services(&state),
         &state.account_sessions,
@@ -286,6 +301,7 @@ pub async fn put_provider(
         api_key,
         enabled,
         account_id,
+        keys,
     ) {
         Ok(value) => Ok(Json(value).into_response()),
         Err(error) => Err(error_response(&error, StatusCode::BAD_REQUEST)),
@@ -308,21 +324,44 @@ pub async fn delete_provider_key(
     Ok(Json(json!({ "success": true })).into_response())
 }
 
-/// `POST /api/tools/providers/{provider}/test`
+/// `POST /api/tools/providers/{provider}/test?key_id=&operation=search|fetch`
 pub async fn test_provider(
     State(state): State<AppState>,
     Path(provider): Path<String>,
     headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     if !tool_services::is_search_provider(&provider) {
         return Err(error_response("未知的搜索提供商", StatusCode::BAD_REQUEST));
+    }
+    let key_id = query
+        .get("key_id")
+        .map(String::as_str)
+        .filter(|id| !id.trim().is_empty());
+    let operation = query
+        .get("operation")
+        .map(String::as_str)
+        .unwrap_or("search");
+    if !matches!(operation, "search" | "fetch") {
+        return Err(error_response(
+            "operation 必须是 search 或 fetch",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if tool_services::is_account_provider(&provider) && (key_id.is_some() || operation == "fetch") {
+        return Err(error_response(
+            "已有账号搜索不支持密钥检查或网页抓取",
+            StatusCode::BAD_REQUEST,
+        ));
     }
     let value = tool_services::test_provider(
         super::super::tool_runtime::tool_client_ref(),
         services(&state),
         &state.account_sessions,
         &provider,
+        key_id,
+        operation,
     )
     .await;
     Ok(Json(value).into_response())
@@ -596,12 +635,34 @@ pub async fn install_mcp(
             StatusCode::BAD_REQUEST,
         ));
     }
-    if mode == "bridge" && service != tool_services::VISION_SERVICE_ID {
+    if mode == "bridge"
+        && service != tool_services::VISION_SERVICE_ID
+        && service != tool_services::IMAGE_GENERATION_SERVICE_ID
+    {
         return Err(error_response(
             "该服务不支持本地桥接",
             StatusCode::BAD_REQUEST,
         ));
     }
+    let image_options = if service == tool_services::IMAGE_GENERATION_SERVICE_ID && mode == "bridge"
+    {
+        Some(tool_services::ImageBridgeOptions {
+            output_directory: text_field(&object, "output_directory").to_string(),
+            reference_directories: object
+                .get("reference_directories")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    } else {
+        None
+    };
     let key = plain_key(&state, text_field(&object, "api_key_id"))?;
     let clients = client_ids(&object);
     if clients.is_empty() {
@@ -613,7 +674,15 @@ pub async fn install_mcp(
     let base = base_url(&headers);
     let services = state.tool_services.clone();
     let outcomes = tokio::task::spawn_blocking(move || {
-        tool_services::install_mcp(&services, &service, &mode, &base, &key, &clients)
+        tool_services::install_mcp(
+            &services,
+            &service,
+            &mode,
+            &base,
+            &key,
+            &clients,
+            image_options.as_ref(),
+        )
     })
     .await
     .map_err(|error| {

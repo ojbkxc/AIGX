@@ -144,6 +144,9 @@ pub fn router() -> axum::Router<AppState> {
             "/api/plugins/reload",
             axum::routing::post(handle_reload_plugin),
         )
+    // beta.2 的 `/api/plugins/batch` 与 `/api/plugins/managed-task` 以平铺
+    // `.route(...)` 注册在 `main.rs`（与 install/enable/progress 同一段），
+    // 不在这里重复注册 —— axum 同一路径重复注册会在启动时 panic。
 }
 
 // ── 请求体 ──────────────────────────────────────────────────────────
@@ -542,9 +545,47 @@ pub async fn handle_list_plugins(
             "startup": startup_snapshot(&state, &packs),
             "catalog": catalog,
             "updates": [],
-            "operations": [],
+            // 在途/近期操作（Operation 异步进度模型；含持久化的历史条目）
+            "operations": plugin_operations(&state),
+            // Wasm 宿主能力契约（beta.2：capabilities/limits/compute/scheduling/
+            // tasks/desktopLaunch/verification/managedLogin/sms/accountOrigin/
+            // protocol，逐项带 served 标识）
+            "wasm": crate::plugin_host::wasm::contract_public(),
+            // 已装载 Wasm 清单的扩展声明快照（声明了但未服务的能力由前端标黄）
+            "wasmDeclarations": crate::plugin_host::wasm::declared_extensions(),
+            // 桌面启动（beta.2 `desktopLaunch` 摘录）：本仓未实现桌面端启动，
+            // 如实返回空表，不伪造
+            "desktopLaunch": [],
+            // 发布目录 provider 文档（beta.2 `providerDocs`）：从目录条目的
+            // description/homepage 聚合，供前端详情页展示
+            "providerDocs": provider_docs(&catalog),
         }
     })))
+}
+
+/// `catalog` 条目的 provider 文档聚合（beta.2 `providerDocs` 投影）。
+fn provider_docs(catalog: &Value) -> Value {
+    let mut rows = Vec::new();
+    if let Some(items) = catalog.get("plugins").and_then(Value::as_array) {
+        for item in items {
+            rows.push(json!({
+                "id": item.get("id").cloned().unwrap_or(Value::Null),
+                "name": item.get("name").cloned().unwrap_or(Value::Null),
+                "description": item.get("description").cloned().unwrap_or(Value::Null),
+                "homepage": item.get("homepage").cloned().unwrap_or(Value::Null),
+                "docsUrl": item.get("homepage").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    Value::Array(rows)
+}
+
+/// 当前操作快照的 `operations` 数组（列表页与 `/progress` 同源）。
+fn plugin_operations(state: &AppState) -> Value {
+    crate::plugin_host::operations::snapshot(Some(&state.plugin_host.store()))
+        .get("operations")
+        .cloned()
+        .unwrap_or_else(|| json!([]))
 }
 
 /// 脚本插件宿主快照（A2A 顶层 `scripts`：脚本包与 provider 归属）。
@@ -1512,15 +1553,156 @@ pub async fn handle_refresh_plugin_release(
     ))
 }
 
-/// GET /api/plugins/progress —— 在途操作（内置实现恒空）。
+/// GET /api/plugins/progress —— 在途/近期操作（Operation 异步进度模型）。
+///
+/// 返回与列表页 `operations` 同源的快照：每个操作含
+/// `action/stage/active/done/percent/error/result`，前端据此轮询批量任务。
 pub async fn handle_get_plugin_progress(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    Ok(Json(
-        json!({ "success": true, "data": { "operations": [] } }),
-    ))
+    Ok(Json(json!({
+        "success": true,
+        "data": { "operations": plugin_operations(&state) }
+    })))
+}
+
+/// 批量生命周期请求体（前端 `batchPlugins`）。
+///
+/// 两种形态（对齐 beta.2）：
+/// - `{ "items": [{ id, action, url?, sha256?, catalog? }] }` —— 逐条完整；
+/// - `{ "action": "update"|"enable"|"disable"|"uninstall", "ids": [...] }` ——
+///   批量简写；`update` 时目录条目由服务端从当前目录快照按 id 解析后回填。
+#[derive(Debug, Deserialize)]
+pub struct BatchBody {
+    #[serde(default)]
+    pub items: Vec<crate::plugin_host::operations::BatchItem>,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub ids: Vec<String>,
+}
+
+/// POST /api/plugins/batch —— 批量安装/更新/启停/卸载。
+///
+/// 每个条目在后台独立执行，立即返回初始操作快照（`stage=waiting`）；
+/// 后续进度与结果经 `/api/plugins/progress` 轮询。命中「同包已有在途操作」
+/// 或参数非法时，该条目以 `stage=failed` 即时返回，不影响其它条目。
+pub async fn handle_batch_plugins(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BatchBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let mut items = body.items;
+    if let Some(action) = body.action.as_deref() {
+        if !matches!(
+            action,
+            "install" | "update" | "enable" | "disable" | "reload" | "uninstall"
+        ) {
+            return Err(error_response(
+                &format!("未知的批量动作：{action}"),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        let catalog = if action == "update" {
+            Some(fetch_catalog(&state).await)
+        } else {
+            None
+        };
+        for id in body.ids {
+            let entry = catalog.as_ref().and_then(|catalog| {
+                catalog["plugins"]
+                    .as_array()
+                    .and_then(|plugins| plugins.iter().find(|item| item["id"] == id.as_str()))
+                    .cloned()
+            });
+            items.push(crate::plugin_host::operations::BatchItem {
+                id,
+                action: action.to_string(),
+                url: None,
+                sha256: None,
+                catalog: entry,
+            });
+        }
+    }
+    if items.is_empty() {
+        return Err(error_response(
+            "批量请求至少需要一条条目（items）或一组 id（ids）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 上限：一次最多 64 条，避免误操作把整个目录塞进来。
+    if items.len() > 64 {
+        return Err(error_response(
+            "单次批量操作最多 64 条",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let data = crate::plugin_host::operations::batch(
+        state.plugin_host.clone(),
+        state.plugin_host.store(),
+        items,
+    );
+    tracing::info!("[Plugins] 已受理批量生命周期操作（后台执行，进度见 /api/plugins/progress）");
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// 受控任务审批请求体。
+#[derive(Debug, Deserialize)]
+pub struct ManagedTaskBody {
+    pub id: String,
+    pub approved: bool,
+}
+
+/// POST /api/plugins/managed-task —— 运维批准/撤销某插件包的受控任务执行权。
+///
+/// 批准按包声明的 provider 落地；停用/卸载/重载会经 `wasm::forget` 自动撤销
+/// （fail-closed）。插件侧 `managed_task.begin` 只有在其 provider 被批准后
+/// 才成功。
+pub async fn handle_managed_task_approval(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ManagedTaskBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    if body.id == BUILTIN_PACK_ID {
+        return Err(error_response(
+            "内置供应商目录不承载 Wasm 受控任务",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let Some(meta) = state.plugin_host.registry().get(&body.id) else {
+        return Err(error_response(
+            &format!("插件包「{}」不存在", body.id),
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    let providers: Vec<String> = meta.providers.iter().map(|p| p.id.clone()).collect();
+    if providers.is_empty() {
+        return Err(error_response(
+            "该插件包没有声明可受控执行的 provider",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    for provider in &providers {
+        if body.approved {
+            crate::plugin_host::wasm::managed_task::approve(provider);
+        } else {
+            crate::plugin_host::wasm::managed_task::revoke(provider);
+        }
+    }
+    tracing::info!(
+        "[Plugins] 受控任务执行权「{}」已{}（provider: {:?}）",
+        body.id,
+        if body.approved { "批准" } else { "撤销" },
+        providers
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": { "id": body.id, "approved": body.approved, "providers": providers }
+    })))
 }
 
 #[cfg(test)]

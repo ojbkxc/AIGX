@@ -141,6 +141,23 @@ impl PluginHostManager {
         Ok(meta)
     }
 
+    /// 下载插件包字节（带上限与进度回调；安装流程的「下载」阶段）。
+    pub async fn download_with_progress<F>(
+        &self,
+        url: &str,
+        on_progress: F,
+    ) -> Result<Vec<u8>, InstallError>
+    where
+        F: FnMut(u64, u64),
+    {
+        install::download_bytes_with_progress(&self.http, url, on_progress).await
+    }
+
+    /// 底层存储句柄（Operation 进度记录等运行期状态持久化用）。
+    pub fn store(&self) -> Arc<FileStore> {
+        self.store.clone()
+    }
+
     /// 从 URL 下载并安装。
     pub async fn install_from_url(
         &self,
@@ -368,6 +385,8 @@ impl PluginHostManager {
         }
         // Wasm 宿主：取消在途调用 + 排空 + 摘清单。
         crate::plugin_host::wasm::stop_all().await;
+        // 网关关闭：受控任务审批与在途任务全部作废（fail-closed，重启需重新批准）。
+        crate::plugin_host::wasm::managed_task::invalidate();
         for slot in self.runtime.write().values_mut() {
             slot.running = false;
         }

@@ -39,6 +39,9 @@ pub(crate) mod image_runtime;
 mod install;
 mod mcp;
 mod normalize;
+mod provider_errors;
+mod provider_keys;
+mod provider_request;
 mod providers;
 mod search;
 mod skill_package;
@@ -56,7 +59,7 @@ use crate::storage::FileStore;
 
 pub use account_search::{test_provider, AccountSearchHost, PluginHostSearchBridge};
 pub use bridge::VISION_BRIDGE_SCRIPT;
-pub use image_bridge::IMAGE_BRIDGE_SCRIPT;
+pub use image_bridge::{ImageBridgeOptions, IMAGE_BRIDGE_SCRIPT};
 pub use image_config::ImageConfig;
 pub use install::{
     install_mcp, install_skill, mcp_targets, skill_targets, uninstall_mcp, uninstall_skill,
@@ -66,6 +69,8 @@ pub use mcp::{
     dispatch as mcp_dispatch, unsupported as mcp_unsupported, McpRequestContext, McpServerKind,
     McpSpec,
 };
+#[allow(unused_imports)] // 对外常量（前端/后续管理面可能用到，与上游同名）
+pub use provider_keys::{ProviderKeyConfig, ProviderKeyUpdate, MAX_PROVIDER_KEYS};
 pub use search::{batch_items, run_fetch, run_search, SearchError, SearchErrorCode};
 pub use skill_package::{
     build_skill_files, is_skill_variant, recommended_skill_variant, skill_variants,
@@ -226,9 +231,20 @@ impl ToolServices {
 
     /// 在锁内做一次读改写（两个页面同时保存时后写者基于前写者的结果）。
     pub fn update(&self, mutate: impl FnOnce(&mut ToolConfig)) -> Result<ToolConfig, String> {
+        self.try_update(|config| {
+            mutate(config);
+            Ok(())
+        })
+    }
+
+    /// 同 [`ToolServices::update`]，但闭包可以返回错误中止写回（多密钥校验用）。
+    pub fn try_update(
+        &self,
+        mutate: impl FnOnce(&mut ToolConfig) -> Result<(), String>,
+    ) -> Result<ToolConfig, String> {
         let _guard = self.lock.lock();
         let mut current = self.load();
-        mutate(&mut current);
+        mutate(&mut current)?;
         let current = current.normalized();
         let value = serde_json::to_value(&current)
             .map_err(|error| format!("工具服务配置序列化失败：{error}"))?;
@@ -261,9 +277,13 @@ pub fn router() -> axum::Router<AppState> {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProviderConfig {
-    /// `enc1:` 信封；空串 = 未配置
+    /// 旧版单密钥字段（`enc1:` 信封）；读取后迁移进 [`ProviderConfig::keys`]。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub encrypted_key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub key_hint: String,
+    /// 有序密钥列表（多密钥 + 每密钥限额状态）；详见 `provider_keys`。
+    pub keys: Vec<ProviderKeyConfig>,
     /// 账号型来源只保存账号引用，凭证仍由账号库与插件管理。
     pub account_id: String,
     pub enabled: bool,
@@ -323,6 +343,12 @@ impl ToolConfig {
         }
         for provider in SEARCH_PROVIDERS {
             self.providers.entry(provider.to_string()).or_default();
+        }
+        // 密钥型来源：把旧版单密钥迁移进有序列表并去重。
+        for provider in API_KEY_PROVIDERS {
+            if let Some(entry) = self.providers.get_mut(provider) {
+                provider_keys::normalize(entry);
+            }
         }
         self.selection
             .search
@@ -511,18 +537,7 @@ pub async fn list_providers(services: &ToolServices, sessions: &AccountSessionSt
                 .get(*provider)
                 .cloned()
                 .unwrap_or_default();
-            json!({
-                "provider": provider,
-                "display_name": provider_display_name(provider),
-                "auth_type": "api_key",
-                "supports_search": true,
-                "supports_fetch": true,
-                "available": true,
-                "configured": !entry.encrypted_key.is_empty(),
-                "key_hint": if entry.key_hint.is_empty() { Value::Null } else { json!(entry.key_hint) },
-                "enabled": entry.enabled,
-                "updated_at": if entry.updated_at > 0 { json!(entry.updated_at) } else { Value::Null },
-            })
+            provider_keys::provider_row(provider, &entry)
         })
         .collect();
     for provider in ACCOUNT_PROVIDERS {
@@ -551,12 +566,13 @@ pub fn update_provider(
     api_key: Option<&str>,
     enabled: Option<bool>,
     account_id: Option<&str>,
+    keys: Option<Vec<ProviderKeyUpdate>>,
 ) -> Result<Value, String> {
     if !is_search_provider(provider) {
         return Err("未知的搜索提供商".into());
     }
     if is_account_provider(provider) {
-        if api_key.is_some_and(|key| !key.trim().is_empty()) {
+        if keys.is_some() || api_key.is_some_and(|key| !key.trim().is_empty()) {
             return Err("该搜索来源使用已有账号，不接受 API Key".into());
         }
         let account_id = account_id.map(str::trim);
@@ -591,43 +607,42 @@ pub fn update_provider(
     if account_id.is_some() {
         return Err("该搜索来源使用 API Key，不接受账号绑定".into());
     }
-    let api_key = api_key.map(str::trim).filter(|value| !value.is_empty());
-    let encrypted = match api_key {
-        Some(key) => {
-            let sealed = crate::account_session::secret::seal_secret(
-                key,
-                &crate::account_session::secret::data_dir(),
-            )
-            .map_err(|_| "无法加密 API Key".to_string())?;
-            Some((sealed, key_hint(key)))
-        }
-        None => None,
-    };
-    let config_value = services.update(|config_value| {
+    if keys.is_some() && api_key.is_some() {
+        return Err("不能同时提交单密钥和密钥列表".into());
+    }
+    let prepared = keys
+        .as_deref()
+        .map(provider_keys::prepare_updates)
+        .transpose()?;
+    let replacement = api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(provider_keys::prepare_legacy_key)
+        .transpose()?;
+    let config_value = services.try_update(|config_value| {
         let entry = config_value
             .providers
             .entry(provider.to_string())
             .or_default();
-        if let Some((sealed, hint)) = encrypted {
-            entry.encrypted_key = sealed;
-            entry.key_hint = hint;
-            entry.updated_at = now_ms();
+        if let Some(items) = prepared {
+            provider_keys::apply_updates(entry, items)?;
+        }
+        if let Some(key) = replacement {
+            provider_keys::replace_legacy_key(entry, key);
         }
         if let Some(enabled) = enabled {
             entry.enabled = enabled;
         }
+        Ok(())
     })?;
     let entry = config_value
         .providers
         .get(provider)
         .cloned()
         .unwrap_or_default();
-    Ok(json!({
-        "success": true,
-        "provider": provider,
-        "configured": !entry.encrypted_key.is_empty(),
-        "key_hint": if entry.key_hint.is_empty() { Value::Null } else { json!(entry.key_hint) },
-    }))
+    let mut result = provider_keys::provider_row(provider, &entry);
+    result["success"] = json!(true);
+    Ok(result)
 }
 
 pub fn clear_provider_key(services: &ToolServices, provider: &str) -> bool {
@@ -640,27 +655,12 @@ pub fn clear_provider_key(services: &ToolServices, provider: &str) -> bool {
                 .providers
                 .entry(provider.to_string())
                 .or_default();
+            entry.keys.clear();
             entry.encrypted_key.clear();
             entry.key_hint.clear();
             entry.updated_at = now_ms();
         })
         .is_ok()
-}
-
-/// 读取某家当前配置（含解密后的密钥；仅服务端内部使用，禁止出现在日志/响应中）。
-pub fn provider_key(services: &ToolServices, provider: &str) -> Option<String> {
-    decrypt_provider_key(services.load().providers.get(provider)?)
-}
-
-pub(crate) fn decrypt_provider_key(entry: &ProviderConfig) -> Option<String> {
-    if entry.encrypted_key.is_empty() {
-        return None;
-    }
-    let value = crate::account_session::secret::open_secret(
-        &entry.encrypted_key,
-        &crate::account_session::secret::data_dir(),
-    );
-    Some(value).filter(|text| !text.is_empty())
 }
 
 #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
@@ -669,7 +669,7 @@ pub fn configured_provider(services: &ToolServices, provider: &str) -> bool {
         .load()
         .providers
         .get(provider)
-        .is_some_and(|entry| !entry.encrypted_key.is_empty() && entry.enabled)
+        .is_some_and(|entry| provider_keys::has_keys(entry) && entry.enabled)
 }
 
 /// 已启用且已配置好的提供商（密钥型看密钥，账号型看绑定账号是否存在）。
@@ -691,7 +691,7 @@ pub fn ready_providers(
             if is_account_provider(provider) {
                 account_search::validate_account(sessions, provider, &entry.account_id).is_ok()
             } else {
-                !entry.encrypted_key.is_empty()
+                provider_keys::has_keys(entry) && provider_keys::usable(entry, "search")
             }
         })
         .collect()

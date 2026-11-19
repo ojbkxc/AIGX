@@ -345,6 +345,55 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "/api/plugins/scripts/install",
             "脚本插件安装=执行第三方代码；安装接口强制 trusted=true（运维对「脚本以 Bun 进程权限运行」的显式确认）。AI 代填这个布尔等于替人担责，故本路由不提供 AI 面——安装只能由人在插件页二次确认后发起。启停/卸载/改配置仍归 aigx_plugin_manage",
         ),
+        // ── 2026-11-19 beta.2 配置面新增（均为「界面配置」类 + revision CAS）──
+        (
+            "/api/routing/errors",
+            "统一错误处理策略（重试/换号/冷却动作）：直接改变数据面失败处理行为，须人工在环（与 /api/settings 同性质）",
+        ),
+        (
+            "/api/plugins/capacity",
+            "运行容量并发/内存预算：直接改变数据面准入与 503 行为，须人工在环",
+        ),
+        (
+            "/api/web-tool-emulation",
+            "网页工具调用模拟开关：改变数据面工具转换能力，须人工在环",
+        ),
+        (
+            "/api/prompt/rules",
+            "系统提示词规则引擎（含 /preview 命中预演）：改规则会改写所有请求的 system，须人工在环",
+        ),
+        (
+            "/api/model-key-source",
+            "模型 Key 进程内权威状态与重建代（撤销闸）：重建代等于批量撤销/放行 Key，属安全边界，须人工在环",
+        ),
+        (
+            "/api/plugin-task-grants",
+            "插件受控任务授权边界：改授权等于放开插件执行面，须人工在环",
+        ),
+        (
+            "/api/plugins/batch",
+            "插件批量操作（安装/卸载/启停等）：批量执行第三方代码管理，须人工在环",
+        ),
+        (
+            "/api/plugins/managed-task",
+            "插件受控任务执行：触发插件侧受限任务运行，须人工在环",
+        ),
+        (
+            "/api/accounts/list",
+            "账号列表查询（A2A 形状分页视图）：只读投影，但同族写方法（凭证替换）须人工在环，整族不进 AI 面以免拆开读/写边界",
+        ),
+        (
+            "/api/accounts/summary",
+            "账号计数汇总（只读投影）：与 /api/accounts/list 同族，整族不进 AI 面",
+        ),
+        (
+            "/api/accounts/ids",
+            "账号 id 列表（只读投影）：与 /api/accounts/list 同族，整族不进 AI 面",
+        ),
+        (
+            "/api/accounts/{id}/credentials/replace",
+            "账号登录凭证替换：写入上游凭据 + CAS，安全敏感，须人工在环",
+        ),
     ];
 
 /// 已知缺口台账：真实存在、暂无工具、且**已逐条论证过为什么现在不做**。

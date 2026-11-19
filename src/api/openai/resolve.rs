@@ -101,7 +101,7 @@ pub(crate) fn verify_api_key_full(
         }
     }
     // B22：按结构化错误变体映射状态码，取代原先的 msg.contains(...) 文本匹配
-    state
+    let key_obj = state
         .api_key_store
         .validate_request(&key, model, ip.as_deref())
         .map_err(|e| {
@@ -117,7 +117,17 @@ pub(crate) fn verify_api_key_full(
                 | ApiKeyError::IpNotAllowed(_) => StatusCode::FORBIDDEN,
             };
             openai_error_response("auth_error", &e.to_string(), status)
-        })
+        })?;
+    // 撤销闸（model_key_source）：权威已发布时，要求 Key 仍是当前代有效 Key。
+    // 未发布（未初始化）时放行，保持既有行为。
+    if !crate::model_key_source::check_current(&key) {
+        return Err(openai_error_response(
+            "auth_error",
+            "API key has been revoked",
+            StatusCode::UNAUTHORIZED,
+        ));
+    }
+    Ok(key_obj)
 }
 /// 列举类端点（`/v1/models`）的鉴权：完整校验但跳过模型白名单。
 pub(crate) fn verify_api_key_listing(
@@ -644,8 +654,11 @@ pub(crate) fn model_declared_by_channel(state: &AppState, model: &str) -> bool {
             return state.account_sessions.for_channel(&c.id).iter().any(|s| {
                 s.status == "enabled"
                     && !state.model_rules.is_disabled(&s.provider, model)
-                    && (s.models.iter().any(|m| m == model)
-                        || (s.models.is_empty() && c.effective_models().iter().any(|m| m == model)))
+                    && (s.models.iter().any(|m| m.eq_ignore_ascii_case(model))
+                        || (s.models.is_empty()
+                            && c.effective_models()
+                                .iter()
+                                .any(|m| m.eq_ignore_ascii_case(model))))
             });
         }
         !state

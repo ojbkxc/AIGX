@@ -174,6 +174,36 @@ export interface ToolVariantItem {
   entrypoint: string;
 }
 
+// ── v3.5.0-beta.2：provider 多密钥 / 额度状态（tool_services::provider_keys）──
+// 契约锚点：api/tools.rs put_provider（keys: ProviderKeyUpdate[]，最多 100）、
+// test_provider?key_id=&operation=search|fetch。每把密钥按优先级从上到下使用，
+// 额度耗尽 / 限流 / 无效状态与上游恢复时间（reset_at，unix 毫秒）随行返回。
+
+/** 单把密钥在某操作维度（搜索 / 抓取）上的可用状态 */
+export interface ProviderKeyStatus {
+  status: 'ready' | 'quota_exhausted' | 'rate_limited' | 'invalid_provider_key';
+  scope: 'all' | 'search' | 'fetch' | null;
+  /** 上游给出的额度恢复时间（unix 毫秒）；null = 上游未提供，不自动重试 */
+  reset_at: number | null;
+  message: string | null;
+}
+
+/** 一把已保存的密钥行（明文不回，只回 key_hint） */
+export interface ProviderKeyRow {
+  id: string;
+  priority: number;
+  key_hint: string;
+  updated_at: number | null;
+  search: ProviderKeyStatus;
+  fetch: ProviderKeyStatus;
+}
+
+/** 保存时的密钥更新项（id 缺省 = 新增；api_key 留空 = 保持原值） */
+export interface ProviderKeyUpdate {
+  id?: string;
+  api_key?: string;
+}
+
 /** 搜索提供商行（密钥只回 configured / key_hint，不回明文） */
 export interface ToolProviderRow {
   provider: string;
@@ -191,6 +221,19 @@ export interface ToolProviderRow {
   accounts?: Array<{ id: string; name: string; enabled: boolean }>;
   max_query_chars?: number | null;
   unavailable_reason?: string | null;
+  // ── beta.2 多密钥扩展 ──
+  /** 搜索维度是否可用（enabled && configured && 至少一把可用密钥） */
+  usable?: boolean;
+  fetch_usable?: boolean;
+  /** 搜索 / 抓取当前优先使用的密钥 id（高亮用） */
+  active_key_id?: string | null;
+  active_fetch_key_id?: string | null;
+  available_key_count?: number;
+  available_fetch_key_count?: number;
+  /** 单家最多可保存的密钥数 */
+  max_keys?: number;
+  /** 已保存的多密钥清单（单密钥后端可能不返回此字段） */
+  keys?: ProviderKeyRow[];
 }
 
 export interface ToolProviderSelection {

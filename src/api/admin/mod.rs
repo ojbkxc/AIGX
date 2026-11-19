@@ -1,5 +1,6 @@
 pub mod account_login;
 pub mod account_sessions;
+pub mod accounts_query; // 账号列表查询/分页 + 凭证替换（对齐 A2A accounts_list / accounts_credentials）
 pub mod assistant;
 pub mod auth;
 pub mod backup;
@@ -156,13 +157,17 @@ pub use dashboard::{
 };
 
 pub use settings::{
-    handle_get_agent_settings, handle_get_chat_settings, handle_get_gateway_prompt,
-    handle_get_gateway_settings, handle_get_limits, handle_get_oauth_config,
-    handle_get_report_settings, handle_get_sanitize, handle_get_security_policy,
-    handle_get_settings, handle_update_agent_settings, handle_update_chat_settings,
-    handle_update_gateway_prompt, handle_update_gateway_settings, handle_update_limits,
-    handle_update_oauth_config, handle_update_report_settings, handle_update_sanitize,
-    handle_update_security_policy, handle_update_settings,
+    handle_get_agent_settings, handle_get_chat_settings, handle_get_error_policy,
+    handle_get_gateway_prompt, handle_get_gateway_settings, handle_get_limits,
+    handle_get_model_key_source, handle_get_oauth_config, handle_get_plugin_task_grants,
+    handle_get_prompt_rules, handle_get_report_settings, handle_get_runtime_capacity,
+    handle_get_sanitize, handle_get_security_policy, handle_get_settings, handle_get_web_tools,
+    handle_preview_prompt_rules, handle_refresh_model_key_source, handle_update_agent_settings,
+    handle_update_chat_settings, handle_update_error_policy, handle_update_gateway_prompt,
+    handle_update_gateway_settings, handle_update_limits, handle_update_oauth_config,
+    handle_update_plugin_task_grants, handle_update_prompt_rules, handle_update_report_settings,
+    handle_update_runtime_capacity, handle_update_sanitize, handle_update_security_policy,
+    handle_update_settings, handle_update_web_tools,
 };
 
 // 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）

@@ -288,7 +288,7 @@ fn list_item(
             }
         }
     }
-    serde_json::json!({
+    let mut item = serde_json::json!({
         "id": name,
         "object": "model",
         "created": if refreshed_at > 0 { refreshed_at } else { now },
@@ -307,7 +307,16 @@ fn list_item(
         "reasoning_levels": meta.reasoning_levels,
         // 每键来源（`user` / `upstream` / `modelsdev` / null；管理面可信度展示）
         "cap_sources": sources,
-    })
+    });
+    // 工具调用模式（A2A beta.2 `shape.rs::list_item` 的 `tool_calling_mode`）。
+    // 上游仅在模型条目带字符串型 `toolCallingMode` 时输出该键；
+    // AIGX 从 `ModelMetadata` 同源透出，`None` 不输出键（与上游同判据）。
+    if let Some(mode) = &meta.tool_calling_mode {
+        if let Some(obj) = item.as_object_mut() {
+            obj.insert("tool_calling_mode".to_string(), Value::String(mode.clone()));
+        }
+    }
+    item
 }
 
 /// 把 OpenAI 形态的列表体转成 **Anthropic 原生列表形态**（A2A
@@ -707,6 +716,7 @@ mod shapes_tests {
             context_length: Some(128000),
             capabilities: vec!["chat".to_string(), "tools".to_string()],
             reasoning_levels: vec!["low".to_string(), "high".to_string()],
+            tool_calling_mode: None,
         }
     }
 
@@ -727,6 +737,17 @@ mod shapes_tests {
         // 模态与布尔位同源：无图片 → 只有 text
         assert_eq!(item["input_modalities"], serde_json::json!(["text"]));
         assert_eq!(item["reasoning_levels"], serde_json::json!(["low", "high"]));
+        // tool_calling_mode 未声明 → 键不存在（与上游 shape.rs 同判据）
+        assert!(item.get("tool_calling_mode").is_none());
+    }
+
+    /// tool_calling_mode 声明时原样透出（A2A beta.2 `shape.rs` 对齐）。
+    #[test]
+    fn list_item_passes_tool_calling_mode_when_set() {
+        let mut m = meta();
+        m.tool_calling_mode = Some("emulated".to_string());
+        let item = list_item("gpt-4o", None, &m, &Value::Null, 0);
+        assert_eq!(item["tool_calling_mode"], "emulated");
     }
 
     /// 用户覆盖压过上游标签集（三态：user > upstream）。

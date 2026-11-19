@@ -377,6 +377,7 @@ pub fn install_mcp(
     base_url: &str,
     api_key: &str,
     client_ids: &[String],
+    image_options: Option<&super::image_bridge::ImageBridgeOptions>,
 ) -> Vec<InstallOutcome> {
     let name = server_name(service);
     let url = format!(
@@ -384,7 +385,30 @@ pub fn install_mcp(
         base_url.trim_end_matches('/'),
         super::endpoint(service, "mcp")
     );
-    let timeout = super::timeout_seconds(services, service);
+    let timeout = if service == super::IMAGE_GENERATION_SERVICE_ID {
+        120
+    } else {
+        super::timeout_seconds(services, service)
+    };
+    let image_bridge = if service == super::IMAGE_GENERATION_SERVICE_ID && mode == "bridge" {
+        let options = image_options.ok_or_else(|| "请选择图片输出目录".to_string());
+        match options.and_then(super::image_bridge::prepare) {
+            Ok(prepared) => Some(prepared),
+            Err(error) => {
+                return client_ids
+                    .iter()
+                    .map(|id| {
+                        let label = Target::parse(id)
+                            .map(|def| def.label())
+                            .unwrap_or(id.as_str());
+                        InstallOutcome::failed(id, label, error.clone())
+                    })
+                    .collect();
+            }
+        }
+    } else {
+        None
+    };
     let bridge = if service == super::VISION_SERVICE_ID && mode == "bridge" {
         match ensure_bridge_script() {
             Ok(path) => Some(path),
@@ -410,7 +434,14 @@ pub fn install_mcp(
             outcomes.push(InstallOutcome::failed(client_id, client_id, "未知客户端"));
             continue;
         };
-        let config = mcp_entry(def, &url, api_key, bridge.as_deref(), timeout);
+        let config = if let Some(image_bridge) = &image_bridge {
+            merge_entry(
+                super::image_bridge::entry(def, &url, api_key, image_bridge),
+                timeout_entry(def, timeout),
+            )
+        } else {
+            mcp_entry(def, &url, api_key, bridge.as_deref(), timeout)
+        };
         match write_mcp_entry(def, name, config) {
             Ok(path) => outcomes.push(InstallOutcome::ok(client_id, def.label(), path)),
             Err(error) => outcomes.push(InstallOutcome::failed(client_id, def.label(), error)),

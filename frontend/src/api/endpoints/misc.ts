@@ -87,18 +87,36 @@ export const endpoints = {
     request<ApiResponse<ToolProviderSelection>>('GET', `${API_BASE}/tools/provider-selection`),
   saveToolProviderSelection: (body: ToolProviderSelection): Promise<ApiResponse<ToolProviderSelection>> =>
     request<ApiResponse<ToolProviderSelection>>('PUT', `${API_BASE}/tools/provider-selection`, body),
-  /** 写一家搜索提供商的密钥 / 启用态 / 账号绑定（api_key 只写不回） */
+  /** 写一家搜索提供商的密钥 / 启用态 / 账号绑定（api_key 只写不回）。
+   *  beta.2 多密钥：`keys` = `{id?, api_key?}[]`（id 缺省新增，留空保持原值，最多 100）。 */
   saveToolProvider: (
     provider: string,
-    body: { api_key?: string; account_id?: string | null; enabled?: boolean },
+    body: {
+      api_key?: string;
+      account_id?: string | null;
+      enabled?: boolean;
+      keys?: Array<{ id?: string; api_key?: string }>;
+    },
   ): Promise<ApiResponse<ToolProviderRow>> =>
     request<ApiResponse<ToolProviderRow>>('PUT', `${API_BASE}/tools/providers/${encodeURIComponent(provider)}`, body),
   /** 清除一家搜索提供商的密钥 */
   clearToolProviderKey: (provider: string): Promise<ApiResponse<{ success: boolean }>> =>
     request<ApiResponse<{ success: boolean }>>('DELETE', `${API_BASE}/tools/providers/${encodeURIComponent(provider)}/key`),
-  /** 连通性测试一家搜索提供商 */
-  testToolProvider: (provider: string): Promise<ApiResponse<ToolProviderTestResult>> =>
-    request<ApiResponse<ToolProviderTestResult>>('POST', `${API_BASE}/tools/providers/${encodeURIComponent(provider)}/test`, {}),
+  /** 连通性测试一家搜索提供商（beta.2：可按 key_id + operation=search|fetch 单密钥检查） */
+  testToolProvider: (
+    provider: string,
+    opts: { keyId?: string; operation?: 'search' | 'fetch' } = {},
+  ): Promise<ApiResponse<ToolProviderTestResult>> => {
+    const query = new URLSearchParams();
+    if (opts.keyId) query.set('key_id', opts.keyId);
+    if (opts.operation) query.set('operation', opts.operation);
+    const suffix = query.toString();
+    return request<ApiResponse<ToolProviderTestResult>>(
+      'POST',
+      `${API_BASE}/tools/providers/${encodeURIComponent(provider)}/test${suffix ? `?${suffix}` : ''}`,
+      {},
+    );
+  },
   /** 视觉分析绑定（provider / upstream_model / 思考等级 / 内部 Key + 可选 Key 清单） */
   getToolVisionConfig: (): Promise<ApiResponse<ToolVisionPayload>> =>
     request<ApiResponse<ToolVisionPayload>>('GET', `${API_BASE}/tools/vision/config`),
@@ -203,4 +221,39 @@ export const endpoints = {
       `${API_BASE}/models/refresh`,
       {},
     ),
+
+  // ── A2A v3.5.0-beta.2 配置面新增（契约锚点见各方法注释）───────────────────
+  // 后端由 config-align 同步实施；端点未就绪（404）时组件整块降级「后端未就绪」，
+  // 这里不吞错。返回值按各组件本地定义的视图类型断言（data 形状见组件）。
+
+  /** 运行容量快照（GET /api/plugins/capacity）—— settings/revision/effective/resources/usage */
+  getRuntimeCapacity: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/capacity`),
+  /** 保存运行容量（PATCH /api/plugins/capacity `{settings, revision}`，revision 过期 → 409） */
+  saveRuntimeCapacity: (body: { settings: unknown; revision: string }): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('PATCH', `${API_BASE}/plugins/capacity`, body),
+
+  /** 错误处理策略（GET /api/routing/errors）—— settings/defaults/revision/providers */
+  getRoutingErrors: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/routing/errors`),
+  /** 保存错误处理策略（PUT /api/routing/errors `{settings, revision}`，revision 过期 → 409） */
+  saveRoutingErrors: (body: { settings: unknown; revision: string }): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/routing/errors`, body),
+
+  /** 网页工具调用模拟开关（GET /api/web-tool-emulation）—— {enabled, providers[]} */
+  getWebToolEmulation: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/web-tool-emulation`),
+  /** 保存网页工具调用模拟开关（PUT /api/web-tool-emulation `{enabled}`） */
+  saveWebToolEmulation: (enabled: boolean): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/web-tool-emulation`, { enabled }),
+
+  /** 系统提示词规则引擎（GET /api/prompt/rules）—— config/revision/providers/clients/models/… */
+  getPromptRules: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/prompt/rules`),
+  /** 保存提示词规则（PUT /api/prompt/rules `{config, revision}`，revision 过期 → 409） */
+  savePromptRules: (body: { config: unknown; revision: string }): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/prompt/rules`, body),
+  /** 规则命中预览（POST /api/prompt/rules/preview `{config, sample}`） */
+  previewPromptRules: (body: { config: unknown; sample: { provider: string; client: string; model: string } }): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/prompt/rules/preview`, body),
 };

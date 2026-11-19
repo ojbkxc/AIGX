@@ -262,6 +262,8 @@ pub enum StreamEvent {
     Chunk(Vec<u8>),
     /// 流正常收尾（`end` 事件帧或 `{"id":X,"result":null}` 应答帧）。
     End,
+    /// 插件日志输出（测试用；生产侧由 RPC 层直接截获）。
+    Log { message: String },
 }
 
 /// 一条流式调用在网关侧的句柄（[`RpcChannel::call_stream`] 的产出）。

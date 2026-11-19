@@ -279,6 +279,11 @@ impl AccountBridge {
     fn classify_skip(error: &BridgeError) -> bool {
         match error {
             BridgeError::UpstreamStatus { status, .. } => {
+                // 统一错误策略已显式配置时，按规则决定是否原地重发；
+                // 未配置沿用既有「直接换号状态码 + 404 豁免」判定。
+                if let Some(allowed) = crate::error_policy::self_retry_allowed(*status, "") {
+                    return !allowed;
+                }
                 crate::config::is_retry_status(*status) || *status == 404
             }
             BridgeError::ModelNotFound(_) => true,
@@ -395,6 +400,12 @@ impl AccountBridge {
                     "account {} credential rejected repeatedly by a non-refreshable provider; marked needs_relogin",
                     lease.id()
                 );
+            }
+        }
+        // 统一错误策略已显式配置时，按决策覆盖是否继续换号/重试。
+        if let Some(status) = status {
+            if let Some(switch) = crate::error_policy::should_switch(status, "") {
+                return switch;
             }
         }
         crate::api::openai::is_retryable_bridge_error(error)

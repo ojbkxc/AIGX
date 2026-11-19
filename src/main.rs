@@ -49,6 +49,7 @@ pub(crate) fn install_rustls_provider_for_tests() {
 mod account;
 mod account_login;
 mod account_session;
+mod accounts_list;
 mod agent;
 mod altcha;
 mod api;
@@ -60,9 +61,12 @@ mod chat_session;
 mod checkin;
 mod config;
 mod continuation;
+mod credential_version;
 mod cron;
 mod debug_traffic;
+mod desktop_launch;
 mod egress;
+mod error_policy;
 mod error_translate;
 mod graphql;
 mod guardrail;
@@ -74,6 +78,7 @@ mod log;
 mod maintenance;
 mod metrics;
 mod model;
+mod model_key_source;
 mod monitor;
 mod net_guard;
 mod notify;
@@ -81,6 +86,7 @@ mod oauth;
 mod payment;
 mod plan;
 mod plugin_host;
+mod plugin_ledger;
 mod pricing;
 mod prompt;
 mod proxy;
@@ -90,6 +96,7 @@ mod quota_monitor;
 mod ratelimit;
 mod redemption;
 mod route_special;
+mod runtime_capacity;
 mod runtime_log;
 mod sanitize;
 mod scheduled_tasks;
@@ -216,6 +223,14 @@ async fn main() -> anyhow::Result<()> {
     // 会话图片压缩与图片兼容设置快照（数据面每请求读快照；压缩默认开、
     // 视觉兼容默认关，未配置段时快照回落内置默认值）
     crate::image_compat::set_settings(config.image_compat.clone());
+    // 统一错误处理策略快照（bridge/account.rs 自身重试/换号判定读取）
+    crate::error_policy::install_snapshot(std::sync::Arc::new(
+        crate::error_policy::build_snapshot(&config),
+    ));
+    // 运行容量设置快照（数据面准入中间件读取）
+    crate::runtime_capacity::install_settings(config.runtime_capacity.clone());
+    // 网页工具调用模拟开关快照（缺省开启）
+    crate::config::set_web_tool_emulation(config.web_tools.emulation);
 
     // 初始化存储（默认 SQLite 后端；--no-default-features 构建降级为 JSON 文件）
     let data_dir = crate::config::expand_path(&config.server.data_dir);
@@ -324,6 +339,22 @@ async fn main() -> anyhow::Result<()> {
     // 注入用户存储到 API Key 存储（余额预检：零余额用户拒绝请求）
     api_key_store.with_user_store(user_store.clone());
     let api_key_store = Arc::new(api_key_store);
+
+    // 发布初始 Key 权威代（撤销闸；之后运营改 Key 时经 /api/model-key-source/refresh 刷新）。
+    crate::model_key_source::publish_keys(
+        api_key_store
+            .list()
+            .into_iter()
+            .map(|key| crate::model_key_source::KeyDefinition {
+                id: key.id,
+                name: key.name,
+                key: key.key,
+                enabled: key.is_active && key.status == "active",
+                allowed_providers: key.allowed_providers.unwrap_or_default(),
+            })
+            .collect(),
+        true,
+    );
 
     // 初始化订单存储
     let order_store = Arc::new(OrderStore::new(store.clone()));
@@ -2266,6 +2297,46 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::handle_get_gateway_settings)
                 .put(api::admin::handle_update_gateway_settings),
         )
+        // 统一错误处理策略（routingErrorPolicy，对照 beta.2 /api/routing/errors）
+        .route(
+            "/api/routing/errors",
+            get(api::admin::handle_get_error_policy).put(api::admin::handle_update_error_policy),
+        )
+        // 运行容量管理（runtimeCapacity，对照 beta.2 /api/plugins/capacity GET/PATCH）
+        .route(
+            "/api/plugins/capacity",
+            get(api::admin::handle_get_runtime_capacity)
+                .patch(api::admin::handle_update_runtime_capacity),
+        )
+        // 网页工具调用模拟开关（webToolEmulation，对照 beta.2 /api/web-tool-emulation）
+        .route(
+            "/api/web-tool-emulation",
+            get(api::admin::handle_get_web_tools).put(api::admin::handle_update_web_tools),
+        )
+        // 系统提示词规则引擎（promptRules，对照 beta.2 /api/prompt/rules + preview）
+        .route(
+            "/api/prompt/rules",
+            get(api::admin::handle_get_prompt_rules).put(api::admin::handle_update_prompt_rules),
+        )
+        .route(
+            "/api/prompt/rules/preview",
+            post(api::admin::handle_preview_prompt_rules),
+        )
+        // 插件受控任务授权（pluginManagedTaskGrants，对照 beta.2）
+        .route(
+            "/api/plugin-task-grants",
+            get(api::admin::handle_get_plugin_task_grants)
+                .put(api::admin::handle_update_plugin_task_grants),
+        )
+        // 模型 Key 进程内权威（撤销闸状态 + 重建代）
+        .route(
+            "/api/model-key-source",
+            get(api::admin::handle_get_model_key_source),
+        )
+        .route(
+            "/api/model-key-source/refresh",
+            post(api::admin::handle_refresh_model_key_source),
+        )
         // 安全策略（登录失败锁定 / 登录限流阈值，对照 Agent2API「设置 → 安全」）
         .route(
             "/api/security/policy",
@@ -2756,6 +2827,23 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/accounts", get(api::admin::handle_list_accounts))
         .route("/api/accounts", post(api::admin::handle_add_account))
         .route("/api/accounts/test", post(api::admin::handle_test_account))
+        // A2A 形状账号列表（查询/分页/计数/ids + 凭证替换，对齐 beta.2）
+        .route(
+            "/api/accounts/list",
+            get(api::admin::accounts_query::handle_accounts_list_query),
+        )
+        .route(
+            "/api/accounts/summary",
+            get(api::admin::accounts_query::handle_accounts_summary),
+        )
+        .route(
+            "/api/accounts/ids",
+            get(api::admin::accounts_query::handle_accounts_ids),
+        )
+        .route(
+            "/api/accounts/:id/credentials/replace",
+            axum::routing::put(api::admin::accounts_query::handle_replace_account_credentials),
+        )
         .route("/api/accounts/:id", put(api::admin::handle_update_account))
         .route(
             "/api/accounts/:id",
@@ -3062,6 +3150,16 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/plugins/progress",
             get(api::admin::plugins::handle_get_plugin_progress),
         )
+        // beta.2 批量生命周期（后台执行，进度经 /api/plugins/progress 轮询）
+        .route(
+            "/api/plugins/batch",
+            post(api::admin::plugins::handle_batch_plugins),
+        )
+        // beta.2 受控任务审批（运维显式批准/撤销某包的 managed_task 执行权）
+        .route(
+            "/api/plugins/managed-task",
+            post(api::admin::plugins::handle_managed_task_approval),
+        )
         // 脚本插件管理面（Magpie 脚本包：一个 Bun 宿主承载全部 npm 风格脚本）
         .route(
             "/api/plugins/scripts",
@@ -3321,6 +3419,8 @@ impl Drop for InflightGuard {
 struct InflightBody {
     inner: axum::body::Body,
     _guard: InflightGuard,
+    /// 运行容量票据：随 body 结束/丢弃释放并发计数（数据面路径才有）。
+    _capacity: Option<crate::runtime_capacity::Ticket>,
 }
 
 impl hyper::body::Body for InflightBody {
@@ -3345,11 +3445,37 @@ impl hyper::body::Body for InflightBody {
 }
 
 /// 每请求 in-flight 计数中间件：进入 +1，响应体结束/丢弃时 -1。
+///
+/// 顺带做**运行容量准入**（对齐 Agent2API runtimeCapacity）：数据面路径
+/// （`/v1/*` 与无前缀兼容路由）按 `Class::Request` 尝试取票，取不到即 503
+/// 快速失败；票据随响应体 Drop 释放。管理面/静态资源不占容量。
 async fn track_inflight(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     crate::metrics::global().request_started();
+    let capacity = if is_data_plane_path(req.uri().path()) {
+        match crate::runtime_capacity::try_acquire(crate::runtime_capacity::Class::Request, "") {
+            Ok(ticket) => Some(ticket),
+            Err(()) => {
+                let body = serde_json::json!({
+                    "error": {
+                        "message": "运行容量暂时不足，请稍后重试",
+                        "type": "gateway_busy",
+                        "code": "gateway_busy",
+                    }
+                });
+                return axum::response::Response::builder()
+                    .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::RETRY_AFTER, "1")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()));
+            }
+        }
+    } else {
+        None
+    };
     // 若本中间件在构造响应前被取消（客户端断开/任务 abort），守卫随之 Drop，
     // 计数仍然会被正确回收，不会泄漏。
     let guard = InflightGuard(true);
@@ -3360,8 +3486,32 @@ async fn track_inflight(
         axum::body::Body::new(InflightBody {
             inner: body,
             _guard: guard,
+            _capacity: capacity,
         }),
     )
+}
+
+/// 数据面路径判据：`/v1/*` 或与路由表一致的无前缀兼容路径。
+fn is_data_plane_path(path: &str) -> bool {
+    if path.starts_with("/v1/") {
+        return true;
+    }
+    matches!(
+        path,
+        "/chat/completions"
+            | "/responses"
+            | "/completions"
+            | "/embeddings"
+            | "/rerank"
+            | "/images/generations"
+            | "/images/edits"
+            | "/audio/transcriptions"
+            | "/audio/translations"
+            | "/audio/speech"
+            | "/models"
+            | "/messages"
+            | "/messages/count_tokens"
+    ) || path.starts_with("/models/")
 }
 
 /// 遗留 KV 键清扫（log-retention-sweep 第四档，08-prod P2-8）。

@@ -655,6 +655,7 @@ export default function Wallet(): JSX.Element {
 
       {/* 邀请返利卡片（对齐 new-api AffiliateRewardsCard） */}
       <Card title={t('邀请返利')} bodyClassName="">
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>{t('邀请返利规则')}</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
           <div>
             <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('我的邀请码')}</div>

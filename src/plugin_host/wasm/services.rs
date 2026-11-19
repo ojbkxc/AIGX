@@ -454,6 +454,14 @@ impl Context {
                 }
                 Ok(Value::Null)
             }
+            "verification.lease.open" | "verification.lease.check" | "verification.lease.close" => {
+                self.verification_lease(method, &params).await
+            }
+            "managed_task.status"
+            | "managed_task.begin"
+            | "managed_task.end"
+            | "managed_task.abort" => self.managed_task(method, &params).await,
+            "http.open_account" => self.open_account(&params).await,
             _ => Err(WireError::with_code(
                 "插件请求了未支持的主程序能力",
                 WireError::NO_METHOD,

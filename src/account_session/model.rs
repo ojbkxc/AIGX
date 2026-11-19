@@ -762,9 +762,9 @@ impl AccountSession {
         }
     }
 
-    /// 是否支持指定模型（`models` 为空 = 全部支持）。
+    /// 是否支持指定模型（`models` 为空 = 全部支持；大小写不敏感）。
     pub fn supports_model(&self, model: &str) -> bool {
-        self.models.is_empty() || self.models.iter().any(|m| m == model)
+        self.models.is_empty() || self.models.iter().any(|m| m.eq_ignore_ascii_case(model))
     }
 
     /// 是否支持指定模型（兼容「用户可见名 / 上游真名」两种配置口径）。
@@ -775,7 +775,7 @@ impl AccountSession {
         if self.supports_model(model) {
             return true;
         }
-        alias.is_some_and(|other| self.models.iter().any(|m| m == other))
+        alias.is_some_and(|other| self.models.iter().any(|m| m.eq_ignore_ascii_case(other)))
     }
 
     /// 该上游模型的冷却到期时间（unix 秒）。

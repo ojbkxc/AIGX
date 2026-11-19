@@ -921,6 +921,74 @@ pub struct AppConfig {
     /// 视觉兼容 describe/switch 与备选链；压缩默认开、视觉兼容默认关）。
     #[serde(default)]
     pub image_compat: crate::image_compat::ImageCompatConfig,
+    /// 统一错误处理策略（对齐 Agent2API v3.5.0-beta.2 `routingErrorPolicy`）。
+    ///
+    /// 缺省（`None`）= 未显式配置：错误决策沿用既有重试字段并按 legacy 投影；
+    /// 存在且校验通过时，数据面自重试/换号按本段规则执行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_policy: Option<crate::error_policy::ErrorPolicyConfig>,
+    /// 运行容量管理（对齐 Agent2API v3.5.0-beta.2 `runtimeCapacity`）。
+    #[serde(default)]
+    pub runtime_capacity: crate::runtime_capacity::CapacitySettings,
+    /// 网页工具调用模拟开关（对齐 Agent2API v3.5.0-beta.2 `webToolEmulation`）。
+    #[serde(default)]
+    pub web_tools: WebToolsConfig,
+    /// 插件受控任务授权边界（对齐 Agent2API v3.5.0-beta.2 `pluginManagedTaskGrants`）。
+    #[serde(default)]
+    pub plugin_task_grants: PluginTaskGrantsConfig,
+}
+
+/// 网页工具调用模拟（`[web_tools]` 段）。
+///
+/// 参考树的 `webToolEmulation` 是**布尔开关**：缺省开启（只启用插件明确声明的
+/// 模拟契约，不扩大旧插件或原生通道能力）；关闭后不再对插件声明注入模拟契约。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebToolsConfig {
+    /// 缺省 `true`：与参考树 `enabled_in` 的「缺省开启」一致。
+    #[serde(default = "default_web_tool_emulation")]
+    pub emulation: bool,
+}
+
+fn default_web_tool_emulation() -> bool {
+    true
+}
+
+impl Default for WebToolsConfig {
+    fn default() -> Self {
+        Self {
+            emulation: default_web_tool_emulation(),
+        }
+    }
+}
+
+/// 插件受控任务授权边界（`[plugin_task_grants]` 段）。
+///
+/// 键 = 受控任务标识（如 `plugin_install` / `plugin_capability:<name>`），值 =
+/// 是否已授权。缺键 = 未授权（fail-closed，与参考树「执行批准保持关闭」一致）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginTaskGrantsConfig {
+    #[serde(default)]
+    pub grants: std::collections::BTreeMap<String, bool>,
+}
+
+impl PluginTaskGrantsConfig {
+    /// 某受控任务是否已授权（缺键 = 未授权）。
+    pub fn is_granted(&self, task: &str) -> bool {
+        self.grants.get(task).copied().unwrap_or(false)
+    }
+}
+
+/// 网页工具调用模拟开关的进程级快照（缺省开启）。
+static WEB_TOOL_EMULATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// 读取网页工具调用模拟开关。
+pub fn web_tool_emulation_enabled() -> bool {
+    WEB_TOOL_EMULATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 `/api/web-tool-emulation` 保存后写入快照。
+pub fn set_web_tool_emulation(v: bool) {
+    WEB_TOOL_EMULATION.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 插件宿主（`[plugins]` 段）。

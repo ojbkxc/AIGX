@@ -235,6 +235,11 @@ mod tests {
             memory_mib: 64,
             concurrency: 8,
             verified: false,
+            account_origin: None,
+            desktop_launch: None,
+            managed_login: None,
+            managed_task: None,
+            concurrency_hard_limit: None,
         }
     }
 

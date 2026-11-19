@@ -1656,7 +1656,9 @@ fn compare_prerelease(left: &str, right: &str) -> i32 {
 }
 
 /// a > b 返回 1，相等 0，a < b 返回 -1；无法解析返回 None。
-fn compare_versions(a: &str, b: &str) -> Option<i32> {
+///
+/// 公开给插件目录版本比较使用（插件更新检查需要判断「目录版本是否比已装版本新」）。
+pub fn compare_versions(a: &str, b: &str) -> Option<i32> {
     let (left, left_pre) = split_version(a)?;
     let (right, right_pre) = split_version(b)?;
     for (left_part, right_part) in left.iter().zip(right.iter()) {

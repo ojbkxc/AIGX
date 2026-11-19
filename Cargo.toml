@@ -71,6 +71,8 @@ rustls-pki-types = "1"
 # reqwest rustls-no-provider 不捆绑 crypto provider：程序启动时手动安装 ring
 # （见 main.rs install_default），显式声明以固定版本与特性。
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging"] }
+# ring 直接依赖：插件包 ed25519 验签（ring::signature::ED25519，与 rustls 同一份 ring）。
+ring = "0.17"
 # url crate — reqwest 的传递依赖，显式声明用于 form_urlencoded 构造 submit.php 回退 query string
 url = "2"
 bytes = "1"

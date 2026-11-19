@@ -283,10 +283,8 @@ pub(super) async fn provider_row(
 
 #[derive(Clone, Debug)]
 pub(super) enum SearchSource {
-    Key {
-        provider: String,
-        key: String,
-    },
+    /// 密钥型来源：只记 provider，真正的密钥由请求层按需轮换解密。
+    Key { provider: String },
     Account {
         provider: String,
         /// 插件 `admin.action` 点名用的账号 id（凭证由账号库与插件管理）。
@@ -299,7 +297,7 @@ pub(super) enum SearchSource {
 impl SearchSource {
     pub(super) fn provider(&self) -> &str {
         match self {
-            Self::Key { provider, .. } | Self::Account { provider, .. } => provider,
+            Self::Key { provider } | Self::Account { provider, .. } => provider,
         }
     }
 
@@ -312,8 +310,8 @@ impl SearchSource {
         timeout: u64,
     ) -> Result<Vec<SourceDraft>, SearchError> {
         match self {
-            Self::Key { provider, key } => {
-                super::providers::search(client, provider, key, query, timeout).await
+            Self::Key { provider } => {
+                super::providers::search(services, client, provider, query, timeout).await
             }
             Self::Account {
                 provider,
@@ -361,11 +359,11 @@ pub(super) async fn prepare(
             max_chars,
         })
     } else {
-        let key = super::decrypt_provider_key(entry)
-            .ok_or_else(|| configuration("提供商尚未配置有效密钥"))?;
+        if !super::provider_keys::has_keys(entry) {
+            return Err(configuration("提供商尚未配置有效密钥"));
+        }
         Ok(SearchSource::Key {
             provider: provider.to_string(),
-            key,
         })
     }
 }
@@ -426,9 +424,12 @@ pub async fn test_provider(
     services: &ToolServices,
     sessions: &AccountSessionStore,
     provider: &str,
+    key_id: Option<&str>,
+    operation: &str,
 ) -> Value {
     if !super::is_account_provider(provider) {
-        return super::providers::test_provider(client, services, provider).await;
+        return super::providers::test_provider(client, services, provider, key_id, operation)
+            .await;
     }
     let started = super::now_ms();
     let entry = services

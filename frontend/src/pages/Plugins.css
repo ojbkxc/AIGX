@@ -329,3 +329,84 @@
 @keyframes pl-spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── beta.2 批量管理：选择条 + 卡片选择框 + 操作进度 ─────────────────── */
+.pl-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--primary-color);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+}
+
+.pl-batch-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  flex: 0 0 auto;
+}
+
+.pl-batch-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pl-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.pl-batch-check {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.pl-batch-ops {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.pl-batch-op {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.pl-batch-op-id {
+  font-family: ui-monospace, monospace;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.pl-batch-op-stage {
+  flex: 1;
+  min-width: 0;
+}
+
+.pl-batch-op.is-failed .pl-batch-op-stage {
+  color: var(--danger-color);
+}
+
+.pl-batch-op.is-done .pl-batch-op-stage {
+  color: var(--success-color, #2e9e5b);
+}

@@ -34,9 +34,15 @@ pub const TARGET: &str = "wasm32-unknown-unknown";
 /// 沙箱 ABI 版本。插件导出 `a2a_abi_version()` 必须返回它。
 pub const ABI: u32 = 1;
 
-/// 能力白名单（24 项，与上游 `CAPABILITIES` 逐字一致）。
+/// 能力白名单（对齐 Agent2API v3.5.0-beta.2 `CAPABILITIES`，逐字一致）。
+///
+/// 这是**插件可以在 `wasm.json` 里声明**的能力全集。达到全集后，beta.2 的
+/// Wasm 插件（声明 compute/scheduling/tasks/desktopLaunch/verification/
+/// managedLogin/sms 等新能力）都能通过清单校验；宿主是否**真正服务**某项
+/// 能力见 [`SERVED_CAPABILITIES`]（未服务的能力在调用时如实报不支持）。
 pub const CAPABILITIES: &[&str] = &[
     "http.v1",
+    "http.timeout.v1",
     "websocket.v1",
     "accounts.cas.v1",
     "settings.v1",
@@ -58,17 +64,104 @@ pub const CAPABILITIES: &[&str] = &[
     "login.interaction.v1",
     "login.callback.v1",
     "login.captcha.geetest.v1",
+    "login.captcha.alicom4.v1",
     "native.helpers.v1",
     "settings.schema.v1",
+    "login.sms.v1",
+    "login.device.v1",
+    "resources.fetch-public.v1",
+    "protocol.convert.v1",
+    "http.account-origin.v1",
+    "runtime.platform.v1",
+    "verification.account.v1",
+    "verification.claim.v1",
+    "runtime.architecture.v1",
+    "runtime.client-fingerprint.v1",
+    "request.context.v1",
+    "login.managed.v1",
+    "login.loopback.v1",
+    "login.captcha.aliyun.v1",
+    "resources.inbound-images.v1",
+    "login.desktop.chatglm.v1",
+    "credential.codearts-refresh.v1",
+    "http.catpaw-turn.v1",
+    "credential.cline-free-refresh.v1",
+    "claim.doubao-tasks.v1",
+    "http.managed-task.v1",
+    "http.codearts-session.v1",
+    "login.codearts.v1",
+    "desktop.credentials.v1",
+    "http.doubao-turn.v1",
+    "crypto.monkeycode-cap.v1",
+    "desktop.launch.v1",
+    "resources.cookie-file.v1",
+    "credential.kiro-external-refresh.v1",
+    "credentials.legacy-import.v1",
 ];
 
+/// 宿主**实际落地的能力**（其余声明在 [`CAPABILITIES`] 里只做前向兼容放行，
+/// 调用时返回「未支持」而非假装支持）。
+///
+/// 与 `services.rs` 的能力闸门逐条对应：每个方法在分派前都会
+/// `permission(name)` 校验，未授权 → `forbidden`；未在 [`CAPABILITIES`]
+/// 白名单 → 清单校验阶段即拒绝加载。
+pub const SERVED_CAPABILITIES: &[&str] = &[
+    "http.v1",
+    "websocket.v1",
+    "accounts.cas.v1",
+    "settings.v1",
+    "sessions.v1",
+    "clock.v1",
+    "random.v1",
+    "locks.v1",
+    "catalog.v1",
+    "catalog.accounts.v1",
+    "chat.stream.v1",
+    "state.v1",
+    "resources.v1",
+    "tasks.v1",
+    "native.helpers.v1",
+    "settings.schema.v1",
+    "accounts.identity.v1",
+    "login.forms.v1",
+    "login.interaction.v1",
+    "login.callback.v1",
+    "login.captcha.geetest.v1",
+    "checkin.rolling.v1",
+    "errors.v1",
+    "verification.claim.v1",
+    "http.managed-task.v1",
+    "http.account-origin.v1",
+];
+
+/// 某项能力是否由宿主实际服务。
+pub fn served(capability: &str) -> bool {
+    SERVED_CAPABILITIES.contains(&capability)
+}
+
 /// `wasm.json` 的磁盘形状（`deny_unknown_fields`，与上游一致）。
+///
+/// beta.2 在清单里新增了 `account_origin` / `desktop_launch` / `managed_login`
+/// / `managed_task` / `concurrency_hard_limit` 等声明键。本结构体**接受**
+/// 这些键（前向兼容，缺失即 `None`），但宿主目前只消费核心字段；扩展声明
+/// 由对应子系统（若已实现）在自己的模块里按原始 JSON 解读。
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub abi: u32,
     pub requires: Vec<String>,
     pub origins: Vec<String>,
+    // ── beta.2 清单扩展（前向兼容放行；宿主是否消费见各子系统）──────────
+    #[serde(default)]
+    pub account_origin: Option<serde_json::Value>,
+    #[serde(default)]
+    pub desktop_launch: Option<serde_json::Value>,
+    #[serde(default)]
+    pub managed_login: Option<serde_json::Value>,
+    #[serde(default)]
+    pub managed_task: Option<serde_json::Value>,
+    #[serde(default)]
+    pub concurrency_hard_limit: Option<usize>,
     #[serde(default)]
     pub helpers: Vec<String>,
     #[serde(default = "memory_default")]
@@ -101,6 +194,12 @@ pub struct WasmManifest {
     pub memory_mib: usize,
     pub concurrency: usize,
     pub verified: bool,
+    // beta.2 清单扩展声明（原始 JSON，供对应子系统按需解读）。
+    pub account_origin: Option<serde_json::Value>,
+    pub desktop_launch: Option<serde_json::Value>,
+    pub managed_login: Option<serde_json::Value>,
+    pub managed_task: Option<serde_json::Value>,
+    pub concurrency_hard_limit: Option<usize>,
 }
 
 impl WasmManifest {
@@ -266,6 +365,11 @@ pub fn read_manifest(dir: &Path, pack: &serde_json::Value) -> Result<Option<Wasm
         memory_mib: spec.memory_mib,
         concurrency: spec.concurrency,
         verified: spec.verified,
+        account_origin: spec.account_origin,
+        desktop_launch: spec.desktop_launch,
+        managed_login: spec.managed_login,
+        managed_task: spec.managed_task,
+        concurrency_hard_limit: spec.concurrency_hard_limit,
     }))
 }
 
@@ -468,9 +572,17 @@ mod tests {
     }
 
     #[test]
-    fn capability_whitelist_is_24() {
-        assert_eq!(CAPABILITIES.len(), 24);
+    fn capability_whitelist_matches_beta2() {
+        // 对齐 Agent2API v3.5.0-beta.2 CAPABILITIES 全集（56 项）。
+        assert_eq!(CAPABILITIES.len(), 56);
         let unique: std::collections::HashSet<_> = CAPABILITIES.iter().collect();
         assert_eq!(unique.len(), CAPABILITIES.len());
+        // 已服务能力必须是白名单子集，不能广告白名单外的东西。
+        for capability in SERVED_CAPABILITIES {
+            assert!(
+                CAPABILITIES.contains(capability),
+                "SERVED 含白名单外能力: {capability}"
+            );
+        }
     }
 }

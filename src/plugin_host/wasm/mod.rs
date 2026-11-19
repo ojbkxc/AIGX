@@ -42,6 +42,8 @@
 // allow 只会报出 tasks 的条目），后者会连带掩盖真正的接线遗漏。
 pub(crate) mod access;
 pub(crate) mod account_access;
+/// 账号来源授权（`http.open_account`）。
+pub(crate) mod account_origin;
 pub(crate) mod catalog;
 mod context;
 pub(crate) mod egress;
@@ -52,6 +54,8 @@ mod host;
 mod http;
 mod limits;
 mod login;
+/// 受控任务审批闸门 + 任务生命周期（`managed_task.*`）。
+pub(crate) mod managed_task;
 pub(crate) mod manifest;
 pub(crate) mod methods;
 #[allow(dead_code)] // deferred：不注入时 native.snapshot 返回空表
@@ -65,6 +69,8 @@ mod services;
 mod state;
 #[allow(dead_code)] // lib target 无调用方：唯一消费者是 bin 的 main.rs
 pub(crate) mod tasks;
+/// 宿主签发的验证租约（`verification.lease.open|check|close`）与状态 CAS 提交。
+pub(crate) mod verification;
 pub(crate) mod wire;
 
 use std::collections::HashMap;
@@ -231,16 +237,40 @@ fn global_slots(streaming: bool) -> &'static Semaphore {
 }
 
 /// 能力契约（`init` 的 params，插件据此校验宿主支持面）。
+///
+/// `capabilities` 只广告**宿主实际服务**的能力（[`manifest::SERVED_CAPABILITIES`]），
+/// `declaredCapabilities` 是插件**可声明**的全集（[`manifest::CAPABILITIES`]），
+/// 两者之差即「能装上但调用会如实报未支持」的能力。子系统键（compute /
+/// scheduling / tasks / desktopLaunch / verification / managedLogin / sms /
+/// accountOrigin / protocol）按 beta.2 形状给出，`served` 标识宿主是否真正
+/// 提供该子系统的 host call。
 pub(crate) fn contract() -> serde_json::Value {
     json!({
         "abi": manifest::ABI,
-        "capabilities": manifest::CAPABILITIES,
+        "capabilities": manifest::SERVED_CAPABILITIES,
+        "declaredCapabilities": manifest::CAPABILITIES,
         "limits": {
             "messageBytes": MAX_MESSAGE,
             "streamChunkBytes": 64 * 1024,
             "resourceBytes": 96 * 1024 * 1024,
             "accountStateBytes": 2 * 1024 * 1024,
-            "conversationTtlMs": 86_400_000
+            "conversationTtlMs": 86_400_000,
+            "verificationMessageBytes": 256 * 1024,
+            "verificationTimeoutMs": 2000,
+            "verificationFuel": 50_000_000_u64,
+            "verificationHostCalls": 128_u32
+        },
+        "compute": {
+            "owner": "host",
+            "fuel": 2_000_000_000_u64,
+            "yieldInterval": 100_000_u64,
+            "clock": "fuel"
+        },
+        "scheduling": {
+            "owner": "host",
+            "legacyConcurrency": "advisory",
+            "classes": ["conversation", "interactive", "background", "image"],
+            "global": { "streaming": 16, "control": 8 }
         },
         "state": {
             "login": "discard_on_reload",
@@ -259,9 +289,82 @@ pub(crate) fn contract() -> serde_json::Value {
         },
         "images": "normalized_result_resources",
         "catalog": "account_snapshots_provider_union",
+        "tasks": {
+            "declarations": "tasks.list",
+            "categories": "tasks.categories",
+            "placement": "host_owned",
+            "categoryValues": ["checkin", "growth", "rewards", "maintenance", "other"],
+            "categoryGrantsPermissions": false,
+            "accountScope": "current_provider_current_account",
+            "served": manifest::served("tasks.v1")
+        },
+        "desktopLaunch": {
+            "capability": "desktop.launch.v1",
+            "served": manifest::served("desktop.launch.v1")
+        },
+        "managedTask": {
+            "capability": "http.managed-task.v1",
+            "methods": ["managed_task.status", "managed_task.begin", "managed_task.end", "managed_task.abort"],
+            "approval": "host_admin_then_fence",
+            "executor": "plugin_performs_own_egress",
+            "served": manifest::served("http.managed-task.v1")
+        },
         "nativeHelpers": "explicit_grant_pinned_package",
-        "network": "https_exact_origins_no_redirects"
+        "network": "https_exact_origins_no_redirects",
+        "accountOrigin": {
+            "capability": "http.account-origin.v1",
+            "method": "http.open_account",
+            "authorization": "current_installed_runtime_current_account_routes",
+            "source": "current_account_secret",
+            "proxySupported": true,
+            "served": manifest::served("http.account-origin.v1")
+        },
+        "protocol": {
+            "capability": "protocol.convert.v1",
+            "request": ["chat", "anthropic", "responses"],
+            "stream": ["chat", "anthropic", "responses", "gemini"],
+            "output": "chat_sse",
+            "handles": "current_call_only",
+            "served": manifest::served("protocol.convert.v1")
+        },
+        "verification": {
+            "capability": "verification.account.v1",
+            "claimCapability": "verification.claim.v1",
+            "actions": ["captcha.push", "claim.verification.poll", "claim.verification.complete"],
+            "lease": ["verification.lease.open", "verification.lease.check", "verification.lease.close"],
+            "leaseMaxMs": 50_000_u64,
+            "entry": "host_owned_account_call",
+            "network": false,
+            "concurrency": 4,
+            "servedLease": manifest::served("verification.claim.v1"),
+            "servedActions": manifest::served("verification.account.v1")
+        },
+        "managedLogin": {
+            "capability": "login.managed.v1",
+            "steps": "host_owned_compare_exchange",
+            "methods": ["login.context", "login.input.take", "login.step.publish", "login.loopback.open", "login.loopback.close"],
+            "browserModes": ["external"],
+            "input": "current_trusted_call_once",
+            "lifetime": "login_task",
+            "served": manifest::served("login.managed.v1")
+        },
+        "sms": {
+            "capability": "login.sms.v1",
+            "methods": ["login.sms.send", "login.sms.verify"],
+            "transport": "admin.action",
+            "state": "host_owned_opaque_ticket",
+            "sendStatus": ["sent", "captcha"],
+            "served": manifest::served("login.sms.v1")
+        }
     })
+}
+
+/// 管理面可读的能力契约（= `init` params + 已装载清单扩展声明）。
+///
+/// 与沙箱内部用的 [`contract`] 同一份数据；单独导出是因为 `contract` 是
+/// `pub(crate)`，管理面在 `api::admin` 树里需要公开入口。
+pub fn contract_public() -> serde_json::Value {
+    contract()
 }
 
 /// 已加载的 Wasm 清单表（provider → 清单）。
@@ -317,10 +420,48 @@ pub fn manifest_for(provider: &str) -> Option<WasmManifest> {
     manifests().lock().ok()?.get(provider).cloned()
 }
 
+/// 已装载 Wasm 清单的只读快照（provider → 声明摘要）。
+///
+/// 管理面据此如实展示「本包是否声明了 beta.2 扩展能力
+/// （desktopLaunch / managedLogin / managedTask / accountOrigin）」——
+/// 声明了但 `served=false` 的能力即宿主未提供，界面标「未支持」。
+pub fn declared_extensions() -> serde_json::Value {
+    let table = manifests()
+        .lock()
+        .map(|table| table.clone())
+        .unwrap_or_default();
+    let mut rows: Vec<serde_json::Value> = table
+        .into_values()
+        .map(|manifest| {
+            json!({
+                "provider": manifest.provider,
+                "verified": manifest.verified,
+                "capabilities": manifest.requires,
+                "accountOrigin": manifest.account_origin,
+                "desktopLaunch": manifest.desktop_launch,
+                "managedLogin": manifest.managed_login,
+                "managedTask": manifest.managed_task,
+                "concurrencyHardLimit": manifest.concurrency_hard_limit,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        a["provider"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["provider"].as_str().unwrap_or(""))
+    });
+    serde_json::Value::Array(rows)
+}
+
 /// 摘除一个 provider 的全部临时状态（卸载 / 停用）。
 pub(crate) fn forget(provider: &str) {
     tasks::forget(provider);
     state::forget_provider(provider);
+    verification::forget_provider(provider);
+    managed_task::forget_provider(provider);
+    // 停用/卸载即撤销受控任务批准（fail-closed：旧批准不能续期）。
+    managed_task::revoke(provider);
     catalog::forget(provider);
     // provider 维度的模型目录（`catalog` 并集的出口）同步摘除 ——
     // 宿主都没了，目录不能继续对外广告（= 上游 `rpc_cache::forget`）。
@@ -380,6 +521,11 @@ mod tests {
             memory_mib: 64,
             concurrency: 8,
             verified: false,
+            account_origin: None,
+            desktop_launch: None,
+            managed_login: None,
+            managed_task: None,
+            concurrency_hard_limit: None,
         };
         register_manifest(manifest);
         // 清单在，但没有活宿主 -> 不算接管、不放行任何能力
@@ -397,10 +543,31 @@ mod tests {
     fn contract_advertises_abi_and_capabilities() {
         let value = contract();
         assert_eq!(value["abi"], ABI);
+        // capabilities 只广告宿主实际服务的子集；declaredCapabilities 是全集。
         assert_eq!(
             value["capabilities"].as_array().map(Vec::len),
+            Some(manifest::SERVED_CAPABILITIES.len())
+        );
+        assert_eq!(
+            value["declaredCapabilities"].as_array().map(Vec::len),
             Some(CAPABILITIES.len())
         );
         assert_eq!(value["limits"]["messageBytes"], MAX_MESSAGE);
+        // beta.2 子系统键存在（形状对齐）
+        for key in [
+            "compute",
+            "scheduling",
+            "tasks",
+            "desktopLaunch",
+            "verification",
+            "managedLogin",
+            "sms",
+            "accountOrigin",
+            "protocol",
+        ] {
+            assert!(value.get(key).is_some(), "contract 缺少子系统键: {key}");
+        }
+        // verification 租约是已服务能力
+        assert_eq!(value["verification"]["servedLease"], true);
     }
 }

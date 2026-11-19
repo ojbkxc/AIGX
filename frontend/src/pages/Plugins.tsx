@@ -102,6 +102,9 @@ function InstalledPackCard({
   busy,
   canUpdate,
   latestVersion,
+  selectable,
+  checked,
+  onToggleSelect,
   onEnabled,
   onReload,
   onRemove,
@@ -114,6 +117,9 @@ function InstalledPackCard({
   busy: boolean;
   canUpdate: boolean;
   latestVersion?: string | null;
+  selectable?: boolean;
+  checked?: boolean;
+  onToggleSelect?: () => void;
   onEnabled: (enabled: boolean) => void;
   onReload: () => void;
   onRemove: () => void;
@@ -129,6 +135,16 @@ function InstalledPackCard({
   return (
     <div className="pl-card is-installed">
       <div className="pl-card-head">
+        {selectable ? (
+          <input
+            type="checkbox"
+            className="pl-batch-check"
+            checked={checked}
+            disabled={isBuiltin}
+            aria-label={t('选择 {{name}}', { name: pack.name || pack.id })}
+            onChange={() => onToggleSelect?.()}
+          />
+        ) : null}
         <div className="pl-card-icon">
           {pack.icon ? <img src={pack.icon} alt="" /> : (pack.name || pack.id).slice(0, 1).toUpperCase()}
         </div>
@@ -265,6 +281,9 @@ function StorePackCard({
   catalogReason,
   busy,
   operation,
+  selectable,
+  checked,
+  onToggleSelect,
   onInstall,
 }: {
   item: StorePlugin;
@@ -273,6 +292,9 @@ function StorePackCard({
   catalogReason?: string | null;
   busy: boolean;
   operation?: PluginOperation;
+  selectable?: boolean;
+  checked?: boolean;
+  onToggleSelect?: () => void;
   onInstall: (item: StorePlugin) => void;
 }): JSX.Element {
   const { t } = useTranslation();
@@ -282,6 +304,16 @@ function StorePackCard({
   return (
     <div className="pl-card is-store">
       <div className="pl-card-head">
+        {selectable ? (
+          <input
+            type="checkbox"
+            className="pl-batch-check"
+            checked={checked}
+            disabled={!installable}
+            aria-label={t('选择 {{name}}', { name: item.name || item.id })}
+            onChange={() => onToggleSelect?.()}
+          />
+        ) : null}
         <div className="pl-card-icon">
           {item.icon ? <img src={item.icon} alt="" /> : (item.name || item.id).slice(0, 1).toUpperCase()}
         </div>
@@ -355,6 +387,12 @@ export default function Plugins(): JSX.Element {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   /** 插件页分组（原生插件包 / 脚本插件（Magpie）） */
   const [tab, setTab] = useState<PluginTab>('native');
+  /** 批量管理：选择态（键 = `pack:<id>` / `store:<id>`） */
+  const [batchMode, setBatchMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchRunning, setBatchRunning] = useState(false);
+  /** 本次批量操作的操作快照（轮询 /api/plugins/progress 实时更新） */
+  const [batchOps, setBatchOps] = useState<PluginOperation[]>([]);
   /** provider 设置弹层：null = 关闭；否则给该包声明的 provider 清单 */
   const [settingsProviders, setSettingsProviders] = useState<string[] | null>(null);
   /** provider-settings 端点是否有内容（未就绪时「设置」按钮也给替换提示） */
@@ -564,6 +602,133 @@ export default function Plugins(): JSX.Element {
     }
   };
 
+  // ── 批量管理（beta.2：消费后端 Operation 异步进度模型）───────────────────
+  // POST /api/plugins/batch 立即返回初始操作快照（stage=waiting），随后轮询
+  // GET /api/plugins/progress 直至所有本次操作 inactive，再回读列表。
+  // install 逐条带 url；update/enable/disable/uninstall 用 {action, ids} 简写
+  // （update 由后端从当前目录快照按 id 解析下载地址）。
+  const toggleSelect = (key: string): void => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const exitBatch = (): void => {
+    setBatchMode(false);
+    setSelected(new Set());
+    setBatchOps([]);
+  };
+
+  const selectedPacks = packs.filter((p) => p.id !== 'builtin' && selected.has(`pack:${p.id}`));
+  const selectedStores = storePlugins.filter((item) => selected.has(`store:${item.id}`));
+  const batchCount = selectedPacks.length + selectedStores.length;
+  const anyPackEnabled = selectedPacks.some((p) => p.enabled);
+  const anyPackDisabled = selectedPacks.some((p) => !p.enabled);
+  const anyUpdatable = selectedPacks.some((p) => !!updateOf(p.id));
+  const selectableKeys = [
+    ...packs.filter((p) => p.id !== 'builtin').map((p) => `pack:${p.id}`),
+    ...storePlugins.filter((s) => payload?.catalog?.available !== false && s.platforms.some((p) => p.target === (payload?.target || ''))).map((s) => `store:${s.id}`),
+  ];
+  const allSelected = selectableKeys.length > 0 && selectableKeys.every((k) => selected.has(k));
+
+  const toggleAll = (): void => {
+    setSelected(allSelected ? new Set() : new Set(selectableKeys));
+  };
+
+  /** 轮询进度直到本次所有操作都 inactive；完成回读列表并汇总 */
+  const pollBatchUntilDone = async (watched: PluginOperation[]): Promise<void> => {
+    const ids = new Set(watched.map((op) => op.id));
+    let latest = watched;
+    for (let i = 0; i < 300; i += 1) {
+      const res = await api.getPluginProgress();
+      const ops = res?.data?.operations ?? [];
+      latest = ops.filter((op) => ids.has(op.id));
+      setBatchOps(latest);
+      if (latest.length > 0 && latest.every((op) => !op.active)) break;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    setBatchRunning(false);
+    setBusyId(null);
+    await load();
+    // 失败判定：stage=failed / 本地阶段错误（error）/ 宿主加载失败（hostError）。
+    // hostError 是独立字段（下载安装成功但宿主加载失败），同样需要提示用户。
+    const failed = latest.filter((op) => op.stage === 'failed' || op.error || op.hostError);
+    if (failed.length) {
+      addToast(
+        t('批量操作完成，{{n}} 项失败：{{detail}}', {
+          n: failed.length,
+          detail: failed
+            .slice(0, 3)
+            .map((op) => `${op.id}: ${op.error || op.hostError || op.stage}`)
+            .join('；'),
+        }),
+        'error',
+      );
+    } else {
+      addToast(t('批量操作完成'));
+      setSelected(new Set());
+    }
+  };
+
+  const runBatch = async (
+    action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall',
+  ): Promise<void> => {
+    if (batchRunning || busy) return;
+    const target = payload?.target || '';
+    let body: Parameters<typeof api.batchPlugins>[0];
+    if (action === 'install') {
+      const items = selectedStores
+        .map((item) => {
+          const platform = item.platforms.find((p) => p.target === target);
+          return platform ? { id: item.id, action: 'install', url: platform.url, sha256: platform.sha256 || undefined } : null;
+        })
+        .filter((x): x is { id: string; action: string; url: string; sha256: string | undefined } => x !== null);
+      if (!items.length) {
+        addToast(t('所选项没有可执行该操作的插件'), 'error');
+        return;
+      }
+      body = { items };
+    } else {
+      let ids: string[];
+      if (action === 'enable') ids = selectedPacks.filter((p) => !p.enabled).map((p) => p.id);
+      else if (action === 'disable') ids = selectedPacks.filter((p) => p.enabled).map((p) => p.id);
+      else if (action === 'update') ids = selectedPacks.filter((p) => !!updateOf(p.id)).map((p) => p.id);
+      else ids = selectedPacks.map((p) => p.id);
+      if (!ids.length) {
+        addToast(t('所选项没有可执行该操作的插件'), 'error');
+        return;
+      }
+      body = { action, ids };
+    }
+    setBatchRunning(true);
+    setBusyId(`batch:${action}`);
+    setBatchOps([]);
+    try {
+      const res = await api.batchPlugins(body);
+      const started = res?.data?.operations ?? [];
+      setBatchOps(started);
+      await pollBatchUntilDone(started);
+    } catch (err) {
+      setBatchRunning(false);
+      setBusyId(null);
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const confirmBatchUninstall = (): void => {
+    setConfirmState({
+      title: t('批量卸载插件包'),
+      message: t('确定卸载所选的 {{n}} 个插件包吗？卸载后这些包里的提供商将无法转发，也无法添加账号。账号数据本身不会被删除，重新安装后可以继续使用。', { n: selectedPacks.length }),
+      confirmText: t('卸载'),
+      danger: true,
+      onConfirm: async () => {
+        await runBatch('uninstall');
+      },
+    });
+  };
+
   /** 点「设置」：把该包声明的 provider 交给弹层（弹层内按 provider 过滤） */
   const openPackSettings = (pack: PluginPackSummary): void => {
     if (!settingsRows || settingsRows.length === 0) {
@@ -594,6 +759,15 @@ export default function Plugins(): JSX.Element {
           <p>{t('按需安装插件扩展提供商能力；启停、状态与来源统一管理。')}</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          {tab === 'native' && !notReady && (
+            <Button
+              variant={batchMode ? 'primary' : 'outline'}
+              onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}
+              disabled={loading}
+            >
+              {batchMode ? t('退出批量') : t('批量管理')}
+            </Button>
+          )}
           <Button variant="outline" onClick={() => void load()} disabled={loading}>
             {loading ? <Loader2 size={13} className="pl-spin" /> : <RefreshCw size={13} />}
             {t('刷新')}
@@ -618,6 +792,74 @@ export default function Plugins(): JSX.Element {
       ) : (
         <div hidden={tab !== 'native'}>
           {error && <div className="error-message">{error}</div>}
+
+          {batchMode && !notReady && !loading ? (
+            <div className="pl-batch-bar" role="region" aria-label={t('批量管理')}>
+              <label className="pl-batch-all">
+                <input type="checkbox" checked={allSelected} disabled={batchRunning || selectableKeys.length === 0} onChange={toggleAll} />
+                {t('全选当前结果')}
+              </label>
+              <span className="pl-batch-count">
+                {t('已选 {{count}} 个插件', { count: batchCount })} ·{' '}
+                {t('{{installed}} 已安装 · {{missing}} 未安装', {
+                  installed: selectedPacks.length,
+                  missing: selectedStores.length,
+                })}
+              </span>
+              <div className="pl-batch-actions">
+                {selectedStores.length > 0 ? (
+                  <Button variant="primary" size="sm" disabled={batchRunning || busy} onClick={() => void runBatch('install')}>
+                    {t('安装所选（{{n}}）', { n: selectedStores.length })}
+                  </Button>
+                ) : null}
+                {selectedPacks.length > 0 && anyUpdatable ? (
+                  <Button variant="primary" size="sm" disabled={batchRunning || busy} onClick={() => void runBatch('update')}>
+                    {t('批量更新')}
+                  </Button>
+                ) : null}
+                {selectedPacks.length > 0 && anyPackDisabled ? (
+                  <Button variant="outline" size="sm" disabled={batchRunning || busy} onClick={() => void runBatch('enable')}>
+                    {t('批量启用')}
+                  </Button>
+                ) : null}
+                {selectedPacks.length > 0 && anyPackEnabled ? (
+                  <Button variant="outline" size="sm" disabled={batchRunning || busy} onClick={() => void runBatch('disable')}>
+                    {t('批量停用')}
+                  </Button>
+                ) : null}
+                {selectedPacks.length > 0 ? (
+                  <Button variant="danger" size="sm" disabled={batchRunning || busy} onClick={confirmBatchUninstall}>
+                    <Trash2 size={13} /> {t('批量卸载（{{n}}）', { n: selectedPacks.length })}
+                  </Button>
+                ) : null}
+                {batchRunning ? <Loader2 size={13} className="pl-spin" /> : null}
+                <Button variant="outline" size="sm" disabled={batchRunning} onClick={exitBatch}>
+                  {t('退出')}
+                </Button>
+              </div>
+              {batchOps.length > 0 ? (
+                <ul className="pl-batch-ops" aria-live="polite">
+                  {batchOps.map((op, i) => (
+                    <li
+                      key={`${op.id}:${i}`}
+                      className={`pl-batch-op is-${!op.active && (op.stage === 'failed' || op.error || op.hostError) ? 'failed' : op.stage}`}
+                    >
+                      <span className="pl-batch-op-id">{op.id}</span>
+                      <span className="pl-batch-op-stage">
+                        {op.active
+                          ? `${stageLabel(t, op.stage)}${op.stage === 'downloading' && op.total > 0 ? ` ${Math.round(op.percent || 0)}%` : ''}`
+                          : op.stage === 'failed'
+                            ? `${t('失败')}${op.error ? `：${op.error}` : ''}`
+                            : op.hostError
+                              ? `${t('失败')}：${op.hostError}`
+                              : t('完成')}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
 
           {loading ? (
             <Loading text={t('读取插件列表')} />
@@ -688,6 +930,9 @@ export default function Plugins(): JSX.Element {
                             busy={busy || op?.active === true}
                             canUpdate={!!update}
                             latestVersion={update?.latest}
+                            selectable={batchMode}
+                            checked={selected.has(`pack:${pack.id}`)}
+                            onToggleSelect={() => toggleSelect(`pack:${pack.id}`)}
                             onEnabled={(v) => handleEnabled(pack, v)}
                             onReload={() => handleReload(pack)}
                             onRemove={() => handleUninstall(pack)}
@@ -706,6 +951,9 @@ export default function Plugins(): JSX.Element {
                           catalogReason={catalog?.reason}
                           busy={busy}
                           operation={operations.find((op) => op.id === item.id)}
+                          selectable={batchMode}
+                          checked={selected.has(`store:${item.id}`)}
+                          onToggleSelect={() => toggleSelect(`store:${item.id}`)}
                           onInstall={handleInstall}
                         />
                       ))}

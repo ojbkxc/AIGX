@@ -21,9 +21,11 @@ use super::ToolServices;
 use super::{account_search, providers};
 use crate::account_session::AccountSessionStore;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SearchErrorCode {
     InvalidProviderKey,
+    QuotaExhausted,
     RateLimited,
     TimedOut,
     NoResults,
@@ -37,6 +39,7 @@ impl SearchErrorCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InvalidProviderKey => "invalid_provider_key",
+            Self::QuotaExhausted => "quota_exhausted",
             Self::RateLimited => "rate_limited",
             Self::TimedOut => "timed_out",
             Self::NoResults => "no_results",
@@ -51,6 +54,7 @@ impl SearchErrorCode {
         match self {
             Self::InvalidInput => 400,
             Self::PermissionDenied => 403,
+            Self::QuotaExhausted => 402,
             Self::RateLimited => 429,
             Self::Configuration => 503,
             Self::TimedOut => 504,
@@ -63,6 +67,8 @@ impl SearchErrorCode {
 pub struct SearchError {
     pub code: SearchErrorCode,
     pub message: String,
+    /// 上游声明的额度/限流恢复时间（毫秒时间戳，`None` = 未识别）。
+    pub reset_at: Option<i64>,
 }
 
 impl SearchError {
@@ -70,6 +76,7 @@ impl SearchError {
         Self {
             code,
             message: message.into(),
+            reset_at: None,
         }
     }
 }
@@ -399,14 +406,12 @@ pub struct FetchRun {
 /// 执行一次批量抓取。
 pub async fn run_fetch(
     services: &ToolServices,
-    sessions: &AccountSessionStore,
+    _sessions: &AccountSessionStore,
     client: &reqwest::Client,
     urls: Vec<String>,
 ) -> Result<FetchRun, SearchError> {
     let provider = services.load().selection.fetch;
-    if !super::is_fetch_provider(&provider)
-        || !super::ready_providers(services, sessions).contains(&provider.as_str())
-    {
+    if !super::is_fetch_provider(&provider) || !super::configured_provider(services, &provider) {
         return Err(SearchError::new(
             SearchErrorCode::Configuration,
             format!(
@@ -414,12 +419,6 @@ pub async fn run_fetch(
             ),
         ));
     }
-    let Some(key) = super::provider_key(services, &provider) else {
-        return Err(SearchError::new(
-            SearchErrorCode::Configuration,
-            format!("Configured fetch provider \"{provider}\" is not configured with an API key"),
-        ));
-    };
 
     let (accepted, rejected) = normalize_fetch_urls(urls);
     if accepted.is_empty() {
@@ -434,7 +433,7 @@ pub async fn run_fetch(
         .collect();
     let timeout = super::timeout_seconds(services, super::WEB_SEARCH_SERVICE_ID);
     let (pages, mut errors) =
-        providers::fetch(client, &provider, &key, &normalized, timeout).await?;
+        providers::fetch(services, client, &provider, &normalized, timeout).await?;
     let by_normalized: std::collections::HashMap<&str, &str> = accepted
         .iter()
         .map(|(input, normalized)| (normalized.as_str(), input.as_str()))

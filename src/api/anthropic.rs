@@ -53,7 +53,7 @@ fn verify_api_key_full(
         }
     }
     // B22：按结构化错误变体映射状态码，取代原先的 msg.contains(...) 文本匹配
-    state
+    let key_obj = state
         .api_key_store
         .validate_request(&key, model, ip.as_deref())
         .map_err(|e| {
@@ -69,7 +69,15 @@ fn verify_api_key_full(
                 | ApiKeyError::IpNotAllowed(_) => StatusCode::FORBIDDEN,
             };
             anthropic_error("authentication_error", &e.to_string(), status)
-        })
+        })?;
+    if !crate::model_key_source::check_current(&key) {
+        return Err(anthropic_error(
+            "authentication_error",
+            "API key has been revoked",
+            StatusCode::UNAUTHORIZED,
+        ));
+    }
+    Ok(key_obj)
 }
 
 /// Anthropic 错误格式

@@ -22,6 +22,7 @@
 //! 简化口径（相对 A2A）：不做提示词文件来源三档、不做降级中性提示词——
 //! AIGX 无该降级机制。
 
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -30,6 +31,329 @@ use crate::storage::FileStore;
 
 /// 持久化键。
 pub const GATEWAY_PROMPT_KEY: &str = "gateway_prompt";
+
+// ── 提示词规则引擎（对齐 Agent2API v3.5.0-beta.2 `config/prompt_rules.rs` +
+//    `core/prompt/rules.rs`）────────────────────────────────────────────
+//
+// AIGX 既有的 `models` / `providers` 覆盖表是「精确键 → 整条覆盖」的简化形态；
+// 这里补的是参考树的**条件规则**：每条规则由若干条件组成（字段 = provider /
+// client / model，操作 = 是 / 不是 / 包含 / 不包含 / glob / 正则），`logic`
+// 决定 All/Any 组合，命中后整条替代下一层。规则优先级最高（rules > models >
+// providers > 全局），默认空表 = 走既有三层，零行为变化。
+
+/// 规则数上限。
+pub const MAX_PROMPT_RULES: usize = 200;
+/// 单规则条件数上限。
+pub const MAX_PROMPT_CONDITIONS: usize = 32;
+/// 单条件值数上限（非 model 字段）。
+pub const MAX_PROMPT_VALUES: usize = 100;
+/// 单条件值字符上限。
+pub const MAX_PROMPT_PATTERN_CHARS: usize = 256;
+/// 单条提示词正文字节上限。
+pub const MAX_PROMPT_TEXT_BYTES: usize = 1024 * 1024;
+
+/// 规则条件字段。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptField {
+    Provider,
+    Client,
+    Model,
+}
+
+/// 规则条件操作符。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptOperator {
+    Is,
+    IsNot,
+    Contains,
+    NotContains,
+    Glob,
+    Regex,
+}
+
+/// 条件组合逻辑。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptLogic {
+    #[default]
+    All,
+    Any,
+}
+
+/// 单条规则条件。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptCondition {
+    pub id: String,
+    pub field: PromptField,
+    pub op: PromptOperator,
+    pub values: Vec<String>,
+}
+
+/// 单条提示词规则。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptRule {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub logic: PromptLogic,
+    pub conditions: Vec<PromptCondition>,
+    pub mode: PromptMode,
+    /// 提示词文件路径（对齐参考树；AIGX 当前只消费 `text`，保留字段以便线表一致）。
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+impl PromptRule {
+    /// 规则自身的 (mode, text)。
+    pub fn content(&self) -> (PromptMode, &str) {
+        (self.mode, self.text.as_str())
+    }
+}
+
+/// 编译后的条件匹配器（模型字段的 glob/regex 预编译）。
+#[derive(Clone, Debug)]
+pub struct PromptMatcher {
+    condition: PromptCondition,
+    pattern: Option<Regex>,
+}
+
+impl PromptMatcher {
+    pub fn compile(condition: &PromptCondition) -> Result<Self, String> {
+        let value = condition.values.first().map(String::as_str).unwrap_or("");
+        let pattern = if condition.field == PromptField::Model && !value.is_empty() {
+            match condition.op {
+                PromptOperator::Glob => {
+                    let mut body = String::from("\\A");
+                    for ch in value.chars() {
+                        match ch {
+                            '*' => body.push_str(".*"),
+                            '?' => body.push('.'),
+                            other => body.push_str(&regex::escape(&other.to_string())),
+                        }
+                    }
+                    body.push_str("\\z");
+                    Some(compile_regex(&body)?)
+                }
+                PromptOperator::Regex => Some(compile_regex(value)?),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            condition: condition.clone(),
+            pattern,
+        })
+    }
+
+    /// 条件是否命中（provider / client / model 三选一取值）。
+    pub fn matches(&self, provider: &str, client: &str, model: &str) -> bool {
+        let actual = match self.condition.field {
+            PromptField::Provider => provider,
+            PromptField::Client => client,
+            PromptField::Model => model,
+        };
+        // 空条件不扩大范围；未指定模型也不参与「不是 / 不包含」。
+        if actual.is_empty() || self.condition.values.is_empty() {
+            return false;
+        }
+        if self.condition.field != PromptField::Model {
+            let hit = self
+                .condition
+                .values
+                .iter()
+                .any(|value| actual.eq_ignore_ascii_case(value));
+            return if self.condition.op == PromptOperator::IsNot {
+                !hit
+            } else {
+                hit
+            };
+        }
+        let value = &self.condition.values[0];
+        if value.is_empty() {
+            return false;
+        }
+        match self.condition.op {
+            PromptOperator::Is => actual.eq_ignore_ascii_case(value),
+            PromptOperator::IsNot => !actual.eq_ignore_ascii_case(value),
+            PromptOperator::Contains => actual
+                .to_ascii_lowercase()
+                .contains(&value.to_ascii_lowercase()),
+            PromptOperator::NotContains => !actual
+                .to_ascii_lowercase()
+                .contains(&value.to_ascii_lowercase()),
+            PromptOperator::Glob | PromptOperator::Regex => {
+                self.pattern.as_ref().is_some_and(|p| p.is_match(actual))
+            }
+        }
+    }
+}
+
+fn compile_regex(value: &str) -> Result<Regex, String> {
+    RegexBuilder::new(value)
+        .case_insensitive(true)
+        .size_limit(1024 * 1024)
+        .dfa_size_limit(1024 * 1024)
+        .build()
+        .map_err(|error| format!("模型匹配表达式无效：{error}"))
+}
+
+fn valid_rule_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+}
+
+/// 校验一组提示词规则（对齐参考树 `validate_rules`）。
+pub fn validate_prompt_rules(rules: &[PromptRule]) -> Result<(), String> {
+    use std::collections::HashSet;
+    if rules.len() > MAX_PROMPT_RULES {
+        return Err(format!("最多允许 {MAX_PROMPT_RULES} 条提示词规则"));
+    }
+    let mut ids = HashSet::new();
+    for rule in rules {
+        if !valid_rule_id(&rule.id) || !ids.insert(&rule.id) {
+            return Err("提示词规则标识无效或重复".into());
+        }
+        if rule.name.chars().count() > 80 || rule.name.chars().any(char::is_control) {
+            return Err("规则名称最长 80 个字符，不能包含换行等控制字符".into());
+        }
+        if rule.text.len() > MAX_PROMPT_TEXT_BYTES {
+            return Err("提示词正文不能超过 1 MiB".into());
+        }
+        if rule.file.len() > 4096 || rule.file.chars().any(char::is_control) {
+            return Err("提示词文件路径无效或过长".into());
+        }
+        if rule.conditions.len() > MAX_PROMPT_CONDITIONS {
+            return Err(format!("每条规则最多允许 {MAX_PROMPT_CONDITIONS} 个条件"));
+        }
+        let mut conditions = HashSet::new();
+        for condition in &rule.conditions {
+            if !valid_rule_id(&condition.id) || !conditions.insert(&condition.id) {
+                return Err("条件标识无效或重复".into());
+            }
+            if condition.field != PromptField::Model
+                && !matches!(condition.op, PromptOperator::Is | PromptOperator::IsNot)
+            {
+                return Err("提供商和客户端条件只能使用「是 / 不是」".into());
+            }
+            let limit = if condition.field == PromptField::Model {
+                1
+            } else {
+                MAX_PROMPT_VALUES
+            };
+            if condition.values.len() > limit {
+                return Err("条件值数量超过上限".into());
+            }
+            let mut values = HashSet::new();
+            for value in &condition.values {
+                if value.trim() != value
+                    || value.is_empty()
+                    || value.chars().count() > MAX_PROMPT_PATTERN_CHARS
+                    || value.chars().any(char::is_control)
+                    || !values.insert(value)
+                {
+                    return Err("条件值不能为空、重复或含控制字符，最长 256 个字符".into());
+                }
+                if condition.field != PromptField::Model && !valid_rule_id(value) {
+                    return Err("提供商或客户端标识无效".into());
+                }
+            }
+            PromptMatcher::compile(condition)?;
+        }
+    }
+    Ok(())
+}
+
+/// 编译一条规则的全部条件匹配器。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
+pub fn compile_prompt_rule(rule: &PromptRule) -> Result<Vec<PromptMatcher>, String> {
+    rule.conditions.iter().map(PromptMatcher::compile).collect()
+}
+
+/// 一组已编译规则。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
+pub struct CompiledPromptRules {
+    entries: Vec<(PromptRule, Vec<PromptMatcher>)>,
+}
+
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
+impl CompiledPromptRules {
+    /// 编译 + 校验；任一失败即整体失败（与参考树 `compile` 同口径）。
+    pub fn new(rules: Vec<PromptRule>) -> Result<Self, String> {
+        validate_prompt_rules(&rules)?;
+        let mut entries = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let matchers = compile_prompt_rule(&rule)?;
+            entries.push((rule, matchers));
+        }
+        Ok(Self { entries })
+    }
+
+    /// 返回第一条命中且启用的规则。
+    pub fn first_match(&self, provider: &str, client: &str, model: &str) -> Option<&PromptRule> {
+        self.entries
+            .iter()
+            .find(|(rule, matchers)| {
+                rule.enabled
+                    && !matchers.is_empty()
+                    && match rule.logic {
+                        PromptLogic::All => {
+                            matchers.iter().all(|m| m.matches(provider, client, model))
+                        }
+                        PromptLogic::Any => {
+                            matchers.iter().any(|m| m.matches(provider, client, model))
+                        }
+                    }
+            })
+            .map(|(rule, _)| rule)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// 单条条件是否命中（临时编译；规则为 opt-in，默认空表不进入）。
+fn condition_matches(
+    condition: &PromptCondition,
+    provider: &str,
+    client: &str,
+    model: &str,
+) -> bool {
+    match PromptMatcher::compile(condition) {
+        Ok(matcher) => matcher.matches(provider, client, model),
+        Err(_) => false,
+    }
+}
+
+/// 返回第一条命中且启用的规则（引用绑定 `rules`，不借用临时值）。
+pub fn first_matching_rule<'a>(
+    rules: &'a [PromptRule],
+    provider: &str,
+    client: &str,
+    model: &str,
+) -> Option<&'a PromptRule> {
+    rules.iter().find(|rule| {
+        if !rule.enabled || rule.conditions.is_empty() {
+            return false;
+        }
+        let matches =
+            |condition: &PromptCondition| condition_matches(condition, provider, client, model);
+        match rule.logic {
+            PromptLogic::All => rule.conditions.iter().all(matches),
+            PromptLogic::Any => rule.conditions.iter().any(matches),
+        }
+    })
+}
 
 /// 提示词模式（字符串形态是 API 契约，见 `as_str`）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +443,12 @@ pub struct GatewayPrompt {
     /// 缺段 = 用官方原文（由 provider 实现提供）。空表 = 全部官方原文。
     #[serde(default)]
     pub gateway_text: std::collections::BTreeMap<String, GatewayTextBlocks>,
+    /// 条件规则（对齐 Agent2API v3.5.0-beta.2 `promptRules`）。
+    ///
+    /// 优先级最高：命中第一条启用规则时整条替代 models/providers/全局。
+    /// 空表 = 不参与判定（默认，零行为变化）。
+    #[serde(default)]
+    pub rules: Vec<PromptRule>,
 }
 
 /// 网关自带提示词的三段正文（A2A `{identity, stable, dynamic}`）。
@@ -146,6 +476,7 @@ impl Default for GatewayPrompt {
             developer_role_compat: default_developer_role_compat(),
             gateway: std::collections::BTreeMap::new(),
             gateway_text: std::collections::BTreeMap::new(),
+            rules: Vec::new(),
         }
     }
 }
@@ -210,6 +541,15 @@ pub fn snapshot() -> Option<Arc<GatewayPrompt>> {
     GATEWAY_PROMPT_SNAPSHOT.read().clone()
 }
 
+/// 提示词配置的修订号（SHA256），供 `/api/prompt/rules` 保存时做乐观并发校验。
+pub fn revision(cfg: &GatewayPrompt) -> String {
+    use sha2::{Digest, Sha256};
+    let text = serde_json::to_string(cfg).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn apply_prompt(messages: &[ChatMessage], cfg: &GatewayPrompt) -> Option<Vec<ChatMessage>> {
     apply_prompt_for("", messages, cfg)
@@ -246,6 +586,19 @@ pub fn apply_prompt_selected(
     cfg: &GatewayPrompt,
 ) -> Option<Vec<ChatMessage>> {
     let (mode, text) = resolve_layers(model, Some(provider), cfg);
+    apply_with(mode, text, messages)
+}
+
+/// 带客户端维度的应用（规则层的 `client` 条件仅在此入口生效）。
+#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
+pub fn apply_prompt_full(
+    model: &str,
+    provider: &str,
+    client: &str,
+    messages: &[ChatMessage],
+    cfg: &GatewayPrompt,
+) -> Option<Vec<ChatMessage>> {
+    let (mode, text) = resolve_layers_full(model, Some(provider), client, cfg);
     apply_with(mode, text, messages)
 }
 
@@ -291,6 +644,23 @@ fn resolve_layers<'a>(
     provider: Option<&str>,
     cfg: &'a GatewayPrompt,
 ) -> (PromptMode, &'a str) {
+    resolve_layers_full(model, provider, "", cfg)
+}
+
+/// 带客户端维度的解析（规则层可用 `client` 条件）。
+fn resolve_layers_full<'a>(
+    model: &str,
+    provider: Option<&str>,
+    client: &str,
+    cfg: &'a GatewayPrompt,
+) -> (PromptMode, &'a str) {
+    // 规则层最高优先级；空表直接跳过（默认零开销）。逐条判定，命中返回
+    // `cfg.rules` 里的规则引用（生命周期绑定 cfg，不借用临时编译产物）。
+    if !cfg.rules.is_empty() {
+        if let Some(rule) = first_matching_rule(&cfg.rules, provider.unwrap_or(""), client, model) {
+            return rule.content();
+        }
+    }
     if let Some(over) = cfg.models.get(model) {
         return (over.mode, over.text.as_str());
     }

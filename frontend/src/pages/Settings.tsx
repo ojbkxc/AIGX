@@ -33,6 +33,10 @@ import GuardrailPanel from '../components/GuardrailPanel';
 import ZcodeCaptchaPanel from '../components/ZcodeCaptchaPanel';
 import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
+import PromptRulesPanel from '../components/PromptRulesPanel';
+import RuntimeCapacityPanel from '../components/RuntimeCapacityPanel';
+import WebToolsPanel from '../components/WebToolsPanel';
+import RoutingErrorsPanel from '../components/RoutingErrorsPanel';
 import BrandingSettingsPanel from '../components/BrandingSettingsPanel';
 import DebugTrafficPanel from '../components/DebugTrafficPanel';
 import StreamCompatPanel from '../components/StreamCompatPanel';
@@ -889,6 +893,7 @@ export default function Settings() {
       )}
 
       {activeTab === 'retry' && (
+        <>
         <div className="card">
           <div className="card-header">
             <h2>{t('重试')}</h2>
@@ -919,6 +924,12 @@ export default function Settings() {
             </div>
           </div>
         </div>
+
+        <div style={{ marginTop: 16 }}>
+          {/* 错误处理策略（beta.2：按错误类型的处理动作 + 冷却/保护；后端 /api/routing/errors 未就绪时降级） */}
+          <RoutingErrorsPanel />
+        </div>
+        </>
       )}
 
       {activeTab === 'perf' && (
@@ -1017,6 +1028,11 @@ export default function Settings() {
                 </div>
               )}
             </div>
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            {/* 运行容量（beta.2：自动/手动并发与内存预算；后端 /api/plugins/capacity 未就绪时降级） */}
+            <RuntimeCapacityPanel />
           </div>
         </>
       )}
@@ -1193,6 +1209,14 @@ export default function Settings() {
           </div>
           <div style={{ marginTop: 16 }}>
             <PromptPanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            {/* 系统提示词规则引擎（beta.2：按规则匹配决定 system 的处理方式；后端 /api/prompt/rules 未就绪时降级） */}
+            <PromptRulesPanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            {/* 网页工具调用模拟（beta.2：为声明支持的网页模型转换工具调用；后端 /api/web-tool-emulation 未就绪时降级） */}
+            <WebToolsPanel />
           </div>
           <div style={{ marginTop: 16 }}>
             <DebugTrafficPanel />

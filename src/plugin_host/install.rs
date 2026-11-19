@@ -1,31 +1,321 @@
 //! 插件包下载、解压与校验。
 //!
-//! ## 信任链（AIGX 能做到的部分）
+//! ## 信任链
 //!
 //! 1. **sha256**：源清单声明摘要时比对（挡「文件传坏了」）；
 //! 2. **协议版本**：`pack.json` 的 `protocol` 必须等于网关的
 //!    [`PROTOCOL_VERSION`]（挡版本不匹配）；
 //! 3. **入口存在性 + zip-slip 防护**：解包时拒绝越界路径，并确认入口
-//!    二进制真的在包里。
+//!    二进制真的在包里；
+//! 4. **ed25519 验签**（对齐 Agent2API v3.5.0-beta.2）：`pack.json` 带
+//!    `signature` 时，按 [`signing_payload`] 的**规范化载荷**（内容而非 zip
+//!    字节）用内置公钥表 [`OFFICIAL_PUBKEYS`] 验签。**未签名的包仍允许安装**
+//!    （界面标「未签名」），带签名却验不过的包**一律拒绝**。
 //!
-//! ## 为什么不做 ed25519 验签
-//!
-//! 上游的签名覆盖的是**它自己的规范化 payload**（`signing_payload`）。
-//! 复刻该算法必须读上游 AGPL 源码——AIGX 不拷其代码，故不做验签。
-//! 这个取舍如实反映在界面：包带签名时标「带签名（未校验）」，不带签名
-//! 标「未签名」。**AIGX 不因此声称包可信**。
+//! `signature` 覆盖的平台与本平台不一致时按「没有适用于本平台的签名」处理
+//! （多平台包每平台各签一份）。
 
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::registry::{PackMeta, PackProvider};
 use super::rpc::PROTOCOL_VERSION;
 
-/// 单个 zip 的大小上限（与上游 MAX_PACK_BYTES 同量级的宽松上限）。
-pub const MAX_PACK_BYTES: usize = 96 * 1024 * 1024;
+/// 单个 zip 的大小上限（对齐上游 `MAX_PACK_BYTES`：24 MiB）。
+pub const MAX_PACK_BYTES: usize = 24 * 1024 * 1024;
+
+/// 官方发布者公钥表：`(key_id, 32 字节 ed25519 公钥的十六进制)`。
+///
+/// 编译期常量（运行期不可改 —— 一个能被配置改掉的公钥等于没有签名）；
+/// 支持轮换：新密钥先加进来、旧包重签后再删旧的。表内容与上游
+/// Agent2API v3.5.0-beta.2 的 `OFFICIAL_PUBKEYS` 逐字一致。
+pub const OFFICIAL_PUBKEYS: &[(&str, &str)] = &[(
+    "official-2026",
+    "7cdac378ff9bf23b72ae1b686f19859b3c802c26eed13c699f7df39f027352d6",
+)];
+
+/// 验签结果（三态：未签名 ≠ 验签失败，处置完全不同）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignatureState {
+    /// 带了本平台签名且验签通过。
+    Verified,
+    /// 没有适用于本平台的签名（未签名包 / 签的是别的平台）。
+    Unsigned,
+    /// 带了本平台签名但验不过（算法不认 / 公钥不在表里 / 签名不匹配）。
+    Invalid,
+}
+
+impl SignatureState {
+    /// 是否算「已签名」（界面展示用）。
+    pub fn is_signed(self) -> bool {
+        matches!(self, Self::Verified)
+    }
+}
+
+/// `pack.json` 的签名块（字段与上游 `PackSignature` 一致）。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackSignature {
+    pub algorithm: String,
+    pub key_id: String,
+    pub value: String,
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
+}
+
+/// 规范化签名载荷（与上游 `signing_payload` 逐字一致）。
+///
+/// ```text
+/// agent2api-pack-v1\n
+/// id=<id>\n
+/// version=<version>\n
+/// protocol=<protocol>\n
+/// target=<target>\n
+/// providers=<id>:<order>:<default_enabled(1/0)>,…   ← 字典序
+/// entry=<target>=<path>,…                          ← 字典序
+/// binary=<entry 二进制 sha256>\n
+/// ui=<relpath>=<sha256>,…                          ← 字典序
+/// ```
+///
+/// AIGX 的 `PackProvider` 没有 `order` 字段（固定 0），`default_enabled` 取
+/// 清单原值 —— 与上游包（order 恒写 0 的发布物）逐字对得上。
+///
+/// Wasm 包的额外项：`wasm=<wasm.json sha256>`；带 `host.json` 时追加
+/// `host=<host.json sha256>`（两行都在 `ui=` 之后，与上游顺序一致）。
+pub fn signing_payload(
+    manifest: &PackManifest,
+    target: &str,
+    binary_sha256: &str,
+    ui_files: &[(String, String)],
+    wasm_sha256: Option<&str>,
+    host_sha256: Option<&str>,
+) -> String {
+    let mut providers: Vec<String> = manifest
+        .providers
+        .iter()
+        .map(|item| {
+            format!(
+                "{}:{}:{}",
+                item.id,
+                0,
+                if item.default_enabled { 1 } else { 0 }
+            )
+        })
+        .collect();
+    providers.sort();
+    let mut entries: Vec<String> = manifest
+        .entry
+        .per_target
+        .iter()
+        .map(|(target, path)| format!("{target}={path}"))
+        .collect();
+    if !manifest.entry.single.is_empty() {
+        entries.push(format!("{target}={}", manifest.entry.single));
+    }
+    entries.sort();
+    let mut ui: Vec<String> = ui_files
+        .iter()
+        .map(|(path, hash)| format!("{path}={hash}"))
+        .collect();
+    ui.sort();
+    let mut payload = format!(
+        "agent2api-pack-v1\nid={}\nversion={}\nprotocol={}\ntarget={}\nproviders={}\nentry={}\nbinary={}\nui={}\n",
+        manifest.id,
+        manifest.version,
+        manifest.protocol,
+        target,
+        providers.join(","),
+        entries.join(","),
+        binary_sha256,
+        ui.join(","),
+    );
+    if let Some(wasm) = wasm_sha256 {
+        payload.push_str(&format!("wasm={wasm}\n"));
+    }
+    if let Some(host) = host_sha256 {
+        payload.push_str(&format!("host={host}\n"));
+    }
+    payload
+}
+
+/// 十六进制（64 字符）→ 32 字节。
+fn hex_to_32(text: &str) -> Option<[u8; 32]> {
+    let text = text.trim();
+    if text.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (index, chunk) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let chunk = std::str::from_utf8(chunk).ok()?;
+        bytes[index] = u8::from_str_radix(chunk, 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// ed25519 验签（`ring` 的 `ED25519`，与上游 dalek 逐位等价）。
+fn verify_ed25519(public: &[u8; 32], message: &[u8], signature: &[u8]) -> bool {
+    if signature.len() != 64 {
+        return false;
+    }
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public.as_ref())
+        .verify(message, signature)
+        .is_ok()
+}
+
+/// 递归遍历 UI 资源（`ui/` 下全部文件），返回 `(POSIX 相对路径, sha256)`。
+fn collect_ui_files(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let root = match dir.join("ui").canonicalize() {
+        Ok(root) => root,
+        Err(_) => return out,
+    };
+    let mut stack = vec![root.clone()];
+    while let Some(current) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let Ok(relative) = path.strip_prefix(&root) else {
+                    continue;
+                };
+                let relative = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if let Ok(bytes) = std::fs::read(&path) {
+                    out.push((format!("ui/{relative}"), hex_sha256(&bytes)));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 验一份已解包目录的签名。
+///
+/// 返回 `(状态, 失败原因)` —— 原因只在 `Invalid` 时有值。
+///
+/// `target` 是**当前宿主的**目标三元组；Wasm 包（入口声明在
+/// `wasm32-unknown-unknown` 下）强制按该三元组验。
+pub fn verify_signature(
+    dir: &Path,
+    manifest: &PackManifest,
+    target: &str,
+) -> (SignatureState, Option<String>) {
+    let wasm_entry = manifest
+        .entry
+        .per_target
+        .get(super::wasm::manifest::TARGET)
+        .cloned();
+    let target = if wasm_entry.is_some() {
+        super::wasm::manifest::TARGET
+    } else {
+        target
+    };
+    let Some(signature) = manifest.signature.as_ref() else {
+        return (SignatureState::Unsigned, None);
+    };
+    let signature: PackSignature = match serde_json::from_value(signature.clone()) {
+        Ok(signature) => signature,
+        Err(_) => return (SignatureState::Invalid, Some("签名块格式无效".to_string())),
+    };
+    // 签名绑定的平台与本平台不一致：当作「没有适用于本平台的签名」。
+    if signature.target.as_deref() != Some(target) {
+        return (SignatureState::Unsigned, None);
+    }
+    if !signature.algorithm.eq_ignore_ascii_case("ed25519") {
+        return (
+            SignatureState::Invalid,
+            Some(format!("不支持的签名算法：{}", signature.algorithm)),
+        );
+    }
+    let Some((_, public_hex)) = OFFICIAL_PUBKEYS
+        .iter()
+        .find(|(id, _)| *id == signature.key_id)
+    else {
+        return (
+            SignatureState::Invalid,
+            Some(format!(
+                "签名密钥 {} 不在本版本的信任列表里（可能需要更新网关）",
+                signature.key_id
+            )),
+        );
+    };
+    let Some(public) = hex_to_32(public_hex) else {
+        return (
+            SignatureState::Invalid,
+            Some(format!("内置公钥 {} 的格式无效", signature.key_id)),
+        );
+    };
+    let Some(entry) = manifest.entry.for_target(target) else {
+        return (
+            SignatureState::Invalid,
+            Some("清单缺少本平台入口".to_string()),
+        );
+    };
+    let binary = match std::fs::read(dir.join(entry)) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                SignatureState::Invalid,
+                Some(format!("入口二进制不可读：{entry}")),
+            )
+        }
+    };
+    let ui = collect_ui_files(dir);
+    let wasm_sha = if wasm_entry.is_some() {
+        std::fs::read(dir.join("wasm.json"))
+            .ok()
+            .map(|bytes| hex_sha256(&bytes))
+    } else {
+        None
+    };
+    let host_sha = std::fs::read(dir.join("host.json"))
+        .ok()
+        .map(|bytes| hex_sha256(&bytes));
+    let payload = signing_payload(
+        manifest,
+        target,
+        &hex_sha256(&binary),
+        &ui,
+        wasm_sha.as_deref(),
+        host_sha.as_deref(),
+    );
+    if signature.value.len() > 256 {
+        return (SignatureState::Invalid, Some("签名本体过长".to_string()));
+    }
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(signature.value.trim()) {
+        Ok(decoded) => decoded,
+        Err(_) => {
+            return (
+                SignatureState::Invalid,
+                Some("签名本体不是有效的 base64".to_string()),
+            )
+        }
+    };
+    if verify_ed25519(&public, payload.as_bytes(), &decoded) {
+        (SignatureState::Verified, None)
+    } else {
+        (
+            SignatureState::Invalid,
+            Some("签名与包内容不匹配（包被改动或来源不是它自称的发布者）".to_string()),
+        )
+    }
+}
 
 /// 解压后文件数上限（防 zip bomb）。
 const MAX_ENTRIES: usize = 4096;
@@ -74,6 +364,20 @@ impl PackEntry {
         }
         // 未精确命中（上游三元组命名与宿主不同，或单平台包只列了一项）：
         // 只有唯一一项时用它，否则放弃——宁可让 `bin/` 自动探测，也不猜错平台。
+        if self.per_target.len() == 1 {
+            return self.per_target.values().next().map(|s| s.as_str());
+        }
+        None
+    }
+
+    /// 指定平台三元组的入口相对路径（签名载荷用；精确命中才算）。
+    pub fn for_target(&self, target: &str) -> Option<&str> {
+        if let Some(path) = self.per_target.get(target) {
+            return Some(path.as_str());
+        }
+        if !self.single.is_empty() {
+            return Some(self.single.as_str());
+        }
         if self.per_target.len() == 1 {
             return self.per_target.values().next().map(|s| s.as_str());
         }
@@ -333,7 +637,22 @@ pub fn install_from_zip(
         Ok(bytes) => Some(sha256_hex(&bytes)),
         Err(_) => None,
     };
-    // 4) 移到版本目录
+    // 4.5) 验签（对齐 beta.2）：签名在**解包后的内容**上验，不是 zip 字节。
+    //      · Verified  → signed=true
+    //      · Unsigned  → 允许安装，界面标「未签名」
+    //      · Invalid   → 一律拒绝（包被改动或不是它自称的发布者）
+    let (signature_state, signature_error) = verify_signature(
+        &content,
+        &manifest,
+        &crate::plugin_host::process::host_target_triple(),
+    );
+    if signature_state == SignatureState::Invalid {
+        let reason = signature_error.unwrap_or_else(|| "签名校验失败".to_string());
+        return Err(InstallError::Manifest(format!(
+            "插件包验签未通过：{reason}"
+        )));
+    }
+    // 5) 移到版本目录
     let dest = plugins_root.join(&manifest.id).join(&manifest.version);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -346,7 +665,7 @@ pub fn install_from_zip(
     // 清理暂存（若 content != staging，两者都要清）
     let _ = std::fs::remove_dir_all(&staging);
 
-    let signed = manifest.signature.is_some();
+    let signed = signature_state.is_signed();
     Ok(PackMeta {
         id: manifest.id,
         name: manifest.name,
@@ -415,6 +734,50 @@ pub async fn download_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u
         return Err(InstallError::TooLarge(bytes.len(), MAX_PACK_BYTES));
     }
     Ok(bytes.to_vec())
+}
+
+/// 下载一个 URL 到内存（带上限），并在每收到一块时回报进度。
+///
+/// 与 [`download_bytes`] 的唯一差异是 `on_progress(received, total)`：
+/// 服务端给出 `Content-Length` 时 `total` 是确定值，否则为 `0`（前端据此
+/// 显示不确定进度条）。累计字节数单调递增，首帧固定回调一次 `(0, total)`。
+///
+/// 这是插件「Operation 异步进度」模型的数据来源（下载阶段）。
+pub async fn download_bytes_with_progress<F>(
+    client: &reqwest::Client,
+    url: &str,
+    mut on_progress: F,
+) -> Result<Vec<u8>, InstallError>
+where
+    F: FnMut(u64, u64),
+{
+    use futures::StreamExt;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| InstallError::Download(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(InstallError::Download(format!("HTTP {}", resp.status())));
+    }
+    let total = resp.content_length().unwrap_or(0);
+    if total as usize > MAX_PACK_BYTES {
+        return Err(InstallError::TooLarge(total as usize, MAX_PACK_BYTES));
+    }
+    let mut received: u64 = 0;
+    let mut buffer: Vec<u8> = Vec::with_capacity(total.min(MAX_PACK_BYTES as u64) as usize);
+    on_progress(0, total);
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| InstallError::Download(e.to_string()))?;
+        received += chunk.len() as u64;
+        if received as usize > MAX_PACK_BYTES {
+            return Err(InstallError::TooLarge(received as usize, MAX_PACK_BYTES));
+        }
+        buffer.extend_from_slice(&chunk);
+        on_progress(received, total);
+    }
+    Ok(buffer)
 }
 
 #[cfg(test)]
@@ -571,13 +934,14 @@ mod tests {
     }
 
     #[test]
-    fn manifest_signed_flag_from_signature_field() {
+    fn manifest_with_malformed_signature_block_is_rejected() {
+        // beta.2 起签名参与信任链：缺 keyId 的签名块是「验不过」，一律拒绝。
         let root = temp_root();
         let manifest = r#"{"id":"p","name":"p","version":"1.0.0","protocol":1,"entry":"bin/plugin","providers":[],"signature":{"algorithm":"ed25519","value":"abc"}}"#;
         let bytes = make_zip(&[("pack.json", manifest.as_bytes()), ("bin/plugin", b"x")]);
-        let meta = install_from_zip(&bytes, &root, None).unwrap();
-        assert!(meta.signed, "带 signature 字段应标 signed");
-        assert!(meta.signature.is_some());
+        let err = install_from_zip(&bytes, &root, None).unwrap_err();
+        assert!(err.to_string().contains("验签"), "{err}");
+        assert!(!root.join("p").exists());
     }
 
     #[test]
@@ -641,5 +1005,171 @@ mod tests {
         let bytes = make_zip(&[("pack.json", manifest.as_bytes()), ("bin/plugin", b"x")]);
         let meta = install_from_zip(&bytes, &root, None).unwrap();
         assert_eq!(meta.entry, "bin/plugin");
+    }
+
+    // ── ed25519 验签 ────────────────────────────────────────────────
+
+    /// 用测试密钥签一个可复现的包：返回 `(pack.json 字符串, 签名 base64, 公钥)`。
+    ///
+    /// 载荷拼装规则与 [`signing_payload`] 同源，签名用 ring 的 Ed25519KeyPair
+    /// （与验签侧同一个实现，保证「拼装/验签」两边一致才过）。
+    fn sign_pack(
+        manifest_json: &str,
+        binary: &[u8],
+        target: &str,
+        ui: &[(&str, &[u8])],
+    ) -> (String, String, [u8; 32]) {
+        use ring::rand::SystemRandom;
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public: [u8; 32] = pair.public_key().as_ref().try_into().unwrap();
+        let manifest: PackManifest = serde_json::from_str(manifest_json).unwrap();
+        let mut ui_files: Vec<(String, String)> = ui
+            .iter()
+            .map(|(path, data)| (path.to_string(), hex_sha256(data)))
+            .collect();
+        ui_files.sort();
+        let payload = signing_payload(
+            &manifest,
+            target,
+            &hex_sha256(binary),
+            &ui_files,
+            None,
+            None,
+        );
+        let signature = pair.sign(payload.as_bytes());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+        (manifest_json.to_string(), encoded, public)
+    }
+
+    fn with_signature(manifest_json: &str, signature_b64: &str, target: &str) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(manifest_json).unwrap();
+        value["signature"] = serde_json::json!({
+            "algorithm": "ed25519",
+            "keyId": "official-2026",
+            "value": signature_b64,
+            "target": target,
+        });
+        serde_json::to_string(&value).unwrap()
+    }
+
+    #[test]
+    fn signature_payload_matches_reference_format() {
+        let manifest = pack_json("demo", "1.0.0", 1, "bin/plugin", &["kiro", "loomy"]);
+        let manifest: PackManifest = serde_json::from_str(&manifest).unwrap();
+        let payload = signing_payload(
+            &manifest,
+            "x86_64-unknown-linux-gnu",
+            "abc",
+            &[("ui/a.js".into(), "def".into())],
+            None,
+            None,
+        );
+        assert!(payload.starts_with("agent2api-pack-v1\n"));
+        assert!(payload.contains("\nid=demo\n"));
+        assert!(payload.contains("\nversion=1.0.0\n"));
+        assert!(payload.contains("\nbinary=abc\n"));
+        assert!(payload.contains("\nui=ui/a.js=def\n"));
+        assert!(payload.ends_with('\n'), "载荷末尾不留空行");
+    }
+
+    #[test]
+    fn unsigned_pack_is_allowed() {
+        let manifest = pack_json("p", "1.0.0", 1, "bin/p", &["kiro"]);
+        let manifest: PackManifest = serde_json::from_str(&manifest).unwrap();
+        let dir = temp_root();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/p"), b"x").unwrap();
+        let (state, reason) = verify_signature(&dir, &manifest, "x86_64-unknown-linux-gnu");
+        assert_eq!(state, SignatureState::Unsigned);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn signature_for_other_target_is_unsigned() {
+        let manifest = pack_json("p", "1.0.0", 1, "bin/p", &["kiro"]);
+        let signed = with_signature(&manifest, "AAAA", "some-other-target");
+        let manifest: PackManifest = serde_json::from_str(&signed).unwrap();
+        let dir = temp_root();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/p"), b"x").unwrap();
+        let (state, _) = verify_signature(&dir, &manifest, "x86_64-unknown-linux-gnu");
+        assert_eq!(state, SignatureState::Unsigned);
+    }
+
+    #[test]
+    fn unknown_key_id_is_invalid() {
+        let manifest = pack_json("p", "1.0.0", 1, "bin/p", &["kiro"]);
+        let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        value["signature"] = serde_json::json!({
+            "algorithm": "ed25519", "keyId": "not-in-table", "value": "AAAA",
+            "target": "x86_64-unknown-linux-gnu",
+        });
+        let manifest: PackManifest = serde_json::from_value(value).unwrap();
+        let dir = temp_root();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/p"), b"x").unwrap();
+        let (state, reason) = verify_signature(&dir, &manifest, "x86_64-unknown-linux-gnu");
+        assert_eq!(state, SignatureState::Invalid);
+        assert!(reason.unwrap().contains("信任列表"));
+    }
+
+    #[test]
+    fn non_ed25519_algorithm_is_invalid() {
+        let manifest = pack_json("p", "1.0.0", 1, "bin/p", &["kiro"]);
+        let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        value["signature"] = serde_json::json!({
+            "algorithm": "rsa", "keyId": "official-2026", "value": "AAAA",
+            "target": "x86_64-unknown-linux-gnu",
+        });
+        let manifest: PackManifest = serde_json::from_value(value).unwrap();
+        let dir = temp_root();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/p"), b"x").unwrap();
+        let (state, _) = verify_signature(&dir, &manifest, "x86_64-unknown-linux-gnu");
+        assert_eq!(state, SignatureState::Invalid);
+    }
+
+    #[test]
+    fn invalid_pack_is_rejected_before_disk_write() {
+        // 带官方 keyId、算法 ed25519，但签名与内容不符 —— 验签必须失败且**不落盘**。
+        let root = temp_root();
+        let manifest = pack_json("p", "1.0.0", 1, "bin/p", &["kiro"]);
+        let target = crate::plugin_host::process::host_target_triple();
+        // 用测试密钥按正确载荷签，但把包里的二进制换掉 -> 载荷不匹配
+        let (_, signature_b64, _public) = sign_pack(&manifest, b"original", &target, &[]);
+        let tampered = with_signature(&manifest, &signature_b64, &target);
+        let bytes = make_zip(&[("pack.json", tampered.as_bytes()), ("bin/p", b"tampered")]);
+        // 测试密钥不在 OFFICIAL_PUBKEYS 里 → 「密钥不在信任列表」即 Invalid；
+        // 即便将来把测试密钥加入信任表，载荷不匹配仍会 Invalid。两种情况都必须
+        // 拒绝且不落盘 —— 这里验证的正是这个硬性质。
+        let err = install_from_zip(&bytes, &root, None).unwrap_err();
+        assert!(matches!(err, InstallError::Manifest(_)));
+        assert!(err.to_string().contains("验签"), "{err}");
+        assert!(!root.join("p").exists(), "验签失败的包不能出现在插件目录");
+    }
+
+    #[test]
+    fn invalid_signature_but_other_target_is_not_rejected() {
+        // 别的平台的签名（哪怕无效值）不算「本平台验不过」，按未签名放行。
+        let root = temp_root();
+        let manifest = pack_json("p", "1.0.0", 1, "bin/p", &["kiro"]);
+        let signed = with_signature(&manifest, "AAAA", "another-platform");
+        let bytes = make_zip(&[("pack.json", signed.as_bytes()), ("bin/p", b"x")]);
+        let meta = install_from_zip(&bytes, &root, None).unwrap();
+        assert!(!meta.signed, "别的平台的签名不算已签名");
+    }
+
+    #[test]
+    fn signing_pack_list_is_compilable() {
+        // 复现签名一侧的调用形状（official-2026 之外不存在私钥，只验证
+        // 函数可调用、返回非空载荷）。
+        let manifest = pack_json("p", "1.0.0", 1, "bin/p", &["kiro"]);
+        let (_json, signature_b64, public) =
+            sign_pack(&manifest, b"x", "x86_64-unknown-linux-gnu", &[]);
+        assert!(!signature_b64.is_empty());
+        assert_eq!(public.len(), 32);
     }
 }

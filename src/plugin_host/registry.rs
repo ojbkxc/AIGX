@@ -300,6 +300,24 @@ pub fn is_hard_reserved(provider: &str) -> bool {
     HARD_RESERVED.contains(&provider) || provider.starts_with("custom-")
 }
 
+/// 该 provider 是否使用插件管理的动态登录（对齐 beta.2 `registry::dynamic_login`）。
+///
+/// **语义**：provider 由 Wasm 插件接管时返回 `true`（插件负责登录交互，
+/// 不走 AIGX 原生的静态 API Key 路径）。脚本插件由 `ScriptHostManager`
+/// 在运行期检查，不在此处（与上游 `adapter.dynamic_login()` 同口径：
+/// 上游也是查运行期 adapter 是否存在）。
+///
+/// 硬保留集合（[`HARD_RESERVED`]）永远返回 `false`：它们是 AIGX 原生虚拟 id。
+///
+/// 当前无内部调用方（beta.2 形状 API 别名，待登录闸门接线后移除 allow）。
+#[allow(dead_code)]
+pub fn dynamic_login(provider: &str) -> bool {
+    if is_hard_reserved(provider) {
+        return false;
+    }
+    super::wasm::owns(provider)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

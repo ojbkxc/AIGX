@@ -108,6 +108,7 @@ dependencies = [
  "rand 0.8.7",
  "regex",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-pki-types",

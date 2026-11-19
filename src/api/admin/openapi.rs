@@ -1192,6 +1192,36 @@ fn paths_settings_ops() -> Value {
         },
         "/api/ip/blacklist/{pattern}": {
             "delete": op_params("安全", "删除 IP 黑名单条目（写操作）", &[path_param("pattern")])
+        },
+        // ── beta.2 配置面新增（对照 real_admin_routes 同步登记）──────────
+        "/api/routing/errors": {
+            "get": op("路由", "查询统一错误处理策略（重试/换号判定）"),
+            "put": op_body("路由", "更新错误处理策略（热生效）", "retry/fallback/switch 策略字段")
+        },
+        "/api/plugins/capacity": {
+            "get": op("插件", "查询运行容量设置（数据面准入并发限制）"),
+            "patch": op_body("插件", "更新运行容量设置（热生效）", "capacity 配置字段")
+        },
+        "/api/web-tool-emulation": {
+            "get": op("网关", "查询网页工具调用模拟开关"),
+            "put": op_body("网关", "更新网页工具调用模拟开关（热生效）", "emulation: boolean")
+        },
+        "/api/prompt/rules": {
+            "get": op("提示词", "查询系统提示词规则引擎配置"),
+            "put": op_body("提示词", "更新提示词规则引擎配置（热生效）", "rules 规则数组")
+        },
+        "/api/prompt/rules/preview": {
+            "post": op_body("提示词", "预览提示词规则应用效果", "messages/model 等")
+        },
+        "/api/plugin-task-grants": {
+            "get": op("插件", "查询插件受控任务授权表"),
+            "put": op_body("插件", "更新插件受控任务授权表（写操作）", "grants 授权配置")
+        },
+        "/api/model-key-source": {
+            "get": op("模型", "查询模型 Key 进程内权威状态（撤销闸 + 重建代）")
+        },
+        "/api/model-key-source/refresh": {
+            "post": op("模型", "刷新模型 Key 权威代（运营改 Key 后重建撤销闸）")
         }
     })
 }
@@ -1243,6 +1273,23 @@ fn paths_accounts_network() -> Value {
         "/api/accounts/{id}": {
             "put": op_params("网络层", "更新账号", &[path_param("id")]),
             "delete": op_params("网络层", "删除账号", &[path_param("id")])
+        },
+        // ── beta.2 A2A 形状账号列表（对齐 accounts_list / accounts_credentials）──
+        "/api/accounts/list": {
+            "get": op_params("网络层", "A2A 形状账号列表（查询/分页/计数）", &[
+                query_param("page", "integer", "页码（缺省 1）"),
+                query_param("page_size", "integer", "每页条数（缺省 20）"),
+                query_param("search", "string", "模糊匹配名称/备注")
+            ])
+        },
+        "/api/accounts/summary": {
+            "get": op("网络层", "账号汇总统计（总数/活跃/冷却等）")
+        },
+        "/api/accounts/ids": {
+            "get": op("网络层", "账号 ID 清单（轻量，仅供批量引用）")
+        },
+        "/api/accounts/{id}/credentials/replace": {
+            "put": op_body("网络层", "替换账号凭证（写操作；enc1 加密落库不落日志）", "credentials 凭证字段")
         },
         "/api/account-sessions": {
             "get": op("账号池", "列出账号型渠道的账号（凭证/代理脱敏）"),
@@ -1375,7 +1422,7 @@ fn paths_accounts_network() -> Value {
             "get": op("插件", "发布目录（从 [plugins] source_url 实时拉取）")
         },
         "/api/plugins/progress": {
-            "get": op("插件", "在途安装/更新操作（当前恒空）")
+            "get": op("插件", "在途/近期插件操作快照（Operation 异步进度模型：action/stage/percent/error/result；含持久化的历史条目）")
         },
         // ── A2A 对齐波（v1.0.63）：插件管理面子页 ────────────────────
         // 这些路由注册在子模块的 `router()` 里（plugin_*.rs），由 main.rs
@@ -1394,6 +1441,21 @@ fn paths_accounts_network() -> Value {
         },
         "/api/plugins/reload": {
             "post": op_body("插件", "热重启一个已启用的外置包（停→启，不改变 enabled 选择）", "{ id }")
+        },
+        // ── beta.2 批量生命周期 + 受控任务审批（本文件 `router()` 注册）────
+        "/api/plugins/batch": {
+            "post": op_body(
+                "插件",
+                "批量安装/更新/启停/重载/卸载（后台执行，进度经 /api/plugins/progress 轮询）",
+                "{ items: [{ id, action, url?, sha256?, catalog? }] } | { action, ids }",
+            )
+        },
+        "/api/plugins/managed-task": {
+            "post": op_body(
+                "插件",
+                "批准/撤销某插件包的受控任务执行权（停用/卸载/重载自动撤销）",
+                "{ id, approved }",
+            )
         },
         "/api/plugins/tasks": {
             "get": op("插件", "插件后台任务快照（每项 {provider, task, runs}；只含已加载的 wasm provider）"),
@@ -1839,6 +1901,19 @@ mod tests {
         add("/api/accounts/sorting", &["get", "put"]);
         add("/api/accounts/refresh-expiring", &["post"]);
         add("/api/accounts/export-files", &["post"]);
+        // ── beta.2 配置面新增（路由按参考树路径，方法集与 handler 一致）──────────
+        add("/api/accounts/list", &["get"]);
+        add("/api/accounts/summary", &["get"]);
+        add("/api/accounts/ids", &["get"]);
+        add("/api/accounts/{id}/credentials/replace", &["put"]);
+        add("/api/routing/errors", &["get", "put"]);
+        add("/api/plugins/capacity", &["get", "patch"]);
+        add("/api/web-tool-emulation", &["get", "put"]);
+        add("/api/prompt/rules", &["get", "put"]);
+        add("/api/prompt/rules/preview", &["post"]);
+        add("/api/model-key-source", &["get"]);
+        add("/api/model-key-source/refresh", &["post"]);
+        add("/api/plugin-task-grants", &["get", "put"]);
         // ── 签到台账 / 计划 / 活动福利（T6）─────────────────────────
         // 前三者是 `any(handler)` 单入口按 method+path 分发，对外承诺的方法
         // 见 handler 内部分支；文档列具体方法，闸门对 `any` 跳过方法比对。
@@ -1946,6 +2021,8 @@ mod tests {
         add("/api/plugins/startup", &["get"]);
         add("/api/plugins/settings", &["get", "patch"]);
         add("/api/plugins/reload", &["post"]);
+        add("/api/plugins/batch", &["post"]);
+        add("/api/plugins/managed-task", &["post"]);
         add("/api/plugins/tasks", &["get", "patch"]);
         add("/api/plugins/tasks/run", &["post"]);
         add("/api/plugins/helpers", &["get", "patch"]);

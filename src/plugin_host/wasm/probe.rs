@@ -915,6 +915,7 @@ mod tests {
                     head = true;
                 }
                 Some(Ok(StreamEvent::Chunk(bytes))) => chunks.push(bytes),
+                Some(Ok(StreamEvent::Log { .. })) => {}
                 Some(Ok(StreamEvent::End)) => {}
                 Some(Err(error)) => panic!("wasm 流错误: {}", error.message),
                 None => break,
