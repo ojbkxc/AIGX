@@ -2717,11 +2717,22 @@ export interface PurgeRuntime {
   inflight?: number;
 }
 
-/** GET/PUT /api/purge 的 data 结构 */
+/** GET /api/purge 附带的技能目录扫描快照（不含正文） */
+export interface PurgeSkillBrief {
+  name: string;
+  keywords: string[];
+  body_chars: number;
+}
+
+/** GET /api/purge 的 data 结构 */
 export interface PurgeData {
   settings: PurgeSettings;
   stats: PurgeStats;
   runtime: PurgeRuntime;
+  /** 配置体检：「开了但不生效 / 自相矛盾」的静态检查结果（旧版后端不返回） */
+  config_warnings?: string[];
+  /** 技能目录扫描快照（旧版后端不返回） */
+  skills?: PurgeSkillBrief[];
 }
 
 /** GET /api/public/branding 的 data 结构（免鉴权） */

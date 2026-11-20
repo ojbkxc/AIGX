@@ -293,3 +293,45 @@
   font-size: 12px;
   color: var(--text-secondary, #6b7280);
 }
+
+/* 配置体检告警：危险色块，逐条独立成段 */
+.purge-warning-box {
+  padding: 12px 16px;
+  border: 1px solid var(--danger-color, #dc2626);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger-color, #dc2626) 7%, transparent);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.purge-warning-box p {
+  margin: 0 0 4px;
+}
+.purge-warning-box p:last-child {
+  margin-bottom: 0;
+}
+
+/* 技能扫描快照列表 */
+.purge-skill-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.purge-skill-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.purge-skill-meta {
+  color: var(--text-secondary, #6b7280);
+  font-size: 12px;
+}
+.purge-skill-keywords {
+  color: var(--text-secondary, #6b7280);
+  font-size: 12px;
+  word-break: break-all;
+}

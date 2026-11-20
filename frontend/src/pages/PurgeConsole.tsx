@@ -2,7 +2,13 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { api } from '../api';
-import type { PurgeData, PurgeRewriteRule, PurgeSettings, PurgeStats, PurgeTemplate } from '../types';
+import type {
+  PurgeData,
+  PurgeRewriteRule,
+  PurgeSettings,
+  PurgeStats,
+  PurgeTemplate,
+} from '../types';
 import {
   Button,
   Card,
@@ -15,6 +21,7 @@ import {
   Switch,
   Textarea,
 } from '../components/ui';
+import { downloadText } from '../lib/format';
 import { useToast } from '../components/Toast';
 import './PurgeConsole.css';
 
@@ -386,6 +393,11 @@ export default function PurgeConsole(): JSX.Element {
   const [previewOut, setPreviewOut] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewMeta, setPreviewMeta] = useState<{ changed: boolean; skill_hit: boolean } | null>(null);
+  // 配置体检告警 + 技能快照（GET /api/purge 附带；旧版后端不返回则无展示）
+  const [configWarnings, setConfigWarnings] = useState<string[]>([]);
+  const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
+  // 导入配置文件选择
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   // PUT 互斥：开关乐观保存与底部保存共用一把锁，防止并发 PUT 互相覆盖
   const savingRef = useRef(false);
@@ -441,6 +453,8 @@ export default function PurgeConsole(): JSX.Element {
       setDraft(res.data.settings);
       setNumRaw(numRawOf(res.data.settings));
       setNumErrors({});
+      setConfigWarnings(res.data.config_warnings ?? []);
+      setSkills(res.data.skills ?? []);
       setDirty(false);
     } catch {
       addToast(t('加载失败'), 'error');
@@ -643,6 +657,37 @@ export default function PurgeConsole(): JSX.Element {
     }
   }, [addToast, previewInput, previewing, t]);
 
+  /** 导出配置：当前服务端快照 → JSON 文件（含全部词表/模板/开关） */
+  const exportConfig = useCallback((): void => {
+    const snapshot = dataRef.current;
+    if (!snapshot) return;
+    const filename = `aigx-purge-config-${new Date().toISOString().slice(0, 10)}.json`;
+    downloadText(filename, JSON.stringify({ version: 1, settings: snapshot.settings }, null, 2) + '\n');
+    addToast(t('配置已导出'), 'success');
+  }, [addToast, t]);
+
+  /** 导入配置：读取 JSON → 校验结构 → 填入草稿（不直接保存，确认后再点保存） */
+  const importConfig = useCallback(async (file: File | null): Promise<void> => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as { version?: number; settings?: PurgeSettings };
+      const settings = parsed?.settings;
+      if (!settings || typeof settings !== 'object' || !Array.isArray(settings.rewrite_rules)) {
+        throw new Error('invalid shape');
+      }
+      setDraft(settings);
+      setNumRaw(numRawOf(settings));
+      setNumErrors({});
+      setDirty(true);
+      setPreviewOut(null);
+      setPreviewMeta(null);
+      addToast(t('配置已导入草稿，检查无误后点「保存」生效'), 'success');
+    } catch {
+      addToast(t('导入失败：不是有效的破甲配置文件'), 'error');
+    }
+  }, [addToast, t]);
+
   // 词表增删后把焦点落回列表内，避免按钮随行卸载后焦点掉到 body
   useEffect(() => {
     if (focusRule.current === null || !draft) return;
@@ -795,6 +840,15 @@ export default function PurgeConsole(): JSX.Element {
         t={t}
       />
 
+      {/* 配置体检告警：开了但不生效 / 配置自相矛盾（静态可判定项） */}
+      {configWarnings.length > 0 && (
+        <div className="purge-warning-box" role="alert">
+          {configWarnings.map((warning, index) => (
+            <p key={index}>{warning}</p>
+          ))}
+        </div>
+      )}
+
       <Card
         title={t('开关')}
         actions={<span className="purge-hint">{t('点一下立即生效，重启后保留')}</span>}
@@ -802,7 +856,34 @@ export default function PurgeConsole(): JSX.Element {
         <SwitchRows flags={flags} disabled={saving} onToggle={toggle} t={t} />
       </Card>
 
-      <Card title={t('只读参数')}>
+      <Card
+        title={t('只读参数')}
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={exportConfig}>
+              {t('导出配置')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => importInputRef.current?.click()}
+            >
+              {t('导入配置')}
+            </Button>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                void importConfig(event.target.files?.[0] ?? null);
+                // 允许连续导入同名文件
+                event.target.value = '';
+              }}
+            />
+          </>
+        }
+      >
         {/* 只读区一律读服务端快照（data.settings），不读草稿——未保存的编辑
             不应提前出现在「只读」区（与失败分类、在途数等运行时字段同口径）。 */}
         <ParamGrid
@@ -971,6 +1052,26 @@ export default function PurgeConsole(): JSX.Element {
           onChange={(event) => patch({ structured_suffix: event.target.value })}
         />
       </Card>
+
+      {/* 技能扫描快照：让 skill_inject 配置可验证（目录里到底扫到了什么） */}
+      {skills.length > 0 && (
+        <Card title={t('技能扫描快照')}>
+          <ul className="purge-skill-list">
+            {skills.map((skill) => (
+              <li key={skill.name}>
+                <strong>{skill.name}</strong>
+                <span className="purge-skill-meta">
+                  {t('{{count}} 个关键词 · 正文 {{chars}} 字符', {
+                    count: skill.keywords.length,
+                    chars: skill.body_chars,
+                  })}
+                </span>
+                <span className="purge-skill-keywords">{skill.keywords.slice(0, 6).join(' / ')}</span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       <Card
         title={t('结构化模板')}

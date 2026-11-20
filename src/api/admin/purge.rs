@@ -158,6 +158,10 @@ fn payload(state: &AppState) -> Value {
         "data": {
             "settings": settings.as_ref(),
             "stats": crate::purge::snapshot(),
+            // 配置体检：「开了但不生效 / 自相矛盾」的静态检查结果
+            "config_warnings": crate::purge::config_warnings(&settings),
+            // 技能目录扫描快照（名称+关键词+正文字符数；skill_inject 配置的可验证性）
+            "skills": crate::purge::skill_briefs(&settings.skill_dir),
             "runtime": {
                 "pid": crate::purge::pid(),
                 "uptime_secs": crate::purge::uptime_secs(),
