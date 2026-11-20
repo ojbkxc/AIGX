@@ -31,6 +31,8 @@ test.describe('插件管理页', () => {
     await expect(card).toContainText('v1.2.0');
     await expect(card.locator('.pl-card-badges')).toContainText('已启用');
     await expect(card).toContainText('2 家提供商');
+    // 无图标声明 → 回落首字母（图标不撑破卡片、也不会空白）
+    await expect(card.locator('.pl-card-icon-fallback')).toHaveText('提');
     // 宿主运行态 + 已加载 1 家
     await expect(card.locator('.pl-card-state')).toContainText('宿主运行中');
     await expect(card.locator('.pl-card-state')).toContainText('已加载 1 家');
@@ -100,6 +102,19 @@ test.describe('插件管理页', () => {
     await expect(page.locator('.toast-success')).toContainText('插件已下载', { timeout: 5000 });
     // 安装完成后商店卡消失（桩把目录条目摘掉）
     await expect(page.locator('.pl-card.is-store')).toHaveCount(0);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('更多操作菜单：检查更新打到 /api/plugins/update', async ({ page, pageErrors }) => {
+    const calls: string[] = [];
+    page.on('request', (r) => {
+      if (new URL(r.url()).pathname === '/api/plugins/update') calls.push(r.method());
+    });
+    await page.getByRole('button', { name: '更多操作' }).click();
+    await page.getByRole('menuitem', { name: '检查更新', exact: true }).click();
+    await expect.poll(() => calls.length, { timeout: 5000 }).toBe(1);
+    expect(calls[0]).toBe('GET');
+    await expect(page.locator('.toast-success')).toContainText('已检查更新', { timeout: 5000 });
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 

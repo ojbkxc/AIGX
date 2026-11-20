@@ -2404,6 +2404,12 @@ export interface StorePlugin {
   icon?: string | null;
   /** 清单声明的 provider（动态索引才有；缺失插件横幅据此把隐藏账号映射到包） */
   providers?: Array<{ id: string; label?: string }>;
+  /** 上游 index.json 分类元数据（原样透传；Wasm 徽标据此渲染） */
+  category?: string | null;
+  /** 条目要求签名校验（Wasm / 发布包） */
+  requireSigned?: boolean;
+  /** 条目标签（含 `wasm` 时明确标注跑在 Wasm 沙箱） */
+  tags?: string[];
 }
 
 /** 发布目录刷新态 */
@@ -2534,6 +2540,41 @@ export interface ScriptPackageView {
   providerRouted: boolean;
   /** 包图标（后端若提供：data URI / 缓存图标相对路径 / 外链；缺省回落首字母） */
   icon?: string | null;
+  /** 宿主回填的包级设置声明（providerOptions 开关表单数据源） */
+  settingsSchema?: ScriptSettingsSchema | null;
+}
+
+/** 脚本包的单个 provider 选项声明（`settingsSchema.providerOptions` 项） */
+export interface ScriptProviderOption {
+  key: string;
+  /** 多语标签（`labels` 优先，缺省 `label` 单语） */
+  label?: string;
+  labels?: Record<string, string>;
+  description?: string;
+  descriptions?: Record<string, string>;
+  /** 开启前的二次确认文案 */
+  confirm?: string;
+  confirms?: Record<string, string>;
+  default?: boolean;
+}
+
+/** 宿主回填的脚本包设置声明（字段只读透传） */
+export interface ScriptSettingsSchema {
+  version?: number;
+  /** provider id → 该家可开关的选项 */
+  providerOptions?: Record<string, ScriptProviderOption[]>;
+  [key: string]: unknown;
+}
+
+/** GET / POST `/api/plugins/scripts/settings` 响应 data */
+export interface ScriptSettingsView {
+  id: string;
+  /** 包级高级参数（options） */
+  options: Record<string, unknown>;
+  /** provider id → { optionKey: 是否开启 } */
+  providerOptions: Record<string, Record<string, boolean>>;
+  /** 设置声明（宿主回填；可能为空） */
+  schema: ScriptSettingsSchema | null;
 }
 
 /** 脚本宿主状态（GET /api/plugins/scripts 的 host） */

@@ -15,7 +15,7 @@
  * - 任何候选图 404/解码失败 → 依次尝试下一个候选，全部失败回落首字母（空名回落 🧩）；
  * - 图标始终被固定在 `.pl-card-icon` 尺寸盒内（`overflow:hidden`），不撑破卡片。
  */
-import { useState } from 'react';
+import { memo, useState } from 'react';
 
 /** 把后端给的图标值解析成可放进 <img src> 的地址；空/非法返回 ''。 */
 export function resolveIconSrc(value: unknown): string {
@@ -30,7 +30,14 @@ export function resolveIconSrc(value: unknown): string {
   return `/${raw.replace(/^\.?\//, '')}`;
 }
 
-export function PluginIcon({
+/**
+ * 图标盒（性能约束）。
+ *
+ * 插件列表轮询（下载/批量操作时每 2s 回读）会让卡片整体重渲染；图标常是
+ * `data:` URI，若每次重建 `<img>` 触发解码，长列表会明显掉帧。这里用
+ * `memo` + 按内容比较 `sources` 数组，父级重渲染时图标节点原样复用。
+ */
+function PluginIconInner({
   src,
   sources,
   label,
@@ -66,6 +73,8 @@ export function PluginIcon({
         src={current}
         alt=""
         loading="lazy"
+        decoding="async"
+        draggable={false}
         referrerPolicy="no-referrer"
         onError={() => {
           if (index + 1 < candidates.length) setIndex(index + 1);
@@ -75,5 +84,16 @@ export function PluginIcon({
     </div>
   );
 }
+
+const sourceKey = (value?: string[]): string => (value && value.length > 0 ? value.join('\u0001') : '');
+
+export const PluginIcon = memo(
+  PluginIconInner,
+  (prev, next) =>
+    prev.src === next.src &&
+    prev.label === next.label &&
+    prev.className === next.className &&
+    sourceKey(prev.sources) === sourceKey(next.sources),
+);
 
 export default PluginIcon;

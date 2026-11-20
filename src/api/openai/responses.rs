@@ -208,7 +208,11 @@ pub(crate) async fn handle_responses(
         tracing::debug!("image_compat: responses request image processing applied");
     }
 
-    let ctx = BridgeContext::new(request_id.clone(), model.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model.clone()).with_client_headers(
+        headers
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
+    );
 
     // B06：failover 循环——依次尝试候选渠道透传，仅对上游可重试错误切换
     let mut result_opt = None;

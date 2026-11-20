@@ -36,8 +36,9 @@
 //! 从未在本进程刷新过」会伪装成「目录是旧的但看起来正常」（上游
 //! `restore` 的语义，本期未接；见 docs/a2a-alignment/README.md §六.1）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -239,6 +240,77 @@ pub fn plugin_channel_source(channel: &crate::channel::Channel) -> (String, Vec<
     (provider, ids, refreshed_at)
 }
 
+/// 插件通知模型变化后，同一 provider 的多次通知合并为一次触发的时间窗。
+pub const MODELS_CHANGED_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// 去抖后真正执行刷新的触发器（`provider, account`）。
+pub type ModelsChangedTrigger = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+fn trigger_slot() -> &'static OnceLock<ModelsChangedTrigger> {
+    static TRIGGER: OnceLock<ModelsChangedTrigger> = OnceLock::new();
+    &TRIGGER
+}
+
+fn pending_slot() -> &'static Mutex<HashSet<String>> {
+    static PENDING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 注册 models_changed 的真实刷新触发器（启动装配调用；重复调用忽略）。
+///
+/// 触发器是上层把「通知」接到现有刷新入口（`models.refresh` /
+/// `handle_sync_account_catalog`）的唯一接缝——本模块不持宿主句柄，不在
+/// 同步回调里跨宿主调用，避免与 RPC 读循环互等。
+#[allow(dead_code)] // 接线在启动装配（main.rs）；本模块先冻结入口
+pub fn install_models_changed_trigger(trigger: ModelsChangedTrigger) {
+    let _ = trigger_slot().set(trigger);
+}
+
+/// 插件 `notify{kind:"models_changed"}` → 去抖触发一次模型目录刷新。
+///
+/// 对齐上游 `bootstrap.rs`/`model_sync.rs`：上游收到通知后调
+/// `model_sync::notify`；AIGX 的目录刷新入口在管理面（`models.refresh`），
+/// 由 [`install_models_changed_trigger`] 装进来的触发器承接。同一 provider
+/// 在 [`MODELS_CHANGED_DEBOUNCE`] 窗口内的重复通知只触发**一次**——插件在
+/// 一次探测里常按账号连发多条。
+pub fn notify_models_changed(provider: &str, account: &str) {
+    notify_models_changed_after(provider, account, MODELS_CHANGED_DEBOUNCE);
+}
+
+/// 带窗口参数的入口（单测用短窗口；生产走 [`notify_models_changed`]）。
+pub(crate) fn notify_models_changed_after(provider: &str, account: &str, window: Duration) {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return;
+    }
+    let provider = provider.to_string();
+    let account = account.trim().to_string();
+    {
+        // 已在窗口内排队 = 合并，不重复起任务。
+        let mut pending = pending_slot()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !pending.insert(provider.clone()) {
+            return;
+        }
+    }
+    // 回调用独立任务：同步回调（`CallbackHandler::handle`）不能 await，
+    // 也不该阻塞 RPC 读循环；去抖窗口结束后再触发一次。
+    tokio::spawn(async move {
+        tokio::time::sleep(window).await;
+        pending_slot()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&provider);
+        match trigger_slot().get() {
+            Some(trigger) => trigger(&provider, &account),
+            None => {
+                tracing::debug!("[plugin] models_changed: {provider}/{account}（未注册刷新触发器）")
+            }
+        }
+    });
+}
+
 /// 测试共用存储：进程内只装一次，所有目录相关用例用它 + 唯一 provider 名，
 /// 避免并行用例互相覆盖（`install` 是 OnceLock，晚到的实参会被忽略）。
 #[cfg(test)]
@@ -380,5 +452,37 @@ mod tests {
         assert!(p.is_empty());
         assert!(models.is_empty());
         remove(&provider);
+    }
+
+    /// 通知 → 去抖 → 触发一次：同一 provider 在窗口内的多次 `models_changed`
+    /// 合并；窗口过后再通知会再次触发。
+    #[tokio::test]
+    async fn models_changed_debounces_to_single_trigger() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        // 触发器是进程级 OnceLock：本用例装一次即可（其它用例不装）。
+        install_models_changed_trigger(Arc::new(|provider: &str, _account: &str| {
+            if provider.starts_with("unit-cat-debounce") {
+                HITS.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let provider = unique("debounce");
+        for _ in 0..6 {
+            notify_models_changed_after(&provider, "acc", Duration::from_millis(20));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            HITS.load(Ordering::SeqCst),
+            1,
+            "窗口内 6 次通知应合并为 1 次触发"
+        );
+        // 新窗口 → 再次触发（去抖只合并窗口内，不是永久去重）
+        notify_models_changed_after(&provider, "acc", Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(HITS.load(Ordering::SeqCst), 2, "新窗口应再次触发");
+        // 空 provider 直接忽略
+        notify_models_changed_after("   ", "acc", Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(HITS.load(Ordering::SeqCst), 2, "空 provider 不应触发");
     }
 }

@@ -18,6 +18,7 @@ import type {
   ScriptCatalogPayload,
   ScriptPackageView,
   ScriptPackagesPayload,
+  ScriptSettingsView,
   PricingSyncConfigItem,
   ExchangeRatesItem,
   IpFilterConfigItem,
@@ -151,6 +152,32 @@ export const endpoints = {
   /** 手动重启脚本宿主（排障用；无已启用包时等于关停宿主） */
   rebuildScriptHost: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/scripts/rebuild`),
+  /** 检查脚本插件更新（A2A `GET /api/plugins/scripts/check`；与原生包检查一起问） */
+  checkScriptUpdates: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/scripts/check`),
+  /**
+   * 读取脚本包设置视图（`POST /api/plugins/scripts/settings`，只带 id = 只读）：
+   * 返回 options / providerOptions / 宿主回填的 settingsSchema。
+   */
+  getScriptSettings: (id: string, version?: string): Promise<ApiResponse<ScriptSettingsView>> =>
+    request<ApiResponse<ScriptSettingsView>>('POST', `${API_BASE}/plugins/scripts/settings`, {
+      id,
+      ...(version ? { version } : {}),
+    }),
+  /**
+   * 保存脚本包设置：`options`（包级高级参数，变化会重建宿主）与
+   * `providerOptions`（逐 provider 开关，运行中实时生效）。两者都是补丁。
+   */
+  saveScriptSettings: (
+    id: string,
+    body: { options?: Record<string, unknown>; providerOptions?: Record<string, Record<string, boolean>> },
+    version?: string,
+  ): Promise<ApiResponse<{ package: ScriptPackageView }>> =>
+    request<ApiResponse<{ package: ScriptPackageView }>>('POST', `${API_BASE}/plugins/scripts/settings`, {
+      id,
+      ...(version ? { version } : {}),
+      ...body,
+    }),
 
   // 系统监控
   getSystemMonitor: (): Promise<ApiResponse<SystemMonitorItem>> =>

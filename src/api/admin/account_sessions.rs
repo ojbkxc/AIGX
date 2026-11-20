@@ -2799,6 +2799,62 @@ fn plugin_catalog_target(
     PluginCatalogTarget::Gateway
 }
 
+/// 插件 `models_changed` 通知 → 刷新该 provider 的全部插件账号模型目录。
+///
+/// 对齐上游 `model_sync::notify`：插件探测完目录后发通知，网关在去抖窗口内
+/// 合并，再按 provider 全量刷新并落盘。返回刷新的模型条数合计（0 = 无插件
+/// 账号或全部失败，调用方只记日志，不影响通知应答）。
+pub(crate) async fn sync_plugin_provider_catalog(
+    state: &AppState,
+    provider: &str,
+) -> Result<usize, String> {
+    let sessions = state.account_sessions.clone();
+    let targets: Vec<crate::account_session::model::AccountSession> = sessions
+        .all()
+        .into_iter()
+        .filter(|session| session.provider == provider && session.is_plugin_account())
+        .collect();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    let access: std::sync::Arc<dyn crate::plugin_host::wasm::access::WasmAccountAccess> =
+        crate::plugin_host::wasm::AccountSessionAccess::new(
+            "models-changed",
+            std::sync::Arc::new(sessions.clone()),
+            sessions.store().clone(),
+        );
+    let mut total = 0usize;
+    for session in targets {
+        let wasm =
+            crate::plugin_host::wasm::has_capability(&session.provider, "catalog.accounts.v1");
+        match refresh_plugin_account_catalog(state, &session, true, wasm, &access).await {
+            Ok(saved) => {
+                crate::account_session::catalog::record_catalog_error(
+                    &sessions,
+                    &session.provider,
+                    &session.id,
+                    None,
+                );
+                total += saved.models.len();
+            }
+            Err(error) => {
+                crate::account_session::catalog::record_catalog_error(
+                    &sessions,
+                    &session.provider,
+                    &session.id,
+                    Some(error.as_str()),
+                );
+                tracing::warn!(
+                    provider = %session.provider,
+                    account = %session.id,
+                    "[models_changed] 插件账号目录刷新失败: {error}"
+                );
+            }
+        }
+    }
+    Ok(total)
+}
+
 /// 调插件宿主刷新一个账号的目录并落盘（返回真实写入的模型快照）。
 ///
 /// wasm：`host.call("models.refresh", {provider, account, force})`；
@@ -4683,6 +4739,38 @@ pub(crate) async fn plugin_login_poll(
     }
 }
 
+/// 从浏览器回调地址里提取授权码（对齐上游 `LoginCallback.code`）。
+///
+/// 上游在 `submit_login_callback` 里取 query 的首个 `code` /
+/// `authorization_code`，取不到时回落**完整回调地址**（有些家的插件要自己
+/// 解析整串）。此前 AIGX 只发 `{provider, flow, url}`，插件侧
+/// `login.mjs` 的 `method="code"` 分支读 `params.code` 得到 `undefined`，
+/// 直接报「请提交完整登录回调」——回调登录因此走不通。
+fn derive_login_callback_code(callback_url: &str) -> String {
+    url::Url::parse(callback_url)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "code" || key == "authorization_code")
+                .map(|(_, value)| value.into_owned())
+        })
+        .filter(|code| !code.trim().is_empty())
+        .unwrap_or_else(|| callback_url.to_string())
+}
+
+/// 插件 `login.callback` 的参数（上游 `LoginCallback` 形状 + provider）。
+///
+/// `flow` 是插件在 `login.start` 时分配的流程号（不是网关的 `plugin:*`
+/// state）；`code` 是浏览器回调里的授权码，`url` 保留完整回调地址。
+fn login_callback_params(provider: &str, flow: &str, callback_url: &str) -> Value {
+    json!({
+        "provider": provider,
+        "flow": flow,
+        "code": derive_login_callback_code(callback_url),
+        "url": callback_url,
+    })
+}
+
 /// 提交浏览器回调地址给插件（`login.callback`），成功即落账号。
 pub(crate) async fn plugin_login_callback(
     state: &AppState,
@@ -4697,7 +4785,7 @@ pub(crate) async fn plugin_login_callback(
         state,
         &task.provider,
         "login.callback",
-        json!({ "provider": task.provider, "flow": task.flow, "url": callback_url }),
+        login_callback_params(&task.provider, &task.flow, callback_url),
     )
     .await?;
     match polled.get("state").and_then(Value::as_str) {
@@ -5381,5 +5469,54 @@ mod catalog_sync_target_tests {
         assert_eq!(plugin_catalog_target(true, false, false, true), Unavailable);
         // 未知来源的普通账号 → 网关探测
         assert_eq!(plugin_catalog_target(true, false, false, false), Gateway);
+    }
+}
+
+#[cfg(test)]
+mod login_callback_params_tests {
+    use super::{derive_login_callback_code, login_callback_params};
+    use serde_json::json;
+
+    /// 授权码：`code` 优先，其次 `authorization_code`，都没有回落完整地址。
+    #[test]
+    fn derives_code_from_callback_url() {
+        assert_eq!(
+            derive_login_callback_code("http://127.0.0.1:1455/auth/callback?state=s1&code=abc123"),
+            "abc123"
+        );
+        assert_eq!(
+            derive_login_callback_code("https://example.com/cb?authorization_code=xyz&state=s1"),
+            "xyz"
+        );
+        // 无 code / URL 非绝对地址 → 回落完整回调地址
+        assert_eq!(
+            derive_login_callback_code("https://example.com/cb?state=only"),
+            "https://example.com/cb?state=only"
+        );
+        assert_eq!(derive_login_callback_code("not-a-url"), "not-a-url");
+        // 空 code 不当授权码
+        assert_eq!(
+            derive_login_callback_code("https://e.com/cb?code=&state=s"),
+            "https://e.com/cb?code=&state=s"
+        );
+    }
+
+    /// 参数形状必须是上游 `LoginCallback`：flow / code / url（+ provider）。
+    #[test]
+    fn params_carry_flow_code_and_url() {
+        let params = login_callback_params(
+            "kiro",
+            "flow-42",
+            "http://127.0.0.1:1455/auth/callback?state=flow-42&code=abc123",
+        );
+        assert_eq!(
+            params,
+            json!({
+                "provider": "kiro",
+                "flow": "flow-42",
+                "code": "abc123",
+                "url": "http://127.0.0.1:1455/auth/callback?state=flow-42&code=abc123",
+            })
+        );
     }
 }

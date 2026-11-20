@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ExternalLink, Loader2, Plus, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
+import { ExternalLink, Loader2, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useToast } from '../Toast';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
@@ -26,6 +26,8 @@ import type {
   ScriptCatalogStatus,
   ScriptPackageView,
   ScriptPackagesPayload,
+  ScriptProviderOption,
+  ScriptSettingsView,
 } from '../../types';
 import './ScriptPluginsPanel.css';
 
@@ -241,60 +243,147 @@ function InstalledScriptCard({
   );
 }
 
-/** 配置弹窗：options.values 键值对编辑器（值按 JSON 解析，失败按字符串保存） */
+/** 选项声明里的多语文案取值（labels/descriptions/confirms 优先，回退单语字段） */
+function optionWord(
+  option: ScriptProviderOption,
+  key: 'label' | 'description' | 'confirm',
+  lang: string,
+): string {
+  const map =
+    key === 'label' ? option.labels : key === 'description' ? option.descriptions : option.confirms;
+  if (map && typeof map === 'object') {
+    for (const candidate of [lang, lang.split('-')[0], 'zh', 'zh-CN', 'en']) {
+      const hit = map[candidate];
+      if (typeof hit === 'string' && hit.trim()) return hit;
+    }
+  }
+  const single = option[key];
+  return typeof single === 'string' ? single : '';
+}
+
+/**
+ * 配置弹窗（对齐 A2A `ScriptPluginSettings` + `ScriptPluginOptions`）。
+ *
+ * 数据源是 `POST /api/plugins/scripts/settings`（只带 id = 只读），返回
+ * `{options, providerOptions, schema}`：
+ * - `schema.providerOptions` 渲染逐 provider 开关（运行中实时生效，不重建宿主）；
+ * - 高级参数（options）是包级 JSON，保存后启用中的包会重建宿主；
+ * - 设置端点不可用时降级到旧的 `/scripts/options`（仅包级参数），不整块失效。
+ */
 function OptionsDialog({
   pkg,
   busy,
   onClose,
-  onSave,
+  onSaved,
 }: {
   pkg: ScriptPackageView;
   busy: boolean;
   onClose: () => void;
-  onSave: (pkg: ScriptPackageView, values: Record<string, unknown>) => Promise<void>;
+  onSaved: () => Promise<void> | void;
 }): JSX.Element {
-  const { t } = useTranslation();
-  const [rows, setRows] = useState<Array<{ key: string; value: string }>>(() =>
-    Object.entries(pkg.options?.values ?? {}).map(([key, value]) => ({
-      key,
-      value: typeof value === 'string' ? value : JSON.stringify(value),
-    }))
-  );
-  /** 保存失败的就地错误：弹窗不关，用户能看着错误改 */
-  const [saveError, setSaveError] = useState('');
+  const { t, i18n } = useTranslation();
+  const addToast = useToast();
+  const lang = i18n.language || 'zh';
+  const mounted = useRef(true);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<ScriptSettingsView | null>(null);
+  const [providerOptions, setProviderOptions] = useState<Record<string, Record<string, boolean>>>({});
+  const [draft, setDraft] = useState('{}');
+  const [optionsDirty, setOptionsDirty] = useState(false);
+  const [settingsAvailable, setSettingsAvailable] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  /** 需要二次确认的选项（打开前先展示插件声明的 confirm 文案） */
+  const [pending, setPending] = useState<{ provider: string; option: ScriptProviderOption } | null>(null);
+  /** 兜底 options（设置端点不可用时）：用 ref 固化首值，避免轮询改包对象触发重载。 */
+  const fallbackOptions = useRef(pkg.options?.values ?? {});
 
-  const updateRow = (index: number, patch: Partial<{ key: string; value: string }>): void => {
-    setRows((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
-  };
-  const removeRow = (index: number): void => {
-    setRows((prev) => prev.filter((_, i) => i !== index));
-  };
-  const addRow = (): void => {
-    setRows((prev) => [...prev, { key: '', value: '' }]);
-  };
-
-  const handleSave = async (): Promise<void> => {
-    const values: Record<string, unknown> = {};
-    for (const row of rows) {
-      if (!row.key) continue;
+  useEffect(() => {
+    mounted.current = true;
+    void (async () => {
       try {
-        values[row.key] = JSON.parse(row.value);
+        const res = await api.getScriptSettings(pkg.id, pkg.version);
+        if (!mounted.current) return;
+        const data = res?.data ?? null;
+        setView(data);
+        setProviderOptions(data?.providerOptions ?? {});
+        setDraft(JSON.stringify(data?.options ?? fallbackOptions.current, null, 2));
+        setSettingsAvailable(true);
       } catch {
-        values[row.key] = row.value;
+        if (!mounted.current) return;
+        // 设置端点不可用：保留旧的 options 编辑能力，提示用户范围受限
+        setError(t('设置接口不可用，仅可编辑包级参数'));
+        setDraft(JSON.stringify(fallbackOptions.current, null, 2));
+        setSettingsAvailable(false);
+      } finally {
+        if (mounted.current) setLoading(false);
       }
+    })();
+    return () => {
+      mounted.current = false;
+    };
+  }, [pkg.id, pkg.version, t]);
+
+  const applyOption = (provider: string, key: string, on: boolean): void => {
+    setProviderOptions((prev) => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [key]: on } }));
+  };
+
+  const toggleOption = (provider: string, option: ScriptProviderOption, next: boolean): void => {
+    if (next && optionWord(option, 'confirm', lang)) {
+      setPending({ provider, option });
+      return;
     }
+    applyOption(provider, option.key, next);
+  };
+
+  const save = async (): Promise<void> => {
+    if (saving || busy) return;
+    let options: Record<string, unknown>;
     try {
-      setSaveError('');
-      await onSave(pkg, values);
+      const parsed: unknown = JSON.parse(draft);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(t('插件参数必须是 JSON 对象'));
+      }
+      options = parsed as Record<string, unknown>;
     } catch (err) {
-      // 失败必须可见且弹窗保持打开（onSave 成功时才由父层关闭）
-      setSaveError(formatError(err));
+      setError(err instanceof SyntaxError ? t('JSON 格式不正确') : formatError(err));
+      return;
+    }
+    // 后端强制 ≤ 256 KiB：本地先量一次，给出可读错误
+    const bytes = new TextEncoder().encode(JSON.stringify(options)).length;
+    if (bytes > MAX_OPTIONS_BYTES) {
+      setError(t('配置过大（{{size}} KiB），上限 256 KiB', { size: Math.ceil(bytes / 1024) }));
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      if (settingsAvailable) {
+        // options 未改动就不回传，避免无谓地重建宿主；providerOptions 始终保存
+        await api.saveScriptSettings(
+          pkg.id,
+          { ...(optionsDirty ? { options } : {}), providerOptions },
+          pkg.version,
+        );
+      } else {
+        await api.saveScriptPackageOptions(pkg.id, options, pkg.version);
+      }
+      addToast(t('配置已保存'));
+      await onSaved();
+      onClose();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      if (mounted.current) setSaving(false);
     }
   };
+
+  const optionGroups = Object.entries(view?.schema?.providerOptions ?? {});
+  const disabled = busy || saving;
 
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" onClick={onClose}>
-      <div className="modal" style={{ maxWidth: 560, width: '92%' }} onClick={(e) => e.stopPropagation()}>
+      <div className="modal" style={{ maxWidth: 600, width: '92%' }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{t('编辑配置 · {{name}}', { name: pkg.label || pkg.id })}</h3>
           <button className="modal-close" onClick={onClose} aria-label={t('关闭')}>
@@ -302,48 +391,99 @@ function OptionsDialog({
           </button>
         </div>
         <div className="modal-body">
-          {rows.length === 0 ? (
-            <p className="pl-store-hint">{t('暂无配置项')}</p>
+          {loading ? (
+            <Loading text={t('读取配置')} />
           ) : (
-            rows.map((row, index) => (
-              <div className="pls-opt-row" key={index}>
-                <input
-                  className="form-input pls-opt-key"
-                  placeholder={t('键')}
-                  value={row.key}
-                  onChange={(e) => updateRow(index, { key: e.target.value })}
+            <>
+              {optionGroups.length > 0 ? (
+                <section className="pls-opt-section">
+                  <h4 className="pls-opt-heading">{t('插件选项')}</h4>
+                  {optionGroups.map(([provider, options]) => (
+                    <div key={provider} className="pls-opt-provider">
+                      <p className="pls-opt-provider-name">
+                        {pkg.providers.find((p) => p.id === provider)?.label || provider}
+                      </p>
+                      {options.map((option) => {
+                        const desc = optionWord(option, 'description', lang);
+                        const confirming = pending?.provider === provider && pending.option.key === option.key;
+                        return (
+                          <div key={option.key} className="pls-opt-switch-row">
+                            <div className="pls-opt-switch-main">
+                              <span>{optionWord(option, 'label', lang) || option.key}</span>
+                              {desc ? <span className="pls-opt-desc">{desc}</span> : null}
+                              {confirming ? (
+                                <div className="pls-opt-confirm">
+                                  <span>{optionWord(option, 'confirm', lang)}</span>
+                                  <span className="pls-opt-confirm-actions">
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => setPending(null)}
+                                    >
+                                      {t('取消')}
+                                    </Button>
+                                    <Button
+                                      variant="primary"
+                                      size="sm"
+                                      onClick={() => {
+                                        applyOption(provider, option.key, true);
+                                        setPending(null);
+                                      }}
+                                    >
+                                      {t('确认')}
+                                    </Button>
+                                  </span>
+                                </div>
+                              ) : null}
+                            </div>
+                            <Switch
+                              checked={providerOptions[provider]?.[option.key] ?? option.default ?? false}
+                              disabled={disabled}
+                              onChange={(next) => toggleOption(provider, option, next)}
+                              ariaLabel={optionWord(option, 'label', lang) || option.key}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </section>
+              ) : null}
+
+              <section className="pls-opt-section">
+                <h4 className="pls-opt-heading">{t('高级参数（JSON）')}</h4>
+                <textarea
+                  className="form-input pls-opt-json"
+                  rows={6}
+                  spellCheck={false}
+                  value={draft}
+                  disabled={disabled}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    setOptionsDirty(true);
+                    setError('');
+                  }}
                 />
-                <input
-                  className="form-input pls-opt-val"
-                  placeholder={t('值')}
-                  value={row.value}
-                  onChange={(e) => updateRow(index, { value: e.target.value })}
-                />
-                <Button variant="outline" size="sm" onClick={() => removeRow(index)} aria-label={t('删除')}>
-                  <Trash2 size={13} />
-                </Button>
-              </div>
-            ))
+                <p className="pl-store-hint">
+                  {t('修改高级参数会等待在途任务结束后重新加载插件；专属开关实时生效。')}
+                </p>
+              </section>
+
+              {error ? (
+                <div className="error-message" style={{ marginTop: 10 }} title={error}>
+                  {error}
+                </div>
+              ) : null}
+            </>
           )}
-          <Button variant="outline" size="sm" onClick={addRow}>
-            <Plus size={13} /> {t('添加配置项')}
-          </Button>
-          <p className="pl-store-hint" style={{ marginTop: 8 }}>
-            {t('值按 JSON 解析（数字/布尔/对象直接生效），解析失败按字符串保存。')}
-          </p>
-          {saveError ? (
-            <div className="error-message" style={{ marginTop: 10 }} title={saveError}>
-              {saveError}
-            </div>
-          ) : null}
         </div>
         <div className="modal-footer">
           <Button variant="outline" onClick={onClose}>
             {t('取消')}
           </Button>
-          <Button variant="primary" disabled={busy} onClick={() => void handleSave()}>
-            {busy ? <Loader2 size={13} className="spin" /> : null}
-            {busy ? t('保存中…') : t('保存配置')}
+          <Button variant="primary" disabled={disabled || loading} onClick={() => void save()}>
+            {saving ? <Loader2 size={13} className="spin" /> : null}
+            {saving ? t('保存中…') : t('保存配置')}
           </Button>
         </div>
       </div>
@@ -360,11 +500,14 @@ function OptionsDialog({
 export default function ScriptPluginsPanel({
   query: pageQuery,
   status: pageStatus,
+  installRequest = 0,
 }: {
   /** 页面级搜索关键词（A2A plugins-page 把搜索透传给脚本面板） */
   query?: string;
   /** 页面级状态筛选（missing = 未安装） */
   status?: 'all' | 'updatable' | 'installed' | 'missing';
+  /** 自增计数器：页头「从 npm / GitHub 安装」请求打开手动安装弹窗 */
+  installRequest?: number;
 } = {}): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -379,6 +522,9 @@ export default function ScriptPluginsPanel({
    * 只允许最新一次的结果落地，避免旧快照覆盖新状态（竞态）。
    */
   const loadSeq = useRef(0);
+  /** 数据快照签名：轮询/回读返回同一份数据时跳过 setState，避免整表重渲染。 */
+  const payloadSig = useRef<string | null>(null);
+  const catalogSig = useRef<string | null>(null);
 
   const [payload, setPayload] = useState<ScriptPackagesPayload | null>(null);
   const [catalog, setCatalog] = useState<ScriptCatalogPayload | null>(null);
@@ -388,6 +534,21 @@ export default function ScriptPluginsPanel({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [editingPkg, setEditingPkg] = useState<ScriptPackageView | null>(null);
+  /** 手动安装弹窗（npm 包名 / GitHub 地址 / magpie: 前缀） */
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualSelector, setManualSelector] = useState('');
+  const [manualError, setManualError] = useState('');
+  const lastInstallRequest = useRef(installRequest);
+
+  // 页头「从 npm / GitHub 安装」自增计数器 → 打开手动安装弹窗
+  useEffect(() => {
+    if (installRequest > lastInstallRequest.current) {
+      lastInstallRequest.current = installRequest;
+      setManualSelector('');
+      setManualError('');
+      setManualOpen(true);
+    }
+  }, [installRequest]);
 
   // 筛选与搜索
   const [query, setQuery] = useState('');
@@ -413,10 +574,20 @@ export default function ScriptPluginsPanel({
   const load = useCallback(async (): Promise<void> => {
     const seq = ++loadSeq.current;
     try {
-      const [listRes, catRes] = await Promise.all([api.listScriptPlugins(), api.scriptCatalog()]);
+      const results = await Promise.all([api.listScriptPlugins(), api.scriptCatalog()]);
+      const listData = results[0]?.data ?? null;
+      const catData = results[1]?.data ?? null;
       if (!mounted.current || seq !== loadSeq.current) return;
-      setPayload(listRes?.data ?? null);
-      setCatalog(catRes?.data ?? null);
+      const nextPayloadSig = listData ? JSON.stringify(listData) : '';
+      const nextCatalogSig = catData ? JSON.stringify(catData) : '';
+      if (nextPayloadSig !== payloadSig.current) {
+        payloadSig.current = nextPayloadSig;
+        setPayload(listData);
+      }
+      if (nextCatalogSig !== catalogSig.current) {
+        catalogSig.current = nextCatalogSig;
+        setCatalog(catData);
+      }
       setNotReady(false);
       setError('');
     } catch (err) {
@@ -428,6 +599,8 @@ export default function ScriptPluginsPanel({
       // 404 = 管理面未提供（降级空态）；其它错误保留上次成功数据，
       // 只挂错误条——瞬时网络抖动不该把已加载的面板整块清空。
       if (is404) {
+        payloadSig.current = null;
+        catalogSig.current = null;
         setPayload(null);
         setCatalog(null);
       }
@@ -587,27 +760,34 @@ export default function ScriptPluginsPanel({
     });
   };
 
-  const handleSaveOptions = async (pkg: ScriptPackageView, values: Record<string, unknown>): Promise<void> => {
-    // 后端强制 ≤ 256 KiB（MAX_SETTINGS_BYTES）：本地先量一次，给出可读错误，
-    // 而不是等整轮请求被 400 打回。
-    const bytes = new TextEncoder().encode(JSON.stringify(values)).length;
-    if (bytes > MAX_OPTIONS_BYTES) {
-      throw new Error(t('配置过大（{{size}} KiB），上限 256 KiB', { size: Math.ceil(bytes / 1024) }));
-    }
-    const res = await runMutation(
-      `options:${pkg.id}@${pkg.version}`,
-      async () => {
-        await api.saveScriptPackageOptions(pkg.id, values, pkg.version);
-        addToast(t('配置已保存'));
-      },
-      { toastError: false }
-    );
-    if (!res.ok) {
-      // 抛回 OptionsDialog：弹窗保持打开并就地显示错误，用户改完可直接重试
-      if (res.error && res.error !== 'busy') throw new Error(res.error);
+  /**
+   * 手动安装（npm 包名 / GitHub 地址 / `magpie:` 前缀）：与目录卡安装同一条
+   * 安全闸门——先弹含「脚本不是沙箱」的确认，确认后传 `trusted=true`。
+   */
+  const handleManualInstall = (raw: string): void => {
+    const selector = raw.trim();
+    if (!selector) {
+      setManualError(t('请填写安装来源'));
       return;
     }
-    setEditingPkg(null);
+    setManualOpen(false);
+    setConfirmState({
+      title: t('安装脚本包'),
+      message: t('脚本不是沙箱，将以 Bun 进程权限运行。确认安装「{{name}}」？', { name: selector }),
+      confirmText: t('确认安装'),
+      danger: true,
+      onConfirm: async () => {
+        const res = await runMutation(
+          `install:${selector}`,
+          async () => {
+            await api.installScriptPackage(selector, true);
+            addToast(t('脚本包已安装'));
+          },
+          { toastError: false }
+        );
+        if (!res.ok && res.error && res.error !== 'busy') throw new Error(res.error);
+      },
+    });
   };
 
   /**
@@ -835,12 +1015,57 @@ export default function ScriptPluginsPanel({
       )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+      {manualOpen ? (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={t('从 npm / GitHub 安装')} onClick={() => setManualOpen(false)}>
+          <div className="modal" style={{ maxWidth: 520, width: '92%' }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('从 npm / GitHub 安装')}</h3>
+              <button className="modal-close" onClick={() => setManualOpen(false)} aria-label={t('关闭')}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <label className="pls-opt-field">
+                <span>{t('安装来源')}</span>
+                <input
+                  className="form-input"
+                  autoComplete="off"
+                  placeholder="@scope/plugin / https://github.com/owner/repo / magpie:包名"
+                  value={manualSelector}
+                  onChange={(e) => {
+                    setManualSelector(e.target.value);
+                    setManualError('');
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleManualInstall(manualSelector);
+                  }}
+                />
+              </label>
+              <p className="pl-store-hint">
+                {t('仅安装你信任的 npm 包、GitHub 仓库或 Magpie 分发包；完整性校验不等于安全审计。')}
+              </p>
+              <div className="pl-missing-warn">
+                <p>{t('脚本不是安全沙箱，可以访问网关所在电脑的文件和网络。不要安装来历不明的插件。')}</p>
+              </div>
+              {manualError ? <div className="error-message">{manualError}</div> : null}
+            </div>
+            <div className="modal-footer">
+              <Button variant="outline" onClick={() => setManualOpen(false)}>
+                {t('取消')}
+              </Button>
+              <Button variant="primary" disabled={busy} onClick={() => handleManualInstall(manualSelector)}>
+                {t('继续安装')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {editingPkg ? (
         <OptionsDialog
           pkg={editingPkg}
           busy={busy}
           onClose={() => setEditingPkg(null)}
-          onSave={handleSaveOptions}
+          onSaved={() => load()}
         />
       ) : null}
     </div>

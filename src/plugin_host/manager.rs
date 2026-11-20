@@ -20,12 +20,16 @@
 //! 窗口里点启用/停用时，监督**代际**递增，旧代循环醒来即退出，不会
 //! 新旧双拉。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use parking_lot::RwLock as PlRwLock;
+use serde_json::Value;
 
 use crate::account_session::AccountSessionStore;
 use crate::storage::FileStore;
@@ -62,6 +66,236 @@ const MAX_RESTART_ATTEMPTS: u32 = 5;
 /// 观察子进程退出的轮询间隔（`try_wait` 短持锁，不长期占用 child）。
 const SUPERVISE_POLL: Duration = Duration::from_millis(500);
 
+/// 有界 FIFO 缓存（按插入顺序淘汰；插件包数量极少，无需严格 LRU）。
+///
+/// key 由调用方拼好（见 `plugins.rs` 的 `pack_view_key`：包 id+版本+
+/// `pack.json` 的 mtime/size），缓存自身只负责「有界 + 命中计数」。
+struct BoundedCache<V> {
+    map: HashMap<String, V>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl<V> BoundedCache<V> {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&V> {
+        self.map.get(key)
+    }
+
+    fn insert(&mut self, key: String, value: V) {
+        // 覆盖已有 key：不重复占用淘汰序（`get_mut` 判定，避开 clippy::map_entry）。
+        if self.map.get_mut(&key).is_some() {
+            self.map.insert(key, value);
+            return;
+        }
+        while self.map.len() >= self.cap {
+            match self.order.pop_front() {
+                Some(old) => {
+                    self.map.remove(&old);
+                }
+                None => break,
+            }
+        }
+        self.order.push_back(key.clone());
+        self.map.insert(key, value);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+/// 插件列表视图缓存（图标 data URI + `pack.json` 解析结果）。
+///
+/// `GET /api/plugins` 在前端轮询时每 2s 拉一次，而每个已装包都要读
+/// `pack.json` 并把图标读成 base64——这两步都是重复 IO。缓存键含
+/// `pack.json` 的 mtime/size，重装或覆盖写会自动失效。上限
+/// [`Self::CAPACITY`] 条，超出按插入序淘汰（包数量远小于上限）。
+pub struct PluginViewCache {
+    icons: Mutex<BoundedCache<Option<String>>>,
+    manifests: Mutex<BoundedCache<Value>>,
+    icon_hits: AtomicU64,
+    icon_misses: AtomicU64,
+    manifest_hits: AtomicU64,
+    manifest_misses: AtomicU64,
+}
+
+impl PluginViewCache {
+    /// 缓存条目上限（每个包最多 2 条：图标 + 清单）。
+    pub const CAPACITY: usize = 256;
+
+    pub fn new() -> Self {
+        Self {
+            icons: Mutex::new(BoundedCache::new(Self::CAPACITY)),
+            manifests: Mutex::new(BoundedCache::new(Self::CAPACITY)),
+            icon_hits: AtomicU64::new(0),
+            icon_misses: AtomicU64::new(0),
+            manifest_hits: AtomicU64::new(0),
+            manifest_misses: AtomicU64::new(0),
+        }
+    }
+
+    /// 取图标缓存；`Some(None)` = 命中「无图标」，`None` = 未命中。
+    pub fn get_icon(&self, key: &str) -> Option<Option<String>> {
+        let hit = self.icons.lock().get(key).cloned();
+        match &hit {
+            Some(_) => self.icon_hits.fetch_add(1, Ordering::Relaxed),
+            None => self.icon_misses.fetch_add(1, Ordering::Relaxed),
+        };
+        hit
+    }
+
+    pub fn put_icon(&self, key: String, value: Option<String>) {
+        self.icons.lock().insert(key, value);
+    }
+
+    /// 取清单缓存（`Value::Null` 表示读不到/解析失败，同样缓存以免反复读盘）。
+    pub fn get_manifest(&self, key: &str) -> Option<Value> {
+        let hit = self.manifests.lock().get(key).cloned();
+        match &hit {
+            Some(_) => self.manifest_hits.fetch_add(1, Ordering::Relaxed),
+            None => self.manifest_misses.fetch_add(1, Ordering::Relaxed),
+        };
+        hit
+    }
+
+    pub fn put_manifest(&self, key: String, value: Value) {
+        self.manifests.lock().insert(key, value);
+    }
+
+    /// `(hits, misses)`（图标缓存）——计数型单测证明「N 次列表只读 1 次盘」。
+    #[cfg(test)]
+    pub fn icon_stats(&self) -> (u64, u64) {
+        (
+            self.icon_hits.load(Ordering::Relaxed),
+            self.icon_misses.load(Ordering::Relaxed),
+        )
+    }
+
+    /// `(hits, misses)`（清单缓存）。
+    #[cfg(test)]
+    pub fn manifest_stats(&self) -> (u64, u64) {
+        (
+            self.manifest_hits.load(Ordering::Relaxed),
+            self.manifest_misses.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn icon_len(&self) -> usize {
+        self.icons.lock().len()
+    }
+
+    #[cfg(test)]
+    pub fn manifest_len(&self) -> usize {
+        self.manifests.lock().len()
+    }
+}
+
+impl Default for PluginViewCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 发布目录 TTL 缓存 + 单飞。
+///
+/// 列表接口轮询时不应每次都打上游：成功结果缓存 [`CatalogCache::ok_ttl`]
+/// （默认 60s），不可用/错误态缓存更短（[`CatalogCache::err_ttl`]，默认
+/// 10s）避免把上游打爆。`get_or_fetch` 在 tokio 互斥锁内完成「查缓存 →
+/// 未命中则拉取 → 写回」，并发请求只会有一个真正发起拉取（其余等待后
+/// 命中新值），即单飞。`force = true`（`GET /api/plugins/release` 刷新
+/// 语义）绕过 TTL，但仍会把新结果写回缓存。
+pub struct CatalogCache {
+    state: tokio::sync::Mutex<CatalogState>,
+    ok_ttl: Duration,
+    err_ttl: Duration,
+}
+
+struct CatalogState {
+    source: String,
+    value: Option<Value>,
+    at: Option<Instant>,
+    ok: bool,
+}
+
+impl CatalogCache {
+    pub fn new() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(CatalogState {
+                source: String::new(),
+                value: None,
+                at: None,
+                ok: false,
+            }),
+            ok_ttl: Duration::from_secs(60),
+            err_ttl: Duration::from_secs(10),
+        }
+    }
+
+    /// 测试用：自定义 TTL（避免单测真的等 60s）。
+    #[cfg(test)]
+    pub fn with_ttl(ok_ttl: Duration, err_ttl: Duration) -> Self {
+        let mut cache = Self::new();
+        cache.ok_ttl = ok_ttl;
+        cache.err_ttl = err_ttl;
+        cache
+    }
+
+    /// 命中判定：源一致、有过成功/失败结果、且未超过对应 TTL。
+    fn fresh(state: &CatalogState, source: &str, ok_ttl: Duration, err_ttl: Duration) -> bool {
+        if state.value.is_none() || state.source != source {
+            return false;
+        }
+        let ttl = if state.ok { ok_ttl } else { err_ttl };
+        state.at.map(|at| at.elapsed() < ttl).unwrap_or(false)
+    }
+
+    /// 取目录；未命中/过期/`force` 时调用 `fetch` 拉取并写回。
+    ///
+    /// `fetch` 在持锁期间执行，故同一时刻只会有一个上游请求（单飞）。
+    pub async fn get_or_fetch<F, Fut>(&self, source: &str, force: bool, fetch: F) -> Value
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Value>,
+    {
+        let mut state = self.state.lock().await;
+        if !force && Self::fresh(&state, source, self.ok_ttl, self.err_ttl) {
+            return state.value.clone().unwrap_or(Value::Null);
+        }
+        let value = fetch().await;
+        state.ok = value
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        state.source = source.to_string();
+        state.at = Some(Instant::now());
+        state.value = Some(value.clone());
+        value
+    }
+
+    /// 当前是否持有未过期结果（诊断/单测用）。
+    #[cfg(test)]
+    pub async fn is_fresh(&self, source: &str) -> bool {
+        let state = self.state.lock().await;
+        Self::fresh(&state, source, self.ok_ttl, self.err_ttl)
+    }
+}
+
+impl Default for CatalogCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 一个包在运行期的状态（管理面展示 + 数据面路由用）。
 #[derive(Clone, Debug, Default)]
 pub struct PackRuntime {
@@ -96,6 +330,10 @@ pub struct PluginHostManager {
     account_sessions: Arc<AccountSessionStore>,
     /// 插件回调用的底层存储（`PluginCallbacks` 用）。
     store: Arc<FileStore>,
+    /// 列表视图缓存（图标 / `pack.json`），见 [`PluginViewCache`]。
+    view_cache: PluginViewCache,
+    /// 发布目录 TTL + 单飞缓存，见 [`CatalogCache`]。
+    catalog_cache: CatalogCache,
 }
 
 impl PluginHostManager {
@@ -117,11 +355,23 @@ impl PluginHostManager {
             host_env,
             account_sessions,
             store,
+            view_cache: PluginViewCache::new(),
+            catalog_cache: CatalogCache::new(),
         }
     }
 
     pub fn registry(&self) -> &Arc<PackRegistry> {
         &self.registry
+    }
+
+    /// 列表视图缓存（图标 / 清单；`plugins.rs` 热路径用）。
+    pub fn view_cache(&self) -> &PluginViewCache {
+        &self.view_cache
+    }
+
+    /// 发布目录缓存（TTL + 单飞；`plugins.rs` 热路径用）。
+    pub fn catalog_cache(&self) -> &CatalogCache {
+        &self.catalog_cache
     }
 
     pub fn plugins_root(&self) -> &PathBuf {
@@ -422,6 +672,7 @@ impl PluginHostManager {
                 .map(|info| ProviderInfo {
                     id: info.id,
                     label: info.label,
+                    ..Default::default()
                 })
                 .collect();
             let mut rt = self.runtime.write();
@@ -475,6 +726,7 @@ impl PluginHostManager {
             .map(|info| ProviderInfo {
                 id: info.id,
                 label: info.label,
+                ..Default::default()
             })
             .collect();
         self.registry.set_enabled(&meta.id, true)?;
@@ -740,5 +992,131 @@ mod tests {
         assert!(rt.providers.is_empty());
         assert!(rt.last_error.is_none());
         assert_eq!(rt.crashes, 0);
+    }
+
+    /// 计数型证明：TTL 内连续调用只触发一次拉取；`force` 绕过 TTL
+    /// （刷新目录语义）；源变化视为未命中。
+    #[tokio::test]
+    async fn catalog_cache_ttl_hits_and_force_bypass() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let cache = Arc::new(CatalogCache::with_ttl(
+            Duration::from_secs(60),
+            Duration::from_millis(20),
+        ));
+        let calls = Arc::new(AtomicU32::new(0));
+
+        let fetch = |tag: &'static str| {
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({ "available": true, "tag": tag })
+                }
+            }
+        };
+
+        // TTL 内两次：只拉一次
+        let _ = cache.get_or_fetch("src", false, fetch("a")).await;
+        let _ = cache.get_or_fetch("src", false, fetch("a")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "TTL 内不应重复拉取");
+
+        // force（刷新目录）绕过 TTL：再拉一次
+        let forced = cache.get_or_fetch("src", true, fetch("b")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "force 必须绕过缓存");
+        assert_eq!(forced["tag"], "b");
+
+        // 源变化视为未命中
+        let _ = cache.get_or_fetch("other", false, fetch("c")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "源变化应重新拉取");
+    }
+
+    /// 错误态 TTL 更短：失败结果过期后重试，成功结果在更长的 TTL 内不重拉。
+    #[tokio::test]
+    async fn catalog_cache_error_ttl_is_shorter() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let cache = CatalogCache::with_ttl(Duration::from_secs(60), Duration::from_millis(15));
+        let calls = Arc::new(AtomicU32::new(0));
+
+        let make_fail = || {
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({ "available": false, "error": true })
+                }
+            }
+        };
+        cache.get_or_fetch("s", false, make_fail()).await;
+        // 未过错误 TTL：命中
+        let ok = cache.get_or_fetch("s", false, make_fail()).await;
+        assert_eq!(ok["available"], false);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        // 过了错误 TTL：重拉
+        cache.get_or_fetch("s", false, make_fail()).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "错误态应短 TTL 后重试");
+
+        let ok_calls = Arc::new(AtomicU32::new(0));
+        let make_succeed = || {
+            let ok_calls = ok_calls.clone();
+            move || {
+                let ok_calls = ok_calls.clone();
+                async move {
+                    ok_calls.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({ "available": true })
+                }
+            }
+        };
+        cache.get_or_fetch("ok", false, make_succeed()).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        cache.get_or_fetch("ok", false, make_succeed()).await;
+        assert_eq!(
+            ok_calls.load(Ordering::SeqCst),
+            1,
+            "成功态在 60s TTL 内不应重拉"
+        );
+    }
+
+    /// 并发单飞：8 个并发请求只触发一次上游拉取。
+    #[tokio::test]
+    async fn catalog_cache_single_flight_under_concurrency() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let cache = Arc::new(CatalogCache::new());
+        let calls = Arc::new(AtomicU32::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let calls = calls.clone();
+            handles.push(tokio::spawn(async move {
+                cache
+                    .get_or_fetch("src", false, move || {
+                        let calls = calls.clone();
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            serde_json::json!({ "available": true })
+                        }
+                    })
+                    .await
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "并发请求只应发起一次上游拉取"
+        );
+        assert!(cache.is_fresh("src").await);
     }
 }

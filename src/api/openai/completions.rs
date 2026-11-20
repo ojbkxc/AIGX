@@ -95,7 +95,11 @@ pub(crate) async fn handle_completions(
         ));
     }
 
-    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone()).with_client_headers(
+        headers
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
+    );
 
     // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
     let mut result_opt = None;

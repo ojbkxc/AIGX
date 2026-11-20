@@ -294,16 +294,19 @@ struct PackManifestExtras {
     ui: Vec<Value>,
 }
 
-/// 读包版本目录里的 `pack.json` 扩展键。
+/// 读包版本目录里的 `pack.json` 扩展键（无缓存；缓存版见
+/// [`manifest_extras_for`]）。保留无缓存版本供单测/基准直读对拍。
+#[cfg(test)]
 fn manifest_extras(version_dir: &std::path::Path) -> PackManifestExtras {
-    let text = match std::fs::read_to_string(version_dir.join("pack.json")) {
-        Ok(text) => text,
-        Err(_) => return PackManifestExtras::default(),
-    };
-    let value: Value = match serde_json::from_str(&text) {
-        Ok(value) => value,
-        Err(_) => return PackManifestExtras::default(),
-    };
+    let value = std::fs::read_to_string(version_dir.join("pack.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or(Value::Null);
+    manifest_extras_from_value(&value)
+}
+
+/// 从已解析的 `pack.json` JSON 里取扩展键（缓存命中时直接复用解析结果）。
+fn manifest_extras_from_value(value: &Value) -> PackManifestExtras {
     let string = |key: &str| {
         value
             .get(key)
@@ -325,6 +328,65 @@ fn manifest_extras(version_dir: &std::path::Path) -> PackManifestExtras {
             .cloned()
             .unwrap_or_default(),
     }
+}
+
+/// 列表视图缓存键：包 id + 版本 + `pack.json` 的 mtime/size。
+///
+/// 重装/同版本覆盖都会改写 `pack.json` → 指纹变化 → 旧缓存自动失效。
+/// 读文件不存在时指纹为 `0|0`（「无清单」同样缓存，避免每轮反复尝试读盘）。
+fn pack_view_key(meta: &PackMeta, version_dir: &std::path::Path) -> String {
+    let (mtime_ns, size) = std::fs::metadata(version_dir.join("pack.json"))
+        .ok()
+        .map(|meta| {
+            let ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            (ns, meta.len())
+        })
+        .unwrap_or((0, 0));
+    format!("{}|{}|{mtime_ns}|{size}", meta.id, meta.version)
+}
+
+/// 带进程内缓存的 [`manifest_extras`]（hot path：列表轮询）。
+fn manifest_extras_for(host: &PluginHostManager, meta: &PackMeta) -> PackManifestExtras {
+    let version_dir = meta.version_dir(host.plugins_root());
+    let key = format!("{}|manifest", pack_view_key(meta, &version_dir));
+    if let Some(value) = host.view_cache().get_manifest(&key) {
+        return manifest_extras_from_value(&value);
+    }
+    let value = std::fs::read_to_string(version_dir.join("pack.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or(Value::Null);
+    let extras = manifest_extras_from_value(&value);
+    host.view_cache().put_manifest(key, value);
+    extras
+}
+
+/// 带进程内缓存的 [`pack_icon`]（hot path：列表轮询）。
+///
+/// 键沿用 `pack.json` 指纹 + 清单声明的图标路径；图标文件本身属于同一次
+/// 安装产物，重装会改写 `pack.json`，故指纹足以失效。
+fn pack_icon_for(
+    host: &PluginHostManager,
+    meta: &PackMeta,
+    declared: Option<&str>,
+) -> Option<String> {
+    let version_dir = meta.version_dir(host.plugins_root());
+    let key = format!(
+        "{}|icon|{}",
+        pack_view_key(meta, &version_dir),
+        declared.unwrap_or("")
+    );
+    if let Some(value) = host.view_cache().get_icon(&key) {
+        return value;
+    }
+    let value = pack_icon(&version_dir, declared);
+    host.view_cache().put_icon(key, value.clone());
+    value
 }
 
 /// 图标文件体积上限（2MB，A2A 同值）。
@@ -641,6 +703,39 @@ fn hidden_provider_reason(state: &AppState, provider: &str) -> &'static str {
     "not_installed"
 }
 
+/// 聚合运行期 provider 申报的注入点（A2A `adminPanels` / `accountFeatures`）。
+///
+/// 握手返回的 [`ProviderInfo`](crate::plugin_host::process::ProviderInfo) 现
+/// 已完整保留插件声明；这里把已加载进程的申报投影成列表顶层字段：
+/// - `adminPanels` = 各 provider 的管理面板 id 去重并集；
+/// - `accountFeatures` = `{provider id -> accountFeatures}`（未申报的家不出现）。
+///
+/// 只统计**正在运行**的进程（`runtime_of().providers` 是握手快照），未加载的
+/// 包不该在界面注入入口。
+fn provider_injection_points(host: &PluginHostManager, metas: &[PackMeta]) -> (Value, Value) {
+    let mut panels: Vec<Value> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut features = serde_json::Map::new();
+    for meta in metas {
+        for provider in host.runtime_of(&meta.id).providers {
+            let summary = provider.summary_json();
+            if let Some(items) = summary.get("adminPanels").and_then(Value::as_array) {
+                for item in items {
+                    let Some(id) = item.as_str() else { continue };
+                    if seen.insert(id.to_string()) {
+                        panels.push(Value::String(id.to_string()));
+                    }
+                }
+            }
+            if let Some(account_features) = summary.get("accountFeatures").filter(|v| !v.is_null())
+            {
+                features.insert(provider.id.clone(), account_features.clone());
+            }
+        }
+    }
+    (Value::Array(panels), Value::Object(features))
+}
+
 /// 外置插件包视图（前端 `PluginPackSummary` 契约）。
 ///
 /// - `enabled` 以 `PackMeta.enabled` 为准（包级开关）：包声明里的
@@ -655,9 +750,8 @@ fn hidden_provider_reason(state: &AppState, provider: &str) -> &'static str {
 ///   `PackProviderSummary.overriddenBy`），前端据此显示接管方并禁掉开关。
 fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
     let rt = host.runtime_of(&meta.id);
-    let version_dir = meta.version_dir(host.plugins_root());
     let entry_present = meta.entry_path(host.plugins_root()).is_file();
-    let extras = manifest_extras(&version_dir);
+    let extras = manifest_extras_for(host, meta);
     let providers: Vec<Value> = meta
         .providers
         .iter()
@@ -711,7 +805,7 @@ fn external_pack_view(meta: &PackMeta, host: &PluginHostManager) -> Value {
         "protocol": meta.protocol,
         "entryPresent": entry_present,
         "homepage": extras.homepage,
-        "icon": pack_icon(&version_dir, extras.icons.as_deref()),
+        "icon": pack_icon_for(host, meta, extras.icons.as_deref()),
         "providers": providers,
         "host": {
             "running": rt.running,
@@ -743,6 +837,8 @@ pub async fn handle_list_plugins(
         packs.push(external_pack_view(meta, &state.plugin_host));
     }
     let catalog = fetch_catalog(&state).await;
+    // 运行期 provider 申报的管理面板 / 账号页功能注入点（插件声明透出）
+    let (admin_panels, account_features) = provider_injection_points(&state.plugin_host, &metas);
     // 已装包若清单没声明图标（社区包常见），回落到商店目录同 id 条目的
     // 图标——对齐 A2A 前端 `pack.icon || store?.icon`。
     fill_pack_icons_from_catalog(&mut packs, &catalog);
@@ -758,10 +854,10 @@ pub async fn handle_list_plugins(
             // 宿主进程状态在各外置包的 `host` 字段里（一包一进程）；
             // 顶层 host 留空（内置目录无宿主进程）
             "host": null,
-            // 管理面板注入点（上游 adminPanels）：暂无
-            "adminPanels": [],
-            // 账号页功能注入点（上游 accountFeatures）：暂无
-            "accountFeatures": {},
+            // 管理面板注入点（上游 adminPanels）：已加载插件申报的并集
+            "adminPanels": admin_panels,
+            // 账号页功能注入点（上游 accountFeatures）：provider id -> 声明
+            "accountFeatures": account_features,
             "target": std::env::consts::OS,
             "protocol": 1,
             "pluginsDir": state.plugin_host.plugins_root().display().to_string(),
@@ -1339,6 +1435,121 @@ fn upstream_asset_url(tag: &str, id: &str, version: &str, triple: &str) -> Strin
     )
 }
 
+/// 渲染 manifest 的 release 模板：`{id}` / `{version}` / `{target}`。
+fn render_release_template(template: &str, id: &str, version: &str, triple: &str) -> String {
+    template
+        .replace("{id}", id)
+        .replace("{version}", version)
+        .replace("{target}", triple)
+}
+
+/// manifest 声明的平台三元组（兼容字符串数组与 `{target: …}` 对象数组）。
+fn manifest_platform_targets(manifest: &Value) -> Vec<&str> {
+    manifest
+        .get("platforms")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .or_else(|| item.get("target").and_then(Value::as_str))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 选下载用的 triple：manifest 声明了 `platforms` 时按声明挑。
+///
+/// 1. 本机 triple 在列 → 用它（原生包）；
+/// 2. 否则有 `wasm32-*` → `wasm32-unknown-unknown`（wasm 包跨平台运行）；
+/// 3. 无 `platforms`（老格式）或都不匹配 → 本机 triple（保持旧行为）。
+///
+/// 此前无视 `platforms`、一律用本机 triple 拼资产名，导致 wasm 包下载 404。
+fn resolve_download_triple(manifest: &Value) -> Option<&'static str> {
+    let local = current_target_triple();
+    let targets = manifest_platform_targets(manifest);
+    if targets.is_empty() {
+        return local;
+    }
+    if let Some(local) = local {
+        if targets.contains(&local) {
+            return Some(local);
+        }
+    }
+    if targets.iter().any(|t| t.starts_with("wasm32-")) {
+        return Some("wasm32-unknown-unknown");
+    }
+    local
+}
+
+/// 把上游 `index.json` 条目 + 其 `manifest` 投影成源格式条目（纯函数，便于单测）。
+fn upstream_catalog_item(id: &str, entry: &Value, manifest: &Value) -> Value {
+    let version = manifest
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let release = manifest.get("release");
+    let repo = release
+        .and_then(|r| r.get("repo"))
+        .and_then(Value::as_str)
+        .unwrap_or(UPSTREAM_RELEASE_REPO);
+    // 选择实际下载用的 triple：manifest 声明了 `platforms` 时按声明挑
+    // （wasm 包声明 `wasm32-unknown-unknown`，用本机 triple 拼 URL 会 404）。
+    let triple = resolve_download_triple(manifest);
+    // 组装成 `normalize_store_plugin` 能识别的源格式：当前平台一条 platforms
+    let platforms: Vec<Value> = match triple {
+        Some(t) => {
+            let tag_template = release
+                .and_then(|r| r.get("tag"))
+                .and_then(Value::as_str)
+                .unwrap_or("v{version}");
+            let tag = render_release_template(tag_template, id, version, t);
+            // 资产名同样按 manifest 模板渲染；缺省沿用 `{id}-{version}-{target}.zip`
+            let asset_template = release
+                .and_then(|r| r.get("asset"))
+                .and_then(Value::as_str)
+                .unwrap_or("{id}-{version}-{target}.zip");
+            let asset = render_release_template(asset_template, id, version, t);
+            let url = format!("https://github.com/{repo}/releases/download/{tag}/{asset}");
+            let (size, sha) = upstream_asset_meta(id, t);
+            vec![json!({
+                // wasm 跨平台运行：target 仍填 OS，前端按 OS 才显示「下载」
+                "target": std::env::consts::OS,
+                "size": size,
+                "url": url,
+                "current": false,
+                "sha256": sha,
+            })]
+        }
+        // 无对应平台（如 wasm 三元组匹配不到常规平台）→ 空 platforms，
+        // 前端渲染「当前平台暂无包」，与内置快照口径一致。
+        None => Vec::new(),
+    };
+    json!({
+        "id": id,
+        "name": entry.get("name").and_then(Value::as_str).unwrap_or(id),
+        "description": entry.get("description").and_then(Value::as_str).unwrap_or(""),
+        "official": entry.get("official").and_then(Value::as_bool).unwrap_or(false),
+        "version": version,
+        "page": manifest.get("homepage").and_then(Value::as_str),
+        "homepage": manifest.get("homepage").and_then(Value::as_str),
+        "icon": resolve_store_icon(
+            entry.get("icon").and_then(Value::as_str),
+            Some(UPSTREAM_INDEX_RAW_BASE),
+        ),
+        // 分类元数据（A2A index.json：category / tags / requireSigned）
+        // 透传，供前端渲染 Wasm / 需签名徽标。
+        "category": entry.get("category").cloned().unwrap_or(Value::Null),
+        "requireSigned": entry.get("requireSigned").and_then(Value::as_bool).unwrap_or(false),
+        "tags": entry.get("tags").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "platforms": platforms,
+        // 清单声明的 provider（缺失插件横幅用来把隐藏账号映射到可安装包）
+        "providers": manifest.get("providers").cloned().unwrap_or(Value::Array(Vec::new())),
+    })
+}
+
 /// 上游索引仓库 raw 基址：`index.json` 的 `icon` 是**仓内相对路径**
 /// （如 `icons/agent2api-wasm-kiro.svg`）。
 const UPSTREAM_INDEX_RAW_BASE: &str =
@@ -1470,7 +1681,6 @@ async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
     let index: Value = resp.json().await.ok()?;
     let entries = index.get("plugins").and_then(Value::as_array)?;
 
-    let triple = current_target_triple();
     let mut items: Vec<Value> = Vec::new();
     for entry in entries {
         let id = entry.get("id").and_then(Value::as_str)?;
@@ -1492,60 +1702,7 @@ async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let version = manifest
-            .get("version")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let release = manifest.get("release");
-        let repo = release
-            .and_then(|r| r.get("repo"))
-            .and_then(Value::as_str)
-            .unwrap_or(UPSTREAM_RELEASE_REPO);
-        let tag = release
-            .and_then(|r| r.get("tag"))
-            .and_then(Value::as_str)
-            .unwrap_or("v{version}")
-            .replace("{version}", version);
-        // 组装成 `normalize_store_plugin` 能识别的源格式：当前平台一条 platforms
-        let platforms: Vec<Value> = match triple {
-            Some(t) => {
-                let asset = format!("{id}-{version}-{t}.zip");
-                let url = format!("https://github.com/{repo}/releases/download/{tag}/{asset}");
-                let (size, sha) = upstream_asset_meta(id, t);
-                vec![json!({
-                    "target": std::env::consts::OS,
-                    "size": size,
-                    "url": url,
-                    "current": false,
-                    "sha256": sha,
-                })]
-            }
-            // 无对应平台（如 wasm 三元组匹配不到常规平台）→ 空 platforms，
-            // 前端渲染「当前平台暂无包」，与内置快照口径一致。
-            None => Vec::new(),
-        };
-        let item = json!({
-            "id": id,
-            "name": entry.get("name").and_then(Value::as_str).unwrap_or(id),
-            "description": entry.get("description").and_then(Value::as_str).unwrap_or(""),
-            "official": entry.get("official").and_then(Value::as_bool).unwrap_or(false),
-            "version": version,
-            "page": manifest.get("homepage").and_then(Value::as_str),
-            "homepage": manifest.get("homepage").and_then(Value::as_str),
-            "icon": resolve_store_icon(
-                entry.get("icon").and_then(Value::as_str),
-                Some(UPSTREAM_INDEX_RAW_BASE),
-            ),
-            // 分类元数据（A2A index.json：category / tags / requireSigned）
-            // 透传，供前端渲染 Wasm / 需签名徽标。
-            "category": entry.get("category").cloned().unwrap_or(Value::Null),
-            "requireSigned": entry.get("requireSigned").and_then(Value::as_bool).unwrap_or(false),
-            "tags": entry.get("tags").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
-            "platforms": platforms,
-            // 清单声明的 provider（缺失插件横幅用来把隐藏账号映射到可安装包）
-            "providers": manifest.get("providers").cloned().unwrap_or(Value::Array(Vec::new())),
-        });
-        items.push(item);
+        items.push(upstream_catalog_item(id, entry, &manifest));
     }
     if items.is_empty() {
         return None;
@@ -1569,10 +1726,11 @@ fn upstream_asset_meta(id: &str, triple: &str) -> (u64, Value) {
     }
 }
 
-/// 发布目录：从 `config.toml [plugins] source_url` 拉取（10s 超时）。
+/// 发布目录（`GET /api/plugins` 用）：带 TTL 缓存 + 单飞。
 ///
-/// 未配置 / 拉取失败 / 返回内容无法识别 → `available:false` + 中文
-/// reason（`error:true`，前端渲染降级态而不是空目录白屏）。
+/// 前端有在途操作时每 2s 轮询列表，不应每次都打上游。成功结果缓存 60s、
+/// 不可用态 10s；并发请求只发一次（见 `CatalogCache`）。配置的
+/// `source_url` 变化视为未命中。
 async fn fetch_catalog(state: &AppState) -> Value {
     let source_url = state
         .config_manager
@@ -1582,6 +1740,45 @@ async fn fetch_catalog(state: &AppState) -> Value {
         .source_url
         .trim()
         .to_string();
+    let fetch_state = state.clone();
+    let fetch_source = source_url.clone();
+    state
+        .plugin_host
+        .catalog_cache()
+        .get_or_fetch(&source_url, false, move || async move {
+            fetch_catalog_uncached(&fetch_state, &fetch_source).await
+        })
+        .await
+}
+
+/// 发布目录（`GET /api/plugins/release` 刷新语义）：强制绕过 TTL，重新拉取。
+///
+/// 仍会把新结果写回缓存，后续列表请求直接命中新值。
+async fn refresh_catalog(state: &AppState) -> Value {
+    let source_url = state
+        .config_manager
+        .get()
+        .await
+        .plugins
+        .source_url
+        .trim()
+        .to_string();
+    let fetch_state = state.clone();
+    let fetch_source = source_url.clone();
+    state
+        .plugin_host
+        .catalog_cache()
+        .get_or_fetch(&source_url, true, move || async move {
+            fetch_catalog_uncached(&fetch_state, &fetch_source).await
+        })
+        .await
+}
+
+/// 发布目录的实际拉取（无缓存）。`source_url` 由调用方预先从配置读出。
+///
+/// 未配置 / 拉取失败 / 返回内容无法识别 → `available:false` + 中文
+/// reason（`error:true`，前端渲染降级态而不是空目录白屏）。
+async fn fetch_catalog_uncached(state: &AppState, source_url: &str) -> Value {
     if source_url.is_empty() {
         // 未配置源 → 优先从上游 index.json **动态拉取**（运维看到上游实际有哪些包、
         // 上游新增自动出现）；动态拉取失败（断网/限流）→ 回落内置快照（开箱可见）。
@@ -1593,7 +1790,7 @@ async fn fetch_catalog(state: &AppState) -> Value {
     }
     let resp = match state
         .http_client
-        .get(&source_url)
+        .get(source_url)
         .timeout(CATALOG_TIMEOUT)
         .send()
         .await
@@ -1608,7 +1805,7 @@ async fn fetch_catalog(state: &AppState) -> Value {
         Ok(v) => v,
         Err(e) => return catalog_unavailable(&format!("插件源返回内容无法解析: {e}")),
     };
-    match normalize_catalog(&body, std::env::consts::OS, source_base(&source_url)) {
+    match normalize_catalog(&body, std::env::consts::OS, source_base(source_url)) {
         Some(v) => v,
         None => catalog_unavailable("插件源返回内容无法识别（期望 JSON 对象，含 plugins 数组）"),
     }
@@ -2175,7 +2372,7 @@ pub async fn handle_refresh_plugin_release(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     Ok(Json(
-        json!({ "success": true, "data": fetch_catalog(&state).await }),
+        json!({ "success": true, "data": refresh_catalog(&state).await }),
     ))
 }
 
@@ -2653,6 +2850,210 @@ mod tests {
             "https://github.com/Agent2Builder/agent2api-providers-releases/releases/download/\
              v3.5.0-beta.1/agent2api-providers-3.5.0-beta.1-x86_64-unknown-linux-gnu.zip"
         );
+    }
+
+    /// 线上 404 根因回归：wasm 包 manifest 声明 `wasm32-unknown-unknown` 与
+    /// 自定义 `release.asset` 模板时，URL 必须用 wasm 资产（而非本机 triple），
+    /// 但 `platforms[].target` 仍填 OS（前端按 OS 才显示「下载」）。
+    #[test]
+    fn upstream_catalog_item_uses_manifest_platform_for_wasm() {
+        let entry = json!({
+            "id": "agent2api-wasm-accio-cn",
+            "name": "Accio CN",
+            "manifest": "plugins/agent2api-wasm-accio-cn.json",
+        });
+        let manifest = json!({
+            "version": "0.1.0-beta.1",
+            "platforms": ["wasm32-unknown-unknown"],
+            "release": {
+                "repo": "Agent2Builder/agent2api-wasm-releases",
+                "tag": "wasm-accio-cn-v{version}",
+                "asset": "{id}-{version}-{target}.zip"
+            }
+        });
+        let item = upstream_catalog_item("agent2api-wasm-accio-cn", &entry, &manifest);
+        let platform = &item["platforms"][0];
+        assert_eq!(platform["target"], std::env::consts::OS);
+        let url = platform["url"].as_str().unwrap();
+        assert!(
+            url.ends_with("-wasm32-unknown-unknown.zip"),
+            "wasm 包应使用 manifest 声明的 wasm triple: {url}"
+        );
+        assert!(
+            url.contains("wasm-accio-cn-v0.1.0-beta.1"),
+            "tag 模板应替换 {{version}}: {url}"
+        );
+        // wasm 资产表里没有对应行 → size=0 / sha=null（不阻断下载）
+        assert_eq!(platform["size"], 0);
+        assert!(platform["sha256"].is_null());
+    }
+
+    /// 原生 manifest：本机 triple 在 platforms 里 → 仍走本机资产；
+    /// 无 `platforms` 的老 manifest → 回退本机 triple（保持旧行为）。
+    #[test]
+    fn upstream_catalog_item_keeps_host_triple_for_native_and_legacy() {
+        let Some(host_triple) = current_target_triple() else {
+            return; // 非常规平台：本函数本就回退空 platforms，跳过
+        };
+        let entry = json!({ "id": "agent2api-providers", "name": "Providers" });
+        let native = json!({
+            "version": "3.4.2",
+            "platforms": [host_triple],
+            "release": { "tag": "v{version}" }
+        });
+        let item = upstream_catalog_item("agent2api-providers", &entry, &native);
+        let url = item["platforms"][0]["url"].as_str().unwrap();
+        assert!(
+            url.ends_with(&format!("-{host_triple}.zip")),
+            "原生包应走本机 triple: {url}"
+        );
+        assert_eq!(item["platforms"][0]["target"], std::env::consts::OS);
+
+        // 老 manifest 不声明 platforms
+        let legacy = json!({ "version": "3.4.2", "release": { "tag": "v{version}" } });
+        let item = upstream_catalog_item("agent2api-providers", &entry, &legacy);
+        let url = item["platforms"][0]["url"].as_str().unwrap();
+        assert!(
+            url.ends_with(&format!("-{host_triple}.zip")),
+            "老 manifest 回退本机 triple: {url}"
+        );
+    }
+
+    /// 列表热路径缓存：连续 N 次视图只读一次 `pack.json` / 图标文件；
+    /// 删除图标文件（pack.json 未变）仍命中缓存；重写 pack.json（size 变化）
+    /// 自动失效。
+    #[test]
+    fn pack_view_cache_avoids_repeated_disk_reads() {
+        let (host, root) = temp_host();
+        let meta = cache_test_meta();
+        let version_dir = meta.version_dir(&root);
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("pack.json"),
+            r#"{"description":"cached","icons":"logo.svg","ui":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(version_dir.join("logo.svg"), b"<svg/>").unwrap();
+
+        for _ in 0..25 {
+            let view = external_pack_view(&meta, &host);
+            assert_eq!(view["description"], "cached");
+            assert!(view["icon"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/svg+xml;base64,"));
+        }
+        let (icon_hits, icon_misses) = host.view_cache().icon_stats();
+        assert_eq!(icon_misses, 1, "25 次视图只应读 1 次图标文件");
+        assert_eq!(icon_hits, 24);
+        let (manifest_hits, manifest_misses) = host.view_cache().manifest_stats();
+        assert_eq!(manifest_misses, 1, "25 次视图只应读 1 次 pack.json");
+        assert_eq!(manifest_hits, 24);
+        assert_eq!(host.view_cache().icon_len(), 1);
+        assert_eq!(host.view_cache().manifest_len(), 1);
+
+        // 行为反证：图标文件删掉但 pack.json 未动 → 仍命中缓存（没有重新读盘）
+        std::fs::remove_file(version_dir.join("logo.svg")).unwrap();
+        assert!(external_pack_view(&meta, &host)["icon"].as_str().is_some());
+
+        // 失效：pack.json 内容变化（size 不同）→ 新指纹，重新解析
+        std::fs::write(
+            version_dir.join("pack.json"),
+            r#"{"description":"changed-after-rewrite"}"#,
+        )
+        .unwrap();
+        let view = external_pack_view(&meta, &host);
+        assert_eq!(view["description"], "changed-after-rewrite");
+        // 图标声明已移除且文件不存在 → 回落 None
+        assert!(view["icon"].is_null());
+    }
+
+    /// Micro-benchmark（打印计时，不做时间断言）：直读 vs 缓存的 N 次耗时。
+    #[test]
+    fn micro_bench_pack_view_cache() {
+        let (host, root) = temp_host();
+        let meta = cache_test_meta();
+        let version_dir = meta.version_dir(&root);
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("pack.json"),
+            r#"{"description":"bench","icons":"logo.png","ui":[]}"#,
+        )
+        .unwrap();
+        // 64 KiB 图标：base64 编码是每次请求的主要成本
+        std::fs::write(version_dir.join("logo.png"), vec![0x89u8; 64 * 1024]).unwrap();
+
+        // 预热缓存
+        let _ = manifest_extras_for(&host, &meta);
+        let _ = pack_icon_for(&host, &meta, Some("logo.png"));
+
+        let iterations = 200usize;
+        let raw_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let extras = manifest_extras(&version_dir);
+            let icon = pack_icon(&version_dir, Some("logo.png"));
+            std::hint::black_box((extras, icon));
+        }
+        let raw = raw_start.elapsed();
+
+        let cached_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let extras = manifest_extras_for(&host, &meta);
+            let icon = pack_icon_for(&host, &meta, Some("logo.png"));
+            std::hint::black_box((extras, icon));
+        }
+        let cached = cached_start.elapsed();
+
+        eprintln!(
+            "[bench] {iterations} 次 manifest+icon: 直读={raw:?}, 缓存={cached:?} \
+             (约 {:.1}x)",
+            raw.as_secs_f64() / cached.as_secs_f64().max(f64::EPSILON)
+        );
+        assert!(
+            cached < raw,
+            "缓存路径应快于每次读盘+base64（直读={raw:?}, 缓存={cached:?}）"
+        );
+    }
+
+    /// 缓存测试用的管理器（独立临时目录，互不干扰）。
+    fn temp_host() -> (PluginHostManager, std::path::PathBuf) {
+        let store = temp_store();
+        let registry = Arc::new(crate::plugin_host::registry::PackRegistry::new(
+            store.clone(),
+        ));
+        registry.load().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "aigx-viewcache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let host = PluginHostManager::new(
+            registry,
+            root.clone(),
+            crate::test_http_client(),
+            crate::plugin_host::process::HostEnv::default(),
+            Arc::new(crate::account_session::AccountSessionStore::new(
+                store.clone(),
+            )),
+            store,
+        );
+        (host, root)
+    }
+
+    fn cache_test_meta() -> PackMeta {
+        PackMeta {
+            id: "cache-pack".into(),
+            name: "Cache Pack".into(),
+            version: "1.0.0".into(),
+            protocol: 1,
+            entry: "bin/plugin".into(),
+            enabled: true,
+            ..Default::default()
+        }
     }
 
     /// 发布条目与资产表必须双向对齐：改名后遗留的单边条目会让某平台永远空目录。

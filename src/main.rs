@@ -906,6 +906,32 @@ async fn main() -> anyhow::Result<()> {
         maintenance: std::sync::Arc::new(crate::maintenance::Maintenance::new(store.clone())),
     };
 
+    // 插件 `models_changed` 通知 → 去抖后按 provider 刷新插件账号模型目录
+    // （对齐上游 `model_sync::notify`；触发器是进程级 OnceLock，只能装一次）。
+    {
+        let notify_state = state.clone();
+        crate::plugin_host::model_catalog::install_models_changed_trigger(std::sync::Arc::new(
+            move |provider: &str, _account: &str| {
+                let state = notify_state.clone();
+                let provider = provider.to_string();
+                tokio::spawn(async move {
+                    match crate::api::admin::account_sessions::sync_plugin_provider_catalog(
+                        &state, &provider,
+                    )
+                    .await
+                    {
+                        Ok(count) => tracing::debug!(
+                            "[models_changed] {provider} 目录已刷新（{count} 个模型）"
+                        ),
+                        Err(error) => {
+                            tracing::warn!("[models_changed] {provider} 目录刷新失败: {error}")
+                        }
+                    }
+                });
+            },
+        ));
+    }
+
     // 工具服务 / 维护启动期初始化（装载已存配置；未配置时用内置默认）
     crate::tool_services::init(state.alert_store.clone());
     crate::maintenance::init(state.alert_store.clone());

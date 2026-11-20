@@ -428,7 +428,11 @@ pub(crate) async fn handle_chat_completions(
     // 改写在上面，之后不再有 `&mut chat_req`。
     let chat_req = Arc::new(chat_req);
 
-    let ctx = BridgeContext::new(request_id.clone(), model.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model.clone()).with_client_headers(
+        headers
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
+    );
 
     // 在途请求登记：管理员可在日志页看到这条请求并终止它。
     // guard 在函数返回时 drop → 自动注销（成功 / 失败 / 客户端断连三条路径都覆盖）。

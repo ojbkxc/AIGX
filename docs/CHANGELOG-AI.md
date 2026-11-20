@@ -1,3 +1,44 @@
+## 2026-11-21 · 插件体系深挖对齐 + 热路径优化（1.0.76）
+
+### 插件安装（线上 404 修复）
+- **wasm 插件下载 404**：上游 manifest 声明 `platforms: ["wasm32-unknown-unknown"]` 与
+  `release.asset/tag` 模板时，网关此前用宿主 triple 拼 URL（`…-x86_64-unknown-linux-gnu.zip`），
+  必然 404。现按 manifest 选目标（本机 → `wasm32-*` → 回退本机）、按 `release.asset/tag`
+  模板渲染 `{id}/{version}/{target}`；wasm 条目 `platforms[].target` 仍填宿主 OS（跨平台运行），
+  原生/老 manifest 行为不变；下载失败错误附带 URL。单测覆盖 wasm 与原生两种形态。
+
+### 插件热路径性能
+- `pack_icon` / `manifest_extras` 加进程内 `PluginViewCache`（256 条 FIFO，key 含
+  `pack.json` 的 mtime+size，重装自动失效）；`GET /api/plugins` 轮询不再每包读盘 + base64。
+  实测 200 次视图 340ms → 46ms（≈7.3x）；25 次视图 manifest/icon 各 miss 1、hit 24。
+- 发布目录 `CatalogCache`：成功 TTL 60s / 错误 10s、tokio 锁单飞、`source_url` 变化即失效；
+  `GET /api/plugins/release` 强制绕过 TTL 并回写。实测冷启 8 并发只拉 1 次上游（墙钟≈单次），
+  热态 20 次 GET 合计 325ms。
+
+### 宿主契约（对齐 Agent2API）
+- `ProviderInfo` 补齐 `capabilities`（未知位 `flatten` 保留）/`admin_panels`/`account_features`/
+  `checkin`/`default_models`/`refusal_finishes`/`refusal_markers`；列表顶层 `adminPanels` /
+  `accountFeatures` 由运行期 `summary_json` 聚合（不再恒空）。
+- `models_changed` 通知 → 500ms 去抖 → 按 provider 刷新插件账号模型目录（`main.rs` 装触发器，
+  `account_sessions::sync_plugin_provider_catalog`）；6 条连发合并为 1 次。
+- `login.callback` 补 `code`（query `code` → `authorization_code` → 回落整串）。
+- 插件 `conversation` 转发真实客户端 headers（小写化）与 `x-session-id`（空/超 256 归一），
+  7 处数据面 `BridgeContext::with_client_headers(...)` 接线。
+
+### 插件页 UI
+- 商店卡片补「Wasm」「需签名」徽标；更新日志弹窗；更多菜单「全部更新(n)」；
+  脚本 `/scripts/settings`（providerOptions 逐家开关 + 高级 JSON，失败降级 `/options`）；
+  「从 npm/GitHub 安装」手动弹窗；「检查更新」串联 `/scripts/check`；诊断补可选更新/隐藏账号/
+  包体积上限；`PluginIcon` memo + `decoding=async`，两面板按 payload 签名跳过重渲染。
+
+### 测试
+- 修测试 flake 根因：临时目录 `temp_dir + PID + seq` 在 PID 复用时读到上次残留，
+  已在 `registry.rs` / `install.rs` / `wasm/native.rs` 的 helper 先清目录再建。
+  全量并行连跑 3 次 2344 passed / 0 failed。
+
+验证：cargo test 2344 passed；fmt + clippy 0；tsc/eslint 0；vitest 166；i18n 0；
+plugins e2e desktop 10/10 + mobile 10/10；wasm URL 实测 200；冷启单飞与缓存命中实测。
+
 ## 2026-11-20 · 充值/兑换倍率全局化 + 破甲预设修复 + 社区插件对齐（1.0.75）
 
 ### 充值 / 兑换倍率（1 元 = ? 额度）

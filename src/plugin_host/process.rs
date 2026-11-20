@@ -81,15 +81,105 @@ pub fn host_target_triple() -> String {
     }
 }
 
+/// 插件申报的**运行时能力位**（对齐上游 `provider-protocol::ProviderCapabilities`）。
+///
+/// 这些位决定数据面走哪条路径（对话 / 续期 / 模型刷新 / 用量 / 签到），
+/// 以前只保留 `id`/`label` 会把插件的声明整块丢掉。全部 `bool` 且
+/// `serde(default)`：旧插件不申报时保持 `false`，不改变既有行为。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProviderCapabilities {
+    pub chat: bool,
+    pub stateful: bool,
+    pub refresh: bool,
+    pub model_refresh: bool,
+    pub usage: bool,
+    pub web_login: bool,
+    pub sse_model_rewrite: bool,
+    pub sse_strip_newline_chunks: bool,
+    pub anonymous_default_session: bool,
+    pub system_proxy_when_unset: bool,
+    pub refresh_uses_account: bool,
+    pub supports_default_model: bool,
+    pub env_credentials: bool,
+    pub checkin: bool,
+    pub claims: bool,
+    /// 新插件声明的、网关暂不认识的能力位（原样保留，不丢）。
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 /// 插件申报的一家 provider。
 ///
-/// `serde(default)` 让未知字段自然落到默认值——插件可能申报更多元数据
-/// （能力位、模型列表等），网关不强制校验。
+/// 字段与上游 `provider-protocol::ProviderInfo` 对齐（`id`/`label` 之外的
+/// 能力位、管理面板、账号行渲染参数、默认模型等）。上游用强类型枚举表达
+/// `admin_panels`/`account_features`/`checkin`；AIGX 不消费这些结构的内部
+/// 语义（没有对应面板渲染器），故以 `serde_json::Value` 原样承接，
+/// **至少不再在握手阶段丢弃**，管理面可按下标原样透出。
+///
+/// `serde(default)` 让未知字段自然落到默认值——插件可能申报更多元数据，
+/// 网关不强制校验（未来字段落到 `ProviderCapabilities::extra` 或结构体
+/// 之外时仍不报错）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct ProviderInfo {
     pub id: String,
     pub label: String,
+    /// 运行时能力位（对话 / 续期 / 模型刷新 / 用量 / 登录 / 签到）。
+    pub capabilities: ProviderCapabilities,
+    /// 插件在网关界面声明的管理面板（上游 `AdminPanel` 枚举的字符串形态）。
+    pub admin_panels: Vec<serde_json::Value>,
+    /// 账号行渲染参数（上游 `AccountFeatures`，原样保留）。
+    pub account_features: Option<serde_json::Value>,
+    /// 签到能力（上游 `CheckinInfo`，原样保留）。
+    pub checkin: Option<serde_json::Value>,
+    /// 握手里申报的默认模型清单（上游 `default_models`）。
+    pub default_models: Vec<String>,
+    /// 拒答收尾标记（上游 `refusal_finishes`）。
+    pub refusal_finishes: Vec<String>,
+    /// 正文配额耗尽标记（上游 `refusal_markers`）。
+    pub refusal_markers: Vec<String>,
+}
+
+impl ProviderInfo {
+    /// 能力位的 JSON 形态（管理面透出用；与上游字段名一致）。
+    pub fn capabilities_json(&self) -> serde_json::Value {
+        serde_json::to_value(&self.capabilities).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// 管理面面板 id 列表（只取能表示成字符串的项）。
+    pub fn admin_panel_ids(&self) -> Vec<String> {
+        self.admin_panels
+            .iter()
+            .filter_map(|panel| match panel {
+                serde_json::Value::String(id) => Some(id.clone()),
+                other => other
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string),
+            })
+            .collect()
+    }
+
+    /// 管理面 provider 摘要（列表 / 文档 / 设置面共用）。
+    ///
+    /// 上游 `ProviderInfo` 声明但 AIGX 无对应渲染器的字段原样透出，调用方
+    /// 按需取用，不再出现「插件申报了能力、网关却只回 id/label」。
+    ///
+    /// 消费方在管理面（`api/admin/plugins.rs` 的 `adminPanels` /
+    /// `accountFeatures` 注入点与 `provider_settings::snapshot`），本模块只
+    /// 负责补齐结构并冻结形状。
+    pub fn summary_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "label": self.label,
+            "capabilities": self.capabilities_json(),
+            "adminPanels": self.admin_panel_ids(),
+            "accountFeatures": self.account_features,
+            "checkin": self.checkin,
+            "defaultModels": self.default_models,
+        })
+    }
 }
 
 /// 进程状态。
@@ -475,5 +565,57 @@ mod tests {
         let v: ProviderInfo = serde_json::from_str(r#"{"id":"kiro"}"#).unwrap();
         assert_eq!(v.id, "kiro");
         assert_eq!(v.label, "");
+        assert_eq!(v.capabilities, ProviderCapabilities::default());
+        assert!(v.admin_panels.is_empty());
+        assert!(v.account_features.is_none());
+    }
+
+    /// 上游声明的能力位 / 管理面板 / 账号行参数 / 默认模型必须完整保留，
+    /// 不能再像旧实现那样只留 id/label。
+    #[test]
+    fn provider_info_preserves_upstream_declarations() {
+        let raw = serde_json::json!({
+            "id": "kiro",
+            "label": "Kiro",
+            "capabilities": {
+                "chat": true,
+                "refresh": true,
+                "model_refresh": true,
+                "web_login": true,
+                "checkin": true,
+                "claims": true,
+                "new_future_flag": true
+            },
+            "admin_panels": ["daily_keepalive", {"id": "growth_tasks"}],
+            "account_features": { "balance": true, "region_suffix": "cn" },
+            "checkin": { "daily": true, "onboarding": false },
+            "default_models": ["claude-3-7-sonnet", "claude-3-5-haiku"],
+            "refusal_finishes": ["refusal"],
+            "refusal_markers": ["quota exhausted"]
+        });
+        let info: ProviderInfo = serde_json::from_value(raw).unwrap();
+        assert!(info.capabilities.chat);
+        assert!(info.capabilities.model_refresh);
+        assert!(info.capabilities.web_login);
+        // 网关暂不认识的新能力位落到 extra，不丢
+        assert_eq!(
+            info.capabilities.extra.get("new_future_flag"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            info.admin_panel_ids(),
+            vec!["daily_keepalive", "growth_tasks"]
+        );
+        assert_eq!(info.account_features.as_ref().unwrap()["balance"], true);
+        assert_eq!(info.default_models.len(), 2);
+        assert_eq!(info.refusal_markers, vec!["quota exhausted".to_string()]);
+
+        // 摘要面：列表 / 文档 / 设置页可取到能力位与面板
+        let summary = info.summary_json();
+        assert_eq!(summary["id"], "kiro");
+        assert_eq!(summary["capabilities"]["chat"], true);
+        assert_eq!(summary["adminPanels"][0], "daily_keepalive");
+        assert_eq!(summary["accountFeatures"]["region_suffix"], "cn");
+        assert_eq!(summary["defaultModels"][1], "claude-3-5-haiku");
     }
 }

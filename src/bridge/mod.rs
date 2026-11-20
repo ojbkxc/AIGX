@@ -394,6 +394,12 @@ pub struct BridgeContext {
     pub account_id: Option<String>,
     pub api_token: Option<String>,
     pub deadline: Option<Duration>,
+    /// 客户端入站头（**已小写化**的头名 → 值）。
+    ///
+    /// 数据面在构造上下文时填入；插件桥把它们原样转发给插件（上游
+    /// `forward_conversation` 的 `headers` 字段），并从中取 `x-session-id`
+    /// 作为会话 id。未填 = 无客户端头（`headers` 发空对象，与旧行为一致）。
+    pub client_headers: Option<Arc<std::collections::BTreeMap<String, String>>>,
     /// 请求发出时刻（Unix 毫秒），创建时填入。用于计算首字节延迟。
     pub request_start_ms: Arc<std::sync::Mutex<Option<u64>>>,
     /// 首字节延迟（TTFB，毫秒）。`traced_response` 收到响应时填入。
@@ -409,6 +415,7 @@ impl BridgeContext {
             account_id: None,
             api_token: None,
             deadline: None,
+            client_headers: None,
             request_start_ms: Arc::new(std::sync::Mutex::new(Some(now_ms))),
             first_response_ms: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -416,6 +423,36 @@ impl BridgeContext {
 
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = Some(deadline);
+        self
+    }
+
+    /// 挂上客户端入站头（插件桥转发时原样带给插件）。
+    ///
+    /// 头名统一小写化（与 HTTP/2 / 上游协议一致）：插件按小写键查，
+    /// 网关按小写键给——两边各写一套大小写规则会表现为「插件收不到某个头」
+    /// 且没有任何报错。
+    ///
+    /// 数据面接线（`api/openai/*` 在构造 [`BridgeContext`] 时把入站
+    /// `HeaderMap` 转换后挂上）在下一批处理——本批只把字段/转发路径打通，
+    /// 插件侧已能接收 `headers` 与 `session`。
+    #[allow(dead_code)] // 结构先就位；数据面接线见上方说明
+    pub fn with_client_headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let map: std::collections::BTreeMap<String, String> = headers
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let name = name.as_ref().trim();
+                if name.is_empty() {
+                    return None;
+                }
+                Some((name.to_ascii_lowercase(), value.as_ref().to_string()))
+            })
+            .collect();
+        self.client_headers = Some(Arc::new(map));
         self
     }
 }

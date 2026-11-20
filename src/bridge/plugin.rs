@@ -160,6 +160,43 @@ pub struct PluginBridge {
     provider: String,
 }
 
+/// 转发给插件的客户端头（小写名 → 值）。
+///
+/// 与上游 `forward_conversation` 的 `headers_json` 同口径：头名统一小写
+/// （协议约定，HTTP/2 同款），不可转为字符串的头直接跳过。上下文未填
+/// 任何头时回空对象——上游该字段无 serde 默认，必须存在。
+fn forwarded_headers(ctx: &BridgeContext) -> Value {
+    let Some(headers) = ctx.client_headers.as_ref() else {
+        return json!({});
+    };
+    let mut map = serde_json::Map::with_capacity(headers.len());
+    for (name, value) in headers.iter() {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        map.insert(name.to_ascii_lowercase(), Value::String(value.to_string()));
+    }
+    Value::Object(map)
+}
+
+/// 客户端会话 id：`x-session-id`（空 / 超 256 字符一律当「无会话」，
+/// 与上游 `session_of` / 内置家同口径——超长截断会让不同会话碰撞）。
+fn forwarded_session(ctx: &BridgeContext) -> String {
+    let Some(headers) = ctx.client_headers.as_ref() else {
+        return String::new();
+    };
+    let value = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-session-id"))
+        .map(|(_, value)| value.trim())
+        .unwrap_or("");
+    if value.is_empty() || value.chars().count() > 256 {
+        return String::new();
+    }
+    value.to_string()
+}
+
 impl PluginBridge {
     /// 原生插件桥。
     pub fn new(process: Arc<PluginProcess>, provider: String) -> Self {
@@ -192,7 +229,8 @@ impl PluginBridge {
         &self,
         req: &ChatFormat,
     ) -> Result<ConversationStream, BridgeError> {
-        self.open_conversation(req).await
+        let ctx = BridgeContext::new("plugin-test", &req.model);
+        self.open_conversation(req, &ctx).await
     }
 
     /// 发起一次 conversation 流式调用。
@@ -204,17 +242,22 @@ impl PluginBridge {
     /// 三个后端在此分派：Native/Script 走 RPC `call_stream`，Wasm 走
     /// `WasmHost::open_stream` + `ChannelSink`。产出的 [`ConversationStream`]
     /// 对上层完全同形。
-    async fn open_conversation(&self, req: &ChatFormat) -> Result<ConversationStream, BridgeError> {
+    async fn open_conversation(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ConversationStream, BridgeError> {
         let params = json!({
             "provider": self.provider,
             "account": "",
             "body": build_openai_body(req),
             // 上游 `forward_conversation` 的必填字段（无 serde 默认）：
-            // 缺失会让社区插件反序列化失败。headers 当前不可得（Bridge
-            // 接口不带 HeaderMap），发空对象；session 空 = 无显式会话。
-            "headers": {},
+            // 缺失会让社区插件反序列化失败。客户端关键头由数据面填进
+            // `BridgeContext.client_headers` 后在此原样转发；未填时发空
+            // 对象（与旧行为一致）。`session` 取 `x-session-id`。
+            "headers": forwarded_headers(ctx),
             "stream": true,
-            "session": "",
+            "session": forwarded_session(ctx),
             "wire_model": req.model,
             "proxy": Value::Null,
         });
@@ -750,9 +793,9 @@ impl Bridge for PluginBridge {
     async fn chat(
         &self,
         req: &ChatFormat,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
-        let mut call = self.open_conversation(req).await?;
+        let mut call = self.open_conversation(req, ctx).await?;
         let (_status, pending) = take_head(&mut call).await?;
 
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
@@ -792,9 +835,9 @@ impl Bridge for PluginBridge {
     async fn chat_stream(
         &self,
         req: &ChatFormat,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
-        let mut call = self.open_conversation(req).await?;
+        let mut call = self.open_conversation(req, ctx).await?;
         let (_status, pending) = take_head(&mut call).await?;
 
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
@@ -845,6 +888,40 @@ mod tests {
 
     fn parse_line(line: &str) -> LineOutcome {
         parse_sse_line(line, "fb-id", "fb-model")
+    }
+
+    /// 客户端关键头进入 conversation 的 `headers`，头名小写化。
+    #[test]
+    fn forwards_client_headers_lowercased() {
+        let ctx = BridgeContext::new("r", "m").with_client_headers([
+            ("User-Agent", "AIGX-Test/1.0"),
+            ("X-Session-Id", "sess-123"),
+            ("x-custom", "v"),
+        ]);
+        let headers = forwarded_headers(&ctx);
+        assert_eq!(headers["user-agent"], "AIGX-Test/1.0");
+        assert_eq!(headers["x-session-id"], "sess-123");
+        assert_eq!(headers["x-custom"], "v");
+        assert_eq!(forwarded_session(&ctx), "sess-123");
+    }
+
+    /// 无客户端头：`headers` 仍是对象（上游必填），`session` 空串。
+    #[test]
+    fn missing_client_headers_keeps_empty_wire_shape() {
+        let ctx = BridgeContext::new("r", "m");
+        assert_eq!(forwarded_headers(&ctx), json!({}));
+        assert_eq!(forwarded_session(&ctx), "");
+    }
+
+    /// 空 / 超长 session id 归一为空（上游同口径）。
+    #[test]
+    fn session_id_is_normalized() {
+        let long = "x".repeat(257);
+        let ctx =
+            BridgeContext::new("r", "m").with_client_headers([("x-session-id", long.as_str())]);
+        assert_eq!(forwarded_session(&ctx), "");
+        let ctx = BridgeContext::new("r", "m").with_client_headers([("x-session-id", "  ")]);
+        assert_eq!(forwarded_session(&ctx), "");
     }
 
     /// beta.3：正文/图片超插件上限 → 413 透传（UpstreamStatus），不折成

@@ -327,6 +327,8 @@ mod tests {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("aigx-packs-{}-{seq}", std::process::id()));
+        // PID 会复用：上次异常退出残留的同名目录会让「默认空」断言偶发失败
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         PackRegistry::new(Arc::new(FileStore::new(dir)))
     }

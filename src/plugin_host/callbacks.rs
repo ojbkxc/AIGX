@@ -318,19 +318,48 @@ impl CallbackHandler for PluginCallbacks {
             "notify" => {
                 let kind = text("kind");
                 // SDK 侧通知形状是 `{kind, payload}`（不是 `message`）。
-                // `models_changed` 的 payload 带 provider/account，记下来便于
-                // 排查「插件刷新了模型但网关目录没跟上」；真正的目录同步在
-                // 管理面 `models.refresh` 链路（本回调不持有宿主句柄）。
-                let detail = params
-                    .get("payload")
-                    .map(|payload| payload.to_string())
-                    .or_else(|| {
-                        params
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_default();
+                let payload = params.get("payload").cloned().unwrap_or(Value::Null);
+                // `models_changed` 不能只记日志：上游 `bootstrap.rs` 收到后会走
+                // `model_sync::notify` 刷新该 provider 的模型目录。AIGX 的等价
+                // 刷新入口在管理面（`models.refresh` / `handle_sync_account_catalog`），
+                // 通过 `model_catalog` 的去抖触发器承接——同一 provider 在窗口内
+                // 的多次通知只触发一次，避免一次探测按账号连发把刷新打爆。
+                if kind == "models_changed" {
+                    let provider = payload
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let account = payload
+                        .get("account")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if provider.is_empty() {
+                        tracing::warn!(
+                            "[plugin {} notify] models_changed 缺少 provider，忽略",
+                            self.pack_id
+                        );
+                    } else {
+                        tracing::info!(
+                            "[plugin {} notify] models_changed: {provider}/{account}",
+                            self.pack_id
+                        );
+                        super::model_catalog::notify_models_changed(&provider, &account);
+                    }
+                    return Ok(Value::Null);
+                }
+                let detail = if payload.is_null() {
+                    params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_default()
+                } else {
+                    payload.to_string()
+                };
                 // 只记插件自报的文案，不 dump 整个 params（可能夹带账号数据）
                 tracing::info!("[plugin {} notify] {kind}: {detail}", self.pack_id);
                 Ok(Value::Null)
@@ -760,6 +789,34 @@ mod tests {
             .handle("transport.capabilities", Value::Null)
             .unwrap();
         assert_eq!(got["multipart"], true);
+    }
+
+    /// `models_changed` 通知必须被接受并进入去抖刷新链路（不再是纯日志）。
+    /// 缺 provider 时只 warn，不把回调失败抛回插件。
+    #[tokio::test]
+    async fn models_changed_notify_is_accepted() {
+        let callbacks = PluginCallbacks::new(
+            "kiro-pack".to_string(),
+            Arc::new(AccountSessionStore::new(Arc::new(FileStore::new(
+                tempfile::TempDir::new().unwrap().keep(),
+            )))),
+            Arc::new(FileStore::new(tempfile::TempDir::new().unwrap().keep())),
+        );
+        let out = callbacks
+            .handle(
+                "notify",
+                json!({
+                    "kind": "models_changed",
+                    "payload": { "provider": "unit-notify-provider", "account": "acc-1" }
+                }),
+            )
+            .unwrap();
+        assert_eq!(out, Value::Null);
+        // 缺 provider：忽略但不报错
+        let out = callbacks
+            .handle("notify", json!({ "kind": "models_changed", "payload": {} }))
+            .unwrap();
+        assert_eq!(out, Value::Null);
     }
 
     #[test]

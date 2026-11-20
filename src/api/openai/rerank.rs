@@ -145,7 +145,11 @@ pub(crate) async fn handle_rerank(
         documents,
         top_n,
     };
-    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone()).with_client_headers(
+        headers
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
+    );
     // G1：rerank 计费对齐两段式——请求发起前按 query+documents 精确估算预留，
     // 完成后按上游实际 prompt token 结算；失败路径统一 release。
     let estimated_text = {

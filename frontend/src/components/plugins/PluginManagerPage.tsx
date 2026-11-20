@@ -170,14 +170,15 @@ function MoreMenu({ label, actions }: { label: string; actions: MoreAction[] }):
 
 /** 已安装原生插件卡（A2A InstalledPluginCard 的 AIGX 形态）。 */
 function InstalledPackCard({
-  pack, operation, busy, canUpdate, latestVersion, selectable, checked,
-  onToggleSelect, onEnabled, onReload, onRemove, onProviderEnabled, onOpenSettings, onUpdate,
+  pack, operation, busy, canUpdate, latestVersion, hasUpdateNotes, selectable, checked,
+  onToggleSelect, onEnabled, onReload, onRemove, onProviderEnabled, onOpenSettings, onUpdate, onNotes,
 }: {
   pack: PluginPackSummary;
   operation?: PluginOperation;
   busy: boolean;
   canUpdate: boolean;
   latestVersion?: string | null;
+  hasUpdateNotes?: boolean;
   selectable?: boolean;
   checked?: boolean;
   onToggleSelect?: () => void;
@@ -187,6 +188,7 @@ function InstalledPackCard({
   onProviderEnabled: (provider: string, enabled: boolean) => void;
   onOpenSettings: () => void;
   onUpdate: () => void;
+  onNotes: () => void;
 }): JSX.Element {
   const { t } = useTranslation();
   const [providersOpen, setProvidersOpen] = useState(false);
@@ -275,6 +277,11 @@ function InstalledPackCard({
               <ArrowDownToLine size={13} /> {t('更新')}
             </Button>
           )}
+          {hasUpdateNotes ? (
+            <Button variant="outline" size="sm" disabled={busy} onClick={onNotes}>
+              {t('查看更新日志')}
+            </Button>
+          ) : null}
           <Tooltip label={t('卸载后账号数据保留，重新安装可继续使用')}>
             <Button variant="danger" size="sm" disabled={busy} onClick={onRemove}>
               <Trash2 size={13} /> {t('卸载')}
@@ -311,7 +318,7 @@ function InstalledPackCard({
 /** 商店条目卡（A2A StorePluginCard 的 AIGX 形态）。 */
 function StorePackCard({
   item, target, catalogAvailable, catalogReason, busy, operation, selectable, checked,
-  onToggleSelect, onInstall,
+  onToggleSelect, onInstall, onNotes,
 }: {
   item: StorePlugin;
   target: string;
@@ -323,10 +330,14 @@ function StorePackCard({
   checked?: boolean;
   onToggleSelect?: () => void;
   onInstall: (item: StorePlugin) => void;
+  onNotes: () => void;
 }): JSX.Element {
   const { t } = useTranslation();
   const platform = item.platforms.find((p) => p.target === target);
   const installable = catalogAvailable && !!platform && !!item.version;
+  // Wasm 沙箱包：条目分类或标签声明（后端 index.json 原样透传）
+  const isWasm = item.category === 'wasm' || (item.tags ?? []).some((tag) => tag.toLowerCase() === 'wasm');
+  const hasNotes = Boolean(item.notes || item.page || item.homepage);
   return (
     <div className="pl-card is-store">
       <div className="pl-card-head">
@@ -348,6 +359,8 @@ function StorePackCard({
           </h3>
           <div className="pl-card-badges">
             {item.official ? <Badge tone="info">{t('官方')}</Badge> : null}
+            {isWasm ? <Badge tone="neutral">{t('Wasm')}</Badge> : null}
+            {item.requireSigned ? <Badge tone="warning">{t('需签名')}</Badge> : null}
             {item.prerelease ? <Badge tone="warning">{t('beta 版')}</Badge> : null}
             {!item.version ? <Badge tone="neutral">{t('暂未发布')}</Badge> : null}
           </div>
@@ -373,6 +386,11 @@ function StorePackCard({
           >
             <Download size={13} /> {t('下载')}
           </Button>
+          {hasNotes ? (
+            <Button variant="outline" size="sm" disabled={busy} onClick={onNotes}>
+              {t('更新日志')}
+            </Button>
+          ) : null}
           {!installable && (
             <span
               className="pl-store-hint"
@@ -409,11 +427,24 @@ export default function PluginManagerPage(): JSX.Element {
   const [fileOpen, setFileOpen] = useState(false);
   const [missingOpen, setMissingOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  /** 更新日志 / 版本详情弹窗（目录条目与已装包更新共用） */
+  const [notes, setNotes] = useState<{
+    name: string;
+    version?: string | null;
+    notes?: string | null;
+    page?: string | null;
+    homepage?: string | null;
+  } | null>(null);
   const [scriptPackages, setScriptPackages] = useState<ScriptPackageView[]>([]);
   const [scriptEntries, setScriptEntries] = useState<ScriptCatalogEntryView[]>([]);
   const [scriptHost, setScriptHost] = useState<ScriptHostView | null>(null);
   const [scriptsAvailable, setScriptsAvailable] = useState(false);
+  /** 自增计数器：页头「从 npm / GitHub 安装」触发脚本面板的手动安装弹窗 */
+  const [scriptInstallRequest, setScriptInstallRequest] = useState(0);
   const mounted = useRef(true);
+  /** 上次成功落地列表的快照签名：轮询返回同一份数据时跳过 setState，
+   *  避免在途操作期间每 2s 把整张卡片表重渲染一遍（图标是 data URI 时最贵）。 */
+  const payloadSig = useRef<string | null>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -426,7 +457,12 @@ export default function PluginManagerPage(): JSX.Element {
     try {
       const res = await api.listPlugins();
       if (!mounted.current) return;
-      setPayload(res?.data ?? null);
+      const data = res?.data ?? null;
+      const sig = data ? JSON.stringify(data) : '';
+      if (sig !== payloadSig.current) {
+        payloadSig.current = sig;
+        setPayload(data);
+      }
       setNotReady(false);
       setError('');
     } catch (err) {
@@ -435,6 +471,7 @@ export default function PluginManagerPage(): JSX.Element {
       const is404 = /404|not found/i.test(msg);
       setNotReady(is404);
       setError(is404 ? '' : msg);
+      payloadSig.current = null;
       setPayload(null);
     } finally {
       if (mounted.current) setLoading(false);
@@ -709,6 +746,7 @@ export default function PluginManagerPage(): JSX.Element {
 
   const runBatch = async (
     action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall',
+    overrideIds?: string[],
   ): Promise<void> => {
     if (batchRunning || busy) return;
     let body: Parameters<typeof api.batchPlugins>[0];
@@ -732,6 +770,7 @@ export default function PluginManagerPage(): JSX.Element {
       else if (action === 'disable') ids = selectedPacks.filter((p) => p.enabled).map((p) => p.id);
       else if (action === 'update') ids = selectedPacks.filter((p) => !!updateOf(p.id)).map((p) => p.id);
       else ids = selectedPacks.map((p) => p.id);
+      if (overrideIds) ids = overrideIds;
       if (!ids.length) {
         addToast(t('所选项没有可执行该操作的插件'), 'error');
         return;
@@ -751,6 +790,17 @@ export default function PluginManagerPage(): JSX.Element {
       setBusyId(null);
       addToast(err instanceof Error ? err.message : String(err), 'error');
     }
+  };
+
+  /** 一键更新全部可更新包（对齐 A2A「全部更新」；进度走每张卡片的 Operation）。 */
+  const runUpdateAll = (): void => {
+    const ids = packs.filter((p) => !!updateOf(p.id)).map((p) => p.id);
+    if (!ids.length) {
+      addToast(t('当前没有可更新的插件'), 'error');
+      return;
+    }
+    addToast(t('已触发 {{n}} 个插件的更新', { n: ids.length }));
+    void runBatch('update', ids);
   };
 
   const confirmBatchUninstall = (): void => {
@@ -840,11 +890,16 @@ export default function PluginManagerPage(): JSX.Element {
     if (busy) return;
     setBusyId('check');
     try {
-      const res = await api.checkPluginUpdates();
+      // 原生包与 Magpie 脚本包各有检查链路，一起问，别只查一半。
+      const [res] = await Promise.all([
+        api.checkPluginUpdates(),
+        scriptsAvailable ? api.checkScriptUpdates().catch(() => undefined) : Promise.resolve(undefined),
+      ]);
       const data = res?.data as { error?: boolean; reason?: string } | undefined;
       if (data?.error) addToast(String(data.reason || t('检查更新失败')), 'error');
       else addToast(t('已检查更新'));
       await load();
+      if (scriptsAvailable) await loadScripts();
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -858,7 +913,7 @@ export default function PluginManagerPage(): JSX.Element {
     try {
       await api.refreshPluginRelease();
       await load();
-      await loadScripts();
+      if (scriptsAvailable) await loadScripts();
       addToast(t('已刷新插件目录'));
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
@@ -868,8 +923,11 @@ export default function PluginManagerPage(): JSX.Element {
   };
 
   const openPackSettings = (pack: PluginPackSummary): void => {
-    if (!settingsRows || settingsRows.length === 0) {
-      addToast(t('后端插件设置接口尚未就绪，或该包未声明可编辑设置'), 'error');
+    // settingsRows === null = 挂载时读取失败（后端 404/网络错），给出明确提示；
+    // [] = 后端就绪但没有声明任何设置——仍然打开弹窗（弹窗自己会刷新并显示空态），
+    // 避免「点设置毫无反应」。
+    if (settingsRows === null) {
+      addToast(t('插件设置接口读取失败，请稍后重试'), 'error');
       return;
     }
     setSettingsProviders(pack.providers.map((p) => p.id));
@@ -877,6 +935,8 @@ export default function PluginManagerPage(): JSX.Element {
 
   const focusMagpie = (): void => {
     setSource('magpie');
+    // 打开脚本面板的手动安装弹窗（npm 包名 / GitHub 地址 / magpie: 前缀）
+    setScriptInstallRequest((value) => value + 1);
     window.setTimeout(() => {
       document.getElementById('pl-magpie')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 0);
@@ -901,7 +961,14 @@ export default function PluginManagerPage(): JSX.Element {
 
   // 页头「更多操作」清单（A2A PluginPageTools）：全部沿用既有 handler，
   // disabled/busy 与旧工具栏一致；未接通的动作不出现。
+  const updatableCount = packs.filter((pack) => !!updateOf(pack.id)).length;
   const moreActions: MoreAction[] = [
+    {
+      key: 'update-all',
+      label: t('全部更新（{{n}}）', { n: updatableCount }),
+      disabled: busy || batchRunning || updatableCount === 0,
+      onSelect: runUpdateAll,
+    },
     {
       key: 'check',
       label: busyId === 'check' ? t('检查中…') : t('检查更新'),
@@ -1138,6 +1205,7 @@ export default function PluginManagerPage(): JSX.Element {
                       busy={busy || op?.active === true}
                       canUpdate={!!update}
                       latestVersion={update?.latest}
+                      hasUpdateNotes={Boolean(update?.notes || update?.page)}
                       selectable={batchMode}
                       checked={selected.has(`pack:${pack.id}`)}
                       onToggleSelect={() => toggleSelect(`pack:${pack.id}`)}
@@ -1147,6 +1215,15 @@ export default function PluginManagerPage(): JSX.Element {
                       onProviderEnabled={(provider, v) => handleProviderEnabled(pack, provider, v)}
                       onOpenSettings={() => openPackSettings(pack)}
                       onUpdate={() => handleUpdate(pack)}
+                      onNotes={() =>
+                        setNotes({
+                          name: pack.name || pack.id,
+                          version: update?.latest || pack.version,
+                          notes: update?.notes,
+                          page: update?.page,
+                          homepage: pack.homepage,
+                        })
+                      }
                     />
                   );
                 })}
@@ -1163,6 +1240,15 @@ export default function PluginManagerPage(): JSX.Element {
                     checked={selected.has(`store:${item.id}`)}
                     onToggleSelect={() => toggleSelect(`store:${item.id}`)}
                     onInstall={handleInstall}
+                    onNotes={() =>
+                      setNotes({
+                        name: item.name || item.id,
+                        version: item.version,
+                        notes: item.notes,
+                        page: item.page,
+                        homepage: item.homepage,
+                      })
+                    }
                   />
                 ))}
               </div>
@@ -1171,7 +1257,7 @@ export default function PluginManagerPage(): JSX.Element {
 
           {showMagpie ? (
             <div id="pl-magpie">
-              <ScriptPluginsPanel query={search} status={status} />
+              <ScriptPluginsPanel query={search} status={status} installRequest={scriptInstallRequest} />
             </div>
           ) : null}
 
@@ -1221,6 +1307,9 @@ export default function PluginManagerPage(): JSX.Element {
                     <span>{t('协议版本')} {payload?.protocol ?? '—'}</span>
                     <span>{t('已安装包')} {packs.length}</span>
                     <span>{t('在途操作')} {operations.filter((op) => op.active).length}</span>
+                    <span>{t('可选更新')} {updatableCount}</span>
+                    <span>{t('隐藏账号')} {payload?.hiddenAccounts?.total ?? 0}</span>
+                    <span>{t('安装包体积上限')} {fmtSize(payload?.maxPackBytes ?? 0) || '—'}</span>
                     <span>
                       {t('宿主 lastError')}{' '}
                       <code>
@@ -1249,6 +1338,50 @@ export default function PluginManagerPage(): JSX.Element {
           </p>
         </>
       )}
+
+      {notes ? (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('更新日志')}
+          onClick={() => setNotes(null)}
+        >
+          <div
+            className="modal"
+            style={{ maxWidth: 560, width: '92%' }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3>
+                {t('更新日志')}
+                {notes.version ? <span className="pl-ver"> v{notes.version}</span> : null}
+              </h3>
+              <button className="modal-close" aria-label={t('关闭')} onClick={() => setNotes(null)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="pl-missing-name">{notes.name}</p>
+              {notes.notes ? (
+                <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, margin: '8px 0' }}>{notes.notes}</p>
+              ) : (
+                <p className="pl-empty-hint">{t('暂无更新日志')}</p>
+              )}
+              {notes.page || notes.homepage ? (
+                <a
+                  className="pl-page-foot"
+                  href={notes.page || notes.homepage || '#'}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t('打开更新页面')}
+                </a>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
       <ProviderSettingsDialog

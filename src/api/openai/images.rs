@@ -125,7 +125,11 @@ pub(crate) async fn handle_images_generations(
         ));
     }
 
-    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone()).with_client_headers(
+        headers
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
+    );
 
     // B06：failover 循环——依次尝试候选渠道。换渠道仅限「上游明确未
     // 完成生成」的错误（见 `images_failover_safe`：在途丢失类错误
@@ -503,7 +507,11 @@ pub(crate) async fn handle_images_edits(
         ));
     }
 
-    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone()).with_client_headers(
+        headers
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
+    );
 
     let mut result_opt = None;
     let mut used_channel_id: Option<String> = None;

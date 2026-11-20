@@ -632,6 +632,8 @@ mod tests {
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let dir =
             std::env::temp_dir().join(format!("aigx-native-grants-{}-{seq}", std::process::id()));
+        // PID 复用 + 残留目录会让「缺省为空对象」断言偶发失败
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = FileStore::new(dir.clone());
         assert_eq!(read_grants(&store), json!({}), "缺省为空对象");

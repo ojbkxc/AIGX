@@ -122,3 +122,90 @@
   margin-left: 10px;
   vertical-align: middle;
 }
+
+/* ── 配置弹窗（settingsSchema + 高级 JSON）────────────────────── */
+.pls-opt-section {
+  margin-bottom: 14px;
+}
+
+.pls-opt-heading {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.pls-opt-provider {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--border-color);
+}
+
+.pls-opt-provider:last-child {
+  border-bottom: 0;
+}
+
+.pls-opt-provider-name {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-main);
+}
+
+.pls-opt-switch-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.pls-opt-switch-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-main);
+}
+
+.pls-opt-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+.pls-opt-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px solid var(--warning-color, #d97706);
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+.pls-opt-confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.pls-opt-json {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.pls-opt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-main);
+}

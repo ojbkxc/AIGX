@@ -719,7 +719,10 @@ pub async fn download_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u
         .await
         .map_err(|e| InstallError::Download(e.to_string()))?;
     if !resp.status().is_success() {
-        return Err(InstallError::Download(format!("HTTP {}", resp.status())));
+        return Err(InstallError::Download(format!(
+            "HTTP {} ({url})",
+            resp.status()
+        )));
     }
     if let Some(len) = resp.content_length() {
         if len as usize > MAX_PACK_BYTES {
@@ -758,7 +761,10 @@ where
         .await
         .map_err(|e| InstallError::Download(e.to_string()))?;
     if !resp.status().is_success() {
-        return Err(InstallError::Download(format!("HTTP {}", resp.status())));
+        return Err(InstallError::Download(format!(
+            "HTTP {} ({url})",
+            resp.status()
+        )));
     }
     let total = resp.content_length().unwrap_or(0);
     if total as usize > MAX_PACK_BYTES {
@@ -822,6 +828,8 @@ mod tests {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let d = std::env::temp_dir().join(format!("aigx-install-{}-{seq}", std::process::id()));
+        // PID 复用 + 残留目录会让用例读到上一次的数据（并行/重跑偶发）
+        let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
     }
