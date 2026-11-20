@@ -1717,11 +1717,11 @@ pub async fn handle_set_plugin_provider_enabled(
 /// ── 包级设置（`/api/plugins/settings`）────────────────────────────
 ///
 /// A2A 的这份设置是「插件更新通道与检查计划」（通道跟随软件 / 自定义、
-/// 自动检查、间隔、正式/beta）。AIGX 的对应事实源是 `[update]` 段
-/// （`auto_check` / `include_prerelease` / `interval_hours`），所以这里做
-/// **投影**而不是另存一份：GET 出 `[update]` 的插件相关子集（含 `mode`
-/// 标记它来自全局），PATCH 写回 `[update]`。这样「插件页改了更新策略」
-/// 与「设置页改了更新策略」是同一份数据，不会分叉。
+/// 自动检查、间隔、正式/beta）。AIGX 的对应事实源是**全局检查计划**
+/// （`scheduled_tasks.updateCheck`，与「更新」页、更新调度循环同一份）与
+/// `[update]` 段的通道/自动应用，所以这里做**投影**而不是另存一份：
+/// GET 出全局子集（含 `mode` 标记它来自全局），PATCH 写回同一份事实源。
+/// 这样「插件页改了检查计划」与「更新页/设置页改了」是同一份数据，不会分叉。
 ///
 /// 键名用 A2A 的 camelCase（前端契约）：`autoCheck` / `intervalMinutes` /
 /// `beta` / `autoUpdate` / `stable` / `channelMode` / `checkMode`。
@@ -1739,20 +1739,21 @@ const PLUGIN_SETTINGS_KEYS: &[&str] = &[
     "checkMode",
 ];
 
-/// `[update]` → A2A 形状的插件设置。
-fn plugin_settings_view(config: &crate::config::UpdateConfig) -> Value {
+/// 全局检查计划 + 通道 → A2A 形状的插件设置。
+fn plugin_settings_view(config: &crate::config::AppConfig) -> Value {
+    let check = &config.scheduled_tasks.update_check;
     json!({
         // 通道与检查计划都「跟随软件」：AIGX 的更新设置是全局一份，
         // 没有独立的插件通道/计划，如实报 follow
         "channelMode": "follow",
         "checkMode": "follow",
-        "autoCheck": config.auto_check,
-        // A2A 单位是分钟；AIGX `[update]` 是小时
-        "interval": config.interval_hours.saturating_mul(60),
-        "stable": !config.include_prerelease,
-        "beta": config.include_prerelease,
+        "autoCheck": check.enabled,
+        // A2A 单位是分钟；排期也按分钟存（同一事实源，不再从小时换算）
+        "interval": check.interval,
+        "stable": !config.update.include_prerelease,
+        "beta": config.update.include_prerelease,
         // AIGX 的「自动应用」比「自动下载」激进一档：如实映射到 auto_update
-        "autoUpdate": config.auto_apply,
+        "autoUpdate": config.update.auto_apply,
     })
 }
 
@@ -1765,7 +1766,7 @@ pub async fn handle_plugin_settings(
     let config = state.config_manager.get().await;
     Ok(Json(json!({
         "success": true,
-        "data": plugin_settings_view(&config.update),
+        "data": plugin_settings_view(&config),
     })))
 }
 
@@ -1830,9 +1831,7 @@ pub async fn handle_save_plugin_settings(
         if let Some(mode) = value {
             if mode != "follow" {
                 return Err(error_response(
-                    &format!(
-                        "{key} 只支持 follow（AIGX 的更新通道与检查计划跟随全局 [update] 段）"
-                    ),
+                    &format!("{key} 只支持 follow（AIGX 的更新通道与检查计划跟随全局设置）"),
                     StatusCode::BAD_REQUEST,
                 ));
             }
@@ -1845,10 +1844,18 @@ pub async fn handle_save_plugin_settings(
             StatusCode::BAD_REQUEST,
         ));
     }
-    // 字段级读-改-写（P2）：并发保存不同 tab 时不再整包覆盖
+    // 字段级读-改-写（P2）：并发保存不同 tab 时不再整包覆盖。
+    // 检查计划写进与「更新」页/调度循环同一份 `scheduled_tasks.updateCheck`；
+    // `[update]` 的旧字段只做镜像（既有读取方仍能读到旧值）。
+    let schedule_before: std::sync::Arc<
+        parking_lot::Mutex<Option<crate::scheduled_tasks::types::IntervalTask>>,
+    > = std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let before_slot = schedule_before.clone();
     let config = super::common::update_admin_config(&state, &headers, move |config| {
+        *before_slot.lock() = Some(config.scheduled_tasks.update_check);
         if let Some(value) = patch.auto_check {
             config.update.auto_check = value;
+            config.scheduled_tasks.update_check.enabled = value;
         }
         if let Some(value) = patch.auto_update {
             config.update.auto_apply = value;
@@ -1858,22 +1865,35 @@ pub async fn handle_save_plugin_settings(
             config.update.include_prerelease = beta;
         }
         if let Some(minutes) = patch.interval_minutes {
-            if !(60..=PLUGIN_SETTINGS_MAX_MINUTES).contains(&minutes) {
-                return Err("检查间隔必须是 60 ~ 10080 分钟（1 小时 ~ 7 天）".to_string());
+            let min = crate::scheduled_tasks::types::INTERVAL_MIN_MINUTES;
+            let max = crate::scheduled_tasks::types::INTERVAL_MAX_MINUTES;
+            if !(min..=max).contains(&minutes) {
+                return Err(format!("检查间隔必须是 {min} ~ {max} 分钟"));
             }
+            config.scheduled_tasks.update_check.interval = minutes;
             config.update.interval_hours = (minutes / 60).max(1) as u64;
         }
         Ok(())
     })
     .await?;
+    // 与「定时任务」页的 configure 同一口径：开启即跑一轮 / 改间隔按新间隔重排。
+    let schedule_before = *schedule_before.lock();
+    if let Some(before) = schedule_before {
+        let after = config.scheduled_tasks.update_check;
+        if let Err(message) = crate::scheduled_tasks::on_schedule_changed(
+            &config,
+            crate::scheduled_tasks::TASK_UPDATE_CHECK,
+            before,
+            after,
+        ) {
+            tracing::warn!("[Plugins] 检查计划重排失败：{message}");
+        }
+    }
     Ok(Json(json!({
         "success": true,
-        "data": plugin_settings_view(&config.update),
+        "data": plugin_settings_view(&config),
     })))
 }
-
-/// 间隔上限（分钟）：7 天（与 A2A `INTERVAL_MAX_MINUTES` 同量级）。
-const PLUGIN_SETTINGS_MAX_MINUTES: i64 = 7 * 24 * 60;
 
 /// POST /api/plugins/reload —— 热重启一个外置包（停 → 启）。
 ///
@@ -2545,14 +2565,23 @@ mod tests {
         assert!(pack_icon(&dir, Some("no-such-icons-dir")).is_none());
     }
 
-    /// 设置投影形状：A2A camelCase 键齐、单位换算正确（小时 → 分钟）。
+    /// 设置投影形状：A2A camelCase 键齐，检查计划取全局 `scheduledTasks.updateCheck`
+    /// （与更新页同一事实源，单位本来就是分钟）。
     #[test]
     fn plugin_settings_view_shape() {
-        let config = crate::config::UpdateConfig {
-            auto_check: true,
-            auto_apply: false,
-            interval_hours: 24,
-            include_prerelease: false,
+        let config = crate::config::AppConfig {
+            update: crate::config::UpdateConfig {
+                auto_apply: false,
+                include_prerelease: false,
+                ..Default::default()
+            },
+            scheduled_tasks: crate::scheduled_tasks::types::ScheduledSettings {
+                update_check: crate::scheduled_tasks::types::IntervalTask {
+                    enabled: true,
+                    interval: 1440,
+                },
+                ..Default::default()
+            },
             ..Default::default()
         };
         let view = plugin_settings_view(&config);

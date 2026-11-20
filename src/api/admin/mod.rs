@@ -57,6 +57,7 @@ pub mod security;
 pub mod settings;
 pub mod subscriptions;
 pub mod sync;
+pub mod system_info; // 系统信息（对照 Agent2API GET /api/system-info；版本/环境/路径/开关/计数）
 pub mod tickets;
 pub mod tokens;
 // 工具服务管理面（对齐 A2A api/tools.rs、api/tool_image_admin.rs；T7 填充）
@@ -177,8 +178,8 @@ pub use notify::{handle_get_notify_config, handle_update_notify_config};
 
 pub use security::{handle_security_events, handle_security_summary};
 
-// 破甲控制台（请求治理总控：GET/PUT 配置 + 进程统计）
-pub use purge::{handle_get_purge, handle_update_purge};
+// 破甲控制台（请求治理总控：GET/PUT 配置 + 进程统计；POST 改写试跑）
+pub use purge::{handle_get_purge, handle_preview_purge, handle_update_purge};
 
 // 护栏（输入/输出黑名单 + 200 假答复门控：GET/PUT 配置 + 解除降级）
 pub use guardrail::{
@@ -191,8 +192,15 @@ pub use image_compat_api::{handle_get_image_compat_settings, handle_update_image
 // 视觉兼容设置面（对照 Agent2API /api/vision-compatibility；规则集权威 + revision CAS）
 pub use vision_compat::{handle_get_vision_compatibility, handle_update_vision_compatibility};
 
-// 面板品牌自定义（panel_name / logo_url / favicon_url；公开 GET + 管理员 GET/PUT）
-pub use branding::{handle_get_branding, handle_get_public_branding, handle_update_branding};
+// 面板品牌自定义（panel_name / logo_url / favicon_url + Logo PNG 上传；
+// 公开 GET / 公开 Logo 字节端点 + 管理员 GET/PUT）
+pub use branding::{
+    handle_get_branding, handle_get_public_branding, handle_get_public_branding_logo,
+    handle_update_branding,
+};
+
+// 系统信息（对照 Agent2API GET /api/system-info；管理员一站式环境读数）
+pub use system_info::handle_get_system_info;
 
 // 调试模式：上游原始报文查看/清空（对照 Agent2API `/api/debug/traffic`）
 pub use debug::{
@@ -236,21 +244,20 @@ pub use prompts::{handle_prompt_fetch, handle_prompt_sources, handle_prompt_tran
 pub mod legacy;
 
 pub use legacy::{
-    handle_add_account, handle_add_ip_blacklist, handle_add_ip_whitelist, handle_alert_resolve,
+    handle_add_ip_blacklist, handle_add_ip_whitelist, handle_alert_resolve,
     handle_alert_rules_list, handle_alert_rules_update, handle_alert_test, handle_alerts_active,
-    handle_alerts_history, handle_channel_chat_test, handle_channel_health, handle_delete_account,
-    handle_delete_group, handle_delete_price, handle_epay_notify, handle_epay_return,
-    handle_fetch_channel_models, handle_get_channel_balance, handle_get_exchange_rates,
-    handle_get_ip_filter, handle_get_price_sync_config, handle_get_ratelimit_config,
-    handle_list_accounts, handle_list_groups, handle_list_prices, handle_openapi_json,
-    handle_patch_channel, handle_realtime, handle_refresh_usage, handle_remove_ip_blacklist,
-    handle_remove_ip_whitelist, handle_reset_channel_circuit, handle_rotate_token,
-    handle_stripe_topup, handle_stripe_webhook, handle_swagger_ui, handle_test_account,
-    handle_test_channel, handle_test_email, handle_test_slack, handle_test_telegram,
-    handle_test_webhook, handle_tokens_today, handle_update_account, handle_update_ip_filter,
-    handle_update_price_sync_config, handle_update_ratelimit_config, handle_upsert_group,
-    handle_upsert_price_by_model, handle_usage_models, handle_usage_summary, handle_usage_trend,
-    handle_user_ranking,
+    handle_alerts_history, handle_channel_chat_test, handle_channel_health, handle_delete_group,
+    handle_delete_price, handle_epay_notify, handle_epay_return, handle_fetch_channel_models,
+    handle_get_channel_balance, handle_get_exchange_rates, handle_get_ip_filter,
+    handle_get_price_sync_config, handle_get_ratelimit_config, handle_list_accounts,
+    handle_list_groups, handle_list_prices, handle_openapi_json, handle_patch_channel,
+    handle_realtime, handle_refresh_usage, handle_remove_ip_blacklist, handle_remove_ip_whitelist,
+    handle_reset_channel_circuit, handle_rotate_token, handle_stripe_topup, handle_stripe_webhook,
+    handle_swagger_ui, handle_test_account, handle_test_channel, handle_test_email,
+    handle_test_slack, handle_test_telegram, handle_test_webhook, handle_tokens_today,
+    handle_update_ip_filter, handle_update_price_sync_config, handle_update_ratelimit_config,
+    handle_upsert_group, handle_upsert_price_by_model, handle_usage_models, handle_usage_summary,
+    handle_usage_trend, handle_user_ranking,
 };
 
 // 用户侧端点与未迁移端点（main.rs 恢复路由时需要）

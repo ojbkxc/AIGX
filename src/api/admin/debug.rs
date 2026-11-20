@@ -4,16 +4,22 @@
 //! [`crate::debug_traffic`] 的进程内环形缓冲 + FileStore 持久化；
 //! 这里做开关读取/更新与报文查看/清空。
 //! 报文只在开关开启时抓取（见 `config.usage.debug_traffic`）。
+//!
+//! `GET /api/debug/traffic?id=<请求日志 id>` 返回**单条详情**（对齐 Agent2API
+//! `api/debug_api.rs`）：列表接口只给摘要，详情按需拉，避免数百 KB 的 SSE
+//! 响应体把列表响应撑爆；详情在返回前再过一遍脱敏（防御纵深，见
+//! [`crate::debug_traffic::detail_payload`]）。
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::Json,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::verify_admin;
+use super::common::{error_response, verify_admin};
 
 /// GET /api/debug —— 读取调试模式开关状态。
 ///
@@ -62,15 +68,42 @@ pub async fn handle_update_debug(
 }
 
 /// GET /api/debug/traffic —— 读取最近抓到的上游原始报文。
+///
+/// 带 `?id=<请求日志 id>` 时返回单条详情（`data` 为 detail 对象）；
+/// 不带 id 时保持原行为（`data` 为缓冲概览 + 列表）。
 pub async fn handle_get_debug_traffic(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<TrafficQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    Ok(Json(json!({
-        "success": true,
-        "data": crate::debug_traffic::snapshot(),
-    })))
+    let id = params.id.as_deref().map(str::trim).unwrap_or_default();
+    if id.is_empty() {
+        return Ok(Json(json!({
+            "success": true,
+            "data": crate::debug_traffic::snapshot(),
+        })));
+    }
+    match crate::debug_traffic::get(id) {
+        Some(entry) => Ok(Json(json!({
+            "success": true,
+            "data": crate::debug_traffic::detail_payload(&entry),
+        }))),
+        // 404 而不是空对象：前端据此显示「该请求没有保存原始报文」，
+        // 与 Agent2API 同一文案口径（调试模式当时未开启 / 已超出保留条数）。
+        None => Err(error_response(
+            "该请求没有保存原始报文（调试模式当时未开启，或记录已超出保留条数）",
+            StatusCode::NOT_FOUND,
+        )),
+    }
+}
+
+/// `GET /api/debug/traffic` 的查询参数。
+#[derive(Debug, Default, Deserialize)]
+pub struct TrafficQuery {
+    /// 请求日志 id；缺省 = 列表概览
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// DELETE /api/debug/traffic —— 清空缓冲。

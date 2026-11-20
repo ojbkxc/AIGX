@@ -59,7 +59,7 @@ fn push_prefix(buf: &mut String, filled: &mut usize, s: &str) {
 /// `stream` 必须是已经过首事件守卫（保证首事件已到、非空挂起）的流。
 /// 中途出错时：错误原样交还下游（`Pass` 里带回错误元素），不在探测阶段吞掉——
 /// 探测只判断「拒绝」，其余失败语义仍由原有消费路径处理。
-pub async fn peek_for_refusal(mut stream: ChatChunkStream) -> Peek {
+pub async fn peek_for_refusal(mut stream: ChatChunkStream, refusal_patterns: &[String]) -> Peek {
     let mut prefix: Vec<Result<ChatChunk, BridgeError>> = Vec::with_capacity(PEEK_CHUNKS);
     let mut text = String::new();
     let mut filled = 0usize;
@@ -89,7 +89,7 @@ pub async fn peek_for_refusal(mut stream: ChatChunkStream) -> Peek {
         }
     }
 
-    if !text.is_empty() && crate::purge::looks_refusal(&text) {
+    if !text.is_empty() && crate::purge::looks_refusal_with(&text, refusal_patterns) {
         return Peek::Refused;
     }
 
@@ -127,14 +127,17 @@ mod tests {
             chunk("I'm sorry, but I can't"),
             chunk(" help with that request."),
         ]);
-        assert!(matches!(peek_for_refusal(s).await, Peek::Refused));
+        assert!(matches!(
+            peek_for_refusal(s, &crate::purge::default_refusal_patterns()).await,
+            Peek::Refused
+        ));
     }
 
     #[tokio::test]
     async fn normal_prefix_passes_through_verbatim() {
         let items = vec![chunk("Hello"), chunk(", world"), chunk("!")];
         let s = stream_of(items);
-        match peek_for_refusal(s).await {
+        match peek_for_refusal(s, &crate::purge::default_refusal_patterns()).await {
             Peek::Pass(stream) => {
                 let got: Vec<String> = stream
                     .map(|r| r.unwrap().delta.content.unwrap_or_default())
@@ -152,7 +155,7 @@ mod tests {
         let mut items: Vec<Result<ChatChunk, BridgeError>> =
             (0..PEEK_CHUNKS).map(|_| chunk("ok ")).collect();
         items.push(chunk("I'm sorry, but I can't"));
-        match peek_for_refusal(stream_of(items)).await {
+        match peek_for_refusal(stream_of(items), &crate::purge::default_refusal_patterns()).await {
             Peek::Pass(stream) => assert!(stream.count().await >= PEEK_CHUNKS),
             Peek::Refused => panic!("窗口外命中不应触发拒绝"),
         }
@@ -160,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_stream_passes_through() {
-        match peek_for_refusal(stream_of(vec![])).await {
+        match peek_for_refusal(stream_of(vec![]), &crate::purge::default_refusal_patterns()).await {
             Peek::Pass(stream) => assert_eq!(stream.count().await, 0),
             Peek::Refused => panic!("空流不应判定为拒绝"),
         }
@@ -170,7 +173,7 @@ mod tests {
     async fn error_in_prefix_is_forwarded_not_swallowed() {
         let items: Vec<Result<ChatChunk, BridgeError>> =
             vec![chunk("hi"), Err(BridgeError::StreamAborted), chunk("after")];
-        match peek_for_refusal(stream_of(items)).await {
+        match peek_for_refusal(stream_of(items), &crate::purge::default_refusal_patterns()).await {
             Peek::Pass(stream) => {
                 let got: Vec<Result<ChatChunk, BridgeError>> = stream.collect().await;
                 assert_eq!(got.len(), 3, "错误元素必须原样交还下游");

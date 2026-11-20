@@ -39,13 +39,12 @@ use super::dashboard::{resolve_window, DashboardQuery};
 use super::pricing::PriceRequest;
 use super::users::mask_user;
 
-/// 账号请求（add/update 共用）
+/// 账号请求（测试连接 / 探针 account-test 共用）
 #[derive(Debug, Deserialize)]
 pub struct AccountRequest {
     pub name: String,
     pub account_id: String,
     pub api_token: String,
-    pub status: Option<String>,
 }
 
 /// 拉取渠道模型请求
@@ -218,42 +217,6 @@ pub async fn handle_list_accounts(
     })))
 }
 
-/// POST /api/accounts - 添加账号
-pub async fn handle_add_account(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<AccountRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp();
-
-    let account = CfAccount {
-        id: id.clone(),
-        name: body.name,
-        account_id: body.account_id,
-        api_token: body.api_token,
-        status: body.status.unwrap_or_else(|| "active".to_string()),
-        last_error: None,
-        last_used_at: None,
-        created_at: now,
-    };
-
-    match state.account_pool.add(account) {
-        Ok(_) => Ok(Json(serde_json::json!({
-            "success": true,
-            "data": {
-                "id": id
-            }
-        }))),
-        Err(e) => Err(error_response(
-            &format!("Failed to add account: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
-}
-
 /// POST /api/accounts/test - 测试账号连接
 pub async fn handle_test_account(
     State(state): State<AppState>,
@@ -287,64 +250,6 @@ pub async fn handle_test_account(
         Err(e) => Err(error_response(
             &format!("Account test failed: {e}"),
             StatusCode::BAD_GATEWAY,
-        )),
-    }
-}
-
-/// PUT /api/accounts/:id - 更新账号
-pub async fn handle_update_account(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(body): Json<AccountRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-
-    let existing = state.account_pool.list().into_iter().find(|a| a.id == id);
-    let existing = match existing {
-        Some(a) => a,
-        None => return Err(error_response("Account not found", StatusCode::NOT_FOUND)),
-    };
-
-    let updated = CfAccount {
-        id: id.clone(),
-        name: body.name,
-        account_id: body.account_id,
-        api_token: body.api_token,
-        status: body.status.unwrap_or(existing.status),
-        last_error: existing.last_error,
-        last_used_at: existing.last_used_at,
-        created_at: existing.created_at,
-    };
-
-    match state.account_pool.update(&id, updated) {
-        Ok(_) => Ok(Json(serde_json::json!({
-            "success": true,
-            "data": null
-        }))),
-        Err(e) => Err(error_response(
-            &format!("Failed to update account: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
-}
-
-/// DELETE /api/accounts/:id - 删除账号
-pub async fn handle_delete_account(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-
-    match state.account_pool.remove(&id) {
-        Ok(_) => Ok(Json(serde_json::json!({
-            "success": true,
-            "data": null
-        }))),
-        Err(e) => Err(error_response(
-            &format!("Failed to delete account: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
         )),
     }
 }

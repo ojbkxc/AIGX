@@ -14,6 +14,7 @@ import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import AccountBatchDialog from '../components/AccountBatchDialog';
 import AccountSortDialog from '../components/AccountSortDialog';
+import CheckinCampaignCard from '../components/CheckinCampaignCard';
 import LimiterGroupEditor from '../components/LimiterGroupEditor';
 import { describeGroup, flatToGroups } from '../lib/limiterGroups';
 import ProxySelector from '../components/ProxySelector';
@@ -65,6 +66,14 @@ interface SessionFormState {
   extra_headers: string;
   /** 余额自动查询间隔（秒；'0' = 关闭） */
   usage_query_interval_secs: string;
+  /** 单次查询失败重试次数（A2A usageQuery.retries，0 = 不重试） */
+  usage_query_retries: string;
+  /** 单次查询超时秒数（A2A usageQuery.timeoutSeconds，15~180） */
+  usage_query_timeout_secs: string;
+  /** 余额不足处理档（A2A lowBalance.mode；'' = 缺省，按供应商推导） */
+  low_balance_mode: '' | 'off' | 'skip' | 'disable';
+  /** 余额不足阈值（skip / disable 档必填，> 0） */
+  low_balance_threshold: string;
   expires_at: string;
   clear_key: boolean;
   clear_proxy: boolean;
@@ -105,6 +114,10 @@ const EMPTY_FORM: SessionFormState = {  channel_id: '',
   models: '',
   extra_headers: '',
   usage_query_interval_secs: '0',
+  usage_query_retries: '3',
+  usage_query_timeout_secs: '60',
+  low_balance_mode: '',
+  low_balance_threshold: '',
   expires_at: '',
   clear_key: false,
   clear_proxy: false,
@@ -436,6 +449,39 @@ function hiddenReasonLabel(t: (s: string) => string, reason: string): string {
   }
 }
 
+/** 组余额汇总（分组带徽章）：按单位求和 + 不限/失败计数。
+ *  口径与后端 `groups[].balance`（counted/sum/unlimited/failed）一致；
+ *  只读行上已有的 `last_balance` 快照，不发额外请求。 */
+function groupBalanceText(rows: AccountSessionItem[]): string {
+  const sums = new Map<string, number>();
+  let unlimited = 0;
+  let failed = 0;
+  for (const row of rows) {
+    if (row.last_balance_error) {
+      failed += 1;
+      continue;
+    }
+    const balance = row.last_balance;
+    if (!balance) continue;
+    if ((balance as unknown as { unlimited?: boolean }).unlimited === true) {
+      unlimited += 1;
+      continue;
+    }
+    // available = null 表示「判不出」，不按 0 计入汇总
+    const available = balance.available;
+    const unit = String(balance.unit || '').trim();
+    if (available != null && Number.isFinite(Number(available)) && unit) {
+      sums.set(unit, (sums.get(unit) || 0) + Number(available));
+    }
+  }
+  const parts = [...sums.entries()].map(
+    ([unit, sum]) => `${Math.round(sum * 100) / 100} ${unit}`,
+  );
+  if (unlimited > 0) parts.push(`不限 ×${unlimited}`);
+  if (failed > 0) parts.push(`失败 ${failed}`);
+  return parts.join(' · ');
+}
+
 type StatusSeg = 'all' | 'enabled' | 'disabled' | 'cooling';
 type LimitSeg = 'all' | 'normal' | 'limited';
 
@@ -514,6 +560,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   const [sortDialogOpen, setSortDialogOpen] = useState(false);
   /** 隐藏账号摘要（后端账号快照 hiddenAccounts：插件没装/停用导致列表里看不到的账号） */
   const [hiddenAccounts, setHiddenAccounts] = useState<HiddenAccountsSummary | null>(null);
+  /** 逐账号福利预览弹层（复用签到中心的活动福利卡：GET /api/accounts/{id}/campaigns） */
+  const [welfareFor, setWelfareFor] = useState<AccountSessionItem | null>(null);
   /** refresh-expiring 一键刷新中 */
   const [expiringBusy, setExpiringBusy] = useState(false);
   const [form, setForm] = useState<SessionFormState>(EMPTY_FORM);
@@ -788,6 +836,17 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         .map(([k, v]) => `${k}: ${v}`)
         .join('\n'),
       usage_query_interval_secs: String(session.usage_query_interval_secs ?? 0),
+      usage_query_retries: String(session.usage_query?.retries ?? 3),
+      usage_query_timeout_secs: String(session.usage_query?.timeout_seconds ?? 60),
+      // low_balance 恒有值（后端按供应商缺省物化）；三态下拉里「缺省」= ''
+      low_balance_mode: (session.low_balance?.mode === 'off'
+        || session.low_balance?.mode === 'skip'
+        || session.low_balance?.mode === 'disable')
+        ? session.low_balance.mode
+        : '',
+      low_balance_threshold: session.low_balance && session.low_balance.mode !== 'off'
+        ? String(session.low_balance.threshold ?? '')
+        : '',
       expires_at: session.expires_at ? String(session.expires_at) : '',
       clear_key: false,
       clear_proxy: false,
@@ -940,6 +999,14 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       setError(t('该供应商需要填写上游地址'));
       return;
     }
+    // 余额不足处理：skip / disable 档必须给出 > 0 的阈值（后端同样校验）
+    if (form.low_balance_mode === 'skip' || form.low_balance_mode === 'disable') {
+      const threshold = Number(form.low_balance_threshold);
+      if (!Number.isFinite(threshold) || threshold <= 0) {
+        setError(t('余额阈值必须是大于 0 的数字'));
+        return;
+      }
+    }
     setSaving(true);
     try {
       let channelId = form.channel_id;
@@ -971,8 +1038,23 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         models: splitModels(form.models),
         extra_headers: parseHeaders(form.extra_headers),
         usage_query_interval_secs: Math.max(0, Number(form.usage_query_interval_secs || 0)),
+        // A2A usageQuery.retries / timeoutSeconds（后端归一化：越界回落缺省）
+        usage_query: {
+          retries: Math.min(10, Math.max(0, Number(form.usage_query_retries || 0))),
+          timeout_seconds: Math.min(180, Math.max(15, Number(form.usage_query_timeout_secs || 60))),
+        },
         expires_at: form.expires_at.trim() ? Number(form.expires_at) : null,
       };
+      // 余额不足处理（A2A lowBalance）：只在用户选了具体档时提交，
+      // 「缺省」= 不带该键（保持原值 / 首建时按供应商推导）。
+      if (form.low_balance_mode) {
+        payload.low_balance = {
+          mode: form.low_balance_mode,
+          threshold: form.low_balance_mode === 'off'
+            ? 0
+            : Number(form.low_balance_threshold),
+        };
+      }
       // 代理三态：新增直传；更新时缺省保持原值、"" 清除、非空覆盖
       if (!editing) {
         payload.proxy = form.proxy.trim();
@@ -1838,51 +1920,73 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     }
   };
 
-  /** 拖拽排序：落点后把可见列表按新顺序重赋递减 priority（循环 PATCH 落盘）。
-      语义对齐 Agent2API 队列：列表顺序 = 调度优先顺序（AIGX priority 越大越优先）。 */
+  /** 旧路径回退：逐条 PATCH priority（canonical `/api/accounts/reorder` 未接时）。 */
+  const reorderViaPatch = async (sequence: AccountSessionItem[]): Promise<void> => {
+    const base = sequence.length * 10;
+    const results = await Promise.allSettled(
+      sequence.map((s, i) => api.patchAccountSession(s.id, { priority: base - i * 10 })),
+    );
+    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    if (ok < sequence.length) {
+      addToast(t('排序保存：{{ok}}/{{total}} 成功', { ok, total: sequence.length }), 'error');
+    }
+  };
+
+  /** 整队重排：优先 canonical `POST /api/accounts/reorder`（A2A 全量队列语义）；
+   *  端点未接（404）时回退旧逐条 PATCH。`sequence` 只用于回退。 */
+  const applyQueue = async (queue: string[], sequence: AccountSessionItem[]): Promise<void> => {
+    try {
+      await api.reorderAccounts(queue);
+      addToast(t('顺序已保存'));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/404|not found|未就绪/i.test(msg)) {
+        await reorderViaPatch(sequence);
+        addToast(t('顺序已保存'));
+      } else {
+        addToast(msg, 'error');
+        return;
+      }
+    }
+    await load();
+  };
+
+  /** 拖拽排序：把整队（全量账号，含被筛选/折叠隐藏的行）按新顺序提交。 */
   const handleDropRow = async (targetId: string): Promise<void> => {
     const srcId = dragId;
     setDragId(null);
     setDragOverId(null);
     if (!srcId || srcId === targetId || orderSaving) return;
-    const ids = visible.map((s) => s.id);
-    const from = ids.indexOf(srcId);
-    const to = ids.indexOf(targetId);
+    const queue = sessions.map((s) => s.id);
+    const from = queue.indexOf(srcId);
+    const to = queue.indexOf(targetId);
     if (from < 0 || to < 0) return;
-    const reordered = [...visible];
-    const [moved] = reordered.splice(from, 1);
-    reordered.splice(to, 0, moved);
-    // 重赋 priority：队首最大，递减 10（留间隙便于以后插队）
-    const base = reordered.length * 10;
+    const [moved] = queue.splice(from, 1);
+    queue.splice(to, 0, moved);
+    const position = new Map(queue.map((id, index) => [id, index]));
+    const sequence = [...sessions].sort(
+      (a, b) => (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0),
+    );
     setOrderSaving(true);
     setError('');
     try {
-      const results = await Promise.allSettled(
-        reordered.map((s, i) =>
-          api.patchAccountSession(s.id, { priority: base - i * 10 }),
-        ),
-      );
-      const ok = results.filter((r) => r.status === 'fulfilled').length;
-      if (ok < reordered.length) {
-        addToast(t('排序保存：{{ok}}/{{total}} 成功', { ok, total: reordered.length }), 'error');
-      } else {
-        addToast(t('顺序已保存'));
-      }
-      await load();
+      await applyQueue(queue, sequence);
     } finally {
       setOrderSaving(false);
     }
   };
 
-  /** 组带拖拽（§2.6）：整组重排后把全量账号按新组序重赋 priority（队首最大、递减 10，
-   *  与 handleDropRow 同一套口径）。用「全量账号」而不是可见行重排，避免筛选态下
-   *  把隐藏账号的 priority 撞车。 */
+  /** 组带拖拽（§2.6）：整组重排后把**全量账号**按新组序提交整队。 */
   const handleDropGroup = async (targetProvider: string): Promise<void> => {
     const srcProvider = groupDragActive;
     setGroupDragActive(null);
     setGroupDragOver(null);
     if (!srcProvider || srcProvider === targetProvider || orderSaving) return;
+    // 全量 provider 序列：分组视图顺序优先，筛选态下没出现的家按现有顺序补在后面
     const order = groupedList.map((g) => g.provider);
+    for (const provider of new Set(sessions.map((s) => s.provider || 'unknown'))) {
+      if (!order.includes(provider)) order.push(provider);
+    }
     const from = order.indexOf(srcProvider);
     const to = order.indexOf(targetProvider);
     if (from < 0 || to < 0) return;
@@ -1891,39 +1995,60 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     nextOrder.splice(to, 0, moved);
     const byProvider = (provider: string): AccountSessionItem[] =>
       sessions
-        .filter((s) => (s.provider || 'unknown') === provider
-          && (!channelFilter || s.channel_id === channelFilter))
-        .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0));
+        .filter((s) => (s.provider || 'unknown') === provider)
+        .sort(
+          (a, b) =>
+            (Number(b.priority) || 0) - (Number(a.priority) || 0)
+            || (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0),
+        );
     const sequence = nextOrder.flatMap(byProvider);
     if (!sequence.length) return;
-    const base = sequence.length * 10;
     setOrderSaving(true);
     setError('');
     try {
-      const results = await Promise.allSettled(
-        sequence.map((s, i) => api.patchAccountSession(s.id, { priority: base - i * 10 })),
-      );
-      const ok = results.filter((r) => r.status === 'fulfilled').length;
-      if (ok < sequence.length) {
-        addToast(t('排序保存：{{ok}}/{{total}} 成功', { ok, total: sequence.length }), 'error');
-      } else {
-        addToast(t('顺序已保存'));
-      }
-      await load();
+      await applyQueue(sequence.map((s) => s.id), sequence);
     } finally {
       setOrderSaving(false);
     }
   };
 
-  /** 设为首选（§2.13）：priority 调到全池最大值 + 10（与行拖拽的队首口径一致） */
+  /** 设为首选（§2.13）：优先 canonical `POST /api/accounts/current`（全局队列置顶）；
+   *  端点未接时回退旧「priority = 全池最大 + 10」。 */
   const handleSetFirst = async (session: AccountSessionItem): Promise<void> => {
-    const maxPriority = sessions
-      .filter((s) => !channelFilter || s.channel_id === channelFilter)
-      .reduce((max, s) => Math.max(max, Number(s.priority) || 0), 0);
     setError('');
     try {
-      await api.patchAccountSession(session.id, { priority: maxPriority + 10 });
-      addToast(t('已设为首选'));
+      const res = await api.setCurrentAccount(session.id);
+      addToast(res.changed ? t('已设为首选') : t('已在队列第一位'));
+      await load();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/404|not found|未就绪/i.test(msg)) {
+        addToast(msg, 'error');
+        return;
+      }
+      const maxPriority = sessions
+        .filter((s) => !channelFilter || s.channel_id === channelFilter)
+        .reduce((max, s) => Math.max(max, Number(s.priority) || 0), 0);
+      try {
+        await api.patchAccountSession(session.id, { priority: maxPriority + 10 });
+        addToast(t('已设为首选'));
+        await load();
+      } catch (fallbackErr) {
+        addToast(fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr), 'error');
+      }
+    }
+  };
+
+  /** 相邻交换（A2A `POST /api/accounts/:id/move`）：⋯ 菜单的上移/下移。 */
+  const handleMoveOne = async (
+    session: AccountSessionItem,
+    direction: 'up' | 'down',
+  ): Promise<void> => {
+    setActMenuFor(null);
+    setError('');
+    try {
+      const res = await api.moveAccount(session.id, direction);
+      addToast(res.moved ? t('顺序已更新') : res.reason || t('顺序未变'));
       await load();
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
@@ -2854,6 +2979,23 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                     >
                       {t('设为首选')}
                     </button>
+                    {/* A2A POST /api/accounts/:id/move：与相邻账号交换优先级 */}
+                    <button
+                      type="button"
+                      className="as-act-menu-item"
+                      onClick={() => void handleMoveOne(s, 'up')}
+                      title={t('与上一位交换优先级（A2A move up）')}
+                    >
+                      {t('上移一位')}
+                    </button>
+                    <button
+                      type="button"
+                      className="as-act-menu-item"
+                      onClick={() => void handleMoveOne(s, 'down')}
+                      title={t('与下一位交换优先级（A2A move down）')}
+                    >
+                      {t('下移一位')}
+                    </button>
                     <div className="as-act-menu-row">
                       <span>{t('并发上限')}</span>
                       <input
@@ -2878,6 +3020,18 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                         {t('应用')}
                       </button>
                     </div>
+                    <div className="as-act-menu-sep" />
+                    {/* 逐账号福利预览（活动 / 月度赠送；由插件申报，没接的家给空态） */}
+                    <button
+                      type="button"
+                      className="as-act-menu-item"
+                      onClick={() => {
+                        setActMenuFor(null);
+                        setWelfareFor(s);
+                      }}
+                    >
+                      {t('福利预览')}
+                    </button>
                     <div className="as-act-menu-sep" />
                     <button
                       type="button"
@@ -3349,6 +3503,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                       const gEnabled = groupRows.filter((r) => r.status === 'enabled' && !isCooling(r)).length;
                       const gDisabled = groupRows.filter((r) => r.status !== 'enabled').length;
                       const gCooling = groupRows.filter((r) => r.status === 'enabled' && isCooling(r)).length;
+                      // 组余额徽章（A2A groups[].balance 的前端投影：按单位求和）
+                      const gBalance = groupBalanceText(groupRows);
                       return (
                       <Fragment key={`${g.provider}-${pageIdx}`}>
                         {/* 分组带（对齐 Agent2API grp-band：顺位 + 家图标 + 家名 + 统计 + 折叠箭头 + ⋯ 菜单） */}
@@ -3411,6 +3567,11 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                                 {gDisabled > 0 ? ` · ${t('禁用 {{n}}', { n: gDisabled })}` : ''}
                                 {gCooling > 0 ? ` · ${t('冷却 {{n}}', { n: gCooling })}` : ''}
                               </span>
+                              {gBalance ? (
+                                <span className="as-group-balance" title={t('本组余额汇总（按当前列表读数；分母按单位分别求和）')}>
+                                  <Wallet size={12} /> {gBalance}
+                                </span>
+                              ) : null}
                               <span className="as-group-fill" />
                               <button
                                 type="button"
@@ -3957,6 +4118,51 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                       <option value="43200">{t('每 12 小时')}</option>
                       <option value="86400">{t('每天')}</option>
                     </Select>
+                    {/* A2A usageQuery.retries / timeoutSeconds：每账号的查询执行参数 */}
+                    <Input
+                      label={t('余额查询重试次数')}
+                      type="number"
+                      min="0"
+                      max="10"
+                      hint={t('单次查询失败后的重试次数（0 = 不重试，上限 10）')}
+                      value={form.usage_query_retries}
+                      onChange={(e) => setForm({ ...form, usage_query_retries: e.target.value })}
+                    />
+                    <Input
+                      label={t('余额查询超时（秒）')}
+                      type="number"
+                      min="15"
+                      max="180"
+                      hint={t('单次查询超时（15~180 秒，越界按缺省 60 秒）')}
+                      value={form.usage_query_timeout_secs}
+                      onChange={(e) => setForm({ ...form, usage_query_timeout_secs: e.target.value })}
+                    />
+                    {/* A2A lowBalance：余额不足处理档 + 阈值 */}
+                    <Select
+                      label={t('余额不足处理')}
+                      hint={t('余额读数低于阈值时跳过或禁用该账号；「按供应商缺省」由后端决定')}
+                      value={form.low_balance_mode}
+                      onChange={(e) => setForm({
+                        ...form,
+                        low_balance_mode: e.target.value as SessionFormState['low_balance_mode'],
+                      })}
+                    >
+                      <option value="">{t('按供应商缺省')}</option>
+                      <option value="off">{t('不处理')}</option>
+                      <option value="skip">{t('低于阈值时跳过')}</option>
+                      <option value="disable">{t('低于阈值时禁用')}</option>
+                    </Select>
+                    {(form.low_balance_mode === 'skip' || form.low_balance_mode === 'disable') && (
+                      <Input
+                        label={t('余额不足阈值')}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        hint={t('低于该余额时触发上面的处理（必须大于 0）')}
+                        value={form.low_balance_threshold}
+                        onChange={(e) => setForm({ ...form, low_balance_threshold: e.target.value })}
+                      />
+                    )}
                     <Input
                       label={t('凭证到期时间（可选）')}
                       type="number"
@@ -4147,6 +4353,51 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             await load();
           }}
         />
+      )}
+
+      {welfareFor && (
+        <div className="modal-overlay" onClick={() => setWelfareFor(null)}>
+          <div
+            className="modal as-welfare-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('账号福利预览')}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3>
+                {t('账号福利预览')} · {welfareFor.name || welfareFor.id}
+              </h3>
+              <button type="button" className="modal-close" onClick={() => setWelfareFor(null)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <CheckinCampaignCard
+                accountId={welfareFor.id}
+                accountName={welfareFor.name}
+                provider={welfareFor.provider}
+              />
+              {CHECKIN_PROVIDERS.has(welfareFor.provider) && (
+                <div className="as-welfare-actions">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={claimingId === welfareFor.id}
+                    onClick={() => void handleClaim(welfareFor)}
+                  >
+                    {claimingId === welfareFor.id ? (
+                      <Loader2 size={13} className="spin" />
+                    ) : (
+                      <Gift size={13} />
+                    )}
+                    {t('立即签到 / 领套餐')}
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {showBulk && (

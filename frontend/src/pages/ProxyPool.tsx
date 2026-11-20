@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Globe, Loader2, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { Globe, Loader2, Pencil, Plus, RefreshCw, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -47,6 +47,12 @@ export default function ProxyPool(): JSX.Element {
   const [saving, setSaving] = useState(false);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  // 连通性测试设置（A2A GET/POST /api/proxies/settings）
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsUrl, setSettingsUrl] = useState('');
+  const [settingsDefault, setSettingsDefault] = useState('');
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -66,6 +72,40 @@ export default function ProxyPool(): JSX.Element {
   const openCreate = () => {
     setForm(EMPTY_FORM);
     setShowForm(true);
+  };
+
+  const openSettings = async () => {
+    setSettingsOpen(true);
+    setSettingsError('');
+    try {
+      const res = await api.proxySettings();
+      const data = res?.data;
+      setSettingsUrl(data?.testUrl ?? '');
+      setSettingsDefault(data?.defaults?.testUrl ?? '');
+    } catch (err) {
+      setSettingsError((err as Error).message || t('加载代理设置失败'));
+    }
+  };
+
+  const saveSettings = async (e: FormEvent) => {
+    e.preventDefault();
+    const url = settingsUrl.trim();
+    if (url && !/^https?:\/\//i.test(url)) {
+      setSettingsError(t('测试网址要以 http:// 或 https:// 开头'));
+      return;
+    }
+    setSettingsSaving(true);
+    setSettingsError('');
+    try {
+      const res = await api.saveProxySettings({ testUrl: url });
+      setSettingsUrl(res?.data?.testUrl ?? '');
+      addToast(t('连通性测试设置已保存'), 'success');
+      setSettingsOpen(false);
+    } catch (err) {
+      setSettingsError((err as Error).message || t('保存失败'));
+    } finally {
+      setSettingsSaving(false);
+    }
   };
 
   const openEdit = (entry: ProxyPoolItem) => {
@@ -181,6 +221,9 @@ export default function ProxyPool(): JSX.Element {
           </p>
         </div>
         <div className="page-actions">
+          <Button variant="secondary" onClick={openSettings}>
+            <SlidersHorizontal size={16} /> {t('连通性测试设置')}
+          </Button>
           <Button variant="secondary" onClick={load}>
             <RefreshCw size={16} /> {t('刷新')}
           </Button>
@@ -189,6 +232,42 @@ export default function ProxyPool(): JSX.Element {
           </Button>
         </div>
       </div>
+
+      {settingsOpen && (
+        <Card className="proxy-form-card">
+          <h2 className="proxy-form-title">{t('连通性测试设置')}</h2>
+          <form onSubmit={saveSettings} className="proxy-form">
+            <Input
+              label={t('测试目标网址')}
+              placeholder={settingsDefault}
+              value={settingsUrl}
+              onChange={(e) => setSettingsUrl(e.target.value)}
+            />
+            <span className="form-hint">
+              {t('通过代理访问该网址，检查是否能收到 HTTP 响应。留空沿用网关默认值。')}
+            </span>
+            {settingsError && (
+              <span className="form-hint" style={{ color: 'var(--danger, #dc2626)' }}>❌ {settingsError}</span>
+            )}
+            <div className="proxy-form-actions">
+              <Button
+                type="button"
+                variant="secondary"
+                style={{ marginRight: 'auto' }}
+                onClick={() => { setSettingsUrl(''); setSettingsError(''); }}
+              >
+                {t('恢复默认')}
+              </Button>
+              <Button type="button" variant="secondary" onClick={() => setSettingsOpen(false)}>
+                {t('取消')}
+              </Button>
+              <Button type="submit" disabled={settingsSaving}>
+                {settingsSaving && <Loader2 size={16} className="spin" />} {t('保存设置')}
+              </Button>
+            </div>
+          </form>
+        </Card>
+      )}
 
       {showForm && (
         <Card className="proxy-form-card">

@@ -52,7 +52,8 @@ use std::time::Duration;
 
 use super::benefits::keepalive;
 use super::benefits::{BenefitOutcome, BenefitResult};
-use super::claim::{self, supports_checkin};
+use super::claim::{self, is_implemented};
+use super::history;
 use super::store::{CheckinOutcome, CheckinRecord, CheckinSchedule, CheckinStore, ScheduleCounts};
 use crate::account_session::AccountSessionStore;
 
@@ -183,7 +184,7 @@ fn due_providers(schedule: &CheckinSchedule, now_hhmm: &str, today: &str) -> Vec
     schedule
         .providers
         .iter()
-        .filter(|p| supports_checkin(p))
+        .filter(|p| is_implemented(p))
         .filter(|p| !main_fired(schedule, p, today))
         .filter(|p| {
             let time = effective_time(schedule, p);
@@ -337,6 +338,7 @@ async fn run_due(
                         failed: outcome.failed,
                     };
                     let _ = store.mark_fired(&schedule.id, &date, &outcome.summary, &counts);
+                    let _ = store.mark_last_summary(&schedule.id, &outcome.last_summary);
                 }
                 Some(end) => {
                     // 区间窗：逐 tick 只跑「自己那刻已到」且今天还没落账的账号。
@@ -368,6 +370,7 @@ async fn run_due(
                         // 逐家「已跑」标记只在窗口结束时落（见下面那段）——这里
                         // 只落条目级结果摘要，供界面「上次执行」。
                         let _ = store.mark_fired(&schedule.id, &date, &outcome.summary, &counts);
+                        let _ = store.mark_last_summary(&schedule.id, &outcome.last_summary);
                         // 本轮跑过的账号标为已尝试（排程层去重）
                         let _ = store.mark_attempted(&schedule.id, &ran, &date);
                     }
@@ -528,7 +531,7 @@ fn retry_due_providers(
     schedule
         .providers
         .iter()
-        .filter(|p| supports_checkin(p))
+        .filter(|p| is_implemented(p))
         .filter(|p| main_fired(schedule, p, today))
         .filter(|p| {
             let time = effective_time(schedule, p);
@@ -638,12 +641,14 @@ async fn run_retry_round(
     let mut ok = 0usize;
     let mut failed = 0usize;
     let mut total = 0usize;
+    let mut failures: Vec<String> = Vec::new();
     for session in targets {
         total += 1;
         let client = match sessions.client_for(&session) {
             Ok(client) => client,
-            Err(_) => {
+            Err(error) => {
                 failed += 1;
+                failures.push(format!("{}（出口配置错误：{error}）", session.name));
                 continue;
             }
         };
@@ -652,6 +657,12 @@ async fn run_retry_round(
             ok += 1;
         } else if result.outcome == CheckinOutcome::Failed {
             failed += 1;
+        }
+        if matches!(
+            result.outcome,
+            CheckinOutcome::Failed | CheckinOutcome::Captcha
+        ) {
+            failures.push(format!("{}（{}）", session.name, result.msg));
         }
         record(store, &session, "retry", result.outcome, &result.msg, false);
         // 记账：签上了就摘掉；没签上 → 次数 +1、下次到点 = now + gap
@@ -675,6 +686,7 @@ async fn run_retry_round(
         .retain(|id, count| ledger.accounts.contains_key(id) || *count >= limit);
     write_retry_ledger(store, &schedule.id, &date, &ledger);
     if total > 0 {
+        let reason = format!("重试（{provider}）");
         let _ = store.mark_fired(
             &schedule.id,
             &date,
@@ -685,6 +697,20 @@ async fn run_retry_round(
                 failed,
             },
         );
+        // 结构化摘要（对齐 A2A：重试轮同样更新条目 lastResult / 时间线）
+        let last_summary = serde_json::json!({
+            "at": chrono::Utc::now().timestamp_millis(),
+            "date": date,
+            "reason": reason,
+            "succeeded": ok,
+            "active": 0,
+            "total": total,
+            "skipped": 0,
+            "failed": failures.iter().take(5).cloned().collect::<Vec<_>>(),
+            "failedCount": failures.len(),
+        });
+        let _ = store.mark_last_summary(&schedule.id, &last_summary);
+        history::record(store, &reason, ok, 0, total, 0, &failures);
     }
 }
 
@@ -714,7 +740,7 @@ fn schedule_provider_scope(schedule: &CheckinSchedule) -> Vec<String> {
         schedule
             .providers
             .iter()
-            .filter(|p| supports_checkin(p))
+            .filter(|p| is_implemented(p))
             .cloned()
             .collect()
     }
@@ -728,6 +754,7 @@ pub fn pending_providers(schedule: &CheckinSchedule, today: &str) -> Vec<String>
     schedule
         .providers
         .iter()
+        .filter(|p| is_implemented(p))
         .filter(|p| !main_fired(schedule, p, today))
         .cloned()
         .collect()
@@ -764,7 +791,7 @@ pub fn next_run_at(schedule: &CheckinSchedule, today: &str) -> Option<i64> {
         })
     };
     for provider in &schedule.providers {
-        if !supports_checkin(provider) {
+        if !is_implemented(provider) {
             continue;
         }
         let fired = main_fired(schedule, provider, today);
@@ -848,6 +875,7 @@ async fn run_makeup_round(
             failed: outcome.failed,
         },
     );
+    let _ = store.mark_last_summary(&schedule.id, &outcome.last_summary);
 }
 
 /// `HH:MM` 格式校验。
@@ -862,6 +890,35 @@ pub fn is_hhmm(value: &str) -> bool {
     h < 24 && m < 60
 }
 
+/// 一条条目的重试快照（对齐 A2A `state()` 的 `retryCount` / `retryExhausted` /
+/// `lastResult.retryAttempts`）：读今天的重试记账，按 `retry_limit` 分三档：
+/// - `retry_count`：还在名单里、次数未用尽的账号数（「还会再试」）；
+/// - `exhausted`：次数已用尽、今天不再重试的账号 id 列表；
+/// - `attempts`：`{accountId: 今天已重试几次}`（完整记账）。
+pub fn retry_snapshot(
+    store: &CheckinStore,
+    schedule: &CheckinSchedule,
+) -> (usize, Vec<String>, HashMap<String, i64>) {
+    let date = today();
+    let limit = schedule.retry_limit as i64;
+    let ledger = read_retry_ledger(store, &schedule.id, &date);
+    if limit <= 0 {
+        return (0, Vec::new(), HashMap::new());
+    }
+    let exhausted: Vec<String> = ledger
+        .attempts
+        .iter()
+        .filter(|(_, count)| **count >= limit)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let waiting = ledger
+        .accounts
+        .keys()
+        .filter(|id| ledger.attempts.get(*id).copied().unwrap_or(0) < limit)
+        .count();
+    (waiting, exhausted, ledger.attempts)
+}
+
 /// 一次计划执行的结果汇总（`summary` 进台账，计数供界面展示）。
 #[derive(Debug, Clone, Default)]
 pub struct ScheduleOutcome {
@@ -873,6 +930,14 @@ pub struct ScheduleOutcome {
     pub keepalive: usize,
     /// 失败数
     pub failed: usize,
+    /// 本轮参与的账号总数
+    pub total: usize,
+    /// 失败明细（`名字（原因）`；失败与需验证两种，待重试不算失败）
+    pub failures: Vec<String>,
+    /// 结构化摘要（对齐 A2A `lastResult`：`{at, date, reason, succeeded, active,
+    /// total, skipped, failed[], failedCount}`）—— 供条目 `last_summary` 与
+    /// 签到中心时间线共用。
+    pub last_summary: serde_json::Value,
 }
 
 /// 跑一次指定 provider 范围的签到，返回计数汇总。
@@ -913,8 +978,21 @@ pub(crate) async fn run_targets_with_reason(
     reason: &str,
 ) -> ScheduleOutcome {
     if targets.is_empty() {
+        // 空轮次也给一份结构化摘要（界面「上次执行」/ 条目 lastResult 需要）；
+        // 但不进时间线 —— 没有发生任何签到动作。
         return ScheduleOutcome {
             summary: "没有可签到的账号".to_string(),
+            last_summary: serde_json::json!({
+                "at": chrono::Utc::now().timestamp_millis(),
+                "date": today(),
+                "reason": reason,
+                "succeeded": 0,
+                "active": 0,
+                "total": 0,
+                "skipped": 0,
+                "failed": [],
+                "failedCount": 0,
+            }),
             ..Default::default()
         };
     }
@@ -922,6 +1000,7 @@ pub(crate) async fn run_targets_with_reason(
     let mut failed = 0usize;
     let mut keepalive = 0usize;
     let mut total = 0usize;
+    let mut failures: Vec<String> = Vec::new();
     for session in targets {
         total += 1;
         // 出口统一走 `client_for`（解析 `pool:` / `rotate` 编码）——绕开
@@ -930,17 +1009,19 @@ pub(crate) async fn run_targets_with_reason(
         let client = match sessions.client_for(&session) {
             Ok(client) => client,
             Err(e) => {
+                let message = format!("出口配置错误：{e}");
                 record_with_reason(
                     store,
                     &session,
                     source,
                     CheckinOutcome::Failed,
-                    &format!("出口配置错误：{e}"),
+                    &message,
                     false,
                     reason,
                     0,
                 );
                 failed += 1;
+                failures.push(format!("{}（{message}）", session.name));
                 continue;
             }
         };
@@ -963,6 +1044,11 @@ pub(crate) async fn run_targets_with_reason(
             ok += 1;
         } else if outcome == CheckinOutcome::Failed {
             failed += 1;
+        }
+        // 失败明细（对齐 A2A `failure_of`）：失败与「需人机验证」都算，
+        // 待重试不算失败（那是运营态，明天/下一轮自然收敛）。
+        if matches!(outcome, CheckinOutcome::Failed | CheckinOutcome::Captcha) {
+            failures.push(format!("{}（{message}）", session.name));
         }
         // 签到后回读成长中心连登天数并落账号（WorkBuddy 国内版；对齐 A2A
         // 「签到后回读成长中心连登并落账号」）。只在成功/已签时读 —— 失败时
@@ -988,15 +1074,33 @@ pub(crate) async fn run_targets_with_reason(
             tokio::time::sleep(Duration::from_millis(gap_ms)).await;
         }
     }
+    let summary_text = if keepalive > 0 {
+        format!("成功 {ok}/{total}，保活 {keepalive}")
+    } else {
+        format!("成功 {ok}/{total}")
+    };
+    // 结构化摘要 + 轮次历史台账（对齐 A2A `record_success` / `checkin_history`）。
+    // 台账写失败只记日志，不影响这次签到本身的结果。
+    let last_summary = serde_json::json!({
+        "at": chrono::Utc::now().timestamp_millis(),
+        "date": today(),
+        "reason": reason,
+        "succeeded": ok,
+        "active": keepalive,
+        "total": total,
+        "skipped": 0,
+        "failed": failures.iter().take(5).cloned().collect::<Vec<_>>(),
+        "failedCount": failures.len(),
+    });
+    history::record(store, reason, ok, keepalive, total, 0, &failures);
     ScheduleOutcome {
-        summary: if keepalive > 0 {
-            format!("成功 {ok}/{total}，保活 {keepalive}")
-        } else {
-            format!("成功 {ok}/{total}")
-        },
+        summary: summary_text,
         ok,
         failed,
         keepalive,
+        total,
+        failures,
+        last_summary,
     }
 }
 
@@ -1036,7 +1140,7 @@ pub fn collect_targets(
         .all()
         .into_iter()
         .filter(|s| s.is_enabled() && !s.is_expired(now))
-        .filter(|s| supports_checkin(&s.provider))
+        .filter(|s| is_implemented(&s.provider))
         .filter(|s| providers.is_empty() || providers.iter().any(|p| p == &s.provider))
         .collect()
 }
@@ -1123,6 +1227,7 @@ mod tests {
             last_retried_providers: HashMap::new(),
             account_plan: super::super::store::AccountPlan::default(),
             last_result: String::new(),
+            last_summary: serde_json::Value::Null,
             last_ok: 0,
             last_keepalive: 0,
             last_failed: 0,
@@ -1315,5 +1420,39 @@ mod tests {
         s.retry_limit = 2;
         s.retry_gap_minutes = 0;
         assert_eq!(effective_retry_policy(&s, &settings), (2, 600));
+    }
+
+    #[test]
+    fn retry_snapshot_reads_today_ledger_and_splits_exhausted() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("aigx-retry-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = CheckinStore::new(std::sync::Arc::new(crate::storage::FileStore::new(dir)));
+        store.load().unwrap();
+        let mut s = schedule("09:00", &["loomy"]);
+        s.retry_limit = 3;
+        let today = today();
+        let now = Utc::now().timestamp();
+        let ledger = RetryLedger {
+            accounts: HashMap::from([("a".to_string(), now + 60), ("b".to_string(), now + 60)]),
+            attempts: HashMap::from([("a".to_string(), 1), ("b".to_string(), 3)]),
+        };
+        store
+            .file_store()
+            .put(&retry_key(&s.id, &today), &ledger)
+            .unwrap();
+        let (waiting, exhausted, attempts) = retry_snapshot(&store, &s);
+        // 正向对照：a 还有次数 → 计入「等窗口重试」；b 已用尽 → 单列
+        assert_eq!(waiting, 1);
+        assert_eq!(exhausted, vec!["b".to_string()]);
+        assert_eq!(attempts.get("a").copied(), Some(1));
+        // 关闭重试（limit=0）时整体视为无重试
+        s.retry_limit = 0;
+        let (waiting, exhausted, attempts) = retry_snapshot(&store, &s);
+        assert_eq!(waiting, 0);
+        assert!(exhausted.is_empty());
+        assert!(attempts.is_empty());
     }
 }

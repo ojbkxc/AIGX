@@ -175,7 +175,9 @@ export default function ScheduledTasks({ embedded = false }: ScheduledTasksProps
   }
   if (!admin) return <EmptyState message={t('无权限')} />;
 
-  const backendTasks = tasks.filter((t) => t.runner === 'backend');
+  // 「软件版本检查」不在本页渲染：它的开关/间隔与更新页、插件设置共用同一份
+  // 检查计划（对齐 A2A——定时任务页不再出现这一条），配置入口在「更新」页。
+  const backendTasks = tasks.filter((t) => t.runner === 'backend' && t.id !== 'updateCheck');
   const frontendTasks = tasks.filter((t) => t.runner === 'frontend');
 
   const renderTask = (task: ScheduledTaskItem) => {

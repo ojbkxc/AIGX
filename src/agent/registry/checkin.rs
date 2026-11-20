@@ -18,10 +18,14 @@ pub(super) fn tools() -> Vec<ToolDef> {
             no_args,
             |s, h, _a| {
                 Box::pin(async move {
-                    out(
-                        admin::checkin_center::handle_checkin_center(State(s.clone()), h.clone())
-                            .await,
+                    out(admin::checkin_center::handle_checkin_center(
+                        State(s.clone()),
+                        h.clone(),
+                        // 工具入口不带查询串：等价 `?view=` 空（全量快照）。
+                        // `?view=summary` 的轻量汇总只服务前端徽标轮询。
+                        axum::extract::Query(std::collections::HashMap::new()),
                     )
+                    .await)
                 })
             },
         ),

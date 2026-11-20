@@ -669,7 +669,7 @@ pub(crate) async fn handle_chat_completions(
                         && attempt_index >= purge_cfg.fallback_trigger_attempt
                         && !purge_cfg.fallback_models.is_empty()
                     {
-                        match peek_for_refusal(s).await {
+                        match peek_for_refusal(s, &purge_cfg.refusal_patterns).await {
                             Peek::Refused => {
                                 // 拒答不是渠道不健康：与非流式路径同口径，不记
                                 // 渠道失败/熔断，只计拒绝样本并换下一候选。
@@ -847,7 +847,12 @@ pub(crate) async fn handle_chat_completions(
                         "all channels failed for streaming request".into(),
                     )
                 });
-                crate::purge::record_failure(crate::purge::classify_failure(&e.to_string()));
+                crate::purge::record_failure(crate::purge::classify_failure_with(
+                    &e.to_string(),
+                    &purge_cfg.refusal_patterns,
+                    &purge_cfg.failure_filter_keywords,
+                    &purge_cfg.failure_empty_keywords,
+                ));
                 let latency_ms = request_start.elapsed().as_millis() as u64;
                 let status_code = StatusCode::from_u16(e.http_status())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1542,7 +1547,10 @@ pub(crate) async fn handle_chat_completions(
                     {
                         // 非流式拒答判定走 ChatResponse 正文（与非流式 anthropic
                         // 路径同口径：`message.content_str()`）。
-                        if crate::purge::looks_refusal(resp.message.content_str()) {
+                        if crate::purge::looks_refusal_with(
+                            resp.message.content_str(),
+                            &purge_cfg.refusal_patterns,
+                        ) {
                             crate::purge::record_refusal();
                             last_error = Some(crate::bridge::BridgeError::Config(
                                 "refusal detected; switching to fallback model".into(),
@@ -1718,7 +1726,12 @@ pub(crate) async fn handle_chat_completions(
                         "all channels failed for non-streaming request".into(),
                     )
                 });
-                crate::purge::record_failure(crate::purge::classify_failure(&e.to_string()));
+                crate::purge::record_failure(crate::purge::classify_failure_with(
+                    &e.to_string(),
+                    &purge_cfg.refusal_patterns,
+                    &purge_cfg.failure_filter_keywords,
+                    &purge_cfg.failure_empty_keywords,
+                ));
                 let latency_ms = request_start.elapsed().as_millis() as u64;
                 let status_code = if output_block.is_some() {
                     // 输出被护栏拦截：客户端收到 400（不是 5xx——网关/渠道都没坏）

@@ -1070,6 +1070,7 @@ fn makeup_targets_only_picks_unsucceeded_accounts() {
         last_retried_providers: HashMap::new(),
         account_plan: Default::default(),
         last_result: String::new(),
+        last_summary: serde_json::Value::Null,
         last_ok: 0,
         last_keepalive: 0,
         last_failed: 0,

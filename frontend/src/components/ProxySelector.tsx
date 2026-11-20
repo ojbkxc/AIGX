@@ -90,6 +90,34 @@ export default function ProxySelector({ value, onChange, placeholder }: Props): 
 
   const enabledItems = items.filter((it) => it.enabled);
 
+  // 「从系统代理导入」：读 OS 代理快照并拼成自定义代理串（A2A /api/proxies/system）
+  const [sysBusy, setSysBusy] = useState(false);
+  const [sysError, setSysError] = useState('');
+
+  const importSystemProxy = async (): Promise<void> => {
+    if (sysBusy) return;
+    setSysBusy(true);
+    setSysError('');
+    try {
+      const res = await api.systemProxy();
+      const proxy = res?.data?.proxy;
+      if (!proxy) {
+        setSysError(t('未检测到系统代理，请手动填写'));
+        return;
+      }
+      const auth = proxy.username
+        ? `${encodeURIComponent(proxy.username)}${proxy.password ? `:${encodeURIComponent(proxy.password)}` : ''}@`
+        : '';
+      const next = `${proxy.protocol}://${auth}${proxy.host}:${proxy.port}`;
+      setCustom(next);
+      emit('custom', poolId, rotateIds, next);
+    } catch (err) {
+      setSysError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSysBusy(false);
+    }
+  };
+
   return (
     <div className="proxy-selector">
       <div className="form-group">
@@ -177,6 +205,16 @@ export default function ProxySelector({ value, onChange, placeholder }: Props): 
             }}
           />
           <span className="form-hint">{t('支持 http(s)://、socks5://、socks5h://，可带 userinfo；socks5 会按 socks5h（远端 DNS）处理')}</span>
+          {/* A2A `/api/proxies/system`：把 OS 配置的代理一键填进自定义串 */}
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={sysBusy}
+            onClick={() => void importSystemProxy()}
+          >
+            {sysBusy ? t('读取中…') : t('从系统代理导入')}
+          </button>
+          {sysError && <span className="form-hint" style={{ color: 'var(--danger, #dc2626)' }}>❌ {sysError}</span>}
         </div>
       )}
 

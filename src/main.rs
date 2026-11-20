@@ -188,6 +188,9 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
+    // 记录进程启动时刻（/api/system-info 的 uptime 读数；须在配置加载前登记）
+    crate::api::admin::system_info::record_start();
+
     // 加载配置
     let config_manager = Arc::new(ConfigManager::new(None).await);
     // 启动时确保 session_secret 非空并持久化，避免登录后 token 无法鉴权
@@ -1759,6 +1762,13 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/public/branding",
             get(api::admin::handle_get_public_branding),
         )
+        // 公开端点：品牌 Logo 字节流（登录页/页签图标；带 ETag，免鉴权）
+        .route(
+            "/api/public/branding/logo",
+            get(api::admin::handle_get_public_branding_logo),
+        )
+        // 系统信息读数（设置页「系统信息」；版本/环境/开关/计数，?hideUsername=1 脱敏路径）
+        .route("/api/system-info", get(api::admin::handle_get_system_info))
         .route(
             "/api/auth/login/send-code",
             post(api::admin::handle_login_send_code),
@@ -2478,6 +2488,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/purge",
             get(api::admin::handle_get_purge).put(api::admin::handle_update_purge),
         )
+        // 破甲改写试跑（dry-run：不写统计、不落库）
+        .route("/api/purge/preview", post(api::admin::handle_preview_purge))
         // 护栏（输入/输出黑名单 + 200 假答复门控；默认全关）
         .route(
             "/api/guardrail",
@@ -2824,9 +2836,64 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/usage/models", get(api::admin::handle_usage_models))
         .route("/api/usage/summary", get(api::admin::handle_usage_summary))
         .route("/api/usage/summary", post(api::admin::handle_refresh_usage))
-        .route("/api/accounts", get(api::admin::handle_list_accounts))
-        .route("/api/accounts", post(api::admin::handle_add_account))
+        // 账号（A2A canonical，对齐 beta.2）：GET 列表 / POST 新增（同路径合并一条 .route）
+        .route(
+            "/api/accounts",
+            get(api::admin::accounts_query::handle_accounts_root)
+                .post(api::admin::accounts_query::handle_add_account),
+        )
         .route("/api/accounts/test", post(api::admin::handle_test_account))
+        // 查询 / 选路 / 置顶 / 重排 / 批量 / 导入 / 签到 / 导出 / 用量 / 连接数
+        .route(
+            "/api/accounts/query",
+            post(api::admin::accounts_query::handle_accounts_query_post),
+        )
+        .route(
+            "/api/accounts/selection",
+            post(api::admin::accounts_query::handle_accounts_selection_post),
+        )
+        .route(
+            "/api/accounts/current",
+            post(api::admin::accounts_query::handle_set_current_account),
+        )
+        .route(
+            "/api/accounts/reorder",
+            post(api::admin::accounts_query::handle_reorder_accounts),
+        )
+        .route(
+            "/api/accounts/batch",
+            post(api::admin::accounts_query::handle_batch_accounts),
+        )
+        .route(
+            "/api/accounts/import",
+            post(api::admin::accounts_query::handle_import_accounts),
+        )
+        .route(
+            "/api/accounts/checkin",
+            post(api::admin::accounts_query::handle_accounts_checkin),
+        )
+        .route(
+            "/api/accounts/refresh",
+            post(api::admin::accounts_query::handle_refresh_account),
+        )
+        .route(
+            "/api/accounts/export",
+            get(api::admin::accounts_query::handle_export_accounts),
+        )
+        .route(
+            "/api/accounts/usage",
+            get(api::admin::accounts_query::handle_accounts_usage),
+        )
+        .route(
+            "/api/accounts/connections",
+            get(api::admin::accounts_query::handle_accounts_connections),
+        )
+        // 用量窗口 scoped 快照（A2A canonical；GET ?ids= / POST {ids:[]}，与 /api/accounts/usage 相邻不串）
+        .route(
+            "/api/accounts/usage/snapshot",
+            get(api::admin::account_sessions::handle_accounts_usage_snapshot)
+                .post(api::admin::account_sessions::handle_usage_snapshot_scoped),
+        )
         // A2A 形状账号列表（查询/分页/计数/ids + 凭证替换，对齐 beta.2）
         .route(
             "/api/accounts/list",
@@ -2844,10 +2911,59 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/accounts/:id/credentials/replace",
             axum::routing::put(api::admin::accounts_query::handle_replace_account_credentials),
         )
-        .route("/api/accounts/:id", put(api::admin::handle_update_account))
+        .route(
+            "/api/accounts/:id/move",
+            post(api::admin::accounts_query::handle_move_account),
+        )
+        // 单账号：GET 详情 / PATCH 部分更新 / DELETE 删除（同路径合并一条 .route）
         .route(
             "/api/accounts/:id",
-            delete(api::admin::handle_delete_account),
+            get(api::admin::accounts_query::handle_account_detail)
+                .patch(api::admin::accounts_query::handle_patch_account)
+                .delete(api::admin::accounts_query::handle_delete_account),
+        )
+        // 代理池（对齐 A2A proxies：出口测试 / 系统代理快照 / 连通性设置 / Clash 池管理）
+        .route(
+            "/api/proxies",
+            get(api::admin::proxy_pool_api::handle_proxies_list),
+        )
+        .route(
+            "/api/proxies/system",
+            get(api::admin::proxy_pool_api::handle_proxies_system),
+        )
+        .route(
+            "/api/proxies/test",
+            post(api::admin::proxy_pool_api::handle_proxies_test),
+        )
+        .route(
+            "/api/proxies/settings",
+            get(api::admin::proxy_pool_api::handle_proxies_settings_get)
+                .post(api::admin::proxy_pool_api::handle_proxies_settings_save),
+        )
+        .route(
+            "/api/proxies/pool",
+            get(api::admin::proxy_pool_api::handle_proxies_pool_list)
+                .post(api::admin::proxy_pool_api::handle_proxies_pool_create),
+        )
+        .route(
+            "/api/proxies/pool/update",
+            post(api::admin::proxy_pool_api::handle_proxies_pool_update),
+        )
+        .route(
+            "/api/proxies/pool/enable",
+            post(api::admin::proxy_pool_api::handle_proxies_pool_enable),
+        )
+        .route(
+            "/api/proxies/pool/remove",
+            post(api::admin::proxy_pool_api::handle_proxies_pool_remove),
+        )
+        .route(
+            "/api/proxies/pool/test",
+            post(api::admin::proxy_pool_api::handle_proxies_pool_test),
+        )
+        .route(
+            "/api/proxies/pool/sync-clash",
+            post(api::admin::proxy_pool_api::handle_proxies_pool_sync_clash),
         )
         // 账号型渠道账号池（账号级调度）：列表/新增/批量导入/改/删/测试/重置冷却
         .route(

@@ -669,6 +669,31 @@ pub fn map_agent2api_record(
     session.expires_at = a2a_expires_at(obj);
     session.credential = credential;
 
+    // 每账号余额查询配置（A2A `usageQuery` → AIGX 间隔 + 执行参数）。
+    // A2A 缺省是「开启、间隔 60s」；显式 `{enabled:false}` 才是关。
+    if let Some(config) = obj.get("usageQuery").and_then(Value::as_object) {
+        let enabled = config.get("enabled").and_then(Value::as_bool);
+        let interval = config.get("interval").and_then(Value::as_u64);
+        session.usage_query_interval_secs = match enabled {
+            Some(false) => None,
+            _ => interval.filter(|value| *value > 0).or(Some(60)),
+        };
+        if let Ok(settings) = serde_json::from_value::<super::model::UsageQuerySettings>(
+            Value::Object(config.clone()),
+        ) {
+            session.usage_query = settings.normalized();
+        }
+    }
+    // 余额不足处理（A2A `lowBalance`：`{mode, threshold}`；非法值按缺省跳过）。
+    if let Some(low) = obj.get("lowBalance") {
+        if let Ok(setting) = serde_json::from_value::<super::model::LowBalanceSetting>(low.clone())
+        {
+            if let Ok(normalized) = setting.normalized() {
+                session.low_balance = Some(normalized);
+            }
+        }
+    }
+
     // officeace 兼容：AK/SK/STS/project_id 拼 JSON 进 refresh_secret
     // （现有签到链路从 refresh_secret JSON 读，见 claim::officeace_temp_creds）。
     if session.provider == "officeace" {

@@ -88,6 +88,23 @@ fn store() -> Result<&'static Arc<FileStore>, String> {
         .ok_or_else(|| "任务状态存储不可用，未发送后台请求".to_string())
 }
 
+/// 失败退避策略（对齐 Agent2API `task_state::FailureBackoff`）。
+///
+/// - [`Exponential`]：普通后台任务——连续失败按间隔指数退避（上限一天）；
+/// - [`UpstreamOnly`]：**来源自管**的任务（`updateCheck:` / 插件目录等）——
+///   冷却只认调用方显式传入的 `retry_at`（通常来自上游的 `Retry-After` /
+///   限额恢复时刻），本地不再叠加指数退避。否则一次 GitHub 403 会让更新检查
+///   停摆几小时，而上游恢复后它仍按本地退避干等。
+///
+/// 由 [`change`] 按键前缀自动切换（见 [`source_managed`]），任务代码不必关心。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum FailureBackoff {
+    #[default]
+    Exponential,
+    UpstreamOnly,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TaskState {
@@ -100,6 +117,7 @@ pub struct TaskState {
     pub retry_at: i64,
     pub failures: u32,
     pub value: Option<Value>,
+    failure_backoff: FailureBackoff,
     interval_ms: i64,
     lease_until: i64,
     owner: String,
@@ -115,11 +133,41 @@ impl TaskState {
     }
 
     pub fn waiting_message(&self) -> String {
+        self.describe_wait(false)
+    }
+
+    /// 手动触发**越过失败冷却**时用的那一条（见 [`ManualBackoff::Bypass`]）。
+    ///
+    /// 冷却还在只说明「上一轮为什么没成功」，不构成「现在不能试」—— 这时真正
+    /// 挡住这一轮的通常只是在途占位或最短请求间隔。照 [`waiting_message`] 的
+    /// 算法会把用户往「几小时后再说」引，而实际一秒后就能再点一次。
+    pub fn waiting_message_bypassing(&self) -> String {
+        self.describe_wait(true)
+    }
+
+    /// 来源自管的任务切换到 [`FailureBackoff::UpstreamOnly`]：清掉本地指数
+    /// 退避留下的 `retry_at`，并把 `next_run_at` 收回「上一次尝试 + 间隔」的
+    /// 普通排期（若它被旧退避推得更远）。返回是否发生了迁移（供存储层落盘）。
+    pub(super) fn use_source_backoff(&mut self) -> bool {
+        let changed = self.failure_backoff != FailureBackoff::UpstreamOnly || self.retry_at != 0;
+        self.failure_backoff = FailureBackoff::UpstreamOnly;
+        self.retry_at = 0;
+        let scheduled_at = self
+            .last_run_at
+            .max(self.last_attempt_at)
+            .saturating_add(self.interval_ms.max(0));
+        let next_run_at = self.next_run_at.min(scheduled_at);
+        let changed = changed || self.next_run_at != next_run_at;
+        self.next_run_at = next_run_at;
+        changed
+    }
+
+    fn describe_wait(&self, backoff_bypassed: bool) -> String {
         if self.running() {
             return "任务正在执行中，请稍候".to_string();
         }
         let seconds = ((self.retry_at - now_ms()).max(0) + 999) / 1000;
-        if seconds > 0 {
+        if seconds > 0 && !backoff_bypassed {
             format!("请求处于冷却期，请在 {seconds} 秒后重试")
         } else {
             "刚刚已执行，请稍后重试".to_string()
@@ -156,6 +204,25 @@ pub fn read_all() -> Result<HashMap<String, TaskState>, String> {
     read_states(store()?)
 }
 
+/// 由**上游来源**管理失败冷却的排期键前缀（对齐 Agent2API
+/// `task_state::storage::source_managed`）。
+///
+/// 这些任务的重试时刻由上游（GitHub 限额 / 插件目录响应）给出，本地指数退避
+/// 只会让恢复后的第一次检查白等。AIGX 目前只有 `updateCheck:` 一类键在用；
+/// 其余前缀先登记，与上游保持同一份名单。
+const SOURCE_MANAGED_PREFIXES: &[&str] = &[
+    "updateCheck:",
+    "pluginCatalog:",
+    "pluginRequirement:",
+    "pluginGithub:",
+];
+
+fn source_managed(key: &str) -> bool {
+    SOURCE_MANAGED_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+}
+
 /// 读改写整份任务状态 map（进程内串行化）。
 ///
 /// 由 `CHANGE_LOCK` 保证「读 → mutate → 写」原子，避免并发 `claim`（调度循环与
@@ -166,6 +233,9 @@ fn change(key: &str, mutate: impl FnOnce(&mut TaskState)) -> Result<TaskState, S
     let store = store()?;
     let mut states = read_states(store)?;
     let state = states.entry(key.to_string()).or_default();
+    if source_managed(key) {
+        state.use_source_backoff();
+    }
     mutate(state);
     let result = state.clone();
     store
@@ -183,22 +253,62 @@ fn change(key: &str, mutate: impl FnOnce(&mut TaskState)) -> Result<TaskState, S
 pub fn schedule_now(key: &str) -> Result<(), String> {
     change(key, |state| {
         let now = now_ms();
+        state.adjust_clock(now);
         state.next_run_at = now;
     })?;
     Ok(())
 }
 
-/// 按给定间隔重新排期：从未跑过的排到「现在」（启动即跑一次），跑过的按「上次尝试 + 间隔」。
+/// 记录一次**外部发起**的真实请求（用户手动点的那一轮）：把定时排期顺延一个
+/// 间隔，避免「刚点完、到点或重启后又立刻再跑一遍」。
+///
+/// 正在执行的那一轮（占位仍有效）不动 —— 那正是它自己的排期，由 `RunGuard`
+/// 在收尾时统一写。失败也不改冷却：手动动作不该把上游的限流冷却提前解除。
+pub fn note_external_run(key: &str, interval_ms: i64) -> Result<(), String> {
+    change(key, |state| {
+        if state.running() {
+            return;
+        }
+        let now = now_ms();
+        state.adjust_clock(now);
+        state.last_attempt_at = now;
+        state.next_run_at = now.saturating_add(interval_ms).max(state.retry_at);
+    })?;
+    Ok(())
+}
+
+/// 清除一条任务的**失败冷却**（`retry_at` 归零），不动排期与最近尝试时间。
+///
+/// 用途：调用方确认上次失败的前提已经改变，例如更新时更换出网代理。
+/// 排期（`next_run_at`）保持不动：定时任务仍按自己的间隔跑，这条函数只解开
+/// 「现在不让试」的那把锁。`adjust_clock` 与其它入口一样先跑一遍，防系统时钟
+/// 回拨把旧时间当成无限期冷却。
+pub fn clear_cooldown(key: &str) -> Result<(), String> {
+    change(key, |state| {
+        let now = now_ms();
+        state.adjust_clock(now);
+        state.retry_at = 0;
+    })?;
+    Ok(())
+}
+
+/// 按给定间隔重新排期：从未跑过的排到「现在」（启动即跑一次），跑过的按
+/// 「最近一次执行 + 间隔」。失败冷却仍然优先（`next_run_at` 不早于 `retry_at`）。
 ///
 /// 停机 / 休眠错过的那一轮在醒来时跑一次（`next_run_at` 落到过去 → 下一拍即到点），
 /// 不补跑期间的每一轮。
 pub fn reschedule(key: &str, interval_ms: i64) -> Result<(), String> {
     change(key, |state| {
         let now = now_ms();
+        state.adjust_clock(now);
         state.interval_ms = interval_ms;
-        // last_attempt=0（从未跑）→ 0+interval 是过去时刻 → max(now)=now，于是启动即跑。
-        // 跑过的 → last_attempt+interval；若已过期则 max(now)=now，补跑一次。
-        state.next_run_at = state.last_attempt_at.saturating_add(interval_ms).max(now);
+        let anchor = state.last_run_at.max(state.last_attempt_at);
+        state.next_run_at = if anchor > 0 {
+            anchor.saturating_add(interval_ms)
+        } else {
+            now
+        };
+        state.next_run_at = state.next_run_at.max(state.retry_at);
     })?;
     Ok(())
 }
@@ -315,12 +425,17 @@ impl RunGuard {
             } else {
                 state.last_error = Some(summary);
                 state.failures = state.failures.saturating_add(1);
-                let multiplier = 1_i64 << state.failures.saturating_sub(1).min(10);
-                let delay = interval_ms
-                    .max(60_000)
-                    .saturating_mul(multiplier)
-                    .min(MAX_BACKOFF_MS);
-                state.retry_at = retry_at.max(now.saturating_add(delay));
+                state.retry_at = match state.failure_backoff {
+                    FailureBackoff::UpstreamOnly => retry_at,
+                    FailureBackoff::Exponential => {
+                        let multiplier = 1_i64 << state.failures.saturating_sub(1).min(10);
+                        let delay = interval_ms
+                            .max(60_000)
+                            .saturating_mul(multiplier)
+                            .min(MAX_BACKOFF_MS);
+                        retry_at.max(now.saturating_add(delay))
+                    }
+                };
             }
             if let Some(value) = value {
                 state.value = Some(value);
@@ -336,17 +451,19 @@ impl RunGuard {
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        // 正常收尾由 finish 完成（owner 已清空、finished=true）；走到这里说明中途
-        // 取消（panic / 提前 return）。释放占位，否则任务会卡在「执行中」直到租约过期。
+        self.heartbeat.abort();
+        // 正常收尾由 finish 完成（owner 已清空、finished=true）；走到这里说明
+        // 中途取消（panic / 提前 return）。释放占位，否则任务会卡在「执行中」
+        // 直到租约过期；同时留一句话给界面，别让「上次结果」永远停在更早那轮。
         if !self.finished {
             let _ = change(&self.key, |state| {
                 if state.owner == self.owner {
                     state.owner.clear();
                     state.lease_until = 0;
+                    state.last_result = Some("上次执行中断，保留原有排期".to_string());
                 }
             });
         }
-        self.heartbeat.abort();
     }
 }
 
@@ -403,6 +520,48 @@ mod tests {
             Claim::Deferred(_) => panic!("Bypass 应越过失败冷却"),
         };
         drop(guard); // 中途取消：Drop 释放占位
-        assert!(!read(key).unwrap().running(), "Drop 必须释放租约");
+        let state = read(key).unwrap();
+        assert!(!state.running(), "Drop 必须释放租约");
+        assert_eq!(
+            state.last_result.as_deref(),
+            Some("上次执行中断，保留原有排期")
+        );
+
+        // 手动外部执行顺延：排期推到 now+interval，冷却不动
+        let external = "test:external";
+        note_external_run(external, 120_000).unwrap();
+        let state = read(external).unwrap();
+        assert!(state.last_attempt_at > 0);
+        assert!(state.next_run_at >= state.last_attempt_at + 120_000);
+        assert_eq!(state.retry_at, 0);
+
+        // 清冷却只清 retry_at，排期与尝试时间保持
+        let guard = match claim(external, 120_000, true, ManualBackoff::Bypass, 0).unwrap() {
+            Claim::Acquired(guard) => guard,
+            Claim::Deferred(_) => panic!("外部执行后应可再领"),
+        };
+        guard
+            .finish(false, "boom".into(), None, 0, 120_000)
+            .unwrap();
+        let cooled = read(external).unwrap();
+        assert!(cooled.retry_at > now_ms(), "普通任务失败必须产生冷却");
+        let next_before = cooled.next_run_at;
+        clear_cooldown(external).unwrap();
+        let cleared = read(external).unwrap();
+        assert_eq!(cleared.retry_at, 0);
+        assert_eq!(cleared.next_run_at, next_before);
+
+        // 来源自管（`updateCheck:` 前缀）：只认调用方给的 retry_at，
+        // 不叠加本地指数退避 —— 同一失败口径下普通键必须产生冷却（正对照）。
+        let managed = "updateCheck:website:test/repo";
+        let guard = match claim(managed, 60_000, true, ManualBackoff::Bypass, 0).unwrap() {
+            Claim::Acquired(guard) => guard,
+            Claim::Deferred(_) => panic!("首次 claim 应拿到租约"),
+        };
+        guard.finish(false, "403".into(), None, 0, 60_000).unwrap();
+        let state = read(managed).unwrap();
+        assert_eq!(state.failures, 1);
+        assert_eq!(state.retry_at, 0, "来源自管不得生成指数冷却");
+        assert_eq!(state.failure_backoff, FailureBackoff::UpstreamOnly);
     }
 }

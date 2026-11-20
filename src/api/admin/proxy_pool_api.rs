@@ -363,6 +363,386 @@ pub async fn handle_pool_sync_clash(
     Ok(Json(payload))
 }
 
+// ── Agent2API `/api/proxies*` 对齐面 ──────────────────────────────
+//
+// 上游（v3.5.0-beta.3 `api/proxies.rs` + `api/accounts.rs::proxies_entry`）把
+// 网络代理全部挂在 `/api/proxies*` 下，响应一律包成 `{success, data}`。
+// AIGX 既有路由是 `/api/proxy-pool*`（扁平 `{success, items, ...}`，本页
+// 前端在用，不能改）。这里补一组薄别名：同语义、同 handler，只把成功响应
+// 转成上游的 data 信封；既有的 `/api/proxy-pool*` 行为零变化。
+//
+//   GET  /api/proxies                → 账号代理总览 + Clash 快照
+//   GET  /api/proxies/system         → 系统代理快照（表单「从系统代理导入」）
+//   POST /api/proxies/test           → 出口测试（`{id}` / `{proxy}` / 空 = 直连）
+//   GET  /api/proxies/settings       → 连通性测试设置 `{testUrl, defaults}`
+//   POST /api/proxies/settings       → 保存测试目标
+//   GET/POST /api/proxies/pool*      → 代理池 CRUD/启停/测试/Clash 同步（别名）
+//
+// 路由注册不在本文件（main.rs 由集成方接线），见交付报告里的 route 清单。
+
+/// 把既有扁平成功响应转成上游 `{success, data}` 信封（错误响应两种 API 同形，
+/// 原样透传）。既有 handler 在成功体里带 `"success": true` 的信封位，转
+/// data 信封时去掉它；**测试类响应例外**（`success` 是测试结论，见下）。
+fn into_data_envelope(
+    result: Result<Json<Value>, (StatusCode, Json<Value>)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match result {
+        Ok(Json(mut payload)) => {
+            if let Some(object) = payload.as_object_mut() {
+                object.remove("success");
+            }
+            Ok(Json(json!({ "success": true, "data": payload })))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 测试类响应的信封：`success` 留作**测试结论**（上游 data 里也是这个语义），
+/// 外层信封另写 `success: true`（请求本身成功）。
+fn into_test_envelope(
+    result: Result<Json<Value>, (StatusCode, Json<Value>)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match result {
+        Ok(Json(payload)) => Ok(Json(json!({ "success": true, "data": payload }))),
+        Err(error) => Err(error),
+    }
+}
+
+/// 账号代理配置的脱敏形态（与 `account_sessions::mask_proxy` 同口径：
+/// `pool:` / `rotate` 引用原样，URL 里的 userinfo 换成 `***`）。
+fn redact_proxy(proxy: Option<&str>) -> Value {
+    let Some(raw) = proxy.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Value::Null;
+    };
+    if raw.starts_with("pool:") || raw.starts_with("rotate") {
+        return Value::String(raw.to_string());
+    }
+    let Some((userinfo, host)) = raw.rsplit_once('@') else {
+        return Value::String(raw.to_string());
+    };
+    let scheme_end = userinfo.find("://").map(|index| index + 3).unwrap_or(0);
+    Value::String(format!("{}***@{host}", &userinfo[..scheme_end]))
+}
+
+/// GET /api/proxies —— 账号代理总览（上游 `list_proxies`）。
+///
+/// 账号行只带代理配置的脱敏形态（AIGX 列表口径；凭据不回传）。
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let accounts: Vec<Value> = state
+        .account_sessions
+        .all()
+        .iter()
+        .map(|session| {
+            json!({
+                "id": session.id,
+                "name": session.name,
+                "priority": session.priority,
+                "enabled": session.status == "enabled",
+                "proxy": redact_proxy(session.proxy.as_deref()),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "accounts": accounts,
+            "clash": pool::clash::clash_proxy_options(),
+            "note": "支持手动 HTTP / SOCKS5 地址与 Clash Verge 端点；未配置代理时直连",
+        }
+    })))
+}
+
+/// GET /api/proxies/system —— 系统代理快照（读 OS 配置，不探活）。
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_system(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let snapshot = tokio::task::spawn_blocking(pool::system::snapshot)
+        .await
+        .map_err(|_| error_response("读取系统代理失败", StatusCode::INTERNAL_SERVER_ERROR))?;
+    match snapshot {
+        Ok(value) => Ok(Json(json!({ "success": true, "data": value }))),
+        Err(message) => Err(error_response(&message, StatusCode::BAD_REQUEST)),
+    }
+}
+
+/// GET /api/proxies/settings —— 连通性测试设置。
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_settings_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": pool::settings::get(),
+    })))
+}
+
+/// POST /api/proxies/settings —— 保存测试目标（`{testUrl}`；空 = 恢复默认）。
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_settings_save(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    match pool::settings::save(&body) {
+        Ok(value) => Ok(Json(json!({ "success": true, "data": value }))),
+        Err(message) => Err(error_response(&message, StatusCode::BAD_REQUEST)),
+    }
+}
+
+/// `POST /api/proxies/test` 请求体：上游用 `{id}` 指账号、`{proxy}` 给配置
+/// （对象 / 字符串 / null 直连）。AIGX 账号 id 字段同名，`proxy` 两种形态都收。
+#[derive(Debug, Default, Deserialize)]
+pub struct ProxiesTestBody {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    proxy: Option<Value>,
+}
+
+/// 上游 `proxy` 配置对象 → AIGX 的 proxy 引用串（`pool:` / `rotate` / URL）。
+///
+/// 只翻译 AIGX 真实支持的来源：`custom`（拼 URL）、`pool`、`rotate`、`direct`；
+/// `clash`（Clash 监听器 uid）在 AIGX 没有对应实体 —— 如实报错，不猜地址。
+fn proxy_config_to_reference(value: &Value) -> Result<Option<String>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(raw) => {
+            let raw = raw.trim();
+            Ok((!raw.is_empty()).then(|| raw.to_string()))
+        }
+        Value::Object(fields) => {
+            let source = fields
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let source = if source.is_empty()
+                && fields
+                    .get("host")
+                    .and_then(Value::as_str)
+                    .is_some_and(|host| !host.trim().is_empty())
+            {
+                "custom".to_string()
+            } else {
+                source
+            };
+            match source.as_str() {
+                "direct" => Ok(None),
+                "custom" => {
+                    let host = fields
+                        .get("host")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|host| !host.is_empty())
+                        .ok_or_else(|| "代理配置缺少 host".to_string())?;
+                    let protocol = fields
+                        .get("protocol")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|protocol| !protocol.is_empty())
+                        .unwrap_or("http");
+                    if !matches!(protocol, "http" | "https" | "socks5" | "socks5h") {
+                        return Err(format!("代理协议不支持：{protocol}"));
+                    }
+                    let port = fields
+                        .get("port")
+                        .and_then(Value::as_u64)
+                        .filter(|port| (1..=65535).contains(port))
+                        .ok_or_else(|| "代理配置缺少有效端口".to_string())?;
+                    let username = fields
+                        .get("username")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let password = fields
+                        .get("password")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let auth = if username.is_empty() {
+                        String::new()
+                    } else if password.is_empty() {
+                        format!("{username}@")
+                    } else {
+                        format!("{username}:{password}@")
+                    };
+                    Ok(Some(format!("{protocol}://{auth}{host}:{port}")))
+                }
+                "pool" => {
+                    let id = fields
+                        .get("proxyId")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| "代理池引用缺少 proxyId".to_string())?;
+                    Ok(Some(format!("pool:{id}")))
+                }
+                "rotate" => {
+                    let all = fields.get("all").and_then(Value::as_bool).unwrap_or(true);
+                    if all {
+                        return Ok(Some("rotate".to_string()));
+                    }
+                    let ids: Vec<&str> = fields
+                        .get("proxyIds")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::trim)
+                                .filter(|id| !id.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if ids.is_empty() {
+                        return Err("轮询代理缺少 proxyIds".to_string());
+                    }
+                    Ok(Some(format!("rotate:{}", ids.join(","))))
+                }
+                "clash" => Err(
+                    "Clash 监听器代理暂不支持按 uid 引用，请改用代理池条目或手动地址".to_string(),
+                ),
+                other => Err(format!("代理来源不支持：{other}")),
+            }
+        }
+        _ => Err("代理配置必须是对象、字符串或 null".to_string()),
+    }
+}
+
+/// POST /api/proxies/test —— 出口测试（上游 `test_proxy`）。
+///
+/// 两种用法：`{id}` 测该账号生效的代理（含 `pool:` / `rotate` 解析）；
+/// `{proxy}` 测临时配置；两者都缺省 = 测直连。测试失败也是 200
+/// （`success:false` + error，与上游同约定）。
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<ProxiesTestBody>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let body = match body {
+        Some(Json(body)) => body,
+        None => ProxiesTestBody::default(),
+    };
+    let account_id = body
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let (proxy_url, label) = if let Some(id) = account_id {
+        let session = state
+            .account_sessions
+            .get(id)
+            .ok_or_else(|| error_response("账号不存在", StatusCode::NOT_FOUND))?;
+        let resolved = pool::resolve_proxy(session.proxy.as_deref(), &session.id)
+            .map_err(|message| error_response(&message, StatusCode::BAD_REQUEST))?;
+        (resolved, pool::describe_proxy(session.proxy.as_deref()))
+    } else {
+        let reference = match body.proxy.as_ref() {
+            Some(value) => proxy_config_to_reference(value)
+                .map_err(|message| error_response(&message, StatusCode::BAD_REQUEST))?,
+            None => None,
+        };
+        let resolved = pool::resolve_proxy(reference.as_deref(), "")
+            .map_err(|message| error_response(&message, StatusCode::BAD_REQUEST))?;
+        (resolved, pool::describe_proxy(reference.as_deref()))
+    };
+    let result = pool::test_connectivity(proxy_url.as_deref()).await;
+    let mut data = serde_json::to_value(&result).unwrap_or_else(|_| json!({}));
+    if let Some(object) = data.as_object_mut() {
+        object.insert("proxy".to_string(), Value::String(label));
+    }
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+// 代理池路由的 data 信封别名（同 handler，仅转信封）。
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_pool_list(
+    state: State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    into_data_envelope(handle_pool_list(state, headers).await)
+}
+
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_pool_create(
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let entry = parse_entry_input(body.0)?;
+    into_data_envelope(handle_pool_create(state, headers, Json(entry)).await)
+}
+
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_pool_update(
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let entry = parse_entry_input(body.0)?;
+    into_data_envelope(handle_pool_update(state, headers, Json(entry)).await)
+}
+
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_pool_enable(
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: Json<EnableBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    into_data_envelope(handle_pool_enable(state, headers, body).await)
+}
+
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_pool_remove(
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: Json<IdBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    into_data_envelope(handle_pool_remove(state, headers, body).await)
+}
+
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_pool_test(
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: Json<IdBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    into_test_envelope(handle_pool_test(state, headers, body).await)
+}
+
+#[allow(dead_code)] // A2A 别名 handler：路由由集成批次接入 main.rs
+pub async fn handle_proxies_pool_sync_clash(
+    state: State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    into_data_envelope(handle_pool_sync_clash(state, headers).await)
+}
+
+/// 上游允许 `{items:[...]}` 批量导入；AIGX 暂未实现（如实 400，不静默当单条）。
+fn parse_entry_input(body: Value) -> Result<pool::EntryInput, (StatusCode, Json<Value>)> {
+    if body.get("items").is_some() {
+        return Err(error_response(
+            "批量导入暂不支持（AIGX 请逐条 POST /api/proxies/pool）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    serde_json::from_value::<pool::EntryInput>(body)
+        .map_err(|error| error_response(&format!("代理条目无效：{error}"), StatusCode::BAD_REQUEST))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +757,101 @@ mod tests {
         assert_eq!(body.proxy.as_deref(), Some("socks5://1.2.3.4:1080"));
         let body: TestAccountBody = serde_json::from_str(r#"{"account_id":"abc"}"#).expect("parse");
         assert_eq!(body.account_id, "abc");
+    }
+
+    #[test]
+    fn proxies_test_body_accepts_id_and_proxy_forms() {
+        // 上游 `/api/proxies/test` 用 `{id}` 指账号、`{proxy}` 给配置对象。
+        let body: ProxiesTestBody = serde_json::from_str(r#"{"id":"acct-1"}"#).expect("parse");
+        assert_eq!(body.id.as_deref(), Some("acct-1"));
+        // serde 的 Option<Value> 把 JSON null 收成 None（null = 直连，与缺省同义）
+        let body: ProxiesTestBody = serde_json::from_str(r#"{"proxy":null}"#).expect("parse");
+        assert!(body.proxy.is_none());
+        let body: ProxiesTestBody =
+            serde_json::from_str(r#"{"proxy":{"source":"custom","host":"1.2.3.4","port":8080}}"#)
+                .expect("parse");
+        assert!(body.proxy.is_some());
+    }
+
+    #[test]
+    fn proxy_config_object_translates_to_reference() {
+        // custom → URL（含认证）；pool / rotate 编码；direct / null → 直连。
+        assert_eq!(
+            proxy_config_to_reference(&json!({
+                "source": "custom", "protocol": "socks5", "host": "1.2.3.4",
+                "port": 1080, "username": "u", "password": "p",
+            }))
+            .unwrap()
+            .as_deref(),
+            Some("socks5://u:p@1.2.3.4:1080")
+        );
+        assert_eq!(
+            proxy_config_to_reference(&json!({ "host": "5.6.7.8", "port": 8080 }))
+                .unwrap()
+                .as_deref(),
+            Some("http://5.6.7.8:8080")
+        );
+        assert_eq!(
+            proxy_config_to_reference(&json!({ "source": "pool", "proxyId": "px_1" }))
+                .unwrap()
+                .as_deref(),
+            Some("pool:px_1")
+        );
+        assert_eq!(
+            proxy_config_to_reference(&json!({ "source": "rotate", "all": true }))
+                .unwrap()
+                .as_deref(),
+            Some("rotate")
+        );
+        assert_eq!(
+            proxy_config_to_reference(
+                &json!({ "source": "rotate", "all": false, "proxyIds": ["a","b"] })
+            )
+            .unwrap()
+            .as_deref(),
+            Some("rotate:a,b")
+        );
+        assert_eq!(
+            proxy_config_to_reference(&json!({ "source": "direct" })).unwrap(),
+            None
+        );
+        assert_eq!(proxy_config_to_reference(&Value::Null).unwrap(), None);
+        assert_eq!(proxy_config_to_reference(&json!("")).unwrap(), None);
+    }
+
+    #[test]
+    fn proxy_config_rejects_unsupported_shapes() {
+        // 负向断言 + 正向对照：非法形状全部报错，合法形状在上一条用例通过。
+        for bad in [
+            json!({ "source": "clash", "listenerUid": "x" }),
+            json!({ "source": "custom", "host": "1.2.3.4" }),
+            json!({ "source": "custom", "host": "1.2.3.4", "port": 0 }),
+            json!({ "source": "pool" }),
+            json!({ "source": "rotate", "all": false, "proxyIds": [] }),
+            json!({ "source": "unknown" }),
+            json!(42),
+        ] {
+            assert!(proxy_config_to_reference(&bad).is_err(), "应拒绝 {bad:?}");
+        }
+    }
+
+    #[test]
+    fn redact_proxy_keeps_reference_forms_only() {
+        assert_eq!(redact_proxy(Some("pool:abc")), json!("pool:abc"));
+        assert_eq!(redact_proxy(Some("rotate")), json!("rotate"));
+        assert_eq!(
+            redact_proxy(Some("http://user:pass@1.2.3.4:8080")),
+            json!("http://***@1.2.3.4:8080")
+        );
+        assert_eq!(redact_proxy(None), Value::Null);
+        assert_eq!(redact_proxy(Some("  ")), Value::Null);
+    }
+
+    #[test]
+    fn batch_items_body_is_rejected_loudly() {
+        let error = parse_entry_input(json!({ "items": [] })).expect_err("批量体应被拒绝");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        // 单条体可解析（正向对照）
+        assert!(parse_entry_input(json!({ "name": "n", "host": "1.2.3.4", "port": 8080 })).is_ok());
     }
 }

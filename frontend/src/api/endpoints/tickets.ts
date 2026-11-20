@@ -14,7 +14,9 @@ import type {
   AccountSessionItem,
   ProxyPoolItem,
   ProxyPoolResult,
+  ProxySettings,
   ProxyTestResult,
+  SystemProxySnapshot,
   AccountSessionStatsItem,
   ApiResponse,
   ApiList,
@@ -32,6 +34,7 @@ import type {
   GatewaySettingsItem,
   SecurityPolicyItem,
   DebugTrafficView,
+  DebugTrafficDetail,
   ModelMetadataStatus,
   ModelMetadataRefreshResult,
   RoutingPolicyItem,
@@ -228,6 +231,14 @@ export const endpoints = {
     request<ApiResponse<ProxyTestResult & { items?: ProxyPoolItem[] }>>('POST', `${API_BASE}/proxy-pool/test`, { id }),
   testAccountProxy: (data: { account_id?: string; proxy?: string | null }): Promise<ApiResponse<ProxyTestResult>> =>
     request<ApiResponse<ProxyTestResult>>('POST', `${API_BASE}/proxy-pool/test-account`, data),
+  /** 代理连通性测试设置（A2A `/api/proxies/settings`） */
+  proxySettings: (): Promise<ApiResponse<ProxySettings>> =>
+    request<ApiResponse<ProxySettings>>('GET', `${API_BASE}/proxies/settings`),
+  saveProxySettings: (data: { testUrl: string }): Promise<ApiResponse<ProxySettings>> =>
+    request<ApiResponse<ProxySettings>>('POST', `${API_BASE}/proxies/settings`, data),
+  /** 系统代理快照（A2A `/api/proxies/system`；账号代理表单「从系统代理导入」用） */
+  systemProxy: (): Promise<ApiResponse<SystemProxySnapshot>> =>
+    request<ApiResponse<SystemProxySnapshot>>('GET', `${API_BASE}/proxies/system`),
   /** 上游模型目录发现：同步某账号（或某 provider 下全部账号）的模型清单 */
   syncAccountCatalog: (data: {
     account_id?: string;
@@ -313,6 +324,9 @@ export const endpoints = {
   // 开关走 /api/limits 的 debug_traffic 字段；这里只做读取与清空。
   getDebugTraffic: (): Promise<ApiResponse<DebugTrafficView>> =>
     request<ApiResponse<DebugTrafficView>>('GET', `${API_BASE}/debug/traffic`),
+  // 单条详情（对照 Agent2API GET /api/debug/traffic?id=）：404 = 该请求没有保存原始报文
+  getDebugTrafficDetail: (id: string): Promise<ApiResponse<DebugTrafficDetail>> =>
+    request<ApiResponse<DebugTrafficDetail>>('GET', `${API_BASE}/debug/traffic?id=${encodeURIComponent(id)}`),
   clearDebugTraffic: (): Promise<ApiResponse<{ cleared: number }>> =>
     request<ApiResponse<{ cleared: number }>>('DELETE', `${API_BASE}/debug/traffic`),
   // models.dev 模型元数据（对照 Agent2API `/api/models/metadata`）：开关 + 状态 + 手动刷新。

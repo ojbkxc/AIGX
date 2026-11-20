@@ -5,7 +5,7 @@ import {
   Monitor, Sun, Moon,
   SlidersHorizontal, Sparkles, Network, RotateCcw,
   Timer, Gauge, CreditCard, Database, Bell, ShieldCheck, Download,
-  MessageSquare, CalendarClock,
+  MessageSquare, CalendarClock, Info,
 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
@@ -44,6 +44,7 @@ import ClientCompatPanel from '../components/ClientCompatPanel';
 import QueuePanel from '../components/QueuePanel';
 import AutoContinuePanel from '../components/AutoContinuePanel';
 import ModelMetadataPanel from '../components/ModelMetadataPanel';
+import SystemInfoPanel from '../components/SystemInfoPanel';
 import DataManagement from '../components/DataManagement';
 import CloudSyncPanel from '../components/CloudSyncPanel';
 import ScheduledTasks from './ScheduledTasks';
@@ -120,6 +121,7 @@ type SettingsTab =
   | 'scheduled'
   | 'notify'
   | 'security'
+  | 'system'
   | 'update';
 
 /** 计费分区子标签（易支付 / 用户分组） */
@@ -206,6 +208,7 @@ const SETTINGS_CATEGORIES: Array<{ key: SettingsTab; label: string; icon: typeof
   { key: 'scheduled', label: '定时任务', icon: CalendarClock },
   { key: 'notify', label: '通知', icon: Bell },
   { key: 'security', label: '安全', icon: ShieldCheck },
+  { key: 'system', label: '系统信息', icon: Info },
   { key: 'update', label: '更新', icon: Download },
 ];
 
@@ -1291,6 +1294,9 @@ export default function Settings() {
       {activeTab === 'scheduled' && <ScheduledTasks embedded />}
 
       {activeTab === 'notify' && <Notify />}
+
+      {/* 系统信息（对照 Agent2API 设置页「版本信息」：一屏看全 + 一键复制） */}
+      {activeTab === 'system' && <SystemInfoPanel />}
 
       {activeTab === 'update' && <UpdatePanel />}
 

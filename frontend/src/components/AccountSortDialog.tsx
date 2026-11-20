@@ -52,6 +52,28 @@ function rulesOf(draft: RuleDraft): AccountSortRule[] {
   return out;
 }
 
+/**
+ * 排序响应 → provider→规则表。
+ *
+ * 后端返回 A2A 完整排序视图（`{configured, rules, providerOrder, accountOrder,
+ * creditExpiresAt, balanceSortStates, …}`），**配置表在 `configured`**；旧后端
+ * 只回扁平 `{provider: rules[]}`。两种都认：有 `configured` 用它，否则取顶层
+ * 且只保留数组值（其余是元数据键，不是 provider）。
+ */
+function settingsMapOf(data: unknown): AccountSortSettings {
+  const raw = (data ?? {}) as Record<string, unknown>;
+  const source =
+    raw.configured && typeof raw.configured === 'object'
+      ? (raw.configured as Record<string, unknown>)
+      : raw;
+  const out: AccountSortSettings = {};
+  for (const [provider, rules] of Object.entries(source)) {
+    if (!Array.isArray(rules)) continue;
+    out[provider] = rules as AccountSortRule[];
+  }
+  return out;
+}
+
 interface AccountSortDialogProps {
   open: boolean;
   onClose: () => void;
@@ -87,12 +109,12 @@ export default function AccountSortDialog({ open, onClose, providers }: AccountS
     setLoading(true);
     try {
       const res = await api.getAccountSorting();
-      const data = res?.data ?? {};
-      setSettings(data);
+      const map = settingsMapOf(res?.data);
+      setSettings(map);
       const next: Record<string, RuleDraft> = {};
-      for (const [provider, rules] of Object.entries(data)) next[provider] = draftOf(rules);
+      for (const [provider, rules] of Object.entries(map)) next[provider] = draftOf(rules);
       setDrafts(next);
-      setCurrent((prev) => (prev && Object.prototype.hasOwnProperty.call(data, prev) ? prev : Object.keys(data)[0] ?? ''));
+      setCurrent((prev) => (prev && Object.prototype.hasOwnProperty.call(map, prev) ? prev : Object.keys(map)[0] ?? ''));
       setNotReady(false);
       setError('');
     } catch (err) {
@@ -124,10 +146,10 @@ export default function AccountSortDialog({ open, onClose, providers }: AccountS
     try {
       const rules = rulesOf(draft);
       const res = await api.saveAccountSorting(current, rules.length ? rules : null);
-      const data = res?.data ?? {};
-      setSettings(data);
+      const map = settingsMapOf(res?.data);
+      setSettings(map);
       const next: Record<string, RuleDraft> = {};
-      for (const [provider, list] of Object.entries(data)) next[provider] = draftOf(list);
+      for (const [provider, list] of Object.entries(map)) next[provider] = draftOf(list);
       setDrafts(next);
       addToast(t('排序规则已保存'));
     } catch (err) {
@@ -142,10 +164,10 @@ export default function AccountSortDialog({ open, onClose, providers }: AccountS
     setSaving(true);
     try {
       const res = await api.saveAccountSorting(current, null);
-      const data = res?.data ?? {};
-      setSettings(data);
+      const map = settingsMapOf(res?.data);
+      setSettings(map);
       const next: Record<string, RuleDraft> = {};
-      for (const [provider, list] of Object.entries(data)) next[provider] = draftOf(list);
+      for (const [provider, list] of Object.entries(map)) next[provider] = draftOf(list);
       setDrafts(next);
       addToast(t('已恢复默认排序'));
     } catch (err) {

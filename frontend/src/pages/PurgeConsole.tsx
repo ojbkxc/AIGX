@@ -2,11 +2,12 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { api } from '../api';
-import type { PurgeData, PurgeRewriteRule, PurgeSettings, PurgeStats } from '../types';
+import type { PurgeData, PurgeRewriteRule, PurgeSettings, PurgeStats, PurgeTemplate } from '../types';
 import {
   Button,
   Card,
   Input,
+  Select,
   Skeleton,
   SkeletonCards,
   SkeletonList,
@@ -86,6 +87,43 @@ function splitList(value: string): string[] {
     .filter(Boolean);
 }
 
+/** 换行分隔的词表（保留含逗号/空格的短语原文，拒绝话术词表用） */
+function splitLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 找出词表中重复的 key（大小写不敏感）。
+ * 返回值是「重复的原文 → 出现下标列表」，首个出现项不算冲突目标，
+ * 用于行内提示「该原文与第 N 行重复」。
+ */
+function findDuplicates(items: string[]): Map<string, number[]> {
+  const seen = new Map<string, number[]>();
+  items.forEach((item, index) => {
+    const key = item.trim().toLowerCase();
+    if (!key) return;
+    const list = seen.get(key);
+    if (list) list.push(index);
+    else seen.set(key, [index]);
+  });
+  // 只保留真正出现 ≥2 次的
+  for (const [key, list] of seen) {
+    if (list.length < 2) seen.delete(key);
+  }
+  return seen;
+}
+
+/** 降档目标候选（clamp_reasoning 只压 high/medium/xhigh/max 档） */
+const REASONING_FLOORS: Array<{ value: string; label: string }> = [
+  { value: 'low', label: 'low（默认）' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'minimal', label: 'minimal' },
+];
+
 function formatUptime(total: number, units: { sec: string; min: string; hour: string; day: string }): string {
   const seconds = Math.max(0, Math.floor(total));
   if (seconds < 60) return `${seconds} ${units.sec}`;
@@ -125,6 +163,7 @@ const RuleRow = memo(function RuleRow({
   fromLabel,
   toLabel,
   removeLabel,
+  dupHint,
   onPatch,
   onRemove,
 }: {
@@ -133,17 +172,22 @@ const RuleRow = memo(function RuleRow({
   fromLabel: string;
   toLabel: string;
   removeLabel: string;
+  /** 与其他行原文重复时的行内提示（后端会静默截断重复规则，前端显式提示） */
+  dupHint?: string;
   onPatch: (index: number, part: Partial<PurgeRewriteRule>) => void;
   onRemove: (index: number) => void;
 }): JSX.Element {
   return (
     <div className="purge-rule-row">
-      <Input
-        placeholder={fromLabel}
-        aria-label={fromLabel}
-        value={rule.from}
-        onChange={(event) => onPatch(index, { from: event.target.value })}
-      />
+      <div>
+        <Input
+          placeholder={fromLabel}
+          aria-label={fromLabel}
+          value={rule.from}
+          onChange={(event) => onPatch(index, { from: event.target.value })}
+        />
+        {dupHint ? <span className="purge-dup-hint">{dupHint}</span> : null}
+      </div>
       <span className="purge-arrow" aria-hidden="true">→</span>
       <Input
         placeholder={toLabel}
@@ -337,6 +381,11 @@ export default function PurgeConsole(): JSX.Element {
     retry_limit: '',
   });
   const [numErrors, setNumErrors] = useState<Partial<Record<NumKey, string>>>({});
+  // 改写预览（dry-run）：样例输入 + 改写结果（不写统计）
+  const [previewInput, setPreviewInput] = useState('');
+  const [previewOut, setPreviewOut] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [previewMeta, setPreviewMeta] = useState<{ changed: boolean; skill_hit: boolean } | null>(null);
 
   // PUT 互斥：开关乐观保存与底部保存共用一把锁，防止并发 PUT 互相覆盖
   const savingRef = useRef(false);
@@ -354,6 +403,34 @@ export default function PurgeConsole(): JSX.Element {
   // 同义词词表增删后的焦点回归（与死区词表独立，互不干扰）
   const synRulesRef = useRef<HTMLDivElement | null>(null);
   const focusSynRule = useRef<number | 'add' | null>(null);
+
+  // 规则重复检测（大小写不敏感，按 trim 后原文）：
+  // 死区词表 / 同义词表 / 模板名各自独立检测；重复项保存前给行内提示（不阻断保存，
+  // 与后端 normalize 的静默去重互补——后端截断静默丢弃，前端显式提示）。
+  const dupRules = useMemo(
+    () => findDuplicates(draft?.rewrite_rules.map((r) => r.from) ?? []),
+    [draft?.rewrite_rules],
+  );
+  const dupSynonyms = useMemo(
+    () => findDuplicates(draft?.synonym_pairs.map((r) => r.from) ?? []),
+    [draft?.synonym_pairs],
+  );
+  const dupTemplates = useMemo(
+    () => findDuplicates(draft?.structured_templates?.map((tpl) => tpl.name) ?? []),
+    [draft?.structured_templates],
+  );
+
+  // 未保存离开保护：关闭/刷新页签前弹浏览器原生确认（dirty 时才挂监听）
+  useEffect(() => {
+    if (!dirty) return;
+    const handler = (event: BeforeUnloadEvent): void => {
+      event.preventDefault();
+      // Chrome 需要returnValue 才会弹确认框；文案由浏览器统一提供，不可自定义
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirty]);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -390,6 +467,11 @@ export default function PurgeConsole(): JSX.Element {
       addToast(t('存在无效输入，请检查标红的字段'), 'warning');
       return;
     }
+    // 模板重名阻断保存：active_template 按名匹配，重名会让「当前启用模板」悬空命中错行
+    if (dupTemplates.size > 0) {
+      addToast(t('存在重复的模板名称，请先修改再保存'), 'warning');
+      return;
+    }
     let next = current;
     const rawNext = { ...numRaw };
     for (const f of NUM_FIELDS) {
@@ -415,7 +497,7 @@ export default function PurgeConsole(): JSX.Element {
       savingRef.current = false;
       setSaving(false);
     }
-  }, [addToast, numRaw, t]);
+  }, [addToast, dupTemplates.size, numRaw, t]);
 
   /**
    * 开关：乐观翻本键，失败只回滚该键。
@@ -501,6 +583,65 @@ export default function PurgeConsole(): JSX.Element {
     focusSynRule.current = index;
     setDraft((d) => (d ? { ...d, synonym_pairs: d.synonym_pairs.filter((_, i) => i !== index) } : d));
   }, []);
+
+  /** 结构化模板编辑：空模板表按空数组处理（旧后端不返回该字段） */
+  const patchTemplate = useCallback((index: number, part: Partial<PurgeTemplate>): void => {
+    setDirty(true);
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            structured_templates: (d.structured_templates ?? []).map((tpl, i) =>
+              i === index ? { ...tpl, ...part } : tpl,
+            ),
+          }
+        : d,
+    );
+  }, []);
+
+  const addTemplate = useCallback((): void => {
+    setDirty(true);
+    setDraft((d) =>
+      d ? { ...d, structured_templates: [...(d.structured_templates ?? []), { name: '', text: '' }] } : d,
+    );
+  }, []);
+
+  const removeTemplate = useCallback((index: number): void => {
+    setDirty(true);
+    setDraft((d) => {
+      if (!d) return d;
+      const templates = (d.structured_templates ?? []).filter((_, i) => i !== index);
+      // 删除的正是当前启用模板 → 清空选择（回退 structured_suffix），避免悬空引用
+      const removed = (d.structured_templates ?? [])[index];
+      const active = d.active_template && removed && d.active_template === removed.name ? '' : d.active_template;
+      return { ...d, structured_templates: templates, active_template: active ?? '' };
+    });
+  }, []);
+
+  /** 改写预览：以当前草稿为配置试跑样例输入（dry-run，不写统计、不落库） */
+  const runPreview = useCallback(async (): Promise<void> => {
+    const current = draftRef.current;
+    if (!current || previewing) return;
+    if (!previewInput.trim()) {
+      addToast(t('请输入预览样例'), 'warning');
+      return;
+    }
+    setPreviewing(true);
+    try {
+      const res = await api.previewPurge({
+        settings: current,
+        messages: [{ role: 'user', content: previewInput }],
+      });
+      if (!res.success || !res.data) throw new Error('preview failed');
+      const lastUser = [...res.data.messages].reverse().find((m) => m.role === 'user');
+      setPreviewOut(lastUser?.content ?? '');
+      setPreviewMeta(res.data.applied);
+    } catch {
+      addToast(t('预览失败'), 'error');
+    } finally {
+      setPreviewing(false);
+    }
+  }, [addToast, previewInput, previewing, t]);
 
   // 词表增删后把焦点落回列表内，避免按钮随行卸载后焦点掉到 body
   useEffect(() => {
@@ -606,9 +747,43 @@ export default function PurgeConsole(): JSX.Element {
         <h1>{t('破甲控制台')}</h1>
         <div className="purge-meta">
           PID {data.runtime.pid} · {uptime} · {t('上游')}{' '}
-          {data.runtime.upstream || '—'}
+          {data.runtime.upstream || '—'}{' '}
+          {/* 刷新统计：load 会重置草稿，有未保存编辑时禁用避免吞掉改动 */}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={saving || dirty || loading}
+            title={dirty ? t('有未保存的修改，保存或重新加载后才能刷新') : undefined}
+            onClick={() => void load()}
+          >
+            {t('刷新')}
+          </Button>
         </div>
       </div>
+
+      {/* 未保存编辑警示条：离开保护之外的页内显性提示，提供「放弃修改」出口 */}
+      {dirty && (
+        <div className="purge-dirty-bar" role="status">
+          <span>{t('有未保存的修改')}</span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={saving}
+            onClick={() => {
+              const snapshot = dataRef.current;
+              if (!snapshot) return;
+              setDraft(snapshot.settings);
+              setNumRaw(numRawOf(snapshot.settings));
+              setNumErrors({});
+              setDirty(false);
+              setPreviewOut(null);
+              setPreviewMeta(null);
+            }}
+          >
+            {t('放弃修改')}
+          </Button>
+        </div>
+      )}
 
       <StatsGrid stats={stats} retryRate={retryRate} t={t} />
 
@@ -665,6 +840,11 @@ export default function PurgeConsole(): JSX.Element {
                 fromLabel={t('原文')}
                 toLabel={t('改写为')}
                 removeLabel={t('删除')}
+                dupHint={
+                  dupRules.get(rule.from.trim().toLowerCase())
+                    ? t('与其他行的原文重复，保存时后端只保留最早出现的一条')
+                    : undefined
+                }
                 onPatch={patchRule}
                 onRemove={removeRule}
               />
@@ -693,6 +873,11 @@ export default function PurgeConsole(): JSX.Element {
                 fromLabel={t('敏感词')}
                 toLabel={t('同义词')}
                 removeLabel={t('删除')}
+                dupHint={
+                  dupSynonyms.get(rule.from.trim().toLowerCase())
+                    ? t('与其他行的敏感词重复，保存时后端只保留最早出现的一条')
+                    : undefined
+                }
                 onPatch={patchSynonymRule}
                 onRemove={removeSynonymRule}
               />
@@ -746,6 +931,38 @@ export default function PurgeConsole(): JSX.Element {
             value={draft.normalize_strip_prefixes.join(', ')}
             onChange={(event) => patch({ normalize_strip_prefixes: splitList(event.target.value) })}
           />
+          <Select
+            label={t('降档目标（reasoning_floor）')}
+            hint={t('降思考开启后，把 high/medium/xhigh/max 压到该档位')}
+            value={draft.reasoning_floor}
+            onChange={(event) => patch({ reasoning_floor: event.target.value })}
+          >
+            {REASONING_FLOORS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {t(item.label)}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <Textarea
+          label={t('拒绝话术词表（每行一条，空表 = 关闭字面拒绝检测）')}
+          rows={4}
+          value={(draft.refusal_patterns ?? []).join('\n')}
+          onChange={(event) => patch({ refusal_patterns: splitLines(event.target.value) })}
+        />
+        <div className="purge-form-grid">
+          <Textarea
+            label={t('「内容过滤」类失败关键词（每行一条）')}
+            rows={3}
+            value={(draft.failure_filter_keywords ?? []).join('\n')}
+            onChange={(event) => patch({ failure_filter_keywords: splitLines(event.target.value) })}
+          />
+          <Textarea
+            label={t('「空答」类失败关键词（每行一条）')}
+            rows={3}
+            value={(draft.failure_empty_keywords ?? []).join('\n')}
+            onChange={(event) => patch({ failure_empty_keywords: splitLines(event.target.value) })}
+          />
         </div>
         <Textarea
           label={t('结构化输出后缀')}
@@ -753,6 +970,91 @@ export default function PurgeConsole(): JSX.Element {
           value={draft.structured_suffix}
           onChange={(event) => patch({ structured_suffix: event.target.value })}
         />
+      </Card>
+
+      <Card
+        title={t('结构化模板')}
+        actions={
+          <Button variant="outline" size="sm" onClick={addTemplate}>
+            {t('添加模板')}
+          </Button>
+        }
+      >
+        <Select
+          label={t('当前启用模板')}
+          hint={t('结构化提示开启时，命中模板则用其文本替代默认后缀；选「使用默认后缀」即回退')}
+          value={draft.active_template ?? ''}
+          onChange={(event) => patch({ active_template: event.target.value })}
+        >
+          <option value="">{t('（使用默认后缀）')}</option>
+          {(draft.structured_templates ?? []).map((tpl, index) => (
+            <option key={`tpl-${index}`} value={tpl.name} disabled={!tpl.name.trim()}>
+              {tpl.name.trim() || t('（未命名）')}
+            </option>
+          ))}
+        </Select>
+        {(draft.structured_templates ?? []).length === 0 ? (
+          <p className="purge-empty">{t('暂无模板，点击右上角「添加模板」新建一条')}</p>
+        ) : (
+          <div className="purge-rules">
+            {(draft.structured_templates ?? []).map((tpl, index) => (
+              <div className="purge-rule-row" key={`tpl-${index}`}>
+                <div>
+                  <Input
+                    placeholder={t('模板名称')}
+                    aria-label={t('模板名称')}
+                    value={tpl.name}
+                    error={
+                      dupTemplates.get(tpl.name.trim().toLowerCase())
+                        ? t('模板名称重复，保存前请先修改')
+                        : undefined
+                    }
+                    onChange={(event) => patchTemplate(index, { name: event.target.value })}
+                  />
+                </div>
+                <Textarea
+                  rows={3}
+                  placeholder={t('模板文本')}
+                  aria-label={t('模板文本')}
+                  value={tpl.text}
+                  onChange={(event) => patchTemplate(index, { text: event.target.value })}
+                />
+                <Button variant="outline" size="sm" onClick={() => removeTemplate(index)}>
+                  {t('删除')}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card title={t('改写预览')}>
+        <Textarea
+          label={t('样例输入')}
+          rows={3}
+          placeholder={t('粘贴一段 user 消息，按当前草稿配置试跑改写效果（dry-run，不发送请求、不写统计）')}
+          value={previewInput}
+          onChange={(event) => setPreviewInput(event.target.value)}
+        />
+        <div className="purge-actions">
+          {/* 预览用草稿里的未保存配置：保存前即可验证词表/模板/技能注入效果 */}
+          <Button variant="outline" disabled={previewing || saving} onClick={() => void runPreview()}>
+            {previewing ? t('预览中…') : t('预览改写')}
+          </Button>
+        </div>
+        {previewOut !== null ? (
+          <>
+            {previewMeta ? (
+              <div className="purge-preview-meta">
+                {previewMeta.changed ? t('已应用改写') : t('无改写命中（原样返回）')}
+                {previewMeta.skill_hit ? ` · ${t('技能已注入')}` : ''}
+              </div>
+            ) : null}
+            <pre className="purge-preview-out" aria-label={t('改写结果')}>
+              {previewOut}
+            </pre>
+          </>
+        ) : null}
       </Card>
 
       <div className="purge-actions">

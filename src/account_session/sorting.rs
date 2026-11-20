@@ -31,8 +31,9 @@ use super::store::AccountSessionStore;
 /// 排序规则的 KB 键（与轮换策略同库）。
 pub const SORT_SETTINGS_KEY: &str = "acctses:account_sort_rules";
 
-/// 每个 provider 最多几条规则（与路由档案同上限口径）。
-pub const MAX_SORT_RULES: usize = 2;
+/// 每个 provider 最多几条规则（A2A `validate_account_sort`：credit / balance /
+/// added 三维度，最多三条且键不可重复）。
+pub const MAX_SORT_RULES: usize = 3;
 
 /// 落盘设置：`{rules: {provider: [...]}, updated_at}`。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -64,9 +65,38 @@ impl AccountSortSettings {
 }
 
 /// A2A 口径的规则输入：`credit` 归一为 AIGX 的 `expires`。
+///
+/// 同时接受两种线格式（A2A beta.2 起前端按上游写法提交）：
+///
+/// - **A2A**：`{"key":"credit"|"balance"|"added","on":true,"dir":"soon"|"late"|
+///   "high"|"low"|"new"|"old"}`（`on:false` 的规则在应用时丢弃——AIGX 的
+///   存储只保留生效规则，缺省维度由 `effective_rules` 补齐）；
+/// - **旧 AIGX**：`{"on":"credit"|"expires"|"balance"|"added"|"quota_reset",
+///   "dir":"asc"|"desc"}`。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SortRuleInput {
+    A2a(A2aSortRuleInput),
+    Legacy(LegacySortRuleInput),
+}
+
+/// A2A 线格式的一条规则。
+#[derive(Debug, Clone, Deserialize)]
+pub struct A2aSortRuleInput {
+    pub key: String,
+    #[serde(default = "default_rule_on")]
+    pub on: bool,
+    pub dir: String,
+}
+
+fn default_rule_on() -> bool {
+    true
+}
+
+/// 旧 AIGX 线格式的一条规则（tag = `on` 变体名）。
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(tag = "on", rename_all = "snake_case")]
-pub enum SortRuleInput {
+pub enum LegacySortRuleInput {
     /// A2A 名字：按积分/套餐最早到期（→ `Expires`）
     Credit {
         dir: SortDir,
@@ -86,20 +116,83 @@ pub enum SortRuleInput {
     },
 }
 
-impl From<SortRuleInput> for AccountSortRule {
-    fn from(input: SortRuleInput) -> Self {
-        match input {
-            SortRuleInput::Credit { dir } | SortRuleInput::Expires { dir } => {
-                AccountSortRule::Expires { dir }
-            }
-            SortRuleInput::Balance { dir } => AccountSortRule::Balance { dir },
-            SortRuleInput::Added { dir } => AccountSortRule::Added { dir },
-            SortRuleInput::QuotaReset { dir } => AccountSortRule::QuotaReset { dir },
+impl SortRuleInput {
+    /// 规则是否生效（A2A `on:false` 的条目保留在配置里但不参与比较）。
+    pub fn enabled(&self) -> bool {
+        match self {
+            SortRuleInput::A2a(rule) => rule.on,
+            SortRuleInput::Legacy(_) => true,
+        }
+    }
+
+    /// 规则键（校验重复用；`credit` 与 `expires` 视为同一维度）。
+    pub fn key(&self) -> &'static str {
+        match self {
+            SortRuleInput::A2a(rule) => match rule.key.as_str() {
+                "credit" | "expires" => "credit",
+                "balance" => "balance",
+                "added" => "added",
+                "quotaReset" | "quota_reset" => "quota_reset",
+                _ => "unknown",
+            },
+            SortRuleInput::Legacy(rule) => match rule {
+                LegacySortRuleInput::Credit { .. } | LegacySortRuleInput::Expires { .. } => {
+                    "credit"
+                }
+                LegacySortRuleInput::Balance { .. } => "balance",
+                LegacySortRuleInput::Added { .. } => "added",
+                LegacySortRuleInput::QuotaReset { .. } => "quota_reset",
+            },
         }
     }
 }
 
-/// 校验一批规则：条数上限。
+impl From<SortRuleInput> for AccountSortRule {
+    fn from(input: SortRuleInput) -> Self {
+        match input {
+            SortRuleInput::Legacy(rule) => match rule {
+                LegacySortRuleInput::Credit { dir } | LegacySortRuleInput::Expires { dir } => {
+                    AccountSortRule::Expires { dir }
+                }
+                LegacySortRuleInput::Balance { dir } => AccountSortRule::Balance { dir },
+                LegacySortRuleInput::Added { dir } => AccountSortRule::Added { dir },
+                LegacySortRuleInput::QuotaReset { dir } => AccountSortRule::QuotaReset { dir },
+            },
+            SortRuleInput::A2a(rule) => match rule.key.as_str() {
+                "credit" | "expires" => AccountSortRule::Expires {
+                    dir: if rule.dir == "late" {
+                        SortDir::Desc
+                    } else {
+                        SortDir::Asc
+                    },
+                },
+                "balance" => AccountSortRule::Balance {
+                    dir: if rule.dir == "high" {
+                        SortDir::Desc
+                    } else {
+                        SortDir::Asc
+                    },
+                },
+                "added" => AccountSortRule::Added {
+                    dir: if rule.dir == "old" {
+                        SortDir::Asc
+                    } else {
+                        SortDir::Desc
+                    },
+                },
+                _ => AccountSortRule::QuotaReset {
+                    dir: if rule.dir == "desc" {
+                        SortDir::Desc
+                    } else {
+                        SortDir::Asc
+                    },
+                },
+            },
+        }
+    }
+}
+
+/// 校验一批规则：条数上限 + 键不重复（对齐上游 `validate_account_sort`）。
 ///
 /// 空数组**不报错**：`effective_rules` 把它与「没配」同等对待（回落默认），
 /// 而「显式清空/恢复默认」的正式写法是 PUT 时传 `rules: null`（handler 会
@@ -107,6 +200,18 @@ impl From<SortRuleInput> for AccountSortRule {
 pub fn validate_rules(rules: &[AccountSortRule]) -> Result<(), String> {
     if rules.len() > MAX_SORT_RULES {
         return Err(format!("账号排序规则最多 {MAX_SORT_RULES} 条"));
+    }
+    let mut keys = std::collections::HashSet::new();
+    for rule in rules {
+        let key = match rule {
+            AccountSortRule::Expires { .. } => "credit",
+            AccountSortRule::Balance { .. } => "balance",
+            AccountSortRule::Added { .. } => "added",
+            AccountSortRule::QuotaReset { .. } => "quota_reset",
+        };
+        if !keys.insert(key) {
+            return Err(format!("账号排序包含重复规则「{key}」"));
+        }
     }
     Ok(())
 }
@@ -124,9 +229,38 @@ pub fn effective_rules(provider: &str, settings: &AccountSortSettings) -> Vec<Ac
     }
 }
 
-/// 把规则序列化回 JSON（管理面回显）。
+/// 把规则序列化回 JSON（A2A 线格式：`{key, on, dir}`，管理面回显）。
+///
+/// `credit` 是 A2A 的名字（AIGX 内部存为 `Expires`）；方向词同样是 A2A 的
+/// `soon/late`、`high/low`、`new/old`——前端弹窗按这套词渲染下拉。
 fn rules_json(rules: &[AccountSortRule]) -> Value {
-    serde_json::to_value(rules).unwrap_or(Value::Array(Vec::new()))
+    Value::Array(
+        rules
+            .iter()
+            .map(|rule| match rule {
+                AccountSortRule::Expires { dir } => json!({
+                    "key": "credit",
+                    "on": true,
+                    "dir": if *dir == SortDir::Asc { "soon" } else { "late" },
+                }),
+                AccountSortRule::Balance { dir } => json!({
+                    "key": "balance",
+                    "on": true,
+                    "dir": if *dir == SortDir::Desc { "high" } else { "low" },
+                }),
+                AccountSortRule::Added { dir } => json!({
+                    "key": "added",
+                    "on": true,
+                    "dir": if *dir == SortDir::Desc { "new" } else { "old" },
+                }),
+                AccountSortRule::QuotaReset { dir } => json!({
+                    "key": "quotaReset",
+                    "on": true,
+                    "dir": if *dir == SortDir::Asc { "asc" } else { "desc" },
+                }),
+            })
+            .collect(),
+    )
 }
 
 /// 单条账号的排序读数：积分最早到期（秒）与可用余额。
@@ -160,6 +294,61 @@ fn balance_available_of(session: &AccountSession) -> Option<f64> {
         .and_then(Value::as_f64)
 }
 
+/// 余额读数对象（A2A `AccountSortBalance`：`{remaining, unit, unlimited}`）。
+fn balance_object_of(session: &AccountSession) -> Value {
+    let balance = session.last_balance.as_ref();
+    let unit = balance
+        .and_then(|balance| balance.get("unit"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|unit| !unit.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default();
+    let unit = if unit.eq_ignore_ascii_case("credit") || unit.eq_ignore_ascii_case("credits") {
+        "积分".to_string()
+    } else {
+        unit
+    };
+    json!({
+        "remaining": balance_available_of(session),
+        "unit": unit,
+        "unlimited": balance
+            .and_then(|balance| balance.get("unlimited"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+/// 余额排序状态（A2A `BalanceSortState` 的字符串投影）。
+fn balance_sort_state(provider: &str, members: &[&AccountSession]) -> &'static str {
+    if !crate::account_session::balance::supports_balance(provider) {
+        return "unsupported";
+    }
+    let mut units: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for session in members {
+        let Some(balance) = session.last_balance.as_ref() else {
+            continue;
+        };
+        if balance.get("unlimited").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let unit = balance
+            .get("unit")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|unit| !unit.is_empty() && *unit != "%");
+        let available = balance.get("available").and_then(Value::as_f64);
+        if let (Some(unit), Some(_)) = (unit, available) {
+            units.insert(unit.to_string());
+        }
+    }
+    match units.len() {
+        0 => "noData",
+        1 => "ready",
+        _ => "mixedUnits",
+    }
+}
+
 /// 按 provider 分组并对每组排序（与选号阶段共用 `compare_sessions_by_rules`）。
 pub struct AccountSorting {
     pub configured: AccountSortSettings,
@@ -167,7 +356,10 @@ pub struct AccountSorting {
     pub effective: BTreeMap<String, Vec<AccountSortRule>>,
     pub account_order: BTreeMap<String, Vec<String>>,
     pub credit_expires_at: BTreeMap<String, Option<i64>>,
-    pub balances: BTreeMap<String, Option<f64>>,
+    /// 逐账号余额读数（A2A 形状 `{remaining, unit, unlimited}`）。
+    pub balances: BTreeMap<String, Value>,
+    /// 逐 provider 的余额排序可用态（ready / noData / mixedUnits / unsupported）。
+    pub balance_sort_states: BTreeMap<String, &'static str>,
 }
 
 impl AccountSorting {
@@ -182,6 +374,7 @@ impl AccountSorting {
         let mut account_order = BTreeMap::new();
         let mut credit_expires_at = BTreeMap::new();
         let mut balances = BTreeMap::new();
+        let mut balance_sort_states = BTreeMap::new();
         for provider in &providers {
             let rules = effective_rules(provider, &settings);
             let mut members: Vec<&AccountSession> = sessions
@@ -197,8 +390,9 @@ impl AccountSorting {
             });
             for session in &members {
                 credit_expires_at.insert(session.id.clone(), credit_expires_of(session));
-                balances.insert(session.id.clone(), balance_available_of(session));
+                balances.insert(session.id.clone(), balance_object_of(session));
             }
+            balance_sort_states.insert(provider.clone(), balance_sort_state(provider, &members));
             account_order.insert(
                 provider.clone(),
                 members.iter().map(|session| session.id.clone()).collect(),
@@ -212,6 +406,7 @@ impl AccountSorting {
             account_order,
             credit_expires_at,
             balances,
+            balance_sort_states,
         }
     }
 
@@ -235,16 +430,28 @@ impl AccountSorting {
         let balances = self
             .balances
             .iter()
-            .map(|(id, available)| (id.clone(), json!(available)))
+            .map(|(id, balance)| (id.clone(), balance.clone()))
             .collect::<Map<String, Value>>();
+        let balance_states = self
+            .balance_sort_states
+            .iter()
+            .map(|(provider, state)| (provider.clone(), json!(state)))
+            .collect::<Map<String, Value>>();
+        let updated_at = now.max(self.configured.updated_at);
         json!({
-            "updated_at": now.max(self.configured.updated_at),
+            // A2A camelCase 主键 + AIGX 旧 snake 别名（既有调用方零改动）
+            "updatedAt": updated_at,
+            "updated_at": updated_at,
             "configured": Value::Object(configured),
             "rules": Value::Object(rules),
+            "providerOrder": self.providers,
             "providers": self.providers,
+            "accountOrder": self.account_order,
             "account_order": self.account_order,
+            "creditExpiresAt": Value::Object(credit.clone()),
             "credit_expires_at": Value::Object(credit),
             "balances": Value::Object(balances),
+            "balanceSortStates": Value::Object(balance_states),
         })
     }
 }
@@ -306,5 +513,70 @@ mod tests {
             AccountSortRule::from(input),
             AccountSortRule::Expires { dir: SortDir::Asc }
         ));
+    }
+
+    #[test]
+    fn a2a_wire_rules_map_to_internal_dimensions() {
+        let input: SortRuleInput =
+            serde_json::from_value(json!({ "key": "credit", "on": true, "dir": "soon" })).unwrap();
+        assert!(matches!(
+            AccountSortRule::from(input),
+            AccountSortRule::Expires { dir: SortDir::Asc }
+        ));
+        let input: SortRuleInput =
+            serde_json::from_value(json!({ "key": "balance", "on": true, "dir": "high" })).unwrap();
+        assert!(matches!(
+            AccountSortRule::from(input),
+            AccountSortRule::Balance { dir: SortDir::Desc }
+        ));
+        let input: SortRuleInput =
+            serde_json::from_value(json!({ "key": "added", "on": true, "dir": "old" })).unwrap();
+        assert!(matches!(
+            AccountSortRule::from(input),
+            AccountSortRule::Added { dir: SortDir::Asc }
+        ));
+        let disabled: SortRuleInput =
+            serde_json::from_value(json!({ "key": "added", "on": false, "dir": "new" })).unwrap();
+        assert!(!disabled.enabled());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_keys_beyond_three_rules() {
+        use crate::channel::routing_policy::AccountSortRule as Rule;
+        assert!(validate_rules(&[
+            Rule::Expires { dir: SortDir::Asc },
+            Rule::Balance { dir: SortDir::Desc },
+            Rule::Added { dir: SortDir::Desc },
+        ])
+        .is_ok());
+        assert!(validate_rules(&[
+            Rule::Expires { dir: SortDir::Asc },
+            Rule::Expires { dir: SortDir::Desc },
+        ])
+        .is_err());
+        assert!(validate_rules(&[
+            Rule::Expires { dir: SortDir::Asc },
+            Rule::Balance { dir: SortDir::Desc },
+            Rule::Added { dir: SortDir::Desc },
+            Rule::QuotaReset { dir: SortDir::Asc },
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn sorting_json_uses_a2a_wire_names() {
+        let sessions = vec![session("kiro", "a", 1, Some(200))];
+        let sorting = AccountSorting::build(&sessions, AccountSortSettings::default());
+        let view = sorting.to_json(1000);
+        assert_eq!(view["updatedAt"], json!(1000));
+        assert_eq!(view["providerOrder"], json!(["kiro"]));
+        assert_eq!(view["accountOrder"]["kiro"], json!(["a"]));
+        assert_eq!(view["account_order"]["kiro"], json!(["a"]));
+        assert!(view["creditExpiresAt"].get("a").is_some());
+        assert!(view["balanceSortStates"].get("kiro").is_some());
+        // 规则以 A2A 线格式回显（credit / on / soon）
+        assert_eq!(view["rules"]["kiro"][0]["key"], json!("credit"));
+        assert_eq!(view["rules"]["kiro"][0]["on"], json!(true));
+        assert_eq!(view["rules"]["kiro"][0]["dir"], json!("soon"));
     }
 }

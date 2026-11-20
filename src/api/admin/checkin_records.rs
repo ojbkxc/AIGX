@@ -14,8 +14,9 @@
 //!
 //! GET → `{records: [...], total, stats}`：total 是**同条件**的总数（分页器用它算
 //! 页数），records 按时间倒序。字段用 A2A 的 camelCase 形状（`accountId` /
-//! `accountName` / `keptActive` / `streakDays` / `rowId`…），与签到中心聚合页对齐。
-//! DELETE → `{success:true, removed}`（removed = 删除条数）。
+//! `accountName` / `keptActive` / `streakDays` / `rowId`…），与签到中心聚合页对齐
+//! （`stats` 是 AIGX 扩展，统计卡直读）。DELETE → `{success:true, removed}`
+//! （removed = 删除条数）。
 //!
 //! ## DELETE 的护栏（照抄 logs 的规则）
 //!
@@ -89,26 +90,28 @@ fn outcome_of(value: Option<&String>) -> Option<CheckinOutcome> {
 
 /// 一条记录 → 对外 JSON。
 ///
-/// 字段一律 **snake_case**（对齐 AIGX 既有台账结构与前端 CheckinRecord 类型；
-/// camelCase 会让记录页整列渲染成「—」而不报错 —— 静默失效比编译错更贵）。
+/// 字段一律 **camelCase**，与 A2A `core/checkin_records::query` 的行形状逐项
+/// 对齐（`rowId / accountId / accountName / providerId / keptActive /
+/// streakDays`）。`provider` 是展示名（providerId 才是原始 id）—— 与 A2A
+/// 同口径：界面直接展示这一列，id 只有开发者认得出。
 fn record_json(record: &CheckinRecord, row_id: usize) -> Value {
     json!({
-        "row_id": row_id,
+        "rowId": row_id,
         "ts": record.ts,
         "date": record.date,
         "source": record.source,
         "kind": record.kind,
         "reason": record.reason,
-        "account_id": record.account_id,
-        "account_name": record.account_name,
+        "accountId": record.account_id,
+        "accountName": record.account_name,
         "provider": crate::model::manage::provider_label(&record.provider),
-        "provider_id": record.provider,
+        "providerId": record.provider,
         "outcome": record.outcome.as_str(),
         "ok": record.ok,
         "message": record.message,
         "error": record.error,
-        "kept_active": record.kept_active,
-        "streak_days": record.streak_days,
+        "keptActive": record.kept_active,
+        "streakDays": record.streak_days,
     })
 }
 
@@ -126,6 +129,8 @@ fn kind_matches(record: &CheckinRecord, kind: &str) -> bool {
             matches!(source, "makeup" | "startup")
                 || (source == "schedule" && record.reason.starts_with("补签"))
         }
+        // AIGX 扩展档（A2A 只有前三档）：窗口重试轮单列
+        "retry" => source == "retry",
         _ => true,
     }
 }
@@ -210,7 +215,7 @@ fn query_records(
         stats.insert(outcome.as_str().to_string(), json!(count));
     }
     stats.insert(
-        "kept_active".to_string(),
+        "keptActive".to_string(),
         json!(records.iter().filter(|r| r.kept_active).count()),
     );
     let page: Vec<Value> = records
@@ -337,6 +342,9 @@ mod tests {
         assert!(kind_matches(&rec(1, "schedule", "补签（条目）"), "makeup"));
         assert!(kind_matches(&rec(1, "makeup", "补签"), "makeup"));
         assert!(kind_matches(&rec(1, "startup", "启动补签"), "makeup"));
+        // 窗口重试轮单列（AIGX 扩展档）
+        assert!(kind_matches(&rec(1, "retry", "重试"), "retry"));
+        assert!(!kind_matches(&rec(1, "manual", ""), "retry"));
     }
 
     #[test]

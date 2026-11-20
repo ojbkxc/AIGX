@@ -493,6 +493,17 @@ fn paths_tools_maintenance() -> Value {
         "/api/checkin-schedules/{id}/run": {
             "post": op("签到中心", "立即执行一条签到计划")
         },
+        "/api/checkin-schedules/{id}": {
+            "delete": op("签到中心", "删除一条签到计划（A2A 规范写法；`/{id}/delete` 为别名）")
+        },
+        "/api/travel-schedule": {
+            "get": op("签到中心", "猫猫旅行排程状态（开关 / 时刻 / 今日已跑 / 上一轮结果）"),
+            "post": op_body("签到中心", "改猫猫旅行排程（只改传进来的字段）",
+                "{ enabled?: bool, times?: string[] }")
+        },
+        "/api/travel-schedule/run": {
+            "post": op("签到中心", "立即巡检一轮（真打上游；执行中 409，异常回带 schedule 快照）")
+        },
         "/api/auto-checkin": {
             "get": op("签到中心", "自动签到总开关与计划快照"),
             "post": op_body("签到中心", "保存自动签到总开关与全局参数",
@@ -959,6 +970,9 @@ fn paths_settings_ops() -> Value {
             "get": op("设置", "查询系统限额"),
             "put": op_body("设置", "更新系统限额（写操作）", "限额键值对象")
         },
+        "/api/system-info": {
+            "get": op_params("设置", "系统信息读数（版本/环境/开关/计数/uptime；管理员）", &[query_param("hideUsername", "string", "可选脱敏：1/true/yes/on 时隐藏路径中的用户名")])
+        },
         "/api/agent/settings": {
             "get": op("AI 助手", "查询 AI 助手设置（模型/提示词/工具开关/轮数）"),
             "put": op_body("AI 助手", "更新 AI 助手设置（写操作）", "model/systemPrompt/disabledTools/maxTurns/approvalTimeout")
@@ -1264,15 +1278,89 @@ fn paths_playground() -> Value {
 fn paths_accounts_network() -> Value {
     json!({
         "/api/accounts": {
-            "get": op("网络层", "列出 Cloudflare 账号池"),
-            "post": op_body("网络层", "新增账号", "account 配置字段")
+            "get": op("网络层", "列账号池（A2A canonical 视图）"),
+            "post": op_body("网络层", "手动添加账号（A2A canonical；按 provider 分派建号）", "account 记录（provider + 凭证/代理/优先级…）")
         },
         "/api/accounts/test": {
             "post": op("网络层", "测试账号可用性")
         },
+        "/api/accounts/query": {
+            "post": op_body("网络层", "账号筛选查询（反序列化 AccountListQuery，返回分页列表）", "AccountListQuery 过滤条件")
+        },
+        "/api/accounts/selection": {
+            "post": op_body("网络层", "账号选路查询（同 query，仅回 id 列表 ids_only）", "AccountListQuery 过滤条件")
+        },
+        "/api/accounts/current": {
+            "post": op_body("网络层", "把账号置顶（仅调整全局优先级）", "{id}")
+        },
+        "/api/accounts/reorder": {
+            "post": op_body("网络层", "整队重排（分组模式拖拽后提交整条队列）", "{order: [id, ...]}")
+        },
+        "/api/accounts/batch": {
+            "post": op_body("网络层", "批量操作（启用/禁用/改代理/并发/删除等，逐账号回执）", "op/ids + 按 op 的 payload")
+        },
+        "/api/accounts/import": {
+            "post": op_body("网络层", "导入账号（merge：按 id 命中更新、未命中追加）", "{accounts: [...]}")
+        },
+        "/api/accounts/checkin": {
+            "post": op_body("网络层", "签到（串行；跳过范围外的提供商）", "{id?}")
+        },
+        "/api/accounts/refresh": {
+            "post": op_body("网络层", "刷新指定（或当前队首）账号 token", "{id?, force?}")
+        },
+        "/api/accounts/export": {
+            "get": op("网络层", "导出全部账号（含 token，换机后导入继续用）")
+        },
+        "/api/accounts/usage": {
+            "get": op("网络层", "逐账号并发查询余额/积分汇总")
+        },
+        "/api/accounts/connections": {
+            "get": op("网络层", "逐账号活跃连接数（账号页「连接数」列）")
+        },
+        "/api/accounts/usage/snapshot": {
+            "get": op_params("网络层", "各账号最近一次余额查询快照（scoped；?ids= JSON 数组只回给定账号）", &[query_param("ids", "string", "可选：JSON 数组字符串，如 [\"id1\",\"id2\"]")]),
+            "post": op_body("网络层", "scoped 余额快照（POST 形态，避免大量 id 撑爆 URL）", "{ids: [string]}")
+        },
         "/api/accounts/{id}": {
-            "put": op_params("网络层", "更新账号", &[path_param("id")]),
+            "get": op_params("网络层", "单账号详情", &[path_param("id")]),
+            "patch": op_params("网络层", "部分更新（名称/状态/优先级/权重/并发/代理/限制器/usageQuery/UA…）", &[path_param("id")]),
             "delete": op_params("网络层", "删除账号", &[path_param("id")])
+        },
+        "/api/accounts/{id}/move": {
+            "post": op_params("网络层", "与相邻账号交换优先级（direction: up|down）", &[path_param("id")])
+        },
+        // ── 代理池（对齐 A2A proxies）────────────────────────────────
+        "/api/proxies": {
+            "get": op("代理池", "账号代理总览（脱敏；含 Clash 出口选项）")
+        },
+        "/api/proxies/system": {
+            "get": op("代理池", "系统代理快照（读 OS 配置，不探活）")
+        },
+        "/api/proxies/test": {
+            "post": op_body("代理池", "出口连通性测试", "url?/proxy?")
+        },
+        "/api/proxies/settings": {
+            "get": op("代理池", "连通性测试设置"),
+            "post": op_body("代理池", "保存测试目标（空 = 恢复默认）", "{testUrl}")
+        },
+        "/api/proxies/pool": {
+            "get": op("代理池", "代理池条目列表"),
+            "post": op_body("代理池", "新增代理池条目", "name/url/...")
+        },
+        "/api/proxies/pool/update": {
+            "post": op_body("代理池", "更新代理池条目", "id + 字段")
+        },
+        "/api/proxies/pool/enable": {
+            "post": op_body("代理池", "启用/停用代理池条目", "{id, enabled}")
+        },
+        "/api/proxies/pool/remove": {
+            "post": op_body("代理池", "删除代理池条目", "{id}")
+        },
+        "/api/proxies/pool/test": {
+            "post": op_body("代理池", "测试代理池条目连通性", "{id}")
+        },
+        "/api/proxies/pool/sync-clash": {
+            "post": op("代理池", "从 Clash 端点同步代理池")
         },
         // ── beta.2 A2A 形状账号列表（对齐 accounts_list / accounts_credentials）──
         "/api/accounts/list": {
@@ -1790,6 +1878,9 @@ fn paths_branding_image_compat() -> Value {
         "/api/public/branding": {
             "get": op("面板品牌", "公开读取品牌（免鉴权；登录页与页签图标数据源）")
         },
+        "/api/public/branding/logo": {
+            "get": op_pub("面板品牌", "公开读取品牌 Logo（PNG 字节；带 ETag/If-None-Match→304，换图立即生效）")
+        },
         "/api/image-compat/settings": {
             "get": op("图片压缩与兼容", "查询图片压缩与视觉兼容配置"),
             "put": op_body("图片压缩与兼容", "更新图片压缩与视觉兼容配置", "{...设置项（camelCase，见 GET 响应）}")
@@ -1935,6 +2026,9 @@ mod tests {
         add("/api/checkin-schedules", &["get", "post"]);
         add("/api/checkin-schedules/{id}/delete", &["delete", "post"]);
         add("/api/checkin-schedules/{id}/run", &["post"]);
+        add("/api/checkin-schedules/{id}", &["delete"]);
+        add("/api/travel-schedule", &["get", "post"]);
+        add("/api/travel-schedule/run", &["post"]);
         add("/api/auto-checkin", &["get", "post"]);
         add("/api/auto-checkin/run", &["post"]);
         add("/api/zcode/claim-verification", &["post"]);
@@ -2070,7 +2164,31 @@ mod tests {
         add("/api/update/status", &["get"]);
         add("/api/accounts", &["get", "post"]);
         add("/api/accounts/test", &["post"]);
-        add("/api/accounts/{id}", &["delete", "put"]);
+        add("/api/accounts/query", &["post"]);
+        add("/api/accounts/selection", &["post"]);
+        add("/api/accounts/current", &["post"]);
+        add("/api/accounts/reorder", &["post"]);
+        add("/api/accounts/batch", &["post"]);
+        add("/api/accounts/import", &["post"]);
+        add("/api/accounts/checkin", &["post"]);
+        add("/api/accounts/refresh", &["post"]);
+        add("/api/accounts/export", &["get"]);
+        add("/api/accounts/usage", &["get"]);
+        add("/api/accounts/connections", &["get"]);
+        add("/api/accounts/usage/snapshot", &["get", "post"]);
+        add("/api/accounts/{id}", &["delete", "get", "patch"]);
+        add("/api/accounts/{id}/move", &["post"]);
+        // 代理池（对齐 A2A proxies）
+        add("/api/proxies", &["get"]);
+        add("/api/proxies/system", &["get"]);
+        add("/api/proxies/test", &["post"]);
+        add("/api/proxies/settings", &["get", "post"]);
+        add("/api/proxies/pool", &["get", "post"]);
+        add("/api/proxies/pool/update", &["post"]);
+        add("/api/proxies/pool/enable", &["post"]);
+        add("/api/proxies/pool/remove", &["post"]);
+        add("/api/proxies/pool/test", &["post"]);
+        add("/api/proxies/pool/sync-clash", &["post"]);
         add("/api/aff", &["get"]);
         add("/api/aff_transfer", &["post"]);
         add("/api/alerts/active", &["get"]);
@@ -2151,6 +2269,7 @@ mod tests {
         // 面板品牌（#4）+ 图片压缩与兼容设置（#7）
         add("/api/branding", &["get", "put"]);
         add("/api/public/branding", &["get"]);
+        add("/api/public/branding/logo", &["get"]);
         add("/api/image-compat/settings", &["get", "put"]);
         // 视觉兼容规则集（对照 Agent2API /api/vision-compatibility）
         add("/api/vision-compatibility", &["get", "put"]);
@@ -2161,6 +2280,7 @@ mod tests {
         add("/api/ip/whitelist/{pattern}", &["delete"]);
         // legacy /api/keys 两条已删（路由与文档表同步移除，见 paths_tokens 注释）
         add("/api/limits", &["get", "put"]);
+        add("/api/system-info", &["get"]);
         add("/api/agent/settings", &["get", "put"]);
         // Agent 工作台（src/agent/api.rs 独立 router）
         add("/api/agent/config", &["get"]);
@@ -2393,6 +2513,10 @@ mod tests {
         (
             "/api/web-search/fetch",
             "面向客户端 Skill/MCP 的运行时端点（网关 Key 鉴权），不面向管理面板，故不进管理面自描述文档",
+        ),
+        (
+            "/api/purge/preview",
+            "破甲控制台改写试跑（dry-run：不落库、不计统计、不改数据面），属 /api/purge 配置页的保存前预演动作，不自描述",
         ),
     ];
 

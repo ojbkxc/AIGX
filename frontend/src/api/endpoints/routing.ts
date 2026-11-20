@@ -28,6 +28,7 @@ import type {
   GatewayPromptItem,
   SanitizeHeadersItem,
   PurgeData,
+  PurgePreviewResult,
   PurgeSettings,
   ZcodeCaptchaConfig,
   ZcodeCaptchaPoolStats,
@@ -131,6 +132,12 @@ export const endpoints = {
     request<ApiResponse<PurgeData>>('GET', `${API_BASE}/purge`),
   savePurge: (data: PurgeSettings): Promise<ApiResponse<PurgeData>> =>
     request<ApiResponse<PurgeData>>('PUT', `${API_BASE}/purge`, data),
+  // 破甲改写试跑（dry-run：不写统计、不落库）
+  previewPurge: (payload: {
+    settings?: PurgeSettings;
+    messages: Array<{ role: string; content: string }>;
+  }): Promise<ApiResponse<PurgePreviewResult>> =>
+    request<ApiResponse<PurgePreviewResult>>('POST', `${API_BASE}/purge/preview`, payload),
   // ZCode 验证码令牌池（对照 Agent2API「网关 → 验证码令牌池」）
   getZcodeCaptcha: (): Promise<ApiResponse<ZcodeCaptchaPoolStats>> =>
     request<ApiResponse<ZcodeCaptchaPoolStats>>('GET', `${API_BASE}/zcode/captcha`),

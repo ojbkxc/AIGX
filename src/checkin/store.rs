@@ -20,6 +20,7 @@
 use anyhow::Result;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -146,9 +147,14 @@ pub struct CheckinSchedule {
     /// 确定性随机时刻 + 尝试标记，重启后沿用（不重排、不重复主轮）。
     #[serde(default)]
     pub account_plan: AccountPlan,
-    /// 上次结果摘要
+    /// 上次结果摘要（旧口径：一句话字符串；界面与新字段并存）
     #[serde(default)]
     pub last_result: String,
+    /// 上次结果摘要的结构化形状（对齐 A2A `lastResult`：`{at, date, reason,
+    /// succeeded, active, total, skipped, failed[], failedCount}`）。
+    /// 存量条目缺失 = `Null`，读侧回落到 `last_result` + 计数字段拼一份。
+    #[serde(default)]
+    pub last_summary: Value,
     /// 上次执行计数（对齐 Agent2API 的「成功 n·保活 n·失败 n」）
     #[serde(default)]
     pub last_ok: usize,
@@ -209,13 +215,6 @@ impl AccountPlan {
             .collect();
         due.sort();
         due.into_iter().map(|(_, id)| id).collect()
-    }
-
-    /// 该 provider 今天是否还有未尝试的账号（用于「主轮是否跑完」判定）。
-    pub fn pending_for(&self, provider: &str) -> bool {
-        self.accounts
-            .values()
-            .any(|account| account.provider == provider && account.attempted_at.is_none())
     }
 
     /// 下一次还会发生的时刻（unix 毫秒）：未尝试账号里最早的 `at`。
@@ -406,6 +405,19 @@ impl CheckinStore {
                 schedule.last_ok = counts.ok;
                 schedule.last_keepalive = counts.keepalive;
                 schedule.last_failed = counts.failed;
+            }
+        }
+        self.persist_schedules()
+    }
+
+    /// 记下某计划的**结构化**上次结果（对齐 A2A `lastResult` / `mark_result`）。
+    /// 与 [`mark_fired`](Self::mark_fired) 分开：后者只更新「上次执行」字符串
+    /// 与计数，结构化摘要由调度在执行结束时单独落（`last_summary`）。
+    pub fn mark_last_summary(&self, id: &str, summary: &Value) -> Result<()> {
+        {
+            let mut guard = self.schedules.write();
+            if let Some(schedule) = guard.schedules.iter_mut().find(|s| s.id == id) {
+                schedule.last_summary = summary.clone();
             }
         }
         self.persist_schedules()
@@ -792,20 +804,6 @@ impl CheckinStore {
             .flatten()
             .unwrap_or(0)
     }
-
-    /// 台账按 provider 汇总（今日）：`provider → (完成数, 总数)`。
-    pub fn today_summary(&self) -> Result<HashMap<String, (usize, usize)>> {
-        let records = self.recent_records(1, None, None, None, None)?;
-        let mut map: HashMap<String, (usize, usize)> = HashMap::new();
-        for r in records {
-            let entry = map.entry(r.provider.clone()).or_insert((0, 0));
-            entry.1 += 1;
-            if r.ok {
-                entry.0 += 1;
-            }
-        }
-        Ok(map)
-    }
 }
 
 #[cfg(test)]
@@ -852,6 +850,7 @@ mod tests {
                 last_retried_providers: HashMap::new(),
                 account_plan: AccountPlan::default(),
                 last_result: String::new(),
+                last_summary: Value::Null,
                 last_ok: 0,
                 last_keepalive: 0,
                 last_failed: 0,
@@ -997,8 +996,7 @@ mod tests {
         );
         // 跨天作废
         assert!(plan.due(1500, "2026-11-18").is_empty());
-        // pending / next_at 只看未尝试
-        assert!(plan.pending_for("loomy"));
+        // next_at 只看未尝试
         assert_eq!(plan.next_at(), Some(500));
         plan.accounts.get_mut("a2").unwrap().attempted_at = Some(99);
         assert_eq!(plan.next_at(), Some(1000));
@@ -1026,6 +1024,7 @@ mod tests {
                 last_retried_providers: HashMap::new(),
                 account_plan: AccountPlan::default(),
                 last_result: String::new(),
+                last_summary: Value::Null,
                 last_ok: 0,
                 last_keepalive: 0,
                 last_failed: 0,

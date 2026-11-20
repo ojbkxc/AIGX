@@ -272,6 +272,7 @@ pub async fn handle_desktop_import(
         allow_route_skip: None,
         user_agent: None,
         usage_query: None,
+        low_balance: None,
         rate_limits: None,
     };
     // 走与前端创建账号**完全相同的入口**（SSRF 校验/审计/自动建渠道/

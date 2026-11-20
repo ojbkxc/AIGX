@@ -158,6 +158,101 @@ impl UsageQuerySettings {
     }
 }
 
+/// 「余额不足处理」设置（A2A 兼容字段 `lowBalance`：`{mode, threshold}`）。
+///
+/// 对齐 Agent2API `usage_records::default_low_balance` / 旧 `normalize_low_balance`：
+/// - `mode = off`：不处理（阈值归零存放，不留「关了还挂旧阈值」的脏数据）；
+/// - `mode = skip`：最近读数**严格小于**阈值时选路跳过（余额回升自动恢复）；
+/// - `mode = disable`：同 skip 档，语义上是整号禁用（AIGX 选号层同样按跳过消费，
+///   与扁平 `limiters` 的 disable 动作一致）；
+/// - 缺省按 provider 区分：`cline-free` 免费池余额贴 0 是常态 → `off`；
+///   其余 → `skip`、阈值 [`DEFAULT_LOW_BALANCE_THRESHOLD`]。
+///
+/// 优先级：显式 `limiters`（扁平规则）是源真值；没有余额规则时按本字段推导
+/// （与上游「限制器上线后 lowBalance 只是兼容入口」同一取舍）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LowBalanceSetting {
+    /// `off` / `skip` / `disable`。
+    #[serde(default = "default_low_balance_mode_skip")]
+    pub mode: String,
+    /// 余额阈值（off 档恒 0；其它档必须有限且 > 0）。
+    #[serde(default)]
+    pub threshold: f64,
+}
+
+/// 余额不足档的缺省阈值（A2A `DEFAULT_LOW_BALANCE_THRESHOLD`）。
+pub const DEFAULT_LOW_BALANCE_THRESHOLD: f64 = 1.0;
+
+fn default_low_balance_mode_skip() -> String {
+    "skip".to_string()
+}
+
+/// 各 provider 缺省的「余额不足处理」档（A2A `default_low_balance_mode`）。
+///
+/// Cline 免费池 → `off`（余额长期贴 0 / 欠费是常态，默认跳过会把整个池从
+/// 选路里剔掉）；其余 provider → `skip`（没钱让路、有钱照常）。
+pub fn default_low_balance_mode(provider: &str) -> &'static str {
+    match provider {
+        "cline-free" => "off",
+        _ => "skip",
+    }
+}
+
+/// 缺省档的完整形状（与上游 `default_low_balance` 一致：off 档阈值归零）。
+pub fn default_low_balance(provider: &str) -> LowBalanceSetting {
+    if default_low_balance_mode(provider) == "off" {
+        LowBalanceSetting {
+            mode: "off".to_string(),
+            threshold: 0.0,
+        }
+    } else {
+        LowBalanceSetting {
+            mode: "skip".to_string(),
+            threshold: DEFAULT_LOW_BALANCE_THRESHOLD,
+        }
+    }
+}
+
+impl Default for LowBalanceSetting {
+    fn default() -> Self {
+        default_low_balance("")
+    }
+}
+
+impl LowBalanceSetting {
+    /// 写入侧归一化（A2A `normalize_low_balance`）：
+    /// mode 三选一；off 档阈值归零；skip/disable 档要求阈值有限且 > 0。
+    pub fn normalized(&self) -> Result<Self, String> {
+        let mode = self.mode.trim();
+        if !matches!(mode, "off" | "skip" | "disable") {
+            return Err("余额不足的处理方式必须是「不处理 / 跳过 / 禁用」之一".to_string());
+        }
+        if mode == "off" {
+            return Ok(Self {
+                mode: "off".to_string(),
+                threshold: 0.0,
+            });
+        }
+        if !self.threshold.is_finite() || self.threshold <= 0.0 {
+            return Err("余额阈值必须是大于 0 的数字".to_string());
+        }
+        Ok(Self {
+            mode: mode.to_string(),
+            threshold: self.threshold,
+        })
+    }
+
+    /// 该档是否应拦截（skip / disable）。
+    pub fn blocks(&self) -> bool {
+        matches!(self.mode.as_str(), "skip" | "disable")
+    }
+
+    /// 最近读数（`available`）是否低于阈值（等于阈值仍可用，与上游同口径）。
+    pub fn under_threshold(&self, available: f64) -> bool {
+        self.blocks() && available < self.threshold
+    }
+}
+
 /// 一条账号限制规则（余额 / Token 两类，对齐前端 `LimiterRule` 与 Agent2API
 /// 的 `accounts-dialog-limiter`；JSON 字段名与 Agent2API `LimiterRule::to_json`
 /// 同名：`type` / `action` / `threshold` / `reset` / `period` / `enabled`）。
@@ -560,6 +655,10 @@ pub struct AccountSession {
     /// 余额查询的执行参数（重试 / 超时）；缺省 = A2A 默认值。
     #[serde(default)]
     pub usage_query: UsageQuerySettings,
+    /// 余额不足处理（A2A 兼容字段 `lowBalance`）。缺省 = 按 provider 推导
+    /// （[`default_low_balance`]）；显式 `limiters` 里的余额规则优先。
+    #[serde(default, alias = "lowBalance", skip_serializing_if = "Option::is_none")]
+    pub low_balance: Option<LowBalanceSetting>,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -635,6 +734,7 @@ impl AccountSession {
             allow_route_skip: default_allow_route_skip(),
             user_agent: String::new(),
             usage_query: UsageQuerySettings::default(),
+            low_balance: None,
             created_at: now,
             updated_at: now,
         }
@@ -813,24 +913,115 @@ impl AccountSession {
 
     /// 余额限制器是否跳过此账号（选路消费，P1-6）。
     ///
-    /// 检查 `limiters` 中的 balance 规则：若 `available` 低于阈值则跳过。
-    /// `available` 为 None（判不出）时返回 false（放行，与基线一致）。
+    /// 口径（对齐 A2A `balance_blocked` 的有效规则推导）：
+    /// - 有扁平 balance 规则（`limiters`）→ **规则是源真值**，只看启用规则的
+    ///   `available < threshold`；
+    /// - `limiters` 非空但没有 balance 规则（只有 token 规则）→ 不拦
+    ///   （上游在写 limiters 时会把旧 lowBalance 同步成 off）；
+    /// - `limiters` 为空 → 按 [`LowBalanceSetting`]（显式 `low_balance` 或
+    ///   provider 缺省；A2A 缺省 = 大多数家 skip/1，cline-free off）推导。
+    ///
+    /// `available` 为 None（判不出）时一律放行：跳过是对「这个账号此刻没钱」
+    /// 的断言，断言拿不出证据就不能拦请求。
     pub fn should_skip_by_balance(&self) -> bool {
-        for limiter in &self.limiters {
-            if !limiter.enabled || limiter.kind != "balance" {
-                continue;
-            }
-            if limiter.action == "skip" || limiter.action == "disable" {
-                if let Some(balance) = &self.last_balance {
-                    if let Some(available) = balance.get("available").and_then(|v| v.as_f64()) {
+        let available = self
+            .last_balance
+            .as_ref()
+            .and_then(|balance| balance.get("available"))
+            .and_then(|value| value.as_f64());
+        let has_balance_rule = self
+            .limiters
+            .iter()
+            .any(|limiter| limiter.kind == "balance");
+        if has_balance_rule {
+            for limiter in &self.limiters {
+                if !limiter.enabled || limiter.kind != "balance" {
+                    continue;
+                }
+                if limiter.action == "skip" || limiter.action == "disable" {
+                    if let Some(available) = available {
                         if available < limiter.threshold {
                             return true;
                         }
                     }
                 }
             }
+            return false;
         }
-        false
+        // 只有 token 规则：视为「用户配置过 limiters」，不再按 lowBalance 推导。
+        if !self.limiters.is_empty() {
+            return false;
+        }
+        match available {
+            Some(available) => self.effective_low_balance().under_threshold(available),
+            None => false,
+        }
+    }
+
+    /// 当前生效的「余额不足处理」档：显式 `low_balance` 优先（非法阈值按
+    /// 上游读侧口径回落缺省 1），否则按 provider 缺省推导。
+    pub fn effective_low_balance(&self) -> LowBalanceSetting {
+        match &self.low_balance {
+            Some(setting) => {
+                let mode = match setting.mode.trim() {
+                    "off" => "off",
+                    "skip" => "skip",
+                    "disable" => "disable",
+                    // 脏数据：按缺省档处理（宁可当作 skip 也不当作 off 静默放行）
+                    _ => default_low_balance_mode(&self.provider),
+                };
+                if mode == "off" {
+                    return LowBalanceSetting {
+                        mode: "off".to_string(),
+                        threshold: 0.0,
+                    };
+                }
+                let threshold = if setting.threshold.is_finite() && setting.threshold > 0.0 {
+                    setting.threshold
+                } else {
+                    DEFAULT_LOW_BALANCE_THRESHOLD
+                };
+                LowBalanceSetting {
+                    mode: mode.to_string(),
+                    threshold,
+                }
+            }
+            None => default_low_balance(&self.provider),
+        }
+    }
+
+    /// 公开视图（A2A `lowBalance`）：恒为 `{mode, threshold}`，缺省已物化。
+    pub fn low_balance_view(&self) -> serde_json::Value {
+        let setting = self.low_balance_public();
+        serde_json::json!({ "mode": setting.mode, "threshold": setting.threshold })
+    }
+
+    /// 公开形态的「余额不足处理」（A2A `lowBalance` 出口口径）：
+    /// 扁平 `limiters` 是源真值 —— 有余额规则时取首条（skip/disable + 阈值）；
+    /// 有 `limiters` 但没有余额规则时视为 off（上游同步口径）；都没有才按
+    /// 显式 `low_balance` / provider 缺省推导。
+    pub fn low_balance_public(&self) -> LowBalanceSetting {
+        if let Some(rule) = self.limiters.iter().find(|rule| rule.kind == "balance") {
+            return LowBalanceSetting {
+                mode: if rule.action == "disable" {
+                    "disable".to_string()
+                } else {
+                    "skip".to_string()
+                },
+                threshold: if rule.threshold.is_finite() && rule.threshold > 0.0 {
+                    rule.threshold
+                } else {
+                    DEFAULT_LOW_BALANCE_THRESHOLD
+                },
+            };
+        }
+        if !self.limiters.is_empty() {
+            return LowBalanceSetting {
+                mode: "off".to_string(),
+                threshold: 0.0,
+            };
+        }
+        self.effective_low_balance()
     }
 
     /// 平均成功延迟（毫秒；无成功样本时为 0）。
@@ -844,6 +1035,7 @@ impl AccountSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// 凭证加解密用**全局**的 data_dir（密钥文件所在目录）—— 并行测试会
     /// 互相换钥匙，所以这里用跨模块共享锁（`secret::test_lock`）把
@@ -1159,5 +1351,119 @@ mod tests {
         assert!(rule("token", "skip", Some("weekly"), None)
             .validate()
             .is_err());
+    }
+
+    /// lowBalance 归一化（A2A `normalize_low_balance`）：off 档阈值归零、
+    /// skip/disable 要求正阈值；非法 mode 拒绝（负向 + 正向对照）。
+    #[test]
+    fn low_balance_normalization() {
+        let off = LowBalanceSetting {
+            mode: "off".to_string(),
+            threshold: 5.0,
+        };
+        assert_eq!(off.normalized().unwrap().threshold, 0.0);
+        let skip = LowBalanceSetting {
+            mode: "skip".to_string(),
+            threshold: 2.5,
+        };
+        let normalized = skip.normalized().unwrap();
+        assert_eq!(normalized.mode, "skip");
+        assert_eq!(normalized.threshold, 2.5);
+        for bad in [
+            LowBalanceSetting {
+                mode: "pause".to_string(),
+                threshold: 1.0,
+            },
+            LowBalanceSetting {
+                mode: "skip".to_string(),
+                threshold: 0.0,
+            },
+            LowBalanceSetting {
+                mode: "disable".to_string(),
+                threshold: f64::NAN,
+            },
+        ] {
+            assert!(bad.normalized().is_err(), "应拒绝 {bad:?}");
+        }
+    }
+
+    /// 缺省档按 provider 区分：cline-free → off，其余 → skip/1。
+    #[test]
+    fn low_balance_defaults_follow_provider() {
+        let cline = default_low_balance("cline-free");
+        assert_eq!(cline.mode, "off");
+        assert_eq!(cline.threshold, 0.0);
+        let other = default_low_balance("qoder");
+        assert_eq!(other.mode, "skip");
+        assert_eq!(other.threshold, DEFAULT_LOW_BALANCE_THRESHOLD);
+        // 有效档与公开视图同源
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "cline-free".to_string();
+        assert_eq!(
+            session.low_balance_view(),
+            json!({"mode": "off", "threshold": 0.0})
+        );
+        session.provider = "qoder".to_string();
+        assert_eq!(
+            session.low_balance_view(),
+            json!({"mode": "skip", "threshold": 1.0})
+        );
+    }
+
+    /// 余额拦截的推导顺序：扁平 balance 规则 > 有 limiters（无余额规则）不拦 >
+    /// limiters 为空按 lowBalance/缺省；读数缺失一律放行。
+    #[test]
+    fn balance_skip_derives_from_low_balance_when_no_limiter_rules() {
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "qoder".to_string();
+        session.last_balance = Some(json!({ "available": 0.5, "unit": "USD" }));
+        // 缺省 skip/1：0.5 < 1 → 跳过（A2A 缺省口径）
+        assert!(session.should_skip_by_balance());
+        // 显式 off → 不拦（正向对照：同一读数，只改配置）
+        session.low_balance = Some(LowBalanceSetting {
+            mode: "off".to_string(),
+            threshold: 0.0,
+        });
+        assert!(!session.should_skip_by_balance());
+        // 显式 skip 阈值 0.4：0.5 不低于阈值 → 不拦；阈值 0.6 → 拦
+        session.low_balance = Some(LowBalanceSetting {
+            mode: "skip".to_string(),
+            threshold: 0.4,
+        });
+        assert!(!session.should_skip_by_balance());
+        session.low_balance = Some(LowBalanceSetting {
+            mode: "skip".to_string(),
+            threshold: 0.6,
+        });
+        assert!(session.should_skip_by_balance());
+        // 有扁平 token 规则（无余额规则）→ 不按 lowBalance 推导
+        session.limiters = vec![AccountLimiterRule {
+            kind: "token".to_string(),
+            action: "skip".to_string(),
+            threshold: 100.0,
+            reset: Some("daily".to_string()),
+            period: None,
+            enabled: true,
+        }];
+        assert!(!session.should_skip_by_balance());
+        // 有扁平 balance 规则时规则优先（阈值 0.1 → 0.5 不拦）
+        session.limiters = vec![AccountLimiterRule {
+            kind: "balance".to_string(),
+            action: "skip".to_string(),
+            threshold: 0.1,
+            reset: None,
+            period: None,
+            enabled: true,
+        }];
+        assert!(!session.should_skip_by_balance());
+        // 读数缺失 → 放行（保守方向）
+        session.last_balance = None;
+        session.limiters.clear();
+        assert!(!session.should_skip_by_balance());
+        // cline-free 缺省 off → 即使读数 0 也不拦（先清掉上面设过的显式 skip/0.6）
+        session.low_balance = None;
+        session.provider = "cline-free".to_string();
+        session.last_balance = Some(json!({ "available": 0.0 }));
+        assert!(!session.should_skip_by_balance());
     }
 }

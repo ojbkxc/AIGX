@@ -45,6 +45,8 @@ use std::time::Duration;
 use crate::storage::FileStore;
 
 pub mod clash;
+pub mod settings;
+pub mod system;
 
 /// KV 键名（整份 JSON 数组读写）。
 pub const KV_KEY: &str = "proxy_pool_items";
@@ -71,15 +73,16 @@ pub fn install(store: std::sync::Arc<FileStore>) {
     let _ = STORE.set(store);
 }
 
-fn store() -> Result<&'static std::sync::Arc<FileStore>, String> {
+pub(crate) fn store() -> Result<&'static std::sync::Arc<FileStore>, String> {
     STORE
         .get()
         .ok_or_else(|| "proxy pool storage not installed".to_string())
 }
 
 /// 出口连通性测试的默认目标（照 A2A 的取舍：判据是「能连上一个常规
-/// HTTPS 站点」，拿到任意 HTTP 响应（含 401/404）就算通）。
-const DEFAULT_TEST_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
+/// HTTPS 站点」，拿到任意 HTTP 响应（含 401/404）就算通）。设置页
+/// （[`settings`]，`GET/POST /api/proxies/settings`）可覆盖。
+pub(crate) const DEFAULT_TEST_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 /// 测试超时（毫秒）。
 const TEST_TIMEOUT_MS: u64 = 10_000;
 /// 出口 IP 回显服务（测试成功后顺带查出口 IP；失败一律吞掉——
@@ -631,9 +634,11 @@ pub struct TestResult {
 
 /// 测试一个出口（判据：能拿到任意 HTTP 响应；成功后顺带查出口 IP）。
 ///
-/// `proxy_url` 为 `None` = 测直连。
+/// `proxy_url` 为 `None` = 测直连。测试目标默认 [`DEFAULT_TEST_URL`]，
+/// 可在「网络代理 → 连通性测试设置」（[`settings`]）里覆写。
 pub async fn test_connectivity(proxy_url: Option<&str>) -> TestResult {
     let started = std::time::Instant::now();
+    let target_url = settings::test_url().unwrap_or_else(|| DEFAULT_TEST_URL.to_string());
     let mut builder = reqwest::Client::builder()
         .http1_only()
         .timeout(Duration::from_millis(TEST_TIMEOUT_MS))
@@ -665,7 +670,7 @@ pub async fn test_connectivity(proxy_url: Option<&str>) -> TestResult {
         }
     };
     let response = match client
-        .get(DEFAULT_TEST_URL)
+        .get(&target_url)
         .header("Accept", "text/plain")
         .timeout(Duration::from_millis(TEST_TIMEOUT_MS))
         .send()

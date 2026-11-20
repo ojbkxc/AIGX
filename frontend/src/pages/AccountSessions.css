@@ -1056,6 +1056,23 @@ body.as-col-resizing {
   text-overflow: ellipsis;
 }
 
+/* 组余额徽章（A2A groups[].balance 的前端投影） */
+.as-group-balance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface-2, rgba(128, 128, 128, 0.08));
+  border: 1px solid var(--hairline, rgba(128, 128, 128, 0.18));
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
 .as-group-fill {
   flex: 1;
 }
@@ -2501,4 +2518,24 @@ tr[draggable="true"]:active .as-grip {
   flex: 1;
   min-width: 0;
   word-break: break-word;
+}
+
+/* ── 逐账号福利预览弹层（活动 / 月度赠送，复用 CheckinCampaignCard）── */
+.as-welfare-modal {
+  width: min(880px, 94vw);
+  max-width: 880px;
+  max-height: 86vh;
+}
+
+.as-welfare-modal .modal-body {
+  overflow-y: auto;
+}
+
+.as-welfare-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline, rgba(128, 128, 128, 0.18));
 }

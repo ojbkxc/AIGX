@@ -145,7 +145,13 @@ async fn claim_and_record(state: &AppState, request: &Request) -> Result<Prepare
     )? {
         crate::scheduled_tasks::task_state::Claim::Acquired(guard) => guard,
         crate::scheduled_tasks::task_state::Claim::Deferred(state_state) => {
-            return Err(state_state.waiting_message())
+            // 手动入口越过的是失败冷却：提示里不该再让用户「几小时后再试」，
+            // 真正挡住这一轮的通常只是在途占位或最短请求间隔。
+            return Err(if manual {
+                state_state.waiting_message_bypassing()
+            } else {
+                state_state.waiting_message()
+            });
         }
     };
     let recorder = storage::Recorder::start(

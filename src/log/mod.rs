@@ -2873,6 +2873,19 @@ mod tests {
         day.and_hms_opt(20, 0, 0).unwrap().and_utc().timestamp()
     }
 
+    /// 显式 UTC 日键 —— 复刻「现网旧数据以 GMT+0 落盘」的前提。
+    ///
+    /// **不能用 `date_key_at(ts, 0)`**：该函数的 `offset == 0` 代表**进程系统本地**
+    /// 口径（见 `report_tz_of`），在 UTC+8 的机器上会把「旧键」算成本地(+8)，
+    /// 与迁移目标 +8 重合，于是 0→8 的错位前提消失、测试在非 UTC runner 上假红
+    /// （这正是本条测试此前在开发者机上报 `old_b(19) != new_a(18)` 的原因）。
+    /// 现网旧机器是 GMT+0，用显式 UTC 才在任何宿主机上都是忠实模拟。
+    fn utc_date_key(ts: i64) -> String {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    }
+
     /// 只落明细、不产生运行期聚合行（`add` 不经 `record_request` 漏斗）。
     fn add_log_at(s: &LogStore, ts: i64, uid: &str) {
         let mut l = RequestLog::new();
@@ -2916,18 +2929,18 @@ mod tests {
         let t_b = ts_at_2000z(2);
         add_log_at(&s, t_a, "u1");
         add_log_at(&s, t_b, "u1");
-        let old_a = daily_agg::date_key_at(t_a, 0);
-        let old_b = daily_agg::date_key_at(t_b, 0);
+        let old_a = utc_date_key(t_a);
+        let old_b = utc_date_key(t_b);
         let new_a = daily_agg::date_key_at(t_a, 8);
         let new_b = daily_agg::date_key_at(t_b, 8);
         // 错位前提本身也要钉住（否则整条测试退化成空转）。
-        // 口径 0 = **系统本地**（见 `report_tz_of`），CI runner 是 UTC ⇒ 与 +8 必然
-        // 差一天；只有在 UTC+9 及以东的机器上跑才会退化（那不是代码问题，故写进
-        // 失败信息而不是悄悄放过）。
+        // 旧口径取**显式 UTC**（复刻现网 GMT+0 落盘），与迁移目标 +8 在 20:00Z
+        // 必然差一天——与宿主机的本地时区无关（早先误用 `date_key_at(t, 0)`
+        // 会把 offset 0 解成本地口径，在 UTC+8 机器上与目标重合而假红）。
         assert_eq!(old_b, new_a, "20:00Z 在 +8 归次日 → 键整体前移一天");
         assert_ne!(
             old_a, new_a,
-            "0→8 必须真的错位：本机系统口径需早于 UTC+9（CI runner = UTC）"
+            "0→8 必须真的错位：旧 GMT+0 键须早于 +8 键一天"
         );
         seed_old_row(&s, &old_a);
         seed_old_row(&s, &old_b);

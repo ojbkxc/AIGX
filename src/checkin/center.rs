@@ -1,4 +1,4 @@
-// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+// Ported from Agent2API v3.5.0-beta.3 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
 //
 //! 签到中心的**状态视图 + 立即执行入口**（对齐 Agent2API `core/auto_checkin`
 //! 的 `state()` / `run_now` / `run_schedule_now`，以及 `api/checkin_center.rs`
@@ -9,6 +9,15 @@
 //! `store` 管持久化、`scheduler` 管到点触发、`schedules` 管条目 CRUD；
 //! 这里只负责**读侧组装**（界面渲染要的形状）与**手动执行**（按钮入口）。
 //! 三者共用同一份 `CheckinStore` 句柄，没有第二个落点。
+//!
+//! ## 契约（对齐 A2A，字段一律 camelCase）
+//!
+//! - `schedules[]`：`displayLabel / timeEnd / providerTimes / providerRows /
+//!   retryTime / providerRetryTimes / retryGapMinutes / retryLimit /
+//!   lastFiredDate / lastFiredToday / pendingProviders / retryCount /
+//!   retryExhausted / retryAttempts / nextRunAt / lastResult`
+//! - 顶层：`enabled / running / providerOptions[{id,label,builtinTime}] /
+//!   defaultRetryTime / schedules`，另带 AIGX 扩展 `settings`（设置卡直读）。
 //!
 //! ## 手动执行与定时执行的唯一差别
 //!
@@ -24,7 +33,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::claim;
 use super::scheduler::{self, ScheduleOutcome};
@@ -61,25 +70,38 @@ pub fn is_running() -> bool {
 
 /// 界面可勾选的签到提供商（顺序 = 注册顺序）。
 ///
-/// 只列**库里真有账号**的家：没账号的家勾了也没账号可签，列出来是一屏点了
-/// 必然空转的复选框（A2A 2026-10 用户反馈同一结论）。一家账号都没有时回落到
-/// 完整白名单（首次配置场景，用户还没导入账号）。
+/// 只列**实际可用**的家（见 [`claim::available_checkin_providers`]）：没实现
+/// 的三家（插件仓）与没账号的家不出现，避免一屏点了必然空转的复选框。
 pub fn provider_options(sessions: &AccountSessionStore) -> Vec<String> {
-    let present: std::collections::HashSet<String> =
-        sessions.all().into_iter().map(|s| s.provider).collect();
-    let picked: Vec<String> = claim::CHECKIN_PROVIDERS
-        .iter()
-        .filter(|id| present.contains(**id))
-        .map(|id| id.to_string())
-        .collect();
-    if picked.is_empty() {
-        claim::CHECKIN_PROVIDERS
-            .iter()
-            .map(|id| id.to_string())
-            .collect()
+    claim::available_checkin_providers(sessions)
+}
+
+/// 条目最近一轮的结构化结果（对齐 A2A `lastResult`）。
+///
+/// 优先 `last_summary`（新写法）；存量条目没有它时，用上一句摘要 + 计数字段
+/// 拼一份同形对象 —— 界面不必判「字段缺失」。`retryAttempts` 按今天的重试
+/// 记账合并进来（对齐 A2A `retry::merge` 的输出）。
+fn last_result_view(schedule: &CheckinSchedule, retry_attempts: &Map<String, Value>) -> Value {
+    let mut value = if !schedule.last_summary.is_null() {
+        schedule.last_summary.clone()
+    } else if !schedule.last_result.is_empty() || !schedule.last_fired_date.is_empty() {
+        json!({
+            "date": schedule.last_fired_date,
+            "reason": schedule.last_result,
+            "succeeded": schedule.last_ok,
+            "active": schedule.last_keepalive,
+            "failedCount": schedule.last_failed,
+        })
     } else {
-        picked
+        Value::Null
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "retryAttempts".to_string(),
+            Value::Object(retry_attempts.clone()),
+        );
     }
+    value
 }
 
 /// 一条条目的对外视图（对齐 A2A `AutoCheckin::state()` 的 `schedules[]` 元素）。
@@ -92,46 +114,55 @@ fn schedule_view(
     let pending = super::scheduler::pending_providers(schedule, today);
     let fired_today = pending.is_empty();
     let rows = super::schedules::provider_rows(store, schedule, today);
-    // 字段一律 snake_case（对齐 AIGX 既有 `CheckinSchedule` 序列化与前端
-    // `types/index.ts` 的读取点；camelCase 会让整批字段静默读成 undefined）。
+    let (retry_count, retry_exhausted, retry_attempts) = scheduler::retry_snapshot(store, schedule);
+    let retry_attempts_json: Map<String, Value> = retry_attempts
+        .into_iter()
+        .map(|(id, count)| (id, Value::from(count)))
+        .collect();
+    let provider_retry_times = super::schedules::provider_retry_times(schedule);
     json!({
         "id": schedule.id,
         "label": schedule.label,
-        "display_label": super::schedules::display_label(schedule),
+        "displayLabel": super::schedules::display_label(schedule),
         "enabled": schedule.enabled,
         "time": schedule.time,
-        "time_end": schedule.time_end,
+        "timeEnd": schedule.time_end,
         "randomize": schedule.randomize,
         "providers": schedule.providers,
-        "provider_times": schedule.provider_times,
-        "provider_rows": rows,
-        // A2A 叫 retryTime（补签时刻）；AIGX 既有字段名是 makeup_time
-        "retry_time": schedule.makeup_time,
-        "makeup_time": schedule.makeup_time,
-        "retry_gap_minutes": schedule.retry_gap_minutes,
-        "retry_limit": schedule.retry_limit,
-        "last_fired_date": schedule.last_fired_date,
-        "last_fired_today": fired_today,
-        "last_fired_providers": schedule.last_fired_providers,
-        "last_retried_providers": schedule.last_retried_providers,
-        "pending_providers": pending,
-        "next_run_at": if master && schedule.enabled {
+        "providerTimes": schedule.provider_times,
+        "providerRows": rows,
+        // A2A 的「补签时刻」叫 retryTime；AIGX 落盘字段名是 makeup_time
+        "retryTime": schedule.makeup_time,
+        // 逐家的补签时刻（窗口结束 + 等待间隔，不早于 retryTime）
+        "providerRetryTimes": provider_retry_times,
+        "retryGapMinutes": schedule.retry_gap_minutes,
+        "retryLimit": schedule.retry_limit,
+        "lastFiredDate": if schedule.last_fired_date.is_empty() {
+            Value::Null
+        } else {
+            Value::String(schedule.last_fired_date.clone())
+        },
+        "lastFiredToday": fired_today,
+        "pendingProviders": pending,
+        // 中性未领取、等窗口重试的账号数（界面上要说清「还会再试」）
+        "retryCount": retry_count,
+        // 今天重试次数已用完的账号（已不在重试名单里，但必须单独说一句）
+        "retryExhausted": retry_exhausted,
+        "retryAttempts": retry_attempts_json,
+        "nextRunAt": if master && schedule.enabled {
             super::scheduler::next_run_at(schedule, today)
         } else {
             None
         },
-        "last_result": schedule.last_result,
-        "last_ok": schedule.last_ok,
-        "last_keepalive": schedule.last_keepalive,
-        "last_failed": schedule.last_failed,
+        "lastResult": last_result_view(schedule, &retry_attempts_json),
     })
 }
 
-/// 自动签到状态（对齐 A2A `GET /api/auto-checkin` 与 `/api/checkin-schedules` 的 GET）。
+/// 自动签到状态（对齐 A2A `GET /api/auto-checkin` / `GET /api/checkin-schedules`）。
 ///
 /// 顶层是**兼容视图**（默认条目的投影：`time` / `providers` / `lastResult` …），
 /// `schedules` 是完整条目数组。前端两套页面（旧的单条目视图 + 新的多条目视图）
-/// 都能直接用同一份响应。
+/// 都能直接用同一份响应；`settings` 是 AIGX 扩展（设置卡直读）。
 pub fn auto_state(store: &CheckinStore, sessions: &AccountSessionStore) -> Value {
     let settings = store.settings();
     let today = scheduler::today();
@@ -144,19 +175,22 @@ pub fn auto_state(store: &CheckinStore, sessions: &AccountSessionStore) -> Value
     let next_run_at = if master {
         entries
             .iter()
-            .filter_map(|entry| entry.get("next_run_at").and_then(Value::as_i64))
+            .filter_map(|entry| entry.get("nextRunAt").and_then(Value::as_i64))
             .min()
     } else {
         None
     };
-    let default_entry = schedules.first();
+    let default_entry = entries.first();
+    let default_last_result = default_entry
+        .and_then(|entry| entry.get("lastResult").cloned())
+        .unwrap_or(Value::Null);
     let options: Vec<Value> = provider_options(sessions)
         .into_iter()
         .map(|id| {
             json!({
                 "id": id,
                 "label": crate::model::manage::provider_label(&id),
-                "builtin_time": super::scheduler::PROVIDER_TIMES
+                "builtinTime": super::scheduler::PROVIDER_TIMES
                     .iter()
                     .find(|(pid, _)| *pid == id)
                     .map(|(_, time)| Value::from(*time))
@@ -164,23 +198,52 @@ pub fn auto_state(store: &CheckinStore, sessions: &AccountSessionStore) -> Value
             })
         })
         .collect();
+    let empty_schedule = CheckinSchedule {
+        id: String::new(),
+        label: String::new(),
+        enabled: false,
+        time: "00:01".to_string(),
+        time_end: String::new(),
+        randomize: false,
+        retry_limit: 3,
+        retry_gap_minutes: 5,
+        makeup_time: DEFAULT_RETRY_TIME.to_string(),
+        providers: Vec::new(),
+        provider_times: Default::default(),
+        last_fired_date: String::new(),
+        last_fired_providers: Default::default(),
+        last_retried_providers: Default::default(),
+        account_plan: Default::default(),
+        last_result: String::new(),
+        last_summary: Value::Null,
+        last_ok: 0,
+        last_keepalive: 0,
+        last_failed: 0,
+    };
+    let default_schedule = schedules.first().unwrap_or(&empty_schedule);
     json!({
         "enabled": master,
-        // 兼容字段（默认条目的投影；语义与改造前的顶层字段一致）
-        "time": default_entry.map(|s| s.time.clone()).unwrap_or_else(|| "00:01".to_string()),
-        "time_end": default_entry.map(|s| s.time_end.clone()).unwrap_or_default(),
-        "providers": default_entry.map(|s| s.providers.clone()).unwrap_or_default(),
-        "last_fired_date": default_entry.map(|s| s.last_fired_date.clone()).unwrap_or_default(),
-        "last_fired_today": default_entry
-            .map(|s| super::scheduler::pending_providers(s, &today).is_empty())
-            .unwrap_or(false),
-        "last_result": default_entry.map(|s| s.last_result.clone()).unwrap_or_default(),
-        "next_run_at": next_run_at,
-        "provider_options": options,
-        "default_retry_time": DEFAULT_RETRY_TIME,
-        "schedules": entries,
         "running": is_running(),
-        // 签到设置（间隔 / 时区 / 保留期）—— 旧界面「设置」卡直接读这一块
+        // 兼容字段（默认条目的投影；语义与改造前的顶层字段一致）
+        "time": default_schedule.time,
+        "timeEnd": default_schedule.time_end,
+        "providers": default_schedule.providers,
+        "lastFiredDate": if default_schedule.last_fired_date.is_empty() {
+            Value::Null
+        } else {
+            Value::String(default_schedule.last_fired_date.clone())
+        },
+        "lastFiredToday": default_entry
+            .and_then(|entry| entry.get("lastFiredToday").and_then(Value::as_bool))
+            .unwrap_or(false),
+        "lastResult": default_last_result,
+        "nextRunAt": next_run_at,
+        // 界面的复选框清单（签到范围），顺序即注册顺序
+        "providerOptions": options,
+        // 缺省补签时刻：界面「补签时刻」输入框的 placeholder 用
+        "defaultRetryTime": DEFAULT_RETRY_TIME,
+        "schedules": entries,
+        // AIGX 扩展：签到设置（间隔 / 时区 / 保留期）—— 设置卡直接读这一块
         "settings": settings,
     })
 }
@@ -242,24 +305,145 @@ pub async fn run_schedule_now(
         failed: outcome.failed,
     };
     let _ = store.mark_fired(&schedule.id, &scheduler::today(), &outcome.summary, &counts);
+    let _ = store.mark_last_summary(&schedule.id, &outcome.last_summary);
     drop(guard);
     Some(outcome)
 }
 
-/// 聚合快照里的 `campaigns` 行（活动 / 月度赠送 / 套餐）。
+// ─── 快照的账号行 / 分组（对齐 A2A `api/checkin_center.rs`）────────────
+
+/// 账号的可用性（与签到中心「不可用」徽标同口径：启用且凭证未过期）。
+pub fn account_available(session: &crate::account_session::model::AccountSession) -> bool {
+    session.is_enabled() && !session.is_expired(chrono::Utc::now().timestamp())
+}
+
+/// 账号行（对齐 A2A `CheckinAccount`：`{id,name,available,checkinAt,
+/// checkedInToday,dailyCheckin,edition,streakDays}`，另带 AIGX 展示用扩展）。
+pub fn account_row(
+    store: &CheckinStore,
+    session: &crate::account_session::model::AccountSession,
+    today: &str,
+) -> Value {
+    let last = store
+        .last_today(&session.id, &session.provider)
+        .ok()
+        .flatten();
+    json!({
+        "id": session.id,
+        "name": if session.name.is_empty() { session.id.clone() } else { session.name.clone() },
+        "available": account_available(session),
+        // 上次签到时间（毫秒；A2A 同名字段）
+        "checkinAt": last.as_ref().map(|r| r.ts.saturating_mul(1000)),
+        "checkedInToday": last.as_ref().map(|r| r.ok).unwrap_or(false),
+        // 当日签到台账（只有 ok/already 才带 claimAt）
+        "dailyCheckin": store
+            .daily_checkin(&session.id, today)
+            .unwrap_or(Value::Null),
+        // 版本（cn / intl，缺失 null）：国际版按钮文案是「领日活」而非「签到」
+        "edition": session.extra_headers.get("edition").cloned().unwrap_or_else(|| {
+            if session.provider.ends_with("-intl") { "intl".to_string() } else { "cn".to_string() }
+        }),
+        // 成长中心连登天数（0 = 还没读到过，恒为数字）
+        "streakDays": store.streak_days(&session.id),
+        // AIGX 展示扩展（表格「最近结果」列直读）
+        "lastOutcome": last.as_ref().map(|r| r.outcome.as_str()),
+        "lastMessage": last.as_ref().map(|r| r.message.clone()),
+        "lastTs": last.as_ref().map(|r| r.ts),
+        "channel_id": session.channel_id,
+    })
+}
+
+/// 账号为什么不在签到范围内（对齐 A2A `out_of_scope_reason`）。
 ///
-/// AIGX 目前只有 ZCode 两地的「限时套餐」一条活动链路（`benefits::zcode_claim`），
-/// 本地领取台账落在 `benefit:zcode_plan:{account_id}` 的 `claimed` 数组里。
-/// 形状对齐 A2A `CampaignEntry`（`{id, name, provider, available, claimPlans}`），
-/// 没有活动链路的家**不出现**（空集但形状不变）。
-pub fn campaign_rows(store: &CheckinStore, sessions: &AccountSessionStore) -> Vec<Value> {
-    let _ = store;
+/// AIGX 的排除分支：实现未进主仓（插件仓）/ 没有签到链路 / 账号停用 /
+/// 凭证过期。判据与 `scheduler::collect_targets` 的过滤是同一对条件 ——
+/// 快照说「不参与」的账号，点「立即全部签到」也确实不会跑。
+pub fn out_of_scope_reason(
+    session: &crate::account_session::model::AccountSession,
+) -> Option<&'static str> {
+    if claim::UNSUPPORTED_PROVIDERS.contains(&session.provider.as_str()) {
+        return Some("实现随上游进入插件仓，主仓未接入");
+    }
+    if !claim::supports_checkin(&session.provider) {
+        return Some("没有签到链路");
+    }
+    if !session.is_enabled() {
+        return Some("账号已停用");
+    }
+    if session.is_expired(chrono::Utc::now().timestamp()) {
+        return Some("凭证已过期");
+    }
+    None
+}
+
+/// 新手福利的账号入口（对齐 A2A `extras.onboarding`）。
+///
+/// 判据是 `benefits::actions_for` 里有 `onboarding` 的家（loomy /
+/// xiaohuanxiong）；OfficeAce 的新人礼与每日签到是同一个上游动作（A2A 同样
+/// 不把它列进新手福利档），因此排除。`settled` 是**一次性福利的结算记忆**
+/// （本地事实、零上游请求），界面据此直接渲染「已领取」并跳过自动查询。
+pub fn onboarding_rows(store: &CheckinStore, sessions: &AccountSessionStore) -> Vec<Value> {
     sessions
         .all()
         .into_iter()
-        .filter(|session| matches!(session.provider.as_str(), "zcode" | "zcode-intl"))
+        .filter(|session| {
+            session.provider != "officeace"
+                && crate::checkin::benefits::actions_for(&session.provider)
+                    .contains(&"onboarding")
+        })
         .map(|session| {
-            // 本地领取台账：`{planId: 毫秒}`（形状对齐 A2A `claimPlans`）
+            let memory = crate::checkin::benefits::load_memory(
+                store.file_store(),
+                &crate::checkin::benefits::memory_key(&session.id, "onboarding"),
+            );
+            let settled = memory
+                .as_ref()
+                .and_then(|value| value.get("settled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let settled_at = memory
+                .as_ref()
+                .and_then(|value| value.get("updated_at"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            json!({
+                "id": session.id,
+                "name": if session.name.is_empty() { session.id.clone() } else { session.name.clone() },
+                "provider": session.provider,
+                "settled": if settled {
+                    // A2A `OnboardingSettlement` 的形状（at/tasks/earned/total）；
+                    // AIGX 的结算记忆只记「结清」这一事实，明细字段给空值
+                    json!({
+                        "at": settled_at,
+                        "tasks": [],
+                        "earned": Value::Null,
+                        "total": Value::Null,
+                    })
+                } else {
+                    Value::Null
+                },
+                // 待领项数（只读记忆，零上游请求；None = 还没盘点过）
+                "pending": crate::checkin::benefits::onboarding::pending_count(
+                    store.file_store(),
+                    &session.id,
+                    &session.provider,
+                ),
+            })
+        })
+        .collect()
+}
+
+/// 活动套餐的账号入口（对齐 A2A `extras.plans`）：带**本地领取台账**
+/// （`account.claimPlans` 形状，零上游请求），界面「今天领过哪几份」按它
+/// 逐份比对。
+pub fn plan_rows(store: &CheckinStore, sessions: &AccountSessionStore) -> Vec<Value> {
+    sessions
+        .all()
+        .into_iter()
+        .filter(|session| {
+            crate::checkin::benefits::actions_for(&session.provider).contains(&"plan")
+        })
+        .map(|session| {
             let memory = crate::checkin::benefits::load_memory(
                 store.file_store(),
                 &crate::checkin::benefits::memory_key(&session.id, "zcode_plan"),
@@ -269,7 +453,9 @@ pub fn campaign_rows(store: &CheckinStore, sessions: &AccountSessionStore) -> Ve
                 .get("claimed_at")
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
-            let claim_plans: serde_json::Map<String, Value> = memory
+            // A2A 的 claimAt / claimPlans 值是**毫秒**；AIGX 记忆里存的是秒
+            let claimed_at_ms = claimed_at.saturating_mul(1000);
+            let claim_plans: Map<String, Value> = memory
                 .get("claimed")
                 .and_then(Value::as_array)
                 .map(|items| {
@@ -279,21 +465,130 @@ pub fn campaign_rows(store: &CheckinStore, sessions: &AccountSessionStore) -> Ve
                             let id = item
                                 .as_str()
                                 .or_else(|| item.get("id").and_then(Value::as_str))?;
-                            Some((id.to_string(), Value::from(claimed_at)))
+                            Some((id.to_string(), Value::from(claimed_at_ms)))
                         })
                         .collect()
                 })
                 .unwrap_or_default();
             json!({
                 "id": session.id,
-                "name": session.name,
+                "name": if session.name.is_empty() { session.id.clone() } else { session.name.clone() },
                 "provider": session.provider,
-                "available": session.is_enabled(),
-                "claim_at": if claimed_at > 0 { Value::from(claimed_at) } else { Value::Null },
-                "claim_plans": Value::Object(claim_plans),
+                "claimAt": if claimed_at_ms > 0 { Value::from(claimed_at_ms) } else { Value::Null },
+                "claimPlans": Value::Object(claim_plans),
             })
         })
         .collect()
+}
+
+/// 成长任务的账号入口（对齐 A2A `extras.growth`）。
+pub fn growth_rows(sessions: &AccountSessionStore) -> Vec<Value> {
+    sessions
+        .all()
+        .into_iter()
+        .filter(|session| {
+            crate::checkin::benefits::actions_for(&session.provider).contains(&"growth")
+        })
+        .map(|session| {
+            json!({
+                "id": session.id,
+                "name": if session.name.is_empty() { session.id.clone() } else { session.name.clone() },
+                "provider": session.provider,
+            })
+        })
+        .collect()
+}
+
+/// 活动福利的账号入口（对齐 A2A `extras.campaigns`）：判据是「有活动链路但
+/// 没归入新手福利 / 套餐」的家。AIGX 当前的活动链路只有 ZCode 限时套餐，
+/// 已归入 `plans`（`actions_for` 里没有独立的活动能力位），因此这里为空集 ——
+/// 形状保留，将来接入独立活动链路时往这里填即可。
+pub fn campaign_rows() -> Vec<Value> {
+    Vec::new()
+}
+
+/// 各家申报的签到链路信息（A2A `checkinFeatures` 的 AIGX 等价物）。
+///
+/// A2A 由插件申报（`CheckinInfo`）；AIGX 的执行体在主仓，能力从
+/// `claim::supports_checkin` 与 `benefits::actions_for` 推导。字段名按 A2A
+/// 的序列化形状（camelCase），没申报的家不出现（旧读端走自己的兜底）。
+pub fn checkin_features() -> Map<String, Value> {
+    let mut map = Map::new();
+    for provider in claim::CHECKIN_PROVIDERS {
+        let provider = *provider;
+        let actions = crate::checkin::benefits::actions_for(provider);
+        let daily =
+            claim::supports_checkin(provider) && !claim::UNSUPPORTED_PROVIDERS.contains(&provider);
+        let onboarding = actions.contains(&"onboarding");
+        let plans = actions.contains(&"plan");
+        let growth = actions.contains(&"growth");
+        let newbie = actions.contains(&"newbie");
+        // 完全没有签到链路且没有福利通道的家不进表（界面显示空态）
+        if !daily && !onboarding && !plans && !growth && !newbie {
+            continue;
+        }
+        let mut modes: Vec<&str> = Vec::new();
+        if daily {
+            modes.push("checkin");
+        }
+        if provider == "workbuddy-intl" {
+            modes.extend(["keepalive", "claim", "full"]);
+        }
+        let ui_hooks: Vec<&str> = if provider == "qoder-intl" {
+            vec!["umid_component"]
+        } else {
+            Vec::new()
+        };
+        map.insert(
+            provider.to_string(),
+            json!({
+                "daily": daily,
+                "onboarding": onboarding || newbie,
+                "plans": plans,
+                "growth": growth,
+                "manualPlans": daily && plans,
+                "excludeGuest": provider == "chatglm",
+                "description": Value::Null,
+                "modes": modes,
+                "uiHooks": ui_hooks,
+                // AIGX 扩展：该家的全部福利动作（福利通道页用）
+                "benefitActions": actions,
+            }),
+        );
+    }
+    map
+}
+
+/// 界面要显示的管理面板（对齐 A2A `adminPanels`：`daily_keepalive` /
+/// `growth_tasks`）。
+///
+/// A2A 由插件申报；AIGX 按「库里有没有该能力的目标账号」推导 —— 没有
+/// workbuddy-intl 账号就不显示「保活模型链」，没有 workbuddy 账号就不显示
+/// 「猫猫旅行」。与「没装插件 → 面板不出现」同一取向。
+pub fn admin_panels(sessions: &AccountSessionStore) -> Vec<&'static str> {
+    let providers: std::collections::HashSet<String> =
+        sessions.all().into_iter().map(|s| s.provider).collect();
+    let mut panels: Vec<&'static str> = Vec::new();
+    if providers.contains("workbuddy-intl") {
+        panels.push("daily_keepalive");
+    }
+    if providers.contains("workbuddy") {
+        panels.push("growth_tasks");
+    }
+    panels
+}
+
+/// 保活免费模型链的对外视图（A2A `KeepaliveState`：camelCase `defaultModels`，
+/// 另带 AIGX 既有 snake_case 别名）。
+pub fn keepalive_view(store: &CheckinStore) -> Value {
+    let view = crate::checkin::benefits::keepalive::config_view(store.file_store());
+    let models = view.get("models").cloned().unwrap_or(json!([]));
+    let default_models = view.get("default_models").cloned().unwrap_or(json!([]));
+    json!({
+        "models": models,
+        "defaultModels": default_models,
+        "default_models": default_models,
+    })
 }
 
 /// 活动预览的空形状（对齐 A2A `CampaignPreview`：`CampaignReward[]` /
@@ -319,9 +614,8 @@ pub fn campaign_preview_shape() -> Value {
 // 已删除（2026-11-18）：此处原有一份 `account_row()`，是
 // `checkin_center::handle_checkin_center` 内联 `json!` 的**副本**。核账时
 // 发现它已与 handler 漂移：缺 `edition` 字段、`available` 少了
-// `!is_expired(now)` 判据、且 handler 消费的是 `collect_targets`（已过滤
-// 停用/过期账号）后的列表。接线会改变输出形状，保留则必然误导 —— 故整块
-// 删除；行形状的权威定义只保留 handler 一处。
+// `!is_expired(now)` 判据。现由本文件的 [`account_row`] 唯一化，handler
+// 直接调用 —— 行形状的权威定义只此一处。
 
 #[cfg(test)]
 mod tests {
@@ -342,18 +636,21 @@ mod tests {
     static GLOBAL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn auto_state_shape_has_compat_and_schedules() {
+    fn auto_state_shape_has_a2a_contract_and_settings() {
         // 只断言「字段存在且类型正确」，**不断言 running 的具体值** ——
         // running 是进程级全局闸，并行测试下由别的用例持有，断言值会 flaky。
         let store = CheckinStore::new(temp_store());
         store.load().unwrap();
         let sessions = AccountSessionStore::new(temp_store());
         let state = auto_state(&store, &sessions);
-        // 兼容字段存在
+        // A2A 契约字段
         assert!(state.get("enabled").is_some());
         assert!(state.get("time").is_some());
-        assert!(state.get("provider_options").is_some());
+        assert!(state.get("providerOptions").is_some());
+        assert!(state.get("defaultRetryTime").is_some());
         assert!(state.get("schedules").is_some());
+        // AIGX 扩展：设置卡
+        assert!(state.get("settings").is_some());
         // running 只断言是布尔（不断言值）
         assert!(state.get("running").and_then(Value::as_bool).is_some());
         // 没有条目时 schedules 为空数组（不是 null）
@@ -364,6 +661,56 @@ mod tests {
                 .map(Vec::len),
             Some(0)
         );
+    }
+
+    #[test]
+    fn schedule_view_emits_camel_case_contract() {
+        let store = CheckinStore::new(temp_store());
+        store.load().unwrap();
+        let schedule = CheckinSchedule {
+            id: "s1".into(),
+            label: "每日".into(),
+            enabled: true,
+            time: "09:00".into(),
+            time_end: "09:30".into(),
+            randomize: true,
+            retry_limit: 3,
+            retry_gap_minutes: 5,
+            makeup_time: "10:00".into(),
+            providers: vec!["loomy".into()],
+            provider_times: Default::default(),
+            last_fired_date: String::new(),
+            last_fired_providers: Default::default(),
+            last_retried_providers: Default::default(),
+            account_plan: Default::default(),
+            last_result: "成功 1/1".into(),
+            last_summary: serde_json::json!({ "succeeded": 1, "total": 1 }),
+            last_ok: 1,
+            last_keepalive: 0,
+            last_failed: 0,
+        };
+        let view = schedule_view(&store, &schedule, true, &scheduler::today());
+        for key in [
+            "displayLabel",
+            "providerRows",
+            "providerTimes",
+            "retryTime",
+            "providerRetryTimes",
+            "retryGapMinutes",
+            "retryLimit",
+            "lastFiredDate",
+            "lastFiredToday",
+            "pendingProviders",
+            "retryCount",
+            "retryExhausted",
+            "retryAttempts",
+            "nextRunAt",
+            "lastResult",
+        ] {
+            assert!(view.get(key).is_some(), "缺少字段 {key}");
+        }
+        // lastResult 带上 retryAttempts（A2A retry::merge 同形）
+        assert!(view["lastResult"].get("retryAttempts").is_some());
     }
 
     #[test]

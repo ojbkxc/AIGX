@@ -1038,25 +1038,6 @@ pub fn provider_summary(sessions: &[AccountSession]) -> Value {
     Value::Array(rows)
 }
 
-/// 隐藏账号摘要：`{total, byProvider: {provider: n}, accounts: [公开投影]}`。
-pub fn hidden_accounts_summary(sessions: &[AccountSession]) -> Value {
-    let hidden: Vec<&AccountSession> = sessions.iter().filter(|session| session.hidden).collect();
-    let mut by_provider = Map::new();
-    for session in &hidden {
-        let next = by_provider
-            .get(&session.provider)
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            + 1;
-        by_provider.insert(session.provider.clone(), Value::from(next));
-    }
-    json!({
-        "total": hidden.len(),
-        "byProvider": Value::Object(by_provider),
-        "accounts": hidden.iter().map(|session| plugin_account_view(session)).collect::<Vec<_>>(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

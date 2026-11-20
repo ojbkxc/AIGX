@@ -258,13 +258,16 @@ pub struct UpdateConfig {
     /// 是否启用更新模块（关闭后定时任务不再检查，手动检查/更新仍可用）。
     #[serde(default = "default_update_enabled")]
     pub enabled: bool,
-    /// 是否按 `interval_hours` 周期自动检查新版本。
+    /// 旧契约镜像（是否自动检查）：检查计划以
+    /// `scheduled_tasks.update_check` 为准，本字段仅在走
+    /// `PUT /api/update/settings` 旧字段时同步写入，调度循环不读它。
     #[serde(default = "default_update_auto_check")]
     pub auto_check: bool,
     /// 发现新版本后是否自动应用（下载 → 校验 → 替换 → 重启），默认关闭。
     #[serde(default)]
     pub auto_apply: bool,
-    /// 自动检查间隔（小时，最小 1）。
+    /// 旧契约镜像（小时）：真正的间隔见 `scheduled_tasks.update_check.interval`
+    /// （分钟）；本字段仅供旧读方与普通 PUT 的兼容换算。
     #[serde(default = "default_update_interval_hours")]
     pub interval_hours: u64,
     /// 更新来源仓库（`owner/repo`）。

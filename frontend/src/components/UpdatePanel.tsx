@@ -6,14 +6,12 @@ import {
 import { api } from '../api';
 import { useToast } from './Toast';
 import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
-import type { UpdateSettingsItem, UpdateStatusItem } from '../types';
+import type { ScheduledTaskItem, UpdateSettingsItem, UpdateStatusItem } from '../types';
 import './UpdatePanel.css';
 
 interface SettingsForm {
   enabled: boolean;
-  auto_check: boolean;
   auto_apply: boolean;
-  interval_hours: string;
   repo: string;
   api_base: string;
   include_prerelease: boolean;
@@ -49,6 +47,10 @@ export default function UpdatePanel(): JSX.Element {
   const addToast = useToast();
   const [status, setStatus] = useState<UpdateStatusItem | null>(null);
   const [settings, setSettings] = useState<SettingsForm | null>(null);
+  /** 全局检查计划 = `scheduled_tasks.updateCheck`（与调度循环/插件设置同一份） */
+  const [checkPlan, setCheckPlan] = useState<ScheduledTaskItem | null>(null);
+  const [checkIntervalDraft, setCheckIntervalDraft] = useState('');
+  const [checkBusy, setCheckBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [checking, setChecking] = useState(false);
@@ -115,9 +117,7 @@ export default function UpdatePanel(): JSX.Element {
       if (!data || !mountedRef.current) return;
       setSettings({
         enabled: data.enabled,
-        auto_check: data.auto_check,
         auto_apply: data.auto_apply,
-        interval_hours: String(data.interval_hours),
         repo: data.repo,
         api_base: data.api_base,
         include_prerelease: data.include_prerelease,
@@ -136,11 +136,60 @@ export default function UpdatePanel(): JSX.Element {
     }
   }, [t]);
 
+  /** 读取全局检查计划（定时任务 `updateCheck`）：与调度循环同一份数据。 */
+  const loadCheckPlan = useCallback(async (): Promise<void> => {
+    try {
+      const res = await api.getScheduledTasks();
+      const task = res?.data?.tasks?.find((item) => item.id === 'updateCheck');
+      if (!mountedRef.current || !task) return;
+      setCheckPlan(task);
+      setCheckIntervalDraft(String(task.interval));
+    } catch {
+      // 读不到计划就隐藏该区块；其余更新设置不受影响（不把整页打成错误）
+    }
+  }, []);
+
+  /** 保存检查计划：开关即时保存；间隔失焦/回车/点保存提交。 */
+  const saveCheckPlan = useCallback(async (patch: {
+    enabled?: boolean;
+    interval?: number;
+  }): Promise<void> => {
+    if (checkBusy) return;
+    setCheckBusy(true);
+    try {
+      const res = await api.patchScheduledTask('updateCheck', patch);
+      if (res?.success && res?.data) {
+        setCheckPlan(res.data);
+        setCheckIntervalDraft(String(res.data.interval));
+        addToast(t('设置已保存'));
+      } else {
+        addToast(res?.error?.message || t('保存失败'));
+        await loadCheckPlan();
+      }
+    } catch (e) {
+      addToast(e instanceof Error ? e.message : t('保存失败'));
+      await loadCheckPlan();
+    } finally {
+      setCheckBusy(false);
+    }
+  }, [addToast, checkBusy, loadCheckPlan, t]);
+
+  const saveCheckInterval = (): void => {
+    if (!checkPlan) return;
+    const interval = Number(checkIntervalDraft);
+    if (!Number.isInteger(interval) || interval < checkPlan.min || interval > checkPlan.max) {
+      addToast(`${t('间隔')}${t('需在')} ${checkPlan.min}–${checkPlan.max}`);
+      setCheckIntervalDraft(String(checkPlan.interval));
+      return;
+    }
+    if (interval !== checkPlan.interval) void saveCheckPlan({ interval });
+  };
+
   useEffect(() => {
     mountedRef.current = true;
     void (async () => {
       try {
-        await Promise.all([loadStatus(true), loadSettings()]);
+        await Promise.all([loadStatus(true), loadSettings(), loadCheckPlan()]);
       } catch (e) {
         if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -148,7 +197,7 @@ export default function UpdatePanel(): JSX.Element {
       }
     })();
     return () => { mountedRef.current = false; };
-  }, [loadSettings, loadStatus]);
+  }, [loadCheckPlan, loadSettings, loadStatus]);
 
   // 活跃阶段 2s、空闲 15s 轮询：重启后版本号能自动刷新
   const active = Boolean(
@@ -268,9 +317,7 @@ export default function UpdatePanel(): JSX.Element {
     try {
       const payload: Record<string, unknown> = {
         enabled: settings.enabled,
-        auto_check: settings.auto_check,
         auto_apply: settings.auto_apply,
-        interval_hours: Number(settings.interval_hours) || 24,
         repo: settings.repo,
         api_base: settings.api_base,
         include_prerelease: settings.include_prerelease,
@@ -499,6 +546,67 @@ export default function UpdatePanel(): JSX.Element {
         </div>
       </div>
 
+      {checkPlan && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-header">
+            <h2>{t('检查计划')}</h2>
+            <p className="card-subtitle">
+              {t('与「定时任务」和插件设置共用同一份检查计划；关闭后「检查更新」按钮仍可手动触发。')}
+            </p>
+          </div>
+          <div className="card-body">
+            <div className="settings-form">
+              <label className="update-check">
+                <input
+                  type="checkbox"
+                  checked={checkPlan.enabled}
+                  disabled={checkBusy || !settings?.enabled}
+                  onChange={(e) => void saveCheckPlan({ enabled: e.target.checked })}
+                />
+                {t('自动检查更新')}
+              </label>
+              <div className="form-group">
+                <label>{t('检查间隔（分钟）')}</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min={checkPlan.min}
+                    max={checkPlan.max}
+                    value={checkIntervalDraft}
+                    disabled={checkBusy || !settings?.enabled || !checkPlan.enabled}
+                    onChange={(e) => setCheckIntervalDraft(e.target.value)}
+                    onBlur={saveCheckInterval}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        saveCheckInterval();
+                      }
+                    }}
+                  />
+                  <span className="update-hint">
+                    {t('分钟')} · {t('默认')} {checkPlan.defaultInterval} · {checkPlan.min}–{checkPlan.max}
+                  </span>
+                </div>
+              </div>
+              {checkPlan.retryAt && checkPlan.retryAt > Date.now() && (
+                <div className="update-hint">
+                  {t('失败冷却中，将于 {{when}} 重试', {
+                    when: new Date(checkPlan.retryAt).toLocaleString(),
+                  })}
+                </div>
+              )}
+              {checkPlan.lastError && (
+                <div className="update-banner error">
+                  <AlertTriangle size={15} />
+                  <span>{checkPlan.lastError}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-header">
           <h2>{t('自动更新设置')}</h2>
@@ -514,14 +622,6 @@ export default function UpdatePanel(): JSX.Element {
                   onChange={(e) => setSettings({ ...settings, enabled: e.target.checked })}
                 />
                 {t('启用更新模块')}
-              </label>
-              <label className="update-check">
-                <input
-                  type="checkbox"
-                  checked={settings.auto_check}
-                  onChange={(e) => setSettings({ ...settings, auto_check: e.target.checked })}
-                />
-                {t('启用自动检查')}
               </label>
               <label className="update-check">
                 <input
@@ -548,17 +648,6 @@ export default function UpdatePanel(): JSX.Element {
                 {t('包含预发布版本')}
               </label>
 
-              <div className="form-group">
-                <label>{t('检查间隔（小时）')}</label>
-                <input
-                  className="form-input"
-                  type="number"
-                  min={1}
-                  max={720}
-                  value={settings.interval_hours}
-                  onChange={(e) => setSettings({ ...settings, interval_hours: e.target.value })}
-                />
-              </div>
               <div className="form-group">
                 <label>{t('更新源仓库')}</label>
                 <input

@@ -843,95 +843,249 @@ export interface CheckinSettings {
   retry_gap_ms?: number;
 }
 
-export interface CheckinSchedule {
+/** 一条定时条目的逐家行（A2A `ScheduleProviderRow`） */
+export interface CheckinScheduleProviderRow {
   id: string;
   label: string;
+  /** 该家生效时刻（HH:MM） */
+  time: string;
+  /** 区间结束（有窗口时） */
+  timeEnd?: string;
+  /** 内置专属时刻（null = 跟随条目时刻） */
+  builtin?: string | null;
+  /** 今天跑过且没有待执行账号 */
+  firedToday: boolean;
+  /** 当日排程账号数 / 已尝试 / 待执行 */
+  accountCount?: number;
+  attemptedCount?: number;
+  pendingCount?: number;
+  /** 下一个待执行账号的时刻（unix 毫秒） */
+  nextAccountAt?: number | null;
+  /** 到点了但还没跑（false 且 firedToday=false = 在等窗口） */
+  overdue?: boolean;
+}
+
+/** 一轮执行的摘要（A2A `lastResult` / `checkin_history` 行） */
+export interface CheckinResultSummary {
+  at?: number;
+  date?: string;
+  reason?: string;
+  succeeded?: number;
+  /** 活跃保活数（WorkBuddy 国际版） */
+  active?: number;
+  total?: number;
+  skipped?: number;
+  failed?: string[];
+  failedCount?: number;
+  /** 今天每账号已重试次数（窗口重试轮计数） */
+  retryAttempts?: Record<string, number>;
+}
+
+/** 一条定时签到条目（A2A `ScheduleEntry`，camelCase 契约） */
+export interface CheckinScheduleEntry {
+  id: string;
+  label: string;
+  /** 展示名（label 为空时退到 time） */
+  displayLabel: string;
   enabled: boolean;
   /** 每天时刻 HH:MM（按配置时区） */
   time: string;
-  providers: string[];
-  last_fired_date: string;
-  last_result: string;
-  /** 上次执行计数（成功/保活/失败） */
-  last_ok: number;
-  last_keepalive: number;
-  last_failed: number;
-  /** 逐家时刻覆盖（{provider: "HH:MM"}；后端 15f98321 起下发，三档回落：
-   *  条目覆盖 > 内置专属（如 qoder 10:01）> 条目 time） */
-  provider_times?: Record<string, string>;
-  /** 逐家已跑标记（{provider: date}）——同一条目可在多个窗口各跑一批 */
-  last_fired_providers?: Record<string, string>;
-  /* ── 以下为 1.0.49 契约字段（store::CheckinSchedule，serde(default) 全部下发；
-   *    旧后端缺字段时保持可选，前端 feature-detect 门控渲染/提交）── */
-  /** 随机签到区间结束 HH:MM（空 = 无窗口，仅按 time 固定时刻执行） */
-  time_end?: string;
-  /** true = 每个账号在 [time, time_end] 内取确定性随机时刻（hash(account_id)，重启不漂） */
+  /** 随机签到区间结束 HH:MM（空 = 无窗口） */
+  timeEnd?: string;
   randomize?: boolean;
-  /** 每账号每天重试次数上限（0 = 关闭重试；后端缺省 3） */
-  retry_limit?: number;
-  /** 重试间隔（分钟；<=0 回落全局 retry_gap_ms；后端缺省 5） */
-  retry_gap_minutes?: number;
-  /** 补签轮时刻 HH:MM（空 = 不跑补签轮；到点挑当天未签上账号再跑，kind="makeup"） */
-  makeup_time?: string;
+  providers: string[];
+  /** 逐家时刻覆盖（{provider: "HH:MM"}；空串 = 撤销覆盖） */
+  providerTimes: Record<string, string>;
+  /** 逐家生效时刻与今日状态（后端算好，界面直接渲染） */
+  providerRows: CheckinScheduleProviderRow[];
+  /** 补签轮时刻（空 = 关闭补签轮） */
+  retryTime: string;
+  /** 逐家补签时刻（窗口结束 + 等待间隔，不早于 retryTime） */
+  providerRetryTimes?: Record<string, string>;
+  /** 中性未领取的重试间隔（分钟；0 = 不重试） */
+  retryGapMinutes: number;
+  /** 每账号每天的重试次数上限（0 = 不重试） */
+  retryLimit: number;
+  lastFiredDate: string | null;
+  lastFiredToday: boolean;
+  /** 今天还没跑的家（界面显示「待执行」） */
+  pendingProviders: string[];
+  /** 中性未领取、等窗口重试的账号数 */
+  retryCount: number;
+  /** 今天重试次数已用完的账号 id（今天不再重试、明天重置） */
+  retryExhausted?: string[];
+  /** 今天每账号已重试次数 */
+  retryAttempts?: Record<string, number>;
+  nextRunAt: number | null;
+  lastResult: CheckinResultSummary | null;
 }
 
+/** 自动签到状态（A2A `AutoState`） */
+export interface CheckinAutoState {
+  enabled: boolean;
+  running: boolean;
+  providerOptions: Array<{ id: string; label: string; builtinTime?: string | null }>;
+  /** 缺省补签时刻（「补签时刻」输入框 placeholder） */
+  defaultRetryTime?: string;
+  schedules: CheckinScheduleEntry[];
+  /* ── 兼容视图（默认条目投影；旧界面/启动日志直读）── */
+  time?: string;
+  timeEnd?: string;
+  providers?: string[];
+  lastFiredDate?: string | null;
+  lastFiredToday?: boolean;
+  lastResult?: CheckinResultSummary | null;
+  nextRunAt?: number | null;
+  /** AIGX 扩展：签到设置（设置卡直读） */
+  settings?: CheckinSettings;
+}
+
+/** 一行每日签到账号（A2A `CheckinAccount`） */
 export interface CheckinAccountRow {
   id: string;
   name: string;
-  channel_id: string;
-  checked_in_today: boolean;
-  last_outcome?: string;
-  last_message?: string;
-  last_ts?: number;
-  /* ── A2A checkin-center 行扩展（旧后端不下发，逐项按可选容错）── */
-  /** 成长中心连登天数（签到后回读落库；0 = 还没读到过） */
-  streak_days?: number;
-  /** dailyCheckin 原始快照（插件申报的当天逐项完成状态） */
-  daily_checkin?: unknown;
+  /** 账号是否可用（false = 凭证失效/停用，仍列出但降级展示） */
+  available: boolean;
+  /** 上次签到时间（unix 毫秒） */
+  checkinAt: number | null;
+  checkedInToday: boolean;
+  /** dailyCheckin 原始快照（插件/网关申报的当天逐项完成状态） */
+  dailyCheckin?: unknown;
   /** 版本档（cn / intl），按钮文案据此区分「签到 / 领日活」 */
-  edition?: string | null;
-  /** 账号当前是否可用（false = 凭证失效等，仍列出但降级展示） */
-  available?: boolean;
+  edition: string | null;
+  /** 成长中心连登天数（0 = 还没读到过） */
+  streakDays: number;
+  /* ── AIGX 展示扩展（「最近结果」列直读）── */
+  lastOutcome?: string | null;
+  lastMessage?: string | null;
+  lastTs?: number | null;
+  channel_id?: string;
 }
 
+/** 按提供商分组的每日签到行（A2A `ProviderGroup`） */
 export interface CheckinProviderGroup {
-  provider: string;
+  id: string;
   label: string;
   accounts: CheckinAccountRow[];
-  today_done: number;
-  today_total: number;
+  doneCount: number;
+  totalCount: number;
+  /** 该家同时有每日签到与限时套餐（领取要逐份做） */
+  manualPlans?: boolean;
+  description?: string | null;
+  modes?: string[] | null;
+  uiHooks?: string[] | null;
 }
 
+/** 范围外账号（按提供商 + 原因聚合） */
+export interface CheckinOutOfScope {
+  label: string;
+  reason: string;
+  count: number;
+}
+
+/** 逐账号福利入口（新手福利 / 成长任务） */
+export interface CheckinExtraEntry {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+/** 新手福利入口（A2A `extras.onboarding`） */
+export interface CheckinOnboardingEntry extends CheckinExtraEntry {
+  /** 一次性福利的结算记忆（已结清才非空） */
+  settled?: { at?: number | null } | null;
+  /** 待领项数（null = 还没盘点过） */
+  pending?: number | null;
+}
+
+/** 活动套餐入口（A2A `extras.plans`；带本地领取台账） */
+export interface CheckinPlanEntry extends CheckinExtraEntry {
+  claimAt: number | null;
+  claimPlans: Record<string, number> | null;
+}
+
+/** 活动福利入口（A2A `extras.campaigns`） */
+export interface CheckinCampaignEntry extends CheckinExtraEntry {
+  available: boolean;
+}
+
+/** 签到轮次时间线（A2A `HistoryRow`） */
+export interface CheckinHistoryRow {
+  at: number;
+  date?: string;
+  reason?: string;
+  succeeded?: number;
+  active?: number;
+  total?: number;
+  skipped?: number;
+  failed?: string[];
+  failedCount?: number;
+}
+
+/** 一家申报的签到链路信息（A2A `checkinFeatures`） */
+export interface CheckinFeature {
+  daily?: boolean;
+  onboarding?: boolean;
+  plans?: boolean;
+  growth?: boolean;
+  manualPlans?: boolean;
+  excludeGuest?: boolean;
+  description?: string | null;
+  modes?: string[] | null;
+  uiHooks?: string[] | null;
+  /** AIGX 扩展：该家的全部福利动作 */
+  benefitActions?: string[];
+}
+
+/** GET /api/checkin-center 的快照（A2A flat 形状） */
 export interface CheckinCenterData {
-  settings: CheckinSettings;
-  supported_providers: string[];
-  providers: CheckinProviderGroup[];
-  schedules: CheckinSchedule[];
-  /** 台账总条数（统计卡「累计记录数」） */
-  records_total: number;
-  today_summary: Array<{ provider: string; done: number; total: number }>;
-  /** 各家内置签到时刻（{provider: "HH:MM"}，如 qoder 10:01）；后端未下发时
-   *  编辑器不显示「平台专属」标注，预览按覆盖/默认时刻分组 */
-  builtin_times?: Record<string, string>;
-  /** 1.0.49：实现未进主仓（随上游搬进闭源插件仓）的家 —— 前端置灰入口。
-   *  旧后端不下发（undefined = 空集，不置灰） */
-  unsupported_providers?: string[];
-  /** 旅行/成长巡检状态（be-fix #16-B 落地后随 center 下发；缺省 = 不渲染巡检卡） */
+  daily: {
+    providers: CheckinProviderGroup[];
+    outOfScope: CheckinOutOfScope[];
+    todayDone: number;
+    todayEligible: number;
+  };
+  extras: {
+    onboarding: CheckinOnboardingEntry[];
+    plans: CheckinPlanEntry[];
+    campaigns: CheckinCampaignEntry[];
+    growth: CheckinExtraEntry[];
+  };
+  auto: CheckinAutoState;
+  keepalive: KeepaliveConfig;
   travel?: CheckinTravelState;
+  history: CheckinHistoryRow[];
+  /** 面板可见性（daily_keepalive / growth_tasks） */
+  adminPanels: string[];
+  checkinFeatures: Record<string, CheckinFeature>;
+  pluginTasks?: unknown[];
+  /* ── AIGX 扩展 ── */
+  settings: CheckinSettings;
+  recordsTotal?: number;
+  supportedProviders?: string[];
+  unsupportedProviders?: string[];
 }
 
-/** 旅行/成长巡检（对照上游 checkin-schedule-extras TravelPanel / growth_scheduler） */
+/** 旅行/成长巡检（对齐 A2A growth_scheduler::state，camelCase） */
 export interface CheckinTravelState {
   enabled?: boolean;
+  available?: boolean;
+  /** 巡检能力不可用时的暂停原因 */
+  pausedReason?: string | null;
+  paused_reason?: string | null;
   /** 每天自动巡检时刻列表（HH:MM，一行一个） */
   times?: string[];
-  running?: boolean;
-  /** 今日已触发的时刻 */
+  /** 今日已触发的计划时刻 */
+  firedToday?: string[];
   fired_today?: string[];
-  last_result?: string;
-  /** 巡检能力不可用时的暂停原因 */
-  paused_reason?: string;
-  available?: boolean;
+  lastFiredDate?: string | null;
+  lastFiredTime?: string | null;
+  lastResult?: string | null;
+  lastOutcome?: string | null;
+  lastError?: string | null;
+  running?: boolean;
+  last_result?: string | null;
+  last_run?: number | null;
 }
 
 export interface CheckinRunResult {
@@ -955,6 +1109,8 @@ export interface BenefitResult {
 export interface KeepaliveConfig {
   models: string[];
   default_models: string[];
+  /** A2A 别名（camelCase；center 快照给这个） */
+  defaultModels?: string[];
 }
 
 /** 福利通道清单（GET /api/checkin-center/benefits） */
@@ -974,23 +1130,33 @@ export interface CheckinBenefitsData {
   keepalive: KeepaliveConfig;
 }
 
+/** 签到记录明细行（A2A `/api/checkin-records`，camelCase） */
 export interface CheckinRecord {
+  /** 行号（分页 offset + 序号；删除定位不依赖它） */
+  rowId?: number;
+  /** unix 秒 */
   ts: number;
   date: string;
-  account_id: string;
-  account_name: string;
+  accountId: string;
+  accountName: string;
+  /** 展示名（后端已换成 provider label） */
   provider: string;
+  /** provider 原始 id（筛选/展示兜底用） */
+  providerId?: string;
   source: string;
   outcome: string;
   ok: boolean;
   /** 本次执行链是否附带保活动作 */
-  kept_active: boolean;
+  keptActive: boolean;
   message: string;
-  /* ── 1.0.49 契约新增（serde(default)，存量记录可能为空串）── */
   /** 记录类型：manual | schedule | makeup | retry —— 与 source 同值双写 */
   kind?: string;
+  /** 触发原因（人话，界面的「来源/说明」列直读） */
+  reason?: string;
   /** 失败原文（成功 / 今日已领时为空串）—— 台账「失败原因」列直读 */
   error?: string;
+  /** 签到后回读的成长中心连登天数 */
+  streakDays?: number;
 }
 
 export interface TotpSetupResult {
@@ -1367,6 +1533,16 @@ export interface AccountSessionItem {
   expires_at?: number | null;
   /** 余额自动查询间隔（秒；null/缺省 = 关闭） */
   usage_query_interval_secs?: number | null;
+  /** 余额查询执行参数（A2A usageQuery.retries / timeoutSeconds；后端归一化） */
+  usage_query?: {
+    retries: number;
+    timeout_seconds: number;
+  };
+  /** 余额不足处理（A2A lowBalance，后端恒物化缺省）：off / skip / disable */
+  low_balance?: {
+    mode: 'off' | 'skip' | 'disable';
+    threshold: number;
+  };
   /** 上次余额查询时间（unix 秒） */
   last_balance_at?: number | null;
   /** 上次余额查询快照（与 /balance 的 data 同构） */
@@ -1604,6 +1780,24 @@ export interface ProxyTestResult {
   saveError?: string | null;
 }
 
+/** 代理连通性测试设置（GET/POST /api/proxies/settings，A2A 对齐） */
+export interface ProxySettings {
+  testUrl: string;
+  defaults?: { testUrl?: string };
+}
+
+/** 系统代理快照（GET /api/proxies/system；`proxy: null` = 未配置） */
+export interface SystemProxySnapshot {
+  proxy: {
+    source: 'custom';
+    protocol: 'http' | 'socks5';
+    host: string;
+    port: number;
+    username?: string;
+    password?: string;
+  } | null;
+}
+
 /** AI 助手工具条目（GET /api/agent/settings） */
 export interface AgentToolItem {
   name: string;
@@ -1672,8 +1866,10 @@ export interface SecurityPolicyItem {
   restartRequiredFields?: string[];
 }
 
-/** 调试模式 · 一条上游原始报文（GET /api/debug/traffic；仅请求侧） */
+/** 调试模式 · 一条上游原始报文（GET /api/debug/traffic；请求侧 + 错误路径响应侧） */
 export interface DebugTrafficEntry {
+  /** 关联键：请求日志 id（详情 `?id=` 查询用；旧记录可能缺省） */
+  id?: string;
   /** 记录时刻（毫秒 Unix 时间戳） */
   ts: number;
   /** 关联的请求 id（与请求日志同值） */
@@ -1684,14 +1880,40 @@ export interface DebugTrafficEntry {
   account_id?: string;
   /** HTTP 方法 */
   method: string;
-  /** 上游 URL（含路径与查询串） */
+  /** 上游 URL（**已脱敏**） */
   url: string;
   /** 发给上游的请求头（**已脱敏**） */
   headers: Record<string, string>;
-  /** 发给上游的请求体（超长已截断） */
+  /** 发给上游的请求体（超长已截断、凭据字段已脱敏） */
   body?: string;
   /** 请求体是否被截断 */
   truncated?: boolean;
+  /** 上游响应状态码（未收到响应时缺省） */
+  response_status?: number;
+  /** 上游响应头（**已脱敏**） */
+  response_headers?: Record<string, string>;
+  /** 上游响应体（仅错误路径抓取，**已脱敏**） */
+  response_body?: string;
+}
+
+/**
+ * 调试模式 · 单条详情（GET /api/debug/traffic?id=；字段对齐 Agent2API
+ * `detail_payload`，camelCase）。
+ */
+export interface DebugTrafficDetail {
+  id: string;
+  requestId: string;
+  ts: number;
+  method: string;
+  url: string;
+  model: string;
+  accountId?: string | null;
+  requestHeaders: Record<string, unknown>;
+  requestBody?: string | null;
+  status?: number | null;
+  responseHeaders?: Record<string, unknown> | null;
+  responseBody?: string | null;
+  truncated: boolean;
 }
 
 /** 调试模式缓冲概览（GET /api/debug/traffic） */
@@ -1957,8 +2179,10 @@ export interface UpdateStatusItem {
 /** 自动更新配置（GET/PUT /api/update/settings，token 为脱敏值） */
 export interface UpdateSettingsItem {
   enabled: boolean;
+  /** 旧契约镜像字段：检查计划的权威来源是定时任务 `updateCheck` */
   auto_check: boolean;
   auto_apply: boolean;
+  /** 旧契约镜像字段（小时）：真正的间隔见定时任务 `updateCheck.interval`（分钟） */
   interval_hours: number;
   repo: string;
   api_base: string;
@@ -1983,7 +2207,8 @@ export interface UpdateSettingsItem {
  *
  * ─── 两类任务（区别是「谁来执行」）───
  *   - `runner: "backend"`：凭证维护 / 模型刷新 / 版本检查，后端调度循环执行，
- *     有 lastRunAt / nextRunAt 等运行状态，界面可「立即执行」。
+ *     有 lastRunAt / nextRunAt 等运行状态，界面可「立即执行」。其中
+ *     `updateCheck` 的配置入口在「更新」页（检查计划），定时任务页不渲染它。
  *   - `runner: "frontend"`：日志页 / 请求日志页 / 报表页自动刷新，定时器长在
  *     页面上，后端只存开关与间隔，界面自己读；`canRun` 为 false。
  */
@@ -2017,6 +2242,8 @@ export interface ScheduledTaskItem {
   nextRunAt: number | null;
   /** 是否可在后端立即执行（仅 backend 任务为 true） */
   canRun: boolean;
+  /** 改配置时后端是否已写盘（PATCH 响应携带；GET 列表没有该字段） */
+  saved?: boolean;
 }
 
 /** 间隔型任务清单（GET /api/scheduled-tasks 响应） */
@@ -2422,6 +2649,12 @@ export interface PurgeRewriteRule {
   to: string;
 }
 
+/** 破甲控制台 · 结构化提示模板（active_template 命中时替代 structured_suffix） */
+export interface PurgeTemplate {
+  name: string;
+  text: string;
+}
+
 /** 破甲控制台配置 */
 export interface PurgeSettings {
   enabled: boolean;
@@ -2442,7 +2675,23 @@ export interface PurgeSettings {
   skill_dir: string;
   skill_inject_limit: number;
   structured_suffix: string;
+  /** 结构化模板表（可为空；旧后端不返回时按空表处理） */
+  structured_templates?: PurgeTemplate[];
+  /** 当前启用的模板名（空 = 用 structured_suffix） */
+  active_template?: string;
+  /** 拒绝话术词表（空 = 关闭字面拒绝检测） */
+  refusal_patterns?: string[];
+  /** 「内容过滤」类失败关键词 */
+  failure_filter_keywords?: string[];
+  /** 「空答」类失败关键词 */
+  failure_empty_keywords?: string[];
   upstream_label: string;
+}
+
+/** POST /api/purge/preview 的 data 结构（dry-run 试跑结果） */
+export interface PurgePreviewResult {
+  applied: { changed: boolean; skill_hit: boolean };
+  messages: Array<{ role: string; content: string | null }>;
 }
 
 /** 破甲控制台统计（进程内计数，重启归零） */
@@ -2481,6 +2730,8 @@ export interface BrandingData {
   logo_url: string;
   favicon_url: string;
   title: string;
+  /** 是否已上传 Logo（上传后 logo_url 指向公开 Logo 端点） */
+  logo_uploaded?: boolean;
 }
 
 /** GET /api/branding 的 data 结构（管理员） */

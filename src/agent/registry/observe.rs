@@ -618,7 +618,15 @@ pub(super) fn tools() -> Vec<ToolDef> {
                             admin::handle_get_model_metadata(State(s.clone()), h.clone()).await
                         }
                         "debug" => admin::handle_get_debug(State(s.clone()), h.clone()).await,
-                        "debugTraffic" => admin::handle_get_debug_traffic(State(s.clone()), h.clone()).await,
+                        "debugTraffic" => {
+                            // 概览（无 id = 列表）；工具 schema 不暴露 id
+                            admin::handle_get_debug_traffic(
+                                State(s.clone()),
+                                h.clone(),
+                                Query(admin::debug::TrafficQuery::default()),
+                            )
+                            .await
+                        }
                         "reportSettings" => {
                             admin::handle_get_report_settings(State(s.clone()), h.clone()).await
                         }

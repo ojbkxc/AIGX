@@ -5,12 +5,20 @@
 //! ```text
 //!   GET  /api/checkin-schedules                状态（总开关 + 条目数组 + 提供商清单）
 //!   POST /api/checkin-schedules                保存一条（按 id upsert）
-//!   POST /api/checkin-schedules/{id}/delete    删除一条（DELETE 方法同受理）
+//!   POST /api/checkin-schedules/{id}/delete    删除一条（DELETE /{id} 同受理）
 //!   POST /api/checkin-schedules/{id}/run       立即执行这一条
 //!   GET  /api/auto-checkin                     自动签到状态（兼容视图）
 //!   POST /api/auto-checkin                     修改总开关 / 时刻 / 范围
 //!   POST /api/auto-checkin/run                 立即执行一次（全部）
+//!   GET  /api/travel-schedule                  猫猫旅行排程状态
+//!   POST /api/travel-schedule                  改配置 {enabled?, times?}
+//!   POST /api/travel-schedule/run              立即巡检一轮
 //! ```
+//!
+//! 响应形状一律对齐 Agent2API（camelCase：`providerRows` / `retryTime` /
+//! `providerRetryTimes` / `retryGapMinutes` / `retryLimit` / `lastFiredDate` /
+//! `pendingProviders` / `retryCount` / `retryExhausted` / `retryAttempts` /
+//! `nextRunAt` / `lastResult`）—— 见 `checkin::center::auto_state`。
 //!
 //! ## 为什么 `/api/checkin-schedules` 与 `/api/auto-checkin` 是两组接口
 //!
@@ -46,10 +54,22 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/checkin-schedules", any(schedules_root))
+        .route("/api/checkin-schedules/:id", any(schedule_delete_by_id))
         .route("/api/checkin-schedules/:id/delete", any(schedule_delete))
         .route("/api/checkin-schedules/:id/run", any(schedule_run))
         .route("/api/auto-checkin", get(auto_state).post(auto_configure))
         .route("/api/auto-checkin/run", post(auto_run))
+        // 猫猫旅行定时排程（A2A 契约：与签到独立排程，GET/POST + run）。
+        // 挂在已 merge 的本 Router 里，不改 main.rs。
+        .route(
+            "/api/travel-schedule",
+            get(super::checkin_center::handle_get_travel_schedule)
+                .post(super::checkin_center::handle_configure_travel_schedule),
+        )
+        .route(
+            "/api/travel-schedule/run",
+            post(super::checkin_center::handle_run_travel_schedule),
+        )
         // 活动福利 / 月度赠送（对齐 A2A /api/accounts/{id}/campaigns*）：
         // 主口径挂在 /api/accounts/:id，另在 /api/account-sessions/:id 下加影子
         // （AIGX 两套账号前缀并存，前端两处都会用到）。
@@ -111,6 +131,29 @@ async fn schedules_root(
     }
 }
 
+/// `.../{id}`：A2A 规范写法（DELETE）；POST 与 any 分发保持既有 404 口径。
+async fn schedule_delete_by_id(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(params): Path<HashMap<String, String>>,
+    method: Method,
+) -> Response {
+    if let Err(response) = verify_admin(&state, &headers).await {
+        return response.into_response();
+    }
+    if method != Method::DELETE {
+        return not_found(&method);
+    }
+    let id = params.get("id").map(String::as_str).unwrap_or_default();
+    match schedules::remove(&state.upstream_checkin, id) {
+        Ok(_) => ok_json(json!({
+            "success": true,
+            "state": center::auto_state(&state.upstream_checkin, &state.account_sessions),
+        })),
+        Err(message) => bad_request(message),
+    }
+}
+
 /// `.../{id}/delete`：DELETE 是规范写法，POST 是别名（CORS 预检考虑，同 tasks）。
 async fn schedule_delete(
     State(state): State<AppState>,
@@ -166,6 +209,10 @@ async fn schedule_run(
         "ok": outcome.ok,
         "keepalive": outcome.keepalive,
         "failed": outcome.failed,
+        "total": outcome.total,
+        "failedList": outcome.failures,
+        // A2A 契约：structured lastResult（含 retryAttempts）
+        "lastResult": outcome.last_summary,
         "state": center::auto_state(&state.upstream_checkin, &state.account_sessions),
     }))
 }
@@ -315,6 +362,10 @@ async fn auto_run(
         "ok": outcome.ok,
         "keepalive": outcome.keepalive,
         "failed": outcome.failed,
+        "total": outcome.total,
+        "failedList": outcome.failures,
+        // A2A 契约：structured lastResult（含 retryAttempts / 失败明细）
+        "lastResult": outcome.last_summary,
         "state": center::auto_state(&state.upstream_checkin, &state.account_sessions),
     })))
 }

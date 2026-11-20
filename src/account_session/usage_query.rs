@@ -15,6 +15,7 @@ use futures::StreamExt;
 use reqwest::Client;
 
 use serde_json::Value;
+use std::time::Duration;
 
 use super::balance::{self, AccountBalance};
 use super::model::AccountSession;
@@ -22,6 +23,36 @@ use super::store::AccountSessionStore;
 
 /// 一轮巡检里并发查询的账号数（余额接口普遍 20s 超时，并发太高会把上游打疼）。
 const CONCURRENCY: usize = 3;
+
+/// 单账号查询（带「每账号」的超时 + 重试；口径与 `usage_jobs` 的
+/// `query_with_retries` 一致，任一次成功即收口）。
+///
+/// 巡检（[`sweep`]）与手动查询（[`query_manual`]）都走这里：`usageQuery`
+/// 的 `retries` / `timeoutSeconds` 对所有查询路径同源生效（上游同义）。
+async fn query_with_settings(
+    client: &Client,
+    session: &AccountSession,
+    retries: u32,
+    timeout_seconds: u64,
+) -> Result<AccountBalance, String> {
+    let mut last = Err("余额查询未执行".to_string());
+    for attempt in 0..=retries {
+        match tokio::time::timeout(
+            Duration::from_secs(timeout_seconds.max(1)),
+            balance::query_balance(client, session),
+        )
+        .await
+        {
+            Ok(Ok(balance)) => return Ok(balance),
+            Ok(Err(message)) => last = Err(message),
+            Err(_) => last = Err(format!("余额查询超时（{timeout_seconds}s）")),
+        }
+        if attempt < retries {
+            tokio::time::sleep(Duration::from_millis(300 * u64::from(attempt + 1))).await;
+        }
+    }
+    last
+}
 
 /// 该账号是否到期需要查余额。
 pub fn is_due(session: &AccountSession, now: i64) -> bool {
@@ -63,7 +94,10 @@ pub async fn sweep(pool: &AccountSessionStore, client: &Client) -> u64 {
         .map(|session| {
             let client = client.clone();
             async move {
-                let outcome = balance::query_balance(&client, &session).await;
+                let config = session.usage_query.normalized();
+                let outcome =
+                    query_with_settings(&client, &session, config.retries, config.timeout_seconds)
+                        .await;
                 (session.id, outcome)
             }
         })
@@ -182,7 +216,10 @@ pub async fn query_manual(
         .map(|session| {
             let client = client.clone();
             async move {
-                let outcome = balance::query_balance(&client, &session).await;
+                let config = session.usage_query.normalized();
+                let outcome =
+                    query_with_settings(&client, &session, config.retries, config.timeout_seconds)
+                        .await;
                 (session.id, session.name, session.provider, outcome)
             }
         })
@@ -206,10 +243,41 @@ pub async fn query_manual(
 ///（unix 秒；None = 从未查过，不出现在 results）。skipped = 支持查询
 /// 但从未查过的账号数（界面可显示「n 个未查询」）。
 pub fn snapshot_all(pool: &AccountSessionStore) -> (Vec<Value>, usize) {
+    snapshot_rows(pool.all(), None)
+}
+
+/// 指定 id 集合的最近结论快照（上游 `GET /api/accounts/usage/snapshot?ids=`
+/// 与 `POST /api/accounts/usage/snapshot {ids}` 的 scoped 形态）。
+///
+/// 只回给定的 id；未知 id 自然不在结果里，**支持余额但从未查过**的计入
+/// `skipped`（与全量快照同义）。A2A 的 `stale`（查询配置指纹漂移）在 AIGX
+/// 无对应事实（不存指纹），不伪造该字段。
+pub fn snapshot_scoped(pool: &AccountSessionStore, ids: &[String]) -> (Vec<Value>, usize) {
+    let wanted: std::collections::HashSet<&str> = ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !id.is_empty())
+        .collect();
+    snapshot_rows(pool.all(), Some(&wanted))
+}
+
+fn snapshot_rows(
+    sessions: Vec<AccountSession>,
+    wanted: Option<&std::collections::HashSet<&str>>,
+) -> (Vec<Value>, usize) {
     let mut results = Vec::new();
     let mut skipped = 0usize;
-    for session in pool.all() {
-        if !balance::supports_balance(&session.provider) {
+    for session in sessions {
+        if let Some(wanted) = wanted {
+            if !wanted.contains(session.id.as_str()) {
+                continue;
+            }
+            // scoped 请求里「不支持余额」的账号也算跳过（让界面能说清为什么没数）
+            if !balance::supports_balance(&session.provider) {
+                skipped += 1;
+                continue;
+            }
+        } else if !balance::supports_balance(&session.provider) {
             continue;
         }
         match (session.last_balance_at, session.last_balance.clone()) {

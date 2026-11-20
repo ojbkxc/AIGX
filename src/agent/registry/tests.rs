@@ -363,6 +363,10 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "系统提示词规则引擎（含 /preview 命中预演）：改规则会改写所有请求的 system，须人工在环",
         ),
         (
+            "/api/purge/preview",
+            "破甲控制台改写试跑（dry-run：不落库、不计统计、不改数据面）：属 /api/purge 配置页的保存前预演动作，未单开 AI 面工具",
+        ),
+        (
             "/api/model-key-source",
             "模型 Key 进程内权威状态与重建代（撤销闸）：重建代等于批量撤销/放行 Key，属安全边界，须人工在环",
         ),
@@ -393,6 +397,10 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
         (
             "/api/accounts/{id}/credentials/replace",
             "账号登录凭证替换：写入上游凭据 + CAS，安全敏感，须人工在环",
+        ),
+        (
+            "/api/system-info",
+            "系统信息只读读数（版本/环境/开关/计数）：工具面已有诊断三件套，暂无独立版本信息工具",
         ),
     ];
 
@@ -551,6 +559,38 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 // 猫猫旅行巡检（改排程 + 真打上游的运维动作，须人确认时刻表）
                 "/api/checkin-center/travel",
                 "/api/checkin-center/travel/run",
+            ],
+        ),
+        (
+            "v1.0.71 五路接线批（2026-11-20：A2A 形状账号/代理管理面接线；\
+             AI 工具面尚未规划，非「有意不给」——补齐后删掉本组）",
+            &[
+                // #11 账号管理（A2A `/api/accounts/*` 形状；导出/导入含凭据、refresh 真打上游）
+                "/api/accounts/batch",
+                "/api/accounts/checkin",
+                "/api/accounts/connections",
+                "/api/accounts/current",
+                "/api/accounts/export",
+                "/api/accounts/import",
+                "/api/accounts/query",
+                "/api/accounts/refresh",
+                "/api/accounts/reorder",
+                "/api/accounts/selection",
+                "/api/accounts/usage",
+                "/api/accounts/usage/snapshot",
+                "/api/accounts/{id}/move",
+                // #15 代理池（A2A `/api/proxies/*` 形状；旧 `/api/proxy-pool*` 工具面仍在，
+                // 新别名尚未进 `aigx_proxy_pool_manage` 的 covers）
+                "/api/proxies",
+                "/api/proxies/pool",
+                "/api/proxies/pool/enable",
+                "/api/proxies/pool/remove",
+                "/api/proxies/pool/sync-clash",
+                "/api/proxies/pool/test",
+                "/api/proxies/pool/update",
+                "/api/proxies/settings",
+                "/api/proxies/system",
+                "/api/proxies/test",
             ],
         ),
     ];

@@ -18,7 +18,8 @@ import type {
   ModelTestResult,
   CheckinCenterData,
   CheckinRecord,
-  CheckinSchedule,
+  CheckinAutoState,
+  CheckinResultSummary,
   CheckinSettings,
   CheckinTravelState,
   CheckinRunResult,
@@ -131,32 +132,33 @@ export const endpoints = {
     request<ApiResponse<ModelTestResult>>('POST', `${API_BASE}/models/test`, data, { signal }),
 
   // ── 签到中心（管理员替上游账号签到，区别于用户侧 /api/checkin） ──
-  getCheckinCenter: (): Promise<ApiResponse<CheckinCenterData>> =>
-    request<ApiResponse<CheckinCenterData>>('GET', `${API_BASE}/checkin-center`),
+  // 契约对齐 A2A：快照与台账/定时条目都是 **flat 响应**（无 {success,data}
+  // 信封），字段 camelCase。
+  getCheckinCenter: (): Promise<CheckinCenterData> =>
+    request<CheckinCenterData>('GET', `${API_BASE}/checkin-center`),
+  /** 轻量汇总（`?view=summary`）：只给今日进度，顶栏徽标轮询用 */
+  getCheckinCenterSummary: (): Promise<{ daily: { todayDone: number; todayEligible: number } }> =>
+    request('GET', `${API_BASE}/checkin-center?view=summary`),
   runCheckin: (data: {
     account_ids?: string[];
     providers?: string[];
   }): Promise<ApiResponse<{ results: CheckinRunResult[]; done: number; total: number }>> =>
     request('POST', `${API_BASE}/checkin-center/run`, data),
   getCheckinRecords: (params: {
-    days?: number;
     provider?: string;
-    account_id?: string;
     outcome?: string;
-    /** 1.0.49：记录类型 manual | schedule | makeup | retry（缺省不过滤；后端对存量记录回退按 source 匹配） */
+    /** 记录类型 manual | schedule | makeup | retry（缺省不过滤；后端对存量记录回退按 source 匹配） */
     kind?: string;
-    /** 1.0.49：起始 unix 秒（闭区间；缺省不限） */
+    /** 起始 unix 秒（闭区间；缺省不限） */
     start?: number;
-    /** 1.0.49：结束 unix 秒（闭区间；缺省不限） */
+    /** 结束 unix 秒（闭区间；缺省不限） */
     end?: number;
     keyword?: string;
     offset?: number;
     limit?: number;
-  }): Promise<ApiResponse<{ records: CheckinRecord[]; total: number }>> => {
+  }): Promise<{ records: CheckinRecord[]; total: number; stats?: Record<string, number> }> => {
     const query = new URLSearchParams();
-    if (params.days != null) query.set('days', String(params.days));
     if (params.provider) query.set('provider', params.provider);
-    if (params.account_id) query.set('account_id', params.account_id);
     if (params.outcome) query.set('outcome', params.outcome);
     if (params.kind) query.set('kind', params.kind);
     if (params.start != null) query.set('start', String(params.start));
@@ -165,17 +167,39 @@ export const endpoints = {
     if (params.offset != null) query.set('offset', String(params.offset));
     if (params.limit != null) query.set('limit', String(params.limit));
     const suffix = query.toString();
-    return request('GET', `${API_BASE}/checkin-center/records${suffix ? `?${suffix}` : ''}`);
+    return request('GET', `${API_BASE}/checkin-records${suffix ? `?${suffix}` : ''}`);
   },
   markKeptActive: (account_id: string, provider: string): Promise<ApiResponse<{ kept_active: boolean }>> =>
     request('POST', `${API_BASE}/checkin-center/records/mark-kept-active`, {
       account_id,
       provider,
     }),
-  clearCheckinRecords: (days: number): Promise<ApiResponse<{ removed: number }>> =>
-    request('DELETE', `${API_BASE}/checkin-center/records?days=${days}`),
+  /** 删除签到记录：`all=true` 显式全清；否则按当前筛选删除（`{removed}`） */
+  clearCheckinRecords: (params: {
+    all?: boolean;
+    outcome?: string;
+    kind?: string;
+    provider?: string;
+    keyword?: string;
+    start?: number;
+    end?: number;
+  }): Promise<{ success: boolean; removed: number }> => {
+    const query = new URLSearchParams();
+    if (params.all) query.set('all', '1');
+    if (params.outcome) query.set('outcome', params.outcome);
+    if (params.kind) query.set('kind', params.kind);
+    if (params.provider) query.set('provider', params.provider);
+    if (params.keyword) query.set('keyword', params.keyword);
+    if (params.start != null) query.set('start', String(params.start));
+    if (params.end != null) query.set('end', String(params.end));
+    const suffix = query.toString();
+    return request('DELETE', `${API_BASE}/checkin-records${suffix ? `?${suffix}` : ''}`);
+  },
   updateCheckinSettings: (settings: CheckinSettings): Promise<ApiResponse<CheckinSettings>> =>
     request('PUT', `${API_BASE}/checkin-center/settings`, settings),
+  /** 定时条目状态（A2A `AutoState`；与 /api/auto-checkin 同形） */
+  getCheckinSchedules: (): Promise<CheckinAutoState> =>
+    request('GET', `${API_BASE}/checkin-schedules`),
   upsertCheckinSchedule: (schedule: {
     id: string;
     label: string;
@@ -184,7 +208,6 @@ export const endpoints = {
     providers: string[];
     /** 逐家时刻覆盖（非空项才提交；空 = 回落内置/条目时刻） */
     provider_times?: Record<string, string>;
-    /* ── 1.0.49 契约字段（POST 全部可选：未传 = 继承存量；前端 feature-detect 门控）── */
     /** 窗口结束 HH:MM（空 = 无窗口）；randomize=true 时须晚于 time，否则后端 400 */
     time_end?: string;
     /** true = 每账号在 [time, time_end] 内取确定性随机时刻 */
@@ -195,17 +218,31 @@ export const endpoints = {
     retry_gap_minutes?: number;
     /** 补签轮时刻 HH:MM（空 = 不跑补签轮） */
     makeup_time?: string;
-  }): Promise<ApiResponse<CheckinSchedule[]>> =>
-    request('POST', `${API_BASE}/checkin-center/schedules`, schedule),
-  removeCheckinSchedule: (id: string): Promise<ApiResponse<CheckinSchedule[]>> =>
-    request('POST', `${API_BASE}/checkin-center/schedules/remove`, { id }),
-  runCheckinSchedule: (id: string): Promise<ApiResponse<{ summary: string; ok: number; keepalive: number; failed: number }>> =>
-    request('POST', `${API_BASE}/checkin-center/schedules/run`, { id }),
-  // 旅行/成长巡检（对照上游 growth_scheduler；be-fix #16-B 契约，未就绪 404 → 降级）
-  updateCheckinTravel: (body: { enabled?: boolean; times?: string[] }): Promise<ApiResponse<CheckinTravelState>> =>
-    request('PATCH', `${API_BASE}/checkin-center/travel`, body),
-  runCheckinTravelNow: (): Promise<ApiResponse<{ summary?: string; ok?: number; failed?: number }>> =>
-    request('POST', `${API_BASE}/checkin-center/travel/run`, {}),
+  }): Promise<CheckinAutoState> =>
+    request('POST', `${API_BASE}/checkin-schedules`, schedule),
+  removeCheckinSchedule: (id: string): Promise<{ success: boolean; state: CheckinAutoState }> =>
+    request('DELETE', `${API_BASE}/checkin-schedules/${encodeURIComponent(id)}`),
+  runCheckinSchedule: (
+    id: string,
+  ): Promise<{
+    summary: string;
+    ok: number;
+    keepalive: number;
+    failed: number;
+    lastResult?: CheckinResultSummary;
+    state: CheckinAutoState;
+  }> => request('POST', `${API_BASE}/checkin-schedules/${encodeURIComponent(id)}/run`, {}),
+  // 猫猫旅行定时排程（A2A 契约：与签到独立排程，GET/POST + run）
+  getCheckinTravel: (): Promise<CheckinTravelState> =>
+    request('GET', `${API_BASE}/travel-schedule`),
+  updateCheckinTravel: (body: { enabled?: boolean; times?: string[] }): Promise<CheckinTravelState> =>
+    request('POST', `${API_BASE}/travel-schedule`, body),
+  runCheckinTravelNow: (): Promise<{
+    outcome: 'completed' | 'skipped' | 'busy' | 'failed';
+    message?: string;
+    summary?: { message?: string; ok?: number; failed?: number } | null;
+    schedule?: CheckinTravelState;
+  }> => request('POST', `${API_BASE}/travel-schedule/run`, {}),
 
   // 一次性 / 限时福利通道（新手礼 / 保活 / 成长任务 / 限时套餐 / UMID）
   getCheckinBenefits: (): Promise<ApiResponse<CheckinBenefitsData>> =>
@@ -260,7 +297,13 @@ export const endpoints = {
     request<ApiResponse<BrandingData>>('GET', `${API_BASE}/public/branding`, null, { skipAuthRedirect: true }),
   getBranding: (): Promise<ApiResponse<BrandingAdminData>> =>
     request<ApiResponse<BrandingAdminData>>('GET', `${API_BASE}/branding`),
-  updateBranding: (data: { panel_name?: string; logo_url?: string; favicon_url?: string }): Promise<ApiResponse<BrandingData>> =>
+  updateBranding: (data: {
+    panel_name?: string;
+    logo_url?: string;
+    favicon_url?: string;
+    /** data URL = 上传 PNG/JPG/WebP；null = 移除已上传 Logo（回落 logo_url） */
+    logo?: string | null;
+  }): Promise<ApiResponse<BrandingData>> =>
     request<ApiResponse<BrandingData>>('PUT', `${API_BASE}/branding`, data),
 
   // Limits

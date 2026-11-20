@@ -233,6 +233,7 @@ pub fn upsert(store: &CheckinStore, payload: &Value) -> Result<Vec<CheckinSchedu
             .unwrap_or_default(),
         account_plan: old.map(|s| s.account_plan.clone()).unwrap_or_default(),
         last_result: old.map(|s| s.last_result.clone()).unwrap_or_default(),
+        last_summary: old.map(|s| s.last_summary.clone()).unwrap_or(Value::Null),
         last_ok: old.map(|s| s.last_ok).unwrap_or(0),
         last_keepalive: old.map(|s| s.last_keepalive).unwrap_or(0),
         last_failed: old.map(|s| s.last_failed).unwrap_or(0),
@@ -258,11 +259,15 @@ pub fn display_label(schedule: &CheckinSchedule) -> &str {
     }
 }
 
-/// 逐家生效时刻的视图（界面每行标注「这家几点签」）。
+/// 逐家生效时刻的视图（界面每行标注「这家几点签 / 今天跑过没有」）。
 ///
-/// 返回 `[{id, label, time, timeEnd, builtin, firedToday, pendingProviders…}]`。
+/// 返回 A2A `ScheduleProviderRow` 形状：
+/// `[{id,label,time,timeEnd,builtin,firedToday,accountCount,attemptedCount,
+///   pendingCount,nextAccountAt,overdue}]`。
 pub fn provider_rows(_store: &CheckinStore, schedule: &CheckinSchedule, today: &str) -> Vec<Value> {
-    let plan = &schedule.account_plan;
+    // 当日排程（跨天的旧排程不算数 —— 与调度判定同一口径）
+    let plan = (schedule.account_plan.date == today).then_some(&schedule.account_plan);
+    let now_ms = chrono::Utc::now().timestamp_millis();
     schedule
         .providers
         .iter()
@@ -273,18 +278,83 @@ pub fn provider_rows(_store: &CheckinStore, schedule: &CheckinSchedule, today: &
                 .last_fired_providers
                 .get(id)
                 .is_some_and(|date| date == today);
-            let pending = plan.date == today && plan.pending_for(id);
+            let accounts: Vec<&super::store::PlannedAccount> = plan
+                .as_ref()
+                .map(|plan| {
+                    plan.accounts
+                        .values()
+                        .filter(|account| &account.provider == id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let pending: Vec<&&super::store::PlannedAccount> = accounts
+                .iter()
+                .filter(|account| account.attempted_at.is_none())
+                .collect();
+            let pending_count = pending.len();
+            let next_account_at = pending.iter().map(|account| account.at).min();
+            let overdue = pending.iter().any(|account| account.at <= now_ms);
+            let account_count = accounts.len();
             serde_json::json!({
                 "id": id,
                 "label": crate::model::manage::provider_label(id),
                 "time": time,
                 "timeEnd": end,
                 "builtin": builtin_time(id),
-                "firedToday": fired && !pending,
-                "pendingCount": if pending { 1 } else { 0 },
+                // 今天跑过且没有待执行账号 = 完成；有排程未到点 = 等窗口
+                "firedToday": fired && pending_count == 0,
+                "accountCount": account_count,
+                "attemptedCount": account_count - pending_count,
+                "pendingCount": pending_count,
+                "nextAccountAt": next_account_at,
+                // 到点了但还没跑（false 且 firedToday=false = 在等窗口）
+                "overdue": overdue,
             })
         })
         .collect()
+}
+
+/// 逐家的补签时刻（对齐 A2A `times::provider_retry_time`）：取
+/// `max(补签时刻, 主签到窗口结束 + 重试间隔)`，不早于补签时刻；越过当天
+/// 24:00 的不出现（那家当天没有补签窗口）。
+pub fn provider_retry_times(schedule: &CheckinSchedule) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    if schedule.makeup_time.trim().is_empty() {
+        return map;
+    }
+    let Some(base) = minutes_of(&schedule.makeup_time) else {
+        return map;
+    };
+    // 间隔被配成 0（关掉重试）时仍给 1 分钟 —— 补签轮与「等窗口重试」是两件事
+    let gap = schedule.retry_gap_minutes.max(1) as i64;
+    for provider in &schedule.providers {
+        let (start, end) = super::scheduler::effective_window(schedule, provider);
+        // 无窗口（未开随机 / 有专属时刻）时「主轮结束」= 生效时刻
+        let main_time = end.unwrap_or(start);
+        let Some(main) = minutes_of(&main_time) else {
+            continue;
+        };
+        let target = base.max(main + gap);
+        if target < 1440 {
+            map.insert(provider.clone(), Value::from(format_minutes(target)));
+        }
+    }
+    map
+}
+
+/// `HH:MM` → 当天分钟数。
+fn minutes_of(value: &str) -> Option<i64> {
+    if !super::scheduler::is_hhmm(value) {
+        return None;
+    }
+    let hour = value[0..2].parse::<i64>().ok()?;
+    let minute = value[3..5].parse::<i64>().ok()?;
+    Some(hour * 60 + minute)
+}
+
+/// 分钟数 → `HH:MM`。
+fn format_minutes(minutes: i64) -> String {
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// 内置专属时刻（qoder 10:01 / zcode 19:01），没有则 null。

@@ -409,7 +409,11 @@ pub async fn run_now(store: &CheckinStore, executor: &dyn TravelExecutor) -> Run
     run_once(store, executor, "手动执行", None).await
 }
 
-/// 对外状态（GET /api/checkin-center 的 `data.travel` 直读；零上游请求）。
+/// 对外状态（GET /api/travel-schedule 与 `/api/checkin-center` 的 `travel` 直读；
+/// 零上游请求）。
+///
+/// 契约对齐 A2A `growth_scheduler::state()`（camelCase）；snake_case 别名保留
+/// 一整版（旧 `/api/checkin-center/travel` 仍在服役）。
 pub fn state(store: &CheckinStore, executor: &dyn TravelExecutor) -> Value {
     let config = read(store);
     let today = scheduler::today();
@@ -419,16 +423,50 @@ pub fn state(store: &CheckinStore, executor: &dyn TravelExecutor) -> Value {
         Vec::new()
     };
     let paused_reason = executor.pause_reason();
+    let last_result = if config.last_result.is_empty() {
+        Value::Null
+    } else {
+        Value::String(config.last_result.clone())
+    };
+    let last_outcome = if config.last_outcome.is_empty() {
+        Value::Null
+    } else {
+        Value::String(config.last_outcome.clone())
+    };
+    let last_error = if config.last_error.is_empty() {
+        Value::Null
+    } else {
+        Value::String(config.last_error.clone())
+    };
     json!({
         "enabled": config.enabled,
         "available": paused_reason.is_none(),
+        "pausedReason": paused_reason,
         "paused_reason": paused_reason,
         "times": config.times,
+        "firedToday": fired_today,
         "fired_today": fired_today,
-        "last_result": if config.last_result.is_empty() { Value::Null } else { Value::String(config.last_result) },
-        "last_outcome": if config.last_outcome.is_empty() { Value::Null } else { Value::String(config.last_outcome) },
+        "lastFiredDate": if config.last_fired_date.is_empty() {
+            Value::Null
+        } else {
+            Value::String(config.last_fired_date.clone())
+        },
+        // 上次结果一句话摘要（A2A `lastResult` 是对象；AIGX 的摘要本身是一句话，
+        // 如实给字符串，另带 `lastOutcome` 分类）
+        "lastResult": last_result,
+        "last_result": last_result,
+        "lastOutcome": last_outcome,
+        "last_outcome": last_outcome,
+        "lastRun": config.last_run,
         "last_run": config.last_run,
-        "last_error": if config.last_error.is_empty() { Value::Null } else { Value::String(config.last_error) },
+        "lastError": last_error,
+        "last_error": last_error,
+        // 上次实际执行时刻（HH:MM，展示用；不参与去重）
+        "lastFiredTime": if config.last_fired_time.is_empty() {
+            Value::Null
+        } else {
+            Value::String(config.last_fired_time.clone())
+        },
         "running": is_running(),
     })
 }

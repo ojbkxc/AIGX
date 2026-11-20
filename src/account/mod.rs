@@ -176,7 +176,8 @@ impl AccountPool {
         Ok(())
     }
 
-    /// 更新账号
+    /// 更新账号（当前仅单测使用；管理面更新路由已由 `accounts_query` 承接）
+    #[allow(dead_code)]
     pub fn update(&self, id: &str, account: CfAccount) -> anyhow::Result<()> {
         let key = format!("account:{}", id);
         self.store.put(&key, &account)?;

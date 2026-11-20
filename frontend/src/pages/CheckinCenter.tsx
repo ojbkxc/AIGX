@@ -20,7 +20,13 @@ import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import BenefitsPanel from '../components/BenefitsPanel';
 import CheckinCampaignCard from '../components/CheckinCampaignCard';
 import { useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
-import type { CheckinCenterData, CheckinRecord, CheckinRunResult, CheckinSchedule } from '../types';
+import type {
+  CheckinCenterData,
+  CheckinHistoryRow,
+  CheckinRecord,
+  CheckinRunResult,
+  CheckinScheduleEntry,
+} from '../types';
 import './CheckinCenter.css';
 
 type TabKey = 'center' | 'schedule' | 'makeup' | 'records' | 'benefits';
@@ -67,17 +73,26 @@ const TZ_OFFSETS = [-12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 
 
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-/** 起止日期（<input type="date"> 的 "YYYY-MM-DD"）→ unix 秒。
- *  起始取当日 00:00:00、结束取当日 23:59:59（含当天，与后端闭区间 [start,end] 对齐）。 */
-const dateToStartSec = (d: string): number | undefined => {
+/** 起止日期（<input type="date"> 的 "YYYY-MM-DD"）→ unix 毫秒。
+ *  起始取当日 00:00:00、结束取当日 23:59:59（含当天，与后端闭区间 [start,end] 对齐）。
+ *  A2A 的 `/api/checkin-records` 的 start/end 是**毫秒**（AIGX 旧端点用秒）。 */
+const dateToStartMs = (d: string): number | undefined => {
   if (!d) return undefined;
   const ms = new Date(`${d}T00:00:00`).getTime();
-  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+  return Number.isFinite(ms) ? ms : undefined;
 };
-const dateToEndSec = (d: string): number | undefined => {
+const dateToEndMs = (d: string): number | undefined => {
   if (!d) return undefined;
   const ms = new Date(`${d}T23:59:59`).getTime();
-  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+  return Number.isFinite(ms) ? ms + 999 : undefined;
+};
+
+/** 快捷时间档（1/7/30/全部）→ 起始毫秒（本地 00:00）。全部 = undefined。 */
+const quickStartMs = (days: number): number | undefined => {
+  if (days >= 3650) return undefined;
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return start.getTime() - (days - 1) * 86_400_000;
 };
 
 /**
@@ -151,7 +166,7 @@ const EMPTY_SCHEDULE: ScheduleForm = {
  * 边界值单测 checkinTz.test.ts）：按 settings.timezone_offset 计算（缺省 8
  * = UTC+8；0 = 跟随系统本地时区），与后端执行口径一致——此前硬编码
  * Asia/Shanghai，设置 offset=0 后展示与执行脱钩（#21 补做项）。 */
-import { localDateKey, nextRunLabel } from '../lib/checkinTz';
+import { nextRunLabel } from '../lib/checkinTz';
 
 
 const LS_TCOLS = 'aigx-tbl-cols.checkin-records';
@@ -172,6 +187,119 @@ const CK_REC_COL_DEFS: TableColumnDef[] = [
 interface CheckinCenterProps {
   /** 作为供应商页「签到」子页内嵌时隐藏自身标题区（页内 4 个二级 Tab 保留） */
   embedded?: boolean;
+}
+
+/** 轮次时间线（A2A `history`）：新条目在前，前端按序渲染。 */
+function CheckinHistoryTimeline({ rows }: { rows: CheckinHistoryRow[] }): JSX.Element | null {
+  const { t } = useTranslation();
+  if (rows.length === 0) return null;
+  return (
+    <Card title={t('最近签到轮次')}>
+      <ol className="ck-history">
+        {rows.map((row, index) => {
+          const failed = Number(row.failedCount ?? row.failed?.length ?? 0);
+          const succeeded = Number(row.succeeded ?? 0);
+          const active = Number(row.active ?? 0);
+          const total = Number(row.total ?? 0);
+          return (
+            <li key={`${row.at}-${index}`} className="ck-history-item">
+              <span className="ck-history-time">
+                {row.at ? new Date(row.at).toLocaleString() : row.date || '—'}
+              </span>
+              <span className="ck-history-reason">{row.reason || t('批量签到')}</span>
+              <Badge tone={failed > 0 ? 'warning' : 'success'}>
+                {t('成功 {{ok}}/{{total}}', { ok: succeeded, total })}
+              </Badge>
+              {active > 0 && <Badge tone="info">{t('保活 {{n}}', { n: active })}</Badge>}
+              {failed > 0 && <Badge tone="danger">{t('失败 {{n}}', { n: failed })}</Badge>}
+              {row.failed && row.failed.length > 0 && (
+                <span className="ck-history-failures">{row.failed.join('、')}</span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </Card>
+  );
+}
+
+/** 逐账号福利预览（A2A `extras`）：快照只给入口清单，明细走福利通道。 */
+function CheckinExtrasPreview({ center }: { center: CheckinCenterData }): JSX.Element | null {
+  const { t } = useTranslation();
+  const { onboarding, plans, campaigns, growth } = center.extras;
+  const hasAny =
+    onboarding.length > 0 || plans.length > 0 || campaigns.length > 0 || growth.length > 0;
+  if (!hasAny) return null;
+  const groups: Array<{ title: string; rows: JSX.Element[] }> = [];
+  if (onboarding.length > 0) {
+    groups.push({
+      title: t('新手福利'),
+      rows: onboarding.map((row) => (
+        <li key={`onboarding-${row.id}`} className="ck-extra-row">
+          <span className="ck-extra-name">{row.name || row.id}</span>
+          <span className="ck-extra-provider">{row.provider}</span>
+          {row.settled ? (
+            <Badge tone="success">{t('已结清')}</Badge>
+          ) : (row.pending ?? 0) > 0 ? (
+            <Badge tone="warning">{t('{{n}} 项待领', { n: row.pending })}</Badge>
+          ) : row.pending == null ? (
+            <Badge tone="neutral">{t('待盘点')}</Badge>
+          ) : (
+            <Badge tone="neutral">{t('暂无待领')}</Badge>
+          )}
+        </li>
+      )),
+    });
+  }
+  if (plans.length > 0 || campaigns.length > 0) {
+    const seen = new Set<string>();
+    const rows: JSX.Element[] = [];
+    for (const row of [...plans, ...campaigns]) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      const planRow = plans.find((item) => item.id === row.id);
+      const claimed = planRow?.claimPlans ? Object.keys(planRow.claimPlans).length : 0;
+      rows.push(
+        <li key={`plans-${row.id}`} className="ck-extra-row">
+          <span className="ck-extra-name">{row.name || row.id}</span>
+          <span className="ck-extra-provider">{row.provider}</span>
+          {claimed > 0 ? (
+            <Badge tone="success">{t('今日已领 {{n}} 份', { n: claimed })}</Badge>
+          ) : (
+            <Badge tone="neutral">{t('未领取')}</Badge>
+          )}
+        </li>,
+      );
+    }
+    groups.push({ title: t('活动福利 / 限时套餐'), rows });
+  }
+  if (growth.length > 0) {
+    groups.push({
+      title: t('成长任务'),
+      rows: growth.map((row) => (
+        <li key={`growth-${row.id}`} className="ck-extra-row">
+          <span className="ck-extra-name">{row.name || row.id}</span>
+          <span className="ck-extra-provider">{row.provider}</span>
+          <Badge tone="neutral">{t('在「福利通道」执行')}</Badge>
+        </li>
+      )),
+    });
+  }
+  return (
+    <Card title={t('福利预览（逐账号）')}>
+      <p className="ck-extra-hint">
+        {t('入口清单来自快照（零上游请求）；任务明细与领取在「福利通道」页执行。')}
+      </p>
+      <div className="ck-extra-groups">
+        {groups.map((group) => (
+          <div key={group.title} className="ck-extra-group">
+            <h4>{group.title}</h4>
+            <ul>{group.rows}</ul>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
 }
 
 export default function CheckinCenter({ embedded = false }: CheckinCenterProps = {}): JSX.Element {
@@ -259,8 +387,8 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     setLoading(true);
     setError('');
     try {
-      const res = await api.getCheckinCenter();
-      const d = res?.data ?? null;
+      // A2A 契约：flat 响应（daily / extras / auto / history …）
+      const d = await api.getCheckinCenter();
       setData(d);
       if (d?.settings) {
         setGapMsEdit(String(d.settings.gap_ms ?? 800));
@@ -284,25 +412,24 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
 
   const loadRecords = useCallback(async () => {
     setRecordsLoading(true);
-    // 日期字符串 → unix 秒（闭区间：起 00:00:00 / 止 23:59:59）
-    const dateStart = dateToStartSec(recordStart);
-    const dateEnd = dateToEndSec(recordEnd);
+    // 起止日期 → unix 毫秒（闭区间：起 00:00:00 / 止 23:59:59.999）
+    const explicitStart = dateToStartMs(recordStart);
+    const explicitEnd = dateToEndMs(recordEnd);
+    // 快捷档只在没有显式起止时生效；「全部」= 不限下界
+    const start = explicitStart ?? quickStartMs(recordDays);
     try {
       const res = await api.getCheckinRecords({
-        // 起止日期生效时把 days 放开到「全部」以区间为准——否则 days 的默认 7 天
-        // 会与区间取交集，选 30 天前~10 天前也会被裁成 7 天内
-        days: dateStart != null || dateEnd != null ? 3650 : recordDays,
         provider: recordProvider || undefined,
         outcome: recordOutcome || undefined,
         kind: recordKind || undefined,
-        start: dateStart,
-        end: dateEnd,
+        start,
+        end: explicitEnd,
         keyword: kwApplied || undefined,
         offset: (page - 1) * size,
         limit: size,
       });
-      setRecords(res?.data?.records ?? []);
-      setTotal(res?.data?.total ?? 0);
+      setRecords(res?.records ?? []);
+      setTotal(res?.total ?? 0);
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -443,9 +570,16 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
 
   const runTravel = async (): Promise<void> => {
     try {
-      const res = await api.runCheckinTravelNow();
-      const d = res?.data;
-      addToast(`${t('巡检完成')}${d?.summary ? `：${d.summary}` : ''}`);
+      // A2A 契约：flat `{outcome, message?, summary?, schedule?}`
+      const d = await api.runCheckinTravelNow();
+      if (d?.outcome === 'skipped') {
+        addToast(t('本轮已跳过：{{reason}}', { reason: d.message || '—' }));
+      } else if (d?.outcome === 'busy') {
+        addToast(t('巡检正在执行中，请稍候'), 'error');
+      } else {
+        const summary = d?.summary?.message || '';
+        addToast(`${t('巡检完成')}${summary ? `：${summary}` : ''}`);
+      }
       await load();
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
@@ -498,8 +632,8 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     }
   };
 
-  /** 定时条目行内开关：直接 PATCH 同 id 其余字段不动 */
-  const toggleSchedule = async (schedule: CheckinSchedule, enabled: boolean) => {
+  /** 定时条目行内开关：直接 upsert 同 id 其余字段不动 */
+  const toggleSchedule = async (schedule: CheckinScheduleEntry, enabled: boolean) => {
     try {
       await api.upsertCheckinSchedule({
         id: schedule.id,
@@ -519,19 +653,19 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     setEditingId('new');
   };
 
-  const openEditSchedule = (schedule: CheckinSchedule) => {
+  const openEditSchedule = (schedule: CheckinScheduleEntry) => {
     setScheduleForm({
       id: schedule.id,
       label: schedule.label,
       enabled: schedule.enabled,
       time: schedule.time,
       providers: schedule.providers,
-      providerTimes: { ...(schedule.provider_times ?? {}) },
-      timeEnd: schedule.time_end ?? '',
+      providerTimes: { ...(schedule.providerTimes ?? {}) },
+      timeEnd: schedule.timeEnd ?? '',
       randomize: schedule.randomize ?? false,
-      retryGapMinutes: String(schedule.retry_gap_minutes ?? 5),
-      retryLimit: String(schedule.retry_limit ?? 3),
-      makeupTime: schedule.makeup_time ?? '',
+      retryGapMinutes: String(schedule.retryGapMinutes ?? 5),
+      retryLimit: String(schedule.retryLimit ?? 3),
+      makeupTime: schedule.retryTime ?? '',
     });
     setEditingId(schedule.id);
   };
@@ -591,10 +725,10 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     }
   };
 
-  const removeSchedule = (schedule: CheckinSchedule) => {
+  const removeSchedule = (schedule: CheckinScheduleEntry) => {
     setConfirmState({
       title: t('删除签到计划'),
-      message: `${schedule.label}（${schedule.time}）`,
+      message: `${schedule.displayLabel || schedule.label}（${schedule.time}）`,
       confirmText: t('删除'),
       danger: true,
       onConfirm: async () => {
@@ -605,13 +739,13 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     });
   };
 
-  const runSchedule = async (schedule: CheckinSchedule) => {
+  const runSchedule = async (schedule: CheckinScheduleEntry) => {
     setBusyKey(`sched:${schedule.id}`);
     try {
-      const res = await api.runCheckinSchedule(schedule.id);
-      const d = res?.data;
+      // A2A 契约：flat 响应（summary / ok / keepalive / failed / lastResult / state）
+      const d = await api.runCheckinSchedule(schedule.id);
       addToast(
-        `${schedule.label}：${d?.summary ?? ''}` +
+        `${schedule.displayLabel || schedule.label}：${d?.summary ?? ''}` +
           (d ? `（成功 ${d.ok}·保活 ${d.keepalive}·失败 ${d.failed}）` : ''),
       );
       await load();
@@ -623,30 +757,80 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
   };
 
   const clearRecords = () => {
+    // 快捷时间档（1/7/30 天）也算筛选：只删该窗口命中的记录；
+    // 「全部」+ 无其它筛选 = 显式全清（后端要求 all=1 护栏）。
+    const filtered = hasRecordFilter || recordDays < 3650;
     setConfirmState({
       title: t('清空签到记录'),
-      message: t('将删除最近 {{days}} 天的全部签到台账（不受当前筛选限制），不可恢复。', {
-        days: recordDays,
-      }),
+      message: filtered
+        ? t('将删除当前筛选命中的全部签到记录（与「筛出什么就删什么」同一过滤链），不可恢复。')
+        : t('未设置筛选：将清空全部签到记录，不可恢复。'),
       confirmText: t('清空'),
       danger: true,
       onConfirm: async () => {
-        const res = await api.clearCheckinRecords(recordDays);
-        addToast(`${t('已删除')} ${res?.data?.removed ?? 0} ${t('条记录')}`);
+        const res = await api.clearCheckinRecords(
+          filtered
+            ? {
+                outcome: recordOutcome || undefined,
+                kind: recordKind || undefined,
+                provider: recordProvider || undefined,
+                keyword: kwApplied || undefined,
+                start: dateToStartMs(recordStart) ?? quickStartMs(recordDays),
+                end: dateToEndMs(recordEnd),
+              }
+            : { all: true },
+        );
+        addToast(`${t('已删除')} ${res?.removed ?? 0} ${t('条记录')}`);
         await loadRecords();
       },
     });
   };
 
-  const providers = useMemo(() => data?.providers ?? [], [data?.providers]);
-  const supported = useMemo(() => data?.supported_providers ?? [], [data?.supported_providers]);
-  /** 1.0.49 契约：实现未进主仓的三家（置灰 + 「插件仓」标注）；旧后端无此字段则为空集 */
-  const unsupported = useMemo(() => data?.unsupported_providers ?? [], [data?.unsupported_providers]);
-  const unsupportedSet = useMemo(() => new Set(unsupported), [unsupported]);
+  const providers = useMemo(
+    () => data?.daily?.providers ?? [],
+    [data?.daily?.providers],
+  );
+  const outOfScope = useMemo(
+    () => data?.daily?.outOfScope ?? [],
+    [data?.daily?.outOfScope],
+  );
+  const supported = useMemo(
+    () => data?.supportedProviders ?? [],
+    [data?.supportedProviders],
+  );
+  /** 1.0.49 契约：实现未进主仓的三家（不出现在可选范围，见下方说明） */
+  const unsupported = useMemo(
+    () => data?.unsupportedProviders ?? [],
+    [data?.unsupportedProviders],
+  );
+  const schedules = useMemo(
+    () => data?.auto?.schedules ?? [],
+    [data?.auto?.schedules],
+  );
+  /** 范围复选框清单（A2A `available_checkin_providers` → `providerOptions`）：
+   *  只列**实际可用**的家（有实现且有账号），没账号的家不出现。 */
+  const pickOptions = useMemo(
+    () => data?.auto?.providerOptions ?? [],
+    [data?.auto?.providerOptions],
+  );
+  /** 条目范围的展示文案：全部可用家 / 或逐家名。 */
+  const scopeLabel = useCallback(
+    (providers: string[]): string => {
+      const all = pickOptions.map((option) => option.id);
+      const isAll =
+        providers.length === 0 ||
+        (all.length > 0 && all.every((id) => providers.includes(id)));
+      if (isAll) {
+        return t('全部 {{n}} 家', { n: all.length || providers.length || supported.length });
+      }
+      return providers.join('、');
+    },
+    [pickOptions, supported.length, t],
+  );
 
   /** 提供商分类栏过滤后的分组（'' = 全部；只影响「每日签到」Tab 的列表渲染） */
   const railGroups = useMemo(
-    () => (railProvider ? providers.filter((g) => g.provider === railProvider) : providers),
+    () => (railProvider ? providers.filter((g) => g.id === railProvider) : providers),
     [providers, railProvider],
   );
 
@@ -654,7 +838,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
   const campaignAccounts = useMemo(
     () =>
       providers.flatMap((g) =>
-        g.accounts.map((a) => ({ id: a.id, name: a.name || a.id, provider: g.provider })),
+        g.accounts.map((a) => ({ id: a.id, name: a.name || a.id, provider: g.id })),
       ),
     [providers],
   );
@@ -674,24 +858,37 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
   );
 
   const totals = useMemo(() => {
-    let done = 0;
-    let total = 0;
-    for (const p of providers) {
-      done += p.today_done;
-      total += p.today_total;
-    }
-    return { done, total, accounts: providers.reduce((n, p) => n + p.accounts.length, 0) };
-  }, [providers]);
+    // A2A 契约：todayDone / todayEligible 由后端算好（判据与批量签到同一对）
+    const accounts = providers.reduce((n, p) => n + p.accounts.length, 0);
+    return {
+      done: data?.daily?.todayDone ?? 0,
+      total: data?.daily?.todayEligible ?? 0,
+      accounts,
+    };
+  }, [data?.daily?.todayDone, data?.daily?.todayEligible, providers]);
+
+  /** 范围外账号总数（统计卡「另有 N 个账号不参与」） */
+  const outOfScopeCount = useMemo(
+    () => outOfScope.reduce((sum, item) => sum + (Number(item.count) || 0), 0),
+    [outOfScope],
+  );
 
   const hasRecordFilter = !!kwApplied || !!recordOutcome || !!recordProvider || !!recordKind || !!recordStart || !!recordEnd;
 
   /* 1.0.49 契约字段已冻结：编辑器控件无条件渲染（旧后端 serde(default) 忽略未知字段） */
-  const builtinTimes = data?.builtin_times;
+  /** 内置专属时刻（A2A `providerOptions[].builtinTime` → {provider: "HH:MM"}） */
+  const builtinTimes = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const option of data?.auto?.providerOptions ?? []) {
+      if (option.builtinTime) map[option.id] = option.builtinTime;
+    }
+    return map;
+  }, [data?.auto?.providerOptions]);
 
   /** 生效时刻三档回落：逐家覆盖 > 内置专属 > 条目时刻（对齐上游 effectiveScheduleTime） */
   const effectiveTime = useCallback(
     (provider: string, form: ScheduleForm): string =>
-      form.providerTimes[provider] || builtinTimes?.[provider] || form.time,
+      form.providerTimes[provider] || builtinTimes[provider] || form.time,
     [builtinTimes],
   );
 
@@ -706,25 +903,29 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [scheduleForm, effectiveTime]);
 
-  /** 顶栏徽标（对齐 Agent2API #checkin-badge）：日期比对按配置时区 */
+  /** 顶栏徽标（对齐 Agent2API AutoBadge：三态 —— 执行中 / 已关闭 / 已开启） */
   const autoBadge = useMemo(() => {
-    if (!data) return null;
-    const enabled = data.settings.enabled;
-    const tz = data.settings.timezone_offset ?? 8;
-    const firedToday = (data.schedules ?? []).some(
-      (s) => s.enabled && s.last_fired_date === localDateKey(tz),
-    );
-    if (!enabled) {
-      return (
-        <span className="ck-tab-badge is-off">{t('定时已关闭')}</span>
-      );
+    const auto = data?.auto;
+    if (!auto) return null;
+    if (auto.running) {
+      return <span className="ck-tab-badge is-on">{t('自动签到执行中…')}</span>;
+    }
+    if (!auto.enabled) {
+      return <span className="ck-tab-badge is-off">{t('定时已关闭')}</span>;
+    }
+    const pending = (auto.schedules ?? [])
+      .filter((s) => s.enabled)
+      .reduce((sum, s) => sum + (s.pendingProviders?.length ?? 0), 0);
+    const firedToday = (auto.schedules ?? []).some((s) => s.enabled && s.lastFiredToday);
+    if (pending > 0) {
+      return <span className="ck-tab-badge is-on">{t('还有 {{n}} 个平台未执行', { n: pending })}</span>;
     }
     return (
       <span className={`ck-tab-badge ${firedToday ? 'is-ok' : 'is-on'}`}>
         {firedToday ? t('已开启 · 今日已执行') : t('定时已开启')}
       </span>
     );
-  }, [data, t]);
+  }, [data?.auto, t]);
 
   const toggleGroup = (provider: string): void => {
     setExpanded((prev) => {
@@ -791,8 +992,8 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               onClick={() =>
                 setScheduleForm({
                   ...scheduleForm,
-                  // 全选跳过未接入主仓的家（置灰项不可选）
-                  providers: supported.filter((p) => !unsupportedSet.has(p)),
+                  // 全选 = 当前可用清单（A2A providerOptions）
+                  providers: pickOptions.map((option) => option.id),
                 })
               }
             >
@@ -807,23 +1008,21 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
           </span>
         </div>
         <div className="ck-provider-picks">
-          {supported.map((provider) => {
+          {pickOptions.map((option) => {
+            const provider = option.id;
             const checked = scheduleForm.providers.includes(provider);
             const override = scheduleForm.providerTimes[provider] ?? '';
             const eff = effectiveTime(provider, scheduleForm);
-            const isBuiltin = !override && Boolean(builtinTimes?.[provider]);
-            // 1.0.49 契约：实现随上游搬进闭源插件仓的三家 → 置灰 + 说明，不可选
-            const unsupported = unsupportedSet.has(provider);
+            const isBuiltin = !override && Boolean(builtinTimes[provider] || option.builtinTime);
             return (
               <div
                 key={provider}
-                className={`ck-provider-pick ck-provider-pick-row${checked ? ' is-checked' : ''}${unsupported ? ' is-unsupported' : ''}`}
+                className={`ck-provider-pick ck-provider-pick-row${checked ? ' is-checked' : ''}`}
               >
                 <label className="ck-provider-pick-name">
                   <input
                     type="checkbox"
                     checked={checked}
-                    disabled={unsupported}
                     onChange={(e) => {
                       const next = e.target.checked
                         ? [...scheduleForm.providers, provider]
@@ -833,22 +1032,15 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                       setScheduleForm({ ...scheduleForm, providers: next, providerTimes: times });
                     }}
                   />
-                  {provider}
+                  {option.label || provider}
                   {isBuiltin && <span className="ck-pick-tag">{t('平台专属')}</span>}
-                  {unsupported && (
-                    <Tooltip label={t('实现随上游进入插件仓，主仓未接入')}>
-                      <span className="ck-pick-tag ck-pick-tag-unsupported">
-                        {t('插件仓')}
-                      </span>
-                    </Tooltip>
-                  )}
                 </label>
-                {checked && !unsupported && (
+                {checked && (
                   <span className="ck-pick-time">
                     <input
                       type="time"
                       className="form-input ck-time-input"
-                      aria-label={t('{{provider}} 签到时刻', { provider })}
+                      aria-label={t('{{provider}} 签到时刻', { provider: option.label || provider })}
                       value={override || eff}
                       onChange={(e) =>
                         setScheduleForm({
@@ -883,7 +1075,13 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
           })}
         </div>
         {scheduleForm.providers.length === 0 && (
-          <span className="form-hint">{t('不选 = 全部支持的上游')}</span>
+          <span className="form-hint">{t('不选 = 全部可用上游')}</span>
+        )}
+        {unsupported.length > 0 && (
+          <span className="form-hint">
+            {t('以下上游的实现随上游进入插件仓、主仓未接入，不出现在可选范围：')}
+            {unsupported.join('、')}
+          </span>
         )}
       </div>
 
@@ -1111,15 +1309,15 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               onClick={() => setTab('records')}
             >
               <div className="ck-stat-body">
-                <div className="ck-stat-value">{data?.records_total ?? 0}</div>
+                <div className="ck-stat-value">{data?.recordsTotal ?? 0}</div>
                 <div className="ck-stat-label">{t('累计记录数')}</div>
               </div>
             </button>
             <button type="button" className="ck-stat ck-stat-link" onClick={() => setTab('schedule')}>
               <div className="ck-stat-body">
                 <div className="ck-stat-value">
-                  {(data?.schedules ?? []).filter((s) => s.enabled).length}/
-                  {(data?.schedules ?? []).length}
+                  {(schedules ?? []).filter((s) => s.enabled).length}/
+                  {(schedules ?? []).length}
                 </div>
                 <div className="ck-stat-label">{t('定时计划启用')}</div>
               </div>
@@ -1144,19 +1342,19 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               </button>
               {providers.map((group) => (
                 <button
-                  key={group.provider}
+                  key={group.id}
                   type="button"
-                  className={`ck-rail-item${railProvider === group.provider ? ' is-active' : ''}`}
-                  onClick={() => setRailProvider(group.provider)}
+                  className={`ck-rail-item${railProvider === group.id ? ' is-active' : ''}`}
+                  onClick={() => setRailProvider(group.id)}
                 >
-                  {providerIcon(group.provider) ? (
-                    <img className="ck-rail-logo" src={providerIcon(group.provider) as string} alt="" />
+                  {providerIcon(group.id) ? (
+                    <img className="ck-rail-logo" src={providerIcon(group.id) as string} alt="" />
                   ) : (
-                    <span className="ck-rail-logo ck-rail-letter">{(group.label || group.provider).slice(0, 1).toUpperCase()}</span>
+                    <span className="ck-rail-logo ck-rail-letter">{(group.label || group.id).slice(0, 1).toUpperCase()}</span>
                   )}
-                  <span className="ck-rail-name">{group.label || group.provider}</span>
-                  <span className={`ck-rail-count${group.today_done < group.today_total ? ' pending' : ''}`}>
-                    {group.today_done}/{group.today_total}
+                  <span className="ck-rail-name">{group.label || group.id}</span>
+                  <span className={`ck-rail-count${group.doneCount < group.totalCount ? ' pending' : ''}`}>
+                    {group.doneCount}/{group.totalCount}
                   </span>
                 </button>
               ))}
@@ -1182,26 +1380,30 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
             {providers.length === 0 ? (
               <EmptyState
                 icon="📅"
-                message={t(
-                  '账号池里还没有可签到的账号。支持的上游：' + supported.join('、')
-                )}
+                message={
+                  Object.keys(data?.checkinFeatures ?? {}).length > 0
+                    ? t('签到能力已就绪，但还没有可签到的账号。到「账号」页添加并启用账号后，这里会自动出现。')
+                    : t('还没有可签到的提供商。签到能力由提供商插件/实现提供，支持的上游：' + supported.join('、'))
+                }
               />
             ) : (
               <div className="ck-prov-list">                {railGroups.map((group) => {
-                  const open = expanded.has(group.provider);
-                  const icon = providerIcon(group.provider);
+                  const open = expanded.has(group.id);
+                  const icon = providerIcon(group.id);
+                  const description =
+                    group.description || PROVIDER_DESC[group.id] || '';
                   return (
-                    <div key={group.provider} className="ck-prov-block">
+                    <div key={group.id} className="ck-prov-block">
                       <div
                         className={`ck-prov-row${open ? ' is-open' : ''}`}
                         role="button"
                         tabIndex={0}
                         aria-expanded={open}
-                        onClick={() => toggleGroup(group.provider)}
+                        onClick={() => toggleGroup(group.id)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
-                            toggleGroup(group.provider);
+                            toggleGroup(group.id);
                           }
                         }}
                       >
@@ -1209,19 +1411,19 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                           <img className="ck-prov-logo" src={icon as string} alt="" />
                         ) : (
                           <span className="ck-prov-logo ck-prov-letter">
-                            {(group.label || group.provider).slice(0, 1).toUpperCase()}
+                            {(group.label || group.id).slice(0, 1).toUpperCase()}
                           </span>
                         )}
                         <div className="ck-prov-main">
                           <span className="ck-prov-name">{group.label}</span>
                           <span className="ck-prov-sub">
-                            {t('{{n}} 个账号', { n: group.accounts.length })} · {t('已签')} {group.today_done}
+                            {t('{{n}} 个账号', { n: group.accounts.length })} · {t('已签')} {group.doneCount}
                           </span>
-                          {PROVIDER_DESC[group.provider] && (
-                            <span className="ck-prov-desc">{PROVIDER_DESC[group.provider]}</span>
+                          {description && (
+                            <span className="ck-prov-desc">{description}</span>
                           )}
                         </div>
-                        {groupBadge(group.today_done, group.today_total)}
+                        {groupBadge(group.doneCount, group.totalCount)}
                         <ChevronRight size={14} className={`ck-prov-caret${open ? ' is-open' : ''}`} />
                       </div>
                       {open && (
@@ -1232,12 +1434,12 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                               className="btn btn-outline btn-sm"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void runAll([group.provider], `g:${group.provider}`);
+                                void runAll([group.id], `g:${group.id}`);
                               }}
                               disabled={busyKey !== null}
                             >
                               <Play size={12} />{' '}
-                              {busyKey === `g:${group.provider}` ? t('签到中...') : t('签到本组')}
+                              {busyKey === `g:${group.id}` ? t('签到中...') : t('签到本组')}
                             </button>
                           </div>
                           <table className="ck-table">
@@ -1258,30 +1460,32 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                                   <td>
                                     {account.available === false ? (
                                       <Badge tone="warning">{t('不可用')}</Badge>
-                                    ) : account.checked_in_today ? (
+                                    ) : account.checkedInToday ? (
                                       <Badge tone="success">{t('已签')}</Badge>
                                     ) : (
                                       <Badge tone="info">{t('待签')}</Badge>
                                     )}
                                   </td>
-                                  {/* 连登天数（A2A streakDays；旧后端不下发 → 0 显示「—」） */}
+                                  {/* 连登天数（A2A streakDays；0 = 还没读到过） */}
                                   <td className="ck-streak">
-                                    {(account.streak_days ?? 0) > 0
-                                      ? t('{{n}} 天', { n: account.streak_days })
+                                    {(account.streakDays ?? 0) > 0
+                                      ? t('{{n}} 天', { n: account.streakDays })
                                       : '—'}
                                   </td>
                                   <td className="ck-time-subtle">
-                                    {account.last_ts
-                                      ? new Date(account.last_ts * 1000).toLocaleString()
-                                      : '—'}
+                                    {account.lastTs
+                                      ? new Date(account.lastTs * 1000).toLocaleString()
+                                      : account.checkinAt
+                                        ? new Date(account.checkinAt).toLocaleString()
+                                        : '—'}
                                   </td>
                                   <td className="ck-message">
-                                    {account.last_outcome && (
-                                      <Badge tone={OUTCOME_TONE[account.last_outcome] ?? 'neutral'}>
-                                        {t(OUTCOME_LABEL[account.last_outcome] ?? account.last_outcome)}
+                                    {account.lastOutcome && (
+                                      <Badge tone={OUTCOME_TONE[account.lastOutcome] ?? 'neutral'}>
+                                        {t(OUTCOME_LABEL[account.lastOutcome] ?? account.lastOutcome)}
                                       </Badge>
                                     )}{' '}
-                                    {account.last_message || '—'}
+                                    {account.lastMessage || '—'}
                                   </td>
                                   <td>
                                     <button
@@ -1295,7 +1499,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                                     >
                                       {busyKey === account.id
                                         ? t('签到中…')
-                                        : account.checked_in_today
+                                        : account.checkedInToday
                                           ? t('重签')
                                           : t('签到')}
                                     </button>
@@ -1309,6 +1513,19 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                     </div>
                   );
                 })}
+              </div>
+            )}
+            {/* 范围外账号（A2A outOfScope）：按提供商 + 原因聚合，一点即可看到
+                「为什么这些账号不参与」——不把它们混进每日签到列表 */}
+            {outOfScope.length > 0 && (
+              <div className="ck-out-of-scope">
+                <CalendarCheck size={13} />
+                <span>
+                  {t('另有 {{n}} 个账号不参与签到：', { n: outOfScopeCount })}
+                  {outOfScope
+                    .map((item) => `${item.label}（${item.reason} ×${item.count}）`)
+                    .join('、')}
+                </span>
               </div>
             )}
           </Card>
@@ -1354,6 +1571,12 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               onAccountChange={(id) => setCampaignAccountId(id)}
             />
           )}
+
+          {/* 逐账号福利预览（A2A extras）：入口清单零上游请求 */}
+          {data && <CheckinExtrasPreview center={data} />}
+
+          {/* 轮次时间线（A2A history）：批量轮次的成败总览 */}
+          <CheckinHistoryTimeline rows={data?.history ?? []} />
           </div>
           </div>
         </>
@@ -1495,7 +1718,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               </button>
             }
           >
-            {(data?.schedules ?? []).length === 0 && editingId !== 'new' ? (
+            {(schedules ?? []).length === 0 && editingId !== 'new' ? (
               <EmptyState icon="⏰" message={t('还没有签到计划')} />
             ) : (
               <div className="ck-sched-list">
@@ -1504,12 +1727,10 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                     <div className="ck-sched-body">{scheduleEditor}</div>
                   </div>
                 )}
-                {(data?.schedules ?? []).map((schedule) => {
-                  const scope =
-                    schedule.providers.length === 0 ||
-                    schedule.providers.length >= supported.length
-                      ? t('全部 {{n}} 家', { n: supported.length })
-                      : schedule.providers.join('、');
+                {(schedules ?? []).map((schedule) => {
+                  const scope = scopeLabel(schedule.providers);
+                  const last = schedule.lastResult;
+                  const pending = schedule.pendingProviders ?? [];
                   if (editingId === schedule.id) {
                     return (
                       <div key={schedule.id} className="ck-sched-row is-editing">
@@ -1527,27 +1748,73 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                       />
                       <div className="ck-sched-main">
                         <div className="ck-sched-name">
-                          {schedule.label}
+                          {schedule.displayLabel || schedule.label}
                           {!schedule.enabled && <Badge tone="neutral">{t('已停用')}</Badge>}
                         </div>
                         <div className="ck-sched-desc">
                           {t('每天 {{time}} · {{scope}}', { time: schedule.time, scope })}
+                          {(schedule.timeEnd || schedule.randomize) &&
+                            ` · ${t('区间至 {{end}}', { end: schedule.timeEnd || '—' })}`}
                         </div>
+                        {/* 逐家生效时刻与今日状态（A2A providerRows）：界面上每行能
+                            看到「这家到底几点签 / 跑过没有 / 还有几个待执行」 */}
+                        {schedule.providerRows.length > 0 && (
+                          <div className="ck-sched-provider-rows">
+                            {schedule.providerRows.map((row) => (
+                              <span
+                                key={row.id}
+                                className={`ck-sched-provider-row${row.firedToday ? ' is-done' : ''}${row.overdue ? ' is-overdue' : ''}`}
+                                title={
+                                  row.builtin
+                                    ? t('内置专属时刻 {{time}}', { time: row.builtin })
+                                    : undefined
+                                }
+                              >
+                                {row.label}
+                                <span className="ck-sched-provider-time">{row.time}</span>
+                                {row.firedToday ? (
+                                  <Badge tone="success">{t('已跑')}</Badge>
+                                ) : (row.pendingCount ?? 0) > 0 ? (
+                                  <Badge tone="warning">{t('{{n}} 待执行', { n: row.pendingCount })}</Badge>
+                                ) : row.overdue ? (
+                                  <Badge tone="warning">{t('已到点')}</Badge>
+                                ) : (
+                                  <Badge tone="neutral">{t('等窗口')}</Badge>
+                                )}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                         <div className="ck-sched-desc ck-sched-last">
-                          {schedule.last_fired_date
+                          {schedule.lastFiredDate
                             ? t('上次执行：{{d}} · {{r}} · 成功 {{ok}}·保活 {{ka}}·失败 {{f}}', {
-                                d: schedule.last_fired_date,
-                                r: schedule.last_result || '—',
-                                ok: schedule.last_ok,
-                                ka: schedule.last_keepalive,
-                                f: schedule.last_failed,
+                                d: schedule.lastFiredDate,
+                                r: last?.reason || '—',
+                                ok: last?.succeeded ?? 0,
+                                ka: last?.active ?? 0,
+                                f: last?.failedCount ?? 0,
                               })
                             : t('从未执行')}
+                          {pending.length > 0 &&
+                            ` · ${t('待执行：{{list}}', { list: pending.join('、') })}`}
+                          {(schedule.retryCount ?? 0) > 0 &&
+                            ` · ${t('等窗口重试 {{n}} 个', { n: schedule.retryCount })}`}
+                          {(schedule.retryExhausted ?? []).length > 0 &&
+                            ` · ${t('今天重试已用尽 {{n}} 个', { n: schedule.retryExhausted?.length ?? 0 })}`}
+                          {last?.failed && last.failed.length > 0 && (
+                            <span className="ck-sched-failures">
+                              {' '}
+                              {t('失败明细：')}
+                              {last.failed.join('、')}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <div className="ck-sched-next">
                         {schedule.enabled
-                          ? t('下次 {{when}}', { when: nextRunLabel(schedule.time, data?.settings.timezone_offset ?? 8) })
+                          ? schedule.nextRunAt
+                            ? t('下次 {{when}}', { when: new Date(schedule.nextRunAt).toLocaleString() })
+                            : nextRunLabel(schedule.time, data?.settings?.timezone_offset ?? 8)
                           : '—'}
                       </div>
                       <div className="ck-sched-ops">
@@ -1580,12 +1847,12 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               </div>
             )}
           </Card>
-          {/* 旅行/成长巡检（growth_scheduler；be-fix #16-B 下发 data.travel 后出现） */}
-          {travel && (
+          {/* 旅行/成长巡检（A2A adminPanels 的 growth_tasks 面板；camelCase 契约） */}
+          {travel && (data?.adminPanels ?? []).includes('growth_tasks') && (
             <Card title={t('成长巡检（travel / school）')}>
               {travel.available === false && (
                 <div className="error-message">
-                  {t('自动巡检已暂停：{{reason}}', { reason: travel.paused_reason || t('能力不可用') })}
+                  {t('自动巡检已暂停：{{reason}}', { reason: travel.pausedReason || travel.paused_reason || t('能力不可用') })}
                 </div>
               )}
               <div className="ck-setting-row">
@@ -1608,8 +1875,8 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                   <div className="ck-setting-label">{t('巡检时刻（每行一个 HH:MM）')}</div>
                   <div className="ck-setting-hint">
                     {t('每天在这些时刻巡检成长任务；今日已跑 {{n}} 次：{{fired}}', {
-                      n: (travel.fired_today ?? []).length,
-                      fired: (travel.fired_today ?? []).join('、') || '—',
+                      n: (travel.firedToday ?? travel.fired_today ?? []).length,
+                      fired: (travel.firedToday ?? travel.fired_today ?? []).join('、') || '—',
                     })}
                   </div>
                 </div>
@@ -1637,8 +1904,11 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                   </div>
                 </div>
               </div>
-              {travel.last_result && (
-                <div className="ck-setting-hint">{t('上次结果：{{r}}', { r: travel.last_result })}</div>
+              {travel.lastResult && (
+                <div className="ck-setting-hint">
+                  {t('上次结果：{{r}}', { r: travel.lastResult })}
+                  {travel.lastError ? ` · ${travel.lastError}` : ''}
+                </div>
               )}
             </Card>
           )}
@@ -1655,23 +1925,20 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
               </span>
             }
           >
-            {(data?.schedules ?? []).length === 0 ? (
+            {(schedules ?? []).length === 0 ? (
               <EmptyState icon="🌙" message={t('还没有签到计划——先在「定时签到」里建一条。')} />
             ) : (
               <div className="ck-makeup-list">
-                {(data?.schedules ?? []).map((schedule) => {
-                  const enabled = !!schedule.makeup_time;
+                {(schedules ?? []).map((schedule) => {
+                  const enabled = !!schedule.retryTime;
                   const paused = !data?.settings.enabled || !schedule.enabled;
-                  const scope =
-                    schedule.providers.length === 0 ||
-                    schedule.providers.length >= supported.length
-                      ? t('全部 {{n}} 家', { n: supported.length })
-                      : schedule.providers.join('、');
+                  const last = schedule.lastResult;
+                  const scope = scopeLabel(schedule.providers);
                   return (
                     <div key={schedule.id} className={`ck-makeup-row${enabled ? '' : ' is-off'}`}>
                       <div className="ck-makeup-main">
                         <div className="ck-makeup-name">
-                          {schedule.label}
+                          {schedule.displayLabel || schedule.label}
                           <Badge tone={enabled ? 'success' : 'neutral'}>
                             {enabled ? t('补签已开启') : t('补签已关闭')}
                           </Badge>
@@ -1680,7 +1947,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                         <div className="ck-makeup-desc">
                           {enabled
                             ? t('补签时刻 {{time}} · 主签到 {{main}} · {{scope}}', {
-                                time: schedule.makeup_time,
+                                time: schedule.retryTime,
                                 main: schedule.time,
                                 scope,
                               })
@@ -1688,14 +1955,19 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                                 main: schedule.time,
                                 scope,
                               })}
+                          {schedule.providerRetryTimes &&
+                            Object.keys(schedule.providerRetryTimes).length > 0 &&
+                            ` · ${t('逐家补签：')}${Object.entries(schedule.providerRetryTimes)
+                              .map(([id, time]) => `${id} ${time}`)
+                              .join('、')}`}
                         </div>
                         <div className="ck-makeup-desc ck-sched-last">
-                          {schedule.last_fired_date
+                          {schedule.lastFiredDate
                             ? t('上次执行：{{d}} · 成功 {{ok}}·保活 {{ka}}·失败 {{f}}', {
-                                d: schedule.last_fired_date,
-                                ok: schedule.last_ok,
-                                ka: schedule.last_keepalive,
-                                f: schedule.last_failed,
+                                d: schedule.lastFiredDate,
+                                ok: last?.succeeded ?? 0,
+                                ka: last?.active ?? 0,
+                                f: last?.failedCount ?? 0,
                               })
                             : t('从未执行')}
                         </div>
@@ -1776,20 +2048,24 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                 </tr>
               </thead>
               <tbody>
-                {(data?.schedules ?? []).map((schedule) => (
+                {(schedules ?? []).map((schedule) => (
                   <tr key={schedule.id}>
-                    <td>{schedule.label}</td>
+                    <td>{schedule.displayLabel || schedule.label}</td>
                     <td className="ck-time-subtle">
-                      {(schedule.retry_limit ?? 3) > 0
-                        ? t('{{n}} 次', { n: schedule.retry_limit ?? 3 })
+                      {(schedule.retryLimit ?? 3) > 0
+                        ? t('{{n}} 次', { n: schedule.retryLimit ?? 3 })
                         : t('关闭')}
                     </td>
                     <td className="ck-time-subtle">
-                      {(schedule.retry_gap_minutes ?? 5) > 0
-                        ? t('{{n}} 分钟', { n: schedule.retry_gap_minutes ?? 5 })
+                      {(schedule.retryGapMinutes ?? 5) > 0
+                        ? t('{{n}} 分钟', { n: schedule.retryGapMinutes ?? 5 })
                         : t('回落全局')}
                     </td>
-                    <td className="ck-time-subtle">{schedule.makeup_time || '—'}</td>
+                    <td className="ck-time-subtle">
+                      {schedule.retryTime || '—'}
+                      {(schedule.retryCount ?? 0) > 0 &&
+                        ` · ${t('重试中 {{n}}', { n: schedule.retryCount })}`}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1962,7 +2238,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                 </thead>
                 <tbody>
                   {records.map((record, index) => (
-                    <tr key={`${record.ts}-${record.account_id}-${index}`}>
+                    <tr key={`${record.ts}-${record.accountId}-${index}`}>
                       {recKeySet.has('time') && (
                       <td>
                         {new Date(record.ts * 1000).toLocaleString()}
@@ -1971,8 +2247,8 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                       )}
                       {recKeySet.has('account') && (
                       <td>
-                        {record.account_name || record.account_id}
-                        {record.kept_active && <Badge tone="info">{t('保活')}</Badge>}
+                        {record.accountName || record.accountId}
+                        {record.keptActive && <Badge tone="info">{t('保活')}</Badge>}
                       </td>
                       )}
                       {recKeySet.has('provider') && (

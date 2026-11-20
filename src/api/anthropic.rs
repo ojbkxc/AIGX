@@ -942,7 +942,8 @@ pub async fn handle_messages(
                         && attempt_index >= purge_cfg.fallback_trigger_attempt
                         && !purge_cfg.fallback_models.is_empty()
                     {
-                        match super::openai::peek_for_refusal(s).await {
+                        match super::openai::peek_for_refusal(s, &purge_cfg.refusal_patterns).await
+                        {
                             super::openai::Peek::Refused => {
                                 crate::purge::record_refusal();
                                 if let Some(capture) = route_capture.as_mut() {
@@ -1102,7 +1103,12 @@ pub async fn handle_messages(
                         "all channels failed for streaming request".into(),
                     )
                 });
-                crate::purge::record_failure(crate::purge::classify_failure(&e.to_string()));
+                crate::purge::record_failure(crate::purge::classify_failure_with(
+                    &e.to_string(),
+                    &purge_cfg.refusal_patterns,
+                    &purge_cfg.failure_filter_keywords,
+                    &purge_cfg.failure_empty_keywords,
+                ));
                 // #47：计费接管点/记账点（见各分支语义）
                 attempt_guard.handoff();
                 let latency_ms = request_start.elapsed().as_millis() as u64;
@@ -1849,7 +1855,10 @@ pub async fn handle_messages(
                         && plan_model == model.as_str()
                         && attempt_index >= purge_cfg.fallback_trigger_attempt
                         && !purge_cfg.fallback_models.is_empty()
-                        && crate::purge::looks_refusal(resp.message.content_str())
+                        && crate::purge::looks_refusal_with(
+                            resp.message.content_str(),
+                            &purge_cfg.refusal_patterns,
+                        )
                     {
                         crate::purge::record_refusal();
                         last_error = Some(crate::bridge::BridgeError::Config(
@@ -2019,7 +2028,12 @@ pub async fn handle_messages(
                         "all channels failed for non-streaming request".into(),
                     )
                 });
-                crate::purge::record_failure(crate::purge::classify_failure(&e.to_string()));
+                crate::purge::record_failure(crate::purge::classify_failure_with(
+                    &e.to_string(),
+                    &purge_cfg.refusal_patterns,
+                    &purge_cfg.failure_filter_keywords,
+                    &purge_cfg.failure_empty_keywords,
+                ));
                 // #47：计费接管点/记账点（见各分支语义）
                 attempt_guard.handoff();
                 let latency_ms = request_start.elapsed().as_millis() as u64;

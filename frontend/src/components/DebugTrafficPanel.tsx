@@ -2,17 +2,23 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import type { DebugTrafficEntry, DebugTrafficView } from '../types';
+import type {
+  DebugTrafficDetail,
+  DebugTrafficEntry,
+  DebugTrafficView,
+} from '../types';
 
 /**
- * 调试模式 · 上游原始报文（系统设置 → 运维 → 网关）
+ * 调试模式 · 上游原始报文（系统设置 → 网关 → 调试模式）
  *
- * 对照 Agent2API「设置 → 网关 → 调试模式」：开启后，AIGX 会在**即将发往上游**
- * 时抓一份 envelope —— 上游 URL、**脱敏后的**请求头、实际发出的请求体
- * （已按别名映射改写 model 的最终形态）。与 `log_body`（下游客户端侧）互补：
- * 前者回答「用户要什么」，这里回答「我们到底发出去了什么」。
+ * 对照 Agent2API v3.5.0-beta.3：开启后，AIGX 会在**即将发往上游**时抓一份
+ * envelope —— 上游 URL、**脱敏后的**请求头/请求体（已按别名映射改写 model
+ * 的最终形态），以及错误路径的上游响应状态/头/体。与 `log_body`（下游客户端
+ * 侧）互补：前者回答「用户要什么」，这里回答「我们到底发出去了什么」。
  *
- * 缓冲在进程内（不写库），**重启即清空**；关闭开关时后端会顺手清空。
+ * 列表只给摘要；点条目打开**详情弹层**，按请求日志 id 调
+ * `GET /api/debug/traffic?id=` 取单条（数百 KB 的 SSE 体不塞进列表响应）。
+ * 缓冲在进程内（FileStore 持久化最近条目），关闭开关时后端会顺手清空。
  */
 export default function DebugTrafficPanel(): JSX.Element {
   const { t } = useTranslation();
@@ -21,7 +27,10 @@ export default function DebugTrafficPanel(): JSX.Element {
   const [error, setError] = useState('');
   const [enabled, setEnabled] = useState(false);
   const [view, setView] = useState<DebugTrafficView | null>(null);
-  const [openIdx, setOpenIdx] = useState<number | null>(null);
+  const [detail, setDetail] = useState<DebugTrafficDetail | null>(null);
+  const [detailError, setDetailError] = useState('');
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
 
   const loadView = useCallback(async (): Promise<void> => {
     try {
@@ -47,6 +56,21 @@ export default function DebugTrafficPanel(): JSX.Element {
     })();
   }, []);
 
+  // 弹层 Esc 关闭（直接内联状态清理，避免把每次渲染新建的 closeDetail 放进依赖）
+  useEffect(() => {
+    if (!openId) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        setOpenId(null);
+        setDetail(null);
+        setDetailError('');
+        setDetailLoading(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [openId]);
+
   const toggle = async (next: boolean): Promise<void> => {
     setError('');
     try {
@@ -64,13 +88,41 @@ export default function DebugTrafficPanel(): JSX.Element {
     setError('');
     try {
       const res = await api.clearDebugTraffic();
-      setOpenIdx(null);
+      closeDetail();
       await loadView();
       addToast(t('已清空 {{n}} 条', { n: res?.data?.cleared ?? 0 }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
+
+  const openDetail = async (entry: DebugTrafficEntry): Promise<void> => {
+    const id = entry.id || entry.request_id;
+    if (!id) {
+      addToast(t('该记录缺少请求 ID，无法打开详情'), 'error');
+      return;
+    }
+    setOpenId(id);
+    setDetail(null);
+    setDetailError('');
+    setDetailLoading(true);
+    try {
+      const res = await api.getDebugTrafficDetail(id);
+      setDetail(res?.data ?? null);
+    } catch (err) {
+      // 后端 404 = 调试模式当时未开启/记录已超出保留条数
+      setDetailError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  function closeDetail(): void {
+    setOpenId(null);
+    setDetail(null);
+    setDetailError('');
+    setDetailLoading(false);
+  }
 
   if (loading) {
     return <div className="loading">{t('加载中')}</div>;
@@ -85,7 +137,7 @@ export default function DebugTrafficPanel(): JSX.Element {
       <div className="card-header">
         <h2>{t('调试模式（上游原始报文）')}</h2>
         <p className="card-subtitle">
-          {t('记录 AIGX 实际发往上游的 URL、脱敏后的请求头与请求体；存在内存环形缓冲中，重启即清空。')}
+          {t('记录 AIGX 实际发往上游的 URL、脱敏后的请求头与请求体；凭据类字段一律脱敏，不可关闭。')}
         </p>
       </div>
       <div className="card-body">
@@ -101,7 +153,7 @@ export default function DebugTrafficPanel(): JSX.Element {
               <span>{t('开启调试模式（抓取上游原始报文）')}</span>
             </label>
             <div className="form-hint">
-              {t('凭据类请求头（authorization / cookie / x-api-key 等）一律脱敏为 [redacted]，不可关闭。')}
+              {t('凭据类请求头（authorization / cookie / x-api-key 等）与 URL/正文中的凭据字段一律脱敏为 [redacted]，不可关闭。')}
             </div>
           </div>
 
@@ -113,7 +165,7 @@ export default function DebugTrafficPanel(): JSX.Element {
               {t('清空')}
             </button>
             <span style={{ marginLeft: 'auto', opacity: 0.7, fontSize: 12 }}>
-              {t('保留最近 {{max}} 条 · 单条请求体上限 {{kb}} KB · 已挤出 {{dropped}} 条', {
+              {t('保留最近 {{max}} 条 · 单条正文上限 {{kb}} KB · 已挤出 {{dropped}} 条', {
                 max: view?.maxEntries ?? 0,
                 kb: Math.round((view?.maxBodyBytes ?? 0) / 1024),
                 dropped: view?.dropped ?? 0,
@@ -134,42 +186,28 @@ export default function DebugTrafficPanel(): JSX.Element {
           {entries.length > 0 && (
             <div className="debug-traffic-list" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {entries.map((entry, idx) => {
-                const key = `${entry.ts}-${idx}`;
-                const open = openIdx === idx;
+                const key = `${entry.ts}-${entry.id ?? idx}`;
                 return (
                   <div
                     key={key}
                     className="card"
-                    style={{ padding: 10, border: '1px solid var(--border, #333)' }}
+                    style={{ padding: 10, border: '1px solid var(--border, #333)', cursor: 'pointer' }}
+                    onClick={() => void openDetail(entry)}
+                    title={t('点击查看详情')}
                   >
-                    <div
-                      style={{ cursor: 'pointer', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}
-                      onClick={() => setOpenIdx(open ? null : idx)}
-                    >
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span style={{ fontSize: 12, opacity: 0.65 }}>
                         {new Date(entry.ts).toLocaleString()}
                       </span>
                       <span className="badge">{entry.method}</span>
                       <span style={{ wordBreak: 'break-all' }}>{entry.url}</span>
+                      {entry.response_status != null && (
+                        <span className="badge">{entry.response_status}</span>
+                      )}
                       {entry.truncated && <span className="badge">{t('已截断')}</span>}
                       {entry.model && <span style={{ opacity: 0.7 }}>{entry.model}</span>}
                       {entry.account_id && <span style={{ opacity: 0.7 }}>#{entry.account_id}</span>}
                     </div>
-                    {open && (
-                      <div style={{ marginTop: 8, fontSize: 12 }}>
-                        <div style={{ opacity: 0.7, marginBottom: 4 }}>
-                          {t('请求 ID')}: {entry.request_id || '-'}
-                        </div>
-                        <div style={{ opacity: 0.7, marginBottom: 4 }}>{t('请求头（已脱敏）')}</div>
-                        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>
-                          {JSON.stringify(entry.headers ?? {}, null, 2)}
-                        </pre>
-                        <div style={{ opacity: 0.7, margin: '8px 0 4px' }}>{t('请求体')}</div>
-                        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>
-                          {entry.body ?? t('（空）')}
-                        </pre>
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -177,6 +215,94 @@ export default function DebugTrafficPanel(): JSX.Element {
           )}
         </div>
       </div>
+
+      {/* 详情弹层：按请求日志 id 单条拉取（列表不夹带原始报文） */}
+      {openId && (
+        <div
+          className="modal-overlay"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeDetail();
+          }}
+        >
+          <div className="modal log-detail-modal" role="dialog" aria-label={t('原始报文详情')}>
+            <div className="modal-header">
+              <h3>{t('原始报文详情')}</h3>
+              <button type="button" className="modal-close" onClick={closeDetail} aria-label="×">
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              {detailLoading && <div className="loading">{t('加载中...')}</div>}
+              {detailError && <div className="error-message">{detailError}</div>}
+              {detail && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12 }}>
+                  <div className="log-detail-grid">
+                    <div className="log-detail-row">
+                      <span className="log-detail-label">{t('请求 ID')}</span>
+                      <span className="log-detail-value log-detail-mono">{detail.id || '—'}</span>
+                    </div>
+                    <div className="log-detail-row">
+                      <span className="log-detail-label">{t('时间')}</span>
+                      <span className="log-detail-value">
+                        {detail.ts ? new Date(detail.ts).toLocaleString() : '—'}
+                      </span>
+                    </div>
+                    <div className="log-detail-row">
+                      <span className="log-detail-label">{t('方法')}</span>
+                      <span className="log-detail-value">{detail.method || '—'}</span>
+                    </div>
+                    <div className="log-detail-row">
+                      <span className="log-detail-label">{t('状态码')}</span>
+                      <span className="log-detail-value">{detail.status ?? '—'}</span>
+                    </div>
+                    <div className="log-detail-row">
+                      <span className="log-detail-label">{t('模型')}</span>
+                      <span className="log-detail-value log-detail-mono">{detail.model || '—'}</span>
+                    </div>
+                    {detail.accountId && (
+                      <div className="log-detail-row">
+                        <span className="log-detail-label">{t('账号')}</span>
+                        <span className="log-detail-value log-detail-mono">#{detail.accountId}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <div className="log-detail-label">{t('上游 URL（已脱敏）')}</div>
+                    <pre className="log-detail-pre">{detail.url || '—'}</pre>
+                  </div>
+                  <div>
+                    <div className="log-detail-label">{t('请求头（已脱敏）')}</div>
+                    <pre className="log-detail-pre">
+                      {JSON.stringify(detail.requestHeaders ?? {}, null, 2)}
+                    </pre>
+                  </div>
+                  <div>
+                    <div className="log-detail-label">
+                      {t('请求体')}
+                      {detail.truncated ? ` ${t('（已截断）')}` : ''}
+                    </div>
+                    <pre className="log-detail-pre">{detail.requestBody ?? t('（空）')}</pre>
+                  </div>
+                  {detail.responseHeaders && (
+                    <div>
+                      <div className="log-detail-label">{t('响应头（已脱敏）')}</div>
+                      <pre className="log-detail-pre">
+                        {JSON.stringify(detail.responseHeaders, null, 2)}
+                      </pre>
+                    </div>
+                  )}
+                  {detail.responseBody != null && (
+                    <div>
+                      <div className="log-detail-label">{t('响应体（已脱敏）')}</div>
+                      <pre className="log-detail-pre">{detail.responseBody}</pre>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

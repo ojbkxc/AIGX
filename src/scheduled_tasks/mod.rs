@@ -21,6 +21,16 @@
 //!   - **改完设置下一轮就生效**（最多慢一个 tick）；
 //!   - **机器休眠 / 锁屏 / 改时钟后自愈**：醒来的第一次 tick 比一下墙上时钟就把
 //!     错过的时点补上（只补一次，不补跑期间的每一轮）。
+//!
+//! ── 与 `cron.rs` 的分工（页面模型只列本模块）──────────────────
+//! `cron.rs` 承载**用户不可配**的运维基础设施任务（会话清扫、预留解冻等），
+//! 不出现在设置页；本模块承载页面上的六条可配任务。新增后台任务先判断
+//! 「用户该不该配它」：不该 → `cron.rs`，该 → 本模块 `TASKS`（并同步页面）。
+//!
+//! ── 「软件版本检查」的状态键是特例 ────────────────────────────
+//! 它不在本模块内执行，`state_key` 委托给 `update::check_key`（按仓库隔离）：
+//! 更新管理器的手动/定时检查与设置页「检查计划」读写同一份 `task_state`，
+//! 因此页面上的「上次执行 / 下次执行」就是真实请求的排期，不会各排各的。
 
 use std::time::Duration;
 
@@ -96,7 +106,7 @@ pub const TASKS: [TaskDef; 6] = [
     TaskDef {
         id: TASK_UPDATE_CHECK,
         label: "软件版本检查",
-        description: "定期向 GitHub 查询最新发布版本，默认每 20 分钟一次。开启自动应用时，发现新版本会下载替换并自重启。开关与间隔在此页配置。",
+        description: "定期向 GitHub 查询最新发布版本，默认每 20 分钟一次。检查结果、排期和限流冷却跨重启保留；手动检查也会合并重复请求并遵守在途占位。开关与间隔在「更新」页的「检查计划」里配置（定时任务页不再渲染这一条）。",
         unit: "minutes",
         runner: Runner::Backend,
         min: INTERVAL_MIN_MINUTES,
@@ -159,8 +169,18 @@ fn interval_ms(task: &TaskDef, settings: &ScheduledSettings) -> i64 {
     interval * if task.unit == "seconds" { 1000 } else { 60_000 }
 }
 
-fn state_key(id: &str) -> String {
-    id.to_string()
+/// 某条任务在 `task_state` 里的排期键。
+///
+/// 「软件版本检查」**委托给更新管理器**：检查动作、失败冷却与「是否在跑」都
+/// 记在 `update::check_key`（按仓库隔离）这一条上，本页只读同一份状态 ——
+/// 否则定时循环和设置页的手动检查会各排各的，界面显示的「下次执行」永远
+/// 对不上真实请求。其余任务用任务 id 本身（与 A2A `state_key` 同一口径）。
+fn state_key(config: &crate::config::AppConfig, id: &str) -> String {
+    if id == TASK_UPDATE_CHECK {
+        crate::update::check_key(&config.update)
+    } else {
+        id.to_string()
+    }
 }
 
 fn task_json(
@@ -203,7 +223,7 @@ fn task_json(
 pub async fn list(state: &AppState) -> Value {
     // 一次读出全部状态：本接口被「定时任务」页每 20 秒轮询一次，
     // 逐条任务各读一次 KV 没有意义。
-    let settings = state.config_manager.get().await.scheduled_tasks;
+    let config = state.config_manager.get().await;
     let states = task_state::read_all();
     json!({
         "tasks": TASKS
@@ -211,11 +231,11 @@ pub async fn list(state: &AppState) -> Value {
             .map(|task| {
                 let state = match &states {
                     Ok(states) if task.runner == Runner::Backend =>
-                        Ok(states.get(&state_key(task.id)).cloned().unwrap_or_default()),
+                        Ok(states.get(&state_key(&config, task.id)).cloned().unwrap_or_default()),
                     Ok(_) => Ok(TaskState::default()),
                     Err(error) => Err(error.clone()),
                 };
-                task_json(task, &settings, state)
+                task_json(task, &config.scheduled_tasks, state)
             })
             .collect::<Vec<_>>(),
     })
@@ -226,13 +246,13 @@ pub async fn task_by_id(state: &AppState, id: &str) -> Value {
         Some(task) => task,
         None => return Value::Null,
     };
-    let settings = state.config_manager.get().await.scheduled_tasks;
+    let config = state.config_manager.get().await;
     let state_state = if task.runner == Runner::Backend {
-        task_state::read(&state_key(task.id))
+        task_state::read(&state_key(&config, task.id))
     } else {
         Ok(TaskState::default())
     };
-    task_json(task, &settings, state_state)
+    task_json(task, &config.scheduled_tasks, state_state)
 }
 
 /// 把 patch 落到 `settings` 的对应字段（按 id 选中那一条）。
@@ -251,6 +271,35 @@ fn apply_patch(settings: &mut ScheduledSettings, id: &str, patch: IntervalTaskPa
     }
     if let Some(interval) = patch.interval {
         target.interval = interval;
+    }
+}
+
+/// 后端任务的排期变更（开关拨开 → 立即跑一轮；改间隔 → 按新间隔重排）。
+///
+/// `configure` 与插件设置 PATCH（`/api/plugins/settings` 的检查计划跟随全局）
+/// 共用这一份口径：两处入口都改同一个 `scheduled_tasks` 配置，排期不能各写一套。
+pub(crate) fn on_schedule_changed(
+    config: &crate::config::AppConfig,
+    id: &str,
+    before: crate::scheduled_tasks::types::IntervalTask,
+    after: crate::scheduled_tasks::types::IntervalTask,
+) -> Result<(), String> {
+    let Some(task) = find(id) else {
+        return Ok(());
+    };
+    if task.runner != Runner::Backend || before == after {
+        return Ok(());
+    }
+    let key = state_key(config, id);
+    if !before.enabled && after.enabled {
+        // 刚开启：保留「开启即跑一次」的语义（下一个 tick 就执行），
+        // 而不是按上次尝试时间算出的旧排期干等。失败冷却仍然优先。
+        task_state::schedule_now(&key)
+    } else if before.interval != after.interval {
+        // 改间隔：按**新**间隔从上次尝试起重新计时（要马上跑有「立即执行」按钮）
+        task_state::reschedule(&key, interval_ms(task, &config.scheduled_tasks))
+    } else {
+        Ok(())
     }
 }
 
@@ -280,23 +329,14 @@ pub async fn configure(
     let before = settings_of(&config.scheduled_tasks, id);
     apply_patch(&mut config.scheduled_tasks, id, patch);
     let after = settings_of(&config.scheduled_tasks, id);
-    // 新间隔按 patch 后的设置算——config 马上要被 update 移走，先取出来。
-    let new_interval_ms = interval_ms(task, &config.scheduled_tasks);
     state
         .config_manager
         .update(config)
         .await
         .map_err(|error| format!("保存配置失败: {error}"))?;
-    if task.runner == Runner::Backend {
-        if !before.enabled && after.enabled {
-            // 刚开启：保留「开启即跑一次」的语义（下一个 tick 就执行），
-            // 而不是按上次尝试时间算出的旧排期干等。失败冷却仍然优先。
-            task_state::schedule_now(&state_key(id))?;
-        } else if before.interval != after.interval {
-            // 改间隔：按**新**间隔从上次尝试起重新计时（要马上跑有「立即执行」按钮）
-            task_state::reschedule(&state_key(id), new_interval_ms)?;
-        }
-    }
+    // 落盘后的权威配置：排期键要按（可能已变的）仓库/设置重算。
+    let config = state.config_manager.get().await;
+    on_schedule_changed(&config, id, before, after)?;
     if before != after {
         tracing::info!(
             "[Tasks] 定时任务「{}」已{}，间隔 {} {}",
@@ -310,7 +350,11 @@ pub async fn configure(
             }
         );
     }
-    Ok(task_by_id(state, id).await)
+    let mut result = task_by_id(state, id).await;
+    // 与 A2A 一致：把「是否写盘成功」带给界面（AIGX 的 ConfigManager 写失败会
+    // 直接 Err，能走到这里即为 true；字段保留是为了前端契约同形）。
+    result["saved"] = json!(true);
+    Ok(result)
 }
 
 pub async fn run_now(state: &AppState, id: &str) -> Result<String, String> {
@@ -344,55 +388,35 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
         return Err("未知后端任务".to_string());
     }
 
-    // 更新开关关闭时不占位直接跳过：占位是为了防并发与排期推进，开关关闭本就不该跑。
-    if !state.config_manager.get().await.update.enabled {
+    // 更新动作与排期都委托给更新管理器（`check` 手动 / `check_scheduled` 定时）：
+    // 它自己 `claim` 同一个排期键并写回结果，本模块不再重复占位 —— 否则一次
+    // 「立即执行」会先占住 `updateCheck` 的租约，再被更新管理器判成「已在跑」。
+    let config = state.config_manager.get().await;
+    // 更新模块总开关关闭：定时/手动任务入口都跳过（手动查版本仍可用更新页按钮）。
+    if !config.update.enabled {
         return Ok("软件更新开关已关闭，跳过".to_string());
     }
-    let settings = state.config_manager.get().await.scheduled_tasks;
-    let interval = interval_ms(task, &settings);
-    let guard = match task_state::claim(
-        task.id,
-        interval,
-        manual,
-        task_state::ManualBackoff::Respect,
-        1_000,
-    )? {
-        task_state::Claim::Acquired(guard) => guard,
-        task_state::Claim::Deferred(state_state) => return Err(state_state.waiting_message()),
+    let info = if manual {
+        state.update.check(&config).await?
+    } else {
+        state.update.check_scheduled(&config).await?
     };
-    let (summary, success) = {
-        let config = state.config_manager.get().await;
-        // check 内部有冷却保护；失败记退避（连续失败按间隔指数退避，避免打爆限额）。
-        match state.update.check(&config.update).await {
-            Ok(info) => {
-                if config.update.auto_apply
-                    && info.get("hasUpdate").and_then(Value::as_bool) == Some(true)
-                {
-                    if let Err(e) = state.update.start_apply(&config.update, false) {
-                        tracing::warn!("[Update] 自动应用失败：{e}");
-                    }
-                }
-                if info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
-                    let summary = format!(
-                        "发现新版本 {}（当前 {}）",
-                        info["latestVersion"].as_str().unwrap_or(""),
-                        crate::update::CURRENT_VERSION
-                    );
-                    tracing::info!("[Update] {summary}");
-                    (summary, true)
-                } else {
-                    ("已完成版本检查".to_string(), true)
-                }
-            }
-            Err(error) => {
-                let summary = format!("版本检查失败（{error}）");
-                tracing::warn!("[Tasks] {summary}");
-                (summary, false)
-            }
+    if config.update.auto_apply && info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
+        if let Err(e) = state.update.start_apply(&config.update, false) {
+            tracing::warn!("[Update] 自动应用失败：{e}");
         }
-    };
-    guard.finish(success, summary.clone(), None, 0, interval)?;
-    Ok(summary)
+    }
+    if info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
+        let summary = format!(
+            "发现新版本 {}（当前 {}）",
+            info["latestVersion"].as_str().unwrap_or(""),
+            crate::update::CURRENT_VERSION
+        );
+        tracing::info!("[Update] {summary}");
+        Ok(summary)
+    } else {
+        Ok("已完成版本检查".to_string())
+    }
 }
 
 /// 模型目录刷新的一轮工作（models.dev + 渠道清单 + 目录对账）。
@@ -632,11 +656,12 @@ pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         // 首轮先按持久化状态恢复排期：从未跑过的任务排到「现在」（于是全新安装
         // 启动即跑一次），跑过的沿用「上次尝试 + 间隔」。
-        let init_settings = state.config_manager.get().await.scheduled_tasks;
+        let init_config = state.config_manager.get().await;
         for task in TASKS.iter().filter(|task| task.runner == Runner::Backend) {
-            if let Err(error) =
-                task_state::reschedule(&state_key(task.id), interval_ms(task, &init_settings))
-            {
+            if let Err(error) = task_state::reschedule(
+                &state_key(&init_config, task.id),
+                interval_ms(task, &init_config.scheduled_tasks),
+            ) {
                 tracing::warn!("[Tasks] 恢复「{}」排期失败：{error}", task.label);
             }
         }
@@ -646,17 +671,20 @@ pub fn spawn(state: AppState) {
                 continue;
             };
             for task in TASKS.iter().filter(|task| task.runner == Runner::Backend) {
-                let settings = state.config_manager.get().await.scheduled_tasks;
-                if !settings_of(&settings, task.id).enabled {
+                // 逐条读当前配置：上一条若是长任务（更新检查），本拍后续任务的
+                // 开关/间隔仍以最新配置为准（改完设置最多慢一个 tick 生效）。
+                let config = state.config_manager.get().await;
+                if !settings_of(&config.scheduled_tasks, task.id).enabled {
                     continue;
                 }
                 // 状态条目缺失（启动时 store 不可用 / KV 被清 / 新任务 id）
                 // 不跳过：按「从未跑过」交给 run_backend → claim 重建排期，
                 // 否则该任务会永久停摆直到下一次重启（C-7）。
-                let Some(state_state) = states.get(&state_key(task.id)) else {
-                    if let Err(error) =
-                        task_state::reschedule(&state_key(task.id), interval_ms(task, &settings))
-                    {
+                let Some(state_state) = states.get(&state_key(&config, task.id)) else {
+                    if let Err(error) = task_state::reschedule(
+                        &state_key(&config, task.id),
+                        interval_ms(task, &config.scheduled_tasks),
+                    ) {
                         tracing::warn!("[Tasks] 重建「{}」排期失败：{error}", task.label);
                     }
                     continue;
@@ -680,7 +708,8 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        task_interval_ms, TASK_CREDENTIAL_MAINTENANCE, TASK_MODEL_REFRESH, TASK_UPDATE_CHECK,
+        state_key, task_interval_ms, TASK_CREDENTIAL_MAINTENANCE, TASK_MODEL_REFRESH,
+        TASK_UPDATE_CHECK,
     };
     use crate::scheduled_tasks::types::ScheduledSettings;
 
@@ -702,5 +731,20 @@ mod tests {
         );
         // 未知任务：1 分钟兜底（claim 不会因未知 id 卡死）
         assert_eq!(task_interval_ms(&settings, "nope"), 60_000);
+    }
+
+    /// 版本检查的状态键必须与更新管理器同一口径（按仓库隔离），
+    /// 其余任务仍用任务 id（页面/调度/维护三方读同一行）。
+    #[test]
+    fn update_check_state_key_delegates_to_update_manager() {
+        let config = crate::config::AppConfig::default();
+        let key = state_key(&config, TASK_UPDATE_CHECK);
+        assert_eq!(key, crate::update::check_key(&config.update));
+        assert!(key.starts_with("updateCheck:website:"), "key = {key}");
+        assert_eq!(
+            state_key(&config, TASK_CREDENTIAL_MAINTENANCE),
+            TASK_CREDENTIAL_MAINTENANCE
+        );
+        assert_eq!(state_key(&config, TASK_MODEL_REFRESH), TASK_MODEL_REFRESH);
     }
 }

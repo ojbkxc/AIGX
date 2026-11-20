@@ -35,6 +35,8 @@
 pub mod benefits;
 pub mod center;
 pub mod claim;
+// 轮次历史台账（对齐 A2A core/checkin_history）：签到中心时间线的数据源。
+pub mod history;
 pub mod scheduler;
 pub mod schedules;
 pub mod store;

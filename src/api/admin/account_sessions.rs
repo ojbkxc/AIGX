@@ -197,6 +197,10 @@ pub struct AccountSessionRequest {
     /// 余额查询执行参数 `{retries, timeout_seconds}`。
     #[serde(default, alias = "usageQuery")]
     pub usage_query: Option<crate::account_session::model::UsageQuerySettings>,
+    /// 余额不足处理（A2A 兼容字段 `lowBalance`：`{mode, threshold}`）。
+    /// 三态：缺省 = 保持原值；`null` 以外的对象 = 归一化后写入（非法整单 400）。
+    #[serde(default, alias = "lowBalance")]
+    pub low_balance: Option<crate::account_session::model::LowBalanceSetting>,
     /// 逐模型限流标记（A2A `rateLimits`）。
     #[serde(default, alias = "rateLimits")]
     pub rate_limits: Option<serde_json::Map<String, Value>>,
@@ -273,6 +277,9 @@ pub struct AccountSessionPatch {
     /// 余额查询执行参数。
     #[serde(default, alias = "usageQuery")]
     pub usage_query: Option<crate::account_session::model::UsageQuerySettings>,
+    /// 余额不足处理（A2A 兼容字段 `lowBalance`）。缺省 = 保持原值。
+    #[serde(default, alias = "lowBalance")]
+    pub low_balance: Option<crate::account_session::model::LowBalanceSetting>,
     /// 逐模型限流标记（整块替换；空对象 = 清空）。
     #[serde(default, alias = "rateLimits")]
     pub rate_limits: Option<serde_json::Map<String, Value>>,
@@ -343,6 +350,18 @@ fn validate_limiters(
 ) -> Result<(), (StatusCode, Json<Value>)> {
     crate::account_session::model::validate_limiter_rules(rules)
         .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))
+}
+
+/// 校验「余额不足处理」（A2A `lowBalance`）：非法 mode / 阈值整单 400。
+fn validate_low_balance(
+    setting: Option<&crate::account_session::model::LowBalanceSetting>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if let Some(setting) = setting {
+        setting
+            .normalized()
+            .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
+    }
+    Ok(())
 }
 
 /// 校验渠道存在且是账号型渠道。
@@ -622,6 +641,13 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
     }
     if let Some(usage_query) = &body.usage_query {
         session.usage_query = usage_query.normalized();
+    }
+    // 余额不足处理（A2A lowBalance）：调用方已校验；这里只归一化写回
+    //（off 档阈值归零）。归一失败（异常调用方）保留原值，不静默清掉。
+    if let Some(setting) = &body.low_balance {
+        if let Ok(normalized) = setting.normalized() {
+            session.low_balance = Some(normalized);
+        }
     }
     if let Some(rate_limits) = &body.rate_limits {
         session.rate_limits = rate_limits.clone();
@@ -904,6 +930,8 @@ fn session_json(
         "allow_route_skip": session.allow_route_skip,
         "user_agent": session.user_agent,
         "usage_query": session.usage_query,
+        // 余额不足处理（A2A lowBalance，缺省已按 provider 物化）
+        "low_balance": session.low_balance_view(),
         "rate_limits": session.rate_limits,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
@@ -1009,8 +1037,68 @@ pub async fn handle_list_account_sessions(
         // 前端不用为这三个视图再发额外请求（账号页一屏内要用）。
         "providers": crate::account_session::plugin::provider_summary(&visible),
         "currentAccountIds": crate::account_session::plugin::current_account_ids(&visible),
-        "hiddenAccounts": crate::account_session::plugin::hidden_accounts_summary(&hidden),
+        "hiddenAccounts": hidden_accounts_view(&state, &hidden),
     })))
+}
+
+/// 隐藏账号摘要（对齐 A2A `core/account_store/hidden_accounts.rs::summary`）。
+///
+/// 形状 `{total, byProvider, providers:[{id,label,count,reason,packId}]}`；
+/// `reason` 是插件/提供商为什么不可见（`not_installed` / `pack_disabled` /
+/// `provider_disabled` / `not_loaded`）—— 前端缺失插件提示条据此说明原因。
+///
+/// **只返回数量与提供商元数据**，不返回隐藏账号的记录或凭证（上游同口径；
+/// 隐藏账号可能属于已停用的插件，其公开投影也不该在账号页外泄）。
+pub(crate) fn hidden_accounts_view(state: &AppState, hidden: &[AccountSession]) -> Value {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for session in hidden {
+        *counts.entry(session.provider.clone()).or_insert(0) += 1;
+    }
+    let registry = state.plugin_host.registry();
+    let providers: Vec<Value> = counts
+        .iter()
+        .map(|(provider, count)| {
+            json!({
+                "id": provider,
+                "label": crate::model::manage::provider_label(provider),
+                "count": count,
+                "reason": hidden_provider_reason(state, provider),
+                "packId": registry.find_pack_for_provider(provider),
+            })
+        })
+        .collect();
+    let by_provider: Map<String, Value> = counts
+        .iter()
+        .map(|(provider, count)| (provider.clone(), json!(count)))
+        .collect();
+    json!({
+        "total": hidden.len(),
+        "byProvider": Value::Object(by_provider),
+        "providers": providers,
+    })
+}
+
+/// 隐藏账号的归属原因（A2A `HiddenReason` 的 AIGX 投影）。
+fn hidden_provider_reason(state: &AppState, provider: &str) -> &'static str {
+    if let Some(pack) = state
+        .plugin_host
+        .registry()
+        .list()
+        .into_iter()
+        .find(|pack| pack.providers.iter().any(|item| item.id == provider))
+    {
+        if !pack.enabled {
+            return "pack_disabled";
+        }
+        if !pack.provider_enabled(provider) {
+            return "provider_disabled";
+        }
+        return "not_loaded";
+    }
+    if state.provider_gates.is_disabled(provider) {
+        return "provider_disabled";
+    }
+    "not_installed"
 }
 
 // ── 排序 / 置顶（SPEC 1.0.49 §9）────────────────────────────────────
@@ -1184,6 +1272,7 @@ pub async fn handle_create_account_session(
             ensure_session_channel(&state, body.channel_id.trim(), &provider_kind)?
         };
         validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
+        validate_low_balance(body.low_balance.as_ref())?;
         let (secret, public, identity_hint, file_name) = if has_auth_file {
             let parsed = crate::account_session::auth_file::parse_auth_file(
                 &provider_kind,
@@ -1292,6 +1381,7 @@ pub async fn handle_create_account_session(
         };
         // 限制规则先校验再应用：非法就整单拒绝，不产生「存了一半」的账号
         validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
+        validate_low_balance(body.low_balance.as_ref())?;
         let mut session = AccountSession::new(channel.id.clone(), String::new());
         session = apply_request(session, &body);
         // 登录态型供应商：凭证形态标记为 session（Cookie/JWT），与 API Key 区分。
@@ -1382,6 +1472,7 @@ pub async fn handle_update_account_session(
     ensure_session_channel(&state, &prev.channel_id, &prev.provider)?;
     // 限制规则先校验再应用（与新增同口径）
     validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
+    validate_low_balance(body.low_balance.as_ref())?;
     let mut session = apply_request(prev.clone(), &body);
     // 原生 ↔ 插件归属不可在原账号上切换：凭证 KV 以 channel_id 为键，跨界
     // 迁移必须删旧建新（否则重启后旧渠道键复活成副本）。
@@ -1490,6 +1581,13 @@ pub async fn handle_patch_account_session(
     if let Some(rules) = &body.limiters {
         validate_limiters(rules)?;
         next.limiters = rules.clone();
+    }
+    // 余额不足处理（A2A lowBalance）：缺省 = 保持原值；给了就校验后归一写入
+    if let Some(setting) = &body.low_balance {
+        let normalized = setting
+            .normalized()
+            .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))?;
+        next.low_balance = Some(normalized);
     }
     // 限制条件组（Phase1-A2）：缺省 = 保持原值；给了就校验后整块替换
     //（空数组 = 清空回落扁平双读）；校验失败整单拒绝（400）
@@ -1989,6 +2087,7 @@ pub async fn handle_bulk_import_account_sessions(
             allow_route_skip: None,
             user_agent: None,
             usage_query: None,
+            low_balance: None,
             rate_limits: None,
         };
         match handle_create_account_session(State(state.clone()), headers.clone(), Json(req)).await
@@ -3719,6 +3818,16 @@ pub async fn handle_import_account_sessions_json(
                     )
                     .ok()
                 }),
+            low_balance: entry
+                .get("low_balance")
+                .or_else(|| entry.get("lowBalance"))
+                .cloned()
+                .and_then(|value| {
+                    serde_json::from_value::<crate::account_session::model::LowBalanceSetting>(
+                        value,
+                    )
+                    .ok()
+                }),
             rate_limits: entry
                 .get("rate_limits")
                 .or_else(|| entry.get("rateLimits"))
@@ -3860,8 +3969,25 @@ fn apply_sorting_rules(
         Some(value) => {
             let inputs: Vec<crate::account_session::sorting::SortRuleInput> =
                 serde_json::from_value(value).map_err(|e| format!("账号排序规则格式错误: {e}"))?;
-            let rules: Vec<crate::channel::routing_policy::AccountSortRule> =
-                inputs.into_iter().map(Into::into).collect();
+            // A2A 的 `on:false` 规则不参与比较（AIGX 只存生效规则）；键必须
+            // 可识别且不重复（credit 与 expires 视为同一维度）。
+            let mut keys = std::collections::HashSet::new();
+            for input in inputs.iter().filter(|input| input.enabled()) {
+                let key = input.key();
+                if key == "unknown" {
+                    return Err(
+                        "账号排序规则包含未知的 key（credit / balance / added）".to_string()
+                    );
+                }
+                if !keys.insert(key) {
+                    return Err(format!("账号排序包含重复规则「{key}」"));
+                }
+            }
+            let rules: Vec<crate::channel::routing_policy::AccountSortRule> = inputs
+                .into_iter()
+                .filter(crate::account_session::sorting::SortRuleInput::enabled)
+                .map(Into::into)
+                .collect();
             crate::account_session::sorting::validate_rules(&rules)?;
             settings.rules.insert(provider.to_string(), rules);
         }
@@ -3933,6 +4059,23 @@ pub async fn handle_refresh_expiring(
         &state.http_client,
     )
     .await;
+    // 手动批量刷新已经真打了一轮上游：把定时那轮往后顺延一个间隔，免得
+    // 「刚点完、到点或重启后又立刻再刷一遍」（对齐 A2A `note_manual_run`）。
+    {
+        let config = state.config_manager.get().await;
+        let interval = config
+            .scheduled_tasks
+            .credential_maintenance
+            .interval
+            .max(1)
+            * 60_000;
+        if let Err(error) = crate::scheduled_tasks::task_state::note_external_run(
+            crate::scheduled_tasks::TASK_CREDENTIAL_MAINTENANCE,
+            interval,
+        ) {
+            tracing::debug!("[Accounts] 凭证维护排期顺延失败：{error}");
+        }
+    }
     let admin_id = admin_id_from_session(&state, &headers).await;
     record_audit(
         &state,
@@ -4839,13 +4982,89 @@ pub async fn handle_usage_snapshot(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
+    Ok(Json(snapshot_payload(&state, None)))
+}
+
+/// GET /api/accounts/usage/snapshot —— A2A canonical 路径（scoped 形态）。
+///
+/// 与 `/api/account-sessions/usage/snapshot` 同数据；可选
+/// `?ids=["id1","id2"]`（JSON 数组字符串）只回给定账号（上游同形）。
+#[allow(dead_code)] // A2A 路径 handler：路由由集成批次接入 main.rs
+pub async fn handle_accounts_usage_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<UsageSnapshotQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let ids = match query
+        .ids
+        .as_deref()
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    {
+        None => None,
+        Some(raw) => {
+            let ids: Vec<String> = serde_json::from_str(raw)
+                .map_err(|_| error_response("余额快照账号范围无效", StatusCode::BAD_REQUEST))?;
+            validate_snapshot_ids(&ids)?;
+            Some(ids)
+        }
+    };
+    Ok(Json(snapshot_payload(&state, ids.as_deref())))
+}
+
+/// GET `/usage/snapshot` 的查询参数（`ids` 为 JSON 数组字符串）。
+#[derive(Debug, Default, Deserialize)]
+pub struct UsageSnapshotQuery {
+    #[serde(default)]
+    pub ids: Option<String>,
+}
+
+/// scoped 快照请求体（上游 `POST /api/accounts/usage/snapshot`：`{ids:[...]}`）。
+#[derive(Debug, Deserialize)]
+pub struct UsageSnapshotScope {
+    pub ids: Vec<String>,
+}
+
+/// POST `.../usage/snapshot` —— scoped 快照（只回给定 id，语义同 GET ?ids=）。
+///
+/// 与 GET 分开注册（Axum 同路径不同方法）：POST 让前端不必把 id 集塞进
+/// query string（几千个 id 会顶到 URL 长度上限，上游同因由提供此形态）。
+#[allow(dead_code)] // A2A 路径 handler：路由由集成批次接入 main.rs
+pub async fn handle_usage_snapshot_scoped(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(scope): Json<UsageSnapshotScope>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    validate_snapshot_ids(&scope.ids)?;
+    Ok(Json(snapshot_payload(&state, Some(&scope.ids))))
+}
+
+/// 快照响应体（全量 / scoped 共用一个形状）。
+fn snapshot_payload(state: &AppState, ids: Option<&[String]>) -> Value {
     let now = chrono::Utc::now().timestamp();
-    let (results, skipped) =
-        crate::account_session::usage_query::snapshot_all(&state.account_sessions);
-    Ok(Json(json!({
+    let (results, skipped) = match ids {
+        Some(ids) => {
+            crate::account_session::usage_query::snapshot_scoped(&state.account_sessions, ids)
+        }
+        None => crate::account_session::usage_query::snapshot_all(&state.account_sessions),
+    };
+    json!({
         "success": true,
         "data": { "at": now, "results": results, "skipped": skipped }
-    })))
+    })
+}
+
+/// 快照账号范围校验（上游同边界：≤ 3000 个、单个 id 非空且 ≤ 512 字符）。
+fn validate_snapshot_ids(ids: &[String]) -> Result<(), (StatusCode, Json<Value>)> {
+    if ids.len() > 3000 || ids.iter().any(|id| id.is_empty() || id.len() > 512) {
+        return Err(error_response(
+            "余额快照账号范围无效",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    Ok(())
 }
 
 /// POST /api/account-sessions/usage —— 手动批量/单账号余额查询（写回快照）。

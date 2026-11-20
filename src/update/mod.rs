@@ -74,8 +74,20 @@ const PENDING_RESTART_KEY: &str = "update:pending_restart";
 /// 换目录的瞬间旧进程就开始吐新前端了，而新后端要等 2 秒后的 exec 才起来
 /// —— 那 2 秒（以及 exec 失败时的整个残留期）就是前后端错配窗口。
 const STATIC_STAGED_KEY: &str = "update:static_staged";
-/// 两次检查之间的最短间隔（秒）：手动按钮连点会重复消耗 GitHub 匿名限额。
-const MIN_CHECK_GAP: i64 = 60;
+
+/// 等待「正在跑的那一轮」的上限：略小于执行占位的租约（90 秒），
+/// 超时后按冷却/上次结果如实回答，而不是把用户挂在这里。
+const WAIT_RUNNING_MS: i64 = 75_000;
+
+/// 版本检查的**持久化排期键**（手动与定时共用）。
+///
+/// 按仓库隔离：换仓库后新键从「现在」起算，不会继承旧仓库的冷却/排期。
+/// 前缀 `updateCheck:` 同时让 `task_state` 走「来源自管退避」——GitHub 限额的
+/// 恢复时刻由调用方给出的 `retry_at` 表达，不叠加本地指数退避。
+/// 与 `scheduled_tasks::state_key` 同一口径：定时任务页读的就是这一条状态。
+pub fn check_key(config: &UpdateConfig) -> String {
+    format!("updateCheck:website:{}", repo_of(config))
+}
 
 /// 本进程的启动时间（unix 秒）。exec 自重启**不换 PID**，前端只能靠
 /// startedAt 的变化判定「新进程起来了」——这是无缝更新的关键信号。
@@ -127,6 +139,11 @@ pub struct ReleaseInfo {
     pub checksum: Option<UpdateAsset>,
 }
 
+/// 旧版落盘的检查快照（`update:last_check`）。
+///
+/// `checked_at` / `retry_at` / `last_error` 只作为 `task_state` 缺记录时的
+/// 读侧兜底（升级后首次启动、状态库不可用）；排期的权威来源是
+/// [`check_key`] 那一条 `task_state` 记录。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PersistedCheck {
     #[serde(default)]
@@ -328,7 +345,12 @@ impl UpdateManager {
     }
 
     /// 给界面/API/AI 工具的状态快照（**不触发网络请求**）。
+    ///
+    /// 排期三件套（`checkedAt` / `retryAt` / `checking`）以 `task_state` 里那条
+    /// 持久化记录为准（与定时任务页同一来源，重启后不丢）；`self.inner` 仍持有
+    /// 最新 Release 与下载/应用进度，并从旧版本落盘的快照兜底。
     pub fn status(&self, config: &UpdateConfig) -> Value {
+        let schedule = crate::scheduled_tasks::task_state::read(&check_key(config)).ok();
         let guard = self.lock();
         let latest = guard.latest.as_ref();
         let latest_tag = latest.map(|release| release.tag.as_str()).unwrap_or("");
@@ -343,16 +365,23 @@ impl UpdateManager {
             } else {
                 Value::Null
             };
-        // 冷却期可见：刚查过就直说，别让按钮像坏了（前端据此显示倒计时）
-        let now = now_ts();
-        let since_check = guard.checked_at.max(0);
-        let recently_checked =
-            since_check > 0 && now - since_check < MIN_CHECK_GAP && !guard.checking;
-        let retry_after_secs = if recently_checked {
-            MIN_CHECK_GAP - (now - since_check)
-        } else {
-            0
-        };
+        // 排期状态：task_state 有记录就用它（跨重启、与「定时任务」页一致）；
+        // 没有（首次启动 / 尚未跑过一轮）才回落到旧版落盘的快照。
+        let checked_at = schedule
+            .as_ref()
+            .map(|state| state.last_success_at / 1000)
+            .filter(|value| *value > 0)
+            .unwrap_or(guard.checked_at);
+        let retry_at = schedule
+            .as_ref()
+            .map(|state| state.retry_at / 1000)
+            .filter(|value| *value > 0)
+            .unwrap_or(guard.retry_at);
+        let checking = guard.checking || schedule.as_ref().is_some_and(|state| state.running());
+        let last_error = schedule
+            .as_ref()
+            .and_then(|state| state.last_error.clone())
+            .or_else(|| guard.last_error.clone());
         let static_ver = static_version(&self.exe);
         let version_mismatch = static_ver
             .as_deref()
@@ -377,10 +406,10 @@ impl UpdateManager {
             "checksumAvailable": latest
                 .map(|release| release.checksum.is_some())
                 .unwrap_or(false),
-            "checkedAt": guard.checked_at,
-            "lastError": guard.last_error,
-            "retryAt": guard.retry_at,
-            "checking": guard.checking,
+            "checkedAt": checked_at,
+            "lastError": last_error,
+            "retryAt": retry_at,
+            "checking": checking,
             "applying": guard.applying,
             "pendingRestart": guard.pending_restart,
             "download": download,
@@ -411,60 +440,123 @@ impl UpdateManager {
             "staticVersion": static_ver,
             "versionMismatch": version_mismatch,
             "containerized": containerized(),
-            "recentlyChecked": recently_checked,
-            "retryAfterSecs": retry_after_secs,
+            // 手动检查不再有「刚查过」的最短间隔：与 A2A 一致，手动入口只受
+            // 在途占位约束（撞上正在跑的请求会等它的结果复用）。两个字段保留
+            // 是为了前端类型兼容，值恒为不冷却。
+            "recentlyChecked": false,
+            "retryAfterSecs": 0,
         })
     }
 
-    /// 检查更新（手动与定时共用）。失败时返回可读原因并落冷却。
-    pub async fn check(&self, config: &UpdateConfig) -> Result<Value, String> {
-        let now = now_ts();
-        let recently_checked = {
-            let guard = self.lock();
-            if guard.checking {
-                return Err("已有一次更新检查正在进行".to_string());
+    /// 检查更新（**手动**入口：设置页按钮 / `POST /api/update/check`）。
+    ///
+    /// 与定时入口共用同一份持久化排期（键 [`check_key`]）；手动**越过失败
+    /// 冷却**（改完代理/令牌点按钮的预期就是「现在真打一次」），但在途占位
+    /// 不越过：已有请求在跑时等它的结果复用，而不是并排再打一次 GitHub。
+    pub async fn check(&self, app: &crate::config::AppConfig) -> Result<Value, String> {
+        self.check_with_mode(app, true).await
+    }
+
+    /// 定时检查（`scheduled_tasks` 的「软件版本检查」任务）。
+    ///
+    /// 与 [`check`](Self::check) 的差别只在 `manual`：定时入口遵守失败冷却与
+    /// 普通排期。排期键与手动入口相同，因此「刚手动查过」会自然顺延下一轮定时。
+    pub async fn check_scheduled(&self, app: &crate::config::AppConfig) -> Result<Value, String> {
+        self.check_with_mode(app, false).await
+    }
+
+    async fn check_with_mode(
+        &self,
+        app: &crate::config::AppConfig,
+        manual: bool,
+    ) -> Result<Value, String> {
+        use crate::scheduled_tasks::task_state::{self, Claim, ManualBackoff};
+
+        let config = &app.update;
+        let key = check_key(config);
+        // 定时任务的间隔就是排期口径（手动触发也按同一间隔顺延，避免「刚点完
+        // 又立刻被定时那轮再查一次」）。
+        let interval = app.scheduled_tasks.update_check.interval.max(1) * 60_000;
+        let started = now_ms();
+        let guard = match task_state::claim(&key, interval, manual, ManualBackoff::Bypass, 0)? {
+            Claim::Acquired(guard) => guard,
+            Claim::Deferred(mut state) => {
+                // 已有一次在跑（另一个入口撞车，或另一进程）：等它的结果，
+                // 而不是并排再打一次 GitHub —— 匿名限额不该被并发翻倍。
+                while state.running() && now_ms() - started < WAIT_RUNNING_MS {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    state = task_state::read(&key)?;
+                }
+                // 等到了结果就复用；仍在跑（或正处于失败冷却）就如实报原因。
+                if state.running() {
+                    return Err(state.waiting_message());
+                }
+                if let Some(error) = state.last_error.as_deref() {
+                    return Err(error.to_string());
+                }
+                if state.last_success_at > 0 {
+                    return Ok(self.status(config));
+                }
+                return Err(state.waiting_message());
             }
-            if guard.retry_at > now {
-                return Err(format!(
-                    "更新检查冷却中，请约 {} 秒后再试",
-                    guard.retry_at - now
-                ));
-            }
-            guard.checked_at > 0 && now - guard.checked_at < MIN_CHECK_GAP
         };
-        // 刚查过：直接复用最近结果（前端连点不应把匿名限额连点掉）
-        if recently_checked {
-            return Ok(self.status(config));
-        }
         self.lock().checking = true;
         let outcome = self.fetch_release(config).await;
-        {
-            let mut guard = self.lock();
-            guard.checking = false;
-            match &outcome {
-                Ok(release) => {
-                    guard.latest = release.clone();
-                    guard.checked_at = now_ts();
-                    guard.retry_at = 0;
-                    guard.last_error = None;
-                }
-                Err((message, retry_at)) => {
-                    guard.last_error = Some(message.clone());
-                    guard.retry_at = *retry_at;
-                }
-            }
-        }
-        self.persist();
         match outcome {
             Ok(release) => {
+                {
+                    let mut inner = self.lock();
+                    inner.checking = false;
+                    inner.latest = release.clone();
+                    inner.checked_at = now_ts();
+                    inner.retry_at = 0;
+                    inner.last_error = None;
+                }
+                self.persist();
                 let tag = release
                     .as_ref()
                     .map(|item| item.tag.as_str())
                     .unwrap_or("(无)");
                 tracing::info!("update check: current={CURRENT_VERSION} latest={tag}");
+                let summary = match release.as_ref() {
+                    Some(info) if compare_versions(&info.tag, CURRENT_VERSION) == Some(1) => {
+                        format!("发现新版本 {}（当前 {CURRENT_VERSION}）", info.tag)
+                    }
+                    _ => "已完成版本检查".to_string(),
+                };
+                guard.finish(true, summary, None, 0, interval)?;
                 Ok(self.status(config))
             }
-            Err((message, _)) => Err(message),
+            Err((message, retry_at)) => {
+                {
+                    let mut inner = self.lock();
+                    inner.checking = false;
+                    inner.last_error = Some(message.clone());
+                    // `inner.retry_at` 是秒（旧字段口径）；task_state 统一毫秒。
+                    inner.retry_at = retry_at;
+                }
+                self.persist();
+                // 来源给的冷却（`Retry-After` / 限额恢复时刻）是秒，转毫秒写入排期。
+                guard.finish(
+                    false,
+                    format!("检查失败：{message}"),
+                    None,
+                    retry_at.saturating_mul(1000),
+                    interval,
+                )?;
+                Err(message)
+            }
+        }
+    }
+
+    /// 更换出网代理后清除旧出口的失败等待（`PUT /api/update/settings` 调用）。
+    ///
+    /// 只解「现在不让试」的锁，排期与历史结果不动：冷却记的是旧线路的限流
+    /// 恢复时刻，换线路后它不再成立；清不掉不是致命错误（到点自然失效）。
+    pub fn clear_check_cooldown(&self, config: &UpdateConfig) {
+        self.lock().retry_at = 0;
+        if let Err(error) = crate::scheduled_tasks::task_state::clear_cooldown(&check_key(config)) {
+            tracing::warn!("[Update] 清除检查失败冷却失败：{error}");
         }
     }
 
@@ -953,27 +1045,9 @@ impl UpdateManager {
         Ok(json!({ "restored": true, "needRestart": true }))
     }
 
-    /// 定时任务入口：按配置的间隔检查，必要时自动应用并重启。
-    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
-    pub async fn tick(&self, config: &UpdateConfig) {
-        if !config.enabled || !config.auto_check {
-            return;
-        }
-        let interval = config.interval_hours.max(1) as i64 * 3600;
-        if now_ts() - self.lock().checked_at < interval {
-            return;
-        }
-        match self.check(config).await {
-            Ok(status) => {
-                if config.auto_apply && status["hasUpdate"].as_bool() == Some(true) {
-                    if let Err(e) = self.start_apply(config, false) {
-                        tracing::warn!("auto update apply failed: {e}");
-                    }
-                }
-            }
-            Err(e) => tracing::warn!("auto update check failed: {e}"),
-        }
-    }
+    // 定时检查不再由 UpdateManager 自己维护 interval —— 「何时做」统一归
+    // `scheduled_tasks`（开关与间隔是用户在「更新」页配置的那一条任务），
+    // 本模块只提供 `check` / `check_scheduled` 两个入口（与 A2A 同一分工）。
 }
 
 impl UpdateManager {
@@ -1120,6 +1194,11 @@ pub fn server_bundle_name(version: &str, arch: &str) -> Option<String> {
 
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// 毫秒时间戳（与 `scheduled_tasks::task_state` 同一口径）。
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 fn repo_of(config: &UpdateConfig) -> String {

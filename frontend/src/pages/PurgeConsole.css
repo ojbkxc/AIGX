@@ -250,3 +250,46 @@
     transition: none !important;
   }
 }
+
+/* 改写预览结果：保留换行与缩进、长行折行、与表单同底色 */
+.purge-preview-out {
+  margin: 8px 0 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 未保存修改警示条：页头下方显性提示 + 放弃出口 */
+.purge-dirty-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--warning-color, #d97706);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning-color, #d97706) 8%, transparent);
+  font-size: 13px;
+}
+
+/* 词表行重复提示：紧跟原文输入框下方，不挤占网格 */
+.purge-dup-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--warning-color, #d97706);
+}
+
+/* 预览元信息：changed / skill_hit 标记行 */
+.purge-preview-meta {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #6b7280);
+}

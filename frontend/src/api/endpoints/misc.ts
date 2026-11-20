@@ -30,7 +30,48 @@ import type {
   ApiResponse,
   ManageView,
 } from '@/types';
+import type { SystemInfo } from '@/types/system_info';
 import { API_BASE, request } from '../client';
+
+/** 账号分页页（A2A `core::accounts_list::page` 的响应，raw JSON）。 */
+export interface AccountListPageView {
+  accounts: Array<Record<string, unknown>>;
+  matchedIds?: string[];
+  displayIds?: string[];
+  total: number;
+  displayTotal?: number;
+  offset?: number;
+  pageSize?: number;
+  summary?: Record<string, number>;
+  counts?: Record<string, unknown>;
+  mobileCounts?: Record<string, unknown> | null;
+  groups?: Array<Record<string, unknown>>;
+  sorting?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+/** 组余额汇总（`groups[].balance`，A2A `accounts_list/balance.rs`）。 */
+export interface AccountGroupBalance {
+  counted: number;
+  total: number;
+  sum: number | null;
+  unlimited: number;
+  unit: string;
+  failed: number;
+  uncountable: number;
+  pending: number;
+  partial: number;
+  scope: 'group' | 'filtered';
+  additive: boolean;
+  ratio?: Record<string, unknown> | null;
+  expiring: {
+    count: number;
+    todayCount: number;
+    amounts: Array<{ unit: string; count: number; unknownCount: number; sum: number | null }>;
+    todayAmounts: Array<{ unit: string; count: number; unknownCount: number; sum: number | null }>;
+  };
+  [key: string]: unknown;
+}
 
 export const endpoints = {
   // ── A2A v3.5.0-beta.1 对齐新增（T8）──────────────────────────────
@@ -62,6 +103,73 @@ export const endpoints = {
   /** 导单文件：按账号 id 或 provider 分组导出逐账号凭证文件 */
   exportAccountFiles: (body: { id?: string; provider?: string }): Promise<ApiResponse<AccountFileExportResult>> =>
     request<ApiResponse<AccountFileExportResult>>('POST', `${API_BASE}/accounts/export-files`, body),
+
+  // ── 账号模块 canonical `/api/accounts*`（A2A 语义，raw JSON）────────────
+  // 新端点返回 A2A 原始 JSON（无 {success,data} 信封），调用方按各方法
+  // 注释里的形状断言；错误仍走管理面 {success:false,error}。
+
+  /** 账号分页查询（POST /api/accounts/query，body = AccountListQuery） */
+  queryAccounts: (body: Record<string, unknown>): Promise<AccountListPageView> =>
+    request<AccountListPageView>('POST', `${API_BASE}/accounts/query`, body),
+  /** 账号选中集（POST /api/accounts/selection，只回匹配 id） */
+  selectAccounts: (body: Record<string, unknown>): Promise<{ ids: string[]; total: number }> =>
+    request<{ ids: string[]; total: number }>('POST', `${API_BASE}/accounts/selection`, body),
+  /** 单账号详情（GET /api/accounts/:id，含 detailsLoaded:true） */
+  getAccountDetail: (id: string): Promise<Record<string, unknown>> =>
+    request<Record<string, unknown>>('GET', `${API_BASE}/accounts/${encodeURIComponent(id)}`),
+  /** 全局队列置顶（POST /api/accounts/current {id}） */
+  setCurrentAccount: (id: string): Promise<{ id: string; changed: boolean; reason?: string }> =>
+    request<{ id: string; changed: boolean; reason?: string }>('POST', `${API_BASE}/accounts/current`, { id }),
+  /** 整队重排（POST /api/accounts/reorder {queue}；queue 必须是全部账号的排列） */
+  reorderAccounts: (queue: string[]): Promise<{ updated: number; skipped: number; total: number }> =>
+    request<{ updated: number; skipped: number; total: number }>('POST', `${API_BASE}/accounts/reorder`, { queue }),
+  /** 相邻交换（POST /api/accounts/:id/move {direction: 'up'|'down'}） */
+  moveAccount: (id: string, direction: 'up' | 'down'): Promise<{ id: string; moved: boolean; reason?: string }> =>
+    request<{ id: string; moved: boolean; reason?: string }>(
+      'POST',
+      `${API_BASE}/accounts/${encodeURIComponent(id)}/move`,
+      { direction },
+    ),
+  /** 批量操作（POST /api/accounts/batch；action = enable/disable/proxy/concurrency/usageQuery/limiters/remove） */
+  batchAccounts: (body: {
+    ids: string[];
+    action: string;
+    proxy?: string | null;
+    maxConcurrent?: number;
+    usageQuery?: Record<string, unknown>;
+    limiterMode?: string;
+    limiterGroups?: unknown;
+    limiters?: unknown;
+  }): Promise<{ action: string; ok: unknown[]; failed: unknown[]; skipped: unknown[]; total: number }> =>
+    request<{ action: string; ok: unknown[]; failed: unknown[]; skipped: unknown[]; total: number }>(
+      'POST',
+      `${API_BASE}/accounts/batch`,
+      body,
+    ),
+  /** 导入账号（POST /api/accounts/import {accounts:[…]}；同 id 合并更新） */
+  importAccounts: (payload: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    request<Record<string, unknown>>('POST', `${API_BASE}/accounts/import`, payload),
+  /** 导出全部账号（GET /api/accounts/export，含 token） */
+  exportAccounts: (): Promise<{ version: number; exportedAt: number; accounts: Array<Record<string, unknown>> }> =>
+    request<{ version: number; exportedAt: number; accounts: Array<Record<string, unknown>> }>(
+      'GET',
+      `${API_BASE}/accounts/export`,
+    ),
+  /** 刷新指定/当前账号 token（POST /api/accounts/refresh {id?, force?}） */
+  refreshAccount: (body: { id?: string; force?: boolean } = {}): Promise<{ refreshedId: string; result: unknown }> =>
+    request<{ refreshedId: string; result: unknown }>('POST', `${API_BASE}/accounts/refresh`, body),
+  /** 逐账号余额同步查询（GET /api/accounts/usage[?id=]） */
+  queryAccountsUsage: (id?: string): Promise<{ results: Array<Record<string, unknown>>; skipped: number }> =>
+    request<{ results: Array<Record<string, unknown>>; skipped: number }>(
+      'GET',
+      `${API_BASE}/accounts/usage${id ? `?id=${encodeURIComponent(id)}` : ''}`,
+    ),
+  /** 逐账号活跃连接数（GET /api/accounts/connections；只含非零项） */
+  getAccountsConnections: (): Promise<{ counts: Record<string, number> }> =>
+    request<{ counts: Record<string, number> }>('GET', `${API_BASE}/accounts/connections`),
+  /** 账号页签到（POST /api/accounts/checkin {id?}） */
+  runAccountsCheckin: (id?: string): Promise<Record<string, unknown>> =>
+    request<Record<string, unknown>>('POST', `${API_BASE}/accounts/checkin`, id ? { id } : {}),
 
   /** 签到中心：某账号的活动福利 / 月度赠送预览 */
   getCheckinCampaigns: (accountId: string): Promise<ApiResponse<CheckinCampaignPreview>> =>
@@ -256,4 +364,14 @@ export const endpoints = {
   /** 规则命中预览（POST /api/prompt/rules/preview `{config, sample}`） */
   previewPromptRules: (body: { config: unknown; sample: { provider: string; client: string; model: string } }): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/prompt/rules/preview`, body),
+
+  /**
+   * 系统信息（GET /api/system-info；对照 Agent2API 同名端点）。
+   * `hideUsername` = 后端把主目录前缀替换成 `~`（复制/截图分享用）。
+   */
+  getSystemInfo: (hideUsername = false): Promise<ApiResponse<SystemInfo>> =>
+    request<ApiResponse<SystemInfo>>(
+      'GET',
+      `${API_BASE}/system-info${hideUsername ? '?hideUsername=1' : ''}`,
+    ),
 };

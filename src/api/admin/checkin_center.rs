@@ -1,15 +1,22 @@
 //! 签到中心 API（仅管理员）。
 //!
-//! - `GET  /api/checkin-center`          总览快照：支持清单 + 今日汇总 + 账号状态
+//! - `GET  /api/checkin-center`          聚合快照（A2A 形状：daily / extras /
+//!   auto / keepalive / travel / history / adminPanels / checkinFeatures）
+//! - `GET  /api/checkin-center?view=summary` 轻量汇总（只给 todayDone /
+//!   todayEligible，顶栏徽标轮询用）
 //! - `POST /api/checkin-center/run`      立即签到（全部 / 指定账号 / 指定 provider）
-//! - `GET  /api/checkin-center/records`  台账分页
+//! - `GET  /api/checkin-center/records`  台账分页（旧路径；新契约见
+//!   `api::admin::checkin_records` 的 `/api/checkin-records`）
 //! - `DELETE /api/checkin-center/records` 清空台账
 //! - `GET/PUT /api/checkin-center/settings` 总开关 + 间隔
-//! - `GET/POST /api/checkin-center/schedules` 计划列表 / 新增更新
+//! - `GET/POST /api/checkin-center/schedules` 计划列表 / 新增更新（旧路径；
+//!   新契约见 `api::admin::checkin_schedules` 的 `/api/checkin-schedules`）
 //! - `POST /api/checkin-center/schedules/remove` 删除计划
 //! - `POST /api/checkin-center/schedules/run` 立即执行某计划
-//! - `PATCH /api/checkin-center/travel`   猫猫旅行巡检配置 `{enabled?, times?}`
-//! - `POST /api/checkin-center/travel/run` 立即巡检一轮（真打上游）
+//! - `GET/POST /api/travel-schedule`      猫猫旅行巡检状态 / 改配置
+//! - `POST /api/travel-schedule/run`      立即巡检一轮（真打上游）
+//! - `PATCH /api/checkin-center/travel`   旧路径：猫猫旅行巡检配置
+//! - `POST /api/checkin-center/travel/run` 旧路径：立即巡检一轮
 //!
 //! ## 与 `/api/checkin` 的区别
 //!
@@ -23,126 +30,189 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::super::openai::AppState;
 use super::common::{error_response, verify_admin};
+use crate::checkin::center;
 use crate::checkin::claim::{self, supports_checkin};
+use crate::checkin::history;
 use crate::checkin::scheduler;
 use crate::checkin::store::{CheckinOutcome, CheckinRecord, CheckinSchedule, CheckinSettings};
 use crate::checkin::travel::{self, RunOutcome, TravelActionError, TravelExecutor};
 
-/// GET /api/checkin-center —— 总览快照（零上游请求）。
+/// GET /api/checkin-center —— 聚合快照（零上游请求）。
+///
+/// 形状对齐 Agent2API `api/checkin_center::get_center`：
+///
+/// ```json
+/// {
+///   "daily": { "providers": [...], "outOfScope": [...],
+///              "todayDone": 6, "todayEligible": 9 },
+///   "extras": { "onboarding": [...], "plans": [...], "campaigns": [...], "growth": [...] },
+///   "auto": { ...AutoState... },
+///   "keepalive": { "models": [...], "defaultModels": [...] },
+///   "travel": { ...TravelState... },
+///   "history": [ ...时间线... ],
+///   "adminPanels": ["daily_keepalive", "growth_tasks"],
+///   "checkinFeatures": { "loomy": {...}, ... }
+/// }
+/// ```
+///
+/// `?view=summary` 只回 `{daily:{todayDone,todayEligible}}` —— 顶栏徽标轮询
+/// 不必拉全量快照。
 pub async fn handle_checkin_center(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
 
-    let targets = scheduler::collect_targets(&state.account_sessions, &[]);
-    let summary = state.upstream_checkin.today_summary().unwrap_or_default();
-    let settings = state.upstream_checkin.settings();
-
-    // 按 provider 分组：每个 provider 下有哪些账号、今天签到状态
-    let mut by_provider: std::collections::BTreeMap<String, Vec<Value>> =
-        std::collections::BTreeMap::new();
-    for session in &targets {
-        let last = state
-            .upstream_checkin
-            .last_today(&session.id, &session.provider)
-            .ok()
-            .flatten();
-        by_provider
-            .entry(session.provider.clone())
-            .or_default()
-            .push(json!({
-                "id": session.id,
-                "name": session.name,
-                "channel_id": session.channel_id,
-                // available = 账号是否可用（与签到中心「不可用」徽标同口径：
-                // `status == "enabled"` 且凭证未过期）。语义对应 A2A 账号快照的
-                // `available`（false = 凭证失效等，仍列出但降级展示）。
-                "available": session.is_enabled() && !session.is_expired(chrono::Utc::now().timestamp()),
-                "checked_in_today": last.as_ref().map(|r| r.ok).unwrap_or(false),
-                "last_outcome": last.as_ref().map(|r| r.outcome.as_str()),
-                "last_message": last.as_ref().map(|r| r.message.clone()),
-                "last_ts": last.as_ref().map(|r| r.ts),
-                // 版本档（cn / intl，缺失 null）：国际版按钮文案是「领日活」而非「签到」
-                "edition": session.extra_headers.get("edition").cloned().unwrap_or_else(|| {
-                    if session.provider.ends_with("-intl") { "intl".to_string() } else { "cn".to_string() }
-                }),
-                // 成长中心连登天数（snake_case，与前端 types/index.ts 的
-                // `streak_days` 对齐；camelCase 会让连登天数永远显示「—」）
-                "streak_days": state.upstream_checkin.streak_days(&session.id),
-                // 当日签到台账（对齐 A2A dailyCheckin：只有 ok/already 才带 claimAt）
-                "daily_checkin": state
-                    .upstream_checkin
-                    .daily_checkin(&session.id, &scheduler::today())
-                    .unwrap_or(serde_json::Value::Null),
-            }));
+    let store = &state.upstream_checkin;
+    let today = scheduler::today();
+    let sessions = state.account_sessions.all();
+    // 可用清单：插件/实现接管 + 库里已有账号的家（顺序 = 白名单注册顺序）。
+    // 范围外账号统一进 `outOfScope`（按 provider + 原因聚合）。
+    let available = claim::available_checkin_providers(&state.account_sessions);
+    let summary_only = params
+        .get("view")
+        .is_some_and(|view| view.trim() == "summary");
+    if summary_only {
+        let eligible: Vec<_> = sessions
+            .iter()
+            .filter(|session| {
+                available.iter().any(|id| id == &session.provider)
+                    && center::out_of_scope_reason(session).is_none()
+            })
+            .collect();
+        let done = eligible
+            .iter()
+            .filter(|session| {
+                store
+                    .last_today(&session.id, &session.provider)
+                    .ok()
+                    .flatten()
+                    .map(|record| record.ok)
+                    .unwrap_or(false)
+            })
+            .count();
+        return Ok(Json(json!({
+            "daily": { "todayDone": done, "todayEligible": eligible.len() }
+        })));
     }
 
-    let providers: Vec<Value> = by_provider
-        .into_iter()
-        .map(|(provider, accounts)| {
-            let (done, total) = summary.get(&provider).copied().unwrap_or((0, 0));
+    // 按可用清单分桶（界面行序稳定）；范围外账号按「provider + 原因」聚合
+    let mut buckets: Vec<Vec<Value>> = vec![Vec::new(); available.len()];
+    let mut out_of_scope: BTreeMap<String, (String, String, i64)> = BTreeMap::new();
+    for session in &sessions {
+        let slot = available
+            .iter()
+            .position(|id| id == &session.provider)
+            .filter(|_| center::out_of_scope_reason(session).is_none());
+        if let Some(index) = slot {
+            buckets[index].push(center::account_row(store, session, &today));
+        } else {
+            let label = crate::model::manage::provider_label(&session.provider);
+            let reason = center::out_of_scope_reason(session).unwrap_or("没有签到链路");
+            let entry = out_of_scope
+                .entry(format!("{}|{reason}", session.provider))
+                .or_insert_with(|| (label, reason.to_string(), 0));
+            entry.2 += 1;
+        }
+    }
+
+    let features = center::checkin_features();
+    let mut provider_rows: Vec<Value> = available
+        .iter()
+        .zip(buckets)
+        .map(|(id, rows)| {
+            let done = rows
+                .iter()
+                .filter(|row| row.get("checkedInToday").and_then(Value::as_bool) == Some(true))
+                .count();
+            let declared = features.get(id.as_str()).cloned().unwrap_or(Value::Null);
+            let manual_plans = declared
+                .get("manualPlans")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             json!({
-                "provider": provider,
-                "label": crate::model::manage::provider_label(&provider),
-                "accounts": accounts,
-                "today_done": done,
-                "today_total": total,
+                "id": id,
+                "label": crate::model::manage::provider_label(id),
+                "accounts": rows,
+                "doneCount": done,
+                "totalCount": rows.len(),
+                "manualPlans": manual_plans,
+                // 插件/能力申报的链路信息（A2A 同名字段；无申报的家给 null）
+                "description": declared.get("description").cloned().unwrap_or(Value::Null),
+                "modes": declared.get("modes").cloned().unwrap_or(Value::Null),
+                "uiHooks": declared.get("uiHooks").cloned().unwrap_or(Value::Null),
             })
         })
         .collect();
-
-    let records_total = state.upstream_checkin.total_records().unwrap_or(0);
+    // 无账号的家排在最后（与 A2A 同一取舍：空行不占首屏）
+    provider_rows
+        .sort_by_key(|row| row.get("totalCount").and_then(Value::as_u64).unwrap_or(0) == 0);
+    // 库里一家账号都没有时，可用清单回落到「全部有实现的家」给编辑器用；
+    // 但签到中心的**分组行**只列真有账号的家 —— 否则首次使用会看到十几行
+    // 点了必然空转的空行（A2A 2026-10 用户反馈同一结论）。范围外账号所在的
+    // 家仍然出现（行上 0 个可签账号 + outOfScope 原因）。
+    let present: std::collections::HashSet<&str> = sessions
+        .iter()
+        .map(|session| session.provider.as_str())
+        .collect();
+    provider_rows.retain(|row| {
+        row.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| present.contains(id))
+    });
+    let today_done: u64 = provider_rows
+        .iter()
+        .map(|row| row.get("doneCount").and_then(Value::as_u64).unwrap_or(0))
+        .sum();
+    let today_eligible: u64 = provider_rows
+        .iter()
+        .map(|row| row.get("totalCount").and_then(Value::as_u64).unwrap_or(0))
+        .sum();
+    let out_rows: Vec<Value> = out_of_scope
+        .into_values()
+        .map(|(label, reason, count)| json!({ "label": label, "reason": reason, "count": count }))
+        .collect();
 
     Ok(Json(json!({
-        "success": true,
-        "data": {
-            "settings": settings,
-            "supported_providers": claim::supported_providers(),
-            // 实现随上游进入闭源插件仓、主仓未接入的三家（前端据此置灰入口）：
-            "unsupported_providers": claim::UNSUPPORTED_PROVIDERS,
-            "providers": providers,
-            "schedules": state.upstream_checkin.schedules(),
-            "records_total": records_total,
-            // 多条目自动签到状态（对齐 A2A `auto` 块）：总开关 + 条目数组 + 提供商清单
-            "auto": crate::checkin::center::auto_state(
-                &state.upstream_checkin,
-                &state.account_sessions,
-            ),
-            // 活动 / 月度赠送 / 限时套餐的账号清单（本地领取台账，零上游请求）
-            "campaigns": crate::checkin::center::campaign_rows(
-                &state.upstream_checkin,
-                &state.account_sessions,
-            ),
-            // 活动预览的空形状（对齐 A2A CampaignPreview：campaigns / monthlyGifts /
-            // riskNote / redemption）——AIGX 暂无 provider 活动链路，返回空集但形状不变
-            "campaign_preview": crate::checkin::center::campaign_preview_shape(),
-            // 猫猫旅行巡检（growth_scheduler；前端 CheckinCenter.tsx 读 data.travel，
-            // 缺省 = 不渲染该卡）。零上游请求：只读 `checkin:travel` 与本轮 running 位。
-            "travel": travel_state(&state),
-            // 台账按 outcome 的统计卡（成功 / 已领 / 待重试 / 需验证 / 失败）
-            "records_stats": {
-                "success": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Success), None).map(|r| r.len()).unwrap_or(0),
-                "already": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Already), None).map(|r| r.len()).unwrap_or(0),
-                "pending": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Pending), None).map(|r| r.len()).unwrap_or(0),
-                "captcha": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Captcha), None).map(|r| r.len()).unwrap_or(0),
-                "failed": state.upstream_checkin.recent_records(1, None, None, Some(CheckinOutcome::Failed), None).map(|r| r.len()).unwrap_or(0),
-            },
-            "today_summary": summary.iter().map(|(k, (done, total))| json!({
-                "provider": k, "done": done, "total": total
-            })).collect::<Vec<_>>(),
-            // #18-⑤（生产实证：三处开关全关，签到静默不跑，用户以为坏了）：
-            // 定时总开关关 + 重试间隔关（retry_gap_ms=0）+ 无启用计划 ⇒
-            // all_disabled=true，前端据此显示显著提示 + 一键开启入口。
-            // 是否开启由用户决策——后端只如实上报，不擅自改配置。
-            "all_disabled": !settings.enabled
-                && settings.retry_gap_ms == 0
-                && state.upstream_checkin.schedules().iter().all(|s| !s.enabled),
-        }
+        "daily": {
+            "providers": provider_rows,
+            "outOfScope": out_rows,
+            "todayDone": today_done,
+            "todayEligible": today_eligible,
+        },
+        "extras": {
+            "onboarding": center::onboarding_rows(store, &state.account_sessions),
+            "plans": center::plan_rows(store, &state.account_sessions),
+            "campaigns": center::campaign_rows(),
+            "growth": center::growth_rows(&state.account_sessions),
+        },
+        // 自动签到（多条目状态机；与 /api/checkin-schedules 的 GET 同形）
+        "auto": center::auto_state(store, &state.account_sessions),
+        // WorkBuddy 国际版日活保活的模型链（签到中心可编辑）
+        "keepalive": center::keepalive_view(store),
+        // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果
+        "travel": travel_state(&state),
+        // 插件申报的签到窗口任务（AIGX 由本仓调度接管，形状占位空数组）
+        "pluginTasks": [],
+        // 轮次时间线（新条目在前；只记批量轮次）
+        "history": history::list(store),
+        // 面板可见性（对齐 A2A adminPanels）：没装/没账号时不显示面板
+        "adminPanels": center::admin_panels(&state.account_sessions),
+        // 各家签到链路信息（说明 / 档位 / UI 钩子），按 provider id 索引
+        "checkinFeatures": features,
+        // ── AIGX 扩展（A2A 快照没有这些键；前端设置卡与统计卡在用）──
+        "settings": state.upstream_checkin.settings(),
+        "recordsTotal": state.upstream_checkin.total_records().unwrap_or(0),
+        "supportedProviders": claim::supported_providers(),
+        "unsupportedProviders": claim::UNSUPPORTED_PROVIDERS,
+        // 活动预览的空形状（A2A `CampaignPreview`）：AIGX 暂无 provider 活动
+        // 下发链路，返回空集但形状不变（前端按类型解析不会拿到 undefined）
+        "campaignPreview": center::campaign_preview_shape(),
     })))
 }
 
@@ -179,6 +249,7 @@ pub async fn handle_checkin_run(
 
     let mut results: Vec<Value> = Vec::with_capacity(targets.len());
     let mut ok = 0usize;
+    let mut failures: Vec<String> = Vec::new();
     for session in &targets {
         // 出口统一走 `client_for`（解析 pool:/rotate 编码），与数据面同链路
         let client = match state.account_sessions.client_for(session) {
@@ -193,6 +264,7 @@ pub async fn handle_checkin_run(
                     &message,
                     false,
                 );
+                failures.push(format!("{}（{message}）", session.name));
                 results.push(json!({
                     "account_id": session.id,
                     "account_name": session.name,
@@ -207,6 +279,12 @@ pub async fn handle_checkin_run(
         let result = claim::claim_for(&client, session).await;
         if result.outcome.is_ok() {
             ok += 1;
+        }
+        if matches!(
+            result.outcome,
+            CheckinOutcome::Failed | CheckinOutcome::Captcha
+        ) {
+            failures.push(format!("{}（{}）", session.name, result.msg));
         }
         scheduler::record(
             &state.upstream_checkin,
@@ -227,6 +305,19 @@ pub async fn handle_checkin_run(
         if settings.gap_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(settings.gap_ms)).await;
         }
+    }
+    // 批量手动轮次也进签到中心时间线（单账号点签不进 —— 见 history 模块头）。
+    // A2A 的 `run_now` 走 `run_checkin`，两种批量手动同样记一条。
+    if request.account_ids.is_empty() {
+        history::record(
+            &state.upstream_checkin,
+            "手动触发",
+            ok,
+            0,
+            targets.len(),
+            0,
+            &failures,
+        );
     }
 
     Ok(Json(json!({
@@ -593,6 +684,7 @@ pub async fn handle_upsert_checkin_schedule(
     let (
         last_fired_date,
         last_result,
+        last_summary,
         last_ok,
         last_keepalive,
         last_failed,
@@ -605,6 +697,7 @@ pub async fn handle_upsert_checkin_schedule(
             (
                 s.last_fired_date.clone(),
                 s.last_result.clone(),
+                s.last_summary.clone(),
                 s.last_ok,
                 s.last_keepalive,
                 s.last_failed,
@@ -657,6 +750,7 @@ pub async fn handle_upsert_checkin_schedule(
             last_retried_providers,
             account_plan,
             last_result,
+            last_summary,
             last_ok,
             last_keepalive,
             last_failed,
@@ -727,6 +821,9 @@ pub async fn handle_run_checkin_schedule(
         &outcome.summary,
         &counts,
     );
+    let _ = state
+        .upstream_checkin
+        .mark_last_summary(&schedule.id, &outcome.last_summary);
     Ok(Json(json!({
         "success": true,
         "data": {
@@ -880,7 +977,97 @@ fn travel_state(state: &AppState) -> Value {
     travel::state(&state.upstream_checkin, &executor)
 }
 
-/// PATCH /api/checkin-center/travel —— 部分更新 `{enabled?, times?}`。
+// ── 猫猫旅行定时排程（A2A 契约：GET/POST /api/travel-schedule +
+//    POST /api/travel-schedule/run；旧 PATCH 路径保留在下面）──────────────
+
+/// GET /api/travel-schedule —— 开关、时刻数组、今日已执行时刻、上一轮结果。
+pub async fn handle_get_travel_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(travel_state(&state)))
+}
+
+/// POST /api/travel-schedule —— 改配置 `{enabled?, times?}`（只改传进来的字段）。
+///
+/// 校验口径对齐 A2A `growth_scheduler::configure`：空对象 / 非法时刻 /
+/// 空时刻表 / 超过上限 → 400 管理信封（`{success:false,error}`）。
+pub async fn handle_configure_travel_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let config = travel::patch(&state.upstream_checkin, &body)
+        .map_err(|message| error_response(&message, StatusCode::BAD_REQUEST))?;
+    tracing::info!(
+        "[Travel] 排程已{}，时刻 {:?}",
+        if config.enabled { "开启" } else { "关闭" },
+        config.times
+    );
+    Ok(Json(travel_state(&state)))
+}
+
+/// POST /api/travel-schedule/run —— 立即巡检一轮（真打上游）。
+///
+/// 响应对齐 A2A `api::growth_schedule::run_now`：
+/// - 成功 → 200 `{outcome:"completed", summary, schedule}`
+/// - 能力不可用（插件未装/未启用）→ 200 `{outcome:"skipped", message, schedule}`
+/// - 已有一轮在跑 → 409 `{success:false,outcome:"busy",error,schedule}`
+/// - 上游失败 → `{success:false,outcome:"failed",error,code,schedule}`
+pub async fn handle_run_travel_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let executor = StateTravelExecutor::new(&state);
+    match travel::run_now(&state.upstream_checkin, &executor).await {
+        RunOutcome::Completed {
+            summary,
+            ok,
+            failed,
+        } => Ok(Json(json!({
+            "outcome": "completed",
+            "summary": { "message": summary, "ok": ok, "failed": failed },
+            "schedule": travel_state(&state),
+        }))),
+        RunOutcome::Skipped(message) => Ok(Json(json!({
+            "outcome": "skipped",
+            "message": message,
+            "summary": Value::Null,
+            "schedule": travel_state(&state),
+        }))),
+        RunOutcome::Busy => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "success": false,
+                "outcome": "busy",
+                "error": "旅行巡检正在执行中，请稍候",
+                "schedule": travel_state(&state),
+            })),
+        )),
+        RunOutcome::Failed(error) => {
+            let status = match error.code.as_deref() {
+                Some("unsupported") => StatusCode::NOT_IMPLEMENTED,
+                Some("configuration") => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            Err((
+                status,
+                Json(json!({
+                    "success": false,
+                    "outcome": "failed",
+                    "error": error.message,
+                    "code": error.code,
+                    "schedule": travel_state(&state),
+                })),
+            ))
+        }
+    }
+}
+
+/// PATCH /api/checkin-center/travel —— 部分更新 `{enabled?, times?}`（旧路径）。
 ///
 /// 校验口径见 [`travel::patch`]：非法 HH:MM / 空时刻表 / 超过上限 → 400，
 /// 不落半截配置。响应给刷新后的完整状态（前端就地重绘）。

@@ -288,6 +288,46 @@ pub fn supported_providers() -> &'static [&'static str] {
     CHECKIN_PROVIDERS
 }
 
+/// 这家是否**有本地实现**（白名单内且不在插件仓清单）。
+///
+/// 与 [`supports_checkin`] 的分工：后者是**配置白名单**（签到范围与上游对齐，
+/// 允许先落盘、后补实现）；本函数是**执行判据** —— 调度、批量签到只跑
+/// 有实现的家，未实现（插件仓）的家不会被每天打一遍必然失败的上游。
+pub fn is_implemented(provider: &str) -> bool {
+    CHECKIN_PROVIDERS.contains(&provider) && !UNSUPPORTED_PROVIDERS.contains(&provider)
+}
+
+/// 当前**实际可用**的签到提供商清单（对齐 A2A
+/// `auto_checkin::available_checkin_providers`）：白名单里**有实现**的家
+/// （排除 [`UNSUPPORTED_PROVIDERS`]），且满足其一：
+///
+/// - 库里已有它的账号（签到中心分组、范围复选框按这个清单渲染 —— 没账号
+///   的家列出来是一屏点了必然空转的复选框，A2A 2026-10 用户反馈同一结论）；
+/// - 一家账号都没有时回落完整可用清单（首次配置场景，用户还没导入账号）。
+///
+/// 白名单顺序即展示顺序（内置家的顺序是存量契约，别按字母重排）。
+pub fn available_checkin_providers(
+    sessions: &crate::account_session::AccountSessionStore,
+) -> Vec<String> {
+    let implemented: Vec<String> = CHECKIN_PROVIDERS
+        .iter()
+        .filter(|id| is_implemented(id))
+        .map(|id| id.to_string())
+        .collect();
+    let present: std::collections::HashSet<String> =
+        sessions.all().into_iter().map(|s| s.provider).collect();
+    let picked: Vec<String> = implemented
+        .iter()
+        .filter(|id| present.contains(*id))
+        .cloned()
+        .collect();
+    if picked.is_empty() {
+        implemented
+    } else {
+        picked
+    }
+}
+
 /// 执行一次签到。
 pub async fn claim_for(client: &Client, session: &AccountSession) -> ClaimResult {
     if session.credential.kind != CREDENTIAL_KIND_SESSION {
@@ -2329,5 +2369,40 @@ mod tests {
                 "{provider} 应仍在签到白名单里（只是实现未接入）"
             );
         }
+    }
+
+    #[test]
+    fn is_implemented_excludes_plugin_repo_entries_and_unknowns() {
+        // 正向：有实现的家
+        assert!(is_implemented("loomy"));
+        assert!(is_implemented("zcode-intl"));
+        // 反向：插件仓三家 + 未知 id 都不可执行
+        for provider in UNSUPPORTED_PROVIDERS {
+            assert!(!is_implemented(provider), "{provider} 不应被执行链选中");
+        }
+        assert!(!is_implemented("not-a-provider"));
+    }
+
+    #[test]
+    fn available_providers_fall_back_to_implemented_when_store_empty() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("aigx-claim-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::account_session::AccountSessionStore::new(std::sync::Arc::new(
+            crate::storage::FileStore::new(dir),
+        ));
+        let ids = available_checkin_providers(&store);
+        // 一家账号都没有时回落「全部有实现的家」（首次配置场景）
+        assert_eq!(
+            ids.len(),
+            CHECKIN_PROVIDERS.len() - UNSUPPORTED_PROVIDERS.len()
+        );
+        // 正向对照：可用的家确实在清单里；插件仓三家不在
+        assert!(ids.iter().any(|id| id == "loomy"));
+        assert!(ids
+            .iter()
+            .all(|id| !UNSUPPORTED_PROVIDERS.contains(&id.as_str())));
     }
 }
