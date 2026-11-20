@@ -79,6 +79,7 @@ pub(crate) fn record_playground_usage(
     // 管理员豁免计费 → cost=0）
     let log = crate::log::RequestLog {
         purge_applied: false,
+        special_route: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: Some(user_id.to_string()),
         key_id: Some(format!("playground:{kind}")),
@@ -155,6 +156,7 @@ pub(crate) fn record_playground_failure(
 ) {
     let log = crate::log::RequestLog {
         purge_applied: false,
+        special_route: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: Some(user_id.to_string()),
         key_id: Some(format!("playground:{kind}")),

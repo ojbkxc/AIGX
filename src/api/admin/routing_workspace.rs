@@ -1420,7 +1420,9 @@ fn trace_entry_json(log: &RequestLog, meta: &HashMap<String, ChannelMeta>) -> Va
         object.insert("hasRouteReplay".to_string(), json!(has_route_replay(log)));
         // 前端 `RoutingTraceRow.route`（回放快照的扁平投影）：只在有捕获时给，
         // 与既有 GET /api/routing/replay/:request_id 的详情端点互补。
-        let route = if has_route_replay(log) {
+        // 特殊路由留痕（compact/title/vision）即使没有回放捕获也要投影，否则
+        // 「最近命中」右栏恒为空（frontend SpecialHits 读这三键）。
+        let mut route = if has_route_replay(log) {
             json!({
                 "strategy": log.route_config.as_ref().map(|config| config.strategy.clone()),
                 "sticky": log.route_config.as_ref().map(|config| config.sticky_enabled),
@@ -1429,7 +1431,49 @@ fn trace_entry_json(log: &RequestLog, meta: &HashMap<String, ChannelMeta>) -> Va
                 "attempts": log.attempt_details,
             })
         } else {
+            json!({})
+        };
+        if let Some(trace) = &log.special_route {
+            if let Some(object) = route.as_object_mut() {
+                match trace.kind.as_str() {
+                    "compact" => {
+                        object.insert(
+                            "compactRoute".to_string(),
+                            json!({
+                                "source": trace.from.as_deref(),
+                                "target": trace.to.as_deref(),
+                            }),
+                        );
+                    }
+                    "title" => {
+                        object.insert(
+                            "titleRoute".to_string(),
+                            json!({
+                                "source": trace.from.as_deref(),
+                                "target": trace.to.as_deref(),
+                            }),
+                        );
+                    }
+                    "vision" => {
+                        object.insert(
+                            "visionCompatibility".to_string(),
+                            json!({
+                                "mode": trace.mode.as_deref(),
+                                "target": trace
+                                    .to
+                                    .as_deref()
+                                    .map(|model| json!({ "model": model })),
+                            }),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let route = if route.as_object().is_some_and(|object| object.is_empty()) {
             Value::Null
+        } else {
+            route
         };
         object.insert("route".to_string(), route);
     }
@@ -1954,6 +1998,46 @@ mod tests {
     }
 
     // ── trace 过滤 ──
+
+    /// 特殊路由留痕投影：compact/title/vision 各自映射成前端约定的三键，
+    /// 即使没有路由回放捕获也要出现；无留痕时 route 保持 Null（旧契约）。
+    #[test]
+    fn trace_route_projects_special_hits() {
+        use crate::log::SpecialRouteTrace;
+        let meta = HashMap::new();
+
+        let mut compact = log_with("id-c", "glm-5.3-flash", Some("glm-5.3"), "ch1", 200, 5, 20);
+        compact.special_route = Some(SpecialRouteTrace::rewrite(
+            "compact",
+            "glm-5.3",
+            "glm-5.3-flash",
+        ));
+        let value = trace_entry_json(&compact, &meta);
+        let route = &value["route"];
+        assert_eq!(route["compactRoute"]["source"], "glm-5.3");
+        assert_eq!(route["compactRoute"]["target"], "glm-5.3-flash");
+        assert!(route.get("titleRoute").is_none());
+        assert!(route.get("visionCompatibility").is_none());
+
+        let mut title = log_with("id-t", "cheap", Some("gpt-4o"), "ch1", 200, 5, 21);
+        title.special_route = Some(SpecialRouteTrace::rewrite("title", "gpt-4o", "cheap"));
+        let value = trace_entry_json(&title, &meta);
+        assert_eq!(value["route"]["titleRoute"]["source"], "gpt-4o");
+        assert_eq!(value["route"]["titleRoute"]["target"], "cheap");
+
+        let mut vision = log_with("id-v", "gpt-4o", None, "ch1", 200, 5, 22);
+        vision.special_route = Some(SpecialRouteTrace::vision("switch", Some("qwen-vl".into())));
+        let value = trace_entry_json(&vision, &meta);
+        assert_eq!(value["route"]["visionCompatibility"]["mode"], "switch");
+        assert_eq!(
+            value["route"]["visionCompatibility"]["target"]["model"],
+            "qwen-vl"
+        );
+
+        // 没有任何留痕 → route 仍是 Null（保持旧契约）。
+        let plain = log_with("id-p", "gpt-4o", None, "ch1", 200, 5, 23);
+        assert!(trace_entry_json(&plain, &meta)["route"].is_null());
+    }
 
     #[test]
     fn trace_filters_status_model_and_search() {

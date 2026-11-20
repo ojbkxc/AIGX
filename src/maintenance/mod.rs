@@ -7,7 +7,8 @@
 //!   · 凭证维护：逐账号 `account_session::refresh::refresh_one`，每条账号一条
 //!     明细（成功 / 跳过 / 失败，失败可带 `invalid` 标记）；
 //!   · 模型目录刷新：调用 `scheduled_tasks::model_refresh_work`（models.dev +
-//!     渠道清单 + 目录对账），元数据结果记在 `run.metadata` 一条。
+//!     渠道清单 + 目录对账），逐启用渠道一条明细（成功 / 跳过 / 失败 + 条数），
+//!     models.dev 汇总另记在 `run.metadata` 一条。
 //!
 //! 排期状态仍委托 `scheduled_tasks::task_state`（租约 / 所有者 / 心跳 /
 //! 失败退避）；执行记录落在 [`storage`]（FileStore KV，有界保留）。
@@ -16,6 +17,12 @@
 //! `/api/maintenance/run/{task}` 与自动任务走同一 `execute`；手动执行
 //! **越过失败冷却**（Bypass）但不越过在途租约与最短请求间隔。重试按记录里
 //! 的失败项点名原账号（`forced`），账号被删/禁用时不偷偷换号，如实记 skipped。
+//!
+//! ── 手动单账号刷新为何也走这里 ──────────────────────────────
+//! `/api/account-sessions/:id/refresh` 的刷新效果与自动维护同源（都调
+//! `refresh_one`），记录也应同源 —— 否则「手动刷新过什么」在维护记录里永远
+//! 看不到。见 [`refresh_single_recorded`]：只补一条 `source=manual` 明细，
+//! 记录失败**不影响**刷新结果（原响应体与错误语义一概不变）。
 
 pub mod storage;
 pub mod types;
@@ -190,6 +197,83 @@ pub async fn launch_async(state: AppState, request: Request) -> Result<Detail, S
     Ok(started)
 }
 
+/// 手动刷新单个账号并落一条 `source=manual` 维护记录。
+///
+/// 复用 `account_session::refresh::refresh_one` 的全部语义（单飞 / CAS / 失败
+/// 不改写凭据）；**原样返回** `RefreshOutcome`，调用方据此维持原来的响应体与
+/// 错误码。记录写入失败只记一条 warn，绝不影响刷新结果 —— 用户按下刷新按钮
+/// 要的是「凭证刷没刷成功」，不是「记录写没写进去」。
+pub async fn refresh_single_recorded(
+    state: &AppState,
+    session: &crate::account_session::model::AccountSession,
+) -> RefreshOutcome {
+    let started = std::time::Instant::now();
+    let before_expires = session.expires_at.filter(|value| *value > 0);
+    let outcome = refresh::refresh_one(&state.account_sessions, &state.http_client, session).await;
+    let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let after_expires = state
+        .account_sessions
+        .get(&session.id)
+        .and_then(|current| current.expires_at)
+        .filter(|value| *value > 0);
+    if let Err(error) = record_manual_single(
+        state.maintenance.store.clone(),
+        session,
+        &outcome,
+        before_expires,
+        after_expires,
+        duration_ms,
+    ) {
+        tracing::warn!("[Maintenance] 手动刷新记录写入失败（不影响刷新结果）：{error}");
+    }
+    outcome
+}
+
+/// 把一次手动单账号刷新的结果写成一条轮次（一条明细）。
+///
+/// 抽成同步辅助函数是为了可单测：调用方（[`refresh_single_recorded`]）需要
+/// `AppState` 才能真刷，而「记录形状是否正确」与网络无关。`Stale` 记 skipped
+/// 而不是 failed —— 凭据已被别的路径更新，本次没有覆盖任何东西，也没有出错。
+fn record_manual_single(
+    store: Arc<FileStore>,
+    session: &crate::account_session::model::AccountSession,
+    outcome: &RefreshOutcome,
+    before_expires: Option<i64>,
+    after_expires: Option<i64>,
+    duration_ms: i64,
+) -> Result<Detail, String> {
+    let recorder = storage::Recorder::start(store, CREDENTIAL, "manual", None)?;
+    let snapshots = types::accounts(std::slice::from_ref(session));
+    let (status, message, invalid, credential_changed) = match outcome {
+        RefreshOutcome::Refreshed(_) => ("refreshed", None, false, true),
+        RefreshOutcome::Stale => (
+            "skipped",
+            Some("凭据已被其他路径更新，未覆盖".to_string()),
+            false,
+            false,
+        ),
+        RefreshOutcome::Invalid(message) => ("failed", Some(message.clone()), true, false),
+        RefreshOutcome::Failed(message) => ("failed", Some(message.clone()), false, false),
+    };
+    let raw = json!({
+        "id": &session.id,
+        "provider": &session.provider,
+        "providerLabel": types::provider_label(&session.provider),
+        "accountId": &session.id,
+        "accountName": &session.name,
+        "status": status,
+        "message": message,
+        "expiresBefore": before_expires.map(|value| value * 1000),
+        "expiresAfter": after_expires.map(|value| value * 1000),
+        "credentialChanged": credential_changed,
+        "durationMs": duration_ms,
+        // 手动按钮语义即「现在真打一次」，与维护重试点名同一口径。
+        "forced": true,
+        "invalid": invalid,
+    });
+    recorder.finish(vec![types::item(&raw, 0, &snapshots)], None)
+}
+
 async fn complete(
     state: &AppState,
     request: Request,
@@ -271,35 +355,33 @@ async fn complete_prepared(
             format!("凭证维护：成功 {refreshed} 个，失败 {hard_failed} 个（失效标记见明细）");
         tracing::info!("[Maintenance] {note}");
     } else {
-        let (work_summary, ok, count) = crate::scheduled_tasks::model_refresh_work(state).await;
+        let work = crate::scheduled_tasks::model_refresh_work(state).await;
+        // 逐启用渠道一条明细（成功 / 跳过 / 失败 + 条数）：模型目录刷新此前只留
+        // 一条 models.dev 汇总，某家渠道连续 401 时界面上看不出是谁坏了。
+        for (index, raw) in work.results.iter().enumerate() {
+            items.push(types::item(raw, index, &HashMap::new()));
+        }
         metadata = Some(types::item(
             &json!({
                 "provider": "models.dev",
                 "providerLabel": "models.dev",
-                "status": if ok { "refreshed" } else { "failed" },
-                "message": if ok { Value::Null } else { json!(work_summary) },
-                "count": count,
+                "status": if work.ok { "refreshed" } else { "failed" },
+                "message": if work.ok { Value::Null } else { json!(&work.summary) },
+                "count": work.count,
             }),
             0,
             &HashMap::new(),
         ));
-        if ok {
-            refreshed = 1;
-        } else {
-            hard_failed = 1;
-        }
-        tracing::info!("[Maintenance] 模型目录更新：{work_summary}");
+        // 明细计数 + models.dev 汇总共同决定这一轮成败：任一渠道失败仍是部分
+        // 成功（不退避），全失败或元数据失败才退避。
+        let (item_refreshed, _, item_failed) = types::summary(&items);
+        refreshed = item_refreshed;
+        hard_failed = item_failed + if work.ok { 0 } else { 1 };
+        tracing::info!("[Maintenance] 模型目录更新：{}", work.summary);
     }
 
-    let success = if request.task_id == CREDENTIAL {
-        // 与上游意图一致：部分成功不退避；全失败（不含 invalid）才退避。
-        hard_failed == 0 || refreshed > 0
-    } else {
-        metadata
-            .as_ref()
-            .is_none_or(|item| item.status == "refreshed")
-            || !items.iter().any(|item| item.status == "failed")
-    };
+    // 与上游同一口径：部分成功不退避，全失败（不含 invalid）才退避。
+    let success = hard_failed == 0 || refreshed > 0;
     let detail_result = recorder.finish(items, metadata);
     let note = match &detail_result {
         Ok(detail) => summary(detail),
@@ -438,6 +520,101 @@ pub async fn retry_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_store() -> (Arc<FileStore>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        (Arc::new(FileStore::new(dir.path().to_path_buf())), dir)
+    }
+
+    fn session(
+        id: &str,
+        provider: &str,
+        expires: Option<i64>,
+    ) -> crate::account_session::model::AccountSession {
+        let mut session = crate::account_session::model::AccountSession::new("chan", id);
+        session.id = id.to_string();
+        session.provider = provider.to_string();
+        session.name = format!("Name {id}");
+        session.expires_at = expires;
+        session
+    }
+
+    /// 缺口 1：手动单账号刷新必须落一条 `source=manual` 记录（一条明细，
+    /// 含 provider / account / status / message / duration）。
+    #[tokio::test]
+    async fn manual_single_refresh_writes_manual_record() {
+        let (store, _dir) = temp_store();
+        let target = session("acc-1", "workbuddy", Some(1_700_003_600));
+        let detail = record_manual_single(
+            store.clone(),
+            &target,
+            &RefreshOutcome::Refreshed("token 已续期".to_string()),
+            Some(1_700_000_000),
+            Some(1_700_003_600),
+            42,
+        )
+        .unwrap();
+        assert_eq!(detail.run.task_id, CREDENTIAL);
+        assert_eq!(detail.run.source, "manual");
+        assert_eq!(detail.run.status, "completed");
+        assert_eq!(detail.results.len(), 1);
+        let item = &detail.results[0];
+        assert_eq!(item.account_id.as_deref(), Some("acc-1"));
+        assert_eq!(item.provider, "workbuddy");
+        assert_eq!(item.status, "refreshed");
+        assert_eq!(item.duration_ms, Some(42));
+        assert!(item.forced);
+        assert!(!item.invalid);
+        assert_eq!(item.expires_before, Some(1_700_000_000_000));
+        assert_eq!(item.expires_after, Some(1_700_003_600_000));
+
+        let stored = storage::detail(&store, &detail.run.id).unwrap();
+        assert_eq!(stored.results.len(), 1);
+        // 维护记录按 manual 来源能筛出来（前端「手动」筛选同口径）。
+        let manual = storage::list(
+            &store,
+            &types::Query {
+                source: "manual".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(manual["total"], 1);
+    }
+
+    /// 失效与普通失败都记 failed，但只有 `Invalid` 带 invalid 标记（重试无意义）。
+    #[tokio::test]
+    async fn manual_single_refresh_marks_invalid_and_stale() {
+        let (store, _dir) = temp_store();
+        let target = session("acc-2", "trae", Some(2_000));
+        let detail = record_manual_single(
+            store.clone(),
+            &target,
+            &RefreshOutcome::Invalid("refresh token 失效".to_string()),
+            None,
+            None,
+            5,
+        )
+        .unwrap();
+        assert_eq!(detail.run.status, "failed");
+        assert!(detail.results[0].invalid);
+        assert_eq!(
+            detail.results[0].message.as_deref(),
+            Some("refresh token 失效")
+        );
+
+        let detail = record_manual_single(
+            store.clone(),
+            &target,
+            &RefreshOutcome::Stale,
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        assert_eq!(detail.run.status, "skipped");
+        assert_eq!(detail.results[0].status, "skipped");
+    }
 
     #[test]
     fn task_constants_match_scheduled_tasks() {

@@ -226,7 +226,14 @@ function CheckinHistoryTimeline({ rows }: { rows: CheckinHistoryRow[] }): JSX.El
 /** 逐账号福利预览（A2A `extras`）：快照只给入口清单，明细走福利通道。 */
 function CheckinExtrasPreview({ center }: { center: CheckinCenterData }): JSX.Element | null {
   const { t } = useTranslation();
-  const { onboarding, plans, campaigns, growth } = center.extras;
+  // extras 是 A2A 后来的契约新增字段：旧后端/旧桩不返回时，缺一个可选区块
+  // 不应把整页打成「出错了」。缺失按空清单处理（组件随后 return null）。
+  const { onboarding, plans, campaigns, growth } = center.extras ?? {
+    onboarding: [],
+    plans: [],
+    campaigns: [],
+    growth: [],
+  };
   const hasAny =
     onboarding.length > 0 || plans.length > 0 || campaigns.length > 0 || growth.length > 0;
   if (!hasAny) return null;

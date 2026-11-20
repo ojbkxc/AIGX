@@ -218,8 +218,11 @@ export default function Wallet(): JSX.Element {
     return Math.round(money * 100) / 100;
   };
 
+  // 与后端 topup_quota 对齐：**折扣只影响实付金额**，到账按面值折算
+  // （充 100 打 9 折 = 付 90、到账仍按 100 元 × price）。两边都乘折扣会让
+  // 档位越大到账越少，优惠名不副实。
   const quotaFor = (amt: number): number => {
-    const quota = amt * (epay?.price || 1) * discountFor(amt);
+    const quota = amt * (epay?.price || 1);
     return quota;
   };
 

@@ -24,13 +24,19 @@
 //!    `api::client_id::BUILTIN_CLIENTS` 注册内置 UA 令牌 `zcode`（对齐 A2A
 //!    `core/client/catalog.rs`），显式声明 `X-Client-Name: zcode` 也归一到
 //!    同一规范名 `ZCode` —— 两条路径都能命中压缩路由。
-//! 4. **挂钩点**：只挂钩 chat 数据面（[`apply_chat_request`]），只做「识别 +
-//!    改写 `body["model"]` + 请求体留痕」，不碰协议转换。Responses /
-//!    Anthropic 两个入口本波未接（A2A 支持，AIGX 待后续）。
-//! 5. **未移植**：`parameters::cap_output`（按目标模型 `maxOutputTokens`
-//!    收口）需要模型目录查询，数据面 hook 为纯函数、拿不到 provider 目录，
-//!    本波不做；`title_routes` 的旧形状（`clients`+`model`）折叠不做 ——
-//!    AIGX 无历史遗留配置。模型存在性校验放在管理面 PUT（见 `api::admin`）。
+//! 4. **挂钩点**：三个数据面入口都接（`apply_request`）——chat
+//!    （[`apply_chat_request`]）、`/v1/responses`（[`Format::Responses`]）、
+//!    Anthropic `/v1/messages`（[`Format::Anthropic`]）。识别与改写都在协议
+//!    翻译**之前**读各自的原生请求体（Responses 的 `input`、Anthropic 的
+//!    `messages` + `content` 块），只做「识别 + 改写 `body["model"]` + 请求体
+//!    留痕」，不碰协议转换。视觉（image_compat）裁决在三个入口各自已有，
+//!    本模块不重复。
+//! 5. **cap_output**：压缩换模型后按目标模型的 `maxOutputTokens` 收口
+//!    `max_tokens` / `max_completion_tokens` / `max_output_tokens`。AIGX 没有
+//!    上游那种按 provider 的目录，取 models.dev 目录的 `output`（同一次模型
+//!    刷新写入，见 [`compact::cap_output`]）；拿不到上限时**不猜**，原样放行。
+//!    `title_routes` 的旧形状（`clients`+`model`）折叠不做 —— AIGX 无历史遗留
+//!    配置。模型存在性校验放在管理面 PUT（见 `api::admin`）。
 
 use std::sync::{Arc, OnceLock};
 
@@ -81,6 +87,37 @@ pub enum Kind {
     Compact,
     /// 标题生成（Codex / ZCode / Claude Code）
     Title,
+}
+
+/// 请求所处的协议形态。
+///
+/// 既决定去哪里读消息列表（Responses 是 `input`，其余是 `messages`），也决定
+/// 内容块里的纯文本类型名（Responses 是 `input_text`）—— 与上游
+/// `compact_routing::RequestFormat` 同口径。识别必须在协议翻译**之前**读原生
+/// 请求体：翻成 Chat 后连续 user 会被合并、块类型也会丢。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Chat,
+    Responses,
+    Anthropic,
+}
+
+impl Format {
+    /// 消息列表所在的顶层字段。
+    pub(crate) fn messages_field(self) -> &'static str {
+        match self {
+            Self::Responses => "input",
+            _ => "messages",
+        }
+    }
+
+    /// 内容块数组里的纯文本类型名。
+    pub(crate) fn text_type(self) -> &'static str {
+        match self {
+            Self::Responses => "input_text",
+            _ => "text",
+        }
+    }
 }
 
 impl Kind {
@@ -243,18 +280,29 @@ pub fn client_id_from_identity(identity: &ClientIdentity) -> Option<&'static str
     }
 }
 
-/// chat 数据面入口：识别并改写模型名。
+/// chat 数据面入口（[`Format::Chat`] 的薄包装，保留旧调用点）。
+pub fn apply_chat_request(
+    identity: &ClientIdentity,
+    headers: &HeaderMap,
+    body: &mut Value,
+) -> Option<Rewrite> {
+    apply_request(identity, headers, body, Format::Chat)
+}
+
+/// 数据面统一入口：按请求协议形态识别并改写模型名。
 ///
 /// 返回 `Some` 时已完成 `body["model"]` 改写、会话参数收口与请求体留痕。
 /// **调用方必须**：把本地 `model` 变量更新为 `rewrite.target`（否则后续选路
 /// 仍用旧名），并把 `rewrite.source` 记进 `RequestLog.origin_model`。
 ///
 /// 顺序与 A2A 一致：先判压缩（它的模板里也含「summary of the conversation」
-/// 一类措辞，先判可保证压缩请求不被标题路由抢走），再判标题。
-pub fn apply_chat_request(
+/// 一类措辞，先判可保证压缩请求不被标题路由抢走），再判标题。压缩命中后额外
+/// 按目标模型的最大输出收口（[`compact::cap_output`]）。
+pub fn apply_request(
     identity: &ClientIdentity,
     headers: &HeaderMap,
     body: &mut Value,
+    format: Format,
 ) -> Option<Rewrite> {
     let client = client_id_from_identity(identity)?;
     let source = body
@@ -266,8 +314,11 @@ pub fn apply_chat_request(
         return None;
     }
 
-    let rewrite = if let Some(target) = compact::resolve(client, &source, body) {
+    let rewrite = if let Some(target) = compact::resolve_for(client, &source, body, format) {
         compact::clear_source_reasoning(body);
+        // 压缩请求换到（通常更便宜的）目标模型后，按目标的已知最大输出收口；
+        // 否则客户端按来源模型给的 max_tokens 可能超过目标上限，上游直接 400。
+        compact::cap_output(body, &target);
         Rewrite {
             kind: Kind::Compact,
             client,
@@ -276,7 +327,7 @@ pub fn apply_chat_request(
             fallback: None,
         }
     } else {
-        let (target, fallback) = title::resolve(client, headers, body)?;
+        let (target, fallback) = title::resolve_for(client, headers, body, format)?;
         // 目标与来源同名时不做改写（A2A `rewrite_title` 同口径）。
         if title::model_key(&target) == title::model_key(&source) {
             return None;
@@ -303,6 +354,33 @@ pub fn apply_chat_request(
         "特殊路由改写模型"
     );
     Some(rewrite)
+}
+
+/// 把一次模型改写转成日志留痕（compact / title）。
+pub fn rewrite_trace(rewrite: &Rewrite) -> crate::log::SpecialRouteTrace {
+    crate::log::SpecialRouteTrace::rewrite(rewrite.kind.as_str(), &rewrite.source, &rewrite.target)
+}
+
+/// 把视觉裁决转成日志留痕（仅实际介入时返回）。
+///
+/// `assist_call` = 辅助识图（图片被替换成文本描述）；`switch` = 视觉模型接管
+/// （选路模型被换掉）。`Keep` 表示没有干预，不记录。与前端 SpecialtyHits 的
+/// mode 取值对齐。
+pub fn vision_trace(
+    ctx: &crate::image_compat::RequestImageContext,
+) -> Option<crate::log::SpecialRouteTrace> {
+    use crate::image_compat::VisionDecision;
+    match ctx.decision() {
+        VisionDecision::Keep => None,
+        VisionDecision::Describe(plan) => Some(crate::log::SpecialRouteTrace::vision(
+            "assist_call",
+            Some(plan.target.model.clone()),
+        )),
+        VisionDecision::Reroute(targets) => Some(crate::log::SpecialRouteTrace::vision(
+            "switch",
+            targets.first().map(|target| target.model.clone()),
+        )),
+    }
 }
 
 /// 写入请求体痕迹字段。

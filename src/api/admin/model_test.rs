@@ -519,6 +519,7 @@ fn write_test_log(
 ) {
     let log = crate::log::RequestLog {
         purge_applied: false,
+        special_route: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: None,
         key_id: Some("model_test".to_string()),

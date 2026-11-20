@@ -40,11 +40,16 @@ export function fmtCompact(val: number | null | undefined): string {
 }
 
 /**
- * 额度展示（缺省按 0）：与 fmtCompact 同一套中文单位，undefined/null 显示 0 而不是 —
+ * 额度展示（缺省按 0）：后端配额单位是「额度」，统一 /200 折成元后固定两位小数 +
+ * 千分位。与仪表盘 fmtCost、钱包/套餐/兑换码等金额出口同一「额度 → 元」口径。
  */
 export function fmtQuota(val: number | null | undefined): string {
   const n = Number(val ?? 0);
-  return Number.isFinite(n) ? fmtCompact(n) : '0';
+  if (!Number.isFinite(n)) return '0.00';
+  return (n / 200).toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 /**

@@ -615,10 +615,11 @@ impl PricingStore {
         if cost <= 0.0 {
             return Ok(0);
         }
-        Ok((cost + 0.999999) as i64)
+        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整。
+        Ok((cost * 200.0 + 0.999999) as i64)
     }
 
-    /// 计算费用并向上取整为 i64 配额单位（避免浮点扣费）。
+    /// 计算费用并向上取整为 i64 配额（单位：额度，1 元 = 200 额度；避免浮点扣费）。
     pub fn calculate_cost_quoted(
         &self,
         model: &str,
@@ -629,7 +630,7 @@ impl PricingStore {
         self.calculate_cost_quoted_with_cache(model, input_tokens, output_tokens, 0, group)
     }
 
-    /// 缓存感知版配额计费（向上取整，最低 1 配额单位）。
+    /// 缓存感知版配额计费（向上取整为「分」，最低 1 额度）。
     pub fn calculate_cost_quoted_with_cache(
         &self,
         model: &str,
@@ -648,11 +649,12 @@ impl PricingStore {
         if cost <= 0.0 {
             return Ok(0);
         }
-        // 向上取整，最低 1 配额单位
-        Ok((cost + 0.999999) as i64)
+        // 向上取整，最低 1 额度
+        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整。
+        Ok((cost * 200.0 + 0.999999) as i64)
     }
 
-    /// 双名感知版配额计费（向上取整，最低 1 配额单位）。
+    /// 双名感知版配额计费（向上取整为「分」，最低 1 额度）。
     #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn calculate_cost_quoted_with_cache_aliased(
         &self,
@@ -674,7 +676,8 @@ impl PricingStore {
         if cost <= 0.0 {
             return Ok(0);
         }
-        Ok((cost + 0.999999) as i64)
+        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整。
+        Ok((cost * 200.0 + 0.999999) as i64)
     }
 
     // ── 工具价格表 ──────────────────────────────────────────────────
@@ -725,10 +728,10 @@ impl PricingStore {
         Ok(())
     }
 
-    /// 计算工具按次调用附加费（配额单位，向上取整）。
+    /// 计算工具按次调用附加费（配额单位：额度，向上取整）。
     ///
     /// 参照 new-api `calculateTextToolCallSurcharge`：
-    ///   surcharge = Σ (price/1000 * count) * group_ratio，向上取整为配额单位。
+    ///   surcharge = Σ (price/1000 * count) * group_ratio，向上取整为「分」。
     /// 内置保留名按内置价计费；自定义函数名仅在显式配置了价格时计费。
     pub fn calculate_tool_surcharge(
         &self,
@@ -751,7 +754,7 @@ impl PricingStore {
         if total <= 0.0 {
             return 0;
         }
-        (total + 0.999999) as i64
+        (total * 200.0 + 0.999999) as i64
     }
 }
 
@@ -911,6 +914,26 @@ mod tests {
             s.calculate_cost_quoted("free-model", 1_000_000, 1_000_000, "vip")
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn quoted_cost_is_in_cents_rounded_up() {
+        let s = store();
+        // 1k input + 1k output @ 0.0015/1k = 0.003 美元 → ×200 = 0.6 额度 → 向上取整 1 额度
+        s.upsert_price(ModelPrice::new("cent", 0.0015, 0.0015))
+            .unwrap();
+        assert_eq!(
+            s.calculate_cost_quoted("cent", 1000, 1000, "default")
+                .unwrap(),
+            1
+        );
+        // 1M+1M @ 0.5/1k = 1000 美元 → ×200 = 200000 额度（不丢精度、不溢出）
+        s.upsert_price(ModelPrice::new("bulk", 0.5, 0.5)).unwrap();
+        assert_eq!(
+            s.calculate_cost_quoted("bulk", 1_000_000, 1_000_000, "default")
+                .unwrap(),
+            200_000
         );
     }
 

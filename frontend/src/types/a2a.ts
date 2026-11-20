@@ -352,6 +352,8 @@ export interface MaintenanceItemView {
   fixed?: boolean | null;
   retryAt?: number | null;
   forced?: boolean;
+  /** AIGX 扩展：refresh_token 已失效，单条重试无意义（后端序列化时 true 才出现） */
+  invalid?: boolean;
 }
 
 /** 一次维护执行（记录列表一行） */

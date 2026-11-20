@@ -501,6 +501,7 @@ export default function Plans({ embedded = false }: { embedded?: boolean } = {})
                     placeholder="100000"
                     value={form.quota}
                     onChange={(e) => setForm({ ...form, quota: e.target.value })}
+                    hint={t('单位：额度')}
                   />
                   <Input
                     label={`${t('有效期天数')} ${t('(0 = 永不过期)')}`}
@@ -547,7 +548,7 @@ export default function Plans({ embedded = false }: { embedded?: boolean } = {})
                     label={`${t('订阅总配额')} ${t('(0 = 不限)')}`}
                     type="number"
                     placeholder="500000"
-                    hint={t('订阅期内可用总额度，耗尽后按下方策略处理')}
+                    hint={`${t('单位：额度')} · ${t('订阅期内可用总额度，耗尽后按下方策略处理')}`}
                     value={form.total_amount}
                     onChange={(e) => setForm({ ...form, total_amount: e.target.value })}
                   />

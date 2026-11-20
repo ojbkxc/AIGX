@@ -198,8 +198,11 @@ pub(crate) async fn handle_chat_completions(
     // 特殊路由（compact/title）：识别 + 改写 body.model；命中后选路用新模型。
     // 位置必须在鉴权/分组/定价校验之后——校验对象是用户请求的 source 模型
     // （与 image switch 先校验 source 再换 routing_model 同款语义）。
+    // 日志留痕：模型改写优先于视觉裁决（两者同时出现时以改写为准）。
+    let mut special_route = crate::route_special::vision_trace(&image_ctx);
     if let Some(rewrite) = crate::route_special::apply_chat_request(&client, &headers, &mut body) {
         model = rewrite.target.clone();
+        special_route = Some(crate::route_special::rewrite_trace(&rewrite));
         // 目标模型同样要求已定价（与普通请求同口径），未定价则拒绝而非免费用量。
         if let Err(e) = ensure_model_priced(&state, &model) {
             return e.into_response();
@@ -859,6 +862,7 @@ pub(crate) async fn handle_chat_completions(
                 let mut log = crate::log::RequestLog::new();
                 log.purge_applied =
                     purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
+                log.special_route = special_route.clone();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
                 log.channel_id = used_channel_id.clone();
@@ -1345,6 +1349,7 @@ pub(crate) async fn handle_chat_completions(
             let mut log = crate::log::RequestLog::new();
             log.purge_applied =
                 purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
+            log.special_route = special_route.clone();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = Some("cache".to_string());
@@ -1747,6 +1752,7 @@ pub(crate) async fn handle_chat_completions(
                 let mut log = crate::log::RequestLog::new();
                 log.purge_applied =
                     purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
+                log.special_route = special_route.clone();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
                 log.channel_id = used_channel_id.clone();
@@ -1886,6 +1892,7 @@ pub(crate) async fn handle_chat_completions(
             let mut log = crate::log::RequestLog::new();
             log.purge_applied =
                 purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
+            log.special_route = special_route.clone();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();

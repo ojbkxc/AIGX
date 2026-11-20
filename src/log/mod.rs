@@ -25,6 +25,45 @@ pub mod writer;
 
 // ── RequestLog ─────────────────────────────────────────────────────
 
+/// 特殊请求路由的一次改写留痕（compact / title / vision）。
+///
+/// `kind` 取 `compact` / `title` / `vision`；`from` / `to` 是模型名（vision 的
+/// describe 形态 `to` 是读图模型）；`mode` 仅 vision 使用（`assist_call` /
+/// `switch`）。回放页按 `kind` 投影成前端已约定的三键之一。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecialRouteTrace {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+impl SpecialRouteTrace {
+    /// compact / title：模型被从 `from` 改写到 `to`。
+    pub fn rewrite(kind: &str, from: &str, to: &str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            from: Some(from.to_string()),
+            to: Some(to.to_string()),
+            mode: None,
+        }
+    }
+
+    /// vision：`mode` = `assist_call`（辅助识图）或 `switch`（视觉模型接管）。
+    pub fn vision(mode: &str, to: Option<String>) -> Self {
+        Self {
+            kind: "vision".to_string(),
+            from: None,
+            to,
+            mode: Some(mode.to_string()),
+        }
+    }
+}
+
 /// 请求日志 — 每次推理调用记录一条。
 ///
 /// 参照 new-api model/log.go Log struct。
@@ -56,10 +95,10 @@ pub struct RequestLog {
     /// 输出 token 数
     #[serde(default)]
     pub output_tokens: u64,
-    /// 本次请求费用（配额单位，向用户收的销售价）
+    /// 本次请求费用（配额单位：额度，向用户收的销售价）
     #[serde(default)]
     pub cost: i64,
-    /// 渠道成本（配额单位）。未配成本价时 = cost，利润显示 "—"；
+    /// 渠道成本（配额单位：额度）。未配成本价时 = cost，利润显示 "—"；
     /// 配了成本价时 = 按 cost_pricing 算出的成本，利润 = cost - channel_cost。
     #[serde(default)]
     pub channel_cost: i64,
@@ -103,6 +142,12 @@ pub struct RequestLog {
     /// 仅管理员可见，非管理员不展示。
     #[serde(default)]
     pub purge_applied: bool,
+    /// 特殊请求路由留痕（compact / title / vision）。仅命中时出现。
+    ///
+    /// 回放页把它投影成 `route.compactRoute/titleRoute/visionCompatibility`；
+    /// 信息非敏感（只有模型名与模式），普通用户导出不剔除。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub special_route: Option<SpecialRouteTrace>,
     /// 请求/响应快照（仅 log_body 开关开启时记录；关闭时 None 且不序列化）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<LogDebugSnapshot>,
@@ -671,6 +716,7 @@ impl RequestLog {
             selected_channel: None,
             cache_hit: false,
             purge_applied: false,
+            special_route: None,
             debug: None,
             conversation: None,
             first_response_ms: None,
@@ -2469,6 +2515,37 @@ mod tests {
         let parsed: RequestLog =
             serde_json::from_str(r#"{"id":"x","created_at":1}"#).expect("老日志应能解析");
         assert!(!parsed.purge_applied, "缺字段应默认 false");
+    }
+
+    /// `special_route`：默认 None；序列化含字段并保留；老日志缺字段为 None。
+    #[test]
+    fn request_log_special_route_roundtrip() {
+        let mut log = RequestLog::new();
+        assert!(log.special_route.is_none(), "new() 默认无特殊路由");
+        log.special_route = Some(SpecialRouteTrace::rewrite(
+            "compact",
+            "glm-5.3",
+            "glm-5.3-flash",
+        ));
+        let json = serde_json::to_string(&log).expect("序列化");
+        assert!(json.contains("\"special_route\""), "序列化应含字段: {json}");
+        let back: RequestLog = serde_json::from_str(&json).expect("反序列化");
+        let trace = back.special_route.expect("反序列化应保留");
+        assert_eq!(trace.kind, "compact");
+        assert_eq!(trace.from.as_deref(), Some("glm-5.3"));
+        assert_eq!(trace.to.as_deref(), Some("glm-5.3-flash"));
+        assert!(trace.mode.is_none());
+
+        // 老日志缺该字段 → None
+        let parsed: RequestLog =
+            serde_json::from_str(r#"{"id":"x","created_at":1}"#).expect("老日志应能解析");
+        assert!(parsed.special_route.is_none());
+
+        // vision 留痕带 mode（前端据此区分辅助识图 / 接管）。
+        let vision = SpecialRouteTrace::vision("switch", Some("qwen-vl".into()));
+        assert_eq!(vision.kind, "vision");
+        assert_eq!(vision.mode.as_deref(), Some("switch"));
+        assert_eq!(vision.to.as_deref(), Some("qwen-vl"));
     }
 
     /// `window_bounds`：条数走 COUNT(*)、首尾各取一个键，不反序列化全量。

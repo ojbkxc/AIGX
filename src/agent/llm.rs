@@ -495,6 +495,7 @@ fn record_agent_request_log(
         .unwrap_or(0);
     let log = crate::log::RequestLog {
         purge_applied: false,
+        special_route: None,
         id: request_id.to_string(),
         user_id: None,
         key_id: Some(key_id.to_string()),

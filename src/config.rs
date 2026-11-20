@@ -36,17 +36,19 @@ fn default_generated_images_max_bytes() -> u64 {
     1024 * 1024 * 1024
 }
 
+/// 每日消费上限默认 10000（配额单位：额度）。
 fn default_daily_limit() -> u64 {
     10000
 }
 
+/// 每月消费上限默认 100_000（配额单位：额度）。
 fn default_monthly_limit() -> u64 {
     100_000
 }
 
-/// 注册赠送配额默认 200（用户要求：注册即送 200 额度）。
+/// 注册赠送默认 500（配额单位：额度）。
 fn default_register_quota() -> i64 {
-    200
+    500
 }
 
 /// 注册开关默认开启（向后兼容：升级不停用既有注册入口）。
@@ -564,11 +566,13 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageConfig {
+    /// 每日消费上限（配额单位：额度，1 元 = 200 额度）。
     #[serde(default = "default_daily_limit")]
     pub daily_limit: u64,
+    /// 每月消费上限（配额单位：额度）。
     #[serde(default = "default_monthly_limit")]
     pub monthly_limit: u64,
-    /// 新用户注册赠送配额（与 monthly_limit 分离，避免"月度限额"被当作
+    /// 新用户注册赠送配额（配额单位：额度；与 monthly_limit 分离，避免"月度限额"被当作
     /// 充值配额赠送——原实现二者混用导致计费口径错乱）。
     #[serde(default = "default_register_quota")]
     pub register_quota: i64,
@@ -796,7 +800,8 @@ fn default_queue_max_waits() -> u8 {
 }
 
 fn default_billing_flat_quota() -> i64 {
-    2
+    // 配额单位是「额度」：每次固定扣 200 额度（1 元 = 200 额度）。
+    200
 }
 
 fn default_api_timeout() -> u64 {

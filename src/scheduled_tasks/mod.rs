@@ -375,6 +375,14 @@ pub(crate) fn task_interval_ms(settings: &ScheduledSettings, id: &str) -> i64 {
         .unwrap_or(60_000)
 }
 
+/// 模型目录刷新任务是否开启。
+///
+/// 被动触发（`GET /v1/models` 后异步刷新）与调度循环必须用同一判据 —— 否则
+/// 用户关掉任务后，被动路径仍在暗处联网，开关形同虚设。
+pub(crate) fn model_refresh_enabled(settings: &ScheduledSettings) -> bool {
+    settings.model_refresh.enabled
+}
+
 async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<String, String> {
     // 维护型任务（凭证 / 模型目录）：完整执行记录由 maintenance 模块负责，
     // 本函数只把结果摘要回给调用方（scheduled_tasks 仍负责「何时做」）。
@@ -419,14 +427,66 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
     }
 }
 
+/// 一次模型目录刷新的结果。
+///
+/// `results` 是**逐启用渠道（provider）**的明细行（成功 / 跳过 / 失败 + 条数），
+/// 由维护模块归成 `Item`；`summary`/`ok`/`count` 是 models.dev 元数据汇总
+/// （仍记在 `run.metadata` 一条）。两者分开是为了「某家渠道坏了」能在维护明细里
+/// 看出来，而元数据的成败不淹没在渠道行里。
+pub(crate) struct ModelRefreshWork {
+    pub summary: String,
+    pub ok: bool,
+    pub count: usize,
+    pub results: Vec<Value>,
+}
+
+/// 目录刷新实际会拉取的上游渠道：启用的 OpenAI 兼容渠道。
+///
+/// 账号型渠道的模型来自账号池、插件渠道的上游由插件进程构造，网关在这里不会
+/// 为它们拉 `/models`，所以它们不出现在逐项结果里（拿不到的数据不编造）。
+pub(crate) fn model_refresh_targets(
+    channels: &[crate::channel::Channel],
+) -> Vec<crate::channel::Channel> {
+    channels
+        .iter()
+        .filter(|ch| {
+            ch.is_enabled() && ch.channel_type == crate::channel::ChannelType::OpenaiCompatible
+        })
+        .cloned()
+        .collect()
+}
+
+/// 一行渠道级刷新结果（形状交给 `maintenance::types::item` 归一）。
+fn model_refresh_row(
+    provider: &str,
+    label: &str,
+    status: &'static str,
+    message: Option<String>,
+    count: usize,
+    duration_ms: i64,
+) -> Value {
+    json!({
+        "provider": provider,
+        "providerLabel": label,
+        "status": status,
+        "message": message,
+        "count": count,
+        "durationMs": duration_ms,
+    })
+}
+
 /// 模型目录刷新的一轮工作（models.dev + 渠道清单 + 目录对账）。
 ///
-/// 由 `maintenance::execute`（自动 / 手动 / 重试）调用；返回值：
-/// `(summary, ok, models_dev_count)`。抽出来是为了让「维护明细」与
-/// 「定时任务循环」共用同一份实现，而不是两边各写一遍。
-pub(crate) async fn model_refresh_work(state: &AppState) -> (String, bool, usize) {
+/// 由 `maintenance::execute`（自动 / 手动 / 重试 / 被动）调用。抽出来是为了让
+/// 「维护明细」与「定时任务循环」共用同一份实现，而不是两边各写一遍。
+pub(crate) async fn model_refresh_work(state: &AppState) -> ModelRefreshWork {
     if !crate::config::models_dev_enabled() {
-        return ("models.dev 元数据开关已关闭，跳过".to_string(), true, 0);
+        return ModelRefreshWork {
+            summary: "models.dev 元数据开关已关闭，跳过".to_string(),
+            ok: true,
+            count: 0,
+            results: Vec::new(),
+        };
     }
     {
         let (count, catalog_ok, catalog_note) = match crate::model::models_dev::refresh(
@@ -443,15 +503,28 @@ pub(crate) async fn model_refresh_work(state: &AppState) -> (String, bool, usize
         // 生产实证见 08-prod「目录漂移」）。只刷启用且带渠道级凭证的
         // openai_compat 渠道；逐渠道失败不判整轮失败（各渠道独立）。
         let mut refreshed_channels = 0usize;
+        // 逐启用渠道的结果行（维护明细）；无渠道时为空的 Vec，不 panic。
+        let mut results: Vec<Value> = Vec::new();
         // 目录对账（P2-6②）：声明 vs 发现差异 + 渠道级悬空映射统计（只读）
         let mut drift_channels: Vec<Value> = Vec::new();
         // 阶段2：清理候选（与对账同口径组装；守卫判定全在 plan_channel_prune）
         let mut prune_candidates: Vec<crate::channel::PruneCandidate> = Vec::new();
-        for ch in state.channel_store.list() {
-            if !ch.is_enabled()
-                || ch.channel_type != crate::channel::ChannelType::OpenaiCompatible
-                || ch.base_url.trim().is_empty()
-            {
+        for ch in model_refresh_targets(&state.channel_store.list()) {
+            let started = std::time::Instant::now();
+            // 模型目录的「提供商」就是渠道本身：用渠道名做 provider / 展示名，
+            // 让维护明细里每一家渠道各成一行（同名渠道罕见，可接受折叠）。
+            let provider = ch.name.as_str();
+            let elapsed_ms = || started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+            // 启用但没配上游地址：不是失败，但也没拉到东西 —— 如实记 skipped。
+            if ch.base_url.trim().is_empty() {
+                results.push(model_refresh_row(
+                    provider,
+                    &ch.name,
+                    "skipped",
+                    Some("渠道未配置上游地址，未拉取模型清单".to_string()),
+                    0,
+                    elapsed_ms(),
+                ));
                 continue;
             }
             let api_key = ch.decode_api_key();
@@ -466,6 +539,7 @@ pub(crate) async fn model_refresh_work(state: &AppState) -> (String, bool, usize
             {
                 Ok((_, models)) => {
                     if !models.is_empty() {
+                        let model_count = models.len();
                         // 对账（P2-6②）：有效清单 = models 非空用白名单，空用本轮发现快照。
                         // 必须先于 save_discovered_models（其 move 掉 models）。
                         // 直接吃循环里 ch 的 model_mapping（无现取窗口，避免并发删改静默少报）。
@@ -507,6 +581,23 @@ pub(crate) async fn model_refresh_work(state: &AppState) -> (String, bool, usize
                         }
                         let _ = state.channel_store.save_discovered_models(&ch.id, models);
                         refreshed_channels += 1;
+                        results.push(model_refresh_row(
+                            provider,
+                            &ch.name,
+                            "refreshed",
+                            None,
+                            model_count,
+                            elapsed_ms(),
+                        ));
+                    } else {
+                        results.push(model_refresh_row(
+                            provider,
+                            &ch.name,
+                            "skipped",
+                            Some("上游未返回模型清单".to_string()),
+                            0,
+                            elapsed_ms(),
+                        ));
                     }
                 }
                 Err((status, body)) => {
@@ -518,6 +609,14 @@ pub(crate) async fn model_refresh_work(state: &AppState) -> (String, bool, usize
                         "[Tasks] 渠道「{}」模型清单刷新失败：HTTP {status} {message}",
                         ch.name
                     );
+                    results.push(model_refresh_row(
+                        provider,
+                        &ch.name,
+                        "failed",
+                        Some(format!("HTTP {status} {message}")),
+                        0,
+                        elapsed_ms(),
+                    ));
                 }
             }
         }
@@ -635,10 +734,20 @@ pub(crate) async fn model_refresh_work(state: &AppState) -> (String, bool, usize
         if !catalog_ok {
             summary.push_str(&format!("；{catalog_note}"));
             tracing::warn!("[Tasks] {summary}");
-            (summary, false, count)
+            ModelRefreshWork {
+                summary,
+                ok: false,
+                count,
+                results,
+            }
         } else {
             tracing::info!("[Tasks] {summary}");
-            (summary, true, count)
+            ModelRefreshWork {
+                summary,
+                ok: true,
+                count,
+                results,
+            }
         }
     }
 }
@@ -746,5 +855,75 @@ mod tests {
             TASK_CREDENTIAL_MAINTENANCE
         );
         assert_eq!(state_key(&config, TASK_MODEL_REFRESH), TASK_MODEL_REFRESH);
+    }
+
+    /// 缺口 3 的开关判据：被动触发只在「模型目录刷新」任务开启时执行。
+    #[test]
+    fn passive_refresh_respects_enabled_flag() {
+        let mut settings = ScheduledSettings::default();
+        assert!(
+            super::model_refresh_enabled(&settings),
+            "默认应开启模型目录刷新（被动触发可执行）"
+        );
+        settings.model_refresh.enabled = false;
+        assert!(
+            !super::model_refresh_enabled(&settings),
+            "任务关闭时被动触发必须不执行"
+        );
+    }
+
+    /// 缺口 2：逐渠道结果只覆盖真正会拉取的上游（启用 OpenAI 兼容）；
+    /// 无渠道时返回空集且不 panic。
+    #[test]
+    fn model_refresh_targets_filter_and_empty() {
+        use crate::channel::Channel;
+        let empty: Vec<Channel> = Vec::new();
+        assert!(
+            super::model_refresh_targets(&empty).is_empty(),
+            "无渠道时应产出空结果集（不 panic）"
+        );
+        let channel = |id: &str, kind: &str, status: &str| -> Channel {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "name": id,
+                "channel_type": kind,
+                "status": status,
+            }))
+            .unwrap()
+        };
+        let channels = vec![
+            channel("a", "openai_compatible", "enabled"),
+            channel("b", "openai_compatible", "disabled"),
+            channel("c", "account", "enabled"),
+        ];
+        let targets = super::model_refresh_targets(&channels);
+        assert_eq!(targets.len(), 1, "只保留启用且 OpenAI 兼容的渠道");
+        assert_eq!(targets[0].id, "a");
+    }
+
+    /// 缺口 2：渠道结果行经 `types::item` 归一后带上 provider / status / count。
+    #[test]
+    fn model_refresh_rows_carry_status_and_count() {
+        use std::collections::HashMap;
+        let raw =
+            super::model_refresh_row("openai_compatible", "My Channel", "refreshed", None, 12, 34);
+        let item = crate::maintenance::types::item(&raw, 0, &HashMap::new());
+        assert_eq!(item.provider, "openai_compatible");
+        assert_eq!(item.provider_label, "My Channel");
+        assert_eq!(item.status, "refreshed");
+        assert_eq!(item.count, Some(12));
+        assert_eq!(item.duration_ms, Some(34));
+
+        let raw = super::model_refresh_row(
+            "openai_compatible",
+            "My Channel",
+            "failed",
+            Some("HTTP 401 Unauthorized".to_string()),
+            0,
+            9,
+        );
+        let item = crate::maintenance::types::item(&raw, 0, &HashMap::new());
+        assert_eq!(item.status, "failed");
+        assert_eq!(item.message.as_deref(), Some("HTTP 401 Unauthorized"));
     }
 }

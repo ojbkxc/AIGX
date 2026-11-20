@@ -262,6 +262,7 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
               <label>{t('面额（配额）')}</label>
               <input className="form-input" type="number" min="1" value={genForm.quota}
                 onChange={(e) => setGenForm({ ...genForm, quota: Number(e.target.value) })} />
+              <span className="form-hint">{t('单位：额度')}</span>
             </div>
             <div className="form-group">
               <label>{t('名称（备注）')}</label>

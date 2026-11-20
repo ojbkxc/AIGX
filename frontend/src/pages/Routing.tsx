@@ -56,6 +56,7 @@ import {
 import CompactRoutes from '../components/routing/special/CompactRoutes';
 import TitleRoutes from '../components/routing/special/TitleRoutes';
 import VisionCompat from '../components/routing/special/VisionCompat';
+import SpecialHits from '../components/routing/special/SpecialHits';
 import RoutingWorkspace from '../components/routing/RoutingWorkspace';
 import RoutingFlow from '../components/routing/RoutingFlow';
 import RoutingTrace from '../components/routing/RoutingTrace';
@@ -833,15 +834,31 @@ export default function Routing(): JSX.Element {
           <div hidden={view !== 'config'}>{configView}</div>
           {view === 'replay' ? replayView : null}
 
-          {/* 三个特殊面板同时挂载、只有当前那块拉数据：草稿切走再切回仍在 */}
+          {/* 三个特殊面板同时挂载、只有当前那块拉数据：草稿切走再切回仍在。
+              每块右侧并排「最近命中」栏（读回放快照，按改写类型筛选）。 */}
           <div hidden={view !== 'compact'}>
-            <CompactRoutes active={view === 'compact'} />
+            <div className="rt-special-split">
+              <div className="rt-special-split-main">
+                <CompactRoutes active={view === 'compact'} />
+              </div>
+              <SpecialHits kind="compact" active={view === 'compact'} onOpenReplay={() => setView('replay')} />
+            </div>
           </div>
           <div hidden={view !== 'title'}>
-            <TitleRoutes active={view === 'title'} />
+            <div className="rt-special-split">
+              <div className="rt-special-split-main">
+                <TitleRoutes active={view === 'title'} />
+              </div>
+              <SpecialHits kind="title" active={view === 'title'} onOpenReplay={() => setView('replay')} />
+            </div>
           </div>
           <div hidden={view !== 'vision'}>
-            <VisionCompat active={view === 'vision'} />
+            <div className="rt-special-split">
+              <div className="rt-special-split-main">
+                <VisionCompat active={view === 'vision'} />
+              </div>
+              <SpecialHits kind="vision" active={view === 'vision'} onOpenReplay={() => setView('replay')} />
+            </div>
           </div>
         </div>
       </div>

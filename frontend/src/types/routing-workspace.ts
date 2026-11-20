@@ -492,6 +492,23 @@ export interface RoutingTraceRow {
     sticky?: string;
     stickyHit?: boolean;
     picked?: string;
+    /** 特殊请求路由改写快照（后端 #7 记录后下发；缺省 = 该请求未被改写）。
+     *  形状对齐上游 routing-types.ts 的 route.compactRoute/titleRoute/visionCompatibility。 */
+    compactRoute?: {
+      source?: string;
+      target?: string;
+      client?: string;
+    } | null;
+    titleRoute?: {
+      source?: string;
+      target?: string;
+      client?: string;
+    } | null;
+    visionCompatibility?: {
+      mode?: string;
+      calls?: unknown[];
+      target?: { model?: string } | null;
+    } | null;
   } | null;
 }
 
@@ -499,6 +516,24 @@ export interface RoutingTraceList {
   entries?: RoutingTraceRow[];
   matched?: number;
   available?: boolean;
+}
+
+/** GET /api/routing/replays 的查询参数（A2A 同名端点）。 */
+export interface RoutingReplaysQuery {
+  model?: string;
+  offset?: number;
+  limit?: number;
+  /** error / sticky */
+  status?: string;
+}
+
+/** GET /api/routing/replays 的 data（与 trace 列表同形的回放行）。 */
+export interface RoutingReplaysList {
+  available?: boolean;
+  entries?: RoutingTraceRow[];
+  matched?: number;
+  offset?: number;
+  limit?: number;
 }
 
 /** 时间窗选项（5/10/30/60 分钟，与后端 flow/trace 的 minutes 参数同口径） */

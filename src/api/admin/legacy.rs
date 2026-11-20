@@ -946,7 +946,7 @@ pub async fn handle_epay_notify(
             let quota_to_add = if order.quota > 0 {
                 order.quota
             } else if order.money > 0.0 && config.epay.price > 0.0 {
-                (order.money / config.epay.price).round() as i64
+                (order.amount as f64 * config.epay.price * 200.0).round() as i64
             } else {
                 order.quota
             };
@@ -1052,7 +1052,7 @@ pub async fn handle_epay_return(
                 let quota_to_add = if order.quota > 0 {
                     order.quota
                 } else if order.money > 0.0 && config.epay.price > 0.0 {
-                    (order.money / config.epay.price).round() as i64
+                    (order.amount as f64 * config.epay.price * 200.0).round() as i64
                 } else {
                     order.quota
                 };
@@ -2487,7 +2487,8 @@ pub async fn handle_stripe_topup(
     // 配额换算与 Epay 对齐：quota = amount × epay.price（充值倍率）。
     // 原实现写死 1 美元 = 10000 单位，与 Epay 的 1 元 = price 单位口径
     // 不一致，两个支付渠道充值等值金额入账配额不同。
-    let quota = (amount as f64 * config.epay.price).round() as i64;
+    // 配额单位是「额度」：再 ×200（1 元 = 200 额度）。
+    let quota = (amount as f64 * config.epay.price * 200.0).round() as i64;
 
     let order = crate::payment::TopUpOrder {
         trade_no: trade_no.clone(),
@@ -4332,6 +4333,7 @@ fn record_chat_test_usage(
         .unwrap_or(0);
     let log = crate::log::RequestLog {
         purge_applied: false,
+        special_route: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: Some(user.id.clone()),
         key_id: Some("chat_test".to_string()),
@@ -4392,6 +4394,7 @@ fn record_chat_test_failure(
 ) {
     let log = crate::log::RequestLog {
         purge_applied: false,
+        special_route: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: Some(user.id.clone()),
         key_id: Some("chat_test".to_string()),

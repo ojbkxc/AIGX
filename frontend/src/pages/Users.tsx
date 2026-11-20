@@ -701,6 +701,7 @@ export default function Users(): JSX.Element {
                 type="number"
                 value={form.quota}
                 onChange={(e) => setForm({ ...form, quota: e.target.value })}
+                hint={t('单位：额度')}
               />
               <Input
                 label={t('用户备注')}

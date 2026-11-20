@@ -330,30 +330,79 @@ const PLUGINS_SEED = JSON.parse(JSON.stringify(PLUGINS_PAYLOAD));
 
 // ── 签到中心快照（形状对齐 src/api/admin/checkin_center.rs）──
 const CHECKIN_CENTER = {
+  // A2A flat 契约：daily / extras / auto / keepalive / history（camelCase）。
+  // 旧桩用的是 providers/today_summary/schedules，v1.0.71 签到改版后页面读不到
+  // 任何数据（统计全 0、分组空），这批 e2e 因此整片红。
+  daily: {
+    providers: [
+      {
+        id: 'workbuddy',
+        label: 'WorkBuddy 国内版',
+        doneCount: 1,
+        totalCount: 2,
+        accounts: [
+          { id: 'acc-1', name: 'workbuddy-1', available: true, checkinAt: 1761900000000, checkedInToday: true, edition: 'cn', streakDays: 3, lastOutcome: 'success', lastMessage: '签到成功 +100' },
+          { id: 'acc-2', name: 'workbuddy-2', available: true, checkinAt: null, checkedInToday: false, edition: 'cn', streakDays: 0, lastOutcome: '', lastMessage: '' },
+        ],
+      },
+    ],
+    outOfScope: [],
+    todayDone: 1,
+    todayEligible: 2,
+  },
+  extras: { onboarding: [], plans: [], campaigns: [], growth: [] },
+  auto: {
+    enabled: true,
+    running: false,
+    providerOptions: [{ id: 'workbuddy', label: 'WorkBuddy 国内版' }],
+    schedules: [
+      {
+        id: 'sch-1',
+        label: '每日 09:00',
+        displayLabel: '每日 09:00',
+        enabled: true,
+        time: '09:00',
+        providers: ['workbuddy'],
+        // 页面直接读 providerRows.length / providerTimes，缺数组会整页渲染异常
+        providerTimes: {},
+        providerRows: [
+          { id: 'workbuddy', label: 'WorkBuddy 国内版', time: '09:00', firedToday: true, accountCount: 2 },
+        ],
+        retryTime: '',
+        providerRetryTimes: {},
+        retryGapMinutes: 0,
+        retryLimit: 0,
+        lastFiredDate: null,
+        lastFiredToday: true,
+        lastResult: null,
+        retryExhausted: [],
+      },
+    ],
+    time: '09:00',
+    providers: ['workbuddy'],
+    lastFiredDate: null,
+    lastFiredToday: false,
+    lastResult: null,
+    nextRunAt: null,
+  },
+  keepalive: { models: [], default_models: [], defaultModels: [] },
+  history: [],
+  adminPanels: [],
+  checkinFeatures: {},
+  /* ── AIGX 扩展 ── */
   settings: { enabled: true, gap_ms: 500 },
-  supported_providers: ['workbuddy', 'workbuddy-intl'],
-  providers: [
-    {
-      provider: 'workbuddy',
-      label: 'WorkBuddy 国内版',
-      today_done: 1,
-      today_total: 2,
-      accounts: [
-        { id: 'acc-1', name: 'workbuddy-1', provider: 'workbuddy', supports_checkin: true, checked_in_today: true, last_checkin_at: 1761900000, last_outcome: 'success', last_message: '签到成功 +100' },
-        { id: 'acc-2', name: 'workbuddy-2', provider: 'workbuddy', supports_checkin: true, checked_in_today: false, last_checkin_at: 0, last_outcome: '', last_message: '' },
-      ],
-    },
-  ],
-  schedules: [
-    { id: 'sch-1', label: '每日 09:00', enabled: true, time: '09:00', providers: ['workbuddy'], last_fired_date: '', last_result: '' },
-  ],
-  today_summary: [{ provider: 'workbuddy', done: 1, total: 2 }],
+  supportedProviders: ['workbuddy', 'workbuddy-intl'],
+  unsupportedProviders: [],
+  recordsTotal: 2,
 };
 
-// 签到台账：一次成功 + 一次「已签到」，用于验证记录 Tab 与结果着色
+// 签到台账：一次成功 + 一次「已签到」，用于验证记录 Tab 与结果着色。
+// 时间必须是「今天」：页面默认时间筛选是「今天」，写死旧日期会让表格恒为空。
+const __ckNow = Math.floor(Date.now() / 1000);
+const __ckToday = new Date(__ckNow * 1000).toISOString().slice(0, 10);
 const CHECKIN_RECORDS = [
-  { ts: 1761900000, date: '2025-10-31', account_id: 'acc-1', account_name: 'workbuddy-1', provider: 'workbuddy', source: 'manual', outcome: 'success', ok: true, message: '签到成功 +100' },
-  { ts: 1761890000, date: '2025-10-31', account_id: 'acc-2', account_name: 'workbuddy-2', provider: 'workbuddy', source: 'schedule', outcome: 'already', ok: true, message: '今日已签到' },
+  { ts: __ckNow - 60, date: __ckToday, account_id: 'acc-1', account_name: 'workbuddy-1', provider: 'workbuddy', source: 'manual', outcome: 'success', ok: true, message: '签到成功 +100' },
+  { ts: __ckNow - 120, date: __ckToday, account_id: 'acc-2', account_name: 'workbuddy-2', provider: 'workbuddy', source: 'schedule', outcome: 'already', ok: true, message: '今日已签到' },
 ];
 
 // ── 请求日志（含对话快照，验证「不开调试模式也能看对话」）──
@@ -1425,9 +1474,16 @@ function handle(req, res, p, bodyText) {
     }
 
     // 签到中心
-    if (p === '/api/checkin-center') return sendJson(res, { success: true, data: CHECKIN_CENTER });
+    // 签到中心快照是 **flat 响应**（A2A 契约，无 {success,data} 信封）；
+    // records / run 仍走信封。桩按各自形状返回，否则页面拿不到 daily。
+    if (p === '/api/checkin-center') return sendJson(res, CHECKIN_CENTER);
     if (p === '/api/checkin-center/records') {
       return sendJson(res, { success: true, data: { records: CHECKIN_RECORDS, total: CHECKIN_RECORDS.length } });
+    }
+    // 台账端点已迁到 A2A flat 契约：前端 GET /api/checkin-records 直读 records/total
+    //（无 {success,data} 信封）。旧桩仍挂在 /api/checkin-center/records，页面因此取不到。
+    if (p === '/api/checkin-records') {
+      return sendJson(res, { records: CHECKIN_RECORDS, total: CHECKIN_RECORDS.length });
     }
     if (p === '/api/checkin-center/run') {
       return sendJson(res, {

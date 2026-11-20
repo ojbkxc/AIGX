@@ -5,6 +5,14 @@ use crate::bridge::ChatFormat;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// 配额（额度）→ 微美元：1 分 = 0.01 美元 = 10_000 微美元。
+///
+/// 内部配额单位改为「分」后，`/metrics` 的 `aigx_cost_usd_total` 仍是美元语义；
+/// 这里做唯一一处换算，避免每个上报点各写一个魔数（写错就是 100 倍漂移）。
+fn quota_to_micro_usd(quota: i64) -> u64 {
+    (quota.max(0) as u64).saturating_mul(5_000)
+}
+
 /// 执行计费扣减（用户 quota + key used_quota）。
 ///
 /// 参照 new-api：优先扣 key 绑定用户 quota，再扣 key 自身额度；
@@ -108,7 +116,7 @@ pub(crate) fn resolve_billing_quota(
         }
     }
 }
-/// 计算渠道成本（配额单位）。
+/// 计算渠道成本（配额单位：额度）。
 ///
 /// 该渠道配了该模型成本价 → 按成本价单价 * 全局倍率表算；
 /// 未配成本价 → 直接回退为销售价 `cost`（日志利润列显示 "—"）。
@@ -143,9 +151,11 @@ pub(crate) fn compute_channel_cost(
         (prompt_tokens as f64 * cp.input_price + completion_tokens as f64 * cp.output_price)
             / 1000.0
     };
+    // 配额单位是「额度」：美元金额折成额度后向上取整。
     let channel_cost = (base
         * ratios.model_ratio_aliased(requested_model, billing_model)
         * ratios.group_ratio(group)
+        * 200.0
         + 0.999999) as i64;
     // 有成本价但该模型成本算出来为 0（配置异常等）：回退到销售价，避免误显示利润
     if channel_cost == 0 {
@@ -182,12 +192,12 @@ pub(crate) fn charge_usage_with_tools(
         cached_tokens,
         tool_calls,
     );
-    // Prometheus 成本指标：pricing 以 USD 计价，cost 即向上取整后的美元配额
-    // （单位 1 美元），统一折算为微美元累加，供 /metrics 展示 aigx_cost_usd_total。
+    // Prometheus 成本指标：pricing 以 USD 计价，cost 是向上取整后的配额（额度），
+    // 统一折算为微美元累加，供 /metrics 展示 aigx_cost_usd_total。
     // P1-5：返回「实际扣除额」而非名义 cost，未扣到的一律不计收入。
     let mut collected = 0i64;
     if cost > 0 {
-        crate::metrics::global().record_cost("usd", (cost as u64).saturating_mul(1_000_000));
+        crate::metrics::global().record_cost("usd", quota_to_micro_usd(cost));
         if let Some(uid) = &api_key.user_id {
             // P2 订阅化：直接扣路径同样优先扣活跃订阅池（最早到期的先用），
             // 池不足部分回退钱包。订阅禁 overflow 且池不足时整体拒绝。
@@ -372,7 +382,8 @@ fn compute_cost_from_snapshot_pure(
     if base <= 0.0 {
         0
     } else {
-        (base * snapshot.model_ratio * snapshot.group_ratio + 0.999999) as i64
+        // 配额单位是「额度」（1 元 = 200 额度），与 live 计费同一口径。
+        (base * snapshot.model_ratio * snapshot.group_ratio * 200.0 + 0.999999) as i64
     }
 }
 
@@ -409,7 +420,7 @@ fn compute_cost_from_snapshot(
             total += tp * (*count as f64) / 1000.0 * snapshot.group_ratio;
         }
         if total > 0.0 {
-            c = c.saturating_add((total + 0.999999) as i64);
+            c = c.saturating_add((total * 200.0 + 0.999999) as i64);
         }
     }
     c
@@ -663,7 +674,7 @@ pub(crate) fn settle_usage(
     };
 
     if actual_cost > 0 {
-        crate::metrics::global().record_cost("usd", (actual_cost as u64).saturating_mul(1_000_000));
+        crate::metrics::global().record_cost("usd", quota_to_micro_usd(actual_cost));
     }
 
     distribute_settlement(state, api_key, reservation, actual_cost);
@@ -686,7 +697,7 @@ pub(crate) fn settle_cache_hit(
 ) -> i64 {
     let cache_cost = cache_cost.max(0);
     if cache_cost > 0 {
-        crate::metrics::global().record_cost("usd", (cache_cost as u64).saturating_mul(1_000_000));
+        crate::metrics::global().record_cost("usd", quota_to_micro_usd(cache_cost));
     }
     distribute_settlement(state, api_key, reservation, cache_cost);
     cache_cost
@@ -895,7 +906,7 @@ impl StreamBillingState {
         (prompt_tokens, completion_tokens)
     }
 
-    /// 计算渠道成本（配额单位）。配了成本价则按成本价算；未配则 = 销售价 cost
+    /// 计算渠道成本（配额单位：额度）。配了成本价则按成本价算；未配则 = 销售价 cost
     /// （日志利润列显示 "—"）。
     fn compute_channel_cost(&self, prompt_tokens: u64, completion_tokens: u64, cost: i64) -> i64 {
         compute_channel_cost(
@@ -1316,18 +1327,18 @@ mod price_snapshot_tests {
     #[test]
     fn snapshot_token_cost_matches_live_equivalent() {
         // 1000 input * 0.03/1k + 500 output * 0.06/1k = 0.03 + 0.03 = 0.06
-        // × model_ratio(2) × group_ratio(1) = 0.12 → (0.12 + 0.999999) as i64 = 1
+        // × model_ratio(2) × group_ratio(1) = 0.12 美元 → ×200 = 24 额度
         let snap = token_snapshot(0.03, 0.06, None, 2.0, 1.0);
-        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 1);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 24);
     }
 
     // 3. 改价不变：快照冻结了单价，改价不影响结算（核心 P1-8 保证）
     #[test]
     fn price_change_does_not_affect_snapshot() {
         // 快照冻结 0.03/0.06，compute_cost_from_snapshot_pure 只用快照值
-        // → 0.03*1 + 0.06*0.5 = 0.06 → (0.06 + 0.999999) as i64 = 1
+        // → 0.03*1 + 0.06*0.5 = 0.06 美元 → ×200 = 12 额度
         let snap = token_snapshot(0.03, 0.06, None, 1.0, 1.0);
-        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 1);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 12);
     }
 
     // 4. 空快照回退：price=None + count_flat=None → 0
@@ -1345,15 +1356,15 @@ mod price_snapshot_tests {
     // 5. cache_price 未配 → 回退正价（不白送）
     #[test]
     fn cache_price_none_falls_back_to_input_price() {
-        // fresh=0, cached=1000, cache_price=None → 1000 * 0.03 / 1k = 0.03 → 1
+        // fresh=0, cached=1000, cache_price=None → 1000 * 0.03 / 1k = 0.03 美元 → ×200 = 6 额度
         let snap = token_snapshot(0.03, 0.06, None, 1.0, 1.0);
-        assert_eq!(compute_cost_from_snapshot_pure(&snap, 0, 0, 1000), 1);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 0, 0, 1000), 6);
     }
 
     // 6. cache_price 已配 → 按缓存价收
     #[test]
     fn cache_price_some_charges_cached_at_cache_rate() {
-        // fresh=0, cached=1000, cache_price=0.001 → 1000 * 0.001 / 1k = 0.001 → 1
+        // fresh=0, cached=1000, cache_price=0.001 → 0.001 美元 → 0.1 分 → 向上取整 1 分
         let snap = token_snapshot(0.03, 0.06, Some(0.001), 1.0, 1.0);
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 0, 0, 1000), 1);
     }
@@ -1362,7 +1373,7 @@ mod price_snapshot_tests {
     #[test]
     fn cached_clamped_when_fresh_present() {
         // prompt=1000, cached=2000（超 prompt）→ cached 钳到 1000, fresh=0
-        // cache_price=0.001 → 1000 * 0.001 / 1k = 0.001 → 1
+        // cache_price=0.001 → 0.001 美元 → 0.1 分 → 1
         let snap = token_snapshot(0.03, 0.06, Some(0.001), 1.0, 1.0);
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 0, 2000), 1);
         // prompt=0, cached=1000 → 不钳（命中计费形态）→ 同上 = 1
@@ -1380,8 +1391,8 @@ mod price_snapshot_tests {
             model_ratio: 1.0,
             group_ratio: 1.0,
         };
-        // count 型：base = input_price = 0.04 → (0.04 + 0.999999) as i64 = 1
-        assert_eq!(compute_cost_from_snapshot_pure(&snap, 999, 0, 999), 1);
+        // count 型：base = input_price = 0.04 美元 → ×200 = 8 额度
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 999, 0, 999), 8);
     }
     /// #47 单测盲区补齐（lead 复核）：499 日志写入的字段断言——
     /// Drop→write_499 的日志级行为由此钉住；估算结算走 E1/E2 行为级验证。

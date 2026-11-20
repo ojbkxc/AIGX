@@ -35,14 +35,13 @@ fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
     (money * 100.0).round() / 100.0
 }
 
-/// F02（契约2）：入账配额 = amount × price × discount
+/// F02（契约2）：入账额度 = amount × price（1 元 = 200 额度）。
+///
+/// **折扣只作用于实付金额**（见 [`pay_money`]）：充 100 元打 9 折 = 实付 90 元、
+/// 到账仍按 100 元面值（100 × price）。此前两边都乘 discount，等于「少付多少
+/// 就少给多少」，档位越大反而到账越少，折扣形同虚设。
 fn topup_quota(epay: &EpayConfig, amount: i64) -> i64 {
-    let discount = *epay
-        .amount_discount
-        .get(&amount.to_string())
-        .filter(|d| **d > 0.0)
-        .unwrap_or(&1.0);
-    ((amount as f64) * epay.price * discount + 0.999999) as i64
+    ((amount as f64) * epay.price * 200.0 + 0.999999) as i64
 }
 
 /// 处理回调地址

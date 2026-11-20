@@ -313,6 +313,24 @@ fn has_tools(body: &Value) -> bool {
         })
 }
 
+/// Responses 协议的 `input` 数组里也可能带 function_call 项（没有 role）。
+fn responses_has_tools(body: &Value) -> bool {
+    has_tools(body)
+        || body
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    matches!(
+                        item.get("type").and_then(Value::as_str),
+                        Some("function_call")
+                            | Some("function_call_output")
+                            | Some("custom_tool_call")
+                    )
+                })
+            })
+}
+
 /// 从 `x-codex-turn-metadata` 里读 `thread_source`。
 ///
 /// `user` / `subagent` / 空都表示「正常轮次」，不算标题请求。
@@ -404,18 +422,32 @@ fn claude_title(messages: &[Value]) -> bool {
         .any(|prefix| trimmed.starts_with(prefix))
 }
 
+#[cfg(test)]
 /// 判定这次请求是否属于某家客户端的标题生成（chat 协议 `messages`）。
 ///
 /// Codex 用请求头，先判（省一次消息遍历）；提示词类判据要遍历消息结构，且
 /// 带工具的一律不算。
 pub fn detect(client: &str, headers: &HeaderMap, body: &Value) -> bool {
+    detect_for(client, headers, body, super::Format::Chat)
+}
+
+/// 按协议形态判定标题请求。
+///
+/// 只有消息列表的取值（与工具形态）随形态变化；Codex 完全靠请求头/元数据，
+/// 与形态无关。ZCode / Claude Code 的措辞判据对 Anthropic 的 `content` 块与
+/// Responses 的 `input` 数组同样成立（`text_of_content` 已兼容两种块）。
+pub fn detect_for(client: &str, headers: &HeaderMap, body: &Value, format: super::Format) -> bool {
     if client == CLIENT_CODEX {
         return codex_title(headers, body);
     }
-    if has_tools(body) {
+    let tools = match format {
+        super::Format::Responses => responses_has_tools(body),
+        _ => has_tools(body),
+    };
+    if tools {
         return false;
     }
-    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+    let Some(messages) = body.get(format.messages_field()).and_then(Value::as_array) else {
         return false;
     };
     match client {
@@ -425,12 +457,24 @@ pub fn detect(client: &str, headers: &HeaderMap, body: &Value) -> bool {
     }
 }
 
-/// 在给定配置里判定命中：`(目标模型, 回退策略)`。
+#[cfg(test)]
+/// 在给定配置里判定命中：`(目标模型, 回退策略)`（chat 形态）。
 pub fn find_target(
     settings: &TitleRoutes,
     client: &str,
     headers: &HeaderMap,
     body: &Value,
+) -> Option<(String, Fallback)> {
+    find_target_for(settings, client, headers, body, super::Format::Chat)
+}
+
+/// [`find_target`] 的协议形态感知版。
+pub fn find_target_for(
+    settings: &TitleRoutes,
+    client: &str,
+    headers: &HeaderMap,
+    body: &Value,
+    format: super::Format,
 ) -> Option<(String, Fallback)> {
     if !settings.enabled {
         return None;
@@ -440,20 +484,25 @@ pub fn find_target(
     if model.is_empty() {
         return None;
     }
-    if !detect(client, headers, body) {
+    if !detect_for(client, headers, body, format) {
         return None;
     }
     Some((model.to_string(), rule.fallback))
 }
 
-/// 数据面综合判据：总开关 + 规则命中 + 判据命中。
-pub fn resolve(client: &str, headers: &HeaderMap, body: &Value) -> Option<(String, Fallback)> {
+/// 数据面综合判据：总开关 + 规则命中 + 判据命中（按协议形态）。
+pub fn resolve_for(
+    client: &str,
+    headers: &HeaderMap,
+    body: &Value,
+    format: super::Format,
+) -> Option<(String, Fallback)> {
     let snapshot = super::title_current();
     let settings = snapshot.settings.as_ref().ok()?;
     if !active(settings) {
         return None;
     }
-    find_target(settings, client, headers, body)
+    find_target_for(settings, client, headers, body, format)
 }
 
 #[cfg(test)]
@@ -579,6 +628,67 @@ mod tests {
             CLIENT_CLAUDE_CODE,
             &HeaderMap::new(),
             &json!({ "messages": [{ "role": "user", "content": "hello" }] })
+        ));
+    }
+
+    /// Responses 的标题请求在 `input` 数组里；带 function_call / tools 的不算。
+    #[test]
+    fn title_detects_responses_input_and_rejects_tool_items() {
+        use crate::route_special::Format;
+        let body = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Please write a 5-10 word title for this session." }]
+            }]
+        });
+        assert!(detect_for(
+            CLIENT_CLAUDE_CODE,
+            &HeaderMap::new(),
+            &body,
+            Format::Responses
+        ));
+        // `function_call` 项没有 role，但属于工具轮次 → 不判标题。
+        let with_call = json!({
+            "input": [
+                { "type": "function_call", "name": "x", "arguments": "{}" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "Please write a 5-10 word title" }] }
+            ]
+        });
+        assert!(!detect_for(
+            CLIENT_CLAUDE_CODE,
+            &HeaderMap::new(),
+            &with_call,
+            Format::Responses
+        ));
+        // 顶层 tools 同样拦截。
+        let with_tools = json!({
+            "tools": [{ "type": "function", "name": "t" }],
+            "input": [{ "type": "message", "role": "user", "content": "Please write a 5-10 word title" }]
+        });
+        assert!(!detect_for(
+            CLIENT_CLAUDE_CODE,
+            &HeaderMap::new(),
+            &with_tools,
+            Format::Responses
+        ));
+    }
+
+    /// Anthropic 的标题请求在 `messages` 的 `text` 块里（两种连字符都认）。
+    #[test]
+    fn title_detects_anthropic_text_blocks() {
+        use crate::route_special::Format;
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{ "type": "text", "text": "Please write a 5–10 word title for this session." }]
+            }]
+        });
+        assert!(detect_for(
+            CLIENT_CLAUDE_CODE,
+            &HeaderMap::new(),
+            &body,
+            Format::Anthropic
         ));
     }
 

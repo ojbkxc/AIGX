@@ -516,6 +516,33 @@ fn wants_anthropic_shape(headers: &HeaderMap) -> bool {
     headers.contains_key("anthropic-version") || headers.contains_key("x-api-key")
 }
 
+/// `GET /v1/models` 之后异步触发一次被动模型刷新（`source=passive`）。
+///
+/// 为什么用被动触发：客户端列举模型的时刻，正是「目录可能已经和上游错位」的
+/// 时刻（对照上游 `chat.rs::spawn_catalog_refresh`）。这里**不新增任何每请求
+/// 都跑的拉取逻辑**，只是把一次 `maintenance::execute` 丢到后台：
+///   · 任务开关关闭时直接返回（与调度循环同一判据，见
+///     `scheduled_tasks::model_refresh_enabled`）；
+///   · 其余交给 `maintenance::execute` → `task_state::claim`：在途租约与 1 秒
+///     最短间隔会把并发的列举请求收敛成一轮，未到点的请求只记 debug。
+///
+/// 整段放进 `tokio::spawn`：列举响应不能等网络刷新；后台失败只影响记录，
+/// 不影响本次返回。
+fn spawn_passive_model_refresh(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let config = state.config_manager.get().await;
+        if !crate::scheduled_tasks::model_refresh_enabled(&config.scheduled_tasks) {
+            return;
+        }
+        let mut request = crate::maintenance::Request::full(crate::maintenance::MODEL, false);
+        request.source = "passive";
+        if let Err(error) = crate::maintenance::execute(&state, request).await {
+            tracing::debug!("[Maintenance] 被动模型刷新未执行：{error}");
+        }
+    });
+}
+
 /// GET /v1/models - 模型列表（客户端可见的对外清单）
 ///
 /// 鉴权：`verify_api_key_listing` 做完整校验（状态 / 过期 / 额度 / IP / 用户
@@ -528,6 +555,10 @@ pub(crate) async fn handle_list_models(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_api_key_listing(&state, &headers)?;
+
+    // 被动触发一次模型目录刷新（source=passive）：先在后台排队，绝不阻塞本次
+    // 响应。是否真的执行由「任务开关 + maintenance 的租约/最短间隔」决定。
+    spawn_passive_model_refresh(&state);
 
     // 聚合走与控制台下拉同一个函数（见 collect_available_models 的说明）：
     // 客户端能调到的模型，控制台就能选到，反之亦然。
@@ -749,6 +780,31 @@ mod shared_catalog_tests {
             !MANAGE_SRC.contains(any_gate),
             "模型管理视图不得过滤未定价模型（否则管理员无法配价）"
         );
+    }
+
+    /// 缺口 3：`/v1/models` 返回前必须异步触发一次 passive 模型刷新，且整段
+    /// 放在 `tokio::spawn` 里（不阻塞响应）、以任务开关为前置条件、复用现有
+    /// `maintenance::execute`（租约与最短间隔由它兜底，不新增每请求拉取逻辑）。
+    ///
+    /// 源码级不变量：构造完整 `AppState` 才能测运行期行为，成本远高于本针。
+    /// 针尖一律 `concat!` 拆写（`MODELS_SRC` 会读入本测试源码，写全就恒真）。
+    #[test]
+    fn list_models_triggers_guarded_passive_refresh() {
+        let needles = [
+            (concat!("source = \"pass", "ive\""), "passive 来源标记"),
+            (concat!("model_refresh", "_enabled("), "任务开关判据"),
+            (
+                concat!("maintenance::exe", "cute("),
+                "复用 maintenance::execute",
+            ),
+            (concat!("tokio::spa", "wn("), "后台执行不阻塞响应"),
+        ];
+        for (needle, what) in needles {
+            assert!(
+                MODELS_SRC.contains(needle),
+                "/v1/models 的被动刷新缺少{what}：`{needle}`"
+            );
+        }
     }
 }
 

@@ -2,6 +2,41 @@
 
 
 
+## 2026-11-20 · 计费精度到「额度」+ 自动维护完整对齐 + 特殊请求路由补齐（1.0.73）
+
+### 计费与充值
+- **精度到两位小数**：内部配额单位从「整元」改为「额度」，换算口径 **1 元 = 200 额度**。
+  日志 / 仪表盘 / 余额 / 兑换码 / 套餐 / 钱包所有金额出口统一 `额度 ÷ 200` 显示两位小数，
+  不再出现「每次都是 ¥1」（原先 `(cost+0.999999) as i64` 把所有不足 1 元的请求取整成 1）。
+- **充值折扣语义修正**：折扣只作用于**实付金额**（充 100 打 9 折 = 实付 90、到账仍按 100 元面值）；
+  此前实付与到账同时乘折扣，等于「少付多少就少给多少」，档位越大到账反而越少。
+  涉及 `topup_quota`、Stripe 建单、旧订单回退与前端档位换算。
+- 默认值：注册赠送 500 额度；日限 10000、月限 100_000（数值保持原样，单位改为额度）。
+
+### 自动维护（对齐 Agent2API）
+- 手动单账号刷新落入维护记录（source=manual，逐项 status/message/耗时；记录失败不影响刷新结果）。
+- 模型刷新产出逐启用渠道明细（成功/跳过/失败 + 条数），models.dev 元数据汇总保留。
+- `GET /v1/models` 异步触发 passive 模型刷新（受任务开关与租约/最短间隔约束，不阻塞响应）。
+- 维护面板补齐：明细状态/提供商筛选与联动计数、每页 10 条、行快照、「去账号页处理」、
+  明细缓存(20)+in-flight 去重、执行完成后自动重取、执行/重试后自动打开明细、
+  retryOf 标记 / 保留期说明 / 翻页越界回退。
+
+### 特殊请求路由
+- 入口覆盖：compact/title/vision 裁决从只挂 chat 扩到 `/v1/responses` 与 Anthropic `/v1/messages`；
+  改写后统一重新 `ensure_model_priced`。
+- compact 补 `cap_output`（按目标 maxOutputTokens 收口，查不到不猜）。
+- 命中留痕：`RequestLog.special_route`（kind/from/to/mode），回放快照投影
+  `compactRoute` / `titleRoute` / `visionCompatibility`；路由页新增「最近命中」右栏。
+
+### 测试
+- 修复 v1.0.71 起 CI 红的签到 e2e 契约漂移：flat 台账端点 `/api/checkin-records`、
+  center 桩升级 A2A flat 契约、保存拦截改 `/api/checkin-schedules`、时区用例对齐。
+
+### 验证结论
+- `cargo test --bin aigx` 2310 passed / 0 failed；`cargo fmt` + `clippy -D warnings` 0。
+- 前端 tsc 0 / eslint 0 / vitest 157 passed / i18n 缺失 0；static 重建 1.0.73。
+- 签到三 spec（desktop+mobile）36 passed / 4 skipped / 0 failed。
+
 ## 2026-11-20 · 破甲预设库（1.0.72）
 
 ### 做了什么

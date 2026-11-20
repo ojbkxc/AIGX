@@ -46,6 +46,8 @@ import type {
   CompactRoutesView,
   RoutingFlowQuery,
   RoutingFlowSnapshot,
+  RoutingReplaysList,
+  RoutingReplaysQuery,
   RoutingTraceList,
   RoutingTraceQuery,
   RoutingTraceRow,
@@ -70,6 +72,9 @@ export const endpoints = {
     request<ApiResponse<RoutingFlowSnapshot>>('GET', `${API_BASE}/routing/flow?${buildQuery({ ...query })}`),
   getRoutingTrace: (query: RoutingTraceQuery): Promise<ApiResponse<RoutingTraceList>> =>
     request<ApiResponse<RoutingTraceList>>('GET', `${API_BASE}/routing/trace?${buildQuery({ ...query })}`),
+  /** 可回放请求列表（route_replay 有捕获的终态日志；「最近命中」右栏复用）。 */
+  getRoutingReplays: (query: RoutingReplaysQuery): Promise<ApiResponse<RoutingReplaysList>> =>
+    request<ApiResponse<RoutingReplaysList>>('GET', `${API_BASE}/routing/replays?${buildQuery({ ...query })}`),
   getRoutingTraceRequest: (id: string, ts?: number): Promise<ApiResponse<RoutingTraceRow>> =>
     request<ApiResponse<RoutingTraceRow>>(
       'GET',

@@ -3,7 +3,7 @@
 // 单卡信息量等价且不再占三格。已耗 >80% 红、>50% 黄。
 import { useTranslation } from 'react-i18next';
 import { Wallet } from 'lucide-react';
-import { fmtInt } from '../../lib/format';
+import { fmtQuota } from '../../lib/utils';
 
 interface Props {
   monthlyUsed: number;
@@ -11,7 +11,7 @@ interface Props {
   lang?: string;
 }
 
-export default function QuotaCards({ monthlyUsed, monthlyLimit, lang }: Props): JSX.Element {
+export default function QuotaCards({ monthlyUsed, monthlyLimit }: Props): JSX.Element {
   const { t } = useTranslation();
   const pct = monthlyLimit != null && monthlyLimit > 0 ? Math.min(100, (monthlyUsed / monthlyLimit) * 100) : null;
   return (
@@ -33,7 +33,7 @@ export default function QuotaCards({ monthlyUsed, monthlyLimit, lang }: Props): 
           </div>
         </div>
         <div className="stat-value" style={{ fontSize: '26px' }}>
-          {fmtInt(monthlyUsed, lang)}
+          {fmtQuota(monthlyUsed)}
           {pct != null && (
             <span style={{ fontSize: 13, marginLeft: 8, color: 'var(--text-muted)' }}>
               {pct.toFixed(1)}% {t('已消耗')}
@@ -43,7 +43,7 @@ export default function QuotaCards({ monthlyUsed, monthlyLimit, lang }: Props): 
         <div className="stat-desc" style={{ fontSize: '11px' }}>
           {monthlyLimit == null
             ? t('未设限额')
-            : `${t('总配额')} ${fmtInt(monthlyLimit, lang)} · ${t('剩余配额')} ${fmtInt(Math.max(0, monthlyLimit - monthlyUsed), lang)}`}
+            : `${t('总配额')} ${fmtQuota(monthlyLimit)} · ${t('剩余配额')} ${fmtQuota(Math.max(0, monthlyLimit - monthlyUsed))}`}
         </div>
         {pct != null && (
           <div style={{ height: 4, background: 'var(--bg-color)', borderRadius: 2, marginTop: 8, overflow: 'hidden' }}>

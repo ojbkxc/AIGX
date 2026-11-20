@@ -43,13 +43,15 @@ describe('fmtCompact', () => {
 });
 
 describe('fmtQuota', () => {
-  it('空值按 0 展示', () => {
-    expect(fmtQuota(null)).toBe('0');
-    expect(fmtQuota(undefined)).toBe('0');
+  it('空值按 0 元展示', () => {
+    expect(fmtQuota(null)).toBe('0.00');
+    expect(fmtQuota(undefined)).toBe('0.00');
   });
 
-  it('沿用中文单位', () => {
-    expect(fmtQuota(1_200_000)).toBe('120万');
+  it('按 200 额度 = 1 元折算两位小数', () => {
+    expect(fmtQuota(2_400_000)).toBe('12,000.00');
+    expect(fmtQuota(24690)).toBe('123.45');
+    expect(fmtQuota(1)).toBe('0.01');
   });
 });
 

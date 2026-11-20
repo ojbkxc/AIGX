@@ -2336,13 +2336,9 @@ pub async fn handle_account_refresh(
             })));
         }
     }
-    match crate::account_session::refresh::refresh_one(
-        &state.account_sessions,
-        &state.http_client,
-        &session,
-    )
-    .await
-    {
+    // 走维护记录器：刷新效果与自动维护同源，记录也应同源（source=manual，
+    // 一条明细）。记录写入失败不影响刷新结果，响应体与错误语义保持不变。
+    match crate::maintenance::refresh_single_recorded(&state, &session).await {
         crate::account_session::refresh::RefreshOutcome::Refreshed(message) => Ok(Json(json!({
             "success": true,
             "data": { "outcome": "refreshed", "message": message },

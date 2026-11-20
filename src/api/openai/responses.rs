@@ -142,7 +142,24 @@ pub(crate) async fn handle_responses(
     let body_needs = from_chat_body(&body);
     let image_ctx =
         crate::image_compat::RequestImageContext::build(&state, &model, body_needs.images);
-    let model = image_ctx.routing_model(&model);
+    let mut model = image_ctx.routing_model(&model);
+    // 特殊路由（compact/title）：与 chat 面同一裁决，但读 Responses 原生
+    // `input` 数组 / `client_metadata`（协议翻译前判，块类型与轮次边界才完整）。
+    // 源模型已在上面完成鉴权 / 限流 / 分组 / 定价校验；改写后的目标同样要求已定价。
+    // 日志留痕：模型改写优先于视觉裁决。
+    let mut special_route = crate::route_special::vision_trace(&image_ctx);
+    if let Some(rewrite) = crate::route_special::apply_request(
+        &client,
+        &headers,
+        &mut body,
+        crate::route_special::Format::Responses,
+    ) {
+        model = rewrite.target.clone();
+        special_route = Some(crate::route_special::rewrite_trace(&rewrite));
+        if let Err(e) = ensure_model_priced(&state, &model) {
+            return e.into_response();
+        }
+    }
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
     // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
@@ -336,6 +353,7 @@ pub(crate) async fn handle_responses(
             let status_code =
                 StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut log = crate::log::RequestLog::new();
+            log.special_route = special_route.clone();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
@@ -441,6 +459,7 @@ pub(crate) async fn handle_responses(
 
             // 记录请求日志
             let mut log = crate::log::RequestLog::new();
+            log.special_route = special_route.clone();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
@@ -596,6 +615,7 @@ pub(crate) async fn handle_responses(
             rate_bundle.commit_tokens(total_tokens).await;
 
             let mut log = crate::log::RequestLog::new();
+            log.special_route = special_route.clone();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();

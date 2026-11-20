@@ -12,26 +12,43 @@ import { test, expect, loginAsAdmin } from './fixtures';
  */
 test.describe('签到计划编辑器（契约字段）', () => {
   /** 供编辑流程用的完整 center 数据：契约字段齐全 */
+  // A2A flat 契约（daily / extras / auto / settings …，camelCase，无 success/data 信封）。
+  // v1.0.71 签到改版后前端直接读这些顶层字段；旧的 providers/schedules/settings 平铺形状读不到。
   const CENTER_WITH_CONTRACT = {
+    daily: { providers: [], outOfScope: [], todayDone: 0, todayEligible: 0 },
+    extras: { onboarding: [], plans: [], campaigns: [], growth: [] },
+    auto: {
+      enabled: true,
+      running: false,
+      providerOptions: [{ id: 'workbuddy', label: 'workbuddy', builtinTime: null }],
+      schedules: [
+        {
+          id: 'sch-1', label: '每日 09:00', displayLabel: '每日 09:00',
+          enabled: true, time: '09:00', timeEnd: '09:30', randomize: false,
+          providers: ['workbuddy'],
+          providerTimes: { workbuddy: '10:05' },
+          // 页面直接读 providerRows.length，缺数组会渲染异常
+          providerRows: [
+            { id: 'workbuddy', label: 'WorkBuddy 国内版', time: '10:05', firedToday: false, accountCount: 2, attemptedCount: 0, pendingCount: 0, overdue: false },
+          ],
+          retryTime: '12:00', providerRetryTimes: {},
+          retryGapMinutes: 15, retryLimit: 5,
+          lastFiredDate: null, lastFiredToday: false,
+          pendingProviders: [], retryCount: 0, retryExhausted: [], retryAttempts: {},
+          nextRunAt: null, lastResult: null,
+        },
+      ],
+      time: '09:00', providers: ['workbuddy'],
+      lastFiredDate: null, lastFiredToday: false, lastResult: null, nextRunAt: null,
+    },
+    keepalive: { models: [], default_models: [], defaultModels: [] },
+    history: [],
+    adminPanels: [],
+    checkinFeatures: {},
     settings: { enabled: true, gap_ms: 500, timezone_offset: 8, retry_gap_ms: 600_000, keep_days: 30 },
-    supported_providers: ['workbuddy', 'workbuddy-intl'],
-    providers: [],
-    schedules: [
-      {
-        id: 'sch-1', label: '每日 09:00', enabled: true, time: '09:00',
-        providers: ['workbuddy'],
-        provider_times: { workbuddy: '10:05' },
-        time_end: '09:30',
-        randomize: false,
-        makeup_time: '12:00',
-        retry_gap_minutes: 15,
-        retry_limit: 5,
-        last_fired_date: '', last_result: '', last_ok: 0, last_keepalive: 0, last_failed: 0,
-      },
-    ],
-    records_total: 2,
-    today_summary: [{ provider: 'workbuddy', done: 1, total: 2 }],
-    builtin_times: { workbuddy: '10:01' },
+    supportedProviders: ['workbuddy', 'workbuddy-intl'],
+    unsupportedProviders: [],
+    recordsTotal: 2,
   };
 
   test('设置卡：时区/重试间隔/台账保留渲染与保存', async ({ page, pageErrors }) => {
@@ -88,7 +105,7 @@ test.describe('签到计划编辑器（契约字段）', () => {
   test('编辑器：逐家覆盖/预览分组/契约字段渲染与提交', async ({ page, pageErrors }) => {
     test.skip((page.viewportSize()?.width ?? 0) < 900, '桌面编辑器形态');
     await page.route('**/api/checkin-center', (r) =>
-      r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: CENTER_WITH_CONTRACT }) }));
+      r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(CENTER_WITH_CONTRACT) }));
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/checkin');
     await page.locator('.sub-tab', { hasText: '定时签到' }).click();
@@ -117,7 +134,7 @@ test.describe('签到计划编辑器（契约字段）', () => {
 
     // 保存：POST body 带全部契约字段
     let saved: Record<string, unknown> | null = null;
-    await page.route('**/api/checkin-center/schedules', async (route) => {
+    await page.route('**/api/checkin-schedules', async (route) => {
       saved = route.request().postDataJSON() as Record<string, unknown>;
       return route.fulfill({
         status: 200, contentType: 'application/json',
@@ -151,7 +168,7 @@ test.describe('签到计划编辑器（契约字段）', () => {
     await expect(page.locator('.ck-editor').getByText('补签与重试')).toBeVisible();
 
     let saved: Record<string, unknown> | null = null;
-    await page.route('**/api/checkin-center/schedules', async (route) => {
+    await page.route('**/api/checkin-schedules', async (route) => {
       saved = route.request().postDataJSON() as Record<string, unknown>;
       return route.fulfill({
         status: 200, contentType: 'application/json',
@@ -199,23 +216,36 @@ test.describe('签到时区边界（page.clock 定针）', () => {
     await page.clock.setFixedTime(new Date(pinnedMs));
 
     // 两条计划：23:45（北京帧未到 → 今天）与 09:00（已过 → 明天跨日）
+    // A2A flat 契约（camelCase）。nextRunAt=null 时 .ck-sched-next 走 nextRunLabel(time, tz)，
+    // 正是本用例要锁的日切边界；providerRows 缺失会渲染异常，需显式给数组。
+    const scheduleEntry = (id: string, label: string, time: string) => ({
+      id, label, displayLabel: label, enabled: true, time,
+      providers: ['workbuddy'], providerTimes: {},
+      providerRows: [],
+      retryTime: '', providerRetryTimes: {},
+      retryGapMinutes: 0, retryLimit: 0,
+      lastFiredDate: null, lastFiredToday: false,
+      pendingProviders: [], retryCount: 0, retryExhausted: [], retryAttempts: {},
+      nextRunAt: null, lastResult: null,
+    });
     await page.route('**/api/checkin-center', (r) =>
       r.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          success: true,
-          data: {
-            settings: { enabled: true, gap_ms: 500, timezone_offset: 8 },
-            supported_providers: ['workbuddy'],
-            providers: [],
-            schedules: [
-              { id: 'sch-1', label: '夜班', enabled: true, time: '23:45', providers: ['workbuddy'], last_fired_date: '', last_result: '', last_ok: 0, last_keepalive: 0, last_failed: 0 },
-              { id: 'sch-2', label: '早班', enabled: true, time: '09:00', providers: ['workbuddy'], last_fired_date: '', last_result: '', last_ok: 0, last_keepalive: 0, last_failed: 0 },
-            ],
-            records_total: 0,
-            today_summary: [],
+          daily: { providers: [], outOfScope: [], todayDone: 0, todayEligible: 0 },
+          extras: { onboarding: [], plans: [], campaigns: [], growth: [] },
+          auto: {
+            enabled: true, running: false,
+            providerOptions: [{ id: 'workbuddy', label: 'WorkBuddy 国内版', builtinTime: null }],
+            schedules: [scheduleEntry('sch-1', '夜班', '23:45'), scheduleEntry('sch-2', '早班', '09:00')],
+            time: '23:45', providers: ['workbuddy'],
+            lastFiredDate: null, lastFiredToday: false, lastResult: null, nextRunAt: null,
           },
+          keepalive: { models: [], default_models: [], defaultModels: [] },
+          history: [], adminPanels: [], checkinFeatures: {},
+          settings: { enabled: true, gap_ms: 500, timezone_offset: 8 },
+          supportedProviders: ['workbuddy'], unsupportedProviders: [], recordsTotal: 0,
         }),
       }));
     await loginAsAdmin(page);

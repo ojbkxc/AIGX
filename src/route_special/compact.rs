@@ -192,12 +192,22 @@ fn template_matches(text: &str) -> bool {
     true
 }
 
+#[cfg(test)]
 /// 当前请求末尾是否为 ZCode 压缩模板（chat 协议 `messages`）。
 ///
 /// 要求：最后一条是 user；前文至少一次 assistant；内容（字符串或最后一块
 /// `text`）完整匹配模板。
 pub fn detect_chat(body: &Value) -> bool {
-    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+    detect(body, super::Format::Chat)
+}
+
+/// 按协议形态判定压缩模板（对应上游 `RequestFormat`）。
+///
+/// Responses 的消息在 `input`，纯文本块类型是 `input_text`；Chat / Anthropic
+/// 在 `messages`，块类型是 `text`。Anthropic 的连续 user 在翻译成 Chat 后会被
+/// 合并、块类型也会丢 —— 所以必须在协议翻译前判。
+pub fn detect(body: &Value, format: super::Format) -> bool {
+    let Some(messages) = body.get(format.messages_field()).and_then(Value::as_array) else {
         return false;
     };
     let Some(last) = messages.last() else {
@@ -207,9 +217,14 @@ pub fn detect_chat(body: &Value) -> bool {
         return false;
     }
     // 前文至少有一次助手响应；孤立粘贴模板不是已发生的会话压缩。
+    // Responses 的助手轮次可能是 `function_call` 项（没有 assistant 角色）。
     if !messages[..messages.len().saturating_sub(1)]
         .iter()
-        .any(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+                || (format == super::Format::Responses
+                    && message.get("type").and_then(Value::as_str) == Some("function_call"))
+        })
     {
         return false;
     }
@@ -217,7 +232,7 @@ pub fn detect_chat(body: &Value) -> bool {
         Some(Value::String(text)) => template_matches(text),
         Some(Value::Array(parts)) => parts
             .last()
-            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some(format.text_type()))
             .and_then(|part| part.get("text").and_then(Value::as_str))
             .is_some_and(template_matches),
         _ => false,
@@ -240,8 +255,14 @@ pub fn find_target(settings: &CompactRoutes, client: &str, source: &str) -> Opti
 
 /// 数据面综合判据：总开关 + ZCode 模板 + `(client, source)` 规则。
 ///
-/// 只认 ZCode（压缩模板只有 ZCode 有）。
-pub fn resolve(client: &str, source: &str, body: &Value) -> Option<String> {
+/// 只认 ZCode（压缩模板只有 ZCode 有）。`format` 决定从 `input` 还是
+/// `messages` 读消息、以及内容块类型（Responses 是 `input_text`）。
+pub fn resolve_for(
+    client: &str,
+    source: &str,
+    body: &Value,
+    format: super::Format,
+) -> Option<String> {
     if client != CLIENT_ZCODE {
         return None;
     }
@@ -250,7 +271,7 @@ pub fn resolve(client: &str, source: &str, body: &Value) -> Option<String> {
     if !settings.enabled {
         return None;
     }
-    if !detect_chat(body) {
+    if !detect(body, format) {
         return None;
     }
     find_target(settings, client, source)
@@ -283,6 +304,40 @@ pub fn clear_source_reasoning(body: &mut Value) {
         output.remove("effort");
         if output.is_empty() {
             object.remove("output_config");
+        }
+    }
+}
+
+/// 按目标模型的最大输出 token 收口请求里的输出上限（对齐上游 `cap_output`）。
+///
+/// AIGX 没有上游那种按 provider 的 `routing_groups::catalog_model`，改用同一次
+/// 模型目录刷新写进 models.dev 的 `output`（[`crate::model::models_dev`]）。
+/// 查询不到上限时**不猜**、原样放行：宁可能让上游按自己的默认值截断，也不要
+/// 凭空写一个数字。
+pub fn cap_output(body: &mut Value, model: &str) {
+    let Some(limit) = crate::model::models_dev::lookup(model)
+        .and_then(|entry| entry.output)
+        .filter(|limit| *limit > 0)
+    else {
+        return;
+    };
+    cap_output_limit(body, limit);
+}
+
+/// 把三种协议形态的输出上限字段截到 `limit`（纯函数，便于单测）。
+///
+/// 只在**请求值超过上限**时改写：客户端没给上限时保持「由上游决定」的语义。
+fn cap_output_limit(body: &mut Value, limit: u64) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        if object
+            .get(key)
+            .and_then(Value::as_u64)
+            .is_some_and(|requested| requested > limit)
+        {
+            object.insert(key.to_string(), Value::from(limit));
         }
     }
 }
@@ -422,6 +477,73 @@ mod tests {
             Some("json_schema")
         );
         assert!(body.pointer("/output_config/effort").is_none());
+    }
+
+    /// Responses 的压缩模板在 `input` 里、块类型是 `input_text`；chat 判据不得误命中。
+    #[test]
+    fn compact_detects_responses_input_shape() {
+        use crate::route_special::Format;
+        let body = json!({
+            "model": "m",
+            "input": [
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] },
+                { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "hello" }] },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": template("") }] }
+            ]
+        });
+        assert!(detect(&body, Format::Responses));
+        // 换错形态读不到 `messages` → 不命中。
+        assert!(!detect(&body, Format::Chat));
+
+        // Responses 的助手轮次可能是 `function_call` 项（无 role）。
+        let call_body = json!({
+            "model": "m",
+            "input": [
+                { "type": "function_call", "name": "x", "arguments": "{}" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": template("") }] }
+            ]
+        });
+        assert!(detect(&call_body, Format::Responses));
+    }
+
+    /// Anthropic 的压缩模板在 `messages` 的 `text` 块里，协议翻译前可识别。
+    #[test]
+    fn compact_detects_anthropic_content_blocks() {
+        use crate::route_special::Format;
+        let body = json!({
+            "model": "m",
+            "messages": [
+                { "role": "user", "content": [{ "type": "text", "text": "hi" }] },
+                { "role": "assistant", "content": [{ "type": "text", "text": "hello" }] },
+                { "role": "user", "content": [{ "type": "text", "text": template("") }] }
+            ]
+        });
+        assert!(detect(&body, Format::Anthropic));
+        assert!(
+            detect(&body, Format::Chat),
+            "chat 与 anthropic 消息形状相同"
+        );
+    }
+
+    /// cap_output：只截超过上限的输出字段，三种协议的键名都覆盖；缺省值不动。
+    #[test]
+    fn cap_output_caps_only_exceeding_fields() {
+        let mut body = json!({
+            "max_tokens": 5000,
+            "max_completion_tokens": 100,
+            "max_output_tokens": 9999,
+            "temperature": 0.2
+        });
+        cap_output_limit(&mut body, 1000);
+        assert_eq!(body["max_tokens"], 1000);
+        assert_eq!(body["max_completion_tokens"], 100, "未超上限不改");
+        assert_eq!(body["max_output_tokens"], 1000);
+        assert_eq!(body["temperature"], 0.2);
+        // 没有上限字段时保持「由上游决定」，不凭空写入。
+        let mut empty = json!({ "model": "m" });
+        cap_output_limit(&mut empty, 1000);
+        assert!(empty.get("max_tokens").is_none());
+        assert!(empty.get("max_output_tokens").is_none());
     }
 
     #[test]

@@ -1,9 +1,9 @@
 // 仪表盘统一读数出口（Agent2API units.js / report-charts.ts 的 A2A 口径移植）。
 //
 // 口径约定（阶段 4 定案，修「两套成本显示」bug）：
-// - cost 是**原始配额单位**（pricing.calculate_cost 向上取整的 i64，
-//   充值倍率 epay.price 是系统配置级换算，报表层不做币种折算）——
-//   与 Logs 页 `¥{cost}` 同口径可对账；旧的 /100 显示是 bug，已废。
+// - cost 是**后端配额单位「分」**（1 元 = 200 额度，pricing.calculate_cost 产出的
+//   i64 已按分计）。展示时统一 /100 折成元，再固定两位小数 + 千分位，与
+//   Logs 页 `¥{cost}`、钱包/套餐等金额出口同口径可对账。
 // - token 量级：中文「万/亿」1 位小数 ⇄ 英文 k/M（随界面语言联动，
 //   照 A2A units.js 的 localTokens/englishTokens 算法）。
 // - 百分比统一 1 位小数；请求数千分位（量级缩写反而看不出量级差）。
@@ -72,19 +72,19 @@ export function fmtPct(rate: number | null | undefined): string {
 }
 
 /**
- * 成本读数：¥ + 原始配额值（口径定案见文件头；null → —）。
- * 全仪表盘唯一出口——旧 fmtMoney 与 cost/100 两套并存是 bug。
+ * 成本读数：¥ + 「额度 → 元」折算（后端配额单位是分，1 元 = 200 额度）。
+ * 全仪表盘唯一出口——旧 fmtMoney 与未折算两套并存是 bug。
  * 货币金额统一两位小数 + 千分位；负数写成 `-¥1.00`（负号在币号外）。
  */
 export function fmtCost(value: number | null | undefined, lang?: Lang): string {
   if (value == null) return '—';
   const n = Number(value) || 0;
-  const rounded = Number(n.toFixed(2));
-  const abs = Math.abs(rounded).toLocaleString(
+  const yuan = Number((n / 200).toFixed(2));
+  const abs = Math.abs(yuan).toLocaleString(
     NUMBER_LOCALES[isZh(lang) ? 'zh' : 'en'] ?? 'en-US',
     { minimumFractionDigits: 2, maximumFractionDigits: 2 },
   );
-  return `${rounded < 0 ? '-' : ''}¥${abs}`;
+  return `${yuan < 0 ? '-' : ''}¥${abs}`;
 }
 
 // ── 图表几何（A2A report-charts.ts 移植，纯计算便于单测） ──────────

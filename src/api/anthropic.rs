@@ -407,6 +407,8 @@ pub async fn handle_messages(
     let client_ip = extract_client_ip(&headers);
     // 客户端识别（只读请求头；不改转发/计费行为）
     let client = crate::api::client_id::identify(&headers);
+    // 特殊路由会在请求体上留痕并改写 `model`，这里起就持有可变副本。
+    let mut body = body;
 
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
@@ -497,7 +499,25 @@ pub async fn handle_messages(
     // 视觉模型未定价时 build 内自动降级回原模型）。
     let image_ctx =
         crate::image_compat::RequestImageContext::build(&state, &model, body_needs.images);
-    let model = image_ctx.routing_model(&model);
+    let mut model = image_ctx.routing_model(&model);
+    // 特殊路由（compact/title）：与 chat 面同一裁决，读 Anthropic 原生
+    // `messages` + `content` 文本块（协议翻译前判；system 在顶层不影响标题判据
+    // ——Claude Code 的标题请求是 user 措辞，ZCode 走 chat 协议）。
+    // 源模型已在上方完成鉴权 / 限流 / 分组 / 定价校验；改写后的目标同样要求已定价。
+    // 日志留痕：模型改写优先于视觉裁决。
+    let mut special_route = crate::route_special::vision_trace(&image_ctx);
+    if let Some(rewrite) = crate::route_special::apply_request(
+        &client,
+        &headers,
+        &mut body,
+        crate::route_special::Format::Anthropic,
+    ) {
+        model = rewrite.target.clone();
+        special_route = Some(crate::route_special::rewrite_trace(&rewrite));
+        if let Err(e) = super::openai::ensure_model_priced(&state, &model) {
+            return e.into_response();
+        }
+    }
     let candidates = super::openai::resolve_bridges_with_affinity_needs(
         &state,
         &model,
@@ -1115,6 +1135,7 @@ pub async fn handle_messages(
                 let status_code = StatusCode::from_u16(e.http_status())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 let mut log = crate::log::RequestLog::new();
+                log.special_route = special_route.clone();
                 log.purge_applied =
                     purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
                 log.user_id = api_key.user_id.clone();
@@ -2047,6 +2068,7 @@ pub async fn handle_messages(
                         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
                 };
                 let mut log = crate::log::RequestLog::new();
+                log.special_route = special_route.clone();
                 log.purge_applied =
                     purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
                 log.user_id = api_key.user_id.clone();
@@ -2163,6 +2185,7 @@ pub async fn handle_messages(
 
             // 记录请求日志（含 channel_id，问题 4）
             let mut log = crate::log::RequestLog::new();
+            log.special_route = special_route.clone();
             log.purge_applied =
                 purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
             log.user_id = api_key.user_id.clone();
