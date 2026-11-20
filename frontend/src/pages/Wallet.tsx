@@ -17,13 +17,15 @@ import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
 import { Tooltip } from '../components/ui';
 import { Columns3 } from 'lucide-react';
-import { fmtQuota } from '../lib/utils';
+import { setQuotaPerYuan } from '../lib/quotaRate';
 
 interface WalletUser {
   email?: string;
   username?: string;
   quota?: number;
   used_quota?: number;
+  /** 后端计算的可用余额（quota - used - reserved），优先于前端自算 */
+  remaining?: number;
   aff_count?: number;
   aff_quota?: number;
   aff_history_quota?: number;
@@ -42,9 +44,14 @@ interface EpayConfig {
   enabled?: boolean;
   pay_address?: string;
   min_topup?: number;
+  /** 兑换倍率：1 元 = ? 额度（后端已兜底为有效值） */
   price?: number;
   amount_discount?: Record<string, number>;
   pay_methods?: string[];
+  /** 预设充值档位（元） */
+  amount_options?: number[];
+  /** 外部充值链接（留空则不显示） */
+  topup_link?: string;
 }
 
 /** 订阅套餐卡片数据（#85，对齐后端 /api/subscription/plans） */
@@ -90,16 +97,13 @@ interface WalletOrder {
   create_time?: number;
 }
 
-// 预设充值档位（new-api 式快捷金额）
-const AMOUNT_PRESETS = [10, 50, 100, 500];
-
-
 const LS_TCOLS = 'aigx-tbl-cols.wallet-orders';
 /** 订单表列声明（订单号/操作语义锁定——订单无操作列，单号即主键） */
 const WALLET_ORDER_COL_DEFS: TableColumnDef[] = [
   { key: 'trade_no', label: '订单号', width: 240, locked: true },
-  { key: 'amount', label: '金额', align: 'right', width: 100 },
-  { key: 'quota', label: '配额', align: 'right', width: 110 },
+  { key: 'amount', label: '面值', align: 'right', width: 100 },
+  { key: 'money', label: '实付', align: 'right', width: 100 },
+  { key: 'quota', label: '到账额度', align: 'right', width: 110 },
   { key: 'pay', label: '支付方式', width: 110 },
   { key: 'status', label: '状态', align: 'center', width: 90 },
   { key: 'created', label: '创建时间', width: 160 },
@@ -171,12 +175,16 @@ export default function Wallet(): JSX.Element {
   // 兑换码是不可逆消费，提交前二次确认
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
+  // 支付方式跟随后台配置：当前选中项不在可用列表里时切到第一个。
   useEffect(() => {
-    void load();
-  }, []);
+    if (!epay) return;
+    const list = epay.pay_methods?.length ? epay.pay_methods : ['alipay', 'wxpay'];
+    if (!list.includes(method)) setMethod(list[0]);
+  }, [epay, method]);
 
-  const load = async () => {
-    setLoading(true);
+  // `silent`：后台刷新（支付回跳后的延迟刷新）不切骨架屏，避免整页闪一下。
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError('');
     try {
       const [meRes, epayRes, orderRes, affRes, checkinRes, subPlansRes, mySubsRes] = await Promise.all([
@@ -189,7 +197,11 @@ export default function Wallet(): JSX.Element {
         api.subscriptionSelf().catch(() => null),
       ]);
       if (meRes) setMe(meRes.data as WalletUser | null);
-      if (epayRes) setEpay(epayRes.data as EpayConfig | null);
+      if (epayRes) {
+        setEpay(epayRes.data as EpayConfig | null);
+        // 与后端同口径：拿到有效倍率就同步全局展示倍率
+        setQuotaPerYuan((epayRes.data as EpayConfig | null)?.price);
+      }
       if (orderRes) setOrders(Array.isArray(orderRes.data) ? (orderRes.data as unknown as WalletOrder[]) : []);
       if (affRes) setAffCode(String(affRes.data ?? ''));
       if (subPlansRes && Array.isArray(subPlansRes.data)) setSubPlans(subPlansRes.data as unknown as SubPlan[]);
@@ -201,9 +213,31 @@ export default function Wallet(): JSX.Element {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // 支付网关同步跳转回来时（`/wallet?pay=success|pending|fail`）：
+  // 提示结果、清掉 URL 参数，并在几秒后刷新余额/订单（异步回调可能稍晚到账）。
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const pay = params.get('pay');
+    if (!pay) return;
+    if (pay === 'success') addToast(t('充值成功，额度已到账'));
+    else if (pay === 'pending') addToast(t('支付结果确认中，到账后会自动刷新'));
+    else addToast(t('支付未完成或已取消'), 'error');
+    params.delete('pay');
+    const qs = params.toString();
+    window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''));
+    const timer = window.setTimeout(() => {
+      void load(true);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [addToast, load, t]);
 
   // 与后端 pay_money/topup_quota 对齐：档位折扣（金额 → 折扣比例）
   const discountFor = (amt: number): number => {
@@ -221,9 +255,31 @@ export default function Wallet(): JSX.Element {
   // 与后端 topup_quota 对齐：**折扣只影响实付金额**，到账按面值折算
   // （充 100 打 9 折 = 付 90、到账仍按 100 元 × price）。两边都乘折扣会让
   // 档位越大到账越少，优惠名不副实。
+  // 兑换倍率：1 元 = ? 额度。后端 `/api/epay/info` 已回落成有效值，
+  // 这里再兜一层，避免配置异常时页面显示 0/NaN。
+  const rate = (): number => (Number(epay?.price) > 0 ? Number(epay?.price) : 200);
+
+  /** 额度 → 元（与全局展示口径一致）。 */
+  const yuanOf = (quota: number): number => Number(((Number(quota) || 0) / rate()).toFixed(2));
+
+  /** ¥ 金额（两位小数 + 千分位）。 */
+  const fmtYuan = (yuan: number): string =>
+    `¥${(Number(yuan) || 0).toLocaleString('zh-CN', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+
+  /** 额度数（整数 + 千分位 + 单位）。 */
+  const fmtQuotaUnit = (quota: number): string =>
+    `${Math.max(0, Math.round(Number(quota) || 0)).toLocaleString('zh-CN')} ${t('额度')}`;
+
+  /** 「额度（≈¥金额）」双显示。 */
+  const fmtQuotaBoth = (quota: number): string => `${fmtQuotaUnit(quota)}（≈${fmtYuan(yuanOf(quota))}）`;
+
+  /** 当前金额档位的实际到账额度（折扣不影响到账）。 */
   const quotaFor = (amt: number): number => {
-    const quota = amt * (epay?.price || 1);
-    return quota;
+    const n = Number(amt);
+    return Number.isFinite(n) && n > 0 ? Math.round(n * rate()) : 0;
   };
 
   const handleTopup = async () => {
@@ -281,7 +337,7 @@ export default function Wallet(): JSX.Element {
       message: (
         <>
           {t('即将以余额购买订阅「{{name}}」，将从余额扣费，订阅期间消耗优先走订阅配额池。', { name: p.name })}
-          {p.total_amount ? <><br />{t('订阅总配额')}：{fmtQuota(p.total_amount)}</> : null}
+          {p.total_amount ? <><br />{t('订阅总配额')}：{fmtQuotaBoth(p.total_amount)}</> : null}
           <br />{t('售价')}：¥{Number(p.price || 0).toFixed(2)}
         </>
       ),
@@ -313,7 +369,7 @@ export default function Wallet(): JSX.Element {
     try {
       const res = await api.doCheckin();
       const awarded = Number((res?.data as { quota_awarded?: number } | null)?.quota_awarded ?? 0);
-      addToast(`${t('签到成功，获得')} ${fmtQuota(awarded)} ${t('配额')}`);
+      addToast(`${t('签到成功，获得')} ${fmtQuotaBoth(awarded)}`);
       // 刷新余额与签到状态
       const [meRes, statusRes] = await Promise.all([
         api.getMe().catch(() => null),
@@ -349,7 +405,7 @@ export default function Wallet(): JSX.Element {
       const res = await api.affTransfer();
       const transferred = Number((res?.data as { transferred?: number } | null)?.transferred ?? 0);
       if (transferred > 0) {
-        addToast(`${t('已领取')} ${fmtQuota(transferred)} ${t('配额')}`);
+        addToast(`${t('已领取')} ${fmtQuotaBoth(transferred)}`);
       } else {
         addToast(t('暂无可领取的邀请奖励'));
       }
@@ -391,7 +447,7 @@ export default function Wallet(): JSX.Element {
       <div>
         <div className="page-header">
           <h1>{t('钱包充值')}</h1>
-          <p>{t('通过易支付为账户充值配额')}</p>
+          <p>{t('通过易支付为账户充值额度')}</p>
         </div>
         <SkeletonCards count={3} />
         <SkeletonTable columns={6} rows={6} />
@@ -399,8 +455,15 @@ export default function Wallet(): JSX.Element {
     );
   }
 
-  const remaining = me ? (me.quota || 0) - (me.used_quota || 0) : 0;
+  // 优先用后端 remaining（已扣除 used_quota 与在途预留），避免前端自算漏掉 reserved。
+  const remaining = me ? (me.remaining ?? (me.quota || 0) - (me.used_quota || 0)) : 0;
   const methods = (epay && epay.pay_methods && epay.pay_methods.length > 0) ? epay.pay_methods : ['alipay', 'wxpay'];
+  // 预设档位以后台 `amount_options` 为准（与 /api/epay/info 下发一致），
+  // 旧实现写死 [10,50,100,500]，后台改了档位页面不联动。
+  const amountPresets =
+    epay?.amount_options && epay.amount_options.length > 0
+      ? epay.amount_options
+      : [10, 20, 50, 100, 200, 500];
 
   // 订阅展示辅助（#85）
   const fmtSubDuration = (p: SubPlan): string => {
@@ -439,7 +502,7 @@ export default function Wallet(): JSX.Element {
     <div>
       <div className="page-header">
         <h1>{t('钱包充值')}</h1>
-        <p>{t('通过易支付为账户充值配额')}</p>
+        <p>{t('通过易支付为账户充值额度')}</p>
       </div>
 
       {error && <div className="error-message">{error}</div>}
@@ -461,14 +524,16 @@ export default function Wallet(): JSX.Element {
                 {me?.username && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{me.username}</div>}
               </div>
               <div>
-                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('剩余配额')}</div>
+                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('账户余额')}</div>
                 <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--accent-color)' }}>
-                  {fmtQuota(remaining)}
+                  {fmtYuan(yuanOf(remaining))}
                 </div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{fmtQuotaUnit(remaining)}</div>
               </div>
               <div>
                 <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('兑换倍率')}</div>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>{t('1 元 =')} {epay.price || 1} {t('配额')}</div>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>{t('1 元 =')} {rate()} {t('额度')}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('可在「系统设置 → 计费 → 易支付配置」调整')}</div>
               </div>
             </div>
           </Card>
@@ -476,7 +541,7 @@ export default function Wallet(): JSX.Element {
           <Card title={t('充值')} bodyClassName="">
             {/* 预设档位（new-api 式）：快捷选择 + 实时换算 */}
             <div className="wallet-amount-grid">
-              {AMOUNT_PRESETS.map((v) => {
+              {amountPresets.map((v) => {
                 const active = Math.floor(Number(amount)) === v;
                 return (
                   <button
@@ -487,8 +552,12 @@ export default function Wallet(): JSX.Element {
                   >
                     <span className="wallet-amount-num">¥{Number(v).toFixed(2)}</span>
                     <span className="wallet-amount-quota">
-                      {fmtQuota(quotaFor(v))} {t('配额')}
-                      {discountFor(v) < 1 && <em style={{ marginLeft: 4, fontStyle: 'normal', color: '#34d399' }}>{t('折扣')} {discountFor(v)}</em>}
+                      {fmtQuotaUnit(quotaFor(v))}
+                      {discountFor(v) < 1 && (
+                        <em style={{ marginLeft: 4, fontStyle: 'normal', color: '#34d399' }}>
+                          {t('实付')} {fmtYuan(payMoney(v))}
+                        </em>
+                      )}
                     </span>
                   </button>
                 );
@@ -503,7 +572,7 @@ export default function Wallet(): JSX.Element {
                 min={epay.min_topup || 1}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
-                hint={`${t('最低')} ${epay.min_topup || 1} ${t('元，将获得')} ${fmtQuota(quotaFor(Number(amount) || 0))} ${t('配额')}`}
+                hint={`${t('最低')} ${epay.min_topup || 1} ${t('元，到账')} ${fmtQuotaBoth(quotaFor(Number(amount) || 0))}`}
               />
               {/* 支付方式按钮网格（new-api 式） */}
               <div>
@@ -524,11 +593,24 @@ export default function Wallet(): JSX.Element {
               {/* 实付结算块 */}
               <div className="wallet-pay-summary">
                 <span>{t('实付金额')}</span>
-                <span className="wallet-pay-amount">¥{payMoney(Number(amount) || 0).toFixed(2)}</span>
+                <span className="wallet-pay-amount">{fmtYuan(payMoney(Number(amount) || 0))}</span>
                 <span className="wallet-pay-arrow">→</span>
-                <span>{t('获得配额')}</span>
-                <span className="wallet-pay-quota">{fmtQuota(quotaFor(Number(amount) || 0))}</span>
+                <span>{t('到账额度')}</span>
+                <span className="wallet-pay-quota">
+                  {fmtQuotaUnit(quotaFor(Number(amount) || 0))}
+                  <span style={{ marginLeft: 6, fontWeight: 400, color: 'var(--text-muted)' }}>
+                    ≈{fmtYuan(yuanOf(quotaFor(Number(amount) || 0)))}
+                  </span>
+                </span>
               </div>
+              {epay.topup_link && (
+                <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>
+                  {t('其他充值方式')}：
+                  <a href={epay.topup_link} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-color)' }}>
+                    {epay.topup_link}
+                  </a>
+                </p>
+              )}
               <Button type="submit" disabled={submitting}>
                 {submitting ? t('正在跳转...') : t('立即充值')}
               </Button>
@@ -550,7 +632,7 @@ export default function Wallet(): JSX.Element {
             <div>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('奖励区间')}</div>
               <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
-                {fmtQuota(checkin.min_quota)} ~ {fmtQuota(checkin.max_quota)}
+                {fmtQuotaBoth(checkin.min_quota ?? 0)} ~ {fmtQuotaBoth(checkin.max_quota ?? 0)}
               </div>
             </div>
             <div>
@@ -560,7 +642,10 @@ export default function Wallet(): JSX.Element {
             <div>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('本月累计奖励')}</div>
               <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4, color: 'var(--accent-color)' }}>
-                {fmtQuota(checkin.month_total)}
+                {fmtYuan(yuanOf(checkin.month_total ?? 0))}
+                <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>
+                  {fmtQuotaUnit(checkin.month_total ?? 0)}
+                </span>
               </div>
             </div>
             <Button size="sm" onClick={() => void handleCheckin()} disabled={checkingIn || checkin.checked_today}>
@@ -587,7 +672,7 @@ export default function Wallet(): JSX.Element {
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ color: 'var(--text-muted)' }}>{t('订阅配额')}</span>
-                    <span>{p.total_amount ? fmtQuota(p.total_amount) : t('不限')}</span>
+                    <span>{p.total_amount ? fmtQuotaBoth(p.total_amount) : t('不限')}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ color: 'var(--text-muted)' }}>{t('周期重置')}</span>
@@ -641,8 +726,8 @@ export default function Wallet(): JSX.Element {
                         <td><span className={badge.cls}>{badge.text}</span></td>
                         <td>
                           {s.amount_total > 0
-                            ? `${fmtQuota(s.amount_used)} / ${fmtQuota(s.amount_total)}`
-                            : `${fmtQuota(s.amount_used)} / ${t('不限')}`}
+                            ? `${fmtQuotaUnit(s.amount_used)} / ${fmtQuotaUnit(s.amount_total)}（≈${fmtYuan(yuanOf(s.amount_used))} / ${fmtYuan(yuanOf(s.amount_total))}）`
+                            : `${fmtQuotaUnit(s.amount_used)} / ${t('不限')}`}
                         </td>
                         <td>{s.end_time > 0 ? new Date(s.end_time * 1000).toLocaleString() : '—'}</td>
                         <td>{active && s.next_reset_time > 0 ? new Date(s.next_reset_time * 1000).toLocaleString() : '—'}</td>
@@ -676,12 +761,20 @@ export default function Wallet(): JSX.Element {
           <div>
             <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('待领取奖励')}</div>
             <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4, color: 'var(--accent-color)' }}>
-              {fmtQuota(me?.aff_quota ?? 0)}
+              {fmtYuan(yuanOf(me?.aff_quota ?? 0))}
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>
+                {fmtQuotaUnit(me?.aff_quota ?? 0)}
+              </span>
             </div>
           </div>
           <div>
             <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('累计邀请获得')}</div>
-            <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4 }}>{fmtQuota(me?.aff_history_quota ?? 0)}</div>
+            <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4 }}>
+              {fmtYuan(yuanOf(me?.aff_history_quota ?? 0))}
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>
+                {fmtQuotaUnit(me?.aff_history_quota ?? 0)}
+              </span>
+            </div>
           </div>
           <Button size="sm" onClick={() => void claimAff()} disabled={claiming || !me?.aff_quota}>
             {claiming ? t('领取中...') : t('领取奖励')}
@@ -710,7 +803,7 @@ export default function Wallet(): JSX.Element {
             value={redeemCode}
             onChange={(e) => setRedeemCode(e.target.value)}
             placeholder={t('输入兑换码直接充值配额')}
-            hint={t('输入管理员发放的兑换码，即可将对应配额充入账户。')}
+            hint={t('输入管理员发放的兑换码，即可将对应额度充入账户。')}
             style={{ fontFamily: 'monospace', letterSpacing: 1 }}
           />
           <Button type="submit" disabled={redeeming}>
@@ -785,10 +878,17 @@ export default function Wallet(): JSX.Element {
                     <td><code className="key-value" style={{ maxWidth: 240 }}>{o.trade_no}</code></td>
                     )}
                     {orderKeySet.has('amount') && (
-                    <td>¥{Number(o.money || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td>{o.amount != null ? fmtYuan(Number(o.amount)) : '—'}</td>
+                    )}
+                    {orderKeySet.has('money') && (
+                    <td>{o.money != null ? fmtYuan(Number(o.money)) : '—'}</td>
                     )}
                     {orderKeySet.has('quota') && (
-                    <td>{fmtQuota(o.quota != null ? o.quota : (o.amount || 0) * (epay?.price || 1))}</td>
+                    <td>
+                      {o.quota != null && o.quota > 0
+                        ? `${fmtQuotaUnit(o.quota)}（≈${fmtYuan(yuanOf(o.quota))}）`
+                        : '—'}
+                    </td>
                     )}
                     {orderKeySet.has('pay') && (
                     <td>{o.payment_method}</td>

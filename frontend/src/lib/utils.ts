@@ -3,6 +3,7 @@
  * clsx + tailwind-merge 组合，参照 new-api / ds-free-api 的 cn() 惯例
  */
 
+import { getQuotaPerYuan } from './quotaRate';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -40,13 +41,13 @@ export function fmtCompact(val: number | null | undefined): string {
 }
 
 /**
- * 额度展示（缺省按 0）：后端配额单位是「额度」，统一 /200 折成元后固定两位小数 +
+ * 额度展示（缺省按 0）：后端配额单位是「额度」，统一除以当前兑换倍率（默认 200）折成元后固定两位小数 +
  * 千分位。与仪表盘 fmtCost、钱包/套餐/兑换码等金额出口同一「额度 → 元」口径。
  */
 export function fmtQuota(val: number | null | undefined): string {
   const n = Number(val ?? 0);
   if (!Number.isFinite(n)) return '0.00';
-  return (n / 200).toLocaleString('zh-CN', {
+  return (n / getQuotaPerYuan()).toLocaleString('zh-CN', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });

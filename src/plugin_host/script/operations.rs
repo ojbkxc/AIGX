@@ -159,6 +159,14 @@ pub async fn install(
     }
     package.trusted = true;
     package.enabled = false;
+    // 包图标兜底：宿主握手要等「启用 + 加载成功」才回填 `icon`，但商店
+    // 「已安装」卡片与后续列表在启用前就该有图标。先读包清单的
+    // `magpie.icon` 落库（data URI / https），刷新 worker 随后落缓存。
+    // 宿主回填值优先（`apply_package_list` 会覆盖）。
+    if package.icon.is_none() {
+        let manifest_dir = package.version_dir(dir_root);
+        package.icon = super::icons::manifest(&manifest_dir);
+    }
 
     // 依赖安装：package.json 有 dependencies 才起 Bun（bun::ensure 幂等）。
     // Bun 暂不可用不阻断安装——宿主启动时会再次 ensure；依赖缺失由宿主
@@ -190,6 +198,8 @@ pub async fn install(
         cleanup_on_install_failure(manager.data_dir(), &package);
         return Err(format!("登记脚本包失败：{e:#}"));
     }
+    // 图标缓存立即刷新一轮（不等整点）：新装包的商店/已装卡片马上有图。
+    super::icons::wake(false);
     tracing::info!(
         "[Script] 已安装 {} {}（来源 {}，未启用）",
         package.id,
@@ -321,6 +331,8 @@ pub async fn uninstall(
     if let Err(e) = manager.rebuild("uninstall").await {
         tracing::warn!("[Script] 卸载后宿主重建失败（包已删除且已停用，重启后自愈）：{e}");
     }
+    // 清掉已删包的图标绑定（refresh 会 retain_cards）。
+    super::icons::wake(false);
     tracing::info!("[Script] 已卸载 {package_id}");
     Ok(())
 }

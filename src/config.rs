@@ -1933,7 +1933,10 @@ impl ConfigManager {
         let tmp = self.path.with_extension("toml.tmp");
         // `save_with` 从 `AppConfig` 序列化；这里已有一份字符串，直接复用
         // 写盘段（见下方 `write_tmp_and_rename`）。
-        self.write_tmp_and_rename(&tmp, &content).await
+        self.write_tmp_and_rename(&tmp, &content).await?;
+        let rate = self.config.read().await.epay.quota_per_yuan();
+        crate::pricing::set_quota_per_yuan(rate);
+        Ok(())
     }
 
     /// 把已序列化的 TOML 内容原子落盘（tmp + rename，0600）。
@@ -1970,8 +1973,11 @@ impl ConfigManager {
     /// 两个管理员同时保存不同 tab 时互相丢更新。
     pub async fn update(&self, config: AppConfig) -> anyhow::Result<()> {
         let _guard = self.write_lock.lock().await;
-        *self.config.write().await = config;
-        self.save().await
+        *self.config.write().await = config.clone();
+        self.save().await?;
+        // `save()` 不走 `save_with`，这里补一次全局倍率同步
+        crate::pricing::set_quota_per_yuan(config.epay.quota_per_yuan());
+        Ok(())
     }
 
     /// 字段级读-改-写：在同一把写锁内取当前快照、应用闭包、落盘、发布。
@@ -2001,7 +2007,11 @@ impl ConfigManager {
     async fn save_with(&self, config: &AppConfig) -> anyhow::Result<()> {
         let content = toml::to_string_pretty(config)?;
         let tmp = self.path.with_extension("toml.tmp");
-        self.write_tmp_and_rename(&tmp, &content).await
+        self.write_tmp_and_rename(&tmp, &content).await?;
+        // 兑换倍率（1 元 = ? 额度）是计费/充值/展示的全局口径：
+        // 任何配置保存路径都同步一次，热生效（默认 200）。
+        crate::pricing::set_quota_per_yuan(config.epay.quota_per_yuan());
+        Ok(())
     }
 
     /// 获取当前配置的只读副本

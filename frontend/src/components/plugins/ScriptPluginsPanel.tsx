@@ -18,6 +18,7 @@ import { ExternalLink, Loader2, Plus, RefreshCw, RotateCcw, Search, Star, Trash2
 import { api } from '../../api';
 import { useToast } from '../Toast';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
+import PluginIcon from './PluginIcon';
 import { Badge, Button, Card, EmptyState, Loading, Switch, Tooltip } from '../ui';
 import type {
   ScriptCatalogEntryView,
@@ -69,20 +70,6 @@ function PublisherBadge({ publisher }: { publisher: string }): JSX.Element {
   return <Badge tone={tone}>{t(publisher === 'official' ? '官方' : publisher === 'recommended' ? '推荐' : '第三方')}</Badge>;
 }
 
-/** 图标：iconSources 按序回退（第一个候选失败 → 首字母兜底） */
-function ScriptIcon({ sources, label }: { sources: string[]; label: string }): JSX.Element {
-  const [failed, setFailed] = useState(false);
-  const src = sources[0];
-  if (!src || failed) {
-    return <div className="pl-card-icon">{(label || '?').slice(0, 1).toUpperCase()}</div>;
-  }
-  return (
-    <div className="pl-card-icon">
-      <img src={src} alt="" onError={() => setFailed(true)} />
-    </div>
-  );
-}
-
 /** 目录条目卡片（商店形态：安装 / 已安装徽标 / 可更新徽标） */
 function CatalogCard({
   entry,
@@ -104,7 +91,7 @@ function CatalogCard({
   return (
     <div className={`pl-card${entry.installable ? '' : ' is-disabled'}`}>
       <div className="pl-card-head">
-        <ScriptIcon sources={entry.iconSources} label={entry.label || entry.name} />
+        <PluginIcon sources={entry.iconSources} label={entry.label || entry.name} />
         <div className="pl-card-title">
           <h3>
             {entry.label || entry.name}
@@ -184,7 +171,7 @@ function InstalledScriptCard({
   return (
     <div className="pl-card is-installed">
       <div className="pl-card-head">
-        <div className="pl-card-icon">{(pkg.label || pkg.id).slice(0, 1).toUpperCase()}</div>
+        <PluginIcon src={pkg.icon} label={pkg.label || pkg.id} />
         <div className="pl-card-title">
           <h3>
             {pkg.label || pkg.id}

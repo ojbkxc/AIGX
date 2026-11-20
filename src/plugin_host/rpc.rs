@@ -208,6 +208,83 @@ pub fn decode_frame(line: &str) -> Result<Frame, RpcError> {
     serde_json::from_str(line).map_err(|e| RpcError::new(format!("decode: {e}"), "decode"))
 }
 
+/// 补齐 `conversation` / `chat` 的**必填线字段**。
+///
+/// 上游 `provider-protocol` 的 `ConversationRequest` / `ChatRequest` 直接把
+/// `params` 反序列化成结构体，而 `headers` 与 `stream` **没有** serde 默认值
+/// —— 缺任何一个，插件 SDK 都会回「参数无法解析」，表现为所有对话 500。
+/// 网关自己的调用方可能只填 `{provider, account, body}`（插件渠道没有客户端
+/// 头上下文），所以由 RPC 内核统一补默认值：
+///
+/// - `headers`: `{}`（空表 = 没有可透传的客户端头）
+/// - `stream`: `true`（`conversation` 恒强制；`chat` 缺省时补 true）
+/// - `account`: `""`（未指定账号 = 插件用自己已授权的默认账号）
+/// - `session`: `""`（`conversation` 专用，少一个会话标识不影响首轮）
+/// - `wire_model`: `body.model`（插件拼 URL / 选信封时要用的发送名）
+/// - `reasoning`: `""`（`chat` 专用）
+///
+/// 调用方已经给了的值一律保留。
+fn fill_wire_defaults(method: &str, params: Value) -> Value {
+    let conversation = method == "conversation";
+    if !conversation && method != "chat" {
+        return params;
+    }
+    let Value::Object(mut map) = params else {
+        return params;
+    };
+    let object_or_default = |map: &mut serde_json::Map<String, Value>, key: &str| match map.get(key)
+    {
+        Some(Value::Object(_)) => {}
+        _ => {
+            map.insert(key.to_string(), Value::Object(Default::default()));
+        }
+    };
+    object_or_default(&mut map, "headers");
+    if conversation {
+        // 网关只实现流式路径：插件永远推 chat SSE 帧，非流式由网关自己聚合
+        // （与上游 `forward_conversation` 恒发 `stream:true` 同口径）。
+        map.insert("stream".to_string(), Value::Bool(true));
+    } else {
+        match map.get("stream") {
+            Some(Value::Bool(_)) => {}
+            _ => {
+                map.insert("stream".to_string(), Value::Bool(true));
+            }
+        }
+    }
+    match map.get("account") {
+        Some(Value::String(_)) => {}
+        _ => {
+            map.insert("account".to_string(), Value::String(String::new()));
+        }
+    }
+    if conversation {
+        match map.get("session") {
+            Some(Value::String(_)) => {}
+            _ => {
+                map.insert("session".to_string(), Value::String(String::new()));
+            }
+        }
+    } else {
+        match map.get("reasoning") {
+            Some(Value::String(_)) => {}
+            _ => {
+                map.insert("reasoning".to_string(), Value::String(String::new()));
+            }
+        }
+    }
+    if !matches!(map.get("wire_model"), Some(Value::String(_))) {
+        let model = map
+            .get("body")
+            .and_then(|body| body.get("model"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        map.insert("wire_model".to_string(), Value::String(model));
+    }
+    Value::Object(map)
+}
+
 /// 插件→网关的回调处理器。
 ///
 /// 插件通过这个方法族反向调用网关（读账号、写台账、打日志、发通知）。
@@ -487,6 +564,7 @@ impl RpcChannel {
     /// 分配奇数 id，写请求帧，在 `pending` 里注册应答通道，等插件回应答。
     /// 超时（由调用方的 select 控制）或通道关闭则报错。
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let params = fill_wire_defaults(method, params);
         let id = self.shared.next_id.fetch_add(2, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
@@ -524,6 +602,7 @@ impl RpcChannel {
     /// 插件拒绝（error 应答）、head 超时、首帧不是 head、写出失败——都在
     /// 这里直接报错，不返回半条流。
     pub async fn call_stream(&self, method: &str, params: Value) -> Result<StreamCall, RpcError> {
+        let params = fill_wire_defaults(method, params);
         let id = self.shared.next_id.fetch_add(2, Ordering::Relaxed);
         let (tx, mut rx) = mpsc::unbounded_channel();
         {
@@ -631,8 +710,18 @@ impl RpcChannel {
 
 impl Shared {
     /// 写一帧到插件 stdin。
+    ///
+    /// ── 为什么在这里挡超限而不是让插件去挡 ──────────────────────
+    /// 插件 SDK 的 `read_frame` 遇到超过 [`MAX_LINE_BYTES`] 的行会判
+    /// `InvalidData` **并断开读循环**（整个宿主随之失效）。网关如果在写端
+    /// 不拦，一条超限的 `conversation` 就能把插件进程打死，后续所有请求
+    /// 全部失败。这里提前给出可分类的 `plugin_request_too_large`（与 Wasm
+    /// 宿主同码），编排层按 413 透传，不换号重试。
     async fn write_frame(&self, frame: &Frame) -> Result<(), RpcError> {
         let line = encode_frame(frame)?;
+        if let Some(error) = oversize_error(line.len()) {
+            return Err(error);
+        }
         let mut writer = self.writer.lock().await;
         writer
             .write_all(line.as_bytes())
@@ -650,6 +739,24 @@ impl Shared {
     }
 }
 
+/// 一帧（含行尾）超过 [`MAX_LINE_BYTES`] 时的错误；未超限返回 `None`。
+///
+/// 错误码用 `plugin_request_too_large`：与 Wasm 宿主、`bridge/plugin.rs`
+/// 的 413 映射同码（对齐 A2A beta.3）。
+fn oversize_error(line_len: usize) -> Option<RpcError> {
+    if line_len < MAX_LINE_BYTES {
+        return None;
+    }
+    Some(RpcError::new(
+        format!(
+            "本次请求约 {:.1} MiB，超过插件单帧上限 {:.1} MiB",
+            line_len as f64 / (1024.0 * 1024.0),
+            MAX_LINE_BYTES as f64 / (1024.0 * 1024.0),
+        ),
+        "plugin_request_too_large",
+    ))
+}
+
 /// 读一行（有界）。
 ///
 /// `AsyncBufReadExt::read_until` 会一直读到换行或 EOF——对端不换行时会
@@ -665,6 +772,12 @@ async fn read_bounded_line(
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
+            if buf.len() > MAX_LINE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "rpc line exceeds MAX_LINE_BYTES",
+                ));
+            }
             return Ok(if buf.is_empty() {
                 None
             } else {
@@ -1143,8 +1256,77 @@ mod tests {
         assert!(!line.contains("event"), "None 字段应跳过");
     }
 
-    // ── 流式调用（call_stream / StreamCall）──────────────────────────
+    // ── 线字段默认值（Community SDK 的必填 ConversationRequest）────────
 
+    /// 只带 `{provider, account, body}` 的 conversation 参数必须被补齐
+    /// `headers` / `stream` / `session` / `wire_model`，否则插件 SDK 的
+    /// `serde_json::from_value::<ConversationRequest>` 会因缺字段失败。
+    #[test]
+    fn wire_defaults_fill_conversation_required_fields() {
+        let params = serde_json::json!({
+            "provider": "kiro",
+            "account": "",
+            "body": { "model": "wire-model-x" }
+        });
+        let filled = fill_wire_defaults("conversation", params);
+        assert!(filled["headers"].is_object(), "headers 必填：{filled}");
+        assert_eq!(filled["stream"], true, "stream 必填：{filled}");
+        assert_eq!(filled["session"], "", "session 应有默认串：{filled}");
+        assert_eq!(filled["wire_model"], "wire-model-x");
+        // 插件 SDK 的严格反序列化：这一份必须能解出全部必填字段。
+        assert_eq!(filled["provider"], "kiro");
+        assert_eq!(filled["account"], "");
+        assert!(filled["body"].is_object());
+    }
+
+    #[test]
+    fn wire_defaults_preserve_caller_values_and_skip_other_methods() {
+        let params = serde_json::json!({
+            "provider": "kiro",
+            "account": "acc-1",
+            "body": { "model": "m" },
+            "headers": { "x-session-id": "s1" },
+            "stream": false,
+            "session": "s1",
+            "wire_model": "m2"
+        });
+        let filled = fill_wire_defaults("conversation", params.clone());
+        assert_eq!(
+            filled["stream"], true,
+            "conversation 恒为流式（上游同口径）"
+        );
+        assert_eq!(filled["headers"]["x-session-id"], "s1");
+        assert_eq!(filled["session"], "s1");
+        assert_eq!(filled["wire_model"], "m2");
+        assert_eq!(filled["account"], "acc-1", "显式账号应保留");
+
+        // 其它方法原样透传（不偷偷改动 admin/login 参数）。
+        let login = serde_json::json!({ "provider": "kiro", "flow": "f1" });
+        assert_eq!(fill_wire_defaults("login.poll", login.clone()), login);
+    }
+
+    #[test]
+    fn wire_defaults_fill_chat_reasoning() {
+        let params = serde_json::json!({ "provider": "kiro", "body": { "model": "m" } });
+        let filled = fill_wire_defaults("chat", params);
+        assert_eq!(filled["stream"], true);
+        assert_eq!(filled["reasoning"], "");
+        assert_eq!(filled["wire_model"], "m");
+        assert!(filled["headers"].is_object());
+    }
+
+    #[test]
+    fn oversize_error_matches_plugin_request_too_large_code() {
+        assert!(
+            oversize_error(MAX_LINE_BYTES - 1).is_none(),
+            "含行尾恰好到上限不算超"
+        );
+        let error = oversize_error(MAX_LINE_BYTES).expect("再加行尾就应拒绝");
+        assert_eq!(error.code.as_deref(), Some("plugin_request_too_large"));
+        assert!(error.message.contains("MiB"), "文案应带尺寸: {error}");
+    }
+
+    // ── 流式调用（call_stream / StreamCall）──────────────────────────
     /// 组一帧并写出（mock 插件侧用）。
     async fn write_frame_line<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) {
         w.write_all(encode_frame(frame).unwrap().as_bytes())
@@ -1402,6 +1584,61 @@ mod tests {
             StreamEvent::Chunk(bytes) => assert_eq!(bytes.as_slice(), b"data".as_slice()),
             other => panic!("expected chunk after unknown event, got {other:?}"),
         }
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::End
+        ));
+        drop(call);
+        mock.await.unwrap();
+        client.shutdown();
+    }
+
+    /// 网关只发 `{provider, account, body}` 时，写出的 conversation 请求必须
+    /// 已带齐 SDK 的必填字段（headers/stream/session/wire_model）。
+    #[tokio::test]
+    async fn conversation_call_stream_fills_required_params() {
+        let (client_read, client_write, plugin_read, mut plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        let mock = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let req = read_one_frame(&mut reader).await;
+            assert_eq!(req.method.as_deref(), Some("conversation"));
+            let params = req.params.as_ref().expect("params 必须有");
+            assert!(params["headers"].is_object(), "headers 缺失: {params}");
+            assert_eq!(params["stream"], true, "stream 缺失: {params}");
+            assert_eq!(params["session"], "");
+            assert_eq!(params["wire_model"], "wire-x");
+            let head = Frame {
+                id: req.id,
+                event: Some("head".into()),
+                status: Some(200),
+                ..Default::default()
+            };
+            write_frame_line(&mut plugin_write, &head).await;
+            let end = Frame {
+                id: req.id,
+                event: Some("end".into()),
+                ..Default::default()
+            };
+            write_frame_line(&mut plugin_write, &end).await;
+        });
+
+        let mut call = client
+            .call_stream(
+                "conversation",
+                serde_json::json!({
+                    "provider": "kiro",
+                    "account": "",
+                    "body": { "model": "wire-x", "messages": [] }
+                }),
+            )
+            .await
+            .expect("call_stream 应成功");
+        assert!(matches!(
+            call.next().await.unwrap().unwrap(),
+            StreamEvent::Head { .. }
+        ));
         assert!(matches!(
             call.next().await.unwrap().unwrap(),
             StreamEvent::End

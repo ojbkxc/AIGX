@@ -316,7 +316,9 @@ fn manifest_extras(version_dir: &std::path::Path) -> PackManifestExtras {
         description: string("description"),
         homepage: string("homepage"),
         provider_category: string("provider_category"),
-        icons: string("icons"),
+        // 图标声明：A2A 清单用 `icons`（目录），社区包也见 `icon`（单个路径）。
+        // 两者都收，交给 `pack_icon` 判断是文件还是目录。
+        icons: string("icons").or_else(|| string("icon")),
         ui: value
             .get("ui")
             .and_then(Value::as_array)
@@ -334,39 +336,54 @@ const ICON_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 /// 从版本目录读出包图标，转成 data URI。
 ///
-/// 优先顺序 `logo.*` → `icon.*` → 目录内任意一张图（排序稳定）。任何一步
-/// 失败返回 `None`（装饰性字段不该让列表失败）。路径校验：目录键不得是
-/// 绝对路径 / 盘符 / 含 `..`；命中文件 canonicalize 后必须仍在版本目录内。
-fn pack_icon(version_dir: &std::path::Path, icons_dir: Option<&str>) -> Option<String> {
-    let icons_dir = icons_dir?;
-    if icons_dir.starts_with(['/', '\\'])
-        || icons_dir.contains(':')
-        || icons_dir.split(['/', '\\']).any(|part| part == "..")
-    {
-        return None;
-    }
-    let icons_dir = version_dir.join(icons_dir);
+/// ── 支持哪些清单形态 ─────────────────────────────────────────
+/// 社区包的图标声明并不统一：`icons` 可能是**目录**（A2A 约定）、**单个
+/// 文件路径**（`icon: "logo.svg"` / `icons: "assets/logo.png"`），也可能
+/// 完全没声明但包内按常见布局放了图（`icons/`、`assets/` 或包根的
+/// `logo.*` / `icon.*`）。只认「`icons` 是目录」会把后两类全部漏掉 ——
+/// 这正是社区包「装了但图标不显示」的根因之一。
+///
+/// 查找优先级：清单声明的文件 → 清单声明的目录（`logo.*` → `icon.*` →
+/// 目录内任意图）→ `icons/` → `assets/` → 包根（后三者只认 `logo`/`icon`
+/// 前缀，避免把截图等无关图片当图标）。
+///
+/// 任何一步失败返回 `None`（界面回落字母）——图标是装饰，不该让列表失败。
+/// 路径校验：声明不得是绝对路径 / 盘符 / 含 `..`；命中文件 canonicalize
+/// 后必须仍在版本目录内。体积上限 [`ICON_MAX_BYTES`]。
+fn pack_icon(version_dir: &std::path::Path, declared: Option<&str>) -> Option<String> {
+    let root = version_dir.canonicalize().ok()?;
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    for stem in ["logo", "icon"] {
-        for ext in ["png", "webp", "jpg", "jpeg", "svg"] {
-            candidates.push(icons_dir.join(format!("{stem}.{ext}")));
+    if let Some(declared) = declared {
+        if declared.starts_with(['/', '\\'])
+            || declared.contains(':')
+            || declared.split(['/', '\\']).any(|part| part == "..")
+        {
+            return None;
         }
+        let target = version_dir.join(declared);
+        if target.is_file() {
+            candidates.push(target.clone());
+        } else if target.is_dir() {
+            push_icon_candidates(&mut candidates, &target, true);
+        }
+        // 声明无效 / 不存在时继续走兜底布局，而不是直接放弃。
     }
-    if let Ok(entries) = std::fs::read_dir(&icons_dir) {
-        let mut rest: Vec<std::path::PathBuf> = entries
-            .filter_map(|item| item.ok())
-            .map(|item| item.path())
-            .filter(|path| path.is_file() && is_image_path(path))
-            .collect();
-        rest.sort();
-        candidates.extend(rest);
+    for dir in ["icons", "assets", "."] {
+        let candidate_dir = if dir == "." {
+            version_dir.to_path_buf()
+        } else {
+            version_dir.join(dir)
+        };
+        if candidate_dir.is_dir() {
+            push_icon_candidates(&mut candidates, &candidate_dir, false);
+        }
     }
     let path = candidates
         .into_iter()
         .find(|path| path.is_file())?
         .canonicalize()
         .ok()?;
-    if !path.starts_with(version_dir.canonicalize().ok()?) {
+    if !path.starts_with(&root) {
         return None;
     }
     if std::fs::metadata(&path).ok()?.len() > ICON_MAX_BYTES {
@@ -384,11 +401,38 @@ fn pack_icon(version_dir: &std::path::Path, icons_dir: Option<&str>) -> Option<S
         "webp" => "image/webp",
         "jpg" | "jpeg" => "image/jpeg",
         "svg" => "image/svg+xml",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
         _ => return None,
     };
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(format!("data:{mime};base64,{encoded}"))
+}
+
+/// 往候选表里追加一个目录下的图标路径：`logo.*` / `icon.*` 优先；
+/// `include_any` 时再补齐目录内其余任意图片（排序保证确定性）。
+fn push_icon_candidates(
+    candidates: &mut Vec<std::path::PathBuf>,
+    dir: &std::path::Path,
+    include_any: bool,
+) {
+    for stem in ["logo", "icon"] {
+        for ext in ["png", "webp", "jpg", "jpeg", "svg", "gif", "ico"] {
+            candidates.push(dir.join(format!("{stem}.{ext}")));
+        }
+    }
+    if include_any {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut rest: Vec<std::path::PathBuf> = entries
+                .filter_map(|item| item.ok())
+                .map(|item| item.path())
+                .filter(|path| path.is_file() && is_image_path(path))
+                .collect();
+            rest.sort();
+            candidates.extend(rest);
+        }
+    }
 }
 
 /// 扩展名是不是界面能显示的图片。
@@ -399,7 +443,7 @@ fn is_image_path(path: &std::path::Path) -> bool {
             .unwrap_or("")
             .to_ascii_lowercase()
             .as_str(),
-        "png" | "webp" | "jpg" | "jpeg" | "svg"
+        "png" | "webp" | "jpg" | "jpeg" | "svg" | "gif" | "ico"
     )
 }
 
@@ -699,6 +743,9 @@ pub async fn handle_list_plugins(
         packs.push(external_pack_view(meta, &state.plugin_host));
     }
     let catalog = fetch_catalog(&state).await;
+    // 已装包若清单没声明图标（社区包常见），回落到商店目录同 id 条目的
+    // 图标——对齐 A2A 前端 `pack.icon || store?.icon`。
+    fill_pack_icons_from_catalog(&mut packs, &catalog);
     // 更新检查：已装外置包 vs 当前目录（同一份 catalog，不额外请求）
     let updates = compute_updates(&metas, &catalog);
     // 账号摘要（A2A `accountCounts` / `hiddenAccounts`）：前端「补全缺失插件」
@@ -744,6 +791,37 @@ pub async fn handle_list_plugins(
     })))
 }
 
+/// 已装包图标兜底：清单没声明 icon 时用商店目录同 id 条目的 icon。
+///
+/// 社区原生包的 `pack.json` 通常不含 `icons`（实测上游 index.json /
+/// manifest 均无），但索引仓库里有图标；A2A 在**前端**做 `pack.icon ||
+/// store?.icon` 兜底，AIGX 在列表接口补一份，等价且不改前端契约。
+fn fill_pack_icons_from_catalog(packs: &mut [Value], catalog: &Value) {
+    let Some(items) = catalog.get("plugins").and_then(Value::as_array) else {
+        return;
+    };
+    for pack in packs.iter_mut() {
+        if pack.get("icon").is_some_and(|icon| !icon.is_null()) {
+            continue;
+        }
+        let Some(id) = pack.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if id == BUILTIN_PACK_ID {
+            continue;
+        }
+        let icon = items
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(|item| item.get("icon"))
+            .filter(|icon| !icon.is_null())
+            .cloned();
+        if let Some(icon) = icon {
+            pack["icon"] = icon;
+        }
+    }
+}
+
 /// `catalog` 条目的 provider 文档聚合（beta.2 `providerDocs` 投影）。
 fn provider_docs(catalog: &Value) -> Value {
     let mut rows = Vec::new();
@@ -781,6 +859,9 @@ fn script_snapshot(state: &AppState) -> Value {
         "providers": status.providers,
         "crashes": status.crashes,
         "lastError": status.last_error,
+        // Bun 运行时诊断（A2A `payload.scripts.runtime`）：版本 / 是否已装 /
+        // 可执行路径 / 平台不可用时的错误。前端据此展示运行时状态。
+        "runtime": crate::plugin_host::script::bun::snapshot(state.script_host.data_dir()),
     })
 }
 
@@ -1258,6 +1339,55 @@ fn upstream_asset_url(tag: &str, id: &str, version: &str, triple: &str) -> Strin
     )
 }
 
+/// 上游索引仓库 raw 基址：`index.json` 的 `icon` 是**仓内相对路径**
+/// （如 `icons/agent2api-wasm-kiro.svg`）。
+const UPSTREAM_INDEX_RAW_BASE: &str =
+    "https://raw.githubusercontent.com/Agent2plugin/Agent2plugin/main";
+
+/// 商店条目的 `icon` → `<img>` 可直接加载的绝对地址。
+///
+/// `index.json` 及自定义插件源里的 `icon` 通常是相对路径；原样透给前端会
+/// 被浏览器解析成管理面自身的相对地址（`/icons/…`）→ 404，这正是商店
+/// 卡片「有条目、没图标」的根因。规则：
+/// - `data:image/…` / `http(s)://…` 原样保留（已是可加载地址）；
+/// - 相对路径按 `base`（索引仓库 raw 基址 / 自定义源目录）拼成绝对 URL；
+/// - 绝对路径 / 盘符 / 含 `..` / `\\` 一律丢弃（不给任意主机/路径开口子）。
+fn resolve_store_icon(icon: Option<&str>, base: Option<&str>) -> Option<String> {
+    let icon = icon.map(str::trim).filter(|value| !value.is_empty())?;
+    if icon.len() > 2048 {
+        return None;
+    }
+    if icon.starts_with("data:image/")
+        || icon.starts_with("https://")
+        || icon.starts_with("http://")
+    {
+        return Some(icon.to_string());
+    }
+    if icon.starts_with('/')
+        || icon.contains('\\')
+        || icon.contains(':')
+        || icon.split('/').any(|part| part == "..")
+    {
+        return None;
+    }
+    let base = base?.trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    Some(format!("{base}/{icon}"))
+}
+
+/// 自定义插件源 URL → 相对图标基址（去掉最后一段文件名）。
+///
+/// 例：`https://h.example/plugins/index.json` → `https://h.example/plugins`。
+fn source_base(source_url: &str) -> Option<&str> {
+    let source_url = source_url.split(['?', '#']).next().unwrap_or(source_url);
+    let (base, _) = source_url.rsplit_once('/')?;
+    // 必须仍是带 scheme 的地址（`https://h` 这类无路径 URL 没有可用的
+    // 同级目录，返回 None 让相对图标走丢弃路径，而不是拼出 `https:/…`）。
+    (base.starts_with("https://") || base.starts_with("http://")).then_some(base)
+}
+
 /// 内置发布目录（未配置 `[plugins] source_url` 时的默认目录）。
 ///
 /// 形状与 [`normalize_catalog`] 的输出一致（前端 `PluginReleaseState`）。
@@ -1296,7 +1426,12 @@ fn builtin_catalog() -> Value {
                 "prerelease": true,
                 "platforms": platforms,
                 "homepage": rel.homepage,
-                "icon": null,
+                // 上游索引仓库内有各包图标（`icons/{id}.png`），相对路径
+                // 拼成 raw 绝对地址，避免内置快照卡片无图。
+                "icon": resolve_store_icon(
+                    Some(&format!("icons/{}.png", rel.id)),
+                    Some(UPSTREAM_INDEX_RAW_BASE),
+                ),
                 // 内置快照不附带清单 provider 列表（动态索引才有）
                 "providers": [],
             })
@@ -1397,7 +1532,15 @@ async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
             "version": version,
             "page": manifest.get("homepage").and_then(Value::as_str),
             "homepage": manifest.get("homepage").and_then(Value::as_str),
-            "icon": entry.get("icon").and_then(Value::as_str),
+            "icon": resolve_store_icon(
+                entry.get("icon").and_then(Value::as_str),
+                Some(UPSTREAM_INDEX_RAW_BASE),
+            ),
+            // 分类元数据（A2A index.json：category / tags / requireSigned）
+            // 透传，供前端渲染 Wasm / 需签名徽标。
+            "category": entry.get("category").cloned().unwrap_or(Value::Null),
+            "requireSigned": entry.get("requireSigned").and_then(Value::as_bool).unwrap_or(false),
+            "tags": entry.get("tags").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
             "platforms": platforms,
             // 清单声明的 provider（缺失插件横幅用来把隐藏账号映射到可安装包）
             "providers": manifest.get("providers").cloned().unwrap_or(Value::Array(Vec::new())),
@@ -1411,6 +1554,7 @@ async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
     normalize_catalog(
         &json!({ "current": "", "plugins": items }),
         std::env::consts::OS,
+        Some(UPSTREAM_INDEX_RAW_BASE),
     )
 }
 
@@ -1464,7 +1608,7 @@ async fn fetch_catalog(state: &AppState) -> Value {
         Ok(v) => v,
         Err(e) => return catalog_unavailable(&format!("插件源返回内容无法解析: {e}")),
     };
-    match normalize_catalog(&body, std::env::consts::OS) {
+    match normalize_catalog(&body, std::env::consts::OS, source_base(&source_url)) {
         Some(v) => v,
         None => catalog_unavailable("插件源返回内容无法识别（期望 JSON 对象，含 plugins 数组）"),
     }
@@ -1504,12 +1648,12 @@ fn catalog_unavailable(reason: &str) -> Value {
 /// ```
 ///
 /// 无法识别（缺 `plugins` 数组）返回 `None`（调用方转不可用态）。
-fn normalize_catalog(v: &Value, target_os: &str) -> Option<Value> {
+fn normalize_catalog(v: &Value, target_os: &str, icon_base: Option<&str>) -> Option<Value> {
     let plugins = v.get("plugins")?.as_array()?;
     let current = v.get("current").and_then(|x| x.as_str()).unwrap_or("");
     let items: Vec<Value> = plugins
         .iter()
-        .filter_map(|item| normalize_store_plugin(item, target_os))
+        .filter_map(|item| normalize_store_plugin(item, target_os, icon_base))
         .collect();
     Some(json!({
         "available": true,
@@ -1521,7 +1665,7 @@ fn normalize_catalog(v: &Value, target_os: &str) -> Option<Value> {
 }
 
 /// 单个发布条目 → 前端 `StorePlugin` 形状。缺 `id` 的条目丢弃（无法键控）。
-fn normalize_store_plugin(item: &Value, target_os: &str) -> Option<Value> {
+fn normalize_store_plugin(item: &Value, target_os: &str, icon_base: Option<&str>) -> Option<Value> {
     let id = item.get("id")?.as_str()?.to_string();
     let name = {
         let n = item.get("name").and_then(|x| x.as_str()).unwrap_or("");
@@ -1589,7 +1733,21 @@ fn normalize_store_plugin(item: &Value, target_os: &str) -> Option<Value> {
         "error": item.get("error").and_then(|x| x.as_bool()).unwrap_or(false),
         "reason": str_field("reason"),
         "homepage": str_field("homepage"),
-        "icon": str_field("icon"),
+        "icon": resolve_store_icon(str_field("icon").as_deref(), icon_base),
+        // 上游 index.json 的分类元数据（A2A 商店卡片/Wasm 徽标据此渲染）：
+        // 原样透传，缺失即为 null / 空表；不影响安装链路。
+        "category": str_field("category"),
+        "requireSigned": item.get("requireSigned").and_then(|x| x.as_bool()).unwrap_or(false),
+        "tags": item
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .map(|tag| Value::String(tag.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
         "platforms": platforms,
         "providers": providers,
     }))
@@ -2361,7 +2519,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let out = normalize_catalog(&v, "linux").unwrap();
+        let out = normalize_catalog(&v, "linux", None).unwrap();
         assert_eq!(out["available"], true);
         assert_eq!(out["current"], "1.0.52");
         assert_eq!(out["error"], false);
@@ -2381,19 +2539,42 @@ mod tests {
     }
 
     #[test]
+    fn normalize_catalog_resolves_relative_icon_and_keeps_meta() {
+        let v: Value = serde_json::from_str(
+            r#"{"plugins":[{"id":"p","name":"P","icon":"icons/p.png",
+                 "category":"agent","requireSigned":true,"tags":["community","wasm"],
+                 "url":"https://x/p.zip"}]}"#,
+        )
+        .unwrap();
+        let out = normalize_catalog(&v, "linux", Some(UPSTREAM_INDEX_RAW_BASE)).unwrap();
+        let p = &out["plugins"][0];
+        assert_eq!(
+            p["icon"].as_str().unwrap(),
+            format!("{UPSTREAM_INDEX_RAW_BASE}/icons/p.png")
+        );
+        assert_eq!(p["category"], "agent");
+        assert_eq!(p["requireSigned"], true);
+        assert_eq!(p["tags"], serde_json::json!(["community", "wasm"]));
+        // data URI / 绝对 URL 不被改写
+        let v = serde_json::json!({"plugins":[{"id":"q","icon":"https://e/a.svg","url":"https://x/q.zip"}]});
+        let out = normalize_catalog(&v, "linux", Some(UPSTREAM_INDEX_RAW_BASE)).unwrap();
+        assert_eq!(out["plugins"][0]["icon"], "https://e/a.svg");
+    }
+
+    #[test]
     fn normalize_catalog_rejects_malformed() {
         // 缺 plugins 数组
         let v = serde_json::json!({"current": "1"});
-        assert!(normalize_catalog(&v, "linux").is_none());
+        assert!(normalize_catalog(&v, "linux", None).is_none());
         // plugins 不是数组
         let v = serde_json::json!({"plugins": "x"});
-        assert!(normalize_catalog(&v, "linux").is_none());
+        assert!(normalize_catalog(&v, "linux", None).is_none());
     }
 
     #[test]
     fn normalize_catalog_entry_without_url_keeps_empty_platforms() {
         let v = serde_json::json!({"plugins": [{"id": "p", "name": "P"}]});
-        let out = normalize_catalog(&v, "linux").unwrap();
+        let out = normalize_catalog(&v, "linux", None).unwrap();
         assert_eq!(out["available"], true);
         let plugins = out["plugins"].as_array().unwrap();
         assert_eq!(plugins.len(), 1);
@@ -2430,6 +2611,12 @@ mod tests {
                 .expect("内置目录缺条目");
             assert_eq!(p["official"], false, "上游社区包不打官方徽标");
             assert_eq!(p["prerelease"], true);
+            // 图标：相对路径已解析到上游索引仓库 raw 基址（可被 <img> 加载）
+            let icon = p["icon"].as_str().unwrap_or_default();
+            assert!(
+                icon.starts_with(UPSTREAM_INDEX_RAW_BASE) && icon.ends_with(".png"),
+                "内置目录图标应为绝对 raw 地址: {icon}"
+            );
             let plats = p["platforms"].as_array().unwrap();
             if current_target_triple().is_some() {
                 assert_eq!(plats.len(), 1, "{id} 当前平台应恰好一条");
@@ -2561,8 +2748,72 @@ mod tests {
         for bad in ["/etc", "C:\\icons", "../icons", "a/../../b"] {
             assert!(pack_icon(&dir, Some(bad)).is_none(), "{bad} 应被拒绝");
         }
-        // 不存在的目录如实回落 None（装饰字段不该失败）
-        assert!(pack_icon(&dir, Some("no-such-icons-dir")).is_none());
+        // 不存在的目录如实回落 None（装饰字段不该失败）；用独立空目录，
+        // 避免 /tmp 里恰好有 logo.png 时误命中兜底布局。
+        let empty = tempfile::tempdir().unwrap();
+        assert!(pack_icon(empty.path(), Some("no-such-icons-dir")).is_none());
+    }
+
+    /// 社区包图标布局兼容：清单写文件路径 / 写目录 / 完全不写（icons、
+    /// assets、包根的 logo/icon）都要找到；扩展名大小写不敏感。
+    #[test]
+    fn pack_icon_supports_file_and_fallback_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        std::fs::write(
+            dir.path().join("assets/logo.svg"),
+            b"<svg xmlns='http://www.w3.org/2000/svg'></svg>",
+        )
+        .unwrap();
+        // 清单指向文件 / 目录 / 未声明
+        let file = pack_icon(dir.path(), Some("assets/logo.svg")).unwrap();
+        assert!(file.starts_with("data:image/svg+xml;base64,"));
+        assert!(pack_icon(dir.path(), Some("assets")).is_some());
+        assert!(pack_icon(dir.path(), None).is_some());
+
+        // 大写扩展名同样识别，且 MIME 归一到小写
+        std::fs::write(dir.path().join("icon.PNG"), b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let upper = pack_icon(dir.path(), Some("icon.PNG")).unwrap();
+        assert!(upper.starts_with("data:image/png;base64,"));
+
+        // 没有任何图片的目录 → None
+        let empty = tempfile::tempdir().unwrap();
+        assert!(pack_icon(empty.path(), Some("icons")).is_none());
+    }
+
+    /// 商店条目的相对 icon 要拼成可加载的绝对地址；绝对/data URI 原样保留；
+    /// 危险路径丢弃。
+    #[test]
+    fn store_icon_resolution() {
+        let base = Some(UPSTREAM_INDEX_RAW_BASE);
+        assert_eq!(
+            resolve_store_icon(Some("icons/x.png"), base).as_deref(),
+            Some("https://raw.githubusercontent.com/Agent2plugin/Agent2plugin/main/icons/x.png")
+        );
+        assert_eq!(
+            resolve_store_icon(Some("https://example.com/a.svg"), base).as_deref(),
+            Some("https://example.com/a.svg")
+        );
+        assert_eq!(
+            resolve_store_icon(Some("data:image/png;base64,AA"), base).as_deref(),
+            Some("data:image/png;base64,AA")
+        );
+        for bad in ["../x.png", "/etc/x.png", "a\\b.png", "C:/x.png"] {
+            assert!(resolve_store_icon(Some(bad), base).is_none(), "{bad}");
+        }
+        // 无基址时相对路径无法解析
+        assert!(resolve_store_icon(Some("icons/x.png"), None).is_none());
+        assert!(resolve_store_icon(None, base).is_none());
+        // 自定义源基址
+        assert_eq!(
+            source_base("https://h.example/plugins/index.json"),
+            Some("https://h.example/plugins")
+        );
+        assert_eq!(
+            source_base("https://h.example"),
+            None,
+            "无路径 URL 不产生基址"
+        );
     }
 
     /// 设置投影形状：A2A camelCase 键齐，检查计划取全局 `scheduledTasks.updateCheck`

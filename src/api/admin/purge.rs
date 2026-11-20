@@ -76,10 +76,12 @@ pub async fn handle_list_purge_presets(
     let limit = query.limit.unwrap_or(presets::DEFAULT_LIMIT);
     let (items, vendors, total) = presets::list(query.q.as_deref(), query.vendor.as_deref(), limit);
 
+    // 统一 API 信封：前端 `request()` 原样返回 JSON，页面按 `{success,data}`
+    // 解包（与 /api/purge 一致）。此前直接返回裸对象，`!res.success` 恒真
+    // → 破甲控制台「预设列表加载失败」。
     Ok(Json(json!({
-        "items": items,
-        "vendors": vendors,
-        "total": total,
+        "success": true,
+        "data": { "items": items, "vendors": vendors, "total": total },
     })))
 }
 
@@ -92,7 +94,7 @@ pub async fn handle_get_purge_preset(
     verify_admin(&state, &headers).await?;
 
     match presets::get(&id) {
-        Some(detail) => Ok(Json(json!(detail))),
+        Some(detail) => Ok(Json(json!({ "success": true, "data": detail }))),
         None => Err(error_response(
             &format!("Preset not found: {id}"),
             StatusCode::NOT_FOUND,
@@ -161,8 +163,8 @@ pub async fn handle_apply_purge_preset(
     };
 
     Ok(Json(json!({
-        "applied": applied,
-        "settings": settings,
+        "success": true,
+        "data": { "applied": applied, "settings": settings },
     })))
 }
 

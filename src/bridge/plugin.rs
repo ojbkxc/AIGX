@@ -11,8 +11,19 @@
 //! ## conversation 参数形状（参照上游 rpc.rs 的 forward_conversation）
 //!
 //! ```json
-//! { "provider": "<插件 provider id>", "account": "", "body": { …OpenAI chat 请求体… } }
+//! {
+//!   "provider": "<插件 provider id>", "account": "",
+//!   "body": { …OpenAI chat 请求体… },
+//!   "headers": {}, "stream": true, "session": "",
+//!   "wire_model": "<请求模型>", "proxy": null
+//! }
 //! ```
+//!
+//! `headers` / `stream` / `session` / `wire_model` / `proxy` 是上游
+//! `forward_conversation` **无 serde 默认**的必填字段：缺任意一个都会让
+//! 社区插件在反序列化阶段直接失败（表现为对话 500）。网关侧没有客户端
+//! 头上下文（Bridge 接口不携带 HeaderMap），因此 `headers` 发空对象、
+//! `session` 发空串（插件按无显式会话处理）。
 //!
 //! body 里的 `stream` 恒为 `true`：上游设计是「插件只写一条流式路径」
 //! （非流式时网关本地聚合），因此本桥的 `chat` 同样走流式 RPC 再聚合，
@@ -198,6 +209,14 @@ impl PluginBridge {
             "provider": self.provider,
             "account": "",
             "body": build_openai_body(req),
+            // 上游 `forward_conversation` 的必填字段（无 serde 默认）：
+            // 缺失会让社区插件反序列化失败。headers 当前不可得（Bridge
+            // 接口不带 HeaderMap），发空对象；session 空 = 无显式会话。
+            "headers": {},
+            "stream": true,
+            "session": "",
+            "wire_model": req.model,
+            "proxy": Value::Null,
         });
         match &self.backend {
             PluginBackend::Native(process) => process

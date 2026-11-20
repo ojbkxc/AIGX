@@ -1,5 +1,6 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { cn, fmtCompact, fmtQuota, isAdmin } from './utils';
+import { setQuotaPerYuan } from './quotaRate';
 
 describe('cn', () => {
   it('合并普通类名', () => {
@@ -53,6 +54,16 @@ describe('fmtQuota', () => {
     expect(fmtQuota(24690)).toBe('123.45');
     expect(fmtQuota(1)).toBe('0.01');
   });
+
+  it('随兑换倍率动态折算', () => {
+    setQuotaPerYuan(100);
+    expect(fmtQuota(12345)).toBe('123.45');
+    setQuotaPerYuan(200);
+  });
+});
+
+afterEach(() => {
+  setQuotaPerYuan(200);
 });
 
 describe('isAdmin', () => {

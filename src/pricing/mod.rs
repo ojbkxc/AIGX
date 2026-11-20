@@ -11,6 +11,7 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::storage::FileStore;
@@ -23,16 +24,36 @@ use tracing::error;
 pub mod exchange_rate;
 pub mod price_sync;
 
-/// 1 元 = 200 额度（内部配额单位）。
-pub const QUOTA_PER_YUAN: f64 = 200.0;
+/// 默认兑换倍率：1 元 = 200 额度（可被 `[epay] price` 覆盖）。
+pub const DEFAULT_QUOTA_PER_YUAN: f64 = 200.0;
+
+/// 生效的兑换倍率（进程级快照，热路径零锁读取）。
+///
+/// 语义：`1 元 = quota_per_yuan 额度`，**同时**决定
+/// ①充值到账（`amount × rate`）；②模型美元定价折算（`cost × fx × rate`）；
+/// ③前端「额度↔元」展示。运维在「系统设置 → 计费 → 易支付配置」改
+/// `price` 后，`ConfigManager::save` 会同步这里，热生效、无需重启。
+static QUOTA_PER_YUAN_BITS: AtomicU64 = AtomicU64::new(0x4069_0000_0000_0000); // 200.0
+
+/// 当前生效的兑换倍率（1 元 = ? 额度）。
+pub fn quota_per_yuan() -> f64 {
+    f64::from_bits(QUOTA_PER_YUAN_BITS.load(Ordering::Relaxed))
+}
+
+/// 更新兑换倍率快照；非法值（<=0/NaN/∞）忽略，保持上一次有效值。
+pub fn set_quota_per_yuan(rate: f64) {
+    if rate.is_finite() && rate > 0.0 {
+        QUOTA_PER_YUAN_BITS.store(rate.to_bits(), Ordering::Relaxed);
+    }
+}
 
 /// 美元成本 → 额度（向上取整，最低 1）。
 ///
 /// 模型定价目录的单价单位是 USD，账户与展示以人民币结算：
-/// `quota = cost_usd × fx(USD→CNY) × 200`。`fx` 未配置时按 1.0
-/// （与 1.0.73 及以前一致，零破坏）；配置见管理面「汇率配置」。
+/// `quota = cost_usd × fx(USD→CNY) × rate(1 元 = ? 额度)`。
+/// `fx` 未配置时 1.0；`rate` 默认 200（与 1.0.73 及以前一致，零破坏）。
 pub fn usd_cost_to_quota(cost_usd: f64) -> i64 {
-    (cost_usd * exchange_rate::usd_to_cny_rate() * QUOTA_PER_YUAN + 0.999999) as i64
+    (cost_usd * exchange_rate::usd_to_cny_rate() * quota_per_yuan() + 0.999999) as i64
 }
 
 /// 内置工具名（与 new-api `dto.BuildInTool*` 对齐）

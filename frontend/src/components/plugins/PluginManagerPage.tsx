@@ -16,12 +16,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ArrowDownToLine, Download, Loader2, RefreshCw, RotateCcw, Search, Settings2, Trash2,
+  ArrowDownToLine, Download, Loader2, MoreHorizontal, RotateCcw, Search, Settings2, Trash2,
 } from 'lucide-react';
 import { api } from '../../api';
 import ScriptPluginsPanel from './ScriptPluginsPanel';
 import ProviderSettingsDialog from './ProviderSettingsDialog';
 import FileInstallDialog from './FileInstallDialog';
+import PluginIcon from './PluginIcon';
 import { useToast } from '../Toast';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
 import { Badge, Button, Card, EmptyState, Loading, Switch, Tooltip } from '../ui';
@@ -31,6 +32,7 @@ import type {
   PluginProviderSettingsRow,
   PluginsPayload,
   ScriptCatalogEntryView,
+  ScriptHostView,
   ScriptPackageView,
   StorePlugin,
 } from '../../types';
@@ -98,6 +100,74 @@ function OperationProgress({ op }: { op: PluginOperation }): JSX.Element {
   );
 }
 
+interface MoreAction {
+  key: string;
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean;
+}
+
+/**
+ * 页头「更多操作」三点菜单（对齐 A2A PluginPageTools 的 Popover）。
+ *
+ * 用原生按钮实现（AIGX ui 无 Popover 组件）：点击外部 / 按 Esc 关闭，
+ * 每个条目沿用页面既有 handler，disabled 态由调用方按现有 busy 逻辑传入。
+ * 菜单为绝对定位且右对齐，窄屏下可点击、不撑破页头。
+ */
+function MoreMenu({ label, actions }: { label: string; actions: MoreAction[] }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDocDown = (event: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  return (
+    <div className="pl-more" ref={ref}>
+      <button
+        type="button"
+        className="pl-more-btn"
+        aria-label={label}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <MoreHorizontal size={18} />
+      </button>
+      {open ? (
+        <div className="pl-more-menu" role="menu" aria-label={label}>
+          {actions.map((action) => (
+            <button
+              key={action.key}
+              type="button"
+              role="menuitem"
+              className="pl-more-item"
+              disabled={action.disabled}
+              onClick={() => {
+                setOpen(false);
+                action.onSelect();
+              }}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** 已安装原生插件卡（A2A InstalledPluginCard 的 AIGX 形态）。 */
 function InstalledPackCard({
   pack, operation, busy, canUpdate, latestVersion, selectable, checked,
@@ -134,9 +204,7 @@ function InstalledPackCard({
             onChange={() => onToggleSelect?.()}
           />
         ) : null}
-        <div className="pl-card-icon">
-          {pack.icon ? <img src={pack.icon} alt="" /> : (pack.name || pack.id).slice(0, 1).toUpperCase()}
-        </div>
+        <PluginIcon src={pack.icon} label={pack.name || pack.id} />
         <div className="pl-card-title">
           <h3>
             {pack.name || pack.id}
@@ -272,9 +340,7 @@ function StorePackCard({
             onChange={() => onToggleSelect?.()}
           />
         ) : null}
-        <div className="pl-card-icon">
-          {item.icon ? <img src={item.icon} alt="" /> : (item.name || item.id).slice(0, 1).toUpperCase()}
-        </div>
+        <PluginIcon src={item.icon} label={item.name || item.id} />
         <div className="pl-card-title">
           <h3>
             {item.name || item.id}
@@ -345,6 +411,7 @@ export default function PluginManagerPage(): JSX.Element {
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [scriptPackages, setScriptPackages] = useState<ScriptPackageView[]>([]);
   const [scriptEntries, setScriptEntries] = useState<ScriptCatalogEntryView[]>([]);
+  const [scriptHost, setScriptHost] = useState<ScriptHostView | null>(null);
   const [scriptsAvailable, setScriptsAvailable] = useState(false);
   const mounted = useRef(true);
 
@@ -381,11 +448,13 @@ export default function PluginManagerPage(): JSX.Element {
       if (!mounted.current) return;
       setScriptPackages(listRes?.data?.packages ?? []);
       setScriptEntries(catRes?.data?.entries ?? []);
+      setScriptHost(listRes?.data?.host ?? null);
       setScriptsAvailable(true);
     } catch {
       if (!mounted.current) return;
       setScriptPackages([]);
       setScriptEntries([]);
+      setScriptHost(null);
       setScriptsAvailable(false);
     }
   }, []);
@@ -424,6 +493,11 @@ export default function PluginManagerPage(): JSX.Element {
   const operations = payload?.operations ?? [];
   const updates = useMemo(() => payload?.updates ?? [], [payload]);
   const target = payload?.target || '';
+  // 顶层 host 恒为 null（列表接口没有「全局宿主」概念），宿主错误挂在每个
+  // 包的 host.lastError 上——诊断弹窗汇总这里，避免永远显示「—」。
+  const packHostErrors = packs
+    .filter((p) => p.host?.lastError)
+    .map((p) => `${p.id}: ${p.host?.lastError}`);
   const busy = busyId != null;
 
   const updateOf = useCallback(
@@ -825,6 +899,52 @@ export default function PluginManagerPage(): JSX.Element {
     setSearch('');
   };
 
+  // 页头「更多操作」清单（A2A PluginPageTools）：全部沿用既有 handler，
+  // disabled/busy 与旧工具栏一致；未接通的动作不出现。
+  const moreActions: MoreAction[] = [
+    {
+      key: 'check',
+      label: busyId === 'check' ? t('检查中…') : t('检查更新'),
+      disabled: busy,
+      onSelect: () => void handleCheckUpdates(),
+    },
+    {
+      key: 'refresh',
+      label: t('刷新'),
+      disabled: busy,
+      onSelect: () => void handleRefreshStore(),
+    },
+    {
+      key: 'settings',
+      label: t('插件设置'),
+      disabled: busy,
+      onSelect: () => setSettingsProviders(settingsRows?.map((row) => row.provider) ?? []),
+    },
+    {
+      key: 'file',
+      label: t('从文件安装…'),
+      disabled: batchRunning,
+      onSelect: () => setFileOpen(true),
+    },
+    {
+      key: 'script',
+      label: t('从 npm / GitHub 安装'),
+      disabled: !scriptsAvailable || busy,
+      onSelect: focusMagpie,
+    },
+    {
+      key: 'missing',
+      label: t('补全缺失插件'),
+      disabled: missingCount === 0,
+      onSelect: () => setMissingOpen(true),
+    },
+    {
+      key: 'diagnostics',
+      label: t('诊断信息'),
+      onSelect: () => setDiagnosticsOpen(true),
+    },
+  ];
+
   return (
     <div>
       <div className="page-header">
@@ -832,11 +952,16 @@ export default function PluginManagerPage(): JSX.Element {
           <h1>{t('插件管理')}</h1>
           <p>{t('按需安装插件扩展提供商能力；启停、状态与来源统一管理。')}</p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="outline" onClick={() => void load()} disabled={loading}>
-            {loading ? <Loader2 size={13} className="pl-spin" /> : <RefreshCw size={13} />}
-            {t('刷新')}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Button
+            variant={batchMode ? 'primary' : 'outline'}
+            size="sm"
+            disabled={batchRunning}
+            onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}
+          >
+            {batchMode ? t('退出批量管理') : t('批量管理')}
           </Button>
+          <MoreMenu label={t('更多操作')} actions={moreActions} />
         </div>
       </div>
 
@@ -901,43 +1026,6 @@ export default function PluginManagerPage(): JSX.Element {
                 onChange={(event) => setSearch(event.currentTarget.value)}
               />
             </label>
-          </div>
-          <div className="pl-toolbar-actions">
-            <Button
-              variant={batchMode ? 'primary' : 'outline'}
-              size="sm"
-              disabled={batchRunning}
-              onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}
-            >
-              {batchMode ? t('退出批量管理') : t('批量管理')}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setFileOpen(true)} disabled={batchRunning}>
-              {t('本地安装')}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => void handleCheckUpdates()} disabled={busy}>
-              {busyId === 'check' ? t('检查中…') : t('检查更新')}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => void handleRefreshStore()} disabled={busy}>
-              {busyId === 'refresh' ? <Loader2 size={13} className="pl-spin" /> : null}
-              {t('刷新')}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setSettingsProviders(settingsRows?.map((row) => row.provider) ?? [])}
-              disabled={busy}
-            >
-              <Settings2 size={13} /> {t('插件设置')}
-            </Button>
-            <Button variant="outline" size="sm" onClick={focusMagpie} disabled={!scriptsAvailable || busy}>
-              {t('从 npm / GitHub 安装')}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setMissingOpen(true)} disabled={missingCount === 0}>
-              {t('补全缺失插件')}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setDiagnosticsOpen((value) => !value)}>
-              {t('诊断信息')}
-            </Button>
           </div>
 
           {/* 缺失插件横幅（A2A PluginMissingBanner） */}
@@ -1108,24 +1196,52 @@ export default function PluginManagerPage(): JSX.Element {
           ) : null}
 
           {diagnosticsOpen ? (
-            <Card
-              title={t('诊断信息')}
-              actions={
-                <Button variant="outline" size="sm" onClick={() => setDiagnosticsOpen(false)}>
-                  {t('关闭')}
-                </Button>
-              }
+            <div
+              className="modal-overlay"
+              role="dialog"
+              aria-modal="true"
+              aria-label={t('诊断信息')}
+              onClick={() => setDiagnosticsOpen(false)}
             >
-              <div className="pl-diagnostics-body">
-                <span>{t('插件目录')} <code>{payload?.pluginsDir || '—'}</code></span>
-                <span>{t('当前平台')} <code>{target || '—'}</code></span>
-                <span>{t('协议版本')} {payload?.protocol || '—'}</span>
-                <span>{t('已安装包')} {packs.length}</span>
-                <span>{t('在途操作')} {operations.filter((op) => op.active).length}</span>
-                {catalog?.reason ? <span className="pl-dg-err">{catalog.reason}</span> : null}
-                {payload?.host?.lastError ? <span className="pl-dg-err">{payload.host.lastError}</span> : null}
+              <div
+                className="modal"
+                style={{ maxWidth: 560, width: '92%' }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="modal-header">
+                  <h3>{t('诊断信息')}</h3>
+                  <button className="modal-close" aria-label={t('关闭')} onClick={() => setDiagnosticsOpen(false)}>
+                    &times;
+                  </button>
+                </div>
+                <div className="modal-body">
+                  <div className="pl-diagnostics-body">
+                    <span>{t('插件目录')} <code>{payload?.pluginsDir || '—'}</code></span>
+                    <span>{t('当前平台')} <code>{target || '—'}</code></span>
+                    <span>{t('协议版本')} {payload?.protocol ?? '—'}</span>
+                    <span>{t('已安装包')} {packs.length}</span>
+                    <span>{t('在途操作')} {operations.filter((op) => op.active).length}</span>
+                    <span>
+                      {t('宿主 lastError')}{' '}
+                      <code>
+                        {packHostErrors.length > 0
+                          ? packHostErrors.join('；')
+                          : payload?.host?.lastError || '—'}
+                      </code>
+                    </span>
+                    <span>
+                      {t('脚本运行时')} {scriptsAvailable
+                        ? `${scriptHost?.running ? t('宿主运行中') : t('宿主未运行')} · ${t('已装载 {{count}} 个包', { count: scriptHost?.packages ?? 0 })} · ${t('崩溃 {{count}} 次', { count: scriptHost?.crashes ?? 0 })}`
+                        : t('脚本插件后端尚未就绪')}
+                    </span>
+                    {scriptHost?.lastError ? (
+                      <span className="pl-dg-err">{scriptHost.lastError}</span>
+                    ) : null}
+                    {catalog?.reason ? <span className="pl-dg-err">{catalog.reason}</span> : null}
+                  </div>
+                </div>
               </div>
-            </Card>
+            </div>
           ) : null}
 
           <p className="pl-page-foot">

@@ -101,8 +101,15 @@ async fn refresh(
     let keys: std::collections::HashSet<String> = packages.iter().map(|p| p.id.clone()).collect();
     cache::retain_cards(&keys);
     for package in packages {
-        // 包级图标
-        if let Some(icon) = package.icon.as_deref().and_then(formats::own) {
+        // 包级图标：优先宿主回填值，回落到包清单 `magpie.icon`
+        // （未启用的包不会走宿主握手，只有清单可读）。
+        let package_dir = package.version_dir(script_root);
+        let own_icon = package
+            .icon
+            .as_deref()
+            .and_then(formats::own)
+            .or_else(|| manifest(&package_dir));
+        if let Some(icon) = own_icon {
             if let Some(file) = cache::resolve(&icon, force).await {
                 cache::bind(&package.id, Some(&file));
             }
@@ -116,13 +123,40 @@ async fn refresh(
             }
         }
     }
-    let _ = script_root;
 }
 
 /// 一个包的图标 URL 片段（`/plugins/script-icons/{file}`）。
 #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn installed(package: &crate::plugin_host::script::types::ScriptPackage) -> Option<String> {
     cache::card(&package.id)
+}
+
+/// 读包内 `package.json` 的 `magpie.icon`（未走宿主握手时的兜底）。
+///
+/// 宿主只在**加载成功后**回填 `ScriptPackage.icon`；装好未启用的包、或
+/// 宿主启动失败的包因此没有 `icon`。目录商店卡片（已安装徽标）与商店
+/// 条目应当仍能显示图标，所以刷新时从包清单直接读一份。
+pub fn manifest(directory: &std::path::Path) -> Option<String> {
+    let path = directory.join("package.json");
+    let meta = std::fs::metadata(&path).ok()?;
+    if meta.len() > 1024 * 1024 {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("magpie")
+        .and_then(|magpie| magpie.get("icon"))
+        .and_then(|icon| icon.as_str())
+        .and_then(formats::own)
+}
+
+/// Magpie 市场图标引用 → URL 候选（裸名字展开为上游 svg/png 资源）。
+///
+/// 供目录投影（`catalog::market`）把 registry.json 的 `icon` 归一成可显示
+/// 的绝对地址；纯函数，无 IO。
+pub fn market_sources(value: &str) -> Vec<String> {
+    formats::market(value)
 }
 
 /// 一个 provider 的图标 URL 片段。

@@ -2532,6 +2532,8 @@ export interface ScriptPackageView {
   options: { values: Record<string, unknown> };
   /** 任一 provider 被脚本宿主实际接管（宿主未跑/未装载 = false） */
   providerRouted: boolean;
+  /** 包图标（后端若提供：data URI / 缓存图标相对路径 / 外链；缺省回落首字母） */
+  icon?: string | null;
 }
 
 /** 脚本宿主状态（GET /api/plugins/scripts 的 host） */

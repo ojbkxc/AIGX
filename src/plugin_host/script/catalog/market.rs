@@ -261,7 +261,16 @@ pub async fn fetch_registry(client: &reqwest::Client) -> Result<Vec<Entry>, Fail
             Entry::recommended_npm(&p.package, &p.name, p.providers.clone())
         };
         e.summary = p.summary.clone();
-        e.icon_sources = p.icon.iter().cloned().collect();
+        // registry 的 icon 可能是完整 URL / data URI / **裸资源名**（如
+        // `githubcopilot`，2026-11-20 实测 126 条里 26 条）。裸名字原样透给
+        // 前端会解析成管理面自身的相对路径而 404 —— 这是商店图标不显示的
+        // 根因。用 `icons::market_sources` 归一再落库（绝对 URL 原样保留，
+        // 裸名字展开为上游 svg/png 两个候选）。
+        e.icon_sources = p
+            .icon
+            .as_deref()
+            .map(crate::plugin_host::script::icons::market_sources)
+            .unwrap_or_default();
         e.kind = p.kind.clone();
         if let Some(r) = &p.repository {
             e.repository = Some(r.clone());
@@ -394,6 +403,37 @@ pub async fn fetch_market(client: &reqwest::Client) -> Result<Vec<Entry>, Failur
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_bare_icon_names_become_asset_urls() {
+        // 实测裸名字（如 kiro-color）必须展开成上游资源 URL，而不是原样
+        // 透出（否则前端 <img src="kiro-color"> 404）。
+        let v: RegistryPlugin = serde_json::from_str(
+            r#"{"package":"@magpie-community/kiro","name":"Kiro","providers":["kiro"],
+                "community":true,"icon":"kiro-color"}"#,
+        )
+        .unwrap();
+        let sources = v
+            .icon
+            .as_deref()
+            .map(crate::plugin_host::script::icons::market_sources)
+            .unwrap_or_default();
+        assert_eq!(sources.len(), 2);
+        assert!(sources[0].contains("/assets/icons/kiro-color.svg"));
+        assert!(sources[1].contains("/assets/icons/kiro-color.png"));
+        // 完整 URL 原样保留
+        let v: RegistryPlugin = serde_json::from_str(
+            r#"{"package":"p","icon":"https://example.com/a.svg","providers":["x"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            v.icon
+                .as_deref()
+                .map(crate::plugin_host::script::icons::market_sources)
+                .unwrap_or_default(),
+            vec!["https://example.com/a.svg".to_string()]
+        );
+    }
 
     #[test]
     fn registry_keep_rule_default_kind_is_provider() {

@@ -156,7 +156,7 @@ pub(crate) fn compute_channel_cost(
         * ratios.model_ratio_aliased(requested_model, billing_model)
         * ratios.group_ratio(group)
         * crate::pricing::exchange_rate::usd_to_cny_rate()
-        * 200.0
+        * crate::pricing::quota_per_yuan()
         + 0.999999) as i64;
     // 有成本价但该模型成本算出来为 0（配置异常等）：回退到销售价，避免误显示利润
     if channel_cost == 0 {
@@ -288,6 +288,8 @@ pub(crate) struct PriceSnapshot {
     /// 计价时冻结的 USD→CNY 汇率（未配置 = 1.0）。
     /// 冻结口径与单价一致：请求在途期间改汇率不影响该笔结算。
     pub fx_rate: f64,
+    /// 计价时冻结的兑换倍率（1 元 = ? 额度），同上冻结。
+    pub quota_rate: f64,
 }
 
 impl PriceSnapshot {
@@ -299,6 +301,7 @@ impl PriceSnapshot {
             model_ratio: 1.0,
             group_ratio: 1.0,
             fx_rate: 1.0,
+            quota_rate: crate::pricing::DEFAULT_QUOTA_PER_YUAN,
         }
     }
 }
@@ -323,6 +326,7 @@ fn capture_price_snapshot(
             model_ratio: 1.0,
             group_ratio: 1.0,
             fx_rate: 1.0,
+            quota_rate: crate::pricing::DEFAULT_QUOTA_PER_YUAN,
         };
     }
     let priced_name = state
@@ -343,6 +347,7 @@ fn capture_price_snapshot(
         model_ratio,
         group_ratio,
         fx_rate: crate::pricing::exchange_rate::usd_to_cny_rate(),
+        quota_rate: crate::pricing::quota_per_yuan(),
     }
 }
 
@@ -389,10 +394,14 @@ fn compute_cost_from_snapshot_pure(
     if base <= 0.0 {
         0
     } else {
-        // 配额单位是「额度」（1 元 = 200 额度），与 live 计费同一口径；
-        // USD→CNY 用请求下单时冻结的汇率。
-        (base * snapshot.model_ratio * snapshot.group_ratio * snapshot.fx_rate * 200.0 + 0.999999)
-            as i64
+        // 配额单位是「额度」，与 live 计费同一口径：
+        // USD→CNY 与「1 元 = ? 额度」都用请求下单时冻结的值。
+        (base
+            * snapshot.model_ratio
+            * snapshot.group_ratio
+            * snapshot.fx_rate
+            * snapshot.quota_rate
+            + 0.999999) as i64
     }
 }
 
@@ -429,7 +438,8 @@ fn compute_cost_from_snapshot(
             total += tp * (*count as f64) / 1000.0 * snapshot.group_ratio;
         }
         if total > 0.0 {
-            c = c.saturating_add((total * snapshot.fx_rate * 200.0 + 0.999999) as i64);
+            c = c
+                .saturating_add((total * snapshot.fx_rate * snapshot.quota_rate + 0.999999) as i64);
         }
     }
     c
@@ -1317,6 +1327,7 @@ mod price_snapshot_tests {
             model_ratio,
             group_ratio,
             fx_rate: 1.0,
+            quota_rate: 200.0,
         }
     }
 
@@ -1329,6 +1340,7 @@ mod price_snapshot_tests {
             model_ratio: 1.0,
             group_ratio: 1.0,
             fx_rate: 1.0,
+            quota_rate: crate::pricing::DEFAULT_QUOTA_PER_YUAN,
         };
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 100, 200, 0), 42);
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 999999, 0, 0), 42);
@@ -1373,6 +1385,7 @@ mod price_snapshot_tests {
             model_ratio: 1.0,
             group_ratio: 1.0,
             fx_rate: 1.0,
+            quota_rate: crate::pricing::DEFAULT_QUOTA_PER_YUAN,
         };
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 0);
     }
@@ -1415,6 +1428,7 @@ mod price_snapshot_tests {
             model_ratio: 1.0,
             group_ratio: 1.0,
             fx_rate: 1.0,
+            quota_rate: crate::pricing::DEFAULT_QUOTA_PER_YUAN,
         };
         // count 型：base = input_price = 0.04 美元 → ×200 = 8 额度
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 999, 0, 999), 8);

@@ -348,7 +348,8 @@ pub async fn handle_get_epay_config(
             "epay_id": config.epay.epay_id,
             "epay_key": masked_key,
             "pay_methods": config.epay.pay_methods,
-            "price": config.epay.price,
+            // 生效倍率（非法值回落到默认 200），避免页面显示 0 但实际按 200 生效
+            "price": config.epay.quota_per_yuan(),
             "amount_discount": config.epay.amount_discount,
             "min_topup": config.epay.min_topup,
             "custom_callback_address": config.epay.custom_callback_address,
@@ -380,13 +381,25 @@ pub async fn handle_get_epay_info(
         "data": {
             "enabled": config.epay.ready(),
             "pay_methods": config.epay.pay_methods,
-            "price": config.epay.price,
+            "price": config.epay.quota_per_yuan(),
             "amount_discount": config.epay.amount_discount,
             "min_topup": config.epay.min_topup,
             "amount_options": amount_options,
             "topup_link": config.epay.topup_link,
         }
     })))
+}
+
+/// GET /api/public/quota-rate —— 公开的兑换倍率（1 元 = ? 额度）。
+///
+/// 前端在挂载前拉一次，让所有「额度 ↔ 元」展示（仪表盘/日志/钱包/套餐）
+/// 与后台配置同口径；无需登录，只暴露一个倍率数字。
+pub async fn handle_public_quota_rate(State(state): State<AppState>) -> Json<Value> {
+    let config = state.config_manager.get().await;
+    Json(serde_json::json!({
+        "success": true,
+        "data": { "quota_per_yuan": config.epay.quota_per_yuan() }
+    }))
 }
 
 /// 脱敏字符串：保留前3后3字符，中间用 *** 替代
@@ -946,7 +959,7 @@ pub async fn handle_epay_notify(
             let quota_to_add = if order.quota > 0 {
                 order.quota
             } else if order.money > 0.0 && config.epay.price > 0.0 {
-                (order.amount as f64 * config.epay.price).round() as i64
+                (order.amount as f64 * config.epay.quota_per_yuan()).round() as i64
             } else {
                 order.quota
             };
@@ -1052,7 +1065,7 @@ pub async fn handle_epay_return(
                 let quota_to_add = if order.quota > 0 {
                     order.quota
                 } else if order.money > 0.0 && config.epay.price > 0.0 {
-                    (order.amount as f64 * config.epay.price).round() as i64
+                    (order.amount as f64 * config.epay.quota_per_yuan()).round() as i64
                 } else {
                     order.quota
                 };
@@ -2488,7 +2501,7 @@ pub async fn handle_stripe_topup(
     // 原实现写死 1 美元 = 10000 单位，与 Epay 的 1 元 = price 单位口径
     // 不一致，两个支付渠道充值等值金额入账配额不同。
     // 配额单位是「额度」：再 ×200（1 元 = 200 额度）。
-    let quota = (amount as f64 * config.epay.price).round() as i64;
+    let quota = (amount as f64 * config.epay.quota_per_yuan()).round() as i64;
 
     let order = crate::payment::TopUpOrder {
         trade_no: trade_no.clone(),

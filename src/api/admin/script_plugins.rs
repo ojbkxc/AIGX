@@ -280,6 +280,9 @@ fn package_view(p: &ScriptPackage, routed_providers: &HashSet<String>) -> Value 
         "id": p.id,
         "label": p.label,
         "version": p.version,
+        // 图标：图标缓存的公开路径（`/plugins/script-icons/{file}`，文件名
+        // 即内容摘要）。未命中（未启用/尚未刷新）为 null，前端回落首字母。
+        "icon": crate::plugin_host::script::icons::installed(p),
         "source": p.source.as_str(),
         "publisher": p.publisher.as_str(),
         "providers": p

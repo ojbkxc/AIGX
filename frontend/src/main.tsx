@@ -8,6 +8,7 @@ import './styles/density.css';
 import { i18nReady } from './i18n';
 import { initTheme } from './lib/theme';
 import { initZoom } from './lib/zoom';
+import { setQuotaPerYuan } from './lib/quotaRate';
 
 // 初始化主题（system/light/dark 三态，system 跟随系统明暗）
 initTheme();
@@ -47,6 +48,17 @@ async function bootstrap(): Promise<void> {
     await i18nReady;
   } catch {
     /* i18n 初始化/资源加载失败：继续以 fallback 语言挂载 */
+  }
+  // 兑换倍率（1 元 = ? 额度）：先拉一次再渲染，保证首帧金额口径正确。
+  // 失败/超时保持默认 200，不阻塞挂载。
+  try {
+    const res = await fetch('/api/public/quota-rate', {
+      signal: AbortSignal.timeout(1500),
+    });
+    const json = (await res.json()) as { data?: { quota_per_yuan?: unknown } };
+    setQuotaPerYuan(json?.data?.quota_per_yuan);
+  } catch {
+    /* 保持默认倍率 */
   }
   ReactDOM.createRoot(rootElement as HTMLElement).render(
     <React.StrictMode>

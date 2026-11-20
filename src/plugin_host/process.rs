@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, RwLock};
@@ -29,7 +28,11 @@ use super::rpc::NoopCallbacks;
 use super::rpc::{CallbackHandler, RpcChannel, RpcError, PROTOCOL_VERSION};
 
 /// 握手超时。
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// 对齐上游 `HostOptions::init_timeout`（60s）：插件在 `init` 里可能做一次
+/// 性的模型目录同步 / 本机状态探测，10s 会让慢一点的社区包在启动阶段被判
+/// 失败，再叠加崩溃退避后表现为「装了但一直起不来」。
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 优雅关闭：等子进程自行退出的超时。
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -257,7 +260,11 @@ pub async fn handshake(
 pub async fn shutdown(process: &PluginProcess) {
     process.mark_shutdown();
     // 先尝试 RPC shutdown（best effort，插件可能已退出）
-    let _ = tokio::time::timeout(SHUTDOWN_GRACE, process.rpc.call("shutdown", Value::Null)).await;
+    let _ = tokio::time::timeout(
+        SHUTDOWN_GRACE,
+        process.rpc.call("shutdown", serde_json::json!({})),
+    )
+    .await;
     process.rpc.shutdown();
     // 兜底：直接 kill 子进程
     {
@@ -304,6 +311,7 @@ pub async fn supervise(process: Arc<PluginProcess>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
     type BoxReader = Box<dyn AsyncRead + Send + Unpin>;

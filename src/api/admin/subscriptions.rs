@@ -140,11 +140,7 @@ pub async fn handle_subscription_balance_pay(
     // 元 → 额度：`epay.price` 即「1 元可购买多少额度」（生产 200 表示 1 元 = 200 额度）。
     // 套餐价（元）× 该倍率；**不要再额外乘 200**，否则扣款放大 100 倍。
     let config = state.config_manager.get().await;
-    let unit_price = if config.epay.price > 0.0 {
-        config.epay.price
-    } else {
-        1.0
-    };
+    let unit_price = config.epay.quota_per_yuan();
     let required_quota = if plan.price > 0.0 {
         (plan.price * unit_price + 0.999999) as i64
     } else {

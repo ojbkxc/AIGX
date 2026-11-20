@@ -173,6 +173,35 @@ fn binary_path_for(data_dir: &Path, asset: &Asset) -> Result<PathBuf> {
     Ok(install_dir_for(data_dir, asset)?.join(suffix))
 }
 
+/// 运行时状态快照（A2A `bun::snapshot` 形状：`version` / `installed` /
+/// `path` / `downloaded` / `error`）。
+///
+/// 纯本地探测，不下载、不执行二进制：只判断「按当前平台资产推导出的可执行
+/// 路径是否存在」。管理面据此展示运行时版本与路径；`error` 用于表达
+/// 「当前平台没有可安装的资产」（AIGX 不持久化历史错误，故其它情况为 null）。
+pub fn snapshot(data_dir: &Path) -> serde_json::Value {
+    use serde_json::json;
+    match binary_path(data_dir) {
+        Ok(path) => {
+            let installed = path.is_file();
+            json!({
+                "version": VERSION,
+                "installed": installed,
+                "path": path.display().to_string(),
+                "downloaded": installed,
+                "error": serde_json::Value::Null,
+            })
+        }
+        Err(error) => json!({
+            "version": VERSION,
+            "installed": false,
+            "path": serde_json::Value::Null,
+            "downloaded": false,
+            "error": error.to_string(),
+        }),
+    }
+}
+
 /// 运行期探测是否为 musl libc。
 ///
 /// 判据：**存在 `ld-musl-*` loader 且不存在 glibc `ld-linux-*` loader**。

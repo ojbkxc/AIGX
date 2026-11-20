@@ -199,8 +199,10 @@ async fn main() -> anyhow::Result<()> {
     // XFF/X-Real-IP 信任快照：默认不信任（客户端可伪造），
     // 部署在可信反代后时在 config.toml 设 trust_proxy_headers = true
     crate::config::set_trust_proxy_headers(config.trust_proxy_headers);
-    // 请求日志快照开关快照（数据面同步路径读取，见 config::log_body_enabled）
+    // 请求日志开关快照（数据面同步路径读取，见 config::log_body_enabled）
     crate::config::set_log_body(config.usage.log_body);
+    // 兑换倍率全局快照（1 元 = ? 额度；计费/充值/展示同口径，默认 200）
+    crate::pricing::set_quota_per_yuan(config.epay.quota_per_yuan());
     // 路由回放快照开关快照（resolve/选号路径读取，见 config::route_replay_enabled）
     crate::config::set_route_replay(config.usage.route_replay);
     // 聊天助手工具回路开关快照（见 config::assistant_tools_enabled）
@@ -1759,6 +1761,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/auth/captcha", get(api::admin::handle_captcha))
         // 公开端点：按客户端 IP 推荐界面语言（登录页默认语言；无代理头时返回 null）
         .route("/api/public/geo-lang", get(api::admin::handle_geo_lang))
+        .route(
+            "/api/public/quota-rate",
+            get(api::admin::handle_public_quota_rate),
+        )
         // 公开端点：面板品牌信息（登录页在拿到会话前就要渲染名称与 Logo）
         .route(
             "/api/public/branding",

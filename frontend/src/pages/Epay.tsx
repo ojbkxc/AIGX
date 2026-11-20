@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import { setQuotaPerYuan } from '../lib/quotaRate';
 
 interface DiscountTier {
   amount: string;
@@ -104,6 +105,8 @@ export default function Epay() {
       // 仅当用户输入了新密钥才提交该字段；空值不带字段，防止覆盖真实商户密钥
       if (cfg.epay_key && cfg.epay_key.trim()) payload.epay_key = cfg.epay_key.trim();
       await api.updateEpayConfig(payload);
+      // 兑换倍率是全局展示口径：保存后立刻生效，无需刷新页面
+      setQuotaPerYuan(Number(cfg.price));
       addToast(t('易支付配置已保存'));
       load();
     } catch (err) {
@@ -207,10 +210,12 @@ export default function Epay() {
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <div className="form-group">
-                <label>{t('兑换比例')} <code style={{ fontSize: 11 }}>price</code></label>
-                <input className="form-input" type="number" step="0.01" value={cfg.price}
+                <label>{t('兑换倍率')} <code style={{ fontSize: 11 }}>price</code></label>
+                <input className="form-input" type="number" step="1" min="1" value={cfg.price}
                   onChange={(e) => setCfg({ ...cfg, price: e.target.value })} />
-                <span className="form-hint">{t('1 元 = 多少配额。对应 new-api 的 EpayPrice')}</span>
+                <span className="form-hint">
+                  {t('1 元 = 多少额度（默认 200）。同时决定充值到账、模型美元定价折算与所有「额度↔元」显示；保存后热生效。')}
+                </span>
               </div>
               <div className="form-group">
                 <label>{t('最低充值金额')} <code style={{ fontSize: 11 }}>min_topup</code></label>

@@ -39,6 +39,43 @@ pub fn own(value: &str) -> Option<String> {
     .then(|| url.to_string())
 }
 
+/// Magpie 市场图标引用 → 可抓取的 URL 候选。
+///
+/// registry.json 的 `icon` 有三种形态（2026-11-20 实测 126 条）：完整
+/// `https://…`（31 条，走 [`own`] 原样接受）、内嵌 `data:`（3 条）、以及
+/// **裸名字**（26 条，如 `githubcopilot` / `kiro-color`）——后者是 Magpie
+/// 自带的图标资源名，相对上游 GUI 的 `internal/gui/assets/icons/` 目录。
+///
+/// 裸名字若原样透会给前端（`<img src="githubcopilot">` 解析成管理面自身
+/// 的相对路径 → 404），这正是「商店图标不显示」的根因之一。这里把裸名字
+/// 展开成 svg/png 两个候选（同名资源可能只存在其一），按序由前端回退。
+///
+/// 名字字符集钉死为字母数字与 `-_`（防把奇怪字符串拼进 URL）；`generic`
+/// 是上游的占位默认图标，没有意义，丢弃。
+pub fn market(value: &str) -> Vec<String> {
+    if let Some(value) = own(value) {
+        return vec![value];
+    }
+    let name = value.trim();
+    if name.is_empty()
+        || name.len() > 80
+        || name == "generic"
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Vec::new();
+    }
+    ["svg", "png"]
+        .into_iter()
+        .map(|ext| {
+            format!(
+                "https://raw.githubusercontent.com/yetone/magpie/main/internal/gui/assets/icons/{name}.{ext}"
+            )
+        })
+        .collect()
+}
+
 /// 百分号解码（data URL 的非 base64 分支）。
 fn percent_decode(value: &str) -> Option<Vec<u8>> {
     let mut output = Vec::with_capacity(value.len().min(MAX_BYTES));
@@ -161,6 +198,30 @@ pub fn filename(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn market_resolves_bare_names_and_keeps_absolute() {
+        // 绝对 https / data URI 原样接受（单候选）
+        assert_eq!(
+            market("https://example.com/a.svg"),
+            vec!["https://example.com/a.svg".to_string()]
+        );
+        assert_eq!(
+            market("data:image/png;base64,AAA"),
+            vec!["data:image/png;base64,AAA".to_string()]
+        );
+        // 裸名字 → svg/png 两个上游资源候选
+        let candidates = market("kiro-color");
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates[0].ends_with("/icons/kiro-color.svg"));
+        assert!(candidates[1].ends_with("/icons/kiro-color.png"));
+        // 非法/占位一律空
+        assert!(market("").is_empty());
+        assert!(market("generic").is_empty());
+        assert!(market("../etc/passwd").is_empty());
+        assert!(market("a b").is_empty());
+        assert!(market("http://example.com/a.png").is_empty(), "只收 https");
+    }
 
     #[test]
     fn own_accepts_data_and_https_only() {

@@ -1,3 +1,36 @@
+## 2026-11-20 · 充值/兑换倍率全局化 + 破甲预设修复 + 社区插件对齐（1.0.75）
+
+### 充值 / 兑换倍率（1 元 = ? 额度）
+- `epay.price` 升级为**全局兑换倍率**：充值到账（`amount × rate`）、模型美元定价折算
+  （`cost_usd × fx × rate`）、前端所有「额度 ↔ 元」展示共用同一值，默认 200。
+- 后台「系统设置 → 计费 → 易支付配置」改倍率后**热生效**：`ConfigManager` 三条落盘路径
+  同步 `pricing::set_quota_per_yuan`；前端启动经 `GET /api/public/quota-rate` 拉取
+  （`lib/quotaRate`），`fmtQuota` / `fmtCost` 不再写死 `÷200`；管理端保存后立即更新口径。
+- **修正重复换算**：1.0.73 在 `price` 之外又乘了一次 200（充 10 元到账 40 万额度，与页面差
+  100 倍）。充值下单、余额买套餐、易支付 notify/return 回退、Stripe 建单统一 `amount × rate`；
+  折扣仍只作用于实付。
+- 钱包页整理：到账/余额/套餐/签到/邀请统一「X 额度（≈¥Y）」双显示；订单表拆「面值 / 实付 /
+  到账额度」；档位改读后台 `amount_options`；支付方式跟随后台配置；支付回跳显示结果并静默刷新；
+  余额改用后端 `remaining`（含在途预留）；显示 `topup_link` 外部充值入口。
+
+### 破甲控制台
+- 预设库三个端点（列表/详情/应用）统一 `{success,data}` 信封。此前返回裸 JSON，前端按信封
+  解包 → `!res.success` 恒真，页面永远报「预设列表加载失败」。
+
+### 插件（对齐 Agent2API 社区插件）
+- 协议宿主：`store.get/list` 补全 `StoreAccount` 形状（缺字段会让社区插件反序列化失败 →
+  对话 500）；`conversation` 参数补齐；写端超限回 `plugin_request_too_large`；握手超时 10s→60s。
+- 插件桥：`conversation` 补 `headers/stream/session/wire_model/proxy` 必填字段（脚本/Wasm
+  插件「装得上但对话 500」的根因）。
+- 图标链路：商店条目相对 icon（`icons/x.png`）按 index 基址解析；已装包兼容清单文件/目录、
+  `icons/`、`assets/`、包根与 gif/ico/大小写；脚本包级图标与 Bun runtime 诊断信息。
+  2MB 上限与路径越界校验保持不变。
+- 插件页：右上角三点「更多操作」菜单（检查更新/刷新/插件设置/从文件安装/从 npm·GitHub 安装/
+  诊断信息）；`PluginIcon` 多候选回退 + 首字母/🧩 回落；诊断弹窗汇总各包宿主错误。
+
+验证：cargo test 2329 passed / 0 failed；fmt + clippy 0；tsc/eslint 0；vitest 166 passed；
+i18n 缺失 0；插件图标反证（最小 pack/越界/3MB/并发安装）通过；六处版本 1.0.75。
+
 ## 2026-11-20 · 充值换算修正 + 汇率配置可用化 + 维护筛选修复（1.0.74）
 
 ### 充值 / 套餐（1 元 = 200 额度）

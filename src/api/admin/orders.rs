@@ -46,7 +46,7 @@ fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
 /// 到账仍按 100 元面值（100 × price）。此前两边都乘 discount，等于「少付多少
 /// 就少给多少」，档位越大反而到账越少，折扣形同虚设。
 fn topup_quota(epay: &EpayConfig, amount: i64) -> i64 {
-    ((amount as f64) * epay.price + 0.999999) as i64
+    ((amount as f64) * epay.quota_per_yuan() + 0.999999) as i64
 }
 
 /// 处理回调地址
