@@ -35,13 +35,18 @@ fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
     (money * 100.0).round() / 100.0
 }
 
-/// F02（契约2）：入账额度 = amount × price（1 元 = 200 额度）。
+/// F02（契约2）：入账额度 = amount × price。
+///
+/// `epay.price` 的语义就是「1 元可购买多少额度」：生产配置 `price = 200` 表示
+/// 1 元 = 200 额度。**不要再乘 200**——1.0.73 曾在 price 之外又乘了一次
+/// 「1 元 = 200 额度」的换算系数，实际到账变成 `amount × price × 200`
+/// （充 10 元到账 40 万额度），与充值页显示差 100 倍。
 ///
 /// **折扣只作用于实付金额**（见 [`pay_money`]）：充 100 元打 9 折 = 实付 90 元、
 /// 到账仍按 100 元面值（100 × price）。此前两边都乘 discount，等于「少付多少
 /// 就少给多少」，档位越大反而到账越少，折扣形同虚设。
 fn topup_quota(epay: &EpayConfig, amount: i64) -> i64 {
-    ((amount as f64) * epay.price * 200.0 + 0.999999) as i64
+    ((amount as f64) * epay.price + 0.999999) as i64
 }
 
 /// 处理回调地址
@@ -342,4 +347,46 @@ pub async fn handle_topup_amount(
             "quota": quota,
         }
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn epay() -> EpayConfig {
+        EpayConfig {
+            price: 200.0,
+            amount_discount: HashMap::from([("100".to_string(), 0.9)]),
+            min_topup: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn quota_is_amount_times_price_once() {
+        // price = 200（1 元 = 200 额度）：充 10 元 → 2000 额度 = ¥10。
+        // 回归 1.0.73 的重复换算：曾得出 10 × 200 × 200 = 400000。
+        assert_eq!(topup_quota(&epay(), 10), 2000);
+        assert_eq!(topup_quota(&epay(), 1), 200);
+        assert_eq!(topup_quota(&epay(), 100), 20_000);
+    }
+
+    #[test]
+    fn discount_applies_to_paid_money_not_quota() {
+        // 充 100 打 9 折：实付 90，到账仍按面值 100 × 200。
+        assert_eq!(pay_money(&epay(), 100), 90.0);
+        assert_eq!(topup_quota(&epay(), 100), 20_000);
+        // 无折扣档位：实付=面值。
+        assert_eq!(pay_money(&epay(), 10), 10.0);
+    }
+
+    #[test]
+    fn zero_or_negative_discount_is_ignored() {
+        let mut cfg = epay();
+        cfg.amount_discount.insert("10".into(), 0.0);
+        cfg.amount_discount.insert("20".into(), -0.5);
+        assert_eq!(pay_money(&cfg, 10), 10.0);
+        assert_eq!(pay_money(&cfg, 20), 20.0);
+    }
 }

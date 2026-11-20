@@ -348,6 +348,14 @@ fn run_matches(store: &FileStore, run: &Run, query: &Query, keyword: &str) -> bo
                 return false;
             }
         }
+        // 被动记录（`/v1/models` 列举触发，见 `api/openai/models.rs` 的
+        // `spawn_passive_model_refresh`）单列一档；此前该值落到 `_ => return false`
+        // 永远筛不出任何记录，前端「被动」下拉是死选项。
+        "passive" => {
+            if run.source != "passive" {
+                return false;
+            }
+        }
         _ => return false,
     }
     match query.status.as_str() {
@@ -579,6 +587,37 @@ mod tests {
         .unwrap();
         assert_eq!(page["items"].as_array().unwrap().len(), 1);
         assert_eq!(page["total"], 3);
+    }
+
+    #[tokio::test]
+    async fn source_filter_separates_passive_from_automatic() {
+        // 「被动」（/v1/models 列举触发）必须能从「自动」里单独筛出：
+        // 旧实现在 `_` 分支直接拒绝，前端下拉该项永远为空。
+        let (store, _dir) = temp_store();
+        for source in ["automatic", "passive"] {
+            let recorder = Recorder::start(store.clone(), "modelRefresh", source, None).unwrap();
+            recorder.finish(vec![item("refreshed")], None).unwrap();
+        }
+        let passive = list(
+            &store,
+            &Query {
+                source: "passive".into(),
+                ..Query::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(passive["total"], 1);
+        assert_eq!(passive["items"][0]["source"], "passive");
+        let automatic = list(
+            &store,
+            &Query {
+                source: "automatic".into(),
+                ..Query::default()
+            },
+        )
+        .unwrap();
+        // 自动档把被动记录一并纳入（两者都是「非人工」）
+        assert_eq!(automatic["total"], 2);
     }
 
     #[tokio::test]

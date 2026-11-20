@@ -23,6 +23,18 @@ use tracing::error;
 pub mod exchange_rate;
 pub mod price_sync;
 
+/// 1 元 = 200 额度（内部配额单位）。
+pub const QUOTA_PER_YUAN: f64 = 200.0;
+
+/// 美元成本 → 额度（向上取整，最低 1）。
+///
+/// 模型定价目录的单价单位是 USD，账户与展示以人民币结算：
+/// `quota = cost_usd × fx(USD→CNY) × 200`。`fx` 未配置时按 1.0
+/// （与 1.0.73 及以前一致，零破坏）；配置见管理面「汇率配置」。
+pub fn usd_cost_to_quota(cost_usd: f64) -> i64 {
+    (cost_usd * exchange_rate::usd_to_cny_rate() * QUOTA_PER_YUAN + 0.999999) as i64
+}
+
 /// 内置工具名（与 new-api `dto.BuildInTool*` 对齐）
 pub const TOOL_WEB_SEARCH: &str = "web_search";
 pub const TOOL_WEB_SEARCH_PREVIEW: &str = "web_search_preview";
@@ -615,8 +627,9 @@ impl PricingStore {
         if cost <= 0.0 {
             return Ok(0);
         }
-        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整。
-        Ok((cost * 200.0 + 0.999999) as i64)
+        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整；
+        // 模型单价是 USD、结算币种是人民币，中间按 USD→CNY 汇率（未配置=1.0）折算。
+        Ok(usd_cost_to_quota(cost))
     }
 
     /// 计算费用并向上取整为 i64 配额（单位：额度，1 元 = 200 额度；避免浮点扣费）。
@@ -650,8 +663,9 @@ impl PricingStore {
             return Ok(0);
         }
         // 向上取整，最低 1 额度
-        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整。
-        Ok((cost * 200.0 + 0.999999) as i64)
+        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整；
+        // 模型单价是 USD、结算币种是人民币，中间按 USD→CNY 汇率（未配置=1.0）折算。
+        Ok(usd_cost_to_quota(cost))
     }
 
     /// 双名感知版配额计费（向上取整为「分」，最低 1 额度）。
@@ -676,8 +690,9 @@ impl PricingStore {
         if cost <= 0.0 {
             return Ok(0);
         }
-        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整。
-        Ok((cost * 200.0 + 0.999999) as i64)
+        // 配额单位是「额度」（1 元 = 200 额度）：先把美元金额折成额度再向上取整；
+        // 模型单价是 USD、结算币种是人民币，中间按 USD→CNY 汇率（未配置=1.0）折算。
+        Ok(usd_cost_to_quota(cost))
     }
 
     // ── 工具价格表 ──────────────────────────────────────────────────
@@ -754,7 +769,7 @@ impl PricingStore {
         if total <= 0.0 {
             return 0;
         }
-        (total * 200.0 + 0.999999) as i64
+        usd_cost_to_quota(total)
     }
 }
 

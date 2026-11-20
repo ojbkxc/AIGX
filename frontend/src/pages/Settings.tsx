@@ -447,7 +447,15 @@ export default function Settings() {
     setExchangeRatesSaving(true);
     setError('');
     try {
-      await api.updateExchangeRates(exchangeRates as unknown as Record<string, unknown>);
+      // 空值 = 未配置 / 清空：不发（后端只接受正数；USD 为基准也不发）。
+      // 旧实现把 '' 原样提交，serde 解析 f64 失败 → 422，整页保存失败。
+      const payload: Record<string, number> = {};
+      for (const [cur, raw] of Object.entries(exchangeRates ?? {})) {
+        if (cur.toUpperCase() === 'USD') continue;
+        const n = typeof raw === 'number' ? raw : Number(raw);
+        if (Number.isFinite(n) && n > 0) payload[cur] = n;
+      }
+      await api.updateExchangeRates(payload);
       addToast(t('汇率配置已更新'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1147,6 +1155,8 @@ export default function Settings() {
                 <div className="settings-form">
                   <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
                     {t('各币种相对于 USD 的汇率。例如 CNY=7.2 表示 1 USD = 7.2 CNY。')}
+                    <br />
+                    {t('模型定价以美元录入，计费按 USD→CNY 汇率折算为人民币；留空按 1:1 计算。')}
                   </p>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16 }}>
                     {Object.keys(exchangeRates).map((currency) => (
@@ -1158,7 +1168,7 @@ export default function Settings() {
                           step="0.0001"
                           min="0"
                           placeholder="1.0"
-                          value={exchangeRates[currency] ?? ''}
+                          value={Number(exchangeRates[currency]) > 0 ? exchangeRates[currency] : ''}
                           disabled={currency.toUpperCase() === 'USD'}
                           onChange={(e) => handleExchangeRateChange(currency, e.target.value)}
                         />

@@ -1239,6 +1239,7 @@ export default function Keys(): JSX.Element {
                   />
                   <Input
                     label={`${t('额度上限')} ${t('(留空则无上限)')}`}
+                    hint={t('单位：额度')}
                     type="number"
                     placeholder={editing ? t('留空表示不修改') : t('keysPlaceholderQuotaLimit')}
                     value={form.quota_limit}

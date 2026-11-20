@@ -10,6 +10,7 @@
 
 #![allow(dead_code)] // 汇率同步任务（预留，未启动）
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -17,6 +18,39 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::FileStore;
+
+/// 支持的币种全集（管理面「汇率配置」按此列表渲染可编辑项）。
+///
+/// 此前 GET 只回显「已存过」的币种，而生产从未写过任何汇率，
+/// 于是页面永远只有 USD 一行、没有任何可编辑输入框——配置入口等于不存在。
+pub const SUPPORTED_CURRENCIES: [Currency; 5] = [
+    Currency::Usd,
+    Currency::Cny,
+    Currency::Eur,
+    Currency::Jpy,
+    Currency::Gbp,
+];
+
+/// 计费口径的 USD→CNY 汇率（进程级快照，热路径零锁读取）。
+///
+/// 模型定价目录里的 `input_price/output_price` 单位是 **USD**，而配额与展示
+/// 都以人民币结算；因此 `cost_usd × fx × 200 = 额度`。未配置汇率时 fx=1.0，
+/// 与 1.0.73 及以前的行为完全一致（零破坏）。
+///
+/// 用 `AtomicU64` 存 f64 位模式：读写都是一次原子操作，不需要锁。
+static USD_TO_CNY_BITS: AtomicU64 = AtomicU64::new(0x3FF0_0000_0000_0000); // 1.0
+
+/// 当前生效的 USD→CNY 汇率（未配置 = 1.0）。
+pub fn usd_to_cny_rate() -> f64 {
+    f64::from_bits(USD_TO_CNY_BITS.load(Ordering::Relaxed))
+}
+
+/// 更新进程级汇率快照；非有限值或 <=0 忽略（保持上一次有效值）。
+fn publish_usd_to_cny(rate: Option<f64>) {
+    if let Some(r) = rate.filter(|r| r.is_finite() && *r > 0.0) {
+        USD_TO_CNY_BITS.store(r.to_bits(), Ordering::Relaxed);
+    }
+}
 
 /// 后台同步检查间隔（1 小时）。
 const SYNC_CHECK_INTERVAL_SECS: u64 = 3600;
@@ -159,9 +193,16 @@ impl ExchangeRateService {
         self.rates.get(&(from, to)).map(|r| r.rate)
     }
 
-    /// 设置汇率（仅内存）。
+    /// 设置汇率（仅内存；**不**自动刷新计费快照，由调用方显式
+    /// [`sync_billing_rate`](Self::sync_billing_rate) 决定时机，避免单测里
+    /// 构造服务就改变全局计费口径）。
     pub fn set_rate(&self, from: Currency, to: Currency, rate: f64) {
         self.rates.insert((from, to), CachedRate::from_rate(rate));
+    }
+
+    /// 把 USD→CNY 同步到计费用的进程级快照（启动时、管理面改汇率后调用）。
+    pub fn sync_billing_rate(&self) {
+        publish_usd_to_cny(self.get_rate(Currency::Usd, Currency::Cny));
     }
 
     /// 设置汇率并持久化。

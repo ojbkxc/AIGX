@@ -946,7 +946,7 @@ pub async fn handle_epay_notify(
             let quota_to_add = if order.quota > 0 {
                 order.quota
             } else if order.money > 0.0 && config.epay.price > 0.0 {
-                (order.amount as f64 * config.epay.price * 200.0).round() as i64
+                (order.amount as f64 * config.epay.price).round() as i64
             } else {
                 order.quota
             };
@@ -1052,7 +1052,7 @@ pub async fn handle_epay_return(
                 let quota_to_add = if order.quota > 0 {
                     order.quota
                 } else if order.money > 0.0 && config.epay.price > 0.0 {
-                    (order.amount as f64 * config.epay.price * 200.0).round() as i64
+                    (order.amount as f64 * config.epay.price).round() as i64
                 } else {
                     order.quota
                 };
@@ -2488,7 +2488,7 @@ pub async fn handle_stripe_topup(
     // 原实现写死 1 美元 = 10000 单位，与 Epay 的 1 元 = price 单位口径
     // 不一致，两个支付渠道充值等值金额入账配额不同。
     // 配额单位是「额度」：再 ×200（1 元 = 200 额度）。
-    let quota = (amount as f64 * config.epay.price * 200.0).round() as i64;
+    let quota = (amount as f64 * config.epay.price).round() as i64;
 
     let order = crate::payment::TopUpOrder {
         trade_no: trade_no.clone(),
@@ -3138,18 +3138,35 @@ pub async fn handle_trigger_price_sync(
 }
 
 /// GET /api/pricing/exchange-rates - 获取全部汇率（扁平对象：{CNY: 7.2, ...}）
+///
+/// 返回**受支持币种全集**（未配置的给 0，前端按「空 = 未配置」渲染）。
+/// 旧实现只回显「存过的币种」：生产从未写过汇率时，页面只有 USD 一行、
+/// 没有任何可编辑输入框，等于没法配置任何汇率。
 pub async fn handle_get_exchange_rates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    // 返回 {币种: 相对 USD 的汇率}，USD 恒为 1.0
+    use crate::pricing::exchange_rate::{Currency, SUPPORTED_CURRENCIES};
     let mut map = serde_json::Map::new();
-    map.insert("USD".to_string(), serde_json::json!(1.0));
-    for (from, to, rate, _updated) in state.exchange_rate.list_rates() {
-        if from.code() == "USD" {
-            map.insert(to.code().to_string(), serde_json::json!(rate));
+    for cur in SUPPORTED_CURRENCIES {
+        if cur == Currency::Usd {
+            map.insert("USD".to_string(), serde_json::json!(1.0));
+            continue;
         }
+        // 直接汇率优先，其次取反向汇率的倒数（1 CNY = x USD ⇒ 1 USD = 1/x CNY）。
+        let rate = state
+            .exchange_rate
+            .get_rate(Currency::Usd, cur)
+            .or_else(|| {
+                state
+                    .exchange_rate
+                    .get_rate(cur, Currency::Usd)
+                    .filter(|r| *r > 0.0)
+                    .map(|r| 1.0 / r)
+            })
+            .unwrap_or(0.0);
+        map.insert(cur.code().to_string(), serde_json::json!(rate));
     }
     Ok(Json(serde_json::json!({ "success": true, "data": map })))
 }
@@ -3188,6 +3205,8 @@ pub async fn handle_update_exchange_rates(
                 )
             })?;
     }
+    // 立即生效：把 USD→CNY 同步进计费快照（无需重启）。
+    state.exchange_rate.sync_billing_rate();
     Ok(Json(serde_json::json!({ "success": true, "data": null })))
 }
 

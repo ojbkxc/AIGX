@@ -155,6 +155,7 @@ pub(crate) fn compute_channel_cost(
     let channel_cost = (base
         * ratios.model_ratio_aliased(requested_model, billing_model)
         * ratios.group_ratio(group)
+        * crate::pricing::exchange_rate::usd_to_cny_rate()
         * 200.0
         + 0.999999) as i64;
     // 有成本价但该模型成本算出来为 0（配置异常等）：回退到销售价，避免误显示利润
@@ -284,6 +285,9 @@ pub(crate) struct PriceSnapshot {
     pub model_ratio: f64,
     /// 分组倍率
     pub group_ratio: f64,
+    /// 计价时冻结的 USD→CNY 汇率（未配置 = 1.0）。
+    /// 冻结口径与单价一致：请求在途期间改汇率不影响该笔结算。
+    pub fx_rate: f64,
 }
 
 impl PriceSnapshot {
@@ -294,6 +298,7 @@ impl PriceSnapshot {
             price: None,
             model_ratio: 1.0,
             group_ratio: 1.0,
+            fx_rate: 1.0,
         }
     }
 }
@@ -317,6 +322,7 @@ fn capture_price_snapshot(
             price: None,
             model_ratio: 1.0,
             group_ratio: 1.0,
+            fx_rate: 1.0,
         };
     }
     let priced_name = state
@@ -336,6 +342,7 @@ fn capture_price_snapshot(
         price,
         model_ratio,
         group_ratio,
+        fx_rate: crate::pricing::exchange_rate::usd_to_cny_rate(),
     }
 }
 
@@ -382,8 +389,10 @@ fn compute_cost_from_snapshot_pure(
     if base <= 0.0 {
         0
     } else {
-        // 配额单位是「额度」（1 元 = 200 额度），与 live 计费同一口径。
-        (base * snapshot.model_ratio * snapshot.group_ratio * 200.0 + 0.999999) as i64
+        // 配额单位是「额度」（1 元 = 200 额度），与 live 计费同一口径；
+        // USD→CNY 用请求下单时冻结的汇率。
+        (base * snapshot.model_ratio * snapshot.group_ratio * snapshot.fx_rate * 200.0 + 0.999999)
+            as i64
     }
 }
 
@@ -420,7 +429,7 @@ fn compute_cost_from_snapshot(
             total += tp * (*count as f64) / 1000.0 * snapshot.group_ratio;
         }
         if total > 0.0 {
-            c = c.saturating_add((total * 200.0 + 0.999999) as i64);
+            c = c.saturating_add((total * snapshot.fx_rate * 200.0 + 0.999999) as i64);
         }
     }
     c
@@ -1307,6 +1316,7 @@ mod price_snapshot_tests {
             price: Some(p),
             model_ratio,
             group_ratio,
+            fx_rate: 1.0,
         }
     }
 
@@ -1318,6 +1328,7 @@ mod price_snapshot_tests {
             price: None,
             model_ratio: 1.0,
             group_ratio: 1.0,
+            fx_rate: 1.0,
         };
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 100, 200, 0), 42);
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 999999, 0, 0), 42);
@@ -1330,6 +1341,18 @@ mod price_snapshot_tests {
         // × model_ratio(2) × group_ratio(1) = 0.12 美元 → ×200 = 24 额度
         let snap = token_snapshot(0.03, 0.06, None, 2.0, 1.0);
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 24);
+    }
+
+    // 2b. 汇率冻结：结算按请求下单时的 USD→CNY 汇率折算
+    #[test]
+    fn snapshot_uses_frozen_fx_rate() {
+        // 0.06 USD × 1 × 1 × fx(7.0) × 200 = 84 额度
+        let mut snap = token_snapshot(0.03, 0.06, None, 1.0, 1.0);
+        snap.fx_rate = 7.0;
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 84);
+        // fx=1.0（未配置）与历史口径一致
+        snap.fx_rate = 1.0;
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 12);
     }
 
     // 3. 改价不变：快照冻结了单价，改价不影响结算（核心 P1-8 保证）
@@ -1349,6 +1372,7 @@ mod price_snapshot_tests {
             price: None,
             model_ratio: 1.0,
             group_ratio: 1.0,
+            fx_rate: 1.0,
         };
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 0);
     }
@@ -1390,6 +1414,7 @@ mod price_snapshot_tests {
             price: Some(p),
             model_ratio: 1.0,
             group_ratio: 1.0,
+            fx_rate: 1.0,
         };
         // count 型：base = input_price = 0.04 美元 → ×200 = 8 额度
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 999, 0, 999), 8);

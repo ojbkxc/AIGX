@@ -535,6 +535,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化汇率服务（多币种转换，批次4）
     let exchange_rate = Arc::new(ExchangeRateService::with_store(store.clone()));
+    // 计费口径：USD→CNY 快照（未配置 = 1.0，保持历史行为）
+    exchange_rate.sync_billing_rate();
 
     // 初始化用户分组存储
     let user_group_store = Arc::new(UserGroupStore::new(store.clone()));
