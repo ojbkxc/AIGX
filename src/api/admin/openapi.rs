@@ -1685,6 +1685,9 @@ fn paths_accounts_network() -> Value {
         "/api/public/geo-lang": {
             "get": op("公开", "按 IP 推断语言")
         },
+        "/api/public/quota-rate": {
+            "get": op("公开", "兑换倍率（1 元 = ? 额度，前端展示口径）")
+        },
         "/api/tickets": {
             "get": op("工单", "工单列表"),
             "post": op_body("工单", "提交工单", "")
@@ -2163,6 +2166,7 @@ mod tests {
         add("/api/session/login/interaction", &["get", "post"]);
         add("/api/session/login/wasm-callback", &["get"]);
         add("/api/public/geo-lang", &["get"]);
+        add("/api/public/quota-rate", &["get"]);
         add("/api/tickets", &["get", "post"]);
         add("/api/tickets/close", &["post"]);
         add("/api/tickets/reply", &["post"]);

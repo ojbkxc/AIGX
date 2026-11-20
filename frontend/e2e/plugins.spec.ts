@@ -103,9 +103,10 @@ test.describe('插件管理页', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('诊断信息：工具栏按钮展开诊断卡（目录 / 平台 / 协议版本）', async ({ page, pageErrors }) => {
-    const tools = page.locator('.pl-toolbar-actions');
-    await tools.getByRole('button', { name: '诊断信息' }).click();
+  test('诊断信息：更多操作菜单展开诊断卡（目录 / 平台 / 协议版本）', async ({ page, pageErrors }) => {
+    // 1.0.75 起工具栏收进页头「更多操作」三点菜单（对齐 Agent2API）
+    await page.getByRole('button', { name: '更多操作' }).click();
+    await page.getByRole('menuitem', { name: '诊断信息' }).click();
     const diag = page.locator('.pl-diagnostics-body');
     await expect(diag).toBeVisible();
     await expect(diag).toContainText('插件目录');
@@ -113,7 +114,7 @@ test.describe('插件管理页', () => {
     await expect(diag).toContainText('x86_64-unknown-linux-gnu');
     await expect(diag).toContainText('协议版本');
     // 关闭后隐藏
-    await page.locator('.card-header').filter({ hasText: '诊断信息' }).getByRole('button', { name: '关闭' }).click();
+    await page.locator('.modal-header').filter({ hasText: '诊断信息' }).getByRole('button', { name: '关闭' }).click();
     await expect(diag).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
