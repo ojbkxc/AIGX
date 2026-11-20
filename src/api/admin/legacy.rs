@@ -4331,6 +4331,7 @@ fn record_chat_test_usage(
         .calculate_cost_quoted(model, p, c, &group)
         .unwrap_or(0);
     let log = crate::log::RequestLog {
+        purge_applied: false,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: Some(user.id.clone()),
         key_id: Some("chat_test".to_string()),
@@ -4390,6 +4391,7 @@ fn record_chat_test_failure(
     latency_ms: u64,
 ) {
     let log = crate::log::RequestLog {
+        purge_applied: false,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: Some(user.id.clone()),
         key_id: Some("chat_test".to_string()),

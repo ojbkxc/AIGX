@@ -5,16 +5,18 @@
 //! 真实请求行为，不是历史报表。
 
 use axum::{
-    extract::State,
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
 use super::common::{error_response, verify_admin};
 
 use crate::bridge::{ChatMessage, Role};
+use crate::purge::presets::{self, ApplyTarget};
 use crate::purge::{PurgeSettings, RewriteRule};
 
 /// GET /api/purge —— 读取破甲配置、统计快照与进程运行信息。
@@ -57,6 +59,119 @@ pub async fn handle_update_purge(
     })?;
 
     Ok(Json(payload(&state)))
+}
+
+/// GET /api/purge/presets —— 内置预设检索（不带正文，只带预览）。
+///
+/// 查询参数：`q` 关键词（匹配 id/vendor/model/title/tags）、`vendor` 厂商精确
+/// 匹配（忽略大小写）、`limit` 条数（默认 50，上限 500）。
+/// `vendors` 的计数按**过滤后**结果统计，前端 chip 数量才会跟着搜索词变。
+pub async fn handle_list_purge_presets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PresetQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    let limit = query.limit.unwrap_or(presets::DEFAULT_LIMIT);
+    let (items, vendors, total) = presets::list(query.q.as_deref(), query.vendor.as_deref(), limit);
+
+    Ok(Json(json!({
+        "items": items,
+        "vendors": vendors,
+        "total": total,
+    })))
+}
+
+/// GET /api/purge/presets/{id} —— 单条预设详情（含完整正文）。
+pub async fn handle_get_purge_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    match presets::get(&id) {
+        Some(detail) => Ok(Json(json!(detail))),
+        None => Err(error_response(
+            &format!("Preset not found: {id}"),
+            StatusCode::NOT_FOUND,
+        )),
+    }
+}
+
+/// POST /api/purge/presets/{id}/apply —— 把预设落到生效位置。
+///
+/// 请求体：`{ "target": "structured_template" | "skill_file", "activate": bool }`
+/// - `structured_template`：写入配置并**立即落库热生效**，返回新的完整配置；
+/// - `skill_file`：只写盘（不改配置），由后续 `skill_inject` 扫描命中。
+///
+/// 两种目标都不改数据面转发逻辑，也不自动启用任何治理开关。
+pub async fn handle_apply_purge_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    let target: ApplyTarget = match body.get("target").and_then(|v| v.as_str()) {
+        Some("structured_template") => ApplyTarget::StructuredTemplate,
+        Some("skill_file") => ApplyTarget::SkillFile,
+        Some(other) => {
+            return Err(error_response(
+                &format!("Invalid target: {other} (expected structured_template | skill_file)"),
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+        None => {
+            return Err(error_response(
+                "Missing target: expected structured_template | skill_file",
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    };
+    let activate = body
+        .get("activate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut cfg = state.purge.snapshot().as_ref().clone();
+    let applied = presets::apply(&mut cfg, &id, target, activate).map_err(|e| {
+        // 预设不存在 / id 不可用作路径段 / 写盘失败都归到这里：
+        // 前两者是调用方输入问题（400），写盘失败是环境问题（500）。
+        let code = if presets::get(&id).is_some() {
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        error_response(&format!("Failed to apply preset: {e}"), code)
+    })?;
+
+    // 只有结构化模板需要落库；技能文件只写盘，配置保持不变。
+    let settings = if target == ApplyTarget::StructuredTemplate {
+        state.purge.update(normalize(cfg)).map_err(|e| {
+            error_response(
+                &format!("Failed to save purge settings: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?
+    } else {
+        state.purge.snapshot().as_ref().clone()
+    };
+
+    Ok(Json(json!({
+        "applied": applied,
+        "settings": settings,
+    })))
+}
+
+/// `/api/purge/presets` 的查询参数。
+#[derive(Debug, Deserialize)]
+pub struct PresetQuery {
+    q: Option<String>,
+    vendor: Option<String>,
+    limit: Option<usize>,
 }
 
 /// POST /api/purge/preview —— 改写试跑（dry-run）。

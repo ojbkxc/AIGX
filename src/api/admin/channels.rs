@@ -496,6 +496,9 @@ pub async fn handle_list_channels(
 /// 1. 按用户分组 `allowed_models` 白名单收窄（None/空 = 不限）；
 /// 2. 附加价格字段（`price_input` / `price_output` / `price_type`），
 ///    供控制台展示 —— 客户端清单不含价格。
+///
+/// 与 `/v1/models` 一样剔除未定价模型：下拉能选到的模型必须调得通。
+/// 管理员要给未定价模型配价，走模型管理页的全量视图（不走本端点）。
 pub async fn handle_available_models(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -512,8 +515,12 @@ pub async fn handle_available_models(
     };
     let allow_set = group_allow.unwrap_or_default();
 
-    // 聚合 = 与 /v1/models 同一实现（渠道/账号模型 + 懒发现 + 全局别名 + 自定义模型）
-    let models = super::super::openai::collect_available_models(&state).await;
+    // 聚合 = 与 /v1/models 同一实现（渠道/账号模型 + 懒发现 + 全局别名 + 自定义模型），
+    // 同样剔除未定价条目（retain_priced_models 与数据面门禁同判据）。
+    let models = super::super::openai::retain_priced_models(
+        &state,
+        super::super::openai::collect_available_models(&state).await,
+    );
 
     let data: Vec<Value> = models
         .into_iter()

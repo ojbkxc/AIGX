@@ -277,7 +277,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
                         "model_name": { "type": "string" },
                         "input_price": { "type": "number" },
                         "output_price": { "type": "number" },
-                        "price_type": { "type": "string", "description": "token/image 等" }
+                        "price_type": { "type": "string", "description": "token（按量）/count（按次）/free（免费）" }
                     },
                     "required": ["model_name", "input_price", "output_price", "price_type"]
                 })

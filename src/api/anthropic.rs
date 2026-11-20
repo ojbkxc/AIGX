@@ -1115,6 +1115,8 @@ pub async fn handle_messages(
                 let status_code = StatusCode::from_u16(e.http_status())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 let mut log = crate::log::RequestLog::new();
+                log.purge_applied =
+                    purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
                 log.channel_id = used_channel_id.clone();
@@ -2045,6 +2047,8 @@ pub async fn handle_messages(
                         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
                 };
                 let mut log = crate::log::RequestLog::new();
+                log.purge_applied =
+                    purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
                 log.channel_id = used_channel_id.clone();
@@ -2159,6 +2163,8 @@ pub async fn handle_messages(
 
             // 记录请求日志（含 channel_id，问题 4）
             let mut log = crate::log::RequestLog::new();
+            log.purge_applied =
+                purge_cfg.enabled && (purge_applied.changed || purge_applied.skill_hit);
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();

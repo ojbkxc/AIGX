@@ -46,6 +46,8 @@ export function RequestLogDetail({ log, admin, onClose }: {
     ] : []),
     { label: t('延迟'), value: `${log.latency_ms ?? 0}ms` },
     { label: t('状态码'), value: String(log.status_code ?? '—') },
+    // 破甲控制台使用标记（后端仅对管理员下发，普通用户已剥离）
+    ...(admin ? [{ label: t('破甲控制台'), value: log.purge_applied ? t('是') : t('否') }] : []),
     ...(admin && log.key_id && !src ? [{ label: 'API Key ID', value: log.key_id, mono: true }] : []),
     ...(admin && log.ip ? [{ label: 'IP', value: log.ip, mono: true }] : []),
   ];

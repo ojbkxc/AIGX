@@ -1108,6 +1108,28 @@ fn paths_settings_ops() -> Value {
             "get": op("网关", "查询破甲控制台配置 / 进程统计 / 运行信息"),
             "put": op_body("网关", "全量更新破甲控制台配置（热生效）", "enabled/system_normalize/dead_zone_rewrite/reduce_reasoning/cross_source_fallback/skill_inject/structured_prompt 等")
         },
+        "/api/purge/presets": {
+            "get": op_params("网关", "检索内置破甲预设库（不带正文，只带预览）", &[
+                query_param("q", "string", "关键词：匹配 id / vendor / model / title / tags"),
+                query_param("vendor", "string", "厂商精确匹配（忽略大小写）"),
+                query_param("limit", "integer", "返回条数，默认 50，上限 500"),
+            ])
+        },
+        "/api/purge/presets/{id}": {
+            "get": op_params("网关", "读取单条预设详情（含完整正文）", &[path_param("id")])
+        },
+        "/api/purge/presets/{id}/apply": {
+            "post": op_params("网关", "把预设应用到结构化模板（落库热生效）或技能目录（只写盘）", &[
+                path_param("id"),
+                json!({
+                    "name": "body",
+                    "in": "body",
+                    "required": true,
+                    "schema": { "type": "object" },
+                    "description": "target: structured_template | skill_file；activate: bool（仅结构化模板生效）",
+                }),
+            ])
+        },
         "/api/cline-headers": {
             "get": op("网关", "查询 Cline 伪装头覆盖表"),
             "put": op_body("网关", "更新 Cline 伪装头覆盖表（热生效）", "headers: object")
@@ -2322,6 +2344,9 @@ mod tests {
         // #46 补登：网关指纹/排队 + 安全策略 + 定时任务 + 数据升级
         add("/api/sanitize", &["get", "put"]);
         add("/api/purge", &["get", "put"]);
+        add("/api/purge/presets", &["get"]);
+        add("/api/purge/presets/{id}", &["get"]);
+        add("/api/purge/presets/{id}/apply", &["post"]);
         add("/api/cline-headers", &["get", "put"]);
         add("/api/queue", &["get", "put"]);
         add("/api/security/policy", &["get", "put"]);

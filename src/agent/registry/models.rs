@@ -68,7 +68,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
                         "input_price": { "type": "number" },
                         "output_price": { "type": "number" },
                         "cache_price": { "type": "number" },
-                        "price_type": { "type": "string", "description": "token/count" },
+                        "price_type": { "type": "string", "description": "token/count/free" },
                         "model_ratio": { "type": "number" }
                     },
                     "required": ["model", "input_price", "output_price"]

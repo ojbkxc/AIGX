@@ -27,6 +27,11 @@ use std::time::{Duration, Instant};
 use crate::bridge::{ChatMessage, Role};
 use crate::storage::FileStore;
 
+/// 内置预设目录（同步脚本生成，勿手改）。
+pub mod preset_catalog;
+/// 预设检索与应用。
+pub mod presets;
+
 /// 持久化键（FileStore）。
 pub const PURGE_SETTINGS_KEY: &str = "purge_settings";
 
@@ -840,7 +845,7 @@ fn skills_for(dir: &str) -> Arc<Vec<SkillEntry>> {
     entries
 }
 
-fn expand_home(path: &str) -> PathBuf {
+pub(crate) fn expand_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home).join(rest);

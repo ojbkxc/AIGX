@@ -4,6 +4,8 @@ import type { TFunction } from 'i18next';
 import { api } from '../api';
 import type {
   PurgeData,
+  PurgePresetDetail,
+  PurgePresetList,
   PurgeRewriteRule,
   PurgeSettings,
   PurgeStats,
@@ -368,6 +370,278 @@ const ParamGrid = memo(function ParamGrid({
   );
 });
 
+/**
+ * 破甲预设库：内置 prompt 集合的浏览与落盘。
+ *
+ * 三条动作各自独立：
+ * - 设为结构化模板：把正文写进父组件的草稿（不直接 PUT，需手动保存）；
+ * - 复制全文：只进剪贴板；
+ * - 写入技能目录：后端直接写盘，成功后刷新技能快照。
+ *
+ * 搜索防抖 250ms：预设库有 50+ 条，每次按键都打后端没必要。
+ */
+const PresetsSection = memo(function PresetsSection({
+  t,
+  addToast,
+  onApplyTemplate,
+  onSkillWritten,
+}: {
+  t: TFunction;
+  addToast: (message: string, type?: 'success' | 'error' | 'warning') => void;
+  onApplyTemplate: (name: string, text: string) => void;
+  onSkillWritten: () => void;
+}): JSX.Element {
+  const [q, setQ] = useState('');
+  const [debouncedQ, setDebouncedQ] = useState('');
+  const [vendor, setVendor] = useState('');
+  const [list, setList] = useState<PurgePresetList | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<PurgePresetDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQ(q.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [q]);
+
+  // 列表：搜索词 / 厂商变化时重拉（不传 limit，用后端默认 50）
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    void (async () => {
+      try {
+        const res = await api.listPurgePresets({
+          q: debouncedQ || undefined,
+          vendor: vendor || undefined,
+        });
+        if (!alive) return;
+        if (!res.success || !res.data) throw new Error('list failed');
+        setList(res.data);
+      } catch {
+        if (alive) addToast(t('预设列表加载失败'), 'error');
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [addToast, debouncedQ, t, vendor]);
+
+  // 详情：选中项变化时拉全文
+  useEffect(() => {
+    if (!selectedId) {
+      setDetail(null);
+      return;
+    }
+    let alive = true;
+    setDetailLoading(true);
+    void (async () => {
+      try {
+        const res = await api.getPurgePreset(selectedId);
+        if (!alive) return;
+        if (!res.success || !res.data) throw new Error('detail failed');
+        setDetail(res.data);
+      } catch {
+        if (alive) {
+          setDetail(null);
+          addToast(t('预设正文加载失败'), 'error');
+        }
+      } finally {
+        if (alive) setDetailLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [addToast, selectedId, t]);
+
+  const items = list?.items ?? [];
+
+  /** 拉全文（供复制用；详情已在时直接用缓存） */
+  const fetchBody = useCallback(
+    async (id: string): Promise<PurgePresetDetail | null> => {
+      if (detail && detail.id === id) return detail;
+      const res = await api.getPurgePreset(id);
+      if (!res.success || !res.data) throw new Error('detail failed');
+      return res.data;
+    },
+    [detail],
+  );
+
+  const handleApplyTemplate = useCallback(
+    async (id: string): Promise<void> => {
+      setBusy(`template:${id}`);
+      try {
+        const full = await fetchBody(id);
+        if (!full) throw new Error('detail failed');
+        onApplyTemplate(full.title, full.body);
+        addToast(t('已写入模板草稿，点底部「保存」后生效'), 'success');
+      } catch {
+        addToast(t('应用预设失败'), 'error');
+      } finally {
+        setBusy(null);
+      }
+    },
+    [addToast, fetchBody, onApplyTemplate, t],
+  );
+
+  const handleCopy = useCallback(
+    async (id: string): Promise<void> => {
+      setBusy(`copy:${id}`);
+      try {
+        const full = await fetchBody(id);
+        if (!full) throw new Error('detail failed');
+        await navigator.clipboard.writeText(full.body);
+        addToast(t('全文已复制到剪贴板'), 'success');
+      } catch {
+        addToast(t('复制失败（浏览器可能禁用了剪贴板权限）'), 'error');
+      } finally {
+        setBusy(null);
+      }
+    },
+    [addToast, fetchBody, t],
+  );
+
+  const handleApplySkill = useCallback(
+    async (id: string): Promise<void> => {
+      setBusy(`skill:${id}`);
+      try {
+        const res = await api.applyPurgePreset(id, 'skill_file');
+        if (!res.success || !res.data) throw new Error('apply failed');
+        addToast(
+          t('已写入技能目录：{{path}}', { path: res.data.applied.path ?? '' }),
+          'success',
+        );
+        onSkillWritten();
+      } catch {
+        addToast(t('写入技能目录失败'), 'error');
+      } finally {
+        setBusy(null);
+      }
+    },
+    [addToast, onSkillWritten, t],
+  );
+
+  return (
+    <Card title={t('破甲预设库')}>
+      {/* 授权边界必须常驻可见：正文是第三方公开 prompt 原文，这里只搬不改 */}
+      <p className="purge-preset-notice">
+        {t(
+          '内置 {{count}} 条第三方公开 prompt 原文，仅供授权的防御性安全评估使用。内容原样搬运、不改写；合规责任在使用方。',
+          { count: list?.total ?? 0 },
+        )}
+      </p>
+      <div className="purge-preset-toolbar">
+        <Input
+          placeholder={t('搜索标题 / 厂商 / 模型 / 标签')}
+          aria-label={t('搜索预设')}
+          value={q}
+          onChange={(event) => setQ(event.target.value)}
+        />
+        <span className="purge-preset-total">
+          {t('共 {{total}} 条', { total: list?.total ?? 0 })}
+        </span>
+      </div>
+      <div className="purge-preset-chips" role="group" aria-label={t('按厂商过滤')}>
+        <button
+          type="button"
+          className={`purge-preset-chip${vendor === '' ? ' is-active' : ''}`}
+          onClick={() => setVendor('')}
+        >
+          {t('全部')}
+        </button>
+        {(list?.vendors ?? []).map((item) => (
+          <button
+            key={item.vendor}
+            type="button"
+            className={`purge-preset-chip${vendor === item.vendor ? ' is-active' : ''}`}
+            onClick={() => setVendor(item.vendor)}
+          >
+            {item.vendor}
+            <span className="purge-preset-chip-count">{item.count}</span>
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <SkeletonList rows={4} />
+      ) : items.length === 0 ? (
+        <p className="purge-empty">{t('没有匹配的预设')}</p>
+      ) : (
+        <ul className="purge-preset-list">
+          {items.map((item) => {
+            const active = selectedId === item.id;
+            return (
+              <li key={item.id}>
+                <button
+                  type="button"
+                  className={`purge-preset-item${active ? ' is-active' : ''}`}
+                  data-testid="purge-preset-item"
+                  aria-pressed={active}
+                  onClick={() => setSelectedId(active ? null : item.id)}
+                >
+                  <span className="purge-preset-item-main">
+                    <strong>{item.title}</strong>
+                    <span className="purge-preset-item-meta">
+                      {item.vendor} · {item.model}
+                    </span>
+                  </span>
+                  <span className="purge-preset-item-side">
+                    <span>{(item.bytes / 1024).toFixed(1)} KB</span>
+                    <code title={item.sha256}>{item.sha256.slice(0, 8)}</code>
+                  </span>
+                </button>
+                {active ? (
+                  <div className="purge-preset-detail">
+                    <div className="purge-actions">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-testid="purge-preset-apply-template"
+                        disabled={busy !== null}
+                        onClick={() => void handleApplyTemplate(item.id)}
+                      >
+                        {busy === `template:${item.id}` ? t('处理中…') : t('设为结构化模板')}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busy !== null}
+                        onClick={() => void handleCopy(item.id)}
+                      >
+                        {busy === `copy:${item.id}` ? t('处理中…') : t('复制全文')}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-testid="purge-preset-apply-skill"
+                        disabled={busy !== null}
+                        onClick={() => void handleApplySkill(item.id)}
+                      >
+                        {busy === `skill:${item.id}` ? t('处理中…') : t('写入技能目录')}
+                      </Button>
+                    </div>
+                    {detailLoading ? (
+                      <SkeletonList rows={6} />
+                    ) : (
+                      <pre className="purge-preset-preview" data-testid="purge-preset-preview">
+                        {detail && detail.id === item.id ? detail.body : item.preview}
+                      </pre>
+                    )}
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Card>
+  );
+});
+
 export default function PurgeConsole(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -611,6 +885,34 @@ export default function PurgeConsole(): JSX.Element {
           }
         : d,
     );
+  }, []);
+
+  /**
+   * 预设落盘后的技能快照刷新。
+   *
+   * 只重拉 `skills`，**不动 draft**——预设页与表单是两套状态，整页 `load()` 会把
+   * 用户未保存的编辑抹掉。
+   */
+  const refreshSkills = useCallback(async (): Promise<void> => {
+    try {
+      const res = await api.getPurge();
+      if (res.success && res.data) setSkills(res.data.skills ?? []);
+    } catch {
+      // 刷新失败不影响写入结果，静默即可
+    }
+  }, []);
+
+  /** 预设 → 结构化模板草稿（同名 upsert；不直接 PUT，用户手动保存） */
+  const applyPresetTemplate = useCallback((name: string, text: string): void => {
+    setDirty(true);
+    setDraft((d) => {
+      if (!d) return d;
+      const templates = [...(d.structured_templates ?? [])];
+      const index = templates.findIndex((tpl) => tpl.name === name);
+      if (index >= 0) templates[index] = { name, text };
+      else templates.push({ name, text });
+      return { ...d, structured_templates: templates };
+    });
   }, []);
 
   const addTemplate = useCallback((): void => {
@@ -1072,6 +1374,14 @@ export default function PurgeConsole(): JSX.Element {
           </ul>
         </Card>
       )}
+
+      {/* 预设库：内置 prompt 集合浏览 + 一键落盘（放在结构化模板之上，应用后直接在下方看到结果） */}
+      <PresetsSection
+        t={t}
+        addToast={addToast}
+        onApplyTemplate={applyPresetTemplate}
+        onSkillWritten={() => void refreshSkills()}
+      />
 
       <Card
         title={t('结构化模板')}

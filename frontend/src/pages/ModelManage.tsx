@@ -185,6 +185,8 @@ function fmtPrice(n: number | null | undefined): string {
 
 /** 定价条目是否全 0（免费模型）——与「未定价」（price 为 null）区分开展示 */
 function isFreePrice(p: { input_price: number; output_price: number; cache_price?: number | null; price_type: string }): boolean {
+  // 计价方式=免费是显式第三态，与「价格恰好为 0」等价展示
+  if (p.price_type === 'free') return true;
   if (p.price_type === 'count') return p.input_price === 0;
   return p.input_price === 0 && p.output_price === 0 && (p.cache_price == null || p.cache_price === 0);
 }
@@ -602,9 +604,12 @@ export default function ModelManage(): JSX.Element {
   const savePrice = async () => {
     if (!priceTarget) return;
     setPriceError('');
-    const input = Number(priceForm.input_price || 0);
-    const output = Number(priceForm.output_price || 0);
-    const cache = priceForm.cache_price.trim() === '' ? null : Number(priceForm.cache_price);
+    const free = priceForm.price_type === 'free';
+    // 免费：价格与倍率都不参与计费（后端 cost_with_name 对 free 直接返回 0），
+    // 统一提交 0/null，避免残留旧价格让列表误显示成「$x/1k tokens」。
+    const input = free ? 0 : Number(priceForm.input_price || 0);
+    const output = free ? 0 : Number(priceForm.output_price || 0);
+    const cache = free || priceForm.cache_price.trim() === '' ? null : Number(priceForm.cache_price);
     if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0) {
       setPriceError(t('价格必须是非负数字'));
       return;
@@ -613,7 +618,7 @@ export default function ModelManage(): JSX.Element {
       setPriceError(t('缓存价格必须是非负数字'));
       return;
     }
-    const ratioText = priceForm.model_ratio.trim();
+    const ratioText = free ? '' : priceForm.model_ratio.trim();
     const ratio = ratioText === '' ? undefined : Number(ratioText);
     if (ratio !== undefined && (!Number.isFinite(ratio) || ratio < 0)) {
       setPriceError(t('模型倍率必须是非负数字'));
@@ -2491,8 +2496,20 @@ export default function ModelManage(): JSX.Element {
                 >
                   <option value="token">{t('按 token 计价')}</option>
                   <option value="count">{t('按次计价')}</option>
+                  <option value="free">{t('免费')}</option>
                 </select>
               </div>
+              {priceForm.price_type === 'free' ? (
+                <div className="form-group">
+                  <p style={{ margin: 0, color: 'var(--text-muted)' }}>
+                    {t('价格已配置为 0，调用不计费')}
+                  </p>
+                  <p style={{ margin: '6px 0 0', color: 'var(--text-muted)' }}>
+                    {t('免费模型仍有定价条目，因此保留在客户端模型清单里；未定价模型则不会出现在清单中。')}
+                  </p>
+                </div>
+              ) : (
+                <>
               <div className="form-group">
                 <label>
                   {priceForm.price_type === 'count' ? t('每次价格') : t('输入价格（每 1k token）')}
@@ -2539,6 +2556,8 @@ export default function ModelManage(): JSX.Element {
                   disabled={savingPrice}
                 />
               </div>
+                </>
+              )}
             </div>
             <div className="modal-footer">
               <Button variant="outline" onClick={() => setPriceTarget(null)} disabled={savingPrice}>

@@ -2,6 +2,82 @@
 
 
 
+## 2026-11-20 · 破甲预设库（1.0.72）
+
+### 做了什么
+- 新增破甲预设库：把 `D:/GitHub/jailbreaks` 的 53 条第三方公开破甲
+  prompt 原文（19 个厂商目录）全量数据化——`tools/sync_purge_presets.py`
+  同步脚本（CRLF→LF 规范化 + sha256 + 200 字符预览，`--check` 幂等门禁），
+  产出 `assets/purge-presets/` 53 文件与生成的 `src/purge/preset_catalog.rs`
+  （include_str! 内联，排序确定性 `(vendor, model, id)`，无时间戳）。
+- 检索/应用层 `src/purge/presets.rs`：list（关键词+厂商过滤、计数、
+  total）/ get（全文）/ apply 两落点（structured_template 同名 upsert 幐等
+  不落库，随管理面 PUT 热生效；skill_file 只写 SKILL.md 到技能目录），
+  `is_safe_segment` 路径白名单 + `chars().take()` 多字节安全预览，16 单测。
+- 三条 API：`GET /api/purge/presets`（q/vendor/limit）、
+  `GET /api/purge/presets/{id}`、`POST /api/purge/presets/{id}/apply`
+  （body 含 target/activate）；main.rs 路由 + openapi.rs 双侧登记
+  （`real_admin_routes()` 与 paths 双向一致）+ registry 豁免
+  （EXEMPT_PREFIXES：AI 面已有 /api/purge 等价读写，apply 的写盘副作用
+  不对 AI 开放）。
+- 观测：RequestLog 新增 `purge_applied` 字段，chat 路径按
+  `enabled && (changed || skill_hit)` 赋值，其余 6 处初始化点补 false。
+- 前端 PurgeConsole 新增 PresetsSection：厂商 chip + 搜索（防抖 250ms）
+  + 列表 + total + 展开预览（等宽限高滚动）+ 三动作（设为结构化模板＝
+  写草稿置脏不自动 PUT / 复制全文 / 写入技能目录＝后端写盘后只重拉
+  skills 快照不动 draft）+ 授权提示常驻可见；i18n zh/en 20 词条。
+- E2E `e2e/purge-console-presets.spec.ts` 7 条（desktop+mobile）。
+- 六处版本同步 1.0.72 + `docs/SPEC-1.0.72-PURGE-PRESETS.md` + README。
+
+### 为什么
+- 破甲控制台 1.0.71 上线后词表/模板全靠手打，内置公开研究集合原文
+  （只搬不改）可一键落为结构化模板或技能文件，降低配置成本。
+- 合规边界：预设库仅供授权的防御性安全评估；UI 顶部常驻授权提示，
+  不内置自动绕过逻辑。
+
+### 验证结论
+- `python tools/sync_purge_presets.py --check` exit 0。
+- `cargo test --bin aigx` 全量 2289 passed / 0 failed（14.94s）；
+  purge 38 / registry 99 / openapi 4 全绿。
+- 前端 `tsc --noEmit` 0 error；`vitest` 157 passed；新 e2e 7+7 全绿。
+- `verify-version.py` 六处版本一致。
+- 说明：本批原计划 5 人团队派发，成员全部因 provider 账号代理 400 故障
+  失败（复活重试仍失败），按纪律改由 lead 在主会话按 T1→T5 落地。
+
+
+## 2026-11-20 · 模型定价门禁与「免费」计价（1.0.72，与上条同版发布）
+
+### 做了什么
+- **未定价模型不对用户暴露**：`/v1/models` 与 `/api/models/available`
+  （聊天下拉 / 密钥白名单 / 全局搜索共用）在聚合结果上应用
+  `retain_priced_models`——没有定价条目的模型直接剔除。模型管理页仍显示
+  全量（走独立管理视图，否则管理员无从配价）。
+- **数据面收紧**：`ensure_model_priced` 不再对「渠道已声明」的未定价模型
+  放行（旧逻辑等价于「渠道声明即可白嫖」），未定价统一 403
+  `model_not_priced`，与列表口径一致。
+- **计价方式新增第三态「免费」**（`price_type = "free"`）：模型管理定价
+  弹窗新增选项并隐藏价格/倍率输入；后端 `cost_with_name_inner`、预扣与
+  配额计价一律按 0，模型仍保留在客户端清单（有定价条目，区别于未定价）。
+- **定价/倍率查找大小写不敏感兜底**：清单统一输出 lowercase，而管理页按
+  渠道原始大小写配价（如 `GLM-5.3-Flash`）；精确匹配会把同一模型判成
+  「未定价」（清单被过滤、计费失败）。精确键优先，未命中再 CI 兜底。
+- `upsert_price` 校验 `price_type ∈ {token, count, free}`，拼错（如 `Free`）
+  不再静默落进 token 分支。
+- 单测：free 计费恒 0 且条目可见、非法 price_type 拒绝、大小写兜底与倍率
+  同口径、清单门禁源码不变量（两个用户出口必须过滤、模型管理不得过滤）。
+
+### 为什么
+- 管理员没配价的模型此前仍能被调用（按 0 计费），等于免费用量；列表里
+  也照常显示，用户「能选、调用可能失败」。产品要求：没有售价就不让用。
+- 免费是合法经营策略（自建/赠送模型），需要显式的第三态，不能靠「价格
+  填 0」暗示——后端 free 分支与未定价门禁语义必须分开。
+
+### 验证结论
+- `cargo test --bin aigx` 全量 2296 passed / 0 failed（22.20s）。
+- `cargo fmt -- --check` / `cargo clippy --all-targets -- -D warnings` 0 错误
+  （顺带修掉 `purge/presets.rs` 的 9 处风格告警）。
+- 前端 `tsc --noEmit` 0 error / `eslint` 0 warning / i18n 缺失 0。
+
 ## 2026-09-09 · 会话撤销收尾 + 模型元信息同步（P1 第二波收尾）
 
 ### 做了什么

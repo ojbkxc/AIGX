@@ -74,6 +74,14 @@ impl ModelPrice {
             updated_at: now,
         }
     }
+
+    /// 计价方式是否为「免费」（`price_type == "free"`）。
+    ///
+    /// 免费是独立于 token/count 的第三态：模型在可用清单里可见（已有定价条目），
+    /// 但任何调用都按 0 计费。与「未定价」（没有条目、被门禁排除）语义不同。
+    pub fn is_free(&self) -> bool {
+        self.price_type == "free"
+    }
 }
 
 // ── RatioConfig ─────────────────────────────────────────────────────
@@ -94,19 +102,39 @@ pub struct RatioConfig {
 
 impl RatioConfig {
     pub fn model_ratio(&self, model: &str) -> f64 {
-        self.model_ratio.get(model).copied().unwrap_or(1.0)
+        if let Some(v) = self.model_ratio.get(model) {
+            return *v;
+        }
+        // 与定价查找同口径：清单输出 lowercase，配置键可能混合大小写。
+        self.model_ratio
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(model))
+            .map(|(_, v)| *v)
+            .unwrap_or(1.0)
     }
 
     /// 模型倍率（双名感知）：先按对外请求名查，未配置再按映射后上游名查，缺省 1.0。
     ///
     /// 倍率的配置入口（模型管理定价弹窗 / 倍率页）以对外模型名为键；计费发生时
     /// 名字可能已被渠道级映射改写为上游名。双名 fallback 让「一次配置」对两种
-    /// 计费路径都生效，避免映射场景倍率静默失效。
+    /// 计费路径都生效，避免映射场景倍率静默失效。两个名字都精确未命中时再做
+    /// 大小写不敏感兜底（理由同 [`PricingStore::get_price`]）。
     pub fn model_ratio_aliased(&self, requested: &str, upstream: &str) -> f64 {
+        if let Some(v) = self.model_ratio.get(requested) {
+            return *v;
+        }
+        if let Some(v) = self.model_ratio.get(upstream) {
+            return *v;
+        }
         self.model_ratio
-            .get(requested)
-            .or_else(|| self.model_ratio.get(upstream))
-            .copied()
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(requested))
+            .or_else(|| {
+                self.model_ratio
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(upstream))
+            })
+            .map(|(_, v)| *v)
             .unwrap_or(1.0)
     }
 
@@ -319,8 +347,21 @@ impl PricingStore {
     }
 
     /// 获取单模型定价
+    ///
+    /// 精确键优先，未命中时做一次大小写不敏感兜底：对外模型清单
+    /// （`collect_available_models`）统一输出 lowercase，而定价条目按模型
+    /// 管理页里的原始声明（可能混合大小写，如 `GLM-5.3-Flash`）保存。
+    /// 只做精确匹配会把同一个模型判成两套 —— 客户端清单把它当未定价剔除、
+    /// 数据面报 `model_not_priced`，而管理页明明配过价。
     pub fn get_price(&self, model: &str) -> Option<ModelPrice> {
-        self.prices.read().get(model).cloned()
+        let prices = self.prices.read();
+        if let Some(p) = prices.get(model) {
+            return Some(p.clone());
+        }
+        prices
+            .values()
+            .find(|p| p.model_name.eq_ignore_ascii_case(model))
+            .cloned()
     }
 
     /// 解析计价键：对外请求名优先，映射后上游名兜底。
@@ -329,19 +370,39 @@ impl PricingStore {
     /// 已被渠道级映射改写。若按上游名找不到定价，回退对外名——否则映射场景
     /// 定价整体失效、请求被调用方按 0 计费（免费放行）。返回 `None` 表示两个
     /// 名字都未定价。
+    ///
+    /// 两个名字都精确未命中时各做一次大小写不敏感兜底（理由同 [`Self::get_price`]），
+    /// 返回**实际存储键**，保证调用方随后 `get_price(返回名)` 精确命中。
     pub fn resolve_priced_name(&self, requested: &str, upstream: &str) -> Option<String> {
         let prices = self.prices.read();
         if prices.contains_key(requested) {
-            Some(requested.to_string())
-        } else if prices.contains_key(upstream) {
-            Some(upstream.to_string())
-        } else {
-            None
+            return Some(requested.to_string());
         }
+        if prices.contains_key(upstream) {
+            return Some(upstream.to_string());
+        }
+        prices
+            .values()
+            .find(|p| p.model_name.eq_ignore_ascii_case(requested))
+            .or_else(|| {
+                prices
+                    .values()
+                    .find(|p| p.model_name.eq_ignore_ascii_case(upstream))
+            })
+            .map(|p| p.model_name.clone())
     }
 
     /// 新增/更新定价（upsert，以 model_name 为键）
     pub fn upsert_price(&self, mut price: ModelPrice) -> anyhow::Result<ModelPrice> {
+        // 计价方式三态：token（按量）/ count（按次）/ free（免费）。
+        // 拼错（如 "Free"）会静默落进 token 分支：按 0 单价看似免费，但界面
+        // 仍显示按量计价，语义糊掉。挡在写入口，调用方拿到明确错误。
+        if !matches!(price.price_type.as_str(), "token" | "count" | "free") {
+            anyhow::bail!(
+                "计价方式必须是 token、count 或 free（收到 {:?}）",
+                price.price_type
+            );
+        }
         let now = chrono::Utc::now().timestamp();
         if price.created_at == 0 {
             price.created_at = now;
@@ -496,7 +557,10 @@ impl PricingStore {
         let model_ratio = ratios.model_ratio(name);
         let group_ratio = ratios.group_ratio(group);
 
-        let base = if price.price_type == "count" {
+        let base = if price.is_free() {
+            // 计价方式=免费：无论 token 量/倍率如何，一律按 0 计（不产生费用）。
+            0.0
+        } else if price.price_type == "count" {
             price.input_price
         } else {
             // 命中计费的调用形态是 input=0, cached=prompt_tokens：
@@ -820,6 +884,70 @@ mod tests {
         assert!(s.calculate_cost("unknown", 1000, 1000, "default").is_err());
     }
 
+    #[test]
+    fn free_price_type_costs_zero() {
+        // 计价方式=免费：即便 input/output/倍率给到非零，费用也恒为 0。
+        let s = store();
+        let mut p = ModelPrice::new("free-model", 0.5, 0.9); // 故意给非零单价
+        p.price_type = "free".to_string();
+        assert!(p.is_free());
+        s.upsert_price(p).unwrap();
+        // 免费模型**有定价条目**（因此会通过客户端清单的「已定价」门禁、保持可见），
+        // 只是计费恒为 0 —— 这与「未定价」（get_price 为 None、被清单排除）不同。
+        assert!(s.get_price("free-model").is_some());
+        let mut ratios = RatioConfig::default();
+        ratios.model_ratio.insert("free-model".to_string(), 3.0);
+        ratios.group_ratio.insert("vip".to_string(), 2.0);
+        s.update_ratios(ratios).unwrap();
+        let cost = s
+            .calculate_cost("free-model", 1_000_000, 1_000_000, "vip")
+            .unwrap();
+        assert!(
+            (cost - 0.0).abs() < 1e-12,
+            "free 模型费用必须为 0，实得 {cost}"
+        );
+        // 配额计费（向上取整）也是 0
+        assert_eq!(
+            s.calculate_cost_quoted("free-model", 1_000_000, 1_000_000, "vip")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn upsert_price_rejects_unknown_price_type() {
+        // 拼错的计价方式必须在写入口被拒，不能静默落进 token 分支。
+        let s = store();
+        let mut p = ModelPrice::new("typo-model", 0.1, 0.2);
+        p.price_type = "Free".to_string();
+        assert!(s.upsert_price(p).is_err());
+        assert!(s.get_price("typo-model").is_none());
+    }
+
+    #[test]
+    fn price_lookup_falls_back_to_case_insensitive() {
+        // 清单输出统一 lowercase，定价键保留管理页的原始大小写：
+        // 两种写法必须能互相命中，否则模型会被误判「未定价」。
+        let s = store();
+        s.upsert_price(ModelPrice::new("GLM-5.3-Flash", 1.0, 2.0))
+            .unwrap();
+        assert!(s.get_price("glm-5.3-flash").is_some());
+        assert_eq!(
+            s.resolve_priced_name("glm-5.3-flash", "other-upstream")
+                .as_deref(),
+            Some("GLM-5.3-Flash"),
+            "应返回实际存储键，供后续精确 get_price 命中"
+        );
+        // 精确键优先：两个大小写变体并存时，精确匹配胜出
+        s.upsert_price(ModelPrice::new("glm-5.3-flash", 9.0, 9.0))
+            .unwrap();
+        assert_eq!(s.get_price("glm-5.3-flash").unwrap().input_price, 9.0);
+        // 倍率查找同口径（否则清单 lowercase 会让按原大小写配置的倍率静默失效）
+        let mut ratios = RatioConfig::default();
+        ratios.model_ratio.insert("GLM-5.3-Flash".to_string(), 2.5);
+        assert_eq!(ratios.model_ratio("glm-5.3-flash"), 2.5);
+        assert_eq!(ratios.model_ratio_aliased("glm-5.3-flash", "upstream"), 2.5);
+    }
     #[test]
     fn aliased_pricing_prefers_requested_name() {
         // 对外名与上游名都定价时，按对外名计（「一个模型设一次价」语义）

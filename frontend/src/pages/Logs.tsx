@@ -79,6 +79,8 @@ export interface RequestLogItem {
   client_name?: string;
   /** 客户端版本（能提取则有值） */
   client_version?: string;
+  /** 是否使用破甲控制台（仅 admin 下发，普通用户已被后端剥离） */
+  purge_applied?: boolean;
 }
 
 export interface AuditLogItem {
@@ -171,6 +173,7 @@ function logsReqColDefs(admin: boolean): TableColumnDef[] {
     { key: 'cost', label: '费用', align: 'right' as const, width: 100 },
     { key: 'latency', label: '延迟', align: 'right' as const, width: 90 },
     { key: 'status', label: '状态', align: 'center' as const, width: 90 },
+    ...(admin ? [{ key: 'purge', label: '破甲', align: 'center' as const, width: 70 }] : []),
   ];
 }
 
@@ -1147,6 +1150,15 @@ export default function Logs(): JSX.Element {
                           <span className={statusKind(l.status_code) === 'ok' ? 'badge badge-success' : 'badge badge-danger'}>
                             {l.status_code}
                           </span>
+                        ) : (
+                          <span className="badge badge-neutral">—</span>
+                        )}
+                      </td>
+                      )}
+                      {admin && visibleKeySet.has('purge') && (
+                      <td>
+                        {l.purge_applied ? (
+                          <span className="badge badge-warning">{t('破甲')}</span>
                         ) : (
                           <span className="badge badge-neutral">—</span>
                         )}

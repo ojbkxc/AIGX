@@ -30,6 +30,10 @@ import type {
   PurgeData,
   PurgePreviewResult,
   PurgeSettings,
+  PurgePresetApplyResult,
+  PurgePresetApplyTarget,
+  PurgePresetDetail,
+  PurgePresetList,
   ZcodeCaptchaConfig,
   ZcodeCaptchaPoolStats,
   ZcodeCaptchaPushResult,
@@ -138,6 +142,37 @@ export const endpoints = {
     messages: Array<{ role: string; content: string }>;
   }): Promise<ApiResponse<PurgePreviewResult>> =>
     request<ApiResponse<PurgePreviewResult>>('POST', `${API_BASE}/purge/preview`, payload),
+  // 破甲预设库（内置 prompt 集合：检索 / 详情 / 应用）
+  listPurgePresets: (params?: {
+    q?: string;
+    vendor?: string;
+    limit?: number;
+  }): Promise<ApiResponse<PurgePresetList>> => {
+    const search = new URLSearchParams();
+    if (params?.q) search.set('q', params.q);
+    if (params?.vendor) search.set('vendor', params.vendor);
+    if (params?.limit) search.set('limit', String(params.limit));
+    const qs = search.toString();
+    return request<ApiResponse<PurgePresetList>>(
+      'GET',
+      `${API_BASE}/purge/presets${qs ? `?${qs}` : ''}`,
+    );
+  },
+  getPurgePreset: (id: string): Promise<ApiResponse<PurgePresetDetail>> =>
+    request<ApiResponse<PurgePresetDetail>>(
+      'GET',
+      `${API_BASE}/purge/presets/${encodeURIComponent(id)}`,
+    ),
+  applyPurgePreset: (
+    id: string,
+    target: PurgePresetApplyTarget,
+    activate = false,
+  ): Promise<ApiResponse<PurgePresetApplyResult>> =>
+    request<ApiResponse<PurgePresetApplyResult>>(
+      'POST',
+      `${API_BASE}/purge/presets/${encodeURIComponent(id)}/apply`,
+      { target, activate },
+    ),
   // ZCode 验证码令牌池（对照 Agent2API「网关 → 验证码令牌池」）
   getZcodeCaptcha: (): Promise<ApiResponse<ZcodeCaptchaPoolStats>> =>
     request<ApiResponse<ZcodeCaptchaPoolStats>>('GET', `${API_BASE}/zcode/captcha`),

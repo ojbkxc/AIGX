@@ -595,22 +595,27 @@ pub(crate) fn check_group_model_permission(
 ///
 /// 未配置价格的模型若被放行，事后计费将静默为 0（产生免费用量）；
 /// 在入口处拦截可避免“管理员忘记配置价格 → 用户免费白嫖”的资金损失。
+///
+/// ── 口径（v1.0.73 收紧）──────────────────────────────────────
+/// 旧实现留了个口子：只要模型被任一启用渠道声明/发现就放行（按 0 计费），
+/// 理由是「列表看得到、调用却 503」体验割裂。现在列表侧（`/v1/models` 与
+/// `/api/models/available`）已经同步剔除未定价模型，「看得到」不再成立，
+/// 这个口子只剩下「渠道声明即可白嫖」的效果，与产品要求（没有售价就不让用）
+/// 相反，故移除。
+///
+/// 免费模型仍可用：它在定价目录里有 `price_type = "free"` 条目（0 计费），
+/// `get_price` 命中即放行。管理员要放开一个模型，正确做法是在模型管理里
+/// 给它配价（哪怕配成免费），而不是让渠道声明替它兜底。
 pub(crate) fn ensure_model_priced(
     state: &AppState,
     model: &str,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     if state.pricing_store.get_price(model).is_none() {
-        // 放行：模型由任一启用渠道声明或发现（models ∪ discovered_models），
-        // 即管理员显式暴露的模型——即便 pricing_store 无条目也允许调用（按 0 计费），
-        // 避免列表显示可用但调用 503 的体验割裂。仅对"无渠道声明又无定价"的
-        // 任意模型名才拒绝（防止用户猜模型名蹭免费）。
-        if !model_declared_by_channel(state, model) {
-            return Err(openai_error_response(
-                "model_not_priced",
-                &format!("Model '{model}' has no price configured, contact admin"),
-                StatusCode::SERVICE_UNAVAILABLE,
-            ));
-        }
+        return Err(openai_error_response(
+            "model_not_priced",
+            &format!("Model '{model}' has no price configured, contact admin"),
+            StatusCode::FORBIDDEN,
+        ));
     }
     Ok(())
 }

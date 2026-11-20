@@ -31,21 +31,7 @@ fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: b
         .map(|mut l| {
             if let Some(obj) = l.as_object_mut() {
                 if !admin {
-                    // 普通用户只拿统计字段：原始报文（debug）与对话正文
-                    // （conversation）都属于「管理员排障/审计」视图，不下发。
-                    // 对话里可能含他人的系统提示词拼接、工具参数等敏感上下文。
-                    obj.remove("debug");
-                    obj.remove("conversation");
-                    // 路由回放字段同理：候选/被过滤渠道与过滤原因暴露的是
-                    // 站方内部拓扑（有几家渠道、谁被熔断、健康度），
-                    // 普通用户只需知道自己这次请求的结果。
-                    obj.remove("candidate_channels");
-                    obj.remove("filtered_channels");
-                    obj.remove("selected_channel");
-                    // 上游实际模型名（`model` = 映射后的上游真实名）与渠道归属遮罩：
-                    // 统一收在 `redact_model_for_non_admin` 里，列表 / JSON 导出 /
-                    // CSV 导出三处共用同一口径，避免权限边界不一致。
-                    crate::log::redact_model_for_non_admin(obj);
+                    strip_non_admin_fields(obj);
                 }
                 if let Some(uid) = obj.get("user_id").and_then(|v| v.as_str()) {
                     if let Some(u) = state.user_store.get_by_id(uid) {
@@ -56,6 +42,24 @@ fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: b
             l
         })
         .collect()
+}
+
+/// 普通用户视角剥离：只保留统计字段，去掉管理员排障/审计专属字段。
+///
+/// 抽成纯函数（不依赖 `AppState`）以便单测直接覆盖权限边界；剥离口径在
+/// 列表（本文件）与 JSON 导出（`log::export_json_filtered`）保持对称：
+/// - `debug` / `conversation`：含原始报文与他人系统提示词拼接，属审计视图；
+/// - `candidate_channels` / `filtered_channels` / `selected_channel`：站方渠道拓扑；
+/// - `purge_applied`：破甲控制台使用标记，仅管理员可见；
+/// - 上游实际模型名遮罩（`redact_model_for_non_admin`）。
+fn strip_non_admin_fields(obj: &mut serde_json::Map<String, Value>) {
+    obj.remove("debug");
+    obj.remove("conversation");
+    obj.remove("candidate_channels");
+    obj.remove("filtered_channels");
+    obj.remove("selected_channel");
+    obj.remove("purge_applied");
+    crate::log::redact_model_for_non_admin(obj);
 }
 
 /// 审计日志附加 admin_email（admin_id → 邮箱解析，"admin" 等旧值原样保留）。
@@ -1114,6 +1118,7 @@ pub async fn handle_get_route_replay(
             "attempt_details": log.attempt_details,
             "attempt_details_truncated": log.attempt_details_truncated,
             "account_skips": log.account_skips,
+            "purge_applied": log.purge_applied,
         }
     })))
 }
@@ -1121,6 +1126,43 @@ pub async fn handle_get_route_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 普通用户视角必须剥离破甲使用标记（`purge_applied`）及其他 admin 专属字段，
+    /// 且不误伤统计字段 —— 这是列表页「破甲仅管理员可见」的权限边界单测。
+    #[test]
+    fn strip_non_admin_fields_drops_purge_applied_keeps_stats() {
+        let mut obj = serde_json::json!({
+            "id": "log-1",
+            "model": "gpt-4",
+            "cost": 0.12,
+            "status_code": 200,
+            "purge_applied": true,
+            "debug": { "request_body": "x" },
+            "conversation": { "messages": [] },
+            "candidate_channels": ["ch-a"],
+            "filtered_channels": [{ "channel_id": "ch-b", "reason": "x" }],
+            "selected_channel": "ch-a",
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+        strip_non_admin_fields(&mut obj);
+        // admin 专属字段全部剥离（含破甲标记）
+        for k in [
+            "purge_applied",
+            "debug",
+            "conversation",
+            "candidate_channels",
+            "filtered_channels",
+            "selected_channel",
+        ] {
+            assert!(!obj.contains_key(k), "非管理员不应下发 `{k}`");
+        }
+        // 统计字段保留
+        assert_eq!(obj.get("id").and_then(|v| v.as_str()), Some("log-1"));
+        assert_eq!(obj.get("cost").and_then(|v| v.as_f64()), Some(0.12));
+        assert_eq!(obj.get("status_code").and_then(|v| v.as_u64()), Some(200));
+    }
 
     /// 迁移响应必须把四条坑原文吐给调用方（本单约定：**不许只写在文档里**）。
     ///

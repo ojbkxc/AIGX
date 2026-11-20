@@ -221,6 +221,27 @@ pub(crate) async fn collect_available_models(
     model_list
 }
 
+/// 客户端/普通用户视角的可用模型：剔除「未定价」条目。
+///
+/// 判据与数据面一致：`resolve::ensure_model_priced` 用
+/// `pricing_store.get_price(name).is_some()` 判定，未定价的调用会被拒绝
+/// （B09：防免费用量）。若清单仍展示这些模型，用户会看到「下拉能选、
+/// 调用报错」的错位，因此客户端 `/v1/models` 与控制台下拉
+/// `/api/models/available` 都要先过这里。
+///
+/// **管理面模型管理页不走本函数**：它读全量管理视图，未定价模型必须留在
+/// 那里，否则管理员无从配价。免费模型（`price_type = "free"`）有定价条目、
+/// 只是按 0 计费，因此保留可见。
+pub(crate) fn retain_priced_models(
+    state: &AppState,
+    models: Vec<(String, Option<&'static str>)>,
+) -> Vec<(String, Option<&'static str>)> {
+    models
+        .into_iter()
+        .filter(|(name, _)| state.pricing_store.get_price(name).is_some())
+        .collect()
+}
+
 /// 插件渠道对模型清单的贡献（去空、按 `model_rules` 关闭项过滤）。
 ///
 /// 三态与其它渠道同口径：统一模型管理里按 `(provider, model)` 关掉的模型
@@ -510,9 +531,11 @@ pub(crate) async fn handle_list_models(
 
     // 聚合走与控制台下拉同一个函数（见 collect_available_models 的说明）：
     // 客户端能调到的模型，控制台就能选到，反之亦然。
+    // 未定价模型剔除：数据面会以「no price configured」拒绝调用，清单里
+    // 保留只会让客户端选到必然失败的模型（见 retain_priced_models）。
     let owners = model_owner_index(&state);
-    let data: Vec<Value> = collect_available_models(&state)
-        .await
+    let aggregated = collect_available_models(&state).await;
+    let data: Vec<Value> = retain_priced_models(&state, aggregated)
         .into_iter()
         .map(|(name, channel_owned_by)| {
             let (meta, cap_sources) = state
@@ -699,6 +722,33 @@ mod shared_catalog_tests {
         for (name, src) in [("models.rs", MODELS_SRC), ("model/manage.rs", MANAGE_SRC)] {
             assert!(!src.contains(cache_key), "{name} 内联了账号目录缓存键");
         }
+    }
+
+    /// 客户端可见的模型清单（`/v1/models` 与控制台下拉）必须过定价门禁：
+    /// 未定价模型在数据面会被 `ensure_model_priced` 拒绝，清单里留着就是
+    /// 「能选、调用报错」。管理面模型管理视图**不得**过滤 —— 管理员要看到
+    /// 未定价模型才能给它配价。
+    ///
+    /// 与上一条同款源码级不变量：构造完整 `AppState` 需要 DB/渠道/密钥一整套，
+    /// 成本远高于本针要防的回归（把过滤加错地方 / 漏加一处）。
+    #[test]
+    fn client_lists_apply_pricing_gate_but_manage_view_does_not() {
+        // 针尖逐段拆写：`MODELS_SRC` 会把本测试源码整段读入，写全就恒真。
+        let list_gate = concat!("retain_priced_", "models(&state, aggregated)");
+        let label_gate = concat!("openai::retain_priced_", "models(");
+        let any_gate = concat!("retain_priced_", "models(");
+        assert!(
+            MODELS_SRC.contains(list_gate),
+            "/v1/models 必须对聚合结果应用定价门禁"
+        );
+        assert!(
+            CHANNELS_SRC.contains(label_gate),
+            "/api/models/available 必须同样应用定价门禁"
+        );
+        assert!(
+            !MANAGE_SRC.contains(any_gate),
+            "模型管理视图不得过滤未定价模型（否则管理员无法配价）"
+        );
     }
 }
 

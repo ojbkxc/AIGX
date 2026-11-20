@@ -2490,6 +2490,19 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         // 破甲改写试跑（dry-run：不写统计、不落库）
         .route("/api/purge/preview", post(api::admin::handle_preview_purge))
+        // 破甲预设库：检索 / 详情 / 应用到结构化模板或技能目录
+        .route(
+            "/api/purge/presets",
+            get(api::admin::handle_list_purge_presets),
+        )
+        .route(
+            "/api/purge/presets/:id",
+            get(api::admin::handle_get_purge_preset),
+        )
+        .route(
+            "/api/purge/presets/:id/apply",
+            post(api::admin::handle_apply_purge_preset),
+        )
         // 护栏（输入/输出黑名单 + 200 假答复门控；默认全关）
         .route(
             "/api/guardrail",

@@ -179,7 +179,11 @@ pub use notify::{handle_get_notify_config, handle_update_notify_config};
 pub use security::{handle_security_events, handle_security_summary};
 
 // 破甲控制台（请求治理总控：GET/PUT 配置 + 进程统计；POST 改写试跑）
-pub use purge::{handle_get_purge, handle_preview_purge, handle_update_purge};
+// 预设库：检索内置 prompt 集合 + 一键落到结构化模板或技能目录
+pub use purge::{
+    handle_apply_purge_preset, handle_get_purge, handle_get_purge_preset,
+    handle_list_purge_presets, handle_preview_purge, handle_update_purge,
+};
 
 // 护栏（输入/输出黑名单 + 200 假答复门控：GET/PUT 配置 + 解除降级）
 pub use guardrail::{

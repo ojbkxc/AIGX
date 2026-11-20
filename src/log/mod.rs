@@ -99,6 +99,10 @@ pub struct RequestLog {
     /// 是否缓存命中（G4：区分 cache 请求与普通请求的记账维度）
     #[serde(default)]
     pub cache_hit: bool,
+    /// 是否使用破甲控制台（请求治理实际介入：changed 或 skill_hit）。
+    /// 仅管理员可见，非管理员不展示。
+    #[serde(default)]
+    pub purge_applied: bool,
     /// 请求/响应快照（仅 log_body 开关开启时记录；关闭时 None 且不序列化）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<LogDebugSnapshot>,
@@ -666,6 +670,7 @@ impl RequestLog {
             filtered_channels: Vec::new(),
             selected_channel: None,
             cache_hit: false,
+            purge_applied: false,
             debug: None,
             conversation: None,
             first_response_ms: None,
@@ -1517,6 +1522,9 @@ impl RequestLogStore {
                         obj.remove("candidate_channels");
                         obj.remove("filtered_channels");
                         obj.remove("selected_channel");
+                        // 破甲控制台使用标记仅管理员可见（普通用户不下发），
+                        // 口径与列表页 `logs_with_user_email` 一致。
+                        obj.remove("purge_applied");
                         // 上游实际模型名遮罩（`model` → 请求名 + 移除
                         // `origin_model`），口径与列表页共用同一函数。
                         redact_model_for_non_admin(obj);
@@ -2441,6 +2449,26 @@ mod tests {
         LogStore::new(Arc::new(FileStore::new(
             TempDir::new().unwrap().path().to_path_buf(),
         )))
+    }
+
+    /// `purge_applied`：new() 默认 false；序列化含该字段、反序列化保留；
+    /// 老日志缺字段按 `#[serde(default)]` 落 false（零迁移语义）。
+    #[test]
+    fn request_log_purge_applied_roundtrip() {
+        let mut log = RequestLog::new();
+        assert!(!log.purge_applied, "new() 应默认 false");
+        log.purge_applied = true;
+        let json = serde_json::to_string(&log).expect("序列化");
+        assert!(
+            json.contains("\"purge_applied\":true"),
+            "序列化应含字段: {json}"
+        );
+        let back: RequestLog = serde_json::from_str(&json).expect("反序列化");
+        assert!(back.purge_applied, "反序列化应保留 true");
+        // 老日志缺该字段 → 默认 false
+        let parsed: RequestLog =
+            serde_json::from_str(r#"{"id":"x","created_at":1}"#).expect("老日志应能解析");
+        assert!(!parsed.purge_applied, "缺字段应默认 false");
     }
 
     /// `window_bounds`：条数走 COUNT(*)、首尾各取一个键，不反序列化全量。
@@ -3423,6 +3451,34 @@ mod tests {
         assert!(admin.contains("conversation"));
         assert!(admin.contains("candidate_channels"));
         assert!(admin.contains("秘密对话"));
+    }
+
+    /// 破甲控制台使用标记（`purge_applied`）仅管理员可见：非管理员 JSON 导出
+    /// 必须剥离，管理员保留 —— 与列表页 `logs_with_user_email` 同一权限边界。
+    #[test]
+    fn export_json_hides_purge_applied_for_non_admin() {
+        let s = store();
+        let mut log = RequestLog::new();
+        log.user_id = Some("u1".to_string());
+        log.model = "gpt-4".to_string();
+        log.purge_applied = true;
+        s.requests.add(log).unwrap();
+
+        let non_admin = s
+            .requests
+            .export_json_filtered(Some("u1"), None, None, None, None, false);
+        assert!(
+            !non_admin.contains("purge_applied"),
+            "破甲使用标记不应泄露给非管理员: {non_admin}"
+        );
+
+        let admin = s
+            .requests
+            .export_json_filtered(Some("u1"), None, None, None, None, true);
+        assert!(
+            admin.contains("\"purge_applied\": true") || admin.contains("\"purge_applied\":true"),
+            "管理员导出应保留破甲使用标记: {admin}"
+        );
     }
 
     /// 需求6：非 admin 导出必须把 `model`（上游实际模型名）重写为请求侧原名，

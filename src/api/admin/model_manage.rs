@@ -415,6 +415,12 @@ pub async fn handle_upsert_model_price(
     if body.input_price < 0.0 || body.output_price < 0.0 {
         return Err(error_response("价格不能为负数", StatusCode::BAD_REQUEST));
     }
+    if !matches!(body.price_type.as_str(), "token" | "count" | "free") {
+        return Err(error_response(
+            "计价方式必须是 token、count 或 free",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
     if let Some(ratio) = body.model_ratio {
         if !ratio.is_finite() || ratio < 0.0 {
             return Err(error_response(

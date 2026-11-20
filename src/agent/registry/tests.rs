@@ -284,6 +284,10 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
         ("/api/user/stripe", "用户侧支付发起（同上）"),
         ("/api/tickets", "工单是用户↔人工的通道；Agent 侧另有 /api/admin/tickets"),
         ("/api/prompts", "提示词库：未纳入运维工具面规划"),
+        (
+            "/api/purge/presets",
+            "破甲预设库：UI 侧浏览/落盘的便捷入口。AI 面已有 `/api/purge` GET/PUT 可等价读写模板配置；`/apply` 额外引入「按 id 往技能目录写文件」的副作用，不向 AI 面开放",
+        ),
         ("/api/oauth", "上游 OAuth 跳转，必须浏览器在场"),
         ("/api/mcp", "MCP 服务自身端点（是 Agent 入口，不是被管对象）"),
         (

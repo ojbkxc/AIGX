@@ -343,6 +343,10 @@ fn compute_cost_from_snapshot_pure(
     let Some(price) = &snapshot.price else {
         return 0;
     };
+    // 计价方式=免费：不随 token/倍率计费，实扣额恒为 0。
+    if price.is_free() {
+        return 0;
+    }
     // token 计费（上游缓存口径：cache_price 未配时回退正价）
     let base = if price.price_type == "count" {
         price.input_price

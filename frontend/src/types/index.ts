@@ -2735,6 +2735,61 @@ export interface PurgeData {
   skills?: PurgeSkillBrief[];
 }
 
+/** 破甲预设库 · 列表条目（GET /api/purge/presets，不含正文，只带预览） */
+export interface PurgePresetBrief {
+  id: string;
+  vendor: string;
+  model: string;
+  title: string;
+  tags: string[];
+  /** 正文字节数（UTF-8） */
+  bytes: number;
+  /** 正文 sha256（小写十六进制） */
+  sha256: string;
+  /** 正文前 200 字符预览 */
+  preview: string;
+}
+
+/** 破甲预设库 · 厂商计数（过滤后统计，跟随搜索词变化） */
+export interface PurgePresetVendorCount {
+  vendor: string;
+  count: number;
+}
+
+/** GET /api/purge/presets 的 data 结构 */
+export interface PurgePresetList {
+  items: PurgePresetBrief[];
+  vendors: PurgePresetVendorCount[];
+  /** 过滤后总数（items 已被 limit 截断） */
+  total: number;
+}
+
+/** 破甲预设库 · 详情（GET /api/purge/presets/{id}，含完整正文） */
+export interface PurgePresetDetail {
+  id: string;
+  vendor: string;
+  model: string;
+  title: string;
+  tags: string[];
+  bytes: number;
+  sha256: string;
+  body: string;
+}
+
+/** 预设应用落点：结构化模板（落库热生效）/ 技能目录（只写盘） */
+export type PurgePresetApplyTarget = 'structured_template' | 'skill_file';
+
+/** POST /api/purge/presets/{id}/apply 的 data 结构 */
+export interface PurgePresetApplyResult {
+  applied: {
+    target: string;
+    name: string;
+    /** 写盘路径（仅 skill_file 有） */
+    path: string | null;
+  };
+  settings: PurgeSettings;
+}
+
 /** GET /api/public/branding 的 data 结构（免鉴权） */
 export interface BrandingData {
   panel_name: string;
