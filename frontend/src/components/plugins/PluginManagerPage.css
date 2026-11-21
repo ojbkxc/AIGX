@@ -10,7 +10,7 @@
   margin-bottom: 10px;
   border: 1px solid var(--border-color, #e5e7eb);
   border-radius: 10px;
-  background: var(--surface-color, #fff);
+  background: var(--surface-2);
 }
 
 .pl-filter-group {
@@ -21,7 +21,7 @@
 
 .pl-filter-label {
   font-size: 12px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   white-space: nowrap;
 }
 
@@ -30,7 +30,7 @@
   padding: 2px;
   gap: 2px;
   border-radius: 8px;
-  background: var(--seg-bg, #f3f4f6);
+  background: var(--control-hover);
 }
 
 .pl-seg-btn {
@@ -42,7 +42,7 @@
   padding: 4px 10px;
   border-radius: 6px;
   font-size: 12px;
-  color: var(--text-secondary, #4b5563);
+  color: var(--text-2);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -55,12 +55,12 @@
 }
 
 .pl-seg-btn:hover {
-  color: var(--text-color, #111827);
+  color: var(--text-1);
 }
 
 .pl-seg-btn.is-active {
-  background: var(--surface-color, #fff);
-  color: var(--text-color, #111827);
+  background: var(--surface-3);
+  color: var(--text-1);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   font-weight: 600;
 }
@@ -70,7 +70,7 @@
   align-items: center;
   gap: 6px;
   margin-left: auto;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
 }
 
 .pl-search-wrap .pl-search {
@@ -101,13 +101,13 @@
   padding: 0;
   border: 1px solid var(--border-color, #e5e7eb);
   border-radius: 8px;
-  background: var(--surface-color, #fff);
-  color: var(--text-secondary, #4b5563);
+  background: var(--surface-3);
+  color: var(--text-2);
   cursor: pointer;
 }
 
 .pl-more-btn:hover {
-  color: var(--text-color, #111827);
+  color: var(--text-1);
   border-color: var(--primary-color, #6366f1);
 }
 
@@ -128,7 +128,7 @@
   gap: 2px;
   border: 1px solid var(--border-color, #e5e7eb);
   border-radius: 10px;
-  background: var(--surface-color, #fff);
+  background: var(--surface-3);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
@@ -138,7 +138,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-color, #111827);
+  color: var(--text-1);
   font-size: 12.5px;
   text-align: left;
   white-space: nowrap;
@@ -146,11 +146,11 @@
 }
 
 .pl-more-item:hover:not(:disabled) {
-  background: var(--seg-bg, #f3f4f6);
+  background: var(--control-hover);
 }
 
 .pl-more-item:disabled {
-  color: var(--text-secondary, #9ca3af);
+  color: var(--text-2);
   cursor: not-allowed;
   opacity: 0.7;
 }
@@ -224,7 +224,7 @@
 .pl-missing-meta {
   margin: 3px 0 0;
   font-size: 11.5px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   word-break: break-word;
 }
 
@@ -254,8 +254,8 @@
   padding: 16px;
   border: 1.5px dashed var(--border-color, #d1d5db);
   border-radius: 10px;
-  background: var(--surface-color, #fff);
-  color: var(--text-secondary, #6b7280);
+  background: var(--surface-3);
+  color: var(--text-2);
   cursor: pointer;
   text-align: left;
 }
@@ -272,7 +272,7 @@
 .pl-file-drop-title {
   display: block;
   font-size: 13px;
-  color: var(--text-color, #111827);
+  color: var(--text-1);
 }
 
 .pl-file-drop-hint {
@@ -294,8 +294,8 @@
   justify-content: space-between;
   padding: 8px 12px;
   font-size: 12px;
-  color: var(--text-secondary, #6b7280);
-  background: var(--seg-bg, #f9fafb);
+  color: var(--text-2);
+  background: var(--control-hover);
   border-bottom: 1px solid var(--border-color, #e5e7eb);
 }
 
@@ -325,7 +325,7 @@
 .pl-file-meta {
   margin: 3px 0 0;
   font-size: 11px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
 }
 
 .pl-file-err {
@@ -337,7 +337,7 @@
 
 .pl-file-state {
   font-size: 11.5px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -362,7 +362,7 @@
 
 .pl-file-summary {
   font-size: 12px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
 }
 
 .pl-file-actions {
@@ -375,7 +375,7 @@
   flex-wrap: wrap;
   gap: 8px 20px;
   font-size: 12px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
 }
 
 .pl-diagnostics-body code {
@@ -386,5 +386,5 @@
   margin: 14px 0 0;
   font-size: 11.5px;
   line-height: 1.6;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
 }
