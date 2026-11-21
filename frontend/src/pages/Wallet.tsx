@@ -550,12 +550,19 @@ export default function Wallet(): JSX.Element {
                     className={`wallet-amount-preset ${active ? 'active' : ''}`}
                     onClick={() => setAmount(String(v))}
                   >
-                    <span className="wallet-amount-num">¥{Number(v).toFixed(2)}</span>
+                    <span className="wallet-amount-num">{fmtYuan(payMoney(v))}</span>
                     <span className="wallet-amount-quota">
                       {fmtQuotaUnit(quotaFor(v))}
                       {discountFor(v) < 1 && (
-                        <em style={{ marginLeft: 4, fontStyle: 'normal', color: '#34d399' }}>
-                          {t('实付')} {fmtYuan(payMoney(v))}
+                        <em
+                          style={{
+                            marginLeft: 4,
+                            fontStyle: 'normal',
+                            color: 'var(--text-muted)',
+                            textDecoration: 'line-through',
+                          }}
+                        >
+                          {fmtYuan(v)}
                         </em>
                       )}
                     </span>
@@ -572,7 +579,7 @@ export default function Wallet(): JSX.Element {
                 min={epay.min_topup || 1}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
-                hint={`${t('最低')} ${epay.min_topup || 1} ${t('元，到账')} ${fmtQuotaBoth(quotaFor(Number(amount) || 0))}`}
+                hint={`${t('最低')} ${epay.min_topup || 1} ${t('元')} · ${t('实付')} ${fmtYuan(payMoney(Number(amount) || 0))} · ${fmtQuotaBoth(quotaFor(Number(amount) || 0))}`}
               />
               {/* 支付方式按钮网格（new-api 式） */}
               <div>
@@ -612,7 +619,9 @@ export default function Wallet(): JSX.Element {
                 </p>
               )}
               <Button type="submit" disabled={submitting}>
-                {submitting ? t('正在跳转...') : t('立即充值')}
+                {submitting
+                  ? t('正在跳转...')
+                  : `${t('立即充值')} ${fmtYuan(payMoney(Number(amount) || 0))}`}
               </Button>
             </form>
           </Card>
