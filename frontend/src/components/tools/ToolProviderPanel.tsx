@@ -16,6 +16,7 @@ import { CheckCircle2, ChevronDown, ChevronUp, Loader2, Play, Plus, RefreshCw, T
 import { api } from '../../api';
 import { useToast } from '../Toast';
 import { Badge, Button, Card, EmptyState, Input, Switch } from '../ui';
+import { toolPayload } from './tools-meta';
 import type {
   ProviderKeyRow,
   ProviderKeyStatus,
@@ -170,8 +171,8 @@ export default function ToolProviderPanel(): JSX.Element {
         api.listToolProviders(),
         api.getToolProviderSelection(),
       ]);
-      setProviders(providersRes?.data ?? []);
-      setSelection(selectionRes?.data ?? null);
+      setProviders(toolPayload<ToolProviderRow[]>(providersRes) ?? []);
+      setSelection(toolPayload<ToolProviderSelection>(selectionRes) ?? null);
       setNotReady(false);
       setError('');
     } catch (err) {
@@ -239,7 +240,7 @@ export default function ToolProviderPanel(): JSX.Element {
     setBusy(provider.provider);
     try {
       const res = await api.testToolProvider(provider.provider);
-      const result = res?.data;
+      const result = toolPayload<ToolProviderTestResult>(res);
       if (result) {
         setTestResults((prev) => ({ ...prev, [provider.provider]: result }));
         addToast(
@@ -309,7 +310,7 @@ export default function ToolProviderPanel(): JSX.Element {
     setKeyTesting(token);
     try {
       const res = await api.testToolProvider(provider.provider, { keyId, operation });
-      const result = res?.data;
+      const result = toolPayload<ToolProviderTestResult>(res);
       if (result) {
         setKeyTests((prev) => ({ ...prev, [`${provider.provider}:${keyId}`]: { result } }));
         addToast(

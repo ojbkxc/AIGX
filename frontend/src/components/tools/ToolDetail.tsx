@@ -23,6 +23,7 @@ import {
   protocolTone,
   serviceDesc,
   serviceName,
+  toolPayload,
 } from './tools-meta';
 import type { ToolInstallInfo, ToolServiceItem } from '../../types';
 import './ToolDetail.css';
@@ -135,7 +136,7 @@ export default function ToolDetail({ service, onBack, onChanged }: ToolDetailPro
     api
       .getToolInstallInfo(service.id)
       .then((res) => {
-        if (alive) setInfo(res?.data ?? null);
+        if (alive) setInfo(toolPayload<ToolInstallInfo>(res));
       })
       .catch((err) => {
         if (alive) setError(err instanceof Error ? err.message : String(err));

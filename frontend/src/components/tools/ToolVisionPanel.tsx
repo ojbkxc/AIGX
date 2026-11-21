@@ -14,7 +14,8 @@ import { CheckCircle2, Eye, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useToast } from '../Toast';
 import { Badge, Button, Card, EmptyState, Select } from '../ui';
-import type { ManageView, ToolVisionConfig, ToolVisionKeyOption } from '../../types';
+import { toolPayload } from './tools-meta';
+import type { ManageView, ToolVisionConfig, ToolVisionKeyOption, ToolVisionPayload } from '../../types';
 import './ToolVisionPanel.css';
 
 /** 思考等级候选（与上游 is_reasoning_level 一致；空 = 不指定） */
@@ -57,7 +58,7 @@ export default function ToolVisionPanel({ onSharedError }: ToolVisionPanelProps)
         api.getToolVisionConfig(),
         api.listManageModels().catch(() => null),
       ]);
-      const payload = visionRes?.data;
+      const payload = toolPayload<ToolVisionPayload>(visionRes);
       setConfig(payload?.config ?? null);
       setKeys(payload?.keys ?? []);
       setView(modelRes?.data ?? null);
@@ -118,7 +119,7 @@ export default function ToolVisionPanel({ onSharedError }: ToolVisionPanelProps)
         ...(reasoning ? { reasoning_effort: reasoning } : {}),
         api_key_id: apiKeyId,
       });
-      setConfig(res?.data ?? null);
+      setConfig(toolPayload<ToolVisionConfig>(res) ?? null);
       addToast(t('视觉分析绑定已保存'));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -151,7 +152,7 @@ export default function ToolVisionPanel({ onSharedError }: ToolVisionPanelProps)
     setTesting(true);
     try {
       const res = await api.testToolVision();
-      const result = res?.data ?? null;
+      const result = toolPayload<{ success: boolean; duration_ms?: number; reply?: string; error?: string }>(res) ?? null;
       setTestResult(result);
       if (result) {
         addToast(

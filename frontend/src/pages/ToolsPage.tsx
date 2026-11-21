@@ -26,6 +26,7 @@ import {
   protocolTone,
   serviceDesc,
   serviceName,
+  toolPayload,
 } from '../components/tools/tools-meta';
 import type { ToolInstallTarget, ToolServiceItem } from '../types';
 import './ToolsPage.css';
@@ -60,7 +61,7 @@ export default function ToolsPage(): JSX.Element {
       rows.map(async (row) => {
         try {
           const res = await api.getToolInstallTargets(row.id, row.protocol === 'skill' ? 'skill' : 'mcp');
-          return [row.key, res?.data?.targets ?? []] as const;
+          return [row.key, toolPayload<{ targets: ToolInstallTarget[] }>(res)?.targets ?? []] as const;
         } catch {
           return [row.key, []] as const;
         }
@@ -74,7 +75,7 @@ export default function ToolsPage(): JSX.Element {
     try {
       const res = await api.listToolServices();
       // API 是固定对外的接口，不作为 MCP & Skills 页的协议条目展示
-      const rows = (res?.data ?? []).filter((row) => row.protocol !== 'api');
+      const rows = (toolPayload<ToolServiceItem[]>(res) ?? []).filter((row) => row.protocol !== 'api');
       setServices(rows);
       // 详情服务若已消失（后端下线），退回列表
       setDetailKey((current) => (current && rows.some((row) => row.key === current) ? current : null));

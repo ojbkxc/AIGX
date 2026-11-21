@@ -13,7 +13,7 @@ import { Loader2 } from 'lucide-react';
 import { api } from '../../api';
 import { useToast } from '../Toast';
 import { Badge, Button, Input, Select, Textarea } from '../ui';
-import { serviceName } from './tools-meta';
+import { serviceName, toolPayload } from './tools-meta';
 import type {
   ToolApiKeyOption,
   ToolInstallOutcome,
@@ -79,7 +79,7 @@ export default function ToolInstallDialog({
           uninstall ? Promise.resolve(null) : api.listToolApiKeys().catch(() => null),
         ]);
         if (!alive) return;
-        const list = targetRes?.data?.targets ?? [];
+        const list = toolPayload<{ targets: ToolInstallTarget[] }>(targetRes)?.targets ?? [];
         // 卸载只列已安装的目标；安装展示全部（unsupported 置灰）
         const shown = uninstall ? list.filter((item) => item.installed) : list;
         setTargets(shown);
@@ -90,7 +90,7 @@ export default function ToolInstallDialog({
               .map((item) => item.key),
           ),
         );
-        const keyList = keyRes?.data?.keys ?? [];
+        const keyList = toolPayload<{ keys: ToolApiKeyOption[] }>(keyRes)?.keys ?? [];
         setKeys(keyList);
         if (keyList.length > 0) setApiKeyId(keyList[0].id);
         const variants = service.variants ?? [];
@@ -161,7 +161,7 @@ export default function ToolInstallDialog({
         const body = { service_id: serviceIdOf(service), clients: [...selected] };
         const res =
           mode === 'mcp' ? await api.uninstallToolMcp(body) : await api.uninstallToolSkill(body);
-        const results = res?.data?.results ?? [];
+        const results = toolPayload<{ results: ToolInstallOutcome[] }>(res)?.results ?? [];
         setOutcomes(results);
         const failed = results.filter((r) => !r.ok);
         const okCount = results.length - failed.length;
@@ -193,7 +193,7 @@ export default function ToolInstallDialog({
               }
             : {}),
         });
-        const results = res?.data?.results ?? [];
+        const results = toolPayload<{ results: ToolInstallOutcome[] }>(res)?.results ?? [];
         setOutcomes(results);
         const failed = results.filter((r) => !r.ok);
         const okCount = results.length - failed.length;
@@ -211,7 +211,7 @@ export default function ToolInstallDialog({
           api_key_id: apiKeyId,
           clients: [...selected],
         });
-        const results = res?.data?.results ?? [];
+        const results = toolPayload<{ results: ToolInstallOutcome[] }>(res)?.results ?? [];
         setOutcomes(results);
         const failed = results.filter((r) => !r.ok);
         const okCount = results.length - failed.length;

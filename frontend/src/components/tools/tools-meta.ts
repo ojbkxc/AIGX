@@ -182,3 +182,15 @@ export function capabilityGroups(t: TFn, id: string): CapabilityGroup[] {
       return [];
   }
 }
+
+/**
+ * 工具管理面（/api/tools/*）返回的是裸 payload（数组或对象），而其它域多用
+ * `{ success, data }` 信封。两种形态都接受，避免列表/详情按错误形状解包后空白。
+ */
+export function toolPayload<T>(res: unknown): T | null {
+  if (res === null || res === undefined) return null;
+  if (typeof res === 'object' && !Array.isArray(res) && 'data' in (res as Record<string, unknown>)) {
+    return (res as { data: T }).data;
+  }
+  return res as T;
+}
