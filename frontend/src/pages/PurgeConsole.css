@@ -23,6 +23,15 @@
   overflow-wrap: anywhere;
 }
 
+/* 总开关关闭提示：紧跟标题下方独立成行——page-header 本身是横向 flex，
+   不占满整行会被挤到元信息后面 */
+.purge-console .page-header .purge-off-notice {
+  flex: 1 1 100%;
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .purge-hint {
   color: var(--text-muted);
   font-size: 12px;
@@ -434,6 +443,14 @@
   gap: 2px;
   min-width: 0;
 }
+/* 标题行：标题与默认模型徽标同行，窄屏允许换行 */
+.purge-preset-item-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
 .purge-preset-item-main strong {
   font-size: 13px;
   font-weight: 600;
@@ -442,6 +459,19 @@
 .purge-preset-item-meta {
   color: var(--text-2);
   font-size: 12px;
+}
+/* 默认模型命中徽标：后端 model_match 为 exact 时才渲染 */
+.purge-preset-match {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--primary-color, #2563eb);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-color, #2563eb) 10%, transparent);
+  color: var(--primary-color, #2563eb);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 .purge-preset-item-side {
   display: flex;

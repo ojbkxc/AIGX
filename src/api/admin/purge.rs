@@ -64,8 +64,13 @@ pub async fn handle_update_purge(
 /// GET /api/purge/presets —— 内置预设检索（不带正文，只带预览）。
 ///
 /// 查询参数：`q` 关键词（匹配 id/vendor/model/title/tags）、`vendor` 厂商精确
-/// 匹配（忽略大小写）、`limit` 条数（默认 50，上限 500）。
+/// 匹配（忽略大小写）、`model` 模型名匹配（可选，口径同 q/vendor：
+/// trim 后为空按未传处理）、`limit` 条数（默认 50，上限 500）。
 /// `vendors` 的计数按**过滤后**结果统计，前端 chip 数量才会跟着搜索词变。
+///
+/// 依赖：`presets::list` 的 `model: Option<&str>` 参数由 rust-core 提供；
+/// 在该签名落地前，本调用按约定签名（`q, vendor, model, limit`）接线，
+/// 合入顺序上必须后于 rust-core 的 presets.rs 变更，否则编译不过。
 pub async fn handle_list_purge_presets(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -74,7 +79,12 @@ pub async fn handle_list_purge_presets(
     verify_admin(&state, &headers).await?;
 
     let limit = query.limit.unwrap_or(presets::DEFAULT_LIMIT);
-    let (items, vendors, total) = presets::list(query.q.as_deref(), query.vendor.as_deref(), limit);
+    let (items, vendors, total) = presets::list(
+        query.q.as_deref(),
+        query.vendor.as_deref(),
+        query.model.as_deref(),
+        limit,
+    );
 
     // 统一 API 信封：前端 `request()` 原样返回 JSON，页面按 `{success,data}`
     // 解包（与 /api/purge 一致）。此前直接返回裸对象，`!res.success` 恒真
@@ -286,10 +296,14 @@ pub async fn handle_import_purge_skills(
 }
 
 /// `/api/purge/presets` 的查询参数。
+///
+/// `model` 为可选过滤：空白（trim 后为空）按未传处理，空白归一在
+/// `presets::list` 内完成，与 q/vendor 同口径。
 #[derive(Debug, Deserialize)]
 pub struct PresetQuery {
     q: Option<String>,
     vendor: Option<String>,
+    model: Option<String>,
     limit: Option<usize>,
 }
 

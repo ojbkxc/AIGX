@@ -152,11 +152,14 @@ export const endpoints = {
   listPurgePresets: (params?: {
     q?: string;
     vendor?: string;
+    /** 默认模型：后端据此给每条附 `model_match`，不筛选、不重排。空白不发送。 */
+    model?: string;
     limit?: number;
   }): Promise<ApiResponse<PurgePresetList>> => {
     const search = new URLSearchParams();
     if (params?.q) search.set('q', params.q);
     if (params?.vendor) search.set('vendor', params.vendor);
+    if (params?.model) search.set('model', params.model);
     if (params?.limit) search.set('limit', String(params.limit));
     const qs = search.toString();
     return request<ApiResponse<PurgePresetList>>(

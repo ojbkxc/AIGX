@@ -5,6 +5,7 @@ import type { TFunction } from 'i18next';
 import { api } from '../api';
 import type {
   PurgeData,
+  PurgePresetBrief,
   PurgePresetDetail,
   PurgePresetList,
   PurgeRewriteRule,
@@ -379,6 +380,18 @@ const ParamGrid = memo(function ParamGrid({
 });
 
 /**
+ * 列表条目 + `model_match`。
+ *
+ * `model_match` 是后端「模型→预设」匹配结果（exact / vendor / mismatch / unknown），
+ * 与 Rust 侧 `PresetMatch` 的 snake_case 序列化一致；旧版后端不返回该字段，
+ * 此时按「未匹配」处理、不渲染徽标——与 config_warnings / skills 的向前兼容写法同口径。
+ * 声明在本页而非 types 里，是因为 wire 侧尚未把该字段并入 PurgePresetBrief。
+ */
+type PresetBriefWithMatch = PurgePresetBrief & {
+  model_match?: 'exact' | 'vendor' | 'mismatch' | 'unknown' | null;
+};
+
+/**
  * 破甲预设库：内置 prompt 集合的浏览与落盘。
  *
  * 三条动作各自独立：
@@ -408,14 +421,42 @@ const PresetsSection = memo(function PresetsSection({
   const [detail, setDetail] = useState<PurgePresetDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  /**
+   * 当前默认模型（后端 settings 的 default_model）：预设列表按它做模型匹配。
+   * 取数口径与「系统设置 → 运维 → 客户端兼容」一致，走 api.getLimits() 的 defaultModel。
+   */
+  const [defaultModel, setDefaultModel] = useState('');
+  /** 默认模型取数是否已完成（含失败）：列表首屏就带上 model，而不是先发一次不带的再补发 */
+  const [modelReady, setModelReady] = useState(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQ(q.trim()), 250);
     return () => window.clearTimeout(timer);
   }, [q]);
 
-  // 列表：搜索词 / 厂商变化时重拉（不传 limit，用后端默认 50）
+  // 默认模型只在进页面时取一次：它归系统设置管，本页只读，不随预设操作变化。
   useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await api.getLimits();
+        if (!alive) return;
+        const d = res?.data as Record<string, unknown> | undefined;
+        setDefaultModel(String(d?.defaultModel ?? '').trim());
+      } catch {
+        // 取不到就不带 model 参数，列表退回「不按模型过滤」的原口径
+      } finally {
+        if (alive) setModelReady(true);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 列表：搜索词 / 厂商 / 默认模型变化时重拉（不传 limit，用后端默认 50）
+  useEffect(() => {
+    if (!modelReady) return;
     let alive = true;
     setLoading(true);
     void (async () => {
@@ -423,6 +464,8 @@ const PresetsSection = memo(function PresetsSection({
         const res = await api.listPurgePresets({
           q: debouncedQ || undefined,
           vendor: vendor || undefined,
+          // 只在有值时带 model：默认模型为空串（未配置）时不传，后端按未过滤处理
+          model: defaultModel || undefined,
         });
         if (!alive) return;
         if (!res.success || !res.data) throw new Error('list failed');
@@ -436,7 +479,7 @@ const PresetsSection = memo(function PresetsSection({
     return () => {
       alive = false;
     };
-  }, [addToast, debouncedQ, t, vendor]);
+  }, [addToast, debouncedQ, defaultModel, modelReady, t, vendor]);
 
   // 详情：选中项变化时拉全文
   useEffect(() => {
@@ -466,7 +509,7 @@ const PresetsSection = memo(function PresetsSection({
     };
   }, [addToast, selectedId, t]);
 
-  const items = list?.items ?? [];
+  const items: PresetBriefWithMatch[] = list?.items ?? [];
 
   /** 拉全文（供复制用；详情已在时直接用缓存） */
   const fetchBody = useCallback(
@@ -574,7 +617,7 @@ const PresetsSection = memo(function PresetsSection({
         ))}
       </div>
 
-      {loading ? (
+      {loading || !modelReady ? (
         <SkeletonList rows={4} />
       ) : items.length === 0 ? (
         <p className="purge-empty">{t('没有匹配的预设')}</p>
@@ -592,7 +635,12 @@ const PresetsSection = memo(function PresetsSection({
                   onClick={() => setSelectedId(active ? null : item.id)}
                 >
                   <span className="purge-preset-item-main">
-                    <strong>{item.title}</strong>
+                    <span className="purge-preset-item-title">
+                      <strong>{item.title}</strong>
+                      {item.model_match === 'exact' ? (
+                        <span className="purge-preset-match">{t('默认模型')}</span>
+                      ) : null}
+                    </span>
                     <span className="purge-preset-item-meta">
                       {item.vendor} · {item.model}
                     </span>
@@ -1149,6 +1197,13 @@ export default function PurgeConsole(): JSX.Element {
             {t('刷新')}
           </Button>
         </div>
+        {/* 总开关关闭提示：放在页面标题下方独立成行（请求不会被改写这件事必须一眼看到，
+            只靠开关行的颜色区分太弱） */}
+        {!draft.enabled ? (
+          <p className="purge-off-notice" role="status">
+            {t('破甲控制台当前关闭，请求不会被改写。')}
+          </p>
+        ) : null}
       </div>
 
       {/* 未保存编辑警示条：离开保护之外的页内显性提示，提供「放弃修改」出口 */}
