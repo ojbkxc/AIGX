@@ -42,13 +42,16 @@ export async function request<T = unknown>(
   body: unknown = null,
   opts: { skipAuthRedirect?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...authHeaders(),
-  };
+  const headers: Record<string, string> = { ...authHeaders() };
   const options: RequestInit = { method, headers, signal: opts.signal };
-  if (body !== null) {
-    options.body = JSON.stringify(body);
+  if (body instanceof FormData) {
+    // multipart：不设 Content-Type，交给浏览器自动带 boundary
+    options.body = body;
+  } else {
+    headers['Content-Type'] = 'application/json';
+    if (body !== null) {
+      options.body = JSON.stringify(body);
+    }
   }
   let res: Response;
   try {

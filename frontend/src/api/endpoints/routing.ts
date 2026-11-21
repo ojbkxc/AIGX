@@ -34,6 +34,7 @@ import type {
   PurgePresetApplyTarget,
   PurgePresetDetail,
   PurgePresetList,
+  PurgeSkillImportResult,
   ZcodeCaptchaConfig,
   ZcodeCaptchaPoolStats,
   ZcodeCaptchaPushResult,
@@ -178,6 +179,21 @@ export const endpoints = {
       `${API_BASE}/purge/presets/${encodeURIComponent(id)}/apply`,
       { target, activate },
     ),
+  // 破甲技能包导入（multipart 上传 ZIP/TAR/TGZ，后端安全解压到技能目录）
+  importPurgeSkills: (
+    file: File,
+    opts: { name?: string; overwrite?: boolean } = {},
+  ): Promise<ApiResponse<PurgeSkillImportResult>> => {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    if (opts.name && opts.name.trim()) form.append('name', opts.name.trim());
+    if (opts.overwrite) form.append('overwrite', 'true');
+    return request<ApiResponse<PurgeSkillImportResult>>(
+      'POST',
+      `${API_BASE}/purge/skills/import`,
+      form,
+    );
+  },
   // ZCode 验证码令牌池（对照 Agent2API「网关 → 验证码令牌池」）
   getZcodeCaptcha: (): Promise<ApiResponse<ZcodeCaptchaPoolStats>> =>
     request<ApiResponse<ZcodeCaptchaPoolStats>>('GET', `${API_BASE}/zcode/captcha`),

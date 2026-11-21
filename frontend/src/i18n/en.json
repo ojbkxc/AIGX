@@ -4706,5 +4706,15 @@
   "组目前通过档案的「默认路由组」或请求显式指定命中；把组登记为可直接调用的模型（出现在 /v1/models 供客户端选择）依赖后端后续能力，本期未提供。": "Groups are currently hit via a profile's \"default routing group\" or an explicit request selection; registering a group as a directly callable model (appearing in /v1/models for clients) depends on future backend capability and is not provided in this release.",
   "最大生成并发": "Max generation concurrency",
   "最近生成记录": "Recent generation records",
-  "DSH 使用 Agent 页当前选择的配置目标。写入后请在 DSH 中确认工具是否出现，必要时重启对应客户端。": "DSH uses the configuration target currently selected on the Agent page. After writing, verify in DSH that the tool appears, and restart the corresponding client if necessary."
+  "DSH 使用 Agent 页当前选择的配置目标。写入后请在 DSH 中确认工具是否出现，必要时重启对应客户端。": "DSH uses the configuration target currently selected on the Agent page. After writing, verify in DSH that the tool appears, and restart the corresponding client if necessary.",
+  "导入技能包": "Import skill package",
+  "上传 ZIP / TAR / TGZ 技能包，安全解压到上面的「技能目录」。包内须含 SKILL.md；导入后会立即出现在技能快照。": "Upload a ZIP / TAR / TGZ skill package; it is safely extracted into the \"Skill directory\" above. The archive must contain SKILL.md; imported skills appear in the snapshot immediately.",
+  "目录名（可选）": "Directory name (optional)",
+  "留空则按文件名推导，仅允许字母/数字/连字符": "Leave empty to derive from the file name; letters/digits/hyphens only",
+  "例如 my-skill-pack": "e.g. my-skill-pack",
+  "覆盖同名目录": "Overwrite existing directory",
+  "选择文件并导入": "Choose file and import",
+  "导入中…": "Importing…",
+  "导入技能包失败": "Failed to import skill package",
+  "已导入技能包：{{dir}}（{{files}} 个文件）": "Imported skill package: {{dir}} ({{files}} files)"
 }

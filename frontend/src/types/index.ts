@@ -2833,6 +2833,15 @@ export interface PurgePresetApplyResult {
   settings: PurgeSettings;
 }
 
+/** POST /api/purge/skills/import 的 data 结构（技能包导入结果） */
+export interface PurgeSkillImportResult {
+  /** 实际落盘目录名（单级，位于技能目录下） */
+  dir: string;
+  files: number;
+  bytes: number;
+  has_skill_md: boolean;
+}
+
 /** GET /api/public/branding 的 data 结构（免鉴权） */
 export interface BrandingData {
   panel_name: string;

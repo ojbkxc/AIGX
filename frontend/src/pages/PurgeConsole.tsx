@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { api } from '../api';
@@ -672,6 +673,11 @@ export default function PurgeConsole(): JSX.Element {
   const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
   // 导入配置文件选择
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  // 技能包导入（ZIP/TAR/TGZ → 技能目录）
+  const [skillPkgName, setSkillPkgName] = useState('');
+  const [skillPkgOverwrite, setSkillPkgOverwrite] = useState(false);
+  const [skillPkgImporting, setSkillPkgImporting] = useState(false);
+  const skillPkgInputRef = useRef<HTMLInputElement | null>(null);
 
   // PUT 互斥：开关乐观保存与底部保存共用一把锁，防止并发 PUT 互相覆盖
   const savingRef = useRef(false);
@@ -901,6 +907,36 @@ export default function PurgeConsole(): JSX.Element {
       // 刷新失败不影响写入结果，静默即可
     }
   }, []);
+
+  /** 技能包导入（ZIP/TAR/TGZ → 技能目录）；成功后只刷新技能快照，不动草稿 */
+  const handleImportSkill = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+      setSkillPkgImporting(true);
+      try {
+        const res = await api.importPurgeSkills(file, {
+          name: skillPkgName.trim() || undefined,
+          overwrite: skillPkgOverwrite,
+        });
+        if (!res.success || !res.data) throw new Error(t('导入技能包失败'));
+        addToast(
+          t('已导入技能包：{{dir}}（{{files}} 个文件）', {
+            dir: res.data.dir,
+            files: res.data.files,
+          }),
+          'success',
+        );
+        await refreshSkills();
+      } catch (err) {
+        addToast(err instanceof Error ? err.message : t('导入技能包失败'), 'error');
+      } finally {
+        setSkillPkgImporting(false);
+      }
+    },
+    [addToast, refreshSkills, skillPkgName, skillPkgOverwrite, t],
+  );
 
   /** 预设 → 结构化模板草稿（同名 upsert；不直接 PUT，用户手动保存） */
   const applyPresetTemplate = useCallback((name: string, text: string): void => {
@@ -1353,6 +1389,44 @@ export default function PurgeConsole(): JSX.Element {
           value={draft.structured_suffix}
           onChange={(event) => patch({ structured_suffix: event.target.value })}
         />
+      </Card>
+
+      {/* 技能包导入：ZIP/TAR/TGZ 安全解压到技能目录（包内须含 SKILL.md） */}
+      <Card title={t('导入技能包')}>
+        <p style={{ margin: '0 0 10px', fontSize: 13 }}>
+          {t(
+            '上传 ZIP / TAR / TGZ 技能包，安全解压到上面的「技能目录」。包内须含 SKILL.md；导入后会立即出现在技能快照。',
+          )}
+        </p>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 220px', minWidth: 220 }}>
+            <Input
+              label={t('目录名（可选）')}
+              hint={t('留空则按文件名推导，仅允许字母/数字/连字符')}
+              value={skillPkgName}
+              placeholder={t('例如 my-skill-pack')}
+              onChange={(event) => setSkillPkgName(event.target.value)}
+            />
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+            <input
+              type="checkbox"
+              checked={skillPkgOverwrite}
+              onChange={(event) => setSkillPkgOverwrite(event.target.checked)}
+            />
+            {t('覆盖同名目录')}
+          </label>
+          <Button disabled={skillPkgImporting} onClick={() => skillPkgInputRef.current?.click()}>
+            {skillPkgImporting ? t('导入中…') : t('选择文件并导入')}
+          </Button>
+          <input
+            ref={skillPkgInputRef}
+            type="file"
+            accept=".zip,.tar,.tgz,.tar.gz"
+            hidden
+            onChange={(event) => void handleImportSkill(event)}
+          />
+        </div>
       </Card>
 
       {/* 技能扫描快照：让 skill_inject 配置可验证（目录里到底扫到了什么） */}
