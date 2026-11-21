@@ -219,7 +219,9 @@ pub async fn call(
             }
         }
     }
-    let jobs = jobs_for(ctx.state);
+    // 任务存储只依赖 ToolServices 的 FileStore（与 `jobs_for(state)` 同源，
+    // 但不必经由 AppState；查询/参数错误路径因此无须完整应用状态）。
+    let jobs = ImageJobs::from_services(ctx.services);
     let mut job = if query {
         let id = text(args, "job_id").to_string();
         let request_id = text(args, "request_id").to_string();
@@ -303,7 +305,15 @@ async fn submit(
         .ok_or_else(|| ImageToolError::new(503, "image_configuration", "尚未配置图片生成服务"))?;
     let target = image_config::target(&config, operation)?.clone();
     // 目录能力校验（模型 image 标签 + 账号存在性）；目录为空时只做形状校验。
-    let catalog = image_config::catalog(ctx.state);
+    // 走到这里才需要完整应用状态；编辑未启用/配置缺失等错误在上方已返回。
+    let state = ctx.state.ok_or_else(|| {
+        ImageToolError::new(
+            503,
+            "image_runtime_unavailable",
+            "图片生成运行时不可用（缺少应用状态）",
+        )
+    })?;
+    let catalog = image_config::catalog(state);
     image_config::validate_target_or_error(&catalog, &target, operation)?;
     // 网关 Key 的作用域（上游 `restrict_scope`）。
     if let Some(allowed) = &ctx.allowed_providers {
@@ -351,7 +361,7 @@ async fn submit(
     let job = same_request(job, &hash)?;
     if created {
         // 受理与执行独立于请求生命周期：HTTP 断线不会只留下占位记录。
-        let state = (*ctx.state).clone();
+        let state = (*state).clone();
         let jobs_copy = jobs.clone();
         let id = job.id.clone();
         tokio::spawn(async move {
@@ -1026,9 +1036,163 @@ pub fn admin_error(error: ImageToolError) -> (StatusCode, axum::Json<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account_session::AccountSessionStore;
+    use crate::api::auth::ApiKeyStore;
+    use crate::storage::FileStore;
+    use crate::tool_services::image_config::{ImageConfig, ImageTarget};
+    use crate::tool_services::ToolServices;
+    use std::sync::Arc;
 
     fn args(value: Value) -> Value {
         value
+    }
+
+    /// 单测用调用上下文：`state: None` 时只有「需要完整应用状态」的分支不可用，
+    /// 参数/配置/查询错误路径都能照常覆盖（生产路径始终是 `Some`）。
+    struct CallHarness {
+        services: ToolServices,
+        sessions: AccountSessionStore,
+        keys: ApiKeyStore,
+        client: reqwest::Client,
+        _dir: tempfile::TempDir,
+    }
+
+    impl CallHarness {
+        fn new(editing: bool) -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+            let target = ImageTarget {
+                provider: "workbuddy".into(),
+                model: "glm-image".into(),
+                account_id: String::new(),
+            };
+            let config = ImageConfig {
+                generation: target.clone(),
+                editing: editing.then_some(target),
+                max_images: 2,
+                max_concurrency: 2,
+                retention_hours: 24,
+                storage_mb: 512,
+            };
+            let services = ToolServices::new(store.clone());
+            services
+                .update(|value| value.image_generation = Some(config))
+                .unwrap();
+            Self {
+                sessions: AccountSessionStore::new(store.clone()),
+                keys: ApiKeyStore::new(store, dir.path().to_path_buf()),
+                services,
+                client: crate::test_http_client(),
+                _dir: dir,
+            }
+        }
+
+        fn ctx(&self) -> McpRequestContext<'_> {
+            McpRequestContext {
+                services: &self.services,
+                sessions: &self.sessions,
+                keys: &self.keys,
+                client: &self.client,
+                base_url: "http://127.0.0.1".into(),
+                allowed_providers: None,
+                allowed_models: None,
+                owner: "key-1".into(),
+                state: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_bad_request_id_before_state() {
+        let harness = CallHarness::new(false);
+        let ctx = harness.ctx();
+        let error = call(
+            "generate_images",
+            &json!({ "request_id": "short", "prompt": "a cat" }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_image_input");
+    }
+
+    #[tokio::test]
+    async fn edit_disabled_is_configuration_error() {
+        let harness = CallHarness::new(false);
+        let ctx = harness.ctx();
+        let error = call(
+            "edit_images",
+            &json!({
+                "request_id": "request-0001",
+                "prompt": "add a hat",
+                "images": ["https://example.com/a.png"]
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "image_configuration");
+        assert!(error.message.contains("尚未启用"));
+    }
+
+    #[tokio::test]
+    async fn edit_enabled_reaches_execution_and_needs_state() {
+        let harness = CallHarness::new(true);
+        let ctx = harness.ctx();
+        let error = call(
+            "edit_images",
+            &json!({
+                "request_id": "request-0001",
+                "prompt": "add a hat",
+                "images": ["https://example.com/a.png"]
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "image_runtime_unavailable");
+    }
+
+    #[tokio::test]
+    async fn query_missing_job_is_not_found() {
+        let harness = CallHarness::new(false);
+        let ctx = harness.ctx();
+        let error = call(
+            "get_image_result",
+            &json!({ "job_id": "0".repeat(64) }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "image_job_not_found");
+    }
+
+    /// 同名 request_id 但请求哈希不同 → 冲突，不重复生图。
+    #[test]
+    fn same_request_rejects_hash_mismatch() {
+        let job = ImageJob {
+            id: "j".into(),
+            owner: "key-1".into(),
+            request_id: "request-0001".into(),
+            request_hash: "hash-a".into(),
+            operation: "generate".into(),
+            provider: "workbuddy".into(),
+            model: "glm-image".into(),
+            account_id: String::new(),
+            state: "running".into(),
+            created_at: 0,
+            updated_at: 0,
+            expires_at: i64::MAX,
+            deadline_at: 0,
+            reserved_bytes: 0,
+            result: None,
+            error: None,
+        };
+        assert_eq!(same_request(job.clone(), "hash-a").unwrap().id, "j");
+        assert_eq!(
+            same_request(job, "hash-b").unwrap_err().code,
+            "image_request_conflict"
+        );
     }
 
     /// MCP spec 之外的纯参数校验：request_id 形状 / wait_seconds / preview。

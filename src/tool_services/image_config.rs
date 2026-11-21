@@ -12,9 +12,10 @@
 //! ── 与上游的差异 ────────────────────────────────────────────
 //! 上游保存时会校验「提供商 × 模型 × 账号」在模型目录/账号池里真实可用；
 //! AIGX 没有 `supports_image_generation` / `supports_image_editing` 两个能力位，
-//! 本模块用模型元信息里的 **`image` 标签**（`model::metadata` 的内置推断 /
-//! models.dev / 管理员覆盖三档合并结果）代替：两个操作共用同一标签（编辑
-//! 能力无法单独表达 —— 报告中列为偏离）。账号校验对照账号池
+//! 本模块用模型元信息里的**能力标签**（`model::metadata` 的内置推断 /
+//! models.dev / 管理员覆盖三档合并结果）代替：`image` → 生图，
+//! `image_editing` / `image_edit` → 参考图编辑；未声明编辑标签时回退为生图
+//! 能力（保持旧行为，宁放勿误伤，见 [`catalog`]）。账号校验对照账号池
 //! （`AccountSessionStore`）中 provider 匹配且启用的账号；`account_id` 为空
 //! 时不强制存在账号（渠道型 provider 没有账号，账号型 provider 由
 //! `AccountBridge` 按优先级选号，见 image_runtime 的偏离说明）。
@@ -71,28 +72,44 @@ pub struct ImageCatalog {
     pub accounts: Vec<ImageAccountRow>,
 }
 
-/// 构造目录快照：模型来自统一模型管理视图（能力标签含 `image` 且启用），
-/// 账号来自账号池（启用 + provider 命中任一图片模型）。
+/// 构造目录快照：模型来自统一模型管理视图（能力标签含 `image` 或编辑标签且
+/// 启用），账号来自账号池（启用 + provider 命中任一图片模型）。
+///
+/// 能力位来源：`image` 标签 = 生图；`image_editing` / `image_edit` 标签 =
+/// 参考图编辑。AIGX 的模型能力白名单目前没有独立编辑标签，因此**未声明编辑
+/// 标签时回退为生图能力**（与旧行为一致，宁放勿误伤）；一旦模型元信息以后
+/// 能声明独立编辑能力，这里无需再改。上游用 `supports_image_generation` /
+/// `supports_image_editing` 两个 bool，本函数是它们在 AIGX 的对应物。
 pub fn catalog(state: &AppState) -> ImageCatalog {
     let view = crate::api::admin::model_manage::current_view(state);
+    let has_tag = |capabilities: &[String], tag: &str| {
+        capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case(tag))
+    };
     let models: Vec<ImageModelRow> = view
         .models
         .into_iter()
         .filter(|model| {
             model.enabled
-                && model
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability.eq_ignore_ascii_case("image"))
+                && (has_tag(&model.capabilities, "image")
+                    || has_tag(&model.capabilities, "image_editing")
+                    || has_tag(&model.capabilities, "image_edit"))
         })
-        .map(|model| ImageModelRow {
-            id: model.id,
-            provider: model.provider,
-            provider_label: model.provider_label,
-            enabled: model.enabled,
-            // AIGX 无独立编辑能力位：同一 `image` 标签同时视为可编辑。
-            generation: true,
-            editing: true,
+        .map(|model| {
+            let generation = has_tag(&model.capabilities, "image");
+            // 独立编辑标签优先；没有则回退到生图能力（保持旧行为）。
+            let editing = generation
+                || has_tag(&model.capabilities, "image_editing")
+                || has_tag(&model.capabilities, "image_edit");
+            ImageModelRow {
+                id: model.id,
+                provider: model.provider,
+                provider_label: model.provider_label,
+                enabled: model.enabled,
+                generation,
+                editing,
+            }
         })
         .collect();
     let providers: std::collections::HashSet<&str> =
@@ -295,7 +312,7 @@ pub fn management_view(services: &ToolServices, catalog: &ImageCatalog) -> Value
         "editing_error": editing_error,
         "timeout_seconds": super::timeout_seconds(services, super::IMAGE_GENERATION_SERVICE_ID),
         "runtime_available": true,
-        "runtime_note": "任务/文件面/MCP/本地桥接脚本已接线；模型目录能力位用 image 标签代替上游 supports_image_generation/supports_image_editing（编辑能力无法单独表达）",
+        "runtime_note": "任务/文件面/MCP/本地桥接脚本已接线；模型能力用标签表达（image → 生图，image_editing/image_edit → 编辑，未声明编辑标签时回退为生图；对应上游 supports_image_generation/supports_image_editing）",
     })
 }
 
@@ -410,5 +427,31 @@ mod tests {
         assert_eq!(view["accounts"].as_array().unwrap().len(), 1);
         clear(&svc).unwrap();
         assert!(load(&svc).is_none());
+    }
+
+    /// 生成 / 编辑能力位分别生效：只有生图能力的模型不能用于编辑
+    /// （`catalog` 里 `image_editing` 标签缺失时回退为生图，这里验证
+    /// `validate_target` 确实按行上的 `editing` 位判定）。
+    #[test]
+    fn validate_target_honours_separate_editing_capability() {
+        let catalog = ImageCatalog {
+            models: vec![ImageModelRow {
+                id: "gen-only".into(),
+                provider: "workbuddy".into(),
+                provider_label: "WorkBuddy".into(),
+                enabled: true,
+                generation: true,
+                editing: false,
+            }],
+            accounts: Vec::new(),
+        };
+        let target = ImageTarget {
+            provider: "workbuddy".into(),
+            model: "gen-only".into(),
+            account_id: String::new(),
+        };
+        assert!(validate_target(&catalog, &target, ImageOperation::Generate).is_ok());
+        let error = validate_target(&catalog, &target, ImageOperation::Edit).unwrap_err();
+        assert!(error.contains("不支持该能力"), "{error}");
     }
 }

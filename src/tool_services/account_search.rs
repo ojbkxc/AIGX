@@ -641,7 +641,13 @@ mod tests {
             .await
             .unwrap();
         let rows = source
-            .search(&services, &sessions, &reqwest::Client::new(), "hello", 30)
+            .search(
+                &services,
+                &sessions,
+                &crate::test_http_client(),
+                "hello",
+                30,
+            )
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -670,7 +676,13 @@ mod tests {
             .await
             .unwrap();
         let error = source
-            .search(&services, &sessions, &reqwest::Client::new(), "hello", 30)
+            .search(
+                &services,
+                &sessions,
+                &crate::test_http_client(),
+                "hello",
+                30,
+            )
             .await
             .unwrap_err();
         assert_eq!(error.code, SearchErrorCode::InvalidInput);

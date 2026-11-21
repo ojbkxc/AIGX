@@ -7,9 +7,12 @@
 //! 两代语义可以共存而不需要维护会话。
 //!
 //! ── 与上游的差异 ────────────────────────────────────────────
-//! 上游还有第三个服务 image-generation（含结果下载 / 文件面）；AIGX 本条线
-//! 没有图片任务存储与上游生图路由，本波只移植 web-search 与 vision 两个
-//! 端点（图片生成的配置面保留在 `image_config`，运行时列入报告「未移植」）。
+//! 三个服务（web-search / vision / image-generation）均已移植：图片生成的
+//! 任务存储、文件面与下载端点见 `image_jobs` / `image_runtime` 以及
+//! `api::tool_runtime` 的 `/mcp/image-generation{,/files/{id}}`。与本文件
+//! JSON-RPC 收发语义相关的差异只剩鉴权模型（AIGX 用网关 Key id 作为任务
+//! owner，上游用 Key 哈希；见 `image_runtime::owner_of`）与模型能力位
+//! （AIGX 用 `image` 标签，无独立的编辑能力位）。
 //!
 //! 协议细节与上游一致：
 //!   · 通知（`notifications/*` 或没有 id）不产生响应；
@@ -58,7 +61,10 @@ pub struct McpRequestContext<'a> {
     /// 调用者标识（日志/审计用；图片任务作为 owner 参与归属鉴权）
     pub owner: String,
     /// 图片生成运行时所需的应用状态（web-search / vision 不使用）。
-    pub state: &'a crate::api::openai::AppState,
+    ///
+    /// `Option` 只是为了单测能在没有完整 `AppState` 时构造上下文；生产路径
+    /// 始终是 `Some`，图片生成分支在 `None` 时返回可读的 503 业务错误。
+    pub state: Option<&'a crate::api::openai::AppState>,
 }
 
 pub struct McpSpec {
@@ -194,6 +200,17 @@ fn negotiate_version(requested: Option<&str>) -> String {
     MCP_LEGACY_VERSIONS[0].to_string()
 }
 
+/// `tools/list` / `server/discover` 的缓存元信息（与上游逐字段一致）：
+/// 图片生成按 Key 作用域裁剪工具集，不能公开缓存，TTL 归零、作用域私有；
+/// web-search / vision 对所有调用者形状相同，可公开缓存。
+fn list_meta(kind: McpServerKind) -> (u64, &'static str) {
+    if kind == McpServerKind::ImageGeneration {
+        (0, "private")
+    } else {
+        (MCP_LIST_TTL_MS, "public")
+    }
+}
+
 async fn call_tool(
     kind: McpServerKind,
     name: &str,
@@ -315,6 +332,19 @@ async fn dispatch_one(
     if method.starts_with("notifications/") {
         return None;
     }
+    // 上游同一口径：图片生成的请求 id 必须是字符串或数字。图片任务按 id
+    // 幂等/查询，`null` 或对象等非法 id 无法与后续 `get_image_result` 对上，
+    // 直接按 INVALID_REQUEST 拒绝，避免产生无法追踪的任务。
+    if kind == McpServerKind::ImageGeneration
+        && message.get("id").is_some()
+        && !matches!(message.get("id"), Some(Value::String(_) | Value::Number(_)))
+    {
+        return Some(rpc_error(
+            Value::Null,
+            INVALID_REQUEST,
+            "A string or number request ID is required",
+        ));
+    }
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     if id.is_null() {
         return None;
@@ -335,40 +365,51 @@ async fn dispatch_one(
                 }),
             ))
         }
-        "server/discover" => Some(rpc_result(
-            id,
-            json!({
-                "resultType": "complete",
-                "ttlMs": MCP_LIST_TTL_MS,
-                "cacheScope": "public",
-                "supportedVersions": [
-                    MCP_MODERN_VERSION,
-                    MCP_LEGACY_VERSIONS[0],
-                    MCP_LEGACY_VERSIONS[1],
-                    MCP_LEGACY_VERSIONS[2],
-                    MCP_LEGACY_VERSIONS[3]
-                ],
-                "capabilities": { "tools": {} },
-                "_meta": { "io.modelcontextprotocol/serverInfo": spec.server_info },
-                "instructions": spec.instructions,
-            }),
-        )),
+        "server/discover" => {
+            let (ttl_ms, cache_scope) = list_meta(kind);
+            Some(rpc_result(
+                id,
+                json!({
+                    "resultType": "complete",
+                    "ttlMs": ttl_ms,
+                    "cacheScope": cache_scope,
+                    "supportedVersions": [
+                        MCP_MODERN_VERSION,
+                        MCP_LEGACY_VERSIONS[0],
+                        MCP_LEGACY_VERSIONS[1],
+                        MCP_LEGACY_VERSIONS[2],
+                        MCP_LEGACY_VERSIONS[3]
+                    ],
+                    "capabilities": { "tools": {} },
+                    "_meta": { "io.modelcontextprotocol/serverInfo": spec.server_info },
+                    "instructions": spec.instructions,
+                }),
+            ))
+        }
         "ping" => Some(rpc_result(id, json!({}))),
-        "tools/list" => Some(rpc_result(
-            id,
-            json!({
-                "resultType": "complete",
-                "ttlMs": MCP_LIST_TTL_MS,
-                "cacheScope": "public",
-                "tools": spec.tools,
-            }),
-        )),
+        "tools/list" => {
+            let (ttl_ms, cache_scope) = list_meta(kind);
+            Some(rpc_result(
+                id,
+                json!({
+                    "resultType": "complete",
+                    "ttlMs": ttl_ms,
+                    "cacheScope": cache_scope,
+                    "tools": spec.tools,
+                }),
+            ))
+        }
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            if !spec
-                .tools
-                .iter()
-                .any(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+            // 与上游一致：`edit_images` 即使未在 `tools/list` 中出现（管理员
+            // 未启用编辑）也放行到运行时，返回「尚未启用参考图编辑」的
+            // business error（isError 结果），而不是协议的 INVALID_PARAMS。
+            let passthrough_edit = kind == McpServerKind::ImageGeneration && name == "edit_images";
+            if !passthrough_edit
+                && !spec
+                    .tools
+                    .iter()
+                    .any(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
             {
                 return Some(rpc_error(
                     id,
@@ -470,5 +511,337 @@ mod tests {
             MCP_LEGACY_VERSIONS[0]
         );
         assert_eq!(negotiate_version(None), MCP_LEGACY_VERSIONS[0]);
+    }
+
+    // ── 分发层（无需完整 AppState：`state: None` 时仅图片执行分支不可用）──
+
+    use crate::account_session::AccountSessionStore;
+    use crate::api::auth::ApiKeyStore;
+    use crate::storage::FileStore;
+    use crate::tool_services::image_config::{ImageConfig, ImageTarget};
+    use std::sync::Arc;
+
+    struct Harness {
+        services: ToolServices,
+        sessions: AccountSessionStore,
+        keys: ApiKeyStore,
+        client: reqwest::Client,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+            Self {
+                services: ToolServices::new(store.clone()),
+                sessions: AccountSessionStore::new(store.clone()),
+                keys: ApiKeyStore::new(store, dir.path().to_path_buf()),
+                client: crate::test_http_client(),
+                _dir: dir,
+            }
+        }
+
+        fn with_image_config(editing: bool) -> Self {
+            let harness = Self::new();
+            let target = ImageTarget {
+                provider: "workbuddy".into(),
+                model: "glm-image".into(),
+                account_id: String::new(),
+            };
+            let config = ImageConfig {
+                generation: target.clone(),
+                editing: editing.then_some(target),
+                max_images: 2,
+                max_concurrency: 2,
+                retention_hours: 24,
+                storage_mb: 512,
+            };
+            harness
+                .services
+                .update(|value| value.image_generation = Some(config))
+                .unwrap();
+            harness
+        }
+
+        fn ctx(&self) -> McpRequestContext<'_> {
+            McpRequestContext {
+                services: &self.services,
+                sessions: &self.sessions,
+                keys: &self.keys,
+                client: &self.client,
+                base_url: "http://127.0.0.1".into(),
+                allowed_providers: None,
+                allowed_models: None,
+                owner: "key-1".into(),
+                state: None,
+            }
+        }
+    }
+
+    fn rpc(method: &str, id: Value) -> Value {
+        json!({ "jsonrpc": "2.0", "id": id, "method": method })
+    }
+
+    fn rpc_call(id: Value, name: &str, arguments: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        })
+    }
+
+    #[tokio::test]
+    async fn handshake_ping_and_notifications() {
+        let harness = Harness::new();
+        let ctx = harness.ctx();
+
+        let init = dispatch(
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": MCP_MODERN_VERSION }
+            }),
+            McpServerKind::WebSearch,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(init["result"]["protocolVersion"], MCP_MODERN_VERSION);
+        assert_eq!(
+            init["result"]["serverInfo"]["name"],
+            super::super::WEB_SEARCH_PACKAGE
+        );
+
+        let ping = dispatch(&rpc("ping", json!(2)), McpServerKind::Vision, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(ping["result"], json!({}));
+
+        // 通知（notifications/* 或无 id）不产生响应
+        assert!(dispatch(
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            McpServerKind::WebSearch,
+            &ctx,
+        )
+        .await
+        .is_none());
+        assert!(
+            dispatch(&rpc("ping", Value::Null), McpServerKind::WebSearch, &ctx)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_requests_and_unknown_methods() {
+        let harness = Harness::new();
+        let ctx = harness.ctx();
+
+        let bad_version = dispatch(
+            &json!({ "jsonrpc": "1.0", "id": 1, "method": "ping" }),
+            McpServerKind::WebSearch,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bad_version["error"]["code"], INVALID_REQUEST);
+
+        let unknown = dispatch(&rpc("tools/nope", json!(3)), McpServerKind::WebSearch, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(unknown["error"]["code"], METHOD_NOT_FOUND);
+
+        // 批量：notification 被跳过，只有 ping 一条响应
+        let batch = dispatch(
+            &json!([
+                { "jsonrpc": "2.0", "method": "notifications/progress" },
+                { "jsonrpc": "2.0", "id": 9, "method": "ping" }
+            ]),
+            McpServerKind::Vision,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch.as_array().unwrap().len(), 1);
+        assert_eq!(batch[0]["id"], 9);
+    }
+
+    #[tokio::test]
+    async fn tools_list_shapes_and_cache_scope() {
+        let harness = Harness::with_image_config(false);
+        let ctx = harness.ctx();
+
+        let search = dispatch(&rpc("tools/list", json!(1)), McpServerKind::WebSearch, &ctx)
+            .await
+            .unwrap();
+        let names: Vec<&str> = search["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["web_search", "web_fetch"]);
+        assert_eq!(search["result"]["cacheScope"], "public");
+        assert_eq!(search["result"]["ttlMs"], MCP_LIST_TTL_MS);
+
+        // 编辑未启用：image-generation 只有 generate + get，且按私有/零 TTL 缓存
+        let image = dispatch(
+            &rpc("tools/list", json!(2)),
+            McpServerKind::ImageGeneration,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let names: Vec<&str> = image["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["generate_images", "get_image_result"]);
+        assert_eq!(image["result"]["cacheScope"], "private");
+        assert_eq!(image["result"]["ttlMs"], 0);
+    }
+
+    #[tokio::test]
+    async fn tools_call_unknown_tool_is_invalid_params() {
+        let harness = Harness::with_image_config(false);
+        let ctx = harness.ctx();
+        for kind in [
+            McpServerKind::WebSearch,
+            McpServerKind::Vision,
+            McpServerKind::ImageGeneration,
+        ] {
+            let response = dispatch(&rpc_call(json!(1), "no_such_tool", json!({})), kind, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(response["error"]["code"], INVALID_PARAMS, "kind={kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn web_search_and_vision_call_paths() {
+        let harness = Harness::new();
+        let ctx = harness.ctx();
+
+        // 参数不合法（协议级错误）
+        let empty = dispatch(
+            &rpc_call(json!(1), "web_search", json!({ "queries": [] })),
+            McpServerKind::WebSearch,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty["error"]["code"], INVALID_PARAMS);
+
+        // 合法参数但没有任何已配置来源 → 业务失败以 isError 结果返回（非协议错）
+        let no_provider = dispatch(
+            &rpc_call(json!(2), "web_search", json!({ "queries": ["rust"] })),
+            McpServerKind::WebSearch,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(no_provider["result"]["isError"], true);
+
+        // 视觉：参数不合法 → INVALID_PARAMS；合法但未配置 → isError
+        let bad_args = dispatch(
+            &rpc_call(
+                json!(3),
+                "image_analyze",
+                json!({ "images": ["file:///etc/passwd"], "prompt": "x" }),
+            ),
+            McpServerKind::Vision,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bad_args["error"]["code"], INVALID_PARAMS);
+
+        let unconfigured = dispatch(
+            &rpc_call(
+                json!(4),
+                "image_analyze",
+                json!({ "images": ["https://example.com/a.png"], "prompt": "describe" }),
+            ),
+            McpServerKind::Vision,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(unconfigured["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn image_call_paths_and_edit_passthrough() {
+        let harness = Harness::with_image_config(false);
+        let ctx = harness.ctx();
+
+        // 请求 id 类型：图片生成只接受字符串/数字（上游口径）
+        let bad_id = dispatch(
+            &json!({ "jsonrpc": "2.0", "id": { "nested": true }, "method": "ping" }),
+            McpServerKind::ImageGeneration,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bad_id["error"]["code"], INVALID_REQUEST);
+
+        // request_id 形状不合法 → 业务错误结果
+        let bad_request = dispatch(
+            &rpc_call(
+                json!(1),
+                "generate_images",
+                json!({ "request_id": "short", "prompt": "a cat" }),
+            ),
+            McpServerKind::ImageGeneration,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bad_request["result"]["isError"], true);
+        assert_eq!(
+            bad_request["result"]["structuredContent"]["code"],
+            "invalid_image_input"
+        );
+
+        // 编辑未启用：tools/list 未列出，但 tools/call 仍放行并返回业务错误
+        let edit = dispatch(
+            &rpc_call(
+                json!(2),
+                "edit_images",
+                json!({
+                    "request_id": "request-0001",
+                    "prompt": "add a hat",
+                    "images": ["https://example.com/a.png"]
+                }),
+            ),
+            McpServerKind::ImageGeneration,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(edit["result"]["isError"], true);
+        assert_eq!(
+            edit["result"]["structuredContent"]["code"],
+            "image_configuration"
+        );
+
+        // 查询不存在的任务 → 业务错误结果
+        let missing = dispatch(
+            &rpc_call(
+                json!(3),
+                "get_image_result",
+                json!({ "job_id": "0".repeat(64) }),
+            ),
+            McpServerKind::ImageGeneration,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(missing["result"]["isError"], true);
+        assert_eq!(
+            missing["result"]["structuredContent"]["code"],
+            "image_job_not_found"
+        );
     }
 }

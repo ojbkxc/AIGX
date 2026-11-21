@@ -806,4 +806,94 @@ mod tests {
         assert!(is_file_id(&"a".repeat(64)));
         assert!(!is_file_id(&"g".repeat(64)));
     }
+
+    /// 失败落状态：`failed` 确定失败 / `uncertain` 上游可能扣费；两者都释放预留，
+    /// 且之后不能再被 `finish` 覆盖。
+    #[test]
+    fn fail_marks_job_and_blocks_finish() {
+        let (jobs, _dir) = setup();
+        let target = target();
+        let (failed, _) = jobs
+            .create(&config(), new_job("k1", "request-0010", &target))
+            .unwrap();
+        jobs.fail(&failed.id, false, "上游 400").unwrap();
+        let after = jobs.get(&failed.id).unwrap();
+        assert_eq!(after.state, "failed");
+        assert_eq!(after.reserved_bytes, 0);
+        assert!(after.error.unwrap().contains("400"));
+
+        let file = ImageFile {
+            id: random_id().unwrap(),
+            mime: "image/png".into(),
+            width: 1,
+            height: 1,
+            bytes: png_bytes(),
+        };
+        assert!(jobs.finish(&failed.id, json!({}), vec![file]).is_err());
+
+        let (uncertain, _) = jobs
+            .create(&config(), new_job("k1", "request-0011", &target))
+            .unwrap();
+        jobs.fail(&uncertain.id, true, "在途丢失").unwrap();
+        let after = jobs.get(&uncertain.id).unwrap();
+        assert_eq!(after.state, "uncertain");
+        assert_eq!(after.reserved_bytes, 0);
+    }
+
+    /// 并发上限：`max_concurrency` 个 running 之后拒绝新的提交（429）。
+    #[test]
+    fn create_enforces_concurrency_limit() {
+        let (jobs, _dir) = setup();
+        let target = target();
+        let mut cfg = config();
+        cfg.max_concurrency = 1;
+        jobs.create(&cfg, new_job("k1", "request-0020", &target))
+            .unwrap();
+        let error = jobs
+            .create(&cfg, new_job("k1", "request-0021", &target))
+            .unwrap_err();
+        assert_eq!(error.status, 429);
+        assert_eq!(error.code, "image_concurrency_limit");
+    }
+
+    /// 存储上限：按张数预留（每张 32 MiB），超过 `storage_mb` 时在请求上游前拒绝。
+    #[test]
+    fn create_enforces_storage_limit_before_generation() {
+        let (jobs, _dir) = setup();
+        let target = target();
+        let mut cfg = config();
+        cfg.storage_mb = 64; // 2 张预留 64 MiB 已占满，3 张必然超
+        let mut input = new_job("k1", "request-0030", &target);
+        input.count = 3;
+        let error = jobs.create(&cfg, input).unwrap_err();
+        assert_eq!(error.status, 507);
+        assert_eq!(error.code, "image_storage_full");
+        assert!(jobs.list().unwrap().is_empty());
+    }
+
+    /// 存储用量：running 计入预留、完成后计入已用字节。
+    #[test]
+    fn storage_usage_tracks_reserved_then_used() {
+        let (jobs, _dir) = setup();
+        let target = target();
+        let (job, _) = jobs
+            .create(&config(), new_job("k1", "request-0040", &target))
+            .unwrap();
+        let usage = jobs.storage_usage().unwrap();
+        assert_eq!(usage["reserved_bytes"], MAX_IMAGE_BYTES);
+        assert_eq!(usage["used_bytes"], 0);
+
+        let file = ImageFile {
+            id: random_id().unwrap(),
+            mime: "image/png".into(),
+            width: 1,
+            height: 1,
+            bytes: png_bytes(),
+        };
+        let size = file.bytes.len() as i64;
+        jobs.finish(&job.id, json!({}), vec![file]).unwrap();
+        let usage = jobs.storage_usage().unwrap();
+        assert_eq!(usage["reserved_bytes"], 0);
+        assert_eq!(usage["used_bytes"], size);
+    }
 }

@@ -671,4 +671,73 @@ mod tests {
         assert_eq!(mask_key("sk-1234567890abcdef"), "sk12••••cdef");
         assert_eq!(mask_key("short"), "••••");
     }
+
+    /// 目标链：provider+model 必须在目录中、已启用、非图片生成、且明确支持图片；
+    /// 命中后展示名与 downstream_model 都取自目录（与上游 `validate_available` 同口径）。
+    #[test]
+    fn resolve_vision_target_catalog_chain() {
+        let catalog = vision_catalog();
+        let (label, model) = resolve_vision_target(&catalog, "workbuddy", "glm-5v").unwrap();
+        assert_eq!(label, "WorkBuddy 国内版");
+        assert_eq!(model, "glm-5v");
+        assert!(resolve_vision_target(&catalog, "workbuddy", "ghost-model").is_err());
+        assert!(resolve_vision_target(&catalog, "other-provider", "glm-5v").is_err());
+        assert!(resolve_vision_target(&catalog, "workbuddy", "text-only")
+            .unwrap_err()
+            .contains("未声明支持图片"));
+        assert!(resolve_vision_target(&catalog, "workbuddy", "img-gen")
+            .unwrap_err()
+            .contains("图片生成模型"));
+        assert!(
+            resolve_vision_target(&catalog, "workbuddy", "disabled-vision")
+                .unwrap_err()
+                .contains("尚未启用")
+        );
+    }
+
+    /// 运行时 fallback 语义：未配置 → 明确错误；配置了模型但内部 Key 缺失 →
+    /// 可读的「Key 不可用」错误。两者都在发出网络请求之前返回。
+    #[tokio::test]
+    async fn run_vision_reports_config_and_key_fallbacks_without_network() {
+        let (services, keys, _dir) = harness();
+        let client = crate::test_http_client();
+        let images = vec!["data:image/png;base64,AAA".to_string()];
+
+        let error = run_vision(
+            &services,
+            &keys,
+            &client,
+            "http://127.0.0.1",
+            images.clone(),
+            "describe".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("not configured"), "{error}");
+
+        services
+            .update(|value| {
+                value.vision = Some(VisionConfig {
+                    provider: "workbuddy".into(),
+                    provider_label: "WorkBuddy".into(),
+                    upstream_model: "glm-5v".into(),
+                    downstream_model: "glm-5v".into(),
+                    reasoning: String::new(),
+                    api_key_id: "missing-key".into(),
+                    api_key_name: String::new(),
+                });
+            })
+            .unwrap();
+        let error = run_vision(
+            &services,
+            &keys,
+            &client,
+            "http://127.0.0.1",
+            images,
+            "describe".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("unavailable"), "{error}");
+    }
 }

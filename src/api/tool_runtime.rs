@@ -427,7 +427,7 @@ async fn mcp_post(
         allowed_providers: allowed_providers(&api_key),
         allowed_models: api_key.allowed_models.clone(),
         owner: tool_services::image_runtime::owner_of(&api_key),
-        state,
+        state: Some(state),
     };
     match tool_services::mcp_dispatch(&payload, kind, &context).await {
         Some(response) => json_response(StatusCode::OK, response),
