@@ -1,10 +1,10 @@
-// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+// Ported from Agent2API v3.5.0-beta.4 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
 // Source: desktop-tauri/src-tauri/server/src/server/core/plugin_host/script/host/diagnostics.mjs
 import { scope } from "./fetch.mjs"
 
 export function safeMessage(error, context = scope.getStore()) {
   let message = String(error?.message || error || "Script plugin failed")
-  if (context?.localProvider) {
+  if (context?.localProvider && context.action === "conversation") {
     message = message.replace(/stderr tail:[\s\S]*/i, "stderr tail: [redacted]")
       .replace(/(["']?(?:prompt|messages|content|system|tool_result)["']?\s*[:=])[\s\S]*/i, "$1 [redacted]")
   }
@@ -13,7 +13,6 @@ export function safeMessage(error, context = scope.getStore()) {
   for (const value of values) {
     for (const record of [value, value?.metadata]) {
       for (const field of ["access", "refresh", "key", "accessToken", "refreshToken", "cookie", "sid", "password"]) {
-        if (context?.localProvider && field === "key" && record?.[field] === "agy") continue
         if (typeof record?.[field] === "string" && record[field]) secrets.add(record[field])
       }
     }

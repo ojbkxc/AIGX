@@ -1,4 +1,4 @@
-// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+// Ported from Agent2API v3.5.0-beta.4 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
 // Source: desktop-tauri/src-tauri/server/src/server/core/plugin_host/script/host/provider.mjs
 import { getAuth, normalized, publicAccount, refresh, refreshLead, noteSignIn } from "./accounts.mjs"
 import { resolvePrompts } from "./login-prompts.mjs"
@@ -16,7 +16,7 @@ import { safeMessage } from "./diagnostics.mjs"
 import { loginMethods, validateInputs } from "./login-policy.mjs"
 import { usageReport, checkinReport } from "./reports.mjs"
 import { compatibleUsageResult } from "./usage-policy.mjs"
-import { isLocalProvider, localErrorPolicy, localRequest } from "./local-provider.mjs"
+import { isLocalProvider, localAddress, localErrorPolicy, localRequest } from "./local-provider.mjs"
 import { checkLocalProxy } from "./local-process.mjs"
 
 export { safeMessage }
@@ -43,9 +43,7 @@ async function conversation(provider, params, call) {
   const suffix = protocol === "gemini" ? `models/${encodeURIComponent(model.api?.id || modelID)}:streamGenerateContent?alt=sse`
     : { anthropic: "messages", responses: "responses", chat: "chat/completions" }[protocol]
   const url = new URL(origin.replace(/\/+$/, "") + "/" + suffix)
-  if (!["https:", "http:"].includes(url.protocol)
-    && !(isLocalProvider(provider) && url.protocol === "agy:" && url.hostname === "local"
-      && !url.username && !url.password && typeof options.fetch === "function")) throw new Error("Invalid upstream protocol")
+  if (!["https:", "http:"].includes(url.protocol) && !localAddress(provider, options, url)) throw new Error("Invalid upstream protocol")
   const nativeProtocol = params.native_protocol === "chat_completions" ? "chat" : params.native_protocol
   const native = nativeProtocol === protocol
   if (params.native_protocol && !native) throw unsupported("Account model protocol differs from the requested native protocol")
@@ -57,7 +55,7 @@ async function conversation(provider, params, call) {
   variantOptions(protocol, model, params.body?.reasoning_effort, body)
   localRequest(provider, params, body)
   if (protocol === "chat") body.stream_options = { ...body.stream_options, include_usage: true }
-  const headers = new Headers({ "content-type": "application/json", accept: "text/event-stream" })
+  const headers = new Headers({ "content-type": "application/json", accept: provider.originalID === "joycode" ? "*/*" : "text/event-stream" })
   const key = options.apiKey || auth?.key
   if (key) headers.set(protocol === "gemini" ? "x-goog-api-key" : protocol === "anthropic" ? "x-api-key" : "authorization",
     protocol === "chat" || protocol === "responses" ? `Bearer ${key}` : key)
@@ -198,7 +196,7 @@ export async function dispatch(provider, method, params, call) {
     case "login.cancel": return cancel(provider, params.flow)
     case "admin.action": {
       const action = typeof params.action === "string" ? params.action : ""
-      if (action === "auth.methods") return methods(provider)
+      if (action === "auth.methods") return methods(provider, params.payload?.locale)
       if (action === "auth.prompts") return resolvePrompts(provider, params.payload ?? {})
       // 插件声明的其余管理动作（web-search.capabilities / web-search.search /
       // growth.* 等）：宿主只做透传，不理解动作语义。插件通过
@@ -210,7 +208,7 @@ export async function dispatch(provider, method, params, call) {
       }
       throw unsupported(`Plugin does not implement admin action: ${action}`)
     }
-    case "classify": return classify(params.status, params.body)
+    case "classify": return classify(params.status, params.body, provider.originalID || provider.id)
     case "is_error_response": return params.status < 200 || params.status >= 300
     case "refusal_markers": return { finishes: [], markers: [] }
     case "retry_advice": return null
