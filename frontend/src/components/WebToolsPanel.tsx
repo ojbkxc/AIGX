@@ -112,6 +112,9 @@ export default function WebToolsPanel(): JSX.Element {
           <span className="form-hint">
             {t('默认开启，仅作用于插件明确声明的模型。网关通过提示词与响应校验转换工具调用，实际操作仍由客户端执行；原生工具调用和没有工具的普通聊天不受影响。')}
           </span>
+          <span className="form-hint">
+            {t('当前版本：该开关仅用于能力声明回显，尚未改变实际转发行为（后端接入后生效）。')}
+          </span>
         </div>
 
         <div className="form-group">

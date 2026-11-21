@@ -138,8 +138,11 @@ function TargetFields({ target, view, editing, disabled, onChange }: TargetField
  * 后端未就绪（404）→ 空态降级；配置形状或目录语义校验失败时把后端文案原样展示。
  */
 export default function ToolImageConfigPanel({
+  serviceEnabled = true,
   onSharedError,
 }: {
+  /** 服务当前启用态：图片生成默认关闭，停用时给出「可先配置、启用后生效」提示 */
+  serviceEnabled?: boolean;
   onSharedError?: (message: string) => void;
 }): JSX.Element {
   const { t } = useTranslation();
@@ -284,6 +287,12 @@ export default function ToolImageConfigPanel({
       <p className="tic-hint">
         {t('复用已有账号生图，不改变 Agent 的对话模型。实际调用遵守接入 Key 的模型和提供商权限。')}
       </p>
+
+      {!serviceEnabled ? (
+        <div className="tic-warn">
+          {t('该服务当前已停用，客户端的 MCP 调用会收到服务停用错误；配置可先行保存，启用后生效。')}
+        </div>
+      ) : null}
 
       {!view?.config && !error ? (
         <div className="tic-warn">{t('尚未配置图片生成，请先选择可用的生图模型并保存。')}</div>

@@ -369,7 +369,7 @@ export default function ToolsPage(): JSX.Element {
 
                       {service.id === 'image-generation' ? (
                         <div className="tp-service-detail">
-                          <ToolImageConfigPanel onSharedError={setError} />
+                          <ToolImageConfigPanel serviceEnabled={service.enabled} onSharedError={setError} />
                         </div>
                       ) : null}
                     </div>
