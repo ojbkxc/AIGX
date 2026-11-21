@@ -8,12 +8,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2 } from 'lucide-react';
+import { Copy, Loader2 } from 'lucide-react';
 import { api } from '../../api';
 import { useToast } from '../Toast';
-import { Badge, Button, Input, Select } from '../ui';
+import { Badge, Button, Input, Select, Textarea } from '../ui';
 import type {
   ToolApiKeyOption,
+  ToolInstallInfo,
   ToolInstallOutcome,
   ToolInstallTarget,
   ToolServiceItem,
@@ -53,23 +54,30 @@ export default function ToolInstallDialog({
 
   const [targets, setTargets] = useState<ToolInstallTarget[]>([]);
   const [keys, setKeys] = useState<ToolApiKeyOption[]>([]);
+  const [info, setInfo] = useState<ToolInstallInfo | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [variant, setVariant] = useState('');
-  const [mcpMode, setMcpMode] = useState('');
+  const [mcpMode, setMcpMode] = useState<'http' | 'bridge'>('http');
   const [apiKeyId, setApiKeyId] = useState('');
-  const [customDir, setCustomDir] = useState('');
+  const [outputDirectory, setOutputDirectory] = useState('');
+  const [referenceDirectories, setReferenceDirectories] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [outcomes, setOutcomes] = useState<ToolInstallOutcome[] | null>(null);
 
+  /** 图片生成支持本地桥接（需要输出目录）；视觉也支持桥接。 */
+  const supportsBridge = service.id === 'vision' || service.id === 'image-generation';
+  const imageBridge = service.id === 'image-generation' && mode === 'mcp' && mcpMode === 'bridge';
+
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const [targetRes, keyRes] = await Promise.all([
+        const [targetRes, keyRes, infoRes] = await Promise.all([
           api.getToolInstallTargets(serviceIdOf(service), mode),
           uninstall ? Promise.resolve(null) : api.listToolApiKeys().catch(() => null),
+          uninstall ? Promise.resolve(null) : api.getToolInstallInfo(serviceIdOf(service)).catch(() => null),
         ]);
         if (!alive) return;
         const list = targetRes?.data?.targets ?? [];
@@ -79,9 +87,11 @@ export default function ToolInstallDialog({
         const keyList = keyRes?.data?.keys ?? [];
         setKeys(keyList);
         if (keyList.length > 0) setApiKeyId(keyList[0].id);
+        setInfo((infoRes?.data as ToolInstallInfo | null) ?? null);
         const variants = service.variants ?? [];
         setVariant(service.recommended_variant || variants.find((v) => v.recommended)?.id || variants[0]?.id || '');
-        setMcpMode('');
+        // 视觉 / 图片生成默认本地桥接（上游同款）；其余 MCP 默认远程 HTTP
+        setMcpMode(supportsBridge ? 'bridge' : 'http');
         setError('');
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : String(err));
@@ -92,15 +102,50 @@ export default function ToolInstallDialog({
     return () => {
       alive = false;
     };
-  }, [service, mode, uninstall]);
+  }, [service, mode, uninstall, supportsBridge]);
+
+  const selectableTargets = useMemo(
+    () => targets.filter((target) => target.supported !== false),
+    [targets],
+  );
+  const allSelected = selectableTargets.length > 0 && selectableTargets.every((target) => selected.has(target.key));
+
+  /** MCP 客户端配置示例（把网关 Key 换成自己的即可） */
+  const mcpSnippet = useMemo(() => {
+    if (!info) return '';
+    return JSON.stringify(
+      {
+        mcpServers: {
+          [info.mcp.server_name]: {
+            type: 'http',
+            url: info.mcp.url,
+            headers: { Authorization: 'Bearer <网关 Key>' },
+          },
+        },
+      },
+      null,
+      2,
+    );
+  }, [info]);
+
+  const copySnippet = async (): Promise<void> => {
+    if (!mcpSnippet) return;
+    try {
+      await navigator.clipboard.writeText(mcpSnippet);
+      addToast(t('已复制'));
+    } catch {
+      addToast(t('复制失败，请手动选择后复制'), 'error');
+    }
+  };
 
   const canSubmit = useMemo(() => {
     if (selected.size === 0) return false;
     if (uninstall) return true;
     if (!apiKeyId) return false;
     if (mode === 'skill' && !variant) return false;
+    if (imageBridge && !outputDirectory.trim()) return false;
     return true;
-  }, [selected, uninstall, apiKeyId, mode, variant]);
+  }, [selected, uninstall, apiKeyId, mode, variant, imageBridge, outputDirectory]);
 
   const toggle = (key: string): void => {
     setSelected((prev) => {
@@ -109,6 +154,12 @@ export default function ToolInstallDialog({
       else next.add(key);
       return next;
     });
+  };
+
+  const toggleAll = (): void => {
+    setSelected(
+      allSelected ? new Set() : new Set(selectableTargets.map((target) => target.key)),
+    );
   };
 
   const submit = async (): Promise<void> => {
@@ -125,12 +176,24 @@ export default function ToolInstallDialog({
         addToast(t('已从 {{ok}}/{{total}} 个客户端卸载', { ok: okCount, total: results.length }), okCount === results.length ? 'success' : 'error');
         onDone();
       } else if (mode === 'mcp') {
+        if (imageBridge && !outputDirectory.trim()) {
+          setError(t('请选择图片输出目录'));
+          return;
+        }
         const res = await api.installToolMcp({
           service_id: serviceIdOf(service),
-          ...(mcpMode ? { mode: mcpMode } : {}),
+          mode: mcpMode,
           api_key_id: apiKeyId,
           clients: [...selected],
-          ...(customDir.trim() ? { output_directory: customDir.trim() } : {}),
+          ...(imageBridge
+            ? {
+                output_directory: outputDirectory.trim(),
+                reference_directories: referenceDirectories
+                  .split('\n')
+                  .map((line) => line.trim())
+                  .filter(Boolean),
+              }
+            : {}),
         });
         const results = res?.data?.results ?? [];
         setOutcomes(results);
@@ -184,7 +247,17 @@ export default function ToolInstallDialog({
               {error && <div className="error-message">{error}</div>}
 
               <div className="tid-block">
-                <span className="tid-label">{t('客户端目录')}</span>
+                <div className="tid-block-head">
+                  <span className="tid-label">{t('客户端目录')}</span>
+                  <span className="tid-count">
+                    {t('已选择 {{count}} / {{total}} 个', { count: selected.size, total: targets.length })}
+                  </span>
+                  {selectableTargets.length > 0 ? (
+                    <Button variant="outline" size="sm" onClick={toggleAll}>
+                      {allSelected ? t('取消全选') : t('全选')}
+                    </Button>
+                  ) : null}
+                </div>
                 {targets.length === 0 ? (
                   <p className="tid-empty">{t('没有探测到可用的客户端目录')}</p>
                 ) : (
@@ -216,6 +289,12 @@ export default function ToolInstallDialog({
                 )}
               </div>
 
+              {!uninstall && mode === 'mcp' && selected.has('dsh') ? (
+                <div className="tid-alert">
+                  {t('DSH 使用 Agent 页当前选择的配置目标。写入后请在 DSH 中确认工具是否出现，必要时重启对应客户端。')}
+                </div>
+              ) : null}
+
               {!uninstall && mode === 'skill' && (
                 <label className="tid-block">
                   <span className="tid-label">{t('运行时变体')}</span>
@@ -230,15 +309,45 @@ export default function ToolInstallDialog({
                 </label>
               )}
 
-              {!uninstall && mode === 'mcp' && (
+              {!uninstall && mode === 'mcp' && supportsBridge && (
                 <label className="tid-block">
-                  <span className="tid-label">{t('MCP 模式')}</span>
-                  <Select value={mcpMode} onChange={(e) => setMcpMode(e.target.value)} aria-label={t('MCP 模式')}>
-                    <option value="">{t('默认')}</option>
-                    <option value="url">{t('远程 URL（需客户端支持 HTTP MCP）')}</option>
+                  <span className="tid-label">{t('接入方式')}</span>
+                  <Select
+                    value={mcpMode}
+                    onChange={(e) => setMcpMode(e.target.value === 'bridge' ? 'bridge' : 'http')}
+                    aria-label={t('接入方式')}
+                  >
                     <option value="bridge">{t('本地桥接脚本')}</option>
+                    <option value="http">{t('远程 HTTP（需客户端支持 HTTP MCP）')}</option>
                   </Select>
+                  <span className="tid-note">
+                    {service.id === 'image-generation'
+                      ? t('本地桥接需要 Node.js 18+，自动读取授权目录的参考图并保存生成结果；HTTP 接入只返回下载地址。')
+                      : t('本地桥接会在本机运行 node 脚本，支持直接传本地图片路径。')}
+                  </span>
                 </label>
+              )}
+
+              {!uninstall && imageBridge && (
+                <>
+                  <label className="tid-block">
+                    <span className="tid-label">{t('图片输出目录')}</span>
+                    <Input
+                      value={outputDirectory}
+                      onChange={(e) => setOutputDirectory(e.target.value)}
+                      placeholder={t('已有目录，图片只会写入此目录及其子目录')}
+                    />
+                  </label>
+                  <label className="tid-block">
+                    <span className="tid-label">{t('参考图允许读取的目录（可选，每行一个）')}</span>
+                    <Textarea
+                      value={referenceDirectories}
+                      rows={3}
+                      onChange={(e) => setReferenceDirectories(e.target.value)}
+                      placeholder={t('每行一个已存在的绝对目录')}
+                    />
+                  </label>
+                </>
               )}
 
               {!uninstall && (
@@ -255,16 +364,20 @@ export default function ToolInstallDialog({
                 </label>
               )}
 
-              {!uninstall && mode === 'mcp' && (
-                <label className="tid-block">
-                  <span className="tid-label">{t('自定义输出目录（可选）')}</span>
-                  <Input
-                    value={customDir}
-                    onChange={(e) => setCustomDir(e.target.value)}
-                    placeholder={t('留空 = 用探测到的默认位置')}
-                  />
-                </label>
-              )}
+              {!uninstall && mode === 'mcp' && info ? (
+                <div className="tid-block">
+                  <div className="tid-block-head">
+                    <span className="tid-label">{t('客户端配置示例（mcpServers）')}</span>
+                    <Button variant="outline" size="sm" onClick={() => void copySnippet()}>
+                      <Copy size={12} /> {t('复制')}
+                    </Button>
+                  </div>
+                  <p className="tid-note">
+                    {t('把下面这段合并到客户端配置的 mcpServers 里，并把 Key 换成你自己的。')}
+                  </p>
+                  <pre className="tid-snippet">{mcpSnippet}</pre>
+                </div>
+              ) : null}
 
               {outcomes && (
                 <div className="tid-outcomes">

@@ -67,6 +67,53 @@
   gap: 6px;
 }
 
+.tid-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tid-block-head .tid-label {
+  flex: 1;
+  min-width: 80px;
+}
+
+.tid-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.tid-alert {
+  padding: 7px 10px;
+  border: 1px solid var(--warning-color, #b8860b);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning-color, #b8860b) 12%, transparent);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.tid-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.tid-snippet {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.08));
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
 .tid-label {
   font-size: 12.5px;
   font-weight: 500;

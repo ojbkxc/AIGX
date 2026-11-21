@@ -12,10 +12,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, RefreshCw, Settings2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Loader2, RefreshCw, Settings2, ShieldCheck } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Badge, Button, Card, EmptyState, Input, Loading, Switch, Tabs, Tooltip } from '../components/ui';
+import ToolImageConfigPanel from '../components/tools/ToolImageConfigPanel';
 import ToolInstallDialog from '../components/tools/ToolInstallDialog';
 import ToolProviderPanel from '../components/tools/ToolProviderPanel';
 import ToolVisionPanel from '../components/tools/ToolVisionPanel';
@@ -364,11 +366,30 @@ export default function ToolsPage(): JSX.Element {
                           </Button>
                         </div>
                       </div>
+
+                      {service.id === 'image-generation' ? (
+                        <div className="tp-service-detail">
+                          <ToolImageConfigPanel onSharedError={setError} />
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })}
               </div>
             )}
+          </Card>
+
+          <Card
+            title={t('用户工具策略')}
+            actions={
+              <Link className="btn btn-outline btn-sm" to="/users?tab=tools">
+                <ShieldCheck size={13} /> {t('前往配置')}
+              </Link>
+            }
+          >
+            <p className="tp-policy-hint">
+              {t('终端用户可调用哪些工具、每个分组允许哪些工具，在「用户管理 → 工具权限」中统一配置（与这里的服务接入相互独立）。')}
+            </p>
           </Card>
 
           <ToolProviderPanel />

@@ -161,3 +161,17 @@
   display: flex;
   gap: 8px;
 }
+
+/* 服务卡内详情（图片生成的配置 + 最近任务） */
+.tp-service-detail {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.tp-policy-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
