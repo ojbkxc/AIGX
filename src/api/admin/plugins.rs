@@ -1513,7 +1513,7 @@ fn upstream_catalog_item(id: &str, entry: &Value, manifest: &Value) -> Value {
                 .unwrap_or("{id}-{version}-{target}.zip");
             let asset = render_release_template(asset_template, id, version, t);
             let url = format!("https://github.com/{repo}/releases/download/{tag}/{asset}");
-            let (size, sha) = upstream_asset_meta(id, t);
+            let (size, sha) = upstream_asset_meta_for_version(id, t, version);
             vec![json!({
                 // wasm 跨平台运行：target 仍填 OS，前端按 OS 才显示「下载」
                 "target": std::env::consts::OS,
@@ -1724,6 +1724,22 @@ fn upstream_asset_meta(id: &str, triple: &str) -> (u64, Value) {
         Some((_, _, size, sha)) => (*size, json!(sha)),
         None => (0, Value::Null),
     }
+}
+
+/// 内置资产表只对「内置快照里同版本」的包可信。
+///
+/// 该表按 `(id, triple)` 键、只存一个版本的 size/sha256；上游版本前进后
+/// （如 atomcode beta.1 → beta.2）同一 `(id, triple)` 的 sha256 已过期，
+/// 若继续套用会把新版本误判为「sha256 不匹配」。版本不同就丢弃
+/// （返回 0/null → install 侧跳过 sha 校验，改由 ed25519 签名兜底）。
+fn upstream_asset_meta_for_version(id: &str, triple: &str, version: &str) -> (u64, Value) {
+    let same_version = BUILTIN_RELEASES
+        .iter()
+        .any(|r| r.id == id && r.version == version);
+    if !same_version {
+        return (0, Value::Null);
+    }
+    upstream_asset_meta(id, triple)
 }
 
 /// 发布目录（`GET /api/plugins` 用）：带 TTL 缓存 + 单飞。
@@ -2635,6 +2651,7 @@ mod tests {
             providers: vec![crate::plugin_host::registry::PackProvider {
                 id: "kiro".into(),
                 label: "Kiro".into(),
+                order: 0,
                 default_enabled: true,
             }],
             entry: "bin/plugin".into(),
@@ -2886,6 +2903,27 @@ mod tests {
         // wasm 资产表里没有对应行 → size=0 / sha=null（不阻断下载）
         assert_eq!(platform["size"], 0);
         assert!(platform["sha256"].is_null());
+    }
+
+    /// 回归：内置资产表只对同版本可信。atomcode 内置快照是 beta.1，
+    /// 上游已升 beta.2 → 不得套用旧 sha256（否则误报「sha256 不匹配」）。
+    #[test]
+    fn upstream_asset_meta_dropped_when_version_advanced() {
+        let (size, sha) = upstream_asset_meta_for_version(
+            "agent2api-wasm-atomcode",
+            "wasm32-unknown-unknown",
+            "0.1.0-beta.2",
+        );
+        assert_eq!(size, 0, "版本前进后不应沿用旧 size");
+        assert!(sha.is_null(), "版本前进后不应沿用旧 sha256");
+        // 内置快照同版本（beta.1）仍返回内置 sha256
+        let (size, sha) = upstream_asset_meta_for_version(
+            "agent2api-wasm-atomcode",
+            "wasm32-unknown-unknown",
+            "0.1.0-beta.1",
+        );
+        assert!(size > 0, "同版本应返回内置 size");
+        assert!(!sha.is_null(), "同版本应返回内置 sha256");
     }
 
     /// 原生 manifest：本机 triple 在 platforms 里 → 仍走本机资产；

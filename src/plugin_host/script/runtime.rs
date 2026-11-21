@@ -1425,6 +1425,7 @@ mod tests {
             providers: vec![PackProvider {
                 id: PACK_PROVIDER.into(),
                 label: "Demo".into(),
+                order: 0,
                 default_enabled: true,
             }],
             ..Default::default()

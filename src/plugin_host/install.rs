@@ -85,8 +85,10 @@ fn hex_sha256(bytes: &[u8]) -> String {
 /// ui=<relpath>=<sha256>,…                          ← 字典序
 /// ```
 ///
-/// AIGX 的 `PackProvider` 没有 `order` 字段（固定 0），`default_enabled` 取
-/// 清单原值 —— 与上游包（order 恒写 0 的发布物）逐字对得上。
+/// AIGX 的 `PackProvider` 带 `order` 字段（缺省 0），`default_enabled` 取
+/// 清单原值 —— 两者都按上游 `pack.json` 的真实值参与载荷。**不可把 `order`
+/// 固定成 0**：早期包 order 恰好是 0，但 wasm 新包会写非 0（如 accio=26），
+/// 写死 0 会导致「签名与包内容不匹配」。
 ///
 /// Wasm 包的额外项：`wasm=<wasm.json sha256>`；带 `host.json` 时追加
 /// `host=<host.json sha256>`（两行都在 `ui=` 之后，与上游顺序一致）。
@@ -105,7 +107,7 @@ pub fn signing_payload(
             format!(
                 "{}:{}:{}",
                 item.id,
-                0,
+                item.order,
                 if item.default_enabled { 1 } else { 0 }
             )
         })
@@ -1081,6 +1083,20 @@ mod tests {
         assert!(payload.contains("\nbinary=abc\n"));
         assert!(payload.contains("\nui=ui/a.js=def\n"));
         assert!(payload.ends_with('\n'), "载荷末尾不留空行");
+    }
+
+    #[test]
+    fn signing_payload_uses_provider_order() {
+        // 回归：上游 wasm 包的 provider 带非 0 order（accio=26），
+        // 载荷必须用真实 order；写死 0 会「签名与包内容不匹配」。
+        let manifest_json = r#"{"id":"agent2api-wasm-accio","version":"0.1.0-beta.1","protocol":1,"entry":{"wasm32-unknown-unknown":"accio.wasm"},"providers":[{"id":"accio","label":"Accio","order":26,"default_enabled":true}]}"#;
+        let manifest: PackManifest = serde_json::from_str(manifest_json).unwrap();
+        let payload = signing_payload(&manifest, "wasm32-unknown-unknown", "abc", &[], None, None);
+        assert!(payload.contains("\nproviders=accio:26:1\n"), "{payload}");
+        assert!(
+            !payload.contains("\nproviders=accio:0:1\n"),
+            "order 不应被写死为 0: {payload}"
+        );
     }
 
     #[test]

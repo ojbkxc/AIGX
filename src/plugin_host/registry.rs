@@ -88,6 +88,9 @@ impl PackMeta {
 pub struct PackProvider {
     pub id: String,
     pub label: String,
+    /// 上游 `pack.json` 的展示/排序序位，**也参与签名载荷**（`id:order:default`）。
+    /// 早期包写 0；wasm 新包会写非 0（如 accio=26），漏掉会验签失败。
+    pub order: i64,
     /// 包建议的默认启停（网关只作展示参考，实际以 `PackMeta.enabled` 为准）。
     pub default_enabled: bool,
 }
@@ -344,6 +347,7 @@ mod tests {
                 .map(|p| PackProvider {
                     id: (*p).into(),
                     label: (*p).into(),
+                    order: 0,
                     default_enabled: true,
                 })
                 .collect(),
