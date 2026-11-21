@@ -73,18 +73,23 @@ export interface RoutingMember {
 }
 
 /**
- * 路由组。**非三态**（后端字段不是 Option）：组一旦被选中，
- * 其 `strategy` / `sticky` 总会覆盖上层——组内没配时即为枚举默认值
- * （weighted / auto）。界面上必须把这条讲明白，否则用户会以为
- * 「组没配策略 = 继承 global」。
+ * 路由组。**`strategy` / `sticky` 是三态（后端字段是 `Option`）**：
+ * `null` = 继承上层（组不覆盖策略）/ 有值 = 组内显式覆盖。
+ *
+ * 这与早先「组总会覆盖上层」的口径不同——后端已把这两个字段改成
+ * `Option`（`src/channel/routing_policy.rs` `RoutingGroup`），`resolve_profile`
+ * 在组层用同一套三态语义（`None` = 不覆盖）。界面上必须给出「继承」档，
+ * 否则用户会以为「组没配策略 = 强制 weighted/auto」而误改全局。
  */
 export interface RoutingGroup {
   id: string;
   name: string;
   /** 该组服务的模型（A2A 的组是 per-model 的） */
   model: string;
-  strategy: RouteStrategy;
-  sticky: StickyMode;
+  /** `null` = 继承上层策略 */
+  strategy: RouteStrategy | null;
+  /** `null` = 继承上层粘性 */
+  sticky: StickyMode | null;
   members: RoutingMember[];
 }
 

@@ -133,16 +133,16 @@ export default function RoutingPanel(): JSX.Element {
       const hw = Number(form.healthWeight);
       const cw = Number(form.costWeight);
       const rw = Number(form.rpmWeight);
-      if (!Number.isFinite(threshold) || threshold < 1 || threshold > 20) {
-        setError(t('断路器阈值须在 1-20 之间'));
+      if (!Number.isInteger(threshold) || threshold < 1 || threshold > 20) {
+        setError(t('断路器阈值须为 1-20 之间的整数'));
         return;
       }
-      if (!Number.isFinite(cooldown) || cooldown < 10 || cooldown > 600) {
-        setError(t('断路器冷却须在 10-600 秒之间'));
+      if (!Number.isInteger(cooldown) || cooldown < 10 || cooldown > 600) {
+        setError(t('断路器冷却须为 10-600 秒之间的整数'));
         return;
       }
-      if (!Number.isFinite(successThreshold) || successThreshold < 1 || successThreshold > 10) {
-        setError(t('半开成功阈值须在 1-10 之间'));
+      if (!Number.isInteger(successThreshold) || successThreshold < 1 || successThreshold > 10) {
+        setError(t('半开成功阈值须为 1-10 之间的整数'));
         return;
       }
       if (![hw, cw, rw].every((w) => Number.isFinite(w) && w >= 0)) {
@@ -343,6 +343,11 @@ export default function RoutingPanel(): JSX.Element {
             <div className="form-hint">
               {t('健康×成本×RPM 三维权重（默认 0.4/0.4/0.2）。只在「多因子调度」策略下参与排序，改小成本权重=优先健康供应商。')}
             </div>
+            {form.strategy !== 'ranked' ? (
+              <div className="rt-notice rt-notice-info" style={{ marginTop: 8 }}>
+                {t('当前策略不是「多因子调度」：这三维权重不参与排序（保存仍会保留），切换到「多因子调度」后生效。')}
+              </div>
+            ) : null}
           </div>
 
           <div className="settings-actions" style={{ display: 'flex', gap: 8 }}>

@@ -83,6 +83,7 @@ export default function TitleRoutes({ active }: { active: boolean }): JSX.Elemen
       editor={editor}
       addLabel={t('添加规则')}
       addDisabled={saving || full || !clients.length}
+      serverError={view?.error ?? null}
       onAddRule={() => setEditing({ rule: blankRule(), index: -1 })}
     >
       <RuleSectionHead title={t('规则')} count={t('{{n}} 条', { n: rules.length })} />

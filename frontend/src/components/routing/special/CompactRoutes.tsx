@@ -92,6 +92,7 @@ export default function CompactRoutes({ active }: { active: boolean }): JSX.Elem
       editor={editor}
       addLabel={t('添加规则')}
       addDisabled={saving || full || !clients.length}
+      serverError={view?.error ?? null}
       onAddRule={() => setEditing({ rule: blankRule(), index: -1 })}
     >
       <RuleSectionHead

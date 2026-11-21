@@ -14,7 +14,7 @@
  *   `{ config, revision }` —— revision 取最近一次 GET 的值，PUT 冲突返回 409。
  */
 import type { RoutingPolicyItem, RoutingQueueEntryItem, RoutingQueueItem } from './index';
-import type { RoutingProfile, RoutingQueueWithLayers } from './routing-profile';
+import type { RoutingProfile, Layer, ProfileProvenance, RoutingQueueWithLayers } from './routing-profile';
 
 /* ─────────────── 特殊路由：压缩 / 标题 ─────────────── */
 
@@ -79,6 +79,8 @@ export interface SpecialModelChoice {
 /** GET /api/models/compact-routes 的 data 形状 */
 export interface CompactRoutesView {
   config?: Partial<CompactRoutesConfig> | null;
+  /** 后端解析已存配置失败时的错误原文（此时 config 为 null，面板须如实告知并禁止覆盖保存） */
+  error?: string | null;
   revision?: string;
   clients?: SpecialRouteClient[];
   models?: SpecialModelWire[];
@@ -88,9 +90,12 @@ export interface CompactRoutesView {
 /** GET /api/models/title-routes 的 data 形状 */
 export interface TitleRoutesView {
   config?: Partial<TitleRoutesConfig> | null;
+  /** 同 compact：已存配置解析失败时的错误原文 */
+  error?: string | null;
   revision?: string;
   clients?: SpecialRouteClient[];
   models?: SpecialModelWire[];
+  fallbackModes?: string[];
   maxRules?: number;
 }
 
@@ -387,6 +392,12 @@ export interface RoutingWorkspaceView {
   models?: string[];
   profile?: RoutingProfile | null;
   inheritedProfile?: RoutingProfile | null;
+  /** 逐字段来源（后端顶层下发；缺省 = 来源未知，界面不猜） */
+  provenance?: ProfileProvenance | null;
+  /** 本次判定实际命中的层 */
+  appliedLayers?: Layer[];
+  /** 多规则总开关（后端 `profilesEnabled`） */
+  profilesEnabled?: boolean;
   queue?: Partial<RoutingQueueItem & RoutingQueueWithLayers> & {
     pickedId?: string | null;
     lastRequestModel?: string;
@@ -395,7 +406,9 @@ export interface RoutingWorkspaceView {
   };
   settings?: Partial<RoutingPolicyItem> & Record<string, unknown>;
   globalSettings?: Partial<RoutingPolicyItem>;
-  revision?: string;
+  revision?: string | null;
+  /** 该端点是否支持修订号（AIGX 工作台恒 false：写入口是 PUT /api/routing*） */
+  revisionSupported?: boolean;
   updatedAt?: number;
   stickyCount?: number;
   modelLastUsed?: Record<string, number>;

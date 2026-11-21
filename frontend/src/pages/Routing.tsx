@@ -119,7 +119,7 @@ export default function Routing(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [policy, setPolicy] = useState<RoutingPolicyWithProfiles | null>(null);
-  /** 后端未返回 profiles（#40 未就绪的旧版本） */
+  /** 后端未返回 profiles（契约不符的旧版本）；正常后端恒返回空档案容器 */
   const [noProfiles, setNoProfiles] = useState(false);
 
   const [enabledBusy, setEnabledBusy] = useState(false);
@@ -301,7 +301,7 @@ export default function Routing(): JSX.Element {
       const st = statusOf(err);
       if (st === 404 || st === 405) {
         setProfilesEndpointReady(false);
-        addToast(t('档案保存端点尚未就绪（后端 #40 第 2 步）：本次修改只在本页，未写入服务端'), 'error');
+        addToast(t('档案保存端点尚未就绪（404/405）：本次修改只在本页，未写入服务端'), 'error');
       } else {
         addToast(err instanceof Error ? err.message : String(err), 'error');
       }
@@ -403,7 +403,7 @@ export default function Routing(): JSX.Element {
         )}
         {noProfiles ? (
           <div className="rt-notice rt-notice-warn" style={{ marginTop: 8 }}>
-            {t('当前后端未返回 profiles 字段（#40 未就绪）：本页只能编辑本地草稿，无法读写服务端档案。')}
+            {t('后端未返回 profiles 字段（与契约不符）：本页只能编辑本地草稿，无法读写服务端档案。')}
           </div>
         ) : null}
       </Card>
@@ -708,7 +708,7 @@ export default function Routing(): JSX.Element {
 
           {pvNotReady ? (
             <div className="rt-notice rt-notice-warn" style={{ marginTop: 10 }}>
-              {t('预演端点尚未就绪（后端 #40 第 2 步）。就绪后这里会显示：命中层、逐字段来源、候选与被裁原因 —— 全部取自后端的同一次判定，界面不复算。上方「候选与命中层」已可看到候选与命中层。')}
+              {t('预演端点尚未就绪（404/405）。就绪后这里会显示：命中层、逐字段来源、候选与被裁原因 —— 全部取自后端的同一次判定，界面不复算。上方「候选与命中层」已可看到候选与命中层。')}
             </div>
           ) : pv ? (
             <div style={{ marginTop: 12 }}>

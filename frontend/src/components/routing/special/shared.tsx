@@ -28,6 +28,7 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
   addLabel,
   addDisabled,
   onAddRule,
+  serverError,
   children,
 }: {
   title: string;
@@ -36,10 +37,13 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
   addLabel?: string;
   addDisabled?: boolean;
   onAddRule?: () => void;
+  /** 后端解析已存配置失败时的错误（config 为 null）：如实告知，且禁止覆盖保存 */
+  serverError?: string | null;
   children: ReactNode;
 }): JSX.Element {
   const { t } = useTranslation();
   const { draft, loading, saving, dirty, error, conflict, notReady, update, save, reload, discard } = editor;
+  const blockedByServerError = Boolean(serverError);
 
   if (notReady) {
     return (
@@ -76,6 +80,16 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
         </label>
       </header>
 
+      {serverError ? (
+        <div className="rt-notice rt-notice-warn" role="alert">
+          <strong>{t('服务端已存配置解析失败：')}</strong>
+          {serverError}
+          <div className="form-hint">
+            {t('为避免用空草稿覆盖掉服务端文件，保存已禁用。请先修复服务端配置或联系管理员。')}
+          </div>
+        </div>
+      ) : null}
+
       {conflict ? (
         <div className="rt-notice rt-notice-warn rt-conflict" role="alert">
           <strong>{t('修订号冲突：')}</strong>
@@ -103,7 +117,7 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
         <div className="rt-special-body">
           {onAddRule ? (
             <div className="rt-special-toolbar">
-              <Button variant="outline" size="sm" disabled={saving || addDisabled} onClick={onAddRule}>
+              <Button variant="outline" size="sm" disabled={saving || addDisabled || blockedByServerError} onClick={onAddRule}>
                 <Plus size={13} />
                 {addLabel ?? t('添加规则')}
               </Button>
@@ -114,7 +128,7 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
       )}
 
       <footer className="rt-savebar">
-        <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving || !draft}>
+        <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving || !draft || blockedByServerError}>
           {saving ? <Loader2 size={13} className="spin" /> : null}
           {t('保存')}
         </Button>

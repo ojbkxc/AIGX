@@ -68,6 +68,7 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
   const [editing, setEditing] = useState<Editing | null>(null);
 
   const models = useMemo(() => visionModelChoices(view?.models), [view]);
+  const sharedTarget = view?.sharedTarget ?? null;
   const rules = draft?.rules ?? [];
   const maxTargets = Number.isFinite(view?.maxTargets) ? Number(view?.maxTargets) : 8;
 
@@ -88,7 +89,9 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
     if (rule.mode === 'assist') {
       const reader =
         rule.source === 'shared'
-          ? t('工具服务的视觉模型')
+          ? sharedTarget
+            ? `${t('工具服务的视觉模型')}（${refLabel(models, sharedTarget) || `${sharedTarget.provider} · ${sharedTarget.model}`}）`
+            : t('工具服务的视觉模型')
           : refLabel(models, rule.target) || t('还没选视觉模型');
       return (
         <>
@@ -141,6 +144,7 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
             key={`edit-${index}`}
             rule={editing.rule}
             models={models}
+            sharedTarget={sharedTarget}
             maxTargets={maxTargets}
             saving={saving}
             onCancel={() => setEditing(null)}
@@ -212,6 +216,7 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
           key="new"
           rule={editing.rule}
           models={models}
+          sharedTarget={sharedTarget}
           maxTargets={maxTargets}
           saving={saving}
           onCancel={() => setEditing(null)}
@@ -296,6 +301,7 @@ function ModelRefPicker({
 function RuleEditor({
   rule,
   models,
+  sharedTarget,
   maxTargets,
   saving,
   onCancel,
@@ -303,6 +309,7 @@ function RuleEditor({
 }: {
   rule: VisionRule;
   models: VisionModelChoice[];
+  sharedTarget?: VisionTarget | null;
   maxTargets: number;
   saving: boolean;
   onCancel: () => void;
@@ -541,6 +548,17 @@ function RuleEditor({
       {draft.mode === 'assist' && draft.source === 'shared' ? (
         <div className="rt-notice rt-notice-info">
           {t('沿用工具服务的视觉模型：视觉目标由「工具服务」的视觉配置决定，本规则只负责把请求路由到识图环节。')}
+          {sharedTarget ? (
+            <div className="form-hint">
+              {t('当前共享视觉模型：{{model}}', {
+                model: refLabel(models, sharedTarget) || `${sharedTarget.provider} · ${sharedTarget.model}`,
+              })}
+            </div>
+          ) : (
+            <div className="form-hint">
+              {t('工具服务当前未配置共享视觉模型；启用「沿用」前请先在工具服务里配置。')}
+            </div>
+          )}
         </div>
       ) : null}
 

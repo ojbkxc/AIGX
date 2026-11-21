@@ -9,9 +9,10 @@
  * 1. **`model` 是「限定」不是「继承」**：后端 `find_group(id, requested_model)`
  *    的判据是 `g.model.is_empty() || g.model == requested_model` ——
  *    留空 = 任何模型都能用这个组；写了模型名 = 只有请求名等于它的请求能用。
- * 2. **组的 strategy / sticky 不是三态**（后端字段不是 Option）：组一旦被
- *    选中，这两个字段**总会**覆盖上层；组里没配时等于枚举默认
- *    （weighted / auto）。所以「组没配策略 ≠ 继承 global」。
+ * 2. **组的 strategy / sticky 是三态**（后端字段是 `Option`）：`null` = 继承
+ *    上层（组不覆盖策略）；有值 = 组内显式覆盖。早先「组总会覆盖上层」的
+ *    口径已随后端改成 `Option` 而废弃 —— 本组件必须给「继承」档，否则用户
+ *    会误以为「组没配策略 = 强制 weighted/auto」。
  * 3. 组的 strategy / sticky **只在这里维护**（不在分层档案里再开一处，
  *    避免同一字段两处可改 —— 本仓既有约定）。
  */
@@ -65,8 +66,8 @@ export function emptyGroup(id: string): RoutingGroup {
     id,
     name: '',
     model: '',
-    strategy: 'weighted',
-    sticky: 'auto',
+    strategy: null,
+    sticky: null,
     members: [],
   };
 }
@@ -99,8 +100,8 @@ export default function GroupEditor({
 
   return (
     <div>
-      <div className="rt-notice rt-notice-warn">
-        {t('组的「选路策略 / 会话粘性」不是可继承的三态：组一旦被选中，这两项总会覆盖上层；组里没配时等于「加权随机 / 自动」。想让组继承上层策略，请让请求不要命中该组。')}
+      <div className="rt-notice rt-notice-info">
+        {t('组的「选路策略 / 会话粘性」是可继承的三态：留「继承上层」表示本组不改这两项，跟随全局/模型级；选了具体值才覆盖。')}
       </div>
 
       <div className="rt-group-actions" style={{ margin: '10px 0' }}>
@@ -191,9 +192,14 @@ export default function GroupEditor({
                 <label>{t('选路策略')}</label>
                 <select
                   className="form-input"
-                  value={g.strategy}
-                  onChange={(e) => patchGroup(gi, { strategy: e.target.value as RouteStrategy })}
+                  value={g.strategy ?? ''}
+                  onChange={(e) =>
+                    patchGroup(gi, {
+                      strategy: (e.target.value || null) as RouteStrategy | null,
+                    })
+                  }
                 >
+                  <option value="">{t('继承上层（不覆盖）')}</option>
                   {(Object.keys(STRATEGY_LABELS) as RouteStrategy[]).map((k) => (
                     <option key={k} value={k}>
                       {t(STRATEGY_LABELS[k])}
@@ -205,9 +211,14 @@ export default function GroupEditor({
                 <label>{t('会话粘性')}</label>
                 <select
                   className="form-input"
-                  value={g.sticky}
-                  onChange={(e) => patchGroup(gi, { sticky: e.target.value as StickyMode })}
+                  value={g.sticky ?? ''}
+                  onChange={(e) =>
+                    patchGroup(gi, {
+                      sticky: (e.target.value || null) as StickyMode | null,
+                    })
+                  }
                 >
+                  <option value="">{t('继承上层（不覆盖）')}</option>
                   {(Object.keys(STICKY_LABELS) as StickyMode[]).map((k) => (
                     <option key={k} value={k}>
                       {t(STICKY_LABELS[k])}

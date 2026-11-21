@@ -53,6 +53,66 @@ import type { ReportSettingsItem, TzMigrateResult } from '@/types/report-tz';
 import type { ImageCompatSettingsBody, ImageCompatSettingsItem } from '@/types/image-compat';
 import { API_BASE, buildQuery, request } from '../client';
 
+/**
+ * 归一 `{success,data}` 外壳。
+ *
+ * `/api/routing`、`/routing/{profiles,queue,preview,defaults}` 这几个策略端点
+ * 后端返回的是**裸 JSON**（例如 `{strategy,sticky,profiles,...}`），而本仓
+ * 其余端点（工作台 / 特殊路由 / 视觉兼容 / 图片兼容）返回 `{success,data}`。
+ * 两种形状在这里统一收敛成 `{success,data}`，调用方继续按 `res.data` 读取 ——
+ * 避免「接口明明有数据、页面却因 `res.data` 为空而静默显示默认值」。
+ */
+function asEnvelope<T>(raw: unknown): ApiResponse<T> {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'success' in raw) {
+    return raw as ApiResponse<T>;
+  }
+  return { success: true, data: raw as T };
+}
+
+/** 兼容两种外壳，取出业务体。 */
+function bodyOf(raw: unknown): Record<string, unknown> | null {
+  const body =
+    raw && typeof raw === 'object' && 'data' in raw
+      ? (raw as { data?: unknown }).data
+      : raw;
+  return body && typeof body === 'object' && !Array.isArray(body)
+    ? (body as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * POST /api/routing/preview 后端把生效值放在 `resolved` 下
+ * （strategy/sticky/scope/sortRules/defaultGroup/provenance/appliedLayers），
+ * 且组号键名是 `requestedGroupId`。这里摊平成前端 `RoutingPreviewItem`
+ * 的扁平形状；其余字段（ordered/blocked/skipped/pickedId）原样带过。
+ */
+function flattenPreview(raw: unknown): RoutingPreviewItem {
+  const body = bodyOf(raw);
+  if (!body) return {} as RoutingPreviewItem;
+  const resolved = (body.resolved ?? {}) as Record<string, unknown>;
+  const profile = {
+    scope: resolved.scope ?? null,
+    strategy: resolved.strategy ?? null,
+    sticky: resolved.sticky ?? null,
+    needs: resolved.needs ?? null,
+    sort_rules: resolved.sortRules ?? null,
+    default_group: resolved.defaultGroup ?? null,
+  } as RoutingPreviewItem['profile'];
+  return {
+    model: String(body.model ?? ''),
+    strategy: resolved.strategy as RoutingPreviewItem['strategy'],
+    sticky: resolved.sticky as RoutingPreviewItem['sticky'],
+    groupId: (body.requestedGroupId as string | null | undefined) ?? null,
+    appliedLayers: (resolved.appliedLayers as RoutingPreviewItem['appliedLayers']) ?? [],
+    provenance: (resolved.provenance as RoutingPreviewItem['provenance']) ?? undefined,
+    profile,
+    pickedId: (body.pickedId as string | null | undefined) ?? null,
+    ordered: (body.ordered as RoutingPreviewItem['ordered']) ?? [],
+    blocked: (body.blocked as RoutingPreviewItem['blocked']) ?? [],
+    skipped: (body.skipped as RoutingPreviewItem['skipped']) ?? undefined,
+  };
+}
+
 export const endpoints = {
   // ==================== 工单（对齐 v2board Ticket） ====================
   listTickets: (id = ''): Promise<ApiResponse<TicketItem[] | TicketItem>> =>
@@ -336,30 +396,36 @@ export const endpoints = {
     request<ApiResponse<ModelMetadataStatus>>('PUT', `${API_BASE}/models/metadata`, { enabled }),
   refreshModelMetadata: (): Promise<ApiResponse<ModelMetadataRefreshResult>> =>
     request<ApiResponse<ModelMetadataRefreshResult>>('POST', `${API_BASE}/models/metadata/refresh`),
-  // 路由策略（对照 Agent2API「设置 → 路由」；保存即热生效，无需重启）
-  getRoutingPolicy: (): Promise<ApiResponse<RoutingPolicyWithProfiles>> =>
-    request<ApiResponse<RoutingPolicyWithProfiles>>('GET', `${API_BASE}/routing`),
-  saveRoutingPolicy: (data: Record<string, unknown>): Promise<ApiResponse<RoutingPolicyItem>> =>
-    request<ApiResponse<RoutingPolicyItem>>('PUT', `${API_BASE}/routing`, data),
+  // 路由策略（对照 Agent2API「设置 → 路由」；保存即热生效，无需重启）。
+  // 这些端点后端返回**裸 JSON** —— 经 asEnvelope 归一成 {success,data}。
+  getRoutingPolicy: async (): Promise<ApiResponse<RoutingPolicyWithProfiles>> =>
+    asEnvelope<RoutingPolicyWithProfiles>(await request('GET', `${API_BASE}/routing`)),
+  saveRoutingPolicy: async (data: Record<string, unknown>): Promise<ApiResponse<RoutingPolicyItem>> =>
+    asEnvelope<RoutingPolicyItem>(await request('PUT', `${API_BASE}/routing`, data)),
   // #40 多规则总开关：PUT /api/routing 是读-改-写，只传 enabled 不会碰其他字段
-  saveRoutingEnabled: (enabled: boolean): Promise<ApiResponse<RoutingPolicyItem>> =>
-    request<ApiResponse<RoutingPolicyItem>>('PUT', `${API_BASE}/routing`, { enabled }),
-  // #40 整份档案读写（契约 §5）。PUT 端点由后端 be-routing 提供；
-  // 未就绪时返回 404（调用方按「端点未就绪」降级，不谎报保存成功）。
-  saveRoutingProfiles: (profiles: RoutingProfiles): Promise<ApiResponse<RoutingProfiles>> =>
-    request<ApiResponse<RoutingProfiles>>('PUT', `${API_BASE}/routing/profiles`, profiles),
-  getRoutingDefaults: (): Promise<ApiResponse<RoutingPolicyItem>> =>
-    request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing/defaults`),
+  saveRoutingEnabled: async (enabled: boolean): Promise<ApiResponse<RoutingPolicyItem>> =>
+    asEnvelope<RoutingPolicyItem>(await request('PUT', `${API_BASE}/routing`, { enabled })),
+  // #40 整份档案读写（契约 §5）。**请求体是 `{ profiles }`**（后端
+  // `RoutingProfilesUpdate { profiles: Option<_> }`）—— 发裸档案对象会被
+  // serde 读成 profiles=None，从而变成「200 成功但什么都没改」的静默
+  // no-op。响应是 `{ enabled, profiles }`，这里取出 profiles 回填。
+  saveRoutingProfiles: async (profiles: RoutingProfiles): Promise<ApiResponse<RoutingProfiles>> => {
+    const raw = await request<unknown>('PUT', `${API_BASE}/routing/profiles`, { profiles });
+    const body = bodyOf(raw);
+    const saved = (body?.profiles as RoutingProfiles | undefined) ?? profiles;
+    return { success: true, data: saved };
+  },
+  getRoutingDefaults: async (): Promise<ApiResponse<RoutingPolicyItem>> =>
+    asEnvelope<RoutingPolicyItem>(await request('GET', `${API_BASE}/routing/defaults`)),
   // 路由候选队列预演（对照 Agent2API「设置 → 路由 → 队列」：只读，不推进轮询游标）
-  getRoutingQueue: (model: string): Promise<ApiResponse<RoutingQueueItem & RoutingQueueWithLayers>> =>
-    request<ApiResponse<RoutingQueueItem & RoutingQueueWithLayers>>(
-      'GET',
-      `${API_BASE}/routing/queue?model=${encodeURIComponent(model)}`,
+  getRoutingQueue: async (model: string): Promise<ApiResponse<RoutingQueueItem & RoutingQueueWithLayers>> =>
+    asEnvelope<RoutingQueueItem & RoutingQueueWithLayers>(
+      await request('GET', `${API_BASE}/routing/queue?model=${encodeURIComponent(model)}`),
     ),
   // #40 档案预演（契约 §5）：与真实转发走同一个 plan_route，返回命中层与逐字段来源。
-  // 后端未就绪 → 404 / 405，调用方按「未就绪」降级，绝不在界面上自己算候选。
-  previewRouting: (req: RoutingPreviewRequest): Promise<ApiResponse<RoutingPreviewItem>> =>
-    request<ApiResponse<RoutingPreviewItem>>('POST', `${API_BASE}/routing/preview`, req),
+  // 后端把生效值放在 `resolved` 下、组号键名 requestedGroupId —— flattenPreview 摊平。
+  previewRouting: async (req: RoutingPreviewRequest): Promise<ApiResponse<RoutingPreviewItem>> =>
+    asEnvelope<RoutingPreviewItem>(flattenPreview(await request('POST', `${API_BASE}/routing/preview`, req))),
   // 路由回放快照（对照 Agent2API「路由回放」：只读渲染请求当时保存的选路事实，
   // 不以当前配置重算历史）。后端 GET /api/routing/replay/{request_id} 由 be-fix
   // 任务 #12-B 提供；未就绪返回 404（err.status 可辨），调用方按空态降级。

@@ -68,11 +68,9 @@ export default function RoutingWorkspace({ active }: { active: boolean }): JSX.E
     );
   }, [ws]);
 
-  /** 逐字段生效来源：后端 workspace 未带 provenance 时显示「来源未知」（不猜） */
-  const provenanceOf = (f: (typeof PROFILE_FIELDS)[number]): Layer | null | undefined => {
-    const p = ws as unknown as { provenance?: Record<string, Layer | null> } | null;
-    return p?.provenance ? p.provenance[f] : undefined;
-  };
+  /** 逐字段生效来源：后端未带 provenance 时显示「来源未知」（不猜） */
+  const provenanceOf = (f: (typeof PROFILE_FIELDS)[number]): Layer | null | undefined =>
+    ws?.provenance ? ws.provenance[f] : undefined;
 
   if (notReady) {
     return (
@@ -190,7 +188,10 @@ export default function RoutingWorkspace({ active }: { active: boolean }): JSX.E
 
       {ws ? (
         <div className="form-hint" style={{ marginTop: 10 }}>
-          {t('工作台修订号：{{rev}}', { rev: ws.revision || t('（未返回）') })}
+          {ws.revisionSupported === false || !ws.revision
+            ? t('该端点不提供修订号（路由写入口为 PUT /api/routing，非 CAS）')
+            : t('工作台修订号：{{rev}}', { rev: ws.revision })}
+          {ws.profilesEnabled === false ? ` · ${t('多规则档案当前关闭，以下为档案关闭时的生效值')}` : ''}
           {ws.stickyCount != null ? ` · ${t('粘滞会话 {{n}} 条', { n: ws.stickyCount })}` : ''}
         </div>
       ) : null}
