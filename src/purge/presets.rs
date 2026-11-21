@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(normalize_model_id("deepseek-v4"), "deepseekv4");
         assert_eq!(normalize_model_id("deepseek_v4"), "deepseekv4");
         assert_eq!(normalize_model_id("deepseek/v4"), "deepseekv4");
-        assert_eq!(normalize_model_id("   "), "");
+        assert!(normalize_model_id("   ").is_empty());
     }
 
     #[test]

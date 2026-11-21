@@ -4794,5 +4794,8 @@
   "MCP & Skills 管理面（/api/tools/*）由后端 tools 模块提供，接口上线后本页自动可用。": "The MCP & Skills admin API (/api/tools/*) is provided by the backend tools module; this page becomes available once it ships.",
   "MCP & Skills 后端尚未就绪": "MCP & Skills backend not ready yet",
   "MCP 接入信息": "MCP connection info",
-  "Node.js 无需额外依赖，推荐使用；Python 需要本机有 python。": "Node.js needs no extra dependencies and is recommended; Python requires a local python."
+  "Node.js 无需额外依赖，推荐使用；Python 需要本机有 python。": "Node.js needs no extra dependencies and is recommended; Python requires a local python.",
+  "固定套用预设 id": "Pinned preset ID",
+  "留空 = 按模型自动匹配；名字对不上就不套，预设正文原样前插到 system 提示词": "Leave empty to match by the request model; no match applies nothing, and the preset body is prepended verbatim to the system prompt",
+  "自动套用": "Auto-applied"
 }

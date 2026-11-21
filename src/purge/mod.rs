@@ -597,7 +597,7 @@ pub fn preview_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) ->
 /// 顺序是刻意的：治理只跑在**原有**文本上，预设正文随后原样前插——词表因此
 /// 永远不会把第三方 prompt 改写成另一个版本。
 pub fn apply_request(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings, model: &str) -> Applied {
-    let mut applied = apply_inner(messages, cfg, true);
+    let mut applied = apply_messages(messages, cfg);
     if apply_auto_preset(messages, cfg, model) {
         applied.changed = true;
         record_auto_preset_hit();
@@ -1780,7 +1780,7 @@ mod tests {
         let cfg = PurgeSettings::default();
         assert!(cfg.enabled, "总开关默认打开");
         assert!(cfg.auto_preset, "自动套用默认打开");
-        assert_eq!(cfg.auto_preset_id, "");
+        assert!(cfg.auto_preset_id.is_empty());
     }
 
     #[test]
