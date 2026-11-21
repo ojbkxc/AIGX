@@ -295,7 +295,7 @@
   border: 0;
   border-right: 1px solid var(--border-color);
   background: transparent;
-  color: var(--text-color);
+  color: var(--text-1);
   font-size: 12px;
   cursor: pointer;
 }

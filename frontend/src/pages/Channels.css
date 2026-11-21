@@ -861,7 +861,7 @@ table tbody td input[type="checkbox"] {
   border: 1px dashed var(--border-color, #d0d7de);
   border-radius: 8px;
   background: transparent;
-  color: var(--text-secondary, #57606a);
+  color: var(--text-2);
   font-size: 13px;
   cursor: pointer;
   text-align: left;
@@ -944,7 +944,7 @@ table tbody td input[type="checkbox"] {
 
 .ch-preset-url {
   font-size: 11px;
-  color: var(--text-secondary, #57606a);
+  color: var(--text-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -963,7 +963,7 @@ table tbody td input[type="checkbox"] {
   cursor: pointer;
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-secondary, #57606a);
+  color: var(--text-2);
   display: flex;
   align-items: center;
   gap: 8px;

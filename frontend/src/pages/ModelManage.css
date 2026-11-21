@@ -1195,20 +1195,20 @@ body.mm-colset-dragging {
   border: 1px solid var(--border-color);
   border-radius: 999px;
   background: transparent;
-  color: var(--text-secondary, var(--text-muted));
+  color: var(--text-2);
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
 
 .mm-cap-toggle:hover:not(:disabled) {
-  border-color: var(--primary, var(--text-color));
-  color: var(--text-color);
+  border-color: var(--primary, var(--text-1));
+  color: var(--text-1);
 }
 
 .mm-cap-toggle.on {
   background: hsla(var(--accent-hue, 160), 70%, 50%, 0.14);
   border-color: hsla(var(--accent-hue, 160), 70%, 50%, 0.55);
-  color: var(--text-color);
+  color: var(--text-1);
 }
 
 /* ── 批量操作弹窗 ── */

@@ -291,7 +291,7 @@
 .purge-preview-meta {
   margin-top: 8px;
   font-size: 12px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
 }
 
 /* 配置体检告警：危险色块，逐条独立成段 */
@@ -327,11 +327,11 @@
   font-size: 13px;
 }
 .purge-skill-meta {
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   font-size: 12px;
 }
 .purge-skill-keywords {
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   font-size: 12px;
   word-break: break-all;
 }
@@ -344,7 +344,7 @@
   border-left: 3px solid var(--warning-color, #d97706);
   border-radius: 6px;
   background: var(--bg-secondary);
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -360,7 +360,7 @@
 }
 .purge-preset-total {
   flex: 0 0 auto;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -380,7 +380,7 @@
   border: 1px solid var(--border-color);
   border-radius: 999px;
   background: transparent;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   font-size: 12px;
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s, background 0.15s;
@@ -440,7 +440,7 @@
   overflow-wrap: anywhere;
 }
 .purge-preset-item-meta {
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   font-size: 12px;
 }
 .purge-preset-item-side {
@@ -448,7 +448,7 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 10px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-2);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }

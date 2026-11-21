@@ -541,12 +541,12 @@ tr[draggable="true"]:active {
 }
 
 tr:hover .as-act:not(:disabled) {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
 }
 
 .as-act:hover:not(:disabled) {
   background: var(--surface-bg, rgba(127, 127, 127, 0.12));
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
 }
 
 .as-act:disabled {
@@ -649,7 +649,7 @@ tr:hover .as-act:not(:disabled) {
 }
 
 .as-panel-clear-all:hover {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   background: rgba(127, 127, 127, 0.12);
 }
 
@@ -665,7 +665,7 @@ tr:hover .as-act:not(:disabled) {
 }
 
 .as-panel-close:hover {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   background: rgba(127, 127, 127, 0.12);
 }
 
@@ -696,7 +696,7 @@ tr:hover .as-act:not(:disabled) {
 .as-limit-model {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11.5px;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   min-width: 140px;
 }
 
@@ -722,7 +722,7 @@ tr:hover .as-act:not(:disabled) {
 }
 
 .as-clear-one:hover {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   background: rgba(127, 127, 127, 0.12);
 }
 
@@ -918,7 +918,7 @@ body.as-col-resizing {
   padding: 5px 4px;
   border-radius: 7px;
   font-size: 12.5px;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   cursor: pointer;
 }
 
@@ -969,7 +969,7 @@ body.as-col-resizing {
 }
 
 .as-colset-reset:hover {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   background: var(--hover-bg, rgba(127, 127, 127, 0.1));
 }
 
@@ -992,7 +992,7 @@ body.as-col-resizing {
 }
 
 .as-name-eye:hover {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   background: rgba(127, 127, 127, 0.14);
 }
 
@@ -1195,7 +1195,7 @@ body.as-col-resizing {
   gap: 7px;
   font-size: 12px;
   font-weight: 700;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   letter-spacing: 0.2px;
 }
 
@@ -1270,7 +1270,7 @@ body.as-col-resizing {
 .as-usage-pool-name {
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1352,7 +1352,7 @@ body.as-col-resizing {
   width: 100%;
   border: none;
   background: transparent;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   font: inherit;
   font-size: 12px;
   padding: 6px 8px;
@@ -1390,7 +1390,7 @@ body.as-col-resizing {
 }
 
 .as-toggle:hover {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
 }
 
 /* 工具条：自动余额轮询间隔选择（沿用全局 form-input 外观，只收窄） */
@@ -1453,7 +1453,7 @@ body.as-col-resizing {
 }
 
 .as-dlg-nav:hover {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   background: var(--hover-bg, rgba(127, 127, 127, 0.08));
 }
 
@@ -1496,7 +1496,7 @@ body.as-col-resizing {
   align-items: center;
   gap: 8px;
   font-size: 12.5px;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   cursor: pointer;
   user-select: none;
 }
@@ -1528,7 +1528,7 @@ body.as-col-resizing {
   flex: 1;
   min-width: 0;
   font-size: 12.5px;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
 }
 
 .as-limiter-ops {
@@ -1549,7 +1549,7 @@ body.as-col-resizing {
 .as-lg-title {
   font-size: 13px;
   font-weight: 600;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1613,7 +1613,7 @@ body.as-col-resizing {
 .as-lg-join {
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
 }
 
 .as-lg-join-select {
@@ -1754,7 +1754,7 @@ body.as-col-resizing {
 
 .as-lim-seg button.active {
   background: var(--btn-secondary-bg);
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   font-weight: 600;
 }
 
@@ -2237,7 +2237,7 @@ tr[draggable="true"]:active .as-grip {
   gap: 8px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   margin-bottom: 8px;
 }
 
@@ -2252,7 +2252,7 @@ tr[draggable="true"]:active .as-grip {
 }
 
 .as-pop-close:hover {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   background: var(--hover-bg);
 }
 
@@ -2278,7 +2278,7 @@ tr[draggable="true"]:active .as-grip {
 }
 
 .as-wallet-name {
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2352,7 +2352,7 @@ tr[draggable="true"]:active .as-grip {
 .as-act-menu-item {
   border: none;
   background: transparent;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   font-size: 12px;
   text-align: left;
   padding: 7px 9px;
@@ -2407,7 +2407,7 @@ tr[draggable="true"]:active .as-grip {
 .as-act-menu-apply {
   border: 1px solid var(--border-color);
   background: transparent;
-  color: var(--text-main, var(--text-color));
+  color: var(--text-main);
   font-size: 11.5px;
   padding: 3px 9px;
   border-radius: 6px;
