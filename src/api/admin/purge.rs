@@ -5,7 +5,7 @@
 //! 真实请求行为，不是历史报表。
 
 use axum::{
-    extract::{Path as AxumPath, Query, State},
+    extract::{Multipart, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -166,6 +166,123 @@ pub async fn handle_apply_purge_preset(
         "success": true,
         "data": { "applied": applied, "settings": settings },
     })))
+}
+
+/// POST /api/purge/skills/import —— 导入技能包（ZIP/TAR/TGZ）到破甲技能目录。
+///
+/// multipart 表单字段：
+/// - `file`：归档文件（必填，ZIP / TAR / TGZ，按魔数识别）；
+/// - `name`：目标目录名（可选，缺省按上传文件名推导）；
+/// - `overwrite`：同名目录是否覆盖（"true"/"1"/"yes"/"on"，默认 false）。
+///
+/// 安全校验（见 [`crate::purge::skill_import`]）：拒绝符号链接/绝对路径/`..`/
+/// 保留名/重复路径，条目数与解压后总大小双上限；归档必须含 `SKILL.md`。只写盘，
+/// 不改配置，不自动启用任何治理开关。
+pub async fn handle_import_purge_skills(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    const MAX_FIELDS: usize = 16;
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut filename = String::new();
+    let mut name = String::new();
+    let mut overwrite = false;
+    let mut fields = 0usize;
+
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        error_response(
+            &format!("读取 multipart 失败：{e}"),
+            StatusCode::BAD_REQUEST,
+        )
+    })? {
+        fields += 1;
+        if fields > MAX_FIELDS {
+            return Err(error_response(
+                "multipart 字段过多",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        let field_name = field.name().unwrap_or_default().to_string();
+        let file_name = field.file_name().map(|s| s.to_string());
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| error_response(&format!("读取字段失败：{e}"), StatusCode::BAD_REQUEST))?
+        {
+            if buf.len() + chunk.len() > crate::purge::skill_import::MAX_ARCHIVE_BYTES {
+                return Err(error_response(
+                    &format!(
+                        "归档超过 {} MiB 上限",
+                        crate::purge::skill_import::MAX_ARCHIVE_BYTES / 1024 / 1024
+                    ),
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                ));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        match field_name.as_str() {
+            "file" => {
+                filename = file_name.unwrap_or_default();
+                file_bytes = Some(buf);
+            }
+            "name" => name = String::from_utf8_lossy(&buf).trim().to_string(),
+            "overwrite" => {
+                let value = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+                overwrite = matches!(value.trim(), "true" | "1" | "yes" | "on");
+            }
+            _ => {}
+        }
+    }
+
+    let bytes = file_bytes
+        .ok_or_else(|| error_response("缺少 file 字段（归档文件）", StatusCode::BAD_REQUEST))?;
+    let format = crate::purge::skill_import::ArchiveFormat::detect(&bytes)
+        .map_err(|e| error_response(&e.to_string(), StatusCode::BAD_REQUEST))?;
+
+    let dir_name = if name.is_empty() {
+        crate::purge::skill_import::derive_dir_name(&filename).ok_or_else(|| {
+            error_response(
+                "无法从文件名推导目录名，请显式提供 name",
+                StatusCode::BAD_REQUEST,
+            )
+        })?
+    } else {
+        name
+    };
+
+    let skill_root = crate::purge::expand_home(&state.purge.snapshot().skill_dir);
+
+    let report = tokio::task::spawn_blocking(move || {
+        crate::purge::skill_import::import_archive(
+            &bytes,
+            format,
+            &skill_root,
+            &dir_name,
+            overwrite,
+        )
+    })
+    .await
+    .map_err(|e| {
+        error_response(
+            &format!("导入任务失败：{e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?
+    .map_err(|e| {
+        let message = e.message().to_string();
+        let status = match e {
+            crate::purge::skill_import::ImportError::Exists(_) => StatusCode::CONFLICT,
+            crate::purge::skill_import::ImportError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            crate::purge::skill_import::ImportError::Invalid(_) => StatusCode::BAD_REQUEST,
+        };
+        error_response(&message, status)
+    })?;
+
+    Ok(Json(json!({ "success": true, "data": report })))
 }
 
 /// `/api/purge/presets` 的查询参数。

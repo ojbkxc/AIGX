@@ -2537,6 +2537,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/purge/presets/:id/apply",
             post(api::admin::handle_apply_purge_preset),
         )
+        // 破甲技能包导入（ZIP/TAR/TGZ 安全解压到技能目录）
+        .route(
+            "/api/purge/skills/import",
+            post(api::admin::handle_import_purge_skills),
+        )
         // 护栏（输入/输出黑名单 + 200 假答复门控；默认全关）
         .route(
             "/api/guardrail",

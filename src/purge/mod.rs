@@ -31,6 +31,8 @@ use crate::storage::FileStore;
 pub mod preset_catalog;
 /// 预设检索与应用。
 pub mod presets;
+/// 技能包导入（ZIP/TAR/TGZ 安全解压到技能目录）。
+pub mod skill_import;
 
 /// 持久化键（FileStore）。
 pub const PURGE_SETTINGS_KEY: &str = "purge_settings";
