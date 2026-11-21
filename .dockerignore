@@ -5,6 +5,8 @@ static/
 .git/
 .github/
 *.md
+# purge 预设是编译期 include_str! 依赖，必须进构建上下文（含 .md）
+!assets/purge-presets/**
 tools/
 scripts/
 frontend/tests/
