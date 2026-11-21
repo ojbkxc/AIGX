@@ -1,4 +1,4 @@
-//! 后台刷新任务：Notify 唤醒 + 60s 空闲 tick 的三阶段流水线。
+//! 后台刷新任务：Notify 唤醒 + 60s 空闲 tick 的刷新流水线。
 //!
 //! ## 调度模型（为什么是 Notify + 空闲 tick）
 //!
@@ -10,24 +10,31 @@
 //!   长睡眠：目录是「打开插件页就要好看」的面子工程，60s 粒度足够；
 //!   长睡眠（如睡 6h 等 TTL）会让手动 wake 白等很久。
 //!
-//! ## 阶段顺序（curated → tagged → stars）与失败语义
+//! ## 刷新顺序：CDN 优先 → 旧链回落 → stars
 //!
-//! 1. **curated**（market）：registry + dist join + npm 回退；
-//! 2. **tagged**（github）：topic 搜索 + 逐仓验证（依赖 market 的条目名
-//!    集合做补集判定，**必须在 market 之后**）；
-//! 3. **stars**：第三方条目的星数刷新（独立 12h TTL，每客户端 12~18h 错开；
-//!    失败不影响前两阶段）。
+//! 1. **CDN 聚合目录**（[`super::cdn`]，对齐 A2A beta.4）：一次拉齐
+//!    official / recommended / third-party 全部分组，再用分发索引补充
+//!    Magpie 条目的下载地址（[`super::distribution`]）。成功即接管
+//!    market + github 两个阶段。
+//! 2. **旧链回落**：CDN 不可用（网络 / 格式 / 空目录保护）时，走 AIGX
+//!    自带的 registry + dist join + npm 回退（[`super::market`]）与 GitHub
+//!    topic 发现（[`super::github`]）——**保证不比没有 CDN 时更差**。
+//!    `CDN 失败` 与 `旧链阶段失败` 的重试闸门都在旧链里推进，避免每轮
+//!    反复打两个源。
+//! 3. **stars**：第三方条目星数刷新（独立 12h TTL，失败不影响可用性）。
 //!
-//! 每阶段独立 TTL + 独立重试闸门（cache.rs）：某阶段被闸门拦住就跳过，
-//! 不重打限流源；force=true 绕过 TTL 但**不绕过重试闸门**——限流退避
-//! 是对上游的礼貌，手动刷新也不例外（这是「手动刷新」与「无脑重试」的
-//! 区别）。
+//! ## 失败语义
+//!
+//! CDN 返回 [`Err`] 时**不**推进闸门，直接进入旧链；旧链阶段自己决定
+//! 成功（清闸门、盖时间戳）还是失败（推进带抖动的重试闸门）。因此 CDN
+//! 挂掉时刷新频率由旧链的 TTL / 闸门控制，不会热循环。
 
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, Notify};
 
 use super::cache::{Cache, Stage};
+use super::cdn;
 use super::network;
 use super::types::{merge, ScriptPublisher};
 
@@ -184,8 +191,89 @@ async fn run_loop(r: Arc<Refresher>) {
     }
 }
 
-/// 一轮刷新：market → github → stars，逐阶段过 TTL / 闸门，成功/失败都落缓存。
+/// 一轮刷新：CDN →（失败回落）旧链 market/github → stars。
 async fn refresh_cycle(r: &Refresher, force: bool) {
+    let client = &r.http;
+
+    // market 是否到期（github 在旧链里再各自判 TTL）
+    let do_market = force || {
+        let c = r.cache.lock().await;
+        c.market_stale(network::now_unix()) && !c.market_blocked(network::now_unix())
+    };
+
+    let mut cdn_done = false;
+    if do_market {
+        let cdn_result = cdn::fetch(client).await;
+        // 「CDN 成功才接管」的判断单独抽出，便于单测（见 tests::cdn_usable）。
+        if cdn_usable(&cdn_result) {
+            let catalog = match cdn_result {
+                Ok(catalog) => catalog,
+                Err(_) => unreachable!("cdn_usable 已保证 Ok"),
+            };
+            let catalog = fill_distribution(client, catalog).await;
+            let mut c = r.cache.lock().await;
+            apply_cdn(&mut c, catalog, network::now_unix());
+            let _ = c.save(&r.path);
+            tracing::info!(
+                market = c.market.len(),
+                third_party = c.github.len(),
+                "CDN 目录刷新成功"
+            );
+            cdn_done = true;
+        } else if let Err(f) = cdn_result {
+            tracing::warn!("CDN 目录不可用，回落旧链：{}", f.message);
+        }
+    }
+
+    // CDN 未接管：旧链 market + github（各自按 TTL / 闸门决定跑不跑）。
+    if !cdn_done {
+        refresh_legacy_market_and_github(r, force).await;
+    }
+
+    // 阶段 3：stars（独立 TTL；只刷第三方条目）
+    refresh_stars(r, force).await;
+}
+
+/// CDN 结果是否可用；不可用（任何 `Err`）即回落旧链。
+///
+/// 抽成函数而非内联 `is_ok()`：这是「CDN 失败回落旧链」契约的单一判据，
+/// 单测直接钉住它。
+fn cdn_usable(result: &Result<cdn::Catalog, network::Failure>) -> bool {
+    result.is_ok()
+}
+
+/// 给 CDN 目录补分发数据（Magpie 下载地址 + integrity）。
+///
+/// 分发索引整段失败也不阻断：Magpie 条目会被标成「暂不可安装」，其余
+/// 来源（npm / github）照常可用。
+async fn fill_distribution(client: &reqwest::Client, mut catalog: cdn::Catalog) -> cdn::Catalog {
+    match super::distribution::fetch(client).await {
+        Ok(dist) => {
+            let hits = super::distribution::attach_archives(&mut catalog.market, &dist);
+            tracing::info!(hits, "CDN 条目补充分发数据完成");
+        }
+        Err(f) => {
+            tracing::warn!("分发索引不可用，Magpie 条目暂标不可安装：{}", f.message);
+            super::distribution::mark_missing_archives(&mut catalog.market);
+        }
+    }
+    catalog
+}
+
+/// 把一次成功的 CDN 结果落进缓存：接管 market + github 两个阶段，清错误
+/// 与闸门、盖时间戳；上游 warning 写进 `market_error` 供管理面展示。
+fn apply_cdn(cache: &mut Cache, catalog: cdn::Catalog, now: i64) {
+    cache.market = catalog.market;
+    cache.github = catalog.github;
+    cache.record_success(Stage::Market, now);
+    cache.record_success(Stage::Github, now);
+    // record_success 会清 market_error；上游告警要覆盖回去（None 时保持已清）。
+    cache.market_error = catalog.warning;
+}
+
+/// 旧链阶段 1 + 2：market（registry + dist + npm）→ github（topic 发现）。
+/// 逐阶段过 TTL / 闸门，成功/失败都落缓存。
+async fn refresh_legacy_market_and_github(r: &Refresher, force: bool) {
     let now = network::now_unix();
     let client = &r.http;
 
@@ -265,9 +353,12 @@ async fn refresh_cycle(r: &Refresher, force: bool) {
             }
         }
     }
+}
 
-    // ---------- 阶段 3：stars（独立 TTL；只刷第三方条目）----------
+/// 阶段 3：stars（独立 TTL；只刷第三方条目）。
+async fn refresh_stars(r: &Refresher, force: bool) {
     let now = network::now_unix();
+    let client = &r.http;
     let do_stars = force || {
         let c = r.cache.lock().await;
         c.stars_stale(now) && !c.stars_blocked(now)
@@ -380,5 +471,45 @@ mod tests {
             .swap(false, std::sync::atomic::Ordering::Relaxed);
         assert!(!r.force_flag.load(std::sync::atomic::Ordering::Relaxed));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CDN 契约：只有 `Ok` 才接管；任何 `Err`（网络 / 坏 schema / 空目录
+    /// 保护）都必须回落旧链。
+    #[test]
+    fn cdn_usable_only_on_ok() {
+        let bad = super::super::cdn::parse_catalog(b"not json");
+        assert!(!cdn_usable(&bad), "解析失败必须回落旧链");
+        let bad_schema = super::super::cdn::parse_catalog(br#"{"schemaVersion":2,"entries":[]}"#);
+        assert!(!cdn_usable(&bad_schema), "坏 schema 必须回落旧链");
+        let good = super::super::cdn::parse_catalog(
+            br#"{"schemaVersion":1,"entries":[
+                {"name":"@magpie-community/a","providers":["a"],"source":"magpie:a",
+                 "publisher":"official","kind":"provider","providerVerified":true}]}"#,
+        );
+        assert!(cdn_usable(&good), "合法目录应接管");
+    }
+
+    /// 一次成功的 CDN 结果接管 market+github 两桶，清错误、盖时间戳，
+    /// 并把上游 warning 落进 market_error。
+    #[test]
+    fn apply_cdn_takes_over_and_records_success() {
+        let mut cache = Cache::empty();
+        // 先塞一条旧错误，验证被清 / 被 warning 覆盖
+        cache.market_error = Some("old".into());
+        let catalog = super::super::cdn::parse_catalog(
+            r#"{"schemaVersion":1,"warning":"目录告警","entries":[
+                {"name":"@magpie-community/a","providers":["a"],"source":"magpie:a",
+                 "publisher":"official","kind":"provider","providerVerified":true}]}"#
+                .as_bytes(),
+        )
+        .expect("合法目录");
+        apply_cdn(&mut cache, catalog, 1_700_000_000);
+        assert_eq!(cache.market.len(), 1);
+        assert_eq!(cache.market_at, 1_700_000_000);
+        assert_eq!(cache.github_at, 1_700_000_000);
+        assert_eq!(cache.market_retry, 0);
+        assert_eq!(cache.github_retry, 0);
+        assert_eq!(cache.market_error.as_deref(), Some("目录告警"));
+        assert!(cache.github.is_empty() && cache.github_missing);
     }
 }

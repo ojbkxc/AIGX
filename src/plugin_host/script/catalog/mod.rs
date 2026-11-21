@@ -1,15 +1,22 @@
-//! Magpie 脚本插件目录 —— 双源拉取 + 三分类 + TTL 缓存的后台任务。
+//! Magpie 脚本插件目录 —— CDN 优先 + 旧链回落 + 三分类 + TTL 缓存的后台任务。
 //!
 //! ## 对齐范围（只对齐可观察契约，不拷上游 AGPL 代码）
 //!
-//! 上游 A2A 3.5.0-beta.1 插件页的「Magpie 插件」分组行为：
+//! 自 A2A **v3.5.0-beta.4** 起，上游把 `script/catalog/{github,market,
+//! network,provider}.rs` 删除，改为拉**官网 CDN 聚合目录**。AIGX 跟进：
+//!
+//! - **首选**：拉官网 CDN 聚合目录（[`cdn`]）——`schemaVersion==1` 的
+//!   camelCase 条目、`is_provider` 过滤、按 `publisher=="third-party"`
+//!   分组、含 `commit_sha`；再用分发索引（[`distribution`]）补齐 Magpie
+//!   条目的下载地址与 integrity；
+//! - **回落**：CDN 不可用（网络 / 格式 / 空目录保护）时，走 AIGX 自带的
+//!   旧链——registry + dist join + npm 回退（[`market`]）与 GitHub topic
+//!   发现（[`github`]）——**保证不比没有 CDN 时更差**；
 //! - **三分类**：官方（@magpie-community/*）/ 推荐（registry 其余）/
-//!   第三方（GitHub topic 搜到但不在 registry）；
-//! - **双源**：策展清单 registry.json（main 分支）+ 分发索引 dist/index.json
-//!   （dist 分支）join 出「可安装」条目；dist 没有的走 npm registry 回退；
-//! - **TTL 缓存**：market 6h / github 10min / stars 6h（节奏差异的理由见
-//!   cache.rs）；catalog.json 落 `{data_dir}/script-plugins/catalog.json`，
-//!   version==1，≤16MB；
+//!   第三方（`publisher=="third-party"`，GitHub 源）；
+//! - **TTL 缓存**：market 30min / github 60min / stars 12h（节奏差异的理由
+//!   见 cache.rs）；缓存落 `{data_dir}/script-plugins/website-catalog.json`
+//!   （beta.4 文件名），version==1，≤16MB；旧 `catalog.json` 兼容读取；
 //! - **排序**：official 0 < recommended 1 < third-party 2，再 stars 降序、
 //!   label 升序。
 //!
@@ -43,12 +50,15 @@
 //! ## 模块布局
 //!
 //! - [`types`] —— 富条目 Entry / 前端投影 PublicEntry / merge 排序
-//! - [`cache`] —— catalog.json 缓存 + 三阶段 TTL / 重试闸门
+//! - [`cache`] —— website-catalog.json 缓存 + 三阶段 TTL / 重试闸门
+//! - [`website`] —— 官网 CDN / legacy 端点 + CDN→legacy 字节回落
+//! - [`cdn`] —— 官网 CDN 聚合目录解析（camelCase / is_provider / 分组 / commit_sha）
+//! - [`distribution`] —— 分发索引（tgz + integrity），CDN→legacy→旧链回落
 //! - [`network`] —— 统一超时/限流/重试语义 + 有界并发工具
-//! - [`market`] —— registry.json + dist join + npm 回退
-//! - [`github`] —— topic 搜索 + 静态验证（不执行代码）
+//! - [`market`] —— 旧链：registry.json + dist join + npm 回退
+//! - [`github`] —— 旧链：topic 搜索 + 静态验证（不执行代码）
 //! - [`provider`] —— 入口源码 tokenizer 静态扫描 auth.provider
-//! - [`refresh`] —— Notify + 60s tick 后台任务（三阶段流水线）
+//! - [`refresh`] —— Notify + 60s tick 后台任务（CDN 优先 / 旧链回落）
 //!
 //! ## 对外 API（[`Catalog`]）
 //!
@@ -57,6 +67,7 @@
 //! - [`Catalog::status`] —— 阶段时间戳/错误/三分类计数（管理面展示）；
 //! - [`Catalog::recommendations`] —— 合并排序列表（可投影成契约条目或
 //!   前端 camelCase JSON）；
+//! - [`Catalog::github_commit`] —— 仓库 → 目录里的 commit_sha（更新判定用）；
 //! - [`Catalog::package_metadata`] —— 已装包名 → 目录条目回映射（安装页
 //!   「已安装」徽标 / 版本提示）；
 //! - [`Catalog::catalog_path`] —— 缓存文件绝对路径（runtime 塞进
@@ -64,6 +75,8 @@
 
 #![allow(dead_code)] // 脚本目录推荐/排行（预留，未接线）
 mod cache;
+mod cdn;
+mod distribution;
 mod github;
 mod market;
 mod network;
@@ -72,6 +85,7 @@ mod network;
 pub(crate) mod provider;
 mod refresh;
 mod types;
+mod website;
 
 // 私有模块的产出类型通过 re-export 变得可命名（否则 pub 方法返回它们
 // 会触发 E0446「private type in public interface」）。IgnoredRepo 直接从
@@ -147,6 +161,24 @@ impl Catalog {
             .find(|e| e.name.to_lowercase() == lower)
     }
 
+    /// 仓库 → 目录里的最新 commit_sha（对应 beta.4 `catalog.rs:13-24`）。
+    ///
+    /// 只 CDN 聚合目录的条目带 `commit_sha`；旧链发现的仓库 / 本地直装没有
+    /// 则返回 None（调用方据此退回 GitHub API 或放弃比对）。只认 40 位
+    /// 十六进制 SHA——短号 / 分支名不是可比的提交标识。
+    pub async fn github_commit(&self, repository: &str) -> Option<String> {
+        self.recommendations()
+            .await
+            .into_iter()
+            .find(|e| {
+                e.repository
+                    .as_deref()
+                    .is_some_and(|repo| repo.eq_ignore_ascii_case(repository))
+            })
+            .and_then(|e| e.commit_sha)
+            .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+
     /// 缓存文件绝对路径（runtime 塞进 ScriptInitPayload.catalog_path）。
     pub fn catalog_path(&self) -> &std::path::Path {
         &self.inner.path
@@ -199,7 +231,7 @@ mod tests {
         // 空缓存：三分类计数为 0，market 必然过期
         assert_eq!(s.official + s.recommended + s.third_party, 0);
         assert!(s.market_stale);
-        assert!(cat.catalog_path().ends_with("catalog.json"));
+        assert!(cat.catalog_path().ends_with("website-catalog.json"));
         assert!(cat.recommendations().await.is_empty());
         assert!(cat.public_entries().await.is_empty());
         assert!(cat.catalog_entries().await.is_empty());

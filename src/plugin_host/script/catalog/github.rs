@@ -363,6 +363,8 @@ async fn verify_repo(
         // 记下本轮读取清单的时刻，作为 MANIFEST_TTL 复用判据。
         manifest_at: Some(now),
         provider_verified: Some(true),
+        // 旧链 GitHub 发现不解析提交 SHA（安装走默认分支），无 commit_sha。
+        commit_sha: None,
     });
     verdict
 }

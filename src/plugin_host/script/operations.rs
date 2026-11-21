@@ -463,35 +463,86 @@ pub async fn set_provider_enabled(
 
 /// 检查更新（A2A `GET /api/plugins/scripts/check`）。
 ///
-/// 对照 Magpie 目录：只报「目录里有、且版本与已装不同」的包。目录未
-/// 刷新时返回空表 + `catalog` 状态（前端负责提示）。
+/// 两种来源分别判定「有没有新版本」：
+/// - **Magpie**：目录里该包的 `version` vs 已装 `version`；
+/// - **GitHub**：目录里的 `commit_sha` vs 已装钉住的提交（见
+///   [`github_update`]，对应 beta.4 `updates.rs:160-169` / `catalog.rs:13-24`）。
+///
+/// 空注册表（没装任何包）直接短路，不必逐条查目录。目录未刷新时返回空表
+/// + `catalog` 状态（前端负责提示）。
 pub async fn check_updates(manager: &ScriptHostManager) -> serde_json::Value {
     let installed = storage::load_packages(manager.store());
     let mut updates = Vec::new();
-    for package in &installed {
-        // 只有 magpie 来源的包有目录版本可比
-        if package.source != ScriptSource::Magpie {
-            continue;
-        }
-        let Some(entry) = manager.catalog().package_metadata(&package.id).await else {
-            continue;
-        };
-        let Some(latest) = entry.version.clone().filter(|v| !v.is_empty()) else {
-            continue;
-        };
-        if latest != package.version {
-            updates.push(serde_json::json!({
-                "id": package.id,
-                "name": package.label,
-                "current": package.version,
-                "latest": latest,
-            }));
+    // 空注册表短路：没有已装包就没有可更新的东西。
+    if !installed.is_empty() {
+        for package in &installed {
+            match package.source {
+                ScriptSource::Magpie => {
+                    let Some(entry) = manager.catalog().package_metadata(&package.id).await else {
+                        continue;
+                    };
+                    let Some(latest) = entry.version.clone().filter(|v| !v.is_empty()) else {
+                        continue;
+                    };
+                    if latest != package.version {
+                        updates.push(serde_json::json!({
+                            "id": package.id,
+                            "name": package.label,
+                            "current": package.version,
+                            "latest": latest,
+                        }));
+                    }
+                }
+                ScriptSource::Github => {
+                    if let Some(update) = github_update(manager, package).await {
+                        updates.push(update);
+                    }
+                }
+                _ => {}
+            }
         }
     }
     serde_json::json!({
         "updates": updates,
         "catalog": manager.catalog().status().await,
     })
+}
+
+/// GitHub 来源的更新判定：用目录里的 `commit_sha` 对比已装钉住的提交。
+///
+/// `source_ref` 形如 `owner/repo` 或 `owner/repo@<ref>`。只有 `ref` 是
+/// 40 位提交 SHA（`github:owner/repo@<sha>`）时才能可靠比对——分支 / 标签
+/// 安装没有记录解析后的提交（`ScriptPackage` 契约不含 commit 字段），无法
+/// 判断「当前是否已是最新」，宁可漏报也不误报。
+async fn github_update(
+    manager: &ScriptHostManager,
+    package: &ScriptPackage,
+) -> Option<serde_json::Value> {
+    let (repository, reference) = package
+        .source_ref
+        .split_once('@')
+        .unwrap_or((package.source_ref.as_str(), ""));
+    let latest = manager.catalog().github_commit(repository).await?;
+    let (current, latest) = commit_update(reference, &latest)?;
+    Some(serde_json::json!({
+        "id": package.id,
+        "name": package.label,
+        "current": current,
+        "latest": latest,
+    }))
+}
+
+/// 纯比较：已装引用是 40 位 SHA 且与目录最新 commit 不同 → 返回
+/// `(current12, latest12)` 短号；否则 None（未钉 SHA / 已是最新）。
+fn commit_update(installed_reference: &str, latest_sha: &str) -> Option<(String, String)> {
+    let current = installed_reference.trim();
+    if current.len() != 40 || !current.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    if current.eq_ignore_ascii_case(latest_sha) {
+        return None;
+    }
+    Some((current[..12].to_string(), latest_sha[..12].to_string()))
 }
 
 fn persist_packages(manager: &ScriptHostManager, packages: &[ScriptPackage]) -> Result<(), String> {
@@ -701,5 +752,22 @@ mod tests {
         assert_eq!(other_enabled_version(&packages, "p", "1.0.0"), None);
         let none = vec![pkgv("p", "1.0.0", false)];
         assert_eq!(other_enabled_version(&none, "p", "2.0.0"), None);
+    }
+
+    #[test]
+    fn commit_update_compares_only_pinned_sha() {
+        let installed = "0123456789abcdef0123456789abcdef01234567";
+        let latest = "fedcba9876543210fedcba9876543210fedcba98";
+        // 不同提交 → 可更新（各 12 位短号）
+        let (cur, lat) = commit_update(installed, latest).unwrap();
+        assert_eq!(cur, &installed[..12]);
+        assert_eq!(lat, &latest[..12]);
+        // 同一提交（大小写不敏感）→ 无更新
+        assert!(commit_update(latest, &latest.to_ascii_uppercase()).is_none());
+        // 分支 / 标签 / 短号 → 无法可靠比对，宁可漏报
+        assert!(commit_update("main", latest).is_none());
+        assert!(commit_update("v1.0.0", latest).is_none());
+        assert!(commit_update(&installed[..12], latest).is_none());
+        assert!(commit_update("", latest).is_none());
     }
 }

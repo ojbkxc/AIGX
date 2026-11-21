@@ -1,4 +1,4 @@
-//! catalog.json 磁盘缓存：目录的持久态 + 各阶段 TTL / 重试闸门。
+//! website-catalog.json 磁盘缓存：目录的持久态 + 各阶段 TTL / 重试闸门。
 //!
 //! ## 为什么 TTL 三个阶段不一样
 //!
@@ -152,19 +152,28 @@ impl Cache {
         }
     }
 
-    /// 缓存文件路径：`{script_plugins_root}/catalog.json`。
+    /// 缓存文件路径：`{script_plugins_root}/website-catalog.json`。
     ///
-    /// runtime 把这个绝对路径塞进 ScriptInitPayload.catalog_path 交给
-    /// js-host（Bun 侧市场查询直接读文件，不走网关 RPC）。
+    /// 文件名对齐 A2A beta.4（上游 `cache.rs:45-52`，从 `catalog.json` 改成
+    /// `website-catalog.json`）。runtime 把这个绝对路径塞进
+    /// ScriptInitPayload.catalog_path 交给 js-host（Bun 侧市场查询直接读
+    /// 文件，不走网关 RPC）。
     pub fn cache_path(script_root: &Path) -> PathBuf {
-        script_root.join("catalog.json")
+        script_root.join("website-catalog.json")
     }
 
     /// 从磁盘加载；任何异常（不存在 / 超限 / 版本不认识 / 解析失败）都
     /// 返回空缓存——缓存永远只是加速，坏了就重拉，不让网关启动失败。
+    ///
+    /// 升级兼容：先读新文件名；不存在时回退读旧 `catalog.json`（beta.4 之前
+    /// 的落盘名），避免升级后首启丢掉已有缓存、白烧一轮完整刷新。
     pub fn load(path: &Path) -> Cache {
-        let Ok(bytes) = std::fs::read(path) else {
-            return Cache::empty();
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => match std::fs::read(path.with_file_name("catalog.json")) {
+                Ok(bytes) => bytes,
+                Err(_) => return Cache::empty(),
+            },
         };
         if bytes.len() > MAX_CACHE_BYTES {
             tracing::warn!(
@@ -208,8 +217,8 @@ impl Cache {
         }
     }
 
-    /// 原子写盘：先写 `catalog.json.tmp` 再 rename（同目录 rename 是原子操作；
-    /// Windows 上 std::fs::rename 对已存在目标会覆盖）。
+    /// 原子写盘：先写 `website-catalog.json.tmp` 再 rename（同目录 rename 是
+    /// 原子操作；Windows 上 std::fs::rename 对已存在目标会覆盖）。
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -312,7 +321,25 @@ mod tests {
     #[test]
     fn cache_path_layout() {
         let p = Cache::cache_path(Path::new("/data/script-plugins"));
-        assert_eq!(p, Path::new("/data/script-plugins/catalog.json"));
+        // 对齐 A2A beta.4：落盘名从 catalog.json 改成 website-catalog.json。
+        assert_eq!(p, Path::new("/data/script-plugins/website-catalog.json"));
+    }
+
+    #[test]
+    fn load_falls_back_to_legacy_catalog_json() {
+        // 升级兼容：新文件名不存在时读旧 catalog.json。
+        let dir = std::env::temp_dir().join("aigx_catalog_cache_legacy_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let new_path = dir.join("website-catalog.json");
+        let legacy_path = dir.join("catalog.json");
+        let mut c = Cache::empty();
+        c.market.push(sample_entry("legacy"));
+        // 只写旧文件名
+        c.save(&legacy_path).unwrap();
+        let loaded = Cache::load(&new_path);
+        assert_eq!(loaded.market.len(), 1, "应回退读取旧 catalog.json");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -117,6 +117,16 @@ pub struct Entry {
     pub manifest_at: Option<i64>,
     /// 入口静态扫描是否验证到 auth.provider 证据（None=未扫描，策展条目默认不扫）。
     pub provider_verified: Option<bool>,
+    /// 目录条目对应的上游提交 SHA（CDN 目录 `commitSha`）。
+    ///
+    /// 仅 CDN 聚合目录（beta.4 `Entry.commit_sha`）会带；旧链
+    /// registry/dist/GitHub 发现条目为 None。用途：已装 GitHub 插件的
+    /// 「有没有新提交」快速判定（`Catalog::github_commit`）——不必再打
+    /// GitHub API 就能和目录里的 commit 比对。
+    ///
+    /// `#[serde(default)]` 让旧 `catalog.json` / 旧缓存条目（无此键）也能
+    /// 反序列化成 None，见模块「兼容旧缓存读取」。
+    pub commit_sha: Option<String>,
 }
 
 impl Entry {
