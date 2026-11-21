@@ -312,7 +312,7 @@ pub fn management_view(services: &ToolServices, catalog: &ImageCatalog) -> Value
         "editing_error": editing_error,
         "timeout_seconds": super::timeout_seconds(services, super::IMAGE_GENERATION_SERVICE_ID),
         "runtime_available": true,
-        "runtime_note": "任务/文件面/MCP/本地桥接脚本已接线；模型能力用标签表达（image → 生图，image_editing/image_edit → 编辑，未声明编辑标签时回退为生图；对应上游 supports_image_generation/supports_image_editing）",
+        "runtime_note": "任务/文件面/MCP/本地桥接脚本已接线；模型能力用标签表达（image → 生图，image_editing/image_edit → 编辑，未声明编辑标签时回退为生图；对应上游 supports_image_generation/supports_image_editing）；MCP 生图使用管理员账号池，不写网关请求日志、不对网关 Key/用户计费（上游经内部 images 管线计用量）",
     })
 }
 

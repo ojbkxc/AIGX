@@ -453,13 +453,59 @@ pub async fn mcp_vision(
     mcp_post(&state, headers, body, McpServerKind::Vision).await
 }
 
+/// 图片 MCP 请求体上限（与上游 `image_input::MAX_REQUEST_BYTES` 一致）。
+const IMAGE_MCP_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// 图片 MCP 请求体护栏（上游口径）：超过 16 MiB → 413；批量数组 → 400。
+///
+/// 图片任务按 `request_id` 幂等、按 Key 归属计配，批量提交无法给每个子请求
+/// 分配独立幂等键，故明确拒绝、要求逐个提交。
+fn image_mcp_body_guard(body: &Bytes) -> Option<Response> {
+    if body.len() > IMAGE_MCP_MAX_BODY_BYTES {
+        return Some(json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({ "error": { "code": "invalid_image_input", "message": "图片 MCP 请求不得超过 16 MiB" } }),
+        ));
+    }
+    if serde_json::from_slice::<Value>(body).is_ok_and(|value| value.is_array()) {
+        return Some(json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": { "code": "invalid_image_input", "message": "图片 MCP 不接受批量提交，请逐个提交任务" } }),
+        ));
+    }
+    None
+}
+
 /// `POST /mcp/image-generation`
+///
+/// 与上游一致：先做网页来源同源校验（防跨站提交），再限 16 MiB、拒绝批量
+/// 数组，最后交给通用 MCP 分发；响应统一加 `Cache-Control: private, no-store`。
 pub async fn mcp_image_generation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    request: axum::extract::Request,
 ) -> Response {
-    mcp_post(&state, headers, body, McpServerKind::ImageGeneration).await
+    if let Err(error) = tool_services::image_runtime::validate_origin(&headers) {
+        return tool_services::image_runtime::error_response(error);
+    }
+    let body = match axum::body::to_bytes(request.into_body(), IMAGE_MCP_MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            return json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({ "error": { "code": "invalid_image_input", "message": "图片 MCP 请求不得超过 16 MiB" } }),
+            )
+        }
+    };
+    if let Some(rejection) = image_mcp_body_guard(&body) {
+        return rejection;
+    }
+    let mut response = mcp_post(&state, headers, body, McpServerKind::ImageGeneration).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("private, no-store"),
+    );
+    response
 }
 
 /// `GET /mcp/image-generation/files/{id}` —— 生成图片下载。
@@ -548,5 +594,24 @@ mod tests {
         assert!(allowed_providers(&key).is_none());
         key.allowed_providers = Some(vec!["workbuddy".into()]);
         assert_eq!(allowed_providers(&key).unwrap(), vec!["workbuddy"]);
+    }
+
+    /// 图片 MCP 请求体护栏：合法单条放行、批量数组 400、超 16 MiB 413。
+    #[test]
+    fn image_mcp_body_guard_rejects_batches_and_oversize() {
+        let single = Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+        assert!(image_mcp_body_guard(&single).is_none());
+
+        let batch = Bytes::from_static(br#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#);
+        assert_eq!(
+            image_mcp_body_guard(&batch).unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let oversized = Bytes::from(vec![b'{'; IMAGE_MCP_MAX_BODY_BYTES + 1]);
+        assert_eq!(
+            image_mcp_body_guard(&oversized).unwrap().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 }
