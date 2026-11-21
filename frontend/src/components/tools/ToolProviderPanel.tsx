@@ -351,7 +351,7 @@ export default function ToolProviderPanel(): JSX.Element {
 
   if (loading) {
     return (
-      <Card title={t('搜索提供商')}>
+      <Card title={t('上游提供商配置')}>
         <div className="tpp-loading">
           <Loader2 size={14} className="tpp-spin" />
           {t('正在读取提供商…')}
@@ -362,7 +362,7 @@ export default function ToolProviderPanel(): JSX.Element {
 
   if (notReady) {
     return (
-      <Card title={t('搜索提供商')}>
+      <Card title={t('上游提供商配置')}>
         <EmptyState icon="🔎" message={t('搜索提供商接口尚未就绪')} />
       </Card>
     );
@@ -373,7 +373,7 @@ export default function ToolProviderPanel(): JSX.Element {
 
   return (
     <Card
-      title={t('搜索提供商')}
+      title={t('上游提供商配置')}
       actions={
         <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
           <RefreshCw size={13} /> {t('刷新')}

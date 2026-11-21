@@ -168,7 +168,7 @@ export default function ToolVisionPanel({ onSharedError }: ToolVisionPanelProps)
 
   if (loading) {
     return (
-      <Card title={t('视觉分析')}>
+      <Card title={t('视觉模型配置')}>
         <div className="tvp-loading">
           <Loader2 size={14} className="tvp-spin" />
           {t('正在读取视觉绑定…')}
@@ -179,7 +179,7 @@ export default function ToolVisionPanel({ onSharedError }: ToolVisionPanelProps)
 
   if (notReady) {
     return (
-      <Card title={t('视觉分析')}>
+      <Card title={t('视觉模型配置')}>
         <EmptyState icon="👁️" message={t('视觉分析接口尚未就绪')} />
       </Card>
     );
@@ -187,7 +187,7 @@ export default function ToolVisionPanel({ onSharedError }: ToolVisionPanelProps)
 
   return (
     <Card
-      title={t('视觉分析')}
+      title={t('视觉模型配置')}
       actions={
         <div className="tvp-head-actions">
           {config ? <Badge tone="success">{t('已绑定')}</Badge> : <Badge tone="neutral">{t('未绑定')}</Badge>}

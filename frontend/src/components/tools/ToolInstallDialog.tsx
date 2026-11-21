@@ -1,20 +1,21 @@
-// Ported from Agent2API v3.5.0-beta.1 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
+// Ported from Agent2API v3.5.0-beta.6 (AGPL-3.0, Copyright (c) 2026 aimod-cc)
 //
-// Skill / MCP 安装与卸载弹窗（工具服务页「安装 / 更新 / 卸载」入口）。
+// Skill / MCP 安装与卸载弹窗（MCP & Skills 列表页「安装 / 更新 / 卸载」入口）。
 // 对照 A2A ui-islands tools-install.tsx：选客户端目录 + 选网关 Key（安装时才
-// 取明文 Key 写进客户端配置），提交后逐客户端回执。
+// 取明文 Key 写进客户端配置），提交后逐客户端回执；全部成功自动关闭。
+// MCP 配置示例已移到详情页「MCP 接入信息」卡，本弹窗不再重复展示。
 // 契约：GET /api/tools/install-targets、GET /api/tools/api-keys、
 //       POST /api/tools/install-skill|install-mcp|uninstall-skill|uninstall-mcp。
 
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Copy, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { api } from '../../api';
 import { useToast } from '../Toast';
 import { Badge, Button, Input, Select, Textarea } from '../ui';
+import { serviceName } from './tools-meta';
 import type {
   ToolApiKeyOption,
-  ToolInstallInfo,
   ToolInstallOutcome,
   ToolInstallTarget,
   ToolServiceItem,
@@ -40,7 +41,7 @@ interface ToolInstallDialogProps {
  * ToolInstallDialog — 把服务接入本机客户端目录。
  *
  * 安装：客户端多选 + Skill 变体（skill 模式）/ MCP 模式（mcp 模式）+ 网关 Key。
- * 卸载：只选客户端。两个方向都按客户端逐条回执（部分失败如实展示）。
+ * 卸载：只列已安装客户端，不选 Key。两个方向都按客户端逐条回执（部分失败如实展示）。
  */
 export default function ToolInstallDialog({
   service,
@@ -54,7 +55,6 @@ export default function ToolInstallDialog({
 
   const [targets, setTargets] = useState<ToolInstallTarget[]>([]);
   const [keys, setKeys] = useState<ToolApiKeyOption[]>([]);
-  const [info, setInfo] = useState<ToolInstallInfo | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [variant, setVariant] = useState('');
   const [mcpMode, setMcpMode] = useState<'http' | 'bridge'>('http');
@@ -74,20 +74,25 @@ export default function ToolInstallDialog({
     let alive = true;
     (async () => {
       try {
-        const [targetRes, keyRes, infoRes] = await Promise.all([
+        const [targetRes, keyRes] = await Promise.all([
           api.getToolInstallTargets(serviceIdOf(service), mode),
           uninstall ? Promise.resolve(null) : api.listToolApiKeys().catch(() => null),
-          uninstall ? Promise.resolve(null) : api.getToolInstallInfo(serviceIdOf(service)).catch(() => null),
         ]);
         if (!alive) return;
         const list = targetRes?.data?.targets ?? [];
-        setTargets(list);
-        // 默认勾选检测到 / 已安装的目标
-        setSelected(new Set(list.filter((item) => item.detected || item.installed).map((item) => item.key)));
+        // 卸载只列已安装的目标；安装展示全部（unsupported 置灰）
+        const shown = uninstall ? list.filter((item) => item.installed) : list;
+        setTargets(shown);
+        setSelected(
+          new Set(
+            shown
+              .filter((item) => (uninstall ? item.installed : item.detected || item.installed) && item.supported !== false)
+              .map((item) => item.key),
+          ),
+        );
         const keyList = keyRes?.data?.keys ?? [];
         setKeys(keyList);
         if (keyList.length > 0) setApiKeyId(keyList[0].id);
-        setInfo((infoRes?.data as ToolInstallInfo | null) ?? null);
         const variants = service.variants ?? [];
         setVariant(service.recommended_variant || variants.find((v) => v.recommended)?.id || variants[0]?.id || '');
         // 视觉 / 图片生成默认本地桥接（上游同款）；其余 MCP 默认远程 HTTP
@@ -109,34 +114,6 @@ export default function ToolInstallDialog({
     [targets],
   );
   const allSelected = selectableTargets.length > 0 && selectableTargets.every((target) => selected.has(target.key));
-
-  /** MCP 客户端配置示例（把网关 Key 换成自己的即可） */
-  const mcpSnippet = useMemo(() => {
-    if (!info) return '';
-    return JSON.stringify(
-      {
-        mcpServers: {
-          [info.mcp.server_name]: {
-            type: 'http',
-            url: info.mcp.url,
-            headers: { Authorization: 'Bearer <网关 Key>' },
-          },
-        },
-      },
-      null,
-      2,
-    );
-  }, [info]);
-
-  const copySnippet = async (): Promise<void> => {
-    if (!mcpSnippet) return;
-    try {
-      await navigator.clipboard.writeText(mcpSnippet);
-      addToast(t('已复制'));
-    } catch {
-      addToast(t('复制失败，请手动选择后复制'), 'error');
-    }
-  };
 
   const canSubmit = useMemo(() => {
     if (selected.size === 0) return false;
@@ -162,7 +139,21 @@ export default function ToolInstallDialog({
     );
   };
 
+  /** 目标状态文案（上游三态） */
+  const targetState = (target: ToolInstallTarget): string => {
+    if (!target.detected) return t('未检测到');
+    return target.installed ? t('已安装') : t('已检测到');
+  };
+
   const submit = async (): Promise<void> => {
+    if (selected.size === 0) {
+      setError(t('请至少选择一个目标'));
+      return;
+    }
+    if (!uninstall && !apiKeyId) {
+      setError(t('请先选择 API Key'));
+      return;
+    }
     setSubmitting(true);
     setError('');
     try {
@@ -172,9 +163,16 @@ export default function ToolInstallDialog({
           mode === 'mcp' ? await api.uninstallToolMcp(body) : await api.uninstallToolSkill(body);
         const results = res?.data?.results ?? [];
         setOutcomes(results);
-        const okCount = results.filter((r) => r.ok).length;
-        addToast(t('已从 {{ok}}/{{total}} 个客户端卸载', { ok: okCount, total: results.length }), okCount === results.length ? 'success' : 'error');
-        onDone();
+        const failed = results.filter((r) => !r.ok);
+        const okCount = results.length - failed.length;
+        if (okCount > 0) {
+          addToast(t('已处理 {{count}} 个目标', { count: okCount }));
+          onDone();
+          if (failed.length === 0) onClose();
+        }
+        if (failed.length > 0) {
+          setError(failed.map((r) => `${r.label}：${r.error || t('卸载失败')}`).join('\n'));
+        }
       } else if (mode === 'mcp') {
         if (imageBridge && !outputDirectory.trim()) {
           setError(t('请选择图片输出目录'));
@@ -197,9 +195,16 @@ export default function ToolInstallDialog({
         });
         const results = res?.data?.results ?? [];
         setOutcomes(results);
-        const okCount = results.filter((r) => r.ok).length;
-        addToast(t('已安装到 {{ok}}/{{total}} 个客户端', { ok: okCount, total: results.length }), okCount === results.length ? 'success' : 'error');
-        onDone();
+        const failed = results.filter((r) => !r.ok);
+        const okCount = results.length - failed.length;
+        if (okCount > 0) {
+          addToast(t('已写入 {{count}} 个客户端配置', { count: okCount }));
+          onDone();
+          if (failed.length === 0) onClose();
+        }
+        if (failed.length > 0) {
+          setError(failed.map((r) => `${r.label}：${r.error || t('写入失败')}`).join('\n'));
+        }
       } else {
         const res = await api.installToolSkill({
           variant,
@@ -208,9 +213,16 @@ export default function ToolInstallDialog({
         });
         const results = res?.data?.results ?? [];
         setOutcomes(results);
-        const okCount = results.filter((r) => r.ok).length;
-        addToast(t('已安装到 {{ok}}/{{total}} 个客户端', { ok: okCount, total: results.length }), okCount === results.length ? 'success' : 'error');
-        onDone();
+        const failed = results.filter((r) => !r.ok);
+        const okCount = results.length - failed.length;
+        if (okCount > 0) {
+          addToast(t('已安装到 {{count}} 个客户端', { count: okCount }));
+          onDone();
+          if (failed.length === 0) onClose();
+        }
+        if (failed.length > 0) {
+          setError(failed.map((r) => `${r.label}：${r.error || t('写入失败')}`).join('\n'));
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -221,9 +233,12 @@ export default function ToolInstallDialog({
     }
   };
 
+  const label = serviceName(t, service.id);
   const title = uninstall
-    ? t('卸载 {{name}}', { name: t(service.package_name || service.id) })
-    : t('安装 {{name}}', { name: t(service.package_name || service.id) });
+    ? t('移除 {{name}} 配置', { name: label })
+    : mode === 'skill'
+      ? t('安装 {{name}}', { name: label })
+      : t('{{name}} 接入客户端', { name: label });
 
   return (
     <div className="tid-overlay" role="dialog" aria-modal="true" aria-label={title}>
@@ -231,7 +246,6 @@ export default function ToolInstallDialog({
         <div className="tid-head">
           <div>
             <h2>{title}</h2>
-            <p>{t('选择要{{action}}的本机客户端目录', { action: uninstall ? t('卸载') : t('安装') })}</p>
           </div>
           <Badge tone={mode === 'skill' ? 'info' : 'success'}>{mode === 'skill' ? 'Skill' : 'MCP'}</Badge>
         </div>
@@ -240,15 +254,27 @@ export default function ToolInstallDialog({
           {loading ? (
             <div className="tid-loading">
               <Loader2 size={14} className="tid-spin" />
-              {t('正在探测本机客户端…')}
+              {t('正在加载安装目标…')}
             </div>
           ) : (
             <>
-              {error && <div className="error-message">{error}</div>}
+              <p className="tid-note">
+                {uninstall
+                  ? t('选择要从中移除的客户端，未勾选的客户端保持不变。')
+                  : mode === 'skill'
+                    ? t('选择安装目标、运行时与调用用的 API Key。Skill 包与密钥只写入所选客户端的本机目录。')
+                    : t('选择要写入 MCP 配置的客户端。配置只动本服务那一项，客户端原有的其它 MCP 服务保持不变。')}
+              </p>
+
+              {error && (
+                <div className="error-message" style={{ whiteSpace: 'pre-wrap' }}>
+                  {error}
+                </div>
+              )}
 
               <div className="tid-block">
                 <div className="tid-block-head">
-                  <span className="tid-label">{t('客户端目录')}</span>
+                  <span className="tid-label">{uninstall ? t('客户端目录') : t('安装目标')}</span>
                   <span className="tid-count">
                     {t('已选择 {{count}} / {{total}} 个', { count: selected.size, total: targets.length })}
                   </span>
@@ -259,7 +285,9 @@ export default function ToolInstallDialog({
                   ) : null}
                 </div>
                 {targets.length === 0 ? (
-                  <p className="tid-empty">{t('没有探测到可用的客户端目录')}</p>
+                  <p className="tid-empty">
+                    {uninstall ? t('当前没有已安装/已配置的目标') : t('当前没有可用的安装目标')}
+                  </p>
                 ) : (
                   <div className="tid-targets">
                     {targets.map((target) => {
@@ -278,8 +306,9 @@ export default function ToolInstallDialog({
                             {target.note ? <span className="tid-target-note">{target.note}</span> : null}
                           </span>
                           <span className="tid-target-badges">
-                            {target.detected ? <Badge tone="success">{t('已探测')}</Badge> : null}
-                            {target.installed ? <Badge tone="info">{t('已安装')}</Badge> : null}
+                            <Badge tone={target.installed ? 'info' : target.detected ? 'success' : 'neutral'}>
+                              {targetState(target)}
+                            </Badge>
                             {disabled ? <Badge tone="neutral">{t('不支持')}</Badge> : null}
                           </span>
                         </label>
@@ -306,6 +335,7 @@ export default function ToolInstallDialog({
                       </option>
                     ))}
                   </Select>
+                  <span className="tid-note">{t('Node.js 无需额外依赖，推荐使用；Python 需要本机有 python。')}</span>
                 </label>
               )}
 
@@ -322,8 +352,10 @@ export default function ToolInstallDialog({
                   </Select>
                   <span className="tid-note">
                     {service.id === 'image-generation'
-                      ? t('本地桥接需要 Node.js 18+，自动读取授权目录的参考图并保存生成结果；HTTP 接入只返回下载地址。')
-                      : t('本地桥接会在本机运行 node 脚本，支持直接传本地图片路径。')}
+                      ? t('本地桥接需要 Node.js 18 或更新版本，自动读取授权目录的参考图并保存生成结果；HTTP 接入只返回下载地址。')
+                      : mcpMode === 'bridge'
+                        ? t('本地桥接会在本机运行一个 node 脚本，支持直接传本地图片路径，推荐在桌面端使用。')
+                        : t('远程 HTTP 只接受图片 URL 或 data URI，不需要本机安装 node。')}
                   </span>
                 </label>
               )}
@@ -335,7 +367,7 @@ export default function ToolInstallDialog({
                     <Input
                       value={outputDirectory}
                       onChange={(e) => setOutputDirectory(e.target.value)}
-                      placeholder={t('已有目录，图片只会写入此目录及其子目录')}
+                      placeholder={t('选择已有目录，图片只会写入此目录及其子目录')}
                     />
                   </label>
                   <label className="tid-block">
@@ -346,7 +378,13 @@ export default function ToolInstallDialog({
                       onChange={(e) => setReferenceDirectories(e.target.value)}
                       placeholder={t('每行一个已存在的绝对目录')}
                     />
+                    <span className="tid-note">
+                      {t('可选，每行一个已有绝对目录。输出目录默认允许读取；其他位置的文件不会读取或上传。')}
+                    </span>
                   </label>
+                  <div className="tid-alert">
+                    {t('只保存新文件，不覆盖已有不同内容。目录权限写入客户端配置，更新配置时需要重新确认。')}
+                  </div>
                 </>
               )}
 
@@ -361,21 +399,19 @@ export default function ToolInstallDialog({
                       </option>
                     ))}
                   </Select>
+                  <span className="tid-note">{t('Key 明文只会写入所选客户端的本机配置文件。')}</span>
                 </label>
               )}
 
-              {!uninstall && mode === 'mcp' && info ? (
-                <div className="tid-block">
-                  <div className="tid-block-head">
-                    <span className="tid-label">{t('客户端配置示例（mcpServers）')}</span>
-                    <Button variant="outline" size="sm" onClick={() => void copySnippet()}>
-                      <Copy size={12} /> {t('复制')}
-                    </Button>
-                  </div>
-                  <p className="tid-note">
-                    {t('把下面这段合并到客户端配置的 mcpServers 里，并把 Key 换成你自己的。')}
-                  </p>
-                  <pre className="tid-snippet">{mcpSnippet}</pre>
+              {!uninstall && service.id === 'image-generation' ? (
+                <div className="tid-alert">
+                  {t('客户端调用超时设为 120 秒；后台生成超时由服务配置控制，未完成时通过任务编号查询。')}
+                </div>
+              ) : !uninstall && service.timeout_seconds ? (
+                <div className="tid-alert">
+                  {t('将按服务的工具执行超时（{{seconds}} 秒）同步写入客户端配置。', {
+                    seconds: service.timeout_seconds,
+                  })}
                 </div>
               ) : null}
 
@@ -397,11 +433,16 @@ export default function ToolInstallDialog({
 
         <div className="tid-foot">
           <Button variant="outline" size="sm" onClick={onClose} disabled={submitting}>
-            {t('关闭')}
+            {t('取消')}
           </Button>
-          <Button variant="primary" size="sm" disabled={!canSubmit || submitting || loading} onClick={() => void submit()}>
+          <Button
+            variant={uninstall ? 'danger' : 'primary'}
+            size="sm"
+            disabled={!canSubmit || submitting || loading}
+            onClick={() => void submit()}
+          >
             {submitting ? <Loader2 size={12} className="tid-spin" /> : null}
-            {uninstall ? t('卸载') : t('安装')}
+            {uninstall ? t('卸载') : mode === 'skill' ? t('安装') : t('写入配置')}
           </Button>
         </div>
       </div>

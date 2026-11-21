@@ -34,7 +34,7 @@ pub const TARGET: &str = "wasm32-unknown-unknown";
 /// 沙箱 ABI 版本。插件导出 `a2a_abi_version()` 必须返回它。
 pub const ABI: u32 = 1;
 
-/// 能力白名单（对齐 Agent2API v3.5.0-beta.4 `CAPABILITIES`，逐字一致）。
+/// 能力白名单（对齐 Agent2API v3.5.0-beta.6 `CAPABILITIES`，逐字一致）。
 ///
 /// 这是**插件可以在 `wasm.json` 里声明**的能力全集。达到全集后，beta.2 的
 /// Wasm 插件（声明 compute/scheduling/tasks/desktopLaunch/verification/
@@ -42,7 +42,9 @@ pub const ABI: u32 = 1;
 /// 能力见 [`SERVED_CAPABILITIES`]（未服务的能力在调用时如实报不支持）。
 ///
 /// beta.4 变更：上游删除了 `credential.cline-free-refresh.v1`（Cline Free
-/// 续期限制整体移除），本表同步删除；其余项与 beta.2 一致。
+/// 续期限制整体移除），本表同步删除。
+/// beta.6 变更：上游删除了 `credential.codearts-refresh.v1`（CodeArts 续期
+/// 撤离），本表同步删除；其余项与 beta.4 一致。
 pub const CAPABILITIES: &[&str] = &[
     "http.v1",
     "http.timeout.v1",
@@ -86,7 +88,6 @@ pub const CAPABILITIES: &[&str] = &[
     "login.captcha.aliyun.v1",
     "resources.inbound-images.v1",
     "login.desktop.chatglm.v1",
-    "credential.codearts-refresh.v1",
     "http.catpaw-turn.v1",
     "claim.doubao-tasks.v1",
     "http.managed-task.v1",
@@ -574,11 +575,12 @@ mod tests {
     }
 
     #[test]
-    fn capability_whitelist_matches_beta4() {
-        // 对齐 Agent2API v3.5.0-beta.4 CAPABILITIES 全集（55 项；beta.4 已移除
-        // credential.cline-free-refresh.v1）。
-        assert_eq!(CAPABILITIES.len(), 55);
+    fn capability_whitelist_matches_beta6() {
+        // 对齐 Agent2API v3.5.0-beta.6 CAPABILITIES 全集（54 项；beta.4 移除
+        // credential.cline-free-refresh.v1，beta.6 移除 credential.codearts-refresh.v1）。
+        assert_eq!(CAPABILITIES.len(), 54);
         assert!(!CAPABILITIES.contains(&"credential.cline-free-refresh.v1"));
+        assert!(!CAPABILITIES.contains(&"credential.codearts-refresh.v1"));
         let unique: std::collections::HashSet<_> = CAPABILITIES.iter().collect();
         assert_eq!(unique.len(), CAPABILITIES.len());
         // 已服务能力必须是白名单子集，不能广告白名单外的东西。

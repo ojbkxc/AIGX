@@ -58,7 +58,7 @@ const navItems: NavItem[] = [
   // 插件管理（契约对齐 Agent2API 插件页；后端建设中整页降级空态，就绪即生效）
   { path: '/plugins', labelKey: '插件管理', icon: Puzzle, adminOnly: true },
   // 工具服务（A2A v3.5.0-beta.1 对齐）：MCP & Skills 接入 / 搜索提供商 / 视觉分析绑定
-  { path: '/tools', labelKey: '工具服务', icon: Wrench, adminOnly: true },
+  { path: '/tools', labelKey: 'MCP & Skills', icon: Wrench, adminOnly: true },
 ];
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
 // 管理员 16 项 / 客户 8 项。合并历史：

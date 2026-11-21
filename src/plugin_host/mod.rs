@@ -14,7 +14,6 @@
 //! - `provider_settings` —— 插件声明的「提供商设置」（schema + CAS 存储）
 //! - `support` —— 包支持状态（beta.2：旧原生 → Wasm 迁移判定）
 //! - `stream_events` —— 流式事件接收器（beta.2：`StreamEvents` 类型）
-//! - `rpc_refresh` —— 凭据续期就绪检查（beta.2）
 //!
 //! ## 对齐版本
 //!
@@ -46,12 +45,6 @@ pub mod process;
 pub mod provider_settings;
 pub mod registry;
 pub mod rpc;
-/// 凭据续期就绪检查（对齐 beta.2 `rpc_refresh`）。
-///
-/// beta.2 协议形状占位：AIGX 的续期由 `account_session` 层实现，本模块只
-/// 保留错误码与签名形状供未来接线。整模块 allow(dead_code)，接线后应移除。
-#[allow(dead_code)]
-mod rpc_refresh;
 pub mod script;
 /// 流式事件接收器（对齐 beta.2 `stream_events`）。
 ///

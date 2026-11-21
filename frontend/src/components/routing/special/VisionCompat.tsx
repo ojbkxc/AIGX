@@ -90,8 +90,8 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
       const reader =
         rule.source === 'shared'
           ? sharedTarget
-            ? `${t('工具服务的视觉模型')}（${refLabel(models, sharedTarget) || `${sharedTarget.provider} · ${sharedTarget.model}`}）`
-            : t('工具服务的视觉模型')
+            ? `${t('MCP & Skills 的视觉模型')}（${refLabel(models, sharedTarget) || `${sharedTarget.provider} · ${sharedTarget.model}`}）`
+            : t('MCP & Skills 的视觉模型')
           : refLabel(models, rule.target) || t('还没选视觉模型');
       return (
         <>
@@ -428,7 +428,7 @@ function RuleEditor({
                 disabled={saving}
                 onChange={(e) => setSource(e.target.value)}
               >
-                <option value="__shared">{t('沿用工具服务的视觉模型')}</option>
+                <option value="__shared">{t('沿用 MCP & Skills 的视觉模型')}</option>
                 {targetModels.map((m) => {
                   const key = refKey(m);
                   return (
@@ -438,7 +438,7 @@ function RuleEditor({
                   );
                 })}
               </select>
-              <span className="form-hint">{t('沿用工具服务 = 使用工具配置里已有的视觉模型。')}</span>
+              <span className="form-hint">{t('沿用 MCP & Skills = 使用该页配置里已有的视觉模型。')}</span>
             </div>
             <div className="rt-subfield">
               <label>{t('复用相同图片的识读结果')}</label>
@@ -556,7 +556,7 @@ function RuleEditor({
       ) : null}
       {draft.mode === 'assist' && draft.source === 'shared' ? (
         <div className="rt-notice rt-notice-info">
-          {t('沿用工具服务的视觉模型：视觉目标由「工具服务」的视觉配置决定，本规则只负责把请求路由到识图环节。')}
+          {t('沿用 MCP & Skills 的视觉模型：视觉目标由「MCP & Skills」的视觉配置决定，本规则只负责把请求路由到识图环节。')}
           {sharedTarget ? (
             <div className="form-hint">
               {t('当前共享视觉模型：{{model}}', {
@@ -565,7 +565,7 @@ function RuleEditor({
             </div>
           ) : (
             <div className="form-hint">
-              {t('工具服务当前未配置共享视觉模型；启用「沿用」前请先在工具服务里配置。')}
+              {t('MCP & Skills 当前未配置共享视觉模型；启用「沿用」前请先在该页配置。')}
             </div>
           )}
         </div>

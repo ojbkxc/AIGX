@@ -1,0 +1,254 @@
+/* MCP & Skills 详情页（对齐 A2A tools-detail.tsx 的信息结构，用 AIGX 语义 class 承载） */
+
+.mcp-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mcp-back {
+  align-self: flex-start;
+}
+
+.mcp-detail-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mcp-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-detail-meta {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.mcp-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mcp-detail-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-main);
+}
+
+.mcp-timeout-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mcp-timeout-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-timeout-field .form-group {
+  margin: 0;
+}
+
+.mcp-timeout-field .form-input {
+  width: 110px;
+}
+
+.mcp-field-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.mcp-seconds {
+  padding-bottom: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.mcp-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.mcp-alert-warn {
+  padding: 8px 10px;
+  border: 1px solid var(--warning-color, #b8860b);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning-color, #b8860b) 12%, transparent);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.mcp-alert-info {
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.mcp-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.mcp-spin {
+  animation: mcp-spin 1s linear infinite;
+}
+
+@keyframes mcp-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── MCP 接入信息卡 ── */
+
+.mcp-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mcp-connect-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-connect-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-connect-head .mcp-connect-label {
+  flex: 1;
+}
+
+.mcp-connect-label {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.mcp-connect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-code {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.08));
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.mcp-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mcp-snippet {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.08));
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+/* ── 服务能力 Tab ── */
+
+.mcp-cap-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mcp-cap {
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.mcp-cap-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mcp-cap-desc {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.mcp-params {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.mcp-param {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.mcp-param-name {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.08));
+  font-family: ui-monospace, monospace;
+}
+
+.mcp-param-type {
+  color: var(--text-muted);
+}
+
+.mcp-param-req {
+  color: var(--danger-color);
+}
+
+.mcp-param-opt {
+  color: var(--text-muted);
+}
+
+.mcp-param-desc {
+  flex-basis: 100%;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+@media (max-width: 767px) {
+  .mcp-cap-grid {
+    grid-template-columns: 1fr;
+  }
+}
