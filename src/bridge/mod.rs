@@ -105,6 +105,19 @@ impl ChatMessage {
     pub fn content_str(&self) -> &str {
         self.content.as_deref().unwrap_or("")
     }
+
+    /// system 消息。破甲「按模型自动套用」在没有 system 时用它前插一条。
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::System,
+            content: Some(content.into()),
+            content_blocks: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning: None,
+        }
+    }
 }
 
 /// 归一化的聊天请求格式

@@ -13,6 +13,8 @@
 //! - `cross_source_fallback`：主模型候选耗尽后尝试 `fallback_models`（仅 chat）。
 //! - `skill_inject`：扫 `skill_dir` 的 SKILL.md，关键词命中追加到末条 user。
 //! - `structured_prompt`：末条 user 追加结构化输出要求。
+//! - `auto_preset`：按请求模型找内置预设，命中就把正文**原样前插**到 system 提示词
+//!   （不参与改写；固定 id 优先；名字对不上就不套）。
 //!
 //! 默认词表只含中性、合规语境的改写示例，管理员可自由增删；不内置任何
 //! 恶意规避词表。
@@ -325,6 +327,11 @@ pub struct PurgeSettings {
     pub structured_templates: Vec<PurgeTemplate>,
     /// 当前启用的结构化模板名（空 = 用 `structured_suffix`）
     pub active_template: String,
+    /// 按模型自动套用预设：请求发出前按模型找同名预设，命中就把正文原样前插到
+    /// system 提示词。默认打开；总开关关闭时零改动。预设正文不参与改写。
+    pub auto_preset: bool,
+    /// 固定套用的预设 id（空 = 按模型自动匹配）
+    pub auto_preset_id: String,
     /// 拒绝话术词表（空 = 关闭字面拒绝检测）
     pub refusal_patterns: Vec<String>,
     /// 「内容过滤」类失败关键词（空 = 该类不参与字面判定）
@@ -338,7 +345,8 @@ pub struct PurgeSettings {
 impl Default for PurgeSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // 总开关默认打开：装好即可用；关掉仍是纯转发（不判定、不改写）。
+            enabled: true,
             // 治理子开关默认开：总开关（enabled）是唯一安全闸，打开总开关即
             // 获得一套开箱可用的中性治理组合；全部为零则打开总开关无任何效果，
             // 新管理员容易误以为功能坏了。
@@ -361,6 +369,8 @@ impl Default for PurgeSettings {
             structured_suffix: default_structured_suffix(),
             structured_templates: default_structured_templates(),
             active_template: String::new(),
+            auto_preset: true,
+            auto_preset_id: String::new(),
             refusal_patterns: default_refusal_patterns(),
             failure_filter_keywords: default_filter_keywords(),
             failure_empty_keywords: default_empty_keywords(),
@@ -470,6 +480,8 @@ pub struct PurgeStats {
     pub failure_filter: u64,
     pub failure_other: u64,
     pub synonym_hits: u64,
+    /// 按模型自动套用、且真的改写了 system 提示词的次数。
+    pub auto_preset_hits: u64,
 }
 
 static STAT_RESPONSES: AtomicU64 = AtomicU64::new(0);
@@ -482,6 +494,7 @@ static STAT_FAILURE_EMPTY: AtomicU64 = AtomicU64::new(0);
 static STAT_FAILURE_FILTER: AtomicU64 = AtomicU64::new(0);
 static STAT_FAILURE_OTHER: AtomicU64 = AtomicU64::new(0);
 static STAT_SYNONYM_HITS: AtomicU64 = AtomicU64::new(0);
+static STAT_AUTO_PRESET_HITS: AtomicU64 = AtomicU64::new(0);
 
 fn bump(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
@@ -523,6 +536,10 @@ pub fn record_synonym_hit() {
     bump(&STAT_SYNONYM_HITS);
 }
 
+pub fn record_auto_preset_hit() {
+    bump(&STAT_AUTO_PRESET_HITS);
+}
+
 pub fn snapshot() -> PurgeStats {
     PurgeStats {
         responses: STAT_RESPONSES.load(Ordering::Relaxed),
@@ -535,6 +552,7 @@ pub fn snapshot() -> PurgeStats {
         failure_filter: STAT_FAILURE_FILTER.load(Ordering::Relaxed),
         failure_other: STAT_FAILURE_OTHER.load(Ordering::Relaxed),
         synonym_hits: STAT_SYNONYM_HITS.load(Ordering::Relaxed),
+        auto_preset_hits: STAT_AUTO_PRESET_HITS.load(Ordering::Relaxed),
     }
 }
 
@@ -572,6 +590,60 @@ pub fn apply_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) -> A
 /// （synonym 命中计数等副作用不生效），供改写规则试跑使用。
 pub fn preview_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) -> Applied {
     apply_inner(messages, cfg, false)
+}
+
+/// 数据面唯一入口：治理全部已启用项，再按模型前插预设正文。
+///
+/// 顺序是刻意的：治理只跑在**原有**文本上，预设正文随后原样前插——词表因此
+/// 永远不会把第三方 prompt 改写成另一个版本。
+pub fn apply_request(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings, model: &str) -> Applied {
+    let mut applied = apply_inner(messages, cfg, true);
+    if apply_auto_preset(messages, cfg, model) {
+        applied.changed = true;
+        record_auto_preset_hit();
+    }
+    applied
+}
+
+/// 按模型把预设正文前插到 system 提示词；返回是否真的改了消息。
+///
+/// - 总开关或 `auto_preset` 关闭、正文为空、找不到对应预设 → 什么都不做。
+/// - 消息里已有这段正文（同一请求的 failover 重放）→ 不重复拼接。
+/// - 没有 system 消息时插入一条；有则拼在它前面，宿主提示词一字不改。
+pub fn apply_auto_preset(
+    messages: &mut Vec<ChatMessage>,
+    cfg: &PurgeSettings,
+    model: &str,
+) -> bool {
+    if !cfg.enabled || !cfg.auto_preset {
+        return false;
+    }
+    let Some((preset, _)) = presets::preset_for_model(model, cfg.auto_preset_id.as_str()) else {
+        return false;
+    };
+    let body = preset.body.as_str();
+    if body.trim().is_empty() {
+        return false;
+    }
+    if messages.iter().any(|msg| msg.content_str().contains(body)) {
+        return false;
+    }
+
+    match messages.iter_mut().find(|msg| msg.role == Role::System) {
+        Some(system) => {
+            let existing = system.content.clone().unwrap_or_default();
+            let merged = if existing.trim().is_empty() {
+                body.to_string()
+            } else {
+                format!("{body}\n\n{existing}")
+            };
+            system.content = Some(merged);
+            // 旧的 content_blocks 与改写后的文本不再一致，按纯文本重发。
+            system.content_blocks = None;
+        }
+        None => messages.insert(0, ChatMessage::system(body.to_string())),
+    }
+    true
 }
 
 fn apply_inner(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings, count_stats: bool) -> Applied {
@@ -1046,6 +1118,14 @@ pub fn config_warnings(cfg: &PurgeSettings) -> Vec<String> {
                 .to_string(),
         );
     }
+    if cfg.auto_preset {
+        let pinned = cfg.auto_preset_id.trim();
+        if !pinned.is_empty() && presets::get(pinned).is_none() {
+            warnings.push(format!(
+                "按模型自动套用已开启，但固定预设 id「{pinned}」不存在：不会套用任何内容，请检查 id 或留空改按模型匹配。"
+            ));
+        }
+    }
     warnings
 }
 
@@ -1152,7 +1232,12 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        let applied = apply_messages(&mut messages, &PurgeSettings::default());
+        // 总开关默认打开，所以「关闭」必须显式写出来。
+        let off = PurgeSettings {
+            enabled: false,
+            ..PurgeSettings::default()
+        };
+        let applied = apply_messages(&mut messages, &off);
         assert!(!applied.changed);
         assert_eq!(
             before,
@@ -1511,8 +1596,13 @@ mod tests {
 
     #[test]
     fn config_warnings_flags_disabled_and_contradictions() {
-        // 总开关关闭 → 无告警（数据面零行为，其余检查无意义）
-        assert!(config_warnings(&PurgeSettings::default()).is_empty());
+        // 总开关关闭 → 无告警（数据面零行为，其余检查无意义）。
+        // 总闸默认已打开，所以这里显式关闭。
+        let off = PurgeSettings {
+            enabled: false,
+            ..PurgeSettings::default()
+        };
+        assert!(config_warnings(&off).is_empty());
 
         // 异源开着无模型 + 触发轮次超上限
         let mut cfg = enabled();
@@ -1676,5 +1766,102 @@ mod tests {
             "预览仍应用改写"
         );
         assert_eq!(snapshot().synonym_hits, before, "预览不得写统计（dry-run）");
+    }
+
+    // ── 按模型自动套用 ──────────────────────────────────────────
+
+    /// 目录里第一条预设的模型名：用它测「同名命中」，不硬编码厂商。
+    fn first_preset_model() -> String {
+        super::preset_catalog::BUILTIN_PRESETS[0].model.to_string()
+    }
+
+    #[test]
+    fn defaults_open_the_master_switch_and_auto_preset() {
+        let cfg = PurgeSettings::default();
+        assert!(cfg.enabled, "总开关默认打开");
+        assert!(cfg.auto_preset, "自动套用默认打开");
+        assert_eq!(cfg.auto_preset_id, "");
+    }
+
+    #[test]
+    fn auto_preset_prepends_the_preset_body_to_system() {
+        let model = first_preset_model();
+        let (preset, _) = super::presets::preset_for_model(&model, "").expect("应当命中");
+        let cfg = PurgeSettings::default();
+        let mut messages = vec![sys("HOST"), user("hi")];
+
+        assert!(apply_auto_preset(&mut messages, &cfg, &model));
+        let system = messages[0].content_str();
+        assert!(system.starts_with(preset.body.as_str()));
+        assert!(system.ends_with("HOST"), "宿主提示词原样保留在后");
+        // 重复调用幂等：同一请求的 failover 重放不叠加
+        assert!(!apply_auto_preset(&mut messages, &cfg, &model));
+    }
+
+    #[test]
+    fn auto_preset_inserts_a_system_message_when_absent() {
+        let model = first_preset_model();
+        let cfg = PurgeSettings::default();
+        let mut messages = vec![user("hi")];
+        assert!(apply_auto_preset(&mut messages, &cfg, &model));
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn auto_preset_never_guesses_on_an_unknown_model() {
+        let cfg = PurgeSettings::default();
+        let mut messages = vec![user("hi")];
+        assert!(!apply_auto_preset(
+            &mut messages,
+            &cfg,
+            "zzz-unknown-model-9"
+        ));
+        assert_eq!(messages[0].content.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn auto_preset_respects_both_switches_and_a_pinned_dead_id() {
+        let model = first_preset_model();
+        let off = PurgeSettings {
+            enabled: false,
+            ..PurgeSettings::default()
+        };
+        let mut messages = vec![user("hi")];
+        assert!(!apply_auto_preset(&mut messages, &off, &model));
+
+        let auto_off = PurgeSettings {
+            auto_preset: false,
+            ..PurgeSettings::default()
+        };
+        assert!(!apply_auto_preset(&mut messages, &auto_off, &model));
+
+        let dead = PurgeSettings {
+            auto_preset_id: "no-such-preset".to_string(),
+            ..PurgeSettings::default()
+        };
+        assert!(!apply_auto_preset(&mut messages, &dead, &model));
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn apply_request_runs_governance_before_splicing_the_preset() {
+        let model = first_preset_model();
+        let cfg = PurgeSettings {
+            system_normalize: false,
+            dead_zone_rewrite: true,
+            rewrite_rules: vec![RewriteRule {
+                from: "HACK".to_string(),
+                to: "audit".to_string(),
+            }],
+            ..PurgeSettings::default()
+        };
+        let mut messages = vec![sys("HACK"), user("go")];
+
+        let applied = apply_request(&mut messages, &cfg, &model);
+        assert!(applied.changed);
+        let system = messages[0].content_str();
+        assert!(system.ends_with("audit"), "治理作用在宿主提示词上");
+        assert!(!system.contains("HACK"));
     }
 }

@@ -2728,6 +2728,10 @@ export interface PurgeSettings {
   failure_filter_keywords?: string[];
   /** 「空答」类失败关键词 */
   failure_empty_keywords?: string[];
+  /** 按模型自动套用预设（默认打开；旧后端不返回时按关闭处理） */
+  auto_preset?: boolean;
+  /** 固定套用的预设 id（空 = 按模型自动匹配） */
+  auto_preset_id?: string;
   upstream_label: string;
 }
 
@@ -2749,6 +2753,8 @@ export interface PurgeStats {
   failure_filter: number;
   failure_other: number;
   synonym_hits: number;
+  /** 按模型自动套用、且真的改写了 system 提示词的次数（旧后端不返回） */
+  auto_preset_hits?: number;
 }
 
 /** 破甲控制台运行信息 */

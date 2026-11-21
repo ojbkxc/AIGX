@@ -181,6 +181,54 @@ pub fn get(id: &str) -> Option<PresetDetail> {
     BUILTIN_PRESETS.iter().find(|p| p.id == id).map(to_detail)
 }
 
+/// 模型标识归一化：折叠大小写与分隔符，`DeepSeek V4` / `deepseek-v4` / `deepseek_v4`
+/// 视为同一个模型。只做这一步，不做模糊前缀——猜错会把无关预设套上去。
+pub fn normalize_model_id(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !matches!(*c, ' ' | '\t' | '\r' | '\n' | '.' | '_' | '-' | '/'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 命中强度：预设目标模型就是当前模型（允许分隔符差异）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresetMatch {
+    /// 同名模型（含「一行覆盖多模型」的双向包含写法）。
+    Exact,
+    /// 操作者在 `auto_preset_id` 里点名的预设。
+    Pinned,
+}
+
+/// 找写给这个模型的预设：**固定 id > 同名模型**，都没有就是 `None`。
+///
+/// 纯函数：不读盘、不联网、不改配置。目录是编译期常量，线性扫描 53 条足够快
+/// （每个请求一次，归一化只发生在模型串上）。
+///
+/// 名字对不上时**坚决不猜**：把写给别的模型的 prompt 静默套上去，比不套更糟。
+pub fn preset_for_model(model: &str, pinned_id: &str) -> Option<(PresetDetail, PresetMatch)> {
+    let pinned = pinned_id.trim();
+    if !pinned.is_empty() {
+        return get(pinned).map(|detail| (detail, PresetMatch::Pinned));
+    }
+
+    let active = normalize_model_id(model);
+    if active.is_empty() {
+        return None;
+    }
+    for preset in BUILTIN_PRESETS {
+        let target = normalize_model_id(preset.model);
+        if target.is_empty() {
+            continue;
+        }
+        // 「deepseekv4.1 and v4.1-1017」这种一行覆盖两个模型的写法，取双向包含。
+        if active == target || active.contains(&target) || target.contains(&active) {
+            return Some((to_detail(preset), PresetMatch::Exact));
+        }
+    }
+    None
+}
+
 /// id 是否可安全用作单级目录名。
 ///
 /// 预设 id 由同步脚本生成，形态固定为 `[a-z0-9-]`；这里显式校验是因为
@@ -453,5 +501,52 @@ mod tests {
         assert!(!is_safe_segment("trail-"));
         assert!(!is_safe_segment("UPPER"));
         assert!(!is_safe_segment("with space"));
+    }
+
+    // ── 按模型找预设 ──────────────────────────────────────────
+
+    #[test]
+    fn normalize_folds_case_and_separators() {
+        assert_eq!(normalize_model_id("DeepSeek V4"), "deepseekv4");
+        assert_eq!(normalize_model_id("deepseek-v4"), "deepseekv4");
+        assert_eq!(normalize_model_id("deepseek_v4"), "deepseekv4");
+        assert_eq!(normalize_model_id("deepseek/v4"), "deepseekv4");
+        assert_eq!(normalize_model_id("   "), "");
+    }
+
+    #[test]
+    fn preset_for_model_hits_the_same_name_and_never_guesses() {
+        let target = &BUILTIN_PRESETS[0];
+        let hit = preset_for_model(target.model, "").expect("同名模型应当命中");
+        assert_eq!(hit.0.id, target.id);
+        assert_eq!(hit.1, PresetMatch::Exact);
+
+        // 大小写/分隔符差异仍算同一个模型。
+        let spaced = target.model.replace('-', " ");
+        assert_eq!(
+            preset_for_model(&spaced, "").map(|(detail, _)| detail.id),
+            Some(target.id.to_string())
+        );
+
+        // 完全对不上的模型：不猜。
+        assert!(preset_for_model("zzz-unknown-model-9", "").is_none());
+        // 空模型：不猜。
+        assert!(preset_for_model("   ", "").is_none());
+    }
+
+    #[test]
+    fn a_pinned_id_wins_over_model_matching() {
+        let pinned = &BUILTIN_PRESETS[1];
+        let hit = preset_for_model("zzz-unknown-model-9", pinned.id).expect("固定 id 应当命中");
+        assert_eq!(hit.0.id, pinned.id);
+        assert_eq!(hit.1, PresetMatch::Pinned);
+
+        // 死 id：什么都不套，也不回落到模型匹配。
+        assert!(preset_for_model(BUILTIN_PRESETS[0].model, "no-such-preset").is_none());
+        // 空白 id 等于没填：回到同名匹配。
+        assert_eq!(
+            preset_for_model(BUILTIN_PRESETS[0].model, "   ").map(|(_, kind)| kind),
+            Some(PresetMatch::Exact)
+        );
     }
 }

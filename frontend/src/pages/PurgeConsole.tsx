@@ -36,7 +36,8 @@ type BoolKey =
   | 'reduce_reasoning'
   | 'cross_source_fallback'
   | 'skill_inject'
-  | 'structured_prompt';
+  | 'structured_prompt'
+  | 'auto_preset';
 
 const SWITCHES: Array<{ key: BoolKey; label: string; desc: string }> = [
   {
@@ -78,6 +79,11 @@ const SWITCHES: Array<{ key: BoolKey; label: string; desc: string }> = [
     key: 'structured_prompt',
     label: '结构化提示',
     desc: '首轮追加格式指令，减少空答',
+  },
+  {
+    key: 'auto_preset',
+    label: '按模型自动套用',
+    desc: '请求发出前按模型找内置预设，命中就把正文原样前插到 system 提示词；名字对不上就不套',
   },
 ];
 
@@ -233,6 +239,7 @@ const StatsGrid = memo(function StatsGrid({
       <StatCard title={t('技能命中')} value={stats.skill_hits} />
       <StatCard title={t('拒绝样本')} value={stats.refusals} />
       <StatCard title={t('同义词命中')} value={stats.synonym_hits} />
+      <StatCard title={t('自动套用')} value={stats.auto_preset_hits ?? 0} />
     </div>
   );
 });
@@ -1312,6 +1319,12 @@ export default function PurgeConsole(): JSX.Element {
             hint={t('扫描该目录下的 SKILL.md，按 frontmatter 关键词命中')}
             value={draft.skill_dir}
             onChange={(event) => patch({ skill_dir: event.target.value })}
+          />
+          <Input
+            label={t('固定套用预设 id')}
+            hint={t('留空 = 按模型自动匹配；名字对不上就不套，预设正文原样前插到 system 提示词')}
+            value={draft.auto_preset_id ?? ''}
+            onChange={(event) => patch({ auto_preset_id: event.target.value })}
           />
           <Input
             label={t('技能注入上限（字符）')}

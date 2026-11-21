@@ -282,7 +282,7 @@ pub(crate) async fn handle_chat_completions(
 
     // 破甲控制台：请求治理（system 归一化 / 死区词改写 / 结构化提示 / 技能注入）
     let purge_cfg = state.purge.snapshot();
-    let purge_applied = crate::purge::apply_messages(&mut messages, &purge_cfg);
+    let purge_applied = crate::purge::apply_request(&mut messages, &purge_cfg, &model);
     if purge_applied.skill_hit {
         crate::purge::record_skill_hit();
     }
@@ -572,7 +572,7 @@ pub(crate) async fn handle_chat_completions(
                     pre_purge,
                     &gateway_prompt,
                 ) {
-                    crate::purge::apply_messages(&mut rebuilt, &purge_cfg);
+                    crate::purge::apply_request(&mut rebuilt, &purge_cfg, &model);
                     attempt_req.messages = rebuilt;
                 }
             }
@@ -1471,7 +1471,7 @@ pub(crate) async fn handle_chat_completions(
                     pre_purge,
                     &gateway_prompt,
                 ) {
-                    crate::purge::apply_messages(&mut rebuilt, &purge_cfg);
+                    crate::purge::apply_request(&mut rebuilt, &purge_cfg, &model);
                     attempt_req.messages = rebuilt;
                 }
             }

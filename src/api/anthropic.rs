@@ -615,7 +615,7 @@ pub async fn handle_messages(
     // 破甲控制台：请求治理（归一化/改写/结构化/技能注入）；异源 fallback 在
     // 下方与 chat 端点共用同一 `build_attempt_plan`（两协议同口径）。
     let purge_cfg = state.purge.snapshot();
-    let purge_applied = crate::purge::apply_messages(&mut all_messages, &purge_cfg);
+    let purge_applied = crate::purge::apply_request(&mut all_messages, &purge_cfg, &model);
     if purge_applied.skill_hit {
         crate::purge::record_skill_hit();
     }
@@ -857,7 +857,7 @@ pub async fn handle_messages(
                     pre_purge,
                     &gateway_prompt,
                 ) {
-                    crate::purge::apply_messages(&mut rebuilt, &purge_cfg);
+                    crate::purge::apply_request(&mut rebuilt, &purge_cfg, &model);
                     attempt_req.messages = rebuilt;
                 }
             }
@@ -1786,7 +1786,7 @@ pub async fn handle_messages(
                     pre_purge,
                     &gateway_prompt,
                 ) {
-                    crate::purge::apply_messages(&mut rebuilt, &purge_cfg);
+                    crate::purge::apply_request(&mut rebuilt, &purge_cfg, &model);
                     attempt_req.messages = rebuilt;
                 }
             }

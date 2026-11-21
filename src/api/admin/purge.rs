@@ -413,6 +413,7 @@ fn normalize(mut cfg: PurgeSettings) -> PurgeSettings {
     cfg.skill_inject_limit = cfg.skill_inject_limit.clamp(16, 20_000);
 
     cfg.reasoning_floor = trim_or(&cfg.reasoning_floor, "low");
+    cfg.auto_preset_id = cfg.auto_preset_id.trim().to_string();
     cfg.skill_dir = cfg.skill_dir.trim().to_string();
     if cfg.skill_dir.is_empty() {
         cfg.skill_dir = crate::purge::DEFAULT_SKILL_DIR.to_string();

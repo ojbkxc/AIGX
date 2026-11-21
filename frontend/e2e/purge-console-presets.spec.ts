@@ -44,6 +44,8 @@ const SETTINGS = {
   refusal_patterns: [],
   failure_filter_keywords: [],
   failure_empty_keywords: [],
+  auto_preset: true,
+  auto_preset_id: '',
   upstream_label: 'e2e',
 };
 
