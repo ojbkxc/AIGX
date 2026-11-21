@@ -49,7 +49,7 @@ jobs:
         run: node tests/e2e/run-browser-e2e.mjs
       - name: Upload E2E artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-browser-artifacts
           path: |

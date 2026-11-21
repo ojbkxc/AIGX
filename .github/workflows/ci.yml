@@ -175,7 +175,7 @@ jobs:
       # 条件限定为「构建本身成功」——tsc/eslint 挂掉时不该产出可被误当成有效产物的包。
       - name: Upload frontend artifact
         if: always() && steps.build.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aigx-static
           path: static/
@@ -210,7 +210,7 @@ jobs:
         run: npx playwright test
       - name: Upload E2E report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: frontend/playwright-report/
