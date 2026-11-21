@@ -142,8 +142,9 @@ pub(crate) fn error(message: impl Into<String>) -> WireError {
 ///
 /// 返回 `None` 表示「未识别的 code，用默认 502」。
 ///
-/// 当前无内部调用方（供 bridge/adapter 接线的 beta.2 形状 API）。
-#[allow(dead_code)]
+/// 调用方：`bridge::plugin::{map_rpc_error, wire_error_to_bridge}` 把
+/// RPC/Wasm 错误码映射成对应 HTTP 状态（busy/unavailable/resource_limit →
+/// 503，超限 → 413 …）。
 pub fn http_status_for_code(code: &str) -> Option<u16> {
     match code {
         WireError::ABORTED => Some(499),

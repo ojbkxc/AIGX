@@ -547,7 +547,6 @@ impl BridgeError {
 
     /// Convenience constructor for synthesised upstream errors that
     /// carry a parsed `Retry-After` hint.
-    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
     pub fn upstream_status_with_retry_after(
         status: u16,
         message: impl Into<String>,
@@ -569,6 +568,11 @@ impl BridgeError {
             BridgeError::UpstreamStatus { status, .. } => {
                 if (400..500).contains(status) {
                     *status
+                } else if *status == 503 {
+                    // 服务不可用（含插件忙 `plugin_busy` / 资源超限服务码）：
+                    // 原样保留 503（可附 Retry-After），而非像其它上游 5xx
+                    // 那样折成 502——「稍后重试」语义对客户端才有意义。
+                    503
                 } else {
                     502
                 }

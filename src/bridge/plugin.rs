@@ -94,13 +94,17 @@ pub enum ConversationStream {
 impl ConversationStream {
     /// 取下一个事件。
     ///
-    /// 与 `StreamCall::next` 的返回值语义逐字对齐：
-    /// - `Some(Ok(ev))` —— 一个事件
-    /// - `Some(Err(e))` —— 中途失败（含 Wasm 沙箱的终结错误）
-    /// - `None` —— 流已终态
-    pub(crate) async fn next(&mut self) -> Option<Result<StreamEvent, RpcError>> {
+    /// 与 `StreamCall::next` 的返回**形状**对齐（`Some(Ok)` / `Some(Err)` /
+    /// `None`），但错误已归一成 [`BridgeError`]：RPC 后端经 [`map_rpc_error`]、
+    /// Wasm 后端经 [`wire_error_to_bridge`]——后者把 beta.4 忙拒绝的
+    /// `reason`/`retry_after` 与错误码对应的 HTTP 状态一路带出，供上层
+    /// failover 与终态响应使用（不再压成只含 message/code 的 `RpcError`）。
+    pub(crate) async fn next(&mut self) -> Option<Result<StreamEvent, BridgeError>> {
         match self {
-            Self::Rpc(call) => call.next().await,
+            Self::Rpc(call) => call
+                .next()
+                .await
+                .map(|result| result.map_err(|error| map_rpc_error(&error))),
             Self::Wasm {
                 rx,
                 sink,
@@ -123,10 +127,7 @@ impl ConversationStream {
                         // 「插件失败」伪装成「正常空回复」**，failover 失效。
                         if let Some(error) = sink.take_error() {
                             *failed = true;
-                            return Some(Err(RpcError {
-                                message: error.message,
-                                code: error.code,
-                            }));
+                            return Some(Err(wire_error_to_bridge(error)));
                         }
                         *ended = true;
                         None
@@ -276,6 +277,12 @@ impl PluginBridge {
             PluginBackend::Wasm(host) => {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 let sink = crate::plugin_host::wasm::ChannelSink::new(tx);
+                // 注意：`open_stream` 的 `Err` 是**宿主启动期**的 `String`
+                // （未加载 / 已关闭 / 登记锁不可用），不是插件产出的 `WireError`，
+                // 因此这里没有可透传的错误码/retry_after，按传输失败处理。
+                // 插件在 `conversation` 内产生的 `WireError`（含 `plugin_busy`）
+                // 由宿主写入 `sink`，经 [`ConversationStream::next`] 的
+                // `wire_error_to_bridge` 映射后交付，不经过此分支。
                 let handle = host
                     .open_stream(params, sink.clone())
                     .await
@@ -305,6 +312,11 @@ impl PluginBridge {
 /// 插件单次调用上限 → 413 原样透传。换渠道/换号不会让请求变小，编排层
 /// 对 4xx 不重试（resolve::is_retryable_bridge_error），直接把可读的尺寸
 /// 说明交回客户端。
+///
+/// `plugin_busy` / `plugin_unavailable` / `plugin_resource_limit`（对齐
+/// beta.2/beta.4）：服务暂不可用 → 503，让客户端稍后重试，而不是折成
+/// Transport 502。RPC 通道不带 `retry_after`（那是 wasm `WireError` 专有，
+/// 见 [`wire_error_to_bridge`]）。
 fn map_rpc_error(err: &RpcError) -> BridgeError {
     match err.code.as_deref() {
         Some("timeout") => BridgeError::Timeout {
@@ -313,8 +325,34 @@ fn map_rpc_error(err: &RpcError) -> BridgeError {
         },
         Some("eof") => BridgeError::StreamAborted,
         Some("plugin_request_too_large") => BridgeError::upstream_status(413, err.message.clone()),
+        Some(code @ ("plugin_busy" | "plugin_unavailable" | "plugin_resource_limit")) => {
+            BridgeError::upstream_status(
+                crate::plugin_host::wasm::wire::http_status_for_code(code).unwrap_or(503),
+                err.message.clone(),
+            )
+        }
         _ => BridgeError::Transport(format!("插件调用失败: {}", err.message)),
     }
+}
+
+/// Wasm 沙箱终结错误（`WireError`）→ [`BridgeError`]。
+///
+/// 把插件错误码映射成对应 HTTP 状态（`plugin_busy` / `plugin_unavailable` /
+/// `plugin_resource_limit` → 503；`plugin_request_too_large` → 413；
+/// `forbidden` / 账号来源 → 403/409 …），并透传 beta.4 忙拒绝元数据
+/// `retry_after`（秒 → `Duration`），供上层 failover 的冷却/等待与终态
+/// 响应使用。未识别的码按 502（与原 Transport 行为一致）。
+///
+/// 这是 `reason`/`retry_after` 的**真实消费点**：此前 `WireError` 被压成
+/// 只含 message/code 的 `RpcError`，元数据在这条链上被丢弃。
+fn wire_error_to_bridge(error: crate::plugin_host::wasm::WireError) -> BridgeError {
+    let status = error
+        .code
+        .as_deref()
+        .and_then(crate::plugin_host::wasm::wire::http_status_for_code)
+        .unwrap_or(502);
+    let retry_after = error.retry_after.map(std::time::Duration::from_secs);
+    BridgeError::upstream_status_with_retry_after(status, error.message, retry_after)
 }
 
 /// 取 head 并校验状态。
@@ -338,7 +376,7 @@ async fn take_head(call: &mut ConversationStream) -> Result<(u16, Option<Vec<u8>
             Some(Ok(StreamEvent::End)) => return Ok((200, None)),
             // 测试用日志事件：忽略，继续等响应头。
             Some(Ok(StreamEvent::Log { .. })) => continue,
-            Some(Err(e)) => return Err(map_rpc_error(&e)),
+            Some(Err(e)) => return Err(e),
             None => return Err(BridgeError::Transport("插件流在响应头前结束".into())),
         }
     }
@@ -360,7 +398,7 @@ async fn drain_stream(call: &mut ConversationStream) -> Result<Vec<u8>, BridgeEr
             Some(Ok(StreamEvent::Head { .. })) => {}
             Some(Ok(StreamEvent::Log { .. })) => {}
             Some(Ok(StreamEvent::End)) | None => return Ok(out),
-            Some(Err(e)) => return Err(map_rpc_error(&e)),
+            Some(Err(e)) => return Err(e),
         }
     }
 }
@@ -814,7 +852,7 @@ impl Bridge for PluginBridge {
                     parser.finish(&id, &model);
                     break;
                 }
-                Some(Err(e)) => return Err(map_rpc_error(&e)),
+                Some(Err(e)) => return Err(e),
                 None => {
                     parser.finish(&id, &model);
                     break;
@@ -868,10 +906,7 @@ impl Bridge for PluginBridge {
                         }
                         Some(Err(e)) => {
                             ended = true;
-                            return Some((
-                                Err(map_rpc_error(&e)),
-                                (call, parser, id, model, ended),
-                            ));
+                            return Some((Err(e), (call, parser, id, model, ended)));
                         }
                         None => ended = true,
                     }
@@ -951,6 +986,102 @@ mod tests {
             code: Some("whatever".into()),
         });
         assert!(matches!(err, BridgeError::Transport(_)));
+    }
+
+    /// beta.4 忙拒绝：`WireError` 的 `reason`/`retry_after` 必须被真实消费——
+    /// 映射成 503 + `Retry-After`（Duration），终态 HTTP 状态保留 503 而非折成
+    /// 502。这是过去被压成 `RpcError{message,code}` 后丢失的元数据。
+    #[test]
+    fn wire_busy_maps_to_503_with_retry_after() {
+        use crate::plugin_host::wasm::WireError;
+        use std::time::Duration;
+
+        let error = WireError::busy(
+            "当前账号还有其他操作，等待账号锁超时，请稍后重试",
+            "account_lock",
+            1,
+        );
+        let bridge = wire_error_to_bridge(error);
+        match &bridge {
+            BridgeError::UpstreamStatus {
+                status,
+                retry_after,
+                ..
+            } => {
+                assert_eq!(*status, 503);
+                assert_eq!(*retry_after, Some(Duration::from_secs(1)));
+            }
+            other => panic!("应映射为 UpstreamStatus: {other:?}"),
+        }
+        // 终态 HTTP 状态必须是 503（不折成 502），客户端据此「稍后重试」。
+        assert_eq!(bridge.http_status(), 503);
+        // 客户端可见的响应状态同样走 503（render_openai_error 不折成 502）。
+        let (response_status, _body) = crate::error_translate::render_openai_error(&bridge);
+        assert_eq!(response_status, 503);
+    }
+
+    /// unavailable / resource_limit → 503：`map_rpc_error` 与 `wire_error_to_bridge`
+    /// 两路同口径（含 beta.2 常量）。
+    #[test]
+    fn busy_codes_map_to_503_on_both_paths() {
+        use crate::plugin_host::wasm::WireError;
+
+        for code in ["plugin_busy", "plugin_unavailable", "plugin_resource_limit"] {
+            let err = map_rpc_error(&RpcError {
+                message: "busy".into(),
+                code: Some(code.into()),
+            });
+            match err {
+                BridgeError::UpstreamStatus { status, .. } => {
+                    assert_eq!(status, 503, "map_rpc_error({code}) 应为 503");
+                }
+                other => panic!("{code} 应映射 503：{other:?}"),
+            }
+        }
+        for code in [
+            WireError::PLUGIN_BUSY,
+            "plugin_unavailable",
+            WireError::PLUGIN_RESOURCE_LIMIT,
+        ] {
+            let bridge = wire_error_to_bridge(WireError::with_code("busy", code));
+            assert_eq!(
+                bridge.http_status(),
+                503,
+                "wire_error_to_bridge({code}) 应为 503"
+            );
+        }
+    }
+
+    /// `plugin_request_too_large` 经 `WireError` 映射仍为 413（不回归，无 retry）。
+    #[test]
+    fn wire_oversize_still_maps_to_413() {
+        use crate::plugin_host::wasm::WireError;
+
+        let bridge = wire_error_to_bridge(WireError::with_code(
+            "本次请求超过插件单次调用上限",
+            "plugin_request_too_large",
+        ));
+        match &bridge {
+            BridgeError::UpstreamStatus {
+                status,
+                retry_after,
+                ..
+            } => {
+                assert_eq!(*status, 413);
+                assert_eq!(*retry_after, None);
+            }
+            other => panic!("应 413：{other:?}"),
+        }
+        assert_eq!(bridge.http_status(), 413);
+    }
+
+    /// 未识别的 `WireError` code 回落 502（与旧 Transport 行为一致，不误报 503）。
+    #[test]
+    fn wire_unknown_code_falls_back_to_502() {
+        use crate::plugin_host::wasm::WireError;
+
+        let bridge = wire_error_to_bridge(WireError::internal("boom"));
+        assert_eq!(bridge.http_status(), 502);
     }
 
     /// `data: {...}` SSE 行 → ChatChunk（delta.content / id / model）。

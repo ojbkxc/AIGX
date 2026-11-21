@@ -52,8 +52,13 @@ pub fn render_openai_error(error: &BridgeError) -> (u16, ErrorBody) {
             ..
         } => {
             let body = render_upstream_error(parsed.as_deref(), *wire, message);
-            // 4xx 透传，非 4xx 转为 502
-            let adjusted_status = if *s >= 400 && *s < 500 { *s } else { 502 };
+            // 4xx 透传，非 4xx 转为 502；但 503（服务不可用，含插件忙
+            // `plugin_busy`）原样保留，让客户端收到 503 的「稍后重试」信号。
+            let adjusted_status = if (*s >= 400 && *s < 500) || *s == 503 {
+                *s
+            } else {
+                502
+            };
             return (adjusted_status, body);
         }
         BridgeError::UpstreamDecode(msg) => ErrorBody {

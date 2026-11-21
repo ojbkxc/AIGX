@@ -86,9 +86,11 @@ const SUPERVISE_POLL: Duration = Duration::from_millis(500);
 
 /// 嵌入二进制的宿主文件（A2A v3.5.0-beta.1 宿主，AGPL，见各文件头注释）。
 ///
-/// 入口恒为 `main.mjs`；其余 28 个是它的同目录相对 import——落盘时全部
+/// 入口恒为 `main.mjs`；其余 29 个是它的同目录相对 import——落盘时全部
 /// 文件必须在同一个 host_dir 里（少一个 = Bun 启动即 ModuleNotFound）。
-/// 清单与 A2A `script/mod.rs::script_files()` 逐字对齐（29 个 mjs）。
+/// 清单与 A2A v3.5.0-beta.4 `script/mod.rs::script_files()` 对齐（30 个 mjs；
+/// beta.4 新增 `localization.mjs`，被 `login-policy.mjs` 经 `localizedText`
+/// 传递依赖）。
 const HOST_FILES: &[(&str, &str)] = &[
     ("main.mjs", include_str!("host/main.mjs")),
     ("wire.mjs", include_str!("host/wire.mjs")),
@@ -122,6 +124,9 @@ const HOST_FILES: &[(&str, &str)] = &[
         include_str!("host/local-provider.mjs"),
     ),
     ("local-process.mjs", include_str!("host/local-process.mjs")),
+    // beta.4：login-policy.mjs 经 `import { localizedText }` 传递依赖；
+    // 漏嵌则 Bun 启动即 ModuleNotFound、脚本宿主整体起不来。
+    ("localization.mjs", include_str!("host/localization.mjs")),
 ];
 
 /// spawn / 握手错误。
