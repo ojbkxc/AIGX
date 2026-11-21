@@ -15,7 +15,6 @@ RUN apk add --no-cache musl-dev
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY aigx-net ./aigx-net
 # 前端产物在编译期不嵌入（运行时读取 ./static），仅需编译 Rust
 #
 # 编译期加固：不可执行栈(noexecstack)；musl 目标默认即静态链接
