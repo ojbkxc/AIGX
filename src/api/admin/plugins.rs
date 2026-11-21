@@ -1415,6 +1415,19 @@ const UPSTREAM_INDEX_REPO: &str = "Agent2plugin/Agent2plugin";
 const UPSTREAM_INDEX_URL: &str =
     "https://raw.githubusercontent.com/Agent2plugin/Agent2plugin/main/index.json";
 
+/// 官网插件目录 CDN（对齐 A2A beta.4 `CDN_PLUGIN_CATALOG_URL`）。
+///
+/// 首选源：`schema:1` + `plugins[].releases[]`（多版本 GitHub Release 快照），
+/// 下载走 CDN 资产域（`browser_download_url` 已指向 `cdn.agent2api.dev`）。
+/// 该源是增强而非硬依赖：拉取失败/缺项时，逐个回落到旧链
+/// （raw `index.json` + manifest 单包 + GitHub Release 拼 URL）。
+const CDN_PLUGIN_CATALOG_URL: &str =
+    "https://cdn.agent2api.dev/agent2api/feeds/plugins/catalog.json";
+
+/// 官网 origin：CDN 目录里的 `icon` 是 `/plugin-assets/…` 绝对路径，
+/// 实际可加载地址在 `agent2api.dev`（不是 CDN 域，实测 CDN 域该路径 404）。
+const UPSTREAM_WEB_ORIGIN: &str = "https://agent2api.dev";
+
 /// AIGX 当前 `(OS, ARCH)` 对应的上游目标三元组；不认识的平台返回 `None`
 /// （该条目会以空 `platforms` 呈现，前端显示「当前平台暂无包」）。
 fn current_target_triple() -> Option<&'static str> {
@@ -1657,17 +1670,267 @@ fn builtin_catalog() -> Value {
     })
 }
 
-/// 从上游 `index.json` 动态拉取插件清单（对齐 A2A `read_index` + `read_detail`）。
+/// 从 release tag 按模板剥离版本号（`wasm-atomcode-v{version}` → `0.1.0-beta.2`）。
 ///
-/// 链路：拉 `index.json` → 逐包拉 `manifest`（拿 `version` / `release` 模板）
-/// → 按 `{id}-{version}-{target}.zip` 模板拼当前平台的下载 URL。`sha256`/`size`
-/// 优先用内置 [`UPSTREAM_ASSETS`] 表（已知三包逐字节对账）；上游新增的包查不到
-/// 表 → 留 `null`（`install` 侧 sha256 本就是可选校验，不阻断下载）。
+/// 模板必须含 `{version}`；剥离结果还要能被版本解析器接受，否则视为坏条目。
+fn release_version_from_tag(tag_name: &str, tag_template: &str) -> Option<String> {
+    let (prefix, suffix) = tag_template.split_once("{version}")?;
+    let version = tag_name.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    if version.is_empty() || crate::update::compare_versions(version, version).is_none() {
+        return None;
+    }
+    Some(version.to_string())
+}
+
+/// 插件下载资产 URL 是否落在允许的域名（对齐 A2A `plugin_url` 的域名白名单）。
 ///
-/// **任何一步失败都返回 `Ok(None)**，由调用方回落到 [`builtin_catalog`]——
-/// 动态拉取是增强，不是硬依赖：断网/限流时运维仍能看到内置快照。
-/// 只读清单元数据、不分发插件二进制（AGPL 边界，见文件头）。
-async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
+/// CDN 目录里的 `browser_download_url` 指向 `cdn.agent2api.dev/agent2api/plugins/…`
+/// （beta.4 新增下载域）；旧链仍可能给 GitHub Release 直连。其它主机一律拒绝，
+/// 避免被远端目录塞入任意下载地址（SSRF / 供应链投毒面）。
+fn plugin_asset_url_allowed(url_str: &str) -> bool {
+    let Ok(url) = url::Url::parse(url_str) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("");
+    let path = url.path();
+    match host {
+        "cdn.agent2api.dev" => {
+            path.starts_with("/agent2api/plugins/") || path.starts_with("/agent2api/installers/")
+        }
+        "github.com" => path.contains("/releases/download/"),
+        // GitHub Release 资产下载会 302 到这两个域。
+        "objects.githubusercontent.com" | "github-releases.githubusercontent.com" => true,
+        _ => false,
+    }
+}
+
+/// 在单个 release 的 `assets[]` 里按资产模板挑本机可用的那条。
+///
+/// 资产名 = 模板渲染后的 `prefix + target + suffix`。目标三元组优先级：
+/// 1. 本机 triple 命中 → 用它（原生包）；
+/// 2. 否则有 `wasm32-*` → `wasm32-unknown-unknown`（wasm 包跨平台运行）；
+/// 3. 都不命中 → `None`（该版本对本机不可用）。
+///
+/// 返回 `{target(OS), size, url, sha256}`；`url` 必须过 [`plugin_asset_url_allowed`]
+/// 白名单，`sha256` 取自 release 资产的 `digest`（`sha256:<hex>`）。
+fn pick_cdn_release_platform(
+    release: &Value,
+    id: &str,
+    version: &str,
+    asset_template: &str,
+) -> Option<Value> {
+    let rendered = asset_template
+        .replace("{id}", id)
+        .replace("{version}", version);
+    let (prefix, suffix) = rendered.split_once("{target}")?;
+    let local = current_target_triple();
+    let wasm_target = "wasm32-unknown-unknown";
+    let assets = release.get("assets")?.as_array()?;
+
+    let mut chosen: Option<(u8, &Value)> = None;
+    for asset in assets {
+        let Some(name) = asset.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(target) = name
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+        else {
+            continue;
+        };
+        let url_ok = asset
+            .get("browser_download_url")
+            .and_then(Value::as_str)
+            .is_some_and(plugin_asset_url_allowed);
+        if !url_ok {
+            continue;
+        }
+        let rank = if local.is_some_and(|l| l == target) {
+            0
+        } else if target == wasm_target {
+            1
+        } else {
+            continue;
+        };
+        if chosen.is_none_or(|(best_rank, _)| rank < best_rank) {
+            chosen = Some((rank, asset));
+        }
+    }
+    let (_, asset) = chosen?;
+    let url = asset
+        .get("browser_download_url")
+        .and_then(Value::as_str)?
+        .to_string();
+    let size = asset.get("size").and_then(Value::as_u64).unwrap_or(0);
+    let sha256 = asset
+        .get("digest")
+        .and_then(Value::as_str)
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .filter(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|hex| hex.to_ascii_lowercase())
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    Some(json!({
+        // 前端按 OS 名过滤「下载」按钮，故 target 仍填 OS。
+        "target": std::env::consts::OS,
+        "size": size,
+        "url": url,
+        "current": false,
+        "sha256": sha256,
+    }))
+}
+
+/// CDN 目录 `icon`：`/plugin-assets/…` 绝对路径挂到官网 origin（CDN 域该路径 404）；
+/// `http(s)://` / `data:image/` 原样；其余（相对路径）丢弃。
+fn resolve_cdn_icon(icon: Option<&str>) -> Option<String> {
+    let icon = icon.map(str::trim).filter(|value| !value.is_empty())?;
+    if let Some(rest) = icon.strip_prefix("/plugin-assets/") {
+        return Some(format!("{UPSTREAM_WEB_ORIGIN}/plugin-assets/{rest}"));
+    }
+    if icon.starts_with("http://")
+        || icon.starts_with("https://")
+        || icon.starts_with("data:image/")
+    {
+        return Some(icon.to_string());
+    }
+    None
+}
+
+/// 把 CDN 目录项 + 其 `releases[]` 投影成源格式条目（纯函数，便于单测）。
+///
+/// 多版本选优：跳过 `draft`，在本机有可用资产的前提下取版本最高的一版
+/// （CDN 目录可能同时带正式版与预发布版，按 `compare_versions` 比较）。
+fn cdn_catalog_item(id: &str, entry: &Value) -> Option<Value> {
+    let detail = entry.get("detail");
+    let release_meta = detail.and_then(|detail| detail.get("release"));
+    let tag_template = entry
+        .get("tagTemplate")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            release_meta
+                .and_then(|r| r.get("tag"))
+                .and_then(Value::as_str)
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or("v{version}");
+    let asset_template = entry
+        .get("assetTemplate")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            release_meta
+                .and_then(|r| r.get("asset"))
+                .and_then(Value::as_str)
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or("{id}-{version}-{target}.zip");
+    let homepage = entry
+        .get("homepage")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            detail
+                .and_then(|detail| detail.get("homepage"))
+                .and_then(Value::as_str)
+        });
+
+    // `releases[]` 是 beta.4 的多版本形态；`release` 单对象是兼容兜底。
+    let releases: Vec<&Value> = match entry.get("releases").and_then(Value::as_array) {
+        Some(list) => list.iter().collect(),
+        None => entry.get("release").into_iter().collect(),
+    };
+    let mut best: Option<(String, &Value, Value)> = None;
+    for release in releases {
+        if release.is_null() || release.get("draft").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let tag = release
+            .get("tag_name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let Some(version) = release_version_from_tag(tag, tag_template) else {
+            continue;
+        };
+        let Some(platform) = pick_cdn_release_platform(release, id, &version, asset_template)
+        else {
+            continue;
+        };
+        let take = best.as_ref().is_none_or(|(best_version, _, _)| {
+            crate::update::compare_versions(&version, best_version) == Some(1)
+        });
+        if take {
+            best = Some((version, release, platform));
+        }
+    }
+    let (version, release, platform) = best?;
+    let prerelease =
+        release.get("prerelease").and_then(Value::as_bool) == Some(true) || version.contains('-');
+    let page = release
+        .get("html_url")
+        .and_then(Value::as_str)
+        .or(homepage)
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    Some(json!({
+        "id": id,
+        "name": entry.get("name").and_then(Value::as_str).unwrap_or(id),
+        "description": entry.get("description").and_then(Value::as_str).unwrap_or(""),
+        "official": entry.get("official").and_then(Value::as_bool).unwrap_or(false),
+        "version": version,
+        "page": page,
+        "homepage": homepage,
+        "icon": resolve_cdn_icon(entry.get("icon").and_then(Value::as_str)),
+        "category": entry.get("category").cloned().unwrap_or(Value::Null),
+        // CDN 目录默认要求签名（对齐 A2A `require_signed = true`）。
+        "requireSigned": entry.get("requireSigned").and_then(Value::as_bool).unwrap_or(true),
+        "tags": entry.get("tags").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "prerelease": prerelease,
+        "publishedAt": release.get("published_at").and_then(Value::as_str),
+        "platforms": vec![platform],
+        "providers": entry.get("providers").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+    }))
+}
+
+/// 拉取官网 CDN 插件目录（`schema:1` + `plugins[].releases[]`）。
+///
+/// 任何一步失败（网络/非 200/Schema 不符/空表）都返回 `None`，调用方继续走
+/// 旧链回落到 raw `index.json`。
+async fn fetch_cdn_catalog_items(state: &AppState) -> Option<Vec<Value>> {
+    let resp = state
+        .http_client
+        .get(CDN_PLUGIN_CATALOG_URL)
+        .timeout(CATALOG_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let document: Value = resp.json().await.ok()?;
+    if document.get("schema").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
+    let entries = document.get("plugins").and_then(Value::as_array)?;
+    let mut items: Vec<Value> = Vec::new();
+    for entry in entries {
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(item) = cdn_catalog_item(id, entry) {
+            items.push(item);
+        }
+    }
+    (!items.is_empty()).then_some(items)
+}
+
+/// 旧链：拉 raw `index.json` → 逐包拉 `manifest`（拿 `version` / `release` 模板）
+/// → 按 `{id}-{version}-{target}.zip` 模板拼 GitHub Release 下载 URL。
+///
+/// 用作 CDN 目录的 fallback，覆盖 CDN 尚未收录的包；`sha256`/`size` 优先用
+/// 内置 [`UPSTREAM_ASSETS`] 表，查不到留 `null`（install 侧 sha256 可选校验）。
+async fn fetch_raw_index_items(state: &AppState) -> Option<Vec<Value>> {
     let resp = state
         .http_client
         .get(UPSTREAM_INDEX_URL)
@@ -1683,26 +1946,65 @@ async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
 
     let mut items: Vec<Value> = Vec::new();
     for entry in entries {
-        let id = entry.get("id").and_then(Value::as_str)?;
-        let manifest_path = entry.get("manifest").and_then(Value::as_str)?;
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(manifest_path) = entry.get("manifest").and_then(Value::as_str) else {
+            continue;
+        };
         // 拼 manifest 的 raw URL（index.json 里的 `manifest` 是仓内相对路径）
         let manifest_url =
             format!("https://raw.githubusercontent.com/{UPSTREAM_INDEX_REPO}/main/{manifest_path}");
-        let mresp = state
+        let mresp = match state
             .http_client
             .get(&manifest_url)
             .timeout(CATALOG_TIMEOUT)
             .send()
             .await
-            .ok()?;
-        if !mresp.status().is_success() {
-            continue;
-        }
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
         let manifest: Value = match mresp.json().await {
             Ok(v) => v,
             Err(_) => continue,
         };
         items.push(upstream_catalog_item(id, entry, &manifest));
+    }
+    (!items.is_empty()).then_some(items)
+}
+
+/// 动态拉取上游插件清单：**优先 CDN `releases[]`，旧链 raw index 补缺**。
+///
+/// - CDN 源（[`CDN_PLUGIN_CATALOG_URL`]）给 `schema:1` + `plugins[].releases[]`，
+///   每包带多版本 GitHub Release 快照与 **CDN 下载地址 + sha256 digest**；
+/// - raw `index.json` 旧链（单 manifest + GitHub Release 拼 URL）作 fallback，
+///   覆盖 CDN 尚未收录的包（例如旧原生包）；同 `id` 以 CDN 为准。
+///
+/// 两者都拿不到 → 返回 `None`，由调用方回落 [`builtin_catalog`]。动态拉取是
+/// 增强而非硬依赖：断网/限流时运维仍能看到内置快照。只读清单元数据、不分发
+/// 插件二进制（AGPL 边界，见文件头）。
+async fn fetch_upstream_catalog(state: &AppState) -> Option<Value> {
+    let mut items: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Some(cdn_items) = fetch_cdn_catalog_items(state).await {
+        for item in cdn_items {
+            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                if seen.insert(id.to_string()) {
+                    items.push(item);
+                }
+            }
+        }
+    }
+    if let Some(raw_items) = fetch_raw_index_items(state).await {
+        for item in raw_items {
+            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                if seen.insert(id.to_string()) {
+                    items.push(item);
+                }
+            }
+        }
     }
     if items.is_empty() {
         return None;
@@ -2903,6 +3205,168 @@ mod tests {
         // wasm 资产表里没有对应行 → size=0 / sha=null（不阻断下载）
         assert_eq!(platform["size"], 0);
         assert!(platform["sha256"].is_null());
+    }
+
+    /// CDN 下载域白名单：只放行 CDN 插件域与 GitHub Release；其它主机、
+    /// 或 CDN 域下的非 `/agent2api/plugins/`、`/agent2api/installers/` 路径拒绝。
+    #[test]
+    fn plugin_asset_url_allowlist() {
+        assert!(plugin_asset_url_allowed(
+            "https://cdn.agent2api.dev/agent2api/plugins/agent2api-wasm-atomcode/\
+             wasm-atomcode-v0.1.0-beta.2/263b3a/agent2api-wasm-atomcode-0.1.0-beta.2-wasm32-unknown-unknown.zip"
+        ));
+        assert!(plugin_asset_url_allowed(
+            "https://github.com/Agent2Builder/agent2api-providers-releases/releases/download/\
+             v3.5.0-beta.1/agent2api-providers-3.5.0-beta.1-x86_64-unknown-linux-gnu.zip"
+        ));
+        // CDN 域但路径不对（博客图标等）→ 拒绝
+        assert!(!plugin_asset_url_allowed(
+            "https://cdn.agent2api.dev/plugin-assets/x.png"
+        ));
+        // 任意第三方主机 → 拒绝
+        assert!(!plugin_asset_url_allowed(
+            "https://evil.example.com/payload.zip"
+        ));
+        // 非 URL → 拒绝
+        assert!(!plugin_asset_url_allowed("not a url"));
+        // 带 userinfo / fragment 的伪装 → 拒绝
+        assert!(!plugin_asset_url_allowed(
+            "https://user@cdn.agent2api.dev/agent2api/plugins/x/y/z.zip"
+        ));
+    }
+
+    #[test]
+    fn release_version_from_tag_strips_template() {
+        assert_eq!(
+            release_version_from_tag("v3.5.0-beta.1", "v{version}").as_deref(),
+            Some("3.5.0-beta.1")
+        );
+        assert_eq!(
+            release_version_from_tag("wasm-atomcode-v0.1.0-beta.2", "wasm-atomcode-v{version}")
+                .as_deref(),
+            Some("0.1.0-beta.2")
+        );
+        // 模板不匹配 → None
+        assert_eq!(
+            release_version_from_tag("v3.5.0-beta.1", "web-v{version}"),
+            None
+        );
+    }
+
+    /// CDN 目录项：`releases[]` 多版本选优（跳过 draft，取最高版本），
+    /// 下载地址取自 release 资产的 `browser_download_url`（CDN 域），
+    /// sha256 取自 `digest`；`.sha256` 边车资产不得被当成主包。
+    #[test]
+    fn cdn_catalog_item_picks_highest_release_with_cdn_asset() {
+        let entry = json!({
+            "id": "agent2api-wasm-atomcode",
+            "name": "AtomCode · Wasm",
+            "description": "desc",
+            "category": "agent",
+            "icon": "/plugin-assets/agent2api-wasm-atomcode.png",
+            "tagTemplate": "wasm-atomcode-v{version}",
+            "assetTemplate": "{id}-{version}-{target}.zip",
+            "requireSigned": true,
+            "providers": [{ "id": "atomcode", "label": "AtomCode" }],
+            "releases": [
+                {
+                    "tag_name": "wasm-atomcode-v0.1.0-beta.1",
+                    "prerelease": true,
+                    "draft": false,
+                    "assets": [
+                        {
+                            "name": "agent2api-wasm-atomcode-0.1.0-beta.1-wasm32-unknown-unknown.zip",
+                            "browser_download_url": "https://cdn.agent2api.dev/agent2api/plugins/agent2api-wasm-atomcode/wasm-atomcode-v0.1.0-beta.1/aaa/agent2api-wasm-atomcode-0.1.0-beta.1-wasm32-unknown-unknown.zip",
+                            "size": 100,
+                            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                    ]
+                },
+                {
+                    "tag_name": "wasm-atomcode-v0.1.0-beta.2",
+                    "prerelease": true,
+                    "draft": false,
+                    "assets": [
+                        {
+                            "name": "agent2api-wasm-atomcode-0.1.0-beta.2-wasm32-unknown-unknown.zip",
+                            "browser_download_url": "https://cdn.agent2api.dev/agent2api/plugins/agent2api-wasm-atomcode/wasm-atomcode-v0.1.0-beta.2/bbb/agent2api-wasm-atomcode-0.1.0-beta.2-wasm32-unknown-unknown.zip",
+                            "size": 450258,
+                            "digest": "sha256:263b3a274bed63b09e653df585d280bfb5980405c124d6cb3c720c32917d7a4f"
+                        },
+                        {
+                            "name": "agent2api-wasm-atomcode-0.1.0-beta.2-wasm32-unknown-unknown.zip.sha256",
+                            "browser_download_url": "https://cdn.agent2api.dev/agent2api/plugins/agent2api-wasm-atomcode/wasm-atomcode-v0.1.0-beta.2/ccc/agent2api-wasm-atomcode-0.1.0-beta.2-wasm32-unknown-unknown.zip.sha256",
+                            "size": 64
+                        }
+                    ]
+                },
+                {
+                    "tag_name": "wasm-atomcode-v0.1.0-beta.3",
+                    "prerelease": true,
+                    "draft": true,
+                    "assets": [
+                        {
+                            "name": "agent2api-wasm-atomcode-0.1.0-beta.3-wasm32-unknown-unknown.zip",
+                            "browser_download_url": "https://cdn.agent2api.dev/agent2api/plugins/agent2api-wasm-atomcode/wasm-atomcode-v0.1.0-beta.3/ddd/agent2api-wasm-atomcode-0.1.0-beta.3-wasm32-unknown-unknown.zip",
+                            "size": 999
+                        }
+                    ]
+                }
+            ]
+        });
+        let item = cdn_catalog_item("agent2api-wasm-atomcode", &entry);
+        let item = item.expect("CDN 条目应被解析");
+        // draft 的 beta.3 被跳过 → 选 beta.2
+        assert_eq!(item["version"], "0.1.0-beta.2");
+        assert_eq!(item["prerelease"], true);
+        assert_eq!(item["category"], "agent");
+        assert_eq!(item["requireSigned"], true);
+        assert_eq!(
+            item["icon"],
+            "https://agent2api.dev/plugin-assets/agent2api-wasm-atomcode.png"
+        );
+        let platform = &item["platforms"][0];
+        assert_eq!(platform["target"], std::env::consts::OS);
+        let url = platform["url"].as_str().unwrap();
+        assert!(
+            url.contains("/agent2api/plugins/agent2api-wasm-atomcode/"),
+            "下载地址应走 CDN 域: {url}"
+        );
+        assert!(
+            url.ends_with("-0.1.0-beta.2-wasm32-unknown-unknown.zip"),
+            "应选 beta.2 的 wasm 主包（不是 .sha256 边车）: {url}"
+        );
+        assert_eq!(platform["size"], 450258);
+        assert_eq!(
+            platform["sha256"],
+            "263b3a274bed63b09e653df585d280bfb5980405c124d6cb3c720c32917d7a4f"
+        );
+    }
+
+    /// 没有可用 release（全 draft / 资产 URL 不安全 / 无匹配平台）→ None，
+    /// 让调用方保留 raw index 的旧链条目而不是塞一个坏条目。
+    #[test]
+    fn cdn_catalog_item_rejects_unusable_releases() {
+        let entry = json!({
+            "id": "agent2api-wasm-bad",
+            "tagTemplate": "wasm-bad-v{version}",
+            "assetTemplate": "{id}-{version}-{target}.zip",
+            "releases": [
+                {
+                    "tag_name": "wasm-bad-v0.1.0-beta.1",
+                    "draft": false,
+                    "assets": [
+                        {
+                            "name": "agent2api-wasm-bad-0.1.0-beta.1-wasm32-unknown-unknown.zip",
+                            // 非白名单主机的下载地址 → 必须丢弃
+                            "browser_download_url": "https://evil.example.com/payload.zip",
+                            "size": 1
+                        }
+                    ]
+                }
+            ]
+        });
+        assert!(cdn_catalog_item("agent2api-wasm-bad", &entry).is_none());
     }
 
     /// 回归：内置资产表只对同版本可信。atomcode 内置快照是 beta.1，

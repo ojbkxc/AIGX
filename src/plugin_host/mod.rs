@@ -80,7 +80,7 @@ pub use manager::PluginHostManager;
 pub use process::{host_target_triple, PluginProcess};
 #[allow(unused_imports)] // `dynamic_login` 别名待接线（registry 内有同名函数）
 pub use registry::{dynamic_login, PackMeta};
-pub use rpc::{RpcError, StreamCall, StreamEvent};
+pub use rpc::{CancellationToken, RpcError, StreamCall, StreamEvent};
 /// 该 provider 是否由 Wasm 包接管（对齐 beta.2 `is_wasm_provider`）。
 #[allow(unused_imports)] // 公开别名待接线
 pub use wasm::owns as is_wasm_provider;

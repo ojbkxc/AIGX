@@ -4509,6 +4509,10 @@ struct PluginLoginTask {
     provider: String,
     flow: String,
     channel_id: String,
+    /// 该登录任务的取消令牌（对齐 A2A beta.4 `call_coded_with_cancel`）。
+    /// `login/cancel` 置位后，正卡在 `login.poll` / `login.submit` 的在途
+    /// RPC 会被立刻中止并从 pending 摘除，避免子进程等待泄漏与竞态。
+    cancel: crate::plugin_host::CancellationToken,
 }
 
 fn plugin_login_tasks(
@@ -4530,11 +4534,16 @@ pub(crate) fn should_use_plugin_login(state: &AppState, provider: &str) -> bool 
 }
 
 /// 向接管该 provider 的插件发起一次能力调用。
+///
+/// `cancel` 为 `Some` 时，原生插件宿主的在途 RPC 可被该令牌中止（登录
+/// `login/cancel` 走这条路径）。脚本宿主的取消接线属 script 模块、本期
+/// 不改动，仍按普通 `call` 发出（脚本宿主无法取消时行为与旧版一致）。
 async fn plugin_login_call(
     state: &AppState,
     provider: &str,
     method: &str,
     params: Value,
+    cancel: Option<&crate::plugin_host::CancellationToken>,
 ) -> Result<Value, String> {
     if let Some(route) = state.script_host.route_for_provider(provider) {
         return route.channel.call(method, params).await.map_err(|error| {
@@ -4547,14 +4556,16 @@ async fn plugin_login_call(
         });
     }
     if let Some(process) = state.plugin_host.process_for_provider(provider) {
-        return process.rpc.call(method, params).await.map_err(|error| {
-            match error.code.as_deref() {
+        return process
+            .rpc
+            .call_with_cancel(method, params, cancel)
+            .await
+            .map_err(|error| match error.code.as_deref() {
                 Some(code) if !code.is_empty() => {
                     format!("插件 {method} 失败[{code}]：{}", error.message)
                 }
                 _ => format!("插件 {method} 失败：{}", error.message),
-            }
-        });
+            });
     }
     Err(format!(
         "「{provider}」的插件宿主未运行，无法发起登录（请先在插件页启用对应插件包）"
@@ -4649,6 +4660,8 @@ pub(crate) async fn plugin_login_start(
         &provider,
         "login.start",
         json!({ "provider": provider, "payload": {} }),
+        // start 发生在网关任务登记之前，尚无令牌可绑定；取消只针对后续轮询/提交。
+        None,
     )
     .await?;
     let flow = started
@@ -4665,6 +4678,7 @@ pub(crate) async fn plugin_login_start(
             provider: provider.clone(),
             flow,
             channel_id: channel_id.trim().to_string(),
+            cancel: crate::plugin_host::CancellationToken::new(),
         },
     );
     Ok(json!({
@@ -4696,6 +4710,7 @@ pub(crate) async fn plugin_login_poll(
         &task.provider,
         "login.poll",
         json!({ "provider": task.provider, "flow": task.flow }),
+        Some(&task.cancel),
     )
     .await?;
     match polled.get("state").and_then(Value::as_str) {
@@ -4786,6 +4801,7 @@ pub(crate) async fn plugin_login_callback(
         &task.provider,
         "login.callback",
         login_callback_params(&task.provider, &task.flow, callback_url),
+        Some(&task.cancel),
     )
     .await?;
     match polled.get("state").and_then(Value::as_str) {
@@ -4825,6 +4841,7 @@ pub(crate) async fn plugin_login_interaction(
         &task.provider,
         "login.interaction",
         json!({ "provider": task.provider, "flow": task.flow }),
+        Some(&task.cancel),
     )
     .await
     {
@@ -4875,6 +4892,7 @@ pub(crate) async fn plugin_login_submit(
             "inputs": body.get("inputs").cloned().unwrap_or(Value::Null),
             "captcha": body.get("captcha").cloned().unwrap_or(Value::Null),
         }),
+        Some(&task.cancel),
     )
     .await?;
     match polled.get("state").and_then(|value| value.as_str()) {
@@ -4904,11 +4922,17 @@ pub(crate) async fn plugin_login_submit(
 /// 取消插件登录任务；`None` = 不是插件任务。
 pub(crate) async fn plugin_login_cancel(state: &AppState, gateway_state: &str) -> Option<bool> {
     let task = plugin_login_tasks().remove(gateway_state)?;
+    // 先置位取消令牌：正卡在 `login.poll` / `login.submit` 的在途 RPC 会
+    // 立刻放弃等待并从 pending 摘除（否则插件迟到的应答会命中无人接收的
+    // 发送端，登记表随每次取消累积）。随后再通知插件终止流程。
+    task.cancel.cancel();
     let _ = plugin_login_call(
         state,
         &task.provider,
         "login.cancel",
         json!({ "provider": task.provider, "flow": task.flow }),
+        // 这一条是「通知插件取消」，自身绝不能被刚置位的令牌中止。
+        None,
     )
     .await;
     Some(true)

@@ -84,6 +84,63 @@ impl RpcError {
     }
 }
 
+/// 一次性的取消令牌（对齐 A2A beta.4 的 `CancellationToken` 语义）。
+///
+/// ── 为什么自带而不是用 `tokio_util::sync::CancellationToken` ──────────
+/// 项目既有约定是**不为此新增依赖**（见 `log/inflight.rs` 的同名注释）；
+/// `tokio` 已是直接依赖，`Notify` 足够表达「一次性置位 + 唤醒全部等待者」。
+///
+/// ── 为什么 `cancelled()` 要先 `enable()` 再复查 ──────────────────────
+/// `Notify::notified()` 只有在**首次被 poll 时**才登记 waiter。若先查
+/// `is_cancelled()`、再 `notified().await`，`cancel()` 恰好落在「查完」
+/// 与「登记」之间时，`notify_waiters()` 没有 waiter 可唤醒、标志位却已置
+/// true —— 等待者会永久挂起。`Notified::enable()` 显式完成登记，之后再
+/// 复查一次标志位，即可堵住这条丢失唤醒的窗口。
+#[derive(Clone, Default)]
+pub struct CancellationToken {
+    inner: Arc<CancellationInner>,
+}
+
+#[derive(Default)]
+struct CancellationInner {
+    cancelled: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 触发取消（幂等，可多线程调用）。
+    pub fn cancel(&self) {
+        self.inner.cancelled.store(true, Ordering::SeqCst);
+        self.inner.notify.notify_waiters();
+    }
+
+    /// 是否已取消（非阻塞）。
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// 等待取消；可放进 `tokio::select!`。
+    pub async fn cancelled(&self) {
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            let notified = self.inner.notify.notified();
+            tokio::pin!(notified);
+            // 先登记 waiter，再复查：消除 cancel 落在检查与登记之间的丢失唤醒。
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 /// 帧种类（由 `Frame::kind()` 判定）。
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum FrameKind {
@@ -564,6 +621,25 @@ impl RpcChannel {
     /// 分配奇数 id，写请求帧，在 `pending` 里注册应答通道，等插件回应答。
     /// 超时（由调用方的 select 控制）或通道关闭则报错。
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.call_with_cancel(method, params, None).await
+    }
+
+    /// 与 [`Self::call`] 同一件事，但可被 [`CancellationToken`] 中止。
+    ///
+    /// 取消语义（对齐 A2A beta.4 `call_coded_with_cancel`）：令牌置位时
+    /// **立刻放弃等待**、从 `pending` 摘除这条在途登记，并返回 `aborted`
+    /// 错误。之所以要显式摘除：取消后调用方已经不再等这条 `oneshot`，若不
+    /// 摘除，插件迟到的应答会命中一个没人接收的发送端，登记表也会随每次
+    /// 登录取消累积 —— 即「取消时子进程泄漏 / 竞态」的根因。
+    ///
+    /// 注意：这里只中止**网关侧等待**，不向插件补发 abort 帧。登录路径的
+    /// `login.cancel` 会另外通知插件终止流程；本条只保证网关不悬挂等待。
+    pub async fn call_with_cancel(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Value, RpcError> {
         let params = fill_wire_defaults(method, params);
         let id = self.shared.next_id.fetch_add(2, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -582,14 +658,30 @@ impl RpcChannel {
             pending.remove(&id);
             return Err(e);
         }
-        match rx.await {
-            Ok(frame) => {
-                if let Some(err) = frame.error {
-                    return Err(err);
+        let wait = async {
+            match rx.await {
+                Ok(frame) => {
+                    if let Some(err) = frame.error {
+                        return Err(err);
+                    }
+                    Ok(frame.result.unwrap_or(Value::Null))
                 }
-                Ok(frame.result.unwrap_or(Value::Null))
+                Err(_) => Err(RpcError::new("channel closed before response", "closed")),
             }
-            Err(_) => Err(RpcError::new("channel closed before response", "closed")),
+        };
+        match cancel {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        // 摘除在途登记：迟到的应答由读循环按未知 id 丢弃。
+                        self.shared.pending.write().await.remove(&id);
+                        Err(RpcError::new("登录已取消", "aborted"))
+                    }
+                    result = wait => result,
+                }
+            }
+            None => wait.await,
         }
     }
 
@@ -1112,6 +1204,79 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().message, "remote boom");
         plugin_task.await.unwrap();
+        client.shutdown();
+    }
+
+    /// 取消令牌置位时，在途的 `call_with_cancel` 必须立刻返回 `aborted`
+    /// 并从 `pending` 摘除登记（否则插件迟到的应答会命中无人接收的发送端，
+    /// 登记表随每次登录取消累积）。
+    #[tokio::test]
+    async fn call_with_cancel_aborts_in_flight_and_clears_pending() {
+        let (client_read, client_write, plugin_read, plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        // 插件端只把请求读走、**永不回应答**——模拟卡住的登录轮询。
+        let _plugin_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let frame = read_one_frame(&mut reader).await;
+            assert_eq!(frame.method.as_deref(), Some("login.poll"));
+            // 故意不回应答；把写端留在作用域里直到任务被丢弃（保持通道存活，
+            // 否则 EOF 会先让 pending 以 "closed" 结束，测不到取消路径）。
+            let _keep_write = plugin_write;
+            std::future::pending::<()>().await;
+        });
+
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            canceller.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.call_with_cancel("login.poll", Value::Null, Some(&token)),
+        )
+        .await
+        .expect("取消必须在超时前生效")
+        .expect_err("取消后必须返回错误");
+        assert_eq!(result.code.as_deref(), Some("aborted"));
+        assert_eq!(result.message, "登录已取消");
+        // 在途登记已被摘除。
+        assert_eq!(client.pending_count().await, 0);
+        client.shutdown();
+    }
+
+    /// 未取消时，`call_with_cancel(Some(token))` 行为与普通 `call` 一致。
+    #[tokio::test]
+    async fn call_with_cancel_returns_response_when_not_cancelled() {
+        let (client_read, client_write, plugin_read, plugin_write) = duplex_pair();
+        let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
+
+        let plugin_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(plugin_read);
+            let frame = read_one_frame(&mut reader).await;
+            let response = Frame {
+                id: frame.id,
+                result: Some(serde_json::json!({ "state": "pending" })),
+                ..Default::default()
+            };
+            let mut w = plugin_write;
+            w.write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .await
+                .unwrap();
+            w.write_all(b"\n").await.unwrap();
+            w.flush().await.unwrap();
+        });
+
+        let token = CancellationToken::new();
+        let value = client
+            .call_with_cancel("login.poll", Value::Null, Some(&token))
+            .await
+            .expect("未取消应拿到应答");
+        assert_eq!(value["state"], "pending");
+        plugin_task.await.unwrap();
+        assert_eq!(client.pending_count().await, 0);
         client.shutdown();
     }
 
