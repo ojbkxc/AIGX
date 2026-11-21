@@ -586,6 +586,20 @@ pub fn decide(
             // AIGX 的视觉裁决发生在选路**前**，拿不到「当前路由范围内的视觉
             // 模型」；`prefer_current_route` 因此不适用（`validate` 直接拒绝
             // 保存 true）。接管一律用显式 targets（空 = 不干预）。
+            //
+            // ── 与上游 `fallback` 语义的差异（2026-11-21 核实）──────────
+            // 上游（`core/upstream/vision_compat/targets.rs`）：接管候选 =
+            //   (prefer_current_route ? 当前路由内视觉模型 : ∅)
+            //   + (fallback == Designated ? rule.targets : ∅)。
+            // 即 `targets` **只在 fallback=Designated 时**才作为备选接管目标。
+            //
+            // AIGX 分叉（有意，已在模块头记录）：因为 `prefer_current_route`
+            // 不支持、且 `fallback` 缺省是 `Stop`，若严格照搬上游，任何**省略
+            // `fallback` 字段**（但显式配了 targets）的合法规则都会静默变成
+            // 「不干预」——`validate` 又允许这种缺省保存。故 AIGX 把「非空
+            // targets」本身当作接管链，**不区分 Stop / Designated**：显式配置的
+            // 目标一定生效（宁生效勿误伤），并由 `validate` 保证 reroute 规则
+            // 必有目标。要恢复上游口径，需先支持 prefer_current_route。
             if rule.targets.is_empty() {
                 return None;
             }
@@ -1018,6 +1032,46 @@ mod tests {
             ..VisionSettings::default()
         };
         assert!(validate(&bad).is_err());
+    }
+
+    /// 钉住与上游 `fallback` 的**已文档化差异**（模块头 + `decide` 注释）：
+    /// 上游 targets 仅在 `Fallback::Designated` 时作为备选；AIGX 因不支持
+    /// `prefer_current_route`、且 `fallback` 缺省 Stop，把「非空 targets」本身
+    /// 当作接管链 —— Stop 与 Designated 行为一致，避免省略 fallback 的合法
+    /// 规则静默失效。空 targets 两者都不干预。
+    #[test]
+    fn reroute_fallback_semantics_documented_divergence() {
+        let make = |fallback: Fallback, targets: Vec<VisionTarget>| VisionSettings {
+            rules: vec![VisionRule {
+                models: vec![ModelRef::new("p", "plain")],
+                mode: Mode::Reroute,
+                prefer_current_route: false,
+                fallback,
+                targets,
+                ..VisionRule::default()
+            }],
+            ..VisionSettings::default()
+        };
+        let chain = |settings: &VisionSettings| {
+            decide(settings, Some("p"), "plain", Some(false), true, None)
+                .map(|action| target_chain_models(&action.reroute_targets))
+        };
+
+        let designated = make(Fallback::Designated, vec![target("vision")]);
+        let stop = make(Fallback::Stop, vec![target("vision")]);
+        assert_eq!(
+            chain(&designated),
+            Some(vec!["vision".to_string()]),
+            "Designated + targets 接管"
+        );
+        assert_eq!(
+            chain(&stop),
+            chain(&designated),
+            "差异点：AIGX 的 Stop + targets 仍接管（与上游不同）"
+        );
+        // 空 targets：两种 fallback 都不干预
+        assert!(chain(&make(Fallback::Designated, Vec::new())).is_none());
+        assert!(chain(&make(Fallback::Stop, Vec::new())).is_none());
     }
 
     #[test]

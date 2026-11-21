@@ -16,7 +16,11 @@
 //!   （AIGX 断路器 HalfOpen 成功即恢复，无独立 success_threshold，不强造）
 //! - 调度权重：A2A 无此项；AIGX 把闲置的 `set_scheduler_config()` 接上
 
-#![allow(dead_code)] // 路由策略表（预留，数据面未接线）
+// 数据面接线状态（2026-11-21 核实）：`resolve_bridges_needs`
+// （src/api/openai/resolve.rs）每请求调 `resolve_profile → select_for_model_by_
+// strategy_filtered → plan_route`；管理面预演/workspace 走同一序列。本模块
+// 已全部接线，保留的是契约面里少数仅供管理面/预演或未来步骤使用的符号。
+#![allow(dead_code)] // 少数管理面/预演专用方法；数据面主路径已接线
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -759,8 +763,11 @@ impl<'a> CandidateRef<'a> {
         self.channel.id.as_str()
     }
 
-    /// 提供商口径 = `ChannelType::as_str()`（与 Key 级 `allowed_providers`
-    /// 过滤同一命名空间，见 `api/openai/resolve.rs`）。
+    /// 渠道类型字面量（`account` / `plugin` / `openai_compatible` …）。
+    ///
+    /// **不要**用它直接匹配 provider 名单：插件渠道的真实 provider 是
+    /// `plugin_provider`、账号型渠道没有单一 provider。`plan_route` 内的
+    /// 名单判定已按渠道形态归一（见那里的注释）。
     pub fn provider(&self) -> &'a str {
         self.channel.channel_type.as_str()
     }
@@ -900,18 +907,32 @@ pub fn plan_route<'a>(
     let mut kept: Vec<CandidateRef<'a>> = Vec::with_capacity(candidates.len());
     let mut skipped = SkipSummary::default();
     for ch in candidates {
-        let provider = ch.channel_type.as_str();
-        if scope
-            .disabled_providers
-            .iter()
-            .any(|p| p.as_str() == provider)
-        {
-            skipped.provider_disabled += 1;
-            continue;
-        }
-        if listed && !scope.providers.iter().any(|p| p.as_str() == provider) {
-            skipped.provider_not_allowed += 1;
-            continue;
+        // provider 口径按渠道形态取（与 `api/openai/resolve.rs::channel_matches_
+        // allowed_providers` 同一命名空间，P0 修复）：
+        // - **插件渠道**的真实 provider 是 `plugin_provider`，`channel_type` 只是
+        //   字面量 `"plugin"` —— 用字面量匹配会把配了名单的插件渠道全部误裁；
+        // - **账号型渠道**没有单一 provider（真正干活的是账号，`AccountBridge`
+        //   内部按账号 provider 再过滤），渠道级一律放行，交给账号级精筛 ——
+        //   否则启用档案 + Listed 会把全部账号渠道误裁；
+        // - 其余渠道：provider = `channel_type.as_str()`。
+        let provider: Option<&str> = match ch.channel_type {
+            crate::channel::ChannelType::Account => None,
+            crate::channel::ChannelType::Plugin => Some(ch.plugin_provider.as_str()),
+            other => Some(other.as_str()),
+        };
+        if let Some(provider) = provider {
+            if scope
+                .disabled_providers
+                .iter()
+                .any(|p| p.as_str() == provider)
+            {
+                skipped.provider_disabled += 1;
+                continue;
+            }
+            if listed && !scope.providers.iter().any(|p| p.as_str() == provider) {
+                skipped.provider_not_allowed += 1;
+                continue;
+            }
         }
         kept.push(CandidateRef { channel: ch });
     }
@@ -935,6 +956,17 @@ mod tests {
             "id": id,
             "name": id,
             "channel_type": provider,
+        }))
+        .unwrap()
+    }
+
+    /// 指定渠道类型 + 插件 provider 的最小渠道（P0 回归用）。
+    fn ch_kind(id: &str, channel_type: &str, plugin_provider: &str) -> Channel {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id,
+            "channel_type": channel_type,
+            "plugin_provider": plugin_provider,
         }))
         .unwrap()
     }
@@ -1089,6 +1121,51 @@ mod tests {
         assert_eq!(plan.skipped, SkipSummary::default());
         assert_eq!(plan.first().unwrap().id, "a", "顺序与输入一致");
         assert!(!plan.is_empty());
+    }
+
+    /// 正向对照（Rule 4）：与上面「关闭即惰性」是**同一份档案**，把 `enabled`
+    /// 翻成 true 后必须真的改变生效策略与候选集合 —— 否则那条关闭路径的等价
+    /// 断言是空洞的（永远成立）。
+    #[test]
+    fn enabled_path_applies_profiles_not_inert() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        let mut policy = RoutingPolicy {
+            strategy: RouteStrategy::Weighted,
+            sticky: StickyMode::Auto,
+            ..RoutingPolicy::default()
+        };
+        policy.profiles.global.strategy = Some(RouteStrategy::RoundRobin);
+        policy.profiles.global.scope = Some(RoutingScope {
+            provider_scope: ProviderScope::Listed,
+            providers: vec!["anthropic".to_string()],
+            ..RoutingScope::default()
+        });
+        let cands = vec![ch("a", "anthropic"), ch("b", "openai_compatible")];
+
+        // 关闭（默认）：档案不参与，策略/候选原样
+        assert!(!policy.enabled);
+        let off = resolve_profile(&policy, "gpt-4o", &m, None);
+        assert_eq!(off.strategy, RouteStrategy::Weighted);
+        assert!(off.scope.providers.is_empty());
+        let off_plan = plan_route(&policy, &off, &cands);
+        assert_eq!(off_plan.len(), 2);
+        assert!(matches!(off_plan.candidates, PlanCandidates::All(_)));
+
+        // 打开同一个快照：global 档案的 strategy/scope 立即生效
+        policy.enabled = true;
+        let on = resolve_profile(&policy, "gpt-4o", &m, None);
+        assert_eq!(on.strategy, RouteStrategy::RoundRobin);
+        assert_eq!(on.provenance.strategy, Some(Layer::Global));
+        assert_eq!(on.scope.providers, vec!["anthropic".to_string()]);
+        assert_eq!(on.provenance.scope, Some(Layer::Global));
+        let on_plan = plan_route(&policy, &on, &cands);
+        assert_eq!(
+            on_plan.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"],
+            "白名单裁剪在启用后生效"
+        );
+        assert_eq!(on_plan.skipped.provider_not_allowed, 1);
     }
 
     /// 三态覆盖 + provenance：`None` 继承下层、`Some(值)` 覆盖。
@@ -1409,6 +1486,62 @@ mod tests {
         let p = plan_route(&policy, &r, &cands);
         assert!(matches!(p.candidates, PlanCandidates::All(_)));
         assert_eq!(p.len(), 3);
+    }
+
+    /// P0 回归：`plan_route` 的 provider 名单必须按**渠道形态**归一 ——
+    /// 插件渠道用 `plugin_provider`（不是字面量 "plugin"）、账号型渠道没有
+    /// 单一 provider（渠道级放行，交给账号级精筛）。修复前：启用档案 + Listed
+    /// 会把账号/插件渠道全部误裁（`account`/`plugin` 不等于真实 provider）。
+    #[test]
+    fn plan_route_provider_scope_matches_plugin_provider_and_spares_accounts() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        let mut policy = RoutingPolicy {
+            enabled: true,
+            ..RoutingPolicy::default()
+        };
+        policy.profiles.global.scope = Some(RoutingScope {
+            provider_scope: ProviderScope::Listed,
+            providers: vec!["kiro".to_string()],
+            ..RoutingScope::default()
+        });
+        let cands = vec![
+            ch_kind("plugin-kiro", "plugin", "kiro"),
+            ch_kind("plugin-other", "plugin", "astudio"),
+            ch_kind("acct", "account", ""),
+            ch("anthropic", "anthropic"),
+            ch("oai", "openai_compatible"),
+        ];
+        let r = resolve_profile(&policy, "gpt-4o", &m, None);
+        let plan = plan_route(&policy, &r, &cands);
+        assert_eq!(
+            plan.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["plugin-kiro", "acct"],
+            "插件按 plugin_provider 匹配命中；账号型渠道放行；其余按 channel_type 裁掉"
+        );
+        assert_eq!(plan.skipped.provider_not_allowed, 3);
+        assert_eq!(plan.skipped.provider_disabled, 0);
+
+        // disabled_providers：插件按 plugin_provider 排除；账号型仍放行
+        policy.profiles.global.scope = Some(RoutingScope {
+            disabled_providers: vec!["kiro".to_string()],
+            ..RoutingScope::default()
+        });
+        let r = resolve_profile(&policy, "gpt-4o", &m, None);
+        let plan = plan_route(&policy, &r, &cands);
+        assert!(
+            !plan.iter().any(|c| c.id == "plugin-kiro"),
+            "plugin_provider=kiro 必须被排除"
+        );
+        assert!(plan.iter().any(|c| c.id == "acct"), "账号型渠道不得误裁");
+        assert_eq!(plan.skipped.provider_disabled, 1);
+
+        // 正向对照：关闭总开关 → 全部直通（P0 修复不改变默认行为）
+        policy.enabled = false;
+        let r = resolve_profile(&policy, "gpt-4o", &m, None);
+        let plan = plan_route(&policy, &r, &cands);
+        assert_eq!(plan.len(), 5);
+        assert_eq!(plan.skipped, SkipSummary::default());
     }
 
     /// 上限校验（契约 §1/§3）：**超限拒绝写入**，不静默截断。

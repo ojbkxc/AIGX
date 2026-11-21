@@ -1036,7 +1036,10 @@ impl ChannelStore {
     /// 不影响既有行为；仅在 `record_channel_failure` 累计达阈值后才生效。
     ///
     /// 批次3增强：过滤阶段额外跳过 AIMD 冷却中的渠道（`aimd_allows`）。
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
+    ///
+    /// 仅供 [`Self::select_for_model_with_affinity`] / [`Self::select_for_model_
+    /// round_robin`] 两个未接线的包装方法复用；数据面走 [`Self::select_for_model
+    /// _filtered`]（带能力粗筛）。
     pub fn select_for_model(&self, model: &str) -> Vec<Channel> {
         self.select_for_model_filtered(model, None)
     }
@@ -1726,7 +1729,6 @@ impl ChannelStore {
     ///
     /// `pricing_store` 用于成本因子（渠道级 cost_pricing 优先，缺失回落全局价）；
     /// rpm 因子取自各渠道的 AIMD 快照。
-    #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn select_for_model_ranked(
         &self,
         model: &str,

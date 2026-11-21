@@ -2,7 +2,7 @@
 //!
 //! 参照 burncloud `crates/router/src/scheduler/combined.rs`：
 //!
-//! Score = admin_weight × (health_norm^w_h × cost_norm^w_r × rpm_norm^w_r)
+//! Score = admin_weight × (health_norm^w_h × cost_norm^w_c × rpm_norm^w_r × latency_norm^w_l)
 //!
 //! - 0.5 偏移 min-max 归一化：小候选集下避免极端失真
 //!   （归一化值域 [0.5, 1.0]，任何两渠道分差最多 2 倍）
@@ -13,8 +13,21 @@
 //! - health：`health_manager::ChannelStateTracker` 的 per-channel 错误率换算
 //! - cost：`pricing_store` 输入+输出单价倒数（1/price，越便宜分越高）
 //! - rpm：AIMD `current_limit`（Learning=1.0，Cooldown=0.1）
+//! - latency：`ChannelHealthSummary::overall_avg_latency_ms` 的 EMA（越短越
+//!   高）；无实测延迟的渠道取候选集内的**最大延迟**（保守，不奖励未知）
+//!
+//! ── latency / load 因子的对齐口径（2026-11-21）──────────────
+//! 上游 Agent2API 3.5.0-beta.3 **没有**多因子调度器（其路由是账号池 +
+//! routing profile），因此 ranked 是 AIGX 的扩展，没有逐字对齐对象。为避免
+//! 改变既有选路，latency 权重默认 **0.0（关闭）**：关闭时该维度权重被清零，
+//! health×cost×rpm 的归一化权重与旧实现逐位一致（见单测
+//! `latency_factor_off_is_behavior_equal`）。
+//!
+//! **load 因子不单独引入**：AIGX 唯一可得的「负载/容量」信号就是 AIMD 的
+//! `current_limit`，它已经是上面的 rpm 因子。再加一个 load 维度会对同一信号
+//! 二次计权，反而扭曲排序；故 load 由 rpm 覆盖，不造假第二个来源。
 
-#![allow(dead_code)] // 多因子调度器（批次3 预留，数据面未接线）
+#![allow(dead_code)] // 见 main.rs 债务清单：rank_candidates/build_context 已接线；load_scheduler_config/PassthroughScheduler 为预留/测试符号
 use std::collections::HashMap;
 
 /// 单候选的调度因子。
@@ -26,6 +39,9 @@ pub struct CandidateFactors {
     pub cost: f64,
     /// RPM 因子（Learning 期固定 1.0，Cooldown 0.1）
     pub rpm: f64,
+    /// 延迟（毫秒，越小越好）；`0.0` = 未知。仅在 `latency_weight > 0` 时参与
+    /// 打分；未知值在打分时取候选集最大延迟（保守）。
+    pub latency_ms: f64,
 }
 
 /// Learning 期的 RPM 因子（容量未知，中性）。
@@ -42,6 +58,10 @@ pub struct SchedulerPolicyConfig {
     pub cost_weight: f64,
     #[serde(default = "default_rpm_weight")]
     pub rpm_weight: f64,
+    /// 延迟权重。默认 **0.0 = 关闭**（不改变既有 health×cost×rpm 排序结果）。
+    /// 仅当管理员显式设 >0 时才把实测延迟纳入打分。
+    #[serde(default = "default_latency_weight")]
+    pub latency_weight: f64,
 }
 
 fn default_health_weight() -> f64 {
@@ -53,6 +73,9 @@ fn default_cost_weight() -> f64 {
 fn default_rpm_weight() -> f64 {
     0.2
 }
+fn default_latency_weight() -> f64 {
+    0.0
+}
 
 impl Default for SchedulerPolicyConfig {
     fn default() -> Self {
@@ -60,6 +83,7 @@ impl Default for SchedulerPolicyConfig {
             health_weight: default_health_weight(),
             cost_weight: default_cost_weight(),
             rpm_weight: default_rpm_weight(),
+            latency_weight: default_latency_weight(),
         }
     }
 }
@@ -67,7 +91,12 @@ impl Default for SchedulerPolicyConfig {
 impl SchedulerPolicyConfig {
     /// 权重合法：非负、有限、至少一个为正。
     pub fn validate(&self) -> bool {
-        let weights = [self.health_weight, self.cost_weight, self.rpm_weight];
+        let weights = [
+            self.health_weight,
+            self.cost_weight,
+            self.rpm_weight,
+            self.latency_weight,
+        ];
         weights
             .iter()
             .all(|w| *w >= 0.0 && w.is_finite() && !w.is_nan())
@@ -98,10 +127,20 @@ impl CombinedScheduler {
         }
 
         // 单遍：收集因子 + 跟踪 min/max 供归一化
+        // 延迟先做一次预扫：只有「有限且 >0」的实测值才算数；未知渠道在打分
+        // 时取候选集最大延迟（保守 —— 不因缺数据而奖励）。全未知 → 维度退化。
+        let (mut lat_max_known, mut lat_any_known) = (f64::NEG_INFINITY, false);
+        for (_, _, f) in candidates {
+            if f.latency_ms.is_finite() && f.latency_ms > 0.0 {
+                lat_any_known = true;
+                lat_max_known = lat_max_known.max(f.latency_ms);
+            }
+        }
         let mut raw: Vec<CandidateFactors> = Vec::with_capacity(n);
         let (mut h_min, mut h_max) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut c_min, mut c_max) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut r_min, mut r_max) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut l_min, mut l_max) = (f64::INFINITY, f64::NEG_INFINITY);
 
         for (_, _, f) in candidates {
             let health = f.health.max(0.0);
@@ -125,18 +164,35 @@ impl CombinedScheduler {
             r_min = r_min.min(rpm);
             r_max = r_max.max(rpm);
 
-            raw.push(CandidateFactors { health, cost, rpm });
+            let latency = if f.latency_ms.is_finite() && f.latency_ms > 0.0 {
+                f.latency_ms
+            } else if lat_any_known {
+                lat_max_known
+            } else {
+                1.0
+            };
+            l_min = l_min.min(latency);
+            l_max = l_max.max(latency);
+
+            raw.push(CandidateFactors {
+                health,
+                cost,
+                rpm,
+                latency_ms: latency,
+            });
         }
 
         let h_degen = (h_max - h_min).abs() < EPS;
         let c_degen = (c_max - c_min).abs() < EPS;
         let r_degen = (r_max - r_min).abs() < EPS;
+        let l_degen = (l_max - l_min).abs() < EPS;
 
-        let (w_h, w_c, w_r) = self.effective_weights(h_degen, c_degen, r_degen);
+        let (w_h, w_c, w_r, w_l) = self.effective_weights(h_degen, c_degen, r_degen, l_degen);
 
         let h_range = if h_degen { 0.0 } else { h_max - h_min };
         let c_range = if c_degen { 0.0 } else { c_max - c_min };
         let r_range = if r_degen { 0.0 } else { r_max - r_min };
+        let l_range = if l_degen { 0.0 } else { l_max - l_min };
 
         let mut scores = HashMap::with_capacity(n);
         for ((ch_id, admin_w, _), f) in candidates.iter().zip(raw.iter()) {
@@ -155,8 +211,14 @@ impl CombinedScheduler {
             } else {
                 (0.5 + 0.5 * (f.rpm - r_min) / r_range).clamp(0.5, 1.0)
             };
+            // 延迟越低越好：归一化时反向（值域仍 [0.5, 1.0]）。
+            let l = if l_degen {
+                0.75
+            } else {
+                (0.5 + 0.5 * (l_max - f.latency_ms) / l_range).clamp(0.5, 1.0)
+            };
 
-            let quality = h.powf(w_h) * c.powf(w_c) * r.powf(w_r);
+            let quality = h.powf(w_h) * c.powf(w_c) * r.powf(w_r) * l.powf(w_l);
             let final_score = (*admin_w).max(1) as f64 * quality;
 
             let score = if final_score.is_finite() && final_score > 0.0 {
@@ -178,7 +240,17 @@ impl CombinedScheduler {
     }
 
     /// 退化维度权重清零后重新归一。
-    fn effective_weights(&self, h_degen: bool, c_degen: bool, r_degen: bool) -> (f64, f64, f64) {
+    ///
+    /// 全维度退化（`total <= 0`）时回退到**旧的** health/cost/rpm 等权
+    /// （1/3, 1/3, 1/3, 0）—— 与引入延迟维度前的逐位行为一致；延迟维度在
+    /// 默认权重 0.0 下永远不参与归一（`w_l` 恒为 0）。
+    fn effective_weights(
+        &self,
+        h_degen: bool,
+        c_degen: bool,
+        r_degen: bool,
+        l_degen: bool,
+    ) -> (f64, f64, f64, f64) {
         let mut w_h = if h_degen {
             0.0
         } else {
@@ -190,17 +262,23 @@ impl CombinedScheduler {
             self.config.cost_weight
         };
         let mut w_r = if r_degen { 0.0 } else { self.config.rpm_weight };
+        let mut w_l = if l_degen {
+            0.0
+        } else {
+            self.config.latency_weight
+        };
 
-        let total = w_h + w_c + w_r;
+        let total = w_h + w_c + w_r + w_l;
         if total <= 0.0 {
-            return (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0);
+            return (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0);
         }
 
         w_h /= total;
         w_c /= total;
         w_r /= total;
+        w_l /= total;
 
-        (w_h, w_c, w_r)
+        (w_h, w_c, w_r, w_l)
     }
 }
 
@@ -315,6 +393,7 @@ impl ChannelScheduler for CombinedScheduler {
             health: 1.0,
             cost: 1.0,
             rpm: RPM_FACTOR_LEARNING,
+            latency_ms: 0.0,
         };
         let triples: Vec<(String, u32, CandidateFactors)> = candidates
             .iter()
@@ -371,6 +450,7 @@ pub fn load_scheduler_config() -> SchedulerPolicyMap {
                         health_weight: entry.health_weight.unwrap_or_else(default_health_weight),
                         cost_weight: entry.cost_weight.unwrap_or_else(default_cost_weight),
                         rpm_weight: entry.rpm_weight.unwrap_or_else(default_rpm_weight),
+                        latency_weight: default_latency_weight(),
                     };
                     if !config.validate() {
                         tracing::warn!("group '{}' 调度权重非法，回退 passthrough", group);
@@ -468,6 +548,9 @@ pub fn rank_passthrough(mut candidates: Vec<(Channel, u32)>) -> Vec<(Channel, u3
 ///   认证/余额故障进一步惩罚
 /// - cost：从 `pricing_store.get_price(model)` 反算（1/price，免费或无定价=1.0 最佳）
 /// - rpm：由 `rpm_overrides` 传入（来自 AIMD 控制器快照）；缺省 `RPM_FACTOR_LEARNING`
+/// - latency：健康摘要的 `overall_avg_latency_ms`（成功请求延迟 EMA，毫秒）；
+///   无健康记录时回落渠道最近一次连通性测试的 `response_time`；都没有 → 0.0
+///   （未知，打分时取候选集最大延迟）。仅在 `latency_weight > 0` 时影响排序。
 pub fn build_context(
     model: &str,
     candidates: &[(Channel, u32)],
@@ -481,7 +564,7 @@ pub fn build_context(
         .map(|p| p.input_price + p.output_price);
 
     for (ch, _) in candidates {
-        let health = if let Some(summary) = health_tracker.get_health(&ch.id) {
+        let (health, latency_ms) = if let Some(summary) = health_tracker.get_health(&ch.id) {
             let h = 1.0 - summary.overall_error_rate;
             let h = if !summary.auth_ok { h * 0.1 } else { h };
             let h = if summary.balance_status == super::health_manager::BalanceStatus::Exhausted {
@@ -489,9 +572,16 @@ pub fn build_context(
             } else {
                 h
             };
-            h.clamp(0.0, 1.0)
+            // 健康摘要里的延迟是成功请求的 EMA；没有观测时回落连通性测试值。
+            let latency = if summary.overall_avg_latency_ms > 0.0 {
+                summary.overall_avg_latency_ms
+            } else {
+                ch.response_time.map(|ms| ms as f64).unwrap_or(0.0)
+            };
+            (h.clamp(0.0, 1.0), latency)
         } else {
-            1.0
+            // 无健康记录：health 视为最好；延迟用连通性测试快照（可能也没有）。
+            (1.0, ch.response_time.map(|ms| ms as f64).unwrap_or(0.0))
         };
 
         let cost = match price_usd {
@@ -503,7 +593,15 @@ pub fn build_context(
             .and_then(|m| m.get(&ch.id).copied())
             .unwrap_or(RPM_FACTOR_LEARNING);
 
-        factors.insert(ch.id.clone(), CandidateFactors { health, cost, rpm });
+        factors.insert(
+            ch.id.clone(),
+            CandidateFactors {
+                health,
+                cost,
+                rpm,
+                latency_ms,
+            },
+        );
     }
 
     SchedulingContext { factors }
@@ -521,6 +619,7 @@ mod tests {
                 health: h,
                 cost: c,
                 rpm: r,
+                latency_ms: 0.0,
             },
         )
     }
@@ -531,6 +630,7 @@ mod tests {
             health_weight: 1.0,
             cost_weight: 0.0,
             rpm_weight: 0.0,
+            latency_weight: 0.0,
         });
         let scores = s.score(&[
             cand("c1", 10, 0.9, 1.0, 10.0),
@@ -545,6 +645,7 @@ mod tests {
             health_weight: 0.0,
             cost_weight: 1.0,
             rpm_weight: 0.0,
+            latency_weight: 0.0,
         });
         let scores = s.score(&[
             cand("c1", 10, 1.0, 0.07, 10.0),  // 更便宜（1/14.3）
@@ -559,6 +660,7 @@ mod tests {
             health_weight: 0.0,
             cost_weight: 0.0,
             rpm_weight: 1.0,
+            latency_weight: 0.0,
         });
         let scores = s.score(&[
             cand("c1", 10, 1.0, 1.0, 100.0),
@@ -573,6 +675,7 @@ mod tests {
             health_weight: 0.0,
             cost_weight: 0.0,
             rpm_weight: 1.0,
+            latency_weight: 0.0,
         });
         // 两渠道 rpm 相同 → 退化 → 等分
         let scores = s.score(&[
@@ -588,12 +691,141 @@ mod tests {
             health_weight: 0.0,
             cost_weight: 0.0,
             rpm_weight: 1.0,
+            latency_weight: 0.0,
         });
         let scores = s.score(&[
             cand("c1", 10, 1.0, 1.0, 100.0),
             cand("c2", 10, 1.0, 1.0, 0.1), // Cooldown
         ]);
         assert!(scores["c1"] > scores["c2"], "Cooldown 渠道应被惩罚");
+    }
+
+    /// 构造带延迟的候选（延迟单位毫秒，0.0 = 未知）。
+    fn cand_lat(
+        id: &str,
+        w: u32,
+        h: f64,
+        c: f64,
+        r: f64,
+        latency_ms: f64,
+    ) -> (String, u32, CandidateFactors) {
+        (
+            id.to_string(),
+            w,
+            CandidateFactors {
+                health: h,
+                cost: c,
+                rpm: r,
+                latency_ms,
+            },
+        )
+    }
+
+    /// **行为等值闸（硬要求）**：`latency_weight` 默认 0.0 时，加入（甚至差异
+    /// 巨大的）延迟数据不得改变任何候选的分数与排名 —— 与引入延迟前逐位一致。
+    #[test]
+    fn latency_factor_off_is_behavior_equal() {
+        let s = CombinedScheduler::default();
+        assert_eq!(
+            s.config.latency_weight, 0.0,
+            "默认必须关闭，否则会改变既有选路"
+        );
+        // 同一健康/成本/RPM 集，一份不带延迟、一份延迟差异极大
+        let base = [
+            cand("a", 10, 0.9, 1.0, 10.0),
+            cand("b", 10, 0.5, 1.0, 10.0),
+            cand("c", 10, 0.7, 1.0, 10.0),
+        ];
+        let with_latency = [
+            cand_lat("a", 10, 0.9, 1.0, 10.0, 5000.0),
+            cand_lat("b", 10, 0.5, 1.0, 10.0, 10.0),
+            cand_lat("c", 10, 0.7, 1.0, 10.0, 300.0),
+        ];
+        let s_base = s.score(&base);
+        let s_lat = s.score(&with_latency);
+        for id in ["a", "b", "c"] {
+            assert!(
+                (s_base[id] - s_lat[id]).abs() < 1e-12,
+                "{id} 分数必须与未加延迟时一致：{} vs {}",
+                s_base[id],
+                s_lat[id]
+            );
+        }
+        assert_eq!(s.rank(&base), s.rank(&with_latency), "排名也必须一致");
+    }
+
+    /// 正向对照：显式开启延迟因子后，延迟低的候选应胜出（健康/成本/RPM 全退化）。
+    #[test]
+    fn latency_factor_on_prefers_lower_latency() {
+        let s = CombinedScheduler::new(SchedulerPolicyConfig {
+            health_weight: 0.0,
+            cost_weight: 0.0,
+            rpm_weight: 0.0,
+            latency_weight: 1.0,
+        });
+        let scores = s.score(&[
+            cand_lat("slow", 10, 1.0, 1.0, 10.0, 2000.0),
+            cand_lat("fast", 10, 1.0, 1.0, 10.0, 50.0),
+        ]);
+        assert!(scores["fast"] > scores["slow"], "低延迟应得高分");
+        assert_eq!(
+            s.rank(&[
+                cand_lat("slow", 10, 1.0, 1.0, 10.0, 2000.0),
+                cand_lat("fast", 10, 1.0, 1.0, 10.0, 50.0),
+            ])[0],
+            "fast"
+        );
+    }
+
+    /// 未知延迟不得被奖励：未知值按候选集**最大延迟**计，短延迟仍胜出。
+    #[test]
+    fn unknown_latency_not_rewarded() {
+        let s = CombinedScheduler::new(SchedulerPolicyConfig {
+            health_weight: 0.0,
+            cost_weight: 0.0,
+            rpm_weight: 0.0,
+            latency_weight: 1.0,
+        });
+        // 三候选：快(40ms)、慢(200ms)、未知。未知按最大延迟 200 计 → 与慢者同分，
+        // 都低于快者（若未知被当成 0ms，它会与快者并列甚至胜出）。
+        let scores = s.score(&[
+            cand_lat("known_fast", 10, 1.0, 1.0, 10.0, 40.0),
+            cand_lat("known_slow", 10, 1.0, 1.0, 10.0, 200.0),
+            cand_lat("unknown", 10, 1.0, 1.0, 10.0, 0.0),
+        ]);
+        assert!(
+            scores["known_fast"] > scores["unknown"],
+            "未知延迟按最大延迟计，不得优于实测低延迟"
+        );
+        assert!(
+            (scores["unknown"] - scores["known_slow"]).abs() < 1e-12,
+            "未知延迟等价于候选集最大延迟"
+        );
+        // 全未知 → 维度退化 → 等分
+        let all_unknown = s.score(&[
+            cand_lat("x", 10, 1.0, 1.0, 10.0, 0.0),
+            cand_lat("y", 10, 1.0, 1.0, 10.0, 0.0),
+        ]);
+        assert!((all_unknown["x"] - all_unknown["y"]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn latency_weight_validation() {
+        assert!(SchedulerPolicyConfig::default().validate());
+        assert!(!SchedulerPolicyConfig {
+            health_weight: 0.4,
+            cost_weight: 0.4,
+            rpm_weight: 0.2,
+            latency_weight: -1.0,
+        }
+        .validate());
+        assert!(SchedulerPolicyConfig {
+            health_weight: 0.0,
+            cost_weight: 0.0,
+            rpm_weight: 0.0,
+            latency_weight: 1.0,
+        }
+        .validate());
     }
 
     #[test]
@@ -620,6 +852,7 @@ mod tests {
             health_weight: 1.0,
             cost_weight: 0.0,
             rpm_weight: 0.0,
+            latency_weight: 0.0,
         });
         let scores = s.score(&[
             cand("c1", 10, 0.9, 1.0, 10.0),
@@ -642,12 +875,14 @@ mod tests {
             health_weight: -1.0,
             cost_weight: 0.4,
             rpm_weight: 0.2,
+            latency_weight: 0.0,
         }
         .validate());
         assert!(!SchedulerPolicyConfig {
             health_weight: 0.0,
             cost_weight: 0.0,
             rpm_weight: 0.0,
+            latency_weight: 0.0,
         }
         .validate());
     }
@@ -707,6 +942,7 @@ mod scheduler_trait_tests {
                             health: h,
                             cost: c,
                             rpm: r,
+                            latency_ms: 0.0,
                         },
                     )
                 })
@@ -733,6 +969,7 @@ mod scheduler_trait_tests {
             health_weight: 1.0,
             cost_weight: 0.0,
             rpm_weight: 0.0,
+            latency_weight: 0.0,
         });
         let scores = scheduler.score_candidates(&[c1, c2], &ctx).unwrap();
         assert!(scores["1"] > scores["2"], "更健康的渠道评分应更高");
@@ -747,6 +984,7 @@ mod scheduler_trait_tests {
             health_weight: 0.0,
             cost_weight: 1.0,
             rpm_weight: 0.0,
+            latency_weight: 0.0,
         });
         let scores = scheduler.score_candidates(&[c1, c2], &ctx).unwrap();
         assert!(scores["1"] > scores["2"], "更便宜的渠道评分应更高");
@@ -761,6 +999,7 @@ mod scheduler_trait_tests {
             health_weight: 0.0,
             cost_weight: 0.0,
             rpm_weight: 1.0,
+            latency_weight: 0.0,
         });
         let scores = scheduler.score_candidates(&[c1, c2], &ctx).unwrap();
         assert!(scores["1"] > scores["2"], "RPM 更高的渠道评分应更高");
@@ -840,6 +1079,7 @@ mod scheduler_trait_tests {
             health_weight: 0.0,
             cost_weight: 0.0,
             rpm_weight: 1.0,
+            latency_weight: 0.0,
         });
         let scores = scheduler.score_candidates(&[c1, c2], &ctx).unwrap();
         assert!(
@@ -857,6 +1097,7 @@ mod scheduler_trait_tests {
             health_weight: 0.0,
             cost_weight: 0.0,
             rpm_weight: 1.0,
+            latency_weight: 0.0,
         });
         let scores = scheduler.score_candidates(&[c1, c2], &ctx).unwrap();
         assert!(scores["1"] > scores["2"], "Cooldown 渠道应被惩罚");

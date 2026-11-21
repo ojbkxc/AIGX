@@ -85,6 +85,8 @@ pub struct SchedulerWeightsUpdate {
     pub health_weight: Option<f64>,
     pub cost_weight: Option<f64>,
     pub rpm_weight: Option<f64>,
+    /// 延迟权重（默认 0.0 = 关闭；>0 时 ranked 才把实测延迟纳入打分）
+    pub latency_weight: Option<f64>,
 }
 
 /// PUT /api/routing — 保存并热应用（读-改-写：未出现的字段保留现值）。
@@ -160,6 +162,9 @@ pub async fn handle_update_routing(
         if let Some(v) = w.rpm_weight {
             policy.scheduler_weights.rpm_weight = v;
         }
+        if let Some(v) = w.latency_weight {
+            policy.scheduler_weights.latency_weight = v;
+        }
         if !policy.scheduler_weights.validate() {
             return Err(super::common::error_response(
                 "调度权重非法：须为非负有限数且至少一个为正",
@@ -216,7 +221,7 @@ pub async fn handle_update_routing(
         .set_scheduler_config(policy.scheduler_weights.clone());
 
     tracing::info!(
-        "路由策略已更新: strategy={} sticky={} breaker({},{},{}) 权重({}/{}/{})",
+        "路由策略已更新: strategy={} sticky={} breaker({},{},{}) 权重({}/{}/{}/{})",
         policy.strategy.as_str(),
         policy.sticky.as_str(),
         policy.breaker.enabled,
@@ -225,6 +230,7 @@ pub async fn handle_update_routing(
         policy.scheduler_weights.health_weight,
         policy.scheduler_weights.cost_weight,
         policy.scheduler_weights.rpm_weight,
+        policy.scheduler_weights.latency_weight,
     );
 
     Ok(Json(json!({

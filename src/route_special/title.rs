@@ -63,16 +63,6 @@ pub enum Fallback {
     Error,
 }
 
-impl Fallback {
-    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Original => "original",
-            Self::Error => "error",
-        }
-    }
-}
-
 /// 标题生成的一条规则：认哪些客户端、改成哪只模型、失败怎么办。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

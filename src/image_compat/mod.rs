@@ -34,16 +34,15 @@
 //! 解码/编码失败、坏图、尺寸非法一律**原样保留**，绝不阻断请求；压完反而
 //! 更大也保留原图。全程纯内存，无磁盘 IO、无网络（辅助识图的上游调用除外）。
 //!
-//! 本模块被 lib 与 bin 两个 target 同时编译：bin 只用到其中一部分公开入口
-//! （路由侧 hook），lib 视角下另有若干入口没有调用方 —— 与 `api::openai`
-//! 同口径整模块豁免 dead_code。
-#![allow(dead_code)]
+//! 本模块由 bin target 编译（单 target，`src/lib.rs` 已删除）：数据面
+//! `RequestImageContext` 被 chat / anthropic / responses 消费；其余为管理面
+//! 与测试入口，故仍整模块豁免 dead_code。
+#![allow(dead_code)] // 管理面/测试入口 + 数据面 hook 共用；见上
 
 /// 视觉兼容规则引擎（对齐 Agent2API `config/vision_compat.rs`）。
 ///
-/// 作为子模块随 `image_compat` 一起编译 —— `main.rs`（bin）与 `lib.rs` 各自
-/// 声明 `mod image_compat;`，子模块无需在任一 target 再申明，两个 target 都
-/// 拿到同一份实现（也避免压缩与视觉各持一份「视觉开关」）。
+/// 作为子模块随 `image_compat` 一起编译（`main.rs` 已 `mod image_compat;`，
+/// 子模块无需在 crate root 再申明，共享同一份压缩/视觉实现）。
 pub mod vision;
 
 use std::collections::HashMap;

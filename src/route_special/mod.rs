@@ -77,7 +77,7 @@ pub fn client_label(id: &str) -> Option<&'static str> {
 /// 改写痕迹字段：随请求体带到转发层。
 ///
 /// chat 数据面用 [`ChatFormat`](crate::bridge::ChatFormat) 重建上游请求体，
-/// 未知顶层字段不会转发；本标记只作请求内可观测痕迹（[`take_route`] 可取走）。
+/// 未知顶层字段不会转发；本标记只作请求内可观测痕迹。
 pub const ROUTE_FIELD: &str = "_aigx_special_route";
 
 /// 改写种类。
@@ -396,12 +396,6 @@ pub fn mark(body: &mut Value, rewrite: &Rewrite) {
             }),
         );
     }
-}
-
-/// 取走请求体痕迹字段（若某转发路径会原样透传 body，则发送前应调用）。
-#[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
-pub fn take_route(body: &mut Value) -> Option<Value> {
-    body.as_object_mut()?.remove(ROUTE_FIELD)
 }
 
 #[cfg(test)]
