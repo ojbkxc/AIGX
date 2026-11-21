@@ -100,6 +100,9 @@ export default function RoutingWorkspace({ active }: { active: boolean }): JSX.E
       <div className="rt-notice">
         {t('输入模型名（请求名）查看它相对全局默认的逐字段差异。生效值全部取自后端解析结果，界面不自己合并。')}
       </div>
+      <div className="form-hint" style={{ marginTop: 4 }}>
+        {t('数据源限制：请求日志无账号/会话维度，账号与会话相关列为空属预期；在途请求的 provider/channel 归因可能为空，不代表未选渠道。')}
+      </div>
 
       <div className="rt-ws-toolbar">
         <input

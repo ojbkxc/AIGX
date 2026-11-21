@@ -123,6 +123,15 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
       addDisabled={saving || !models.length}
       onAddRule={() => setEditing({ rule: blankRule(), index: -1 })}
     >
+      <div className="rt-notice rt-notice-warn" role="note">
+        <strong>{t('已知差距（与上游视觉兼容对照，避免误以为以下能力已生效）：')}</strong>
+        <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+          <li>{t('修订号非强制：仅在提交 revision 时校验，未提供则放行；AIGX 无配置版本 CAS。')}</li>
+          <li>{t('旧版扁平配置不做模型目录展开（legacyExpanded 仅标记读到的是旧形状）。')}</li>
+          <li>{t('不支持「沿用当前路由内的视觉模型」（prefer current route）：视觉裁决在选路前，保存该项会被拒，界面不提供该开关。')}</li>
+        </ul>
+      </div>
+
       <RuleSectionHead
         title={t('规则')}
         count={t('{{n}} 条', { n: rules.length })}

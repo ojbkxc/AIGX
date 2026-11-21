@@ -103,6 +103,9 @@ export default function GroupEditor({
       <div className="rt-notice rt-notice-info">
         {t('组的「选路策略 / 会话粘性」是可继承的三态：留「继承上层」表示本组不改这两项，跟随全局/模型级；选了具体值才覆盖。')}
       </div>
+      <div className="form-hint" style={{ marginTop: 6 }}>
+        {t('组目前通过档案的「默认路由组」或请求显式指定命中；把组登记为可直接调用的模型（出现在 /v1/models 供客户端选择）依赖后端后续能力，本期未提供。')}
+      </div>
 
       <div className="rt-group-actions" style={{ margin: '10px 0' }}>
         <button

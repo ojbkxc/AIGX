@@ -455,6 +455,12 @@ export interface RoutingFlowSnapshot {
   since?: number;
   /** 端点 `detail=requests` 时同形返回的匹配数（个别后端把 matched 放在顶层） */
   matched?: number;
+  /** 有在途请求无法归因到具体路径（缺 provider/channel 字段）——只计入顶层 running */
+  runningUnattributed?: boolean;
+  /** 后端明确告知本次请求里哪些过滤维度不可兑现（如 account） */
+  unsupportedFilters?: string[];
+  /** `detail=sessions` 时为 false：RequestLog 无会话标识 */
+  supported?: boolean;
 }
 
 export interface RoutingTraceQuery {

@@ -88,6 +88,16 @@ export default function RoutingFlow({ active }: { active: boolean }): JSX.Elemen
           n: minutes,
         })}
       </div>
+      <div className="form-hint" style={{ marginTop: 4 }}>
+        {t('数据源限制：请求日志无账号与会话标识 —— 账号列恒空、会话数恒为 0；在途请求只能按模型归因，provider/channel 可能为空。')}
+      </div>
+      {data?.runningUnattributed ? (
+        <div className="rt-notice rt-notice-info" style={{ marginTop: 6 }}>
+          {t('当前有 {{n}} 条在途请求无法归因到具体路径（缺 provider/channel 字段），只计入顶部「在途」。', {
+            n: data?.running ?? 0,
+          })}
+        </div>
+      ) : null}
 
       <div className="rt-flow-toolbar" role="group" aria-label={t('时间窗')}>
         <span className="rt-muted">{t('时间窗')}</span>
