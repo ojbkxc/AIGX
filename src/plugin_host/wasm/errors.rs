@@ -53,6 +53,8 @@ pub(crate) fn decode(mut value: Value) -> Result<Value, WireError> {
         return Err(WireError {
             message: error.message,
             code: error.code,
+            reason: None,
+            retry_after: None,
         });
     }
     value

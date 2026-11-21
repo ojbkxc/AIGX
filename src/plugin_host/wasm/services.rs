@@ -229,7 +229,24 @@ impl Context {
                 } else {
                     return Err(super::wire::error("锁范围无效"));
                 };
-                let guard = self.shared.account_lock(&key).lock_owned().await;
+                // beta.4：账号锁等待受「调用截止 / 10s 上限」约束（`call_deadline.min(now+10s)`）。
+                // AIGX 原先无上界，锁争用会一直等到外层调用超时，最终折成 timeout/aborted；
+                // 这里改为超时即返回可重试的 plugin_busy。beta.4 仅给
+                // `with_code(message, "plugin_busy")`（原因码后续按文案反查），AIGX 直接把
+                // reason/retry_after 结构化带出（可选字段，缺省省略、向后兼容）。
+                let deadline = self
+                    .call_deadline
+                    .min(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+                let guard =
+                    tokio::time::timeout_at(deadline, self.shared.account_lock(&key).lock_owned())
+                        .await
+                        .map_err(|_| {
+                            WireError::busy(
+                                "当前账号还有其他操作，等待账号锁超时，请稍后重试",
+                                "account_lock",
+                                1,
+                            )
+                        })?;
                 self.guards.insert("account".into(), guard);
                 Ok(json!("account"))
             }

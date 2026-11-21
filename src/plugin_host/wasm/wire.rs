@@ -19,14 +19,35 @@
 //! - `account_origin_authorization_required` → 403（账号来源需授权）
 //! - `account_origin_proxy_unsupported` → 409（账号来源不支持代理）
 
+//! ## beta.4 忙拒绝元数据（reason / retry_after）
+//!
+//! beta.4 的容量/锁忙拒绝在服务端以 `GatewayError` 承载 `reason`（拒绝原因码，
+//! 如 `account_lock` / `concurrency_limit`）与 `retry_after`（建议重试秒数），
+//! 并在把插件的 `plugin_busy` 文案还原时用 `classify_busy_message` 按文案反查。
+//! AIGX 的 wasm 层没有 `GatewayError`（HTTP 错误层在 `plugin_host` 之外），也
+//! 没有 beta.4 的 `runtime_capacity` 子系统，故本层把这两项作为 `WireError` 的
+//! **可选**结构化字段**直接透传**：仅在确有原因时填，缺省（`None`）时序列化
+//! 省略键，插件看到的 `{message, code}` 与上游逐字节一致（向后兼容）。
+
 use serde::{Deserialize, Serialize};
 
-/// 插件调用的错误应答（上游 `WireError` 同形）。
+/// 插件调用的错误应答（上游 `WireError` 同形，额外承载可选的忙拒绝元数据）。
+///
+/// 线格式（未填元数据时）：`{"error": {"message": "...", "code": "..."}}`；
+/// 忙拒绝带原因时追加 `"reason"` / `"retry_after"`（均缺省省略）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WireError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// 拒绝原因码（beta.4 `GatewayError::with_reason` / `classify_busy_message`）。
+    /// 缺省省略，保持与上游 `{message, code}` 的向后兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// 建议重试秒数（beta.4 `with_retry_after_seconds`）；`0` 视为不给、
+    /// 缺省省略。仅在有 `reason` 时才有意义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
 }
 
 impl WireError {
@@ -54,7 +75,31 @@ impl WireError {
         Self {
             message: message.into(),
             code: Some(code.into()),
+            reason: None,
+            retry_after: None,
         }
+    }
+
+    /// 挂上拒绝原因码（beta.4 `GatewayError::with_reason` 的线格式对端）。
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    /// 挂上建议重试秒数（`0` 视为不给、保持省略，对齐 beta.4 响应侧口径）。
+    pub fn with_retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds).filter(|value| *value > 0);
+        self
+    }
+
+    /// 构造一个 `plugin_busy` 忙拒绝，带结构化原因与建议重试秒数。
+    ///
+    /// beta.4 在 wasm 调用内只用 `with_code(message, "plugin_busy")`（原因靠文案
+    /// 反查）；AIGX 直接把原因/重试一并带出，便于上层编排按 `reason` 决定重试。
+    pub fn busy(message: impl Into<String>, reason: impl Into<String>, retry_after: u64) -> Self {
+        Self::with_code(message, Self::PLUGIN_BUSY)
+            .with_reason(reason)
+            .with_retry_after(retry_after)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -131,9 +176,36 @@ mod tests {
         let bare = serde_json::to_value(WireError {
             message: "x".into(),
             code: None,
+            reason: None,
+            retry_after: None,
         })
         .unwrap();
         assert!(bare.get("code").is_none());
+        // 缺省元数据不出现，线格式与上游 {message, code} 一致
+        assert!(bare.get("reason").is_none());
+        assert!(bare.get("retry_after").is_none());
+    }
+
+    #[test]
+    fn busy_carries_reason_and_retry() {
+        let value = serde_json::to_value(WireError::busy(
+            "当前账号还有其他操作，等待账号锁超时，请稍后重试",
+            "account_lock",
+            1,
+        ))
+        .unwrap();
+        assert_eq!(value["code"], WireError::PLUGIN_BUSY);
+        assert_eq!(value["reason"], "account_lock");
+        assert_eq!(value["retry_after"], 1);
+        // 0 秒视为不给：不出现 retry_after，但 reason 仍在
+        let zero = serde_json::to_value(
+            WireError::with_code("busy", WireError::PLUGIN_BUSY)
+                .with_reason("account_lock")
+                .with_retry_after(0),
+        )
+        .unwrap();
+        assert_eq!(zero["reason"], "account_lock");
+        assert!(zero.get("retry_after").is_none());
     }
 
     #[test]

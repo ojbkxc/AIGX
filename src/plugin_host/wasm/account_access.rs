@@ -66,6 +66,8 @@ impl AccountSessionAccess {
             .map_err(|error| WireError {
                 message: error.message,
                 code: error.code,
+                reason: None,
+                retry_after: None,
             })
     }
 

@@ -216,7 +216,12 @@ impl Runtime {
             if method == "tasks.run" && !self.shared.manifest.allows("tasks.v1") {
                 return Err(WireError::with_code("插件未声明后台任务能力", "forbidden"));
             }
-            let mut context = Context::new(self.shared.clone(), &params, sink);
+            let mut context = Context::new(
+                self.shared.clone(),
+                &params,
+                sink,
+                tokio::time::Instant::now() + timeout,
+            );
             if context.flow.len() > 256
                 || context.session.len() > 1024
                 || context.session.contains('\0')

@@ -75,6 +75,9 @@ pub(crate) struct Sink {
 /// 单次调用的上下文（= 上游 `context::Context`）。
 pub struct Context {
     pub shared: Arc<Shared>,
+    /// 本次调用（含其所有宿主能力）的最晚截止时刻。beta.4 用它约束
+    /// `lock.acquire` 的等待上界（`call_deadline.min(now+10s)`）。
+    pub(super) call_deadline: tokio::time::Instant,
     pub account: String,
     pub identity: String,
     pub flow: String,
@@ -92,9 +95,15 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(shared: Arc<Shared>, params: &Value, sink: Option<Sink>) -> Self {
+    pub fn new(
+        shared: Arc<Shared>,
+        params: &Value,
+        sink: Option<Sink>,
+        call_deadline: tokio::time::Instant,
+    ) -> Self {
         Self {
             shared,
+            call_deadline,
             account: params["account"].as_str().unwrap_or("").to_string(),
             identity: String::new(),
             flow: params["flow"].as_str().unwrap_or("").to_string(),

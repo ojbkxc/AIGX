@@ -42,6 +42,8 @@ fn map(error: crate::plugin_host::rpc::RpcError) -> WireError {
     WireError {
         message: error.message,
         code: error.code,
+        reason: None,
+        retry_after: None,
     }
 }
 
