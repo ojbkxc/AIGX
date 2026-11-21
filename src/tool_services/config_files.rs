@@ -209,37 +209,34 @@ fn render_yaml(original: &str, desired: &Value) -> Result<String, String> {
     Ok(text)
 }
 
-/// 一个目标的配置文件类别。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileKind {
-    /// 主配置（settings.json / config.toml / settings.yaml）
-    Config,
-    /// DSH 的独立凭据文件（`.credentials.yaml`）
-    Credentials,
-}
-
-/// 一个目标的配置文件（路径由目标决定）。
-#[derive(Debug, Clone)]
-pub struct TargetFile {
-    pub kind: FileKind,
-    pub path: PathBuf,
-}
-
-/// 支持的客户端目标。
+/// 支持的本机客户端目标（对齐 Agent2API `core/agents/registry.rs` 中
+/// 具备用户级 Skill / MCP 路径的客户端；`claude-desktop` 为 AIGX 保留项）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     ClaudeCode,
     Codex,
     ClaudeDesktop,
     Dsh,
+    GeminiCli,
+    OpenCode,
+    Zcode,
+    Workbuddy,
+    CursorCli,
+    KimiCode,
 }
 
 impl Target {
-    pub const ALL: [Target; 4] = [
+    pub const ALL: [Target; 10] = [
         Target::ClaudeCode,
         Target::Codex,
-        Target::ClaudeDesktop,
+        Target::GeminiCli,
+        Target::OpenCode,
+        Target::Zcode,
+        Target::Workbuddy,
+        Target::CursorCli,
+        Target::KimiCode,
         Target::Dsh,
+        Target::ClaudeDesktop,
     ];
 
     pub fn parse(id: &str) -> Option<Target> {
@@ -248,6 +245,12 @@ impl Target {
             "codex" => Some(Target::Codex),
             "claude-desktop" => Some(Target::ClaudeDesktop),
             "dsh" => Some(Target::Dsh),
+            "gemini-cli" => Some(Target::GeminiCli),
+            "opencode" => Some(Target::OpenCode),
+            "zcode" => Some(Target::Zcode),
+            "workbuddy" => Some(Target::Workbuddy),
+            "cursor-cli" => Some(Target::CursorCli),
+            "kimi-code" => Some(Target::KimiCode),
             _ => None,
         }
     }
@@ -258,6 +261,12 @@ impl Target {
             Target::Codex => "codex",
             Target::ClaudeDesktop => "claude-desktop",
             Target::Dsh => "dsh",
+            Target::GeminiCli => "gemini-cli",
+            Target::OpenCode => "opencode",
+            Target::Zcode => "zcode",
+            Target::Workbuddy => "workbuddy",
+            Target::CursorCli => "cursor-cli",
+            Target::KimiCode => "kimi-code",
         }
     }
 
@@ -267,58 +276,92 @@ impl Target {
             Target::Codex => "Codex",
             Target::ClaudeDesktop => "Claude Desktop",
             Target::Dsh => "DSH (DeepSeek Harness)",
+            Target::GeminiCli => "Gemini CLI",
+            Target::OpenCode => "OpenCode",
+            Target::Zcode => "ZCode",
+            Target::Workbuddy => "WorkBuddy",
+            Target::CursorCli => "Cursor CLI",
+            Target::KimiCode => "Kimi Code",
         }
     }
 
+    /// 用于「是否检测到客户端」的配置文件格式。
     pub fn format(self) -> ConfigFormat {
         match self {
-            Target::ClaudeCode | Target::ClaudeDesktop => ConfigFormat::Json,
-            Target::Codex => ConfigFormat::Toml,
+            Target::Codex | Target::KimiCode => ConfigFormat::Toml,
             Target::Dsh => ConfigFormat::Yaml,
+            _ => ConfigFormat::Json,
         }
     }
 
-    pub fn files(self) -> Vec<TargetFile> {
-        match self {
-            Target::ClaudeCode => vec![TargetFile {
-                kind: FileKind::Config,
-                path: claude_settings_path(),
-            }],
-            Target::Codex => vec![TargetFile {
-                kind: FileKind::Config,
-                path: codex_config_path(),
-            }],
-            Target::ClaudeDesktop => vec![TargetFile {
-                kind: FileKind::Config,
-                path: claude_desktop_config_path(),
-            }],
-            Target::Dsh => {
-                let settings = dsh_settings_path();
-                let credentials = match settings.parent() {
-                    Some(dir) => dir.join(".credentials.yaml"),
-                    None => PathBuf::from(".credentials.yaml"),
-                };
-                vec![
-                    TargetFile {
-                        kind: FileKind::Config,
-                        path: settings,
-                    },
-                    TargetFile {
-                        kind: FileKind::Credentials,
-                        path: credentials,
-                    },
-                ]
-            }
-        }
-    }
-
-    /// 主配置文件的路径。
+    /// 客户端配置路径（检测用）。
     pub fn config_path(self) -> PathBuf {
-        self.files()
-            .into_iter()
-            .find(|file| file.kind == FileKind::Config)
-            .map(|file| file.path)
-            .unwrap_or_default()
+        match self {
+            Target::ClaudeCode => claude_settings_path(),
+            Target::Codex => codex_config_path(),
+            Target::ClaudeDesktop => claude_desktop_config_path(),
+            Target::Dsh => dsh_settings_path(),
+            Target::GeminiCli => gemini_settings_path(),
+            Target::OpenCode => opencode_config_path(),
+            Target::Zcode => zcode_provider_config_path(),
+            Target::Workbuddy => workbuddy_models_path(),
+            Target::CursorCli => cursor_config_path(),
+            Target::KimiCode => kimi_config_path(),
+        }
+    }
+
+    /// 可安装 Skill 的根目录（顺序即优先级；首个为默认落点）。
+    pub fn skill_roots(self) -> Vec<PathBuf> {
+        match self {
+            Target::ClaudeCode => vec![claude_home().join("skills")],
+            Target::Codex => vec![
+                home_dir().join(".agents/skills"),
+                codex_home().join("skills"),
+            ],
+            Target::ClaudeDesktop => Vec::new(),
+            Target::Dsh => vec![dsh_home().join("skills"), home_dir().join(".agents/skills")],
+            Target::GeminiCli => vec![gemini_home().join(".gemini/skills")],
+            Target::OpenCode => vec![opencode_config_path()
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(home_dir)
+                .join("skills")],
+            Target::Zcode => vec![zcode_home().join("skills")],
+            Target::Workbuddy => vec![workbuddy_root().join("skills")],
+            Target::CursorCli => vec![cursor_root().join("skills")],
+            Target::KimiCode => vec![
+                home_dir().join(".kimi/skills"),
+                home_dir().join(".config/agents/skills"),
+            ],
+        }
+    }
+
+    /// MCP 配置文件；`None` 表示该客户端暂不支持安全写入（OpenCode 是 JSONC，
+    /// AIGX 的无损渲染器只覆盖 JSON/TOML/YAML）。
+    pub fn mcp_path(self) -> Option<PathBuf> {
+        match self {
+            Target::ClaudeCode => Some(claude_mcp_path()),
+            Target::Codex => Some(codex_config_path()),
+            Target::ClaudeDesktop => Some(claude_desktop_config_path()),
+            Target::Dsh => Some(dsh_settings_path()),
+            Target::GeminiCli => Some(gemini_settings_path()),
+            Target::OpenCode => None,
+            Target::Zcode => Some(zcode_home().join("cli/config.json")),
+            Target::Workbuddy => Some(workbuddy_mcp_path()),
+            Target::CursorCli => Some(cursor_root().join("mcp.json")),
+            Target::KimiCode => Some(kimi_mcp_path()),
+        }
+    }
+
+    /// MCP server 条目在配置文件里的容器键路径（可多级，如 ZCode 的
+    /// `mcp.servers`）。
+    pub fn mcp_container(self) -> &'static [&'static str] {
+        match self {
+            Target::Codex => &["mcp_servers"],
+            Target::Zcode => &["mcp", "servers"],
+            Target::OpenCode => &["mcp"],
+            _ => &["mcpServers"],
+        }
     }
 }
 
@@ -339,18 +382,30 @@ fn env_file(key: &str) -> Option<PathBuf> {
     env_dir(key)
 }
 
-/// Claude Code：`$CLAUDE_CONFIG_DIR` 或 `~/.claude` 下的 `settings.json`。
+fn claude_home() -> PathBuf {
+    env_dir("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"))
+}
+
+/// Claude Code：`$CLAUDE_CONFIG_DIR` 或 `~/.claude` 下的 `settings.json`（检测用）。
 pub fn claude_settings_path() -> PathBuf {
+    claude_home().join("settings.json")
+}
+
+/// Claude Code 的 MCP 配置在用户级 `~/.claude.json`（可用 `CLAUDE_CONFIG_DIR`
+/// 重定向到 `<dir>/.claude.json`），不是 `settings.json` —— 与上游一致。
+pub fn claude_mcp_path() -> PathBuf {
     env_dir("CLAUDE_CONFIG_DIR")
-        .unwrap_or_else(|| home_dir().join(".claude"))
-        .join("settings.json")
+        .map(|dir| dir.join(".claude.json"))
+        .unwrap_or_else(|| home_dir().join(".claude.json"))
+}
+
+fn codex_home() -> PathBuf {
+    env_dir("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex"))
 }
 
 /// Codex：`$CODEX_HOME` 或 `~/.codex` 下的 `config.toml`。
 pub fn codex_config_path() -> PathBuf {
-    env_dir("CODEX_HOME")
-        .unwrap_or_else(|| home_dir().join(".codex"))
-        .join("config.toml")
+    codex_home().join("config.toml")
 }
 
 /// Claude Desktop 的 `claude_desktop_config.json`。
@@ -377,11 +432,125 @@ pub fn claude_desktop_config_path() -> PathBuf {
         .join("claude_desktop_config.json")
 }
 
+fn dsh_home() -> PathBuf {
+    env_dir("DSH_HOME").unwrap_or_else(|| home_dir().join(".dsh"))
+}
+
 /// DSH：`$DSH_HOME` 或 `~/.dsh` 下的 `settings.yaml`。
 pub fn dsh_settings_path() -> PathBuf {
-    env_dir("DSH_HOME")
-        .unwrap_or_else(|| home_dir().join(".dsh"))
-        .join("settings.yaml")
+    dsh_home().join("settings.yaml")
+}
+
+fn gemini_home() -> PathBuf {
+    env_dir("GEMINI_CLI_HOME").unwrap_or_else(home_dir)
+}
+
+/// Gemini CLI：`$GEMINI_CLI_HOME` 或家目录下的 `.gemini/settings.json`。
+pub fn gemini_settings_path() -> PathBuf {
+    gemini_home().join(".gemini/settings.json")
+}
+
+/// OpenCode：`$OPENCODE_CONFIG` 指定文件，或 `$OPENCODE_CONFIG_DIR` / XDG
+/// 目录下按 `opencode.jsonc` → `opencode.json` → `config.json` 取首个已存在项。
+pub fn opencode_config_path() -> PathBuf {
+    if let Some(path) = env_file("OPENCODE_CONFIG") {
+        return path;
+    }
+    let dir = env_dir("OPENCODE_CONFIG_DIR").unwrap_or_else(|| {
+        env_dir("XDG_CONFIG_HOME")
+            .unwrap_or_else(|| home_dir().join(".config"))
+            .join("opencode")
+    });
+    let candidates = [
+        dir.join("opencode.jsonc"),
+        dir.join("opencode.json"),
+        dir.join("config.json"),
+    ];
+    candidates
+        .iter()
+        .find(|path| path.is_file())
+        .cloned()
+        .unwrap_or_else(|| dir.join("opencode.jsonc"))
+}
+
+fn zcode_home() -> PathBuf {
+    env_dir("ZCODE_HOME").unwrap_or_else(|| home_dir().join(".zcode"))
+}
+
+/// ZCode：模型提供商配置（检测用）。
+pub fn zcode_provider_config_path() -> PathBuf {
+    zcode_home().join("v2/provider_config.json")
+}
+
+fn workbuddy_root() -> PathBuf {
+    env_dir("WORKBUDDY_CONFIG_DIR")
+        .or_else(|| env_dir("CODEBUDDY_CONFIG_DIR"))
+        .unwrap_or_else(|| {
+            let legacy = home_dir().join(".codebuddy");
+            let current = home_dir().join(".workbuddy");
+            if current.is_dir() {
+                current
+            } else {
+                legacy
+            }
+        })
+}
+
+/// WorkBuddy 的模型配置（检测用）。
+pub fn workbuddy_models_path() -> PathBuf {
+    workbuddy_root().join("models.json")
+}
+
+/// WorkBuddy 的 MCP 配置：`mcp.json` 优先，其次旧版 `.mcp.json`。
+pub fn workbuddy_mcp_path() -> PathBuf {
+    let root = workbuddy_root();
+    let legacy = root.join(".mcp.json");
+    if root.join("mcp.json").is_file() || !legacy.is_file() {
+        root.join("mcp.json")
+    } else {
+        legacy
+    }
+}
+
+fn cursor_root() -> PathBuf {
+    env_dir("CURSOR_CONFIG_DIR").unwrap_or_else(|| {
+        if cfg!(target_os = "linux") {
+            env_dir("XDG_CONFIG_HOME")
+                .unwrap_or_else(|| home_dir().join(".config"))
+                .join("cursor")
+        } else {
+            home_dir().join(".cursor")
+        }
+    })
+}
+
+/// Cursor CLI 的 `cli-config.json`（检测用）。
+pub fn cursor_config_path() -> PathBuf {
+    cursor_root().join("cli-config.json")
+}
+
+/// Kimi Code：`$KIMI_CODE_HOME` / `$KIMI_SHARE_DIR` 下的 `config.toml`，
+/// 否则按 `~/.kimi-code` → `~/.kimi` 取首个已存在项。
+pub fn kimi_config_path() -> PathBuf {
+    if let Some(dir) = env_dir("KIMI_CODE_HOME").or_else(|| env_dir("KIMI_SHARE_DIR")) {
+        return dir.join("config.toml");
+    }
+    let candidates = [
+        home_dir().join(".kimi-code/config.toml"),
+        home_dir().join(".kimi/config.toml"),
+    ];
+    candidates
+        .iter()
+        .find(|path| path.is_file())
+        .cloned()
+        .unwrap_or_else(|| home_dir().join(".kimi-code/config.toml"))
+}
+
+/// Kimi Code 的 MCP 配置（`$KIMI_SHARE_DIR` 或 `~/.kimi` 下的 `mcp.json`）。
+pub fn kimi_mcp_path() -> PathBuf {
+    env_dir("KIMI_SHARE_DIR")
+        .unwrap_or_else(|| home_dir().join(".kimi"))
+        .join("mcp.json")
 }
 
 #[cfg(test)]

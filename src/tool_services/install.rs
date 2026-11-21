@@ -66,15 +66,29 @@ impl InstallOutcome {
     }
 }
 
-fn skill_root(def: Target) -> PathBuf {
-    def.config_path()
-        .parent()
-        .map(|dir| dir.join("skills"))
-        .unwrap_or_else(|| PathBuf::from("skills"))
-}
-
 fn skill_dir(root: &Path, service: &str) -> PathBuf {
     root.join(super::package_name(service))
+}
+
+/// Skill 落点：优先已存在的根目录，否则用首个默认根目录。
+fn skill_target(def: Target, service: &str) -> PathBuf {
+    let roots = def.skill_roots();
+    let Some(first) = roots.first() else {
+        return PathBuf::new();
+    };
+    roots
+        .iter()
+        .map(|root| skill_dir(root, service))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| skill_dir(first, service))
+}
+
+/// 在客户端所有 Skill 根目录里找到「我们装的」目录（卸载用）。
+fn find_installed_skill(def: Target, service: &str) -> Option<PathBuf> {
+    def.skill_roots()
+        .iter()
+        .map(|root| skill_dir(root, service))
+        .find(|path| path.exists() && marker_is_ours(path, service))
 }
 
 fn marker_is_ours(target: &Path, service: &str) -> bool {
@@ -110,8 +124,10 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
 pub fn skill_targets(service: &str) -> Vec<Value> {
     let mut rows = Vec::new();
     for def in Target::ALL {
-        let root = skill_root(def);
-        let target = skill_dir(&root, service);
+        if def.skill_roots().is_empty() {
+            continue;
+        }
+        let target = skill_target(def, service);
         let installed = target.exists() && marker_is_ours(&target, service);
         let config_exists = def.config_path().exists();
         rows.push(json!({
@@ -158,7 +174,7 @@ pub fn install_skill(
             outcomes.push(InstallOutcome::failed(client_id, client_id, "未知客户端"));
             continue;
         };
-        let target = skill_dir(&skill_root(def), service);
+        let target = skill_target(def, service);
         match write_skill_pack(&target, &contents) {
             Ok(()) => outcomes.push(InstallOutcome::ok(
                 client_id,
@@ -190,11 +206,10 @@ pub fn uninstall_skill(service: &str, client_ids: &[String]) -> Vec<InstallOutco
             outcomes.push(InstallOutcome::failed(client_id, client_id, "未知客户端"));
             continue;
         };
-        let target = skill_dir(&skill_root(def), service);
-        if !target.exists() || !marker_is_ours(&target, service) {
+        let Some(target) = find_installed_skill(def, service) else {
             outcomes.push(InstallOutcome::failed(client_id, def.label(), "未安装"));
             continue;
-        }
+        };
         if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink()) {
             outcomes.push(InstallOutcome::failed(
                 client_id,
@@ -225,29 +240,54 @@ fn server_name(service: &str) -> &'static str {
     super::package_name(service)
 }
 
-/// 各客户端配置文件里 MCP server 的根键。
-fn mcp_root_key(def: Target) -> &'static str {
-    match def {
-        // Codex 的 MCP 配置是 `[mcp_servers.<name>]`
-        Target::Codex => "mcp_servers",
-        // 其余三家按通用 `mcpServers`（与 Claude Desktop 同形态）
-        _ => "mcpServers",
-    }
-}
-
-fn read_snapshot(def: Target) -> Result<(String, Value), String> {
-    let path = def.config_path();
+/// 读取客户端 MCP 配置（目标不支持写入时返回错误）。
+fn mcp_snapshot(def: Target) -> Result<(String, Value, PathBuf), String> {
+    let path = def
+        .mcp_path()
+        .ok_or_else(|| "该客户端暂不支持 MCP 配置写入".to_string())?;
     let original = std::fs::read_to_string(&path).unwrap_or_default();
     let value = edit::parse(def.format(), &original)?;
-    Ok((original, value))
+    Ok((original, value, path))
+}
+
+fn container<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn container_mut<'a>(value: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
+    let mut current = value;
+    for key in path {
+        current = current.get_mut(*key)?;
+    }
+    Some(current)
+}
+
+/// 逐级创建容器对象并返回最内层，例如 `["mcp", "servers"]`。
+fn ensure_container<'a>(
+    value: &'a mut Value,
+    path: &[&str],
+) -> Result<&'a mut serde_json::Map<String, Value>, String> {
+    if path.is_empty() {
+        return value
+            .as_object_mut()
+            .ok_or_else(|| "客户端配置里的 MCP 根节点不是对象".to_string());
+    }
+    let map = value
+        .as_object_mut()
+        .ok_or_else(|| "客户端配置根节点不是对象".to_string())?;
+    let entry = map.entry(path[0].to_string()).or_insert_with(|| json!({}));
+    ensure_container(entry, &path[1..])
 }
 
 fn installed_server(def: Target, name: &str) -> bool {
-    read_snapshot(def)
+    mcp_snapshot(def)
         .ok()
-        .and_then(|(_, value)| {
-            value
-                .get(mcp_root_key(def))
+        .and_then(|(_, value, _)| {
+            container(&value, def.mcp_container())
                 .and_then(Value::as_object)
                 .map(|servers| servers.contains_key(name))
         })
@@ -258,17 +298,21 @@ pub fn mcp_targets(service: &str) -> Vec<Value> {
     let name = server_name(service);
     let mut rows = Vec::new();
     for def in Target::ALL {
-        let path = def.config_path();
+        let Some(path) = def.mcp_path() else {
+            continue;
+        };
         rows.push(json!({
             "key": def.id(),
             "label": def.label(),
             "path": path.display().to_string(),
-            "detected": path.exists(),
+            "detected": def.config_path().exists(),
             "installed": installed_server(def, name),
             "supported": true,
             "note": match def {
                 Target::Codex => Some("写入 [mcp_servers.<name>]；Codex 需重启后生效。"),
-                Target::ClaudeCode => Some("写入 settings.json 的 mcpServers；若客户端使用 .mcp.json 项目级配置，请手工迁移。"),
+                Target::ClaudeCode => Some("写入用户级 ~/.claude.json 的 mcpServers；项目级 .mcp.json 不受影响。"),
+                Target::GeminiCli => Some("写入 settings.json 的 mcpServers；HTTP 服务使用 httpUrl 字段。"),
+                Target::Zcode => Some("写入 CLI 配置的 mcp.servers；不改模型提供商配置。"),
                 _ => None,
             },
         }));
@@ -296,8 +340,9 @@ fn timeout_entry(def: Target, timeout: u64) -> Value {
     match def {
         Target::ClaudeCode => json!({ "timeout": millis }),
         Target::Codex => json!({ "tool_timeout_sec": timeout }),
+        Target::Zcode => json!({ "timeoutMs": millis }),
         Target::Dsh => json!({ "toolCallTimeoutMs": millis }),
-        Target::ClaudeDesktop => Value::Null,
+        _ => Value::Null,
     }
 }
 
@@ -330,6 +375,10 @@ fn mcp_entry(def: Target, url: &str, api_key: &str, bridge: Option<&Path>, timeo
                 "url": url,
                 "http_headers": { "Authorization": authorization },
             }),
+            Target::GeminiCli => json!({
+                "httpUrl": url,
+                "headers": { "Authorization": authorization },
+            }),
             _ => json!({
                 "type": "http",
                 "url": url,
@@ -341,32 +390,26 @@ fn mcp_entry(def: Target, url: &str, api_key: &str, bridge: Option<&Path>, timeo
 }
 
 fn write_mcp_entry(def: Target, name: &str, config: Value) -> Result<String, String> {
-    let (original, mut value) = read_snapshot(def)?;
-    let root = mcp_root_key(def);
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "客户端配置根节点不是对象".to_string())?;
-    let servers = object.entry(root.to_string()).or_insert_with(|| json!({}));
-    let servers = servers
-        .as_object_mut()
-        .ok_or_else(|| "客户端配置里的 MCP 根节点不是对象".to_string())?;
+    let (original, mut value, path) = mcp_snapshot(def)?;
+    let servers = ensure_container(&mut value, def.mcp_container())?;
     servers.insert(name.to_string(), config);
     let rendered = edit::render(def.format(), &original, &value)?;
-    atomic_write(&def.config_path(), &rendered)?;
-    Ok(def.config_path().display().to_string())
+    atomic_write(&path, &rendered)?;
+    Ok(path.display().to_string())
 }
 
 fn remove_mcp_entry(def: Target, name: &str) -> Result<bool, String> {
-    let (original, mut value) = read_snapshot(def)?;
-    let root = mcp_root_key(def);
-    let Some(servers) = value.get_mut(root).and_then(Value::as_object_mut) else {
+    let (original, mut value, path) = mcp_snapshot(def)?;
+    let Some(servers) =
+        container_mut(&mut value, def.mcp_container()).and_then(Value::as_object_mut)
+    else {
         return Ok(false);
     };
     if servers.remove(name).is_none() {
         return Ok(false);
     }
     let rendered = edit::render(def.format(), &original, &value)?;
-    atomic_write(&def.config_path(), &rendered)?;
+    atomic_write(&path, &rendered)?;
     Ok(true)
 }
 
@@ -462,7 +505,9 @@ pub fn uninstall_mcp(service: &str, client_ids: &[String]) -> Vec<InstallOutcome
             Ok(true) => outcomes.push(InstallOutcome::ok(
                 client_id,
                 def.label(),
-                def.config_path().display().to_string(),
+                def.mcp_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
             )),
             Ok(false) => outcomes.push(InstallOutcome::failed(client_id, def.label(), "未配置")),
             Err(error) => outcomes.push(InstallOutcome::failed(client_id, def.label(), error)),
@@ -483,10 +528,57 @@ mod tests {
 
     #[test]
     fn mcp_root_keys_by_client() {
-        assert_eq!(mcp_root_key(Target::Codex), "mcp_servers");
-        assert_eq!(mcp_root_key(Target::ClaudeDesktop), "mcpServers");
-        assert_eq!(mcp_root_key(Target::ClaudeCode), "mcpServers");
-        assert_eq!(mcp_root_key(Target::Dsh), "mcpServers");
+        assert_eq!(Target::Codex.mcp_container().to_vec(), vec!["mcp_servers"]);
+        assert_eq!(
+            Target::ClaudeDesktop.mcp_container().to_vec(),
+            vec!["mcpServers"]
+        );
+        assert_eq!(
+            Target::ClaudeCode.mcp_container().to_vec(),
+            vec!["mcpServers"]
+        );
+        assert_eq!(Target::Dsh.mcp_container().to_vec(), vec!["mcpServers"]);
+        assert_eq!(
+            Target::Zcode.mcp_container().to_vec(),
+            vec!["mcp", "servers"]
+        );
+        assert_eq!(
+            Target::GeminiCli.mcp_container().to_vec(),
+            vec!["mcpServers"]
+        );
+    }
+
+    #[test]
+    fn target_ids_and_skill_roots() {
+        assert_eq!(Target::ALL.len(), 10);
+        assert_eq!(Target::parse("gemini-cli"), Some(Target::GeminiCli));
+        assert_eq!(Target::parse("opencode"), Some(Target::OpenCode));
+        assert_eq!(Target::parse("cursor-cli"), Some(Target::CursorCli));
+        assert_eq!(Target::parse("kimi-code"), Some(Target::KimiCode));
+        assert!(Target::ClaudeDesktop.skill_roots().is_empty());
+        assert_eq!(Target::Codex.skill_roots().len(), 2);
+        assert_eq!(Target::KimiCode.skill_roots().len(), 2);
+        assert!(Target::OpenCode.mcp_path().is_none());
+    }
+
+    #[test]
+    fn mcp_entry_shapes_match_clients() {
+        let gemini = mcp_entry(Target::GeminiCli, "http://x/mcp/vision", "sk", None, 60);
+        assert_eq!(gemini["httpUrl"], "http://x/mcp/vision");
+        assert_eq!(gemini["headers"]["Authorization"], "Bearer sk");
+        let zcode = mcp_entry(Target::Zcode, "http://x/mcp/vision", "sk", None, 60);
+        assert_eq!(zcode["type"], "http");
+        assert_eq!(zcode["timeoutMs"], 60_000);
+        let claude = mcp_entry(Target::ClaudeCode, "http://x/mcp/vision", "sk", None, 60);
+        assert_eq!(claude["timeout"], 60_000);
+    }
+
+    #[test]
+    fn nested_container_is_created() {
+        let mut value = json!({});
+        let servers = ensure_container(&mut value, &["mcp", "servers"]).unwrap();
+        servers.insert("vision".into(), json!({"url": "u"}));
+        assert_eq!(value["mcp"]["servers"]["vision"]["url"], "u");
     }
 
     #[test]

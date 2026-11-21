@@ -12,9 +12,9 @@
 
 | 范围 | 项数 | 已对齐 | 有差异 | 半死 | 缺 |
 |---|---:|---:|---:|---:|---:|
-| 工具服务（MCP / Skill / REST / 配置 / 认证） | 22 | 14 | 7 | 1 | 0 |
+| 工具服务（MCP / Skill / REST / 配置 / 认证） | 22 | 15 | 6 | 1 | 0 |
 | 路由（策略 / profile / 粘性 / 熔断 / AIMD / 特殊路由 / 可观测） | 33 | 12 | 18 | 2 | 1 |
-| **合计** | **55** | **26** | **25** | **3** | **1** |
+| **合计** | **55** | **27** | **24** | **3** | **1** |
 
 最重要的 4 条（详见第 4 节）：
 
@@ -48,7 +48,7 @@
 |---|---|---|---|---|---|
 | T11 | Skill 包内容：`SKILL.md`、`skill.json`、Node/Python 两变体、版本 1.2.0、`.agent2api.json` | [已对齐] | `src/tool_services/skill_package.rs:17-18`（名称/版本）、`:44-71`（变体）；`src/tool_services/install.rs:7-15`（落点） | `core/tool_services/skill_package.rs:11`、`:27-70`；`core/tool_services/install.rs:1-15` | 包名/配置文件名保留上游，AIGX 品牌化留待客户端迁移波。 |
 | T12 | Skill/MCP 安装与卸载管理端点 | [已对齐] | `src/api/admin/tools.rs:773-804`（router）；`:568`（install-skill）、`:612`（install-mcp）、`:697/:725`（uninstall） | `http.rs:465-472`；`api/tools.rs:402/433/482/498` | 端点集合一致。 |
-| T13 | 安装目标客户端覆盖 | [有差异] | `src/tool_services/config_files.rs:230-243`：仅 4 家 `claude-code / codex / claude-desktop / dsh` | `core/agents/registry.rs:47-152`：13 家（claude-code、codex、opencode、workbuddy、zcode、cline、gemini-cli、kimi-code、zed、crush、dsh、qoder、cursor-cli） | AIGX 少 10 家（opencode/workbuddy/zcode/cline/gemini-cli/kimi-code/zed/crush/qoder/cursor-cli），多 claude-desktop。前端按响应渲染（`install-targets`），后端扩表即可。 |
+| T13 | 安装目标客户端覆盖 | [已对齐]（2026-11-21 补齐） | `src/tool_services/config_files.rs`：10 个目标 `claude-code / codex / gemini-cli / opencode / zcode / workbuddy / cursor-cli / kimi-code / dsh / claude-desktop`；多 Skill 根目录（codex/dsh/kimi）、Claude Code MCP 落点改为 `~/.claude.json`、ZCode `mcp.servers`、Gemini `httpUrl`、各客户端超时字段 | `core/agents/registry.rs:47-152` + `resources/paths.rs`：9 个可安装目标（opencode 为 JSONC，AIGX 暂只提供 Skill 安装，MCP 写入标不支持） | 覆盖上游全部可安装客户端；`claude-desktop` 为 AIGX 保留。 |
 | T14 | MCP 安装的"预览 + 确认令牌"写入协议 | [有差异] | `src/tool_services/install.rs:17-24`（模块头明确：上游走预览令牌，AIGX 直接改写 `mcpServers.<name>`） | `core/tool_services/install.rs:12-18`（声明确认令牌）；实现见 `core/agents/preview.rs` | AIGX 省掉确认令牌，直接原子写；风险是误改客户端配置前不可预览。 |
 
 ### 1.3 REST 端点
