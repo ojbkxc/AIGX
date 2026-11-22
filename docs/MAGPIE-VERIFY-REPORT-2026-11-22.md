@@ -1,13 +1,15 @@
 # Magpie 脚本插件全量线上验证报告
 
 > 日期：2026-11-22（生产时区 UTC+8）
-> 环境：生产 `104.223.65.202`，AIGX **v1.0.85**（commit `429d15a2`；全量批次跑在 v1.0.83，v1.0.84 重测了 manifest 上限项，v1.0.85 只加展示兜底/工具/文档）
+> 环境：生产 `104.223.65.202`，AIGX **v1.0.86**（commit `d2510a00`；全量批次跑在 v1.0.83，v1.0.84 重测 manifest 上限项，v1.0.85 加展示兜底/工具/文档，v1.0.86 修复 `ua-pro` 默认分支解析并重测通过）
 > 目录快照：`GET /api/plugins/scripts/catalog` → **264 条**（2026-11-20 manifest）
 > 判据与批次计划：见 [`MAGPIE-PLUGIN-PARITY.md`](./MAGPIE-PLUGIN-PARITY.md)
 >
 > **v1.0.84 更新**：`package.json`/`wasm.json` 上限已从 256 KiB 对齐到 **1 MiB**；
 > 原失败项 `github:tianpeng-dev/opencode-doubao-work-auth` 已在 1.0.84 上**重测通过**
-> （安装成功、`doubao-work` 接管、`providerRouted=true`），通过数更新为 **254/264**。
+> （安装成功、`doubao-work` 接管、`providerRouted=true`），通过数更新为 **254/264**；
+> **v1.0.86 更新**：无 `#ref` 的 GitHub 默认分支解析修复（`ua-pro`）后线上重测通过，
+> 通过数更新为 **255/264**。
 
 ## 1. 结论
 
@@ -15,11 +17,11 @@
 |---|---:|---:|---:|
 | magpie official | 44 | **44** | 0 |
 | npm recommended | 7 | **7** | 0 |
-| GitHub third-party | 213 | **203** | 10 |
-| **合计** | **264** | **254（96.2%）** | **10（3.8%）** |
+| GitHub third-party | 213 | **204** | 9 |
+| **合计** | **264** | **255（96.6%）** | **9（3.4%）** |
 
 - **官方与推荐包 100% 通过**：安装 → 启用 → 宿主装载 → provider 实际接管（`providerRouted=true`）全部成立。
-- GitHub 第三方 10 条仍失败**全部有明确归因**：1 条为 **AIGX 侧默认分支解析缺陷**（`ua-pro`，已修、待发布重测），其余 9 条是插件自身的打包/配置/代码问题（另有 1 条 AIGX 侧上限问题已在 v1.0.84 修复并重测通过，详见 §4）。
+- GitHub 第三方 9 条仍失败，全部是插件自身的打包/配置/代码问题；另有 2 条 AIGX 侧问题已在后续版本修复并重测通过（v1.0.84 manifest 上限、v1.0.86 默认分支 ref 解析，详见 §4）。
 - 验证过程宿主 `crashes=0`、`lastError=null`；每批结束均清理，生产最终回到验证前的 3 个已装包且全部 `providerRouted=true`。
 
 ## 2. 验证方法
@@ -57,13 +59,13 @@ opencode-xfyun-maas-auth           routed=true  providers=[xfyun-coding, xfyun-m
 - **修复**：解包器跳过 `is_pax_global_extensions / is_gnu_longname / is_gnu_longlink`；新增单测 `unpacks_github_codeload_tarball_with_pax_global_header`。
 - **线上证据**：`github:miaocell/magpie-doubao-work-auth#9e85…` 从「解包失败」变为安装成功、`doubao` 接管。
 
-## 4. 失败清单（10/264 仍失败，另有 1 条已在 v1.0.84 修复）
+## 4. 失败清单（9/264 仍失败，另有 2 条已在 v1.0.84/v1.0.86 修复）
 
 | # | selector | 分类 | 归因 |
 |---|---|---|---|
 | 0 | `github:tianpeng-dev/opencode-doubao-work-auth#7b34…` | 解包 | **已在 v1.0.84 修复**：`package.json` 857 KB 被旧 256 KB 上限拒绝；1.0.84 起上限 1 MiB（对齐上游），生产重测安装成功、`doubao-work` 接管 |
 | 1 | `github:Guuuu233/claude-tui-boost#944d…` | 解包 | 压缩包 48.5 MB > 32 MB 上限（上游同为 32 MB）；包内为超大资产，按契约拒装 |
-| 2 | `github:1466109846/ua-pro` | 解析 | **AIGX 侧缺陷（已修，待 v1.0.86 发布后重测）**：无 `#ref` 时 `api.github.com/…/commits` 返回的是 commit **数组**，旧实现按对象取 `sha`，恒报「响应缺 sha 字段」；仓库本身可用、API 正常返回 `5b48ec11…` |
+| 2 | `github:1466109846/ua-pro` | 解析 | **已在 v1.0.86 修复并线上重测通过**：无 `#ref` 时 `api.github.com/…/commits` 返回 commit **数组**，旧实现按对象取 `sha` 恒报「响应缺 sha 字段」；修复后安装成功、`ua-pro` 接管、`providerRouted=true` |
 | 3 | `github:ikashana/magpie-comate-auth#635d…` | 依赖 | `bun install` 拉 `@baidu/comate-browser-use@2.0.4` 在 npmmirror 404（上游依赖缺失） |
 | 4 | `github:mu-zi-lee/magpie-claudeweb2api#9fed…` | 加载 | 插件自报「No packaged backend for linux/x64」——仓库未提供 Linux 构建产物 |
 | 5 | `github:korioinc/magpie-tokscale-import#fbbc…` | 加载 | 插件要求 Magpie 桌面端 `usage.jsonl`，运行环境不适用 |
@@ -101,7 +103,7 @@ opencode-xfyun-maas-auth           enabled routed=true
 - 未打包、未分发任何 AGPL 插件二进制；验证只在生产运行期从目录/仓库拉取。
 - 验证过程使用 `trusted:true` 显式安装第三方代码，所有临时包均已卸载。
 
-## 8. 目录刷新复测（2026-11-22 晚，v1.0.85）
+## 8. 目录刷新复测（2026-11-22 晚，v1.0.85/1.0.86）
 
 `POST /api/plugins/scripts/refresh` 后重新拉取 `GET /api/plugins/scripts/catalog`，目录由
 264 条变为 **233 条**（official 44 / npm recommended 7 / GitHub 182；`status` 显示
@@ -132,9 +134,9 @@ magpie-xiaoyunque           routed=true providers=[xiaoyunque]
 
 | 状态 | 条数 |
 |---|---:|
-| 历史端到端通过（含新增 6 条） | 221 |
+| 历史端到端通过（含新增 6 条与 v1.0.86 的 ua-pro） | 222 |
 | 上轮 install_failed、v1.0.84 已重测通过（`doubao-work-auth`，见 §4 #0） | 1 |
 | 生产常驻且当前 `providerRouted=true`（astudio / agnes / xfyun-maas） | 3 |
-| 仍未通过（插件侧/外部问题，SHA 未变） | **8** |
+| 仍未通过（插件侧/外部问题） | **7** |
 
-即：新目录 **225/233 已有通过结论，8 条失败均已归因**，无未验证条目。
+即：新目录 **226/233 已有通过结论，7 条失败均已归因**，无未验证条目。

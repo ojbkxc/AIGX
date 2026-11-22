@@ -105,7 +105,7 @@ AIGX 侧处理（`src/plugin_host/script/host/identity.mjs::allocateProvider`）
 |---|---|---|---|---|
 | magpie（44） | dist tgz：`raw.githubusercontent.com/magpie-community/plugins/dist/tgz/*.tgz`（`archive_url` 必填） | **必须** `integrity`（sha512）；缺失直接拒装 | 本地 `packages::verify_integrity` 验 SRI | dist 索引刷新与 tgz 内容不一致；官方包在 npm 上多数 404，只能靠 dist |
 | npm（7） | 装时查 `registry.npmjs.org/<name>` → `dist.tarball` | 装时现取 `dist.integrity` | `resolve_npm_tarball` 强校验 tarball 属 `registry.npmjs.org`，防元数据指向第三方 | npm 传播延迟/包被 deprecate/unpublish；7 个均为裸包名（非 scope） |
-| github（213） | `codeload.github.com/<repo>/tar.gz/<commit>` | **无 integrity**（commit 寻址固定内容） | ref→40hex：212 条 selector 已 pin 40hex（**跳过 API，单跳**）；1 条分支 ref 走 `api.github.com/repos/…/commits` 解析（**两跳**） | 分支 ref 条目内容非不可变（`1466109846/ua-pro`）；仓库被删/私有化；tarball 内实际包名需探测 |
+| github（213） | `codeload.github.com/<repo>/tar.gz/<commit>` | **无 integrity**（commit 寻址固定内容） | ref→40hex：212 条 selector 已 pin 40hex（**跳过 API，单跳**）；1 条分支 ref 走 `api.github.com/repos/…/commits` 解析（**两跳**；v1.0.86 起支持默认分支返回的**数组**取首条） | 分支 ref 条目内容非不可变（`1466109846/ua-pro`）；仓库被删/私有化；tarball 内实际包名需探测 |
 
 公共护栏（`packages.rs`）：archive ≤32 MiB、解包总量 ≤128 MiB、条目 ≤4096、`package.json`/`wasm.json` ≤1 MiB（v1.0.84 对齐上游；更早为 256 KiB）、tar 路径穿越防护。
 
@@ -215,7 +215,7 @@ for batch in batches:
 
 > 面向运维的日常操作手册。审计口径与失败样本见
 > [`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)
-> （2026-11-22 生产全量验证：254/264 通过，10 条失败全部归因）。
+> （2026-11-22 生产全量验证：255/264 通过，9 条失败全部归因）。
 
 ### 7.1 日常操作：刷新 → 安装 → 启用 → 观察 → 停用/卸载
 
@@ -277,6 +277,7 @@ selector 三种形态：`magpie:<scoped-npm-name>`（官方 dist）、裸 npm �
 | 入口引用兄弟插件却未声明依赖 | 插件打包缺陷（如 `workbuddy-search`→`opencode-workbuddy-auth`） | 先装兄弟包仍可能不可解析；按不可用处理/联系作者 |
 | 解析 tarball / npm 元数据失败 | npm registry 抖动或包被 deprecate | 重试，不是插件坏 |
 | 分支 ref 内容漂移 | selector 非 pin（`github:…/ua-pro`） | 装前确认 ref 对应 commit 未漂移；优先用 40hex SHA |
+| 「响应缺 sha 字段」（无 `#ref` 的 github selector） | v1.0.85 及更早：`/commits` 返回 commit **数组**，旧实现按对象取 `sha` | 升级到 **v1.0.86+**（已支持数组取首条）；临时可用 40hex SHA 固定条目 |
 
 原则：`error` 非空先归类再动手；**AIGX 侧偏严的上限（32 MiB / 1 MiB / 4096）不为单包放宽**，
 超出即按契约拒装。插件自身的打包/配置/代码缺陷不由运维"修兼容"。
@@ -322,7 +323,7 @@ error, providerRouted, enabled, crashes_before, crashes_after, ts}`，便于按�
 
 ### 7.6 相关文档与入库验证工具
 
-- 全量验证结果与 10 条失败归因：[`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)。
+- 全量验证结果与 9 条失败归因：[`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)。
 - 审计口径、安装/加载链路与风险分类：本文 §1–§5；验收判据 §4；批次计划 §5。
 
 批量验证工具：`tools/verify_magpie_plugins.py`（入库；标准库 + `paramiko`）。凭据全部
