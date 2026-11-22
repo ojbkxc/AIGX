@@ -12,12 +12,13 @@
 | 结论 | 数量 |
 |---|---:|
 | 已对齐 | 43 |
-| 待补 | 5 |
-| 不适用 | 2 |
+| 待补 | 4 |
+| 不适用 | 3 |
 | 合计 | 50 |
 
 AIGX 账号池在「添加/列表/列/筛选/排序拖拽/分组/隐藏/批量/限制器/用量/签到/代理/实时轮询/分页/导入导出/错误提示/凭证维护调度」上与 A2A 功能面基本齐平；
-实质缺口集中在 **ZCode 专属套餐 UI、显式重登交互、更丰富的筛选维度、服务端分页、全量导出格式版本**（见 §2 待补清单）。
+实质缺口集中在 **显式重登交互、更丰富的筛选维度、服务端分页、全量导出格式版本**（见 §2 待补清单）；
+ZCode 专属套餐 UI 经复核判为「不适用（后续）」，理由见 §1 L 节。
 
 ## 1. 逐功能差距表
 
@@ -120,7 +121,7 @@ AIGX 账号池在「添加/列表/列/筛选/排序拖拽/分组/隐藏/批量/�
 
 | 功能项 | A2A 行为（文件:行） | AIGX 现状（文件:行） | 差距 | 结论 | 工作量 |
 |---|---|---|---|---|---|
-| ZCode 套餐/凭据选择 UI（含 captcha 池） | `accounts-zcode-plan.tsx:36-167` + `core/account_store/zcode_accounts.rs:157,229` | `AccountSessions.tsx:160-166`（仅 provider 白名单，无 ZCode 专属 plan 选择/校验 UI） | AIGX 无 ZCode 套餐选择与 captcha 池交互 | 待补 | M |
+| ZCode 套餐/凭据选择 UI（含 captcha 池） | `accounts-zcode-plan.tsx:36-167`；但 CLI 轮询登录、编码套餐凭证换取、活动套餐通道（Anthropic 信封 + 官方三段系统提示词）、`start-plan`、验证码令牌池等已整体搬入其**未随仓库发布的 `agent2api-providers` 插件**（`desktop-tauri/src-tauri/server/src/server/core/providers/zcode/mod.rs:1-25` 自述），参考树只剩地区身份/字段值域，无协议契约 | `AccountSessions.tsx:160-166`（仅 provider 白名单）；`zcode`/`zcode-intl` 为 provider 级 `Protocol::Openai`（`src/account_session/registry.rs:420-428`），无账号级协议覆盖 | 真实分叉需 bridge/adapter 改造（L 量级）；仅落字段、不接数据面属半死功能，故本轮不做。另：`wbZcodeCaptchaPool` 是桌面端**本地**验证码池，网关形态不适用（平台级「验证码令牌池」是另一能力，不搬入账号行） | 不适用（后续） | L |
 | 订阅/套餐展示 | `accounts-panels.tsx:491-511` + `core/account_store/zcode_accounts.rs:572-576` | `AccountSessions.tsx:214-277,2626-2643` + `balance.rs:524,704-898` | 无 | 已对齐 | — |
 
 ### M. 桌面客户端
@@ -156,18 +157,20 @@ AIGX 账号池在「添加/列表/列/筛选/排序拖拽/分组/隐藏/批量/�
 |---|---|---|---|---|---|
 | 凭证维护定时调度（间隔/提前量/退避） | `core/scheduled_tasks.rs:174-197,445` + `config/types.rs:551-567` + `core/credential_maintenance.rs:63-74` | `src/scheduled_tasks/mod.rs:93` + `src/account_session/refresh.rs:67` + `src/account_session/maintenance.rs:26` | 无 | 已对齐 | — |
 
-## 2. 「待补」清单（供 #36/#37 分工）
+## 2. 「待补」清单（供 #36 后端 / #37 前端分工）
+
+> ZCode 专属套餐 UI 经复核改为「不适用（后续）」（证据见 §1 L 节），不再列入下表。
 
 | # | 缺口 | 证据 | 建议归属 | 工作量 |
 |---|---|---|---|---|
-| 1 | ZCode 专属套餐/凭据选择 UI（含 captcha 池状态/校验） | A2A `accounts-zcode-plan.tsx:36-167`；AIGX 仅 `AccountSessions.tsx:160-166` provider 白名单 | 前端（#36） | M |
-| 2 | 显式「需要重登」提示 + 一键重登/去处理入口 | A2A `accounts-authorization.ts:4-7`、`accounts-panels.tsx:1327,1361`；AIGX 后端 `model.rs:639,761,848` 已备，前端仅 tooltip `AccountSessions.tsx:2237-2249` | 前端（#36） | S |
-| 3 | 更丰富的筛选维度：status=relogin/expired、到期范围、用量范围 | A2A `core/accounts_list.rs:11-29,142-145`；AIGX `account_sessions.rs:985-1031` 仅 channel/search/include_hidden | 后端（#37）+ 前端 | S |
-| 4 | 服务端分页（limit/offset）与 ids-only 选择 | A2A `api/accounts_list.rs:16-32`、`core/accounts_list.rs:23-24`；AIGX 列表返回全量 `account_sessions.rs:985` | 后端（#37） | S |
-| 5 | 全量导出格式对齐 A2A v2（版本/字段） | A2A `core/account_transfer.rs:151`（version 2）；AIGX `account_sessions.rs:3519`（version 1） | 后端（#37） | S |
+| 1 | 显式「需要重登」提示 + 一键重登/去处理入口 | A2A `accounts-authorization.ts:4-7`、`accounts-panels.tsx:1327,1361`；AIGX 后端 `model.rs:639,761,848` 已备，前端仅 tooltip `AccountSessions.tsx:2237-2249` | 前端（#37） | S |
+| 2 | 更丰富的筛选维度：status=relogin/expired、到期范围、用量范围 | A2A `core/accounts_list.rs:11-29,142-145`；AIGX `account_sessions.rs:985-1031` 仅 channel/search/include_hidden | 后端（#36）+ 前端 | S |
+| 3 | 服务端分页（limit/offset）与 ids-only 选择 | A2A `api/accounts_list.rs:16-32`、`core/accounts_list.rs:23-24`；AIGX 列表返回全量 `account_sessions.rs:985` | 后端（#36） | S |
+| 4 | 全量导出格式对齐 A2A v2（版本/字段） | A2A `core/account_transfer.rs:151`（version 2）；AIGX `account_sessions.rs:3519`（version 1） | 后端（#36） | S |
 
 ## 3. 说明
 
 - 「已对齐」指**能力等价**，不要求实现逐字一致（AIGX 为 Rust/React 独立实现，A2A 代码为 AGPL，仅审计行为未拷贝）。
-- 「不适用」两项均因产品形态差异：AIGX 是服务端网关，无桌面客户端可「启动/恢复」；账号 SSE 上游本身也未提供（两侧都用轮询）。
+- 「不适用」三项均因产品形态/上游发布形态差异：AIGX 是服务端网关，无桌面客户端可「启动/恢复」；账号 SSE 上游本身也未提供（两侧都用轮询）；ZCode 账号级协议（`start-plan` / Anthropic 信封 / 官方三段提示词 / 验证码令牌池）已移入上游**未发布**的 `agent2api-providers` 插件（`core/providers/zcode/mod.rs:1-25` 自述），参考树无契约，且 AIGX `zcode`/`zcode-intl` 为 provider 级 `Protocol::Openai`（`registry.rs:420-428`），真实分叉需 bridge/adapter 改造（L，后续）。
+- `wbZcodeCaptchaPool` 为桌面端本地验证码池，网关形态不适用；平台级「验证码令牌池」属另一能力，不搬入账号行。
 - 证据行号基于审计当日工作区；后续改动可能漂移，复核以实际代码为准。
