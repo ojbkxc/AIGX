@@ -73,7 +73,7 @@ opencode-xfyun-maas-auth           routed=true  providers=[xfyun-coding, xfyun-m
 | 7 | `github:qq136692547-cmyk/magpie-google-aistudio#1c36…` | 加载 | 「No valid API keys provided」——加载即要求有效 Key，未配置无法装载 |
 | 8 | `github:double2tea/magpie-image-models#daa5…` | 加载 | 「Invalid plugin provider id」——导出的 provider id 不合法（插件缺陷） |
 | 9 | `github:HYKSC-X/magpie-relay-identity#fb2c…` | 加载 | 必须配置 `options.baseURL` 才能装载（配置类插件） |
-| 10 | `github:wanglz111/magpie-workbuddy-search#90f3…` | 加载 | 入口源码相对路径引用 `@magpie-community/opencode-workbuddy-auth`，但未声明依赖；同时安装兄弟插件仍不可解析（插件打包缺陷） |
+| 10 | `github:wanglz111/magpie-workbuddy-search#90f3…` | 加载 | 入口写死相对路径 `plugins/node_modules/@magpie-community/opencode-workbuddy-auth/index.mjs` 且未声明依赖；v1.0.86 同批安装兄弟包（该包本身 `providerRouted=true`）后仍报 `Cannot find module`——包内独立目录不存在该路径（插件打包缺陷） |
 
 > 另：`magpie-codex-guard` 首轮 load_error（后台进程启动竞争），重测通过，已计入通过。
 >
