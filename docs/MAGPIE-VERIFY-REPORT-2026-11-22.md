@@ -100,3 +100,30 @@ opencode-xfyun-maas-auth           enabled routed=true
 - 未写任何 provider 伪装 / 规避上游检测的实现；所有安装、加载、路由均走 AIGX 既有链路。
 - 未打包、未分发任何 AGPL 插件二进制；验证只在生产运行期从目录/仓库拉取。
 - 验证过程使用 `trusted:true` 显式安装第三方代码，所有临时包均已卸载。
+
+## 8. 目录刷新复测（2026-11-22 晚，v1.0.85）
+
+`POST /api/plugins/scripts/refresh` 后重新拉取 `GET /api/plugins/scripts/catalog`，目录由
+264 条变为 **233 条**（official 44 / npm recommended 7 / GitHub 182；`status` 显示
+`ignored=200`、GitHub/market/stars 均非 stale）：
+
+| 变化 | 内容 |
+|---|---|
+| 新增 6 条 GitHub 条目 | 全部按同判据复测 **6/6 通过**（install → enable → routed → uninstall） |
+| 移除 37 条 | 上游目录不再列出的仓库；其中含两条历史失败项 `tokscale-import`、`relay-identity` |
+| 剩余失败项 | 8 条，commit SHA 与上轮完全一致，未变化，无需重测 |
+
+新增 6 条结果（`D:\tmp\v_new6.jsonl`）：
+
+```
+magpie-plugin-msmoli        routed=true providers=[msmoli]
+magpie-amazon-quick         routed=true providers=[amazon-quick]
+magpie-lobsterai-auth       routed=true providers=[lobsterai-plugin]        # 原生 lobsterai 占用→改名
+agent2api-plugin-astudio    routed=true providers=[astudio-plugin-f9ff8166fbfa]  # 二次冲突→追加 sha12
+magpie-provider-eaichat     routed=true providers=[eaichat]
+magpie-xiaoyunque           routed=true providers=[xiaoyunque]
+```
+
+其中 `lobsterai-plugin` 与 `astudio-plugin-f9ff8166fbfa` 验证了宿主身份改名的两条路径
+（reserved 让位 `-plugin`、改名后仍冲突追加 sha12）。复测后生产仍回到验证前的 3 个包，
+`host.crashes=0`、`lastError=null`、全部 `providerRouted=true`。

@@ -10,6 +10,10 @@
 
 ## 0. 结论（TL;DR）
 
+> **目录已刷新（2026-11-22 晚）**：生产 `refresh` 后为 **233 条**（official 44 / npm 7 /
+> GitHub 182）；新增 6 条已复测全部通过，移除 37 条（含两条历史失败项）。下文 §1–§5 的
+> 统计基于 264 条审计快照（`D:\tmp\magpie_catalog.json`），结论口径不变。
+
 - 264 条全部 `installable=true`，但 **119/264（45.1%）目录 providers 为空**（全部是 GitHub 第三方条目，占 GitHub 的 55.9%）。这些包能否接管 provider，只能装完 `enable` 后从宿主上报读取。
 - 三条安装链路：44 magpie 官方（dist tgz **必带 sha512**）、7 裸 npm（装时现查 `registry.npmjs.org` 的 `dist.integrity`）、213 GitHub（commit 寻址，**无 integrity**；212 条已 pin 40 位 SHA，1 条为分支 ref）。
 - provider id 在目录内已有 **12 个被多个条目重复声明**（`agentrouter` 被 5 个条目声称）。AIGX 的 `identity.allocateProvider` 会按 reserved/occupied 冲突把 id 改名为 `<id>-plugin`（`custom-` 前缀再加 `magpie-`，二次冲突追加 sha12），并在 `identities` 记录「声明 id → 实际 id」。**因此任何断言都必须用实际 id，不能用目录 id。**
