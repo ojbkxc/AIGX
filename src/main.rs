@@ -407,9 +407,6 @@ async fn main() -> anyhow::Result<()> {
     // 可配可热更；数据面 resolve_bridges 每请求读快照分派
     let routing_policy =
         Arc::new(crate::channel::routing_policy::RoutingPolicyStore::with_store(store.clone()));
-    // 终端用户工具权限策略（#34 P0）：与路由策略同构的快照存储，默认全关
-    let user_tool_policy =
-        Arc::new(crate::agent::user_tool_policy::UserToolPolicyStore::with_store(store.clone()));
     // 启动时把持久化的路由策略热应用到各组件（免重启生效）：
     // 断路器（开关+三参）、亲和 TTL、调度权重
     {
@@ -847,7 +844,6 @@ async fn main() -> anyhow::Result<()> {
         livez_state: livez_state.clone(),
         channel_store,
         routing_policy,
-        user_tool_policy,
         gateway_prompt,
         purge,
         account_sessions,
@@ -2488,17 +2484,6 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/routing/replays",
             get(api::admin::handle_get_routing_replays),
-        )
-        // 用户工具策略（#34 §5.1，喂 #65 UserTools 配置页）：快照读写 + 工具目录
-        // （配置 100% 管理员；终端用户只消费生效结果，不新增用户侧配置端点）
-        .route(
-            "/api/user-tools/policy",
-            get(api::admin::user_tools::handle_get_user_tool_policy)
-                .put(api::admin::user_tools::handle_put_user_tool_policy),
-        )
-        .route(
-            "/api/user-tools/catalog",
-            get(api::admin::user_tools::handle_get_user_tool_catalog),
         )
         // 路由回放快照（Phase1-B：只读投影，route_replay 开关开启的请求
         // 才有完整数据；管理员鉴权，冷路径）

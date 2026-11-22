@@ -5,13 +5,13 @@ import type { Page } from '@playwright/test';
  * 信息架构整合（IA v2）—— 验收回归。
  *
  * 覆盖 docs/IA-CONSOLIDATION-SPEC.md §7.2 的落点：
- * - 侧栏整合：上游渠道与账号池合并为「供应商」；签到中心 / 用户工具权限 /
- *   系统设置「账户」顶级入口下线；「定时任务」升级为顶级「自动维护」页。
- * - 旧路由重定向：/account-sessions、/checkin、/user-tools、/scheduled-tasks、
+ * - 侧栏整合：上游渠道与账号池合并为「供应商」；签到中心 / 系统设置「账户」
+ *   顶级入口下线；「定时任务」升级为顶级「自动维护」页。
+ * - 旧路由重定向：/account-sessions、/checkin、/scheduled-tasks、
  *   /settings?tab=account、/model-manage?tab=meta。
  * - 供应商页：h1 + 4 Tab（供应商/账号池/健康/签到，无「网关」）、旧 tab= 别名归一。
  * - 统一供应商列表：形态列（API Key / 账号池）、账号数列、账号池型行「管理账号」。
- * - 用户管理双 Tab；系统设置分类（无「定时任务」「账户」）;模型管理双 Tab +
+ * - 用户管理单页列表；系统设置分类（无「定时任务」「账户」）;模型管理双 Tab +
  *   「覆盖管理」弹窗入口；签到嵌入后保留 4 个二级 Tab。
  *
  * 选择器一律走语义（role / title / 稳定文案），不依赖易变 class 名。
@@ -32,7 +32,7 @@ test.describe('IA 整合 · 侧栏与路由', () => {
     await expect(page.locator('.main-content')).toBeVisible();
 
     const nav = sidebar(page);
-    for (const gone of ['渠道与账号池', '签到中心', '用户工具权限', '定时任务']) {
+    for (const gone of ['渠道与账号池', '签到中心', '定时任务']) {
       await expect(nav).not.toContainText(gone);
     }
     for (const kept of ['供应商', '用户管理', '系统设置', '模型管理']) {
@@ -48,9 +48,6 @@ test.describe('IA 整合 · 侧栏与路由', () => {
 
     await page.goto('/checkin');
     await expect(page).toHaveURL(/\/channels\?tab=checkin/);
-
-    await page.goto('/user-tools');
-    await expect(page).toHaveURL(/\/users\?tab=tools/);
 
     await page.goto('/scheduled-tasks');
     await expect(page).toHaveURL(/\/maintenance$/);
@@ -224,14 +221,15 @@ test.describe('IA 整合 · 用户管理 / 系统设置 / 模型管理', () => {
     await loginAsAdmin(page, { sessions: [] });
   });
 
-  test('用户管理双 Tab：用户列表 / 工具权限，?tab=tools 直达工具 Tab', async ({ page, pageErrors }) => {
+  test('用户管理为单页列表（工具权限 Tab 已下线）', async ({ page, pageErrors }) => {
     await page.goto('/users');
-    await expect(page.getByRole('tab')).toHaveCount(2);
-    await expect(page.getByRole('tab', { name: '用户列表' })).toHaveAttribute('aria-selected', 'true');
-    await expect(page.getByRole('tab', { name: '工具权限' })).toHaveCount(1);
+    await expect(page.getByRole('heading', { name: '用户管理' })).toBeVisible();
+    await expect(page.getByRole('tab')).toHaveCount(0);
 
+    // 旧 ?tab=tools 链接不再有专门 Tab，回落到同一用户列表页
     await page.goto('/users?tab=tools');
-    await expect(page.getByRole('tab', { name: '工具权限' })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('heading', { name: '用户管理' })).toBeVisible();
+    await expect(page.getByRole('tab')).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

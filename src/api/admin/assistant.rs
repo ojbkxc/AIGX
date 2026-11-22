@@ -105,8 +105,8 @@ impl DenyKind {
 ///
 /// 「关了就是关了」的第二重：清单与回路 schema 已经过滤过一轮，模型幻觉/上下文
 /// 残留仍可能叫出被禁用的名字，这里必须独立再挡一次——只补出口不补执行正是本仓
-/// 反复复发的形态。高危那一刀只对管理员生效：普通用户分支由 `user_tool_allowed`
-/// 自己封顶高危（D2：高危永不声明 `user_exec`）。
+/// 反复复发的形态。高危那一刀只对管理员生效：普通用户分支的 registry 下发口径
+/// 已把 HighRisk 排除（且 `exec_user_tool` 执行侧再拦），无需在此重复。
 fn exec_denial(
     def: &crate::agent::registry::ToolDef,
     is_admin: bool,
@@ -121,31 +121,10 @@ fn exec_denial(
     }
 }
 
-/// 普通用户域某个工具能否下发（#34 组 allowlist ∩ #35 管理员禁用清单）。
+/// 工具目录条目构造（纯函数，handler 与单测共用）。
 ///
-/// 清单（`GET /api/assistant/tools`）与回路 schema 两条出口共用本函数，禁用项
-/// 两处同时消失；执行侧另有 [`exec_denial`] 兜第二重。禁用优先于 allowlist：
-/// 组里就算写了 `"*"`，被管理员关掉的工具也不下发、也不可执行。
-fn user_tool_visible(
-    t: &crate::agent::registry::ToolDef,
-    policy: &crate::agent::user_tool_policy::UserToolPolicy,
-    group: &str,
-    disabled: &[String],
-) -> bool {
-    !crate::agent::registry::tool_disabled(t.name, disabled)
-        && crate::agent::user_tool_policy::user_tool_allowed(
-            policy,
-            group,
-            t.name,
-            t.risk,
-            t.user_exec.is_some(),
-        ) == crate::agent::user_tool_policy::ToolPermission::Allow
-}
-
-/// 工具目录条目构造（纯函数，handler 与单测共用——同 `user_tools.rs::catalog_payload` 姿势）。
-///
-/// `risk` 必须走 `RiskLevel::as_str()`（`agent/tools.rs`）：全库 4 处 risk 输出点
-/// （本函数、`agent/runner.rs`、`api/admin/settings.rs`、`api/admin/user_tools.rs`）
+/// `risk` 必须走 `RiskLevel::as_str()`（`agent/tools.rs`）：全库 3 处 risk 输出点
+/// （本函数、`agent/runner.rs`、`api/admin/settings.rs`）
 /// 单一取值来源。#18 之前此处手拼 `read_only/low_risk/high_risk` 第三套命名，
 /// 值域由 `tests::assistant_tools_risk_field_is_canonical` 钉死，防再退化（#28）。
 fn tool_json(t: &crate::agent::registry::ToolDef) -> Value {
@@ -162,8 +141,8 @@ fn tool_json(t: &crate::agent::registry::ToolDef) -> Value {
 ///
 /// 管理员（开关开）→ 非 HighRisk ∩ 未被 `disabled_tools` 禁用（与
 /// `registry::visible_tools` 同口径，条数随注册表与开关变化，所以这里不写死数字）；
-/// 普通用户（开关开）→ user_exec 声明集 ∩ 组 allowlist ∩ 未被 `disabled_tools`
-/// 禁用（#34 v2 双身份，user_tool_allowed 判定，设计稿 D1-D8）；
+/// 普通用户（开关开）→ `user_exposed_tools()`（声明 user_exec 且非 HighRisk）
+/// ∩ 未被 `disabled_tools` 禁用（#34 v2 双身份，按 registry 判定）；
 /// 开关关 → 空清单（前端隐藏工具入口）。
 ///
 /// `disabled_tools` 是管理员级的全局开关，不区分身份：关掉的工具两条分支都不下发、
@@ -184,11 +163,10 @@ pub async fn handle_assistant_tools(
                 .collect()
         }
     } else if tools_enabled() {
-        // #34 v2：普通用户域——user_exec 声明 ∩ 组 allowlist ∩ 未禁用（判定函数带
-        // 14 单测；执行侧 exec_user_tool 还有一层兜底，两重防线）
-        let policy = state.user_tool_policy.snapshot();
+        // 普通用户域：按 registry 判定——声明 user_exec 且非 HighRisk，减去管理员
+        // 禁用清单；执行侧 exec_user_tool 再兜一层（user_exec/风险/禁用三重兜底）。
         tools::user_exposed_tools()
-            .filter(|t| user_tool_visible(t, &policy, &user.group, &disabled))
+            .filter(|t| !crate::agent::registry::tool_disabled(t.name, &disabled))
             .map(tool_json)
             .collect()
     } else {
@@ -330,8 +308,6 @@ pub async fn handle_assistant_chat(
     // 管理员禁用集（#35 批1 后半）：下发 schema 与执行前 deny 共用同一个读取结果，
     // 保证「关了就是关了」不会因为两处取数时刻不同而分叉。
     let disabled = disabled_tools(&state).await;
-    // 普通用户的可执行集：user_exec 声明 ∩ 组 allowlist（与 /tools 同判定）
-    let policy = state.user_tool_policy.snapshot();
     let max_rounds = body.max_rounds.unwrap_or(MAX_ROUNDS).clamp(1, MAX_ROUNDS);
 
     let ch = pick_channel(
@@ -387,7 +363,7 @@ pub async fn handle_assistant_chat(
         } else {
             tools::openai_tools_of(
                 tools::user_exposed_tools()
-                    .filter(|t| user_tool_visible(t, &policy, &user.group, &disabled)),
+                    .filter(|t| !crate::agent::registry::tool_disabled(t.name, &disabled)),
             )
         }
     } else {
@@ -502,8 +478,9 @@ pub async fn handle_assistant_chat(
                     }
                     // #34 v2 双身份执行分派：
                     // - 管理员：registry exec_tool（非 HighRisk，与 Agent 同语义）
-                    // - 普通用户：user_tool_allowed 判定（Allowlist/组启用/非高危）
-                    //   → exec_user_tool（user_exec 执行体）；拒绝原因回灌 LLM
+                    // - 普通用户：按 registry 下发口径（`user_exposed_tools` ∩ 未禁用）
+                    //   → exec_user_tool（user_exec 执行体，自带 user_exec + 非
+                    //   HighRisk + 未禁用三重兜底）；写工具另有二次确认门
                     let out: ToolOutcome = if user.is_admin() {
                         let args: Value = serde_json::from_str(&call.arguments)
                             .unwrap_or_else(|_| json!({ "_raw": call.arguments }));
@@ -515,89 +492,64 @@ pub async fn handle_assistant_chat(
                             },
                         }
                     } else {
-                        let perm = crate::agent::user_tool_policy::user_tool_allowed(
-                            &policy,
-                            &user.group,
-                            &call.function_name,
-                            def.risk,
-                            def.user_exec.is_some(),
-                        );
-                        if perm != crate::agent::user_tool_policy::ToolPermission::Allow {
+                        // P0 铁律（设计稿 §3.3/D8）：写工具（LowRisk+）在
+                        // 用户域执行前必须二次确认——非流式 v1 的形态是
+                        // 「回灌确认卡指令」：把 confirm_request 事件载荷
+                        // 作为 role:tool 结果回灌，LLM 据此生成给用户的
+                        // 确认话术；用户下一轮口头确认后重新发起调用。
+                        // （SSE 版将改为 confirm_request 事件流；执行侧
+                        // exec_user_tool 不再重复校验风险，本门是唯一闸。）
+                        if crate::agent::confirm::write_requires_confirm(def.risk) {
+                            let confirm = crate::agent::confirm::ConfirmRequest::new(
+                                def.name,
+                                def.label,
+                                &call.arguments.chars().take(300).collect::<String>(),
+                            );
                             super::common::record_audit(
                                 &state,
                                 &user.email,
-                                "assistant_tool_denied",
+                                "assistant_tool_confirm_requested",
                                 def.name,
                                 None,
-                                Some(json!({ "reason": format!("{perm:?}") })),
+                                Some(json!({ "request_id": confirm.request_id })),
                             );
-                            ToolOutcome {
-                                text: format!(
-                                    "工具 {} 不对当前用户开放（策略拒绝：{perm:?}）",
-                                    def.label
-                                ),
-                                ok: false,
-                            }
-                        } else {
-                            // P0 铁律（设计稿 §3.3/D8）：写工具（LowRisk+）在
-                            // 用户域执行前必须二次确认——非流式 v1 的形态是
-                            // 「回灌确认卡指令」：把 confirm_request 事件载荷
-                            // 作为 role:tool 结果回灌，LLM 据此生成给用户的
-                            // 确认话术；用户下一轮口头确认后重新发起调用。
-                            // （SSE 版将改为 confirm_request 事件流；执行侧
-                            // exec_user_tool 不再重复校验风险，本门是唯一闸。）
-                            if crate::agent::confirm::write_requires_confirm(def.risk) {
-                                let confirm = crate::agent::confirm::ConfirmRequest::new(
-                                    def.name,
+                            tool_trace.push(json!({
+                                "name": call.function_name,
+                                "ok": false,
+                                "summary": format!("写工具 {} 需要用户二次确认", def.label),
+                                "confirm_request": serde_json::to_value(&confirm)
+                                    .unwrap_or(Value::Null),
+                            }));
+                            messages.push(crate::bridge::ChatMessage {
+                                role: Role::Tool,
+                                content: Some(format!(
+                                    "该操作（{}）需要用户二次确认。请把以下确认请求展示给用户，并说明用户回复「确认」后才会执行：{}",
                                     def.label,
-                                    &call.arguments.chars().take(300).collect::<String>(),
-                                );
-                                super::common::record_audit(
-                                    &state,
-                                    &user.email,
-                                    "assistant_tool_confirm_requested",
-                                    def.name,
-                                    None,
-                                    Some(json!({ "request_id": confirm.request_id })),
-                                );
-                                tool_trace.push(json!({
-                                    "name": call.function_name,
-                                    "ok": false,
-                                    "summary": format!("写工具 {} 需要用户二次确认", def.label),
-                                    "confirm_request": serde_json::to_value(&confirm)
-                                        .unwrap_or(Value::Null),
-                                }));
-                                messages.push(crate::bridge::ChatMessage {
-                                    role: Role::Tool,
-                                    content: Some(format!(
-                                        "该操作（{}）需要用户二次确认。请把以下确认请求展示给用户，并说明用户回复「确认」后才会执行：{}",
-                                        def.label,
-                                        serde_json::to_string(&confirm).unwrap_or_default()
-                                    )),
-                                    reasoning: None,
-                                    content_blocks: None,
-                                    name: Some(call.function_name.clone()),
-                                    tool_call_id: Some(call.id.clone()),
-                                    tool_calls: None,
-                                });
-                                continue;
-                            }
-                            let args: Value = serde_json::from_str(&call.arguments)
-                                .unwrap_or_else(|_| json!({ "_raw": call.arguments }));
-                            match crate::agent::registry::exec_user_tool(
-                                &state,
-                                &headers,
-                                &call.function_name,
-                                &args,
-                            )
-                            .await
-                            {
-                                Ok(o) => o,
-                                Err((_code, msg)) => ToolOutcome {
-                                    text: msg,
-                                    ok: false,
-                                },
-                            }
+                                    serde_json::to_string(&confirm).unwrap_or_default()
+                                )),
+                                reasoning: None,
+                                content_blocks: None,
+                                name: Some(call.function_name.clone()),
+                                tool_call_id: Some(call.id.clone()),
+                                tool_calls: None,
+                            });
+                            continue;
+                        }
+                        let args: Value = serde_json::from_str(&call.arguments)
+                            .unwrap_or_else(|_| json!({ "_raw": call.arguments }));
+                        match crate::agent::registry::exec_user_tool(
+                            &state,
+                            &headers,
+                            &call.function_name,
+                            &args,
+                        )
+                        .await
+                        {
+                            Ok(o) => o,
+                            Err((_code, msg)) => ToolOutcome {
+                                text: msg,
+                                ok: false,
+                            },
                         }
                     };
                     tool_total_chars += out.text.chars().count();
@@ -746,7 +698,7 @@ mod tests {
 
     /// 「关了就是关了」执行面（#35 批1 后半）：执行前的 deny 必须独立于下发口径成立，
     /// 且原因/文案分得清「被禁用」与「高危无审批矩阵」。高危那一刀只对管理员拦
-    /// （普通用户分支由 `user_tool_allowed` 封顶高危，D2 保证高危永不声明 user_exec）。
+    /// （普通用户分支由 registry 下发口径 + `exec_user_tool` 执行侧封顶高危）。
     #[test]
     fn exec_denial_blocks_disabled_and_admin_high_risk() {
         let low = crate::agent::registry::find_tool("aigx_query_usage").expect("aigx_query_usage");
@@ -782,7 +734,7 @@ mod tests {
         assert_eq!(
             exec_denial(high, false, &[]),
             None,
-            "用户分支的高危交给 user_tool_allowed，不在这里重复拦"
+            "用户分支的高危交给 registry/exec_user_tool，不在这里重复拦"
         );
 
         let text = DenyKind::Disabled.reply_text("访问令牌删除");
@@ -803,42 +755,10 @@ mod tests {
         );
     }
 
-    /// 「关了就是关了」下发面（#35 批1 后半）：普通用户清单/回路 schema 共用的判定里，
-    /// 管理员禁用清单必须压过组 allowlist（哪怕写了 `"*"` 通配）。
-    #[test]
-    fn user_tool_visible_lets_disabled_win_over_allowlist() {
-        use crate::agent::user_tool_policy::{GroupPolicy, UserToolPolicy};
-        let t = crate::agent::registry::find_tool("aigx_query_usage").expect("aigx_query_usage");
-        let policy = UserToolPolicy {
-            enabled: true,
-            groups: [(
-                "vip".to_string(),
-                GroupPolicy {
-                    allowlist: vec!["*".to_string()],
-                },
-            )]
-            .into_iter()
-            .collect(),
-        };
-
-        assert!(
-            user_tool_visible(t, &policy, "vip", &[]),
-            "前提：通配 allowlist 下该工具本来对用户开放"
-        );
-        assert!(
-            !user_tool_visible(t, &policy, "vip", &[t.name.to_string()]),
-            "allowlist 写了通配也要输给管理员禁用清单"
-        );
-        assert!(
-            !user_tool_visible(t, &policy, "other-group", &[]),
-            "未配置的组本来就没有工具（前提校验）"
-        );
-    }
-
     /// #28：钉死 `GET /api/assistant/tools` 的 risk 值域（防 #18/D-1 类退化）。
     ///
     /// #18 把此处的手拼 match 改成了 `t.risk.as_str()`，但端点此前**没有任何测试**
-    /// 覆盖 risk 字段（`user_tools.rs` 的单测只钉 catalog 端点），再手拼不会被 CI 拦。
+    /// 覆盖 risk 字段（`tool_json` 之外的输出点），再手拼不会被 CI 拦。
     /// 本测走 [`tool_json`]（纯函数，handler 与单测共用），逐条断言：
     /// ①出参与 `RiskLevel::as_str()` 同源；②值落在规范三值内（`read_only/low_risk/high_risk`
     /// 这类别名因此天然不合法）；③注册表里三档都被真测到（防钉变成空转）。

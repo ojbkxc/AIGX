@@ -630,12 +630,9 @@ const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
             ],
         ),
         (
-            "不给 AI 面·Agent 自身边界（lead 裁定①：只读给 aigx_agent_self_status，PUT /api/agent/settings 永不让 AI 改自己；`/api/user-tools/policy` 同族——改它=改 AI 自己的可执行面/权限边界，只读仍由 aigx_config_view 提供）",
+            "不给 AI 面·Agent 自身边界（lead 裁定①：只读给 aigx_agent_self_status，PUT /api/agent/settings 永不让 AI 改自己）",
             &[
                 "/api/agent/settings",
-                // lead 裁定（#34 U-C sub-decision 1）：终端用户工具 allowlist 属 AI 自身边界，
-                // 从「批 2·写侧配置族」移入本组（移动，不是补工具）
-                "/api/user-tools/policy",
             ],
         ),
     ];

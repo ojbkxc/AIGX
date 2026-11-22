@@ -1516,6 +1516,10 @@ export interface AccountSessionItem {
   };
   /** 账号级额外请求头（登录态型供应商补专用头） */
   extra_headers?: Record<string, string>;
+  /** 是否允许选路跳过该账号（A2A `allowRouteSkip`，缺省 true = 可被自动选路跳过；false = 仅显式指定用） */
+  allow_route_skip?: boolean;
+  /** 插件账号的出站 User-Agent 覆盖（空 = 用 provider 默认；A2A `userAgent`） */
+  user_agent?: string;
   /** 是否已保存续期令牌（refreshToken / Coding Plan JWT 等） */
   has_refresh_token?: boolean;
   /** 续期令牌的脱敏形态（不回明文） */
@@ -1577,6 +1581,13 @@ export interface AccountSessionItem {
   public?: Record<string, unknown> | null;
   /** 是否有插件 secret（只回布尔，不回内容；编辑时 `secret` 输入框留空 = 不修改） */
   has_secret?: boolean;
+  /** 是否插件账号（后端 `is_plugin_account`；仅插件账号的 `plugin` 段有值） */
+  is_plugin_account?: boolean;
+  /**
+   * 插件公开投影（后端 `plugin`；仅插件账号下发，含 hasAccessToken / hasRefreshToken /
+   * canRefresh / expiresAt 与插件自报展示字段如 email/nickname）。#50 账号列 email 副行取它。
+   */
+  plugin?: Record<string, unknown> | null;
   /** 登录态推算的「需要重新登录」提醒时刻（unix 秒；仅登录态型账号有，后端 relogin_due_at） */
   relogin_due_at?: number | null;
   /**
@@ -2685,32 +2696,6 @@ export interface ChatSessionSummary {
   parent_session_id?: string | null;
   forked_from_seq?: number | null;
   title_source?: string | null;
-}
-
-/**
- * 终端用户工具策略（#65；设计稿 §4.1 复用 RoutingPolicyStore 快照模式）。
- * `enabled` 默认 false（关闭时终端用户纯聊天，与历史逐字节等价）；
- * `groups[组名].allowlist` 空数组 = 该组无工具，["*"] = 该组获 LowRisk 全集。 */
-export interface UserToolGroupPolicy {
-  allowlist: string[];
-}
-
-export interface UserToolPolicy {
-  enabled: boolean;
-  groups: Record<string, UserToolGroupPolicy>;
-}
-
-/** 工具目录项（§5.1 GET /api/user-tools/catalog；配置界面用） */
-export interface UserToolCatalogItem {
-  /** 工具全名（aigx_*，与 registry 同源） */
-  name: string;
-  label: string;
-  /** 值域与后端 RiskLevel::as_str 对齐（tools.rs:36-41）：小写 readonly/low/high */
-  risk: 'readonly' | 'low' | 'high';
-  /** 工具作者是否声明了用户域执行体（双执行体 D1） */
-  has_user_exec: boolean;
-  /** 当前策略命中状态（端点回带；缺省 = 未计算） */
-  policy_hit?: boolean;
 }
 
 /** 破甲控制台 · 单条改写规则（GET/PUT /api/purge） */

@@ -7,8 +7,6 @@
 
 import type {
   ChatSessionSummary,
-  UserToolCatalogItem,
-  UserToolPolicy,
   ApiResponse,
 } from '@/types';
 import { API_BASE, request } from '../client';
@@ -59,14 +57,4 @@ export const endpoints = {
   /** 追加一条消息（导入旧 localStorage 会话用） */
   appendChatMessage: (id: string, message: { role: string; content: string; extra?: unknown }): Promise<ApiResponse<{ seq: number }>> =>
     request<ApiResponse<{ seq: number }>>('POST', `${API_BASE}/chat/sessions/${encodeURIComponent(id)}/messages`, message),
-  /**
-   * 终端用户工具策略（#65；设计稿 §5.1 三端点，后端未落地前 404 → 页面降级）。
-   * PUT 超限（组数/工具数 caps）返回 409 + 原因文案。
-   */
-  getUserToolPolicy: (): Promise<ApiResponse<UserToolPolicy>> =>
-    request<ApiResponse<UserToolPolicy>>('GET', `${API_BASE}/user-tools/policy`),
-  saveUserToolPolicy: (policy: UserToolPolicy): Promise<ApiResponse<UserToolPolicy>> =>
-    request<ApiResponse<UserToolPolicy>>('PUT', `${API_BASE}/user-tools/policy`, policy),
-  getUserToolCatalog: (): Promise<ApiResponse<{ tools: UserToolCatalogItem[] }>> =>
-    request<ApiResponse<{ tools: UserToolCatalogItem[] }>>('GET', `${API_BASE}/user-tools/catalog`),
 };

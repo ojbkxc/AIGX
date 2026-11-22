@@ -438,11 +438,6 @@ fn reload_cached_stores(state: &AppState) {
     ) {
         reload!("路由策略", state.routing_policy.update(cfg));
     }
-    if let Ok(Some(cfg)) = kv.get::<crate::agent::user_tool_policy::UserToolPolicy>(
-        crate::agent::user_tool_policy::USER_TOOL_POLICY_KEY,
-    ) {
-        reload!("工具策略", state.user_tool_policy.update(cfg));
-    }
 
     // 同步自己的配置 / 状态 / 版本表不在快照里（is_synced_key 排除），
     // 但远端可能混入（手改 / 旧实现）：apply 侧已忽略，这里无需特殊处理。

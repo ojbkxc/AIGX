@@ -76,7 +76,7 @@
 
 | # | 项 | 状态 | AIGX 证据（file:line） | 上游证据（file:line） | 差异/动作 |
 |---|---|---|---|---|---|
-| T21 | 终端用户工具策略（`/api/user-tools/policy|catalog`） | [有差异] | `src/agent/user_tool_policy.rs`；路由 `src/main.rs:2495-2504`；响应构造 `src/api/admin/assistant.rs:189` | 上游该树无 `userTool/user-tool` 符号（`core/`、`api/` 全量搜索） | AIGX 独有能力（#34），不是对齐缺口；确认上游无同类需求即可。 |
+| T21 | 终端用户工具策略 | [已移除] | 已按 #49 整体下线（存储/判定/端点/UI 全部删除）；普通用户工具改按 registry `user_exposed_tools()` 判定 | 上游该树无同类符号 | 能力已移除，不再是差异项。 |
 | T22 | "网页工具调用模拟"开关 `/api/web-tool-emulation` | [半死] | 配置/读写 `src/config.rs:956-999`、`src/api/admin/settings.rs:1633-1656`、路由 `src/main.rs:2357-2359`；**唯一读取点**是 `/skill/web-search` 元数据 `src/api/tool_runtime.rs:184` | 上游该树无该端点/开关 | 开关不会改变任何转发行为（仅被元数据回显）。要么在工具调用路径消费它，要么在前端标注"仅声明能力"。 |
 
 > 注：工具服务数据面的路由注册在 `src/main.rs:3523-3524`（`tool_runtime::router()`）与 `src/main.rs:3526-3527`（`admin::tools/tool_image_admin`）；MCP 路径为 `src/api/tool_runtime.rs:507-519`。

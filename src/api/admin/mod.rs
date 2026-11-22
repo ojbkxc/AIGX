@@ -65,7 +65,6 @@ pub mod tool_image_admin;
 pub mod tools;
 pub mod update;
 pub mod upgrade; // 数据升级端点（对照 Agent2API /api/upgrade）
-pub mod user_tools; // 用户工具策略管理面（#34 §5.1：GET/PUT policy + GET catalog）
 pub mod users; // 网络层管理模块
 pub mod vision_compat; // 视觉兼容设置面（对照 Agent2API /api/vision-compatibility）
 pub mod zcode_captcha; // ZCode 人机验证令牌池（对照 Agent2API /api/zcode/captcha*）

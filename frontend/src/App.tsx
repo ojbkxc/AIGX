@@ -212,8 +212,6 @@ export default function App(): JSX.Element {
             element={<Navigate to="/channels?tab=accounts" replace />}
           />
           <Route path="/proxy-pool" element={<AdminRoute><ProxyPool /></AdminRoute>} />
-          {/* 用户工具权限已并入用户管理「工具权限」Tab（旧路由重定向防书签失效） */}
-          <Route path="/user-tools" element={<Navigate to="/users?tab=tools" replace />} />
           <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
           {/* 已合并的旧路由 → 重定向到合并后位置 */}
           <Route path="/mappings" element={<Navigate to="/channels" replace />} />

@@ -13,8 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
-import { Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Loader2, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Badge, Button, Card, EmptyState, Switch, Tabs, Tooltip } from '../components/ui';
@@ -289,19 +288,6 @@ export default function ToolsPage(): JSX.Element {
                 </table>
               </div>
             )}
-          </Card>
-
-          <Card
-            title={t('用户工具策略')}
-            actions={
-              <Link className="btn btn-outline btn-sm" to="/users?tab=tools">
-                <ShieldCheck size={13} /> {t('前往配置')}
-              </Link>
-            }
-          >
-            <p className="tp-policy-hint">
-              {t('终端用户可调用哪些工具、每个分组允许哪些工具，在「用户管理 → 工具权限」中统一配置（与这里的服务接入相互独立）。')}
-            </p>
           </Card>
         </>
       )}

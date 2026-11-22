@@ -24,8 +24,7 @@ use RiskLevel::HighRisk;
 
 /// 全部可写 key（与读侧 `aigx_config_view` 同名；顺序 = 读侧 enum 顺序 + 本批新补 4 个 + purge）。
 /// 本批对读侧 enum 新增 4 key：`zcodeCaptchaConfig`（G8）、`chatSettings`、`zcodeCaptchaPool`、
-/// `networkConfig`；`purge`=破甲控制台（读侧同 key，本批后补）；`logsRetention` 读侧本就有（写侧沿用同名）。`userToolsPolicy` **不在**本表
-/// ——它改的是 AI 自身可执行面，已按 lead 裁定移出 AI 面。
+/// `networkConfig`；`purge`=破甲控制台（读侧同 key，本批后补）；`logsRetention` 读侧本就有（写侧沿用同名）。
 /// 本文件的 `uc_every_key_has_dispatch_arm` 逐个锚住「key 不落空」。
 const CONFIG_SET_KEYS: [&str; 27] = [
     "settings",
