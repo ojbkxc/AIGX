@@ -71,6 +71,9 @@
 
     # 只重试指定条目
     python tools/verify_magpie_plugins.py --include "magpie:@magpie-community/foo" --batch 1
+
+    # 验证前先刷新生产目录（异步刷新，等待后重新拉取；需凭据）
+    python tools/verify_magpie_plugins.py --refresh --source github --batch 8 --resume
 """
 
 import argparse
@@ -602,6 +605,10 @@ def main():
     parser.add_argument("--out", default="magpie_verify.jsonl", help="JSONL 断点/结果文件")
     parser.add_argument("--csv", default=None, help="CSV 报告（默认与 --out 同名 .csv）")
     parser.add_argument("--resume", action="store_true", help="只跳过 JSONL 中 ok=true 的条目")
+    parser.add_argument("--refresh", action="store_true",
+                        help="验证前先 POST /api/plugins/scripts/refresh 刷新目录并等待重拉（需凭据；忽略本地 --catalog）")
+    parser.add_argument("--refresh-wait", type=float, default=10.0,
+                        help="--refresh 触发后等待后台刷新完成的秒数（默认 10）")
     parser.add_argument("--host-timeout", type=float, default=120.0)
     parser.add_argument("--poll", type=float, default=3.0)
     parser.add_argument("--install-timeout", type=int, default=300)
@@ -633,7 +640,7 @@ def main():
     selection = include if include else (failed if args.retry_failed else set())
 
     # --retry-failed + --plan-only 且无本地目录：直接按 JSONL 统计，不联网。
-    if args.retry_failed and args.plan_only and not args.catalog:
+    if args.retry_failed and args.plan_only and not args.catalog and not args.refresh:
         print(f"--retry-failed：JSONL={args.out} 待重跑(ok=false)={len(failed)}")
         for selector in sorted(failed)[:50]:
             print(f"  {selector}")
@@ -645,6 +652,25 @@ def main():
 
     def resolve_catalog():
         nonlocal cli
+        if args.refresh:
+            if args.catalog:
+                print(f"提示：--refresh 与 --catalog 同时给出，忽略本地目录 {args.catalog}，改为刷新后重新拉取。",
+                      file=sys.stderr)
+            if not has_creds():
+                print("错误：--refresh 需要凭据（AIGX_SSH_PASS/AIGX_ADMIN_PASS）。", file=sys.stderr)
+                sys.exit(2)
+            cli = connect()
+            CFG["token"] = cached_token(cli)
+            resp = api(cli, "POST", "/api/plugins/scripts/refresh", {})
+            if not resp.get("success"):
+                raise RuntimeError("刷新目录失败：" + str(resp.get("error") or resp)[:500])
+            print(f"已触发目录刷新，等待 {args.refresh_wait:g}s 后重新拉取…")
+            time.sleep(args.refresh_wait)
+            doc = fetch_catalog(cli)
+            entries = (doc.get("data") or {}).get("entries") or []
+            write_catalog(args.catalog_out, doc)
+            print(f"已刷新目录并写入 {args.catalog_out}（{len(entries)} 条）")
+            return doc
         if args.catalog:
             try:
                 return read_catalog_doc(args.catalog)

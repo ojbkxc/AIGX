@@ -347,6 +347,8 @@ python tools/verify_magpie_plugins.py --catalog magpie_catalog.json \
 常用参数：
 - `--include` / `--exclude`：逗号分隔的 selector/name，只验证/跳过这些条目；
 - `--source magpie|npm|github|all`、`--batch N`、`--limit N`；
+- `--refresh`（+ `--refresh-wait N`，默认 10s）：验证前先 `POST /api/plugins/scripts/refresh`
+  刷新目录并等待重拉（需凭据；会忽略本地 `--catalog`），便于「刷新 → 验证」一条命令完成；
 - `--out x.jsonl`（每包一行，断点与结果）+ `--csv x.csv`（汇总）；
 - `--resume`：只跳过 JSONL 中 `ok=true` 的条目（失败项会重跑）；
 - `--plan-only`：只打印选中条目，不连接；`--host-timeout/--poll/--install-timeout/--enable-timeout` 控轮询与超时；
