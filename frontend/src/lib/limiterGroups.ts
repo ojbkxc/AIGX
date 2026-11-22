@@ -25,7 +25,7 @@ export function isLocalMetric(m: LimiterMetric): boolean {
 }
 
 /** 百分比类指标（阈值 0~100） */
-export function isPercentMetric(m: LimiterMetric): boolean {
+function isPercentMetric(m: LimiterMetric): boolean {
   return m === 'remaining_percent' || m === 'used_percent';
 }
 
@@ -51,7 +51,7 @@ export function defaultGroup(): LimiterGroup {
  * 组级校验：返回第一条错误的中文文案（与后端 400 文案一致），null = 通过。
  * 逐条件校验用 validateCondition 取行级文案；本函数复核组级约束。
  */
-export function validateCondition(c: LimiterCondition): string | null {
+function validateCondition(c: LimiterCondition): string | null {
   if (!Number.isFinite(c.threshold) || c.threshold < 0) {
     return '限制阈值必须是非负有限数字';
   }

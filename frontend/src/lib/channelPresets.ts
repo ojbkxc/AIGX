@@ -236,7 +236,7 @@ export const PRESET_PROVIDERS: PresetProvider[] = [
 ];
 
 /** 按 key 取一家（找不到给 null） */
-export function presetOf(key: string): PresetProvider | null {
+function presetOf(key: string): PresetProvider | null {
   return PRESET_PROVIDERS.find((p) => p.key === key) || null;
 }
 

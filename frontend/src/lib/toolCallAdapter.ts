@@ -133,11 +133,6 @@ export function extractUsage(frame: Record<string, unknown>): ChatStreamUsage | 
   };
 }
 
-/** 供设置面板/调试使用：可切换的线上形状（默认 auto） */
-export function isToolCallWireMode(v: unknown): v is ToolCallWireMode {
-  return v === 'auto' || v === 'openai_delta' || v === 'role_tool';
-}
-
 /**
  * 把一个分片并入已聚合列表（纯函数，便于单测与流式状态机复用）。
  *

@@ -11,7 +11,7 @@ import { api } from '../api';
 import type { BrandingData } from '../types';
 
 /** 默认品牌（后端未响应/失败时回退，与后端默认值一致） */
-export const DEFAULT_BRANDING: BrandingData = {
+const DEFAULT_BRANDING: BrandingData = {
   panel_name: 'AIGX',
   logo_url: '/logo.png',
   favicon_url: '/logo.png',
@@ -19,7 +19,7 @@ export const DEFAULT_BRANDING: BrandingData = {
 };
 
 /** 应用品牌到 document（title + favicon），幂等。 */
-export function applyBrandingToDocument(b: BrandingData): void {
+function applyBrandingToDocument(b: BrandingData): void {
   if (typeof document !== 'undefined') {
     document.title = b.title || `${b.panel_name} — AI 中转网关`;
     const faviconLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]');

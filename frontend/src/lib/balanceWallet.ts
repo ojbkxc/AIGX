@@ -17,7 +17,7 @@ function object(value: unknown): Wallet | null {
 const NON_BALANCE_WALLET_TYPES = new Set(['solo_parallel', 'solo_package', 'fast_request_per']);
 
 /** 数值读数：数字或数字字符串 → number；空串、非数值 → null。 */
-export function usageNumberOrNull(value: unknown): number | null {
+function usageNumberOrNull(value: unknown): number | null {
   if (typeof value !== 'number' && typeof value !== 'string') return null;
   if (typeof value === 'string' && !value.trim()) return null;
   const number = Number(value);
@@ -25,7 +25,7 @@ export function usageNumberOrNull(value: unknown): number | null {
 }
 
 /** 钱包当前余额不是套餐发放上限；旧版魔粒钱包没有 snapshot 标记。 */
-export function isSnapshotWallet(value: unknown): boolean {
+function isSnapshotWallet(value: unknown): boolean {
   const wallet = object(value);
   return wallet?.snapshot === true || wallet?.type === 'magicubes';
 }

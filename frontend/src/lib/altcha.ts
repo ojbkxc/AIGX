@@ -24,7 +24,7 @@ export interface AltchaChallenge {
 }
 
 /** 有没有原生 Web Crypto：只在 HTTPS / localhost 下有。 */
-export function hasNativeCrypto(): boolean {
+function hasNativeCrypto(): boolean {
   return typeof crypto !== 'undefined' && !!crypto.subtle
     && typeof crypto.subtle.digest === 'function';
 }
@@ -93,7 +93,7 @@ function toHex(bytes: Uint8Array): string {
 }
 
 /** `sha256(文本)` → 小写 hex（原生可用走原生，否则纯 JS 兜底）。 */
-export async function sha256Hex(text: string): Promise<string> {
+async function sha256Hex(text: string): Promise<string> {
   const bytes = new TextEncoder().encode(text);
   if (hasNativeCrypto()) {
     const buf = await crypto.subtle.digest('SHA-256', bytes);

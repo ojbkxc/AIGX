@@ -24,7 +24,7 @@ import { useTranslation } from 'react-i18next';
 import type { FieldState, Layer } from '../../types/routing-profile';
 
 /** 层 → 人类可读名（唯一映射处，别在别处再写一遍） */
-export function layerLabel(t: (s: string) => string, layer: Layer): string {
+function layerLabel(t: (s: string) => string, layer: Layer): string {
   switch (layer) {
     case 'global':
       return t('全局');

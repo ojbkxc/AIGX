@@ -82,11 +82,8 @@ sudo systemctl start aigx
 # 使用 Makefile 构建
 make all-docker
 
-# 使用脚本构建
-bash docker-build.sh all
-
-# 指定平台
-PLATFORMS="linux/arm64" bash docker-build.sh all
+# 或直接 buildx（与 .github/workflows/docker.yml 一致，仅换平台参数即可单平台构建）
+docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile -t aigx:dev .
 ```
 
 #### 本地 AMD64 构建

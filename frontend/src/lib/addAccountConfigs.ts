@@ -94,7 +94,7 @@ export interface ProviderAddConfig {
 }
 
 /** 通用 API Key 型供应商（非登录态）没有独立配置，按 provider 元数据兜底 */
-export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
+const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
   workbuddy: {
     provider: 'workbuddy',
     label: 'WorkBuddy',

@@ -11,7 +11,7 @@
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Plus, Trash2 } from 'lucide-react';
-import { Badge, Button, Switch } from '../../ui';
+import { Button, Switch } from '../../ui';
 import type { SpecialEditorState } from './useSpecialRouteEditor';
 
 /** 模型下拉项 */
@@ -252,7 +252,3 @@ export function ModelSelect({
   );
 }
 
-/** 能力/状态小徽章（规则行右侧） */
-export function StateBadge({ on, children }: { on: boolean; children: ReactNode }): JSX.Element {
-  return <Badge tone={on ? 'success' : 'neutral'}>{children}</Badge>;
-}

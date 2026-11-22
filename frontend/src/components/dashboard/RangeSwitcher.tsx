@@ -14,9 +14,9 @@ import {
   type CustomRange,
 } from '../../lib/format';
 
-export const RANGE_OPTIONS = ['1', '7', '30', '90', '365', 'custom'] as const;
+const RANGE_OPTIONS = ['1', '7', '30', '90', '365', 'custom'] as const;
 export type RangeKey = (typeof RANGE_OPTIONS)[number];
-export const DEFAULT_RANGE: RangeKey = '30';
+const DEFAULT_RANGE: RangeKey = '30';
 
 const LABEL_KEYS: Record<string, string> = {
   '1': '今日',

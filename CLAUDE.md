@@ -135,7 +135,7 @@ cargo build --release
 - [架构设计文档](./ARCHITECTURE-HORIZON-2100.md)
 - [后端架构文档](./API-ARCHITECTURE-2100.md)
 - [前端进化路线](./FRONTEND-EVOLUTION-V3.md)
-- [aisix项目规范](../../rustapi/aisix/CLAUDE.md)
+- [aisix项目规范](../rustapi/aisix/CLAUDE.md)（本机路径，不入库）
 
 ## 常见问题
 

@@ -133,11 +133,3 @@ export function setLanguage(lang: AppLanguage): AppLanguage {
   return lang;
 }
 
-/**
- * 当前界面语言。
- */
-export function getLanguage(): AppLanguage {
-  const cur = i18n.language || 'zh';
-  const match = SUPPORTED_LANGS.find((l) => cur === l.code || cur.startsWith(l.code));
-  return match?.code ?? 'zh';
-}

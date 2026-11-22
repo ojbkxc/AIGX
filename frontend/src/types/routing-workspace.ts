@@ -186,7 +186,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /** 模型 wire → `{id,label}`；无法识别返回 null（调用方过滤）。 */
-export function toModelChoice(raw: SpecialModelWire | unknown): SpecialModelChoice | null {
+function toModelChoice(raw: SpecialModelWire | unknown): SpecialModelChoice | null {
   if (typeof raw === 'string') {
     const id = raw.trim();
     return id ? { id, label: id } : null;
@@ -251,7 +251,7 @@ export function normalizeTitleConfig(raw: Partial<TitleRoutesConfig> | null | un
 }
 
 /** 视觉目标归一：保证三个字段齐全（后端 `reasoning` 缺省为空串）。 */
-export function normalizeVisionTarget(raw: VisionTarget | null | undefined): VisionTarget | null {
+function normalizeVisionTarget(raw: VisionTarget | null | undefined): VisionTarget | null {
   if (!raw || !String(raw.provider ?? '').trim() || !String(raw.model ?? '').trim()) return null;
   return {
     provider: String(raw.provider),
@@ -261,7 +261,7 @@ export function normalizeVisionTarget(raw: VisionTarget | null | undefined): Vis
 }
 
 /** 视觉规则归一（旧记录缺字段时按后端 `Default` 同口径补齐）。 */
-export function normalizeVisionRule(raw: Partial<VisionRule> | null | undefined): VisionRule {
+function normalizeVisionRule(raw: Partial<VisionRule> | null | undefined): VisionRule {
   return {
     enabled: raw?.enabled !== false,
     models: (Array.isArray(raw?.models) ? raw.models : [])

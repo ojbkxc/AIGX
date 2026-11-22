@@ -116,7 +116,7 @@ export const sourceLabel = (keyId: string | undefined): string | null =>
  * 老日志会落成 0。旧实现把 `0` 当成功（`<400`）并渲染成绿色「成功」，属于误导；
  * 这里把「无状态码」单独归为 unknown，表格与时间线都按中性处理。
  */
-export const statusKind = (code?: number | null): 'ok' | 'error' | 'unknown' =>
+const statusKind = (code?: number | null): 'ok' | 'error' | 'unknown' =>
   code == null || code === 0 ? 'unknown' : code < 400 ? 'ok' : 'error';
 
 /** 服务端导出不支持 status/keyword（ExportQuery 无此二参），

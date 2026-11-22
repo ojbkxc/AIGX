@@ -28,8 +28,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   # 依赖漏洞扫描：cargo-audit 对照 RustSec advisory DB 检查 Cargo.lock
-  # 里的全部依赖（含传递依赖）。这是依赖面唯一的主动防线——dependabot
-  # 只管「升级到新版本」，不管「现有版本有没有已知漏洞」。
+  # 里的全部依赖（含传递依赖）。这是依赖面唯一的主动防线——只管「升级到新版本」
+  # 的自动 PR 覆盖不到「现有版本有没有已知漏洞」，故由本 job 承担。
   # 默认策略：高危/严重漏洞即红；豁免必须走下方显式 --ignore + 注释理由。
   audit:
     name: cargo audit

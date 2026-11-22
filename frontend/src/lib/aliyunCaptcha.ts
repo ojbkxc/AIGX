@@ -52,7 +52,7 @@ const INITIALIZATION_MAX_AGE_MS = 19 * 60_000;
 /* ── 错误类型 ─────────────────────────────────────────────────── */
 
 /** 验证码流程失败（`message` 是给人看的中文，界面可直接展示）。 */
-export class CaptchaError extends Error {
+class CaptchaError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'CaptchaError';

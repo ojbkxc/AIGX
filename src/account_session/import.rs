@@ -753,9 +753,7 @@ pub fn map_agent2api_record(
     session.refresh_secret = refresh;
     // 到期时间：顶层优先，其次 `pluginPublic.expiresAt`（秒/毫秒自动归一）。
     session.expires_at = a2a_expires_at(obj).or_else(|| {
-        plugin_public
-            .map(|public| a2a_expires_at(public))
-            .unwrap_or(None)
+        plugin_public.map(a2a_expires_at).unwrap_or(None)
     });
     session.credential = credential;
     // 配置态字段保留：A2A `enabled`(bool) → status；其余一等字段存在才搬

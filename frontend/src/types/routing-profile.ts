@@ -243,7 +243,7 @@ function isEmptyNeeds(v: RequestNeeds): boolean {
 }
 
 /** 枚举类字段（无「空」语义）：只有继承 / 覆盖 */
-export function enumFieldState(v: string | null | undefined): FieldState {
+function enumFieldState(v: string | null | undefined): FieldState {
   return v == null ? 'inherit' : 'override';
 }
 

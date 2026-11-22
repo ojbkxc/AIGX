@@ -54,7 +54,7 @@ export interface TableColumnState {
   items: TableColumnItem[];
 }
 
-export const TABLE_COLUMNS_VERSION = 2;
+const TABLE_COLUMNS_VERSION = 2;
 
 const ALIGNS: TableColumnAlign[] = ['left', 'center', 'right'];
 
@@ -253,13 +253,6 @@ export function applyTableColumns(
     });
   }
   return out;
-}
-
-/** 列是否可见（面板开关用；锁定列恒 true） */
-export function isColumnVisible(state: TableColumnState, key: string): boolean {
-  const item = state.items.find((i) => i.key === key);
-  if (!item) return true;
-  return item.visible || item.locked === true;
 }
 
 /**
