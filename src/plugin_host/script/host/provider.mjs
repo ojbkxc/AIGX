@@ -13,7 +13,7 @@ import { checkAllowance, preserveRefreshableSignIn } from "./allowance.mjs"
 import { rpc, send, chunk, MAX_CHUNK } from "./wire.mjs"
 import { acquire } from "./concurrency.mjs"
 import { safeMessage } from "./diagnostics.mjs"
-import { loginMethods, validateInputs } from "./login-policy.mjs"
+import { loginMethods, validateInputs, importCredential } from "./login-policy.mjs"
 import { usageReport, checkinReport } from "./reports.mjs"
 import { compatibleUsageResult } from "./usage-policy.mjs"
 import { isLocalProvider, localAddress, localErrorPolicy, localRequest } from "./local-provider.mjs"
@@ -135,20 +135,71 @@ async function conversation(provider, params, call) {
 }
 
 async function normalize(provider, params) {
-  if (params.source?.kind !== "manual") throw unsupported("Use the plugin's sign-in method to add this account")
-  const payload = params.source.payload ?? {}
+  const source = params.source ?? {}
+  const context = scope.getStore()
+  // 通用文件凭据导入：网关既接受明文文本（file_text），也接受 base64
+  // （file_base64）；去掉 BOM、拒绝二进制/空内容后交给插件的文件方法
+  // 或 `importCredential` 解析。具体 provider 专属分支不在此移植。
+  if (source.kind === "file_text" || source.kind === "file_base64") {
+    let content = ""
+    if (source.kind === "file_base64") {
+      try { content = Buffer.from(String(source.content ?? ""), "base64").toString("utf8").replace(/^\uFEFF/, "") }
+      catch { throw new Error("凭据文件无法按 UTF-8 文本解码") }
+    } else {
+      content = String(source.content ?? "").replace(/^\uFEFF/, "")
+    }
+    if (!content.trim() || content.includes("\0")) throw new Error("此脚本插件只接受有效的文本凭据文件")
+    context.inputSecrets = [content]
+    context.loginAuth = { key: content }
+    const allMethods = loginMethods(provider)
+    const fileMethod = allMethods.find(method => method.type === "api" && method.file)
+    const apiMethod = fileMethod || allMethods.find(method => method.type === "api" && !method.keyless)
+    let result
+    if (apiMethod && typeof apiMethod.authorize === "function") {
+      const field = typeof apiMethod.file?.field === "string" ? apiMethod.file.field : (apiMethod.prompts?.[0]?.key || "key")
+      const inputs = { [field]: content, ...(field !== "key" ? { key: content } : {}) }
+      await validateInputs(apiMethod, inputs)
+      result = await apiMethod.authorize(inputs, { signal: context.signal, fileName: source.file_name })
+    } else {
+      result = await importCredential(provider, content, { signal: context.signal })
+    }
+    if (result?.type !== "success") throw new Error(result?.error || "Plugin rejected the credentials")
+    context.signal.throwIfAborted()
+    return normalized(provider.id, result, params.name, provider.hooks.auth?.single === true)
+  }
+  if (source.kind !== "manual") throw unsupported("Use the plugin's sign-in method to add this account")
+  const payload = source.payload ?? {}
+  // 未声明 methodIndex 的手动粘贴：把整段输入交给通用凭据导入器解析
+  // （JSON / 纯 API Key 都覆盖），而不是直接判「请用插件的登录方式」。
+  if (payload.methodIndex === undefined) {
+    const raw = JSON.stringify(payload)
+    context.inputSecrets = Object.values(payload).filter(value => typeof value === "string" && value)
+    const result = await importCredential(provider, raw, { signal: context.signal })
+    if (result?.type !== "success") throw new Error(result?.error || "Plugin rejected the credentials")
+    context.signal.throwIfAborted()
+    return normalized(provider.id, result, params.name, provider.hooks.auth?.single === true)
+  }
   const method = loginMethods(provider).find(method => method.methodIndex === payload.methodIndex)
   if (method?.type !== "api") throw unsupported("Select an API key method declared by this plugin")
   const inputs = payload.inputs ?? {}
-  const context = scope.getStore()
   context.inputSecrets = Object.values(inputs).filter(value => typeof value === "string" && value)
   if (typeof inputs.key === "string") context.loginAuth = { key: inputs.key }
   await validateInputs(method, inputs)
-  const result = typeof method.authorize === "function" ? await method.authorize(inputs, { signal: context.signal }) : { type: "success", key: inputs.key, metadata: inputs }
+  const rawKey = typeof inputs.key === "string" ? inputs.key.trim() : ""
+  const isJsonKey = rawKey.startsWith("{") || rawKey.startsWith("[")
+  const result = typeof method.authorize === "function"
+    ? await method.authorize(inputs, { signal: context.signal })
+    : isJsonKey
+      ? await importCredential(provider, inputs.key, { signal: context.signal, inputs })
+      : { type: "success", key: inputs.key, metadata: inputs }
   if (result?.type !== "success") throw new Error(result?.error || "Plugin rejected the credentials")
   context.signal.throwIfAborted()
-  if (!("refresh" in result)) result.metadata = { ...inputs, ...result.metadata }
-  if (!("refresh" in result) && !("key" in result) && typeof inputs.key === "string") result.key = inputs.key
+  // 解析 JSON 凭据/文件字段后，别把原始整段文本当 key/metadata 回写。
+  const cleanInputs = { ...inputs }
+  if (method.file?.field) delete cleanInputs[method.file.field]
+  if (isJsonKey) delete cleanInputs.key
+  if (!("refresh" in result)) result.metadata = { ...cleanInputs, ...result.metadata }
+  if (!("refresh" in result) && !("key" in result) && typeof inputs.key === "string" && !isJsonKey) result.key = inputs.key
   return normalized(provider.id, result, params.name, provider.hooks.auth?.single === true)
 }
 
@@ -168,8 +219,12 @@ export async function dispatch(provider, method, params, call) {
     case "token.refresh": { const auth = await refresh(provider, true); return auth?.access || auth?.key || "" }
     case "token.expiring": {
       const auth = await getAuth()
+      // 网关可传 `minLeadMs`（凭证维护的提前量）：取插件默认提前量与
+      // 请求提前量的较大值，二者都为 0 时行为不变。
+      const requested = Number.isFinite(params?.minLeadMs) && params.minLeadMs > 0 ? params.minLeadMs : 0
+      const lead = Math.max(refreshLead(provider), requested)
       return auth?.type === "oauth" && Number.isFinite(auth.expires) && auth.expires > 0
-        && provider.hooks.auth?.keepAlive !== false && auth.expires <= Date.now() + refreshLead(provider)
+        && provider.hooks.auth?.keepAlive !== false && auth.expires <= Date.now() + lead
     }
     case "usage.query": {
       if (typeof provider.hooks.auth?.usage !== "function") throw unsupported()
@@ -178,7 +233,7 @@ export async function dispatch(provider, method, params, call) {
       context.emptyUsage = null
       const value = compatibleUsageResult(await provider.hooks.auth.usage(getAuth, structuredClone(providerInfo(provider))), context)
       await noteSignIn(value?.signIn)
-      const report = usageReport(value)
+      const report = usageReport(value, provider.id)
       if (context.account) await rpc("store.ledger_put", { account: context.account, kind: "magpieUsage", value: { at: Date.now(), report } })
       return report
     }

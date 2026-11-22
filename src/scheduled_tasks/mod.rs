@@ -44,11 +44,12 @@ pub mod types;
 use self::task_state::TaskState;
 use self::types::{
     IntervalTask, IntervalTaskPatch, ScheduledSettings, DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES,
-    DEFAULT_LOGS_AUTO_REFRESH_SECONDS, DEFAULT_MODEL_REFRESH_MINUTES,
-    DEFAULT_REPORT_AUTO_REFRESH_SECONDS, DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS,
-    DEFAULT_UPDATE_CHECK_MINUTES, INTERVAL_MAX_MINUTES, INTERVAL_MAX_SECONDS, INTERVAL_MIN_MINUTES,
-    INTERVAL_MIN_SECONDS, KEY_CREDENTIAL_MAINTENANCE, KEY_LOGS_AUTO_REFRESH, KEY_MODEL_REFRESH,
-    KEY_REPORT_AUTO_REFRESH, KEY_REQUESTS_AUTO_REFRESH, KEY_UPDATE_CHECK,
+    DEFAULT_LOGS_AUTO_REFRESH_SECONDS, DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES,
+    DEFAULT_MODEL_REFRESH_MINUTES, DEFAULT_REPORT_AUTO_REFRESH_SECONDS,
+    DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS, DEFAULT_UPDATE_CHECK_MINUTES, INTERVAL_MAX_MINUTES,
+    INTERVAL_MAX_SECONDS, INTERVAL_MIN_MINUTES, INTERVAL_MIN_SECONDS, KEY_CREDENTIAL_MAINTENANCE,
+    KEY_LOGS_AUTO_REFRESH, KEY_MODEL_REFRESH, KEY_REPORT_AUTO_REFRESH, KEY_REQUESTS_AUTO_REFRESH,
+    KEY_UPDATE_CHECK,
 };
 
 /// 调度循环的判定间隔。
@@ -78,11 +79,16 @@ pub struct TaskDef {
 pub const TASK_CREDENTIAL_MAINTENANCE: &str = KEY_CREDENTIAL_MAINTENANCE;
 pub const TASK_MODEL_REFRESH: &str = KEY_MODEL_REFRESH;
 pub const TASK_UPDATE_CHECK: &str = KEY_UPDATE_CHECK;
+/// 社区 / Magpie 插件目录与已装插件检查（后端任务）。
+///
+/// 维护任务 id（`maintenance::PLUGIN_CATALOG`）与之同值；间隔取自
+/// `ScheduledSettings.magpie_plugin_check`（与上游 `magpiePluginCheck` 同形）。
+pub const TASK_PLUGIN_CATALOG: &str = "pluginCatalog";
 pub const TASK_LOGS_AUTO_REFRESH: &str = KEY_LOGS_AUTO_REFRESH;
 pub const TASK_REQUESTS_AUTO_REFRESH: &str = KEY_REQUESTS_AUTO_REFRESH;
 pub const TASK_REPORT_AUTO_REFRESH: &str = KEY_REPORT_AUTO_REFRESH;
 
-pub const TASKS: [TaskDef; 6] = [
+pub const TASKS: [TaskDef; 7] = [
     TaskDef {
         id: TASK_CREDENTIAL_MAINTENANCE,
         label: "凭证自动维护",
@@ -112,6 +118,16 @@ pub const TASKS: [TaskDef; 6] = [
         min: INTERVAL_MIN_MINUTES,
         max: INTERVAL_MAX_MINUTES,
         default_interval: DEFAULT_UPDATE_CHECK_MINUTES,
+    },
+    TaskDef {
+        id: TASK_PLUGIN_CATALOG,
+        label: "社区插件目录检查",
+        description: "定期刷新社区 / Magpie 插件目录并检查已安装脚本插件的新版本，默认每 6 小时一次。检查结果统一进维护记录；发现新版本只提示，不自动升级。",
+        unit: "minutes",
+        runner: Runner::Backend,
+        min: INTERVAL_MIN_MINUTES,
+        max: INTERVAL_MAX_MINUTES,
+        default_interval: DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES,
     },
     TaskDef {
         id: TASK_LOGS_AUTO_REFRESH,
@@ -154,6 +170,7 @@ fn settings_of(settings: &ScheduledSettings, id: &str) -> IntervalTask {
         TASK_CREDENTIAL_MAINTENANCE => settings.credential_maintenance,
         TASK_MODEL_REFRESH => settings.model_refresh,
         TASK_UPDATE_CHECK => settings.update_check,
+        TASK_PLUGIN_CATALOG => settings.magpie_plugin_check,
         TASK_LOGS_AUTO_REFRESH => settings.logs_auto_refresh,
         TASK_REQUESTS_AUTO_REFRESH => settings.requests_auto_refresh,
         TASK_REPORT_AUTO_REFRESH => settings.report_auto_refresh,
@@ -185,15 +202,16 @@ fn state_key(config: &crate::config::AppConfig, id: &str) -> String {
 
 fn task_json(
     task: &TaskDef,
-    settings: &ScheduledSettings,
+    config: &crate::config::AppConfig,
     state: Result<TaskState, String>,
 ) -> Value {
+    let settings = &config.scheduled_tasks;
     let it = settings_of(settings, task.id);
     let backend = task.runner == Runner::Backend;
     let error = state.as_ref().err().cloned();
     let state = state.unwrap_or_default();
     let timestamp = |at: i64| if at > 0 { json!(at) } else { Value::Null };
-    json!({
+    let mut item = json!({
         "id": task.id,
         "label": task.label,
         "description": task.description,
@@ -217,7 +235,14 @@ fn task_json(
             Value::Null
         },
         "canRun": backend,
-    })
+    });
+    if task.id == TASK_PLUGIN_CATALOG {
+        // 插件检查计划与软件更新同源（AIGX 没有独立的插件通道/计划）：
+        // 如实报 follow，自动更新映射自 `update.auto_apply`。
+        item["checkMode"] = json!("follow");
+        item["autoUpdate"] = json!(config.update.auto_apply);
+    }
+    item
 }
 
 pub async fn list(state: &AppState) -> Value {
@@ -235,7 +260,7 @@ pub async fn list(state: &AppState) -> Value {
                     Ok(_) => Ok(TaskState::default()),
                     Err(error) => Err(error.clone()),
                 };
-                task_json(task, &config.scheduled_tasks, state)
+                task_json(task, &config, state)
             })
             .collect::<Vec<_>>(),
     })
@@ -252,7 +277,7 @@ pub async fn task_by_id(state: &AppState, id: &str) -> Value {
     } else {
         Ok(TaskState::default())
     };
-    task_json(task, &config.scheduled_tasks, state_state)
+    task_json(task, &config, state_state)
 }
 
 /// 把 patch 落到 `settings` 的对应字段（按 id 选中那一条）。
@@ -261,6 +286,7 @@ fn apply_patch(settings: &mut ScheduledSettings, id: &str, patch: IntervalTaskPa
         TASK_CREDENTIAL_MAINTENANCE => &mut settings.credential_maintenance,
         TASK_MODEL_REFRESH => &mut settings.model_refresh,
         TASK_UPDATE_CHECK => &mut settings.update_check,
+        TASK_PLUGIN_CATALOG => &mut settings.magpie_plugin_check,
         TASK_LOGS_AUTO_REFRESH => &mut settings.logs_auto_refresh,
         TASK_REQUESTS_AUTO_REFRESH => &mut settings.requests_auto_refresh,
         TASK_REPORT_AUTO_REFRESH => &mut settings.report_auto_refresh,
@@ -384,47 +410,19 @@ pub(crate) fn model_refresh_enabled(settings: &ScheduledSettings) -> bool {
 }
 
 async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<String, String> {
-    // 维护型任务（凭证 / 模型目录）：完整执行记录由 maintenance 模块负责，
-    // 本函数只把结果摘要回给调用方（scheduled_tasks 仍负责「何时做」）。
-    if matches!(task.id, TASK_CREDENTIAL_MAINTENANCE | TASK_MODEL_REFRESH) {
+    // 维护型任务（凭证 / 模型目录 / 软件版本 / 社区插件目录）：完整执行记录由
+    // maintenance 模块负责，本函数只把结果摘要回给调用方（scheduled_tasks 仍
+    // 只负责「何时做」）。
+    if matches!(
+        task.id,
+        TASK_CREDENTIAL_MAINTENANCE | TASK_MODEL_REFRESH | TASK_UPDATE_CHECK | TASK_PLUGIN_CATALOG
+    ) {
         let detail =
             crate::maintenance::execute(state, crate::maintenance::Request::full(task.id, manual))
                 .await?;
         return Ok(crate::maintenance::summary(&detail));
     }
-    if task.id != TASK_UPDATE_CHECK {
-        return Err("未知后端任务".to_string());
-    }
-
-    // 更新动作与排期都委托给更新管理器（`check` 手动 / `check_scheduled` 定时）：
-    // 它自己 `claim` 同一个排期键并写回结果，本模块不再重复占位 —— 否则一次
-    // 「立即执行」会先占住 `updateCheck` 的租约，再被更新管理器判成「已在跑」。
-    let config = state.config_manager.get().await;
-    // 更新模块总开关关闭：定时/手动任务入口都跳过（手动查版本仍可用更新页按钮）。
-    if !config.update.enabled {
-        return Ok("软件更新开关已关闭，跳过".to_string());
-    }
-    let info = if manual {
-        state.update.check(&config).await?
-    } else {
-        state.update.check_scheduled(&config).await?
-    };
-    if config.update.auto_apply && info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
-        if let Err(e) = state.update.start_apply(&config.update, false) {
-            tracing::warn!("[Update] 自动应用失败：{e}");
-        }
-    }
-    if info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
-        let summary = format!(
-            "发现新版本 {}（当前 {}）",
-            info["latestVersion"].as_str().unwrap_or(""),
-            crate::update::CURRENT_VERSION
-        );
-        tracing::info!("[Update] {summary}");
-        Ok(summary)
-    } else {
-        Ok("已完成版本检查".to_string())
-    }
+    Err("未知后端任务".to_string())
 }
 
 /// 一次模型目录刷新的结果。
@@ -818,9 +816,32 @@ pub fn spawn(state: AppState) {
 mod tests {
     use super::{
         state_key, task_interval_ms, TASK_CREDENTIAL_MAINTENANCE, TASK_MODEL_REFRESH,
-        TASK_UPDATE_CHECK,
+        TASK_PLUGIN_CATALOG, TASK_UPDATE_CHECK,
     };
-    use crate::scheduled_tasks::types::ScheduledSettings;
+    use crate::scheduled_tasks::types::{IntervalTaskPatch, ScheduledSettings};
+
+    /// 社区插件目录检查读取 `magpiePluginCheck` 配置，默认 360 分钟。
+    #[test]
+    fn plugin_catalog_reads_magpie_plugin_settings() {
+        let mut settings = ScheduledSettings::default();
+        assert_eq!(settings.magpie_plugin_check.interval, 360);
+        assert_eq!(
+            task_interval_ms(&settings, TASK_PLUGIN_CATALOG),
+            360 * 60_000
+        );
+        super::apply_patch(
+            &mut settings,
+            TASK_PLUGIN_CATALOG,
+            IntervalTaskPatch {
+                enabled: Some(false),
+                interval: Some(120),
+            },
+        );
+        assert!(!settings.magpie_plugin_check.enabled);
+        assert_eq!(settings.magpie_plugin_check.interval, 120);
+        // 不影响其它任务
+        assert!(settings.update_check.enabled);
+    }
 
     /// 维护模块 claim 与调度循环共用同一排期口径。
     #[test]

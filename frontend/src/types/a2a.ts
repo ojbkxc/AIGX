@@ -316,8 +316,22 @@ export interface ToolInstallInfo {
 // ==================== 维护任务明细（/api/maintenance，后端 maintenance 模块） ====================
 // 契约锚点：A2A api/maintenance.rs + core/maintenance/types.rs（serde camelCase）。
 
-export type MaintenanceTaskId = 'credentialMaintenance' | 'modelRefresh';
+// beta.7 上游（maintenance-types.ts）把软件版本检查 / 社区插件检查也纳入维护记录；
+// AIGX 不移植桌面专属的 Magpie 检查，故任务集合为下面四项。
+export type MaintenanceTaskId =
+  | 'credentialMaintenance'
+  | 'modelRefresh'
+  | 'updateCheck'
+  | 'pluginCatalog';
 export type MaintenanceRunStatus = 'running' | 'completed' | 'partial' | 'failed' | 'skipped' | 'interrupted';
+
+/** 维护任务清单（概览条按顺序渲染）；与后端 maintenance 任务集合一致。 */
+export const MAINTENANCE_TASKS: readonly MaintenanceTaskId[] = [
+  'credentialMaintenance',
+  'modelRefresh',
+  'updateCheck',
+  'pluginCatalog',
+];
 
 export interface MaintenanceTaskView {
   id: MaintenanceTaskId;
@@ -331,6 +345,15 @@ export interface MaintenanceTaskView {
   lastError?: string | null;
   nextRunAt?: number | null;
   retryAt?: number | null;
+  /**
+   * 社区插件检查的排期来源（beta.7）：`follow` = 跟随「软件检查更新」计划，
+   * `custom` = 自定开关/间隔。其它任务缺省。
+   */
+  checkMode?: 'follow' | 'custom';
+  /** 社区插件检查是否自动升级已启用且已签名的插件。 */
+  autoUpdate?: boolean;
+  /** 改配置时后端是否已写盘（PATCH 响应携带；GET 概览没有该字段）。 */
+  saved?: boolean;
 }
 
 /** 单条账号级结果（明细表一行） */
@@ -354,6 +377,11 @@ export interface MaintenanceItemView {
   forced?: boolean;
   /** AIGX 扩展：refresh_token 已失效，单条重试无意义（后端序列化时 true 才出现） */
   invalid?: boolean;
+  /** beta.7：软件/社区插件检查的逐项版本信息（其它任务缺省）。 */
+  currentVersion?: string | null;
+  latestVersion?: string | null;
+  /** beta.7：检查结论短标签（如「已是最新」「可更新 x.y.z」「检查失败」）。 */
+  changeLabel?: string | null;
 }
 
 /** 一次维护执行（记录列表一行） */

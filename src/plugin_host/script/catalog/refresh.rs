@@ -87,6 +87,9 @@ pub struct Refresher {
     wake: Notify,
     /// 最近一次唤醒是否带 force（wake() 与 force wake() 竞争时后到者赢）。
     force_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// 刷新串行化闸门：后台循环、手动 wake、维护任务同步刷新共用一道门，
+    /// 避免三路同时对 CDN 打同一轮（维护租约只约束维护侧，管不到后台循环）。
+    refresh_gate: Mutex<()>,
     /// HTTP 客户端（目录刷新专用，带 GitHub 头逻辑）。
     pub http: reqwest::Client,
 }
@@ -101,6 +104,7 @@ impl Refresher {
             path,
             wake: Notify::new(),
             force_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            refresh_gate: Mutex::new(()),
             http: network::build_client(),
         })
     }
@@ -121,6 +125,14 @@ impl Refresher {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.wake.notify_one();
+    }
+
+    /// 同步执行一轮刷新（维护任务 / 管理面「立即刷新」用）。
+    ///
+    /// `force=true` 无视 TTL（限流重试闸门仍然生效）。与后台循环共用同一道
+    /// 串行化闸门，避免两路同时打上游。
+    pub async fn refresh_now(&self, force: bool) {
+        refresh_cycle(self, force).await;
     }
 
     /// 状态快照（管理面 /api/script/catalog/status）。
@@ -193,6 +205,8 @@ async fn run_loop(r: Arc<Refresher>) {
 
 /// 一轮刷新：CDN →（失败回落）旧链 market/github → stars。
 async fn refresh_cycle(r: &Refresher, force: bool) {
+    // 串行化：后台循环 / 手动 wake / 维护任务同步刷新三路共用。
+    let _gate = r.refresh_gate.lock().await;
     let client = &r.http;
 
     // market 是否到期（github 在旧链里再各自判 TTL）

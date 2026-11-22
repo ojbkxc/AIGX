@@ -315,6 +315,9 @@ pub fn read_manifest(dir: &Path, pack: &serde_json::Value) -> Result<Option<Wasm
             &["catalog.v1", "accounts.cas.v1"][..],
         ),
         ("accounts.identity.v1", &["accounts.cas.v1"][..]),
+        // beta.7 收窄：`desktop.launch.v1` 只要求 `accounts.cas.v1`，不再隐含
+        // 要求 `accounts.identity.v1`（上游 v3.5.0-beta.7 同口径）。
+        ("desktop.launch.v1", &["accounts.cas.v1"][..]),
         ("login.interaction.v1", &["login.forms.v1", "state.v1"][..]),
         ("login.captcha.geetest.v1", &["login.interaction.v1"][..]),
     ] {
@@ -460,6 +463,37 @@ mod tests {
             tmp.path(),
             "x",
             minimal(&["catalog.accounts.v1", "catalog.v1", "accounts.cas.v1"]),
+        );
+        assert!(read_manifest(tmp.path(), &pack("demo")).unwrap().is_some());
+    }
+
+    /// beta.7 收窄：`desktop.launch.v1` 只要求 `accounts.cas.v1`（不再要求
+    /// `accounts.identity.v1`）。正反两个对照都必须成立，否则「不要求 identity」
+    /// 的断言是空的。
+    #[test]
+    fn desktop_launch_requires_only_accounts_cas() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 负向：缺 accounts.cas.v1 → 拒绝
+        write_plugin(tmp.path(), "x", minimal(&["desktop.launch.v1"]));
+        let err = read_manifest(tmp.path(), &pack("demo")).unwrap_err();
+        assert!(err.contains("依赖"), "{err}");
+        // 正向：accounts.cas.v1 + desktop.launch.v1（无 accounts.identity.v1）→ 通过
+        write_plugin(
+            tmp.path(),
+            "x",
+            minimal(&["desktop.launch.v1", "accounts.cas.v1"]),
+        );
+        assert!(read_manifest(tmp.path(), &pack("demo")).unwrap().is_some());
+        // 附带 accounts.identity.v1 也仍通过：identity 不是 desktop.launch 的
+        // 硬依赖（给了不报错，不给也不报错）。
+        write_plugin(
+            tmp.path(),
+            "x",
+            minimal(&[
+                "desktop.launch.v1",
+                "accounts.identity.v1",
+                "accounts.cas.v1",
+            ]),
         );
         assert!(read_manifest(tmp.path(), &pack("demo")).unwrap().is_some());
     }

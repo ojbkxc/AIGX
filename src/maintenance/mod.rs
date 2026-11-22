@@ -40,6 +40,12 @@ use self::types::{Detail, Item};
 
 pub const CREDENTIAL: &str = crate::scheduled_tasks::TASK_CREDENTIAL_MAINTENANCE;
 pub const MODEL: &str = crate::scheduled_tasks::TASK_MODEL_REFRESH;
+pub const UPDATE_CHECK: &str = crate::scheduled_tasks::TASK_UPDATE_CHECK;
+/// 社区 / Magpie 插件目录检查（刷新目录 + 逐包更新检查）。
+pub const PLUGIN_CATALOG: &str = crate::scheduled_tasks::TASK_PLUGIN_CATALOG;
+
+/// 所有维护任务 id（`storage::latest()` / 维护总览遍历用）。
+pub const ALL_TASKS: [&str; 4] = [CREDENTIAL, MODEL, UPDATE_CHECK, PLUGIN_CATALOG];
 
 /// 维护任务运行时句柄（执行记录/排期状态存储）。
 pub struct Maintenance {
@@ -95,15 +101,26 @@ impl Request {
 }
 
 pub fn is_maintenance_task(task_id: &str) -> bool {
-    matches!(task_id, CREDENTIAL | MODEL)
+    matches!(task_id, CREDENTIAL | MODEL | UPDATE_CHECK | PLUGIN_CATALOG)
 }
 
 pub fn summary(detail: &Detail) -> String {
     let run = &detail.run;
-    let unit = if run.task_id == CREDENTIAL {
-        "个账号"
-    } else {
-        "项"
+    // 软件版本检查：上游把「发现新版本 / 已是最新」写在明细消息里，直接回传
+    // 比再拼一段计数更贴切。
+    if run.task_id == UPDATE_CHECK {
+        if let Some(message) = detail
+            .results
+            .first()
+            .and_then(|item| item.message.as_deref())
+        {
+            return message.to_string();
+        }
+    }
+    let unit = match run.task_id.as_str() {
+        CREDENTIAL => "个账号",
+        PLUGIN_CATALOG => "个插件",
+        _ => "项",
     };
     let mut text = format!(
         "成功 {} {unit}，跳过 {}，失败 {}",
@@ -126,7 +143,9 @@ pub fn summary(detail: &Detail) -> String {
 }
 
 struct Prepared {
-    guard: crate::scheduled_tasks::task_state::RunGuard,
+    /// 维护租约；`None` = 该任务的排期由别的模块持有租约（软件版本检查由
+    /// 更新管理器自己 claim 同一个 `updateCheck` 排期键，这里不再重复占位）。
+    guard: Option<crate::scheduled_tasks::task_state::RunGuard>,
     recorder: storage::Recorder,
     interval: i64,
 }
@@ -143,22 +162,28 @@ async fn claim_and_record(state: &AppState, request: &Request) -> Result<Prepare
     } else {
         crate::scheduled_tasks::task_state::ManualBackoff::Respect
     };
-    let guard = match crate::scheduled_tasks::task_state::claim(
-        &request.task_id,
-        interval,
-        manual,
-        backoff,
-        1_000,
-    )? {
-        crate::scheduled_tasks::task_state::Claim::Acquired(guard) => guard,
-        crate::scheduled_tasks::task_state::Claim::Deferred(state_state) => {
-            // 手动入口越过的是失败冷却：提示里不该再让用户「几小时后再试」，
-            // 真正挡住这一轮的通常只是在途占位或最短请求间隔。
-            return Err(if manual {
-                state_state.waiting_message_bypassing()
-            } else {
-                state_state.waiting_message()
-            });
+    // 软件版本检查的排期键由更新管理器持有（手动/定时都走它的 claim）；
+    // 这里不重复占位，否则会和更新管理器自己那一轮撞成「已在跑」。
+    let guard = if request.task_id == UPDATE_CHECK {
+        None
+    } else {
+        match crate::scheduled_tasks::task_state::claim(
+            &request.task_id,
+            interval,
+            manual,
+            backoff,
+            1_000,
+        )? {
+            crate::scheduled_tasks::task_state::Claim::Acquired(guard) => Some(guard),
+            crate::scheduled_tasks::task_state::Claim::Deferred(state_state) => {
+                // 手动入口越过的是失败冷却：提示里不该再让用户「几小时后再试」，
+                // 真正挡住这一轮的通常只是在途占位或最短请求间隔。
+                return Err(if manual {
+                    state_state.waiting_message_bypassing()
+                } else {
+                    state_state.waiting_message()
+                });
+            }
         }
     };
     let recorder = storage::Recorder::start(
@@ -282,6 +307,193 @@ async fn complete(
     complete_prepared(state, request, prepared).await
 }
 
+/// 软件版本检查：动作与排期都委托更新管理器（它自己 claim / finish 同一个
+/// `updateCheck` 排期键），这里只把结果写成一条维护记录。
+async fn complete_update_check(
+    state: &AppState,
+    request: Request,
+    recorder: storage::Recorder,
+) -> Result<Detail, String> {
+    let config = state.config_manager.get().await;
+    let started = std::time::Instant::now();
+    let raw = if !config.update.enabled {
+        json!({
+            "provider": "update",
+            "providerLabel": "软件版本检查",
+            "status": "skipped",
+            "changeLabel": "已关闭",
+            "message": "软件更新开关已关闭，跳过检查",
+        })
+    } else {
+        let outcome = if request.source == "manual" {
+            state.update.check(&config).await
+        } else {
+            state.update.check_scheduled(&config).await
+        };
+        match outcome {
+            Ok(info) => {
+                let has_update = info.get("hasUpdate").and_then(Value::as_bool) == Some(true);
+                let current = info
+                    .get("currentVersion")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let latest = info
+                    .get("latestVersion")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if has_update && config.update.auto_apply {
+                    if let Err(error) = state.update.start_apply(&config.update, false) {
+                        tracing::warn!("[Maintenance] 自动应用失败：{error}");
+                    }
+                }
+                let message = if has_update {
+                    format!(
+                        "发现新版本 {}（当前 {}）",
+                        latest.as_deref().unwrap_or(""),
+                        current.as_deref().unwrap_or(crate::update::CURRENT_VERSION)
+                    )
+                } else {
+                    "已完成版本检查，已是最新版本".to_string()
+                };
+                json!({
+                    "provider": "update",
+                    "providerLabel": "软件版本检查",
+                    "status": if has_update { "refreshed" } else { "skipped" },
+                    "currentVersion": current,
+                    "latestVersion": latest,
+                    "changeLabel": if has_update { "发现新版本" } else { "已是最新" },
+                    "message": message,
+                })
+            }
+            Err(error) => json!({
+                "provider": "update",
+                "providerLabel": "软件版本检查",
+                "status": "failed",
+                "changeLabel": "检查失败",
+                "message": error,
+            }),
+        }
+    };
+    let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let mut item = types::item(&raw, 0, &HashMap::new());
+    item.duration_ms = Some(duration_ms);
+    let detail = recorder.finish(vec![item], None);
+    match &detail {
+        Ok(detail) => tracing::info!("[Maintenance] {}", summary(detail)),
+        Err(error) => tracing::error!("[Maintenance] {error}"),
+    }
+    detail
+}
+
+/// 社区 / Magpie 插件目录检查：强制刷新目录 → 逐包更新检查 → 一条维护记录。
+///
+/// 「Magpie 专属签名升级」不移植：只做目录刷新与更新提示，绝不自动升级。
+async fn complete_plugin_catalog(
+    state: &AppState,
+    _request: Request,
+    guard: crate::scheduled_tasks::task_state::RunGuard,
+    recorder: storage::Recorder,
+    interval: i64,
+) -> Result<Detail, String> {
+    let catalog = state.script_host.catalog();
+    // 强制刷新（无视 TTL）；维护租约保证同一时刻只有一轮自动检查在跑。
+    let refresh_started = std::time::Instant::now();
+    catalog.refresh_now(true).await;
+    let snapshot = catalog.status().await;
+    let refresh_ms = refresh_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let total = snapshot.official + snapshot.recommended + snapshot.third_party;
+    let catalog_error = snapshot
+        .market_error
+        .clone()
+        .or_else(|| snapshot.github_error.clone());
+
+    let empty = HashMap::new();
+    let mut items: Vec<Item> = Vec::new();
+    match crate::plugin_host::script::operations::check_update_outcomes(&state.script_host).await {
+        Ok(outcomes) => {
+            for outcome in outcomes {
+                let (status, change_label, message) = if let Some(error) = outcome.error.clone() {
+                    ("failed", "检查失败".to_string(), error)
+                } else if outcome.available {
+                    (
+                        "skipped",
+                        format!("可更新 {}", outcome.latest),
+                        format!("发现新版本 {}（可在插件页更新）", outcome.latest),
+                    )
+                } else {
+                    (
+                        "skipped",
+                        "已是最新".to_string(),
+                        "已经是最新版本".to_string(),
+                    )
+                };
+                let raw = json!({
+                    "provider": outcome.id,
+                    "providerLabel": outcome.name,
+                    "accountName": format!("{} · {}", outcome.current, outcome.source_label),
+                    "status": status,
+                    "currentVersion": outcome.current,
+                    "latestVersion": (!outcome.latest.is_empty()).then_some(outcome.latest),
+                    "changeLabel": change_label,
+                    "message": message,
+                });
+                items.push(types::item(&raw, items.len(), &empty));
+            }
+        }
+        Err(error) => {
+            let raw = json!({
+                "provider": "magpieUpdates",
+                "providerLabel": "已安装脚本插件更新检查",
+                "accountName": "脚本注册表",
+                "status": "failed",
+                "changeLabel": "检查失败",
+                "message": error,
+            });
+            items.push(types::item(&raw, items.len(), &empty));
+        }
+    }
+
+    let metadata = Some(types::item(
+        &json!({
+            "provider": "pluginCatalog",
+            "providerLabel": "社区插件目录",
+            "status": if catalog_error.is_some() { "failed" } else { "refreshed" },
+            "count": total as u64,
+            "changeLabel": if catalog_error.is_some() { "目录刷新失败" } else { "目录已刷新" },
+            "message": match &catalog_error {
+                Some(error) => format!("目录刷新失败：{error}"),
+                None => format!("目录已刷新（共 {total} 个插件）"),
+            },
+            "durationMs": refresh_ms,
+        }),
+        0,
+        &empty,
+    ));
+
+    let (refreshed, _, failed) = types::summary(&items);
+    let success = failed == 0 || refreshed > 0;
+    let detail_result = recorder.finish(items, metadata);
+    let note = detail_result
+        .as_ref()
+        .map(summary)
+        .unwrap_or_else(|error| error.clone());
+    let run_value = detail_result
+        .as_ref()
+        .ok()
+        .map(|detail| json!({ "runId": detail.run.id }));
+    let schedule = guard.finish(success, note.clone(), run_value, 0, interval);
+    if detail_result.is_err() {
+        tracing::error!("[Maintenance] {note}");
+    } else {
+        tracing::info!("[Maintenance] {note}");
+    }
+    let detail = detail_result?;
+    if let Err(error) = schedule {
+        return Err(format!("维护结果已保存，但排期更新失败：{error}"));
+    }
+    Ok(detail)
+}
+
 async fn complete_prepared(
     state: &AppState,
     request: Request,
@@ -292,6 +504,20 @@ async fn complete_prepared(
         recorder,
         interval,
     } = prepared;
+    // 软件版本检查：排期由更新管理器负责（它已 claim / finish 同一个键）。
+    if request.task_id == UPDATE_CHECK {
+        return complete_update_check(state, request, recorder).await;
+    }
+    // 社区插件目录检查：刷新目录 + 逐包更新检查，维护租约在本轮内持有。
+    if request.task_id == PLUGIN_CATALOG {
+        let Some(guard) = guard else {
+            return Err("插件检查缺少维护租约".to_string());
+        };
+        return complete_plugin_catalog(state, request, guard, recorder, interval).await;
+    }
+    let Some(guard) = guard else {
+        return Err("维护任务缺少租约".to_string());
+    };
     let sessions = state.account_sessions.all();
     let snapshots = types::accounts(&sessions);
     let mut items: Vec<Item> = Vec::new();
@@ -300,7 +526,11 @@ async fn complete_prepared(
     let mut refreshed = 0usize;
 
     if request.task_id == CREDENTIAL {
-        let targets = select_accounts(&sessions, &request);
+        // 最小提前量 = max(provider 固定窗口, 维护间隔 + 5 分钟缓冲)：默认 10
+        // 分钟间隔要能覆盖「下一轮维护前就会到期」的账号，否则会漏刷。
+        let settings = state.config_manager.get().await.scheduled_tasks;
+        let lead_secs = refresh::maintenance_lead_secs(settings.credential_maintenance.interval);
+        let targets = select_accounts(&sessions, &request, lead_secs);
         for target in targets {
             let started = std::time::Instant::now();
             let before_expires = target.expires_at.filter(|value| *value > 0);
@@ -417,6 +647,7 @@ struct AccountTarget {
 fn select_accounts(
     sessions: &[crate::account_session::model::AccountSession],
     request: &Request,
+    lead_secs: i64,
 ) -> Vec<AccountTarget> {
     let now = chrono::Utc::now().timestamp();
     let by_id: HashMap<&str, &crate::account_session::model::AccountSession> = sessions
@@ -451,7 +682,7 @@ fn select_accounts(
         None => sessions
             .iter()
             .filter(|session| {
-                refresh::needs_refresh(session, now)
+                refresh::needs_refresh_within(session, now, lead_secs)
                     || request
                         .forced_account_ids
                         .iter()
@@ -620,9 +851,14 @@ mod tests {
     fn task_constants_match_scheduled_tasks() {
         assert_eq!(CREDENTIAL, "credentialMaintenance");
         assert_eq!(MODEL, "modelRefresh");
-        assert!(is_maintenance_task(CREDENTIAL));
-        assert!(is_maintenance_task(MODEL));
-        assert!(!is_maintenance_task("updateCheck"));
+        assert_eq!(UPDATE_CHECK, "updateCheck");
+        assert_eq!(PLUGIN_CATALOG, "pluginCatalog");
+        assert_eq!(ALL_TASKS.len(), 4);
+        for task in ALL_TASKS {
+            assert!(is_maintenance_task(task), "{task} 应属维护任务");
+        }
+        assert!(!is_maintenance_task("logsAutoRefresh"));
+        assert!(!is_maintenance_task("unknown"));
     }
 
     #[test]
@@ -694,14 +930,14 @@ mod tests {
         // 临期只有 a（workbuddy 在 supports_refresh 白名单且 60 秒内）
         sessions[0].expires_at = Some(now + 60);
         let request = Request::full(CREDENTIAL, true);
-        let targets = select_accounts(&sessions, &request);
+        let targets = select_accounts(&sessions, &request, 0);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, "a");
         assert!(targets[0].session.is_some());
         // 点名 + 不存在的账号
         let mut request = Request::full(CREDENTIAL, true);
         request.account_ids = Some(vec!["a".into(), "gone".into()]);
-        let targets = select_accounts(&sessions, &request);
+        let targets = select_accounts(&sessions, &request, 0);
         assert_eq!(targets.len(), 2);
         assert!(targets
             .iter()
@@ -709,8 +945,17 @@ mod tests {
         // 强制名单即使不临期也选
         let mut request = Request::full(CREDENTIAL, true);
         request.forced_account_ids = vec!["b".into()];
-        let targets = select_accounts(&sessions, &request);
+        let targets = select_accounts(&sessions, &request, 0);
         assert!(targets.iter().any(|target| target.id == "b"));
+        // 维护提前量：10 分钟间隔 → lead = 600 + 300 = 900 秒；500 秒后到期的
+        // 账号要提前选中（否则下一轮维护前就过期了），不叠加提前量时不在差集里。
+        sessions[0].expires_at = Some(now + 500);
+        let lead = refresh::maintenance_lead_secs(10);
+        assert_eq!(lead, 900);
+        let targets = select_accounts(&sessions, &Request::full(CREDENTIAL, true), lead);
+        assert!(targets.iter().any(|target| target.id == "a"));
+        let targets = select_accounts(&sessions, &Request::full(CREDENTIAL, true), 0);
+        assert!(!targets.iter().any(|target| target.id == "a"));
     }
     fn failed_item(id: &str, account: &str, invalid: bool, forced: bool) -> Item {
         let mut item = types::item(

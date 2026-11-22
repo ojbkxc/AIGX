@@ -50,6 +50,27 @@ const ANTIGRAVITY_MARGIN: i64 = 900;
 /// 智谱清言 JWT 约 2 小时，提前 10 分钟续（与 OrcaTerm 同窗口）。
 const CHATGLM_MARGIN: i64 = 600;
 
+/// 凭证维护巡检在维护间隔之上追加的缓冲（秒）。
+///
+/// ── 为什么需要它（对齐 A2A `MAINTENANCE_BUFFER_MS`）──────────────
+/// 多家 provider 自带的临期窗口只有 3～5 分钟。若只按自带窗口判定，在默认
+/// 10 分钟间隔下经常出现「上一轮还剩 6～10 分钟 → 跳过，下一轮到点已跌到
+/// 0 分（已过期）」的空档。因此维护巡检把「维护间隔 + 5 分钟缓冲」作为
+/// **最小**提前量传给临期判定，与各家固定窗口取较大值；正常对话链路的按需
+/// 续期仍走各家原窗口，不受维护间隔影响。
+pub const MAINTENANCE_BUFFER_SECS: i64 = 5 * 60;
+
+/// 本轮凭证维护要求的最小临期提前量（秒）：维护间隔 + 5 分钟缓冲。
+///
+/// `interval_minutes` 取 `scheduled_tasks.credential_maintenance.interval`
+///（分钟，已由配置层保证 ≥1）。
+pub fn maintenance_lead_secs(interval_minutes: i64) -> i64 {
+    interval_minutes
+        .max(1)
+        .saturating_mul(60)
+        .saturating_add(MAINTENANCE_BUFFER_SECS)
+}
+
 /// CodeArts 换证端点与客户端标识（与登录换证同一套，见 `account_login::codearts`）。
 const CODEARTS_TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
 const CODEARTS_CLIENT_ID: &str = "vscode-codebot";
@@ -234,7 +255,20 @@ fn refresh_plain(session: &AccountSession) -> String {
 }
 
 /// 是否临期需要刷新（无 refresh_secret 或未知过期时间则不动）。
+///
+/// 等价于 [`needs_refresh_within`] 且 `min_lead_secs = 0`（只按各家固定窗口）。
+/// 自动维护巡检应改用 `needs_refresh_within` 并传入 [`maintenance_lead_secs`]，
+/// 把窗口放大到覆盖维护间隔（对齐 A2A 的 `min_lead_ms` 参数）。
 pub fn needs_refresh(session: &AccountSession, now: i64) -> bool {
+    needs_refresh_within(session, now, 0)
+}
+
+/// 带最小提前量（秒）的临期判定：`margin = max(provider 固定窗口, min_lead)`。
+///
+/// `min_lead_secs <= 0` 时退化为只按 provider 固定窗口（与原行为一致）。
+/// 这是「适配层补 `min_lead` 参数」的落点：维护巡检传入「间隔 + 5 分钟缓冲」，
+/// 对话链路的按需续期仍用 [`needs_refresh`]（窗口不变）。
+pub fn needs_refresh_within(session: &AccountSession, now: i64, min_lead_secs: i64) -> bool {
     if !supports_refresh(&session.provider) {
         return false;
     }
@@ -248,7 +282,13 @@ pub fn needs_refresh(session: &AccountSession, now: i64) -> bool {
     let Some(exp) = session.expires_at.filter(|e| *e > 0) else {
         return false;
     };
-    let margin = match session.provider.as_str() {
+    let margin = provider_margin(&session.provider).max(min_lead_secs);
+    exp - now <= margin
+}
+
+/// provider 自带的固定提前刷新窗口（秒）。
+fn provider_margin(provider: &str) -> i64 {
+    match provider {
         "trae" => TRAE_MARGIN,
         "autoclaw" | "autoclaw-intl" => AUTOCLAW_MARGIN,
         "codearts" => CODEARTS_MARGIN,
@@ -261,8 +301,7 @@ pub fn needs_refresh(session: &AccountSession, now: i64) -> bool {
         "antigravity" => ANTIGRAVITY_MARGIN,
         "chatglm" => CHATGLM_MARGIN,
         _ => QODER_MARGIN,
-    };
-    exp - now <= margin
+    }
 }
 
 /// 巡检一轮的逐项计数（凭证维护任务的成败判定用，对齐 A2A
@@ -301,12 +340,26 @@ impl RefreshSummary {
 
 /// 巡检一轮：把所有临期账号串行刷新（每轮一个账号只刷一次）。
 /// 返回逐项计数（成功 / 失败 / 失效）。
+///
+/// 只按各家固定窗口判定（`min_lead = 0`）；自动维护巡检请用
+/// [`refresh_expiring_with_lead`] 传入覆盖维护间隔的最小提前量。
+#[allow(dead_code)] // 保留只按各家窗口的公开入口（当前调用方都传 lead）
 pub async fn refresh_expiring(pool: &AccountSessionStore, client: &Client) -> RefreshSummary {
+    refresh_expiring_with_lead(pool, client, 0).await
+}
+
+/// 巡检一轮（带最小提前量）：把「各家固定窗口」与 `min_lead_secs` 取较大者
+/// 作为临期判据，避免默认维护间隔下漏刷（见 [`maintenance_lead_secs`]）。
+pub async fn refresh_expiring_with_lead(
+    pool: &AccountSessionStore,
+    client: &Client,
+    min_lead_secs: i64,
+) -> RefreshSummary {
     let now = chrono::Utc::now().timestamp();
     let targets: Vec<AccountSession> = pool
         .all()
         .into_iter()
-        .filter(|s| needs_refresh(s, now))
+        .filter(|s| needs_refresh_within(s, now, min_lead_secs))
         .collect();
     let mut summary = RefreshSummary::default();
     for session in targets {
@@ -1621,6 +1674,34 @@ mod tests {
         // 无 refresh_secret 不动
         session.refresh_secret = String::new();
         assert!(!needs_refresh(&session, 1_000_000));
+    }
+
+    #[test]
+    fn maintenance_lead_is_interval_plus_buffer() {
+        // 10 分钟间隔 → 600 + 300 = 900 秒；间隔钳到 ≥1 分钟。
+        assert_eq!(maintenance_lead_secs(10), 900);
+        assert_eq!(maintenance_lead_secs(1), 360);
+        assert_eq!(maintenance_lead_secs(0), 360);
+    }
+
+    #[test]
+    fn needs_refresh_within_takes_larger_of_provider_and_lead() {
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "qoder".to_string();
+        session.refresh_secret = "drt-xxx".to_string();
+        session.expires_at = Some(1_000_000);
+        // qoder 固定窗口 5 分钟：剩 10 分钟不算临期
+        assert!(!needs_refresh_within(&session, 1_000_000 - 600, 0));
+        // 维护最小提前量 15 分钟（900 秒）：剩 10 分钟进入维护窗口 → 临期
+        assert!(needs_refresh_within(&session, 1_000_000 - 600, 900));
+        // max 语义：lead 小于固定窗口时仍按固定窗口（officeace 30 分钟）
+        session.provider = "officeace".to_string();
+        assert!(needs_refresh_within(&session, 1_000_000 - 1_200, 900));
+        // 固定窗口 30 分钟 = 1800 秒；lead 900 秒不影响它：剩 40 分钟仍不刷
+        assert!(!needs_refresh_within(&session, 1_000_000 - 2_400, 900));
+        // 无 refresh_secret 时任何 lead 都不动
+        session.refresh_secret = String::new();
+        assert!(!needs_refresh_within(&session, 1_000_000, 900));
     }
 
     // ── issue #407：凭证刷新「假成功」核对（纯函数）─────────────────────

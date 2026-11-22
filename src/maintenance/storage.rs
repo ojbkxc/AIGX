@@ -406,7 +406,7 @@ fn run_matches(store: &FileStore, run: &Run, query: &Query, keyword: &str) -> bo
 pub fn latest(store: &FileStore) -> Result<Value, String> {
     let runs = read_runs(store)?;
     let mut latest = serde_json::Map::new();
-    for task_id in [super::CREDENTIAL, super::MODEL] {
+    for task_id in super::ALL_TASKS {
         if let Some(run) = runs
             .iter()
             .filter(|run| run.task_id == task_id)
@@ -477,6 +477,9 @@ mod tests {
             retry_at: None,
             forced: false,
             invalid: false,
+            current_version: None,
+            latest_version: None,
+            change_label: None,
         }
     }
 

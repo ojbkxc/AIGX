@@ -461,75 +461,112 @@ pub async fn set_provider_enabled(
     Ok(package)
 }
 
-/// 检查更新（A2A `GET /api/plugins/scripts/check`）。
+/// 单个已装脚本插件的更新检查结果（维护任务 / 管理面共用）。
+#[derive(Clone, Debug)]
+pub struct CheckOutcome {
+    pub id: String,
+    pub name: String,
+    pub current: String,
+    /// 上游最新版本（GitHub 源是提交短号）；拿不到时为空串。
+    pub latest: String,
+    pub available: bool,
+    pub error: Option<String>,
+    /// 来源展示名（Magpie / GitHub / npm / 本地）。
+    pub source_label: String,
+}
+
+/// 检查更新（A2A `GET /api/plugins/scripts/check`）：把逐包 [`CheckOutcome`]
+/// 里「可更新」的项投影成前端契约，并附目录状态。
 ///
-/// 两种来源分别判定「有没有新版本」：
-/// - **Magpie**：目录里该包的 `version` vs 已装 `version`；
-/// - **GitHub**：目录里的 `commit_sha` vs 已装钉住的提交（见
-///   [`github_update`]，对应 beta.4 `updates.rs:160-169` / `catalog.rs:13-24`）。
-///
-/// 空注册表（没装任何包）直接短路，不必逐条查目录。目录未刷新时返回空表
-/// + `catalog` 状态（前端负责提示）。
+/// 目录未刷新时返回空表 + `catalog` 状态（前端负责提示）。
 pub async fn check_updates(manager: &ScriptHostManager) -> serde_json::Value {
-    let installed = storage::load_packages(manager.store());
-    let mut updates = Vec::new();
-    // 空注册表短路：没有已装包就没有可更新的东西。
-    if !installed.is_empty() {
-        for package in &installed {
-            match package.source {
-                ScriptSource::Magpie => {
-                    let Some(entry) = manager.catalog().package_metadata(&package.id).await else {
-                        continue;
-                    };
-                    let Some(latest) = entry.version.clone().filter(|v| !v.is_empty()) else {
-                        continue;
-                    };
-                    if latest != package.version {
-                        updates.push(serde_json::json!({
-                            "id": package.id,
-                            "name": package.label,
-                            "current": package.version,
-                            "latest": latest,
-                        }));
-                    }
-                }
-                ScriptSource::Github => {
-                    if let Some(update) = github_update(manager, package).await {
-                        updates.push(update);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    let outcomes = check_update_outcomes(manager).await.unwrap_or_default();
+    let updates: Vec<serde_json::Value> = outcomes
+        .iter()
+        .filter(|outcome| outcome.available)
+        .map(|outcome| {
+            serde_json::json!({
+                "id": outcome.id,
+                "name": outcome.name,
+                "current": outcome.current,
+                "latest": outcome.latest,
+            })
+        })
+        .collect();
     serde_json::json!({
         "updates": updates,
         "catalog": manager.catalog().status().await,
     })
 }
 
-/// GitHub 来源的更新判定：用目录里的 `commit_sha` 对比已装钉住的提交。
+/// 逐包更新检查（维护任务「社区插件目录检查」用）：每个已装包一条结果，
+/// 不论有没有新版本都返回，便于维护记录逐行展示当前 / 最新版本与变化。
+pub async fn check_update_outcomes(
+    manager: &ScriptHostManager,
+) -> Result<Vec<CheckOutcome>, String> {
+    let installed = storage::load_packages(manager.store());
+    let mut outcomes = Vec::with_capacity(installed.len());
+    for package in &installed {
+        let (latest, available, error) = match package.source {
+            ScriptSource::Magpie => match manager.catalog().package_metadata(&package.id).await {
+                Some(entry) => match entry.version.clone().filter(|v| !v.is_empty()) {
+                    Some(latest) => {
+                        let available = latest != package.version;
+                        (latest, available, None)
+                    }
+                    None => (
+                        String::new(),
+                        false,
+                        Some("目录未提供该插件版本".to_string()),
+                    ),
+                },
+                None => (String::new(), false, Some("目录中未找到该插件".to_string())),
+            },
+            ScriptSource::Github => github_outcome(manager, package).await,
+            // npm / 本地来源没有可问的远端版本：如实报「无最新信息」，不误报有更新。
+            _ => (package.version.clone(), false, None),
+        };
+        outcomes.push(CheckOutcome {
+            id: package.id.clone(),
+            name: package.label.clone(),
+            current: package.version.clone(),
+            latest,
+            available,
+            error,
+            source_label: source_label(package),
+        });
+    }
+    Ok(outcomes)
+}
+
+/// GitHub 来源：目录里的 `commit_sha` 对比已装钉住的提交。
 ///
-/// `source_ref` 形如 `owner/repo` 或 `owner/repo@<ref>`。只有 `ref` 是
-/// 40 位提交 SHA（`github:owner/repo@<sha>`）时才能可靠比对——分支 / 标签
-/// 安装没有记录解析后的提交（`ScriptPackage` 契约不含 commit 字段），无法
-/// 判断「当前是否已是最新」，宁可漏报也不误报。
-async fn github_update(
+/// 只有 `source_ref` 的引用段是 40 位 SHA 时才可靠判定；未钉 SHA / 目录无该
+/// 仓库时返回「无最新信息」（不误报）。
+async fn github_outcome(
     manager: &ScriptHostManager,
     package: &ScriptPackage,
-) -> Option<serde_json::Value> {
+) -> (String, bool, Option<String>) {
     let (repository, reference) = package
         .source_ref
         .split_once('@')
         .unwrap_or((package.source_ref.as_str(), ""));
-    let latest = manager.catalog().github_commit(repository).await?;
-    let (current, latest) = commit_update(reference, &latest)?;
-    Some(serde_json::json!({
-        "id": package.id,
-        "name": package.label,
-        "current": current,
-        "latest": latest,
-    }))
+    let Some(latest_sha) = manager.catalog().github_commit(repository).await else {
+        return (String::new(), false, None);
+    };
+    let latest = latest_sha[..12].to_string();
+    let available = commit_update(reference, &latest_sha).is_some();
+    (latest, available, None)
+}
+
+/// 已装包来源的展示名。
+fn source_label(package: &ScriptPackage) -> String {
+    match package.source {
+        ScriptSource::Magpie => "Magpie 分发源".to_string(),
+        ScriptSource::Npm => "npm".to_string(),
+        ScriptSource::Github => "GitHub".to_string(),
+        ScriptSource::Local => "本地安装".to_string(),
+    }
 }
 
 /// 纯比较：已装引用是 40 位 SHA 且与目录最新 commit 不同 → 返回

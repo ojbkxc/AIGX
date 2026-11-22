@@ -147,12 +147,19 @@ fn identity_of(value: &Value) -> String {
 }
 
 /// 解析一份账号文件；`provider` 是「添加账号」表单选中的家（可空 = 由文件决定）。
+///
+/// `script_provider`：该 provider 是否由**脚本插件**声明接管（对齐 A2A
+/// `import_account_file` 的 `known_provider` 判定）。脚本插件家的原生导出
+/// 账号文件（`format = agent2api-account|aigx-account` 且不含插件 `secret`
+/// 双段）**不得**当原生账号文件解析 —— 那应交给插件自己的导入契约；这里明确
+/// 拒绝，避免把别家的凭据错存成插件的 opaque secret。
 pub fn parse_auth_file(
     provider: &str,
     name: &str,
     content: Option<&str>,
     b64: Option<&str>,
     file_name: Option<&str>,
+    script_provider: bool,
 ) -> Result<ParsedAuthFile, String> {
     // 空 provider = 由文件自报（不要走 normalize_kind：它把空串归一成默认家，
     // 会让「文件自带 provider」的导入被误判成与默认家不一致）
@@ -208,7 +215,7 @@ pub fn parse_auth_file(
                 .find(|item| selected.is_empty() || provider_of_record(item) == selected)
                 .or_else(|| items.first())
                 .ok_or_else(|| "账号文件里没有任何条目".to_string())?;
-            parse_record(selected, name, chosen)
+            parse_record(selected, name, chosen, script_provider)
         }
         Some(Value::Object(object)) => {
             // `{accounts: [...]}` 批量文件
@@ -218,9 +225,9 @@ pub fn parse_auth_file(
                     .find(|item| selected.is_empty() || provider_of_record(item) == selected)
                     .or_else(|| items.first())
                     .ok_or_else(|| "账号文件里没有任何条目".to_string())?;
-                return parse_record(selected, name, chosen);
+                return parse_record(selected, name, chosen, script_provider);
             }
-            parse_record(selected, name, &Value::Object(object))
+            parse_record(selected, name, &Value::Object(object), script_provider)
         }
         Some(_) => Err("账号文件顶层必须是对象或数组".to_string()),
         None => {
@@ -246,10 +253,24 @@ pub fn parse_auth_file(
     })
 }
 
-fn parse_record(selected: String, name: &str, record: &Value) -> Result<ParsedAuthFile, String> {
+fn parse_record(
+    selected: String,
+    name: &str,
+    record: &Value,
+    script_provider: bool,
+) -> Result<ParsedAuthFile, String> {
     let record_provider = provider_of_record(record);
     let format = record.get("format").and_then(Value::as_str);
     let is_account_file = matches!(format, Some(ACCOUNT_FILE_FORMAT) | Some("aigx-account"));
+    // 对齐 A2A `import_account_file`：脚本插件 provider 不走原生账号文件导入。
+    // 仅拦「纯原生导出记录」（没有插件 `secret` 双段）—— 带 `secret` 的导出是
+    // 插件原生形态，仍按插件凭据解析（re-import 自身导出文件不失效）。
+    if is_account_file && script_provider && !record.get("secret").is_some_and(Value::is_object) {
+        return Err(
+            "脚本插件 provider 不支持导入原生账号文件：请通过该插件的登录/导入流程添加账号"
+                .to_string(),
+        );
+    }
     if !selected.is_empty() && !record_provider.is_empty() && record_provider != selected {
         return Err(format!(
             "账号文件的提供商（{record_provider}）与当前选择（{selected}）不一致，请选择对应的提供商后再导入"
@@ -350,7 +371,8 @@ mod tests {
             "secret": { "accessToken": "tok", "uid": "u-1" },
             "public": { "uid": "u-1", "edition": "intl" }
         });
-        let parsed = parse_auth_file("kiro", "", Some(&file.to_string()), None, None).unwrap();
+        let parsed =
+            parse_auth_file("kiro", "", Some(&file.to_string()), None, None, false).unwrap();
         assert_eq!(parsed.provider, "kiro");
         assert_eq!(parsed.name, "kiro-1");
         assert_eq!(parsed.identity, "u-1");
@@ -368,8 +390,15 @@ mod tests {
             "uid": "u-9",
             "accessToken": "tok-9"
         });
-        let parsed =
-            parse_auth_file("", "", Some(&file.to_string()), None, Some("kiro.json")).unwrap();
+        let parsed = parse_auth_file(
+            "",
+            "",
+            Some(&file.to_string()),
+            None,
+            Some("kiro.json"),
+            false,
+        )
+        .unwrap();
         assert_eq!(parsed.provider, "kiro");
         assert_eq!(parsed.secret["accessToken"], "tok-9");
         assert_eq!(parsed.public["uid"], "u-9");
@@ -377,10 +406,41 @@ mod tests {
     }
 
     #[test]
+    fn script_provider_native_account_file_is_rejected() {
+        // 纯原生导出记录（无插件 secret 双段）→ 脚本插件 provider 不得当原生导入。
+        let file = json!({
+            "format": ACCOUNT_FILE_FORMAT,
+            "id": "kiro-account-abc",
+            "provider": "kiro",
+            "accessToken": "tok-9"
+        });
+        let error = parse_auth_file(
+            "kiro",
+            "",
+            Some(&file.to_string()),
+            None,
+            Some("kiro.json"),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("脚本插件 provider"), "{error}");
+        // 反向对照：带插件 secret 双段的自身导出仍可导入（不误伤 re-import）。
+        let with_secret = json!({
+            "format": ACCOUNT_FILE_FORMAT,
+            "provider": "kiro",
+            "secret": { "accessToken": "tok-9" },
+            "public": { "uid": "u-9" }
+        });
+        let parsed =
+            parse_auth_file("kiro", "", Some(&with_secret.to_string()), None, None, true).unwrap();
+        assert_eq!(parsed.secret["accessToken"], "tok-9");
+    }
+
+    #[test]
     fn provider_mismatch_is_rejected() {
         let file = json!({ "provider": "kiro", "secret": { "token": "t" } });
         let error =
-            parse_auth_file("astudio", "", Some(&file.to_string()), None, None).unwrap_err();
+            parse_auth_file("astudio", "", Some(&file.to_string()), None, None, false).unwrap_err();
         assert!(error.contains("不一致"), "{error}");
     }
 
@@ -388,13 +448,14 @@ mod tests {
     fn base64_text_is_decoded() {
         let text = json!({ "provider": "kiro", "secret": { "token": "b64-token" } }).to_string();
         let encoded = STANDARD.encode(text.as_bytes());
-        let parsed = parse_auth_file("kiro", "", None, Some(&encoded), None).unwrap();
+        let parsed = parse_auth_file("kiro", "", None, Some(&encoded), None, false).unwrap();
         assert_eq!(parsed.secret["token"], "b64-token");
     }
 
     #[test]
     fn raw_text_becomes_token() {
-        let parsed = parse_auth_file("kiro", "", Some("  plain-token  "), None, None).unwrap();
+        let parsed =
+            parse_auth_file("kiro", "", Some("  plain-token  "), None, None, false).unwrap();
         assert_eq!(parsed.secret["token"], "plain-token");
     }
 
@@ -416,7 +477,8 @@ mod tests {
         }
         let bytes = std::fs::read(&path).unwrap();
         let encoded = STANDARD.encode(&bytes);
-        let parsed = parse_auth_file("kiro", "", None, Some(&encoded), Some("Cookies")).unwrap();
+        let parsed =
+            parse_auth_file("kiro", "", None, Some(&encoded), Some("Cookies"), false).unwrap();
         let cookie = parsed.secret["cookie"].as_str().unwrap();
         assert!(cookie.contains("sid=abc"), "{cookie}");
         assert!(cookie.contains("tok=xyz"), "{cookie}");

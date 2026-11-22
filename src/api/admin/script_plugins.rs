@@ -576,11 +576,23 @@ pub async fn handle_script_prompts(
 }
 
 /// GET /api/plugins/scripts/check —— A2A 检查更新入口。
+///
+/// 插件页「检查更新」统一进维护记录：优先跑一轮带租约的社区插件目录检查
+/// （刷新目录 + 逐包更新检查 → 维护记录）。若已有检查在跑（租约被占），
+/// 退回只读的本地结果，不阻塞页面、也不重复打上游。
 pub async fn handle_script_check(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
+    if let Err(error) = crate::maintenance::execute(
+        &state,
+        crate::maintenance::Request::full(crate::maintenance::PLUGIN_CATALOG, true),
+    )
+    .await
+    {
+        tracing::debug!("[Script] 插件检查未进入维护记录：{error}");
+    }
     let result = operations::check_updates(&state.script_host).await;
     Ok(Json(json!({ "success": true, "data": result })))
 }

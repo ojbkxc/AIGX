@@ -175,9 +175,13 @@ export default function ScheduledTasks({ embedded = false }: ScheduledTasksProps
   }
   if (!admin) return <EmptyState message={t('无权限')} />;
 
-  // 「软件版本检查」不在本页渲染：它的开关/间隔与更新页、插件设置共用同一份
-  // 检查计划（对齐 A2A——定时任务页不再出现这一条），配置入口在「更新」页。
-  const backendTasks = tasks.filter((t) => t.runner === 'backend' && t.id !== 'updateCheck');
+  // beta.7：维护类任务不再只在「定时任务」页出现——「软件版本检查」(updateCheck)
+  // 的开关/间隔在「更新」页的「检查计划」里配置；社区插件目录检查(pluginCatalog)
+  // 跟随软件更新计划（checkMode 固定 follow，autoUpdate 由「更新」页的自动更新开关
+  // 决定），不在本页渲染成通用开关卡片。两者都由维护面板记录执行结果。
+  // 其余后端任务（凭证维护 / 模型刷新）仍在本页提供开关与间隔。
+  const maintenanceManaged = new Set(['updateCheck', 'pluginCatalog']);
+  const backendTasks = tasks.filter((t) => t.runner === 'backend' && !maintenanceManaged.has(t.id));
   const frontendTasks = tasks.filter((t) => t.runner === 'frontend');
 
   const renderTask = (task: ScheduledTaskItem) => {

@@ -85,6 +85,15 @@ pub const CAPABILITY_METHODS: &[&str] = &[
     "reasoning_patch",
 ];
 
+/// `token.expiring`（`M` 能力面）的可选参数名：网关把「要求的最短提前量」
+/// （毫秒）放在这里透传给宿主。宿主（`host/provider.mjs` 的 `token.expiring`）
+/// 取它与插件默认 `refreshLead` 的较大值作为临期判据（beta.7 起）。
+///
+/// AIGX 目前没有 Rust 侧的 `ProviderAdapter::check_credentials_expiring_within`
+/// 调用点（凭证刷新走原生 provider 表），故这里是契约常量，供将来接线时对齐。
+#[allow(dead_code)] // 线表契约常量（见 main.rs 债务清单）
+pub const TOKEN_EXPIRING_MIN_LEAD_PARAM: &str = "minLeadMs";
+
 /// 全量方法表（25 个 = provider.info + conversation + 能力面）。
 #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn all_methods() -> impl Iterator<Item = &'static str> {

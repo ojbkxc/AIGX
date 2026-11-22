@@ -630,8 +630,11 @@ impl PluginHostManager {
     pub async fn shutdown_all(&self) {
         let procs: Vec<Arc<PluginProcess>> =
             self.processes.write().drain().map(|(_, p)| p).collect();
+        let total = procs.len();
+        // 每个包是否按流程关闭（RPC 确认 vs 超时强杀）；汇总到全局事件。
+        let mut routine = true;
         for p in procs {
-            process::shutdown(&p).await;
+            routine &= process::shutdown(&p).await;
         }
         // Wasm 宿主：取消在途调用 + 排空 + 摘清单。
         crate::plugin_host::wasm::stop_all().await;
@@ -640,6 +643,15 @@ impl PluginHostManager {
         for slot in self.runtime.write().values_mut() {
             slot.running = false;
         }
+        // 全局关闭事件（对齐 beta.7 `plugin.shutdown` 事件：无单包 pluginId，
+        // `routine` 表示所有原生包都在宽限期内确认退出）。
+        tracing::info!(
+            target: "plugin",
+            action = "plugin.shutdown",
+            routine,
+            plugins = total,
+            "插件宿主已全部关停"
+        );
     }
 
     /// Wasm 包的启用路径（返回 `None` 表示这不是 wasm 包，交给原生路径）。

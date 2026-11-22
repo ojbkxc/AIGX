@@ -347,14 +347,19 @@ pub async fn handshake(
 ///
 /// 先发 RPC `shutdown`（等插件自行退出），5s 超时后 `kill`（kill 幂等：
 /// 插件已退出则是 no-op）。
-pub async fn shutdown(process: &PluginProcess) {
+///
+/// 返回是否「按流程」关闭：插件在宽限期内确认了 `shutdown` RPC 即为
+/// `true`；超时后走 `kill` 兜底为 `false`。调用方（`shutdown_all`）据此
+/// 汇总全局事件。
+pub async fn shutdown(process: &PluginProcess) -> bool {
     process.mark_shutdown();
     // 先尝试 RPC shutdown（best effort，插件可能已退出）
-    let _ = tokio::time::timeout(
+    let graceful = tokio::time::timeout(
         SHUTDOWN_GRACE,
         process.rpc.call("shutdown", serde_json::json!({})),
     )
-    .await;
+    .await
+    .is_ok_and(|result| result.is_ok());
     process.rpc.shutdown();
     // 兜底：直接 kill 子进程
     {
@@ -362,6 +367,17 @@ pub async fn shutdown(process: &PluginProcess) {
         let _ = child.kill().await;
     }
     *process.state.write().await = ProcessState::Shutdown;
+    // 结构化事件日志（对齐 beta.7 `plugin.shutdown` 事件）：单包关闭带
+    // `pluginId`；`routine` 表示插件在宽限期内确认退出（否则为强杀兜底）。
+    tracing::info!(
+        target: "plugin",
+        action = "plugin.shutdown",
+        pluginId = %process.pack_id,
+        routine = graceful,
+        localExited = graceful,
+        "插件已关闭"
+    );
+    graceful
 }
 
 /// 观察子进程退出。

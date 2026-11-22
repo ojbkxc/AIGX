@@ -401,10 +401,20 @@ fn provider_is_plugin_provider(state: &AppState, provider: &str) -> bool {
         .list()
         .iter()
         .any(|pack| pack.providers.iter().any(|item| item.id == provider));
-    let script_declared = crate::plugin_host::script::operations::list(&state.script_host)
-        .iter()
-        .any(|pack| pack.providers.iter().any(|info| info.id == provider));
+    let script_declared = provider_is_script_provider(state, &provider);
     plugin_provider_decision(&provider, native_declared, script_declared)
+}
+
+/// 该 provider 是否由**脚本插件**在声明层接管（不要求包已启用 / 宿主在跑）。
+///
+/// 用于「拒绝把脚本插件 provider 当原生账号文件导入」的判定（对齐 A2A
+/// `import_account_file` 的 `known_provider`）：脚本家的账号文件应交给插件
+/// 自己的导入契约，而不是走原生账号文件解析。
+fn provider_is_script_provider(state: &AppState, provider: &str) -> bool {
+    let provider = registry::normalize_kind(provider);
+    crate::plugin_host::script::operations::list(&state.script_host)
+        .iter()
+        .any(|pack| pack.providers.iter().any(|info| info.id == provider))
 }
 
 /// 声明层裁决（纯函数，便于单测）：硬保留集合一律否；任一包声明即真。
@@ -1280,6 +1290,7 @@ pub async fn handle_create_account_session(
                 body.auth_file_content.as_deref(),
                 body.auth_file_b64.as_deref(),
                 body.auth_file_name.as_deref(),
+                provider_is_script_provider(&state, &provider_kind),
             )
             .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
             (parsed.secret, parsed.public, parsed.identity, parsed.name)
@@ -4106,21 +4117,25 @@ pub async fn handle_refresh_expiring(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    let summary = crate::account_session::refresh::refresh_expiring(
+    // 临期窗口取「维护间隔 + 5 分钟缓冲」，与自动维护巡检同一口径（否则手动
+    // 批量刷新会漏掉那些「还没到各家固定窗口、但已进入本轮维护窗口」的账号）。
+    let config = state.config_manager.get().await;
+    let interval_minutes = config
+        .scheduled_tasks
+        .credential_maintenance
+        .interval
+        .max(1);
+    let min_lead_secs = crate::account_session::refresh::maintenance_lead_secs(interval_minutes);
+    let summary = crate::account_session::refresh::refresh_expiring_with_lead(
         &state.account_sessions,
         &state.http_client,
+        min_lead_secs,
     )
     .await;
     // 手动批量刷新已经真打了一轮上游：把定时那轮往后顺延一个间隔，免得
     // 「刚点完、到点或重启后又立刻再刷一遍」（对齐 A2A `note_manual_run`）。
     {
-        let config = state.config_manager.get().await;
-        let interval = config
-            .scheduled_tasks
-            .credential_maintenance
-            .interval
-            .max(1)
-            * 60_000;
+        let interval = interval_minutes * 60_000;
         if let Err(error) = crate::scheduled_tasks::task_state::note_external_run(
             crate::scheduled_tasks::TASK_CREDENTIAL_MAINTENANCE,
             interval,

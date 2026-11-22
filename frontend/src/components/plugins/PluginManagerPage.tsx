@@ -1095,6 +1095,21 @@ export default function PluginManagerPage(): JSX.Element {
             </label>
           </div>
 
+          {/* 插件目录拉取异常提示条（beta.7：A2A PluginCatalogStatus 的轻量版）。
+              网络失败不在每张卡片上刷屏，只在板块顶部提醒一次；已装插件照常可用。 */}
+          {source !== 'magpie' && (catalog?.error || catalog?.available === false) ? (
+            <div className="pl-missing-banner" role="alert">
+              <span className="pl-missing-icon" aria-hidden="true">⚠️</span>
+              <p>
+                {t('暂未连上插件仓库，当前仅影响检查更新与目录刷新；已安装插件可正常使用。')}
+                {catalog?.reason ? ` ${catalog.reason}` : ''}
+              </p>
+              <Button size="sm" disabled={busy} onClick={() => void handleRefreshStore()}>
+                {busyId === 'refresh' ? t('重试中…') : t('重试')}
+              </Button>
+            </div>
+          ) : null}
+
           {/* 缺失插件横幅（A2A PluginMissingBanner） */}
           {missingCount > 0 ? (
             <div className="pl-missing-banner" role="status">

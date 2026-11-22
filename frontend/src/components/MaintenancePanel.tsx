@@ -23,6 +23,7 @@ import { Loader2, RefreshCw, RotateCcw, X } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from './Toast';
 import { Badge, Button, EmptyState, Input, Pagination, Select } from './ui';
+import { MAINTENANCE_TASKS } from '../types';
 import type {
   MaintenanceDetailView,
   MaintenanceItemView,
@@ -32,7 +33,8 @@ import type {
 } from '../types';
 import './MaintenancePanel.css';
 
-const TASKS: MaintenanceTaskId[] = ['credentialMaintenance', 'modelRefresh'];
+/** beta.7 起维护任务含软件版本检查与社区插件检查（不含桌面专属 Magpie）。 */
+const TASKS: readonly MaintenanceTaskId[] = MAINTENANCE_TASKS;
 /** 记录列表每页条数 */
 const LIMIT = 10;
 /** 明细弹窗每页条数（上游 PAGE_SIZE） */
@@ -57,7 +59,82 @@ const INITIAL_QUERY: Query = { taskId: '', source: '', status: '', keyword: '', 
 function taskLabel(t: (s: string) => string, id: string): string {
   if (id === 'credentialMaintenance') return t('凭证维护');
   if (id === 'modelRefresh') return t('模型刷新');
+  if (id === 'updateCheck') return t('软件检查更新');
+  if (id === 'pluginCatalog') return t('社区插件检查');
   return id;
+}
+
+/** 明细表「对象」列标题：不同任务的检查对象不同。 */
+function targetColumnTitle(t: (s: string) => string, id: string | undefined): string {
+  if (id === 'updateCheck') return t('检查对象');
+  if (id === 'pluginCatalog') return t('插件');
+  return t('提供商');
+}
+
+/** 明细表「范围」列标题：账号 / 更新通道 / 当前版本。 */
+function scopeColumnTitle(t: (s: string) => string, id: string | undefined): string {
+  if (id === 'updateCheck') return t('更新通道');
+  if (id === 'pluginCatalog') return t('当前版本');
+  return t('账号');
+}
+
+/** 明细表「变化」列标题：凭证变化 / 模型目录 / 检查结果。 */
+function changeColumnTitle(t: (s: string) => string, id: string | undefined): string {
+  if (id === 'credentialMaintenance') return t('凭证变化');
+  if (id === 'modelRefresh') return t('模型目录');
+  return t('检查结果');
+}
+
+/** 思考/版本检查的结论短标签 → 本地化文案（识别失败时回退原文）。 */
+function changeLabelText(t: (s: string, o?: Record<string, string | number>) => string, label: string): string {
+  switch (label) {
+    case '已是最新': return t('已是最新');
+    case '检查失败': return t('检查失败');
+    case '拉取失败': return t('拉取失败');
+    case '自动更新失败': return t('自动更新失败');
+    case '已停止支持': return t('已停止支持');
+    case '信息异常': return t('信息异常');
+    case '未在目录中': return t('未在目录中');
+    case '已切换通道': return t('已切换通道');
+    case '已关闭': return t('已关闭');
+    case '目录已刷新': return t('目录已刷新');
+    case '目录刷新失败': return t('目录刷新失败');
+  }
+  const found = /^发现 (.+)$/.exec(label);
+  if (found) return t('发现 {{version}}', { version: found[1] });
+  const upgraded = /^已升至 (.+)$/.exec(label);
+  if (upgraded) return t('已升至 {{version}}', { version: upgraded[1] });
+  const updatable = /^可更新 (.+)$/.exec(label);
+  if (updatable) return t('可更新 {{version}}', { version: updatable[1] });
+  const total = /^共 (\d+) 个$/.exec(label);
+  if (total) return t('共 {{n}} 个', { n: total[1] });
+  return t(label);
+}
+
+/** 「变化」列取值：模型目录条目数 / 凭证变化 / 版本检查结论。 */
+function itemChange(
+  t: (s: string, o?: Record<string, string | number>) => string,
+  item: MaintenanceItemView,
+  taskId: string | undefined,
+): string {
+  if (taskId === 'modelRefresh') {
+    if (item.status !== 'refreshed') return t('未变更');
+    return item.count == null ? '—' : t('{{n}} 个模型', { n: item.count });
+  }
+  if (taskId === 'credentialMaintenance') {
+    if (item.status !== 'refreshed') return t('未变更');
+    return item.expiresBefore && item.expiresAfter && item.expiresAfter > item.expiresBefore
+      ? t('有效期已延长')
+      : t('凭证已更新');
+  }
+  const label = item.changeLabel;
+  if (!label) return item.status === 'refreshed' ? t('已完成') : t('未变更');
+  if (label === '发现新版本') {
+    return item.latestVersion
+      ? t('发现新版本 {{version}}', { version: item.latestVersion })
+      : t('发现新版本');
+  }
+  return changeLabelText(t, label);
 }
 
 /** 执行状态 → 徽章色调 + 文案 */
@@ -382,17 +459,22 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
 
       {error && <div className="error-message">{error}</div>}
 
-      {/* 两类任务概览条 */}
+      {/* 维护任务概览条（凭证维护 / 模型刷新 / 软件检查 / 社区插件检查） */}
       <div className="mtp-tasks">
         {TASKS.map((taskId) => {
           const state = overview?.tasks?.find((item) => item?.id === taskId) ?? null;
           const latest = latestByTask[taskId];
+          const followsSoftware = taskId === 'pluginCatalog' && state?.checkMode === 'follow';
           return (
             <div key={taskId} className="mtp-task">
               <div className="mtp-task-main">
                 <div className="mtp-task-name">
                   {taskLabel(t, taskId)}
                   {state?.running ? <Badge tone="info">{t('执行中')}</Badge> : null}
+                  {followsSoftware ? <Badge tone="neutral">{t('跟随软件')}</Badge> : null}
+                  {taskId === 'pluginCatalog' && state?.autoUpdate ? (
+                    <Badge tone="success">{t('自动更新')}</Badge>
+                  ) : null}
                   {latest ? (
                     <Badge tone={runStatus(t, latest.status).tone}>{runStatus(t, latest.status).label}</Badge>
                   ) : null}
@@ -752,9 +834,10 @@ function MaintenanceDetailDialog({
                 <table className="mtp-table mtp-detail-table">
                   <thead>
                     <tr>
-                      <th>{t('提供商')}</th>
-                      <th>{t('账号')}</th>
+                      <th>{targetColumnTitle(t, detail.taskId)}</th>
+                      <th>{scopeColumnTitle(t, detail.taskId)}</th>
                       <th>{t('结果')}</th>
+                      <th>{changeColumnTitle(t, detail.taskId)}</th>
                       <th>{t('说明')}</th>
                       <th>{t('耗时')}</th>
                       <th style={{ width: 92 }}>{t('操作')}</th>
@@ -763,15 +846,18 @@ function MaintenanceDetailDialog({
                   <tbody>
                     {shown.map((item) => {
                       const s = itemStatus(t, item.status);
+                      const scope = item.currentVersion && detail.taskId === 'pluginCatalog'
+                        ? item.currentVersion
+                        : item.accountName || item.accountId || (detail.taskId === 'updateCheck' || detail.taskId === 'pluginCatalog' ? '—' : t('未使用账号'));
+                      const change = itemChange(t, item, detail.taskId);
                       return (
                         <tr key={item.id} className="mtp-clickable-row" onClick={() => setSelected(item)}>
                           <td>{item.providerLabel || item.provider || '—'}</td>
-                          <td title={item.accountId ?? undefined}>
-                            {item.accountName || item.accountId || t('未使用账号')}
-                          </td>
+                          <td title={item.accountId ?? undefined}>{scope}</td>
                           <td>
                             <Badge tone={s.tone}>{s.label}</Badge>
                           </td>
+                          <td className="mtp-message">{change}</td>
                           <td className="mtp-message">{describeItem(t, item)}</td>
                           <td className="mtp-time">{fmtDuration(item.durationMs)}</td>
                           <td>
@@ -791,13 +877,22 @@ function MaintenanceDetailDialog({
                     })}
                     {shown.length === 0 ? (
                       <tr>
-                        <td colSpan={6}>
+                        <td colSpan={7}>
                           <EmptyState icon="🗂️" message={emptyText} />
                         </td>
                       </tr>
                     ) : null}
                   </tbody>
                 </table>
+                {detail.metadata ? (
+                  <div className="mtp-task-meta" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span>{detail.metadata.providerLabel || taskLabel(t, detail.taskId)}</span>
+                    <Badge tone={itemStatus(t, detail.metadata.status).tone}>
+                      {itemStatus(t, detail.metadata.status).label}
+                    </Badge>
+                    <span>{describeItem(t, detail.metadata)}</span>
+                  </div>
+                ) : null}
                 <div className="mtp-detail-foot">
                   <span className="mtp-muted">{t('重试生成新记录，不覆盖本次结果')}</span>
                   {rows.length > DETAIL_PAGE_SIZE ? (
@@ -846,18 +941,25 @@ function ItemSnapshotDialog({
 }: ItemSnapshotDialogProps): JSX.Element {
   const { t } = useTranslation();
   const credential = detail.taskId === 'credentialMaintenance';
+  const model = detail.taskId === 'modelRefresh';
+  const versioned = detail.taskId === 'updateCheck' || detail.taskId === 'pluginCatalog';
   const status = itemStatus(t, item.status);
+
+  const scopeLabel = scopeColumnTitle(t, detail.taskId);
+  const scopeValue = detail.taskId === 'pluginCatalog'
+    ? item.currentVersion || item.accountName || item.accountId || '—'
+    : item.accountName || item.accountId || (versioned ? '—' : t('未使用账号'));
 
   const facts: Array<[string, string]> = [
     [t('执行时间'), fmtTime(detail.startedAt)],
     [t('触发方式'), sourceLabel(t, detail.source)],
-    [t('账号'), item.accountName || item.accountId || t('未使用账号')],
+    [scopeLabel, scopeValue],
     [t('耗时'), fmtDuration(item.durationMs)],
   ];
   if (credential) {
     facts.push([t('刷新前有效期'), fmtTime(item.expiresBefore)]);
     facts.push([t('刷新后有效期'), fmtTime(item.expiresAfter)]);
-  } else {
+  } else if (model) {
     facts.push([
       t('模型目录'),
       item.status !== 'refreshed'
@@ -867,6 +969,10 @@ function ItemSnapshotDialog({
           : t('{{n}} 个模型', { n: item.count }),
     ]);
     facts.push([t('目录最近更新时间'), fmtTime(item.refreshedAt)]);
+  } else if (versioned) {
+    facts.push([t('检查结果'), itemChange(t, item, detail.taskId)]);
+    if (item.currentVersion) facts.push([t('当前版本'), item.currentVersion]);
+    if (item.latestVersion) facts.push([t('最新版本'), item.latestVersion]);
   }
   if (item.retryAt) facts.push([t('建议重试时间'), fmtTime(item.retryAt)]);
 

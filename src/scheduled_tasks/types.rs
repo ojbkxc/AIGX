@@ -46,6 +46,12 @@ pub const DEFAULT_REPORT_AUTO_REFRESH_SECONDS: i64 = 1;
 /// 软件版本检查默认间隔（分钟）。
 pub const DEFAULT_UPDATE_CHECK_MINUTES: i64 = 20;
 
+/// 社区 / Magpie 插件目录与已装插件检查默认间隔（分钟）。
+///
+/// 与上游对齐：插件目录与更新检查默认每 6 小时一次（上游
+/// `DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES`）。
+pub const DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES: i64 = 360;
+
 /// 后端任务间隔下限（分钟）。
 pub const INTERVAL_MIN_MINUTES: i64 = 1;
 /// 后端任务间隔上限（分钟）。
@@ -75,6 +81,8 @@ pub struct ScheduledSettings {
     pub model_refresh: IntervalTask,
     /// 软件版本检查（后端）。
     pub update_check: IntervalTask,
+    /// 社区 / Magpie 插件目录与已装插件检查（后端）。
+    pub magpie_plugin_check: IntervalTask,
     /// 日志页自动刷新（前端）。
     pub logs_auto_refresh: IntervalTask,
     /// 请求日志页自动刷新（前端）。
@@ -97,6 +105,10 @@ impl Default for ScheduledSettings {
             update_check: IntervalTask {
                 enabled: true,
                 interval: DEFAULT_UPDATE_CHECK_MINUTES,
+            },
+            magpie_plugin_check: IntervalTask {
+                enabled: true,
+                interval: DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES,
             },
             logs_auto_refresh: IntervalTask {
                 enabled: true,

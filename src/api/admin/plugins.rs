@@ -871,6 +871,8 @@ pub async fn handle_list_plugins(
             "updates": updates,
             // 在途/近期操作（Operation 异步进度模型；含持久化的历史条目）
             "operations": plugin_operations(&state),
+            // 近期插件生命周期事件（启动/关闭；shutdown 按 routine 归类）
+            "pluginEvents": plugin_events(),
             // Wasm 宿主能力契约（beta.2：capabilities/limits/compute/scheduling/
             // tasks/desktopLaunch/verification/managedLogin/sms/accountOrigin/
             // protocol，逐项带 served 标识）
@@ -941,6 +943,77 @@ fn plugin_operations(state: &AppState) -> Value {
         .get("operations")
         .cloned()
         .unwrap_or_else(|| json!([]))
+}
+
+/// 判定一次插件关闭是否「按流程」（对齐 A2A `logs_store/plugin_events.rs`
+/// 的 `is_clean_shutdown`）：本地确认退出、未触发超时、且没有在途/未完成/
+/// 远端未知的调用。
+fn is_clean_shutdown(data: &serde_json::Map<String, Value>) -> bool {
+    data.get("localExited").and_then(Value::as_bool) == Some(true)
+        && data.get("deadlineReached").and_then(Value::as_bool) != Some(true)
+        && data
+            .get("ordinaryActive")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        && data.get("unfinished").and_then(Value::as_u64).unwrap_or(0) == 0
+        && data
+            .get("remoteUnknown")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+}
+
+/// 规范化一条插件生命周期事件的 `data`（对齐 A2A `plugin_events::prepare`）：
+/// `plugin.startup` 原样返回；`plugin.shutdown` 在缺失 `routine` 时按「干净
+/// 关闭」补 `routine = true`（常规关闭不是异常，日志页据此归类）。
+fn prepare_plugin_event(data: &mut serde_json::Map<String, Value>) {
+    match data.get("action").and_then(Value::as_str) {
+        Some("plugin.startup") => {}
+        Some("plugin.shutdown") if !data.contains_key("routine") && is_clean_shutdown(data) => {
+            data.insert("routine".to_string(), Value::Bool(true));
+        }
+        _ => {}
+    }
+}
+
+/// 从运行日志环形缓冲聚合近期插件生命周期事件（含 shutdown `routine` 归类）。
+///
+/// 上游 `plugin_events` 是日志读取层的归类器；AIGX 没有独立 logs_store，运行
+/// 日志的插件事件结构化字段由 `runtime_log` 捕获，这里做同一套归类后作为
+/// `/api/plugins` 的 `pluginEvents` 暴露（最新在前，最多 50 条）。
+fn plugin_events() -> Value {
+    let snapshot = crate::runtime_log::snapshot(None);
+    let mut rows = Vec::new();
+    let Some(entries) = snapshot.get("entries").and_then(Value::as_array) else {
+        return Value::Array(rows);
+    };
+    for entry in entries {
+        let Some(mut data) = entry.get("data").and_then(Value::as_object).cloned() else {
+            continue;
+        };
+        if !data
+            .get("action")
+            .and_then(Value::as_str)
+            .is_some_and(|action| action.starts_with("plugin."))
+        {
+            continue;
+        }
+        prepare_plugin_event(&mut data);
+        rows.push(json!({
+            "ts": entry.get("ts").cloned().unwrap_or(Value::Null),
+            "level": entry.get("level").cloned().unwrap_or(Value::Null),
+            "message": entry.get("message").cloned().unwrap_or(Value::Null),
+            "action": data.get("action").cloned().unwrap_or(Value::Null),
+            "pluginId": data.get("pluginId").cloned().unwrap_or(Value::Null),
+            // routine = 常规启停（不是异常）；None 表示无法判定
+            "routine": data.get("routine").cloned().unwrap_or(Value::Null),
+        }));
+        if rows.len() >= 50 {
+            break;
+        }
+    }
+    Value::Array(rows)
 }
 
 /// 脚本插件宿主快照（A2A 顶层 `scripts`：脚本包与 provider 归属）。
@@ -2849,6 +2922,53 @@ pub async fn handle_managed_task_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_shutdown_classified_routine() {
+        // 干净关闭：本地确认退出、未超时、无在途/未完成/远端未知。
+        let mut data = json!({
+            "action": "plugin.shutdown",
+            "localExited": true,
+            "deadlineReached": false,
+            "ordinaryActive": 0,
+            "unfinished": 0,
+            "remoteUnknown": 0
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        prepare_plugin_event(&mut data);
+        assert_eq!(data.get("routine"), Some(&Value::Bool(true)));
+
+        // 非干净关闭（超时强杀）：不补 routine。
+        let mut forced = json!({
+            "action": "plugin.shutdown",
+            "localExited": false,
+            "deadlineReached": true
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        prepare_plugin_event(&mut forced);
+        assert!(!forced.contains_key("routine"));
+        assert!(!is_clean_shutdown(&forced));
+
+        // 已在事件里带 routine 的，不覆盖。
+        let mut preset = json!({ "action": "plugin.shutdown", "routine": false })
+            .as_object()
+            .cloned()
+            .unwrap();
+        prepare_plugin_event(&mut preset);
+        assert_eq!(preset.get("routine"), Some(&Value::Bool(false)));
+
+        // startup 事件不归类。
+        let mut startup = json!({ "action": "plugin.startup" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        prepare_plugin_event(&mut startup);
+        assert!(!startup.contains_key("routine"));
+    }
 
     fn temp_store() -> Arc<FileStore> {
         use std::sync::atomic::{AtomicU64, Ordering};

@@ -17,6 +17,7 @@ import AccountSortDialog from '../components/AccountSortDialog';
 import CheckinCampaignCard from '../components/CheckinCampaignCard';
 import LimiterGroupEditor from '../components/LimiterGroupEditor';
 import { describeGroup, flatToGroups } from '../lib/limiterGroups';
+import { mergeUsageWindows } from '../lib/usageWindows';
 import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
@@ -2320,7 +2321,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   /** §2.9 余额明细：wallets[] 逐桶 + windows[] 逐窗口；都空 → 「上游未返回明细」 */
   const balanceDetailRows = (bal: AccountBalance | null | undefined): ReactNode => {
     const wallets = Array.isArray(bal?.wallets) ? bal.wallets : [];
-    const wins = bal?.windows ?? [];
+    // 同一基础模型的不同思考等级先合并，避免明细弹层里重复列同一模型。
+    const wins = mergeUsageWindows(bal?.windows ?? []);
     if (!wallets.length && !wins.length) {
       return <div className="as-pop-empty">{t('上游未返回明细')}</div>;
     }
@@ -2746,7 +2748,10 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             {(() => {
               // 分窗口额度读数（上游 usage windows；后端用量窗口端点起下发，
               // 旧后端无 windows 字段 → 不渲染，余额格维持主额度桶形态）
-              const wins = bal?.state === 'ok' ? (bal.windows ?? []) : (s.last_balance?.windows ?? []);
+              // 同一基础模型的思考等级合并后展示，取最紧剩余比例与有效重置时间。
+              const wins = mergeUsageWindows(
+                bal?.state === 'ok' ? (bal.windows ?? []) : (s.last_balance?.windows ?? []),
+              );
               if (!wins.length) return null;
               return (
                 <div className="as-usage-windows">

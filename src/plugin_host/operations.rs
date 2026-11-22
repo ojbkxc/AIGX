@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
+use tokio::task::JoinHandle;
 
 use crate::storage::FileStore;
 
@@ -241,6 +242,11 @@ fn begin(
 }
 
 /// 启动一次安装/更新（下载 → 校验安装），后台执行，立即返回初始操作快照。
+///
+/// 对齐上游 beta.7 `start_cached_with_wait` 的「可等待」语义：真正发起任务
+/// 的 [`start_install_with_wait`] 返回 `JoinHandle`，调用方（如自动更新）
+/// 可以 `await` 拿到最终结果；本函数是「只关心初始快照」的薄封装，
+/// 保持既有调用点（管理面、批量）不变。
 pub fn start_install(
     manager: Arc<PluginHostManager>,
     store: Arc<FileStore>,
@@ -249,6 +255,21 @@ pub fn start_install(
     url: String,
     sha256: Option<String>,
 ) -> Result<Operation, String> {
+    start_install_with_wait(manager, store, id, action, url, sha256).map(|(operation, _)| operation)
+}
+
+/// 启动一次安装/更新，返回初始操作快照 + 后台任务句柄。
+///
+/// 句柄解析为后台任务的结果（`Ok(pack 视图)` / `Err(失败原因)`），与
+/// [`finalize`] 写进内存/持久化的终态一致；句柄被丢弃不会取消任务。
+pub fn start_install_with_wait(
+    manager: Arc<PluginHostManager>,
+    store: Arc<FileStore>,
+    id: String,
+    action: String,
+    url: String,
+    sha256: Option<String>,
+) -> Result<(Operation, JoinHandle<Result<Value, String>>), String> {
     if url.trim().is_empty() {
         return Err("安装地址（url）不能为空".to_string());
     }
@@ -258,11 +279,12 @@ pub fn start_install(
         operation_id: operation.operation_id.clone(),
         store: store.clone(),
     };
-    tokio::spawn(async move {
-        run_install(manager, store, id, url, sha256).await;
+    let handle = tokio::spawn(async move {
+        let result = run_install(manager, store, id, url, sha256).await;
         drop(guard);
+        result
     });
-    Ok(operation)
+    Ok((operation, handle))
 }
 
 async fn run_install(
@@ -271,9 +293,22 @@ async fn run_install(
     id: String,
     url: String,
     sha256: Option<String>,
-) {
-    set_stage(&id, &store, "downloading");
-    let progress_id = id.clone();
+) -> Result<Value, String> {
+    let result = install_flow(manager, &store, &id, url, sha256).await;
+    // 终态落库后再把结果交回句柄，二者口径一致。
+    finalize(&id, &store, result.clone());
+    result
+}
+
+async fn install_flow(
+    manager: Arc<PluginHostManager>,
+    store: &FileStore,
+    id: &str,
+    url: String,
+    sha256: Option<String>,
+) -> Result<Value, String> {
+    set_stage(id, store, "downloading");
+    let progress_id = id.to_string();
     let download = manager
         .download_with_progress(&url, move |received, total| {
             mutate(&progress_id, |operation| {
@@ -287,36 +322,20 @@ async fn run_install(
             });
         })
         .await;
-    let bytes = match download {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            finalize(&id, &store, Err(error.to_string()));
-            return;
-        }
-    };
-    set_stage(&id, &store, "verifying");
+    let bytes = download.map_err(|error| error.to_string())?;
+    set_stage(id, store, "verifying");
     let mgr = manager.clone();
-    let payload = bytes.clone();
-    let expect = sha256.clone();
-    set_stage(&id, &store, "installing");
-    let installed =
-        tokio::task::spawn_blocking(move || mgr.install_bytes(&payload, expect.as_deref()))
-            .await
-            .map_err(|error| format!("安装任务中断：{error}"))
-            .and_then(|result| result.map_err(|error| error.to_string()));
-    match installed {
-        Ok(meta) => {
-            mutate(&id, |operation| {
-                operation.version = meta.version.clone();
-            });
-            finalize(
-                &id,
-                &store,
-                Ok(json!({ "pack": { "id": meta.id, "version": meta.version } })),
-            );
-        }
-        Err(error) => finalize(&id, &store, Err(error)),
-    }
+    let payload = bytes;
+    let expect = sha256;
+    set_stage(id, store, "installing");
+    let meta = tokio::task::spawn_blocking(move || mgr.install_bytes(&payload, expect.as_deref()))
+        .await
+        .map_err(|error| format!("安装任务中断：{error}"))?
+        .map_err(|error| error.to_string())?;
+    mutate(id, |operation| {
+        operation.version = meta.version.clone();
+    });
+    Ok(json!({ "pack": { "id": meta.id, "version": meta.version } }))
 }
 
 /// 生命周期动作（启停/卸载/重载）。
@@ -350,12 +369,25 @@ impl Lifecycle {
 }
 
 /// 启动一次生命周期变更，后台执行，立即返回初始操作快照。
+///
+/// 与 [`start_install`] 同口径：真正起任务的是
+/// [`start_lifecycle_with_wait`]（返回 `JoinHandle`），本函数是薄封装。
 pub fn start_lifecycle(
     manager: Arc<PluginHostManager>,
     store: Arc<FileStore>,
     id: String,
     action: Lifecycle,
 ) -> Result<Operation, String> {
+    start_lifecycle_with_wait(manager, store, id, action).map(|(operation, _)| operation)
+}
+
+/// 启动一次生命周期变更，返回初始操作快照 + 后台任务句柄。
+pub fn start_lifecycle_with_wait(
+    manager: Arc<PluginHostManager>,
+    store: Arc<FileStore>,
+    id: String,
+    action: Lifecycle,
+) -> Result<(Operation, JoinHandle<Result<Value, String>>), String> {
     let version = manager
         .registry()
         .get(&id)
@@ -367,11 +399,12 @@ pub fn start_lifecycle(
         operation_id: operation.operation_id.clone(),
         store: store.clone(),
     };
-    tokio::spawn(async move {
-        run_lifecycle(manager, store, id, action).await;
+    let handle = tokio::spawn(async move {
+        let result = run_lifecycle(manager, store, id, action).await;
         drop(guard);
+        result
     });
-    Ok(operation)
+    Ok((operation, handle))
 }
 
 async fn run_lifecycle(
@@ -379,7 +412,7 @@ async fn run_lifecycle(
     store: Arc<FileStore>,
     id: String,
     action: Lifecycle,
-) {
+) -> Result<Value, String> {
     let result: Result<Value, String> = {
         // 生命周期变更必须串行：两次宿主切换交错会留下半个状态。
         let _serial = mutation_guard().await;
@@ -405,7 +438,8 @@ async fn run_lifecycle(
                 .map(|_| json!({ "uninstalled": true })),
         }
     };
-    finalize(&id, &store, result);
+    finalize(&id, &store, result.clone());
+    result
 }
 
 // ── 批量 ────────────────────────────────────────────────────────────

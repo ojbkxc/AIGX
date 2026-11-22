@@ -38,6 +38,15 @@ pub struct Item {
     /// AIGX 扩展：refresh_token 已失效（重试无意义，不进入重试选择）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub invalid: bool,
+    /// 当前版本（软件版本检查 / 已装插件检查的明细行）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+    /// 上游最新版本（同上；无新版本时为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    /// 变化摘要（如「发现新版本 v1.2.3」「已是最新」「可更新 v2.0」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_label: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -153,6 +162,9 @@ pub fn item(raw: &Value, index: usize, snapshots: &HashMap<String, AccountSnapsh
         retry_at: millis(raw.get("retryAt")),
         forced: raw.get("forced").and_then(Value::as_bool).unwrap_or(false),
         invalid: raw.get("invalid").and_then(Value::as_bool).unwrap_or(false),
+        current_version: text(raw, "currentVersion"),
+        latest_version: text(raw, "latestVersion"),
+        change_label: text(raw, "changeLabel"),
     }
 }
 
@@ -288,6 +300,9 @@ mod tests {
                 retry_at: None,
                 forced: false,
                 invalid: false,
+                current_version: None,
+                latest_version: None,
+                change_label: None,
             },
             Item {
                 id: "1".into(),
@@ -310,6 +325,9 @@ mod tests {
                     retry_at: None,
                     forced: false,
                     invalid: false,
+                    current_version: None,
+                    latest_version: None,
+                    change_label: None,
                 }
             },
         ];
@@ -347,5 +365,29 @@ mod tests {
         assert!(parsed.forced);
         // 秒级时间戳自动升为毫秒
         assert_eq!(parsed.expires_before, Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn item_maps_version_fields() {
+        let raw = json!({
+            "provider": "update",
+            "status": "refreshed",
+            "currentVersion": "1.0.80",
+            "latestVersion": "1.0.81",
+            "changeLabel": "发现新版本",
+        });
+        let parsed = item(&raw, 0, &HashMap::new());
+        assert_eq!(parsed.current_version.as_deref(), Some("1.0.80"));
+        assert_eq!(parsed.latest_version.as_deref(), Some("1.0.81"));
+        assert_eq!(parsed.change_label.as_deref(), Some("发现新版本"));
+        // 缺省字段不进序列化（skip_serializing_if）
+        let empty = item(
+            &json!({ "provider": "p", "status": "skipped" }),
+            0,
+            &HashMap::new(),
+        );
+        let encoded = serde_json::to_value(&empty).unwrap();
+        assert!(encoded.get("currentVersion").is_none());
+        assert!(encoded.get("latestVersion").is_none());
     }
 }

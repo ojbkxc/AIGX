@@ -465,20 +465,38 @@ impl UpdateManager {
         self.check_with_mode(app, false).await
     }
 
+    /// 认领一次版本检查（**同步**，对齐 A2A `claim_check`）。
+    ///
+    /// 定时任务的间隔就是排期口径（手动触发也按同一间隔顺延，避免「刚点完
+    /// 又立刻被定时那轮再查一次」）。`ManualBackoff::Bypass`：手动入口越过
+    /// 失败冷却，但不越过在途占位（由调用方处理 `Deferred` 等待）。
+    pub(crate) fn claim_check(
+        &self,
+        app: &crate::config::AppConfig,
+        manual: bool,
+    ) -> Result<crate::scheduled_tasks::task_state::Claim, String> {
+        use crate::scheduled_tasks::task_state::{self, ManualBackoff};
+        let interval = app.scheduled_tasks.update_check.interval.max(1) * 60_000;
+        task_state::claim(
+            &check_key(&app.update),
+            interval,
+            manual,
+            ManualBackoff::Bypass,
+            0,
+        )
+    }
+
     async fn check_with_mode(
         &self,
         app: &crate::config::AppConfig,
         manual: bool,
     ) -> Result<Value, String> {
-        use crate::scheduled_tasks::task_state::{self, Claim, ManualBackoff};
+        use crate::scheduled_tasks::task_state::{self, Claim};
 
         let config = &app.update;
         let key = check_key(config);
-        // 定时任务的间隔就是排期口径（手动触发也按同一间隔顺延，避免「刚点完
-        // 又立刻被定时那轮再查一次」）。
-        let interval = app.scheduled_tasks.update_check.interval.max(1) * 60_000;
         let started = now_ms();
-        let guard = match task_state::claim(&key, interval, manual, ManualBackoff::Bypass, 0)? {
+        let guard = match self.claim_check(app, manual)? {
             Claim::Acquired(guard) => guard,
             Claim::Deferred(mut state) => {
                 // 已有一次在跑（另一个入口撞车，或另一进程）：等它的结果，
@@ -500,8 +518,60 @@ impl UpdateManager {
                 return Err(state.waiting_message());
             }
         };
+        // 维护记录：与手动/定时无关，只要真打了一轮就留一条轮次（后端维护页
+        // 与「软件版本检查」任务的最近结果同源）。记录失败绝不影响检查结果。
+        let recorder = self.check_recorder(manual);
+        self.run_claimed_check(app, guard, recorder).await
+    }
+
+    /// 为本轮检查建维护记录（失败返回 None —— 检查照常进行）。
+    ///
+    /// 去重（最小衔接点）：`scheduled_tasks`/管理面「立即执行」的软件版本检查
+    /// 会先经 `maintenance::execute(Request::full(TASK_UPDATE_CHECK, ..))` 建一条
+    /// 运行中的记录，再调用本管理器并在此后 `finish` 它。发现该任务已有运行中
+    /// 记录时，这里不再重复建一条，避免同一次检查落两条维护记录；直接点
+    /// `/api/update/check`（不经维护层）时没有在跑记录，则由本管理器自己写。
+    fn check_recorder(&self, manual: bool) -> Option<crate::maintenance::storage::Recorder> {
+        if self.update_check_record_running() {
+            return None;
+        }
+        crate::maintenance::storage::Recorder::start(
+            self.store.clone(),
+            crate::scheduled_tasks::TASK_UPDATE_CHECK,
+            if manual { "manual" } else { "automatic" },
+            None,
+        )
+        .ok()
+    }
+
+    /// 维护记录里是否已有一条运行中的 `updateCheck` 轮次（外层维护层持有）。
+    fn update_check_record_running(&self) -> bool {
+        crate::maintenance::storage::latest(&self.store)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get(crate::scheduled_tasks::TASK_UPDATE_CHECK)
+                    .and_then(|run| run.get("status"))
+                    .and_then(Value::as_str)
+                    .map(|status| status == "running")
+            })
+            .unwrap_or(false)
+    }
+
+    /// 执行已认领的一轮检查，并把结果写进维护记录（对齐 A2A
+    /// `run_claimed_check`）。`guard` 由 [`claim_check`](Self::claim_check) 产出。
+    pub(crate) async fn run_claimed_check(
+        &self,
+        app: &crate::config::AppConfig,
+        guard: crate::scheduled_tasks::task_state::RunGuard,
+        recorder: Option<crate::maintenance::storage::Recorder>,
+    ) -> Result<Value, String> {
+        let config = &app.update;
+        let interval = app.scheduled_tasks.update_check.interval.max(1) * 60_000;
+        let started = std::time::Instant::now();
         self.lock().checking = true;
         let outcome = self.fetch_release(config).await;
+        let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
         match outcome {
             Ok(release) => {
                 {
@@ -518,13 +588,39 @@ impl UpdateManager {
                     .map(|item| item.tag.as_str())
                     .unwrap_or("(无)");
                 tracing::info!("update check: current={CURRENT_VERSION} latest={tag}");
+                let has_update = release
+                    .as_ref()
+                    .is_some_and(|info| compare_versions(&info.tag, CURRENT_VERSION) == Some(1));
                 let summary = match release.as_ref() {
-                    Some(info) if compare_versions(&info.tag, CURRENT_VERSION) == Some(1) => {
+                    Some(info) if has_update => {
                         format!("发现新版本 {}（当前 {CURRENT_VERSION}）", info.tag)
                     }
                     _ => "已完成版本检查".to_string(),
                 };
+                let message = match release.as_ref() {
+                    Some(info) if has_update => {
+                        format!("发现新版本 v{}（当前 v{CURRENT_VERSION}）", info.tag)
+                    }
+                    _ => format!("已是最新版本（当前 v{CURRENT_VERSION}）"),
+                };
                 guard.finish(true, summary, None, 0, interval)?;
+                if let Some(recorder) = recorder {
+                    let raw = update_check_raw(
+                        "refreshed",
+                        &message,
+                        release.as_ref().map(|info| info.tag.as_str()),
+                        has_update,
+                        duration_ms,
+                    );
+                    let _ = recorder.finish(
+                        vec![crate::maintenance::types::item(
+                            &raw,
+                            0,
+                            &std::collections::HashMap::new(),
+                        )],
+                        None,
+                    );
+                }
                 Ok(self.status(config))
             }
             Err((message, retry_at)) => {
@@ -544,6 +640,17 @@ impl UpdateManager {
                     retry_at.saturating_mul(1000),
                     interval,
                 )?;
+                if let Some(recorder) = recorder {
+                    let raw = update_check_raw("failed", &message, None, false, duration_ms);
+                    let _ = recorder.finish(
+                        vec![crate::maintenance::types::item(
+                            &raw,
+                            0,
+                            &std::collections::HashMap::new(),
+                        )],
+                        None,
+                    );
+                }
                 Err(message)
             }
         }
@@ -1192,6 +1299,36 @@ pub fn server_bundle_name(version: &str, arch: &str) -> Option<String> {
     Some(format!("AIGX-{version}-server-linux-{arch}.upd"))
 }
 
+/// 版本检查的维护记录明细（对齐 A2A `run_claimed_check` 写入的 raw 形状）。
+///
+/// 键名与 `maintenance::types::item` 的映射一致：`currentVersion` /
+/// `latestVersion` / `changeLabel` 由维护侧映射到 `Item` 的新字段；`status`
+/// 取 `refreshed`（成功）或 `failed`（检查失败），由 `types::status` 汇总。
+fn update_check_raw(
+    status: &str,
+    message: &str,
+    latest: Option<&str>,
+    has_update: bool,
+    duration_ms: i64,
+) -> Value {
+    let change_label = match (status, has_update) {
+        ("refreshed", true) => format!("发现 v{}", latest.unwrap_or("")),
+        ("refreshed", false) => "已是最新".to_string(),
+        _ => "检查失败".to_string(),
+    };
+    json!({
+        "provider": "aigx",
+        "providerLabel": "AIGX 软件",
+        "accountName": "软件版本检查",
+        "status": status,
+        "message": message,
+        "currentVersion": CURRENT_VERSION,
+        "latestVersion": latest,
+        "changeLabel": change_label,
+        "durationMs": duration_ms,
+    })
+}
+
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -1799,6 +1936,30 @@ fn pick_listed_release(payload: &Value, only_prerelease: bool) -> Option<&Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_check_record_shape() {
+        let raw = update_check_raw(
+            "refreshed",
+            "发现新版本 v1.2.4（当前 v1.2.3）",
+            Some("1.2.4"),
+            true,
+            12,
+        );
+        let item = crate::maintenance::types::item(&raw, 0, &std::collections::HashMap::new());
+        assert_eq!(item.status, "refreshed");
+        assert_eq!(item.current_version.as_deref(), Some(CURRENT_VERSION));
+        assert_eq!(item.latest_version.as_deref(), Some("1.2.4"));
+        assert_eq!(item.change_label.as_deref(), Some("发现 v1.2.4"));
+        assert_eq!(item.duration_ms, Some(12));
+
+        // 失败：latestVersion 为空、changeLabel 归一为「检查失败」。
+        let failed = update_check_raw("failed", "boom", None, false, 3);
+        let item = crate::maintenance::types::item(&failed, 0, &std::collections::HashMap::new());
+        assert_eq!(item.status, "failed");
+        assert_eq!(item.latest_version, None);
+        assert_eq!(item.change_label.as_deref(), Some("检查失败"));
+    }
 
     #[test]
     fn version_compare_handles_prerelease() {

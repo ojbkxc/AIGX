@@ -2242,6 +2242,13 @@ export interface ScheduledTaskItem {
   nextRunAt: number | null;
   /** 是否可在后端立即执行（仅 backend 任务为 true） */
   canRun: boolean;
+  /**
+   * beta.7：社区插件检查（pluginCatalog）的排期来源。
+   * `follow` = 跟随「软件检查更新」计划，`custom` = 自定开关/间隔；其它任务缺省。
+   */
+  checkMode?: 'follow' | 'custom';
+  /** beta.7：社区插件检查是否自动升级已启用且已签名的插件。 */
+  autoUpdate?: boolean;
   /** 改配置时后端是否已写盘（PATCH 响应携带；GET 列表没有该字段） */
   saved?: boolean;
 }
@@ -2908,3 +2915,6 @@ export type {
   MaintenanceOverviewView,
   MaintenanceQueryParams,
 } from './a2a';
+
+// 维护任务清单是运行期常量（非类型），单独值导出。
+export { MAINTENANCE_TASKS } from './a2a';

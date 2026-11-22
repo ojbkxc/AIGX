@@ -119,6 +119,12 @@ impl Catalog {
         self.inner.wake(force);
     }
 
+    /// 同步执行一轮刷新并返回（维护任务 / 「检查更新」需要拿到完成后的目录
+    /// 状态时用）。与后台循环共用串行化闸门；force=true 无视 TTL。
+    pub async fn refresh_now(&self, force: bool) {
+        self.inner.refresh_now(force).await;
+    }
+
     /// 目录状态快照（阶段时间戳 / 错误 / 三分类计数）。
     pub async fn status(&self) -> Status {
         self.inner.status().await

@@ -2,9 +2,9 @@
 //
 //! 维护任务管理面（`/api/maintenance*`）。
 //!
-//!   GET  /api/maintenance                        总览：两条维护任务 + 最近一轮 + 记录列表
+//!   GET  /api/maintenance                        总览：维护任务 + 最近一轮 + 记录列表
 //!   GET  /api/maintenance/records/{id}           单轮完整明细
-//!   POST /api/maintenance/run/{task}             立即执行（credentialMaintenance / modelRefresh）
+//!   POST /api/maintenance/run/{task}             立即执行（credentialMaintenance / modelRefresh / updateCheck / pluginCatalog）
 //!   POST /api/maintenance/records/{id}/retry     重试一轮（可选 `{itemId}` 只重试一条失败项）
 //!
 //! 全部管理员鉴权。执行记录落在 `maintenance::storage`；排期由
@@ -37,7 +37,7 @@ pub async fn overview(
     let latest = storage::latest(&state.maintenance.store)
         .map_err(|error| safe_error(StatusCode::INTERNAL_SERVER_ERROR, &error))?;
     let mut tasks = Vec::new();
-    for task_id in [maintenance::CREDENTIAL, maintenance::MODEL] {
+    for task_id in maintenance::ALL_TASKS {
         tasks.push(crate::scheduled_tasks::task_by_id(&state, task_id).await);
     }
     Ok(Json(json!({

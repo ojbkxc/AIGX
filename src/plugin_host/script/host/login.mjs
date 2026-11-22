@@ -7,7 +7,7 @@ import { rpc } from "./wire.mjs"
 import { scope, cleanup, untilCancelled } from "./fetch.mjs"
 import { safeMessage } from "./diagnostics.mjs"
 import { loginNetwork } from "./login-network.mjs"
-import { loginMethods, validateInputs, authorizationPolicy, checkedCallback } from "./login-policy.mjs"
+import { loginMethods, methodFile, validateInputs, authorizationPolicy, checkedCallback } from "./login-policy.mjs"
 import { promptView, keyPrompt } from "./login-prompts.mjs"
 
 const flows = new Map()
@@ -15,18 +15,23 @@ const starting = new Set()
 
 export function methods(provider, locale = "zh-CN") {
   return {
-    methods: loginMethods(provider, locale).map(method => ({
-      methodIndex: method.methodIndex, type: method.type, label: method.label || (method.type === "oauth" ? "OAuth 登录" : "API Key"),
-      prompts: [
+    methods: loginMethods(provider, locale).map(method => {
+      const prompts = [
         ...[keyPrompt(method)].filter(Boolean),
         ...(method.prompts ?? []).map(prompt => promptView(provider, method, prompt)),
-      ],
-      dynamicPrompts: typeof method.ask === "function" || (method.prompts ?? []).some(prompt => typeof prompt.condition === "function"),
-      localOnly: method.localOnly === true, manualCallback: method.manualCallback === true,
-      callbackInput: method.callbackInput || "url", instructions: method.instructions || "",
-      embeddedOnly: method.embeddedOnly === true, desktopOnly: method.desktopOnly === true,
-      browserMode: method.browserMode || (method.type === "oauth" ? "choice" : "none"),
-    })).filter(method => method.type === "oauth" || method.type === "api"),
+      ]
+      const dynamicPrompts = typeof method.ask === "function" || (method.prompts ?? []).some(prompt => typeof prompt.condition === "function")
+      const file = methodFile(method, prompts, dynamicPrompts)
+      return {
+        methodIndex: method.methodIndex, type: method.type, label: method.label || (method.type === "oauth" ? "OAuth 登录" : "API Key"),
+        prompts, ...(file ? { file } : {}),
+        dynamicPrompts,
+        localOnly: method.localOnly === true, manualCallback: method.manualCallback === true,
+        callbackInput: method.callbackInput || "url", instructions: method.instructions || "",
+        embeddedOnly: method.embeddedOnly === true, desktopOnly: method.desktopOnly === true,
+        browserMode: method.browserMode || (method.type === "oauth" ? "choice" : "none"),
+      }
+    }).filter(method => method.type === "oauth" || method.type === "api"),
   }
 }
 
