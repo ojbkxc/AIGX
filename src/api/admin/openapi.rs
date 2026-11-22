@@ -1405,8 +1405,11 @@ fn paths_accounts_network() -> Value {
             "put": op_body("网络层", "替换账号凭证（写操作；enc1 加密落库不落日志）", "credentials 凭证字段")
         },
         "/api/account-sessions": {
-            "get": op("账号池", "列出账号型渠道的账号（凭证/代理脱敏）"),
+            "get": op("账号池", "列出账号型渠道的账号（凭证/代理脱敏；可选筛选 status(csv)/expiry_from/expiry_to/usage_min/usage_max + 服务端分页 limit/offset，响应带 offset/pageSize，total=过滤后全量）"),
             "post": op_body("账号池", "新增账号", "channel + 凭证/代理/优先级/并发/模型")
+        },
+        "/api/account-sessions/ids": {
+            "get": op("账号池", "按筛选条件取账号 id 列表（与 /api/account-sessions 同参；不分页）")
         },
         "/api/account-sessions/usage": {
             "post": op_body("账号池", "手动批量/单账号余额查询（写回快照；有界并发 3）", "id?: string（缺省=全部支持查询的账号）")
@@ -1715,7 +1718,7 @@ fn paths_accounts_network() -> Value {
             "get": op("账号池", "各账号实时并发占用快照（连接数列 2s 轮询）")
         },
         "/api/account-sessions/export": {
-            "get": op("账号池", "导出账号池 JSON 迁移包（含明文凭证，仅管理员；写进响应体不落盘）")
+            "get": op("账号池", "导出账号池 JSON 迁移包（含明文凭证，仅管理员；version 2：{version,exportedAt(ms),customProviders,accounts[camelCase 字段]}；单文件导出不变；写进响应体不落盘）")
         },
         "/api/account-sessions/import/json": {
             "post": op_body("账号池", "从 JSON 迁移包导入账号池（幂等更新）", "导出的迁移包结构")
@@ -2020,6 +2023,7 @@ mod tests {
         };
         add("/api-docs/openapi.json", &["get"]);
         add("/api/account-sessions", &["get", "post"]);
+        add("/api/account-sessions/ids", &["get"]);
         add("/api/account-sessions/batch", &["post"]);
         add("/api/account-sessions/usage", &["post"]);
         add("/api/account-sessions/usage/snapshot", &["get"]);

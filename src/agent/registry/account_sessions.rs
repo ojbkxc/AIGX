@@ -14,7 +14,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
             "只读：列出账号池账号（channel_id/search 过滤）",
             ReadOnly,
             "",
-            &["/api/account-sessions"],
+            &["/api/account-sessions", "/api/account-sessions/ids"],
             || json!({ "type":"object","properties":{ "channel_id":{"type":"string"}, "search":{"type":"string"} }, "required":[] }),
             |s, h, a| {
                 Box::pin(async move {
