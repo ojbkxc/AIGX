@@ -199,6 +199,16 @@ pub struct ManageModel {
     pub provider: String,
     pub provider_label: String,
     pub id: String,
+    /// 逐模型清单来源（对齐 A2A `catalog/view.rs` 的 per-model `source`）：
+    /// - `manual`：管理员通过「自定义模型」手动登记；
+    /// - `remote`：上游目录/发现（`discovered_models`、账号目录缓存）拉回；
+    /// - `builtin`：渠道声明（`models`）或账号白名单等内置配置；
+    /// - `modelsdev`：仅由 models.dev 元数据兜底（无任何承载方声明时）。
+    ///
+    /// 同一 `(provider, model)` 有多路来源时按 `manual > remote > builtin >
+    /// modelsdev` 取最强的一档。
+    #[serde(default)]
+    pub source: String,
     /// 行启用状态（**派生值**，SPEC §2.1）：默认绑定开着，**或**任一条别名开着。
     pub enabled: bool,
     /// 默认绑定（`id → id` 自映射）那颗开关 = `!rules.is_disabled(provider, id)`。
@@ -391,7 +401,7 @@ pub fn build_view(
                     session.provider.as_str()
                 };
                 account_providers.insert(provider.to_string());
-                let models: Vec<String> = if session.models.is_empty() {
+                let (models, source): (Vec<String>, &str) = if session.models.is_empty() {
                     // 白名单为空：先回落该账号的目录缓存（SPEC §3.3，与
                     // collect_available_models **同口径**），仍空才回落渠道声明。
                     let cached = crate::account_session::catalog::cached_model_ids(
@@ -400,12 +410,13 @@ pub fn build_view(
                         &session.id,
                     );
                     if cached.is_empty() {
-                        channel.effective_models().to_vec()
+                        (channel.effective_models().to_vec(), "builtin")
                     } else {
-                        cached
+                        (cached, "remote")
                     }
                 } else {
-                    session.models.clone()
+                    // 账号白名单 = 管理员声明
+                    (session.models.clone(), "builtin")
                 };
                 for model in models {
                     if model.is_empty() {
@@ -414,6 +425,7 @@ pub fn build_view(
                     let row = rows
                         .entry((provider.to_string(), model.clone()))
                         .or_insert_with(|| new_row(provider, &model, metadata, pricing, mapper));
+                    merge_source(&mut row.source, source);
                     row.sources.push(ModelSource {
                         kind: "account".to_string(),
                         channel_id: channel.id.clone(),
@@ -441,6 +453,12 @@ pub fn build_view(
             } else {
                 plugin_provider.as_str()
             };
+            // 渠道声明 = builtin；回落到插件目录 = remote。
+            let source = if channel.effective_models().is_empty() {
+                "remote"
+            } else {
+                "builtin"
+            };
             for model in models {
                 if model.is_empty() {
                     continue;
@@ -448,6 +466,7 @@ pub fn build_view(
                 let row = rows
                     .entry((provider.to_string(), model.clone()))
                     .or_insert_with(|| new_row(provider, &model, metadata, pricing, mapper));
+                merge_source(&mut row.source, source);
                 if !row.sources.iter().any(|s| s.channel_id == channel.id) {
                     row.sources.push(ModelSource {
                         kind: "channel".to_string(),
@@ -464,9 +483,13 @@ pub fn build_view(
             if model.is_empty() {
                 continue;
             }
+            // 声明清单 = builtin；仅经上游发现（discovered）拉回 = remote。
+            let declared = channel.models.iter().any(|m| m.eq_ignore_ascii_case(model));
+            let source = if declared { "builtin" } else { "remote" };
             let row = rows
                 .entry((provider.to_string(), model.clone()))
                 .or_insert_with(|| new_row(provider, model, metadata, pricing, mapper));
+            merge_source(&mut row.source, source);
             // 同一渠道既可能来自 models 也可能来自 discovered_models，
             // effective_models 已去重，这里再按 channel_id 去重来源。
             if !row.sources.iter().any(|s| s.channel_id == channel.id) {
@@ -485,8 +508,10 @@ pub fn build_view(
         if entry.id.is_empty() {
             continue;
         }
-        rows.entry((entry.provider.clone(), entry.id.clone()))
+        let row = rows
+            .entry((entry.provider.clone(), entry.id.clone()))
             .or_insert_with(|| new_row(&entry.provider, &entry.id, metadata, pricing, mapper));
+        merge_source(&mut row.source, "manual");
     }
 
     // 启停状态 + 分组统计
@@ -581,6 +606,10 @@ pub fn build_view(
     }
 
     for ((provider, _id), mut row) in rows {
+        // 兜底：任何承载方都没给出处时，仅能归因到 models.dev 元数据。
+        if row.source.is_empty() {
+            row.source = "modelsdev".to_string();
+        }
         // 行启用 = 默认绑定开着，**或**任一条别名开着（SPEC §2.1 派生语义，
         // 对齐 Agent2API 的 `rowEnabled = bindingsOf(m).some(b => b.enabled)`）。
         let default_enabled = !rules.is_disabled(&provider, &row.id);
@@ -772,6 +801,24 @@ fn compose_mapping_views(
     (mapping_views, dangling)
 }
 
+/// 清单来源强弱（同一模型多路来源时取最强）：`manual > remote > builtin > modelsdev`。
+fn source_rank(source: &str) -> u8 {
+    match source {
+        "manual" => 4,
+        "remote" => 3,
+        "builtin" => 2,
+        "modelsdev" => 1,
+        _ => 0,
+    }
+}
+
+/// 合并一路来源到行上：只升级不降级（空/未知值不覆盖已定来源）。
+fn merge_source(slot: &mut String, candidate: &str) {
+    if source_rank(candidate) > source_rank(slot) {
+        *slot = candidate.to_string();
+    }
+}
+
 fn new_row(
     provider: &str,
     model: &str,
@@ -828,6 +875,7 @@ fn new_row(
         provider: provider.to_string(),
         provider_label: provider_label(provider),
         id: model.to_string(),
+        source: String::new(),
         enabled: true,
         default_enabled: true,
         sources: Vec::new(),
@@ -941,6 +989,7 @@ mod tests {
             provider: provider.to_string(),
             provider_label: provider.to_string(),
             id: id.to_string(),
+            source: String::new(),
             enabled: default_enabled,
             default_enabled,
             sources: Vec::new(),
@@ -1184,6 +1233,70 @@ mod tests {
         );
         assert!(view.models.is_empty());
         assert!(view.providers.is_empty());
+    }
+
+    /// 逐模型清单来源 `source` 推导：声明=builtin、发现=remote、自定义登记=manual。
+    ///
+    /// 同一 `(provider, model)` 多路来源时按 `manual > remote > builtin` 取最强。
+    #[test]
+    fn per_model_source_derives_builtin_remote_manual() {
+        let declared: Channel = serde_json::from_value(serde_json::json!({
+            "id": "ch-src-declared",
+            "name": "src-declared",
+            "channel_type": "openai_compatible",
+            "base_url": "https://example.com/v1",
+            "status": "enabled",
+            "models": ["declared-model"],
+        }))
+        .unwrap();
+        // 声明清单为空时 `effective_models()` 回落到 discovered_models（remote）。
+        let discovered: Channel = serde_json::from_value(serde_json::json!({
+            "id": "ch-src-discovered",
+            "name": "src-discovered",
+            "channel_type": "openai_compatible",
+            "base_url": "https://example.com/v1",
+            "status": "enabled",
+            "models": [],
+            "discovered_models": ["found-model"],
+        }))
+        .unwrap();
+        let store = temp_store("source-view");
+        let sessions = AccountSessionStore::new(store.clone());
+        let rules = ModelRules::new(store.clone());
+        rules.load().unwrap();
+        let metadata = ModelMetadataRegistry::new(store.clone());
+        let pricing = PricingStore::new(store.clone());
+        let mapper = ModelMapper::new(store);
+        // 管理员自定义登记一个上游未发现的模型（manual 档）。
+        mapper
+            .add_custom_model("openai_compatible", "manual-model")
+            .unwrap();
+
+        let view = build_view(
+            &[declared, discovered],
+            &sessions,
+            &rules,
+            &metadata,
+            &pricing,
+            &mapper,
+        );
+        let by_id = |id: &str| {
+            view.models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("缺少模型 {id}"))
+        };
+        assert_eq!(
+            by_id("declared-model").source,
+            "builtin",
+            "渠道声明 = builtin"
+        );
+        assert_eq!(by_id("found-model").source, "remote", "上游发现 = remote");
+        assert_eq!(
+            by_id("manual-model").source,
+            "manual",
+            "自定义登记 = manual"
+        );
     }
 
     /// 启停规则大小写不敏感（与 A2A `RuleEntry::matches` 同口径）：

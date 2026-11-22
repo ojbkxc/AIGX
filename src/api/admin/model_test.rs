@@ -25,9 +25,10 @@ use std::time::{Duration, Instant};
 use super::super::openai::AppState;
 use super::common::{error_response, verify_admin};
 use crate::account_session::adapter;
-use crate::account_session::model::AccountSession;
+use crate::account_session::model::{AccountSession, CREDENTIAL_KIND_NONE};
 use crate::bridge::{
-    Bridge, BridgeContext, BridgeError, ChatFormat, ChatMessage, Role, UsageStats,
+    Bridge, BridgeContext, BridgeError, ChatFormat, ChatMessage, ResponsesPassthrough, Role,
+    UsageStats,
 };
 use crate::channel::{Channel, ChannelType};
 
@@ -58,6 +59,66 @@ pub struct ModelTestRequest {
     /// 默认 true：同时验证 SSE 链路与首字延迟
     #[serde(default = "default_stream")]
     pub stream: bool,
+    /// 对话协议：`chat_completions`（默认，走该来源原生链路，完全向后兼容）/
+    /// `responses`（OpenAI Responses 透传）/ `anthropic`（按 Anthropic 线格式构造）。
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// 测试出口：`direct` / `pool` / `pool:<id>` / `node:<id>` / 代理 URL；
+    /// 缺省（None/空）= 沿用账号自身代理 / 渠道默认直连。
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// `proxy` 的别名（A2A 桌面端叫「测试节点」）；与 `proxy` 同时给出时 `proxy` 优先。
+    #[serde(default)]
+    pub node: Option<String>,
+}
+
+/// 测试对话协议（A2A `model-test-dialog` 的三选一）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestProtocol {
+    ChatCompletions,
+    Responses,
+    Anthropic,
+}
+
+impl TestProtocol {
+    fn parse(raw: Option<&str>) -> Result<Self, String> {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None | Some("chat_completions") => Ok(Self::ChatCompletions),
+            Some("responses") => Ok(Self::Responses),
+            Some("anthropic") => Ok(Self::Anthropic),
+            Some(other) => Err(format!(
+                "不支持的 protocol「{other}」：仅支持 chat_completions / responses / anthropic"
+            )),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}
+
+/// 把测试出口描述归一为 `proxy_pool::resolve_proxy` 能识别的 spec。
+///
+/// - `direct` / 空 → `None`（直连，不使用任何代理）；
+/// - `pool` → `rotate`（代理池轮询）；
+/// - `pool:<id>` 原样；`node:<id>` → `pool:<id>`（「测试节点」语义）；
+/// - 其余按代理 URL 原样透传。
+fn normalize_proxy_spec(raw: Option<&str>) -> Option<String> {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    if raw.eq_ignore_ascii_case("direct") {
+        return None;
+    }
+    if raw.eq_ignore_ascii_case("pool") {
+        return Some("rotate".to_string());
+    }
+    if let Some(id) = raw.strip_prefix("node:") {
+        return Some(format!("pool:{}", id.trim()));
+    }
+    Some(raw.to_string())
 }
 
 fn default_stream() -> bool {
@@ -72,6 +133,11 @@ struct Picked {
     account_id: Option<String>,
     bridge: Arc<dyn Bridge>,
     upstream_model: String,
+    /// 生效上游地址 / 凭证 / 出口 Client：供 `protocol=anthropic` 时按需
+    /// 重建同一来源的 Anthropic 线格式桥（不改变默认 chat 行为）。
+    base_url: String,
+    secret: String,
+    client: Arc<reqwest::Client>,
 }
 
 /// POST /api/models/test
@@ -91,7 +157,26 @@ pub async fn handle_model_test(
         ));
     }
 
-    let picked = match pick_source(&state, &provider, &model, &body) {
+    // 对话协议：默认 chat_completions = 走来源原生链路（完全向后兼容）。
+    let protocol = match TestProtocol::parse(body.protocol.as_deref()) {
+        Ok(p) => p,
+        Err(message) => return Err(error_response(&message, StatusCode::BAD_REQUEST)),
+    };
+
+    // 测试出口：`proxy` 优先于 `node`；空 = 沿用账号自身代理 / 渠道默认直连。
+    let proxy_raw = body.proxy.as_deref().or(body.node.as_deref());
+    let client_override = match test_client_override(&state, proxy_raw) {
+        Ok(c) => c,
+        Err(message) => {
+            // 出口配置有问题是「结论」而非 500：200 + ok:false，前端原样展示
+            return Ok(Json(json!({
+                "success": true,
+                "data": { "ok": false, "error": message, "model": model, "provider": provider }
+            })));
+        }
+    };
+
+    let picked = match pick_source(&state, &provider, &model, &body, client_override) {
         Ok(p) => p,
         Err(message) => {
             // 没有可用来源也是「结论」：200 + ok:false，前端原样展示
@@ -109,16 +194,17 @@ pub async fn handle_model_test(
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_PROMPT)
         .to_string();
-    let mut messages: Vec<ChatMessage> = Vec::new();
-    if let Some(sys) = body
+    let system_text = body
         .system_prompt
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
+        .map(str::to_string);
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    if let Some(sys) = &system_text {
         messages.push(ChatMessage {
             role: Role::System,
-            content: Some(sys.to_string()),
+            content: Some(sys.clone()),
             content_blocks: None,
             name: None,
             tool_call_id: None,
@@ -128,7 +214,7 @@ pub async fn handle_model_test(
     }
     messages.push(ChatMessage {
         role: Role::User,
-        content: Some(prompt),
+        content: Some(prompt.clone()),
         content_blocks: None,
         name: None,
         tool_call_id: None,
@@ -161,11 +247,34 @@ pub async fn handle_model_test(
     let ctx = BridgeContext::new(uuid::Uuid::new_v4().to_string(), model.clone());
 
     let started = Instant::now();
-    let outcome = tokio::time::timeout(
-        TEST_TIMEOUT,
-        execute(picked.bridge.clone(), req, ctx, body.stream),
-    )
-    .await;
+    let outcome = match protocol {
+        TestProtocol::ChatCompletions => {
+            tokio::time::timeout(
+                TEST_TIMEOUT,
+                execute(picked.bridge.clone(), req, ctx, body.stream),
+            )
+            .await
+        }
+        TestProtocol::Anthropic => {
+            // 同一来源、按 Anthropic 线格式重建桥（不改变默认 chat 行为）。
+            let bridge = crate::bridge::anthropic::make_bridge(
+                &picked.base_url,
+                &picked.secret,
+                picked.client.as_ref(),
+            );
+            tokio::time::timeout(TEST_TIMEOUT, execute(bridge, req, ctx, body.stream)).await
+        }
+        TestProtocol::Responses => {
+            // Responses 透传：构造 Responses 形状请求体，非流式解析回包。
+            let payload =
+                responses_request(&picked.upstream_model, &prompt, system_text.as_deref());
+            tokio::time::timeout(
+                TEST_TIMEOUT,
+                execute_responses(picked.bridge.clone(), payload, ctx),
+            )
+            .await
+        }
+    };
     let duration_ms = started.elapsed().as_millis() as u64;
 
     let source_json = json!({
@@ -206,6 +315,7 @@ pub async fn handle_model_test(
                 "completion_tokens": out.usage.completion_tokens,
                 "total_tokens": out.usage.total_tokens,
                 "stream": body.stream,
+                "protocol": protocol.as_str(),
                 "source": source_json,
             })
         }
@@ -231,6 +341,7 @@ pub async fn handle_model_test(
                 "status": status,
                 "duration_ms": duration_ms,
                 "stream": body.stream,
+                "protocol": protocol.as_str(),
                 "source": source_json,
             })
         }
@@ -252,6 +363,7 @@ pub async fn handle_model_test(
                 "status": 504,
                 "duration_ms": duration_ms,
                 "stream": body.stream,
+                "protocol": protocol.as_str(),
                 "source": source_json,
             })
         }
@@ -323,12 +435,117 @@ async fn execute(
     })
 }
 
+/// 解析测试出口并构造出口 Client。
+///
+/// - 空 → `Ok(None)`：沿用账号自身代理 / 渠道默认直连；
+/// - `direct` → 强制直连（显式无代理）；
+/// - `pool` / `pool:<id>` / `node:<id>` / 代理 URL → 经 `proxy_pool` 解析后建 client。
+fn test_client_override(
+    state: &AppState,
+    raw: Option<&str>,
+) -> Result<Option<Arc<reqwest::Client>>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.eq_ignore_ascii_case("direct") {
+        return state
+            .account_sessions
+            .egress()
+            .client(None)
+            .map(Some)
+            .map_err(|e| format!("测试出口（直连）构造失败：{e}"));
+    }
+    let spec =
+        normalize_proxy_spec(Some(raw)).expect("非空 raw 归一后必为 Some（direct 已在上方返回）");
+    let resolved = crate::proxy_pool::resolve_proxy(Some(&spec), "model_test")
+        .map_err(|e| format!("测试出口解析失败：{e}"))?;
+    state
+        .account_sessions
+        .egress()
+        .client(resolved.as_deref())
+        .map(Some)
+        .map_err(|e| format!("测试出口构造失败：{e}"))
+}
+
+/// 构造 OpenAI Responses 形状的最小请求体（system → `instructions`）。
+fn responses_request(model: &str, prompt: &str, instructions: Option<&str>) -> Value {
+    let mut body = json!({
+        "model": model,
+        "input": prompt,
+        "stream": false,
+    });
+    if let Some(sys) = instructions {
+        body["instructions"] = Value::String(sys.to_string());
+    }
+    body
+}
+
+/// Responses 透传执行：非流式 JSON 回包 → 统一 [`TestOutcome`]。
+async fn execute_responses(
+    bridge: Arc<dyn Bridge>,
+    payload: Value,
+    ctx: BridgeContext,
+) -> Result<TestOutcome, BridgeError> {
+    let started = Instant::now();
+    match bridge.responses_passthrough(&payload, false, &ctx).await? {
+        ResponsesPassthrough::Json(value) => Ok(responses_outcome(value, started.elapsed())),
+        ResponsesPassthrough::Stream(_) => Err(BridgeError::Config(
+            "responses 测试不支持流式回包（已请求非流式）".to_string(),
+        )),
+    }
+}
+
+/// 从 Responses JSON 回包提取回复 / 用量 / 上游模型名。
+fn responses_outcome(value: Value, elapsed: Duration) -> TestOutcome {
+    let reply = value
+        .get("output_text")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            let mut text = String::new();
+            if let Some(items) = value.get("output").and_then(Value::as_array) {
+                for item in items {
+                    if let Some(content) = item.get("content").and_then(Value::as_array) {
+                        for part in content {
+                            if let Some(t) = part.get("text").and_then(Value::as_str) {
+                                text.push_str(t);
+                            }
+                        }
+                    }
+                }
+            }
+            (!text.is_empty()).then_some(text)
+        })
+        .unwrap_or_default();
+    let mut usage = UsageStats::default();
+    if let Some(u) = value.get("usage") {
+        usage.prompt_tokens = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+        usage.completion_tokens = u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+        usage.total_tokens = u
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(usage.prompt_tokens + usage.completion_tokens);
+    }
+    TestOutcome {
+        reply,
+        reasoning: String::new(),
+        upstream_model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        usage,
+        ttfb_ms: Some(elapsed.as_millis() as u64),
+    }
+}
+
 /// 选来源：钉账号 > 钉渠道 > 自动（账号优先，其次渠道）。
 fn pick_source(
     state: &AppState,
     provider: &str,
     model: &str,
     body: &ModelTestRequest,
+    client_override: Option<Arc<reqwest::Client>>,
 ) -> Result<Picked, String> {
     // ① 钉账号
     if let Some(id) = body
@@ -341,7 +558,7 @@ fn pick_source(
             .account_sessions
             .get(id)
             .ok_or_else(|| format!("账号 {id} 不存在"))?;
-        return pick_account(state, &session, provider, model);
+        return pick_account(state, &session, provider, model, client_override);
     }
 
     // ② 钉渠道
@@ -365,9 +582,9 @@ fn pick_source(
             let Some(session) = session else {
                 return Err(format!("渠道「{}」下没有可用账号", channel.name));
             };
-            return pick_account(state, &session, provider, model);
+            return pick_account(state, &session, provider, model, client_override);
         }
-        return pick_channel(&channel, provider, model);
+        return pick_channel(&channel, provider, model, client_override);
     }
 
     // ③ 自动：先账号后渠道（与视图行 sources 的展示序一致）
@@ -377,7 +594,7 @@ fn pick_source(
         .into_iter()
         .find(|s| account_matches(s, provider, model));
     if let Some(session) = session {
-        return pick_account(state, &session, provider, model);
+        return pick_account(state, &session, provider, model, client_override);
     }
     let channel = state
         .channel_store
@@ -385,7 +602,7 @@ fn pick_source(
         .into_iter()
         .find(|ch| channel_matches(ch, provider, model));
     if let Some(channel) = channel {
-        return pick_channel(&channel, provider, model);
+        return pick_channel(&channel, provider, model, client_override);
     }
     Err("该模型在此提供商下没有可用来源（启用账号或启用渠道）".to_string())
 }
@@ -426,6 +643,7 @@ fn pick_account(
     session: &AccountSession,
     provider: &str,
     model: &str,
+    client_override: Option<Arc<reqwest::Client>>,
 ) -> Result<Picked, String> {
     if !account_matches(session, provider, model) {
         return Err(format!(
@@ -437,8 +655,24 @@ fn pick_account(
             }
         ));
     }
-    let bridge = adapter::build_bridge(session, &state.account_sessions)
-        .map_err(|e| format!("账号链路构造失败：{e}"))?;
+    let base_url =
+        adapter::effective_base_url(session).map_err(|e| format!("账号链路构造失败：{e}"))?;
+    let secret = if session.credential.kind == CREDENTIAL_KIND_NONE {
+        String::new()
+    } else {
+        session.credential.secret_plain()
+    };
+    // 显式出口覆盖优先；缺省沿用账号自身代理。
+    let client = match &client_override {
+        Some(c) => c.clone(),
+        None => state
+            .account_sessions
+            .client_for(session)
+            .map_err(|e| format!("账号出口构造失败：{e}"))?,
+    };
+    let bridge =
+        adapter::build_bridge_with_client(session, &state.account_sessions, client_override)
+            .map_err(|e| format!("账号链路构造失败：{e}"))?;
     Ok(Picked {
         kind: "account",
         channel_id: session.channel_id.clone(),
@@ -451,10 +685,18 @@ fn pick_account(
         bridge,
         // 账号白名单里的名字即上游真名（选号层不做渠道映射）
         upstream_model: model.to_string(),
+        base_url,
+        secret,
+        client,
     })
 }
 
-fn pick_channel(channel: &Channel, provider: &str, model: &str) -> Result<Picked, String> {
+fn pick_channel(
+    channel: &Channel,
+    provider: &str,
+    model: &str,
+    client_override: Option<Arc<reqwest::Client>>,
+) -> Result<Picked, String> {
     if !channel_matches(channel, provider, model) {
         return Err(format!(
             "渠道「{}」不可用于该模型（未启用 / 类型不符 / 模型不在白名单）",
@@ -462,30 +704,37 @@ fn pick_channel(channel: &Channel, provider: &str, model: &str) -> Result<Picked
         ));
     }
     let key = channel.decode_api_key();
-    let http = reqwest::Client::builder()
-        // 强制 HTTP/1.1：与共享 client 同口径（防 h2 PING 帧掩蔽读超时）
-        .http1_only()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let http: Arc<reqwest::Client> = match client_override {
+        Some(client) => client,
+        None => Arc::new(
+            reqwest::Client::builder()
+                // 强制 HTTP/1.1：与共享 client 同口径（防 h2 PING 帧掩蔽读超时）
+                .http1_only()
+                .timeout(TEST_TIMEOUT)
+                .build()
+                .map_err(|e| format!("HTTP client error: {e}"))?,
+        ),
+    };
     let bridge: Arc<dyn Bridge> = match channel.channel_type {
         ChannelType::OpenaiCompatible => crate::bridge::openai::make_bridge_with_quirks(
             &channel.base_url,
             &key,
-            &http,
+            http.as_ref(),
             channel.quirks.clone(),
         ),
         ChannelType::Anthropic => crate::bridge::anthropic::make_bridge_with_quirks(
             &channel.base_url,
             &key,
-            &http,
+            http.as_ref(),
             channel.quirks.clone(),
         ),
-        ChannelType::Gemini => crate::bridge::gemini::make_bridge(&channel.base_url, &key, &http),
+        ChannelType::Gemini => {
+            crate::bridge::gemini::make_bridge(&channel.base_url, &key, http.as_ref())
+        }
         ChannelType::Zai => crate::bridge::zai::make_bridge_with_quirks(
             &channel.base_url,
             &key,
-            &http,
+            http.as_ref(),
             channel.quirks.clone(),
         ),
         // Cloudflare 走 quota_monitor 专项；Account 已在上方分流到账号
@@ -502,6 +751,9 @@ fn pick_channel(channel: &Channel, provider: &str, model: &str) -> Result<Picked
         account_id: None,
         bridge,
         upstream_model,
+        base_url: channel.base_url.clone(),
+        secret: key,
+        client: http,
     })
 }
 
@@ -567,5 +819,87 @@ fn write_test_log(
     if ok {
         crate::metrics::global().record_tokens(model, "prompt", usage.prompt_tokens);
         crate::metrics::global().record_tokens(model, "completion", usage.completion_tokens);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_parse_defaults_to_chat_completions() {
+        assert_eq!(
+            TestProtocol::parse(None).unwrap(),
+            TestProtocol::ChatCompletions
+        );
+        assert_eq!(
+            TestProtocol::parse(Some("")).unwrap(),
+            TestProtocol::ChatCompletions
+        );
+        assert_eq!(
+            TestProtocol::parse(Some("chat_completions")).unwrap(),
+            TestProtocol::ChatCompletions
+        );
+        assert_eq!(
+            TestProtocol::parse(Some("responses")).unwrap(),
+            TestProtocol::Responses
+        );
+        assert_eq!(
+            TestProtocol::parse(Some("anthropic")).unwrap(),
+            TestProtocol::Anthropic
+        );
+        assert!(TestProtocol::parse(Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn proxy_spec_normalization() {
+        assert_eq!(normalize_proxy_spec(None), None);
+        assert_eq!(normalize_proxy_spec(Some("  ")), None);
+        assert_eq!(normalize_proxy_spec(Some("direct")), None);
+        assert_eq!(
+            normalize_proxy_spec(Some("pool")),
+            Some("rotate".to_string())
+        );
+        assert_eq!(
+            normalize_proxy_spec(Some("pool:abc")),
+            Some("pool:abc".to_string())
+        );
+        assert_eq!(
+            normalize_proxy_spec(Some("node:n1")),
+            Some("pool:n1".to_string())
+        );
+        assert_eq!(
+            normalize_proxy_spec(Some("http://127.0.0.1:8080")),
+            Some("http://127.0.0.1:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn responses_request_shape() {
+        let body = responses_request("gpt-5", "hi", Some("be nice"));
+        assert_eq!(body["model"], "gpt-5");
+        assert_eq!(body["input"], "hi");
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["instructions"], "be nice");
+        let no_sys = responses_request("m", "p", None);
+        assert!(no_sys.get("instructions").is_none());
+    }
+
+    #[test]
+    fn responses_outcome_extracts_text_and_usage() {
+        let v = serde_json::json!({
+            "model": "gpt-5",
+            "output": [{ "content": [
+                { "type": "output_text", "text": "hello " },
+                { "type": "output_text", "text": "world" }
+            ] }],
+            "usage": { "input_tokens": 3, "output_tokens": 5, "total_tokens": 8 }
+        });
+        let out = responses_outcome(v, std::time::Duration::from_millis(12));
+        assert_eq!(out.reply, "hello world");
+        assert_eq!(out.upstream_model, "gpt-5");
+        assert_eq!(out.usage.prompt_tokens, 3);
+        assert_eq!(out.usage.completion_tokens, 5);
+        assert_eq!(out.usage.total_tokens, 8);
     }
 }

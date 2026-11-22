@@ -72,6 +72,16 @@ pub fn build_bridge(
     session: &AccountSession,
     sessions: &AccountSessionStore,
 ) -> Result<Arc<dyn Bridge>, BridgeError> {
+    build_bridge_with_client(session, sessions, None)
+}
+
+/// 与 [`build_bridge`] 相同，但可用 `client_override` 强制出口 Client
+/// （模型测试临时指定「直连 / 代理池 / 指定节点」时用；`None` = 沿用账号代理）。
+pub fn build_bridge_with_client(
+    session: &AccountSession,
+    sessions: &AccountSessionStore,
+    client_override: Option<Arc<reqwest::Client>>,
+) -> Result<Arc<dyn Bridge>, BridgeError> {
     let spec = registry::find(&session.provider).ok_or_else(|| {
         BridgeError::Config(format!("unknown account provider '{}'", session.provider))
     })?;
@@ -82,7 +92,10 @@ pub fn build_bridge(
     } else {
         session.credential.secret_plain()
     };
-    let client = sessions.client_for(session)?;
+    let client = match client_override {
+        Some(client) => client,
+        None => sessions.client_for(session)?,
+    };
     let bridge: Arc<dyn Bridge> = match spec.protocol {
         Protocol::Openai => {
             // 登录态型供应商：Cookie / JWT + 专用请求头（不走 Bearer API Key）

@@ -377,13 +377,13 @@ fn paths_pricing() -> Value {
 fn paths_model_manage() -> Value {
     json!({
         "/api/models/manage": {
-            "get": op("模型管理", "统一模型管理视图（渠道模型 + 账号池模型聚合，含启停/来源/定价/别名）")
+            "get": op("模型管理", "统一模型管理视图（渠道模型 + 账号池模型聚合，含启停/来源/定价/别名；逐模型 source=manual/remote/builtin/modelsdev）")
         },
         "/api/models/state": {
             "post": op_body("模型管理", "按 (provider, model) 启停模型", "provider: string, id: string, enabled: bool")
         },
         "/api/models/test": {
-            "post": op_body("模型管理", "模型测试：钉 provider+model（可选 account_id/channel_id）走真实链路发最小对话，返回用时/首字/用量/回复/错误", "provider/model: string, account_id?/channel_id?/prompt?/system_prompt?/reasoning_effort?/stream?")
+            "post": op_body("模型管理", "模型测试：钉 provider+model（可选 account_id/channel_id）走真实链路发最小对话，返回用时/首字/用量/回复/错误；protocol 选 chat_completions/responses/anthropic，proxy/node 临时指定出口", "provider/model: string, account_id?/channel_id?/prompt?/system_prompt?/reasoning_effort?/stream?/protocol?/proxy?/node?")
         },
         "/api/models/price": {
             "post": op_body("模型管理", "写入模型定价与倍率", "model: string, input_price/output_price/cache_price/price_type/model_ratio")

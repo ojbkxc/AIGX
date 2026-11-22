@@ -42,8 +42,8 @@ AIGX 列定义：`MM:80-135`（`COL_ORDER` `MM:83`，`MM_COL_DEFS` `MM:125`；ch
 |---|---|---|---|---|---|
 | 选择列 check | `ISL/models-panel-state.ts:208`；渲染 `ISL/models-page.tsx:728-734` | `MM:83,102`；行勾选 `MM:1417-1427`、表头全选 `MM:1733-1739` | 无（列名/顺序一致，居中） | — | — |
 | 模型列 | `ISL/models-page.tsx:736-747`：`id`（点击复制）+ `name` 副行（`name!==id` 时） | `MM:1443-1447`：`id` + 副行 `provider_label · 上下文` | A2A 副行是**模型名**；AIGX 副行是**来源家名+上下文**，且 `ManageModel` 无 `name` 字段（`MModel:196-243`） | AIGX 增补 `name` 字段并在副行/悬浮展示；是否保留 provider 副行由信息架构定 | P2 |
-| **倍率列 rate ↔ 定价列 price** | `ISL/models-panel-state.ts:210`（“倍率”）；取值/格式化 `ISL/models-page.tsx:166-184,749-753`：取 `model.credits`（`x0.7 credits` 文本），只读展示 + `rate-asc/desc` 排序键 | `MM:104`（“定价”）；渲染 `MM:1449-1482`：`price`（token/次/免费）+ `model_ratio`（Nx）；点击开定价弹窗 | **量纲不同**：A2A `credits`=上游倍率（只读、排序），AIGX 换成运营定价（可编辑）。**AIGX 数据模型无 `credits`**（`MModel:196-243`；A2A `SRV/core/providers/catalog/view.rs:207-231` 有 `credits`） | 二选一：①AIGX 后端 catalog 透传 `credits` 并在“定价”列并存“上游倍率”；②确认 AIGX 以定价替代倍率属有意分叉，记录为设计差异 | **P1** |
-| **来源列 source** | `ISL/models-page.tsx:597-611`：按后端 `source` 分 `manual`/`remote`/`builtin` 三态色点（清单**来源**） | `MM:1483-1507`：渲染 `sources[]`（`account`/`channel` 承载方 tag + `models.dev` 标），语义是**承载方** | **语义不同**：A2A=“清单从哪来”，AIGX=“谁承载”。AIGX 模型行不展示 `manual/remote/builtin` 清单来源（该信息只在 `ProviderGroup.source`，`MModel:270-275`） | 确认 AIGX 需要展示的是承载方（保留），还是同时补“清单来源”三态点；若补，需 `ManageModel` 增加 model 级 `source` | **P1** |
+| **倍率列 rate ↔ 定价列 price** | `ISL/models-panel-state.ts:210`（“倍率”）；取值/格式化 `ISL/models-page.tsx:166-184,749-753`：取 `model.credits`（`x0.7 credits` 文本），只读展示 + `rate-asc/desc` 排序键 | `MM:104`（“定价”）；渲染 `MM:1449-1482`：`price`（token/次/免费）+ `model_ratio`（Nx）；点击开定价弹窗 | **量纲不同**：A2A `credits`=上游倍率（只读、排序），AIGX 换成运营定价（可编辑）。**AIGX 数据模型无 `credits`**（`MModel:196-243`；A2A `SRV/core/providers/catalog/view.rs:207-231` 有 `credits`） | **有意分叉，不实现**：AIGX 有独立定价子系统（token/次/倍率），`credits` 不新增。 | **P1（已定）** |
+| **来源列 source** | `ISL/models-page.tsx:597-611`：按后端 `source` 分 `manual`/`remote`/`builtin` 三态色点（清单**来源**） | `MM:1483-1507`：渲染 `sources[]`（`account`/`channel` 承载方 tag + `models.dev` 标），语义是**承载方** | **语义不同**：A2A=“清单从哪来”，AIGX=“谁承载”。AIGX 模型行不展示 `manual/remote/builtin` 清单来源（该信息只在 `ProviderGroup.source`，`MModel:270-275`） | **后端已实现（#54）**：`ManageModel.source` 补 per-model 清单来源（manual/remote/builtin/modelsdev）；前端消费待接 | **P1** |
 | **上下文/输出列 budget** | `ISL/models-panel-state.ts:215`；渲染 `ISL/models-page.tsx:633-654`：`maxInputTokens / maxOutputTokens` 两数并列，标 models.dev 补齐（虚线）与“已覆盖上游值”标记 | 无独立列；上下文只以**一个数**进 caps 列（`MM:1541-1547` 仅 `row.context_length`） | A2A 分显**输入+输出 token**，AIGX 只显示输入上下文、**无输出 token 展示**；且列被合并进 caps | 增加“上下文/输出”列（或 caps 列内补输出 token + models.dev/已覆盖标记）；`capability_flags` 已含两键（`MModel:217-218`），只需前端展示 | **P1** |
 | 能力列 caps（徽标） | `ISL/models-page.tsx:674-700`：4 键徽标（工具/图片/视频/思考）+ 覆盖标记；键集 `ISL/model-capability.ts:40-51` | `MM:142-148`（`CAP_DOTS` 5 个：工具/图像/视频/音频/思考）；渲染 `MM:1508-1562`，含三态圆点 + models.dev 内侧描边 + 上下文 + 两个编辑入口 | AIGX 多 1 个 **audio** 圆点（11 行/`MM:146`），A2A 无 audio 键；两者三态判定语义一致 | 若要对齐：确认 audio 是否为 AIGX 扩展；`capability_flags` 六键是否含 audio 需核对 `MModel:211-218` 与后端 KEYS | P2 |
 | 能力来源三档（upstream/modelsdev/user）展示 | `ISL/models-page.tsx:674-700` 用 `capSources`（`view.rs:214-219`），cells 区单列来源三档 | 后端已发 `cap_sources`（`MModel:211-214`），但 caps 列只读 `row.capabilities`（`MM:1518`），**未消费 `cap_sources`** | 数据已具备、前端未用：AIGX 看不到“上游实测/社区补齐/用户改”可信度 | caps 列/悬浮按 `cap_sources` 分档上色（与 A2A 同口径） | **P1** |
@@ -144,8 +144,8 @@ AIGX：`MTD:66-78,128-152,221-294`（系统/用户提示词 + 思考等级 + 流
 | 系统/用户提示词 | `:9-11` | `MTD:221-245` | 等价 | — | — |
 | 思考等级 | `:71-99` | `MTD:246-260` | 等价 | — | — |
 | 流式 | `:76` | `MTD:262-265` | 等价 | — | — |
-| **对话协议 protocol** | `:9-11,77-78`（chat_completions/responses/anthropic） | 无 | AIGX 测试无法选协议分支 | 增加 `protocol` 选择并透传到 `/api/models/test`（后端需支持） | **P1** |
-| **测试节点 proxy** | `:79-80`（跟随账号/direct/pool:<id>） | 无 | AIGX 测试无法临时指定出网节点 | 增加节点选择（或等后端支持后接） | **P1** |
+| **对话协议 protocol** | `:9-11,77-78`（chat_completions/responses/anthropic） | 无 | AIGX 测试无法选协议分支 | **后端已实现（#54）**：`/api/models/test` 接受 `protocol`，默认 chat_completions 兼容 | **P1** |
+| **测试节点 proxy** | `:79-80`（跟随账号/direct/pool:<id>） | 无 | AIGX 测试无法临时指定出网节点 | **后端已实现（#54）**：`/api/models/test` 接受 `proxy`/`node` | **P1** |
 | 测试账号选择 | 账号多选（每账号一条请求） | 来源多选（账号/渠道，每来源一条） | AIGX 多“渠道”维度 | 等价增强（AIGX 更宽） | — |
 
 ---
@@ -181,7 +181,7 @@ AIGX `GET /api/models/manage` → `ManageView`（`MB:93-153`；结构 `MModel:27
 |---|---|---|---|---|---|
 | **`mappings` 形状** | 数组（每项含 `dangling/carried/provider`）`view.rs:174-247` | `mappings` 是 **HashMap<String,String>**（仅全局），逐条在 `mapping_entries[]`，悬空在 `dangling[]`（`MModel:283-289`） | **形状不同**：A2A 单数组带标记，AIGX 三份（map + entries + dangling） | 前端如按 A2A 单数组消费会漏 provider 级/悬空条目；建议统一为单数组（保留旧 `mappings` map 兼容） | **P1** |
 | **悬空映射字段名** | `mappings[].dangling`（`view.rs:246`） | 后端字段 `dangling`（`MModel:289`）；前端类型/消费却是 `dangling_mappings`（`TYPES:789`，`MM:1377`） | **字段名不一致**：前端读 `dangling_mappings`，后端发 `dangling` → 前端只能回退自行推断（`MM:1385-1388`），可能读不到后端事实 | 统一字段名（后端补 `dangling_mappings` 或前端改读 `dangling`），并覆盖 `mapping_entries` 类型 | **P1** |
-| per-model `credits` | `view.rs:208` | 无（`MModel:196-243`） | AIGX 缺字段（同 §2 倍率） | 随 §2 决策补数据 | **P1** |
+| per-model `credits` | `view.rs:208` | 无（`MModel:196-243`） | **有意分叉，不实现**（AIGX 独立定价子系统；§2 倍率决策） | **P1（已定）** |
 | per-model `name` | `view.rs:208` | 无 | AIGX 缺字段 | 随 §2 模型列补 | P2 |
 | per-model `reasoningLevels/reasoningDefaultLevel` | `view.rs:225-226` | 无（AIGX 用全局候选 + meta override `MM:294-308`） | AIGX 无逐模型思考档位候选 | 若需逐模型候选，后端 view 透传；否则记录 | P2 |
 | per-model `capSources` | `view.rs:219` | 有 `cap_sources`（`MModel:211-214`）但前端未用（§2） | 数据具备、未展示 | 前端消费 | **P1** |
@@ -220,13 +220,13 @@ AIGX `GET /api/models/manage` → `ManageView`（`MB:93-153`；结构 `MModel:27
 
 ### P1（8 项，字段/行为级，建议随 #51 实施）
 
-1. **倍率 `credits` 缺失**：AIGX 以“定价”替代，数据模型无 `credits`（§2、§6.1）。
+1. **倍率 `credits` 缺失**：**有意分叉，不实现**——AIGX 有独立定价子系统；A2A 的只读 `credits` 不新增（§2、§6.1）。
 2. **上下文/输出列**：A2A 分显输入+输出 token 及 models.dev/已覆盖标记，AIGX 仅显示输入上下文（§2）。
-3. **来源列语义**：A2A=清单来源三态（manual/remote/builtin），AIGX=承载方；AIGX 模型行缺清单来源（§2）。
+3. **来源列语义**：A2A=清单来源三态（manual/remote/builtin），AIGX=承载方；AIGX 模型行缺清单来源（§2）。**已实现（#54）**：后端 `ManageModel.source` 追加 `manual/remote/builtin/modelsdev`。
 4. **`capSources` 已发未用**：AIGX 后端 `cap_sources` 具备，前端 caps 列未消费，可信度不可见（§2、§6.1）。
 5. **批量删除语义**：A2A 删模型登记，AIGX 同位置删定价；AIGX 无批量删模型（§3、§4.6）。
-6. **测试弹窗缺 `protocol`**：无法选 chat_completions/responses/anthropic（§4.7）。
-7. **测试弹窗缺 `proxy`（测试节点）**：无法临时指定出网节点（§4.7）。
+6. **测试弹窗缺 `protocol`**：无法选 chat_completions/responses/anthropic（§4.7）。**后端已实现（#54）**：`POST /api/models/test` 接受 `protocol`。
+7. **测试弹窗缺 `proxy`（测试节点）**：无法临时指定出网节点（§4.7）。**后端已实现（#54）**：`POST /api/models/test` 接受 `proxy`/`node`（direct/pool/node）。
 8. **`dangling` 字段名/`mappings` 形状不一致**：后端 `dangling` vs 前端 `dangling_mappings`；AIGX 三份 vs A2A 单数组（§6.1）。
 
 ### P2（12 项，展示/一致性/冗余，可排后）
