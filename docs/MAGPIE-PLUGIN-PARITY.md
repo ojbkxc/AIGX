@@ -358,3 +358,7 @@ python tools/verify_magpie_plugins.py --catalog magpie_catalog.json \
 `--retry-failed`（只重跑 JSONL 里 `ok=false` 的历史失败项）：已支持，可与 `--plan-only`
 组合离线数待重跑项；只想跳过已成功项时也可用 `--resume`。
 
+每次真跑结束会打印「目录覆盖：X/N 已通过（有记录 M，未验证 U）」——基于 `--out` JSONL
+的累计记录（同 selector 后写覆盖先写）。全量验证时固定同一个 `--out`，即可看到目录级
+覆盖率；换文件会从零开始统计。
+

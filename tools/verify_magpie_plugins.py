@@ -587,6 +587,24 @@ def print_summary(records):
             print(f"  {key}: {counts[key]}")
 
 
+def print_catalog_coverage(entries, records):
+    """按目录全量打印验证覆盖率（JSONL 里同 selector 后写覆盖先写）。
+
+    只统计 `ok=true` 的通过项；`有记录` 含失败项，`未验证` = 目录中尚无任何记录。
+    """
+    latest = {}
+    for rec in records:
+        selector = rec.get("selector")
+        if selector:
+            latest[selector] = rec
+    if not entries:
+        return
+    covered = sum(1 for e in entries if e.get("selector") in latest)
+    ok = sum(1 for e in entries if latest.get(e.get("selector"), {}).get("ok") is True)
+    print(f"目录覆盖：{ok}/{len(entries)} 已通过"
+          f"（有记录 {covered}，未验证 {len(entries) - covered}）")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="AIGX 生产脚本插件批量验证（install→enable→采样→uninstall）"
@@ -776,6 +794,7 @@ def main():
     write_csv(csv_path, all_records)
     print_summary(all_records)
     print(f"\nJSONL: {args.out}\nCSV:   {csv_path}")
+    print_catalog_coverage(extract_entries(doc), all_records)
     if tripped:
         print("结果：因安全闸门提前终止（本批已 uninstall）。")
         sys.exit(2)
