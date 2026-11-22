@@ -563,6 +563,18 @@ const A2A_PLUGIN_SECRET_KEYS: [&str; 9] = [
 /// `pluginSecret` 内可充当续期令牌的键。
 const A2A_PLUGIN_REFRESH_KEYS: [&str; 3] = ["refreshToken", "refresh_token", "refresh"];
 
+/// `pluginSecret` 的**深层凭证回退**（平铺键全未命中时才尝试）。
+///
+/// 只在既有 `A2A_PLUGIN_SECRET_KEYS` 失败后生效，故不改变已映射的记录：
+///   - `pluginSecret.cookieHeader` —— doubaowork 的整串 cookie 即主凭证；
+///   - `pluginSecret.metadata.*`  —— teleagent 的主凭证是 `metadata.token`。
+///
+/// ⚠️ **落地前提**：teleagent / doubaowork 在 AIGX `registry` 里**没有原生
+/// provider**，属**插件型**。这里的映射只保证「导入不丢凭证」，真正能否使用
+/// 取决于是否安装了对应的 Magpie 脚本插件（provider 由插件在运行期注册）。
+/// **导入成功 ≠ 可用**，不要据此声称开箱即用。
+const A2A_PLUGIN_DEEP_FLAT_SECRET_KEYS: [&str; 1] = ["cookieHeader"];
+
 /// 从记录里取第一个非空字符串键。
 fn a2a_first(record: &Map<String, Value>, keys: &[&str]) -> String {
     for key in keys {
@@ -572,6 +584,25 @@ fn a2a_first(record: &Map<String, Value>, keys: &[&str]) -> String {
                 return text.to_string();
             }
         }
+    }
+    String::new()
+}
+
+/// `pluginSecret` 的深层凭证回退（仅当平铺 `A2A_PLUGIN_SECRET_KEYS` 全未命中）。
+///
+/// 顺序：
+///   1. 平铺的额外键（`cookieHeader` —— doubaowork 整串 cookie）；
+///   2. 嵌套 `metadata` 子对象里的通用 token 键（`metadata.token` —— teleagent；
+///      复用平铺键优先级，`metadata.accessToken` 等同样命中）。
+///
+/// 取不到返回空串（调用方据此计入 skipped，不臆造凭证）。
+fn a2a_plugin_deep_secret(plugin_secret: &Map<String, Value>) -> String {
+    let flat = a2a_first(plugin_secret, &A2A_PLUGIN_DEEP_FLAT_SECRET_KEYS);
+    if !flat.is_empty() {
+        return flat;
+    }
+    if let Some(metadata) = plugin_secret.get("metadata").and_then(Value::as_object) {
+        return a2a_first(metadata, &A2A_PLUGIN_SECRET_KEYS);
     }
     String::new()
 }
@@ -642,15 +673,27 @@ pub fn map_agent2api_record(
     let plugin_public = obj.get("pluginPublic").and_then(Value::as_object);
     let top_secret = a2a_first(obj, &A2A_SECRET_KEYS);
     let top_refresh = a2a_first(obj, &["refreshToken", "refresh_token"]);
-    // 顶层凭证优先（既有行为不变）；为空时回落到 `pluginSecret` 字典——
-    // Agent2API 的插件账号把凭证放在这里（dict），旧映射只认顶层字符串键，
-    // 导致这类账号被整条跳过。
-    let secret = if top_secret.is_empty() {
-        plugin_secret
-            .map(|ps| a2a_first(ps, &A2A_PLUGIN_SECRET_KEYS))
-            .unwrap_or_default()
-    } else {
+    // 插件账号的凭证在顶层 `pluginSecret` 字典里：
+    //   1. 先按平铺键（既有行为，158 条既有映射不走深层分支）；
+    //   2. 平铺键全未命中时做「深层回退」—— cookieHeader / metadata.token。
+    let plugin_flat_secret = plugin_secret
+        .map(|ps| a2a_first(ps, &A2A_PLUGIN_SECRET_KEYS))
+        .unwrap_or_default();
+    let plugin_deep_secret = plugin_secret
+        .map(a2a_plugin_deep_secret)
+        .unwrap_or_default();
+    // 深层回退是否真正生效：只有它为真时才额外搬运 `metadata` 具名字段，
+    // 避免改变既有记录（有平铺凭证的家）的字段集合。
+    let plugin_deep_used =
+        top_secret.is_empty() && plugin_flat_secret.is_empty() && !plugin_deep_secret.is_empty();
+    // 顶层凭证优先（既有行为不变）；为空时回落到 `pluginSecret` 平铺键；
+    // 平铺键再为空时才走深层回退。
+    let secret = if !top_secret.is_empty() {
         top_secret
+    } else if !plugin_flat_secret.is_empty() {
+        plugin_flat_secret.clone()
+    } else {
+        plugin_deep_secret.clone()
     };
     let refresh = if top_refresh.is_empty() {
         plugin_secret
@@ -710,6 +753,29 @@ pub fn map_agent2api_record(
                 continue;
             }
             credential.set_field(key, text);
+        }
+    }
+    // 深层回退生效时，把 `pluginSecret.metadata` 子对象的标量键（teleagent 的
+    // scope / accountName / email / expiresAt / token 等）也搬进具名字段，供
+    // 插件回填。仅在深层回退真正被用到时才做，避免改动既有记录的字段集合
+    // （即有平铺凭证的 158 条不受影响）。
+    if plugin_deep_used {
+        if let Some(metadata) = plugin_secret
+            .and_then(|ps| ps.get("metadata"))
+            .and_then(Value::as_object)
+        {
+            for (key, value) in metadata {
+                let text = match value {
+                    Value::String(text) => text.trim().to_string(),
+                    Value::Number(number) => number.to_string(),
+                    Value::Bool(flag) => flag.to_string(),
+                    _ => continue,
+                };
+                if text.is_empty() || credential.fields.contains_key(key) {
+                    continue;
+                }
+                credential.set_field(key, &text);
+            }
         }
     }
 
@@ -1171,5 +1237,72 @@ base_url = "https://stale.example/v1"
         });
         let session = map_agent2api_record("ch-1", &record).expect("顶层凭证路径不变");
         assert_eq!(session.credential.secret, "top-secret");
+    }
+
+    #[test]
+    fn agent2api_record_plugin_secret_teleagent_metadata_token() {
+        // teleagent：主凭证在 `pluginSecret.metadata.token`，平铺键
+        // accountId/key/type 都不是 token —— 深层回退必须把它当 secret，
+        // 其余具名键（含嵌套 scope）进 fields。
+        // 注：teleagent 是**插件型**（AIGX registry 无原生 provider），本映射
+        // 只保证导入不丢凭证；能否使用取决于是否安装对应 Magpie 插件。
+        let record = json!({
+            "id": "tele-1",
+            "provider": "teleagent",
+            "pluginSecret": {
+                "accountId": "acc-123",
+                "key": "key-abc",
+                "type": "oauth",
+                "metadata": {
+                    "accountName": "Tele User",
+                    "email": "tele@example.com",
+                    "expiresAt": 1_900_000_000i64,
+                    "scope": "openid profile",
+                    "token": "meta-token-xyz"
+                }
+            }
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("teleagent 深层 token 应可映射");
+        assert_eq!(session.provider, "teleagent");
+        assert_eq!(session.credential.secret, "meta-token-xyz");
+        assert_eq!(session.credential.field_plain("accountId"), "acc-123");
+        assert_eq!(session.credential.field_plain("key"), "key-abc");
+        assert_eq!(session.credential.field_plain("type"), "oauth");
+        assert_eq!(session.credential.field_plain("scope"), "openid profile");
+        assert_eq!(session.credential.field_plain("email"), "tele@example.com");
+    }
+
+    #[test]
+    fn agent2api_record_plugin_secret_doubaowork_cookie_header() {
+        // doubaowork：主凭证是 `pluginSecret.cookieHeader`（整串 cookie），
+        // 其余 fingerprint/deviceId/userId/enterpriseType 进 fields。
+        // 注：doubaowork 同样是**插件型**，导入仅保证不丢凭证。
+        let record = json!({
+            "id": "dbw-1",
+            "provider": "doubaowork",
+            "pluginSecret": {
+                "avatar": "https://example.com/a.png",
+                "cookieHeader": "sid=abc; token=def",
+                "deviceId": "dev-42",
+                "email": "dbw@example.com",
+                "enterpriseType": "corp",
+                "fingerprint": "fp-777",
+                "name": "DBW User",
+                "userId": "u-9",
+                "webId": "w-1"
+            }
+        });
+        let session =
+            map_agent2api_record("ch-1", &record).expect("doubaowork cookieHeader 应可映射");
+        assert_eq!(session.provider, "doubaowork");
+        assert_eq!(session.credential.secret, "sid=abc; token=def");
+        assert_eq!(
+            session.credential.field_plain("cookieHeader"),
+            "sid=abc; token=def"
+        );
+        assert_eq!(session.credential.field_plain("fingerprint"), "fp-777");
+        assert_eq!(session.credential.field_plain("deviceId"), "dev-42");
+        assert_eq!(session.credential.field_plain("userId"), "u-9");
+        assert_eq!(session.credential.field_plain("enterpriseType"), "corp");
     }
 }
