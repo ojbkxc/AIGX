@@ -1579,6 +1579,13 @@ export interface AccountSessionItem {
   has_secret?: boolean;
   /** 登录态推算的「需要重新登录」提醒时刻（unix 秒；仅登录态型账号有，后端 relogin_due_at） */
   relogin_due_at?: number | null;
+  /**
+   * 需要重新登录（后端 `needsRelogin` 合并语义：`status === "needs_relogin"` 或
+   * 插件自报位）。true 时转发会被上游拒绝，需运维重新登录该账号。
+   */
+  needs_relogin?: boolean;
+  /** 插件自报的独立 needs_relogin 位（`pluginNeedsRelogin`，插件账号才有） */
+  plugin_needs_relogin?: boolean;
   created_at?: number;
   updated_at?: number;
 }

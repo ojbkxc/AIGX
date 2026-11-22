@@ -587,6 +587,14 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   const [statusSeg, setStatusSeg] = useState<StatusSeg>(() => readFilterPrefs().status);
   // 限额分段过滤（SPEC §2.4：全部/正常/已限流；唯一判据是后端 limiter_state）
   const [limitSeg, setLimitSeg] = useState<LimitSeg>(() => readFilterPrefs().limit);
+  // 服务端扩展筛选（v1.0.87 契约：status=relogin/expired、到期区间、用量区间）。
+  // 这些维度客户端不好算准（尤其用量「已用 %」），交给后端过滤；其余维度仍客户端过滤。
+  const [advReloginOnly, setAdvReloginOnly] = useState(false);
+  const [advExpiredOnly, setAdvExpiredOnly] = useState(false);
+  const [advExpiryFrom, setAdvExpiryFrom] = useState('');
+  const [advExpiryTo, setAdvExpiryTo] = useState('');
+  const [advUsageMin, setAdvUsageMin] = useState('');
+  const [advUsageMax, setAdvUsageMax] = useState('');
   // 列表排序（对齐上游 accounts-sort：展示序不改调度 priority；
   // credit 档按凭证/套餐到期（最急着过期的排最前，没到期值排最后），
   // added 档按创建时间新→旧；默认 list = 调度优先序，选择落盘 localStorage）
@@ -708,12 +716,37 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   const [clearMenuFor, setClearMenuFor] = useState<string | null>(null);
   const clearMenuRef = useRef<HTMLDivElement | null>(null);
 
+  /**
+   * 服务端扩展筛选参数。用 ref 保存：`load` 身份保持稳定（依赖 []），每次调用读
+   * ref 拿到最新值。缺省空对象 = 旧行为（全量、不附加过滤）。
+   */
+  const serverFilterRef = useRef<Record<string, string | number>>({});
+  serverFilterRef.current = (() => {
+    const p: Record<string, string | number> = {};
+    if (advReloginOnly && advExpiredOnly) p.status = 'relogin,expired';
+    else if (advReloginOnly) p.status = 'relogin';
+    else if (advExpiredOnly) p.status = 'expired';
+    if (advExpiryFrom) {
+      const from = new Date(`${advExpiryFrom}T00:00:00`).getTime();
+      if (Number.isFinite(from)) p.expiry_from = Math.floor(from / 1000);
+    }
+    if (advExpiryTo) {
+      const to = new Date(`${advExpiryTo}T23:59:59`).getTime();
+      if (Number.isFinite(to)) p.expiry_to = Math.floor(to / 1000);
+    }
+    const umin = Number(advUsageMin);
+    if (advUsageMin !== '' && Number.isFinite(umin)) p.usage_min = Math.max(0, Math.min(100, umin));
+    const umax = Number(advUsageMax);
+    if (advUsageMax !== '' && Number.isFinite(umax)) p.usage_max = Math.max(0, Math.min(100, umax));
+    return p;
+  })();
+
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError('');
     try {
       const [sessionsRes, channelsRes, providersRes, statsRes] = await Promise.all([
-        api.listAccountSessions(),
+        api.listAccountSessions(serverFilterRef.current),
         api.listChannels({ channel_type: 'account' }),
         api.accountProviders(),
         api.accountSessionStats(),
@@ -738,6 +771,17 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 服务端扩展筛选项变化 → 重新拉取（首帧跳过，初始 load 已覆盖）。
+  const advFilterKey = `${advReloginOnly}|${advExpiredOnly}|${advExpiryFrom}|${advExpiryTo}|${advUsageMin}|${advUsageMax}`;
+  const advMounted = useRef(false);
+  useEffect(() => {
+    if (!advMounted.current) {
+      advMounted.current = true;
+      return;
+    }
+    void load();
+  }, [advFilterKey, load]);
 
   // 筛选偏好落盘（§2.5：provider / 状态档 / 限额档；搜索词不落盘）
   useEffect(() => {
@@ -1801,6 +1845,26 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     }
   };
 
+  /** 账号是否需要重新登录（后端 needsRelogin 合并语义 + 插件自报位） */
+  const needsReloginOf = (s: AccountSessionItem): boolean =>
+    s.needs_relogin === true || s.plugin_needs_relogin === true || s.status === 'needs_relogin';
+
+  /**
+   * 「重新登录 / 去处理」入口：仍持有续期令牌时先强制刷新；否则没有在线续期手段，
+   * 明确引导运维通过「添加账号」对同一供应商重新登录（或更新凭证后启用），
+   * 不假装一键修好。
+   */
+  const handleRelogin = async (session: AccountSessionItem): Promise<void> => {
+    if (session.has_refresh_token) {
+      await handleRefreshCredential(session);
+      return;
+    }
+    addToast(
+      t('该账号需重新登录：请通过「添加账号」重新登录该供应商，或更新凭证后启用'),
+      'error',
+    );
+  };
+
   /** 导出全部账号为 JSON（含明文凭证；浏览器触发下载） */
   /** 一键刷新全部已过期/临期凭证（A2A POST /api/accounts/refresh-expiring） */
   const handleRefreshExpiring = async (): Promise<void> => {
@@ -2124,9 +2188,29 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     setSearch('');
     setStatusSeg('all');
     setLimitSeg('all');
+    setAdvReloginOnly(false);
+    setAdvExpiredOnly(false);
+    setAdvExpiryFrom('');
+    setAdvExpiryTo('');
+    setAdvUsageMin('');
+    setAdvUsageMax('');
   };
 
-  const filterActive = providerFilter !== '' || search.trim() !== '' || statusSeg !== 'all' || limitSeg !== 'all';
+  const filterActive =
+    providerFilter !== '' ||
+    search.trim() !== '' ||
+    statusSeg !== 'all' ||
+    limitSeg !== 'all' ||
+    advReloginOnly ||
+    advExpiredOnly ||
+    advExpiryFrom !== '' ||
+    advExpiryTo !== '' ||
+    advUsageMin !== '' ||
+    advUsageMax !== '';
+
+  // ZCode 账号存在时给一条只读说明（套餐通道选择需后端 plan_channel 字段，尚未定契约；
+  // 桌面端本地验证码池不属于网关，见 ACCOUNT-POOL-PARITY §L）。
+  const hasZcodeAccounts = sessions.some((s) => s.provider === 'zcode' || s.provider === 'zcode-intl');
 
   // ── 供应商选择（仅新增账号时使用）──
   const providerLabel = (kind: string): string =>
@@ -2506,6 +2590,24 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               title={t('Token 限额命中且账号已被自动禁用（窗口重置也不恢复，需手动启用）')}
             >
               {t('Token 限额已禁用')}
+            </span>,
+          );
+        }
+        // 显式「需要重登」提示（后端口径 needs_relogin / status=needs_relogin）
+        if (needsReloginOf(s)) {
+          healthTags.push(
+            <span
+              key="relogin"
+              className="as-status-tag bad"
+              title={
+                s.relogin_due_at
+                  ? t('上游已拒绝该账号凭证，请重新登录（预计到期 {{time}}）', {
+                      time: new Date(s.relogin_due_at * 1000).toLocaleString(),
+                    })
+                  : t('上游已拒绝该账号凭证，请在操作菜单点「重新登录」或重新添加该供应商账号')
+              }
+            >
+              {t('需要重登')}
             </span>,
           );
         }
@@ -2968,6 +3070,24 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                     >
                       {t('刷新 Token')}
                     </button>
+                    {needsReloginOf(s) ? (
+                      <button
+                        type="button"
+                        className="as-act-menu-item"
+                        onClick={() => {
+                          setActMenuFor(null);
+                          void handleRelogin(s);
+                        }}
+                        disabled={refreshingId === s.id}
+                        title={
+                          s.has_refresh_token
+                            ? t('先强制刷新凭证；若仍失败请重新添加/登录该供应商')
+                            : t('该账号没有在线续期手段，请重新登录该供应商账号')
+                        }
+                      >
+                        {t('重新登录')}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="as-act-menu-item"
@@ -3372,6 +3492,72 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               </button>
             ))}
           </div>
+          {/* 服务端扩展筛选（v1.0.87 契约）：仅需重登/已过期 + 到期区间 + 用量区间。
+              这些维度交后端过滤（用量「已用 %」客户端算不准），其余维度仍客户端过滤。 */}
+          <div className="seg-filter" role="group" aria-label={t('更多筛选')}>
+            <button
+              type="button"
+              className={`seg-filter-btn${advReloginOnly ? ' active' : ''}`}
+              onClick={() => setAdvReloginOnly((v) => !v)}
+              title={t('仅显示需要重新登录的账号')}
+            >
+              {t('仅需重登')}
+            </button>
+            <button
+              type="button"
+              className={`seg-filter-btn${advExpiredOnly ? ' active' : ''}`}
+              onClick={() => setAdvExpiredOnly((v) => !v)}
+              title={t('仅显示已过期账号')}
+            >
+              {t('仅已过期')}
+            </button>
+          </div>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+            {t('到期')}
+            <input
+              type="date"
+              className="form-input"
+              style={{ width: 138 }}
+              value={advExpiryFrom}
+              onChange={(e) => setAdvExpiryFrom(e.target.value)}
+              aria-label={t('到期起')}
+            />
+            ~
+            <input
+              type="date"
+              className="form-input"
+              style={{ width: 138 }}
+              value={advExpiryTo}
+              onChange={(e) => setAdvExpiryTo(e.target.value)}
+              aria-label={t('到期止')}
+            />
+          </label>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+            {t('已用 %')}
+            <input
+              type="number"
+              min={0}
+              max={100}
+              className="form-input"
+              style={{ width: 64 }}
+              value={advUsageMin}
+              onChange={(e) => setAdvUsageMin(e.target.value)}
+              placeholder={t('下限')}
+              aria-label={t('已用百分比下限')}
+            />
+            ~
+            <input
+              type="number"
+              min={0}
+              max={100}
+              className="form-input"
+              style={{ width: 64 }}
+              value={advUsageMax}
+              onChange={(e) => setAdvUsageMax(e.target.value)}
+              placeholder={t('上限')}
+              aria-label={t('已用百分比上限')}
+            />
+          </label>
           {/* §2.3 清除筛选：只重置筛选维度（分组/排序/余额间隔/列设置是偏好，不动） */}
           <button
             type="button"
@@ -3383,6 +3569,22 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             {t('清除筛选')}
           </button>
         </div>
+
+        {/* ZCode 只读说明（不提供可选但无效果的控件）：套餐通道选择待后端落库；
+            网关不承载桌面端本地验证码池，平台验证码池在「系统设置 → 网关」查看。 */}
+        {hasZcodeAccounts ? (
+          <p
+            role="note"
+            style={{
+              margin: '8px 0 0',
+              fontSize: 12,
+              lineHeight: 1.5,
+              color: 'var(--text-muted)',
+            }}
+          >
+            {t('ZCode 说明：套餐通道（编码套餐 / 套餐池）的选择尚未开放，需后端支持后提供；网关不承载桌面端本地验证码池，平台验证码池状态可在「系统设置 → 网关 → 验证码令牌池」查看。')}
+          </p>
+        ) : null}
 
         {picked.size > 0 && (
           <div className="batch-bar">
