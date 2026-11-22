@@ -629,9 +629,10 @@ mod tests {
 
     #[test]
     fn capability_whitelist_matches_beta6() {
-        // 对齐 Agent2API v3.5.0-beta.6 CAPABILITIES 全集（54 项；beta.4 移除
-        // credential.cline-free-refresh.v1，beta.6 移除 credential.codearts-refresh.v1）。
-        assert_eq!(CAPABILITIES.len(), 54);
+        // 对齐 Agent2API v3.5.0-beta.6 CAPABILITIES 全集（beta.4 移除
+        // credential.cline-free-refresh.v1，beta.6 移除 credential.codearts-refresh.v1），
+        // +crypto.deepseek-pow.v1（#62，AIGX 扩展超 beta6）=> 55 项。
+        assert_eq!(CAPABILITIES.len(), 55);
         assert!(!CAPABILITIES.contains(&"credential.cline-free-refresh.v1"));
         assert!(!CAPABILITIES.contains(&"credential.codearts-refresh.v1"));
         let unique: std::collections::HashSet<_> = CAPABILITIES.iter().collect();
