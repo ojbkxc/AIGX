@@ -56,6 +56,16 @@ function formatError(err: unknown): string {
   return oneLine.length > MAX_ERROR_DISPLAY ? `${oneLine.slice(0, MAX_ERROR_DISPLAY)}…` : oneLine;
 }
 
+/**
+ * 配置类加载失败识别：错误里提到缺 options 字段 / API Key / 必填项时，属于
+ * 「装好了但还没配置」，配好 options 后即可接管（不是代码/宿主故障）。
+ * 命中时卡片额外给「需要配置」提示并引导先「去配置」。
+ */
+function isConfigError(error: string | null | undefined): boolean {
+  if (!error) return false;
+  return /(options\.|api[\s_-]?keys?|required)/i.test(error);
+}
+
 /** 目录刷新是否已有进展：刷新是后台异步任务（refresh 端点只负责唤醒），
  * 阶段时间戳前进即视为本轮已落地。无基线时退化为「两个阶段都不过期」。
  */
@@ -170,6 +180,8 @@ function InstalledScriptCard({
   onEditOptions: (pkg: ScriptPackageView) => void;
 }): JSX.Element {
   const { t } = useTranslation();
+  // 配置类失败（缺 options / API Key）：引导先配置再启用，而非当作代码故障
+  const configError = isConfigError(pkg.error);
   return (
     <div className="pl-card is-installed">
       <div className="pl-card-head">
@@ -200,6 +212,7 @@ function InstalledScriptCard({
           title={pkg.error}
         >
           <Badge tone="warning">{t('加载失败')}</Badge>
+          {configError ? <Badge tone="info">{t('需要配置')}</Badge> : null}
           <span style={{ flex: 1, minWidth: 0 }}>{pkg.error}</span>
           <button
             type="button"
@@ -250,8 +263,14 @@ function InstalledScriptCard({
             ariaLabel={`${t('启用')} ${pkg.label || pkg.id}`}
           />
         </label>
-        <Button variant="outline" size="sm" disabled={busy} onClick={() => onEditOptions(pkg)}>
-          {t('配置')}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => onEditOptions(pkg)}
+          title={configError ? t('先在配置中填写必需参数，再启用或重建宿主') : undefined}
+        >
+          {configError ? t('去配置') : t('配置')}
         </Button>
         <Tooltip
           label={

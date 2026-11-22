@@ -4842,5 +4842,8 @@
   "后端 maintenance 模块上线后，本段自动显示维护任务的执行记录、明细与重试。": "Once the backend maintenance module is online, this section automatically shows the execution records, details, and retries for maintenance tasks.",
   "只看失败": "Show failures only",
   "复制错误": "Copy error",
-  "没有失败或未接管的脚本包": "No failed or unrouted script packages"
+  "没有失败或未接管的脚本包": "No failed or unrouted script packages",
+  "需要配置": "Configuration required",
+  "去配置": "Configure",
+  "先在配置中填写必需参数，再启用或重建宿主": "Fill in the required options first, then enable or rebuild the host"
 }

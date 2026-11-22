@@ -45,25 +45,29 @@
 
 示例
 ----
-    # 0) 先保存目录 JSON（在服务器本机执行；token 由登录获得，登录口令只从
-    #    环境变量 $AIGX_ADMIN_PASS 读取，不写进命令/脚本）：
-    #      curl -s -H "Authorization: Bearer $TOKEN" \
-    #          $AIGX_BASE_URL/api/plugins/scripts/catalog > magpie_catalog.json
-    #    说明：$AIGX_ADMIN_PASS 仅用于 /api/auth/login（ALTCHA）换取 $TOKEN。
+    # 目录来源二选一：
+    #   a) 省略 --catalog：自动经管理 API 拉取并写入 --catalog-out（需凭据），
+    #   b) 传 --catalog <path>：直接读本地目录 JSON（无需联网）。
+    # 手工保存目录（可选，便于离线/--plan-only 不联网；token 由登录获得，
+    # 登录口令只从环境变量 $AIGX_ADMIN_PASS 读取，不写进命令/脚本）：
+    #   curl -s -H "Authorization: Bearer $TOKEN" \
+    #       $AIGX_BASE_URL/api/plugins/scripts/catalog > magpie_catalog.json
 
-    # 先看会选中哪些条目（不连生产）
-    python tools/verify_magpie_plugins.py --catalog magpie_catalog.json \
-        --source magpie --limit 2 --plan-only
+    # 看会选中哪些条目：有 --catalog 时纯离线；无 --catalog 且凭据可用时先只读拉目录
+    python tools/verify_magpie_plugins.py --source magpie --limit 2 --plan-only
 
-    # 小批真跑（装完自动卸载）
+    # 小批真跑（装完自动卸载；--catalog 省略 = 自动拉目录）
     AIGX_SSH_PASS=... AIGX_ADMIN_PASS=... \
-    python tools/verify_magpie_plugins.py --catalog magpie_catalog.json \
-        --source magpie --limit 2 --batch 2
+    python tools/verify_magpie_plugins.py --source magpie --limit 2 --batch 2
 
     # 正式全量：magpie → npm → github，批次 8，断点续跑
     python tools/verify_magpie_plugins.py --source magpie --batch 8 --resume
     python tools/verify_magpie_plugins.py --source npm    --batch 8 --resume
     python tools/verify_magpie_plugins.py --source github --batch 8 --resume
+
+    # 只重跑上一轮失败项（读 --out 里 ok=false 的 selector；--include 优先）
+    python tools/verify_magpie_plugins.py --retry-failed --batch 8
+    python tools/verify_magpie_plugins.py --retry-failed --plan-only   # 只数待重跑项，不联网
 
     # 只重试指定条目
     python tools/verify_magpie_plugins.py --include "magpie:@magpie-community/foo" --batch 1
@@ -115,6 +119,10 @@ def normalize_path(path):
 
 def split_csv(value):
     return {item.strip() for item in (value or "").split(",") if item.strip()}
+
+
+def has_creds():
+    return bool(os.environ.get("AIGX_SSH_PASS") and os.environ.get("AIGX_ADMIN_PASS"))
 
 
 # ── SSH + ALTCHA 登录 ────────────────────────────────────────────────
@@ -228,17 +236,23 @@ def get_state(cli):
 
 
 # ── 目录 / 断点 ──────────────────────────────────────────────────────
-def load_entries(path, source, limit, include, exclude):
+def read_catalog_doc(path):
+    """读本地目录 JSON；FileNotFoundError / JSONDecodeError 由调用方友好处理。"""
     with open(path, encoding="utf-8") as f:
-        doc = json.load(f)
+        return json.load(f)
+
+
+def extract_entries(doc):
     if isinstance(doc, list):
-        entries = doc
-    elif isinstance(doc, dict) and isinstance(doc.get("entries"), list):
-        entries = doc["entries"]
-    elif isinstance(doc, dict) and isinstance((doc.get("data") or {}).get("entries"), list):
-        entries = doc["data"]["entries"]
-    else:
-        raise SystemExit(f"无法识别目录 JSON 结构：{path}")
+        return doc
+    if isinstance(doc, dict) and isinstance(doc.get("entries"), list):
+        return doc["entries"]
+    if isinstance(doc, dict) and isinstance((doc.get("data") or {}).get("entries"), list):
+        return doc["data"]["entries"]
+    raise SystemExit("无法识别目录 JSON 结构（既不是数组，也没有 entries）")
+
+
+def filter_entries(entries, source, limit, include, exclude):
     out = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -259,6 +273,43 @@ def load_entries(path, source, limit, include, exclude):
     if limit and limit > 0:
         out = out[:limit]
     return out
+
+
+def load_entries(path, source, limit, include, exclude):
+    return filter_entries(extract_entries(read_catalog_doc(path)), source, limit, include, exclude)
+
+
+def fetch_catalog(cli):
+    """经 SSH + 管理 API 拉取目录（只读；返回完整响应对象）。"""
+    resp = api(cli, "GET", "/api/plugins/scripts/catalog", timeout=120)
+    data = resp.get("data") or {}
+    if not resp.get("success") or not isinstance(data.get("entries"), list):
+        raise RuntimeError("拉取目录失败：" + str(resp.get("error") or resp)[:500])
+    return resp
+
+
+def write_catalog(path, resp):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(resp, f, ensure_ascii=False)
+
+
+def load_failed(path):
+    """--retry-failed：收集 JSONL 里 ok=false 的 selector 集合。"""
+    failed = set()
+    if not os.path.exists(path):
+        return failed
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if rec.get("ok") is False and rec.get("selector"):
+                failed.add(rec["selector"])
+    return failed
 
 
 def load_done(path):
@@ -538,12 +589,16 @@ def main():
         description="AIGX 生产脚本插件批量验证（install→enable→采样→uninstall）"
     )
     parser.add_argument("--catalog", default=None,
-                        help="目录 JSON（GET /api/plugins/scripts/catalog 的响应）；必填")
+                        help="本地目录 JSON；省略时自动经管理 API 拉取并写入 --catalog-out")
+    parser.add_argument("--catalog-out", default="magpie_catalog.json",
+                        help="自动拉取目录时的保存路径（默认 magpie_catalog.json）")
     parser.add_argument("--source", choices=["magpie", "npm", "github", "all"], default="all")
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--limit", type=int, default=0, help="0 = 不限制")
     parser.add_argument("--include", default="", help="逗号分隔 selector/name，只验证这些条目")
     parser.add_argument("--exclude", default="", help="逗号分隔 selector/name，跳过这些条目")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="只重跑 --out JSONL 里 ok=false 的条目（--include 优先）")
     parser.add_argument("--out", default="magpie_verify.jsonl", help="JSONL 断点/结果文件")
     parser.add_argument("--csv", default=None, help="CSV 报告（默认与 --out 同名 .csv）")
     parser.add_argument("--resume", action="store_true", help="只跳过 JSONL 中 ok=true 的条目")
@@ -551,53 +606,91 @@ def main():
     parser.add_argument("--poll", type=float, default=3.0)
     parser.add_argument("--install-timeout", type=int, default=300)
     parser.add_argument("--enable-timeout", type=int, default=180)
-    parser.add_argument("--plan-only", action="store_true", help="只打印选中条目，不连接")
+    parser.add_argument("--plan-only", action="store_true",
+                        help="只打印计划，绝不安装/启停；缺 --catalog 且凭据可用时会先只读拉取目录")
     parser.add_argument("--host", default=os.environ.get("AIGX_HOST", DEFAULT_HOST))
     parser.add_argument("--ssh-user", default=os.environ.get("AIGX_SSH_USER", "root"))
     parser.add_argument("--ssh-port", type=int, default=int(os.environ.get("AIGX_SSH_PORT", "22")))
     parser.add_argument("--base-url", default=os.environ.get("AIGX_BASE_URL", "http://127.0.0.1:9527"))
     args = parser.parse_args()
 
-    # 目录 JSON 必填：缺失/不存在/非法 JSON 都友好提示，绝不抛 traceback。
-    if not args.catalog:
-        print(
-            "错误：缺少 --catalog。\n"
-            "请先把 `GET /api/plugins/scripts/catalog` 的响应保存为 JSON，"
-            "再传 --catalog <path>。\n"
-            "保存示例（服务器本机，登录口令只走 $AIGX_ADMIN_PASS）：\n"
-            "  curl -s -H \"Authorization: Bearer $TOKEN\" \\\n"
-            "      $AIGX_BASE_URL/api/plugins/scripts/catalog > magpie_catalog.json\n"
-            "然后：python tools/verify_magpie_plugins.py --catalog magpie_catalog.json --plan-only",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    # 运行期配置（连接前就绪：connect/curl 都读 CFG）
+    CFG.update(host=args.host, port=args.ssh_port, user=args.ssh_user,
+               base=args.base_url.rstrip("/"))
 
     # MSYS 路径规范化（Windows）
-    args.catalog = normalize_path(args.catalog)
+    if args.catalog:
+        args.catalog = normalize_path(args.catalog)
+    args.catalog_out = normalize_path(args.catalog_out)
     args.out = normalize_path(args.out)
     if args.csv:
         args.csv = normalize_path(args.csv)
 
     include = split_csv(args.include)
     exclude = split_csv(args.exclude)
-    try:
-        entries = load_entries(args.catalog, args.source, args.limit, include, exclude)
-    except FileNotFoundError:
-        print(
-            f"错误：目录文件不存在：{args.catalog}\n"
-            "请先把 `GET /api/plugins/scripts/catalog` 的响应保存为 JSON，再传 --catalog <path>。",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    except json.JSONDecodeError as ex:
-        print(f"错误：目录文件不是合法 JSON：{args.catalog}（{ex}）", file=sys.stderr)
-        sys.exit(2)
+    failed = load_failed(args.out) if args.retry_failed else set()
+    # --include 优先于 --retry-failed；两者都空 = 全量。
+    selection = include if include else (failed if args.retry_failed else set())
+
+    # --retry-failed + --plan-only 且无本地目录：直接按 JSONL 统计，不联网。
+    if args.retry_failed and args.plan_only and not args.catalog:
+        print(f"--retry-failed：JSONL={args.out} 待重跑(ok=false)={len(failed)}")
+        for selector in sorted(failed)[:50]:
+            print(f"  {selector}")
+        if not failed:
+            print("没有 ok=false 的条目。")
+        return
+
+    cli = None
+
+    def resolve_catalog():
+        nonlocal cli
+        if args.catalog:
+            try:
+                return read_catalog_doc(args.catalog)
+            except FileNotFoundError:
+                print(
+                    f"错误：目录文件不存在：{args.catalog}\n"
+                    "可省略 --catalog 让工具自动拉取（需凭据），或提供有效的本地目录 JSON。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            except json.JSONDecodeError as ex:
+                print(f"错误：目录文件不是合法 JSON：{args.catalog}（{ex}）", file=sys.stderr)
+                sys.exit(2)
+        if not has_creds():
+            print(
+                "未提供 --catalog，且缺少凭据（AIGX_SSH_PASS/AIGX_ADMIN_PASS），无法自动拉取目录。\n"
+                "请设置凭据后重试，或用 --catalog 指定本地目录 JSON。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        cli = connect()
+        CFG["token"] = cached_token(cli)
+        resp = fetch_catalog(cli)
+        write_catalog(args.catalog_out, resp)
+        print(f"已自动拉取目录并写入 {args.catalog_out}")
+        return resp
+
+    doc = resolve_catalog()
+    entries = filter_entries(extract_entries(doc), args.source, args.limit, selection, exclude)
+
     if args.plan_only:
-        print(f"catalog={args.catalog} source={args.source} 选中={len(entries)} batch={args.batch}")
+        label = args.catalog or args.catalog_out
+        suffix = "（--retry-failed）" if args.retry_failed and not include else ""
+        print(f"catalog={label} source={args.source} 选中={len(entries)} "
+              f"batch={args.batch}{suffix}")
         for entry in entries[:50]:
             print(f"  {entry.get('source'):12} {entry.get('selector')}")
         if len(entries) > 50:
             print(f"  ... 其余 {len(entries) - 50} 条")
+        if not entries:
+            print("没有匹配条目。")
+        if cli is not None:
+            try:
+                cli.close()
+            except Exception:  # noqa: BLE001
+                pass
         return
 
     if args.resume:
@@ -607,16 +700,22 @@ def main():
         print(f"--resume：已成功跳过 {before - len(entries)}，剩余 {len(entries)}")
     if not entries:
         print("没有待处理条目。")
+        if cli is not None:
+            try:
+                cli.close()
+            except Exception:  # noqa: BLE001
+                pass
         return
 
-    CFG.update(host=args.host, port=args.ssh_port, user=args.ssh_user, base=args.base_url.rstrip("/"))
     csv_path = args.csv or (os.path.splitext(args.out)[0] + ".csv")
     batch_size = max(1, args.batch)
 
-    cli = connect()
+    if cli is None:
+        cli = connect()
     tripped = None
     try:
-        CFG["token"] = cached_token(cli)
+        if not CFG["token"]:
+            CFG["token"] = cached_token(cli)
         base = get_state(cli)["host"]
         print(f"登录完成 host={CFG['host']} base={CFG['base']}")
         print(f"宿主基线：running={base.get('running')} packages={base.get('packages')} "

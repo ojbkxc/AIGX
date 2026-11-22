@@ -1215,7 +1215,7 @@ fn apply_package_list(
             if disabled {
                 continue;
             }
-            let info = package
+            let mut info = package
                 .providers
                 .iter()
                 .find(|provider| provider.id == actual)
@@ -1244,6 +1244,17 @@ fn apply_package_list(
                     id: actual.to_string(),
                     ..Default::default()
                 });
+            // 声明侧 label 为空时，用宿主上报的同 id label 兜底；两边都空则
+            // 保留空串（前端回落 id，不编造展示名）。改名（id → 实际 id）会
+            // 沿用声明侧 label，若它为空则不能带走宿主 label——这是「空 label
+            // 卡片」的修复点。
+            if info.label.trim().is_empty() {
+                if let Some(host) = host_by_id.get(actual) {
+                    if !host.label.trim().is_empty() {
+                        info.label = host.label.clone();
+                    }
+                }
+            }
             next.push(info);
         }
         // 声明过但本轮未装载的家：停用的保留（否则 UI 无法再启用）；
@@ -1655,10 +1666,11 @@ mod tests {
     #[test]
     fn apply_package_list_adopts_host_actual_provider_ids() {
         let mut package = pkg("@a/astudio-auth", &["astudio"]);
-        // 声明 id 带 label，宿主上报实际 id 时应保留 label
-        package.providers[0].label = "AStudio".into();
+        // 目录常见：声明侧 label 为空。改名到实际 id 时必须用宿主上报的
+        // 同 id label 兜底（否则生产 `astudio-plugin` 卡片显示空 label）。
+        package.providers[0].label = String::new();
         let mut packages = vec![package];
-        let host = vec![provider("astudio-plugin")];
+        let host = vec![ScriptProviderInfo::new("astudio-plugin", "AStudio")];
         let list = vec![json!({
             "id": "@a/astudio-auth",
             "providers": ["astudio-plugin"],
@@ -1668,7 +1680,7 @@ mod tests {
         let package = &packages[0];
         assert_eq!(package.providers.len(), 1);
         assert_eq!(package.providers[0].id, "astudio-plugin");
-        // 改名场景保留声明侧 label（宿主上报的裸 id 只是兜底）
+        // 声明 label 为空 → 取宿主同 id 的 label。
         assert_eq!(package.providers[0].label, "AStudio");
         assert_eq!(
             package
@@ -1677,6 +1689,26 @@ mod tests {
                 .and_then(Value::as_str),
             Some("astudio-plugin")
         );
+    }
+
+    /// 声明侧与宿主侧 label 都为空 → 仍保留空串（前端回落 id，不编造展示名）。
+    #[test]
+    fn apply_package_list_label_stays_empty_without_host_label() {
+        let mut package = pkg("@a/astudio-auth", &["astudio"]);
+        package.providers[0].label = String::new();
+        let mut packages = vec![package];
+        let host = vec![ScriptProviderInfo {
+            id: "astudio-plugin".into(),
+            ..Default::default()
+        }];
+        let list = vec![json!({
+            "id": "@a/astudio-auth",
+            "providers": ["astudio-plugin"],
+            "aliases": { "astudio": "astudio-plugin" },
+        })];
+        apply_package_list(&mut packages, &list, &host);
+        assert_eq!(packages[0].providers[0].id, "astudio-plugin");
+        assert_eq!(packages[0].providers[0].label, "");
     }
 
     /// 包内停用（`disabled_providers`）不因宿主清单回填而丢：停用的声明 id

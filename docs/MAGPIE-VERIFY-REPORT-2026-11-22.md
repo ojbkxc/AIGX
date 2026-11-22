@@ -1,9 +1,13 @@
 # Magpie 脚本插件全量线上验证报告
 
 > 日期：2026-11-22（生产时区 UTC+8）
-> 环境：生产 `104.223.65.202`，AIGX **v1.0.83**（commit `710399b9`），数据面 `127.0.0.1:9527`
+> 环境：生产 `104.223.65.202`，AIGX **v1.0.84**（commit `10486489`；全量批次跑在 v1.0.83，v1.0.84 重测了 manifest 上限项）
 > 目录快照：`GET /api/plugins/scripts/catalog` → **264 条**（2026-11-20 manifest）
 > 判据与批次计划：见 [`MAGPIE-PLUGIN-PARITY.md`](./MAGPIE-PLUGIN-PARITY.md)
+>
+> **v1.0.84 更新**：`package.json`/`wasm.json` 上限已从 256 KiB 对齐到 **1 MiB**；
+> 原失败项 `github:tianpeng-dev/opencode-doubao-work-auth` 已在 1.0.84 上**重测通过**
+> （安装成功、`doubao-work` 接管、`providerRouted=true`），通过数更新为 **254/264**。
 
 ## 1. 结论
 
@@ -11,11 +15,11 @@
 |---|---:|---:|---:|
 | magpie official | 44 | **44** | 0 |
 | npm recommended | 7 | **7** | 0 |
-| GitHub third-party | 213 | **202** | 11 |
-| **合计** | **264** | **253（95.8%）** | **11（4.2%）** |
+| GitHub third-party | 213 | **203** | 10 |
+| **合计** | **264** | **254（96.2%）** | **10（3.8%）** |
 
 - **官方与推荐包 100% 通过**：安装 → 启用 → 宿主装载 → provider 实际接管（`providerRouted=true`）全部成立。
-- GitHub 第三方 11 条失败**全部有明确归因**：1 条是 AIGX 侧偏严的上限（可修），1 条仓库本身不可用，其余 9 条是插件自身的打包/配置/代码问题（详见 §4）。
+- GitHub 第三方 10 条仍失败**全部有明确归因**：1 条仓库本身不可用，其余 9 条是插件自身的打包/配置/代码问题（另有 1 条 AIGX 侧上限问题已在 v1.0.84 修复并重测通过，详见 §4）。
 - 验证过程宿主 `crashes=0`、`lastError=null`；每批结束均清理，生产最终回到验证前的 3 个已装包且全部 `providerRouted=true`。
 
 ## 2. 验证方法
@@ -53,21 +57,21 @@ opencode-xfyun-maas-auth           routed=true  providers=[xfyun-coding, xfyun-m
 - **修复**：解包器跳过 `is_pax_global_extensions / is_gnu_longname / is_gnu_longlink`；新增单测 `unpacks_github_codeload_tarball_with_pax_global_header`。
 - **线上证据**：`github:miaocell/magpie-doubao-work-auth#9e85…` 从「解包失败」变为安装成功、`doubao` 接管。
 
-## 4. 失败清单（11/264，全部为 GitHub 第三方）
+## 4. 失败清单（10/264 仍失败，另有 1 条已在 v1.0.84 修复）
 
 | # | selector | 分类 | 归因 |
 |---|---|---|---|
-| 1 | `github:tianpeng-dev/opencode-doubao-work-auth#7b34…` | 解包 | **AIGX 偏严**：`package.json` 857 KB，超过当前 256 KB 上限；上游为 1 MB。可对齐 |
-| 2 | `github:Guuuu233/claude-tui-boost#944d…` | 解包 | 压缩包 48.5 MB > 32 MB 上限（上游同为 32 MB）；包内为超大资产，按契约拒装 |
-| 3 | `github:1466109846/ua-pro` | 解析 | 该仓库默认分支解析 `api.github.com/repos/…/commits` 未返回 sha（仓库/分支不可用） |
-| 4 | `github:ikashana/magpie-comate-auth#635d…` | 依赖 | `bun install` 拉 `@baidu/comate-browser-use@2.0.4` 在 npmmirror 404（上游依赖缺失） |
-| 5 | `github:mu-zi-lee/magpie-claudeweb2api#9fed…` | 加载 | 插件自报「No packaged backend for linux/x64」——仓库未提供 Linux 构建产物 |
-| 6 | `github:korioinc/magpie-tokscale-import#fbbc…` | 加载 | 插件要求 Magpie 桌面端 `usage.jsonl`，运行环境不适用 |
-| 7 | `github:jingyi0605/magpie-newapi#167d…` | 加载 | 「Duplicated provider in plugin package」——包内重复导出同一 provider（插件缺陷） |
-| 8 | `github:qq136692547-cmyk/magpie-google-aistudio#1c36…` | 加载 | 「No valid API keys provided」——加载即要求有效 Key，未配置无法装载 |
-| 9 | `github:double2tea/magpie-image-models#daa5…` | 加载 | 「Invalid plugin provider id」——导出的 provider id 不合法（插件缺陷） |
-| 10 | `github:HYKSC-X/magpie-relay-identity#fb2c…` | 加载 | 必须配置 `options.baseURL` 才能装载（配置类插件） |
-| 11 | `github:wanglz111/magpie-workbuddy-search#90f3…` | 加载 | 入口源码相对路径引用 `@magpie-community/opencode-workbuddy-auth`，但未声明依赖；同时安装兄弟插件仍不可解析（插件打包缺陷） |
+| 0 | `github:tianpeng-dev/opencode-doubao-work-auth#7b34…` | 解包 | **已在 v1.0.84 修复**：`package.json` 857 KB 被旧 256 KB 上限拒绝；1.0.84 起上限 1 MiB（对齐上游），生产重测安装成功、`doubao-work` 接管 |
+| 1 | `github:Guuuu233/claude-tui-boost#944d…` | 解包 | 压缩包 48.5 MB > 32 MB 上限（上游同为 32 MB）；包内为超大资产，按契约拒装 |
+| 2 | `github:1466109846/ua-pro` | 解析 | 该仓库默认分支解析 `api.github.com/repos/…/commits` 未返回 sha（仓库/分支不可用） |
+| 3 | `github:ikashana/magpie-comate-auth#635d…` | 依赖 | `bun install` 拉 `@baidu/comate-browser-use@2.0.4` 在 npmmirror 404（上游依赖缺失） |
+| 4 | `github:mu-zi-lee/magpie-claudeweb2api#9fed…` | 加载 | 插件自报「No packaged backend for linux/x64」——仓库未提供 Linux 构建产物 |
+| 5 | `github:korioinc/magpie-tokscale-import#fbbc…` | 加载 | 插件要求 Magpie 桌面端 `usage.jsonl`，运行环境不适用 |
+| 6 | `github:jingyi0605/magpie-newapi#167d…` | 加载 | 「Duplicated provider in plugin package」——包内重复导出同一 provider（插件缺陷） |
+| 7 | `github:qq136692547-cmyk/magpie-google-aistudio#1c36…` | 加载 | 「No valid API keys provided」——加载即要求有效 Key，未配置无法装载 |
+| 8 | `github:double2tea/magpie-image-models#daa5…` | 加载 | 「Invalid plugin provider id」——导出的 provider id 不合法（插件缺陷） |
+| 9 | `github:HYKSC-X/magpie-relay-identity#fb2c…` | 加载 | 必须配置 `options.baseURL` 才能装载（配置类插件） |
+| 10 | `github:wanglz111/magpie-workbuddy-search#90f3…` | 加载 | 入口源码相对路径引用 `@magpie-community/opencode-workbuddy-auth`，但未声明依赖；同时安装兄弟插件仍不可解析（插件打包缺陷） |
 
 > 另：`magpie-codex-guard` 首轮 load_error（后台进程启动竞争），重测通过，已计入通过。
 >
@@ -77,7 +81,7 @@ opencode-xfyun-maas-auth           routed=true  providers=[xfyun-coding, xfyun-m
 
 - `MAX_SCRIPT_PACKAGES=64`（上游同口径）：**264 条不能同时驻留**。本报告为逐条验证 + 每批清理；生产最终保留验证前的 3 个包。
 - 单 Bun 宿主承载全部已启用包，init 握手 60 s、单包 import bounded 20 s；不要一次启用过多重包。
-- 安装护栏：压缩包 ≤32 MiB、解包 ≤128 MiB、条目 ≤4096、`package.json` ≤256 KiB（**待对齐上游 1 MiB**）。
+- 安装护栏：压缩包 ≤32 MiB、解包 ≤128 MiB、条目 ≤4096、`package.json`/`wasm.json` ≤1 MiB（v1.0.84 已对齐上游；更早为 256 KiB）。
 - GitHub 来源无 integrity，只靠 40 位 commit SHA 固定内容；目录中仅 1 条为分支 ref。
 - 目录 `providers=[]` 的 119 条是常态（第三方入口在 JS 里注册），验收以宿主实际 id 为准。
 

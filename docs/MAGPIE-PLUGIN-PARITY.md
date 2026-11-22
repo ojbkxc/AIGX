@@ -316,7 +316,38 @@ error, providerRouted, enabled, crashes_before, crashes_after, ts}`，便于按�
 - 写操作（install/enable/change/options/rebuild）在宿主侧串行（`WRITE_LOCK`），但**这不限制
   插件运行期能力**——信任判断仍以来源为准。
 
-### 7.6 相关文档
+### 7.6 相关文档与入库验证工具
 
 - 全量验证结果与 11 条失败归因：[`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)。
 - 审计口径、安装/加载链路与风险分类：本文 §1–§5；验收判据 §4；批次计划 §5。
+
+批量验证工具：`tools/verify_magpie_plugins.py`（入库；标准库 + `paramiko`）。凭据全部
+走环境变量，禁止硬编码：`AIGX_SSH_PASS`、`AIGX_ADMIN_PASS`（必需），
+`AIGX_EMAIL`/`AIGX_HOST`/`AIGX_SSH_USER`/`AIGX_SSH_PORT`/`AIGX_BASE_URL` 可覆盖。
+
+```
+# 0) 先保存目录 JSON（服务器本机；$TOKEN 由管理员登录换取）
+curl -s -H "Authorization: Bearer $TOKEN" \
+    "$AIGX_BASE_URL/api/plugins/scripts/catalog" > magpie_catalog.json
+
+# 1) 只看选中条目（不连生产）
+python tools/verify_magpie_plugins.py --catalog magpie_catalog.json \
+    --source github --include <selector> --plan-only
+
+# 2) 真跑（install→enable→采集→uninstall；单包失败不中断整批）
+AIGX_SSH_PASS=... AIGX_ADMIN_PASS=... \
+python tools/verify_magpie_plugins.py --catalog magpie_catalog.json \
+    --source github --include <selector>
+```
+
+常用参数：
+- `--include` / `--exclude`：逗号分隔的 selector/name，只验证/跳过这些条目；
+- `--source magpie|npm|github|all`、`--batch N`、`--limit N`；
+- `--out x.jsonl`（每包一行，断点与结果）+ `--csv x.csv`（汇总）；
+- `--resume`：只跳过 JSONL 中 `ok=true` 的条目（失败项会重跑）；
+- `--plan-only`：只打印选中条目，不连接；`--host-timeout/--poll/--install-timeout/--enable-timeout` 控轮询与超时；
+- 安全闸门：一批内 `host.crashes` 增长 ≥2，或 `host.running=false` 且 `lastError` 非空 → 停批、卸载本批、退出码 2。
+
+`--retry-failed`（只重跑历史失败项）：**待 #26 落地后可用**；在此之前用 `--resume`
+（跳过已成功项）可达到近似效果。
+
