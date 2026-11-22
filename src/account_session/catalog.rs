@@ -328,7 +328,8 @@ enum CatalogParser {
     AntigravityModelsDict,
     /// Accio：`{data:[{provider, modelList:[{modelCode, modelDisplayName,…}]}]}`。
     Accio,
-    /// 小浣熊(raccoon)：`{data:{models:[{modelId, modelName,…}]}}`。
+    /// 小浣熊(raccoon)：`{data:{categories:[{models:[{name,…}]}]}}`（兼容旧
+    /// `{data:{models:[{modelId,…}]}}`）。
     Raccoon,
     /// KukuAI：`{data:{model_list:[…]}}` —— 顶层包络 `status.code` 判成败，
     /// 模型名散落在嵌套结构里（递归收集 `model_name` / `modelname` / `modelid`）。
@@ -548,11 +549,12 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             parser: Some(CatalogParser::Accio),
         }),
         // 小浣熊（上游叫 raccoon）：`GET {llmBase}/model_catalog`。
-        // 响应与 `/v3/config` 同形态：`{data:{models:[{modelId, modelName,…}]}}`。
+        // 真实结构 `{data:{categories:[{models:[{name,…}]}]}}`（解析见
+        // `parse_raccoon_catalog`）；远程拉不到时用 RACCOON_FALLBACK 兜底。
         "xiaohuanxiong" => Some(CatalogSpec {
             path: "/model_catalog",
             openai_shape: false,
-            fallback: &[],
+            fallback: RACCOON_FALLBACK,
             sign: None,
             method: None,
             body: None,
@@ -1137,6 +1139,54 @@ const QODER_INTL_FALLBACK: &[FallbackModel] = &[
         vision: true,
         tool: true,
         context_window: 200_000,
+    },
+];
+
+/// 小浣熊兜底表（远程目录拉不到时保证离线也有可用清单）。
+///
+/// id 用上游真名（`/model_catalog` 条目里的 `name`），上下文窗口与能力位取自
+/// 上游目录的实测值。远程刷新成功后以远程清单为准，本表只兜底。
+const RACCOON_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "raccoon-8c4485",
+        upstream_key: "",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 1_000_000,
+    },
+    FallbackModel {
+        id: "raccoon-19b265",
+        upstream_key: "",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 1_000_000,
+    },
+    FallbackModel {
+        id: "raccoon-405a1c",
+        upstream_key: "",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 1_000_000,
+    },
+    // 桌面端本地预置的默认对话模型（远程目录通常不含，仅兜底可见）。
+    FallbackModel {
+        id: "raccoon-chat-ml-5-5",
+        upstream_key: "",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 180_000,
+    },
+    FallbackModel {
+        id: "sn-sensenova-6-8-flash-lite",
+        upstream_key: "",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 256_000,
     },
 ];
 
@@ -1747,6 +1797,154 @@ fn catalog_base_url(session: &AccountSession) -> Result<String, String> {
     Ok(base.to_string())
 }
 
+/// 「模型目录为空」错误：带去掉查询串的 URL 与已遮蔽的响应摘要（≤800 字符）。
+fn empty_catalog_error(url: &str, value: &Value) -> String {
+    let safe_url = url.split('?').next().unwrap_or("");
+    // `null` / 空字符串视为「没有响应体」，给出明确标记而不是字面量 `null`。
+    let summary = match value {
+        Value::Null => String::new(),
+        Value::String(text) if text.trim().is_empty() => String::new(),
+        _ => body_summary(value, 800),
+    };
+    let summary = if summary.is_empty() {
+        "<空响应体>".to_string()
+    } else {
+        summary
+    };
+    format!("上游返回的模型目录为空（{safe_url}；响应摘要: {summary}）")
+}
+
+/// 诊断用响应体摘要：遮蔽凭证、压成单行、截断到 `limit` 个字符。
+///
+/// 仅用于错误文案（目录解析为空时帮运维看清上游真实结构）。JSON 按值递归：
+/// 敏感键（token / secret / password / cookie / authorization 等）整值替换为
+/// `"[已隐藏]"`；字符串值里疑似 Bearer / JWT / 长 hex / 长 base64 的也遮蔽。
+fn body_summary(value: &Value, limit: usize) -> String {
+    let masked = mask_json_value(value);
+    let text = serde_json::to_string(&masked).unwrap_or_else(|_| masked.to_string());
+    truncate_chars(&collapse_whitespace(&text), limit)
+}
+
+fn mask_json_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, child)| {
+                    let masked = if is_sensitive_key(key) {
+                        Value::String("[已隐藏]".to_string())
+                    } else {
+                        mask_json_value(child)
+                    };
+                    (key.clone(), masked)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(mask_json_value).collect()),
+        Value::String(text) => Value::String(mask_secret_like(text)),
+        other => other.clone(),
+    }
+}
+
+/// 键名是否属于「整值敏感」（去掉非字母数字后按精确/后缀匹配，覆盖
+/// camelCase / snake_case / kebab-case）。涵盖常见 API Key 变体
+/// （`secretKey`/`accessKey`/`privateKey`/`x-api-key`）与 `passwd`/`pwd`。
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "proxyauthorization"
+            | "cookie"
+            | "setcookie"
+            | "password"
+            | "passwd"
+            | "pwd"
+    ) || normalized.ends_with("token")
+        || normalized.ends_with("secret")
+        || normalized.ends_with("password")
+        || normalized.ends_with("apikey")
+        || normalized.ends_with("accesskey")
+        || normalized.ends_with("secretkey")
+        || normalized.ends_with("privatekey")
+}
+
+/// 单个字符串值里的凭证遮蔽：逐 token 判断，覆盖「Bearer <token>」与嵌入在
+/// 长文本中的 JWT / 长 hex / 长 base64（整值不像凭证也不放过句子里的片段）。
+fn mask_secret_like(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut after_bearer = false;
+    for (index, token) in text.split_whitespace().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        let bare = token.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | ',' | ';' | ':' | '{' | '}' | '[' | ']' | '(' | ')'
+            )
+        });
+        let masked = after_bearer
+            || looks_like_jwt(bare)
+            || looks_like_long_hex(bare)
+            || looks_like_long_base64(bare)
+            || looks_like_api_key(bare);
+        after_bearer = bare.eq_ignore_ascii_case("bearer");
+        if masked {
+            out.push_str("[已隐藏]");
+        } else {
+            out.push_str(token);
+        }
+    }
+    out
+}
+
+/// 常见 API Key 前缀（短值也要遮蔽，例如 `sk-abc123`）。
+fn looks_like_api_key(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    (lower.starts_with("sk-") && text.len() > 3)
+        || (lower.starts_with("ghp_") && text.len() > 4)
+        || (lower.starts_with("xoxb-") && text.len() > 5)
+        || (text.starts_with("AKIA") && text.len() >= 12)
+}
+
+fn looks_like_jwt(text: &str) -> bool {
+    let mut parts = text.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(header), Some(payload), Some(sig), None)
+            if header.starts_with("eyJ") && !payload.is_empty() && !sig.is_empty()
+    )
+}
+
+fn looks_like_long_hex(text: &str) -> bool {
+    text.len() >= 32 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn looks_like_long_base64(text: &str) -> bool {
+    text.len() >= 64
+        && text.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=' | b'_' | b'-')
+        })
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let keep = limit.saturating_sub(1);
+    let mut truncated: String = text.chars().take(keep).collect();
+    truncated.push('…');
+    truncated
+}
+
 async fn fetch_remote(
     sessions: &AccountSessionStore,
     session: &AccountSession,
@@ -1881,7 +2079,7 @@ async fn fetch_remote(
         None => parse_response(&value, spec.openai_shape),
     };
     if models.is_empty() {
-        return Err("上游返回的模型目录为空".to_string());
+        return Err(empty_catalog_error(&url, &value));
     }
     Ok(models)
 }
@@ -2134,44 +2332,107 @@ fn collect_model_names(value: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// 解析小浣熊的模型目录（`{data:{models:[{modelId, modelName,…}]}}`）。
+/// 解析小浣熊的模型目录。
+///
+/// 真实形态（实测）：`{data:{categories:[{type, default_model, models:[…]}]}}`，
+/// 单条模型的 id 在 `name` 字段；上下文窗口 `context_window` / 输出上限
+/// `max_tokens` 可能嵌在 `params` 里、也可能在顶层（两级都要看）；视觉能力由
+/// `tags`（vision / image / image-understanding）或 `supportImage` 推断；
+/// 上游目录一般不填 `supportThinking`，缺省按 true 处理。
+///
+/// 兼容旧形态 `{data:{models:[{modelId|id,…}]}}` 与根级 `models`。同名模型
+/// 首次出现者胜，空 id 丢弃。
 fn parse_raccoon_catalog(payload: &Value) -> Vec<CatalogEntry> {
-    let Some(models) = payload
-        .pointer("/data/models")
-        .or_else(|| payload.get("models"))
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
+    let data = payload
+        .get("data")
+        .filter(|value| value.is_object())
+        .unwrap_or(payload);
+
+    // 主形态 data.categories[].models[]；无 categories 时回落到 data.models / 根 models。
+    let models: Vec<&Value> = match data.get("categories").and_then(Value::as_array) {
+        Some(categories) => categories
+            .iter()
+            .filter_map(|category| category.get("models").and_then(Value::as_array))
+            .flatten()
+            .collect(),
+        None => data
+            .get("models")
+            .or_else(|| payload.get("models"))
+            .and_then(Value::as_array)
+            .map(|items| items.iter().collect())
+            .unwrap_or_default(),
     };
+
     let mut out: Vec<CatalogEntry> = Vec::with_capacity(models.len());
     let mut seen: Vec<String> = Vec::with_capacity(models.len());
     for model in models {
-        let id = model
-            .get("modelId")
-            .or_else(|| model.get("id"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if id.is_empty() {
+        let Some(id) = value_text(model.get("name"))
+            .or_else(|| value_text(model.get("model_name")))
+            .or_else(|| value_text(model.get("modelId")))
+            .or_else(|| value_text(model.get("id")))
+        else {
             continue;
-        }
-        if seen.contains(&id) {
+        };
+        if seen.iter().any(|known| known == &id) {
             continue;
         }
         seen.push(id.clone());
+
+        let params = model.get("params").filter(|value| value.is_object());
+        // 上下文窗口优先 context_window；缺失时退化到 max_tokens（两者都可能嵌套 params）。
+        let pick = |keys: &[&str]| -> Option<u32> {
+            for key in keys {
+                if let Some(number) = value_u32(model.get(*key)) {
+                    return Some(number);
+                }
+                if let Some(number) = value_u32(params.and_then(|params| params.get(*key))) {
+                    return Some(number);
+                }
+            }
+            None
+        };
+        let context = pick(&[
+            "context_window",
+            "contextWindow",
+            "maxInputTokens",
+            "contextLength",
+            "context_length",
+        ])
+        .or_else(|| pick(&["max_tokens", "maxTokens"]));
+
+        let tags: Vec<String> = model
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|tag| tag.trim().to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let vision = ["vision", "image", "image-understanding"]
+            .iter()
+            .any(|wanted| tags.iter().any(|tag| tag == wanted))
+            || model.get("supportImage").and_then(Value::as_bool) == Some(true)
+            || model.get("supportsImages").and_then(Value::as_bool) == Some(true)
+            || model.get("is_vl").and_then(Value::as_bool) == Some(true);
+        // 上游目录一般不填 supportThinking；缺省按 true（与上游 normalize 同口径）。
+        let reasoning = model
+            .get("supportThinking")
+            .and_then(Value::as_bool)
+            .or_else(|| model.get("supportsReasoning").and_then(Value::as_bool))
+            .or_else(|| model.get("is_reasoning").and_then(Value::as_bool))
+            .unwrap_or(true);
+
         let mut capabilities: Vec<String> = Vec::new();
-        if model.get("is_reasoning").and_then(Value::as_bool) == Some(true) {
+        if reasoning {
             capabilities.push("reasoning".to_string());
         }
-        if model.get("is_vl").and_then(Value::as_bool) == Some(true) {
+        if vision {
             capabilities.push("vision".to_string());
         }
         capabilities.push("tool".to_string());
-        let context = model
-            .get("maxInputTokens")
-            .and_then(Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok());
         out.push(CatalogEntry {
             id,
             upstream: None,
@@ -2180,6 +2441,29 @@ fn parse_raccoon_catalog(payload: &Value) -> Vec<CatalogEntry> {
         });
     }
     out
+}
+
+/// 宽松取字符串：字符串去空白、数字转字符串；空串视为 None。
+fn value_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+/// 宽松取无符号整数（接受 JSON 数字或数字字符串）。
+fn value_u32(value: Option<&Value>) -> Option<u32> {
+    let value = value?;
+    let number = value.as_u64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+    })?;
+    u32::try_from(number).ok()
 }
 
 /// 解析 Qoder 的模型目录（`{chat:[{key, display_name, is_vl, ...}]}`）。
@@ -2760,6 +3044,208 @@ mod tests {
         assert_eq!(entries[0].id, "spark-x");
         assert_eq!(entries[0].context_length, Some(128000));
         assert!(entries[0].capabilities.iter().any(|c| c == "vision"));
+    }
+
+    #[test]
+    fn body_summary_masks_credentials_and_keeps_structure() {
+        let payload = serde_json::json!({
+            "data": { "list": [
+                {"modelCode": "glm-4", "modelName": "GLM-4"}
+            ]},
+            "access_token": "sk-should-be-hidden",
+            "authorization": "Bearer abc.def.ghi",
+            "detail": "upstream said Bearer topsecretvalue / eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln / deadbeefdeadbeefdeadbeefdeadbeef"
+        });
+        let summary = body_summary(&payload, 800);
+        // 敏感键整值遮蔽
+        assert!(!summary.contains("sk-should-be-hidden"), "{summary}");
+        assert!(!summary.contains("abc.def.ghi"), "{summary}");
+        // 长文本内嵌的 Bearer / JWT / 长 hex 遮蔽
+        assert!(!summary.contains("topsecretvalue"), "{summary}");
+        assert!(!summary.contains("eyJhbGciOiJIUzI1NiJ9"), "{summary}");
+        assert!(!summary.contains("deadbeefdeadbeef"), "{summary}");
+        // 结构（新结构字段）保留，便于判断真实形态
+        assert!(summary.contains("modelCode"), "{summary}");
+        assert!(summary.contains("glm-4"), "{summary}");
+    }
+
+    #[test]
+    fn body_summary_truncates_to_limit() {
+        let payload = serde_json::json!({
+            "data": { "list": [ { "modelCode": "长".repeat(2000) } ] }
+        });
+        let summary = body_summary(&payload, 200);
+        assert!(
+            summary.chars().count() <= 200,
+            "len={}",
+            summary.chars().count()
+        );
+        assert!(summary.ends_with('…'), "{summary}");
+    }
+
+    #[test]
+    fn sensitive_key_positive_and_negative_controls() {
+        for key in [
+            "authorization",
+            "cookie",
+            "set-cookie",
+            "access_token",
+            "refreshToken",
+            "clientSecret",
+            "secretKey",
+            "accessKey",
+            "privateKey",
+            "x-api-key",
+            "apiKey",
+            "password",
+            "passwd",
+            "pwd",
+        ] {
+            assert!(is_sensitive_key(key), "应判敏感: {key}");
+        }
+        for key in [
+            "name",
+            "displayName",
+            "modelCode",
+            "modelId",
+            "contextWindow",
+            "maxOutputTokens",
+            "max_tokens",
+            "tags",
+            "description",
+            "id",
+            "type",
+        ] {
+            assert!(!is_sensitive_key(key), "不应判敏感: {key}");
+        }
+    }
+
+    #[test]
+    fn body_summary_masks_key_variants_and_short_sk() {
+        let payload = serde_json::json!({
+            "secretKey": "short-secret-1",
+            "accessKey": "AKIA-short",
+            "privateKey": "pk-short",
+            "x-api-key": "xkey-short",
+            "passwd": "pw-short-1",
+            "pwd": "pw-short-2",
+            "token": "sk-short",
+            "note": "prefix sk-abc123 tail",
+            "modelCode": "glm-4",
+            "modelName": "GLM-4"
+        });
+        let summary = body_summary(&payload, 800);
+        for secret in [
+            "short-secret-1",
+            "AKIA-short",
+            "pk-short",
+            "xkey-short",
+            "pw-short-1",
+            "pw-short-2",
+            "sk-short",
+            "sk-abc123",
+        ] {
+            assert!(!summary.contains(secret), "{secret} 泄漏: {summary}");
+        }
+        // 普通字段保留，便于看结构
+        assert!(summary.contains("modelCode"), "{summary}");
+        assert!(summary.contains("glm-4"), "{summary}");
+    }
+
+    #[test]
+    fn empty_catalog_error_reports_empty_body_marker() {
+        let message = empty_catalog_error("https://xiaohuanxiong.com/model_catalog", &Value::Null);
+        assert!(message.contains("<空响应体>"), "{message}");
+        let blank = empty_catalog_error(
+            "https://xiaohuanxiong.com/model_catalog",
+            &Value::String("   ".into()),
+        );
+        assert!(blank.contains("<空响应体>"), "{blank}");
+    }
+
+    #[test]
+    fn raccoon_catalog_empty_array_yields_empty() {
+        let payload = serde_json::json!({ "data": { "models": [] } });
+        assert!(parse_raccoon_catalog(&payload).is_empty());
+    }
+
+    /// 真实形态：`data.categories[].models[]`，id 在 `name`，params 嵌套上下文/输出上限。
+    #[test]
+    fn raccoon_catalog_reads_categories_with_nested_params() {
+        let payload = serde_json::json!({
+            "data": { "categories": [
+                { "type": "default", "models": [
+                    { "name": "raccoon-8c4485", "displayName": "Raccoon-Work",
+                      "tags": ["general", "vision"],
+                      "params": { "context_window": 1_000_000, "max_tokens": 100_000 } },
+                    { "name": "raccoon-19b265", "tags": ["code"],
+                      "context_window": 500_000 },
+                    { "name": "raccoon-8c4485", "tags": ["duplicate"] }
+                ]},
+                { "type": "other", "models": [
+                    { "name": "sn-sensenova-6-8-flash-lite", "supportThinking": false,
+                      "params": { "max_tokens": 63_999 } }
+                ]}
+            ]}
+        });
+        let entries = parse_raccoon_catalog(&payload);
+        assert_eq!(entries.len(), 3, "{entries:?}");
+
+        let flagship = entries
+            .iter()
+            .find(|entry| entry.id == "raccoon-8c4485")
+            .expect("应解析出 raccoon-8c4485");
+        assert_eq!(flagship.context_length, Some(1_000_000));
+        assert!(flagship.capabilities.iter().any(|c| c == "vision"));
+        // 缺省 supportThinking=true → reasoning
+        assert!(flagship.capabilities.iter().any(|c| c == "reasoning"));
+        assert!(flagship.capabilities.iter().any(|c| c == "tool"));
+
+        let second = entries
+            .iter()
+            .find(|entry| entry.id == "raccoon-19b265")
+            .expect("应解析出 raccoon-19b265");
+        // 顶层 context_window 也认
+        assert_eq!(second.context_length, Some(500_000));
+
+        let sensenova = entries
+            .iter()
+            .find(|entry| entry.id == "sn-sensenova-6-8-flash-lite")
+            .expect("应解析出 sn-sensenova-6-8-flash-lite");
+        // context_window 缺失 → 退化到 params.max_tokens；supportThinking=false → 无 reasoning
+        assert_eq!(sensenova.context_length, Some(63_999));
+        assert!(!sensenova.capabilities.iter().any(|c| c == "reasoning"));
+    }
+
+    #[test]
+    fn raccoon_catalog_fallback_covers_core_models() {
+        let spec = spec_for("xiaohuanxiong").expect("xiaohuanxiong 应有目录 spec");
+        assert_eq!(spec.fallback.len(), 5);
+        let snapshot = fallback_catalog(&spec);
+        assert_eq!(snapshot.source, "fallback");
+        assert_eq!(snapshot.models.len(), 5);
+        let ids: Vec<&str> = snapshot
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+        assert!(ids.contains(&"raccoon-8c4485"), "{ids:?}");
+        assert!(ids.contains(&"sn-sensenova-6-8-flash-lite"), "{ids:?}");
+    }
+
+    #[test]
+    fn raccoon_empty_catalog_error_has_url_and_masked_summary() {
+        let payload = serde_json::json!({ "data": { "categories": [] } });
+        let message = empty_catalog_error(
+            "https://xiaohuanxiong.com/api/web/llm/v2/model_catalog?token=secret-value",
+            &payload,
+        );
+        assert!(message.contains("model_catalog"), "{message}");
+        // 查询串（可能含凭证）不得进入错误文案
+        assert!(!message.contains("token=secret-value"), "{message}");
+        assert!(message.contains("响应摘要"), "{message}");
+        // 摘要里保留结构，便于定位真实形态
+        assert!(message.contains("categories"), "{message}");
     }
 
     #[test]
