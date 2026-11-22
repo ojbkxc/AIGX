@@ -4882,5 +4882,13 @@
   "responses（OpenAI Responses 透传）": "responses (OpenAI Responses passthrough)",
   "没有匹配的提供商": "No matching providers",
   "Agent 客户端": "Agent client",
-  "Web 网页端": "Web"
+  "Web 网页端": "Web",
+  "按到期分档": "Filter by expiry bucket",
+  "按用量分档": "Filter by usage bucket",
+  "查询失败": "Query failed",
+  "到期：全部": "Expiry: all",
+  "临期(7天)": "Expiring (7d)",
+  "未查询": "Unqueried",
+  "用量：全部": "Usage: all",
+  "有读数": "Has reading"
 }

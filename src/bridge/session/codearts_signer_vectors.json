@@ -1,0 +1,80 @@
+[
+  {
+    "name": "builtin_get",
+    "method": "GET",
+    "url": "https://snap-access.cn-north-4.myhuaweicloud.com/v1/model/builtin",
+    "headers": {"Content-Type":"application/json","Accept":"application/json","X-Language":"en-us","plugin-name":"snap_vscode","plugin-version":"26.9.101","client_version":"Vscode_26.9.101","is_confidential":"false","Agent-Type":"PromptCenter","X-Sdk-Date":"20260101T000000Z"},
+    "body_b64": "", "include_host": false,
+    "access_key": "HUAWEI_AK_TEST_0001", "secret_key": "sk-test-secret-0123456789abcdef",
+    "security_token": "sts-test-token-xyz", "domain_id": "domain-test-0001",
+    "canonical_request": "GET\n/v1/model/builtin/\n\naccept:application/json\nagent-type:PromptCenter\nclient_version:Vscode_26.9.101\ncontent-type:application/json\nis_confidential:false\nplugin-name:snap_vscode\nplugin-version:26.9.101\nx-domain-id:domain-test-0001\nx-language:en-us\nx-sdk-date:20260101T000000Z\nx-security-token:sts-test-token-xyz\n\naccept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "string_to_sign": "SDK-HMAC-SHA256\n20260101T000000Z\n30091f3e5f922b4d95ed6b18995bc007cebc430dbee83b0801763bfbb6e87d09",
+    "signed_headers": "accept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token",
+    "signature": "adab4b38bc40c488c61ea3a334d114970e1c224f2644b3996adeac1e141389b3",
+    "authorization": "SDK-HMAC-SHA256 Access=HUAWEI_AK_TEST_0001, SignedHeaders=accept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token, Signature=adab4b38bc40c488c61ea3a334d114970e1c224f2644b3996adeac1e141389b3"
+  },
+  {
+    "name": "chat_post",
+    "method": "POST",
+    "url": "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/chat/completions",
+    "headers": {"Content-Type":"application/json","Accept":"text/event-stream","client_version":"Vscode_26.9.101","Agent-Type":"ChatAgent","X-Language":"en-us","is_confidential":"false","plugin-name":"snap_vscode","plugin-version":"26.9.101","model-id":"glm-5.3-flash","model-name":"glm-5.3-flash","x-model-id":"glm-5.3-flash","X-Sdk-Date":"20260101T000000Z"},
+    "body_b64": "eyJtb2RlbCI6ImdsbS01LjMtZmxhc2giLCJzdHJlYW0iOmZhbHNlLCJtZXNzYWdlcyI6W3sicm9sZSI6InVzZXIiLCJjb250ZW50IjoiaGkifV19",
+    "include_host": false,
+    "access_key": "HUAWEI_AK_TEST_0001", "secret_key": "sk-test-secret-0123456789abcdef",
+    "security_token": "sts-test-token-xyz", "domain_id": "domain-test-0001",
+    "canonical_request": "POST\n/api/v2/chat/completions/\n\naccept:text/event-stream\nagent-type:ChatAgent\nclient_version:Vscode_26.9.101\ncontent-type:application/json\nis_confidential:false\nmodel-id:glm-5.3-flash\nmodel-name:glm-5.3-flash\nplugin-name:snap_vscode\nplugin-version:26.9.101\nx-domain-id:domain-test-0001\nx-language:en-us\nx-model-id:glm-5.3-flash\nx-sdk-date:20260101T000000Z\nx-security-token:sts-test-token-xyz\n\naccept;agent-type;client_version;content-type;is_confidential;model-id;model-name;plugin-name;plugin-version;x-domain-id;x-language;x-model-id;x-sdk-date;x-security-token\n1874667df95f2fe031c6714ed37018091e9cd4cefd57fe297e3fc4ff92619d18",
+    "string_to_sign": "SDK-HMAC-SHA256\n20260101T000000Z\n4eca681dd746b986cd42c969b552d5e263c58c7a870026e27f887fb52a7670ed",
+    "signed_headers": "accept;agent-type;client_version;content-type;is_confidential;model-id;model-name;plugin-name;plugin-version;x-domain-id;x-language;x-model-id;x-sdk-date;x-security-token",
+    "signature": "127a304454f5875e66732e236b91c6fb2b3c659b689d0acf6d17136d7125fd0b",
+    "authorization": "SDK-HMAC-SHA256 Access=HUAWEI_AK_TEST_0001, SignedHeaders=accept;agent-type;client_version;content-type;is_confidential;model-id;model-name;plugin-name;plugin-version;x-domain-id;x-language;x-model-id;x-sdk-date;x-security-token, Signature=127a304454f5875e66732e236b91c6fb2b3c659b689d0acf6d17136d7125fd0b"
+  },
+  {
+    "name": "agent_detail_query_get",
+    "method": "GET",
+    "url": "https://snap-access.cn-north-4.myhuaweicloud.com/v1/agent-center/agents/detail?agent_id=agent-123&b=2&a=1",
+    "headers": {"Content-Type":"application/json","Accept":"application/json","X-Language":"en-us","plugin-name":"snap_vscode","plugin-version":"26.9.101","client_version":"Vscode_26.9.101","is_confidential":"false","Agent-Type":"AgentCenter","X-Sdk-Date":"20260101T000000Z"},
+    "body_b64": "", "include_host": false,
+    "access_key": "HUAWEI_AK_TEST_0001", "secret_key": "sk-test-secret-0123456789abcdef",
+    "security_token": "sts-test-token-xyz", "domain_id": "domain-test-0001",
+    "canonical_request": "GET\n/v1/agent-center/agents/detail/\na=1&agent_id=agent-123&b=2\naccept:application/json\nagent-type:AgentCenter\nclient_version:Vscode_26.9.101\ncontent-type:application/json\nis_confidential:false\nplugin-name:snap_vscode\nplugin-version:26.9.101\nx-domain-id:domain-test-0001\nx-language:en-us\nx-sdk-date:20260101T000000Z\nx-security-token:sts-test-token-xyz\n\naccept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "string_to_sign": "SDK-HMAC-SHA256\n20260101T000000Z\n9c501ed95523c102ee723d6a094179c0acaf2ff2465d48e61e810e740279fef8",
+    "signed_headers": "accept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token",
+    "signature": "0e3fadcaf52722be624302dde335559bffdfa2d331716e34b104d246187c826b",
+    "authorization": "SDK-HMAC-SHA256 Access=HUAWEI_AK_TEST_0001, SignedHeaders=accept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token, Signature=0e3fadcaf52722be624302dde335559bffdfa2d331716e34b104d246187c826b"
+  },
+  {
+    "name": "benefit_gateway_host_get",
+    "method": "GET",
+    "url": "https://opengw.developer.huaweicloud.com/api/v1/gateway/config",
+    "headers": {"Content-Type":"application/json","Accept":"application/json","X-Language":"en-us","plugin-name":"snap_vscode","plugin-version":"26.9.101","client_version":"Vscode_26.9.101","is_confidential":"false","X-Sdk-Date":"20260101T000000Z"},
+    "body_b64": "", "include_host": true,
+    "access_key": "HUAWEI_AK_TEST_0001", "secret_key": "sk-test-secret-0123456789abcdef",
+    "security_token": "sts-test-token-xyz", "domain_id": "",
+    "canonical_request": "GET\n/api/v1/gateway/config/\n\naccept:application/json\nclient_version:Vscode_26.9.101\ncontent-type:application/json\nhost:opengw.developer.huaweicloud.com\nis_confidential:false\nplugin-name:snap_vscode\nplugin-version:26.9.101\nx-language:en-us\nx-sdk-date:20260101T000000Z\nx-security-token:sts-test-token-xyz\n\naccept;client_version;content-type;host;is_confidential;plugin-name;plugin-version;x-language;x-sdk-date;x-security-token\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "string_to_sign": "SDK-HMAC-SHA256\n20260101T000000Z\n830573424c039a3789fce6675aedd74fed102ab2bbed82a1cdf4d18a75e0ee31",
+    "signed_headers": "accept;client_version;content-type;host;is_confidential;plugin-name;plugin-version;x-language;x-sdk-date;x-security-token",
+    "signature": "726b06aa2770ae2595cd8286493dacee25167c2e3dcd7ba1ba94d10986fb1c19",
+    "authorization": "SDK-HMAC-SHA256 Access=HUAWEI_AK_TEST_0001, SignedHeaders=accept;client_version;content-type;host;is_confidential;plugin-name;plugin-version;x-language;x-sdk-date;x-security-token, Signature=726b06aa2770ae2595cd8286493dacee25167c2e3dcd7ba1ba94d10986fb1c19"
+  },
+  {
+    "name": "query_encoding_contract",
+    "method": "GET",
+    "url": "https://snap-access.cn-north-4.myhuaweicloud.com/v1/x?q=a!b*c'd(e)+f%20g&z=%2F&a=1",
+    "headers": {"Content-Type":"application/json","Accept":"application/json","X-Language":"en-us","plugin-name":"snap_vscode","plugin-version":"26.9.101","client_version":"Vscode_26.9.101","is_confidential":"false","Agent-Type":"PromptCenter","X-Sdk-Date":"20260101T000000Z"},
+    "body_b64": "", "include_host": false,
+    "access_key": "HUAWEI_AK_TEST_0001", "secret_key": "sk-test-secret-0123456789abcdef",
+    "security_token": "sts-test-token-xyz", "domain_id": "domain-test-0001",
+    "canonical_request": "GET\n/v1/x/\na=1&q=a!b*c'd(e)%20f%20g&z=%2F\naccept:application/json\nagent-type:PromptCenter\nclient_version:Vscode_26.9.101\ncontent-type:application/json\nis_confidential:false\nplugin-name:snap_vscode\nplugin-version:26.9.101\nx-domain-id:domain-test-0001\nx-language:en-us\nx-sdk-date:20260101T000000Z\nx-security-token:sts-test-token-xyz\n\naccept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "string_to_sign": "SDK-HMAC-SHA256\n20260101T000000Z\n46547c1c4ec0ba33448649bc5fa0c26be1cb48ccd46cf59bac03dc9263995acc",
+    "signed_headers": "accept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token",
+    "signature": "d4774abbad92a5fc36cea5c1abfd85b79444b6bafbc3de01ed1a84982cbfdb5f",
+    "authorization": "SDK-HMAC-SHA256 Access=HUAWEI_AK_TEST_0001, SignedHeaders=accept;agent-type;client_version;content-type;is_confidential;plugin-name;plugin-version;x-domain-id;x-language;x-sdk-date;x-security-token, Signature=d4774abbad92a5fc36cea5c1abfd85b79444b6bafbc3de01ed1a84982cbfdb5f"
+  },
+  {
+    "name": "missing_sk",
+    "method": "GET",
+    "url": "https://x.example/v1/model/builtin",
+    "expected_error_kind": "incomplete_credential",
+    "access_key": "only-ak", "secret_key": "", "security_token": "", "domain_id": ""
+  }
+]

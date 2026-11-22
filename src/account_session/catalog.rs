@@ -349,6 +349,9 @@ enum CatalogSign {
     /// uinfo / uk），不是网页登录 Cookie 里那份通行证级 STOKEN ——
     /// 光带 Cookie 的症状是「余额正常、模型拉不下」。
     Kuku,
+    /// CodeArts：华为云 **SDK-HMAC-SHA256** 签名 + agent/builtin/benefit
+    /// 三源合并（不是单 URL；`fetch_remote` 会转交 `fetch_codearts_catalog`）。
+    CodeArts,
 }
 
 /// 静态兜底表的一行。
@@ -440,7 +443,9 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             path: "/v1/model/builtin",
             openai_shape: false,
             fallback: &[],
-            sign: None,
+            // 三源合并 + 每请求签名，交给 `fetch_codearts_catalog`（见下方同名
+            // 函数）；这里的 path 只用于「不支持目录」判定与静态兜底判断。
+            sign: Some(CatalogSign::CodeArts),
             method: None,
             body: None,
             parser: None,
@@ -735,13 +740,15 @@ const DEEPSEEK_WEB_FALLBACK: &[FallbackModel] = &[
 
 /// AutoClaw 兜底表（上游无远程目录接口）。
 ///
-/// 移植自 Agent2API `providers/autoclaw/models.rs` 的 `MODELS`：
-/// `id` 是路由 id，`route_id` 是上游真名，`reasoning`/`support_image`
-/// 是能力位，`context_window` 是上下文长度。
+/// 口径（2026-11-23 实测 `GET …/proxy/autoclaw-model-config` 的 `models[]`）：
+/// 目录条目同时给 `id`（路由键，如 `zaicoding_glm-5.3`）与 `name`（展示/模型名，
+/// 如 `GLM-5.3`）。**把 `id` 当 model 发上游会被拒（400「非法模型」）**，
+/// 故这里 `id`=客户端可见名、`upstream_key`=上游 `name`（不是 `id`/routeId）。
+/// `reasoning`/`vision`/`context_window` 仍是能力位与上下文长度。
 const AUTOCLAW_FALLBACK: &[FallbackModel] = &[
     FallbackModel {
         id: "glm-5.3",
-        upstream_key: "zaicoding_glm-5.3",
+        upstream_key: "GLM-5.3",
         reasoning: true,
         vision: false,
         tool: true,
@@ -749,7 +756,7 @@ const AUTOCLAW_FALLBACK: &[FallbackModel] = &[
     },
     FallbackModel {
         id: "glm-5.3-flash",
-        upstream_key: "zai_glm-5.3-flash",
+        upstream_key: "GLM-5.3-FlashX-Legal",
         reasoning: true,
         vision: true,
         tool: true,
@@ -2068,11 +2075,434 @@ fn truncate_chars(text: &str, limit: usize) -> String {
     truncated
 }
 
+// ── CodeArts：SDK-HMAC-SHA256 签名 + agent/builtin/benefit 三源目录 ─────────
+//
+// 对齐 Agent2API `providers/codearts/models.rs`：三个源按 id **先到先得** 合并，
+// 任一源失败只记日志不中断；每请求用 bridge 里同一套 `sign_v4`（避免两处算法
+// 分叉）。目录端点无路径转义，`Url::path()` 与上游 Go 语义等价。
+
+const CODEARTS_PLUGIN_NAME: &str = "snap_vscode";
+const CODEARTS_PLUGIN_VERSION: &str = "26.9.101";
+const CODEARTS_LANGUAGE: &str = "en-us";
+/// 福利网关（另一台主机、签名带 Host、无 domain/agent 头）。
+const CODEARTS_BENEFIT_BASE: &str = "https://opengw.developer.huaweicloud.com";
+
+fn codearts_sdk_date() -> String {
+    chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+/// 一组目录请求头（**全部参与签名**）。`sts`/`domain` 非空才带；`include_host`
+/// 仅福利网关开（snap-access 不带）。
+fn codearts_headers(
+    agent_type: &str,
+    include_host: bool,
+    host: &str,
+    sts: &str,
+    domain: &str,
+    domainless: bool,
+) -> Vec<(String, String)> {
+    let mut headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("Accept".to_string(), "application/json".to_string()),
+        ("X-Language".to_string(), CODEARTS_LANGUAGE.to_string()),
+        ("plugin-name".to_string(), CODEARTS_PLUGIN_NAME.to_string()),
+        (
+            "plugin-version".to_string(),
+            CODEARTS_PLUGIN_VERSION.to_string(),
+        ),
+        (
+            "client_version".to_string(),
+            format!("Vscode_{CODEARTS_PLUGIN_VERSION}"),
+        ),
+        ("is_confidential".to_string(), "false".to_string()),
+        ("X-Sdk-Date".to_string(), codearts_sdk_date()),
+    ];
+    if !agent_type.is_empty() {
+        headers.push(("Agent-Type".to_string(), agent_type.to_string()));
+    }
+    if !sts.trim().is_empty() {
+        headers.push(("X-Security-Token".to_string(), sts.trim().to_string()));
+    }
+    if !domainless && !domain.trim().is_empty() {
+        headers.push(("X-Domain-Id".to_string(), domain.trim().to_string()));
+    }
+    if include_host && !host.trim().is_empty() {
+        headers.push(("Host".to_string(), host.trim().to_string()));
+    }
+    headers
+}
+
+/// 签名并执行一次 GET，返回解析后的 JSON（GET 恒签空体摘要）。
+async fn codearts_get(
+    client: &reqwest::Client,
+    url: &str,
+    headers: Vec<(String, String)>,
+    access_key: &str,
+    secret_key: &str,
+) -> Result<Value, String> {
+    let mut headers = headers;
+    let authorization = crate::bridge::session::codearts::sign_v4(
+        "GET", url, &headers, b"", access_key, secret_key,
+    )?;
+    headers.push(("Authorization".to_string(), authorization));
+    let mut req = client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
+    for (name, value) in &headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let resp = req.send().await.map_err(|e| format!("请求失败：{e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("上游返回 {status}"));
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败：{e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("响应不是合法 JSON：{e}"))
+}
+
+fn codearts_text(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn codearts_u32(value: &Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|number| u32::try_from(number).ok())
+        .filter(|number| *number > 0)
+}
+
+fn codearts_caps(images: bool) -> Vec<String> {
+    let mut caps = Vec::new();
+    if images {
+        caps.push("vision".to_string());
+    }
+    caps
+}
+
+/// `/v1/model/builtin` → 条目（`enable` 显式 false 才跳过）。
+fn parse_codearts_builtin(payload: &Value) -> Vec<CatalogEntry> {
+    let Some(entries) = payload.get("builtinModels").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        if entry.get("enable").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let model_id = codearts_text(entry, "model_id");
+        let id = if model_id.is_empty() {
+            codearts_text(entry, "model_name")
+        } else {
+            model_id
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let images = entry
+            .get("supports_images")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        out.push(CatalogEntry {
+            id,
+            upstream: None,
+            context_length: codearts_u32(entry, "context_window"),
+            capabilities: codearts_caps(images),
+        });
+    }
+    out
+}
+
+/// `/v1/agent-center/agents/useragents` → agent id 列表（去重）。
+fn parse_codearts_agent_ids(payload: &Value) -> Vec<String> {
+    let Some(agents) = payload.get("agents").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for agent in agents {
+        let agent_id = codearts_text(agent, "agent_id");
+        let id = if agent_id.is_empty() {
+            codearts_text(agent, "original_id")
+        } else {
+            agent_id
+        };
+        if !id.is_empty() && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// agent detail 的 `gpts.models` → 条目。
+///
+/// 两条过滤照参考实现：`enabled == false` 跳过；**`display_enabled` 缺失也算
+/// 不可见**（实测 trial 账号的 detail 正是如此）。
+fn parse_codearts_agent_detail(payload: &Value) -> Vec<CatalogEntry> {
+    let Some(entries) = payload.pointer("/gpts/models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let parameters = entry
+            .get("model_parameters")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if parameters.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        if parameters.get("display_enabled").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        // 扩展把 model_parameters 摊在 model_alias 上，嵌套 model_id 优先。
+        let nested = codearts_text(&parameters, "model_id");
+        let id = if !nested.is_empty() {
+            nested
+        } else {
+            let alias = codearts_text(entry, "model_alias");
+            if alias.is_empty() {
+                codearts_text(entry, "model_id")
+            } else {
+                alias
+            }
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let images = parameters
+            .get("supports_images")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        out.push(CatalogEntry {
+            id,
+            upstream: None,
+            context_length: codearts_u32(&parameters, "context_window"),
+            capabilities: codearts_caps(images),
+        });
+    }
+    out
+}
+
+/// `/v1/benefit-gateway-config` → 总开关（缺字段报错，不静默当关）。
+fn parse_codearts_benefit_gate(payload: &Value) -> Result<bool, String> {
+    payload
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "福利开关响应没有 enabled 字段".to_string())
+}
+
+/// 福利网关 `result.models` → 条目（成功看体里 `error_code == "0000"`，不看 HTTP）。
+fn parse_codearts_benefit(payload: &Value) -> Result<Vec<CatalogEntry>, String> {
+    let code = codearts_text(payload, "error_code");
+    if code != "0000" {
+        return Err(format!("福利目录未成功（error_code={code:?}）"));
+    }
+    let Some(entries) = payload.pointer("/result/models").and_then(Value::as_array) else {
+        return Err("福利目录缺少 result.models".to_string());
+    };
+    let mut rows: Vec<(i64, &Value)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.get("sort").and_then(Value::as_i64).unwrap_or(0),
+                entry,
+            )
+        })
+        .collect();
+    rows.sort_by_key(|(sort, _)| *sort);
+    let mut out = Vec::new();
+    for (_, entry) in rows {
+        let id = codearts_text(entry, "model_id");
+        if id.is_empty() {
+            continue;
+        }
+        out.push(CatalogEntry {
+            id,
+            upstream: None,
+            context_length: codearts_u32(entry, "context_window"),
+            capabilities: Vec::new(),
+        });
+    }
+    Ok(out)
+}
+
+/// 按 id 先到先得合并（前者已报过的 id 不再被后者覆盖）。
+fn merge_codearts(mut target: Vec<CatalogEntry>, incoming: Vec<CatalogEntry>) -> Vec<CatalogEntry> {
+    for model in incoming {
+        if !target.iter().any(|existing| existing.id == model.id) {
+            target.push(model);
+        }
+    }
+    target
+}
+
+/// 分页拉 agent id（100/页，最多 100 页，与参考实现同口径）。
+async fn fetch_codearts_agent_ids(
+    client: &reqwest::Client,
+    base: &str,
+    access_key: &str,
+    secret_key: &str,
+    sts: &str,
+    domain: &str,
+) -> Result<Vec<String>, String> {
+    const PAGE: usize = 100;
+    let mut ids: Vec<String> = Vec::new();
+    for page in 0..100usize {
+        let offset = page * PAGE;
+        let url = format!(
+            "{base}/v1/agent-center/agents/useragents?offset={offset}&limit={PAGE}&is_primary_agent=true&supported_client=VSCODE&min_compatible_plugin_version={CODEARTS_PLUGIN_VERSION}"
+        );
+        let headers = codearts_headers("AgentCenter", false, "", sts, domain, false);
+        let payload = codearts_get(client, &url, headers, access_key, secret_key).await?;
+        let page_ids = parse_codearts_agent_ids(&payload);
+        let count = page_ids.len();
+        for id in page_ids {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        if count < PAGE {
+            break;
+        }
+    }
+    Ok(ids)
+}
+
+/// 解析 CodeArts 凭据，兼容两种落库形态：
+///   - **导入形态**：`secret` = AK，`secret_access_key`/`security_token`/`domain_id`
+///     在具名字段（A2A 迁移来的账号）；
+///   - **原生形态**：`secret` = `AK:SK[:STS]`（冒号或换行分隔），字段多为空。
+///
+/// 返回 `(AK, SK, STS, domain)`；缺 SK 由调用方判为「凭据不完整」。
+fn codearts_credentials(session: &AccountSession) -> (String, String, String, String) {
+    let raw = session.credential.secret_plain();
+    let field_sk = session.credential.field_plain("secret_access_key");
+    let field_sts = session.credential.field_plain("security_token");
+    let field_domain = session.credential.field_plain("domain_id");
+    if !field_sk.trim().is_empty() {
+        return (
+            raw.trim().to_string(),
+            field_sk.trim().to_string(),
+            field_sts.trim().to_string(),
+            field_domain.trim().to_string(),
+        );
+    }
+    let parts: Vec<&str> = raw
+        .split([':', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let ak = parts.first().copied().unwrap_or("").to_string();
+    let sk = parts.get(1).copied().unwrap_or("").to_string();
+    let raw_sts = parts.get(2).copied().unwrap_or("");
+    let sts = if field_sts.trim().is_empty() {
+        raw_sts.to_string()
+    } else {
+        field_sts.trim().to_string()
+    };
+    (ak, sk, sts, field_domain)
+}
+
+/// CodeArts 目录：agent → builtin → benefit 三源合并（见模块内注释）。
+async fn fetch_codearts_catalog(
+    sessions: &AccountSessionStore,
+    session: &AccountSession,
+) -> Result<Vec<CatalogEntry>, String> {
+    // 凭证：兼容导入形态（secret=AK + 具名字段）与原生形态（secret=AK:SK:STS）。
+    let (access_key, secret_key, sts, domain) = codearts_credentials(session);
+    if access_key.trim().is_empty() || secret_key.trim().is_empty() {
+        return Err(
+            "codearts 凭据不完整（缺 access_key / secret_access_key），无法签名目录请求"
+                .to_string(),
+        );
+    }
+    let base = catalog_base_url(session)?;
+    let base = base.trim_end_matches('/').to_string();
+    let client = sessions
+        .client_for(session)
+        .map_err(|e| format!("出口客户端不可用：{e}"))?;
+
+    // 1) agent：先列 id，再逐个取 detail。
+    let mut agent_models: Vec<CatalogEntry> = Vec::new();
+    match fetch_codearts_agent_ids(&client, &base, &access_key, &secret_key, &sts, &domain).await {
+        Ok(ids) => {
+            for id in ids {
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("agent_id", &id)
+                    .finish();
+                let url = format!("{base}/v1/agent-center/agents/detail?{query}");
+                let headers = codearts_headers("AgentCenter", false, "", &sts, &domain, false);
+                match codearts_get(&client, &url, headers, &access_key, &secret_key).await {
+                    Ok(payload) => agent_models.extend(parse_codearts_agent_detail(&payload)),
+                    Err(e) => tracing::warn!("codearts agent detail {id} 失败：{e}"),
+                }
+            }
+        }
+        Err(e) => tracing::warn!("codearts agent 列表失败：{e}"),
+    }
+
+    // 2) builtin（多模态只在这里出现）。
+    let builtin = {
+        let url = format!("{base}/v1/model/builtin");
+        let headers = codearts_headers("PromptCenter", false, "", &sts, &domain, false);
+        match codearts_get(&client, &url, headers, &access_key, &secret_key).await {
+            Ok(payload) => parse_codearts_builtin(&payload),
+            Err(e) => {
+                tracing::warn!("codearts builtin 失败：{e}");
+                Vec::new()
+            }
+        }
+    };
+    let mut models = merge_codearts(agent_models, builtin);
+
+    // 3) benefit：先判总开关，开了再取福利网关目录（带 Host、无 domain/agent 头）。
+    let gate_url = format!("{base}/v1/benefit-gateway-config");
+    let gate_headers = codearts_headers("PromptCenter", false, "", &sts, &domain, false);
+    match codearts_get(&client, &gate_url, gate_headers, &access_key, &secret_key).await {
+        Ok(gate) => match parse_codearts_benefit_gate(&gate) {
+            Ok(true) => {
+                let url = format!("{CODEARTS_BENEFIT_BASE}/api/v1/gateway/config");
+                let host = url::Url::parse(&url)
+                    .ok()
+                    .and_then(|parsed| parsed.host_str().map(str::to_string))
+                    .unwrap_or_default();
+                let headers = codearts_headers("", true, &host, &sts, &domain, true);
+                match codearts_get(&client, &url, headers, &access_key, &secret_key).await {
+                    Ok(payload) => match parse_codearts_benefit(&payload) {
+                        Ok(benefit) => models = merge_codearts(models, benefit),
+                        Err(e) => tracing::warn!("codearts 福利目录解析失败：{e}"),
+                    },
+                    Err(e) => tracing::warn!("codearts 福利目录失败：{e}"),
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("codearts 福利开关解析失败：{e}"),
+        },
+        Err(e) => tracing::warn!("codearts 福利开关失败：{e}"),
+    }
+
+    if models.is_empty() {
+        return Err("codearts 三个目录源都没有返回可用模型".to_string());
+    }
+    Ok(models)
+}
+
 async fn fetch_remote(
     sessions: &AccountSessionStore,
     session: &AccountSession,
     spec: &CatalogSpec,
 ) -> Result<Vec<CatalogEntry>, String> {
+    // CodeArts 不是单 URL：每请求签名 + 三个模型源合并，走专用路径。
+    if spec.sign == Some(CatalogSign::CodeArts) {
+        return fetch_codearts_catalog(sessions, session).await;
+    }
     let base = catalog_base_url(session)?;
     let base = base.as_str();
     // `path` 为空 = 该家只有静态兜底（workbuddy / autoclaw / orcaterm / zcode
@@ -3345,6 +3775,115 @@ mod tests {
         assert_eq!(entries[1].id, "gemini-3-pro");
         assert_eq!(entries[1].context_length, Some(1048576));
         assert!(entries[1].capabilities.iter().any(|c| c == "vision"));
+    }
+
+    #[test]
+    fn codearts_three_sources_parse_and_merge() {
+        // builtin：enable=false 跳过；多模态 → vision；context_window → context_length。
+        let builtin = parse_codearts_builtin(&serde_json::json!({
+            "builtinModels": [
+                {"model_id": "GLM-5.2", "model_name": "GLM 5.2", "context_window": 131072, "supports_images": false},
+                {"model_id": "Qwen3-VL-235B", "context_window": 262144, "supports_images": true},
+                {"model_id": "disabled", "enable": false}
+            ]
+        }));
+        assert_eq!(builtin.len(), 2);
+        assert_eq!(builtin[0].id, "GLM-5.2");
+        assert_eq!(builtin[0].context_length, Some(131072));
+        assert!(builtin[1].capabilities.iter().any(|c| c == "vision"));
+
+        // agent detail：display_enabled 缺失（trial）/enabled=false → 跳过；嵌套 model_id 优先。
+        let agent = parse_codearts_agent_detail(&serde_json::json!({
+            "gpts": {"models": [
+                {"model_alias": "glm-5.2-sft", "model_parameters": {"display_enabled": true, "model_id": "glm-5.2-real", "context_window": 128000}},
+                {"model_alias": "trial", "model_parameters": {}},
+                {"model_alias": "off", "model_parameters": {"display_enabled": true, "enabled": false}}
+            ]}
+        }));
+        assert_eq!(agent.len(), 1);
+        assert_eq!(agent[0].id, "glm-5.2-real");
+        assert_eq!(agent[0].context_length, Some(128000));
+
+        // benefit：error_code 非 "0000" 报错；成功按 sort 排序。
+        assert!(parse_codearts_benefit(&serde_json::json!({"error_code": "1"})).is_err());
+        let benefit = parse_codearts_benefit(&serde_json::json!({
+            "error_code": "0000",
+            "result": {"models": [
+                {"model_id": "b-second", "sort": 2},
+                {"model_id": "b-first", "sort": 1, "context_window": 65536}
+            ]}
+        }))
+        .expect("benefit parse");
+        assert_eq!(benefit[0].id, "b-first");
+        assert_eq!(benefit[0].context_length, Some(65536));
+        assert_eq!(benefit[1].id, "b-second");
+
+        // merge：先到先得——agent 已报过的 id 不被 builtin 覆盖。
+        let merged = merge_codearts(
+            vec![CatalogEntry {
+                id: "shared".into(),
+                upstream: None,
+                context_length: Some(1),
+                capabilities: vec![],
+            }],
+            vec![
+                CatalogEntry {
+                    id: "shared".into(),
+                    upstream: None,
+                    context_length: Some(2),
+                    capabilities: vec![],
+                },
+                CatalogEntry {
+                    id: "only-builtin".into(),
+                    upstream: None,
+                    context_length: None,
+                    capabilities: vec![],
+                },
+            ],
+        );
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, "shared");
+        assert_eq!(merged[0].context_length, Some(1), "先到先得：保留 agent 的");
+        assert_eq!(merged[1].id, "only-builtin");
+
+        // agent id 列表：agent_id 优先、original_id 回退、去重。
+        let ids = parse_codearts_agent_ids(&serde_json::json!({
+            "agents": [{"agent_id": "a1"}, {"original_id": "a2"}, {"agent_id": "a1"}]
+        }));
+        assert_eq!(ids, vec!["a1".to_string(), "a2".to_string()]);
+    }
+
+    #[test]
+    fn codearts_credentials_support_import_and_native_shapes() {
+        // 原生形态：secret = AK:SK:STS，具名字段为空。
+        let mut native = AccountSession::new("ch", "acct");
+        native.provider = "codearts".to_string();
+        native.credential.secret = "AK-1:SK-1:STS-1".to_string();
+        assert_eq!(
+            codearts_credentials(&native),
+            (
+                "AK-1".to_string(),
+                "SK-1".to_string(),
+                "STS-1".to_string(),
+                String::new()
+            )
+        );
+        // 导入形态：secret = AK，SK/STS/domain 在具名字段。
+        let mut imported = AccountSession::new("ch", "acct");
+        imported.provider = "codearts".to_string();
+        imported.credential.secret = "AK-2".to_string();
+        imported.credential.set_field("secret_access_key", "SK-2");
+        imported.credential.set_field("security_token", "STS-2");
+        imported.credential.set_field("domain_id", "DOM-2");
+        assert_eq!(
+            codearts_credentials(&imported),
+            (
+                "AK-2".to_string(),
+                "SK-2".to_string(),
+                "STS-2".to_string(),
+                "DOM-2".to_string()
+            )
+        );
     }
 
     #[test]

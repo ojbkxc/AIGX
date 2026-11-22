@@ -44,15 +44,14 @@ import {
 } from '../lib/tableColumns';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
-import { usePageSize, TablePaginationFooter } from '../components/ui/TableShell';
+import { usePageSize, TablePaginationFooter, CLIENT_PAGE_SIZES } from '../components/ui/TableShell';
 import type { AliasEntry, ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
 import './ModelManage.css';
 
 // ── 常量 ─────────────────────────────────────────────────────────────
 
-/** 分页档位（对齐 Agent2API table-shell 的 CLIENT_PAGE_SIZES，去掉 all 防卡顿） */
-const PAGE_SIZES = [20, 25, 50, 100];
-const DEFAULT_PAGE_SIZE = 25;
+/** 分页档位（#67 对齐 Agent2API table-shell 的 CLIENT_PAGE_SIZES：[20,50,100,200,'all']，默认 50） */
+const DEFAULT_PAGE_SIZE = 50;
 /** 聚合视图每组默认展示行数，其余折叠（Agent2API GROUP_LIMIT） */
 const GROUP_LIMIT = 8;
 
@@ -430,7 +429,7 @@ export default function ModelManage(): JSX.Element {
 
   // 分页（每页条数走公共 usePageSize，旧 aigx-mm-pagesize 一次性搬迁）
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = usePageSize(LS_PSZ, PAGE_SIZES, DEFAULT_PAGE_SIZE, [LS_PAGE_SIZE]);
+  const [pageSize, setPageSize] = usePageSize(LS_PSZ, CLIENT_PAGE_SIZES, DEFAULT_PAGE_SIZE, [LS_PAGE_SIZE]);
 
   // 批量选择（key = provider|id）
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -527,7 +526,7 @@ export default function ModelManage(): JSX.Element {
 
   // ── 自定义模型（对齐 Agent2API addCustomModel / removeCustomModel） ──
   const [customModal, setCustomModal] = useState(false);
-  const [customForm, setCustomForm] = useState({ id: '', provider: '', owned_by: '' });
+  const [customForm, setCustomForm] = useState({ id: '', provider: '' });
   const [customError, setCustomError] = useState('');
   const [savingCustom, setSavingCustom] = useState(false);
 
@@ -876,7 +875,7 @@ export default function ModelManage(): JSX.Element {
   };
 
   const openCustomCreate = () => {
-    setCustomForm({ id: '', provider: '', owned_by: '' });
+    setCustomForm({ id: '', provider: '' });
     setCustomError('');
     setCustomModal(true);
   };
@@ -1267,7 +1266,7 @@ export default function ModelManage(): JSX.Element {
     return Array.from(map.entries()).map(([id, g]) => ({ id, ...g }));
   }, [filtered, groupedMode]);
 
-  // 客户端分页（PAGE_SIZES 无 'all' 档，窄化数值口径）
+  // 客户端分页（CLIENT_PAGE_SIZES 含 'all' 档：全部 → 取全量）
   const pageSizeNum = pageSize === 'all' ? filtered.length || 1 : pageSize;
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSizeNum));
   const currentPage = Math.min(page, totalPages);
@@ -2300,7 +2299,7 @@ export default function ModelManage(): JSX.Element {
                     page={currentPage}
                     totalPages={totalPages}
                     size={pageSize}
-                    sizes={PAGE_SIZES}
+                    sizes={CLIENT_PAGE_SIZES}
                     onSizeChange={setPageSize}
                     onPageChange={setPage}
                   />
@@ -2774,16 +2773,7 @@ export default function ModelManage(): JSX.Element {
                   disabled={savingCustom}
                 />
               </div>
-              <div className="form-group">
-                <label>{t('归属方（可选）')}</label>
-                <input
-                  className="form-input"
-                  value={customForm.owned_by}
-                  onChange={(e) => setCustomForm({ ...customForm, owned_by: e.target.value })}
-                  placeholder="custom"
-                  disabled={savingCustom}
-                />
-              </div>
+              {/* #67：移除「归属方 owned_by」死字段（后端 addCustomModel 仅收 provider+id，不提交该值）。*/}
               <p className="mm-dialog-note">
                 {t('自定义模型登记后可在目录中启停、定价与映射；来源色点为手动（琥珀）。')}
               </p>

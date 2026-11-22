@@ -95,7 +95,8 @@ impl CodeArtsBridge {
     /// SDK-HMAC-SHA256：返回 `Authorization` 头值。
     ///
     /// `pub` 给签到/福利领取复用（`checkin::claim::codearts`），签名口径与
-    /// 登录/对话完全一致，避免两处算法分叉。
+    /// 登录/对话完全一致，避免两处算法分叉。真正的算法在模块级
+    /// [`sign_material`] / [`sign_v4`]，这里只是薄封装。
     pub fn sign(
         &self,
         method: &str,
@@ -103,62 +104,117 @@ impl CodeArtsBridge {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Option<String> {
-        if self.access_key.is_empty() || self.secret_key.is_empty() {
-            return None;
-        }
-        let parsed = url::Url::parse(url).ok()?;
-
-        let mut canonical: Vec<(String, String)> = headers
-            .iter()
-            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
-            .collect();
-        // 同名按「后到覆盖」合并
-        canonical.sort_by(|a, b| a.0.cmp(&b.0));
-        canonical.dedup_by(|later, earlier| {
-            if later.0 == earlier.0 {
-                earlier.1 = later.1.clone();
-                true
-            } else {
-                false
-            }
-        });
-        let canonical_headers: String = canonical
-            .iter()
-            .map(|(name, value)| format!("{name}:{value}\n"))
-            .collect();
-        let signed_headers = canonical
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(";");
-
-        let payload_hash = sha256_hex(body);
-        let canonical_request = [
+        sign_v4(
             method,
-            &canonical_uri(parsed.path()),
-            &canonical_query(parsed.query().unwrap_or("")),
-            &canonical_headers,
-            &signed_headers,
-            &payload_hash,
-        ]
-        .join("\n");
-        let date = canonical
-            .iter()
-            .find(|(name, _)| name == "x-sdk-date")
-            .map(|(_, value)| value.clone())
-            .unwrap_or_default();
-        let string_to_sign = [
-            SIGNING_ALGORITHM,
-            &date,
-            &sha256_hex(canonical_request.as_bytes()),
-        ]
-        .join("\n");
-        let signature = hmac_sha256_hex(self.secret_key.as_bytes(), &string_to_sign);
-        Some(format!(
-            "{SIGNING_ALGORITHM} Access={}, SignedHeaders={signed_headers}, Signature={signature}",
-            self.access_key
-        ))
+            url,
+            headers,
+            body,
+            &self.access_key,
+            &self.secret_key,
+        )
+        .ok()
     }
+}
+
+/// 一次签名的全部中间量（便于向量单测逐字段对账）。
+///
+/// `canonical_request` / `string_to_sign` / `signed_headers` / `signature` 仅
+/// 向量单测（`#[cfg(test)]`）逐字段读取；生产构建只读 `authorization`。故在
+/// 非 test 构建对整结构放开 dead_code（**不用裸 `allow`**，避免掩盖真实未用）。
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+struct SignedMaterial {
+    authorization: String,
+    canonical_request: String,
+    string_to_sign: String,
+    signed_headers: String,
+    signature: String,
+}
+
+/// SDK-HMAC-SHA256 签名（bridge 与目录共用，避免两处算法分叉）。
+///
+/// `headers` **不含** `Authorization`；`X-Sdk-Date` 需由调用方放入（目录/对话
+/// 在组头时注入）。返回 `Authorization` 头值；凭据不全或地址非法时给可读错误。
+pub(crate) fn sign_v4(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    access_key: &str,
+    secret_key: &str,
+) -> Result<String, String> {
+    Ok(sign_material(method, url, headers, body, access_key, secret_key)?.authorization)
+}
+
+fn sign_material(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    access_key: &str,
+    secret_key: &str,
+) -> Result<SignedMaterial, String> {
+    if access_key.is_empty() || secret_key.is_empty() {
+        return Err("凭据不完整：access key 与 secret key 都得有".to_string());
+    }
+    let parsed = url::Url::parse(url).map_err(|error| format!("上游地址非法：{error}"))?;
+
+    let mut canonical: Vec<(String, String)> = headers
+        .iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    // 同名按「后到覆盖」合并
+    canonical.sort_by(|a, b| a.0.cmp(&b.0));
+    canonical.dedup_by(|later, earlier| {
+        if later.0 == earlier.0 {
+            earlier.1 = later.1.clone();
+            true
+        } else {
+            false
+        }
+    });
+    let canonical_headers: String = canonical
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}\n"))
+        .collect();
+    let signed_headers = canonical
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+
+    let payload_hash = sha256_hex(body);
+    let canonical_request = [
+        method,
+        &canonical_uri(parsed.path()),
+        &canonical_query(parsed.query().unwrap_or("")),
+        &canonical_headers,
+        &signed_headers,
+        &payload_hash,
+    ]
+    .join("\n");
+    let date = canonical
+        .iter()
+        .find(|(name, _)| name == "x-sdk-date")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let string_to_sign = [
+        SIGNING_ALGORITHM,
+        &date,
+        &sha256_hex(canonical_request.as_bytes()),
+    ]
+    .join("\n");
+    let signature = hmac_sha256_hex(secret_key.as_bytes(), &string_to_sign);
+    let authorization = format!(
+        "{SIGNING_ALGORITHM} Access={access_key}, SignedHeaders={signed_headers}, Signature={signature}"
+    );
+    Ok(SignedMaterial {
+        authorization,
+        canonical_request,
+        string_to_sign,
+        signed_headers,
+        signature,
+    })
 }
 
 #[async_trait]
@@ -554,12 +610,21 @@ fn hmac_sha256_hex(key: &[u8], message: &str) -> String {
     format!("{:x}", mac.finalize().into_bytes())
 }
 
-/// 未保留字符集编码（A-Z a-z 0-9 - . _ ~ 原样，其余 `%XX` 大写）。
+/// 未保留字符集编码：**JS `encodeURIComponent` 的那一组**
+/// `A-Z a-z 0-9 - . _ ~ ! * ' ( )` 原样，其余 `%XX` 大写。
+///
+/// 注意别按 RFC3986 把 `! * ' ( )` 也编码掉：上游签名器复刻的是官方扩展里的
+/// JS 实现（A2A `signer.rs` 的 `unreserved()`），少留/多留这几个都会 401。
 fn encode_component(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for byte in bytes {
         let ch = *byte;
-        if ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'.' | b'_' | b'~') {
+        if ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                b'-' | b'.' | b'_' | b'~' | b'!' | b'*' | b'\'' | b'(' | b')'
+            )
+        {
             out.push(ch as char);
         } else {
             out.push_str(&format!("%{ch:02X}"));
@@ -584,9 +649,14 @@ fn canonical_uri(path: &str) -> String {
     escaped
 }
 
-/// `canonicalQueryString`：解码后重新编码，按键再按值排序。
+/// `canonicalQueryString`：解码后重新编码，按 **(编码后的键, 原始值字节)** 排序。
+///
+/// 与 A2A `signer.rs::canonical_query_string` 同口径：同键多值先按原始值字节排，
+/// 再输出「编码键=编码值」。仅按编码后的字符串排会在含转义的值上与非 ASCII 排序
+/// 结果不一致。
 fn canonical_query(raw: &str) -> String {
-    let mut pairs: Vec<(String, String)> = Vec::new();
+    // (encoded_key, raw_value_bytes, encoded_value)
+    let mut pairs: Vec<(String, Vec<u8>, String)> = Vec::new();
     for part in raw.split('&') {
         if part.is_empty() || part.contains(';') {
             continue;
@@ -603,13 +673,14 @@ fn canonical_query(raw: &str) -> String {
         };
         pairs.push((
             encode_component(key.as_bytes()),
+            value.as_bytes().to_vec(),
             encode_component(value.as_bytes()),
         ));
     }
-    pairs.sort();
+    pairs.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
     pairs
         .iter()
-        .map(|(key, value)| format!("{key}={value}"))
+        .map(|(key, _raw, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -738,5 +809,84 @@ mod tests {
         assert!(signature.starts_with("SDK-HMAC-SHA256 Access=AK"));
         assert!(signature.contains("SignedHeaders="));
         assert!(signature.contains("Signature="));
+    }
+
+    /// 离线签名向量（固定输入 → 固定中间量；不联网）。见
+    /// `docs/CATALOG-SYNC-TRIAGE.md §9.3`，向量文件与生成方式同源。
+    const VECTORS: &str = include_str!("codearts_signer_vectors.json");
+
+    #[test]
+    fn signer_matches_offline_vectors() {
+        use base64::Engine;
+        let doc: Value = serde_json::from_str(VECTORS).expect("向量是合法 JSON");
+        let cases = doc.as_array().expect("向量顶层必须是数组");
+        let mut signed = 0;
+        let mut errored = 0;
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or("?");
+            let get = |key: &str| case[key].as_str().unwrap_or("").to_string();
+            let ak = get("access_key");
+            let sk = get("secret_key");
+            if !get("expected_error_kind").is_empty() {
+                let error = sign_material(&get("method"), &get("url"), &[], b"", &ak, &sk)
+                    .expect_err("缺 SK 应报错");
+                assert!(error.contains("凭据不完整"), "{name}: {error}");
+                errored += 1;
+                continue;
+            }
+            // 复刻调用方组头：STS / X-Domain-Id / Host（benefit 网关带）在签名前注入。
+            let mut headers: Vec<(String, String)> = case["headers"]
+                .as_object()
+                .expect("headers 必须是对象")
+                .iter()
+                .map(|(key, value)| (key.clone(), value.as_str().unwrap_or("").to_string()))
+                .collect();
+            let security_token = get("security_token");
+            if !security_token.is_empty() {
+                headers.push(("X-Security-Token".to_string(), security_token));
+            }
+            let domain_id = get("domain_id");
+            if !domain_id.is_empty() {
+                headers.push(("X-Domain-Id".to_string(), domain_id));
+            }
+            if case["include_host"].as_bool().unwrap_or(false) {
+                let host = url::Url::parse(&get("url"))
+                    .expect("url 合法")
+                    .host_str()
+                    .expect("有 host")
+                    .to_string();
+                headers.push(("Host".to_string(), host));
+            }
+            headers.sort();
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(get("body_b64"))
+                .unwrap_or_default();
+            let material = sign_material(&get("method"), &get("url"), &headers, &body, &ak, &sk)
+                .unwrap_or_else(|error| panic!("{name}: 签名失败 {error}"));
+            assert_eq!(
+                get("canonical_request"),
+                material.canonical_request,
+                "{name}: canonical_request"
+            );
+            assert_eq!(
+                get("string_to_sign"),
+                material.string_to_sign,
+                "{name}: string_to_sign"
+            );
+            assert_eq!(
+                get("signed_headers"),
+                material.signed_headers,
+                "{name}: signed_headers"
+            );
+            assert_eq!(get("signature"), material.signature, "{name}: signature");
+            assert_eq!(
+                get("authorization"),
+                material.authorization,
+                "{name}: authorization"
+            );
+            signed += 1;
+        }
+        assert!(signed >= 5, "签名向量不足：{signed}");
+        assert!(errored >= 1, "缺少错误向量");
     }
 }

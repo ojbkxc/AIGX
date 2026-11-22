@@ -802,7 +802,10 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             auth: SessionAuth::Headers,
             base_url: "https://snap-access.cn-north-4.myhuaweicloud.com",
             chat_path: "/api/v2/chat/completions",
-            headers: &[("x-auth-token", "{credential}"), ("x-language", "zh-cn")],
+            // 认证是**每请求 SDK-HMAC-SHA256 签名**（目录走 `catalog::fetch_codearts_catalog`，
+            // 对话走 `CodeArtsBridge` 自带签名）—— 不再用 `x-auth-token` 直塞原始
+            // AK:SK:STS（未签名会被上游 401）。
+            headers: &[("x-language", "en-us")],
             credential_hint: "粘贴华为云凭证 AK:SK[:SecurityToken]（STS 三元组，冒号或换行分隔）",
             openai_compatible: false,
         },

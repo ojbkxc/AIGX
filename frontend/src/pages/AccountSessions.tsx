@@ -493,6 +493,10 @@ function groupBalanceText(rows: AccountSessionItem[]): string {
 
 type StatusSeg = 'all' | 'enabled' | 'disabled' | 'cooling';
 type LimitSeg = 'all' | 'normal' | 'limited';
+/** #67：到期分档（客户端谓词，对齐 A2A 移动端 soon/longlived；expired 由「仅已过期」开关承担） */
+type ExpirySeg = 'all' | 'soon' | 'longlived';
+/** #67：用量分档（客户端谓词，对齐 A2A 移动端 has/unqueried/failed） */
+type UsageSeg = 'all' | 'has' | 'unqueried' | 'failed';
 
 interface FilterPrefs {
   provider: string;
@@ -505,6 +509,9 @@ interface FilterPrefs {
   expiryTo: string;
   usageMin: string;
   usageMax: string;
+  /** #67 客户端分档：到期（all/soon/longlived）+ 用量（all/has/unqueried/failed） */
+  expirySeg: ExpirySeg;
+  usageSeg: UsageSeg;
 }
 
 /** 读取筛选偏好并做档位合法校验（脏值回落「全部」） */
@@ -514,6 +521,10 @@ function readFilterPrefs(): FilterPrefs {
     raw.status === 'enabled' || raw.status === 'disabled' || raw.status === 'cooling' ? raw.status : 'all';
   const limit: LimitSeg = raw.limit === 'normal' || raw.limit === 'limited' ? raw.limit : 'all';
   const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+  const expirySeg: ExpirySeg =
+    raw.expirySeg === 'soon' || raw.expirySeg === 'longlived' ? raw.expirySeg : 'all';
+  const usageSeg: UsageSeg =
+    raw.usageSeg === 'has' || raw.usageSeg === 'unqueried' || raw.usageSeg === 'failed' ? raw.usageSeg : 'all';
   return {
     provider: typeof raw.provider === 'string' ? raw.provider : '',
     status,
@@ -524,6 +535,8 @@ function readFilterPrefs(): FilterPrefs {
     expiryTo: text(raw.expiryTo),
     usageMin: text(raw.usageMin),
     usageMax: text(raw.usageMax),
+    expirySeg,
+    usageSeg,
   };
 }
 
@@ -789,6 +802,10 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   const [advExpiryTo, setAdvExpiryTo] = useState(() => readFilterPrefs().expiryTo);
   const [advUsageMin, setAdvUsageMin] = useState(() => readFilterPrefs().usageMin);
   const [advUsageMax, setAdvUsageMax] = useState(() => readFilterPrefs().usageMax);
+  // #67 客户端分档筛选（对齐 A2A 移动端）：到期 soon/longlived + 用量 has/unqueried/failed。
+  // 纯客户端谓词（fields 齐备），与上面的到期/用量区间互斥：选分档即清区间，反之亦然。
+  const [expirySeg, setExpirySeg] = useState<ExpirySeg>(() => readFilterPrefs().expirySeg);
+  const [usageSeg, setUsageSeg] = useState<UsageSeg>(() => readFilterPrefs().usageSeg);
   // 列表排序（对齐上游 accounts-sort：展示序不改调度 priority；
   // credit 档按凭证/套餐到期（最急着过期的排最前，没到期值排最后），
   // added 档按创建时间新→旧；默认 list = 调度优先序，选择落盘 localStorage）
@@ -989,6 +1006,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       expiryTo: advExpiryTo,
       usageMin: advUsageMin,
       usageMax: advUsageMax,
+      expirySeg,
+      usageSeg,
     });
   }, [
     providerFilter,
@@ -1000,6 +1019,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     advExpiryTo,
     advUsageMin,
     advUsageMax,
+    expirySeg,
+    usageSeg,
   ]);
 
   // 失效自愈（§2.5）：存的 provider 在当前 sessions 里已不存在 → 静默回到「全部」。
@@ -1737,10 +1758,35 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     if (s.status !== 'enabled') return false;
     return limitSeg === 'limited' ? isLimitedNow(s) : !isLimitedNow(s);
   };
+  /**
+   * #67 到期分档（客户端，对齐 A2A mobile `expiryInfo` 的 soon/longLived）：
+   * soon = 7 天内到期；longlived = 无到期但持有凭证（长期有效）。
+   * （expired 由「仅已过期」开关走服务端 status，不在此重复。）
+   */
+  const matchesExpirySeg = (s: AccountSessionItem): boolean => {
+    if (expirySeg === 'all') return true;
+    const at = accountExpiryOf(s).at;
+    if (expirySeg === 'soon') {
+      const now = Date.now();
+      return at != null && at > now && at - now <= 7 * 86_400_000;
+    }
+    // longlived：无到期值但有凭证
+    return at == null && (Boolean(s.api_key) || s.has_refresh_token === true);
+  };
+  /**
+   * #67 用量分档（客户端，对齐 A2A mobile `usageOfAccount` 的 has/unqueried/failed）：
+   * has = 有余额读数快照；failed = 无读数但有查询错误；unqueried = 既无读数也无错误。
+   */
+  const usageStateOf = (s: AccountSessionItem): 'has' | 'unqueried' | 'failed' =>
+    s.last_balance != null ? 'has' : s.last_balance_error != null ? 'failed' : 'unqueried';
+  const matchesUsageSeg = (s: AccountSessionItem): boolean =>
+    usageSeg === 'all' || usageStateOf(s) === usageSeg;
   /** 基础集合：渠道 + 提供商 + 搜索（两个分段计数的共同 scope） */
   const scopeBase = sessions.filter((s) => {
     if (channelFilter && s.channel_id !== channelFilter) return false;
     if (providerFilter && s.provider !== providerFilter) return false;
+    if (!matchesExpirySeg(s)) return false;
+    if (!matchesUsageSeg(s)) return false;
     if (!needle) return true;
     return (
       s.name.toLowerCase().includes(needle) ||
@@ -2442,6 +2488,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     setAdvExpiryTo('');
     setAdvUsageMin('');
     setAdvUsageMax('');
+    setExpirySeg('all');
+    setUsageSeg('all');
   };
 
   const filterActive =
@@ -2454,7 +2502,9 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     advExpiryFrom !== '' ||
     advExpiryTo !== '' ||
     advUsageMin !== '' ||
-    advUsageMax !== '';
+    advUsageMax !== '' ||
+    expirySeg !== 'all' ||
+    usageSeg !== 'all';
 
   // ZCode 账号存在时给一条只读说明（套餐通道选择需后端 plan_channel 字段，尚未定契约；
   // 桌面端本地验证码池不属于网关，见 ACCOUNT-POOL-PARITY §L）。
@@ -2552,7 +2602,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       ? 1
       : Math.max(1, Math.ceil(visibleSorted.length / pageSize));
   // 筛选/搜索/排序/分组/每页档变化 → 回第 1 页（render 期收敛，同 TableShell 的派生模式）
-  const pageResetKey = `${channelFilter}|${providerFilter}|${statusSeg}|${limitSeg}|${needle}|${sortKey}|${grouped}|${String(pageSize)}`;
+  const pageResetKey = `${channelFilter}|${providerFilter}|${statusSeg}|${limitSeg}|${needle}|${sortKey}|${grouped}|${String(pageSize)}|${expirySeg}|${usageSeg}`;
   const [prevPageResetKey, setPrevPageResetKey] = useState(pageResetKey);
   if (prevPageResetKey !== pageResetKey) {
     setPrevPageResetKey(pageResetKey);
@@ -3832,6 +3882,57 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               {t('仅已过期')}
             </button>
           </div>
+          {/* #67 客户端分档（对齐 A2A 移动端）：到期 soon/longlived + 用量 has/unqueried/failed。
+              与下方「到期区间 / 已用%区间」互斥：选分档即清区间（反之输入区间即把分档复位）。 */}
+          <div className="seg-filter" role="group" aria-label={t('按到期分档')}>
+            {(
+              [
+                ['all', t('到期：全部')],
+                ['soon', t('临期(7天)')],
+                ['longlived', t('长期有效')],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={`seg-filter-btn${expirySeg === key ? ' active' : ''}`}
+                onClick={() => {
+                  setExpirySeg(key);
+                  if (key !== 'all') {
+                    setAdvExpiryFrom('');
+                    setAdvExpiryTo('');
+                  }
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="seg-filter" role="group" aria-label={t('按用量分档')}>
+            {(
+              [
+                ['all', t('用量：全部')],
+                ['has', t('有读数')],
+                ['unqueried', t('未查询')],
+                ['failed', t('查询失败')],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={`seg-filter-btn${usageSeg === key ? ' active' : ''}`}
+                onClick={() => {
+                  setUsageSeg(key);
+                  if (key !== 'all') {
+                    setAdvUsageMin('');
+                    setAdvUsageMax('');
+                  }
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
             {t('到期')}
             <input
@@ -3839,7 +3940,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               className="form-input"
               style={{ width: 138 }}
               value={advExpiryFrom}
-              onChange={(e) => setAdvExpiryFrom(e.target.value)}
+              onChange={(e) => { setAdvExpiryFrom(e.target.value); setExpirySeg('all'); }}
               aria-label={t('到期起')}
             />
             ~
@@ -3848,7 +3949,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               className="form-input"
               style={{ width: 138 }}
               value={advExpiryTo}
-              onChange={(e) => setAdvExpiryTo(e.target.value)}
+              onChange={(e) => { setAdvExpiryTo(e.target.value); setExpirySeg('all'); }}
               aria-label={t('到期止')}
             />
           </label>
@@ -3861,7 +3962,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               className="form-input"
               style={{ width: 64 }}
               value={advUsageMin}
-              onChange={(e) => setAdvUsageMin(e.target.value)}
+              onChange={(e) => { setAdvUsageMin(e.target.value); setUsageSeg('all'); }}
               placeholder={t('下限')}
               aria-label={t('已用百分比下限')}
             />
@@ -3873,7 +3974,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               className="form-input"
               style={{ width: 64 }}
               value={advUsageMax}
-              onChange={(e) => setAdvUsageMax(e.target.value)}
+              onChange={(e) => { setAdvUsageMax(e.target.value); setUsageSeg('all'); }}
               placeholder={t('上限')}
               aria-label={t('已用百分比上限')}
             />
