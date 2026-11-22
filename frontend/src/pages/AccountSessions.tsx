@@ -65,6 +65,10 @@ interface SessionFormState {
   models: string;
   /** 额外请求头（每行 `Key: Value`，登录态型供应商补专用头） */
   extra_headers: string;
+  /** 是否允许选路跳过（A2A allowRouteSkip）；false = 仅显式指定时使用 */
+  allow_route_skip: boolean;
+  /** 出站 User-Agent 覆盖（空 = provider 默认） */
+  user_agent: string;
   /** 余额自动查询间隔（秒；'0' = 关闭） */
   usage_query_interval_secs: string;
   /** 单次查询失败重试次数（A2A usageQuery.retries，0 = 不重试） */
@@ -114,6 +118,8 @@ const EMPTY_FORM: SessionFormState = {  channel_id: '',
   max_concurrency: '3',
   models: '',
   extra_headers: '',
+  allow_route_skip: true,
+  user_agent: '',
   usage_query_interval_secs: '0',
   usage_query_retries: '3',
   usage_query_timeout_secs: '60',
@@ -368,11 +374,13 @@ function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: Ac
  * - **保留 rate（成功率）**：AIGX 有该后端字段（success_count/error_count），A2A 无此列；
  *   既有实现已暴露，删掉是倒退（§9b 裁决）。
  * - **新增 order（顺序）**：数据源 = 流 H 的 sort_order；字段未下发时渲染「—」占位。
- * - **cooldown（原「冷却」）改名「限流」**：A2A 叫「限流」且内容是当前限流中的模型；
- *   内容口径保持 AIGX 现有冷却明细（cooldowns + limiter_state.skip_models 合并在同一
- *   徽章展开）——这是「A2A 列名 + AIGX 内容」的折中，不丢既有信息。
- * - **limiter（限流）**：A2A limits 的列位次（状态之后），承载账号级限制器拦截状态
- *   （limiter_state 的 account_skip / skip_models / disable，后端唯一判据）。
+ * - **limiter 列名对齐 A2A「限流」**（P0，ACCOUNT-POOL-FIELD-PARITY §5）：A2A 的「限流」
+ *   列位次在「状态」之后，承载账号级限流判据。AIGX 同名放在同一位次，内容保持现有账号级
+ *   限制器拦截状态（limiter_state 的 account_skip / skip_models / disable）。列名由「限制器」
+ *   改为「限流」，与 A2A 对齐。
+ * - **cooldown 列改名「冷却」**（P0）：该列内容是冷却明细（cooldowns + limiter_state.skip_models
+ *   合并展开），原名「限流」与上一列语义重叠且与 A2A 列名分叉；改名「冷却」直表其内容，
+ *   消除与「限流」列的重名歧义。
  */
 type AsCol = 'pick' | 'order' | 'name' | 'provider' | 'proxy' | 'conn' | 'status' | 'limiter' | 'expiry' | 'usage' | 'rate' | 'cooldown' | 'act';
 
@@ -386,11 +394,11 @@ const AS_COLS: Array<{ key: AsCol; label: string; w?: number; lock?: boolean; fl
   { key: 'proxy', label: '代理', w: 186 },
   { key: 'conn', label: '连接数', w: 56 },
   { key: 'status', label: '状态', w: 80, lock: true },
-  { key: 'limiter', label: '限制器', w: 148 },
+  { key: 'limiter', label: '限流', w: 148 },
   { key: 'expiry', label: '有效期', w: 132 },
   { key: 'usage', label: '余额', w: 308 },
   { key: 'rate', label: '成功率', w: 64 },
-  { key: 'cooldown', label: '限流', w: 128 },
+  { key: 'cooldown', label: '冷却', w: 128 },
   { key: 'act', label: '操作', w: 200, lock: true },
 ];
 
@@ -490,6 +498,13 @@ interface FilterPrefs {
   provider: string;
   status: StatusSeg;
   limit: LimitSeg;
+  /** 服务端扩展筛选（#37/#50）：仅需重登 / 仅已过期 / 到期区间 / 已用 % 区间 */
+  relogin: boolean;
+  expired: boolean;
+  expiryFrom: string;
+  expiryTo: string;
+  usageMin: string;
+  usageMax: string;
 }
 
 /** 读取筛选偏好并做档位合法校验（脏值回落「全部」） */
@@ -498,7 +513,18 @@ function readFilterPrefs(): FilterPrefs {
   const status: StatusSeg =
     raw.status === 'enabled' || raw.status === 'disabled' || raw.status === 'cooling' ? raw.status : 'all';
   const limit: LimitSeg = raw.limit === 'normal' || raw.limit === 'limited' ? raw.limit : 'all';
-  return { provider: typeof raw.provider === 'string' ? raw.provider : '', status, limit };
+  const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+  return {
+    provider: typeof raw.provider === 'string' ? raw.provider : '',
+    status,
+    limit,
+    relogin: raw.relogin === true,
+    expired: raw.expired === true,
+    expiryFrom: text(raw.expiryFrom),
+    expiryTo: text(raw.expiryTo),
+    usageMin: text(raw.usageMin),
+    usageMax: text(raw.usageMax),
+  };
 }
 
 /**
@@ -589,12 +615,12 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   const [limitSeg, setLimitSeg] = useState<LimitSeg>(() => readFilterPrefs().limit);
   // 服务端扩展筛选（v1.0.87 契约：status=relogin/expired、到期区间、用量区间）。
   // 这些维度客户端不好算准（尤其用量「已用 %」），交给后端过滤；其余维度仍客户端过滤。
-  const [advReloginOnly, setAdvReloginOnly] = useState(false);
-  const [advExpiredOnly, setAdvExpiredOnly] = useState(false);
-  const [advExpiryFrom, setAdvExpiryFrom] = useState('');
-  const [advExpiryTo, setAdvExpiryTo] = useState('');
-  const [advUsageMin, setAdvUsageMin] = useState('');
-  const [advUsageMax, setAdvUsageMax] = useState('');
+  const [advReloginOnly, setAdvReloginOnly] = useState(() => readFilterPrefs().relogin);
+  const [advExpiredOnly, setAdvExpiredOnly] = useState(() => readFilterPrefs().expired);
+  const [advExpiryFrom, setAdvExpiryFrom] = useState(() => readFilterPrefs().expiryFrom);
+  const [advExpiryTo, setAdvExpiryTo] = useState(() => readFilterPrefs().expiryTo);
+  const [advUsageMin, setAdvUsageMin] = useState(() => readFilterPrefs().usageMin);
+  const [advUsageMax, setAdvUsageMax] = useState(() => readFilterPrefs().usageMax);
   // 列表排序（对齐上游 accounts-sort：展示序不改调度 priority；
   // credit 档按凭证/套餐到期（最急着过期的排最前，没到期值排最后），
   // added 档按创建时间新→旧；默认 list = 调度优先序，选择落盘 localStorage）
@@ -783,10 +809,30 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     void load();
   }, [advFilterKey, load]);
 
-  // 筛选偏好落盘（§2.5：provider / 状态档 / 限额档；搜索词不落盘）
+  // 筛选偏好落盘（§2.5：provider / 状态档 / 限额档；#50 起扩展筛选也落盘；搜索词不落盘）
   useEffect(() => {
-    writeLS(LS_FILTER, { provider: providerFilter, status: statusSeg, limit: limitSeg });
-  }, [providerFilter, statusSeg, limitSeg]);
+    writeLS(LS_FILTER, {
+      provider: providerFilter,
+      status: statusSeg,
+      limit: limitSeg,
+      relogin: advReloginOnly,
+      expired: advExpiredOnly,
+      expiryFrom: advExpiryFrom,
+      expiryTo: advExpiryTo,
+      usageMin: advUsageMin,
+      usageMax: advUsageMax,
+    });
+  }, [
+    providerFilter,
+    statusSeg,
+    limitSeg,
+    advReloginOnly,
+    advExpiredOnly,
+    advExpiryFrom,
+    advExpiryTo,
+    advUsageMin,
+    advUsageMax,
+  ]);
 
   // 失效自愈（§2.5）：存的 provider 在当前 sessions 里已不存在 → 静默回到「全部」。
   // loading / error 期间不动，避免一次网络抖动把偏好清掉。
@@ -880,6 +926,9 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       extra_headers: Object.entries(session.extra_headers || {})
         .map(([k, v]) => `${k}: ${v}`)
         .join('\n'),
+      // 缺省 true：A2A allowRouteSkip 缺省 true（可被自动选路跳过）
+      allow_route_skip: session.allow_route_skip !== false,
+      user_agent: session.user_agent || '',
       usage_query_interval_secs: String(session.usage_query_interval_secs ?? 0),
       usage_query_retries: String(session.usage_query?.retries ?? 3),
       usage_query_timeout_secs: String(session.usage_query?.timeout_seconds ?? 60),
@@ -1082,6 +1131,9 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         max_concurrency: Math.max(0, Number(form.max_concurrency || 0)),
         models: splitModels(form.models),
         extra_headers: parseHeaders(form.extra_headers),
+        // A2A allowRouteSkip / userAgent：后端 AccountSession 字段（#50 P2）
+        allow_route_skip: form.allow_route_skip,
+        user_agent: form.user_agent.trim(),
         usage_query_interval_secs: Math.max(0, Number(form.usage_query_interval_secs || 0)),
         // A2A usageQuery.retries / timeoutSeconds（后端归一化：越界回落缺省）
         usage_query: {
@@ -1936,6 +1988,34 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     }
   };
 
+  /** 单行导出（P2，ACCOUNT-POOL-FIELD-PARITY §4/§5）：复用全量导出端点，按 id 过滤出该账号的
+   *  单条记录下载（A2A 每行 ⋯export）。后端 export 无 ids 过滤参数，前端过滤后再落单文件。 */
+  const handleExportOne = async (session: AccountSessionItem): Promise<void> => {
+    setError('');
+    try {
+      const res = await api.exportAccountSessions();
+      const file = res.data;
+      const entries = Array.isArray(file?.accounts) ? file.accounts : [];
+      const one = entries.filter((e) => e && e.id === session.id);
+      if (one.length === 0) throw new Error(t('导出数据里没有该账号'));
+      const single = {
+        ...file,
+        accounts: one,
+      };
+      const blob = new Blob([JSON.stringify(single, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safe = (session.name || session.id).replace(/[^\w.-]+/g, '_').slice(0, 40);
+      a.download = `aigx-account-${safe}-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      addToast(t('已导出账号 {{name}}（文件含明文凭证，请妥善保管）', { name: session.name || session.id }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   /** 导入 JSON：选文件 → 解析 → 选渠道 → 上传 */
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [importJsonChannel, setImportJsonChannel] = useState('');
@@ -2322,12 +2402,19 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   const accountTitleLines = (s: AccountSessionItem): string[] => {
     const lines: string[] = [];
     if (s.name) lines.push(t('账号：{{name}}', { name: nameMasked ? maskName(s.name) : s.name }));
+    // P1（ACCOUNT-POOL-FIELD-PARITY §1 name）：A2A 账号列副行/悬停展示 email 与来源。
+    // 后端 AccountSession 无结构化 email 字段——仅插件账号在 `plugin` 公开投影里可能带 email；
+    // 原生账号以 name/identifier 承载邮箱（无独立字段可出）。
+    const email = typeof s.plugin?.email === 'string' ? s.plugin.email.trim() : '';
+    if (email && email !== s.name) lines.push(t('邮箱：{{email}}', { email }));
     if (s.updated_at) {
       const raw = Number(s.updated_at);
       const at = raw < 1e11 ? raw * 1000 : raw;
       lines.push(t('更新于 {{time}}', { time: new Date(at).toLocaleString() }));
     }
-    lines.push(t('来源：{{provider}}', { provider: providerLabel(s.provider) }));
+    // 来源：插件账号 vs 原生账号（后端 is_plugin_account）；供应商名单独一行（原 providerLabel）。
+    lines.push(t('来源：{{source}}', { source: s.is_plugin_account ? t('插件账号') : t('原生账号') }));
+    lines.push(t('供应商：{{provider}}', { provider: providerLabel(s.provider) }));
     if (s.provider === 'desktop' || s.relogin_due_at != null) {
       lines.push(t('桌面端实时登录态'));
     }
@@ -2484,12 +2571,19 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       }
       case 'name': {
         const titleLines = accountTitleLines(s);
+        // P1（§1 name）：插件账号的 email 副行（原生账号无结构化 email 字段，见 accountTitleLines 注释）
+        const emailSub = typeof s.plugin?.email === 'string' ? s.plugin.email.trim() : '';
         return (
           <td key={col} className="as-c-name">
             {/* §2.8 悬停气泡：名称上显示账号详情（邮箱/标识、更新于、来源、桌面登录态） */}
             <div className="as-name" title={titleLines.length ? titleLines.join('\n') : undefined}>
               {nameMasked ? maskName(s.name) : s.name}
             </div>
+            {emailSub && emailSub !== s.name && (
+              <div className="form-hint" title={emailSub}>
+                {emailSub}
+              </div>
+            )}
             <div className="form-hint">{s.api_key || '—'}</div>
             {s.proxy && <div className="form-hint">{s.proxy}</div>}
             {s.last_error && (
@@ -2638,27 +2732,62 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         );
       }
       case 'limiter': {
-        /* 「限制器」列（A2A limits 的位次：状态之后 / 有效期之前）——§9b 只冻结了列位与
-         * 依赖字段，未写死内容。这里取 AIGX 既有术语「限制器」，只展示**账号级**拦截
-         * 形态，判据唯一是后端 limiter_state（本页「已限流」分段同口径，不在前端按
-         * limiters 重算阈值）；逐模型的 skip_models 明细不在这里重复——它已并入
-         * 「限流」列（cooldown）的徽章展开面板。
+        /* 「限流」列（A2A limits 的位次与名称：状态之后 / 有效期之前，P0 列名对齐）——
+         * 展示**账号级**拦截形态，判据唯一是后端 limiter_state（本页「已限流」分段同口径，
+         * 不在前端按 limiters 重算阈值）；逐模型的 skip_models 明细不在这里重复——它已并入
+         * 相邻的「冷却」列（cooldown）的徽章展开面板。
          *   · Token 限额自动禁用（disable 且非 enabled）→ 红色标签；
          *   · 整号跳过（account_skip）→ 黄色徽章；
-         *   · 都没命中 → 灰「—」。 */
+         *   · 都没命中 → 灰「—」。
+         *
+         * P1 明细（ACCOUNT-POOL-FIELD-PARITY §1 limiter / §5）：后端 limiter_state 只给
+         * {account_skip, skip_models, disable}，**不区分**触发原因（A2A 的
+         * balanceBlocked / tokenBlocked / upstreamSuspendedReason 三个字段后端没有）。
+         * 这里把「能拿到的原因」汇总进悬停 title：已配置的规则、当前命中的状态、活动
+         * 冷却模型、最近错误。不在此重算阈值，只做原始字段展示。 */
         const st = s.limiter_state;
         const accountSkip = st?.account_skip === true;
         const disabledHit = st?.disable === true && s.status !== 'enabled';
+        const ruleLines = (s.limiters ?? [])
+          .filter((r) => r.enabled !== false)
+          .map((r) =>
+            r.type === 'balance'
+              ? t('余额规则：≤ {{n}} 时{{action}}', {
+                  n: r.threshold,
+                  action: r.action === 'disable' ? t('禁用') : t('跳过'),
+                })
+              : t('Token 规则：周期用量 ≥ {{n}} 时{{action}}', {
+                  n: r.threshold,
+                  action: r.action === 'disable' ? t('禁用') : t('跳过'),
+                }),
+          );
+        const activeCools = activeCooldowns(s);
+        const detailLines = [
+          ...ruleLines,
+          st?.account_skip ? t('当前：整号跳过') : '',
+          st?.disable ? t('当前：Token 限额禁用') : '',
+          activeCools.length
+            ? t('冷却中：{{models}}', {
+                models: activeCools
+                  .map(([m, rem]) => `${m === '*' ? t('全部模型') : m}( ${fmtDuration(rem)} )`)
+                  .join('，'),
+              })
+            : '',
+          s.last_error ? t('最近错误：{{err}}', { err: s.last_error }) : '',
+        ].filter(Boolean);
+        const detail = detailLines.length ? detailLines.join('\n') : undefined;
         if (!accountSkip && !disabledHit) {
           return (
             <td key={col} className="as-c-limiter">
-              <span className="form-hint" title={t('当前没有被限制器拦截')}>—</span>
+              <span className="form-hint" title={detail ?? t('当前没有被限制器拦截')}>
+                {ruleLines.length ? t('未触发（{{n}} 条规则）', { n: ruleLines.length }) : t('—')}
+              </span>
             </td>
           );
         }
         return (
           <td key={col} className="as-c-limiter">
-            <div className="as-limiter-tags">
+            <div className="as-limiter-tags" title={detail}>
               {accountSkip && (
                 <span
                   className="as-skip-badge"
@@ -2701,9 +2830,31 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       case 'expiry': {
         // 凭证有效期列（对齐上游 ExpiryCell：收短「N 天后」，完整时刻进 title；
         // 套餐到期次选 —— 凭证没有到期值时用它顶上，区分来源）
+        //
+        // P1 补渲染字段（ACCOUNT-POOL-FIELD-PARITY §1 expiry / §5）：A2A 把「访问凭证」
+        // 与「续期令牌」两行分开画。AIGX 后端只有一个权威 `expires_at`（无 access/refresh
+        // 各自的到期时刻字段），故两行的**到期时刻**无法拆；改为：
+        //   · 有凭证但无到期时刻 → 渲染「长期有效」标签（对齐 A2A long-lived）；
+        //   · 悬停 title 里给出「访问凭证 / 续期令牌」两项**存在性**明细，不伪造到期时刻。
         const exp = accountExpiryOf(s);
         const pending = pendingPlansOf(s);
+        const hasAccess = Boolean(s.api_key);
+        const hasRefresh = s.has_refresh_token === true;
+        const credentialLines = t('访问凭证：{{access}} · 续期令牌：{{refresh}}', {
+          access: hasAccess ? t('已配置') : t('无'),
+          refresh: hasRefresh ? t('已保存') : t('无'),
+        });
         if (exp.at == null && pending.length === 0) {
+          // 有凭证 = 该账号靠凭证自身不过期（长期有效）；无凭证 = 真的没有信息
+          if (hasAccess || hasRefresh) {
+            return (
+              <td key={col} className="as-c-expiry">
+                <span className="badge as-longlived" title={credentialLines}>
+                  {t('长期有效')}
+                </span>
+              </td>
+            );
+          }
           return (
             <td key={col} className="as-c-expiry">
               <span className="form-hint" title={t('记录里没有过期时间')}>—</span>
@@ -2720,7 +2871,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             ) : left != null ? (
               <span
                 className={`as-expiry-left${left < 48 * 3600_000 ? ' soon' : ''}`}
-                title={`${expiryLeftText(left)}过期（${new Date(exp.at as number).toLocaleString()}）${exp.source === 'plan' ? ` · ${t('套餐到期，非凭证到期')}` : ''}`}
+                title={`${expiryLeftText(left)}过期（${new Date(exp.at as number).toLocaleString()}）${exp.source === 'plan' ? ` · ${t('套餐到期，非凭证到期')}` : ''}\n${credentialLines}`}
               >
                 {expiryLeftText(left)}
               </span>
@@ -2892,12 +3043,10 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       case 'rate':
         return <td key={col} className="as-c-rate">{successRate(s)}</td>;
       case 'cooldown': {
-        // A2A 列名 + AIGX 内容的折中（SPEC-1.0.49 §9b I-1 裁决）：
-        // A2A 把这一列叫「限流」，内容是「该账号当前限流中的模型」；AIGX 既有实现叫
-        // 「冷却」，展示 429/限额失败产生的冷却明细（activeCooldowns / as-limits-badge）。
-        // 这里**label 改为「限流」（key 保持 cooldown，避免破坏用户已存的列设置）**，
-        // 内容口径保持 AIGX 冷却明细，并把 limiter_state.skip_models（限制器跳过的
-        // 模型）合并进同一枚徽章的展开面板 —— 不丢 AIGX 既有信息。
+        // P0 列名对齐（ACCOUNT-POOL-FIELD-PARITY §5）：A2A 的「限流」列语义已由相邻 limiter
+        // 列在「状态」后位次承载；本列内容是 429/限额失败产生的**冷却明细**
+        // （activeCooldowns + limiter_state.skip_models 合并展开）。原名「限流」与 limiter 列
+        // 重名且与内容不符，改为「冷却」直表其内容（key 保持 cooldown，不破坏用户已存列设置）。
         const active = activeCooldowns(s);
         const skipModels = s.limiter_state?.skip_models ?? [];
         // 合并去重（同一模型可能既在冷却又被限制器跳过）：冷却剩余时间优先
@@ -3156,6 +3305,18 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                       }}
                     >
                       {t('福利预览')}
+                    </button>
+                    {/* P2 单行导出（A2A 每行 ⋯export）；含明文凭证，文案需提示 */}
+                    <button
+                      type="button"
+                      className="as-act-menu-item"
+                      onClick={() => {
+                        setActMenuFor(null);
+                        void handleExportOne(s);
+                      }}
+                      title={t('仅导出该账号的记录（含明文凭证，请妥善保管）')}
+                    >
+                      {t('导出该账号')}
                     </button>
                     <div className="as-act-menu-sep" />
                     <button
@@ -4299,6 +4460,22 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                         onChange={(e) => setForm({ ...form, weight: e.target.value })}
                       />
                     </div>
+                    {/* P2（ACCOUNT-POOL-FIELD-PARITY §3 allowRouteSkip/userAgent）：后端字段已备，前端补入口 */}
+                    <label className="as-check">
+                      <input
+                        type="checkbox"
+                        checked={form.allow_route_skip}
+                        onChange={(e) => setForm({ ...form, allow_route_skip: e.target.checked })}
+                      />
+                      <span>{t('允许自动选路跳过该账号（取消勾选 = 仅显式指定时使用）')}</span>
+                    </label>
+                    <Input
+                      label={t('出站 User-Agent（可选）')}
+                      placeholder="空 = 使用供应商默认"
+                      hint={t('账号级 User-Agent 覆盖（A2A userAgent）；空 = 用 provider 默认值')}
+                      value={form.user_agent}
+                      onChange={(e) => setForm({ ...form, user_agent: e.target.value })}
+                    />
                     <Input
                       label={t('并发上限')}
                       type="number"

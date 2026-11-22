@@ -640,6 +640,23 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* #51 P1#4：能力圆点按取数来源上色（内置推断 / 社区目录补齐 / 用户覆盖） */
+.mm-cap-dot.src-modelsdev {
+  box-shadow: inset 0 0 0 1px var(--accent-color, #6366f1);
+}
+.mm-cap-dot.src-user {
+  box-shadow: inset 0 0 0 1.5px var(--warn-color, #d98600);
+}
+/* 上下文来源为社区补齐时的提示色 */
+.mm-cap-ctx.from-modelsdev {
+  color: var(--accent-color, #6366f1);
+}
+/* #51 P1#2：输出 token（在输入上下文右侧，`/out↑` 形态） */
+.mm-cap-out {
+  font-size: 9.5px;
+  opacity: 0.8;
+}
+
 /* ── 映射列：可操作 chips（开关 + 名字 + ×）+ 虚线「+ 映射」 ── */
 .mm-alias-cell {
   display: flex;

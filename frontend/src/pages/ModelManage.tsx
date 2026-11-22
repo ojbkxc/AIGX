@@ -173,6 +173,28 @@ function capDotState(caps: string[] | undefined, match: RegExp): '' | 'on' | 'of
   return caps.some((c) => match.test(c)) ? 'on' : 'off';
 }
 
+/**
+ * 能力圆点的**取数来源**（#51 P1#4，消费后端 cap_sources.capabilities）：
+ * 命中该 dot 的能力标签（vision/video/tools/reasoning…）在 cap_sources 里的档
+ * —— builtin（内置推断）/ modelsdev（社区目录补齐）/ user（用户覆盖）/ ''（无标记）。
+ */
+function capDotSource(
+  caps: string[] | undefined,
+  capSources: ManagedModel['cap_sources'],
+  match: RegExp,
+): string {
+  const tag = caps?.find((c) => match.test(c));
+  if (!tag) return '';
+  return String(capSources?.capabilities?.[tag] ?? '');
+}
+
+/** cap_sources 档位 → 人类可读中文（悬停可信度展示） */
+const CAP_SRC_LABEL: Record<string, string> = {
+  builtin: '内置推断',
+  modelsdev: '社区目录补齐',
+  user: '用户覆盖',
+};
+
 // ── 小工具 ───────────────────────────────────────────────────────────
 
 function fmtPrice(n: number | null | undefined): string {
@@ -289,7 +311,7 @@ function capsToForm(caps: string[]): Pick<MetaForm, 'capsMode' | 'capTool' | 'ca
   };
 }
 
-type BatchAction = 'enable' | 'disable' | 'remove-price' | 'set-reasoning';
+type BatchAction = 'enable' | 'disable' | 'remove-price' | 'set-reasoning' | 'remove-custom';
 
 /* ── 思考等级候选（对齐 Agent2API models-reasoning：三级回落） ── */
 
@@ -960,7 +982,12 @@ export default function ModelManage(): JSX.Element {
     try {
       for (const row of selectedRows) {
         try {
-          if (batchAction === 'remove-price') {
+          if (batchAction === 'remove-custom') {
+            // #51 P1#5：删除「自定义模型登记」（对齐 A2A 批量删模型），仅对自定义/手动行；
+            // 复用行内 deleteCustom 的 removeCustomModel(provider, id) 端点。
+            if (isCustomRow(row)) await api.removeCustomModel(row.provider, row.id);
+            else skip += 1;
+          } else if (batchAction === 'remove-price') {
             if (row.price) await api.removeModelPrice(row.id);
             else skip += 1;
           } else if (batchAction === 'set-reasoning') {
@@ -985,7 +1012,9 @@ export default function ModelManage(): JSX.Element {
       await load();
       if (fail === 0) {
         addToast(
-          batchAction === 'remove-price'
+          batchAction === 'remove-custom'
+            ? t('已批量删除自定义模型') + (skip > 0 ? `（${skip} ${t('个非自定义跳过')}）` : '')
+            : batchAction === 'remove-price'
             ? t('已批量删除定价') + (skip > 0 ? `（${skip} ${t('个未定价跳过')}）` : '')
             : batchAction === 'set-reasoning'
               ? t('已批量设置思考等级') + (skip > 0 ? `（${skip} ${t('个无别名跳过')}）` : '')
@@ -1374,8 +1403,16 @@ export default function ModelManage(): JSX.Element {
   const danglingMappings = useMemo<Array<{ alias: string; target: string; fromBackend: boolean }>>(() => {
     const v = view;
     if (!v) return [];
-    if (Array.isArray(v.dangling_mappings)) {
-      return v.dangling_mappings
+    // #51 P1#8：后端口径是 `dangling`（`ManageView.dangling`，含 provider 维度），
+    // 旧前端误读 `dangling_mappings` 导致读不到后端事实、只能自行推断。优先读 `dangling`，
+    // 兼容旧后端/旧字段名回落 `dangling_mappings`，最后才按 mappings 推断。
+    const backend = Array.isArray(v.dangling)
+      ? v.dangling
+      : Array.isArray(v.dangling_mappings)
+        ? v.dangling_mappings
+        : null;
+    if (backend) {
+      return backend
         .filter((m) => m && typeof m.alias === 'string')
         .map((m) => ({ alias: m.alias, target: String(m.target || ''), fromBackend: true }));
     }
@@ -1516,19 +1553,22 @@ export default function ModelManage(): JSX.Element {
             >
               {CAP_DOTS.map((c) => {
                 const state = capDotState(row.capabilities, c.match);
+                // #51 P1#4：消费后端 cap_sources.capabilities，圆点按取数来源上色 + 悬停标注可信度
+                const src = capDotSource(row.capabilities, row.cap_sources, c.match);
                 const Icon = c.icon;
+                const base = `${t(c.label)}：${
+                  state === 'on'
+                    ? t('可用')
+                    : state === 'off'
+                      ? t('不可用')
+                      : t('未测')
+                }`;
                 return (
                   <Tooltip
                     key={c.key}
-                    label={`${t(c.label)}：${
-                      state === 'on'
-                        ? t('可用')
-                        : state === 'off'
-                          ? t('不可用')
-                          : t('未测')
-                    }`}
+                    label={src ? `${base} · ${t('来源')}：${t(CAP_SRC_LABEL[src] ?? src)}` : base}
                   >
-                    <span className={`mm-cap-dot${state ? ` ${state}` : ''}`}>
+                    <span className={`mm-cap-dot${state ? ` ${state}` : ''}${src ? ` src-${src}` : ''}`}>
                       <Icon size={10} />
                     </span>
                   </Tooltip>
@@ -1538,13 +1578,25 @@ export default function ModelManage(): JSX.Element {
               {row.sources.some((s) => s.source === 'modelsdev') && (
                 <span className="mm-cap-mark" title={t('能力由 models.dev 社区目录补齐')} />
               )}
-              <Tooltip
-                label={row.context_length == null ? t('上下文长度未声明') : `${row.context_length}`}
-              >
-                <span className={`mm-cap-ctx${row.context_length == null ? '' : ' filled'}`}>
-                  {row.context_length ? fmtCompact(row.context_length) : '—'}
-                </span>
-              </Tooltip>
+              {/* #51 P1#2：上下文/输出 token 一并展示（后端 capability_flags 已含 maxOutputTokens） */}
+              {(() => {
+                const flags = row.capability_flags;
+                const inTok = flags?.maxInputTokens ?? row.context_length ?? null;
+                const outTok = flags?.maxOutputTokens ?? null;
+                const label =
+                  `${t('上下文')}: ${inTok == null ? t('未声明') : inTok}` +
+                  ` · ${t('输出')}: ${outTok == null ? t('未声明') : outTok}`;
+                // 上下文来源（builtin / modelsdev）来自 cap_sources.context_length
+                const ctxSrc = String(row.cap_sources?.context_length ?? '');
+                return (
+                  <Tooltip label={ctxSrc ? `${label} · ${t('来源')}：${t(CAP_SRC_LABEL[ctxSrc] ?? ctxSrc)}` : label}>
+                    <span className={`mm-cap-ctx${row.context_length == null ? '' : ' filled'}${ctxSrc === 'modelsdev' ? ' from-modelsdev' : ''}`}>
+                      {inTok != null ? fmtCompact(inTok) : '—'}
+                      {outTok != null && <span className="mm-cap-out">/{fmtCompact(outTok)}↑</span>}
+                    </span>
+                  </Tooltip>
+                );
+              })()}
             </button>
             {/* 三态编辑入口：按 (provider, model) 显式声明能力位，
                 与上面的「元信息覆盖」（按模型 id 的目录级声明）并存 —— 前者管
@@ -3008,6 +3060,7 @@ export default function ModelManage(): JSX.Element {
                     ['disable', '禁用'],
                     ['set-reasoning', '设思考等级'],
                     ['remove-price', '删除定价'],
+                    ['remove-custom', '删除自定义模型'],
                   ] as Array<[BatchAction, string]>
                 ).map(([v, label]) => (
                   <label key={v} className={`mm-batch-action${batchAction === v ? ' active' : ''}`}>
@@ -3024,6 +3077,9 @@ export default function ModelManage(): JSX.Element {
               </div>
               {batchAction === 'remove-price' && (
                 <p className="mm-dialog-note">{t('未定价的模型会被跳过；删除后按 0 计费。')}</p>
+              )}
+              {batchAction === 'remove-custom' && (
+                <p className="mm-dialog-note">{t('仅删除自定义 / 手动登记的行，内置与远程目录模型会被跳过；此操作不可撤销。')}</p>
               )}
               {batchAction === 'set-reasoning' && (
                 <div className="form-group">
@@ -3048,11 +3104,11 @@ export default function ModelManage(): JSX.Element {
                 {t('取消')}
               </Button>
               <Button
-                variant={batchAction === 'remove-price' ? 'danger' : 'primary'}
+                variant={batchAction === 'remove-price' || batchAction === 'remove-custom' ? 'danger' : 'primary'}
                 onClick={() => void runBatch()}
                 disabled={batchRunning || selectedRows.length === 0}
               >
-                {batchRunning ? t('执行中…') : `${t('执行')}${t(batchAction === 'enable' ? '启用' : batchAction === 'disable' ? '禁用' : batchAction === 'set-reasoning' ? '设思考等级' : '删除定价')}`}
+                {batchRunning ? t('执行中…') : `${t('执行')}${t(batchAction === 'enable' ? '启用' : batchAction === 'disable' ? '禁用' : batchAction === 'set-reasoning' ? '设思考等级' : batchAction === 'remove-custom' ? '删除自定义模型' : '删除定价')}`}
               </Button>
             </div>
           </div>

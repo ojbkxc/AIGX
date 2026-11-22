@@ -1175,6 +1175,13 @@ body.as-col-resizing {
   font-weight: 600;
 }
 
+/* 「长期有效」标签（P1：账号有凭证但无到期时刻；对齐 A2A long-lived 口径） */
+.as-longlived {
+  color: var(--text-muted);
+  border-color: color-mix(in srgb, var(--text-muted) 40%, transparent);
+  font-weight: 500;
+}
+
 .as-pending-badge {
   display: inline-block;
   margin-top: 3px;

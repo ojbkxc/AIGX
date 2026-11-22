@@ -4862,5 +4862,12 @@
   "允许自动选路跳过该账号（取消勾选 = 仅显式指定时使用）": "Allow routing to skip this account (uncheck = only use when explicitly targeted)",
   "长期有效": "Long-lived",
   "账号级 User-Agent 覆盖（A2A userAgent）；空 = 用 provider 默认值": "Account-level User-Agent override (A2A userAgent); empty = provider default",
-  "Token 规则：周期用量 ≥ {{n}} 时{{action}}": "Token rule: {{action}} when period usage ≥ {{n}}"
+  "Token 规则：周期用量 ≥ {{n}} 时{{action}}": "Token rule: {{action}} when period usage ≥ {{n}}",
+  "个非自定义跳过": " non-custom skipped",
+  "仅删除自定义 / 手动登记的行，内置与远程目录模型会被跳过；此操作不可撤销。": "Only custom / manually registered rows are deleted; built-in and remote catalog models are skipped. This cannot be undone.",
+  "未声明": "Not declared",
+  "已批量删除自定义模型": "Deleted custom models in batch",
+  "内置推断": "Built-in inference",
+  "社区目录补齐": "Community catalog",
+  "用户覆盖": "User override"
 }

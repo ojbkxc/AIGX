@@ -757,6 +757,31 @@ export interface ManagedModel {
   owned_by: string;
   context_length?: number | null;
   capabilities: string[];
+  /**
+   * 能力/上下文取数来源标记（后端 Phase1-A4 `cap_sources`：builtin < modelsdev < user；
+   * 字段级 null = 无读数）。#51 P1#4：caps 列据此上色/悬停显示可信度。旧后端可能不下发。
+   */
+  cap_sources?: {
+    context_length?: string | null;
+    capabilities?: Record<string, string>;
+    reasoning_levels?: unknown;
+  } | null;
+  /**
+   * 能力三态生效值（后端 `capability_flags`，六键；null = 「不知道」≠「不支持」）。
+   * #51 P1#2：caps 列补显 maxOutputTokens（输入上下文用 context_length）。
+   */
+  capability_flags?: {
+    maxInputTokens?: number | null;
+    maxOutputTokens?: number | null;
+    supportsToolCall?: boolean | null;
+    supportsImages?: boolean | null;
+    supportsVideo?: boolean | null;
+    supportsReasoning?: boolean | null;
+  } | null;
+  /** 被用户覆盖的能力键（管理页「已改」标记；空/缺省 = 全部继承） */
+  cap_overrides?: string[];
+  /** 工具调用模式（native / emulated / disabled；缺省 = 未声明） */
+  tool_calling_mode?: string | null;
   /** 定价条目（未定价为 null） */
   price?: ManagedModelPrice | null;
   /** 模型倍率（缺省 1.0） */
@@ -785,7 +810,17 @@ export interface ManageView {
   mappings: Record<string, string | { target?: string; dangling?: boolean; enabled?: boolean }>;
   /** 未定价的模型数 */
   unpriced: number;
-  /** 后端标记的悬空映射（目标模型不在清单里）；旧后端不返回，前端按 mappings 自行推断 */
+  /**
+   * 后端逐条映射（后端 `mapping_entries`，含 provider 维度 / 关闭 / 悬空）。
+   * 新前端按这一份渲染 chip 与开关；旧后端不下发。
+   */
+  mapping_entries?: Array<{ alias: string; target: string; provider?: string | null; enabled?: boolean; dangling?: boolean }>;
+  /**
+   * 后端标记的悬空映射（后端 `dangling`；目标模型不在清单里）。
+   * #51 P1#8：后端字段名是 `dangling`，旧前端误读 `dangling_mappings` 只能自行推断。
+   */
+  dangling?: Array<{ alias: string; target: string; provider?: string | null; dangling?: boolean }>;
+  /** 旧后端/旧前端遗留字段名：后端标记的悬空映射（现后端改发 `dangling`） */
   dangling_mappings?: Array<{ alias: string; target: string }>;
 }
 
