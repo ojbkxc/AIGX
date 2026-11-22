@@ -19,7 +19,7 @@
 | **合计** | **264** | **254（96.2%）** | **10（3.8%）** |
 
 - **官方与推荐包 100% 通过**：安装 → 启用 → 宿主装载 → provider 实际接管（`providerRouted=true`）全部成立。
-- GitHub 第三方 10 条仍失败**全部有明确归因**：1 条仓库本身不可用，其余 9 条是插件自身的打包/配置/代码问题（另有 1 条 AIGX 侧上限问题已在 v1.0.84 修复并重测通过，详见 §4）。
+- GitHub 第三方 10 条仍失败**全部有明确归因**：1 条为 **AIGX 侧默认分支解析缺陷**（`ua-pro`，已修、待发布重测），其余 9 条是插件自身的打包/配置/代码问题（另有 1 条 AIGX 侧上限问题已在 v1.0.84 修复并重测通过，详见 §4）。
 - 验证过程宿主 `crashes=0`、`lastError=null`；每批结束均清理，生产最终回到验证前的 3 个已装包且全部 `providerRouted=true`。
 
 ## 2. 验证方法
@@ -63,7 +63,7 @@ opencode-xfyun-maas-auth           routed=true  providers=[xfyun-coding, xfyun-m
 |---|---|---|---|
 | 0 | `github:tianpeng-dev/opencode-doubao-work-auth#7b34…` | 解包 | **已在 v1.0.84 修复**：`package.json` 857 KB 被旧 256 KB 上限拒绝；1.0.84 起上限 1 MiB（对齐上游），生产重测安装成功、`doubao-work` 接管 |
 | 1 | `github:Guuuu233/claude-tui-boost#944d…` | 解包 | 压缩包 48.5 MB > 32 MB 上限（上游同为 32 MB）；包内为超大资产，按契约拒装 |
-| 2 | `github:1466109846/ua-pro` | 解析 | 该仓库默认分支解析 `api.github.com/repos/…/commits` 未返回 sha（仓库/分支不可用） |
+| 2 | `github:1466109846/ua-pro` | 解析 | **AIGX 侧缺陷（已修，待 v1.0.86 发布后重测）**：无 `#ref` 时 `api.github.com/…/commits` 返回的是 commit **数组**，旧实现按对象取 `sha`，恒报「响应缺 sha 字段」；仓库本身可用、API 正常返回 `5b48ec11…` |
 | 3 | `github:ikashana/magpie-comate-auth#635d…` | 依赖 | `bun install` 拉 `@baidu/comate-browser-use@2.0.4` 在 npmmirror 404（上游依赖缺失） |
 | 4 | `github:mu-zi-lee/magpie-claudeweb2api#9fed…` | 加载 | 插件自报「No packaged backend for linux/x64」——仓库未提供 Linux 构建产物 |
 | 5 | `github:korioinc/magpie-tokscale-import#fbbc…` | 加载 | 插件要求 Magpie 桌面端 `usage.jsonl`，运行环境不适用 |

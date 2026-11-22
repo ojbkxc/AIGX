@@ -242,17 +242,7 @@ pub async fn resolve_github(
             .json()
             .await
             .map_err(|e| SourceError::Resolve(format!("响应不是 JSON: {e}")))?;
-        let sha = v
-            .get("sha")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| SourceError::Resolve("响应缺 sha 字段".to_string()))?
-            .to_string();
-        if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(SourceError::Resolve(format!(
-                "API 返回的 sha 不是 40 位 hex: {sha}"
-            )));
-        }
-        sha.to_ascii_lowercase()
+        extract_commit_sha(&v, reference.is_empty())?
     };
 
     let tarball_url = format!("https://codeload.github.com/{repository}/tar.gz/{commit}");
@@ -260,6 +250,35 @@ pub async fn resolve_github(
         commit,
         tarball_url,
     })
+}
+
+/// 从 GitHub commits API 响应提取 commit SHA 并校验 40 位 hex。
+///
+/// 指定 ref → `/commits/{ref}` 返回**单个 commit 对象**；
+/// 未指定 ref → `/commits` 返回**默认分支的 commit 列表**（JSON 数组，取第一条）。
+/// 早期实现一律按对象取 `sha`，导致无 ref 的 selector（如 `github:owner/repo`）
+/// 永远报「响应缺 sha 字段」。
+fn extract_commit_sha(v: &serde_json::Value, default_branch: bool) -> Result<String, SourceError> {
+    let sha = if default_branch {
+        v.as_array()
+            .and_then(|list| list.first())
+            .and_then(|commit| commit.get("sha"))
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| {
+                SourceError::Resolve("响应缺 sha 字段（默认分支 commit 列表为空）".to_string())
+            })?
+    } else {
+        v.get("sha")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| SourceError::Resolve("响应缺 sha 字段".to_string()))?
+    }
+    .to_string();
+    if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SourceError::Resolve(format!(
+            "API 返回的 sha 不是 40 位 hex: {sha}"
+        )));
+    }
+    Ok(sha.to_ascii_lowercase())
 }
 
 /// ref 段的 URL 转义（只转义必转的字符；validate_ref 已保证字符集安全）。
@@ -608,6 +627,34 @@ pub fn npm_meta_url(name: &str) -> Result<String, SourceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_sha_from_default_branch_list() {
+        let v = serde_json::json!([
+            {"sha": "5b48ec11493c5eb7afe5d84f566704572d87afcc"},
+            {"sha": "0000000000000000000000000000000000000000"}
+        ]);
+        assert_eq!(
+            extract_commit_sha(&v, true).unwrap(),
+            "5b48ec11493c5eb7afe5d84f566704572d87afcc"
+        );
+    }
+
+    #[test]
+    fn extract_sha_from_single_commit_object() {
+        let v = serde_json::json!({"sha": "5B48EC11493C5EB7AFE5D84F566704572D87AFCC"});
+        assert_eq!(
+            extract_commit_sha(&v, false).unwrap(),
+            "5b48ec11493c5eb7afe5d84f566704572d87afcc"
+        );
+    }
+
+    #[test]
+    fn extract_sha_rejects_missing_or_invalid() {
+        assert!(extract_commit_sha(&serde_json::json!([]), true).is_err());
+        assert!(extract_commit_sha(&serde_json::json!({}), false).is_err());
+        assert!(extract_commit_sha(&serde_json::json!({"sha": "short"}), false).is_err());
+    }
 
     #[test]
     fn parse_npm_bare_and_scoped() {
