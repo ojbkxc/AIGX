@@ -981,37 +981,181 @@ fn earliest_wallet_expiry(balance: &Option<serde_json::Value>) -> Option<i64> {
 
 // ── 列表 ────────────────────────────────────────────────────────────
 
-/// GET /api/account-sessions?channel_id=&search=
-pub async fn handle_list_account_sessions(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    verify_admin(&state, &headers).await?;
-    let channel_filter = params.get("channel_id").cloned().unwrap_or_default();
-    let search = params
-        .get("search")
-        .map(|s| s.to_lowercase())
-        .unwrap_or_default();
-    let channels = state.channel_store.list();
-    let mut sessions = state.account_sessions.all();
-    sort_sessions_for_list(&mut sessions);
-    let now = chrono::Utc::now().timestamp();
-    let include_hidden = params
-        .get("include_hidden")
-        .or_else(|| params.get("includeHidden"))
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
-    let mut visible: Vec<AccountSession> = Vec::with_capacity(sessions.len());
-    let mut hidden: Vec<AccountSession> = Vec::new();
-    for session in &sessions {
-        if !channel_filter.is_empty() && session.channel_id != channel_filter {
-            continue;
+/// `/api/account-sessions` 的查询过滤（全部可选；缺省行为与旧版一致）。
+///
+/// 对齐 A2A `core/accounts_list.rs::AccountListQuery` 的筛选维度，另加
+/// `expiry_from/to` 与 `usage_min/max` 两个数值区间；`limit/offset` 提供服务端
+/// 分页（不传 `limit` 时仍返回全量，向后兼容）。
+#[derive(Clone, Debug, Default)]
+struct SessionListFilter {
+    channel_id: String,
+    search: String,
+    include_hidden: bool,
+    /// 多值 OR：`enabled|disabled|limited|relogin|expired`（空 = 不过滤）。
+    statuses: Vec<String>,
+    /// 到期时间区间（unix 秒，闭区间）。
+    expiry_from: Option<i64>,
+    expiry_to: Option<i64>,
+    /// 已用百分比区间（0–100，闭区间）。
+    usage_min: Option<f64>,
+    usage_max: Option<f64>,
+    /// 服务端分页：`limit` 缺省 = 全量；`offset` 默认 0。
+    limit: Option<usize>,
+    offset: usize,
+}
+
+impl SessionListFilter {
+    fn from_params(params: &HashMap<String, String>) -> Self {
+        let get = |key: &str| params.get(key).map(|s| s.trim().to_string());
+        let statuses = get("status")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| {
+                        matches!(
+                            s.as_str(),
+                            "enabled" | "disabled" | "limited" | "relogin" | "expired"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let parse_i64 = |key: &str| get(key).and_then(|s| s.parse::<i64>().ok());
+        let parse_f64 = |key: &str| {
+            get(key)
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|v| v.clamp(0.0, 100.0))
+        };
+        let limit = get("limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|n| n.clamp(1, 200));
+        let offset = get("offset")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+        Self {
+            channel_id: params.get("channel_id").cloned().unwrap_or_default(),
+            search: get("search").map(|s| s.to_lowercase()).unwrap_or_default(),
+            include_hidden: params
+                .get("include_hidden")
+                .or_else(|| params.get("includeHidden"))
+                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
+            statuses,
+            expiry_from: parse_i64("expiry_from"),
+            expiry_to: parse_i64("expiry_to"),
+            usage_min: parse_f64("usage_min"),
+            usage_max: parse_f64("usage_max"),
+            limit,
+            offset,
         }
-        if !search.is_empty() {
-            let channel_name = channel_name_for(&channels, &session.channel_id);
-            if !matches_search(session, &search) && !channel_name.to_lowercase().contains(&search) {
-                continue;
+    }
+
+    fn matches(&self, session: &AccountSession, channels: &[Channel], now: i64) -> bool {
+        if !self.channel_id.is_empty() && session.channel_id != self.channel_id {
+            return false;
+        }
+        if !self.search.is_empty() {
+            let channel_name = channel_name_for(channels, &session.channel_id);
+            if !matches_search(session, &self.search)
+                && !channel_name.to_lowercase().contains(&self.search)
+            {
+                return false;
             }
+        }
+        if !self.statuses.is_empty()
+            && !self.statuses.iter().any(|status| match status.as_str() {
+                "enabled" => session.is_enabled(),
+                "disabled" => !session.is_enabled(),
+                "limited" => session_is_limited(session, now),
+                "relogin" => session.needs_relogin(),
+                "expired" => session.is_expired(now),
+                _ => false,
+            })
+        {
+            return false;
+        }
+        if self.expiry_from.is_some() || self.expiry_to.is_some() {
+            // 无权威到期时间（None/0）的账号无法证明落在区间内 → 排除。
+            let Some(expiry) = session.expires_at.filter(|at| *at > 0) else {
+                return false;
+            };
+            if self.expiry_from.is_some_and(|from| expiry < from) {
+                return false;
+            }
+            if self.expiry_to.is_some_and(|to| expiry > to) {
+                return false;
+            }
+        }
+        if self.usage_min.is_some() || self.usage_max.is_some() {
+            let Some(percent) = account_used_percent(session) else {
+                return false;
+            };
+            if self.usage_min.is_some_and(|min| percent < min) {
+                return false;
+            }
+            if self.usage_max.is_some_and(|max| percent > max) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// 限流中：冷却未到期，或条件组/扁平限制器当前命中。
+fn session_is_limited(session: &AccountSession, now: i64) -> bool {
+    if session.cooldowns.values().any(|until| *until > now) {
+        return true;
+    }
+    let verdict = session.limiter_group_verdict();
+    verdict.account_skip || verdict.disable || !verdict.skip_models.is_empty()
+}
+
+/// 账号「已用百分比」（0–100）：取余额快照里最紧的钱包。
+///
+/// 口径：wallet 显式 `usedPercent` 直接用；只有 `remainingPercent` 时取
+/// `100 - remaining`；只有 `used`/`total` 时按比例算。多个钱包取最大值
+/// （最先耗尽的那份额度）。无任何数字读数 → `None`（过滤时按「无法证明命中」
+/// 排除，不用 0 冒充）。
+fn account_used_percent(session: &AccountSession) -> Option<f64> {
+    let balance = session.last_balance.as_ref()?;
+    let wallets = balance.get("wallets")?.as_array()?;
+    let mut tightest: Option<f64> = None;
+    for wallet in wallets {
+        let used = wallet
+            .get("usedPercent")
+            .or_else(|| wallet.get("used_percent"))
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                wallet
+                    .get("remainingPercent")
+                    .or_else(|| wallet.get("remaining_percent"))
+                    .and_then(Value::as_f64)
+                    .map(|remaining| 100.0 - remaining)
+            })
+            .or_else(|| {
+                let used = wallet.get("used").and_then(Value::as_f64)?;
+                let total = wallet.get("total").and_then(Value::as_f64)?;
+                (total > 0.0).then_some(used / total * 100.0)
+            });
+        if let Some(used) = used {
+            let used = used.clamp(0.0, 100.0);
+            tightest = Some(tightest.map_or(used, |current: f64| current.max(used)));
+        }
+    }
+    tightest
+}
+
+/// 按过滤条件把会话拆成「可见 / 隐藏」（均保留全量，供快照与分页共用）。
+fn partition_sessions(
+    sessions: &[AccountSession],
+    channels: &[Channel],
+    filter: &SessionListFilter,
+    now: i64,
+) -> (Vec<AccountSession>, Vec<AccountSession>) {
+    let mut visible = Vec::new();
+    let mut hidden = Vec::new();
+    for session in sessions {
+        if !filter.matches(session, channels, now) {
+            continue;
         }
         if session.hidden {
             hidden.push(session.clone());
@@ -1019,7 +1163,23 @@ pub async fn handle_list_account_sessions(
             visible.push(session.clone());
         }
     }
-    let mut data: Vec<Value> = Vec::with_capacity(visible.len());
+    (visible, hidden)
+}
+
+/// GET /api/account-sessions?channel_id=&search=&status=&expiry_from=&expiry_to=&usage_min=&usage_max=&limit=&offset=
+pub async fn handle_list_account_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let filter = SessionListFilter::from_params(&params);
+    let channels = state.channel_store.list();
+    let mut sessions = state.account_sessions.all();
+    sort_sessions_for_list(&mut sessions);
+    let now = chrono::Utc::now().timestamp();
+    let (visible, hidden) = partition_sessions(&sessions, &channels, &filter, now);
+    let mut data: Vec<Value> = Vec::with_capacity(visible.len() + hidden.len());
     for session in &visible {
         data.push(session_json(
             &state.account_sessions,
@@ -1028,7 +1188,7 @@ pub async fn handle_list_account_sessions(
             now,
         ));
     }
-    if include_hidden {
+    if filter.include_hidden {
         for session in &hidden {
             data.push(session_json(
                 &state.account_sessions,
@@ -1038,17 +1198,55 @@ pub async fn handle_list_account_sessions(
             ));
         }
     }
+    // `total` 是过滤后的全量条数；分页只影响 `data`（快照三件套仍按完整集）。
     let total = data.len();
+    let (offset, page_size) = match filter.limit {
+        Some(limit) => (filter.offset.min(total), Some(limit)),
+        // 不传 limit：保持旧行为（全量、忽略 offset）。
+        None => (0, None),
+    };
+    let data: Vec<Value> = match page_size {
+        Some(limit) => data.into_iter().skip(offset).take(limit).collect(),
+        None => data,
+    };
     Ok(Json(json!({
         "success": true,
         "data": data,
         "total": total,
+        "offset": offset,
+        "pageSize": page_size,
         // A2A 快照三件套：分组摘要 / 逐家当前账号 / 隐藏账号摘要。
         // 前端不用为这三个视图再发额外请求（账号页一屏内要用）。
         "providers": crate::account_session::plugin::provider_summary(&visible),
         "currentAccountIds": crate::account_session::plugin::current_account_ids(&visible),
         "hiddenAccounts": hidden_accounts_view(&state, &hidden),
     })))
+}
+
+/// GET /api/account-sessions/ids —— 只取与列表筛选一致的账号 id（供批量选择）。
+///
+/// 与 [`handle_list_account_sessions`] 用同一套过滤（含 `include_hidden`），
+/// 但不分页（ids-only 选择要全量命中集）。响应 `{success, data:[id...], total}`。
+pub async fn handle_account_sessions_ids(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let filter = SessionListFilter::from_params(&params);
+    let channels = state.channel_store.list();
+    let mut sessions = state.account_sessions.all();
+    sort_sessions_for_list(&mut sessions);
+    let now = chrono::Utc::now().timestamp();
+    let (visible, hidden) = partition_sessions(&sessions, &channels, &filter, now);
+    let mut ids: Vec<String> = visible.iter().map(|session| session.id.clone()).collect();
+    if filter.include_hidden {
+        ids.extend(hidden.iter().map(|session| session.id.clone()));
+    }
+    let total = ids.len();
+    Ok(Json(
+        json!({ "success": true, "data": ids, "total": total }),
+    ))
 }
 
 /// 隐藏账号摘要（对齐 A2A `core/account_store/hidden_accounts.rs::summary`）。
@@ -3548,26 +3746,25 @@ pub async fn handle_export_account_sessions(
             json!({
                 "name": s.name,
                 "provider": s.provider,
-                "channel_id": s.channel_id,
-                "channel_name": channel_name,
-                "base_url": s.base_url,
-                "chat_path": s.chat_path,
+                "channelId": s.channel_id,
+                "channelName": channel_name,
+                "baseUrl": s.base_url,
+                "chatPath": s.chat_path,
                 "proxy": s.proxy,
                 "status": s.status,
                 "priority": s.priority,
                 "weight": s.weight,
-                "max_concurrency": s.max_concurrency,
+                "maxConcurrency": s.max_concurrency,
                 "models": s.models,
-                "extra_headers": s.extra_headers,
-                "expires_at": s.expires_at,
-                "credential_kind": s.credential.kind,
-                "api_key": s.credential.secret_plain(),
-                "credential_fields": fields,
-                "refresh_token": refresh_token,
+                "extraHeaders": s.extra_headers,
+                "expiresAt": s.expires_at,
+                "credentialKind": s.credential.kind,
+                "accessToken": s.credential.secret_plain(),
+                "refreshToken": refresh_token,
+                "credential": fields,
             })
         })
         .collect();
-    let now = chrono::Utc::now().timestamp();
     let admin_id = admin_id_from_session(&state, &headers).await;
     record_audit(
         &state,
@@ -3580,11 +3777,47 @@ pub async fn handle_export_account_sessions(
     Ok(Json(json!({
         "success": true,
         "data": {
-            "version": 1,
-            "exported_at": now,
+            // 全量导出 v2（对齐 A2A `core/account_transfer.rs` 的导出信封）：
+            // camelCase + `exportedAt` 毫秒 + `customProviders`（AIGX 无自定义
+            // provider 定义，留空数组）；`expiresAt` 仍是 unix 秒（与列表一致）。
+            // 导入端同时兼容 v1(snake_case) 与 v2(camelCase)。
+            "version": 2,
+            "exportedAt": chrono::Utc::now().timestamp_millis(),
+            "customProviders": [],
             "accounts": accounts,
         }
     })))
+}
+
+/// 把 v2（camelCase）导入条目补齐 v1（snake_case）别名，供后续读取逻辑复用。
+///
+/// 全量导出已升 v2（camelCase）；导入端同时接受两种键，保证「导出→导入」
+/// 闭环，也让旧 v1 文件继续可用。已存在的 snake_case 键优先，不被覆盖。
+fn with_v1_aliases(entry: &Value) -> Value {
+    let Some(obj) = entry.as_object() else {
+        return entry.clone();
+    };
+    let mut out = obj.clone();
+    for (camel, snake) in [
+        ("channelId", "channel_id"),
+        ("channelName", "channel_name"),
+        ("baseUrl", "base_url"),
+        ("chatPath", "chat_path"),
+        ("maxConcurrency", "max_concurrency"),
+        ("extraHeaders", "extra_headers"),
+        ("expiresAt", "expires_at"),
+        ("credentialKind", "credential_kind"),
+        ("accessToken", "api_key"),
+        ("refreshToken", "refresh_token"),
+        ("credential", "credential_fields"),
+    ] {
+        if !out.contains_key(snake) {
+            if let Some(value) = obj.get(camel) {
+                out.insert(snake.to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(out)
 }
 
 /// POST /api/account-sessions/import/json —— 导入导出文件中的账号。
@@ -3627,7 +3860,10 @@ pub async fn handle_import_account_sessions_json(
     let mut skipped = 0usize;
     let mut errors: Vec<String> = Vec::new();
 
-    for entry in &entries {
+    for raw_entry in &entries {
+        // v2 导出是 camelCase；补 snake_case 别名后沿用既有 v1 读取逻辑。
+        let entry = with_v1_aliases(raw_entry);
+        let entry = &entry;
         let name = entry
             .get("name")
             .and_then(|v| v.as_str())
@@ -5557,5 +5793,123 @@ mod login_callback_params_tests {
                 "url": "http://127.0.0.1:1455/auth/callback?state=flow-42&code=abc123",
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod pool_filter_tests {
+    use super::*;
+    use crate::account_session::model::AccountSession;
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn filter_parses_status_expiry_usage_and_paging() {
+        let f = SessionListFilter::from_params(&params(&[
+            ("status", "relogin, EXPIRED ,bogus"),
+            ("expiry_from", "100"),
+            ("expiry_to", "200"),
+            ("usage_min", "10"),
+            ("usage_max", "120"), // clamp 到 100
+            ("limit", "0"),       // clamp 到 1
+            ("offset", "5"),
+        ]));
+        assert_eq!(
+            f.statuses,
+            vec!["relogin".to_string(), "expired".to_string()]
+        );
+        assert_eq!(f.expiry_from, Some(100));
+        assert_eq!(f.expiry_to, Some(200));
+        assert_eq!(f.usage_min, Some(10.0));
+        assert_eq!(f.usage_max, Some(100.0));
+        assert_eq!(f.limit, Some(1));
+        assert_eq!(f.offset, 5);
+    }
+
+    #[test]
+    fn filter_defaults_are_backward_compatible() {
+        let f = SessionListFilter::from_params(&HashMap::new());
+        assert!(f.statuses.is_empty());
+        assert!(f.expiry_from.is_none() && f.expiry_to.is_none());
+        assert!(f.usage_min.is_none() && f.usage_max.is_none());
+        assert!(f.limit.is_none(), "缺省不分页（保持全量行为）");
+        assert_eq!(f.offset, 0);
+        assert!(!f.include_hidden);
+    }
+
+    #[test]
+    fn used_percent_prefers_tightest_wallet() {
+        let mut s = AccountSession::new("ch", "a");
+        s.last_balance = Some(json!({ "wallets": [
+            { "usedPercent": 20.0 },
+            { "remainingPercent": 30.0 },   // used = 70
+            { "used": 50.0, "total": 100.0 } // used = 50
+        ]}));
+        assert_eq!(account_used_percent(&s), Some(70.0));
+        // 只有非数字读数 → 无法判定，返回 None（过滤时会排除，不拿 0 冒充）
+        s.last_balance = Some(json!({ "wallets": [ { "displayName": "x" } ] }));
+        assert_eq!(account_used_percent(&s), None);
+        s.last_balance = None;
+        assert_eq!(account_used_percent(&s), None);
+    }
+
+    #[test]
+    fn status_expiry_and_usage_match() {
+        let mut s = AccountSession::new("ch", "a");
+        s.status = "expired".into();
+        s.expires_at = Some(150);
+        let now = 1000;
+        let expired = SessionListFilter {
+            statuses: vec!["expired".into()],
+            ..Default::default()
+        };
+        assert!(expired.matches(&s, &[], now), "expires_at 已过 = expired");
+        let in_range = SessionListFilter {
+            expiry_from: Some(100),
+            expiry_to: Some(200),
+            ..Default::default()
+        };
+        assert!(in_range.matches(&s, &[], now));
+        let too_early = SessionListFilter {
+            expiry_to: Some(120),
+            ..Default::default()
+        };
+        assert!(!too_early.matches(&s, &[], now), "到期时间超出上界应排除");
+        // 无余额读数时 usage 过滤必须排除（无法证明命中）
+        let usage = SessionListFilter {
+            usage_min: Some(1.0),
+            ..Default::default()
+        };
+        assert!(!usage.matches(&s, &[], now));
+    }
+
+    #[test]
+    fn v1_aliases_fill_from_camel_case() {
+        let entry = json!({
+            "name": "a", "provider": "p", "channelId": "c1", "channelName": "C",
+            "baseUrl": "https://x", "chatPath": "/c", "maxConcurrency": 3,
+            "extraHeaders": { "a": "b" }, "expiresAt": 42, "credentialKind": "api_key",
+            "accessToken": "sk", "refreshToken": "r", "credential": { "cookie": "x" }
+        });
+        let v = with_v1_aliases(&entry);
+        assert_eq!(v["channel_id"], "c1");
+        assert_eq!(v["channel_name"], "C");
+        assert_eq!(v["base_url"], "https://x");
+        assert_eq!(v["chat_path"], "/c");
+        assert_eq!(v["max_concurrency"], 3);
+        assert_eq!(v["extra_headers"], json!({ "a": "b" }));
+        assert_eq!(v["expires_at"], 42);
+        assert_eq!(v["credential_kind"], "api_key");
+        assert_eq!(v["api_key"], "sk");
+        assert_eq!(v["refresh_token"], "r");
+        assert_eq!(v["credential_fields"], json!({ "cookie": "x" }));
+        // 已存在的 snake_case 键优先，不被 camelCase 覆盖
+        let mixed = json!({ "channel_id": "old", "channelId": "new" });
+        assert_eq!(with_v1_aliases(&mixed)["channel_id"], "old");
     }
 }
