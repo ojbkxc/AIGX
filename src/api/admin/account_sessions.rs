@@ -818,8 +818,14 @@ fn limiter_state_of(session: &AccountSession) -> Value {
     } else {
         false
     };
+    let account_skip = verdict.account_skip || flat_balance_skip;
     json!({
-        "account_skip": verdict.account_skip || flat_balance_skip,
+        "account_skip": account_skip,
+        // 余额类拦截（A2A `balance_blocked` 口径）。当前 `token` / `requests`
+        // 指标恒 unknown（本地计数器未接入，见 `limiter.rs`），能命中的只可能
+        // 是余额类条件，故与 `account_skip` 同值；`token_blocked` /
+        // `upstream_suspended_reason` **无数据源，暂不实现**（不造半死字段）。
+        "balance_blocked": account_skip,
         "skip_models": verdict.skip_models,
         "disable": verdict.disable,
     })
@@ -833,6 +839,17 @@ fn channel_name_for(channels: &[Channel], channel_id: &str) -> String {
         }
     }
     String::new()
+}
+
+/// 派生账号 email：`AccountSession` **没有**一等 email 字段，只能从凭证具名字段
+/// `credential.fields["email"]` 回填 —— 导入的 `pluginSecret.metadata` 标量与
+/// 部分 provider 的 credential 模板会带它。空/缺省 → `None`（序列化为 null）。
+///
+/// 不改任何登录流：登录型家即使读到 email 也仅用于拼 `name`，不落字段。
+fn account_email_of(session: &AccountSession) -> Option<String> {
+    let email = session.credential.field_plain("email");
+    let email = email.trim();
+    (!email.is_empty()).then(|| email.to_string())
 }
 
 /// 账号 JSON 视图（凭证脱敏）。
@@ -856,6 +873,8 @@ fn session_json(
         "channel_id": session.channel_id,
         "channel_name": channel_name,
         "name": session.name,
+        // 派生 email（无一等字段；来自 credential.fields["email"]，缺省 null）
+        "email": account_email_of(session),
         "provider": session.provider,
         "base_url": session.base_url,
         "chat_path": session.chat_path,
@@ -5634,17 +5653,18 @@ mod proxy_state_tests {
         );
     }
 
-    /// 限流快照：未配置任何限制器 → 三项全空（前端据此归入「正常」）。
+    /// 限流快照：未配置任何限制器 → 各项全空（前端据此归入「正常」）。
     #[test]
     fn limiter_state_empty_when_unconfigured() {
         let s = AccountSession::new("ch-1", "a1");
         let v = limiter_state_of(&s);
         assert_eq!(v["account_skip"], false);
+        assert_eq!(v["balance_blocked"], false);
         assert_eq!(v["disable"], false);
         assert_eq!(v["skip_models"].as_array().map(Vec::len), Some(0));
     }
 
-    /// 限流快照：余额低于扁平规则阈值 → account_skip=true
+    /// 限流快照：余额低于扁平规则阈值 → account_skip/balance_blocked=true
     ///（与选号阶段 `should_skip_by_balance` 同口径）。
     #[test]
     fn limiter_state_flat_balance_skip() {
@@ -5660,7 +5680,22 @@ mod proxy_state_tests {
         s.last_balance = Some(json!({ "available": 1.0 }));
         let v = limiter_state_of(&s);
         assert_eq!(v["account_skip"], true);
+        assert_eq!(v["balance_blocked"], true);
         assert_eq!(v["disable"], false);
+        // 无数据源的分项不出现（不造半死字段）。
+        assert!(v.get("token_blocked").is_none());
+        assert!(v.get("upstream_suspended_reason").is_none());
+    }
+
+    /// 派生 email：`credential.fields["email"]` 有则回填、空/缺省为 None。
+    #[test]
+    fn account_email_derived_from_credential_field() {
+        let mut s = AccountSession::new("ch-1", "a1");
+        assert_eq!(account_email_of(&s), None, "缺省应为 None");
+        s.credential.set_field("email", "  user@example.com  ");
+        assert_eq!(account_email_of(&s).as_deref(), Some("user@example.com"));
+        s.credential.set_field("email", "   ");
+        assert_eq!(account_email_of(&s), None, "空白应归一为 None");
     }
 }
 
