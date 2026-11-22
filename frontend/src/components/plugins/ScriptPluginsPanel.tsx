@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ExternalLink, Loader2, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
+import { Copy, ExternalLink, Loader2, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useToast } from '../Toast';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
@@ -194,9 +194,28 @@ function InstalledScriptCard({
       </p>
       {/* 宿主回填的加载错误：解释「已安装但未接管」的原因（完整文本进 title） */}
       {pkg.error ? (
-        <p className="pl-card-meta" style={{ color: 'var(--danger-color)' }} title={pkg.error}>
+        <p
+          className="pl-card-meta"
+          style={{ color: 'var(--danger-color)', display: 'flex', alignItems: 'center', gap: 6 }}
+          title={pkg.error}
+        >
           <Badge tone="warning">{t('加载失败')}</Badge>
-          <span style={{ marginLeft: 6 }}>{pkg.error}</span>
+          <span style={{ flex: 1, minWidth: 0 }}>{pkg.error}</span>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            style={{ flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            title={t('复制错误')}
+            aria-label={t('复制错误')}
+            onClick={() => {
+              const text = pkg.error ?? '';
+              if (!text) return;
+              // 复制失败静默（权限/非安全上下文），不打断页面
+              void navigator.clipboard?.writeText(text).catch(() => undefined);
+            }}
+          >
+            <Copy size={11} /> {t('复制错误')}
+          </button>
         </p>
       ) : null}
       <p className="pl-card-meta">
@@ -561,6 +580,8 @@ export default function ScriptPluginsPanel({
   const [query, setQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'magpie' | 'npm' | 'github'>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'installed' | 'notInstalled' | 'updatable'>('all');
+  /** 已装列表「只看失败」：过滤 error 非空或未接管（providerRouted=false）的包 */
+  const [onlyFailed, setOnlyFailed] = useState(false);
 
   // 页面级筛选联动：搜索框与状态筛选由插件页统一驱动（A2A 同口径）
   useEffect(() => {
@@ -622,6 +643,16 @@ export default function ScriptPluginsPanel({
 
   const packages = useMemo(() => payload?.packages ?? [], [payload]);
   const host = payload?.host ?? null;
+
+  /** 失败判定：有加载错误，或未接管（providerRouted=false）。「只看失败」据此过滤。 */
+  const failedPackageCount = useMemo(
+    () => packages.filter((pkg) => pkg.error || !pkg.providerRouted).length,
+    [packages],
+  );
+  const visiblePackages = useMemo(
+    () => (onlyFailed ? packages.filter((pkg) => pkg.error || !pkg.providerRouted) : packages),
+    [packages, onlyFailed],
+  );
 
   /** 已装包按名（不区分大小写）索引：目录条目「已安装」徽标 / 可更新判定用 */
   const installedByName = useMemo(() => {
@@ -916,7 +947,39 @@ export default function ScriptPluginsPanel({
 
           {/* 已安装脚本包 */}
           <div style={{ marginTop: 14 }}>
-            <Card title={`${t('已安装脚本包')} (${packages.length})`}>
+            <Card
+              title={`${t('已安装脚本包')} (${onlyFailed ? `${visiblePackages.length}/${packages.length}` : packages.length})`}
+              actions={
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <label
+                    className="pl-switch-label"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}
+                  >
+                    <Switch checked={onlyFailed} onChange={setOnlyFailed} ariaLabel={t('只看失败')} />
+                    <span>
+                      {t('只看失败')}
+                      {failedPackageCount > 0 ? ` (${failedPackageCount})` : ''}
+                    </span>
+                  </label>
+                  {/* 宿主状态徽章（与上方「宿主状态」卡同源；失败时警示色） */}
+                  {host ? (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <Badge tone={host.running ? 'success' : 'warning'}>
+                        {host.running ? t('宿主运行中') : t('宿主未运行')}
+                      </Badge>
+                      {host.crashes > 0 ? (
+                        <Badge tone="danger">{t('崩溃 {{count}} 次', { count: host.crashes })}</Badge>
+                      ) : null}
+                      {host.lastError ? (
+                        <span className="pl-dg-err" title={host.lastError}>
+                          {t('最近错误：{{err}}', { err: formatError(host.lastError) })}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              }
+            >
               {loading && !payload ? (
                 <Loading text={t('正在读取脚本插件…')} />
               ) : packages.length === 0 ? (
@@ -925,9 +988,11 @@ export default function ScriptPluginsPanel({
                   message={t('暂无已安装脚本包')}
                   action={<p className="pl-empty-hint">{t('从下方目录选择脚本包安装后，在这里启停、配置与卸载。')}</p>}
                 />
+              ) : visiblePackages.length === 0 ? (
+                <p className="pl-empty-hint">{t('没有失败或未接管的脚本包')}</p>
               ) : (
                 <div className="pl-grid">
-                  {packages.map((pkg) => (
+                  {visiblePackages.map((pkg) => (
                     <InstalledScriptCard
                       key={`${pkg.id}@${pkg.version}`}
                       pkg={pkg}

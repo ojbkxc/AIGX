@@ -103,7 +103,7 @@ AIGX 侧处理（`src/plugin_host/script/host/identity.mjs::allocateProvider`）
 | npm（7） | 装时查 `registry.npmjs.org/<name>` → `dist.tarball` | 装时现取 `dist.integrity` | `resolve_npm_tarball` 强校验 tarball 属 `registry.npmjs.org`，防元数据指向第三方 | npm 传播延迟/包被 deprecate/unpublish；7 个均为裸包名（非 scope） |
 | github（213） | `codeload.github.com/<repo>/tar.gz/<commit>` | **无 integrity**（commit 寻址固定内容） | ref→40hex：212 条 selector 已 pin 40hex（**跳过 API，单跳**）；1 条分支 ref 走 `api.github.com/repos/…/commits` 解析（**两跳**） | 分支 ref 条目内容非不可变（`1466109846/ua-pro`）；仓库被删/私有化；tarball 内实际包名需探测 |
 
-公共护栏（`packages.rs`）：archive ≤32 MiB、解包总量 ≤128 MiB、条目 ≤4096、`package.json`/`wasm.json` ≤256 KiB、tar 路径穿越防护。
+公共护栏（`packages.rs`）：archive ≤32 MiB、解包总量 ≤128 MiB、条目 ≤4096、`package.json`/`wasm.json` ≤1 MiB（v1.0.84 对齐上游；更早为 256 KiB）、tar 路径穿越防护。
 
 **Bat 关注点**
 - magpie 44 条 integrity 齐全，最可控，作为基线批。
@@ -204,3 +204,119 @@ for batch in batches:
 - 加载链：`host/loader.mjs`（`Promise.all` 并发 + `bounded 20_000`）、`host/entries.mjs::bounded`、`host/identity.mjs::allocateProvider`、`dependencies.rs`（bun install 300s/512MiB）。
 - 运行时权威：`script/runtime.rs:348-419`（上游同口径）、`script/runtime.rs` 的 `compute_routing`/`identities`。
 - 视图/验收字段：`api/admin/script_plugins.rs::package_view`/`host_view`（`providerRouted`、`error`、`providers`、`running`、`crashes`）；路由注册见 `main.rs:3333-3383`。
+
+---
+
+## 7. 运维 Runbook（v1.0.84）
+
+> 面向运维的日常操作手册。审计口径与失败样本见
+> [`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)
+> （2026-11-22 生产全量验证：253/264 通过，11 条失败全部归因）。
+
+### 7.1 日常操作：刷新 → 安装 → 启用 → 观察 → 停用/卸载
+
+UI 路径：管理 → **插件**（`/plugins`）→ 来源筛选「Magpie 插件」→ 脚本插件面板
+（`frontend/src/components/plugins/PluginManagerPage.tsx` 的 `#pl-magpie`，渲染
+`ScriptPluginsPanel`）。所有操作等价 API 都走管理面鉴权（`verify_admin`）。
+
+| 步骤 | UI | API |
+|---|---|---|
+| 刷新目录 | 面板「刷新目录」 | `POST /api/plugins/scripts/refresh`（别名 `/api/plugins/scripts/catalog/refresh`）→ `{ok:true}`；异步刷新，稍后读目录 |
+| 查看目录 | 商店/推荐分组 | `GET /api/plugins/scripts/catalog` → `{status, entries}` |
+| 安装 | 条目「安装」（首次需确认信任） | `POST /api/plugins/scripts/install {"selector": "...", "trusted": true}` |
+| 启用 | 包开关 | `POST /api/plugins/scripts/enable {"id","enabled":true}` 或 `POST /api/plugins/scripts/change {"id","action":"enable","enabled":true}` |
+| 观察 | 包卡片徽标 | `GET /api/plugins/scripts` → `{host, packages}` |
+| 停用 | 包开关关闭 | `enable {"id","enabled":false}` |
+| 卸载 | 包菜单「卸载」 | `POST /api/plugins/scripts/uninstall {"id"}`（别名 `change {"id","action":"remove"}`） |
+
+补充端点：
+- 单家 provider 启停：`POST /api/plugins/scripts/change {"id","action":"provider","provider","enabled"}`。
+- 重启宿主（崩溃重试停止/排障）：`POST /api/plugins/scripts/rebuild`。
+- 包配置 / Key：`POST /api/plugins/scripts/options {"id","values":{…}}`（包级参数），或 A2A 形态 `POST /api/plugins/scripts/settings {"id","options"?, "providerOptions"?}`。
+- 更新检查：`POST /api/plugins/scripts/check`（同时写一条 `pluginCatalog` 维护记录并返回逐包 `CheckOutcome`）。
+
+selector 三种形态：`magpie:<scoped-npm-name>`（官方 dist）、裸 npm 包名（推荐）、
+`github:<owner>/<repo>#<40hex sha|ref>`（第三方）。`trusted:true` 是**必填显式信任**
+（第三方代码），UI 安装时会二次确认。
+
+安装直 await（下载/解包/依赖安装，可能几十秒），成功返回**未启用**的包视图；
+启用会触发单 Bun 宿主 rebuild（失败自动回滚到停用）。每次 enable/disable 都会
+重建整个宿主，批量操作应先装齐、一次性启用、再统一采集。
+
+### 7.2 「装了但没跑」——四个字段怎么读
+
+数据源只有一个：`GET /api/plugins/scripts`。逐字段判据：
+
+| 字段 | 读法 |
+|---|---|
+| `host.running` | 单 Bun 宿主是否在跑。**false 时 `providerRouted` 恒 false（设计如此，不代表包坏）**；先看 `host.lastError` / `host.crashes`，必要时 `POST /api/plugins/scripts/rebuild`。 |
+| `packages[].error` | 宿主 `script.packages.error` 回填的加载错误，是「装了但起不来」的唯一可读诊断。非空 = 该包装载失败，按 §7.3 归类处置。 |
+| `packages[].providerRouted` | 该包声明的任一 provider 是否已进路由表。**true 才算真正接管**。false 但 `error` 为空且 `host.running=true` = 未接线（多为 reserved 让位或声明与自报不一致）。 |
+| `host.crashes` / `host.lastError` | 宿主崩溃计数与最近错误。批次前后 `crashes` 增长或 `lastError` 非空 = 宿主级异常（OOM/启动竞争），先 rebuild、减小批次再试。 |
+
+判定顺序：`host.running` → `package.error` → `providerRouted` → `crashes/lastError`。
+注意目录里 119/264 条 `providers` 为空**是常态**（第三方入口在 JS 里注册）；实际
+身份以 `host.providers` 和 `identities`（声明 id→实际 id，冲突会改名 `<id>-plugin`/
+追加 sha12）为准，不要用目录 id 断言。
+
+### 7.3 常见失败语义与处置
+
+| 现象（error / 报错关键词） | 根因 | 处置 |
+|---|---|---|
+| 包体过大 | archive > **32 MiB**（`MAX_ARCHIVE_BYTES`） | 契约拒装，包不可用；换包，别调大上限硬塞 |
+| 解包总量过大 / 条目过多 | 解包 > **128 MiB** 或条目 > **4096** | 同上，拒装 |
+| manifest 过大 | `package.json`/`wasm.json` > **1 MiB**（`MAX_MANIFEST_BYTES`，已对齐上游） | 拒装；请作者精简清单或换包 |
+| 依赖安装失败 | `bun install --production --ignore-scripts` 失败（依赖在镜像 404 / 解析冲突） | 多为插件依赖问题：重试 / 换源；仍失败则联系作者，不要判宿主坏 |
+| No packaged backend for linux/x64 | 插件未提供 Linux 构建产物 | 该包在此环境不可用；跳过 |
+| No valid API keys provided / 需要 `options.baseURL` | 加载即要求配置 | 安装后先到「包配置 / 提供商设置」填 options/Key，再启用或 rebuild |
+| Invalid plugin provider id / Duplicated provider in plugin package | 插件导出 id 非法或包内重复导出 | 插件缺陷：联系作者或跳过，**不要**手工伪造 provider id |
+| 入口引用兄弟插件却未声明依赖 | 插件打包缺陷（如 `workbuddy-search`→`opencode-workbuddy-auth`） | 先装兄弟包仍可能不可解析；按不可用处理/联系作者 |
+| 解析 tarball / npm 元数据失败 | npm registry 抖动或包被 deprecate | 重试，不是插件坏 |
+| 分支 ref 内容漂移 | selector 非 pin（`github:…/ua-pro`） | 装前确认 ref 对应 commit 未漂移；优先用 40hex SHA |
+
+原则：`error` 非空先归类再动手；**AIGX 侧偏严的上限（32 MiB / 1 MiB / 4096）不为单包放宽**，
+超出即按契约拒装。插件自身的打包/配置/代码缺陷不由运维"修兼容"。
+
+### 7.4 容量与批次
+
+- **`MAX_SCRIPT_PACKAGES=64`**（`src/plugin_host/script/types.rs:41`）：已装包去重数 ≥64 时
+  安装被拒。264 条目录**不可能同时驻留**，最少 5 批。
+- **单 Bun 宿主**承载全部已启用包，`load()` 对 entries `Promise.all` 并发 import。
+- **init 握手 60s**（`process.rs` `HANDSHAKE_TIMEOUT`）；**单包 import bounded 20s**
+  （`host/loader.mjs`）；依赖 `bun install` 300s、`node_modules` ≤512 MiB。
+- 建议每批 **≤48**（给内置/已装包与内存留余量），采用清理式循环。
+
+批次模板：
+
+```
+for batch in batches:                       # 每批 ≤48，安装前已装数 + 本批 ≤64
+  POST /api/plugins/scripts/install {selector, trusted:true}   # 逐条 install
+  POST /api/plugins/scripts/enable  {id, enabled:true}          # 或 change action=enable
+  wait  host.running == true                                    # 轮询 GET /api/plugins/scripts
+  GET   /api/plugins/scripts                                    # 采集 error/providerRouted/providers/crashes
+  enable {id, enabled:false} → uninstall {id}                   # 清理本批
+  assert 已装数归零 / crashes 回到基线                           # 再进下一批
+```
+
+采集产物建议一行一包：`{selector, id, source, declared_providers, actual_providers,
+error, providerRouted, enabled, crashes_before, crashes_after, ts}`，便于按来源汇总成功率。
+「先装齐一批 → 一次性启用 → 采集」比逐个 enable 更省 rebuild（每次启用都会全量重建）。
+
+### 7.5 安全须知
+
+- **脚本插件是第三方代码，以 Bun 进程权限运行，不是 OS 沙箱**。安装即等于允许它访问
+  宿主进程可及的文件/网络/环境变量。只装**可信来源**（官方 magpie / 官方推荐 npm /
+  你审计过的 GitHub 仓库）。
+- GitHub 来源**无 integrity**，只靠 40 位 commit SHA 固定内容；非 pin 的分支 ref 内容可变。
+  npm 在安装时现取 `dist.integrity`；magpie dist 必带 sha512。
+- 安装必须显式 `trusted:true`（UI 二次确认）；生产批量验证时每条都显式信任，且**每批
+  结束清理**，不与常驻账号插件混装。
+- 红线（与 §6 一致）：不写 provider 伪装/规避检测；不打包分发 AGPL 插件；不改宿主请求头
+  指纹；不改目录或伪造 provider id。
+- 写操作（install/enable/change/options/rebuild）在宿主侧串行（`WRITE_LOCK`），但**这不限制
+  插件运行期能力**——信任判断仍以来源为准。
+
+### 7.6 相关文档
+
+- 全量验证结果与 11 条失败归因：[`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)。
+- 审计口径、安装/加载链路与风险分类：本文 §1–§5；验收判据 §4；批次计划 §5。

@@ -33,8 +33,12 @@ pub const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_UNPACKED_BYTES: u64 = 128 * 1024 * 1024;
 /// tar 条目数上限。
 pub const MAX_ENTRIES: usize = 4096;
-/// package.json 字节上限（清单不该很大，防把它当数据通道）。
-pub const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
+/// package.json 字节上限。
+///
+/// 对齐上游 Agent2API（`plugin_host/script/packages.rs` 读清单上限 1 MiB）。
+/// 部分社区包把较大的 `magpie` 元数据 / 模型清单内联进 package.json，生产
+/// 实测有 857 KiB 的合法清单；1 MiB 仍是有界护栏，防止把清单当数据通道。
+pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 /// 从 package.json 里读出的必要信息。
 #[derive(Debug, Clone)]
@@ -828,5 +832,63 @@ pub(crate) mod tests {
         let big = vec![0u8; (MAX_ARCHIVE_BYTES + 1) as usize];
         let err = unpack_tarball(&big, "my-pkg", &dir.path().join("p")).unwrap_err();
         assert!(err.to_string().contains("包体过大"), "{err}");
+    }
+
+    /// 构造一个合法 JSON、`description` 用填充字符撑到 `total` 字节左右的
+    /// package.json。用于验证清单上限的边界行为。
+    fn big_manifest(total: usize) -> Vec<u8> {
+        // 固定骨架：{"name":"my-pkg","version":"1.0.0","main":"index.mjs","description":"…"}
+        let skeleton = r#"{"name":"my-pkg","version":"1.0.0","main":"index.mjs","description":""}"#;
+        let pad = total.saturating_sub(skeleton.len());
+        format!(
+            r#"{{"name":"my-pkg","version":"1.0.0","main":"index.mjs","description":"{}"}}"#,
+            "a".repeat(pad)
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn unpacks_package_with_large_manifest() {
+        // 900 KiB < 1 MiB：生产实测 857 KiB 的合法清单曾因旧的 256 KiB
+        // 上限被拦；提升到 1 MiB 后应能正常解包。
+        let size = 900 * 1024;
+        let manifest_bytes = big_manifest(size);
+        assert!(
+            manifest_bytes.len() as u64 <= MAX_MANIFEST_BYTES,
+            "测试构造的清单应在上限内：{} > {}",
+            manifest_bytes.len(),
+            MAX_MANIFEST_BYTES
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("packages");
+        let tar = make_tarball(&[
+            ("package.json", &manifest_bytes),
+            ("index.mjs", b"export default () => ({})"),
+        ]);
+        let m = unpack_tarball(&tar, "my-pkg", &root).unwrap();
+        assert_eq!(m.name, "my-pkg");
+        assert_eq!(m.entry, "index.mjs");
+        let expected = root.join(dir_name_for("my-pkg")).join("1.0.0");
+        assert!(expected.join("package.json").is_file());
+        assert_eq!(
+            std::fs::metadata(expected.join("package.json"))
+                .unwrap()
+                .len(),
+            manifest_bytes.len() as u64
+        );
+    }
+
+    #[test]
+    fn rejects_manifest_over_1mib() {
+        // 反向控制：超过 1 MiB 的清单仍必须被拒（护栏没有被放大到失控）。
+        let manifest_bytes = big_manifest(MAX_MANIFEST_BYTES as usize + 16);
+        assert!((manifest_bytes.len() as u64) > MAX_MANIFEST_BYTES);
+        let dir = tempfile::tempdir().unwrap();
+        let tar = make_tarball(&[
+            ("package.json", &manifest_bytes),
+            ("index.mjs", b"export default () => ({})"),
+        ]);
+        let err = unpack_tarball(&tar, "my-pkg", &dir.path().join("p")).unwrap_err();
+        assert!(err.to_string().contains("package.json 过大"), "{err}");
     }
 }

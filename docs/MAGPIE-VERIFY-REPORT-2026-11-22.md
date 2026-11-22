@@ -70,6 +70,8 @@ opencode-xfyun-maas-auth           routed=true  providers=[xfyun-coding, xfyun-m
 | 11 | `github:wanglz111/magpie-workbuddy-search#90f3…` | 加载 | 入口源码相对路径引用 `@magpie-community/opencode-workbuddy-auth`，但未声明依赖；同时安装兄弟插件仍不可解析（插件打包缺陷） |
 
 > 另：`magpie-codex-guard` 首轮 load_error（后台进程启动竞争），重测通过，已计入通过。
+>
+> 配置类补充验证：`magpie-relay-identity` 在设置 `options.baseURL` 后安装→启用→`providerRouted=true`（error 为空），证明该类失败是「缺配置」而非宿主缺陷；`magpie-google-aistudio` 同属需要 API Key 的配置类，未提供凭据故未计入通过。
 
 ## 5. 产品边界与限制（非缺陷，需运维知悉）
 
