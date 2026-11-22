@@ -6,12 +6,12 @@ import type { Page } from '@playwright/test';
  *
  * 覆盖 docs/IA-CONSOLIDATION-SPEC.md §7.2 的落点：
  * - 侧栏整合：上游渠道与账号池合并为「供应商」；签到中心 / 用户工具权限 /
- *   定时任务 / 系统设置「账户」顶级入口下线。
+ *   系统设置「账户」顶级入口下线；「定时任务」升级为顶级「自动维护」页。
  * - 旧路由重定向：/account-sessions、/checkin、/user-tools、/scheduled-tasks、
  *   /settings?tab=account、/model-manage?tab=meta。
  * - 供应商页：h1 + 4 Tab（供应商/账号池/健康/签到，无「网关」）、旧 tab= 别名归一。
  * - 统一供应商列表：形态列（API Key / 账号池）、账号数列、账号池型行「管理账号」。
- * - 用户管理双 Tab；系统设置分类（有「定时任务」无「账户」）;模型管理双 Tab +
+ * - 用户管理双 Tab；系统设置分类（无「定时任务」「账户」）;模型管理双 Tab +
  *   「覆盖管理」弹窗入口；签到嵌入后保留 4 个二级 Tab。
  *
  * 选择器一律走语义（role / title / 稳定文案），不依赖易变 class 名。
@@ -53,7 +53,7 @@ test.describe('IA 整合 · 侧栏与路由', () => {
     await expect(page).toHaveURL(/\/users\?tab=tools/);
 
     await page.goto('/scheduled-tasks');
-    await expect(page).toHaveURL(/\/settings\?tab=scheduled/);
+    await expect(page).toHaveURL(/\/maintenance$/);
 
     await page.goto('/settings?tab=account');
     await expect(page).toHaveURL(/\/profile$/);
@@ -236,15 +236,19 @@ test.describe('IA 整合 · 用户管理 / 系统设置 / 模型管理', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('系统设置左栏含「定时任务」不含「账户」，?tab=scheduled 直达', async ({ page, pageErrors }) => {
+  test('系统设置左栏不含「定时任务」，?tab=scheduled 重定向到自动维护页', async ({ page, pageErrors }) => {
     await page.goto('/settings');
     const nav = page.locator('.settings-nav');
     await expect(nav).toBeVisible();
-    await expect(nav).toContainText('定时任务');
+    // v1.0.82 起「定时任务」分类已升级为顶级「自动维护」页，设置页不再有该分类
+    await expect(nav).not.toContainText('定时任务');
     await expect(nav).not.toContainText('账户');
 
+    // 旧 ?tab=scheduled 书签重定向到顶级「自动维护」页
     await page.goto('/settings?tab=scheduled');
-    await expect(page.locator('.settings-nav-item.active')).toContainText('定时任务');
+    await expect(page).toHaveURL(/\/maintenance$/);
+    // 侧栏「管理」组含「自动维护」入口
+    await expect(sidebar(page)).toContainText('自动维护');
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
