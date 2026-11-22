@@ -38,38 +38,6 @@ export interface NetworkStatus {
   lastCheckAt: number;
 }
 
-/** 网络层状态默认值（后端字段缺失时的容错回退） */
-export const defaultNetworkStatus: NetworkStatus = {
-  enabled: true,
-  accountPool: {
-    totalAccounts: 0,
-    availableAccounts: 0,
-    busyAccounts: 0,
-    errorAccounts: 0,
-    invalidAccounts: 0,
-    totalRequests: 0,
-    failedRequests: 0,
-  },
-  connectionPool: {
-    totalConnections: 0,
-    activeConnections: 0,
-    idleConnections: 0,
-    totalConnectionsCreated: 0,
-    totalConnectionsClosed: 0,
-    successfulRequests: 0,
-    failedRequests: 0,
-    avgLatencyMs: 0,
-  },
-  sessionPool: {
-    totalSessions: 0,
-    activeSessions: 0,
-    idleSessions: 0,
-    sessionTtlHours: 0,
-  },
-  loadBalanceStrategy: '',
-  lastCheckAt: 0,
-};
-
 /** 网络层配置请求 */
 export interface NetworkConfigRequest {
   enabled: boolean;

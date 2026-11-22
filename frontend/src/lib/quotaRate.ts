@@ -8,7 +8,7 @@
  *
  * 默认 200：接口不可用 / 未配置时保持历史口径。
  */
-export const DEFAULT_QUOTA_PER_YUAN = 200;
+const DEFAULT_QUOTA_PER_YUAN = 200;
 
 let quotaPerYuan = DEFAULT_QUOTA_PER_YUAN;
 

@@ -12,7 +12,7 @@
  * 性能：读走 lazy init；写只在用户改档位时发生；本模块不在 render 内
  * 重复 JSON.parse（档位表是常量数组，legacy 搬迁只在首次 init 扫一次）。
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Pagination from './Pagination';
 
@@ -92,34 +92,6 @@ export function usePageSize(
   };
 
   return [size, set];
-}
-
-/** 客户端切片：数据一次取回，这里只切窗口。 */
-export function useClientPaging<T>(
-  rows: T[],
-  size: PageSize,
-): {
-  /** 切片后的当前页行 */
-  pageRows: T[];
-  /** 总页数（'all' 恒 1） */
-  totalPages: number;
-  /** 当前页（越界自动夹回） */
-  page: number;
-  setPage: (p: number) => void;
-} {
-  const totalPages = size === 'all' ? 1 : Math.max(1, Math.ceil(rows.length / size));
-  const [rawPage, setRawPage] = useState(1);
-  // total 变化导致越界 → 夹回最后一页（render 期用派生值，不在 effect 里 setState 抖动）
-  const page = Math.min(Math.max(1, rawPage), totalPages);
-  const pageRows = useMemo(
-    () => (size === 'all' ? rows : rows.slice((page - 1) * size, page * size)),
-    [rows, page, size],
-  );
-  useEffect(() => {
-    // 数据域切换后页码复位由调用方决定；这里只保证 rawPage 越界时收敛
-    if (rawPage !== page) setRawPage(page);
-  }, [rawPage, page]);
-  return { pageRows, totalPages, page, setPage: setRawPage };
 }
 
 /**

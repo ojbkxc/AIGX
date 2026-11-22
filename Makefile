@@ -6,7 +6,7 @@
 # 环境配置
 BUILD_DIR := build
 Dockerfile := Dockerfile
-DockerfileFrontend := frontend/Dockerfile
+DockerfileFrontend := $(Dockerfile)
 REGISTRY := aigx
 VERSION := $(shell date +%Y.%m.%d)
 
@@ -30,7 +30,6 @@ backend-build:
 	@docker buildx build \
 		--platform $(PLATFORMS) \
 		--file $(Dockerfile) \
-		--target production \
 		--tag $(REGISTRY)/aigx:$(VERSION) \
 		--push
 	@echo "$(GREEN)✓ 后端镜像构建完成$(NC)"
@@ -68,6 +67,7 @@ frontend-docker:
 	@docker buildx build \
 		--platform $(PLATFORMS) \
 		--file $(DockerfileFrontend) \
+		--target frontend \
 		--tag $(REGISTRY)/aigx-frontend:$(VERSION) \
 		--push
 	@echo "$(GREEN)✓ 前端 Docker 镜像完成$(NC)"
@@ -91,8 +91,12 @@ build-adhoc:
 	@bash build-binaries.sh build
 
 build-multiarch-docker:
-	@echo "$(BLUE)使用 docker-build.sh 构建所有 Docker 镜像$(NC)"
-	@bash docker-build.sh all
+	@echo "$(BLUE)构建多平台 Docker 镜像（Dockerfile 多阶段，与 .github/workflows/docker.yml 同源）...$(NC)"
+	@docker buildx build \
+		--platform $(PLATFORMS) \
+		--file $(Dockerfile) \
+		--tag $(REGISTRY)/aigx:$(VERSION) \
+		--push .
 
 clean:
 	@echo "$(YELLOW)清理构建文件...$(NC)"
@@ -131,7 +135,7 @@ test-integration:
 # 文档
 # ============================================
 
-docs: README.md CHANGELOG.md DEPLOYMENT.md
+docs: README.md docs/CHANGELOG-AI.md DEPLOYMENT.md
 	@echo "$(GREEN)✓ 文档更新完成$(NC)"
 
 install: backend-local-amd64

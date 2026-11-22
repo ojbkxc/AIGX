@@ -17,7 +17,7 @@ function unwrap<T>(res: unknown): T | null {
 }
 
 /** 窗口 → queryKey 片段（days 档与自定义区间分开缓存） */
-export function windowKey(win: ReportWindow): string {
+function windowKey(win: ReportWindow): string {
   return win.start && win.end ? `${win.start}~${win.end}` : `d${win.days ?? 30}`;
 }
 
@@ -25,7 +25,7 @@ type PanelOpts = { staleSec?: number; pollMs?: number; enabled?: boolean; scope?
 
 /** 单面板查询：key=['dashboard', name, window, scope]，统一 unwrap 与缓存策略
  *  scope 维度隔离 admin↔user 数据，避免角色切换时数据串号（admin='all' / user='personal'）。 */
-export function usePanel<T>(
+function usePanel<T>(
   name: string,
   win: ReportWindow,
   fetcher: () => Promise<unknown>,
@@ -233,12 +233,6 @@ export const useCacheTrend24h = (opts: PanelOpts = {}) =>
 
 export const useCacheSavings = (win: ReportWindow, opts: PanelOpts = {}) =>
   usePanel<CacheSavingsData>('cache_savings', win, () => api.getCacheSavings(win), { staleSec: 45, ...opts });
-
-export const useConsumptionTrend = (win: ReportWindow, opts: PanelOpts = {}) =>
-  usePanel<Array<{ date?: string; cost?: number; count?: number }>>('consumption', win, () => api.getConsumptionTrend(win), { staleSec: 100, ...opts });
-
-export const useModelDist = (win: ReportWindow, opts: PanelOpts = {}) =>
-  usePanel<ModelDistItem[]>('model_dist', win, () => api.getModelDistribution(win), { staleSec: 100, ...opts });
 
 export const useReportModels = (win: ReportWindow, opts: PanelOpts = {}) =>
   usePanel<ReportModelRow[]>('report_models', win, () => api.getReportModels(win), { staleSec: 100, ...opts });

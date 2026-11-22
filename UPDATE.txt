@@ -14,7 +14,7 @@ AIGX 服务端 · 升级 / 回滚速查（UPDATE.txt）
   · Docker：面板更新仅更新宿主二进制；容器部署请用镜像升级（见下）。
 
 Docker 升级：
-  docker pull ghcr.io/ojbkxc/aigx:latest
+  docker pull docker.io/ojbkxc/aigx:latest
   docker compose down && docker compose up -d
   （数据卷不随镜像变动，升级不丢数据。）
 
@@ -38,7 +38,7 @@ Windows（重启后生效）：
   失败时看日志里的 "pending rollback" 行（见第四节）。
 
 Docker：回滚 = 拉回旧版本镜像并重启容器
-  docker pull ghcr.io/ojbkxc/aigx:v<旧版本号>
+  docker pull docker.io/ojbkxc/aigx:v<旧版本号>
   docker compose down && docker compose up -d
 
 ──────────────────────────────────────────────

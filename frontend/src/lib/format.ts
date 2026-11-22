@@ -155,7 +155,7 @@ export function heatLevelText(level: number, thresholds: number[], lang?: Lang):
  * 后 10 补充色已校验色相/明度间距）。旧 PieChart 色板前两项重复
  * （'#7ca4f5' 出现两次）是 bug，这里一并消灭。
  */
-export const SLICE_COLORS: readonly string[] = [
+const SLICE_COLORS: readonly string[] = [
   '#f73b00', '#f7bb07', '#4aaa4d', '#1872cb', '#3444a3', '#13c2c2',
   '#722ed1', '#eb2f96', '#a0d911', '#34d399', '#d946ef', '#ff85c0',
   '#b37feb', '#9d174d', '#ffa39e', '#69b1ff',
@@ -226,9 +226,6 @@ export const DONUT = { size: 220, inner: 0.62, outer: 0.88, padAngle: 2 };
 /** tooltip 里最多列几个模型（超出归并「…还有 N 个模型」） */
 export const TIP_MODEL_LIMIT = 8;
 
-/** 元素超过这个数不再逐个挂 React tooltip，降级原生 <title>（A2A TIP_LIMIT） */
-export const TIP_LIMIT = 400;
-
 // ── 时间范围（A2A 六档含 custom；localStorage 持久化） ────────────
 
 /** YYYY-MM-DD 本地日期键（不用 toISOString：那是 UTC，东八区会差一天） */
@@ -261,7 +258,7 @@ export function saveRange(value: string): void {
   }
 }
 
-export function defaultCustomRange(): CustomRange {
+function defaultCustomRange(): CustomRange {
   const end = new Date();
   return {
     start: dayKey(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 6)),
@@ -293,19 +290,6 @@ export function saveCustomRange(range: CustomRange): void {
   } catch {
     /* 忽略 */
   }
-}
-
-/** `YYYY-MM-DD` → 本地零点（避开 new Date(str) 的 UTC 解析陷阱） */
-export function parseDay(key: string): Date {
-  const [y, m, d] = String(key || '').split('-').map(Number);
-  return new Date(y || 1970, (m || 1) - 1, d || 1);
-}
-
-/** 日期写成人话（tooltip 用）：`9月17日`（英文档 `Sep 17`） */
-export function dayLabel(key: string, lang?: Lang): string {
-  const date = parseDay(key);
-  if (isZh(lang)) return `${date.getMonth() + 1}月${date.getDate()}日`;
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 // ── CSV 导出（报表区共用） ────────────────────────────────────────

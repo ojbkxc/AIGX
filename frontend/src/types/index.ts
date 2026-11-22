@@ -10,13 +10,6 @@ import type { LimiterGroup } from './limiter';
 // 核心领域类型
 // ============================================================================
 
-export enum UserRole {
-  ADMIN = 'admin',
-  MANAGER = 'manager',
-  USER = 'user',
-  AUDITOR = 'auditor'
-}
-
 export enum ChannelType {
   OPENAI = 'openai',
   ANTHROPIC = 'anthropic',
@@ -25,53 +18,12 @@ export enum ChannelType {
   CUSTOM = 'custom'
 }
 
-export enum ChannelStatus {
+enum ChannelStatus {
   ACTIVE = 'active',
   INACTIVE = 'inactive',
   DEPRECATED = 'deprecated',
   FAILED = 'failed',
   MAINTENANCE = 'maintenance'
-}
-
-export enum Permission {
-  // 系统管理
-  SYSTEM_ADMIN = 'system:admin',
-  SYSTEM_MONITOR = 'system:monitor',
-
-  // 用户管理
-  USER_VIEW = 'users:view',
-  USER_CREATE = 'users:create',
-  USER_EDIT = 'users:edit',
-  USER_DELETE = 'users:delete',
-
-  // 渠道管理
-  CHANNEL_VIEW = 'channels:view',
-  CHANNEL_CREATE = 'channels:create',
-  CHANNEL_EDIT = 'channels:edit',
-  CHANNEL_DELETE = 'channels:delete',
-  CHANNEL_TEST = 'channels:test',
-
-  // API密钥管理
-  KEY_VIEW = 'keys:view',
-  KEY_CREATE = 'keys:create',
-  KEY_EDIT = 'keys:edit',
-  KEY_DELETE = 'keys:delete',
-  KEY_ROTATE = 'key:rotate',
-
-  // 定价与分组
-  PRICE_VIEW = 'price:view',
-  PRICE_UPDATE = 'price:update',
-  GROUP_VIEW = 'group:view',
-  GROUP_EDIT = 'group:edit',
-
-  // 财务相关
-  WALLET_VIEW = 'wallet:view',
-  ORDER_VIEW = 'order:view',
-  EPAY_CONFIG = 'epay:config',
-
-  // 日志审计
-  LOG_VIEW = 'log:view',
-  LOG_EXPORT = 'log:export'
 }
 
 // 数据库实体类型

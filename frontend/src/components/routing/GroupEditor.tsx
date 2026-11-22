@@ -39,7 +39,7 @@ const STICKY_LABELS: Record<StickyMode, string> = {
 };
 
 /** 新组 id：在既有 id 上取一个不冲突的默认值（可改） */
-export function nextGroupId(groups: RoutingGroup[]): string {
+function nextGroupId(groups: RoutingGroup[]): string {
   const used = new Set(groups.map((g) => g.id));
   for (let i = 1; i < 10_000; i += 1) {
     const id = `group-${i}`;
@@ -61,7 +61,7 @@ function parseAccounts(text: string): string[] {
   return out;
 }
 
-export function emptyGroup(id: string): RoutingGroup {
+function emptyGroup(id: string): RoutingGroup {
   return {
     id,
     name: '',

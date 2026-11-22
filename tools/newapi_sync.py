@@ -8,7 +8,7 @@
   AIGX_TARGET=http://host:9527 AIGX_ADMIN=admin AIGX_PASS=xxx \
   NEWAPI_HOST=104.223.65.202 NEWAPI_SSH_PORT=10122 \
   NEWAPI_SSH_USER=root NEWAPI_SSH_PASS=xxx \
-  python scripts/newapi_sync.py
+  python tools/newapi_sync.py
 
 已执行记录（2026-09-06）：渠道 23 条、分组 vip=0.9/svip=0.8、
 ModelPrice 73 条、ModelRatio 273 条（输入 $0.002/1K 基准 × 倍率，

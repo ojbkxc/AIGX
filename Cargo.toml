@@ -5,14 +5,9 @@ resolver = "2"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-dashmap = "6.0"
-async-trait = "0.1"
-parking_lot = "0.12"
 
 [package]
 name = "aigx"
@@ -53,7 +48,6 @@ tokio = { workspace = true }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http = "1"
-http-body-util = "0.1"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "compression-gzip"] }
 # socks：账号型渠道的出口代理需要 socks5://（reqwest 0.12/0.13 的 socks feature 均为空特性，

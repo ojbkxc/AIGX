@@ -130,7 +130,7 @@ export function HeatmapPanel({ query, lang }: { query: PanelQuery<HeatmapCell[]>
 }
 
 /** Top 模型表：请求数 + 占比条 + 消费/Token（右对齐 num 列，与 Top 渠道榜同法） */
-export function TopModelsTable({ rows, lang }: {
+function TopModelsTable({ rows, lang }: {
   rows: Array<{ model?: string; count?: number; input_tokens?: number; output_tokens?: number; cost?: number }>;
   lang?: string;
 }): JSX.Element {
