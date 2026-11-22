@@ -127,3 +127,14 @@ magpie-xiaoyunque           routed=true providers=[xiaoyunque]
 其中 `lobsterai-plugin` 与 `astudio-plugin-f9ff8166fbfa` 验证了宿主身份改名的两条路径
 （reserved 让位 `-plugin`、改名后仍冲突追加 sha12）。复测后生产仍回到验证前的 3 个包，
 `host.crashes=0`、`lastError=null`、全部 `providerRouted=true`。
+
+**新目录覆盖率核对**（按 selector 精确匹配历史 JSONL）：233 条中
+
+| 状态 | 条数 |
+|---|---:|
+| 历史端到端通过（含新增 6 条） | 221 |
+| 上轮 install_failed、v1.0.84 已重测通过（`doubao-work-auth`，见 §4 #0） | 1 |
+| 生产常驻且当前 `providerRouted=true`（astudio / agnes / xfyun-maas） | 3 |
+| 仍未通过（插件侧/外部问题，SHA 未变） | **8** |
+
+即：新目录 **225/233 已有通过结论，8 条失败均已归因**，无未验证条目。
