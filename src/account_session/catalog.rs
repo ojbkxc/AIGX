@@ -328,6 +328,10 @@ enum CatalogParser {
     AntigravityModelsDict,
     /// Accio：`{data:[{provider, modelList:[{modelCode, modelDisplayName,…}]}]}`。
     Accio,
+    /// Cline（cline / cline-free / cline-pass）：条目用旧缓存字段
+    /// `{id, pool, contextWindow, reasoning, supportsToolCall}`（专用解析见
+    /// `parse_cline_catalog`；不改通用字段归一，避免波及其它 provider）。
+    Cline,
     /// 小浣熊(raccoon)：`{data:{categories:[{models:[{name,…}]}]}}`（兼容旧
     /// `{data:{models:[{modelId,…}]}}`）。
     Raccoon,
@@ -571,7 +575,9 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             sign: None,
             method: None,
             body: None,
-            parser: None,
+            // 专用解析器：识别 contextWindow / 裸 reasoning / supportsToolCall，
+            // 不改通用 pick_*（避免波及其它 provider）。
+            parser: Some(CatalogParser::Cline),
         }),
         // ModelScope（魔搭）国内站 / 国际站：OpenAI 兼容的 `/models` 端点，
         // 响应是 `{data:[{id,...}]}`。两个站点各一份清单（账号体系独立）。
@@ -1774,7 +1780,82 @@ fn parse_response(value: &Value, openai_shape: bool) -> Vec<CatalogEntry> {
     out
 }
 
-/// 拉取上游目录。
+/// 解析 Cline 推荐模型目录（专用）。
+///
+/// Cline 条目用一层独立的旧缓存字段（参考树 `catalog_legacy.rs` 证据）：
+/// `id`（含 `cline-free/` / `cline-pass/` 池前缀）、`contextWindow`、裸
+/// `reasoning`、`supportsToolCall`。这些键与通用 provider 的归一字段
+/// （`maxInputTokens` / `supportsReasoning` / `context_window`）不同，因此在
+/// **Cline 分支**用专用解析器，不改通用 `pick_*` —— 通用函数被十多家共用，
+/// 直接加裸 `reasoning` / `contextWindow` 有误判风险。
+///
+/// 顶层条目容器与通用 parser 一致：`{models:[…]}` / `{data:[…]}` / 顶层数组。
+fn parse_cline_catalog(payload: &Value) -> Vec<CatalogEntry> {
+    let items: Vec<&Value> = payload
+        .get("models")
+        .and_then(Value::as_array)
+        .or_else(|| payload.get("data").and_then(Value::as_array))
+        .or_else(|| payload.as_array())
+        .map(|items| items.iter().collect())
+        .unwrap_or_default();
+    let mut out: Vec<CatalogEntry> = Vec::with_capacity(items.len());
+    let mut seen: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let entry = item
+            .get("model")
+            .filter(|value| value.is_object())
+            .unwrap_or(item);
+        let Some(id) = value_text(entry.get("id"))
+            .or_else(|| value_text(entry.get("name")))
+            .or_else(|| value_text(entry.get("modelId")))
+        else {
+            continue;
+        };
+        if seen.iter().any(|known| known.eq_ignore_ascii_case(&id)) {
+            continue;
+        }
+        seen.push(id.clone());
+
+        // 上下文：Cline 旧缓存用 `contextWindow`；兼容更早的归一键名。
+        let context = [
+            "contextWindow",
+            "context_window",
+            "maxInputTokens",
+            "max_input_tokens",
+            "context_length",
+            "contextLength",
+        ]
+        .iter()
+        .find_map(|key| value_u32(entry.get(*key)));
+
+        let flag = |keys: &[&str]| {
+            keys.iter()
+                .any(|key| entry.get(*key).and_then(Value::as_bool) == Some(true))
+        };
+        let mut capabilities: Vec<String> = Vec::new();
+        if flag(&["reasoning", "supportsReasoning", "supports_reasoning"]) {
+            capabilities.push("reasoning".to_string());
+        }
+        if flag(&["supportsImages", "supports_images", "supports_image"]) {
+            capabilities.push("vision".to_string());
+        }
+        if flag(&[
+            "supportsToolCall",
+            "supports_tool_call",
+            "supportsTools",
+            "supports_tools",
+        ]) {
+            capabilities.push("tool".to_string());
+        }
+        out.push(CatalogEntry {
+            id,
+            upstream: None,
+            context_length: context,
+            capabilities,
+        });
+    }
+    out
+}
 ///
 /// 目录端点绝大多数只需要 provider 默认头 + 账号凭证，因此统一走
 /// `registry::SessionMeta.headers` 模板（`{credential}` 已替换）与
@@ -2073,6 +2154,7 @@ async fn fetch_remote(
         Some(CatalogParser::Trae) => parse_trae_catalog(&value),
         Some(CatalogParser::AntigravityModelsDict) => parse_antigravity_catalog(&value),
         Some(CatalogParser::Accio) => parse_accio_catalog(&value),
+        Some(CatalogParser::Cline) => parse_cline_catalog(&value),
         Some(CatalogParser::Raccoon) => parse_raccoon_catalog(&value),
         Some(CatalogParser::Kuku) => parse_kuku_catalog(&value),
         None if spec.sign == Some(CatalogSign::Cosy) => parse_qoder_chat(&value),
@@ -2894,6 +2976,76 @@ mod tests {
         let entries = parse_response(&v, false);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].id, "y");
+    }
+
+    /// Cline 旧缓存字段（参考树 `catalog_legacy.rs`）：`contextWindow` /
+    /// 裸 `reasoning` / `supportsToolCall` —— 由 **Cline 专用 parser** 识别。
+    #[test]
+    fn cline_legacy_fields_populate_context_and_reasoning() {
+        let payload = serde_json::json!({ "data": [
+            {
+                "id": "cline-pass/some-model",
+                "pool": "cline-pass",
+                "contextWindow": 262_144,
+                "reasoning": true,
+                "supportsToolCall": true
+            },
+            // 兼容更早字段名（不应误伤/误报）
+            {
+                "id": "cline-free/plain-model",
+                "maxInputTokens": 128_000,
+                "supportsReasoning": true
+            }
+        ]});
+        let entries = parse_cline_catalog(&payload);
+        assert_eq!(entries.len(), 2);
+
+        let first = entries
+            .iter()
+            .find(|entry| entry.id == "cline-pass/some-model")
+            .expect("应解析出 Cline 条目");
+        assert_eq!(first.context_length, Some(262_144));
+        assert!(first.capabilities.iter().any(|c| c == "reasoning"));
+        assert!(first.capabilities.iter().any(|c| c == "tool"));
+
+        let second = entries
+            .iter()
+            .find(|entry| entry.id == "cline-free/plain-model")
+            .expect("应解析出旧字段条目");
+        assert_eq!(second.context_length, Some(128_000));
+        assert!(second.capabilities.iter().any(|c| c == "reasoning"));
+    }
+
+    /// 边界：Cline 专用字段**不得**被通用 parser 采纳（证明改动只落在 Cline 分支）。
+    /// 注意 `supportsToolCall` 是通用 parser 既有的 key（原行为），这里只断言本轮
+    /// 新增的两个字段（`contextWindow` / 裸 `reasoning`）不被通用 parser 识别。
+    #[test]
+    fn generic_parser_does_not_consume_cline_specific_fields() {
+        let payload = serde_json::json!({ "models": [
+            {
+                "id": "generic-model",
+                "contextWindow": 262_144,
+                "reasoning": true,
+                "supportsToolCall": true
+            }
+        ]});
+        let entries = parse_response(&payload, false);
+        assert_eq!(entries.len(), 1);
+        // contextWindow 不被通用 pick_context_length 采纳（本轮已回退）
+        assert_eq!(entries[0].context_length, None);
+        // 裸 reasoning 不被通用 pick_capabilities 采纳（本轮已回退）
+        assert!(!entries[0].capabilities.iter().any(|c| c == "reasoning"));
+        // supportsToolCall 是既有通用行为，保持不变
+        assert!(entries[0].capabilities.iter().any(|c| c == "tool"));
+    }
+
+    /// Cline spec 用专用 parser（不是通用 parse_response）。
+    #[test]
+    fn cline_spec_uses_dedicated_parser() {
+        for provider in ["cline", "cline-free", "cline-pass"] {
+            let spec = spec_for(provider).expect("cline 系列应有目录 spec");
+            assert_eq!(spec.parser, Some(CatalogParser::Cline), "{provider}");
+        }
     }
 
     #[test]
