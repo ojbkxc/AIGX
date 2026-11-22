@@ -96,6 +96,7 @@ pub const CAPABILITIES: &[&str] = &[
     "desktop.credentials.v1",
     "http.doubao-turn.v1",
     "crypto.monkeycode-cap.v1",
+    "crypto.deepseek-pow.v1",
     "desktop.launch.v1",
     "resources.cookie-file.v1",
     "credential.kiro-external-refresh.v1",
@@ -135,6 +136,7 @@ pub const SERVED_CAPABILITIES: &[&str] = &[
     "verification.claim.v1",
     "http.managed-task.v1",
     "http.account-origin.v1",
+    "crypto.deepseek-pow.v1",
 ];
 
 /// 某项能力是否由宿主实际服务。
@@ -450,6 +452,23 @@ mod tests {
         write_plugin(tmp.path(), "x", minimal(&["teleport.v1"]));
         let err = read_manifest(tmp.path(), &pack("demo")).unwrap_err();
         assert!(err.contains("teleport.v1"), "{err}");
+    }
+
+    #[test]
+    fn deepseek_pow_capability_is_served_and_accepted() {
+        // 必须同时出现在白名单与真正服务清单里，否则插件 `requires` 会被拒。
+        assert!(
+            served("crypto.deepseek-pow.v1"),
+            "crypto.deepseek-pow.v1 必须由宿主实际服务"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path(), "x", minimal(&["crypto.deepseek-pow.v1"]));
+        assert!(
+            read_manifest(tmp.path(), &pack("deepseek-web"))
+                .unwrap()
+                .is_some(),
+            "deepseek-web 插件声明该能力应能通过清单校验"
+        );
     }
 
     #[test]

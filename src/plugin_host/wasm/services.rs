@@ -21,6 +21,16 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
 
+/// DeepSeek 网页验证计算只允许 `deepseek-web`（与上游 manifest 限制同口径）。
+fn deepseek_pow_provider_allowed(provider: &str) -> bool {
+    provider == "deepseek-web"
+}
+
+/// 深验证难度的硬上限（与上游 `MAX_DIFFICULTY` 一致，防 CPU 被拉爆）。
+fn deepseek_pow_difficulty_allowed(difficulty: i64) -> bool {
+    (1..=2_000_000).contains(&difficulty)
+}
+
 impl Context {
     pub(super) fn permission(&self, name: &str) -> Result<(), WireError> {
         if self.shared.manifest.allows(name) {
@@ -479,10 +489,163 @@ impl Context {
             | "managed_task.end"
             | "managed_task.abort" => self.managed_task(method, &params).await,
             "http.open_account" => self.open_account(&params).await,
+            // DeepSeek 网页版 DeepSeekHashV1 PoW 求解（复用原生
+            // `bridge::session::deepseek_pow`，仅把既有哈希/穷举暴露给插件宿主）。
+            "crypto.deepseek.pow.solve" => self.deepseek_pow_solve(&params).await,
             _ => Err(WireError::with_code(
                 "插件请求了未支持的主程序能力",
                 WireError::NO_METHOD,
             )),
         }
+    }
+
+    /// `crypto.deepseek.pow.solve`：把**已存在的**原生 DeepSeekHashV1 PoW
+    /// （`bridge::session::deepseek_pow`）暴露给插件宿主。
+    ///
+    /// 入参 `{challenge, path}`；出参 `{response: base64(JSON{...answer...})}`。
+    /// 仅 `deepseek-web` 可用；账户绑定存在时顺带校验归属（拿不到则放行）。
+    /// 不新增任何指纹/反检测逻辑 —— 只是把原生求解搬到受控阻塞线程池。
+    async fn deepseek_pow_solve(&self, params: &Value) -> Result<Value, WireError> {
+        self.permission("crypto.deepseek-pow.v1")?;
+        if !deepseek_pow_provider_allowed(&self.shared.manifest.provider) {
+            return Err(WireError::with_code(
+                "DeepSeek 网页验证计算能力不能跨提供商使用",
+                "forbidden",
+            ));
+        }
+        if !self.account.is_empty() {
+            // 防御性：账户存在时校验其确属当前插件 provider（deepseek-web）。
+            self.account()?;
+        }
+
+        let path = text(params, "path");
+        if !matches!(path, "/api/v0/chat/completion" | "/api/v0/file/upload_file") {
+            return Err(WireError::with_code(
+                "DeepSeek 验证目标路径无效",
+                "bad_params",
+            ));
+        }
+        let challenge_value = params
+            .get("challenge")
+            .filter(|value| value.is_object())
+            .ok_or_else(|| WireError::with_code("DeepSeek 验证参数无效", "bad_params"))?;
+        let challenge =
+            crate::bridge::session::deepseek_pow::PowChallenge::from_value(challenge_value)
+                .ok_or_else(|| {
+                    WireError::with_code("DeepSeek 没有返回有效的验证挑战", "bad_params")
+                })?;
+        if challenge.algorithm != "DeepSeekHashV1" {
+            return Err(WireError::with_code(
+                "DeepSeek 网页验证算法已变化，请更新插件",
+                "bad_params",
+            ));
+        }
+        if challenge.target_path != path {
+            return Err(WireError::with_code(
+                "DeepSeek 验证挑战不属于本次目标路径",
+                "bad_params",
+            ));
+        }
+        if !deepseek_pow_difficulty_allowed(challenge.difficulty) {
+            return Err(WireError::with_code(
+                "DeepSeek 验证难度过高或无效",
+                "bad_params",
+            ));
+        }
+
+        // 受控执行：阻塞穷举放到专用线程池，套 20s 上限（且不越过本次调用截止）。
+        let deadline = self
+            .call_deadline
+            .min(tokio::time::Instant::now() + std::time::Duration::from_secs(20));
+        let solver = challenge.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            crate::bridge::session::deepseek_pow::solve(&solver)
+        });
+        let answer = match tokio::time::timeout_at(deadline, joined).await {
+            Ok(Ok(Some(answer))) => answer,
+            Ok(Ok(None)) => {
+                return Err(WireError::with_code(
+                    "DeepSeek 网页验证没有找到有效答案，未提交对应请求",
+                    "deepseek_pow_unsolved",
+                ))
+            }
+            Ok(Err(_)) => {
+                return Err(WireError::with_code(
+                    "DeepSeek 网页验证计算任务已中断",
+                    "deepseek_pow_unavailable",
+                ))
+            }
+            Err(_) => {
+                return Err(WireError::with_code(
+                    "DeepSeek 网页验证计算超时，未提交对应请求",
+                    "deepseek_pow_timeout",
+                ))
+            }
+        };
+        let response = challenge.header_with_answer(answer).ok_or_else(|| {
+            WireError::with_code("DeepSeek 验证证明生成失败", "deepseek_pow_unavailable")
+        })?;
+        Ok(json!({ "response": response }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn deepseek_pow_only_deepseek_web() {
+        assert!(deepseek_pow_provider_allowed("deepseek-web"));
+        for provider in ["deepseek", "chatglm", "openai_compatible", ""] {
+            assert!(
+                !deepseek_pow_provider_allowed(provider),
+                "{provider} 不应被允许求解 DeepSeek PoW"
+            );
+        }
+    }
+
+    #[test]
+    fn deepseek_pow_difficulty_bounds() {
+        assert!(deepseek_pow_difficulty_allowed(1));
+        assert!(deepseek_pow_difficulty_allowed(144_000));
+        assert!(deepseek_pow_difficulty_allowed(2_000_000));
+        assert!(!deepseek_pow_difficulty_allowed(0));
+        assert!(!deepseek_pow_difficulty_allowed(2_000_001));
+    }
+
+    /// 复用的原生 PoW：解析 challenge → solve → header 证明，向量与
+    /// `bridge::session::deepseek_pow` 的单测一致。
+    #[test]
+    fn deepseek_pow_solve_roundtrip_matches_native_vector() {
+        use crate::bridge::session::deepseek_pow::{deepseek_hash_v1, PowChallenge};
+        let (salt, expire, answer) = ("testsalt", 1_700_000_000i64, 42i64);
+        let digest = hex::encode(deepseek_hash_v1(
+            format!("{salt}_{expire}_{answer}").as_bytes(),
+        ));
+        let challenge = PowChallenge::from_value(&serde_json::json!({
+            "algorithm": "DeepSeekHashV1",
+            "challenge": digest,
+            "salt": salt,
+            "expire_at": expire,
+            "difficulty": 1_000,
+            "signature": "sig",
+            "target_path": "/api/v0/chat/completion",
+        }))
+        .expect("challenge 应可解析");
+        assert_eq!(
+            crate::bridge::session::deepseek_pow::solve(&challenge),
+            Some(answer)
+        );
+        let header = challenge.header_with_answer(answer).expect("header");
+        let value: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(header)
+                .expect("base64"),
+        )
+        .expect("json");
+        assert_eq!(value["algorithm"], "DeepSeekHashV1");
+        assert_eq!(value["answer"], answer);
+        assert_eq!(value["target_path"], "/api/v0/chat/completion");
     }
 }
