@@ -513,9 +513,9 @@ impl ScriptHostManager {
         // 抹掉未启用的包——合并回完整清单再写。
         match fetch_package_list(&new_host).await {
             Some(list) => {
-                apply_package_list(&mut packages, &list);
+                apply_package_list(&mut packages, &list, new_host.providers());
                 let mut stored = storage::load_packages(&self.store);
-                apply_package_list(&mut stored, &list);
+                apply_package_list(&mut stored, &list, new_host.providers());
                 if let Err(e) = storage::replace_all(&self.store, &self.data_dir, &stored) {
                     tracing::warn!("[Script] 回填宿主包清单失败（路由不受影响）：{e:#}");
                 }
@@ -884,6 +884,41 @@ fn compute_routing(
         }
     }
 
+    // 1.5) 包记录里的别名（`script.packages` 回填）：声明 id → 实际 id。
+    //
+    // 宿主 `main.mjs` 的 init 应答是**裸 provider 数组**（不含 identities），
+    // 别名只在 `script.packages` 的 `aliases` 里。少了这一步，「声明 id 撞
+    // reserved、实际 id 不撞」的家永远不登记（生产实测：`astudio` 由原生
+    // 插件包占用 → 宿主装载为 `astudio-plugin`，路由表恒空）。
+    for pkg in packages {
+        for (declared, actual_value) in &pkg.provider_aliases {
+            let Some(actual) = actual_value.as_str() else {
+                continue;
+            };
+            if !loaded.contains(actual) || reserved.contains(actual) {
+                continue;
+            }
+            if pkg
+                .disabled_providers
+                .iter()
+                .any(|id| id == declared || id == actual)
+            {
+                continue;
+            }
+            // 声明 id 撞 reserved：它归原生实现/原生插件包，只登记实际 id。
+            if !reserved.contains(declared) {
+                owners
+                    .entry(declared.clone())
+                    .or_insert_with(|| pkg.id.clone());
+            }
+            owners
+                .entry(actual.to_string())
+                .or_insert_with(|| pkg.id.clone());
+            aliases.insert(declared.clone(), actual.to_string());
+            actuals.push(actual.to_string());
+        }
+    }
+
     // 2) 兜底：包清单声明的 provider（identities 缺失时按同名登记）
     for pkg in packages {
         for declared in &pkg.providers {
@@ -1107,10 +1142,23 @@ async fn fetch_package_list(host: &ScriptHost) -> Option<Vec<Value>> {
 
 /// 把 `script.packages` 清单回填到包记录。
 ///
-/// 只覆盖宿主自报的字段：`error` / `settings`（设置声明）/ `icon` /
-/// `providerIcons` / `aliases`。`providers` 保持网关侧声明（label/models
-/// 是徽标与模型页的数据源，宿主清单只回 id 列表）。
-fn apply_package_list(packages: &mut [ScriptPackage], list: &[Value]) {
+/// **provider 身份以宿主清单为权威**（A2A `prepare_inner` 同口径）：清单里的
+/// `providers` 是宿主**实际接管 id**——与保留集合冲突时会被加 `-plugin`
+/// 后缀（`identity.mjs::allocateProvider`）。此前这里只回填 error/settings/
+/// icon/aliases、不碰 `providers`，导致「声明 id 撞 reserved、实际 id 不撞」
+/// 的家（生产实测 `astudio` → `astudio-plugin`）永远不进路由表，
+/// `providerRouted` 恒 false。仅当宿主明确加载成功（`error` 为空）且报告了
+/// 非空 provider 列表时才覆盖；加载失败时保留网关侧声明，供管理面解释
+/// 「哪家没起来」。`host_providers` 用于补齐宿主上报的 label。
+fn apply_package_list(
+    packages: &mut [ScriptPackage],
+    list: &[Value],
+    host_providers: &[ScriptProviderInfo],
+) {
+    let host_by_id: HashMap<&str, ScriptProviderInfo> = host_providers
+        .iter()
+        .map(|provider| (provider.id.as_str(), provider.clone()))
+        .collect();
     for item in list {
         let Some(id) = item.get("id").and_then(Value::as_str) else {
             continue;
@@ -1144,6 +1192,72 @@ fn apply_package_list(packages: &mut [ScriptPackage], list: &[Value]) {
                 .filter(|(_, actual)| actual.is_string())
                 .map(|(declared, actual)| (declared.clone(), actual.clone()))
                 .collect();
+        }
+        // provider 身份回填（实际 id），必须在 aliases 之后——停用判定要按
+        // 「声明 id 或别名翻译后的实际 id」双向匹配。加载失败（error 非空）
+        // 时宿主没装载任何 provider，保留网关侧声明让管理面能解释「没起来」。
+        if package.error.is_some() {
+            continue;
+        }
+        let Some(reported) = item.get("providers").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut next: Vec<ScriptProviderInfo> = Vec::new();
+        for actual in reported.iter().filter_map(Value::as_str) {
+            let disabled = package.disabled_providers.iter().any(|declared| {
+                declared == actual
+                    || package
+                        .provider_aliases
+                        .get(declared)
+                        .and_then(Value::as_str)
+                        == Some(actual)
+            });
+            if disabled {
+                continue;
+            }
+            let info = package
+                .providers
+                .iter()
+                .find(|provider| provider.id == actual)
+                .cloned()
+                .or_else(|| {
+                    // 改名场景（声明 id → 实际 id）：保留声明侧的
+                    // label/models，只把 id 换成宿主实际接管的 id。
+                    package
+                        .provider_aliases
+                        .iter()
+                        .find(|(_, mapped)| mapped.as_str() == Some(actual))
+                        .and_then(|(declared, _)| {
+                            package
+                                .providers
+                                .iter()
+                                .find(|provider| &provider.id == declared)
+                        })
+                        .map(|provider| {
+                            let mut info = provider.clone();
+                            info.id = actual.to_string();
+                            info
+                        })
+                })
+                .or_else(|| host_by_id.get(actual).cloned())
+                .unwrap_or_else(|| ScriptProviderInfo {
+                    id: actual.to_string(),
+                    ..Default::default()
+                });
+            next.push(info);
+        }
+        // 声明过但本轮未装载的家：停用的保留（否则 UI 无法再启用）；
+        // 未停用的说明实际不存在（扫描误报 / 让位），丢弃。
+        for declared in &package.providers {
+            if next.iter().any(|provider| provider.id == declared.id) {
+                continue;
+            }
+            if package.disabled_providers.contains(&declared.id) {
+                next.push(declared.clone());
+            }
+        }
+        if !next.is_empty() {
+            package.providers = next;
         }
     }
 }
@@ -1321,6 +1435,37 @@ mod tests {
     }
 
     #[test]
+    fn routing_registers_renamed_actual_id_from_package_alias() {
+        // 生产实测形态：声明 `astudio` 撞保留集合（原生插件包占用），宿主
+        // 装载为 `astudio-plugin` 并在 `script.packages.aliases` 回映射；
+        // init 应答是裸数组、没有 identities（见 host/main.mjs）。
+        // 只登记实际 id（声明 id 归原生包），路由表必须非空。
+        let mut package = pkg("@magpie-community/opencode-astudio-auth", &["astudio"]);
+        package.provider_aliases = [("astudio".to_string(), json!("astudio-plugin"))]
+            .into_iter()
+            .collect();
+        let packages = vec![package];
+        let providers = vec![provider("astudio-plugin")];
+        let mut reserved: BTreeSet<String> = BTreeSet::new();
+        reserved.insert("astudio".into());
+        let (owners, aliases, actuals) =
+            compute_routing(&packages, &providers, &serde_json::Map::new(), &reserved);
+        assert_eq!(
+            owners.get("astudio-plugin"),
+            Some(&"@magpie-community/opencode-astudio-auth".to_string())
+        );
+        assert!(
+            !owners.contains_key("astudio"),
+            "声明 id 撞保留集合时归原生实现，不得登记"
+        );
+        assert_eq!(
+            aliases.get("astudio").map(String::as_str),
+            Some("astudio-plugin")
+        );
+        assert_eq!(actuals, vec!["astudio-plugin".to_string()]);
+    }
+
+    #[test]
     fn routing_falls_back_to_package_declaration() {
         // 老宿主不报 identities：包声明与实际 id 同名时仍要能路由。
         let packages = vec![pkg("@a/kiro", &["kiro"])];
@@ -1482,7 +1627,7 @@ mod tests {
             json!({ "id": "not-installed", "settings": {} }),
             json!("garbage"),
         ];
-        apply_package_list(&mut packages, &list);
+        apply_package_list(&mut packages, &list, &[]);
         let package = &packages[0];
         assert_eq!(package.error.as_deref(), Some("load failed"));
         assert_eq!(package.icon.as_deref(), Some("data:image/png;base64,zz"));
@@ -1499,8 +1644,63 @@ mod tests {
             package.settings_schema["providerOptions"]["kiro-2"][0]["key"],
             "fast"
         );
-        // providers 保持网关侧声明（label/models 是徽标与模型页数据源）
+        // 加载失败：宿主没装载任何 provider，保留网关侧声明，
+        // 让管理面能显示「这家没起来」。
         assert_eq!(package.providers[0].id, "kiro");
+    }
+
+    /// 加载成功时 `providers` 以宿主实际 id 为权威（声明 id 撞 reserved 被
+    /// 改名 `-plugin` 的场景）：`astudio` → `astudio-plugin` 必须替换进包
+    /// 记录，否则路由表/`providerRouted` 永远为空。
+    #[test]
+    fn apply_package_list_adopts_host_actual_provider_ids() {
+        let mut package = pkg("@a/astudio-auth", &["astudio"]);
+        // 声明 id 带 label，宿主上报实际 id 时应保留 label
+        package.providers[0].label = "AStudio".into();
+        let mut packages = vec![package];
+        let host = vec![provider("astudio-plugin")];
+        let list = vec![json!({
+            "id": "@a/astudio-auth",
+            "providers": ["astudio-plugin"],
+            "aliases": { "astudio": "astudio-plugin" },
+        })];
+        apply_package_list(&mut packages, &list, &host);
+        let package = &packages[0];
+        assert_eq!(package.providers.len(), 1);
+        assert_eq!(package.providers[0].id, "astudio-plugin");
+        // 改名场景保留声明侧 label（宿主上报的裸 id 只是兜底）
+        assert_eq!(package.providers[0].label, "AStudio");
+        assert_eq!(
+            package
+                .provider_aliases
+                .get("astudio")
+                .and_then(Value::as_str),
+            Some("astudio-plugin")
+        );
+    }
+
+    /// 包内停用（`disabled_providers`）不因宿主清单回填而丢：停用的声明 id
+    /// 保留在列表里（UI 还能再启用），实际 id 也被过滤掉。
+    #[test]
+    fn apply_package_list_keeps_disabled_providers() {
+        let mut package = pkg("@a/astudio-auth", &["astudio", "other"]);
+        package.disabled_providers = vec!["astudio".into()];
+        let mut packages = vec![package];
+        let host = vec![provider("astudio-plugin"), provider("other")];
+        let list = vec![json!({
+            "id": "@a/astudio-auth",
+            "providers": ["astudio-plugin", "other"],
+            "aliases": { "astudio": "astudio-plugin" },
+        })];
+        apply_package_list(&mut packages, &list, &host);
+        let ids: Vec<&str> = packages[0]
+            .providers
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        assert!(!ids.contains(&"astudio-plugin"), "停用家的实际 id 不得回填");
+        assert!(ids.contains(&"astudio"), "停用声明要保留以便再启用");
+        assert!(ids.contains(&"other"), "未停用的家正常回填");
     }
 
     #[test]
@@ -1509,7 +1709,7 @@ mod tests {
         package.settings_schema = json!({ "version": 1 });
         package.icon = Some("https://example.invalid/old.png".into());
         let mut packages = vec![package];
-        apply_package_list(&mut packages, &[json!({ "id": "@a/kiro" })]);
+        apply_package_list(&mut packages, &[json!({ "id": "@a/kiro" })], &[]);
         assert_eq!(packages[0].settings_schema, json!({ "version": 1 }));
         assert_eq!(
             packages[0].icon.as_deref(),
@@ -1517,7 +1717,11 @@ mod tests {
         );
         assert!(packages[0].error.is_none());
         // 显式 null 图标 = 宿主撤下图标（清空）
-        apply_package_list(&mut packages, &[json!({ "id": "@a/kiro", "icon": null })]);
+        apply_package_list(
+            &mut packages,
+            &[json!({ "id": "@a/kiro", "icon": null })],
+            &[],
+        );
         assert!(packages[0].icon.is_none());
     }
 
@@ -1624,6 +1828,11 @@ mod tests {
         // Catalog::spawn 会启动后台网络刷新（首刷立即打网络）。测试不需要
         // 目录——首刷失败只落错误状态，不 panic；但为免并行测试互相拖慢，
         // 用一次性 tempdir 作 script_root 即可（每次独立目录）。
+        //
+        // `Catalog::spawn` 内部自建 reqwest 客户端（reqwest 0.13 是
+        // `rustls-no-provider`），单跑本模块测试时若没有别的测试先装过
+        // provider，构建客户端会 panic——显式安装（Once，幂等）。
+        crate::install_rustls_provider_for_tests();
         let catalog = Catalog::spawn(&script_plugins_root(data_dir));
         // 账号池 / 原生包注册表只要求「存在且不抛错」，用 data_dir 下的独立
         // 子目录（不能共享进程级临时目录——并行测试会互相污染 SQLite）。

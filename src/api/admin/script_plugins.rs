@@ -306,6 +306,9 @@ fn package_view(p: &ScriptPackage, routed_providers: &HashSet<String>) -> Value 
         "installedAt": p.installed_at,
         "enabled": p.enabled,
         "trusted": p.trusted,
+        // 宿主上报的加载错误（`script.packages.error` 回填）：插件「装了但
+        // 起不来」的唯一可读诊断，运维面必须能看到，否则只剩一句未接管。
+        "error": p.error,
         "options": { "values": p.options.values },
         // 宿主 `script.packages` 回填的包级设置声明（`settings` 原样），
         // 管理面「提供商设置 / 包配置」表单据此渲染。

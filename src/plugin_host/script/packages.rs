@@ -252,6 +252,13 @@ pub fn unpack_tarball(bytes: &[u8], package_name: &str, packages_root: &Path) ->
         if kind.is_symlink() || kind.is_hard_link() {
             bail!("包内含链接条目，拒绝（防解包越界）");
         }
+        // PAX 全局扩展头不是包内容。`tar` 0.4 会吞掉 GNU longname/longlink
+        // 与 pax **local**（`x`），但**不吞 pax global**（`g`）：GitHub
+        // codeload 的 tarball（`git archive` 产物）顶部固定带一条
+        // `pax_global_header`，不跳过会让所有 `github:` 安装报「多个根目录」。
+        if kind.is_pax_global_extensions() || kind.is_gnu_longname() || kind.is_gnu_longlink() {
+            continue;
+        }
         let path = entry.path().context("读取条目路径失败")?.into_owned();
         // 拒绝绝对路径与任何 `..` 分量：无论如何都不该出现在 npm 包里。
         if path.is_absolute()
@@ -491,6 +498,67 @@ pub(crate) mod tests {
 
     fn manifest(name: &str, version: &str, entry: &str) -> Vec<u8> {
         format!(r#"{{"name":"{name}","version":"{version}","main":"{entry}"}}"#).into_bytes()
+    }
+
+    /// 构造 GitHub codeload 形态的 tarball：顶部一条 `pax_global_header`
+    /// （`git archive` 的产物），内容全部在单一路由 `{root}/…` 下。
+    fn make_github_tarball(root: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            // PAX 全局扩展头：类型 `g`，路径约定 `pax_global_header`。
+            let payload = b"29 mtime=0\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "pax_global_header", &payload[..])
+                .unwrap();
+            for (name, content) in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, format!("{root}/{name}"), *content)
+                    .unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        std::io::Write::write_all(&mut gz, &tar_bytes).unwrap();
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn unpacks_github_codeload_tarball_with_pax_global_header() {
+        // 生产实测：GitHub codeload tarball 顶部带 `pax_global_header`，
+        // 旧解包器把它当第二个根目录 → 所有 github: 安装失败。
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("packages");
+        let tar = make_github_tarball(
+            "magpie-doubao-work-auth-9e853a1",
+            &[
+                (
+                    "package.json",
+                    &manifest("github-pkg", "1.0.0", "index.mjs"),
+                ),
+                ("index.mjs", b"export default () => ({})"),
+            ],
+        );
+        let m = unpack_tarball(&tar, "github-pkg", &root).unwrap();
+        assert_eq!(m.name, "github-pkg");
+        assert_eq!(m.version, "1.0.0");
+        assert_eq!(m.entry, "index.mjs");
+        let dest = root.join(dir_name_for("github-pkg")).join("1.0.0");
+        assert!(dest.join("index.mjs").is_file());
+        assert!(dest.join("package.json").is_file());
+        // pax 头本身不得落盘
+        assert!(!dest.join("pax_global_header").exists());
     }
 
     #[test]

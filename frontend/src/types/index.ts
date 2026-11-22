@@ -2556,6 +2556,12 @@ export interface ScriptPackageView {
   icon?: string | null;
   /** 宿主回填的包级设置声明（providerOptions 开关表单数据源） */
   settingsSchema?: ScriptSettingsSchema | null;
+  /**
+   * 宿主回填的加载错误（`script.packages.error`）：非空表示脚本包已安装但宿主未能
+   * 装载/接管（如入口缺失、运行时异常）；`null`/缺省 = 加载成功。用于向运维解释
+   * 「装了但未接管」的原因。
+   */
+  error?: string | null;
 }
 
 /** 脚本包的单个 provider 选项声明（`settingsSchema.providerOptions` 项） */

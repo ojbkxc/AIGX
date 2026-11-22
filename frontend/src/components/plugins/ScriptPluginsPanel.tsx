@@ -192,6 +192,13 @@ function InstalledScriptCard({
       <p className="pl-card-meta">
         {pkg.summary ? pkg.summary : null}
       </p>
+      {/* 宿主回填的加载错误：解释「已安装但未接管」的原因（完整文本进 title） */}
+      {pkg.error ? (
+        <p className="pl-card-meta" style={{ color: 'var(--danger-color)' }} title={pkg.error}>
+          <Badge tone="warning">{t('加载失败')}</Badge>
+          <span style={{ marginLeft: 6 }}>{pkg.error}</span>
+        </p>
+      ) : null}
       <p className="pl-card-meta">
         <span>{t('{{count}} 家提供商', { count: pkg.providers.length })}</span>
         <span>{t('安装于 {{time}}', { time: fmtUnix(pkg.installedAt) })}</span>
