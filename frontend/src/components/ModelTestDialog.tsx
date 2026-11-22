@@ -75,6 +75,12 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [reasoning, setReasoning] = useState('');
   const [stream, setStream] = useState(true);
+  /** 对话协议（#60 / #54）：chat_completions 默认 / responses / anthropic */
+  const [protocol, setProtocol] = useState<'chat_completions' | 'responses' | 'anthropic'>('chat_completions');
+  /** 测试出口模式：#54 后端 proxy：'' = 跟随账号（不传）/ direct / pool / custom 节点或 URL */
+  const [proxyMode, setProxyMode] = useState<'' | 'direct' | 'pool' | 'custom'>('');
+  /** custom 模式下用户输入的节点/URL（node:<id> / pool:<id> / http://…） */
+  const [proxyCustom, setProxyCustom] = useState('');
   /** 勾选的来源 key 集合（默认勾第一个账号来源，没有账号则第一个来源） */
   const [picked, setPicked] = useState<Set<string>>(() => {
     const sources = model.sources ?? [];
@@ -116,6 +122,15 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
     if (running) return;
     const chosen = usable.filter((s) => picked.has(sourceKey(s)));
     if (chosen.length === 0) return;
+    // 测试出口（#60）：'' = 跟随账号（不传）/ direct / pool / custom 节点或 URL
+    const proxySpec =
+      proxyMode === 'direct'
+        ? 'direct'
+        : proxyMode === 'pool'
+          ? 'pool'
+          : proxyMode === 'custom'
+            ? proxyCustom.trim()
+            : '';
     const seq = ++runSeq.current;
     const ac = new AbortController();
     abortRef.current = ac;
@@ -150,6 +165,9 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
               system_prompt: systemPrompt.trim() || undefined,
               reasoning_effort: reasoning || undefined,
               stream,
+              // #60：对话协议 + 测试出口（#54 后端 /api/models/test 已支持）
+              protocol,
+              proxy: proxySpec || undefined,
             },
             ac.signal,
           );
@@ -267,6 +285,52 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
             </div>
           </div>
 
+          {/* #60：对话协议 + 测试出口（#54 后端 /api/models/test 已支持） */}
+          <div className="mt-grid">
+            <div className="form-group">
+              <label>{t('对话协议')}</label>
+              <select
+                className="form-input"
+                value={protocol}
+                onChange={(e) => setProtocol(e.target.value as typeof protocol)}
+                disabled={running}
+              >
+                <option value="chat_completions">{t('chat_completions（原生链路，默认）')}</option>
+                <option value="responses">{t('responses（OpenAI Responses 透传）')}</option>
+                <option value="anthropic">{t('anthropic（Anthropic 线格式）')}</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label>{t('测试出口')}</label>
+              <select
+                className="form-input"
+                value={proxyMode}
+                onChange={(e) => setProxyMode(e.target.value as typeof proxyMode)}
+                disabled={running}
+              >
+                <option value="">{t('跟随账号（不指定）')}</option>
+                <option value="direct">{t('直连')}</option>
+                <option value="pool">{t('代理池轮询')}</option>
+                <option value="custom">{t('指定节点 / URL')}</option>
+              </select>
+            </div>
+          </div>
+          {proxyMode === 'custom' && (
+            <div className="form-group">
+              <label>{t('节点 / 代理地址')}</label>
+              <input
+                className="form-input"
+                value={proxyCustom}
+                onChange={(e) => setProxyCustom(e.target.value)}
+                disabled={running}
+                placeholder="node:<id> / pool:<id> / http://host:port"
+              />
+              <span className="form-hint">
+                {t('节点用 node:<id>，代理池条目用 pool:<id>，或直接填代理 URL；留空 = 跟随账号')}
+              </span>
+            </div>
+          )}
+
           <div className="form-group">
             <label>
               {t('测试来源')}
@@ -380,6 +444,10 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
                         <div className="mt-slot-meta">
                           {slot.result.upstream_model && slot.result.upstream_model !== model.id && (
                             <span>{t('上游模型')}：{slot.result.upstream_model}</span>
+                          )}
+                          {/* #60：非默认协议时回显本次实际协议 */}
+                          {slot.result.protocol && slot.result.protocol !== 'chat_completions' && (
+                            <span>{t('协议')}：{slot.result.protocol}</span>
                           )}
                           <span>
                             tokens: {slot.result.prompt_tokens ?? 0} + {slot.result.completion_tokens ?? 0} ={' '}

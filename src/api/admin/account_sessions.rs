@@ -2350,19 +2350,32 @@ pub struct ProbeOutcome {
 
 /// 探活使用的模型：账号白名单 → 渠道 models / 发现快照，最后统一走渠道映射
 ///（与数据面「上游真名」口径一致：映射对它自己产出的名字是恒等变换，安全）。
-fn resolve_probe_model(state: &AppState, session: &AccountSession) -> Option<String> {
+fn resolve_probe_model(state: &AppState, session: &AccountSession) -> Option<(String, String)> {
     let channel = state.channel_store.get(&session.channel_id);
     let raw = match session.models.first() {
         Some(model) => model.clone(),
         None => channel.as_ref()?.effective_models().first()?.clone(),
     };
-    let mapped = channel.and_then(|ch| ch.resolve_channel_mapping(&raw));
-    Some(mapped.unwrap_or(raw))
+    // 与数据面**同口径**解析上游真名：渠道映射 → 全局映射 → 清单实际写法
+    // （数据面见 `api/openai/chat.rs` 对 `resolve_upstream_model` 的调用）。
+    // 早先探活只过 `channel.resolve_channel_mapping`，与真实流量不一致 ——
+    // 会造成「数据面能通、探活却报错」的误判。
+    let upstream =
+        crate::api::openai::resolve_upstream_model(&raw, channel.as_ref(), &state.model_mapper);
+    // 再叠账号级「可见名 → 上游真名」别名（目录明确声明上游真名时才有；
+    // 如 AutoClaw `glm-5.3 → zaicoding_glm-5.3`）。无别名 = 原样透传。
+    // 返回 (冷却/统计口径的模型名 = 别名前的上游名, 实际发上游的名字)：
+    // 数据面按别名前的名字记成功/冷却，探活保持一致。
+    let send = session
+        .upstream_alias(&upstream)
+        .map(str::to_string)
+        .unwrap_or_else(|| upstream.clone());
+    Some((upstream, send))
 }
 
 /// 走真实推理链路探活（复用账号的出口 Client 与原生 Bridge）。
 pub async fn probe_session(state: &AppState, session: &AccountSession) -> ProbeOutcome {
-    let Some(model) = resolve_probe_model(state, session) else {
+    let Some((model_key, model)) = resolve_probe_model(state, session) else {
         return ProbeOutcome {
             ok: false,
             latency_ms: 0,
@@ -2415,9 +2428,10 @@ pub async fn probe_session(state: &AppState, session: &AccountSession) -> ProbeO
         Ok(Ok(response)) => {
             let latency_ms = started.elapsed().as_millis() as u64;
             // 探活成功 = 人工确认已恢复：清该模型冷却并记一次成功（不改状态）
+            // 记在**别名前的上游名**上，与数据面的冷却/统计键一致。
             state
                 .account_sessions
-                .record_success(&session.id, &model, latency_ms);
+                .record_success(&session.id, &model_key, latency_ms);
             ProbeOutcome {
                 ok: true,
                 latency_ms,
@@ -2441,6 +2455,67 @@ pub async fn probe_session(state: &AppState, session: &AccountSession) -> ProbeO
 }
 
 /// POST /api/account-sessions/:id/test
+/// 把目录里的「可见名 → 上游真名」别名写进账号的 `model_aliases`。
+///
+/// `apply_catalog_to_session` 只写模型白名单（可见 id），`CatalogEntry.upstream`
+/// 在应用阶段被丢弃；本函数把它补种，供数据面/探活在出站前把 `model` 换成
+/// 上游清单实际写法（如 AutoClaw `glm-5.3 → zaicoding_glm-5.3`）。
+///
+/// 约束（与 #57/#58 一致）：**仅当目录明确声明上游真名且与可见名不同**才落
+/// 别名；无 upstream 的维持现状（原样透传）。只在 `apply=true` 且账号启用时
+/// 调用，写入失败静默（目录是可重建的展示/路由派生数据，不阻断同步结果）。
+fn seed_catalog_model_aliases(
+    sessions: &crate::account_session::store::AccountSessionStore,
+    session_id: &str,
+    entries: &[(String, Option<String>)],
+    replace: bool,
+) {
+    let Some(session) = sessions.get(session_id) else {
+        return;
+    };
+    if session.runtime_status(chrono::Utc::now().timestamp()) != "enabled" {
+        return;
+    }
+    let aliases = merge_catalog_aliases(&session.model_aliases, &session.models, entries, replace);
+    if aliases == session.model_aliases {
+        return;
+    }
+    let mut updated = session;
+    updated.model_aliases = aliases;
+    let _ = sessions.upsert(updated);
+}
+
+/// 目录别名合并的纯函数：只给「已在白名单里」的模型落「可见名→上游真名」
+/// 别名；无 upstream 或与可见名相同的维持原样。`replace` 重建，否则合并。
+fn merge_catalog_aliases(
+    current: &std::collections::HashMap<String, String>,
+    models: &[String],
+    entries: &[(String, Option<String>)],
+    replace: bool,
+) -> std::collections::HashMap<String, String> {
+    let mut aliases = if replace {
+        std::collections::HashMap::new()
+    } else {
+        current.clone()
+    };
+    for (id, upstream) in entries {
+        let id = id.trim();
+        if id.is_empty() || !models.iter().any(|m| m == id) {
+            continue;
+        }
+        let Some(upstream) = upstream else {
+            continue;
+        };
+        let upstream = upstream.trim();
+        if upstream.is_empty() || upstream == id {
+            continue;
+        }
+        aliases.insert(id.to_string(), upstream.to_string());
+    }
+    aliases.retain(|visible, _| models.iter().any(|m| m == visible));
+    aliases
+}
+
 pub async fn handle_test_account_session(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3221,6 +3296,19 @@ pub async fn handle_sync_account_catalog(
                             Ok(()) => applied = true,
                             Err(e) => apply_error = Some(e),
                         }
+                        // 补种「可见名 → 上游真名」别名（目录明确声明 upstream 时）。
+                        let entries: Vec<(String, Option<String>)> = saved
+                            .models
+                            .iter()
+                            .filter_map(|model| {
+                                let id = model["id"].as_str()?.trim().to_string();
+                                if id.is_empty() {
+                                    return None;
+                                }
+                                Some((id, model["upstream"].as_str().map(str::to_string)))
+                            })
+                            .collect();
+                        seed_catalog_model_aliases(&sessions, &session.id, &entries, body.replace);
                     }
                     // 成功落盘 = 插件确认过的远程目录（`save_refresh` 已验
                     // `meta.remote = true`）；空目录不清映射（与既有闸门同口径）。
@@ -3314,6 +3402,13 @@ pub async fn handle_sync_account_catalog(
                         Ok(()) => applied = true,
                         Err(e) => apply_error = Some(e),
                     }
+                    // 补种「可见名 → 上游真名」别名（目录明确声明 upstream 时）。
+                    let entries: Vec<(String, Option<String>)> = snapshot
+                        .models
+                        .iter()
+                        .map(|m| (m.id.clone(), m.upstream.clone()))
+                        .collect();
+                    seed_catalog_model_aliases(&sessions, &session.id, &entries, body.replace);
                 }
                 // 只有「成功回源且目录非空」才计入清理触发条件并收集条目：
                 // cache/fallback 意味着本轮没有真实的新鲜数据，不清
@@ -5226,6 +5321,41 @@ mod security_tests {
             result.is_ok(),
             "temp-dir file should be allowed: {result:?}"
         );
+    }
+
+    #[test]
+    fn catalog_aliases_seed_only_explicit_upstreams() {
+        use std::collections::HashMap;
+        let models = vec!["glm-5.3".to_string(), "plain".to_string()];
+        let entries = vec![
+            ("glm-5.3".to_string(), Some("zaicoding_glm-5.3".to_string())),
+            ("plain".to_string(), None),
+        ];
+        let aliases = merge_catalog_aliases(&HashMap::new(), &models, &entries, true);
+        assert_eq!(
+            aliases.get("glm-5.3").map(String::as_str),
+            Some("zaicoding_glm-5.3")
+        );
+        assert!(
+            !aliases.contains_key("plain"),
+            "无 upstream 不落别名: {aliases:?}"
+        );
+    }
+
+    #[test]
+    fn catalog_aliases_skip_identity_and_prune_stale() {
+        use std::collections::HashMap;
+        let models = vec!["same".to_string()];
+        let entries = vec![("same".to_string(), Some("same".to_string()))];
+        let aliases = merge_catalog_aliases(&HashMap::new(), &models, &entries, true);
+        assert!(aliases.is_empty(), "同名不应落别名: {aliases:?}");
+        // 陈旧别名（模型已不在白名单）被裁掉；append 只合并不重建。
+        let mut current = HashMap::new();
+        current.insert("gone".to_string(), "up-gone".to_string());
+        current.insert("same".to_string(), "old".to_string());
+        let merged = merge_catalog_aliases(&current, &models, &[], false);
+        assert!(!merged.contains_key("gone"), "陈旧别名应裁掉: {merged:?}");
+        assert_eq!(merged.get("same").map(String::as_str), Some("old"));
     }
 }
 

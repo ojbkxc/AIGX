@@ -507,6 +507,14 @@ pub struct AccountSession {
     /// 账号级模型白名单（空 = 不限，跟随渠道）。
     #[serde(default)]
     pub models: Vec<String>,
+    /// 可见模型名 → 上游真名别名（**仅当目录明确声明上游真名且与可见名不同**）。
+    ///
+    /// 由目录应用（`catalog::apply_catalog_to_session`）写入，数据面按账号逐次
+    /// 命中后把出站 `model` 换成上游真名（见 `bridge::account::AccountBridge`）。
+    /// 空 = 全部原样透传（与改造前一致，存量零迁移）。键是客户端可见名，
+    /// 值是上游清单实际写法；两者相同则不落表。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_aliases: HashMap<String, String>,
     /// 账号级额外请求头（登录态型供应商用：逐家补齐专用头，如 `x-token` / `origin`）。
     ///
     /// 与 provider 目录里的默认头合并，同名时以账号级为准；
@@ -704,6 +712,7 @@ impl AccountSession {
             sort_order: 0,
             max_concurrency: default_max_concurrency(),
             models: Vec::new(),
+            model_aliases: HashMap::new(),
             extra_headers: HashMap::new(),
             limiters: Vec::new(),
             limiter_groups: Vec::new(),
@@ -878,6 +887,25 @@ impl AccountSession {
             return true;
         }
         alias.is_some_and(|other| self.models.iter().any(|m| m.eq_ignore_ascii_case(other)))
+    }
+
+    /// 该可见模型对应的**上游真名别名**（目录明确声明时才返回）。
+    ///
+    /// 数据面/探活在把请求发上游前用它把 `model` 换成上游清单的实际写法
+    /// （如 AutoClaw 的 `glm-5.3 → zaicoding_glm-5.3`）。先精确命中，再按
+    /// 大小写不敏感命中（与 [`Self::supports_model`] 同口径）；无别名 → None
+    /// = 原样透传，行为与改造前一致。
+    pub fn upstream_alias(&self, model: &str) -> Option<&str> {
+        if self.model_aliases.is_empty() {
+            return None;
+        }
+        if let Some(alias) = self.model_aliases.get(model) {
+            return Some(alias.as_str());
+        }
+        self.model_aliases
+            .iter()
+            .find(|(visible, _)| visible.eq_ignore_ascii_case(model))
+            .map(|(_, alias)| alias.as_str())
     }
 
     /// 该上游模型的冷却到期时间（unix 秒）。
@@ -1122,6 +1150,23 @@ mod tests {
         assert_eq!(session.runtime_status(100), "expired");
         session.expires_at = None;
         assert_eq!(session.runtime_status(100), "enabled");
+    }
+
+    #[test]
+    fn upstream_alias_maps_only_declared_names() {
+        // 目录声明的上游真名 → 出站前替换；无别名 = 原样（None）。
+        let mut session = AccountSession::new("ch-1", "autoclaw-1");
+        session
+            .model_aliases
+            .insert("glm-5.3".to_string(), "zaicoding_glm-5.3".to_string());
+        assert_eq!(session.upstream_alias("glm-5.3"), Some("zaicoding_glm-5.3"));
+        // 大小写不敏感命中（与 supports_model 同口径）
+        assert_eq!(session.upstream_alias("GLM-5.3"), Some("zaicoding_glm-5.3"));
+        // 未声明 → None（原样透传）
+        assert_eq!(session.upstream_alias("hy3"), None);
+        // 空表零成本返回 None
+        let plain = AccountSession::new("ch-1", "x");
+        assert_eq!(plain.upstream_alias("glm-5.3"), None);
     }
 
     // ── #35 C1：不可续期家的「需人工重登」判定 ──────────────────────────

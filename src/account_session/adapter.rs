@@ -32,6 +32,28 @@ pub fn effective_base_url(session: &AccountSession) -> Result<String, BridgeErro
     Ok(spec.default_base_url.to_string())
 }
 
+/// OfficeAce 的 Basic 鉴权：`Basic base64(modelAppKey:modelAppSecret)`。
+///
+/// 注册表里的 `authorization: Basic {credential}` 只能填主密钥
+/// （导入后是 `modelAppKey`），**缺 `modelAppSecret` 一半** → 上游 400。
+/// 聊天与模型目录都要按上游契约重拼（目录侧 `catalog.rs` 复用本函数）。
+/// 任一半缺失返回 `None`（不伪造空 secret 的 Basic）。
+pub(crate) fn officeace_basic_authorization(session: &AccountSession) -> Option<String> {
+    use base64::Engine;
+    let key = session.credential.secret_plain();
+    let secret = session.credential.field_plain("modelAppSecret");
+    let key = key.trim();
+    let secret = secret.trim();
+    if key.is_empty() || secret.is_empty() {
+        return None;
+    }
+    let raw = format!("{key}:{secret}");
+    Some(format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+    ))
+}
+
 /// 合并请求头：provider 默认头 + Cline 伪装头覆盖表 + 账号级额外头
 /// （同名以账号级为准；覆盖表只对 `cline*` 渠道生效，空串 = 不发这个头）。
 fn session_headers(
@@ -49,6 +71,14 @@ fn session_headers(
         let lower = name.to_ascii_lowercase();
         merged.retain(|(existing, _)| existing.to_ascii_lowercase() != lower);
         merged.push((name.clone(), value.clone()));
+    }
+    // OfficeAce：Authorization 必须是 `Basic base64(modelAppKey:modelAppSecret)`；
+    // 注册表模板 `Basic {credential}` 只含 modelAppKey 一半 → 上游 400。
+    if session.provider == "officeace" {
+        if let Some(basic) = officeace_basic_authorization(session) {
+            merged.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+            merged.push(("Authorization".to_string(), basic));
+        }
     }
     merged
 }
@@ -259,5 +289,32 @@ mod tests {
 
         // 恢复空表，避免影响其它用例
         crate::config::set_cline_header_overrides(Vec::new());
+    }
+
+    #[test]
+    fn officeace_chat_authorization_is_basic_key_secret() {
+        // chat 与目录同源：`Authorization: Basic base64(modelAppKey:modelAppSecret)`，
+        // 不是 registry 模板里只含 secret 一半的 `Basic {credential}`（那会 400）。
+        use base64::Engine;
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "officeace".to_string();
+        session.credential.secret = "APPKEY".to_string();
+        session.credential.set_field("modelAppSecret", "APPSECRET");
+        let meta = registry::session_meta("officeace").unwrap();
+        let headers = session_headers(&session, meta);
+        let auth: Vec<&String> = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(auth.len(), 1, "只保留一条 Authorization");
+        let want = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(b"APPKEY:APPSECRET")
+        );
+        assert_eq!(auth[0], &want);
+        // 缺 modelAppSecret 时不伪造（保留模板，让上游如实报错）
+        session.credential.set_field("modelAppSecret", "");
+        assert!(officeace_basic_authorization(&session).is_none());
     }
 }

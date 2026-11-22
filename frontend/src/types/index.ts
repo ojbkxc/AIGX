@@ -836,6 +836,18 @@ export interface ModelTestPayload {
   system_prompt?: string;
   reasoning_effort?: string;
   stream?: boolean;
+  /**
+   * 对话协议（#60 / #54 后端）：chat_completions（默认，原生链路）/ responses（OpenAI
+   * Responses 透传）/ anthropic（按 Anthropic 线格式构造）。缺省 = chat_completions。
+   */
+  protocol?: 'chat_completions' | 'responses' | 'anthropic';
+  /**
+   * 测试出口（#60 / #54 后端）：direct / pool / pool:<id> / node:<id> / 代理 URL；
+   * 缺省 = 跟随账号自身代理 / 渠道默认直连（不传）。
+   */
+  proxy?: string;
+  /** `proxy` 的别名（A2A 叫「测试节点」）；与 proxy 同时给出时 proxy 优先。 */
+  node?: string;
 }
 
 /** 实际承载本次测试的来源 */
@@ -861,6 +873,8 @@ export interface ModelTestResult {
   completion_tokens?: number;
   total_tokens?: number;
   stream?: boolean;
+  /** 本次实际使用的对话协议（后端回显 chat_completions / responses / anthropic） */
+  protocol?: string;
   source?: ModelTestSource;
 }
 

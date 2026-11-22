@@ -520,9 +520,23 @@ impl Bridge for AccountBridge {
                 }
             };
             let started = Instant::now();
+            // 出站前把「可见名」换成目录声明的上游真名（仅该账号有别名时；
+            // 冷却/统计仍按别名前的 `req.model`，与既有键一致）。
+            let remapped;
+            let send_req: &ChatFormat = match lease.session().upstream_alias(&req.model) {
+                Some(upstream) => {
+                    remapped = {
+                        let mut r = req.clone();
+                        r.model = upstream.to_string();
+                        r
+                    };
+                    &remapped
+                }
+                None => req,
+            };
             let result = self
                 .with_self_retry(started_at, bridge.clone(), |b| async move {
-                    b.chat(req, ctx).await
+                    b.chat(send_req, ctx).await
                 })
                 .await;
             match result {
@@ -574,9 +588,22 @@ impl Bridge for AccountBridge {
                 }
             };
             let started = Instant::now();
+            // 同 `chat`：出站前按账号别名换成上游真名（冷却/统计键不变）。
+            let remapped;
+            let send_req: &ChatFormat = match lease.session().upstream_alias(&req.model) {
+                Some(upstream) => {
+                    remapped = {
+                        let mut r = req.clone();
+                        r.model = upstream.to_string();
+                        r
+                    };
+                    &remapped
+                }
+                None => req,
+            };
             let result = self
                 .with_self_retry(started_at, bridge.clone(), |b| async move {
-                    b.chat_stream(req, ctx).await
+                    b.chat_stream(send_req, ctx).await
                 })
                 .await;
             match result {

@@ -708,7 +708,19 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             auth: SessionAuth::Headers,
             base_url: "https://ai.catpaw.meituan.com",
             chat_path: "/conversation",
-            headers: &[("x-passport-token", "{credential}")],
+            // CatPaw 的凭证是 **Cookie 形态** `Cookie: X-Passport-Token=<token>`，
+            // 不是 `x-passport-token` 头；客户端身份头（M-APPKEY/gray-set/
+            // X-Agent-Version…）与对话桥 `bridge/session/catpaw.rs` 同源
+            // （A2A `providers/catpaw/upstream_http.rs::request_headers`）。
+            // `content-type: application/json` 由 POST 的 `.json(body)` 自动带，不重复加。
+            headers: &[
+                ("accept", "application/json"),
+                ("m-appkey", "fe_com.sankuai.catpaw.external.front"),
+                ("gray-set", "new-agent-sdk"),
+                ("enableheartbeat", "true"),
+                ("x-agent-version", "1.0.1"),
+                ("cookie", "X-Passport-Token={credential}"),
+            ],
             credential_hint: "粘贴 CatPaw 的 passport token（x-passport-token）",
             openai_compatible: false,
         },
@@ -801,18 +813,24 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             auth: SessionAuth::Headers,
             base_url: "https://trae-api-cn.mchost.guru",
             chat_path: "/api/agent/v3/llm_utils_chat",
+            // 版本头与目录表**绑定**：`X-Ide-Version-Code` 决定
+            // `get_detail_param` 返回哪一张模型表（A2A `trae/headers.rs` 实测
+            // 20260820 → 36 条；旧值 "1" 拿不到表，返回 `config_info_list:[]`）。
             headers: &[
                 ("authorization", "Cloud-IDE-JWT {credential}"),
                 ("x-cloudide-token", "{credential}"),
                 ("x-ide-token", "{credential}"),
                 ("x-app-id", "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"),
                 ("x-app-version", "default"),
-                ("x-app-version-code", "1"),
-                ("x-ide-version", "1.0.0"),
-                ("x-ide-version-code", "1"),
+                ("x-app-version-code", "20260820"),
+                ("x-ide-version", "0.1.61"),
+                ("x-ide-version-code", "20260820"),
                 ("x-ide-version-type", "stable"),
                 ("x-device-type", "windows"),
-                ("user-agent", "Trae/1.0 antigravity-cockpit-tools"),
+                ("x-os-version", "Windows 11 Pro"),
+                ("x-device-brand", "83DG"),
+                ("request-traffic-type", "prod"),
+                ("user-agent", "Trae/0.1.61"),
             ],
             credential_hint: "粘贴 Trae 的 accessToken（Cloud-IDE-JWT）",
             openai_compatible: false,
@@ -884,7 +902,16 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             auth: SessionAuth::Bearer,
             base_url: "https://daily-cloudcode-pa.googleapis.com",
             chat_path: "/v1internal:streamGenerateContent?alt=sse",
-            headers: &[],
+            // 出站 UA **必须含 `antigravity`** 且版本 ≥ 4.3.0，否则上游直接 403
+            // （A2A `antigravity/endpoints.rs` 模块头 §3.2/§7.1）。旧实现无自定义
+            // UA → reqwest 默认 UA → 目录 `fetchAvailableModels` 恒 403。
+            // 模型目录/额度这类非 content 方法还用 `x-client-name/version`；
+            // `x-goog-user-project` 由 `catalog.rs` 从账号 `projectId` 字段补。
+            headers: &[
+                ("user-agent", "vscode/1.X.X (Antigravity/4.3.0)"),
+                ("x-client-name", "antigravity"),
+                ("x-client-version", "4.3.0"),
+            ],
             credential_hint: "粘贴 Google OAuth access token（Bearer）",
             openai_compatible: false,
         },
@@ -1546,6 +1573,31 @@ mod tests {
         assert!(session_meta("Cline").is_some());
         assert!(session_meta(" trae ").is_some());
         assert!(session_meta("openai").is_none());
+    }
+
+    /// 目录修复回归：这几家的 auth/版本头上游契约有硬要求，改错会直接
+    /// 405/401/403 或拿空表（逐条证据见 catalog.rs 各 spec 的注释）。
+    #[test]
+    fn catalog_headers_match_upstream_contract() {
+        // catpaw：凭证是 Cookie 形态 `X-Passport-Token=<token>`，不是同名头。
+        let catpaw = session_meta("catpaw").expect("catpaw");
+        assert!(catpaw.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("cookie") && value.contains("X-Passport-Token=")
+        }));
+        // trae：版本头与目录表绑定（旧值 "1" 拿不到 config_info_list）。
+        let trae = session_meta("trae").expect("trae");
+        assert!(trae.headers.iter().any(|(name, value)| name
+            .eq_ignore_ascii_case("x-ide-version-code")
+            && *value == "20260820"));
+        assert!(trae.headers.iter().any(
+            |(name, value)| name.eq_ignore_ascii_case("user-agent") && *value == "Trae/0.1.61"
+        ));
+        // antigravity：UA 必须含 `antigravity`（否则上游 403）。
+        let antigravity = session_meta("antigravity").expect("antigravity");
+        assert!(antigravity.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("user-agent")
+                && value.to_ascii_lowercase().contains("antigravity")
+        }));
     }
 
     /// 分类三值：web 家显式登记；登录态型缺省 agent；API Key 型 api。

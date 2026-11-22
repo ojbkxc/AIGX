@@ -97,8 +97,8 @@ test.describe('账号池列表能力', () => {
     await expect(dataRows(page).filter({ hasText: 'e2e-账号' })).toContainText(/天后/);
     // 已过期 → 红徽章
     await expect(dataRows(page).filter({ hasText: 'wb-二号' }).locator('.badge-danger')).toBeVisible();
-    // 无到期 → 「—」
-    await expect(dataRows(page).filter({ hasText: 'e2e-无到期' }).locator('.as-c-expiry')).toContainText('—');
+    // 无到期 + 有凭证 → 「长期有效」（#50：ACCOUNT-POOL-FIELD-PARITY §1，对齐 A2A long-lived）
+    await expect(dataRows(page).filter({ hasText: 'e2e-无到期' }).locator('.as-c-expiry')).toContainText('长期有效');
     // 套餐 2 小时后到期（无凭证到期时回退套餐）+ 待生效徽章
     const wb1 = dataRows(page).filter({ hasText: 'wb-一号' });
     await expect(wb1.locator('.as-c-expiry')).toContainText('小时后');

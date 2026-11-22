@@ -4869,5 +4869,18 @@
   "已批量删除自定义模型": "Deleted custom models in batch",
   "内置推断": "Built-in inference",
   "社区目录补齐": "Community catalog",
-  "用户覆盖": "User override"
+  "用户覆盖": "User override",
+  "测试出口": "Test egress",
+  "代理池轮询": "Proxy pool rotation",
+  "对话协议": "Chat protocol",
+  "跟随账号（不指定）": "Follow account (unspecified)",
+  "节点 / 代理地址": "Node / proxy address",
+  "节点用 node:<id>，代理池条目用 pool:<id>，或直接填代理 URL；留空 = 跟随账号": "Use node:<id> for a node, pool:<id> for a pool entry, or a proxy URL directly; leave empty to follow the account",
+  "指定节点 / URL": "Specific node / URL",
+  "anthropic（Anthropic 线格式）": "anthropic (Anthropic wire format)",
+  "chat_completions（原生链路，默认）": "chat_completions (native path, default)",
+  "responses（OpenAI Responses 透传）": "responses (OpenAI Responses passthrough)",
+  "没有匹配的提供商": "No matching providers",
+  "Agent 客户端": "Agent client",
+  "Web 网页端": "Web"
 }

@@ -553,6 +553,168 @@ const DLG_ICONS: Record<(typeof DLG_SEGS)[number]['icon'], ReactNode> = {
   wrench: <Wrench size={15} />,
 };
 
+/**
+ * provider 分类展示顺序与中文名（对齐 Agent2API 的 Agent / Web / API 三档 + 插件）。
+ * 后端 `/account-sessions/providers` 的 `category` 字段给出档次（agent/web/api/plugin）。
+ */
+const AS_PROVIDER_GROUPS: Array<{ key: string; label: string }> = [
+  { key: 'agent', label: 'Agent 客户端' },
+  { key: 'web', label: 'Web 网页端' },
+  { key: 'api', label: 'API Key' },
+  { key: 'plugin', label: '插件' },
+  { key: 'other', label: '其他' },
+];
+const AS_PROVIDER_GROUP_ORDER = AS_PROVIDER_GROUPS.map((g) => g.key);
+function asProviderGroupKey(category: string | null | undefined): string {
+  const c = (category || '').toLowerCase();
+  return AS_PROVIDER_GROUP_ORDER.includes(c) ? c : 'other';
+}
+
+interface AsProviderFilterProps {
+  value: string;
+  onChange: (kind: string) => void;
+  providers: AccountProviderItem[];
+  counts: Record<string, number>;
+  total: number;
+  ariaLabel: string;
+}
+
+/**
+ * 账号池「提供商筛选」可搜索 Combobox（对齐 Agent2API accounts-page 的 provider Combobox）：
+ * - 选项来自**全部 registry/插件 provider**（含 0 账号的家，标 0），不是只列已有账号的家；
+ * - 每项带 provider 图标 + label + 账号数，按 category（Agent/Web/API/插件）分组；
+ * - 可输入搜索（label / kind 子串），顶部「全部供应商（N）」；桌面单选。
+ */
+function AsProviderFilter({ value, onChange, providers, counts, total, ariaLabel }: AsProviderFilterProps): JSX.Element {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent): void => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  // 合并：registry 全量 + 兜底（账号里出现但 registry 未列出的 kind 也补一行，避免丢计数）
+  const allProviders = useMemo<AccountProviderItem[]>(() => {
+    const seen = new Set(providers.map((p) => p.kind));
+    const extra = Object.keys(counts)
+      .filter((k) => !seen.has(k))
+      .map((k): AccountProviderItem => ({ kind: k, label: k, protocol: '', default_base_url: '' }));
+    return [...providers, ...extra];
+  }, [providers, counts]);
+
+  const grouped = useMemo(() => {
+    const ql = query.trim().toLowerCase();
+    const buckets = new Map<string, AccountProviderItem[]>();
+    for (const p of allProviders) {
+      if (ql && !(p.label.toLowerCase().includes(ql) || p.kind.toLowerCase().includes(ql))) continue;
+      const gk = asProviderGroupKey(p.category);
+      const arr = buckets.get(gk) ?? [];
+      arr.push(p);
+      buckets.set(gk, arr);
+    }
+    for (const arr of buckets.values()) arr.sort((a, b) => a.label.localeCompare(b.label));
+    return AS_PROVIDER_GROUPS.filter((g) => (buckets.get(g.key)?.length ?? 0) > 0).map((g) => ({
+      ...g,
+      items: buckets.get(g.key) ?? [],
+    }));
+  }, [allProviders, query]);
+
+  const current = value ? allProviders.find((p) => p.kind === value) : null;
+  const currentLabel = current ? current.label : t('全部供应商');
+  const currentCount = value ? counts[value] ?? 0 : total;
+
+  const pick = (kind: string): void => {
+    onChange(kind);
+    setOpen(false);
+    setQuery('');
+  };
+
+  return (
+    <div className="as-provcb" ref={rootRef}>
+      <button
+        type="button"
+        className={`as-provcb-trigger${value ? ' active' : ''}`}
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => {
+          setOpen((v) => !v);
+          setQuery('');
+          window.setTimeout(() => inputRef.current?.focus(), 0);
+        }}
+      >
+        {value && providerIcon(value) && (
+          <img className="as-provcb-ico" src={providerIcon(value) as string} alt="" />
+        )}
+        <span className="as-provcb-label">{currentLabel}</span>
+        <span className="as-provcb-count">{currentCount}</span>
+      </button>
+      {open && (
+        <div className="as-provcb-pop" role="listbox">
+          <div className="as-provcb-search">
+            <input
+              ref={inputRef}
+              className="form-input"
+              placeholder={t('搜索提供商…')}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label={t('搜索提供商')}
+            />
+          </div>
+          <div className="as-provcb-list">
+            {/* 「全部供应商」置顶 */}
+            <button
+              type="button"
+              role="option"
+              aria-selected={value === ''}
+              className={`as-provcb-item${value === '' ? ' active' : ''}`}
+              onClick={() => pick('')}
+            >
+              <span className="as-provcb-dot all" />
+              <span className="as-provcb-item-label">{t('全部供应商')}</span>
+              <span className="as-provcb-count">{total}</span>
+            </button>
+            {grouped.map((g) => (
+              <div key={g.key} className="as-provcb-group">
+                <div className="as-provcb-group-head">{t(g.label)}</div>
+                {g.items.map((p) => (
+                  <button
+                    type="button"
+                    key={p.kind}
+                    role="option"
+                    aria-selected={value === p.kind}
+                    className={`as-provcb-item${value === p.kind ? ' active' : ''}`}
+                    title={`${p.label} · ${p.kind}`}
+                    onClick={() => pick(p.kind)}
+                  >
+                    {providerIcon(p.kind) ? (
+                      <img className="as-provcb-ico" src={providerIcon(p.kind) as string} alt="" />
+                    ) : (
+                      <span className="as-provcb-dot" />
+                    )}
+                    <span className="as-provcb-item-label">{p.label}</span>
+                    {p.source === 'plugin' && <span className="as-provcb-tag">{t('插件')}</span>}
+                    <span className="as-provcb-count">{counts[p.kind] ?? 0}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+            {grouped.length === 0 && <div className="as-provcb-empty">{t('没有匹配的提供商')}</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface AccountSessionsProps {
   /** 作为「供应商」页「账号池」Tab 的子页内嵌时隐藏自身标题区 */
   embedded?: boolean;
@@ -570,6 +732,12 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
   const [sessions, setSessions] = useState<AccountSessionItem[]>([]);
   const [accountChannels, setAccountChannels] = useState<ChannelItem[]>([]);
   const [providers, setProviders] = useState<AccountProviderItem[]>([]);
+  // 每家 provider 的账号数（provider 筛选 Combobox 的计数；0 账号的家不在 sessions 里 → 计 0）
+  const providerCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const s of sessions) if (s.provider) m[s.provider] = (m[s.provider] ?? 0) + 1;
+    return m;
+  }, [sessions]);
   const [stats, setStats] = useState<AccountSessionStatsItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -3521,26 +3689,17 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         }
       >
         <div className="as-filters">
-          {/* 提供商筛选：对齐 Agent2API 账号页的左栏 provider 下拉。
-              渠道是内部容器，不该出现在筛选器里（用户心智里只有供应商）。 */}
-          <Select
+          {/* 提供商筛选：全量对齐 Agent2API 账号页 provider Combobox（可搜索 + 图标 + 账号数 +
+              分类分组；选项来自全部 registry/插件 provider，含 0 账号的家）。渠道是内部容器，
+              不出现在筛选器里（用户心智里只有供应商）。 */}
+          <AsProviderFilter
             value={providerFilter}
-            onChange={(e) => setProviderFilter(e.target.value)}
-            aria-label={t('选择供应商')}
-          >
-            <option value="">{t('全部供应商')}</option>
-            {Array.from(new Set(sessions.map((s) => s.provider).filter(Boolean)))
-              .sort()
-              .map((kind) => {
-                // §2.14 provider 下拉带每家账号数（value 仍是 kind，不影响筛选）
-                const count = sessions.filter((s) => s.provider === kind).length;
-                return (
-                  <option key={kind} value={kind}>
-                    {providers.find((p) => p.kind === kind)?.label || kind} ({count})
-                  </option>
-                );
-              })}
-          </Select>
+            onChange={setProviderFilter}
+            providers={providers}
+            counts={providerCounts}
+            total={sessions.length}
+            ariaLabel={t('选择供应商')}
+          />
           <Input
             placeholder={t('搜索名称 / provider / 地址')}
             value={search}

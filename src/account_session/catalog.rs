@@ -424,13 +424,16 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             body: None,
             parser: None,
         }),
+        // CatPaw：`POST /api/agent/maas/model-types`，`{tenant,scene,env}` 是
+        // **POST body**（不是 query；见 Agent2API `providers/catpaw/catalog.rs`
+        // 的模块头，推翻旧实现「GET」的误读）。旧实现发 GET → 上游 405。
         "catpaw" => Some(CatalogSpec {
             path: "/api/agent/maas/model-types",
             openai_shape: false,
             fallback: &[],
             sign: None,
-            method: None,
-            body: None,
+            method: Some(CatalogMethod::Post),
+            body: Some(catpaw_catalog_body),
             parser: None,
         }),
         "codearts" => Some(CatalogSpec {
@@ -442,8 +445,12 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             body: None,
             parser: None,
         }),
+        // OfficeAce：`GET {网关}/models`（base 需带 `/v2`，见 `catalog_base_url`
+        // 的 officeace 分支 + `officeace_basic_authorization`）。旧实现用
+        // `/v1/models` 且把 `secret`(=modelAppKey) 直接塞进 `Basic`，缺
+        // `modelAppSecret` 一半 → 上游 400。
         "officeace" => Some(CatalogSpec {
-            path: "/v1/models",
+            path: "/models",
             openai_shape: true,
             fallback: &[],
             sign: None,
@@ -1499,6 +1506,36 @@ pub fn supports(provider: &str) -> bool {
     spec_for(provider).is_some()
 }
 
+/// 无远程目录端点时的静态兜底清单（复用各家的 `CatalogSpec.fallback` 表，
+/// 与 raccoon / deepseek-web / autoclaw 等家同一套兜底机制）。
+///
+/// 返回**空切片** = 该家没有可靠的内置清单 —— 不编造模型名，调用方应提示
+/// 「需手动声明模型」。当前 chatglm / codar / qwenwork / tabbit 均属此列。
+pub(crate) fn static_models_for(provider: &str) -> &'static [FallbackModel] {
+    spec_for(provider).map(|spec| spec.fallback).unwrap_or(&[])
+}
+
+/// 这些家在 AIGX 没有可自证的内置模型清单（目录端点在闭源插件 / 家无原生后端），
+/// 与其编造模型名，不如明确提示运维手动声明。custom-* 也归此类（用户自填）。
+fn provider_needs_manual_models(provider: &str) -> bool {
+    matches!(
+        provider,
+        "chatglm"
+            | "codar"
+            | "qwenwork"
+            | "qwenwork-intl"
+            | "tabbit"
+            | "tabbit-intl"
+            | "atomcode"
+            | "lobsterai"
+    ) || provider.starts_with("custom-")
+}
+
+/// 「需手动声明模型」的统一提示文案（目录无法自动发现且无内置清单时）。
+fn manual_declaration_hint(provider: &str) -> String {
+    format!("供应商 {provider} 无远程模型目录或内置静态清单，请在账号模型白名单手动声明模型")
+}
+
 /// 通用模型发现：对**任意** API-Key 型供应商拉一次上游 `/models`。
 ///
 /// 与 [`sync_account_catalog`] 的分工：
@@ -1685,11 +1722,10 @@ fn save_cache(
     );
 }
 
-/// 静态兜底目录。
-fn fallback_catalog(spec: &CatalogSpec) -> CatalogSnapshot {
+/// 由静态兜底表构造目录快照（[`static_models_for`] 的产物归一）。
+fn catalog_from_static(models: &[FallbackModel]) -> CatalogSnapshot {
     CatalogSnapshot {
-        models: spec
-            .fallback
+        models: models
             .iter()
             .map(|m| {
                 let mut capabilities: Vec<String> = Vec::new();
@@ -1874,6 +1910,12 @@ fn catalog_base_url(session: &AccountSession) -> Result<String, String> {
     let base = base.trim().trim_end_matches('/');
     if base.is_empty() {
         return Err("账号未配置上游地址".to_string());
+    }
+    // OfficeAce 的模型网关固定在 `/v2` 之下（A2A `officeace/chat.rs::normalize_base`：
+    // 不以 `/v2` 结尾就补上），目录再拼 `/models`。否则会打成 `/v1/models`
+    // 或 `/v2/v1/models` → 上游 400/404。
+    if session.provider == "officeace" && !base.ends_with("/v2") {
+        return Ok(format!("{base}/v2"));
     }
     Ok(base.to_string())
 }
@@ -2098,6 +2140,55 @@ async fn fetch_remote(
         headers.push((name.clone(), value));
     }
 
+    // ── 逐 provider 的目录鉴权/身份头补齐（只影响目录请求，不动 chat 路径）──
+    // OfficeAce：`Basic base64(modelAppKey:modelAppSecret)`（缺一半 → 上游 400）。
+    if session.provider == "officeace" {
+        if let Some(basic) = super::adapter::officeace_basic_authorization(session) {
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+            headers.push(("Authorization".to_string(), basic));
+        }
+    }
+    // CatPaw：`M-TRACEID` 每次请求一个新随机 UUID（A2A `catpaw/upstream_http.rs`
+    // 每条请求都生成，去掉连字符）。
+    if session.provider == "catpaw" {
+        headers.push((
+            "m-traceid".to_string(),
+            uuid::Uuid::new_v4().simple().to_string(),
+        ));
+    }
+    // Trae：uid / machineId / deviceId 是独立请求头（A2A `trae/headers.rs`）；
+    // 为空就不发（上游把空值当「另一个身份」）。
+    if session.provider == "trae" {
+        for (field, header) in [
+            ("uid", "x-uid"),
+            ("machineId", "x-machine-id"),
+            ("deviceId", "x-device-id"),
+        ] {
+            let value = session.credential.field_plain(field);
+            let value = value.trim();
+            if !value.is_empty()
+                && !headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case(header))
+            {
+                headers.push((header.to_string(), value.to_string()));
+            }
+        }
+    }
+    // Antigravity：非 content 方法（含目录）带 `x-goog-user-project`
+    // （A2A `antigravity/endpoints.rs::admin_headers`；project 为空则不发）。
+    if session.provider == "antigravity" {
+        let project = session.credential.field_plain("projectId");
+        let project = project.trim();
+        if !project.is_empty()
+            && !headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("x-goog-user-project"))
+        {
+            headers.push(("x-goog-user-project".to_string(), project.to_string()));
+        }
+    }
+
     // COSY 签名（Qoder）：目录端点与对话端点用同一套签名 —— 复用
     // `bridge::session::qoder` 的身份解析，两处口径一致，不会出现
     // 「对话能通、目录 401」的分裂。
@@ -2164,6 +2255,16 @@ async fn fetch_remote(
         return Err(empty_catalog_error(&url, &value));
     }
     Ok(models)
+}
+
+/// CatPaw 目录请求体（A2A `providers/catpaw/catalog.rs::request_body` 逐字）：
+/// `tenant/scene/env` 是**客户端身份三常量**，发错拿不到目录。
+fn catpaw_catalog_body() -> Value {
+    serde_json::json!({
+        "tenant": "CatDesk",
+        "scene": "CATX_APP",
+        "env": "EXTERNAL",
+    })
 }
 
 /// Trae 目录请求体。
@@ -2676,6 +2777,11 @@ pub async fn sync_account_catalog(
     force: bool,
 ) -> Result<CatalogSnapshot, String> {
     let Some(spec) = spec_for(&session.provider) else {
+        // 无目录端点、也无内置静态清单（codar/qwenwork/tabbit/custom-* 等）：
+        // 与其报「不支持」，不如明确告诉运维该手动声明模型。
+        if provider_needs_manual_models(&session.provider) {
+            return Err(manual_declaration_hint(&session.provider));
+        }
         return Err(format!("供应商 {} 不支持模型目录发现", session.provider));
     };
 
@@ -2685,6 +2791,13 @@ pub async fn sync_account_catalog(
             snap.source = "cache".to_string();
             return Ok(snap);
         }
+    }
+
+    // 纯静态兜底家（path 空 + 有兜底表，如 deepseek-web）：无需打网络，
+    // 直接下发内置清单（对齐 raccoon「远程失败回退静态」的终态）。
+    let static_models = static_models_for(&session.provider);
+    if spec.path.is_empty() && !static_models.is_empty() {
+        return Ok(catalog_from_static(static_models));
     }
 
     match fetch_remote(sessions, session, &spec).await {
@@ -2709,11 +2822,16 @@ pub async fn sync_account_catalog(
                 snap.source = "cache".to_string();
                 return Ok(snap);
             }
-            let fallback = fallback_catalog(&spec);
-            if fallback.models.is_empty() {
+            let static_models = static_models_for(&session.provider);
+            if static_models.is_empty() {
+                // path 空 + 无兜底表（chatglm / atomcode / lobsterai）：
+                // 没有可自证的清单，明确提示手动声明，而不是抛原始网络错误。
+                if spec.path.is_empty() {
+                    return Err(manual_declaration_hint(&session.provider));
+                }
                 return Err(err);
             }
-            Ok(fallback)
+            Ok(catalog_from_static(static_models))
         }
     }
 }
@@ -2800,10 +2918,13 @@ pub fn models_status(
         };
     }
     if !supports(provider) {
+        // 无目录端点：对已知「无内置清单」的家给明确提示（不假装有模型）；
+        // 其余 API-Key 型家仍按「none」静默（它们可走通用 `discover_models_plain`）。
         return ModelsStatus {
             state: "none".to_string(),
             count: 0,
-            error: None,
+            error: provider_needs_manual_models(provider)
+                .then(|| manual_declaration_hint(provider)),
         };
     }
     // 支持发现却两者皆空：最近一次探测失败，或还没探测过。
@@ -2943,6 +3064,67 @@ mod tests {
         assert_eq!(catalog_base_url(&session).unwrap(), "https://my.proxy/v1");
     }
 
+    /// CatPaw 目录必须是 **POST + 客户端身份 body**（旧实现 GET → 上游 405）。
+    #[test]
+    fn catpaw_catalog_is_post_with_client_identity_body() {
+        let spec = spec_for("catpaw").expect("catpaw spec");
+        assert_eq!(spec.method, Some(CatalogMethod::Post));
+        let body = (spec.body.expect("catpaw body"))();
+        assert_eq!(body["tenant"], "CatDesk");
+        assert_eq!(body["scene"], "CATX_APP");
+        assert_eq!(body["env"], "EXTERNAL");
+    }
+
+    /// OfficeAce：目录路径 `/models`、base 补 `/v2`、鉴权 = `Basic(base64(key:secret))`。
+    #[test]
+    fn officeace_catalog_url_and_basic_auth() {
+        use base64::Engine;
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "officeace".to_string();
+        // base 不带 /v2 → 补上；已带 /v2 → 不重复。
+        session.base_url = "https://modelgw.example.com".to_string();
+        assert_eq!(
+            catalog_base_url(&session).unwrap(),
+            "https://modelgw.example.com/v2"
+        );
+        session.base_url = "https://modelgw.example.com/v2".to_string();
+        assert_eq!(
+            catalog_base_url(&session).unwrap(),
+            "https://modelgw.example.com/v2"
+        );
+        // 目录路径是 /models（不是 /v1/models）
+        assert_eq!(spec_for("officeace").unwrap().path, "/models");
+        // Basic = base64(modelAppKey:modelAppSecret)
+        session.credential.secret = "APPKEY".to_string();
+        session.credential.set_field("modelAppSecret", "APPSECRET");
+        let got = super::super::adapter::officeace_basic_authorization(&session).expect("basic");
+        let want = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(b"APPKEY:APPSECRET")
+        );
+        assert_eq!(got, want);
+        // 缺一半 → None（不伪造一个空 secret 的 Basic）
+        session.credential.set_field("modelAppSecret", "");
+        assert!(super::super::adapter::officeace_basic_authorization(&session).is_none());
+    }
+
+    /// Trae / Antigravity 的目录仍是 POST + 固定 body（版本头见 registry 测试）。
+    #[test]
+    fn trae_and_antigravity_catalog_methods() {
+        let trae = spec_for("trae").expect("trae spec");
+        assert_eq!(trae.method, Some(CatalogMethod::Post));
+        assert_eq!(
+            (trae.body.expect("trae body"))()["function"],
+            "solo_work_lite"
+        );
+        let antigravity = spec_for("antigravity").expect("antigravity spec");
+        assert_eq!(antigravity.method, Some(CatalogMethod::Post));
+        assert_eq!(
+            (antigravity.body.expect("antigravity body"))(),
+            serde_json::json!({})
+        );
+    }
+
     #[test]
     fn pick_id_variants() {
         let v = serde_json::json!({"id": "gpt-4o"});
@@ -3060,7 +3242,7 @@ mod tests {
         assert!(first.context_window > 0);
 
         // 兜底目录条目要带上上游真名与能力位
-        let snapshot = fallback_catalog(&spec);
+        let snapshot = catalog_from_static(spec.fallback);
         assert_eq!(snapshot.models.len(), spec.fallback.len());
         assert_eq!(snapshot.source, "fallback");
         let entry = &snapshot.models[0];
@@ -3373,7 +3555,7 @@ mod tests {
     fn raccoon_catalog_fallback_covers_core_models() {
         let spec = spec_for("xiaohuanxiong").expect("xiaohuanxiong 应有目录 spec");
         assert_eq!(spec.fallback.len(), 5);
-        let snapshot = fallback_catalog(&spec);
+        let snapshot = catalog_from_static(spec.fallback);
         assert_eq!(snapshot.source, "fallback");
         assert_eq!(snapshot.models.len(), 5);
         let ids: Vec<&str> = snapshot
@@ -3383,6 +3565,52 @@ mod tests {
             .collect();
         assert!(ids.contains(&"raccoon-8c4485"), "{ids:?}");
         assert!(ids.contains(&"sn-sensenova-6-8-flash-lite"), "{ids:?}");
+    }
+
+    /// `static_models_for` 复用各家 `fallback` 表：有表的家非空，无证据的家空。
+    #[test]
+    fn static_models_for_reuses_fallback_tables() {
+        assert!(
+            !static_models_for("xiaohuanxiong").is_empty(),
+            "raccoon 应有兜底"
+        );
+        assert!(
+            !static_models_for("deepseek-web").is_empty(),
+            "deepseek-web 应有兜底"
+        );
+        // 目录端点在闭源插件 / 无原生后端：无可自证清单（不编造）。
+        for provider in ["chatglm", "codar", "qwenwork", "tabbit"] {
+            assert!(
+                static_models_for(provider).is_empty(),
+                "{provider} 不应编造静态模型"
+            );
+        }
+    }
+
+    /// 无目录且无静态清单的家 → 明确「请手动声明模型」，不假装有。
+    #[test]
+    fn manual_model_hint_covers_no_catalog_providers() {
+        for provider in [
+            "chatglm",
+            "codar",
+            "qwenwork",
+            "qwenwork-intl",
+            "tabbit",
+            "tabbit-intl",
+            "custom-abc",
+        ] {
+            assert!(
+                provider_needs_manual_models(provider),
+                "{provider} 应提示手动声明"
+            );
+        }
+        for provider in ["xiaohuanxiong", "deepseek", "openai_compatible"] {
+            assert!(
+                !provider_needs_manual_models(provider),
+                "{provider} 不应命中手动声明提示"
+            );
+        }
+        assert!(manual_declaration_hint("chatglm").contains("手动声明"));
     }
 
     #[test]
@@ -3508,7 +3736,7 @@ mod tests {
         assert!(pro.reasoning && pro.vision && pro.tool);
         assert_eq!(pro.context_window, 1_000_000);
         // 兜底快照把能力位与上下文（取 maxInputTokens）翻出来
-        let snapshot = fallback_catalog(&spec);
+        let snapshot = catalog_from_static(spec.fallback);
         assert!(snapshot.models.iter().any(|e| e.id == "hy3-preview"
             && e.context_length == Some(192_000)
             && e.capabilities.iter().any(|c| c == "reasoning")));

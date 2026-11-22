@@ -367,7 +367,8 @@ test.describe('模型管理', () => {
     await expect(modal).toBeVisible();
     await expect(modal).toContainText('批量操作');
     await expect(modal.locator('.mm-batch-models code')).toHaveCount(1);
-    await expect(modal.locator('.mm-batch-action')).toHaveCount(4);
+    // 5 个动作：启用 / 禁用 / 设思考等级 / 删除定价 / 删除自定义模型（#51 P1#5 新增第 5 项）
+    await expect(modal.locator('.mm-batch-action')).toHaveCount(5);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
