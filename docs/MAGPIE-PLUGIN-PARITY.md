@@ -211,7 +211,7 @@ for batch in batches:
 
 > 面向运维的日常操作手册。审计口径与失败样本见
 > [`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)
-> （2026-11-22 生产全量验证：253/264 通过，11 条失败全部归因）。
+> （2026-11-22 生产全量验证：254/264 通过，10 条失败全部归因）。
 
 ### 7.1 日常操作：刷新 → 安装 → 启用 → 观察 → 停用/卸载
 
@@ -318,7 +318,7 @@ error, providerRouted, enabled, crashes_before, crashes_after, ts}`，便于按�
 
 ### 7.6 相关文档与入库验证工具
 
-- 全量验证结果与 11 条失败归因：[`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)。
+- 全量验证结果与 10 条失败归因：[`MAGPIE-VERIFY-REPORT-2026-11-22.md`](./MAGPIE-VERIFY-REPORT-2026-11-22.md)。
 - 审计口径、安装/加载链路与风险分类：本文 §1–§5；验收判据 §4；批次计划 §5。
 
 批量验证工具：`tools/verify_magpie_plugins.py`（入库；标准库 + `paramiko`）。凭据全部
@@ -348,6 +348,6 @@ python tools/verify_magpie_plugins.py --catalog magpie_catalog.json \
 - `--plan-only`：只打印选中条目，不连接；`--host-timeout/--poll/--install-timeout/--enable-timeout` 控轮询与超时；
 - 安全闸门：一批内 `host.crashes` 增长 ≥2，或 `host.running=false` 且 `lastError` 非空 → 停批、卸载本批、退出码 2。
 
-`--retry-failed`（只重跑历史失败项）：**待 #26 落地后可用**；在此之前用 `--resume`
-（跳过已成功项）可达到近似效果。
+`--retry-failed`（只重跑 JSONL 里 `ok=false` 的历史失败项）：已支持，可与 `--plan-only`
+组合离线数待重跑项；只想跳过已成功项时也可用 `--resume`。
 

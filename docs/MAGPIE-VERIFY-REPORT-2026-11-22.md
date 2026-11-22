@@ -1,7 +1,7 @@
 # Magpie 脚本插件全量线上验证报告
 
 > 日期：2026-11-22（生产时区 UTC+8）
-> 环境：生产 `104.223.65.202`，AIGX **v1.0.84**（commit `10486489`；全量批次跑在 v1.0.83，v1.0.84 重测了 manifest 上限项）
+> 环境：生产 `104.223.65.202`，AIGX **v1.0.85**（commit `429d15a2`；全量批次跑在 v1.0.83，v1.0.84 重测了 manifest 上限项，v1.0.85 只加展示兜底/工具/文档）
 > 目录快照：`GET /api/plugins/scripts/catalog` → **264 条**（2026-11-20 manifest）
 > 判据与批次计划：见 [`MAGPIE-PLUGIN-PARITY.md`](./MAGPIE-PLUGIN-PARITY.md)
 >
