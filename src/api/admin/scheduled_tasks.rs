@@ -40,7 +40,11 @@ pub async fn list_handler(
     Ok(Json(scheduled_tasks::list(&state).await).into_response())
 }
 
-/// `PATCH /api/scheduled-tasks/{id}`：改一条任务（`{enabled?}` / `{interval?}`，只改传进来的字段）。
+/// `PATCH /api/scheduled-tasks/{id}`：改一条任务（只改传进来的字段）。
+///
+/// 通用字段：`{enabled?}` / `{interval?}`。
+/// `pluginCatalog` 专属：`{checkMode?:"follow"}` / `{autoUpdate?:bool}`（后者落
+/// `update.auto_apply`；checkMode=follow 时跳过 interval 范围强制校验）。
 pub async fn configure_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -76,6 +80,28 @@ pub async fn configure_handler(
                 None => {
                     return Err(error_response(
                         &format!("「{id}」的间隔必须是整数"),
+                        StatusCode::BAD_REQUEST,
+                    ))
+                }
+            }
+        }
+        if let Some(value) = object.get("checkMode") {
+            match value.as_str() {
+                Some(mode) => patch.check_mode = Some(mode.to_string()),
+                None => {
+                    return Err(error_response(
+                        &format!("「{id}」的 checkMode 必须是字符串"),
+                        StatusCode::BAD_REQUEST,
+                    ))
+                }
+            }
+        }
+        if let Some(value) = object.get("autoUpdate") {
+            match value.as_bool() {
+                Some(flag) => patch.auto_update = Some(flag),
+                None => {
+                    return Err(error_response(
+                        &format!("「{id}」的 autoUpdate 必须是布尔值"),
                         StatusCode::BAD_REQUEST,
                     ))
                 }

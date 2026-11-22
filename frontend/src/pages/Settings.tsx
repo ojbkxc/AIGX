@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Monitor, Sun, Moon,
@@ -47,7 +47,6 @@ import ModelMetadataPanel from '../components/ModelMetadataPanel';
 import SystemInfoPanel from '../components/SystemInfoPanel';
 import DataManagement from '../components/DataManagement';
 import CloudSyncPanel from '../components/CloudSyncPanel';
-import ScheduledTasks from './ScheduledTasks';
 import './Settings.css';
 
 interface LimitsForm {
@@ -118,7 +117,6 @@ type SettingsTab =
   | 'perf'
   | 'billing'
   | 'data'
-  | 'scheduled'
   | 'notify'
   | 'security'
   | 'system'
@@ -205,7 +203,6 @@ const SETTINGS_CATEGORIES: Array<{ key: SettingsTab; label: string; icon: typeof
   { key: 'perf', label: '限流与缓存', icon: Gauge },
   { key: 'billing', label: '计费', icon: CreditCard },
   { key: 'data', label: '数据', icon: Database },
-  { key: 'scheduled', label: '定时任务', icon: CalendarClock },
   { key: 'notify', label: '通知', icon: Bell },
   { key: 'security', label: '安全', icon: ShieldCheck },
   { key: 'system', label: '系统信息', icon: Info },
@@ -240,9 +237,14 @@ export default function Settings() {
 
   // 当前激活的配置分类：左侧导航（对齐 Agent2API 的 CATEGORIES），
   // 每类只渲染自己那块，不再靠子标签层层下钻。
-  // Tab 状态走 URL ?tab=（旧 /scheduled-tasks 重定向到 ?tab=scheduled 后由 URL 驱动；
+  // Tab 状态走 URL ?tab=（旧 /scheduled-tasks 与 ?tab=scheduled 重定向到「自动维护」页；
   // billing 的子标签仍为内部 state，不进 URL）。
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  // beta.7：定时任务分类已升级为顶级「自动维护」页，旧书签 ?tab=scheduled 重定向过去。
+  useEffect(() => {
+    if (searchParams.get('tab') === 'scheduled') navigate('/maintenance', { replace: true });
+  }, [searchParams, navigate]);
   const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
     const want = searchParams.get('tab');
     return want && VALID_SETTINGS_TABS.has(want) ? (want as SettingsTab) : 'general';
@@ -1299,9 +1301,6 @@ export default function Settings() {
           </div>
         </>
       )}
-
-      {/* 定时任务（原独立菜单 /scheduled-tasks 并入；embedded 隐藏自带 h1） */}
-      {activeTab === 'scheduled' && <ScheduledTasks embedded />}
 
       {activeTab === 'notify' && <Notify />}
 

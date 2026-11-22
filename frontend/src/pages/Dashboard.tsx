@@ -5,6 +5,7 @@
 // 根本不发请求。时间档六档含自定义区间（start/end 参数，热力图固定 365 天）。
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
+import PageAutoRefreshControl from '../components/PageAutoRefreshControl';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
@@ -184,6 +185,8 @@ export default function Dashboard(): JSX.Element {
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <RangeSwitcher range={range} custom={custom} onChange={setRange} onCustomChange={setCustom} />
+        {/* 页面自动刷新（beta.7）：报表任务，就地读写 scheduled-tasks */}
+        <PageAutoRefreshControl taskId="reportAutoRefresh" />
         <button className="btn btn-outline btn-sm" onClick={exportCsv} disabled={daily.length === 0} style={{ gap: 6 }}>
           <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />

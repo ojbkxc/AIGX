@@ -2,7 +2,7 @@
 //
 // 维护任务明细面板（定时任务页「上次明细 / 重试」入口）。
 // 对照 A2A ui-shared maintenance-*.tsx：
-//   两类维护任务概览条 + 执行记录表 + 单次明细弹窗（逐项结果 + 单条快照）+ 重试。
+//   四类维护任务概览条 + 执行记录表 + 单次明细弹窗（逐项结果 + 单条快照）+ 重试。
 //
 // 与上游对齐的交互：
 //   · 明细弹窗：状态筛选（全部/失败/成功/跳过，条数随提供商联动）+ 提供商筛选 +
@@ -22,7 +22,7 @@ import { useNavigate } from 'react-router-dom';
 import { Loader2, RefreshCw, RotateCcw, X } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Badge, Button, EmptyState, Input, Pagination, Select } from './ui';
+import { Badge, Button, EmptyState, Input, Pagination, Select, Switch } from './ui';
 import { MAINTENANCE_TASKS } from '../types';
 import type {
   MaintenanceDetailView,
@@ -30,6 +30,8 @@ import type {
   MaintenanceOverviewView,
   MaintenanceRunView,
   MaintenanceTaskId,
+  MaintenanceTaskView,
+  ScheduledTaskPatch,
 } from '../types';
 import './MaintenancePanel.css';
 
@@ -218,7 +220,7 @@ interface MaintenancePanelProps {
 /**
  * MaintenancePanel — 维护任务执行记录。
  *
- * 一屏三段：两类任务概览（是否正常、下次何时跑）→ 筛选条 → 执行记录表。
+ * 一屏三段：四类任务概览（是否正常、下次何时跑）→ 筛选条 → 执行记录表。
  * 记录点「明细」开弹窗看逐账号结果并可重试失败项；点「上次明细」看最近一轮。
  */
 export default function MaintenancePanel({ embedded = false }: MaintenancePanelProps): JSX.Element {
@@ -237,6 +239,7 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
   const [detailLoading, setDetailLoading] = useState('');
   const [detailError, setDetailError] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const seq = useRef(0);
   const mounted = useRef(true);
@@ -441,7 +444,7 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
         <EmptyState
           icon="🛠️"
           message={t('维护任务接口尚未就绪（/api/maintenance）')}
-          action={<p className="mtp-hint">{t('后端 maintenance 模块上线后，本段自动显示两类维护任务的执行记录、明细与重试。')}</p>}
+          action={<p className="mtp-hint">{t('后端 maintenance 模块上线后，本段自动显示维护任务的执行记录、明细与重试。')}</p>}
         />
       </section>
     );
@@ -451,10 +454,20 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
     <section className="mtp-wrap">
       <div className="mtp-head">
         {!embedded && <h2 className="mtp-heading">{t('维护任务明细')}</h2>}
-        <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-          {loading ? <Loader2 size={13} className="mtp-spin" /> : <RefreshCw size={13} />}
-          {t('刷新')}
-        </Button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setSettingsOpen(true)}
+            disabled={loading || !overview?.tasks?.length}
+          >
+            {t('维护设置')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+            {loading ? <Loader2 size={13} className="mtp-spin" /> : <RefreshCw size={13} />}
+            {t('刷新')}
+          </Button>
+        </div>
       </div>
 
       {error && <div className="error-message">{error}</div>}
@@ -660,6 +673,14 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
           onRetryWhole={() => void execute({ retryId: expanded })}
           onRetryItem={(itemId) => void execute({ retryId: expanded, itemId })}
           onAccount={goToAccount}
+        />
+      ) : null}
+
+      {settingsOpen && overview ? (
+        <MaintenanceSettingsDialog
+          tasks={(overview.tasks ?? []).filter((task): task is MaintenanceTaskView => task !== null)}
+          onClose={() => setSettingsOpen(false)}
+          onSaved={() => void load(true)}
         />
       ) : null}
     </section>
@@ -1032,6 +1053,184 @@ function ItemSnapshotDialog({
               </Button>
             ) : null}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface MaintenanceSettingsProps {
+  tasks: MaintenanceTaskView[];
+  onClose(): void;
+  onSaved(): void;
+}
+
+/**
+ * 维护设置弹窗（对齐上游 `maintenance-settings.tsx`）。
+ *
+ * 4 个 AIGX 维护任务的开关 + 间隔，保存走 `PATCH /api/scheduled-tasks/{id}`
+ * 的 `{enabled?, interval?}`。`pluginCatalog` 的 `checkMode` 后端恒为 `follow`
+ * （跟随软件检查计划），只读展示；`autoUpdate` 待 t9 扩展 PATCH 后再启用，
+ * 现在按禁用展示，避免「看起来保存了但没落库」的误导。
+ */
+function MaintenanceSettingsDialog({ tasks, onClose, onSaved }: MaintenanceSettingsProps): JSX.Element {
+  const { t } = useTranslation();
+  const addToast = useToast();
+  const [drafts, setDrafts] = useState<Record<string, { enabled: boolean; interval: string }>>(() =>
+    Object.fromEntries(tasks.map((task) => [task.id, { enabled: task.enabled, interval: String(task.interval) }])),
+  );
+  const pluginTask = tasks.find((task) => task.id === 'pluginCatalog') ?? null;
+  const [autoUpdateDraft, setAutoUpdateDraft] = useState<boolean>(pluginTask?.autoUpdate === true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const saving = useRef(false);
+
+  const patchDraft = (id: string, next: Partial<{ enabled: boolean; interval: string }>): void =>
+    setDrafts((prev) => ({ ...prev, [id]: { ...prev[id], ...next } }));
+
+  const save = async (): Promise<void> => {
+    if (saving.current) return;
+    for (const task of tasks) {
+      const draft = drafts[task.id];
+      const value = Number.parseInt(draft.interval, 10);
+      if (!draft.interval || Number.isNaN(value) || value < task.min || value > task.max) {
+        setError(
+          t('{{name}}的间隔需在 {{min}}–{{max}} 分钟', {
+            name: taskLabel(t, task.id),
+            min: task.min,
+            max: task.max,
+          }),
+        );
+        return;
+      }
+    }
+    saving.current = true;
+    setBusy(true);
+    setError('');
+    let failed = 0;
+    for (const task of tasks) {
+      const draft = drafts[task.id];
+      const interval = Number.parseInt(draft.interval, 10);
+      const body: ScheduledTaskPatch = {};
+      if (draft.enabled !== task.enabled) body.enabled = draft.enabled;
+      if (interval !== task.interval) body.interval = interval;
+      if (task.id === 'pluginCatalog' && autoUpdateDraft !== (task.autoUpdate === true)) {
+        body.autoUpdate = autoUpdateDraft;
+      }
+      if (body.enabled === undefined && body.interval === undefined && body.autoUpdate === undefined) continue;
+      try {
+        const res = await api.patchScheduledTask(task.id, body);
+        if (!res?.success) failed += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    saving.current = false;
+    setBusy(false);
+    if (failed > 0) {
+      addToast(t('部分设置可能已保存，请核对后重试'), 'error');
+      onSaved();
+      return;
+    }
+    addToast(t('维护设置已保存'));
+    onSaved();
+    onClose();
+  };
+
+  return (
+    <div
+      className="mtp-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('维护设置')}
+      onClick={busy ? undefined : onClose}
+    >
+      <div
+        className="mtp-dialog"
+        style={{ width: 'min(560px, 100%)' }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mtp-dialog-head">
+          <div>
+            <h3>{t('维护设置')}</h3>
+            <p>{t('自动维护与手动执行共用同一份结果记录')}</p>
+          </div>
+          <div className="mtp-dialog-actions">
+            <Button variant="outline" size="sm" onClick={onClose} disabled={busy}>
+              <X size={13} /> {t('关闭')}
+            </Button>
+          </div>
+        </div>
+        <div className="mtp-dialog-body">
+          {error ? <div className="error-message">{error}</div> : null}
+          {tasks.map((task) => {
+            const draft = drafts[task.id];
+            return (
+              <div key={task.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <strong>{taskLabel(t, task.id)}</strong>
+                  {task.id === 'pluginCatalog' && task.checkMode === 'follow' ? (
+                    <Badge tone="neutral">{t('跟随软件')}</Badge>
+                  ) : null}
+                  <span style={{ marginLeft: 'auto' }}>
+                    <Switch
+                      checked={draft.enabled}
+                      onChange={(next) => patchDraft(task.id, { enabled: next })}
+                      disabled={busy}
+                      ariaLabel={taskLabel(t, task.id)}
+                    />
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                  <span style={{ color: 'var(--text-muted)' }}>{t('执行间隔（分钟）')}</span>
+                  <input
+                    type="number"
+                    className="form-input"
+                    style={{ width: 96 }}
+                    min={task.min}
+                    max={task.max}
+                    value={draft.interval}
+                    disabled={busy || !draft.enabled}
+                    onChange={(e) => patchDraft(task.id, { interval: e.target.value })}
+                    aria-label={t('执行间隔（分钟）')}
+                  />
+                  <span style={{ color: 'var(--text-muted)' }}>
+                    {task.min}–{task.max}
+                  </span>
+                </div>
+                {task.id === 'pluginCatalog' ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{t('自动更新已启用且已签名的插件')}</span>
+                    <Switch
+                      checked={autoUpdateDraft}
+                      onChange={(next) => setAutoUpdateDraft(next)}
+                      disabled={busy}
+                      ariaLabel={t('自动更新已启用且已签名的插件')}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+          <p className="mtp-muted" style={{ marginTop: 10 }}>
+            {t('关闭自动维护不影响手动执行，也不影响对话请求所需的按需续期。')}
+          </p>
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: 8,
+            padding: '12px 16px',
+            borderTop: '1px solid var(--border-color)',
+          }}
+        >
+          <Button variant="outline" size="sm" onClick={onClose} disabled={busy}>
+            {t('取消')}
+          </Button>
+          <Button size="sm" onClick={() => void save()} disabled={busy}>
+            {busy ? t('保存中…') : t('保存设置')}
+          </Button>
         </div>
       </div>
     </div>

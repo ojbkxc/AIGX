@@ -281,7 +281,10 @@ pub async fn task_by_id(state: &AppState, id: &str) -> Value {
 }
 
 /// 把 patch 落到 `settings` 的对应字段（按 id 选中那一条）。
-fn apply_patch(settings: &mut ScheduledSettings, id: &str, patch: IntervalTaskPatch) {
+///
+/// 只处理 `enabled` / `interval`；`checkMode` / `autoUpdate` 的校验与落点见
+/// [`validate_patch`] 与 [`configure`]（`autoUpdate` 落到 `update.auto_apply`）。
+fn apply_patch(settings: &mut ScheduledSettings, id: &str, patch: &IntervalTaskPatch) {
     let target = match id {
         TASK_CREDENTIAL_MAINTENANCE => &mut settings.credential_maintenance,
         TASK_MODEL_REFRESH => &mut settings.model_refresh,
@@ -297,6 +300,34 @@ fn apply_patch(settings: &mut ScheduledSettings, id: &str, patch: IntervalTaskPa
     }
     if let Some(interval) = patch.interval {
         target.interval = interval;
+    }
+}
+
+/// 校验 `checkMode` / `autoUpdate` 并返回是否 `follow`（纯函数，便于单测）。
+///
+/// 规则（对齐 docs/AUTO-MAINTENANCE-PARITY.md §10）：
+/// - 两个字段只对 `pluginCatalog` 有意义（其它任务传入 → 400，避免静默无效）；
+/// - `checkMode` 仅接受 `"follow"`：AIGX 没有独立原生目录通道，插件检查恒跟随
+///   软件更新计划；
+/// - `autoUpdate` 的落点是 `update.auto_apply`，不写 `scheduled_tasks`。
+fn validate_patch(task: &TaskDef, patch: &IntervalTaskPatch) -> Result<bool, String> {
+    let touches_plugin_opts = patch.check_mode.is_some() || patch.auto_update.is_some();
+    if touches_plugin_opts && task.id != TASK_PLUGIN_CATALOG {
+        return Err(format!("「{}」不支持 checkMode / autoUpdate", task.label));
+    }
+    match patch.check_mode.as_deref() {
+        None => Ok(false),
+        Some(mode) => {
+            let mode = mode.trim();
+            if mode.eq_ignore_ascii_case("follow") {
+                Ok(true)
+            } else {
+                Err(format!(
+                    "「{}」的 checkMode 仅支持 follow（收到 {mode}）",
+                    task.label
+                ))
+            }
+        }
     }
 }
 
@@ -335,11 +366,18 @@ pub async fn configure(
     patch: IntervalTaskPatch,
 ) -> Result<Value, String> {
     let task = find(id).ok_or_else(|| format!("未知的定时任务: {id}"))?;
-    if patch.enabled.is_none() && patch.interval.is_none() {
+    if patch.enabled.is_none()
+        && patch.interval.is_none()
+        && patch.check_mode.is_none()
+        && patch.auto_update.is_none()
+    {
         return Err("没有需要更新的字段".to_string());
     }
+    // checkMode=follow：插件检查跟随软件更新计划，interval 由计划决定 ——
+    // 跳过间隔范围强制校验，且不落 interval（避免存一个不会被使用的越界值）。
+    let follow = validate_patch(task, &patch)?;
     if let Some(interval) = patch.interval {
-        if !(task.min..=task.max).contains(&interval) {
+        if !follow && !(task.min..=task.max).contains(&interval) {
             let unit = if task.unit == "seconds" {
                 "秒"
             } else {
@@ -353,7 +391,15 @@ pub async fn configure(
     }
     let mut config = state.config_manager.get().await;
     let before = settings_of(&config.scheduled_tasks, id);
-    apply_patch(&mut config.scheduled_tasks, id, patch);
+    let mut effective = patch.clone();
+    if follow {
+        effective.interval = None;
+    }
+    apply_patch(&mut config.scheduled_tasks, id, &effective);
+    // autoUpdate 的权威落点是软件更新的自动应用开关（与上游同口径）。
+    if let Some(auto_update) = patch.auto_update {
+        config.update.auto_apply = auto_update;
+    }
     let after = settings_of(&config.scheduled_tasks, id);
     state
         .config_manager
@@ -832,15 +878,67 @@ mod tests {
         super::apply_patch(
             &mut settings,
             TASK_PLUGIN_CATALOG,
-            IntervalTaskPatch {
+            &IntervalTaskPatch {
                 enabled: Some(false),
                 interval: Some(120),
+                ..Default::default()
             },
         );
         assert!(!settings.magpie_plugin_check.enabled);
         assert_eq!(settings.magpie_plugin_check.interval, 120);
         // 不影响其它任务
         assert!(settings.update_check.enabled);
+    }
+
+    /// checkMode 仅接受 follow；checkMode/autoUpdate 仅对 pluginCatalog 生效。
+    #[test]
+    fn patch_validates_check_mode_and_auto_update() {
+        let plugin = super::find(TASK_PLUGIN_CATALOG).unwrap();
+        let credential = super::find(TASK_CREDENTIAL_MAINTENANCE).unwrap();
+        // follow（大小写不敏感）接受，并回报 follow=true。
+        assert!(super::validate_patch(
+            plugin,
+            &IntervalTaskPatch {
+                check_mode: Some("follow".into()),
+                ..Default::default()
+            }
+        )
+        .unwrap());
+        assert!(super::validate_patch(
+            plugin,
+            &IntervalTaskPatch {
+                check_mode: Some("FOLLOW".into()),
+                ..Default::default()
+            }
+        )
+        .unwrap());
+        // 其它 checkMode 拒绝。
+        assert!(super::validate_patch(
+            plugin,
+            &IntervalTaskPatch {
+                check_mode: Some("auto".into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        // 非 pluginCatalog 任务拒绝 checkMode / autoUpdate。
+        assert!(super::validate_patch(
+            credential,
+            &IntervalTaskPatch {
+                auto_update: Some(true),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        // 仅 autoUpdate（pluginCatalog）：接受，follow=false。
+        assert!(!super::validate_patch(
+            plugin,
+            &IntervalTaskPatch {
+                auto_update: Some(true),
+                ..Default::default()
+            }
+        )
+        .unwrap());
     }
 
     /// 维护模块 claim 与调度循环共用同一排期口径。

@@ -49,6 +49,7 @@ const ModelManage = lazyPage(() => import('./pages/ModelManage'));
 // 路由域独立成页（#40）：分层档案 + 预演 + 回放 + 粘滞需要同屏上下文
 const Routing = lazyPage(() => import('./pages/Routing'));
 const PurgeConsole = lazyPage(() => import('./pages/PurgeConsole'));
+const Maintenance = lazyPage(() => import('./pages/Maintenance'));
 const Prompts = lazyPage(() => import('./pages/Prompts'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
@@ -246,10 +247,12 @@ export default function App(): JSX.Element {
           <Route path="/purge" element={<AdminRoute><PurgeConsole /></AdminRoute>} />
           <Route path="/settings" element={<SettingsRoute />} />
           <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
+          {/* 自动维护：顶级页（beta.7 对齐上游） */}
+          <Route path="/maintenance" element={<AdminRoute><Maintenance /></AdminRoute>} />
           {/* 签到中心已并入供应商页「签到」Tab（旧路由重定向防书签失效） */}
           <Route path="/checkin" element={<Navigate to="/channels?tab=checkin" replace />} />
-          {/* 定时任务已并入系统设置「定时任务」分类（旧路由重定向防书签失效） */}
-          <Route path="/scheduled-tasks" element={<Navigate to="/settings?tab=scheduled" replace />} />
+          {/* 定时任务已升级为顶级「自动维护」页（旧路由重定向防书签失效） */}
+          <Route path="/scheduled-tasks" element={<Navigate to="/maintenance" replace />} />
           {/* 系统诊断并入供应商页「健康」Tab（07 E.3：诊断三件套全部以渠道
               为粒度）；独立路由重定向防书签失效 */}
           <Route path="/diagnostics" element={<Navigate to="/channels?tab=health" replace />} />

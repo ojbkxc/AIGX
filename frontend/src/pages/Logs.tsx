@@ -20,6 +20,7 @@ import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../compon
 import { Columns3 } from 'lucide-react';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
+import PageAutoRefreshControl from '../components/PageAutoRefreshControl';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { RequestLogDetail, AuditLogDetail } from '../components/LogDetailDialogs';
@@ -753,6 +754,8 @@ export default function Logs(): JSX.Element {
               {masked ? t('已脱敏') : t('脱敏开关')}
             </button>
           )}
+          {/* 页面自动刷新（beta.7）：日志页管 logsAutoRefresh，请求日志 Tab 管 requestsAutoRefresh */}
+          <PageAutoRefreshControl taskId={autoRefreshTaskId} />
           {view === 'table' && (
             /* 列设置（公共面板；仅表格视图，时间线视图无列概念） */
             <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>

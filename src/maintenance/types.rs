@@ -208,6 +208,10 @@ pub fn report(detail: &Detail) -> Value {
             "expiresAfter": item.expires_after,
             "credentialChanged": item.credential_changed,
             "invalid": item.invalid,
+            // 软件版本检查 / 插件检查的明细：版本与变化摘要（供前端弹窗/概览读）
+            "currentVersion": item.current_version,
+            "latestVersion": item.latest_version,
+            "changeLabel": item.change_label,
         })).collect::<Vec<_>>(),
         "refreshed": detail.run.refreshed,
         "skipped": detail.run.skipped,
@@ -343,6 +347,41 @@ mod tests {
         });
         assert_eq!(summary(&items), (1, 1, 1));
         assert_eq!(status(0, 1, Some(&items[2])), "failed");
+    }
+
+    #[test]
+    fn report_includes_version_fields() {
+        let raw = json!({
+            "provider": "update",
+            "status": "refreshed",
+            "currentVersion": "1.0.80",
+            "latestVersion": "1.0.81",
+            "changeLabel": "发现 v1.0.81"
+        });
+        let parsed = item(&raw, 0, &HashMap::new());
+        let detail = Detail {
+            run: Run {
+                id: "r1".into(),
+                task_id: "updateCheck".into(),
+                source: "manual".into(),
+                retry_of: None,
+                started_at: 0,
+                finished_at: Some(1),
+                duration_ms: Some(1),
+                status: "completed".into(),
+                refreshed: 1,
+                skipped: 0,
+                failed: 0,
+                total: 1,
+                error: None,
+                metadata: None,
+            },
+            results: vec![parsed],
+        };
+        let value = report(&detail);
+        assert_eq!(value["results"][0]["currentVersion"], "1.0.80");
+        assert_eq!(value["results"][0]["latestVersion"], "1.0.81");
+        assert_eq!(value["results"][0]["changeLabel"], "发现 v1.0.81");
     }
 
     #[test]

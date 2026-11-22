@@ -11,7 +11,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, Globe,
-  Puzzle, Route as RouteIcon, Flame, Wrench,
+  Puzzle, Route as RouteIcon, Flame, Wrench, CalendarClock,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -49,6 +49,7 @@ const navItems: NavItem[] = [
   // 破甲控制台：请求治理总控（归一化/改写/降档/异源/技能注入）
   { path: '/purge', labelKey: '破甲控制台', icon: Flame, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
+  { path: '/maintenance', labelKey: '自动维护', icon: CalendarClock, adminOnly: true },
   { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
   { path: '/tickets', labelKey: '工单', icon: Headphones },
@@ -107,14 +108,15 @@ const navGroups: NavGroup[] = [
       navItemOf('/routing'),         // 路由（分层档案 / 预演 / 回放 / 粘滞）
       // 签到中心 → 并入「供应商」页「签到」Tab（每日额度领取与账号池强耦合），顶级菜单下线
       // 用户工具权限 → 并入「用户管理」页「工具权限」Tab，顶级菜单下线
-      // 定时任务 → 并入「系统设置」分类（scheduled），顶级菜单下线
+      // 定时任务 → 升级为顶级「自动维护」页（beta.7 对齐上游），入口见 /maintenance
       // 系统诊断 → 并入「供应商」页「健康」Tab（07 E.3：诊断三件套
       // 全部以渠道为粒度，看到问题就在旁边修），顶级菜单下线
       // 文档 → 并入「API 密钥」第二 Tab「接入文档」（07 E.3：密钥与文档是
       // 同一件事的两半；且全员可见——普通用户也要知道怎么填客户端），顶级菜单下线
       navItemOf('/plugins'),        // 插件管理（后端建设中降级空态）
       navItemOf('/tools'),          // 工具服务（Skill / MCP 接入、搜索提供商、视觉分析）
-      navItemOf('/settings'),        // 系统设置（含「定时任务」分类）
+      navItemOf('/maintenance'),    // 自动维护（凭证/模型/软件/插件检查 + 记录）
+      navItemOf('/settings'),        // 系统设置
       navItemOf('/agent'),           // AI 运维
     ],
   },

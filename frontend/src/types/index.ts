@@ -2262,6 +2262,13 @@ export interface ScheduledTaskList {
 export interface ScheduledTaskPatch {
   enabled?: boolean;
   interval?: number;
+  /**
+   * beta.7：仅 `pluginCatalog` 接受。checkMode 只支持 `follow`
+   * （跟随软件更新计划；follow 时后端跳过并忽略 interval）。
+   */
+  checkMode?: 'follow' | 'custom';
+  /** beta.7：仅 `pluginCatalog` 接受；落点为软件更新的自动应用开关。 */
+  autoUpdate?: boolean;
 }
 
 /** 立即执行结果（POST /api/scheduled-tasks/{id}/run 响应） */

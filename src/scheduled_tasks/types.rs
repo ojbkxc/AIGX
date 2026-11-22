@@ -127,11 +127,15 @@ impl Default for ScheduledSettings {
 }
 
 /// 改一条任务的 patch：只传要改的字段（`None` = 不改）。
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct IntervalTaskPatch {
     /// 是否启用（`None` = 不改）。
     pub enabled: Option<bool>,
     /// 间隔（`None` = 不改）。
     pub interval: Option<i64>,
+    /// 检查模式（仅 `pluginCatalog` 适用；AIGX 只支持 `"follow"` = 跟随软件更新计划）。
+    pub check_mode: Option<String>,
+    /// 是否随检查自动更新（仅 `pluginCatalog` 适用；落到 `update.auto_apply`）。
+    pub auto_update: Option<bool>,
 }
