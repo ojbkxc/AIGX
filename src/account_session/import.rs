@@ -545,6 +545,24 @@ const A2A_SECRET_KEYS: [&str; 6] = [
     "token",
 ];
 
+/// 插件账号的凭证在顶层 `pluginSecret` 字典里；顶层凭证为空时从这里取
+/// `credential.secret`（按优先级）。officeace 这类多层凭证的首个命中即可作
+/// 主键，其余字段走 `Credential.fields`。
+const A2A_PLUGIN_SECRET_KEYS: [&str; 9] = [
+    "accessToken",
+    "access_token",
+    "session",
+    "modelAppKey",
+    "accessKeyId",
+    "jwt",
+    "token",
+    "apiKey",
+    "secret",
+];
+
+/// `pluginSecret` 内可充当续期令牌的键。
+const A2A_PLUGIN_REFRESH_KEYS: [&str; 3] = ["refreshToken", "refresh_token", "refresh"];
+
 /// 从记录里取第一个非空字符串键。
 fn a2a_first(record: &Map<String, Value>, keys: &[&str]) -> String {
     for key in keys {
@@ -579,7 +597,31 @@ fn a2a_expires_at(record: &Map<String, Value>) -> Option<i64> {
     None
 }
 
-/// 把一条 Agent2API 账号记录（`accounts.data` 的扁平 JSON）映射成
+/// A2A `proxy` 字段归一：字符串直接当地址；`{source:"direct"}` = 直连（None）；
+/// 其它 dict 尝试常见 URL 键，取不到返回 `None`（不臆造代理地址）。
+fn a2a_proxy(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        Some(Value::Object(map)) => {
+            if map.get("source").and_then(Value::as_str) == Some("direct") {
+                return None;
+            }
+            for key in ["url", "server", "address", "endpoint", "host"] {
+                if let Some(text) = map.get(key).and_then(Value::as_str) {
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
 /// AIGX `AccountSession` 草稿。`id` / `provider` / 任何凭证都没有的记录
 /// 返回 None（调用方计入 skipped）。
 pub fn map_agent2api_record(
@@ -596,10 +638,27 @@ pub fn map_agent2api_record(
     }
     let provider = super::registry::normalize_kind(&provider_raw);
 
-    let secret = a2a_first(obj, &A2A_SECRET_KEYS);
-    let refresh = a2a_first(obj, &["refreshToken", "refresh_token"]);
-    // officeace 双键形态：网关凭据 modelAppKey 做 secret（签名主键），
-    // modelAppSecret 进 fields。
+    let plugin_secret = obj.get("pluginSecret").and_then(Value::as_object);
+    let plugin_public = obj.get("pluginPublic").and_then(Value::as_object);
+    let top_secret = a2a_first(obj, &A2A_SECRET_KEYS);
+    let top_refresh = a2a_first(obj, &["refreshToken", "refresh_token"]);
+    // 顶层凭证优先（既有行为不变）；为空时回落到 `pluginSecret` 字典——
+    // Agent2API 的插件账号把凭证放在这里（dict），旧映射只认顶层字符串键，
+    // 导致这类账号被整条跳过。
+    let secret = if top_secret.is_empty() {
+        plugin_secret
+            .map(|ps| a2a_first(ps, &A2A_PLUGIN_SECRET_KEYS))
+            .unwrap_or_default()
+    } else {
+        top_secret
+    };
+    let refresh = if top_refresh.is_empty() {
+        plugin_secret
+            .map(|ps| a2a_first(ps, &A2A_PLUGIN_REFRESH_KEYS))
+            .unwrap_or_default()
+    } else {
+        top_refresh
+    };
     let has_any_credential = !secret.is_empty() || !refresh.is_empty();
     if !has_any_credential {
         return None;
@@ -638,12 +697,33 @@ pub fn map_agent2api_record(
         }
         credential.set_field(key, text);
     }
+    // 插件账号：`pluginSecret` 里其余非空字符串字段原样搬进具名字段（保留
+    // 键名；officeace 的 modelAppKey/modelAppSecret、zcode 的 jwt 等靠它留存）。
+    // 不覆盖顶层已解析出的字段，保持「顶层凭证存在」的既有行为不变。
+    if let Some(ps) = plugin_secret {
+        for (key, value) in ps {
+            let Some(text) = value.as_str() else {
+                continue;
+            };
+            let text = text.trim();
+            if text.is_empty() || credential.fields.contains_key(key) {
+                continue;
+            }
+            credential.set_field(key, text);
+        }
+    }
 
     let mut session = AccountSession::new(channel_id, "");
     session.id = id.clone();
     session.provider = provider;
     session.name = {
-        let name = a2a_first(obj, &["name", "nickname", "email"]);
+        let mut name = a2a_first(obj, &["name", "nickname", "email"]);
+        if name.is_empty() {
+            // 插件账号的展示名常在 `pluginPublic`（A2A 只把它当公开投影）。
+            if let Some(public) = plugin_public {
+                name = a2a_first(public, &["name", "displayName"]);
+            }
+        }
         if name.is_empty() {
             let short: String = id.chars().take(8).collect();
             format!("{provider_raw}-{short}")
@@ -653,7 +733,12 @@ pub fn map_agent2api_record(
     };
     // S5：导入的 base_url 会被网关主动请求（探活/转发），必须过 SSRF 校验。
     // 单条不合规 → 返回 None，由调用方计入 skipped，不影响其余记录。
-    let base_url = a2a_first(obj, &["baseUrl", "base_url", "apiHost", "api_host"]);
+    let mut base_url = a2a_first(obj, &["baseUrl", "base_url", "apiHost", "api_host"]);
+    if base_url.is_empty() {
+        if let Some(public) = plugin_public {
+            base_url = a2a_first(public, &["baseUrl", "base_url"]);
+        }
+    }
     if !base_url.is_empty() {
         if let Err(rej) = crate::net_guard::validate_outbound_url(&base_url, false) {
             tracing::warn!(
@@ -666,8 +751,47 @@ pub fn map_agent2api_record(
     }
     session.base_url = base_url;
     session.refresh_secret = refresh;
-    session.expires_at = a2a_expires_at(obj);
+    // 到期时间：顶层优先，其次 `pluginPublic.expiresAt`（秒/毫秒自动归一）。
+    session.expires_at = a2a_expires_at(obj).or_else(|| {
+        plugin_public
+            .map(|public| a2a_expires_at(public))
+            .unwrap_or(None)
+    });
     session.credential = credential;
+    // 配置态字段保留：A2A `enabled`(bool) → status；其余一等字段存在才搬
+    // （`models`/`extraHeaders` 在 A2A 导出里通常为 null；`proxy` 多为
+    // `{source:"direct"}`）。避免重导把 disabled/优先级/白名单抹平。
+    if let Some(false) = obj.get("enabled").and_then(Value::as_bool) {
+        session.status = "disabled".to_string();
+    }
+    if let Some(priority) = obj.get("priority").and_then(Value::as_i64) {
+        session.priority = priority;
+    }
+    if let Some(models) = obj.get("models").and_then(Value::as_array) {
+        session.models = models
+            .iter()
+            .filter_map(|model| model.as_str())
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    session.proxy = a2a_proxy(obj.get("proxy"));
+    if let Some(headers) = obj
+        .get("extraHeaders")
+        .or_else(|| obj.get("extra_headers"))
+        .and_then(Value::as_object)
+    {
+        session.extra_headers = headers
+            .iter()
+            .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+            .collect();
+    }
+    // 插件公开投影（含插件账号的 uid / displayName 等展示字段）：原样留存，
+    // 供账号池视图读取；`uid` 因此随 `pluginPublic` 一并带回。
+    if let Some(public) = plugin_public {
+        session.plugin_public = Some(Value::Object((*public).clone()));
+    }
 
     // 每账号余额查询配置（A2A `usageQuery` → AIGX 间隔 + 执行参数）。
     // A2A 缺省是「开启、间隔 60s」；显式 `{enabled:false}` 才是关。
@@ -897,5 +1021,158 @@ base_url = "https://stale.example/v1"
                 "internal base_url must be skipped: {base}"
             );
         }
+    }
+
+    #[test]
+    fn agent2api_record_plugin_secret_loomy_session() {
+        // loomy 的凭证是 pluginSecret.session（顶层无凭证）。
+        let record = json!({
+            "id": "loomy-1",
+            "provider": "loomy",
+            "pluginSecret": { "session": "sess-1", "userId": "u-1", "phone": "13800000000" }
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("pluginSecret 应可映射");
+        assert_eq!(session.credential.secret, "sess-1");
+        assert_eq!(session.credential.field_plain("session"), "sess-1");
+        assert_eq!(session.credential.field_plain("userId"), "u-1");
+        assert_eq!(session.credential.field_plain("phone"), "13800000000");
+    }
+
+    #[test]
+    fn agent2api_record_plugin_secret_raccoon_and_public() {
+        // raccoon → xiaohuanxiong；pluginSecret.accessToken 作主凭证，
+        // pluginPublic 回填 name / expiresAt / uid。
+        let record = json!({
+            "id": "racc-1",
+            "provider": "raccoon",
+            "pluginSecret": {
+                "accessToken": "at-1",
+                "userId": "u-1",
+                "officeIdentity": "oid-1"
+            },
+            "pluginPublic": {
+                "name": "Raccoon Display",
+                "uid": "u-1",
+                "expiresAt": 1_900_000_000_000i64
+            }
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("raccoon pluginSecret 应可映射");
+        assert_eq!(session.provider, "xiaohuanxiong");
+        assert_eq!(session.credential.secret, "at-1");
+        assert_eq!(session.credential.field_plain("userId"), "u-1");
+        assert_eq!(session.credential.field_plain("officeIdentity"), "oid-1");
+        // 顶层 name 为空 → 用 pluginPublic.name
+        assert_eq!(session.name, "Raccoon Display");
+        // pluginPublic.expiresAt 毫秒 → 秒
+        assert_eq!(session.expires_at, Some(1_900_000_000));
+        // uid 随 pluginPublic 一并留存
+        assert_eq!(
+            session
+                .plugin_public
+                .as_ref()
+                .and_then(|p| p.get("uid"))
+                .and_then(Value::as_str),
+            Some("u-1")
+        );
+    }
+
+    #[test]
+    fn agent2api_record_plugin_secret_officeace_multi_fields() {
+        // officeace 多层凭证：modelAppKey 作 secret，其余字符串（含
+        // modelAppSecret / accessKeyId）必须进 fields，否则转发必失败。
+        let record = json!({
+            "id": "oa-1",
+            "provider": "officeace",
+            "pluginSecret": {
+                "accessKeyId": "AK",
+                "modelAppKey": "app-key",
+                "modelAppSecret": "app-secret",
+                "secretAccessKey": "SK",
+                "securityToken": "STS",
+                "projectId": "proj-1",
+                "dpopKeyPair": { "private": "x" }
+            }
+        });
+        let session =
+            map_agent2api_record("ch-1", &record).expect("officeace pluginSecret 应可映射");
+        assert_eq!(session.credential.secret, "app-key");
+        assert_eq!(
+            session.credential.field_plain("modelAppSecret"),
+            "app-secret"
+        );
+        assert_eq!(session.credential.field_plain("accessKeyId"), "AK");
+        assert_eq!(session.credential.field_plain("modelAppKey"), "app-key");
+        // 非字符串（dpopKeyPair dict）不入 fields
+        assert!(session.credential.field_plain("dpopKeyPair").is_empty());
+    }
+
+    #[test]
+    fn agent2api_record_plugin_secret_zcode_jwt() {
+        let record = json!({
+            "id": "zc-1",
+            "provider": "zcode-intl",
+            "pluginSecret": {
+                "accessToken": "at-z",
+                "jwt": "jwt-z",
+                "deviceMid": "dev-1",
+                "zcodePlan": "coding-plan"
+            }
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("zcode pluginSecret 应可映射");
+        assert_eq!(session.credential.secret, "at-z");
+        assert_eq!(session.credential.field_plain("jwt"), "jwt-z");
+        assert_eq!(session.credential.field_plain("deviceMid"), "dev-1");
+        assert_eq!(session.credential.field_plain("zcodePlan"), "coding-plan");
+    }
+
+    #[test]
+    fn agent2api_record_preserves_enabled_and_config_fields() {
+        let record = json!({
+            "id": "cfg-1",
+            "provider": "trae",
+            "accessToken": "at-top",
+            "enabled": false,
+            "priority": 42,
+            "models": ["m1", "m2"],
+            "proxy": { "source": "direct" },
+            "extraHeaders": { "x-api-key": "h1" }
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("配置字段应保留");
+        assert_eq!(session.status, "disabled", "enabled=false → disabled");
+        assert_eq!(session.priority, 42);
+        assert_eq!(session.models, vec!["m1".to_string(), "m2".to_string()]);
+        assert!(session.proxy.is_none(), "{{source:direct}} = 直连");
+        assert_eq!(
+            session.extra_headers.get("x-api-key"),
+            Some(&"h1".to_string())
+        );
+        // 顶层凭证优先（既有路径不变）
+        assert_eq!(session.credential.secret, "at-top");
+    }
+
+    #[test]
+    fn agent2api_record_enabled_true_and_proxy_url() {
+        let record = json!({
+            "id": "cfg-2",
+            "provider": "trae",
+            "accessToken": "at-top",
+            "enabled": true,
+            "proxy": "http://127.0.0.1:7890"
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("可用");
+        assert_eq!(session.status, "enabled");
+        assert_eq!(session.proxy.as_deref(), Some("http://127.0.0.1:7890"));
+    }
+
+    #[test]
+    fn agent2api_record_top_level_secret_wins_over_plugin_secret() {
+        let record = json!({
+            "id": "pref-1",
+            "provider": "loomy",
+            "accessToken": "top-secret",
+            "pluginSecret": { "accessToken": "inner-secret", "session": "s1" }
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("顶层凭证路径不变");
+        assert_eq!(session.credential.secret, "top-secret");
     }
 }
