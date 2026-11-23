@@ -1540,7 +1540,11 @@ export default function PurgeConsole(): JSX.Element {
     [addToast, t],
   );
 
-  /** 导入 CSV → 追加进草稿（与「添加规则」同口径：不整表替换，重复项靠行内提示） */
+  /**
+   * 导入 CSV → 追加进草稿（与「添加规则」同口径：不整表替换，重复项靠行内提示）。
+   * 导入前对现有草稿做 from 冲突预检：全部重复 → 警告口径（可能导错文件/表）；
+   * 部分重复 → 成功口径附重复数；行内 `——dupHint` 仍逐行标注。
+   */
   const importRulesCsv = useCallback(
     async (kind: 'dead_zone' | 'synonym', file: File | null): Promise<void> => {
       if (!file) return;
@@ -1552,6 +1556,19 @@ export default function PurgeConsole(): JSX.Element {
         }
         if (parsed.length === 0) {
           addToast(t('导入失败：文件里没有规则行'), 'error');
+          return;
+        }
+        const existing = draftRef.current;
+        const existingFroms = new Set(
+          (kind === 'dead_zone' ? existing?.rewrite_rules ?? [] : existing?.synonym_pairs ?? [])
+            .map((r) => r.from.trim().toLowerCase())
+            .filter(Boolean),
+        );
+        const incomingFroms = parsed.map((r) => r.from.trim().toLowerCase());
+        const dupCount = incomingFroms.filter((f) => existingFroms.has(f)).length;
+        if (dupCount === parsed.length) {
+          // 一条都不新：大概率导错了表或旧文件——直接不追加，给出口
+          addToast(t('导入的 {{count}} 条规则的原文全部与当前词表重复，未追加（可能导错了文件？）', { count: parsed.length }), 'warning');
           return;
         }
         setDirty(true);
@@ -1566,11 +1583,15 @@ export default function PurgeConsole(): JSX.Element {
               }
             : d,
         );
-        addToast(
+        const base =
           kind === 'dead_zone'
             ? t('已追加 {{count}} 条死区词到草稿，检查无误后点「保存」生效', { count: parsed.length })
-            : t('已追加 {{count}} 条同义词到草稿，检查无误后点「保存」生效', { count: parsed.length }),
-          'success',
+            : t('已追加 {{count}} 条同义词到草稿，检查无误后点「保存」生效', { count: parsed.length });
+        addToast(
+          dupCount > 0
+            ? `${base} · ${t('其中 {{n}} 条与现有词表原文重复（保存时后端只保留最早一条）', { n: dupCount })}`
+            : base,
+          dupCount > 0 ? 'warning' : 'success',
         );
       } catch {
         addToast(t('导入失败：无法读取文件'), 'error');
