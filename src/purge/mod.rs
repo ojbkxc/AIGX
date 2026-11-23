@@ -1371,18 +1371,25 @@ pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
     if cfg.dead_zone_rewrite && cfg.synonym_enabled {
         // 链式改写：A 表的 to 是 B 表的 from（或同表内互为前后缀）时，
         // 同一段文本会被改两次，最终结果与管理员预期可能不一致。
+        //
+        // 只看**启用行**：`RewriteRule::enabled=false` 的行不参与改写，
+        // 拿它报链式告警是纯粹的噪音（用户刚停用它就是为了掐掉这条链）。
+        let active_syn: Vec<&RewriteRule> =
+            cfg.synonym_pairs.iter().filter(|b| b.enabled).collect();
         let chains: Vec<String> = cfg
             .rewrite_rules
             .iter()
+            .filter(|a| a.enabled)
             .enumerate()
             .filter(|&(_, a)| !a.to.is_empty())
             .filter(|&(i, a)| {
-                cfg.synonym_pairs
+                active_syn
                     .iter()
                     .any(|b| !b.from.is_empty() && a.to.contains(&b.from))
                     || cfg
                         .rewrite_rules
                         .iter()
+                        .filter(|b| b.enabled)
                         .enumerate()
                         .any(|(j, b)| i != j && !b.from.is_empty() && a.to.contains(&b.from))
             })
@@ -2222,6 +2229,29 @@ mod tests {
             to: "YYY".to_string(),
             enabled: true,
         }];
+        assert!(config_warnings(&cfg)
+            .iter()
+            .all(|w| !w.contains("链式二次改写")));
+
+        // 停用其中一侧 → 链已断，不得再报（用户刚停用它就是为了掐掉）
+        cfg.synonym_pairs = vec![RewriteRule {
+            from: "BBB".to_string(),
+            to: "CCC".to_string(),
+            enabled: false,
+        }];
+        assert!(
+            config_warnings(&cfg)
+                .iter()
+                .all(|w| !w.contains("链式二次改写")),
+            "停用行不参与链式判定"
+        );
+        // 死区词侧停用同理
+        cfg.synonym_pairs = vec![RewriteRule {
+            from: "BBB".to_string(),
+            to: "CCC".to_string(),
+            enabled: true,
+        }];
+        cfg.rewrite_rules[0].enabled = false;
         assert!(config_warnings(&cfg)
             .iter()
             .all(|w| !w.contains("链式二次改写")));
