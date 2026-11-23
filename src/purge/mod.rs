@@ -1365,6 +1365,8 @@ pub struct ConfigWarning {
 /// - `chained_rewrite` → 死区词表
 /// - `structured_empty` → 选中默认模板（模板卡区域）
 /// - `preset_missing` → 固定套用预设 id 输入框
+/// - `dead_zone_all_disabled` → 死区词表
+/// - `synonym_all_disabled` → 同义词表
 pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
     let mut warnings = Vec::new();
     if !cfg.enabled {
@@ -1459,6 +1461,33 @@ pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
                 ),
             });
         }
+    }
+    // 开关开着但整张表被单条停用 → 功能实际为 0 生效（用户逐个关掉后忘了关开关）。
+    // 只查「表非空且全部禁用」：空表由 `dead_zone_rewrite && is_empty` 场景覆盖
+    // 不到（空表本身不告警，那是合法的未配置态）。
+    if cfg.dead_zone_rewrite
+        && !cfg.rewrite_rules.is_empty()
+        && cfg.rewrite_rules.iter().all(|rule| !rule.enabled)
+    {
+        warnings.push(ConfigWarning {
+            code: "dead_zone_all_disabled",
+            message: format!(
+                "死区词改写开着，但词表里 {} 条规则全部被单独停用：不会有任何改写发生。",
+                cfg.rewrite_rules.len()
+            ),
+        });
+    }
+    if cfg.synonym_enabled
+        && !cfg.synonym_pairs.is_empty()
+        && cfg.synonym_pairs.iter().all(|rule| !rule.enabled)
+    {
+        warnings.push(ConfigWarning {
+            code: "synonym_all_disabled",
+            message: format!(
+                "同义词替换开着，但表里 {} 条规则全部被单独停用：不会有任何替换发生。",
+                cfg.synonym_pairs.len()
+            ),
+        });
     }
     if cfg.structured_prompt && cfg.active_structured_text().trim().is_empty() {
         warnings.push(ConfigWarning {
@@ -2403,6 +2432,46 @@ mod tests {
             messages[0].content.as_deref(),
             Some("prompt\n\nDEFAULT-SUFFIX")
         );
+    }
+
+    /// 开关开着但整表被单条停用 → 实际 0 生效（须告警）；空表不告警。
+    #[test]
+    fn warns_when_all_rules_are_individually_disabled() {
+        let mut cfg = enabled();
+        cfg.dead_zone_rewrite = true;
+        cfg.synonym_enabled = true;
+        cfg.rewrite_rules = vec![RewriteRule {
+            from: "a".into(),
+            to: "b".into(),
+            enabled: false,
+        }];
+        cfg.synonym_pairs = vec![RewriteRule {
+            from: "c".into(),
+            to: "d".into(),
+            enabled: false,
+        }];
+        let items = config_warning_items(&cfg);
+        assert!(
+            items.iter().any(|w| w.code == "dead_zone_all_disabled"),
+            "死区词全停用应告警: {items:?}"
+        );
+        assert!(
+            items.iter().any(|w| w.code == "synonym_all_disabled"),
+            "同义词全停用应告警: {items:?}"
+        );
+
+        // 至少一条启用 → 不告警
+        cfg.rewrite_rules[0].enabled = true;
+        let items = config_warning_items(&cfg);
+        assert!(items.iter().all(|w| w.code != "dead_zone_all_disabled"));
+
+        // 空表 → 不告警（合法的未配置态）
+        cfg.rewrite_rules.clear();
+        cfg.synonym_pairs.clear();
+        let items = config_warning_items(&cfg);
+        assert!(items
+            .iter()
+            .all(|w| w.code != "dead_zone_all_disabled" && w.code != "synonym_all_disabled"));
     }
 
     /// 上次运行快照的读侧校验：坏值当无记录（不把离谱数字送到管理面）。

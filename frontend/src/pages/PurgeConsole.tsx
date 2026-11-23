@@ -153,6 +153,8 @@ const FIX_TARGETS: Record<string, string> = {
   skill_dir_empty: 'skill-dir',
   skill_keyword_short: 'skill-snapshot',
   chained_rewrite: 'dead-zone-table',
+  dead_zone_all_disabled: 'dead-zone-table',
+  synonym_all_disabled: 'synonym-table',
   structured_empty: 'templates',
   preset_missing: 'auto-preset-id',
 };
@@ -2110,7 +2112,7 @@ export default function PurgeConsole(): JSX.Element {
         {draft.synonym_pairs.length === 0 ? (
           <p className="purge-empty">{t('暂无同义词，点击右上角「添加规则」新建一条')}</p>
         ) : (
-          <div className="purge-rules" ref={synRulesRef}>
+          <div className="purge-rules" ref={synRulesRef} data-purge-fix="synonym-table">
             {draft.synonym_pairs.map((rule, index) => (
               <RuleRow
                 key={index}
