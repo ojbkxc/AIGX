@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-23T10:29:05.269Z",
+  "generatedAt": "2026-11-23T20:23:12.015Z",
   "upstreamRoot": "D:\\GitHub\\Agent2API\\desktop-tauri\\src-tauri\\server\\src\\server\\core\\plugin_host",
   "note": "已知并已分类的缺口。--check 只对基线之外的漂移报红。",
   "methodsOnlyUpstream": [
@@ -66,5 +66,9 @@
     "managed_task.end",
     "native.helpers"
   ],
+  "capabilitiesOnlyUpstream": [],
+  "capabilitiesOnlyAigx": [],
+  "servedOnlyUpstream": [],
+  "servedOnlyAigx": [],
   "servedWithoutGuard": []
 }

@@ -299,9 +299,16 @@ function main() {
   }
 
   // ── 基线：只对「新增漂移」报红，存量缺口是已知并已分类的 ──────────────
+  // 能力差集必须进基线判定：2026-11-24 v3.5.1 的 login.sms.alicom4.v1
+  // 漏报就是因为它不在 baselineShape 里——上游新增能力时 --check 依旧绿。
+  // modules 差集体量大且随上游重构波动（已分类文档化），维持不进 check。
   const baselineShape = {
     methodsOnlyUpstream: report.gaps.methodsOnlyUpstream,
     methodsOnlyAigx: report.gaps.methodsOnlyAigx,
+    capabilitiesOnlyUpstream: report.gaps.capabilitiesOnlyUpstream,
+    capabilitiesOnlyAigx: report.gaps.capabilitiesOnlyAigx,
+    servedOnlyUpstream: report.gaps.servedOnlyUpstream ?? [],
+    servedOnlyAigx: report.gaps.servedOnlyAigx ?? [],
     servedWithoutGuard: report.gaps.servedWithoutGuard,
   };
 
