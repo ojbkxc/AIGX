@@ -1497,6 +1497,12 @@ export interface AccountSessionItem {
    */
   email?: string | null;
   provider: string;
+  /**
+   * provider 可读展示名（后端 v1.0.94 下发）：原生家=注册表 label、
+   * `custom-*`=「自定义供应商」、其它未知 kind 原样回 kind。
+   * UI 的 provider 列/筛选条/分组带优先读它，杜绝空供应商行。
+   */
+  provider_label?: string;
   base_url?: string;
   /** 账号级对话路径覆盖（如 /api/chat），null = 默认 /chat/completions */
   chat_path?: string | null;
@@ -2765,9 +2771,24 @@ export interface PurgeSettings {
   upstream_label: string;
 }
 
+/** 预览命中明细（后端 `AppliedDetail`，snake_case；旧后端不返回 → undefined） */
+export interface PurgeAppliedDetail {
+  normalized?: number;
+  dead_zone_rules?: number;
+  dead_zone_replacements?: number;
+  synonym_rules?: number;
+  synonym_replacements?: number;
+  structured_appended?: boolean;
+  skill_names?: string[];
+  skill_truncated?: boolean;
+  /** 每个命中技能触发匹配的关键词 `[技能名, 关键词]`（与 skill_names 同序） */
+  skill_keywords?: Array<[string, string]>;
+}
+
 /** POST /api/purge/preview 的 data 结构（dry-run 试跑结果） */
 export interface PurgePreviewResult {
   applied: { changed: boolean; skill_hit: boolean };
+  detail?: PurgeAppliedDetail;
   messages: Array<{ role: string; content: string | null }>;
 }
 
@@ -2787,6 +2808,12 @@ export interface PurgeStats {
   auto_preset_hits?: number;
 }
 
+/** 时间窗统计（事件环派生；`truncated` = 环溢出，窗口值为下界估计） */
+export interface PurgeWindowedStats extends PurgeStats {
+  window_ms: number;
+  truncated?: boolean;
+}
+
 /** 破甲控制台运行信息 */
 export interface PurgeRuntime {
   pid: number;
@@ -2803,6 +2830,12 @@ export interface PurgeSkillBrief {
   body_chars: number;
 }
 
+/** 配置体检告警（结构化形态：code 为稳定机器码，前端据此跳修复入口） */
+export interface PurgeConfigWarning {
+  code: string;
+  message: string;
+}
+
 /** GET /api/purge 的 data 结构 */
 export interface PurgeData {
   settings: PurgeSettings;
@@ -2812,6 +2845,11 @@ export interface PurgeData {
   config_warnings?: string[];
   /** 技能目录扫描快照（旧版后端不返回） */
   skills?: PurgeSkillBrief[];
+  /** 时间窗统计（近 1h / 24h；旧版后端不返回时统计卡只有全程口径） */
+  stats_1h?: PurgeWindowedStats;
+  stats_24h?: PurgeWindowedStats;
+  /** 配置体检告警（结构化：带 code；旧后端只有 config_warnings 字符串） */
+  config_warning_items?: PurgeConfigWarning[];
 }
 
 /** 破甲预设库 · 列表条目（GET /api/purge/presets，不含正文，只带预览） */

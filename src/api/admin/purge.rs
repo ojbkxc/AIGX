@@ -394,6 +394,7 @@ pub async fn handle_preview_purge(
         "success": true,
         "data": {
             "applied": { "changed": applied.changed, "skill_hit": applied.skill_hit },
+            "detail": applied.detail,
             "messages": out,
         }
     })))
@@ -406,8 +407,14 @@ fn payload(state: &AppState) -> Value {
         "data": {
             "settings": settings.as_ref(),
             "stats": crate::purge::snapshot(),
-            // 配置体检：「开了但不生效 / 自相矛盾」的静态检查结果
+            // 时间窗计数（beta 迭代：1h / 24h；前端切换统计口径用）
+            "stats_1h": crate::purge::windowed_snapshot(3_600_000),
+            "stats_24h": crate::purge::windowed_snapshot(86_400_000),
+            // 配置体检：「开了但不生效 / 自相矛盾」的静态检查结果。
+            // `config_warning_items` 带 code（前端跳修复入口）；`config_warnings`
+            // 旧字符串形态保留（旧前端兼容）。
             "config_warnings": crate::purge::config_warnings(&settings),
+            "config_warning_items": crate::purge::config_warning_items(&settings),
             // 技能目录扫描快照（名称+关键词+正文字符数；skill_inject 配置的可验证性）
             "skills": crate::purge::skill_briefs(&settings.skill_dir),
             "runtime": {

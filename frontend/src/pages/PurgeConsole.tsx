@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { api } from '../api';
 import type {
+  PurgeAppliedDetail,
   PurgeData,
   PurgePresetBrief,
   PurgePresetDetail,
@@ -25,7 +26,7 @@ import {
   Switch,
   Textarea,
 } from '../components/ui';
-import { downloadText } from '../lib/format';
+import { downloadText, toCsv } from '../lib/format';
 import { useToast } from '../components/Toast';
 import './PurgeConsole.css';
 
@@ -141,6 +142,281 @@ const REASONING_FLOORS: Array<{ value: string; label: string }> = [
   { value: 'minimal', label: 'minimal' },
 ];
 
+/**
+ * 配置体检告警 code → 修复入口锚点（`data-purge-fix` 属性值）。
+ * 与后端 `config_warning_items` 的 code 注释保持同步。
+ */
+const FIX_TARGETS: Record<string, string> = {
+  fallback_empty: 'fallback-models',
+  fallback_after_retry: 'fallback-attempts',
+  skill_dir_empty: 'skill-dir',
+  chained_rewrite: 'dead-zone-table',
+  structured_empty: 'templates',
+  preset_missing: 'auto-preset-id',
+};
+
+/** 滚动到修复入口并聚焦（输入框 focus；卡片/表格只滚动高亮）。 */
+function focusFixTarget(anchor: string): void {
+  const el = document.querySelector(`[data-purge-fix="${anchor}"]`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('purge-fix-flash');
+  window.setTimeout(() => el.classList.remove('purge-fix-flash'), 1800);
+  if (el instanceof HTMLElement) el.focus({ preventScroll: true });
+}
+
+/**
+ * 预览输出 diff：行级 LCS 对齐 + 行内词级高亮（未变行原样）。
+ *
+ * 返回带标记的行序列，渲染层把 `-`/`+` 染红绿、`~` 拆前后缀染色。
+ * 规模控制：行 DP O(行数²)，预览样例几十行内；行内词级对「成对出现的
+ * 改写行」做词 LCS（词数几十内）。超过 400 行整段退化为：
+ * 旧文本整红 + 新文本整绿（不追精确 diff，防卡顿）。
+ */
+export type PreviewDiffRow =
+  | { kind: 'ctx'; text: string }
+  | { kind: 'del'; text: string }
+  | { kind: 'add'; text: string }
+  | { kind: 'mod'; del: string; add: string };
+
+/** 词级切分：CJK 单字成词 + 连续 ASCII 字母数字/符号段成词。 */
+function splitTokens(line: string): string[] {
+  const tokens: string[] = [];
+  let buf = '';
+  const isCjk = (ch: string): boolean => /[\u3000-\u9fff\uff00-\uffef]/.test(ch);
+  for (const ch of line) {
+    if (isCjk(ch)) {
+      if (buf) { tokens.push(buf); buf = ''; }
+      tokens.push(ch);
+    } else if (/\s/.test(ch)) {
+      if (buf) { tokens.push(buf); buf = ''; }
+      tokens.push(ch);
+    } else {
+      buf += ch;
+    }
+  }
+  if (buf) tokens.push(buf);
+  return tokens;
+}
+
+/** 行级 LCS（O(n·m)，双序列回溯）。空串安全。 */
+function lcsRows(a: string[], b: string[]): Array<{ take: 'a' | 'b' | 'both' }> {
+  const n = a.length;
+  const m = b.length;
+  // DP 表压两行
+  let prev = new Array<number>(m + 1).fill(0);
+  let cur = new Array<number>(m + 1).fill(0);
+  // 回溯需要的全表——行数小（≤400）可以接受 O(n·m) 数字矩阵
+  const table: number[][] = [];
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      cur[j] = a[i] === b[j] ? prev[j + 1] + 1 : Math.max(prev[j], cur[j + 1]);
+    }
+    table.unshift(cur.slice());
+    const swap = prev; prev = cur; cur = swap;
+  }
+  // table[i][j] = a[i..] 与 b[j..] 的 LCS 长度
+  const out: Array<{ take: 'a' | 'b' | 'both' }> = [];
+  // 注意 table 存的行序：unshift 使 table[i] 对应 a 从 i 起
+  let i = 0; let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ take: 'both' }); i += 1; j += 1; }
+    else if ((table[i + 1]?.[j] ?? 0) >= (table[i]?.[j + 1] ?? 0)) { out.push({ take: 'a' }); i += 1; }
+    else { out.push({ take: 'b' }); j += 1; }
+  }
+  while (i < n) { out.push({ take: 'a' }); i += 1; }
+  while (j < m) { out.push({ take: 'b' }); j += 1; }
+  return out;
+}
+
+/** 主入口：old → new 的行级 diff；同位增删行折叠为 `mod`（行内词级染色由渲染层做）。 */
+export function diffLines(oldText: string, newText: string): PreviewDiffRow[] {
+  const a = oldText.split('\n');
+  const b = newText.split('\n');
+  if (a.length * b.length > 400 * 400) {
+    // 超大样例：整体红绿，不做精确 diff
+    return [
+      ...a.map((text): PreviewDiffRow => ({ kind: 'del', text })),
+      ...b.map((text): PreviewDiffRow => ({ kind: 'add', text })),
+    ];
+  }
+  const steps = lcsRows(a, b);
+  const out: PreviewDiffRow[] = [];
+  let ai = 0; let bi = 0;
+  let pendingDel: string[] = [];
+  let pendingAdd: string[] = [];
+  const flush = (): void => {
+    // 配对折叠：取 min(len) 对成 mod 行（渲染层做行内词级染色），余量整行 del/add
+    const pairs = Math.min(pendingDel.length, pendingAdd.length);
+    for (let k = 0; k < pairs; k += 1) {
+      out.push({ kind: 'mod', del: pendingDel[k], add: pendingAdd[k] });
+    }
+    for (let k = pairs; k < pendingDel.length; k += 1) out.push({ kind: 'del', text: pendingDel[k] });
+    for (let k = pairs; k < pendingAdd.length; k += 1) out.push({ kind: 'add', text: pendingAdd[k] });
+    pendingDel = []; pendingAdd = [];
+  };
+  for (const step of steps) {
+    if (step.take === 'both') { flush(); out.push({ kind: 'ctx', text: a[ai] }); ai += 1; bi += 1; }
+    else if (step.take === 'a') { pendingDel.push(a[ai]); ai += 1; }
+    else { pendingAdd.push(b[bi]); bi += 1; }
+  }
+  flush();
+  return out;
+}
+
+/**
+ * `mod` 行内部的词级 diff（渲染用）：返回 `{ keep1, del, keep2, add, keep3 }`
+ * ——keep 部分原样渲染，del/add 染色。首尾公共前后缀先剥离；中段用
+ * 贪心双指针求公共子序列做 keep2，其余归 del / add（词数几十内，足够快）。
+ */
+export function diffTokensInLine(
+  oldLine: string,
+  newLine: string,
+): { keep1: string; del: string; keep2: string; add: string; keep3: string } {
+  if (oldLine === newLine) return { keep1: oldLine, del: '', keep2: '', add: '', keep3: '' };
+  const a = splitTokens(oldLine);
+  const b = splitTokens(newLine);
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p += 1;
+  let s = 0;
+  while (
+    s < a.length - p && s < b.length - p &&
+    a[a.length - 1 - s] === b[b.length - 1 - s]
+  ) s += 1;
+  const keep1 = a.slice(0, p).join('');
+  const keep3 = a.slice(a.length - s).join('');
+  const midA = a.slice(p, a.length - s);
+  const midB = b.slice(p, b.length - s);
+  if (midA.length === 0 || midB.length === 0) {
+    return { keep1, del: midA.join(''), keep2: '', add: midB.join(''), keep3 };
+  }
+  let del = '';
+  let add = '';
+  let keep2 = '';
+  let i = 0; let j = 0;
+  while (i < midA.length && j < midB.length) {
+    if (midA[i] === midB[j]) { keep2 += midA[i]; i += 1; j += 1; }
+    else if (midB.slice(j + 1).includes(midA[i])) { add += midB[j]; j += 1; }
+    else { del += midA[i]; i += 1; }
+  }
+  while (i < midA.length) { del += midA[i]; i += 1; }
+  while (j < midB.length) { add += midB[j]; j += 1; }
+  return { keep1, del, keep2, add, keep3 };
+}
+
+/**
+ * 预览输入解析：支持两种形态。
+ *
+ * 1. 裸文本（现状）：整段视作单条 user 消息。
+ * 2. 角色前缀行：以 `system:` / `user:` / `assistant:`（大小写不限，冒号后
+ *    至少一个空白）开头的行开启一条消息；后续无前缀行并入当前消息。
+ *    粘贴整段对话即可进 dry-run——归一化作用于多条 system，死区词/同义词
+ *    同时改 system+user（与线上链路口径一致）。
+ *
+ * 不含 `tool` 角色：改写链只处理 system/user，开放只会误导。
+ */
+export function parsePreviewMessages(
+  text: string,
+): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+  const out: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
+  let current: { role: 'system' | 'user' | 'assistant'; lines: string[] } | null = null;
+  const ROLE_RE = /^(system|user|assistant):\s+(.*)$/i;
+  const flush = (): void => {
+    if (current) {
+      // 尾部空行只可能是「结尾空白/残留 CR」——剔除；内容中间的空行保留。
+      while (current.lines.length > 0 && current.lines[current.lines.length - 1].trim() === '') {
+        current.lines.pop();
+      }
+      const content = current.lines.join('\n');
+      if (content.trim() !== '') out.push({ role: current.role, content });
+    }
+    current = null;
+  };
+  for (const rawLine of text.split(/\r?\n/)) {
+    const m = rawLine.match(ROLE_RE);
+    if (m) {
+      flush();
+      current = {
+        role: m[1].toLowerCase() as 'system' | 'user' | 'assistant',
+        lines: [m[2]],
+      };
+    } else if (current) {
+      current.lines.push(rawLine);
+    } else {
+      // 无前缀引导且尚未开消息：裸文本形态，整段累积为 user
+      current = { role: 'user', lines: [rawLine] };
+    }
+  }
+  flush();
+  return out;
+}
+
+/**
+ * 词表 CSV 解析（RFC 4180 最小实现：引号包裹/双引号转义/换行内嵌/CRLF/BOM）。
+ *
+ * 只接受两列；首行表头（`from,to` 或中文列名变体）可选；空行跳过；
+ * 任何行不是两列或 `from` 为空 → 整单拒绝（`null`），不做半截导入。
+ * 与 `lib/format.ts::toCsv` 对偶：本函数的输出可直接 `toCsv` 回写。
+ */
+export function parseRulesCsv(text: string): { from: string; to: string }[] | null {
+  const rows: string[][] = [];
+  let field = '';
+  let row: string[] = [];
+  let quoted = false;
+  const pushField = (): void => {
+    row.push(field);
+    field = '';
+  };
+  const pushRow = (): void => {
+    pushField();
+    rows.push(row);
+    row = [];
+  };
+  const src = text.replace(/^\uFEFF/, '');
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          field += '"';
+          i += 1;
+        } else {
+          quoted = false;
+        }
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ',') {
+      pushField();
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && src[i + 1] === '\n') i += 1;
+      pushRow();
+    } else {
+      field += ch;
+    }
+  }
+  if (field !== '' || row.length > 0) pushRow();
+  const body = rows.filter((r) => r.length > 0 && r.some((cell) => cell.trim() !== ''));
+  if (body.length === 0) return [];
+  // 首行是表头（两列且都命中已知表头词）→ 丢弃。
+  const HEAD_WORDS = new Set(['from', 'to', '原文', '改写为', '敏感词', '同义词']);
+  const first = body[0].map((cell) => cell.trim().toLowerCase());
+  if (first.length === 2 && first.every((cell) => HEAD_WORDS.has(cell))) {
+    body.shift();
+  }
+  const out: { from: string; to: string }[] = [];
+  for (const cells of body) {
+    if (cells.length !== 2) return null;
+    const from = cells[0].trim();
+    const to = cells[1].trim();
+    if (!from) return null;
+    out.push({ from, to });
+  }
+  return out;
+}
+
 function formatUptime(total: number, units: { sec: string; min: string; hour: string; day: string }): string {
   const seconds = Math.max(0, Math.floor(total));
   if (seconds < 60) return `${seconds} ${units.sec}`;
@@ -149,6 +425,50 @@ function formatUptime(total: number, units: { sec: string; min: string; hour: st
     return `${Math.floor(seconds / 3600)} ${units.hour} ${Math.floor((seconds % 3600) / 60)} ${units.min}`;
   }
   return `${Math.floor(seconds / 86400)} ${units.day}`;
+}
+
+// ── 预览样例历史（localStorage，最近 8 条；微调词表时反复对照用）──────────
+
+const PREVIEW_HISTORY_KEY = 'aigx.purge.previewHistory';
+const PREVIEW_HISTORY_MAX = 8;
+/** 单条上限：超出不入库（防整段协议粘贴把 localStorage 撑爆，5MB 限额） */
+const PREVIEW_HISTORY_ITEM_MAX = 4096;
+
+/** 读历史：坏 JSON / 非字符串数组 → 空表。 */
+export function readPreviewHistory(get: (k: string) => string | null): string[] {
+  try {
+    const raw = JSON.parse(get(PREVIEW_HISTORY_KEY) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((x): x is string => typeof x === 'string').slice(0, PREVIEW_HISTORY_MAX);
+  } catch {
+    return [];
+  }
+}
+
+/** 写历史：新样例去重置顶（去掉旧同值），截断到 8 条。 */
+export function writePreviewHistory(
+  items: string[],
+  sample: string,
+  set: (k: string, v: string) => void,
+): string[] {
+  const next = [
+    sample,
+    ...items.filter((x) => x !== sample),
+  ].filter((x) => x.trim() !== '').slice(0, PREVIEW_HISTORY_MAX);
+  try {
+    set(PREVIEW_HISTORY_KEY, JSON.stringify(next));
+  } catch {
+    // localStorage 满/禁用：静默，预览本体不受影响
+  }
+  return next;
+}
+
+/** 历史条目的展示摘要：首行截 46 字符（角色前缀形态保留前缀可读性）。 */
+export function previewHistoryLabel(sample: string): string {
+  const first = sample.split(/\r?\n/, 1)[0] ?? '';
+  const prefix = /^(system|user|assistant):\s/i.test(first) ? '~ ' : '';
+  const text = first.replace(/^(system|user|assistant):\s+/i, (m) => m);
+  return prefix + (text.length > 46 ? `${text.slice(0, 46)}…` : text);
 }
 
 /** 数字字段字符串镜像初值（从服务端配置派生） */
@@ -220,27 +540,36 @@ const RuleRow = memo(function RuleRow({
 });
 
 /**
- * 统计卡组（memo）：入参只有服务端快照派生值，编辑表单文本时不重画。
+ * 统计卡组（memo）：入参只有服务端快照派生值 + 窗口摘要，编辑表单文本时不重画。
+ *
+ * `suffix`：窗口标记（如「近 1 小时」）拼在各卡标题后；`atLeast`
+ * 为 true 时值前缀「≥」（事件环溢出后窗口值为下界估计）。
  */
 const StatsGrid = memo(function StatsGrid({
   stats,
   retryRate,
+  suffix,
+  atLeast,
   t,
 }: {
   stats: PurgeStats;
   retryRate: string;
+  suffix?: string;
+  atLeast?: boolean;
   t: TFunction;
 }): JSX.Element {
+  const mk = (base: string): string => (suffix ? `${base} · ${suffix}` : base);
+  const v = (n: number): string => (atLeast ? `≥ ${n}` : String(n));
   return (
     <div className="purge-stats" role="group" aria-label={t('统计')}>
-      <StatCard title={t('响应总数')} value={stats.responses} />
-      <StatCard title={t('重试率')} value={`${retryRate}%`} />
-      <StatCard title={t('重试次数')} value={stats.retries} />
-      <StatCard title={t('提前收效')} value={stats.early_success} />
-      <StatCard title={t('技能命中')} value={stats.skill_hits} />
-      <StatCard title={t('拒绝样本')} value={stats.refusals} />
-      <StatCard title={t('同义词命中')} value={stats.synonym_hits} />
-      <StatCard title={t('自动套用')} value={stats.auto_preset_hits ?? 0} />
+      <StatCard title={mk(t('响应总数'))} value={v(stats.responses)} />
+      <StatCard title={mk(t('重试率'))} value={`${atLeast ? '≥ ' : ''}${retryRate}%`} />
+      <StatCard title={mk(t('重试次数'))} value={v(stats.retries)} />
+      <StatCard title={mk(t('提前收效'))} value={v(stats.early_success)} />
+      <StatCard title={mk(t('技能命中'))} value={v(stats.skill_hits)} />
+      <StatCard title={mk(t('拒绝样本'))} value={v(stats.refusals)} />
+      <StatCard title={mk(t('同义词命中'))} value={v(stats.synonym_hits)} />
+      <StatCard title={mk(t('自动套用'))} value={v(stats.auto_preset_hits ?? 0)} />
     </div>
   );
 });
@@ -530,6 +859,8 @@ const PresetsSection = memo(function PresetsSection({
         if (!full) throw new Error('detail failed');
         onApplyTemplate(full.title, full.body);
         addToast(t('已写入模板草稿，点底部「保存」后生效'), 'success');
+        // 写入后立即把模板编辑区带到眼前并闪一下（词表很长时落点在页面底部）
+        focusFixTarget('templates');
       } catch {
         addToast(t('应用预设失败'), 'error');
       } finally {
@@ -721,13 +1052,32 @@ export default function PurgeConsole(): JSX.Element {
   // 改写预览（dry-run）：样例输入 + 改写结果（不写统计）
   const [previewInput, setPreviewInput] = useState('');
   const [previewOut, setPreviewOut] = useState<string | null>(null);
+  /** 改写前基线（与 previewOut 同构：单条纯文本 / 多条 `[role]` 分段），diff 用 */
+  const [previewBase, setPreviewBase] = useState<string | null>(null);
+  /** 预览样例历史（localStorage；成功跑过一次的输入，快速回填对照） */
+  const [previewHistory, setPreviewHistory] = useState<string[]>(() =>
+    readPreviewHistory((k) => window.localStorage.getItem(k)),
+  );
   const [previewing, setPreviewing] = useState(false);
   const [previewMeta, setPreviewMeta] = useState<{ changed: boolean; skill_hit: boolean } | null>(null);
-  // 配置体检告警 + 技能快照（GET /api/purge 附带；旧版后端不返回则无展示）
+  /**
+   * 预览命中明细（后端 `AppliedDetail`，snake_case 序列化）。旧版后端不返回
+   * `detail` 字段 → 保持 null，明细区不渲染（向前兼容）。
+   */
+  const [previewDetail, setPreviewDetail] = useState<PurgeAppliedDetail | null>(null);
+  // 配置体检告警（结构化优先；旧后端只有字符串 → code 为空只读展示） + 技能快照
   const [configWarnings, setConfigWarnings] = useState<string[]>([]);
+  const [configWarningItems, setConfigWarningItems] = useState<
+    Array<{ code: string; message: string }>
+  >([]);
   const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
+  // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
+  const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h'>('all');
   // 导入配置文件选择
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  // 词表 CSV 导入（死区词/同义词各一个 input，value 清空允许连续导同名文件）
+  const deadZoneCsvRef = useRef<HTMLInputElement | null>(null);
+  const synonymCsvRef = useRef<HTMLInputElement | null>(null);
   // 技能包导入（ZIP/TAR/TGZ → 技能目录）
   const [skillPkgName, setSkillPkgName] = useState('');
   const [skillPkgOverwrite, setSkillPkgOverwrite] = useState(false);
@@ -789,6 +1139,7 @@ export default function PurgeConsole(): JSX.Element {
       setNumRaw(numRawOf(res.data.settings));
       setNumErrors({});
       setConfigWarnings(res.data.config_warnings ?? []);
+      setConfigWarningItems(res.data.config_warning_items ?? []);
       setSkills(res.data.skills ?? []);
       setDirty(false);
     } catch {
@@ -1025,11 +1376,19 @@ export default function PurgeConsole(): JSX.Element {
     });
   }, []);
 
-  /** 改写预览：以当前草稿为配置试跑样例输入（dry-run，不写统计、不落库） */
+  /**
+   * 改写预览：以当前草稿为配置试跑样例输入（dry-run，不写统计、不落库）。
+   *
+   * 输入支持角色前缀行（`system:`/`user:`/`assistant:` 开头开新消息，
+   * 见 `parsePreviewMessages`）；裸文本仍视作单条 user。
+   * 多消息时输出整段对话（每条前带 `[role]` 标记），单条时保持原文
+   * 不加标记（老习惯：复制粘贴直接可用）。
+   */
   const runPreview = useCallback(async (): Promise<void> => {
     const current = draftRef.current;
     if (!current || previewing) return;
-    if (!previewInput.trim()) {
+    const parsed = parsePreviewMessages(previewInput);
+    if (parsed.length === 0) {
       addToast(t('请输入预览样例'), 'warning');
       return;
     }
@@ -1037,18 +1396,93 @@ export default function PurgeConsole(): JSX.Element {
     try {
       const res = await api.previewPurge({
         settings: current,
-        messages: [{ role: 'user', content: previewInput }],
+        messages: parsed,
       });
       if (!res.success || !res.data) throw new Error('preview failed');
-      const lastUser = [...res.data.messages].reverse().find((m) => m.role === 'user');
-      setPreviewOut(lastUser?.content ?? '');
+      const back = res.data.messages;
+      const fmt = (msgs: Array<{ role: string; content: string | null }>): string =>
+        msgs.length > 1
+          ? msgs
+              .map((m) => `[${m.role}]\n${m.content ?? ''}`)
+              .join('\n\n')
+          : (msgs[0]?.content ?? '');
+      // diff 基线：输入原样（角色标记与输出同构）；辅助消息（消息数变化时
+      // 逐条配对不可靠）退化为整红整绿。
+      setPreviewBase(fmt(parsed.map((m) => ({ role: m.role, content: m.content }))));
+      setPreviewOut(fmt(back));
       setPreviewMeta(res.data.applied);
+      setPreviewDetail(res.data.detail ?? null);
+      // 试跑成功才入历史（失败/校验不过的输入不记）；超长样例不入库
+      if (previewInput.length <= PREVIEW_HISTORY_ITEM_MAX) {
+        setPreviewHistory((prev) =>
+          writePreviewHistory(prev, previewInput, (k, v) => window.localStorage.setItem(k, v)),
+        );
+      }
     } catch {
       addToast(t('预览失败'), 'error');
     } finally {
       setPreviewing(false);
     }
   }, [addToast, previewInput, previewing, t]);
+
+  // ── 词表 CSV 导入导出（死区词/同义词单表，进草稿不直接保存）──────────────
+  //
+  // 两列 `from,to`（表头可选）；RFC 4180 转义复用 toCsv / downloadText。
+
+  const exportRulesCsv = useCallback(
+    (kind: 'dead_zone' | 'synonym'): void => {
+      const draftNow = draftRef.current;
+      if (!draftNow) return;
+      const rules = kind === 'dead_zone' ? draftNow.rewrite_rules : draftNow.synonym_pairs;
+      if (rules.length === 0) {
+        addToast(t('词表为空，无可导出内容'), 'warning');
+        return;
+      }
+      const filename = `aigx-purge-${kind}-${new Date().toISOString().slice(0, 10)}.csv`;
+      downloadText(filename, toCsv(rules.map((r) => ({ from: r.from, to: r.to }))) + '\n');
+      addToast(t('词表已导出为 CSV'), 'success');
+    },
+    [addToast, t],
+  );
+
+  /** 导入 CSV → 追加进草稿（与「添加规则」同口径：不整表替换，重复项靠行内提示） */
+  const importRulesCsv = useCallback(
+    async (kind: 'dead_zone' | 'synonym', file: File | null): Promise<void> => {
+      if (!file) return;
+      try {
+        const parsed = parseRulesCsv(await file.text());
+        if (parsed === null) {
+          addToast(t('导入失败：必须是两列（原文,改写为）的 CSV'), 'error');
+          return;
+        }
+        if (parsed.length === 0) {
+          addToast(t('导入失败：文件里没有规则行'), 'error');
+          return;
+        }
+        setDirty(true);
+        setDraft((d) =>
+          d
+            ? {
+                ...d,
+                rewrite_rules:
+                  kind === 'dead_zone' ? [...d.rewrite_rules, ...parsed] : d.rewrite_rules,
+                synonym_pairs:
+                  kind === 'synonym' ? [...d.synonym_pairs, ...parsed] : d.synonym_pairs,
+              }
+            : d,
+        );
+        addToast(
+          kind === 'dead_zone'
+            ? t('已追加 {{count}} 条死区词到草稿，检查无误后点「保存」生效', { count: parsed.length })
+            : t('已追加 {{count}} 条同义词到草稿，检查无误后点「保存」生效', { count: parsed.length }),
+          'success',
+        );
+      } catch {
+        addToast(t('导入失败：无法读取文件'), 'error');
+      }
+    },
+    [addToast, t],
+  );
 
   /** 导出配置：当前服务端快照 → JSON 文件（含全部词表/模板/开关） */
   const exportConfig = useCallback((): void => {
@@ -1074,7 +1508,9 @@ export default function PurgeConsole(): JSX.Element {
       setNumErrors({});
       setDirty(true);
       setPreviewOut(null);
+      setPreviewBase(null);
       setPreviewMeta(null);
+      setPreviewDetail(null);
       addToast(t('配置已导入草稿，检查无误后点「保存」生效'), 'success');
     } catch {
       addToast(t('导入失败：不是有效的破甲配置文件'), 'error');
@@ -1170,8 +1606,12 @@ export default function PurgeConsole(): JSX.Element {
     );
   }
 
-  const stats = data.stats;
+  // 旧后端无 stats_1h/24h → 窗口选项禁用（只有全程可看）。
+  const windowed = statsWindow === '1h' ? data.stats_1h : statsWindow === '24h' ? data.stats_24h : undefined;
+  const stats = windowed ?? data.stats;
   const retryRate = stats.responses > 0 ? ((stats.retries / stats.responses) * 100).toFixed(2) : '0.00';
+  const windowLabel =
+    statsWindow === '1h' ? t('近 1 小时') : statsWindow === '24h' ? t('近 24 小时') : undefined;
   const uptime = formatUptime(data.runtime.uptime_secs, {
     sec: t('秒'),
     min: t('分钟'),
@@ -1222,7 +1662,9 @@ export default function PurgeConsole(): JSX.Element {
               setNumErrors({});
               setDirty(false);
               setPreviewOut(null);
+              setPreviewBase(null);
               setPreviewMeta(null);
+              setPreviewDetail(null);
             }}
           >
             {t('放弃修改')}
@@ -1230,7 +1672,33 @@ export default function PurgeConsole(): JSX.Element {
         </div>
       )}
 
-      <StatsGrid stats={stats} retryRate={retryRate} t={t} />
+      {/* 统计口径切换（旧后端无窗口数据 → 窗口档禁用并提示） */}
+      <div className="purge-window-picker" role="group" aria-label={t('统计时间窗')}>
+        {([
+          { key: 'all', label: t('全程'), unavailable: false },
+          { key: '1h', label: t('近 1 小时'), unavailable: !data.stats_1h },
+          { key: '24h', label: t('近 24 小时'), unavailable: !data.stats_24h },
+        ] as const).map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            className={`purge-preset-chip${statsWindow === opt.key ? ' is-active' : ''}`}
+            disabled={opt.unavailable}
+            aria-pressed={statsWindow === opt.key}
+            onClick={() => setStatsWindow(opt.key)}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      <StatsGrid
+        stats={stats}
+        retryRate={retryRate}
+        suffix={windowLabel}
+        atLeast={windowed?.truncated}
+        t={t}
+      />
 
       <FailureBar
         refusal={stats.failure_refusal}
@@ -1240,11 +1708,26 @@ export default function PurgeConsole(): JSX.Element {
         t={t}
       />
 
-      {/* 配置体检告警：开了但不生效 / 配置自相矛盾（静态可判定项） */}
-      {configWarnings.length > 0 && (
+      {/* 配置体检告警：开了但不生效 / 配置自相矛盾（静态可判定项）。
+          结构化告警带 code → 「去修复」滚动并聚焦对应控件；旧后端纯文本。 */}
+      {(configWarningItems.length > 0 || configWarnings.length > 0) && (
         <div className="purge-warning-box" role="alert">
-          {configWarnings.map((warning, index) => (
-            <p key={index}>{warning}</p>
+          {(configWarningItems.length > 0
+            ? configWarningItems.map((w) => ({ code: w.code, message: w.message }))
+            : configWarnings.map((message) => ({ code: '', message }))
+          ).map(({ code, message }, index) => (
+            <p key={index} className="purge-warning-row">
+              <span>{message}</span>
+              {code && FIX_TARGETS[code] ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => focusFixTarget(FIX_TARGETS[code])}
+                >
+                  {t('去修复')}
+                </Button>
+              ) : null}
+            </p>
           ))}
         </div>
       )}
@@ -1304,15 +1787,33 @@ export default function PurgeConsole(): JSX.Element {
       <Card
         title={t('死区词改写词表')}
         actions={
-          <Button variant="outline" size="sm" onClick={addRule}>
-            {t('添加规则')}
-          </Button>
+          <>
+            <Button variant="outline" size="sm" onClick={addRule}>
+              {t('添加规则')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => exportRulesCsv('dead_zone')}>
+              {t('导出 CSV')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => deadZoneCsvRef.current?.click()}>
+              {t('导入 CSV')}
+            </Button>
+            <input
+              ref={deadZoneCsvRef}
+              type="file"
+              accept=".csv,text/csv"
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                void importRulesCsv('dead_zone', event.target.files?.[0] ?? null);
+                event.target.value = '';
+              }}
+            />
+          </>
         }
       >
         {draft.rewrite_rules.length === 0 ? (
-          <p className="purge-empty">{t('暂无改写规则，点击右上角「添加规则」新建一条')}</p>
+          <p className="purge-empty" data-purge-fix="dead-zone-table">{t('暂无改写规则，点击右上角「添加规则」新建一条')}</p>
         ) : (
-          <div className="purge-rules" ref={rulesRef}>
+          <div className="purge-rules" ref={rulesRef} data-purge-fix="dead-zone-table">
             {draft.rewrite_rules.map((rule, index) => (
               <RuleRow
                 key={index}
@@ -1337,9 +1838,27 @@ export default function PurgeConsole(): JSX.Element {
       <Card
         title={t('同义词表')}
         actions={
-          <Button variant="outline" size="sm" onClick={addSynonymRule}>
-            {t('添加规则')}
-          </Button>
+          <>
+            <Button variant="outline" size="sm" onClick={addSynonymRule}>
+              {t('添加规则')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => exportRulesCsv('synonym')}>
+              {t('导出 CSV')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => synonymCsvRef.current?.click()}>
+              {t('导入 CSV')}
+            </Button>
+            <input
+              ref={synonymCsvRef}
+              type="file"
+              accept=".csv,text/csv"
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                void importRulesCsv('synonym', event.target.files?.[0] ?? null);
+                event.target.value = '';
+              }}
+            />
+          </>
         }
       >
         {draft.synonym_pairs.length === 0 ? (
@@ -1374,12 +1893,14 @@ export default function PurgeConsole(): JSX.Element {
             hint={t('扫描该目录下的 SKILL.md，按 frontmatter 关键词命中')}
             value={draft.skill_dir}
             onChange={(event) => patch({ skill_dir: event.target.value })}
+            data-purge-fix="skill-dir"
           />
           <Input
             label={t('固定套用预设 id')}
             hint={t('留空 = 按模型自动匹配；名字对不上就不套，预设正文原样前插到 system 提示词')}
             value={draft.auto_preset_id ?? ''}
             onChange={(event) => patch({ auto_preset_id: event.target.value })}
+            data-purge-fix="auto-preset-id"
           />
           <Input
             label={t('技能注入上限（字符）')}
@@ -1394,6 +1915,7 @@ export default function PurgeConsole(): JSX.Element {
             label={t('异源模型（逗号分隔）')}
             value={draft.fallback_models.join(', ')}
             onChange={(event) => patch({ fallback_models: splitList(event.target.value) })}
+            data-purge-fix="fallback-models"
           />
           <Input
             label={t('异源触发轮次')}
@@ -1403,6 +1925,7 @@ export default function PurgeConsole(): JSX.Element {
             value={numRaw.fallback_trigger_attempt}
             error={numErrors.fallback_trigger_attempt}
             onChange={(event) => handleNumChange('fallback_trigger_attempt', event.target.value)}
+            data-purge-fix="fallback-attempts"
           />
           <Input
             label={t('重试上限')}
@@ -1547,9 +2070,9 @@ export default function PurgeConsole(): JSX.Element {
           ))}
         </Select>
         {(draft.structured_templates ?? []).length === 0 ? (
-          <p className="purge-empty">{t('暂无模板，点击右上角「添加模板」新建一条')}</p>
+          <p className="purge-empty" data-purge-fix="templates">{t('暂无模板，点击右上角「添加模板」新建一条')}</p>
         ) : (
-          <div className="purge-rules">
+          <div className="purge-rules" data-purge-fix="templates">
             {(draft.structured_templates ?? []).map((tpl, index) => (
               <div className="purge-rule-row" key={`tpl-${index}`}>
                 <div>
@@ -1582,10 +2105,26 @@ export default function PurgeConsole(): JSX.Element {
       </Card>
 
       <Card title={t('改写预览')}>
+        {/* 样例历史：点回填；再次点击同一条 = 无操作（已是输入内容） */}
+        {previewHistory.length > 0 && (
+          <div className="purge-window-picker" data-testid="purge-preview-history" role="group" aria-label={t('最近样例')}>
+            {previewHistory.map((sample, index) => (
+              <button
+                key={`${index}-${sample.slice(0, 12)}`}
+                type="button"
+                className={`purge-preset-chip${sample === previewInput ? ' is-active' : ''}`}
+                title={sample.slice(0, 200)}
+                onClick={() => setPreviewInput(sample)}
+              >
+                {previewHistoryLabel(sample)}
+              </button>
+            ))}
+          </div>
+        )}
         <Textarea
           label={t('样例输入')}
           rows={3}
-          placeholder={t('粘贴一段 user 消息，按当前草稿配置试跑改写效果（dry-run，不发送请求、不写统计）')}
+          placeholder={t('粘贴 user 消息试跑；或用 system:/user:/assistant: 行前缀粘贴整段对话（多消息参与归一化与改写）。dry-run，不发送请求、不写统计')}
           value={previewInput}
           onChange={(event) => setPreviewInput(event.target.value)}
         />
@@ -1603,9 +2142,65 @@ export default function PurgeConsole(): JSX.Element {
                 {previewMeta.skill_hit ? ` · ${t('技能已注入')}` : ''}
               </div>
             ) : null}
-            <pre className="purge-preview-out" aria-label={t('改写结果')}>
-              {previewOut}
-            </pre>
+            {/* 逐项命中明细（旧后端无 detail 字段 → 整块不渲染） */}
+            {previewDetail ? (
+              <div className="purge-preview-detail" data-testid="purge-preview-detail">
+                {[
+                  previewDetail.normalized ? `${t('归一化')} ${previewDetail.normalized}` : '',
+                  previewDetail.dead_zone_rules
+                    ? `${t('死区词')} ${previewDetail.dead_zone_rules}/${previewDetail.dead_zone_replacements}`
+                    : '',
+                  previewDetail.synonym_rules
+                    ? `${t('同义词')} ${previewDetail.synonym_rules}/${previewDetail.synonym_replacements}`
+                    : '',
+                  previewDetail.structured_appended ? t('结构化提示已追加') : '',
+                  previewDetail.skill_names && previewDetail.skill_names.length > 0
+                    ? (() => {
+                        // 技能名 + 命中关键词（skill_keywords 与 names 同序；旧后端无则只报名）
+                        const kw = new Map(previewDetail.skill_keywords ?? []);
+                        const names = previewDetail.skill_names
+                          .map((n) => (kw.has(n) ? `${n}（${t('命中关键词')} "${kw.get(n)}"）` : n))
+                          .join(', ');
+                        return `${t('命中技能')}：${names}${previewDetail.skill_truncated ? ` (${t('已截断')})` : ''}`;
+                      })()
+                    : '',
+                ]
+                  .filter(Boolean)
+                  .map((item) => (
+                    <span key={item} className="purge-preview-detail-chip">{item}</span>
+                  ))}
+              </div>
+            ) : null}
+            {/* 改写前后有差异 → 行级/词级 diff 染色；无差异（或无基线）→ 原文 */}
+            {previewBase !== null && previewBase !== previewOut ? (
+              <div className="purge-preview-diff" data-testid="purge-preview-diff" aria-label={t('改写结果')}>
+                {diffLines(previewBase, previewOut).map((row, index) => {
+                  if (row.kind === 'ctx') {
+                    return <div key={index} className="pdl-ctx">{row.text}</div>;
+                  }
+                  if (row.kind === 'del') {
+                    return <div key={index} className="pdl-del">{'- '}{row.text}</div>;
+                  }
+                  if (row.kind === 'add') {
+                    return <div key={index} className="pdl-add">{'+ '}{row.text}</div>;
+                  }
+                  const w = diffTokensInLine(row.del, row.add);
+                  return (
+                    <div key={index} className="pdl-mod">
+                      <span className="pdl-w-keep">{w.keep1}</span>
+                      {w.del ? <span className="pdl-w-del">{w.del}</span> : null}
+                      <span className="pdl-w-keep">{w.keep2}</span>
+                      {w.add ? <span className="pdl-w-add">{w.add}</span> : null}
+                      <span className="pdl-w-keep">{w.keep3}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <pre className="purge-preview-out" aria-label={t('改写结果')}>
+                {previewOut}
+              </pre>
+            )}
           </>
         ) : null}
       </Card>

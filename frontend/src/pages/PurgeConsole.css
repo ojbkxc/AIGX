@@ -45,6 +45,19 @@
   gap: 12px;
 }
 
+/* 统计时间窗切换（全程/近 1 小时/近 24 小时）：与预设库厂商 chip 同款样式 */
+.purge-window-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.purge-window-picker .purge-preset-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 @media (max-width: 1399px) {
   .purge-stats {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -275,6 +288,52 @@
   line-height: 1.6;
 }
 
+/* 预览 diff 视图：与 .purge-preview-out 同框，行级 + 词级染色 */
+.purge-preview-diff {
+  margin: 8px 0 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.purge-preview-diff > div {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pdl-ctx {
+  color: var(--text-1);
+}
+.pdl-del {
+  color: var(--danger-color, #dc2626);
+  background: color-mix(in srgb, var(--danger-color, #dc2626) 9%, transparent);
+  border-radius: 3px;
+}
+.pdl-add {
+  color: var(--success-color, #16a34a);
+  background: color-mix(in srgb, var(--success-color, #16a34a) 9%, transparent);
+  border-radius: 3px;
+}
+.pdl-mod {
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.pdl-w-del {
+  text-decoration: line-through;
+  color: var(--danger-color, #dc2626);
+}
+.pdl-w-add {
+  color: var(--success-color, #16a34a);
+  font-weight: 600;
+}
+.pdl-w-keep {
+  color: var(--text-1);
+}
+
 /* 未保存修改警示条：页头下方显性提示 + 放弃出口 */
 .purge-dirty-bar {
   display: flex;
@@ -303,6 +362,25 @@
   color: var(--text-2);
 }
 
+/* 预览命中明细：逐项 chip 行（归一化/死区词/同义词/结构化/技能） */
+.purge-preview-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.purge-preview-detail-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--accent-color, #4f46e5) 6%, transparent);
+}
+
 /* 配置体检告警：危险色块，逐条独立成段 */
 .purge-warning-box {
   padding: 12px 16px;
@@ -317,6 +395,25 @@
 }
 .purge-warning-box p:last-child {
   margin-bottom: 0;
+}
+
+/* 告警行：文本 + 「去修复」按钮同行，窄屏折行 */
+.purge-warning-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.purge-warning-row > span {
+  flex: 1 1 320px;
+}
+
+/* 「去修复」目标闪烁提示（1.8s；由 focusFixTarget 添加/移除） */
+.purge-fix-flash {
+  outline: 2px solid var(--warning-color, #d97706);
+  outline-offset: 4px;
+  border-radius: 6px;
+  transition: outline-color 0.4s ease;
 }
 
 /* 技能扫描快照列表 */

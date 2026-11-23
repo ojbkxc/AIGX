@@ -413,10 +413,36 @@ impl PurgeSettings {
 }
 
 /// 本次改写结果。
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Applied {
     pub changed: bool,
     pub skill_hit: bool,
+    /// 逐项命中明细（预览面板用；数据面调用方不读，开销只有几个 u64）。
+    pub detail: AppliedDetail,
+}
+
+/// `Applied` 的明细：每条治理项的命中次数与命中的技能名。
+///
+/// `skill_names` 上限 16：`skills_for` 扫描的是技能目录全体条目，
+/// 上限防极端目录把响应撑爆；超过 16 个命中时 `skill_truncated = true`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AppliedDetail {
+    /// system 归一化改变的消息数。
+    pub normalized: u32,
+    /// 死区词改写命中的规则条数（同一规则跨消息只计一次）。
+    pub dead_zone_rules: u32,
+    pub dead_zone_replacements: u32,
+    /// 同义词替换命中的规则条数与总替换次数。
+    pub synonym_rules: u32,
+    pub synonym_replacements: u32,
+    /// 是否追加了结构化提示后缀。
+    pub structured_appended: bool,
+    /// 注入的技能名列表（按注入顺序）。
+    pub skill_names: Vec<String>,
+    pub skill_truncated: bool,
+    /// 每个命中技能触发匹配的关键词（`(技能名, 关键词)`；同一技能多词命中
+    /// 只记第一个）。与 `skill_names` 同序，预览面回显「为什么命中了它」。
+    pub skill_keywords: Vec<(String, String)>,
 }
 
 /// 进程级持有者：每请求快照（Arc clone），保存即生效。
@@ -511,48 +537,134 @@ static STAT_FAILURE_OTHER: AtomicU64 = AtomicU64::new(0);
 static STAT_SYNONYM_HITS: AtomicU64 = AtomicU64::new(0);
 static STAT_AUTO_PRESET_HITS: AtomicU64 = AtomicU64::new(0);
 
-fn bump(counter: &AtomicU64) {
+// ── 时间窗统计（1h / 24h）────────────────────────────────────────
+//
+// 既有 `AtomicU64` 累计值不动（管理面 / 旧前端契约不变）；新增一条**事件环**
+// 记录「带时刻的增量」，读侧按 now-window 裁剪求和得到窗口值。
+//
+// 形状取舍：一环一事件类型（`EventKind`），定容 4096 槽（24h 高频也就
+// 数千次计数，够；溢出覆盖最旧条目 → 超过 4096 次/窗口时窗口值变为下界
+// 估计，管理面提示语如实说「至少 N」）。读侧只需一次锁 + 拷贝，
+// 纳秒级，不打数据面。
+//
+// 为什么不做每计数器独立环：11 个计数器 × 4096 × 16B = 700KB 常驻，
+// 且读侧要 11 次锁；单环分类型聚合读侧一次锁全量派生，开销更小。
+
+/// 事件环条目类型（与 `PurgeStats` 字段一一对应，除 responses 外全为增量 1）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EventKind {
+    Responses,
+    Retries,
+    EarlySuccess,
+    SkillHits,
+    Refusals,
+    FailureRefusal,
+    FailureEmpty,
+    FailureFilter,
+    FailureOther,
+    SynonymHits,
+    AutoPresetHits,
+}
+
+/// 事件环（定容；写侧覆盖最旧，读侧按窗口裁剪）。
+struct EventRing {
+    /// 槽位数组：(epoch_ms, kind)。epoch 用 u64 毫秒，2038 之后也够。
+    slots: std::sync::RwLock<Vec<(u64, EventKind)>>,
+    /// 环形写指针。
+    next: AtomicU64,
+}
+
+impl EventRing {
+    const CAPACITY: usize = 4096;
+
+    fn new() -> Self {
+        Self {
+            slots: std::sync::RwLock::new(vec![(0u64, EventKind::Responses); Self::CAPACITY]),
+            next: AtomicU64::new(0),
+        }
+    }
+
+    /// 记一次事件（数据面热路径：一次原子读 + 一次锁内两字段写）。
+    fn push(&self, kind: EventKind, now_ms: u64) {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) as usize % Self::CAPACITY;
+        if let Ok(mut slots) = self.slots.write() {
+            slots[index] = (now_ms, kind);
+        }
+    }
+
+    /// 窗口内某类事件次数（读侧：一次读锁 + 线性扫 4096 槽，微秒级）。
+    fn count(&self, kind: EventKind, since_ms: u64) -> u64 {
+        self.slots
+            .read()
+            .map(|slots| {
+                slots
+                    .iter()
+                    .filter(|(at, k)| *k == kind && *at >= since_ms && *at != 0)
+                    .count() as u64
+            })
+            .unwrap_or(0)
+    }
+}
+
+static EVENT_RING: OnceLock<EventRing> = OnceLock::new();
+
+fn ring() -> &'static EventRing {
+    EVENT_RING.get_or_init(EventRing::new)
+}
+
+/// 进程当前时刻（epoch 毫秒）。`logging::now_ms` 是日志时钟，口径一致。
+fn now_epoch_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 计数（累计 + 事件环）双写。数据面所有 `record_*` 走这里。
+fn bump_with(counter: &AtomicU64, kind: EventKind) {
     counter.fetch_add(1, Ordering::Relaxed);
+    ring().push(kind, now_epoch_ms());
 }
 
 pub fn record_response() {
-    bump(&STAT_RESPONSES);
+    bump_with(&STAT_RESPONSES, EventKind::Responses);
 }
 
 pub fn record_retry() {
-    bump(&STAT_RETRIES);
+    bump_with(&STAT_RETRIES, EventKind::Retries);
 }
 
 pub fn record_early_success() {
-    bump(&STAT_EARLY_SUCCESS);
+    bump_with(&STAT_EARLY_SUCCESS, EventKind::EarlySuccess);
 }
 
 pub fn record_skill_hit() {
-    bump(&STAT_SKILL_HITS);
+    bump_with(&STAT_SKILL_HITS, EventKind::SkillHits);
 }
 
 pub fn record_refusal() {
-    bump(&STAT_REFUSALS);
+    bump_with(&STAT_REFUSALS, EventKind::Refusals);
 }
 
 pub fn record_failure(category: FailureCategory) {
     match category {
         FailureCategory::Refusal => {
-            bump(&STAT_FAILURE_REFUSAL);
-            bump(&STAT_REFUSALS);
+            bump_with(&STAT_FAILURE_REFUSAL, EventKind::FailureRefusal);
+            bump_with(&STAT_REFUSALS, EventKind::Refusals);
         }
-        FailureCategory::Empty => bump(&STAT_FAILURE_EMPTY),
-        FailureCategory::Filter => bump(&STAT_FAILURE_FILTER),
-        FailureCategory::Other => bump(&STAT_FAILURE_OTHER),
+        FailureCategory::Empty => bump_with(&STAT_FAILURE_EMPTY, EventKind::FailureEmpty),
+        FailureCategory::Filter => bump_with(&STAT_FAILURE_FILTER, EventKind::FailureFilter),
+        FailureCategory::Other => bump_with(&STAT_FAILURE_OTHER, EventKind::FailureOther),
     }
 }
 
 pub fn record_synonym_hit() {
-    bump(&STAT_SYNONYM_HITS);
+    bump_with(&STAT_SYNONYM_HITS, EventKind::SynonymHits);
 }
 
 pub fn record_auto_preset_hit() {
-    bump(&STAT_AUTO_PRESET_HITS);
+    bump_with(&STAT_AUTO_PRESET_HITS, EventKind::AutoPresetHits);
 }
 
 pub fn snapshot() -> PurgeStats {
@@ -568,6 +680,54 @@ pub fn snapshot() -> PurgeStats {
         failure_other: STAT_FAILURE_OTHER.load(Ordering::Relaxed),
         synonym_hits: STAT_SYNONYM_HITS.load(Ordering::Relaxed),
         auto_preset_hits: STAT_AUTO_PRESET_HITS.load(Ordering::Relaxed),
+    }
+}
+
+/// 窗口内计数（`PurgeStats` 字段子集：管理面时间窗切换用）。
+///
+/// `window_ms` 是窗口宽度（`truncated=false` 表示精确；
+/// 事件环溢出覆盖时为下界估计，`truncated=true` 由读侧给出）。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WindowedStats {
+    pub window_ms: u64,
+    pub responses: u64,
+    pub retries: u64,
+    pub early_success: u64,
+    pub skill_hits: u64,
+    pub refusals: u64,
+    pub failure_refusal: u64,
+    pub failure_empty: u64,
+    pub failure_filter: u64,
+    pub failure_other: u64,
+    pub synonym_hits: u64,
+    pub auto_preset_hits: u64,
+    /// 事件环写指针是否已绕圈（窗口值可能为下界估计）。
+    pub truncated: bool,
+}
+
+/// 取某窗口的计数（`window_ms` = 0 → 全零；window 只影响环内裁剪）。
+///
+/// `truncated` 判据：写指针超过环容量 → 有旧事件被覆盖。覆盖未必发生在
+/// 窗口内，但保守标记让管理面如实显示「至少 N」。
+pub fn windowed_snapshot(window_ms: u64) -> WindowedStats {
+    let now = now_epoch_ms();
+    let since = now.saturating_sub(window_ms);
+    let ring = ring();
+    let kind = |k: EventKind| ring.count(k, since);
+    WindowedStats {
+        window_ms,
+        responses: kind(EventKind::Responses),
+        retries: kind(EventKind::Retries),
+        early_success: kind(EventKind::EarlySuccess),
+        skill_hits: kind(EventKind::SkillHits),
+        refusals: kind(EventKind::Refusals),
+        failure_refusal: kind(EventKind::FailureRefusal),
+        failure_empty: kind(EventKind::FailureEmpty),
+        failure_filter: kind(EventKind::FailureFilter),
+        failure_other: kind(EventKind::FailureOther),
+        synonym_hits: kind(EventKind::SynonymHits),
+        auto_preset_hits: kind(EventKind::AutoPresetHits),
+        truncated: ring.next.load(Ordering::Relaxed) > EventRing::CAPACITY as u64,
     }
 }
 
@@ -666,31 +826,49 @@ fn apply_inner(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings, count_stats
         return Applied::default();
     }
     let mut changed = false;
-    if cfg.system_normalize {
-        changed |= normalize_system(messages, &cfg.normalize_strip_prefixes);
+    let mut detail = AppliedDetail::default();
+    if cfg.system_normalize
+        && normalize_system_counted(messages, &cfg.normalize_strip_prefixes, &mut detail)
+    {
+        changed = true;
     }
     if cfg.dead_zone_rewrite && !cfg.rewrite_rules.is_empty() {
-        changed |= rewrite_texts(messages, &cfg.rewrite_rules);
+        changed |= rewrite_texts_detailed(
+            messages,
+            &cfg.rewrite_rules,
+            RewriteBucket::DeadZone,
+            &mut detail,
+        );
     }
     if cfg.synonym_enabled && !cfg.synonym_pairs.is_empty() {
-        let (syn_changed, syn_hits) = rewrite_texts_counted(messages, &cfg.synonym_pairs);
-        if syn_hits > 0 && count_stats {
+        let syn_changed = rewrite_texts_detailed(
+            messages,
+            &cfg.synonym_pairs,
+            RewriteBucket::Synonym,
+            &mut detail,
+        );
+        if detail.synonym_replacements > 0 && count_stats {
             record_synonym_hit();
         }
         changed |= syn_changed;
     }
     if cfg.structured_prompt {
         let suffix = cfg.active_structured_text();
-        if !suffix.trim().is_empty() {
-            changed |= append_to_last_user(messages, suffix);
+        if !suffix.trim().is_empty() && append_to_last_user(messages, suffix) {
+            detail.structured_appended = true;
+            changed = true;
         }
     }
     let mut skill_hit = false;
     if cfg.skill_inject {
-        skill_hit = inject_skills(messages, cfg);
+        skill_hit = inject_skills(messages, cfg, &mut detail);
         changed |= skill_hit;
     }
-    Applied { changed, skill_hit }
+    Applied {
+        changed,
+        skill_hit,
+        detail,
+    }
 }
 
 /// 降思考：仅把显式的高档位压到 `reasoning_floor`，不新造 None。
@@ -761,33 +939,27 @@ pub fn classify_failure_with(
 
 // ── 内部实现 ────────────────────────────────────────────────
 
-fn rewrite_texts(messages: &mut [ChatMessage], rules: &[RewriteRule]) -> bool {
-    let mut changed = false;
-    for message in messages.iter_mut() {
-        if !matches!(message.role, Role::System | Role::User) {
-            continue;
-        }
-        let Some(content) = message.content.as_mut() else {
-            continue;
-        };
-        for rule in rules {
-            if rule.from.is_empty() || !content.contains(&rule.from) {
-                continue;
-            }
-            *content = content.replace(&rule.from, &rule.to);
-            changed = true;
-        }
-    }
-    changed
+/// 改写计数落桶：死区词与同义词各计各的。
+#[derive(Clone, Copy, PartialEq)]
+enum RewriteBucket {
+    DeadZone,
+    Synonym,
 }
 
-/// 与 `rewrite_texts` 同逻辑，但额外返回实际替换次数（逐条规则的命中次数累加）。
+/// 按词表改写 system/user 文本，同时把命中明细落进 `detail`。
 ///
-/// 用于 synonym 路径的命中计数：dead_zone_rewrite 路径继续用旧 `rewrite_texts`
-/// （行为不变），synonym 路径用本函数并在命中时 `record_synonym_hit()`。
-fn rewrite_texts_counted(messages: &mut [ChatMessage], rules: &[RewriteRule]) -> (bool, u64) {
+/// 返回是否有改动。替换语义与旧 `rewrite_texts`/`rewrite_texts_counted`
+/// 完全一致（同一跳过条件、同一 `str::replace`），只是顺路计数：
+/// `*_rules` 按命中的规则条数计（同一规则跨消息只计一次），
+/// `*_replacements` 按实际替换次数计。
+fn rewrite_texts_detailed(
+    messages: &mut [ChatMessage],
+    rules: &[RewriteRule],
+    bucket: RewriteBucket,
+    detail: &mut AppliedDetail,
+) -> bool {
     let mut changed = false;
-    let mut hits = 0u64;
+    let mut hit_rules: HashSet<&str> = HashSet::new();
     for message in messages.iter_mut() {
         if !matches!(message.role, Role::System | Role::User) {
             continue;
@@ -799,12 +971,22 @@ fn rewrite_texts_counted(messages: &mut [ChatMessage], rules: &[RewriteRule]) ->
             if rule.from.is_empty() || !content.contains(&rule.from) {
                 continue;
             }
-            hits += content.matches(&rule.from).count() as u64;
+            hit_rules.insert(rule.from.as_str());
+            let count = content.matches(&rule.from).count() as u32;
             *content = content.replace(&rule.from, &rule.to);
             changed = true;
+            match bucket {
+                RewriteBucket::DeadZone => detail.dead_zone_replacements += count,
+                RewriteBucket::Synonym => detail.synonym_replacements += count,
+            }
         }
     }
-    (changed, hits)
+    let rule_hits = hit_rules.len() as u32;
+    match bucket {
+        RewriteBucket::DeadZone => detail.dead_zone_rules += rule_hits,
+        RewriteBucket::Synonym => detail.synonym_rules += rule_hits,
+    }
+    changed
 }
 
 fn normalize_system(messages: &mut Vec<ChatMessage>, prefixes: &[String]) -> bool {
@@ -845,6 +1027,29 @@ fn normalize_system(messages: &mut Vec<ChatMessage>, prefixes: &[String]) -> boo
 
     *messages = out;
     changed
+}
+
+/// `normalize_system` 的计数版：被归一化改变（合并/去重/删空/折叠/去前缀）
+/// 的 system 消息数落进 `detail.normalized`。执行路径与上方函数共享同一
+/// 判定序列——这里按「进入消息数 − 存活且未变的消息数」计数，避免
+/// 两遍循环口径漂移。
+fn normalize_system_counted(
+    messages: &mut Vec<ChatMessage>,
+    prefixes: &[String],
+    detail: &mut AppliedDetail,
+) -> bool {
+    let before = messages.len();
+    let normalized_changed = normalize_system(messages, prefixes);
+    // 被丢弃（去重/删空）的条数 + 内容被改写（折叠/去前缀）的条数。
+    // 旧实现只返回 bool；这里补一个保守计数：进出的差值是被丢弃的，
+    // changed=true 时至少 1 条被改写，两者相加即「被归一化影响的消息数」。
+    let dropped = before.saturating_sub(messages.len());
+    detail.normalized += dropped as u32;
+    if normalized_changed && dropped == 0 {
+        // 纯改写（无丢弃）至少影响 1 条。
+        detail.normalized += 1;
+    }
+    normalized_changed
 }
 
 fn strip_lines(text: &str, prefixes: &[String]) -> String {
@@ -1074,7 +1279,22 @@ pub fn skill_briefs(dir: &str) -> Vec<SkillBrief> {
 /// - 死区词/同义词同时开着且 from 相互包含 → 改写链路互相覆盖，顺序敏感
 /// - 结构化提示开着但生效文本为空（后缀空 + 无选中模板）→ 零改动
 /// - 改写规则 to 里含本表其它规则的 from → 链式二次改写（可能非预期）
-pub fn config_warnings(cfg: &PurgeSettings) -> Vec<String> {
+///
+/// 配置体检告警的结构化形态：`code` 是**稳定机器码**（前端据此跳修复入口），
+/// `message` 面向人。旧消费方（`Vec<String>`）走 [`config_warnings`]。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConfigWarning {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// 机器码 → 前端修复入口约定：
+/// - `fallback_empty` / `fallback_after_retry` → 异源模型输入框
+/// - `skill_dir_empty` → 技能目录输入框
+/// - `chained_rewrite` → 死区词表
+/// - `structured_empty` → 选中默认模板（模板卡区域）
+/// - `preset_missing` → 固定套用预设 id 输入框
+pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
     let mut warnings = Vec::new();
     if !cfg.enabled {
         // 总开关关闭时数据面零行为，其余检查无意义
@@ -1082,22 +1302,30 @@ pub fn config_warnings(cfg: &PurgeSettings) -> Vec<String> {
     }
 
     if cfg.cross_source_fallback && cfg.fallback_models.is_empty() {
-        warnings.push(
-            "异源递进已开启，但异源模型列表为空：主模型失败后没有可切换的候选，该功能不会生效。"
-                .to_string(),
-        );
+        warnings.push(ConfigWarning {
+            code: "fallback_empty",
+            message:
+                "异源递进已开启，但异源模型列表为空：主模型失败后没有可切换的候选，该功能不会生效。"
+                    .to_string(),
+        });
     }
     if cfg.cross_source_fallback && cfg.fallback_trigger_attempt > cfg.retry_limit {
-        warnings.push(format!(
-            "异源触发轮次（{}）大于重试上限（{}）：候选计划在触发轮次前就会截断，异源递进永远不生效。",
-            cfg.fallback_trigger_attempt, cfg.retry_limit
-        ));
+        warnings.push(ConfigWarning {
+            code: "fallback_after_retry",
+            message: format!(
+                "异源触发轮次（{}）大于重试上限（{}）：候选计划在触发轮次前就会截断，异源递进永远不生效。",
+                cfg.fallback_trigger_attempt, cfg.retry_limit
+            ),
+        });
     }
     if cfg.skill_inject && skills_for(&cfg.skill_dir).is_empty() {
-        warnings.push(format!(
-            "技能注入已开启，但技能目录（{}）扫不到任何 SKILL.md：不会注入任何内容。",
-            cfg.skill_dir
-        ));
+        warnings.push(ConfigWarning {
+            code: "skill_dir_empty",
+            message: format!(
+                "技能注入已开启，但技能目录（{}）扫不到任何 SKILL.md：不会注入任何内容。",
+                cfg.skill_dir
+            ),
+        });
     }
     if cfg.dead_zone_rewrite && cfg.synonym_enabled {
         // 链式改写：A 表的 to 是 B 表的 from（或同表内互为前后缀）时，
@@ -1121,30 +1349,52 @@ pub fn config_warnings(cfg: &PurgeSettings) -> Vec<String> {
             .take(3)
             .collect();
         if !chains.is_empty() {
-            warnings.push(format!(
-                "改写规则的改写结果又命中了另一条规则的原文（链式二次改写）：{}；同一段文本会被改写两次，请检查是否符合预期。",
-                chains.join("、")
-            ));
+            warnings.push(ConfigWarning {
+                code: "chained_rewrite",
+                message: format!(
+                    "改写规则的改写结果又命中了另一条规则的原文（链式二次改写）：{}；同一段文本会被改写两次，请检查是否符合预期。",
+                    chains.join("、")
+                ),
+            });
         }
     }
     if cfg.structured_prompt && cfg.active_structured_text().trim().is_empty() {
-        warnings.push(
-            "结构化提示已开启，但默认后缀为空且未选中模板：不会追加任何内容（等同关闭）。"
+        warnings.push(ConfigWarning {
+            code: "structured_empty",
+            message: "结构化提示已开启，但默认后缀为空且未选中模板：不会追加任何内容（等同关闭）。"
                 .to_string(),
-        );
+        });
     }
     if cfg.auto_preset {
         let pinned = cfg.auto_preset_id.trim();
         if !pinned.is_empty() && presets::get(pinned).is_none() {
-            warnings.push(format!(
-                "按模型自动套用已开启，但固定预设 id「{pinned}」不存在：不会套用任何内容，请检查 id 或留空改按模型匹配。"
-            ));
+            warnings.push(ConfigWarning {
+                code: "preset_missing",
+                message: format!(
+                    "按模型自动套用已开启，但固定预设 id「{pinned}」不存在：不会套用任何内容，请检查 id 或留空改按模型匹配。"
+                ),
+            });
         }
     }
     warnings
 }
 
-fn inject_skills(messages: &mut [ChatMessage], cfg: &PurgeSettings) -> bool {
+/// 兼容入口：只取 message 文本（既有单测与旧消费方用）。
+pub fn config_warnings(cfg: &PurgeSettings) -> Vec<String> {
+    config_warning_items(cfg)
+        .into_iter()
+        .map(|w| w.message)
+        .collect()
+}
+
+/// 注入技能正文到末条 user 消息；命中技能名落进 `detail.skill_names`
+///（截断时 `skill_truncated = true`）。`AIGX` 的注入上限与截断行为不变。
+fn inject_skills(
+    messages: &mut [ChatMessage],
+    cfg: &PurgeSettings,
+    detail: &mut AppliedDetail,
+) -> bool {
+    const MAX_SKILL_NAMES: usize = 16;
     let Some(index) = messages.iter().rposition(|m| m.role == Role::User) else {
         return false;
     };
@@ -1163,12 +1413,21 @@ fn inject_skills(messages: &mut [ChatMessage], cfg: &PurgeSettings) -> bool {
     let mut used = 0usize;
     let mut block = String::new();
     for entry in entries.iter() {
-        if !entry
+        // 第一个命中的关键词回显（多词命中只记首个，够解释「为什么」）
+        let Some(hit_keyword) = entry
             .keywords
             .iter()
-            .any(|keyword| keyword_matches(prompt, keyword))
-        {
+            .find(|keyword| keyword_matches(prompt, keyword))
+        else {
             continue;
+        };
+        if detail.skill_names.len() < MAX_SKILL_NAMES {
+            detail.skill_names.push(entry.name.clone());
+            detail
+                .skill_keywords
+                .push((entry.name.clone(), hit_keyword.clone()));
+        } else {
+            detail.skill_truncated = true;
         }
         let candidate = format!(
             "\n\n<skill name=\"{}\">\n{}\n</skill>",
@@ -1373,7 +1632,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_texts_counted_returns_hit_count() {
+    fn rewrite_texts_detailed_counts_rules_and_replacements() {
         let mut messages = vec![user("黑客 黑客 和 攻击")];
         let rules = vec![
             RewriteRule {
@@ -1385,13 +1644,27 @@ mod tests {
                 to: "测试".to_string(),
             },
         ];
-        let (changed, hits) = rewrite_texts_counted(&mut messages, &rules);
+        let mut detail = AppliedDetail::default();
+        let changed =
+            rewrite_texts_detailed(&mut messages, &rules, RewriteBucket::Synonym, &mut detail);
         assert!(changed);
-        assert_eq!(hits, 3, "黑客×2 + 攻击×1 = 3 次替换");
+        assert_eq!(detail.synonym_rules, 2, "两条规则都命中");
+        assert_eq!(detail.synonym_replacements, 3, "黑客×2 + 攻击×1 = 3 次替换");
         assert_eq!(
             messages[0].content.as_deref(),
             Some("安全研究人员 安全研究人员 和 测试")
         );
+        // 跨消息只计一次规则命中
+        let mut two = vec![user("黑客 A"), user("黑客 B")];
+        let mut d2 = AppliedDetail::default();
+        assert!(rewrite_texts_detailed(
+            &mut two,
+            &rules,
+            RewriteBucket::DeadZone,
+            &mut d2
+        ));
+        assert_eq!(d2.dead_zone_rules, 1, "同一规则跨消息只计一次");
+        assert_eq!(d2.dead_zone_replacements, 2);
     }
 
     #[test]
@@ -1496,11 +1769,18 @@ mod tests {
         let content = messages[0].content.as_deref().unwrap();
         assert!(content.contains("<skill name=\"tshoot\">"));
         assert!(content.chars().count() <= 64 + "please troubleshooting my network".len() + 2);
+        // 命中关键词回显：description 里的词进了 detail.skill_keywords
+        assert_eq!(
+            applied.detail.skill_keywords,
+            vec![("tshoot".to_string(), "troubleshooting".to_string())],
+            "技能名与命中词同序落明细"
+        );
 
-        // 关键词不命中 → 不注入
+        // 关键词不命中 → 不注入、无关键词记录
         let mut other = vec![user("unrelated prompt")];
         let applied = apply_messages(&mut other, &cfg);
         assert!(!applied.skill_hit);
+        assert!(applied.detail.skill_keywords.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1661,6 +1941,14 @@ mod tests {
         let warns = config_warnings(&cfg);
         assert!(warns.iter().any(|w| w.contains("异源模型列表为空")));
         assert!(warns.iter().any(|w| w.contains("大于重试上限")));
+        // 结构化形态：机器码可判（前端跳修复入口的依据）
+        let items = config_warning_items(&cfg);
+        assert!(items
+            .iter()
+            .any(|w| w.code == "fallback_empty" && w.message.contains("异源模型列表为空")));
+        assert!(items
+            .iter()
+            .any(|w| w.code == "fallback_after_retry" && w.message.contains("大于重试上限")));
 
         // 结构化开着但生效文本为空
         let mut cfg = enabled();
@@ -1688,6 +1976,10 @@ mod tests {
         assert!(warns
             .iter()
             .any(|w| w.contains("链式二次改写") && w.contains("AAA→BBB")));
+        // 机器码核对
+        assert!(config_warning_items(&cfg)
+            .iter()
+            .any(|w| w.code == "chained_rewrite"));
 
         // 无链式 → 无该告警
         cfg.synonym_pairs = vec![RewriteRule {
@@ -1805,6 +2097,7 @@ mod tests {
         let before = snapshot().synonym_hits;
         let applied = preview_messages(&mut messages, &cfg);
         assert!(applied.changed);
+        assert!(applied.detail.synonym_rules >= 1, "明细计数可用");
         assert!(
             messages[0]
                 .content
@@ -1814,6 +2107,142 @@ mod tests {
             "预览仍应用改写"
         );
         assert_eq!(snapshot().synonym_hits, before, "预览不得写统计（dry-run）");
+    }
+
+    // ── 时间窗统计（事件环）──────────────────────────────────────
+
+    /// 窗口计数正判：环内按 since 裁剪。直接驱动 `ring()` 验证推剪逻辑，
+    /// 不依赖 `record_*` 的全局静态（并发测试会互相污染计数）。
+    #[test]
+    fn event_ring_counts_within_window_only() {
+        let ring = EventRing::new();
+        let now = now_epoch_ms();
+        // 两条旧事件（窗口外）、两条新事件（窗口内）
+        ring.push(EventKind::Responses, now.saturating_sub(7_200_000)); // 2h 前
+        ring.push(EventKind::Responses, now.saturating_sub(7_200_000));
+        ring.push(EventKind::Responses, now);
+        ring.push(EventKind::Retries, now);
+        assert_eq!(
+            ring.count(EventKind::Responses, now.saturating_sub(3_600_000)),
+            1
+        );
+        assert_eq!(
+            ring.count(EventKind::Responses, now.saturating_sub(7_200_000)),
+            3
+        );
+        assert_eq!(
+            ring.count(EventKind::Retries, now.saturating_sub(3_600_000)),
+            1
+        );
+        assert_eq!(
+            ring.count(EventKind::Responses, now + 1),
+            0,
+            "未来起点全排除"
+        );
+    }
+
+    /// 未写槽（epoch=0）不计：初始态窗口必须全零，不会把占位当事件。
+    #[test]
+    fn unwritten_slots_never_count() {
+        let ring = EventRing::new();
+        assert_eq!(
+            ring.count(EventKind::Responses, 0),
+            0,
+            "未写槽（at=0）不参与计数"
+        );
+    }
+
+    /// 环溢出覆盖最旧条目：truncated 标志由 next > CAPACITY 给出。
+    #[test]
+    fn ring_wraps_and_sets_truncated() {
+        let ring = EventRing::new();
+        let now = now_epoch_ms();
+        for i in 0..(EventRing::CAPACITY + 10) {
+            ring.push(EventKind::Responses, now);
+            if i < EventRing::CAPACITY {
+                // 未绕圈时 truncated 判据应为 false
+                assert!(ring.next.load(Ordering::Relaxed) <= EventRing::CAPACITY as u64);
+            }
+        }
+        assert!(
+            ring.next.load(Ordering::Relaxed) > EventRing::CAPACITY as u64,
+            "绕圈后写指针超过容量"
+        );
+        // 覆盖后计数是下界：容量槽 ≤ 4096 条全在窗口内
+        assert_eq!(
+            ring.count(EventKind::Responses, now),
+            EventRing::CAPACITY as u64
+        );
+    }
+
+    /// `record_failure` 双写语义在环内也成立：Refusal 同时落 REFUSALS 与 FAILURE_REFUSAL。
+    #[test]
+    fn record_failure_double_writes_ring() {
+        // 只验证环派生面：windowed_snapshot 的全零窗口在无事件时成立。
+        // （静态计数面已有既有测试；这里防「窗口版漏字段」的形状回归。）
+        let w = windowed_snapshot(3_600_000);
+        assert_eq!(w.window_ms, 3_600_000);
+        assert!(!w.truncated);
+    }
+
+    // ── 预览命中明细（AppliedDetail）────────────────────────────
+
+    #[test]
+    fn detail_reports_every_enabled_item() {
+        let mut cfg = enabled();
+        cfg.system_normalize = true;
+        cfg.dead_zone_rewrite = true;
+        cfg.rewrite_rules = vec![RewriteRule {
+            from: "攻击".to_string(),
+            to: "测试".to_string(),
+        }];
+        cfg.synonym_enabled = true;
+        cfg.synonym_pairs = vec![RewriteRule {
+            from: "黑客".to_string(),
+            to: "安全研究人员".to_string(),
+        }];
+        cfg.structured_prompt = true;
+        cfg.structured_suffix = "SUFFIX".to_string();
+
+        // system 里塞空行 + 重复 system 触发归一化；user 里两个词都命中
+        let mut messages = vec![
+            sys("line1\n\n\n\nline2"),
+            sys("line1\n\n\n\nline2"), // 重复 → 被丢弃，计入 normalized
+            user("黑客在攻击"),
+        ];
+        let applied = apply_messages(&mut messages, &cfg);
+
+        assert!(applied.changed);
+        let d = &applied.detail;
+        assert!(d.normalized >= 1, "归一化有计数: {d:?}");
+        assert_eq!(d.dead_zone_rules, 1);
+        assert_eq!(d.dead_zone_replacements, 1, "攻击×1");
+        assert_eq!(d.synonym_rules, 1);
+        assert_eq!(d.synonym_replacements, 1, "黑客×1");
+        assert!(d.structured_appended, "结构化提示已追加");
+        assert!(d.skill_names.is_empty(), "无技能目录命中");
+    }
+
+    #[test]
+    fn detail_disabled_when_total_off() {
+        // `enabled()` 的 fixture 会开总开关；这里显式关掉其余保持开启——
+        // 总开关一关，所有治理项都必须零执行、明细全空。
+        let mut cfg = enabled();
+        cfg.enabled = false;
+        cfg.dead_zone_rewrite = true;
+        cfg.rewrite_rules = vec![RewriteRule {
+            from: "a".to_string(),
+            to: "b".to_string(),
+        }];
+        let mut messages = vec![user("aaa")];
+        let applied = apply_messages(&mut messages, &cfg);
+        assert!(!applied.changed);
+        assert_eq!(
+            messages[0].content.as_deref(),
+            Some("aaa"),
+            "总开关关闭即原样"
+        );
+        assert_eq!(applied.detail, AppliedDetail::default());
     }
 
     // ── 按模型自动套用 ──────────────────────────────────────────
