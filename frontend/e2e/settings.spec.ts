@@ -1,132 +1,109 @@
 import { test, expect, loginAsAdmin } from './fixtures';
 
 /**
- * 系统设置 —— 分类导航回归。
+ * 系统设置 —— 分类导航回归（v1.0.93 设置菜单迁移后终态）。
  *
- * 对齐 Agent2API 的 settings-page 分类：超时与重试从原来塞在「站点 → API 配置」
- * 一张卡里拆成独立分类，管理员不必翻长卡片找参数。
+ * 迁移口径（docs/ROUTING-MENU-PARITY.md §9，对齐 Agent2API settings-page）：
+ * - 保留分类：通用 / 显示 / 反馈与需求 / 网关 / 安全 / 数据 / 版本信息 / 更新
+ *   （账户视落地情况另定；提供商不建——供应商已是顶级页 /channels，记分叉）
+ * - 已迁出：AI 助手→/agent 抽屉、聊天→/chat、报表→仪表盘 Tab、限流与缓存→/limit、
+ *   计费→/products 计费设置 Tab、通知→顶级 /notify、重试+超时→路由页「错误处理」rail 面板
+ * - 已删除：流兼容 / 自动续写（A2A 无对应）
  */
 
-/** 左栏分类导航 */
+/** 设置左栏分类导航 */
 const nav = (page: import('@playwright/test').Page) => page.locator('.settings-nav');
 
-test.describe('系统设置分类', () => {
+test.describe('系统设置分类（v1.0.93 迁移后）', () => {
   test.beforeEach(async ({ page }) => {
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/settings');
     await expect(page.locator('.settings-layout')).toBeVisible();
   });
 
-  test('左栏渲染全部分类，默认落在通用', async ({ page, pageErrors }) => {
+  test('左栏渲染终态分类，默认落在通用', async ({ page, pageErrors }) => {
     await expect(nav(page)).toBeVisible();
-    // 「路由」已独立成页 /routing（#40 分层档案 + 预演 + 回放 + 粘滞），不再在此列
-    for (const label of ['通用', 'AI 助手', '聊天', '网关', '重试', '超时', '计费', '数据', '通知', '安全', '更新']) {
+    for (const label of ['通用', '显示', '反馈与需求', '网关', '安全', '数据', '版本信息', '更新']) {
       await expect(nav(page).locator('.settings-nav-item', { hasText: label })).toHaveCount(1);
     }
-    // 默认分类高亮，右栏是通用（使用限额 + 主题）
+    // 迁走的分类不再出现在设置左栏
+    for (const gone of ['AI 助手', '聊天', '报表', '重试', '超时', '限流与缓存', '计费', '通知', '系统信息']) {
+      await expect(nav(page).locator('.settings-nav-item', { hasText: gone })).toHaveCount(0);
+    }
+    // 默认分类高亮，右栏是通用（使用限额）
     await expect(page.locator('.settings-nav-item.active')).toContainText('通用');
     await expect(page.locator('.settings-pane')).toContainText('使用限额');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('超时分类承载五个超时窗口，不再挤在通用里', async ({ page, pageErrors }) => {
-    // 通用分类里不应再出现超时/重试字段
+  test('重试与超时已迁路由页「错误处理」：设置不再有，路由 rail 一级承载', async ({ page, pageErrors }) => {
+    // 设置右栏（通用态）不含任何超时/重试字段
     await expect(page.locator('.settings-pane')).not.toContainText('请求总超时');
 
-    await nav(page).locator('.settings-nav-item', { hasText: '超时' }).click();
-    const pane = page.locator('.settings-pane');
-    await expect(pane).toContainText('请求总超时');
-    await expect(pane).toContainText('连接超时');
-    await expect(pane).toContainText('响应头等待');
-    await expect(pane).toContainText('流空闲超时');
-    await expect(pane).toContainText('非流式响应体超时');
-    // 五个数值输入框
-    await expect(pane.locator('input[type=number]')).toHaveCount(5);
-    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
-  });
-
-  test('重试分类四个字段，含状态码文本框', async ({ page, pageErrors }) => {
-    await nav(page).locator('.settings-nav-item', { hasText: '重试' }).click();
-    const pane = page.locator('.settings-pane');
+    // 路由页 rail 点「错误处理」→ RoutingErrorsPanel 渲染重试 4 字段 + 超时 5 字段
+    await page.goto('/routing');
+    await page.locator('.rt-shell-rail .rt-nav-item', { hasText: '错误处理' }).click();
+    const pane = page.locator('.rt-shell-main');
     await expect(pane).toContainText('最大重试次数（供应商切换）');
     await expect(pane).toContainText('同账号重试次数');
     await expect(pane).toContainText('重试间隔');
     await expect(pane).toContainText('直接换号/换供应商状态码');
-    // 状态码是文本输入（逗号分隔），不是数字框
-    await expect(pane.locator('input[type=text]')).toHaveCount(1);
+    await expect(pane).toContainText('请求总超时 (秒)');
+    await expect(pane).toContainText('连接超时 (秒)');
+    await expect(pane).toContainText('流空闲超时 (秒)');
+    await expect(pane).toContainText('非流式响应体超时 (秒)');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('重试分类保存打到 /api/limits', async ({ page, pageErrors }) => {
+  test('错误处理面板保存打到 /api/limits', async ({ page, pageErrors }) => {
     const calls: string[] = [];
     page.on('request', (r) => {
       if (r.url().includes('/api/limits')) calls.push(r.method());
     });
 
-    await nav(page).locator('.settings-nav-item', { hasText: '重试' }).click();
-    await page.locator('.settings-pane input[type=number]').first().fill('3');
-    await page.locator('.settings-pane .btn-primary', { hasText: '保存更改' }).click();
+    await page.goto('/routing');
+    await page.locator('.rt-shell-rail .rt-nav-item', { hasText: '错误处理' }).click();
+    // 路由错误处理面板内「重试/超时」卡的可见数字输入与保存钮（避开隐藏的粘滞档输入）
+    await page.locator('.rt-shell-main input[type=number]:visible').first().fill('3');
+    await page.locator('.rt-shell-main').getByRole('button', { name: '保存更改' }).first().click();
 
     await expect.poll(() => calls.filter((m) => m === 'PUT' || m === 'POST').length, { timeout: 5000 }).toBeGreaterThan(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('网关 / 数据 / 计费分类各自渲染内容', async ({ page, pageErrors }) => {
+  test('网关 / 数据 / 安全分类各自渲染内容', async ({ page, pageErrors }) => {
     await nav(page).locator('.settings-nav-item', { hasText: '网关' }).click();
-    await expect(page.locator('.settings-pane')).toContainText('请求体大小上限');
+    await expect(page.locator('.settings-pane')).toContainText('网络层');
 
-    // 「数据」在导航里唯一，但「数据」二字也会命中侧边栏分组名，
-    // 用 exact 精确匹配导航项自身的文本
+    // 「数据」在导航里唯一，用 exact 精确匹配导航项自身的文本（避免命中分组名）
     await nav(page).getByRole('button', { name: '数据', exact: true }).click();
-    // 数据面板首屏有 loading 态（<div class="loading">加载中</div>）——不等它落定
-    // 就读 innerText 会抓到 3 个字的加载文案（mobile 上偶发，desktop 时序更宽）。
-    // 等真实内容出现再断言，才符合本用例「分类各自渲染内容」的意图。
     await expect(page.locator('.settings-pane')).toContainText('数据管理');
-    await expect(page.locator('.settings-pane')).not.toContainText('请求体大小上限');
     const text = await page.locator('.settings-pane').innerText();
     expect(text.length).toBeGreaterThan(10);
 
-    await nav(page).getByRole('button', { name: '计费', exact: true }).click();
-    await expect(page.locator('.settings-pane')).toContainText('按次计费');
+    await nav(page).locator('.settings-nav-item', { hasText: '安全' }).click();
+    await expect(page.locator('.settings-pane')).toContainText('安全策略');
+    await expect(page.locator('.settings-pane')).toContainText('IP 过滤');
+    // 安全面板首屏会拉系统指标，e2e 桩未提供该数据时的 console 报错与本迁移无关，过滤后断言
+    const relevant = pageErrors.filter((e) => !e.includes('Failed to fetch metrics'));
+    expect(relevant, relevant.join('\n')).toEqual([]);
+  });
+
+  test('显示分类：主题 / 缩放 / 语言（真落地，非空壳）', async ({ page, pageErrors }) => {
+    await nav(page).locator('.settings-nav-item', { hasText: '显示' }).click();
+    const pane = page.locator('.settings-pane');
+    await expect(pane).toContainText('主题');
+    await expect(pane).toContainText('界面缩放');
+    await expect(pane).toContainText('语言');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('聊天分类：自动标题开关 + 保存走 snake body（#11 契约）', async ({ page, pageErrors }) => {
-    await nav(page).locator('.settings-nav-item', { hasText: '聊天' }).click();
+  test('反馈与需求分类：issue 入口 + 站内工单跳转（真落地，非空壳）', async ({ page, pageErrors }) => {
+    await nav(page).locator('.settings-nav-item', { hasText: '反馈与需求' }).click();
     const pane = page.locator('.settings-pane');
-
-    // 面板渲染：开关 + 截断长度输入 + 渠道下拉含「全局调度」默认项
-    // （#7 图片兼容面板挂进聊天分区后新增 3 个 number 输入——压缩阈值/
-    //   长边/质量。断言收窄到 ChatSettingsPanel 自己的截断输入，不再
-    //   断言整 pane 的 number 总数。）
-    await expect(pane.locator('label', { hasText: '启用会话自动标题' })).toHaveCount(1);
-    const truncateGroup = pane.locator('.form-group', { hasText: '提示词截断长度（字符）' });
-    await expect(truncateGroup.locator('input[type=number]')).toHaveCount(1);
-    await expect(pane.locator('option', { hasText: '全局调度' })).toHaveCount(1);
-
-    // 开关 + 改截断长度
-    await pane.locator('label', { hasText: '启用会话自动标题' }).locator('input[type=checkbox]').check();
-    await truncateGroup.locator('input[type=number]').fill('800');
-
-    // #7 图片兼容面板同挂聊天分区且自带 settings-actions 保存钮——
-    // 点击收窄到 ChatSettingsPanel 的 actions（截断输入所在 .form-group
-    // 之后的第一个 .settings-actions，即该面板自己那颗）。
-    const saveBtn = truncateGroup.locator('xpath=following-sibling::div[contains(@class,"settings-actions")]').locator('.btn-primary');
-    const [req, resp] = await Promise.all([
-      page.waitForRequest((r) => r.url().includes('/api/chat/settings') && r.method() === 'PUT'),
-      page.waitForResponse((r) => r.url().includes('/api/chat/settings') && r.request().method() === 'PUT'),
-      saveBtn.click(),
-    ]);
-    // 冻结契约：PUT body snake_case；GET 响应 camelCase（含回显）
-    expect(JSON.parse(req.postData() || '{}')).toMatchObject({
-      auto_title: true,
-      title_prompt_chars: 800,
-    });
-    expect(resp.status()).toBe(200);
-    expect(await resp.json()).toMatchObject({
-      success: true,
-      data: { autoTitle: true, titlePromptChars: 800 },
-    });
+    await expect(pane).toContainText('问题反馈');
+    await expect(pane).toContainText('功能建议');
+    await expect(pane).toContainText('提交工单（站内通道）');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });

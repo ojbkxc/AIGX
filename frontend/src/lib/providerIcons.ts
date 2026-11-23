@@ -48,6 +48,16 @@ const KIND_ICONS: Record<string, string> = {
   orcaterm: 'orcaterm.png',
   autoclaw: 'autoclaw.png',
   'autoclaw-intl': 'autoclaw.png',
+  // ── 品牌 png 补齐（A2A 有 png、AIGX 之前未映射的 kind）──
+  atomcode: 'atomcode.png',
+  chatglm: 'chatglm.png',
+  lobsterai: 'lobsterai.png',
+  modelscope: 'modelscope.png',
+  'modelscope-intl': 'modelscope.png',
+  doubaowork: 'doubaowork.png',
+  tabbit: 'tabbit.png',
+  astudio: 'astudio.png',
+  quwork: 'quwork.png',
 };
 
 const PRESET_ICONS: Record<string, string> = {
@@ -81,6 +91,17 @@ const PRESET_ICONS: Record<string, string> = {
 export function providerIcon(kind: string): string | null {
   const file = KIND_ICONS[kind];
   return file ? `/providers/${file}` : null;
+}
+
+/**
+ * provider kind 的首字母圆标（无品牌 png 时的兜底）。
+ *
+ * registry 有 60+ 个 kind，品牌图只覆盖一部分；调用方在 `providerIcon()` 返回 null
+ * 时渲染这个首字母圆标，保证**任何 provider 都有图标**（有品牌图用图、没有用首字母）。
+ */
+export function providerMonogram(kind: string): string {
+  const ch = (kind || '').trim().charAt(0);
+  return ch ? ch.toUpperCase() : '?';
 }
 
 /** 预置模板 key → 图标 URL（无图标返回 null）。 */

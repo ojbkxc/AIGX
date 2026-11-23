@@ -41,6 +41,7 @@ const Settings = lazyPage(() => import('./pages/Settings'));
 const Profile = lazyPage(() => import('./pages/Profile'));
 const Logs = lazyPage(() => import('./pages/Logs'));
 const Products = lazyPage(() => import('./pages/Products'));
+const Notify = lazyPage(() => import('./pages/Notify'));
 const Gateways = lazyPage(() => import('./pages/Gateways'));
 const ProxyPool = lazyPage(() => import('./pages/ProxyPool'));
 const Chat = lazyPage(() => import('./pages/Chat'));
@@ -50,6 +51,7 @@ const ModelManage = lazyPage(() => import('./pages/ModelManage'));
 const Routing = lazyPage(() => import('./pages/Routing'));
 const PurgeConsole = lazyPage(() => import('./pages/PurgeConsole'));
 const Maintenance = lazyPage(() => import('./pages/Maintenance'));
+const LimitPage = lazyPage(() => import('./pages/LimitPage'));
 const Prompts = lazyPage(() => import('./pages/Prompts'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
@@ -220,7 +222,7 @@ export default function App(): JSX.Element {
           <Route path="/groups" element={<Navigate to="/settings" replace />} />
           <Route path="/orders" element={<Navigate to="/wallet" replace />} />
           <Route path="/epay" element={<Navigate to="/settings" replace />} />
-          <Route path="/notify" element={<Navigate to="/settings" replace />} />
+          <Route path="/notify" element={<AdminRoute><Notify /></AdminRoute>} />
           <Route path="/security" element={<Navigate to="/settings" replace />} />
           <Route path="/ip-management" element={<Navigate to="/settings" replace />} />
           <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
@@ -247,6 +249,8 @@ export default function App(): JSX.Element {
           <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
           {/* 自动维护：顶级页（beta.7 对齐上游） */}
           <Route path="/maintenance" element={<AdminRoute><Maintenance /></AdminRoute>} />
+          {/* 限流：从「系统设置 → 限流与缓存」独立成顶级页 */}
+          <Route path="/limit" element={<AdminRoute><LimitPage /></AdminRoute>} />
           {/* 签到中心已并入供应商页「签到」Tab（旧路由重定向防书签失效） */}
           <Route path="/checkin" element={<Navigate to="/channels?tab=checkin" replace />} />
           {/* 定时任务已升级为顶级「自动维护」页（旧路由重定向防书签失效） */}

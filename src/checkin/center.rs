@@ -312,9 +312,10 @@ pub async fn run_schedule_now(
 
 // ─── 快照的账号行 / 分组（对齐 A2A `api/checkin_center.rs`）────────────
 
-/// 账号的可用性（与签到中心「不可用」徽标同口径：启用且凭证未过期）。
+/// 账号的可用性（签到中心「不可用」徽标口径）：**只看凭证是否过期**——
+/// 停用（disabled）账号仍可签到（用户要求），故不再以启用状态判不可用。
 pub fn account_available(session: &crate::account_session::model::AccountSession) -> bool {
-    session.is_enabled() && !session.is_expired(chrono::Utc::now().timestamp())
+    !session.is_expired(chrono::Utc::now().timestamp())
 }
 
 /// 账号行（对齐 A2A `CheckinAccount`：`{id,name,available,checkinAt,
@@ -355,9 +356,9 @@ pub fn account_row(
 
 /// 账号为什么不在签到范围内（对齐 A2A `out_of_scope_reason`）。
 ///
-/// AIGX 的排除分支：实现未进主仓（插件仓）/ 没有签到链路 / 账号停用 /
-/// 凭证过期。判据与 `scheduler::collect_targets` 的过滤是同一对条件 ——
-/// 快照说「不参与」的账号，点「立即全部签到」也确实不会跑。
+/// AIGX 的排除分支：实现未进主仓（插件仓）/ 没有签到链路 / 凭证过期。
+/// 注：**账号停用不再排除**（用户要求 disabled 账号也签到——停用但凭证有效
+/// 仍参与）；判据与 `scheduler::collect_targets` 同源。
 pub fn out_of_scope_reason(
     session: &crate::account_session::model::AccountSession,
 ) -> Option<&'static str> {
@@ -366,9 +367,6 @@ pub fn out_of_scope_reason(
     }
     if !claim::supports_checkin(&session.provider) {
         return Some("没有签到链路");
-    }
-    if !session.is_enabled() {
-        return Some("账号已停用");
     }
     if session.is_expired(chrono::Utc::now().timestamp()) {
         return Some("凭证已过期");

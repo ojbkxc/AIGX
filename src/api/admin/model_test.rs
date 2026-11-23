@@ -787,7 +787,7 @@ fn write_test_log(
         status_code,
         error_msg: error.map(|e| e.chars().take(500).collect()),
         ip: None,
-        client_name: String::new(),
+        client_name: crate::api::client_id::SELF_CLIENT.to_string(),
         client_version: String::new(),
         request_id: None,
         created_at: chrono::Utc::now().timestamp(),

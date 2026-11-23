@@ -91,9 +91,12 @@ pub struct RequestLogQuery {
     /// 状态筛选：`ok`（2xx）/ `error`（非 2xx 或带错误信息）
     #[serde(default)]
     pub status: Option<String>,
-    /// 关键词：大小写不敏感，匹配 model / 渠道名 / 错误信息 / 用户
+    /// 关键词：大小写不敏感，匹配 model / 渠道名 / 错误信息 / 用户 / 客户端
     #[serde(default)]
     pub keyword: Option<String>,
+    /// 客户端过滤：大小写不敏感，匹配 client_name / client_version
+    #[serde(default)]
+    pub client: Option<String>,
     #[serde(default)]
     pub start: Option<i64>,
     #[serde(default)]
@@ -187,6 +190,7 @@ pub async fn handle_list_request_logs(
         q.end,
         q.status.as_deref(),
         q.keyword.as_deref(),
+        q.client.as_deref(),
         q.page,
         q.effective_size(),
     );

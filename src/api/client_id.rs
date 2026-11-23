@@ -39,6 +39,11 @@ use crate::storage::FileStore;
 /// 未识别客户端的固定名字（报表/日志对账锚点）。
 pub const UNKNOWN_CLIENT: &str = "unknown";
 
+/// AIGX 自身发起请求（Agent / Playground / 渠道调试 / 模型测试 / 运维助手）的
+/// 固定客户端名。数据面之外的内部调用统一标注为此值，避免落 `unknown` 导致
+/// 「日志里查不到客户端」。同时也是外部声明不可占用的系统保留名。
+pub const SELF_CLIENT: &str = "AIGX";
+
 /// 自定义规则 KV 键（整份 JSON 读写）。
 pub const RULES_KEY: &str = "client_id_rules";
 
@@ -94,6 +99,14 @@ pub struct BuiltinClient {
 
 /// 内置客户端目录。顺序即匹配优先级（更具体的产品令牌在前）。
 pub const BUILTIN_CLIENTS: &[BuiltinClient] = &[
+    // AIGX 自身（无 UA 产品令牌：正常路径由 self_identity() 直接标注；此处登记
+    // 只为让显式声明 / 规则面板把它识别为「已知客户端」并规范化为 AIGX）。
+    BuiltinClient {
+        id: "aigx",
+        name: SELF_CLIENT,
+        aliases: &["aigx"],
+        products: &[],
+    },
     BuiltinClient {
         id: "claude-code",
         name: "Claude Code",
@@ -276,6 +289,73 @@ pub const BUILTIN_CLIENTS: &[BuiltinClient] = &[
         aliases: &["lobechat", "lobe-chat", "lobe chat"],
         products: &["LobeChat"],
     },
+    // ── 对齐 Agent2API catalog.rs 的补充目录（以下 9 家 A2A 有、此前 AIGX 缺）──
+    BuiltinClient {
+        id: "dsh",
+        name: "DeepSeek Harness",
+        aliases: &["deepseek-harness", "deepseek harness", "dsh"],
+        products: &["deepseek-harness"],
+    },
+    BuiltinClient {
+        id: "magpie",
+        name: "Magpie",
+        aliases: &[
+            "magpie",
+            "magpie-router",
+            "magpie-vision",
+            "magpie-search",
+            "magpie-image",
+        ],
+        products: &[
+            "magpie-router",
+            "magpie-vision",
+            "magpie-search",
+            "magpie-image",
+            "magpie",
+        ],
+    },
+    BuiltinClient {
+        id: "hermes",
+        name: "Hermes Agent",
+        aliases: &["hermes", "hermesagent", "hermes-agent", "hermes agent"],
+        products: &["hermesagent", "hermes-agent", "hermes"],
+    },
+    BuiltinClient {
+        id: "hindsight",
+        name: "Hindsight",
+        aliases: &["hindsight"],
+        products: &["hindsight"],
+    },
+    BuiltinClient {
+        id: "workbuddy",
+        name: "WorkBuddy",
+        aliases: &["workbuddy", "workbuddy-ai"],
+        products: &["workbuddy-ai", "workbuddy"],
+    },
+    BuiltinClient {
+        id: "codebuddy",
+        name: "CodeBuddy",
+        aliases: &["codebuddy", "codebuddy-code"],
+        products: &["codebuddy-code", "codebuddy"],
+    },
+    BuiltinClient {
+        id: "crush",
+        name: "Crush",
+        aliases: &["crush"],
+        products: &["crush"],
+    },
+    BuiltinClient {
+        id: "factory-droid",
+        name: "Factory Droid",
+        aliases: &["factory-cli", "factory droid", "factory-droid"],
+        products: &["factory-cli"],
+    },
+    BuiltinClient {
+        id: "goose",
+        name: "Goose",
+        aliases: &["goose"],
+        products: &["goose"],
+    },
 ];
 
 // ── 识别结果 ────────────────────────────────────────────────────────
@@ -298,6 +378,16 @@ impl ClientIdentity {
             version: String::new(),
             source: "unknown",
         }
+    }
+}
+
+/// AIGX 自身发起请求的固定身份。数据面之外的内部调用（Agent / Playground /
+/// 渠道调试 / 模型测试 / 运维助手）用 [`attach`] 写入日志，避免落 `unknown`。
+pub fn self_identity() -> ClientIdentity {
+    ClientIdentity {
+        name: SELF_CLIENT.to_string(),
+        version: String::new(),
+        source: "internal",
     }
 }
 
@@ -470,6 +560,15 @@ fn compile_one(mut rule: ClientRule) -> Result<CompiledRule, String> {
     rule.client_name = rule.client_name.trim().to_string();
     if !valid_text(&rule.client_name, MAX_NAME_CHARS) {
         return Err("目标客户端名不能为空、不能含控制字符，最长 64 个字符".into());
+    }
+    // 系统保留名不可被自定义规则指向（避免把普通请求伪装成 AIGX 自身 / unknown）。
+    if let Some(normalized) = normalize_client_name(&rule.client_name) {
+        if normalized == SELF_CLIENT || normalized.eq_ignore_ascii_case(UNKNOWN_CLIENT) {
+            return Err(format!(
+                "目标客户端名 {} / unknown 为系统保留名",
+                SELF_CLIENT
+            ));
+        }
     }
     if !(-1000..=1000).contains(&rule.priority) {
         return Err("优先级取值范围为 -1000..=1000（数值越小越先匹配）".into());
@@ -648,6 +747,11 @@ pub fn identify_with(headers: &HeaderMap, rules: &CompiledRules) -> ClientIdenti
 fn declared_identity(raw: &str, headers: &HeaderMap) -> Option<ClientIdentity> {
     let (raw_name, inline_version) = split_declared(raw)?;
     let name = normalize_client_name(&raw_name)?;
+    // 外部声明不得冒用系统保留名（AIGX 自身）；命中则该声明视为无效，回落到
+    // 自定义规则 / 内置 UA 识别。
+    if name == SELF_CLIENT {
+        return None;
+    }
     let version = read_header(headers, DECLARATION_VERSION_HEADER)
         .filter(|value| is_version_token(value))
         .or(inline_version)
@@ -1164,5 +1268,62 @@ mod tests {
         assert_eq!(version_at("foo/bar", 4), "");
         assert!(is_version_token("1.2.3"));
         assert!(!is_version_token("python"));
+    }
+
+    /// 自身请求身份：`self_identity()` 固定标 `AIGX`、来源 `internal`（供 attach 写入）。
+    #[test]
+    fn self_identity_marks_aigx() {
+        let id = self_identity();
+        assert_eq!(id.name, SELF_CLIENT);
+        assert_eq!(id.name, "AIGX");
+        assert!(id.version.is_empty());
+        assert_eq!(id.source, "internal");
+    }
+
+    /// 系统保留名 `AIGX` / `unknown` 不得被自定义规则占用（防把普通请求伪装成自身）。
+    #[test]
+    fn reserved_self_and_unknown_names_rejected_in_rules() {
+        for name in ["AIGX", "aigx", " unknown "] {
+            let bad = rule("reserved", RuleTarget::Ua, MatchMode::Prefix, "x", name, 0);
+            assert!(
+                CompiledRules::compile(vec![bad]).is_err(),
+                "保留名 `{name}` 应被拒绝"
+            );
+        }
+    }
+
+    /// 外部显式声明不得冒用 `AIGX`：声明被视为无效，回落到 UA 识别（无 UA → unknown）。
+    #[test]
+    fn declared_aigx_is_not_honored() {
+        let identity = identify_with(
+            &headers(&[("x-client-name", "AIGX")]),
+            &CompiledRules::default(),
+        );
+        assert_ne!(identity.name, SELF_CLIENT, "外部声明不得被当作 AIGX 自身");
+        assert_ne!(identity.source, "declared");
+        assert_eq!(identity.name, UNKNOWN_CLIENT);
+    }
+
+    /// 补齐的 9 家目录：UA 令牌 + 声明别名都应归一为规范名（抽查代表条目）。
+    #[test]
+    fn supplementary_catalog_clients_recognized() {
+        let cases = [
+            ("deepseek-harness/1.0.0", "DeepSeek Harness", "1.0.0"),
+            ("magpie-router/2.1.0", "Magpie", "2.1.0"),
+            ("goose/0.9.4", "Goose", "0.9.4"),
+            ("codebuddy/3.2.0", "CodeBuddy", "3.2.0"),
+        ];
+        for (ua, name, version) in cases {
+            let id = identify_with(&headers(&[("user-agent", ua)]), &CompiledRules::default());
+            assert_eq!(id.name, name, "UA={ua}");
+            assert_eq!(id.version, version, "UA={ua}");
+        }
+        // 声明别名归一（dsh → DeepSeek Harness）
+        let declared = identify_with(
+            &headers(&[("x-client-name", "dsh")]),
+            &CompiledRules::default(),
+        );
+        assert_eq!(declared.name, "DeepSeek Harness");
+        assert_eq!(declared.source, "declared");
     }
 }

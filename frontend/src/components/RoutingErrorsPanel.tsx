@@ -109,6 +109,213 @@ function validate(settings: ErrorSettings, t: (k: string, v?: Record<string, str
 }
 
 export default function RoutingErrorsPanel(): JSX.Element {
+  return (
+    <>
+      <ErrorsCard />
+      <div style={{ marginTop: 16 }}>
+        {/* v1.0.93：原系统设置「重试」「超时」两分类并入（设置菜单对齐 A2A，超时/重试归路由错误处理） */}
+        <RetryTimeoutCard />
+      </div>
+    </>
+  );
+}
+
+/** 原系统设置「重试」字段（/limits 读写），v1.0.93 迁入本面板。 */
+const RETRY_FIELDS: Array<{
+  field: 'max_retries' | 'retry_self_count' | 'retry_interval_ms' | 'retry_on_status';
+  label: string;
+  hint: string;
+  type: 'number' | 'text';
+  min?: number;
+  max?: number;
+  placeholder: string;
+}> = [
+  { field: 'max_retries', label: '最大重试次数（供应商切换）', hint: '供应商级失败切换的最大额外尝试次数（0 = 只尝试首选供应商，最多 10）；保存后立即生效。', type: 'number', min: 0, max: 10, placeholder: '2' },
+  { field: 'retry_self_count', label: '同账号重试次数', hint: '账号池内同一账号原地重试的额外次数（0 = 失败即换号，最多 10）；保存后立即生效。换号次数在账号池「账号路由」里配置。', type: 'number', min: 0, max: 10, placeholder: '1' },
+  { field: 'retry_interval_ms', label: '重试间隔 (毫秒)', hint: '账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。', type: 'number', min: 0, max: 10000, placeholder: '0' },
+  { field: 'retry_on_status', label: '直接换号/换供应商状态码（逗号分隔）', hint: '命中这些上游状态码时不做指数退避冷却（只给基础冷却）并直接换号，同时在供应商级重试中视为可重试；默认 402（余额不足）。', type: 'text', placeholder: '402' },
+];
+
+/** 原系统设置「超时」字段（/limits 读写），v1.0.93 迁入本面板。 */
+const TIMEOUT_FIELDS: Array<{
+  field: 'api_timeout_secs' | 'connect_timeout_secs' | 'headers_timeout_secs' | 'stream_idle_secs' | 'body_timeout_secs';
+  label: string;
+  hint: string;
+  min: number;
+  max: number;
+  placeholder: string;
+}> = [
+  { field: 'api_timeout_secs', label: '请求总超时 (秒)', hint: '单次上游请求的总时长上限，默认 300 秒（修改后重启生效）。', min: 5, max: 3600, placeholder: '300' },
+  { field: 'connect_timeout_secs', label: '连接超时 (秒)', hint: '与上游建立 TCP/TLS 连接的上限，默认 10 秒（修改后重启生效）。', min: 1, max: 300, placeholder: '10' },
+  { field: 'headers_timeout_secs', label: '响应头等待 / 首事件上限 (秒)', hint: '等待上游响应头与流式首个事件的上限，默认 60 秒（保存后立即生效）。', min: 1, max: 600, placeholder: '60' },
+  { field: 'stream_idle_secs', label: '流空闲超时 (秒)', hint: '流式响应两次读取之间的最长静默，默认 30 秒（修改后重启生效）。', min: 1, max: 600, placeholder: '30' },
+  { field: 'body_timeout_secs', label: '非流式响应体超时 (秒)', hint: '非流式请求读完整响应体的上限，默认 300 秒（保存后立即生效）。流式请求不受此项约束。', min: 1, max: 3600, placeholder: '300' },
+];
+
+interface RetryTimeoutForm {
+  max_retries: string;
+  retry_self_count: string;
+  retry_interval_ms: string;
+  retry_on_status: string;
+  api_timeout_secs: string;
+  connect_timeout_secs: string;
+  headers_timeout_secs: string;
+  stream_idle_secs: string;
+  body_timeout_secs: string;
+}
+
+const EMPTY_RTFORM: RetryTimeoutForm = {
+  max_retries: '',
+  retry_self_count: '',
+  retry_interval_ms: '',
+  retry_on_status: '',
+  api_timeout_secs: '',
+  connect_timeout_secs: '',
+  headers_timeout_secs: '',
+  stream_idle_secs: '',
+  body_timeout_secs: '',
+};
+
+/** 重试 / 超时（原系统设置两分类整卡迁入；随 /limits 读写，保存即生效口径不变）。 */
+function RetryTimeoutCard(): JSX.Element {
+  const { t } = useTranslation();
+  const addToast = useToast();
+  const [form, setForm] = useState<RetryTimeoutForm>({ ...EMPTY_RTFORM });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await api.getLimits();
+        const d = (res?.data ?? res) as Partial<RetryTimeoutForm> & { retry_on_status?: number[] } | undefined;
+        if (!alive) return;
+        setForm({
+          max_retries: d?.max_retries != null ? String(d.max_retries) : '',
+          retry_self_count: d?.retry_self_count != null ? String(d.retry_self_count) : '',
+          retry_interval_ms: d?.retry_interval_ms != null ? String(d.retry_interval_ms) : '',
+          retry_on_status: Array.isArray(d?.retry_on_status) ? d.retry_on_status.join(', ') : '',
+          api_timeout_secs: d?.api_timeout_secs != null ? String(d.api_timeout_secs) : '',
+          connect_timeout_secs: d?.connect_timeout_secs != null ? String(d.connect_timeout_secs) : '',
+          headers_timeout_secs: d?.headers_timeout_secs != null ? String(d.headers_timeout_secs) : '',
+          stream_idle_secs: d?.stream_idle_secs != null ? String(d.stream_idle_secs) : '',
+          body_timeout_secs: d?.body_timeout_secs != null ? String(d.body_timeout_secs) : '',
+        });
+      } catch (err) {
+        if (alive) setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const handleChange = (field: keyof RetryTimeoutForm, value: string): void => {
+    setForm({ ...form, [field]: value });
+  };
+
+  const save = async (): Promise<void> => {
+    setSaving(true);
+    setError('');
+    try {
+      const payload: Record<string, number | number[]> = {};
+      // [字段名, 人类标签, 输入串, min, max]（标签取自字段定义，报错可读）
+      const FIELD_LABEL: Record<string, string> = {};
+      for (const f of [...RETRY_FIELDS, ...TIMEOUT_FIELDS]) FIELD_LABEL[f.field] = f.label;
+      const nums: Array<[string, string, number, number, number]> = [
+        ['max_retries', FIELD_LABEL.max_retries, Number(form.max_retries), 0, 10],
+        ['retry_self_count', FIELD_LABEL.retry_self_count, Number(form.retry_self_count), 0, 10],
+        ['retry_interval_ms', FIELD_LABEL.retry_interval_ms, Number(form.retry_interval_ms), 0, 10000],
+        ['api_timeout_secs', FIELD_LABEL.api_timeout_secs, Number(form.api_timeout_secs), 5, 3600],
+        ['connect_timeout_secs', FIELD_LABEL.connect_timeout_secs, Number(form.connect_timeout_secs), 1, 300],
+        ['headers_timeout_secs', FIELD_LABEL.headers_timeout_secs, Number(form.headers_timeout_secs), 1, 600],
+        ['stream_idle_secs', FIELD_LABEL.stream_idle_secs, Number(form.stream_idle_secs), 1, 600],
+        ['body_timeout_secs', FIELD_LABEL.body_timeout_secs, Number(form.body_timeout_secs), 1, 3600],
+      ];
+      for (const [name, label, v, min, max] of nums) {
+        if (form[name as keyof RetryTimeoutForm] !== '') {
+          if (!Number.isFinite(v) || v < min || v > max) {
+            setError(t('{{name}}必须在 {{min}}–{{max}} 之间', { name: t(label), min, max }));
+            setSaving(false);
+            return;
+          }
+          payload[name] = v;
+        }
+      }
+      const statuses = form.retry_on_status
+        .split(/[,，\s]+/)
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isInteger(n) && n >= 100 && n < 600);
+      if (statuses.length > 0) payload.retry_on_status = statuses;
+      await api.updateLimits(payload);
+      addToast(t('重试与超时设置已保存'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card title={t('重试 / 超时')}>
+      <div className="settings-form">
+        <span className="form-hint">
+          {t('上游失败后的重试/换号策略与各阶段等待上限（原系统设置「重试」「超时」两分类，已并入路由错误处理）。')}
+        </span>
+        {loading ? (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <Loader2 size={14} className="confirm-dialog-spin" /> {t('读取中')}
+          </span>
+        ) : (
+          <>
+            {RETRY_FIELDS.map((f) => (
+              <div key={f.field} className="form-group">
+                <label>{t(f.label)}</label>
+                <input
+                  className="form-input"
+                  type={f.type}
+                  min={f.min}
+                  max={f.max}
+                  placeholder={f.placeholder}
+                  value={form[f.field]}
+                  onChange={(e) => handleChange(f.field, e.target.value)}
+                  disabled={saving}
+                />
+                <span className="form-hint">{t(f.hint)}</span>
+              </div>
+            ))}
+            {TIMEOUT_FIELDS.map((f) => (
+              <div key={f.field} className="form-group">
+                <label>{t(f.label)}</label>
+                <input
+                  className="form-input"
+                  type="number"
+                  min={f.min}
+                  max={f.max}
+                  placeholder={f.placeholder}
+                  value={form[f.field]}
+                  onChange={(e) => handleChange(f.field, e.target.value)}
+                  disabled={saving}
+                />
+                <span className="form-hint">{t(f.hint)}</span>
+              </div>
+            ))}
+            {error ? <div className="error-message">{error}</div> : null}
+            <div className="settings-actions">
+              <Button variant="primary" onClick={() => void save()} disabled={saving}>
+                {saving ? t('保存中…') : t('保存更改')}
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function ErrorsCard(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
   const [view, setView] = useState<ErrorPolicyView | null>(null);

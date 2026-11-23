@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  BarChart3, Code2, GraduationCap, ClipboardList, SlidersHorizontal,
+  BarChart3, Code2, GraduationCap, ClipboardList, SlidersHorizontal, Settings,
 } from 'lucide-react';
 import { api } from '../api';
 import ChatDebugger, { type DebugMessage } from '../components/ChatDebugger';
 import SessionDrawer from '../components/chat/SessionDrawer';
+import ChatSettingsPanel from '../components/ChatSettingsPanel';
+import { MobileDrawer } from '../components/ui';
 import type { ChatStreamUsage, ToolCallState } from '../types';
 import { useToast } from '../components/Toast';
+import { isAdmin } from '../lib/utils';
 import './Chat.css';
 
 /** 读取「已启用」提示词并映射为空状态建议卡片（无则用 new-api 同款默认四项） */
@@ -209,12 +212,16 @@ function readSessions(): LegacySession[] {
  */
 export default function Chat(): JSX.Element {
   const { t } = useTranslation();
+  // 聊天设置面板走管理接口：仅管理员显示入口（普通用户不发请求）
+  const admin = isAdmin();
 
   const [messages, setMessages] = useState<DebugMessage[]>([]);
   const [model, setModel] = useState('');
   const [sessions, setSessions] = useState<PlaygroundSession[]>([]);
   const [activeId, setActiveId] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  /** 「聊天设置」抽屉（迁自「系统设置 → 聊天」的 ChatSettingsPanel） */
+  const [settingsOpen, setSettingsOpen] = useState(false);
   /** 标题总结设置弹层（headerExtra 挂抽屉头部；本机偏好存 localStorage） */
   const [titleCfgOpen, setTitleCfgOpen] = useState(false);
   const [cfgDraft, setCfgDraft] = useState<ChatTitleCfg>(() => loadTitleCfg());
@@ -734,7 +741,19 @@ export default function Chat(): JSX.Element {
         onFork={(id) => void forkFromDrawer(id)}
         onRename={(id, next) => void renameSession(id, next)}
         headerExtra={(
-          <span className="sd-title-cfg">
+          <>
+            {/* 聊天设置抽屉（迁自「系统设置 → 聊天」）：管理接口，仅管理员可见 */}
+            {admin && (
+              <button
+                type="button"
+                className="sd-title-gear"
+                title={t('聊天设置')}
+                onClick={() => setSettingsOpen(true)}
+              >
+                <Settings size={13} />
+              </button>
+            )}
+            <span className="sd-title-cfg">
             <button
               type="button"
               className="sd-title-gear"
@@ -773,7 +792,8 @@ export default function Chat(): JSX.Element {
                 </p>
               </div>
             )}
-          </span>
+            </span>
+          </>
         )}
       />
       <ChatDebugger
@@ -790,6 +810,19 @@ export default function Chat(): JSX.Element {
         onBusyChange={(b) => { busyRef.current = b; }}
         onForkMessage={(idx) => void forkSession(idx)}
       />
+      {/* 聊天设置抽屉（迁自「系统设置 → 聊天」）：面板自取数自保存，仅管理员 */}
+      {admin && (
+        <MobileDrawer
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          width="min(92vw, 460px)"
+          ariaLabel={t('聊天设置')}
+        >
+          <div style={{ padding: 16 }}>
+            <ChatSettingsPanel />
+          </div>
+        </MobileDrawer>
+      )}
     </div>
   );
 }

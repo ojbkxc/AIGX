@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next';
 import {
   Bot, Send, Square, ShieldAlert, Terminal, Eye, Wrench, Brain,
-  CheckCircle2, XCircle, History, MessageSquarePlus, Trash2, Lock,
+  CheckCircle2, XCircle, History, MessageSquarePlus, Trash2, Lock, Settings,
 } from 'lucide-react';
 import ModelPicker from '../components/ModelPicker';
 import SessionDrawer from '../components/chat/SessionDrawer';
 import EffortPicker, { type Effort } from '../components/chat/EffortPicker';
 import StreamPhaseIndicator from '../components/chat/StreamPhase';
+import AgentSettingsPanel from '../components/AgentSettingsPanel';
+import { MobileDrawer } from '../components/ui';
 import { usePasteGuard } from '../hooks/usePasteGuard';
 import MessageViewer from '../components/MessageViewer';
 import { api } from '../api';
@@ -100,6 +102,8 @@ export default function Agent(): JSX.Element {
   const [lastEventAt, setLastEventAt] = useState(() => Date.now());
   /** 会话抽屉（cc-haha 会话列表 Web 化：桌面侧栏、移动端覆盖层） */
   const [drawerOpen, setDrawerOpen] = useState(false);
+  /** 「助手设置」抽屉（迁自「系统设置 → 运维 → AI 助手」的 AgentSettingsPanel） */
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   /** 审批卡遮罩误触提示：点遮罩只提示，不自动拒绝（审批必须显式选择） */
@@ -454,6 +458,18 @@ export default function Agent(): JSX.Element {
         onDelete={(id) => void deleteSession(id)}
       />
 
+      {/* 助手设置抽屉（迁自「系统设置 → 运维 → AI 助手」）：面板自取数自保存 */}
+      <MobileDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        width="min(92vw, 460px)"
+        ariaLabel={t('助手设置')}
+      >
+        <div style={{ padding: 16 }}>
+          <AgentSettingsPanel />
+        </div>
+      </MobileDrawer>
+
       {/* open-webui 居中 58rem 消息流（对齐聊天页 chat-debugger-messages） */}
       <div className="agent-main">
         <div className="agent-messages">
@@ -568,6 +584,14 @@ export default function Agent(): JSX.Element {
                   onClick={() => setDrawerOpen((v) => !v)}
                 >
                   <History size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="agent-icon-btn"
+                  title={t('助手设置')}
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  <Settings size={15} />
                 </button>
                 <button
                   type="button"

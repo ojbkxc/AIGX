@@ -11,7 +11,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, Globe,
-  Puzzle, Route as RouteIcon, Flame, Wrench, CalendarClock,
+  Puzzle, Route as RouteIcon, Flame, Wrench, CalendarClock, Bell, Gauge,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -50,6 +50,9 @@ const navItems: NavItem[] = [
   { path: '/purge', labelKey: '破甲控制台', icon: Flame, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/maintenance', labelKey: '自动维护', icon: CalendarClock, adminOnly: true },
+  { path: '/limit', labelKey: '限流', icon: Gauge, adminOnly: true },
+  // 通知（A2A 对齐：从「系统设置」独立成顶级页）
+  { path: '/notify', labelKey: '通知', icon: Bell, adminOnly: true },
   { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
   { path: '/tickets', labelKey: '工单', icon: Headphones },
@@ -115,6 +118,8 @@ const navGroups: NavGroup[] = [
       navItemOf('/plugins'),        // 插件管理（后端建设中降级空态）
       navItemOf('/tools'),          // 工具服务（Skill / MCP 接入、搜索提供商、视觉分析）
       navItemOf('/maintenance'),    // 自动维护（凭证/模型/软件/插件检查 + 记录）
+      navItemOf('/limit'),          // 限流（从设置页迁出为顶级页：RPM/TPM + 缓存 + 运行容量）
+      navItemOf('/notify'),         // 通知（从系统设置迁出为顶级页，对齐 A2A）
       navItemOf('/settings'),        // 系统设置
       navItemOf('/agent'),           // AI 运维
     ],

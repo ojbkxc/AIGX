@@ -234,6 +234,8 @@ impl AssistantBilling {
         log.status_code = if self.error.is_some() { 502 } else { 200 };
         log.error_msg = self.error.clone();
         log.attempts = self.rounds;
+        // AIGX 自身运维助手请求统一标注（避免日志里落 unknown）。
+        crate::api::client_id::attach(&mut log, &crate::api::client_id::self_identity());
         self.state.log_store.record_request(log);
         self.handled = true;
     }

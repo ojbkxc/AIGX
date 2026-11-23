@@ -11,7 +11,8 @@ import { Link } from 'react-router-dom';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
 import { isAdmin } from '../lib/utils';
 import type { ReportWindow } from '../api';
-import { SkeletonCards } from '../components/ui';
+import { SkeletonCards, Tabs } from '../components/ui';
+import ReportSettingsPanel from '../components/ReportSettingsPanel';
 import { fmtInt, fmtTokens, nameColorMap, toCsv, downloadText } from '../lib/format';
 import PanelWrap from '../components/dashboard/PanelWrap';
 import RangeSwitcher, { initialRange, rangeLabel as rangeLabelOf, windowOf, readCustomRange, type RangeKey } from '../components/dashboard/RangeSwitcher';
@@ -63,6 +64,8 @@ export default function Dashboard(): JSX.Element {
 
   const [range, setRange] = useState<RangeKey>(() => initialRange());
   const [custom, setCustom] = useState(() => readCustomRange());
+  // 「报表面板 / 报表设置」两视图（报表设置迁自「系统设置 → 报表」，仅管理员）。
+  const [view, setView] = useState<'report' | 'settings'>('report');
   const win = useMemo(() => windowOf(range, custom), [range, custom]);
   const rLabel = rangeLabelOf(range, custom);
 
@@ -203,6 +206,37 @@ export default function Dashboard(): JSX.Element {
     </div>
   );
 
+  // 「报表面板 / 报表设置」切换（报表设置迁自「系统设置 → 报表」，仅管理员）。
+  // 报表查询 hooks 在上方照常求值，切到设置视图只是不渲染报表面板。
+  const viewTabs = admin ? (
+    <Tabs<'report' | 'settings'>
+      ariaLabel={t('仪表盘分区')}
+      items={[
+        { key: 'report', label: t('报表面板') },
+        { key: 'settings', label: t('报表设置') },
+      ]}
+      active={view}
+      onChange={setView}
+    />
+  ) : null;
+
+  if (admin && view === 'settings') {
+    return (
+      <div>
+        <div className="page-header">
+          <div>
+            <h1>{t('仪表盘')}</h1>
+            <p>{t('报表设置')}</p>
+          </div>
+        </div>
+        {viewTabs}
+        <div style={{ marginTop: 16 }}>
+          <ReportSettingsPanel />
+        </div>
+      </div>
+    );
+  }
+
   // 首屏（无任何缓存数据时）整体骨架；有数据后切档/刷新由面板各自 placeholder 承接。
   const firstLoad = admin
     ? (overviewQ.isPending && realtimeQ.isPending && todayQ.isPending)
@@ -291,6 +325,7 @@ export default function Dashboard(): JSX.Element {
   return (
     <div>
       {header}
+      {viewTabs}
 
       {/* 2) 快捷操作条 */}
       {quickActions}

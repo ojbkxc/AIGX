@@ -42,9 +42,10 @@ import {
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Badge, Button, Card, EmptyState, Loading, Switch } from '../components/ui';
-import RouteReplayPanel from '../components/RouteReplay';
+import RouteReplayPanel, { RouteReplayView } from '../components/RouteReplay';
 import RouteSticky from '../components/RouteSticky';
 import RoutingPanel from '../components/RoutingPanel';
+import RoutingErrorsPanel from '../components/RoutingErrorsPanel';
 import ProfileForm from '../components/routing/ProfileForm';
 import GroupEditor from '../components/routing/GroupEditor';
 import { LayerChip } from '../components/routing/TriStateField';
@@ -57,9 +58,9 @@ import CompactRoutes from '../components/routing/special/CompactRoutes';
 import TitleRoutes from '../components/routing/special/TitleRoutes';
 import VisionCompat from '../components/routing/special/VisionCompat';
 import SpecialHits from '../components/routing/special/SpecialHits';
+// v1.0.93：图片兼容（原系统设置「聊天」Tab 的 ImageCompatPanel）并入路由「特殊请求路由 → 图片兼容」
+import ImageCompatPanel from '../components/ImageCompatPanel';
 import RoutingWorkspace from '../components/routing/RoutingWorkspace';
-import RoutingFlow from '../components/routing/RoutingFlow';
-import RoutingTrace from '../components/routing/RoutingTrace';
 import {
   EMPTY_NEEDS,
   EMPTY_SCOPE,
@@ -82,16 +83,18 @@ import type { RoutingQueueEntryItem, RoutingQueueItem } from '../types';
 import './Routing.css';
 import './RoutingShell.css';
 
-/** rail 五项（与任务书一致：配置 / 回放 / 压缩 / 标题 / 视觉） */
-type RoutingView = 'config' | 'replay' | 'compact' | 'title' | 'vision';
-
-const RAIL_ITEMS: Array<{ key: RoutingView; label: string; icon: typeof SlidersHorizontal }> = [
-  { key: 'config', label: '配置', icon: SlidersHorizontal },
-  { key: 'replay', label: '回放', icon: History },
-  { key: 'compact', label: '压缩', icon: Archive },
-  { key: 'title', label: '标题', icon: Heading },
-  { key: 'vision', label: '视觉', icon: Eye },
+/** 顶部模式分段（对齐 Agent2API：路由配置 / 请求回放） */
+type RoutingMode = 'config' | 'replay';
+/** 配置视图左栏可切换的面板 */
+type ConfigPanel = 'global' | 'errors' | 'compact' | 'vision' | 'title' | 'group';
+/** 特殊请求路由三项（照 Agent2API SPECIAL_RAIL 的文案与顺序） */
+const SPECIAL_RAIL: Array<{ key: 'compact' | 'vision' | 'title'; label: string; icon: typeof SlidersHorizontal }> = [
+  { key: 'compact', label: '压缩上下文', icon: Archive },
+  { key: 'vision', label: '图片兼容', icon: Eye },
+  { key: 'title', label: '标题生成', icon: Heading },
 ];
+/** 按「严格对齐 A2A」隐藏 AIGX 独有的预演 / 覆盖工作台/Flow/Trace（页面不再出现、菜单无入口）；代码保留，待后续单独清理以免本轮大删引入半死态。 */
+const SHOW_ROUTING_ENHANCED = false;
 
 /** 层栏选中项：`global` / `m:<模型名>` / `groups` */
 type LayerSel = 'global' | 'groups' | `m:${string}`;
@@ -115,7 +118,11 @@ export default function Routing(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
 
-  const [view, setView] = useState<RoutingView>('config');
+  const [mode, setMode] = useState<RoutingMode>('config');
+  const [panel, setPanel] = useState<ConfigPanel>('global');
+  // 回放「最近请求」列表（对齐 Agent2API：左列表 + 右 RouteReplayView）
+  const [replayRows, setReplayRows] = useState<Array<{ id: string; model?: string; created_at?: number }>>([]);
+  const [replayId, setReplayId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [policy, setPolicy] = useState<RoutingPolicyWithProfiles | null>(null);
@@ -190,6 +197,32 @@ export default function Routing(): JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 进入回放模式时拉「最近请求」列表（对齐 Agent2API：左列表 + 右执行时间线）
+  useEffect(() => {
+    if (mode !== 'replay') return;
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await api.listRequestLogs({ page: 1, page_size: 50 });
+        if (!alive) return;
+        const rows = (res?.data ?? [])
+          .map((r) => {
+            const row = r as Record<string, unknown>;
+            return {
+              id: String(row.id ?? row.request_id ?? ''),
+              model: typeof row.model === 'string' ? row.model : undefined,
+              created_at: typeof row.created_at === 'number' ? row.created_at : undefined,
+            };
+          })
+          .filter((x) => x.id);
+        setReplayRows(rows);
+      } catch {
+        /* 列表拉取失败不影响按 ID 回放 */
+      }
+    })();
+    return () => { alive = false; };
+  }, [mode]);
 
   /** 总开关：PUT /api/routing 是读-改-写，只传 enabled 不碰其他字段 */
   const toggleEnabled = async (next: boolean): Promise<void> => {
@@ -583,6 +616,7 @@ export default function Routing(): JSX.Element {
         </Card>
       </div>
 
+      {SHOW_ROUTING_ENHANCED && (<>
       {/* ④ 预览与来源：候选与命中层 */}
       <div style={{ marginTop: 12 }}>
         <Card title={t('候选与命中层')}>
@@ -767,8 +801,9 @@ export default function Routing(): JSX.Element {
 
       {/* ⑥ 模型覆盖对比（工作台，be-routing） */}
       <div style={{ marginTop: 12 }}>
-        <RoutingWorkspace active={view === 'config'} />
+        <RoutingWorkspace active={mode === 'config'} />
       </div>
+      </>)}
 
       {/* ⑦ 粘滞会话（旧 sticky 档，原样保留） */}
       <div style={{ marginTop: 12 }}>
@@ -778,14 +813,33 @@ export default function Routing(): JSX.Element {
   );
 
   const replayView = (
-    <div>
-      <RouteReplayPanel />
-      <div style={{ marginTop: 12 }}>
-        <RoutingFlow active={view === 'replay'} />
-      </div>
-      <div style={{ marginTop: 12 }}>
-        <RoutingTrace active={view === 'replay'} />
-      </div>
+    <div className="rt-replay-layout">
+      <aside className="rt-replay-rail" aria-label={t('最近请求')}>
+        <div className="rt-replay-rail-title">{t('最近请求')}</div>
+        {replayRows.length === 0 ? (
+          <div className="rt-replay-empty">{t('暂无可回放的请求')}</div>
+        ) : (
+          replayRows.map((r) => (
+            <button
+              key={r.id}
+              type="button"
+              className={`rt-replay-item${replayId === r.id ? ' is-on' : ''}`}
+              onClick={() => setReplayId(r.id)}
+              title={r.id}
+            >
+              <span className="rt-replay-item-model">{r.model || t('（无模型）')}</span>
+              <span className="rt-replay-item-id">{r.id}</span>
+            </button>
+          ))
+        )}
+      </aside>
+      <section className="rt-replay-main">
+        {replayId ? (
+          <RouteReplayView requestId={replayId} />
+        ) : (
+          <RouteReplayPanel />
+        )}
+      </section>
     </div>
   );
 
@@ -807,61 +861,140 @@ export default function Routing(): JSX.Element {
 
       {error && <div className="error-message">{error}</div>}
 
+      {/* 顶部模式分段：路由配置 / 请求回放（对齐 Agent2API） */}
+      <div className="rt-modebar" role="tablist" aria-label={t('路由模式')}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'config'}
+          className={`rt-mode-btn${mode === 'config' ? ' is-on' : ''}`}
+          onClick={() => setMode('config')}
+        >
+          <SlidersHorizontal size={14} aria-hidden="true" /> {t('路由配置')}
+          {dirty ? <span className="rt-nav-dirty" title={t('有未保存的修改')} /> : null}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'replay'}
+          className={`rt-mode-btn${mode === 'replay' ? ' is-on' : ''}`}
+          onClick={() => setMode('replay')}
+        >
+          <History size={14} aria-hidden="true" /> {t('请求回放')}
+        </button>
+      </div>
+
+      {mode === 'replay' ? replayView : (
       <div className="rt-shell">
         <nav className="rt-shell-rail" aria-label={t('路由分区')}>
-          {RAIL_ITEMS.map(({ key, label, icon: Icon }) => (
+          <div className="rt-rail-title">{t('默认规则')}</div>
+          <button
+            type="button"
+            className={`rt-nav-item${panel === 'global' && layerSel === 'global' ? ' is-on' : ''}`}
+            onClick={() => { setPanel('global'); setLayerSel('global'); }}
+          >
+            <SlidersHorizontal size={14} className="rt-nav-icon" aria-hidden="true" />
+            <span className="rt-nav-label">{t('全局默认')}</span>
+            {dirty ? <span className="rt-nav-dirty" title={t('有未保存的修改')} /> : null}
+          </button>
+          <button
+            type="button"
+            className={`rt-nav-item${panel === 'errors' ? ' is-on' : ''}`}
+            onClick={() => setPanel('errors')}
+          >
+            <RefreshCw size={14} className="rt-nav-icon" aria-hidden="true" />
+            <span className="rt-nav-label">{t('错误处理')}</span>
+          </button>
+
+          <div className="rt-rail-title">{t('特殊请求路由')}</div>
+          {SPECIAL_RAIL.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               type="button"
-              className={`rt-nav-item${view === key ? ' is-on' : ''}`}
-              aria-current={view === key ? 'page' : undefined}
-              onClick={() => setView(key)}
+              className={`rt-nav-item${panel === key ? ' is-on' : ''}`}
+              onClick={() => setPanel(key)}
             >
               <Icon size={14} className="rt-nav-icon" aria-hidden="true" />
               <span className="rt-nav-label">{t(label)}</span>
-              {key === 'config' && dirty ? (
-                <span className="rt-nav-dirty" title={t('有未保存的修改')} />
-              ) : null}
             </button>
           ))}
-          <div className="rt-nav-group rt-rail-title" style={{ border: 0, padding: '4px 6px' }}>
-            {t('特殊请求路由只改写模型，不改选账号规则。')}
+
+          {modelNames.length > 0 ? <div className="rt-rail-title">{t('模型路由')}</div> : null}
+          {modelNames.map((name) => (
+            <button
+              key={`m:${name}`}
+              type="button"
+              className={`rt-nav-item${panel === 'global' && layerSel === `m:${name}` ? ' is-on' : ''}`}
+              title={name}
+              onClick={() => { setPanel('global'); setLayerSel(`m:${name}`); }}
+            >
+              <span className="rt-nav-label">{name}</span>
+            </button>
+          ))}
+
+          {(profiles?.groups.length ?? 0) > 0 ? <div className="rt-rail-title">{t('自定义路由组')}</div> : null}
+          {(profiles?.groups ?? []).map((g) => (
+            <button
+              key={`g:${g.id}`}
+              type="button"
+              className={`rt-nav-item${panel === 'group' ? ' is-on' : ''}`}
+              title={g.id}
+              onClick={() => { setPanel('group'); setLayerSel('groups'); }}
+            >
+              <span className="rt-nav-label">{g.id}</span>
+            </button>
+          ))}
+
+          <div className="rt-rail-add">
+            <input
+              className="form-input"
+              placeholder={t('新增模型档案名')}
+              value={newModel}
+              onChange={(e) => setNewModel(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { addModel(); setPanel('global'); } }}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { addModel(); setPanel('global'); }}
+              disabled={!newModel.trim()}
+            >
+              <Plus size={13} /> {t('新增路由配置')}
+            </Button>
           </div>
         </nav>
 
         <div className="rt-shell-main">
-          {/* 配置视图常驻挂载（切走只隐藏）：基础策略等子组件里的未保存编辑也不丢 */}
-          <div hidden={view !== 'config'}>{configView}</div>
-          {view === 'replay' ? replayView : null}
-
-          {/* 三个特殊面板同时挂载、只有当前那块拉数据：草稿切走再切回仍在。
-              每块右侧并排「最近命中」栏（读回放快照，按改写类型筛选）。 */}
-          <div hidden={view !== 'compact'}>
+          {/* 全局默认 / 模型路由 / 路由组：复用既有配置编辑器（由 layerSel 驱动选层） */}
+          <div hidden={!(panel === 'global' || panel === 'group')}>{configView}</div>
+          {panel === 'errors' ? <RoutingErrorsPanel /> : null}
+          {panel === 'compact' ? (
+            <div className="rt-special-split">
+              <div className="rt-special-split-main"><CompactRoutes active={panel === 'compact'} /></div>
+              <SpecialHits kind="compact" active={panel === 'compact'} onOpenReplay={() => setMode('replay')} />
+            </div>
+          ) : null}
+          {panel === 'title' ? (
+            <div className="rt-special-split">
+              <div className="rt-special-split-main"><TitleRoutes active={panel === 'title'} /></div>
+              <SpecialHits kind="title" active={panel === 'title'} onOpenReplay={() => setMode('replay')} />
+            </div>
+          ) : null}
+          {panel === 'vision' ? (
             <div className="rt-special-split">
               <div className="rt-special-split-main">
-                <CompactRoutes active={view === 'compact'} />
+                <VisionCompat active={panel === 'vision'} />
+                {/* 会话图片压缩/视觉兼容（原「设置 → 聊天」的 ImageCompatPanel，v1.0.93 并入） */}
+                <div style={{ marginTop: 12 }}>
+                  <ImageCompatPanel />
+                </div>
               </div>
-              <SpecialHits kind="compact" active={view === 'compact'} onOpenReplay={() => setView('replay')} />
+              <SpecialHits kind="vision" active={panel === 'vision'} onOpenReplay={() => setMode('replay')} />
             </div>
-          </div>
-          <div hidden={view !== 'title'}>
-            <div className="rt-special-split">
-              <div className="rt-special-split-main">
-                <TitleRoutes active={view === 'title'} />
-              </div>
-              <SpecialHits kind="title" active={view === 'title'} onOpenReplay={() => setView('replay')} />
-            </div>
-          </div>
-          <div hidden={view !== 'vision'}>
-            <div className="rt-special-split">
-              <div className="rt-special-split-main">
-                <VisionCompat active={view === 'vision'} />
-              </div>
-              <SpecialHits kind="vision" active={view === 'vision'} onOpenReplay={() => setView('replay')} />
-            </div>
-          </div>
+          ) : null}
         </div>
       </div>
+      )}
     </div>
   );
 }

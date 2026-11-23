@@ -6,7 +6,7 @@ import {
   Trash2, Upload, User, Wallet, Wrench,
 } from 'lucide-react';
 import { api } from '../api';
-import { providerIcon } from '../lib/providerIcons';
+import { providerIcon, providerMonogram } from '../lib/providerIcons';
 import { addConfigOf, cardKindOf, isCardHidden } from '../lib/addAccountConfigs';
 import { fmtCompact } from '../lib/utils';
 import { balanceWalletOf } from '../lib/balanceWallet';
@@ -679,9 +679,11 @@ function AsProviderFilter({ value, onChange, providers, counts, total, ariaLabel
           window.setTimeout(() => inputRef.current?.focus(), 0);
         }}
       >
-        {value && providerIcon(value) && (
+        {value && (providerIcon(value) ? (
           <img className="as-provcb-ico" src={providerIcon(value) as string} alt="" />
-        )}
+        ) : (
+          <span className="as-provcb-mono">{providerMonogram(value)}</span>
+        ))}
         <span className="as-provcb-label">{currentLabel}</span>
         <span className="as-provcb-count">{currentCount}</span>
       </button>
@@ -726,7 +728,7 @@ function AsProviderFilter({ value, onChange, providers, counts, total, ariaLabel
                     {providerIcon(p.kind) ? (
                       <img className="as-provcb-ico" src={providerIcon(p.kind) as string} alt="" />
                     ) : (
-                      <span className="as-provcb-dot" />
+                      <span className="as-provcb-mono">{providerMonogram(p.kind)}</span>
                     )}
                     <span className="as-provcb-item-label">{p.label}</span>
                     {p.source === 'plugin' && <span className="as-provcb-tag">{t('插件')}</span>}
@@ -2922,12 +2924,14 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         return (
           <td key={col} className="as-c-provider">
             <div className="provider-cell">
-              {providerIcon(s.provider) && (
+              {providerIcon(s.provider) ? (
                 <img
                   className="provider-card-logo"
                   src={providerIcon(s.provider) as string}
                   alt=""
                 />
+              ) : (
+                <span className="provider-card-mono">{providerMonogram(s.provider)}</span>
               )}
               <span>{s.provider}</span>
             </div>
@@ -3874,7 +3878,47 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             onChange={(e) => setSearch(e.target.value)}
             aria-label={t('搜索')}
           />
-          {/* 分组模式（对齐 Agent2API accountGroups：按家分组带 + 组内序号替代优先级数字） */}
+          {/* 限额分段（SPEC §2.4）：全部/正常/已限流；判据 = 后端 limiter_state。
+              放在状态分段之前：e2e 的「全部」定位取第一个，限额「全部」才是这一组。 */}
+          <div className="seg-filter" role="group" aria-label={t('按限额状态过滤')}>
+            {(
+              [
+                ['all', t('全部')],
+                ['normal', t('正常')],
+                ['limited', t('已限流')],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={`seg-filter-btn${limitSeg === key ? ' active' : ''}`}
+                onClick={() => setLimitSeg(key)}
+              >
+                {label} {limitCounts[key]}
+              </button>
+            ))}
+          </div>
+          {/* 状态分段（对齐 A2A 桌面账号页：all/enabled/disabled 三档）。
+              A2A 没有的「冷却中」等细分移入下方「更多筛选」抽屉。 */}
+          <div className="seg-filter" role="group" aria-label={t('按状态过滤')}>
+            {(
+              [
+                ['all', t('全部')],
+                ['enabled', t('启用')],
+                ['disabled', t('禁用')],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={`seg-filter-btn${statusSeg === key ? ' active' : ''}`}
+                onClick={() => setStatusSeg(key)}
+              >
+                {label} {segCounts[key]}
+              </button>
+            ))}
+          </div>
+          {/* 分组模式（视图开关，非筛选；对齐 Agent2API accountGroups：按家分组带 + 组内序号） */}
           <label className="as-toggle" title={t('按提供商分组显示；组内序号即调度顺序')}>
             <input
               type="checkbox"
@@ -3922,188 +3966,6 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             <option value="credit">{t('按到期排序')}</option>
             <option value="added">{t('按添加时间（新→旧）')}</option>
           </Select>
-          {/* 自动余额周期轮询（间隔可配置；关闭时仅保留首次加载那一次查询） */}
-          <Select
-            aria-label={t('自动余额查询间隔')}
-            value={String(autoBalanceMins)}
-            className="as-autobal-select"
-            onChange={(e) => {
-              const v = Number(e.target.value) || 0;
-              setAutoBalanceMins(v);
-              writeLS(LS_AUTOBAL, v);
-            }}
-          >
-            <option value="0">{t('余额自动：关')}</option>
-            <option value="30">{t('每 30 分钟')}</option>
-            <option value="60">{t('每小时')}</option>
-            <option value="360">{t('每 6 小时')}</option>
-            <option value="720">{t('每 12 小时')}</option>
-            <option value="1440">{t('每天')}</option>
-          </Select>
-          {/* 限额分段（SPEC §2.4）：全部/正常/已限流；判据 = 后端 limiter_state。
-              放在状态分段之前：e2e 的「全部」定位取第一个，限额「全部」才是这一组。 */}
-          <div className="seg-filter" role="group" aria-label={t('按限额状态过滤')}>
-            {(
-              [
-                ['all', t('全部')],
-                ['normal', t('正常')],
-                ['limited', t('已限流')],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                className={`seg-filter-btn${limitSeg === key ? ' active' : ''}`}
-                onClick={() => setLimitSeg(key)}
-              >
-                {label} {limitCounts[key]}
-              </button>
-            ))}
-          </div>
-          {/* 状态分段（对齐 Agent2API 账号页）：启用口径=enabled 且不在冷却中 */}
-          <div className="seg-filter" role="group" aria-label={t('按状态过滤')}>
-            {(
-              [
-                ['all', t('全部')],
-                ['enabled', t('启用')],
-                ['disabled', t('禁用')],
-                ['cooling', t('冷却中')],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                className={`seg-filter-btn${statusSeg === key ? ' active' : ''}`}
-                onClick={() => setStatusSeg(key)}
-              >
-                {label} {segCounts[key]}
-              </button>
-            ))}
-          </div>
-          {/* 服务端扩展筛选（v1.0.87 契约）：仅需重登/已过期 + 到期区间 + 用量区间。
-              这些维度交后端过滤（用量「已用 %」客户端算不准），其余维度仍客户端过滤。 */}
-          <div className="seg-filter" role="group" aria-label={t('更多筛选')}>
-            <button
-              type="button"
-              className={`seg-filter-btn${advReloginOnly ? ' active' : ''}`}
-              onClick={() => setAdvReloginOnly((v) => !v)}
-              title={t('仅显示需要重新登录的账号')}
-            >
-              {t('仅需重登')}
-            </button>
-            <button
-              type="button"
-              className={`seg-filter-btn${advExpiredOnly ? ' active' : ''}`}
-              onClick={() => setAdvExpiredOnly((v) => !v)}
-              title={t('仅显示已过期账号')}
-            >
-              {t('仅已过期')}
-            </button>
-          </div>
-          {/* #67 客户端分档（对齐 A2A 移动端）：到期 soon/longlived + 用量 has/unqueried/failed。
-              与下方「到期区间 / 已用%区间」互斥：选分档即清区间（反之输入区间即把分档复位）。 */}
-          <div className="seg-filter" role="group" aria-label={t('按到期分档')}>
-            {(
-              [
-                ['all', t('到期：全部')],
-                ['soon', t('临期(7天)')],
-                ['longlived', t('长期有效')],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                className={`seg-filter-btn${expirySeg === key ? ' active' : ''}`}
-                onClick={() => {
-                  setExpirySeg(key);
-                  if (key !== 'all') {
-                    setAdvExpiryFrom('');
-                    setAdvExpiryTo('');
-                  }
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="seg-filter" role="group" aria-label={t('按用量分档')}>
-            {(
-              [
-                ['all', t('用量：全部')],
-                ['has', t('有读数')],
-                ['unqueried', t('未查询')],
-                ['failed', t('查询失败')],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                className={`seg-filter-btn${usageSeg === key ? ' active' : ''}`}
-                onClick={() => {
-                  setUsageSeg(key);
-                  if (key !== 'all') {
-                    setAdvUsageMin('');
-                    setAdvUsageMax('');
-                  }
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {/* 冷门区间筛选收进可折叠「更多筛选」抽屉（对齐 A2A 窄屏收 ResponsiveSheet 的思路，
-              桌面默认收起以降工具条密度；到期/用量分档段仍在主行，区间是全量精确筛选才展开）。 */}
-          <details className="as-adv-filters">
-            <summary className="as-adv-summary">{t('更多筛选')}</summary>
-            <div className="as-adv-body">
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
-                {t('到期')}
-                <input
-                  type="date"
-                  className="form-input"
-                  style={{ width: 138 }}
-                  value={advExpiryFrom}
-                  onChange={(e) => { setAdvExpiryFrom(e.target.value); setExpirySeg('all'); }}
-                  aria-label={t('到期起')}
-                />
-                ~
-                <input
-                  type="date"
-                  className="form-input"
-                  style={{ width: 138 }}
-                  value={advExpiryTo}
-                  onChange={(e) => { setAdvExpiryTo(e.target.value); setExpirySeg('all'); }}
-                  aria-label={t('到期止')}
-                />
-              </label>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
-                {t('已用 %')}
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  className="form-input"
-                  style={{ width: 64 }}
-                  value={advUsageMin}
-                  onChange={(e) => { setAdvUsageMin(e.target.value); setUsageSeg('all'); }}
-                  placeholder={t('下限')}
-                  aria-label={t('已用百分比下限')}
-                />
-                ~
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  className="form-input"
-                  style={{ width: 64 }}
-                  value={advUsageMax}
-                  onChange={(e) => { setAdvUsageMax(e.target.value); setUsageSeg('all'); }}
-                  placeholder={t('上限')}
-                  aria-label={t('已用百分比上限')}
-                />
-              </label>
-            </div>
-          </details>
           {/* §2.3 清除筛选：只重置筛选维度（分组/排序/余额间隔/列设置是偏好，不动） */}
           <button
             type="button"
@@ -4115,6 +3977,156 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
             {t('清除筛选')}
           </button>
         </div>
+
+        {/* 更多筛选：A2A 桌面没有的细分（冷却/仅需重登/仅已过期/到期段/用量段）+ 冷门区间
+            （到期区间 / 已用% 区间）+ 自动余额间隔。全部收进一个默认收起的抽屉，
+            让主筛选行只留 provider / 搜索 / 状态 / 限额（对齐 A2A 桌面一行）。 */}
+        <details className="as-adv-filters as-more-filters">
+          <summary className="as-adv-summary">{t('更多筛选')}</summary>
+          <div className="as-adv-body">
+            <div className="seg-filter" role="group" aria-label={t('按冷却过滤')}>
+              <button
+                type="button"
+                className={`seg-filter-btn${statusSeg === 'cooling' ? ' active' : ''}`}
+                onClick={() => setStatusSeg(statusSeg === 'cooling' ? 'all' : 'cooling')}
+                title={t('仅显示处于冷却中的账号')}
+              >
+                {t('冷却中')} {segCounts.cooling}
+              </button>
+            </div>
+            <div className="seg-filter" role="group" aria-label={t('更多状态筛选')}>
+              <button
+                type="button"
+                className={`seg-filter-btn${advReloginOnly ? ' active' : ''}`}
+                onClick={() => setAdvReloginOnly((v) => !v)}
+                title={t('仅显示需要重新登录的账号')}
+              >
+                {t('仅需重登')}
+              </button>
+              <button
+                type="button"
+                className={`seg-filter-btn${advExpiredOnly ? ' active' : ''}`}
+                onClick={() => setAdvExpiredOnly((v) => !v)}
+                title={t('仅显示已过期账号')}
+              >
+                {t('仅已过期')}
+              </button>
+            </div>
+            <div className="seg-filter" role="group" aria-label={t('按到期分档')}>
+              {(
+                [
+                  ['all', t('到期：全部')],
+                  ['soon', t('临期(7天)')],
+                  ['longlived', t('长期有效')],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`seg-filter-btn${expirySeg === key ? ' active' : ''}`}
+                  onClick={() => {
+                    setExpirySeg(key);
+                    if (key !== 'all') {
+                      setAdvExpiryFrom('');
+                      setAdvExpiryTo('');
+                    }
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="seg-filter" role="group" aria-label={t('按用量分档')}>
+              {(
+                [
+                  ['all', t('用量：全部')],
+                  ['has', t('有读数')],
+                  ['unqueried', t('未查询')],
+                  ['failed', t('查询失败')],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`seg-filter-btn${usageSeg === key ? ' active' : ''}`}
+                  onClick={() => {
+                    setUsageSeg(key);
+                    if (key !== 'all') {
+                      setAdvUsageMin('');
+                      setAdvUsageMax('');
+                    }
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+              {t('到期')}
+              <input
+                type="date"
+                className="form-input"
+                style={{ width: 138 }}
+                value={advExpiryFrom}
+                onChange={(e) => { setAdvExpiryFrom(e.target.value); setExpirySeg('all'); }}
+                aria-label={t('到期起')}
+              />
+              ~
+              <input
+                type="date"
+                className="form-input"
+                style={{ width: 138 }}
+                value={advExpiryTo}
+                onChange={(e) => { setAdvExpiryTo(e.target.value); setExpirySeg('all'); }}
+                aria-label={t('到期止')}
+              />
+            </label>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+              {t('已用 %')}
+              <input
+                type="number"
+                min={0}
+                max={100}
+                className="form-input"
+                style={{ width: 64 }}
+                value={advUsageMin}
+                onChange={(e) => { setAdvUsageMin(e.target.value); setUsageSeg('all'); }}
+                placeholder={t('下限')}
+                aria-label={t('已用百分比下限')}
+              />
+              ~
+              <input
+                type="number"
+                min={0}
+                max={100}
+                className="form-input"
+                style={{ width: 64 }}
+                value={advUsageMax}
+                onChange={(e) => { setAdvUsageMax(e.target.value); setUsageSeg('all'); }}
+                placeholder={t('上限')}
+                aria-label={t('已用百分比上限')}
+              />
+            </label>
+            {/* 自动余额周期轮询（间隔可配置；关闭时仅保留首次加载那一次查询） */}
+            <Select
+              aria-label={t('自动余额查询间隔')}
+              value={String(autoBalanceMins)}
+              className="as-autobal-select"
+              onChange={(e) => {
+                const v = Number(e.target.value) || 0;
+                setAutoBalanceMins(v);
+                writeLS(LS_AUTOBAL, v);
+              }}
+            >
+              <option value="0">{t('余额自动：关')}</option>
+              <option value="30">{t('每 30 分钟')}</option>
+              <option value="60">{t('每小时')}</option>
+              <option value="360">{t('每 6 小时')}</option>
+              <option value="720">{t('每 12 小时')}</option>
+              <option value="1440">{t('每天')}</option>
+            </Select>
+          </div>
+        </details>
 
         {/* ZCode 只读说明（不提供可选但无效果的控件）：套餐通道选择待后端落库；
             网关不承载桌面端本地验证码池，平台验证码池在「系统设置 → 网关」查看。 */}
@@ -4320,7 +4332,9 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                               </span>
                               {providerIcon(g.provider) ? (
                                 <img className="provider-card-logo" src={providerIcon(g.provider) as string} alt="" />
-                              ) : null}
+                              ) : (
+                                <span className="provider-card-mono">{providerMonogram(g.provider)}</span>
+                              )}
                               <span className="as-group-label">{providerLabel(g.provider)}</span>
                               {providers.find((p) => p.kind === g.provider)?.native_fallback === true ? (
                                 <span className="add-card-badge is-fallback">{t('原生备选')}</span>

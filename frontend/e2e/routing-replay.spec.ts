@@ -96,7 +96,8 @@ async function openReplayPanel(page: import('@playwright/test').Page, requestId:
   // 路由域已从「系统设置 → 路由」独立成页（#40）：/routing 单页多模式
   await page.goto('/routing');
   // v1.0.65 起路由页 rail 用 button.rt-nav-item（不再是 role=tab）
-  await page.locator('.rt-shell-rail .rt-nav-item', { hasText: '回放' }).click();
+  // v1.0.66 起「请求回放」提到顶部模式分段（.rt-mode-btn），不再是 rail 项
+  await page.locator('.rt-mode-btn', { hasText: '请求回放' }).click();
   await expect(page.locator('.rr-panel h2', { hasText: '路由回放' })).toBeVisible();
   await page.getByPlaceholder('粘贴请求日志里的请求 ID').fill(requestId);
   // rail 也有一个「回放」按钮，限定到回放面板内避免 strict mode 歧义

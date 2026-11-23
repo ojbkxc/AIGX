@@ -443,8 +443,8 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
         {!embedded && <h2 className="mtp-heading">{t('维护任务明细')}</h2>}
         <EmptyState
           icon="🛠️"
-          message={t('维护任务接口尚未就绪（/api/maintenance）')}
-          action={<p className="mtp-hint">{t('后端 maintenance 模块上线后，本段自动显示维护任务的执行记录、明细与重试。')}</p>}
+          message={t('无法读取维护记录（接口返回 404）')}
+          action={<p className="mtp-hint">{t('请确认当前后端版本已包含 /api/maintenance；刚升级后重启服务即可恢复。')}</p>}
         />
       </section>
     );

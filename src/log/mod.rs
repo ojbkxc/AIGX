@@ -1461,7 +1461,8 @@ impl RequestLogStore {
     /// 带状态/关键词的扩展筛选（在基础筛选之上再收窄）。
     ///
     /// - `status`：`ok` = 2xx 成功；`error` = 非 2xx 或带 `error_msg`
-    /// - `keyword`：大小写不敏感，匹配 model / channel_name / error_msg / user_id
+    /// - `keyword`：大小写不敏感，匹配 model / channel_name / error_msg / user_id / client
+    /// - `client`：大小写不敏感，匹配 client_name / client_version（专用客户端维度过滤）
     ///
     /// 不要扩展 `list_with_filter` 的签名：那是热路径（无筛选时走索引快路径），
     /// 多出的条件会让所有调用点都被迫传 None。扩展筛选只在真正用到时退化全扫。
@@ -1475,14 +1476,18 @@ impl RequestLogStore {
         end: Option<i64>,
         status: Option<&str>,
         keyword: Option<&str>,
+        client: Option<&str>,
         page: usize,
         size: usize,
     ) -> (Vec<RequestLog>, usize) {
         let kw = keyword
             .map(|k| k.trim().to_lowercase())
             .filter(|k| !k.is_empty());
+        let client_kw = client
+            .map(|c| c.trim().to_lowercase())
+            .filter(|c| !c.is_empty());
         // 无扩展条件时直接走基础路径（保留索引快路径）
-        if status.is_none() && kw.is_none() {
+        if status.is_none() && kw.is_none() && client_kw.is_none() {
             return self.list_with_filter(user_id, model, channel_id, start, end, page, size);
         }
         let page = page.clamp(1, 10_000);
@@ -1495,6 +1500,13 @@ impl RequestLogStore {
                 Some("ok") => (200..300).contains(&l.status_code),
                 Some("error") => !(200..300).contains(&l.status_code) || l.error_msg.is_some(),
                 _ => true,
+            })
+            .filter(|l| match &client_kw {
+                None => true,
+                Some(c) => {
+                    l.client_name.to_lowercase().contains(c)
+                        || l.client_version.to_lowercase().contains(c)
+                }
             })
             .filter(|l| match &kw {
                 None => true,
@@ -1512,6 +1524,8 @@ impl RequestLogStore {
                             .as_deref()
                             .map(|u| u.to_lowercase().contains(k))
                             .unwrap_or(false)
+                        || l.client_name.to_lowercase().contains(k)
+                        || l.client_version.to_lowercase().contains(k)
                 }
             })
             .collect();
@@ -1649,7 +1663,7 @@ impl RequestLogStore {
     ) -> String {
         let all = self.list_all();
         let mut buf = String::from(
-            "id,created_at,user_id,key_id,channel_id,channel_name,model,origin_model,input_tokens,output_tokens,cost,channel_cost,latency_ms,status_code,error_msg,ip\n",
+            "id,created_at,user_id,key_id,channel_id,channel_name,model,origin_model,input_tokens,output_tokens,cost,channel_cost,latency_ms,status_code,error_msg,ip,client_name,client_version\n",
         );
         for l in all
             .iter()
@@ -1675,7 +1689,7 @@ impl RequestLogStore {
                 (l.origin_model.as_deref().unwrap_or(&l.model), "", "", "")
             };
             buf.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_escape(&l.id),
                 csv_escape(&l.created_at.to_string()),
                 csv_escape(l.user_id.as_deref().unwrap_or("")),
@@ -1692,6 +1706,10 @@ impl RequestLogStore {
                 l.status_code,
                 csv_escape(l.error_msg.as_deref().unwrap_or("")),
                 csv_escape(l.ip.as_deref().unwrap_or("")),
+                // 客户端身份两列：普通用户可见（是其自身识别信息，非上游拓扑），
+                // 与列表/JSON 口径一致。
+                csv_escape(&l.client_name),
+                csv_escape(&l.client_version),
             ));
         }
         buf

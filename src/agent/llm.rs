@@ -511,7 +511,7 @@ fn record_agent_request_log(
         status_code: if error.is_some() { 502 } else { 200 },
         error_msg: error.map(|e| e.chars().take(200).collect()),
         ip: None,
-        client_name: String::new(),
+        client_name: crate::api::client_id::SELF_CLIENT.to_string(),
         client_version: String::new(),
         request_id: None,
         created_at: chrono::Utc::now().timestamp(),

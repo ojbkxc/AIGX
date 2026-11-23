@@ -19,7 +19,7 @@
 //! - 能力必须在 [`CAPABILITIES`] 白名单内，且带依赖声明
 //! - 内存 8–128 MiB、并发 1–16
 //! - 原生辅助：≤8 项、标识字符集受限、必须声明 `native.helpers.v1`
-//! - 网络来源：≤32 条、必须是精确 HTTPS origin（无路径/查询/凭据/通配符）
+//! - 网络来源：≤64 条（原 32，放宽以容纳 kiro 等多区域 OIDC 提供商）、必须是精确 HTTPS origin（无路径/查询/凭据/通配符）
 //! - 入口必须是包内普通文件（canonicalize 后仍在包目录内）
 
 use std::path::{Path, PathBuf};

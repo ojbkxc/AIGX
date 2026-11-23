@@ -40,12 +40,17 @@ pub async fn overview(
     for task_id in maintenance::ALL_TASKS {
         tasks.push(crate::scheduled_tasks::task_by_id(&state, task_id).await);
     }
+    // 成功分支统一套 `{success:true, data:<payload>}` 信封（对齐 A2A `ok_json`，
+    // 前端按 `res.data` 读取 overview/明细/成败）。
     Ok(Json(json!({
-        "tasks": tasks,
-        "latest": latest,
-        "records": records,
-        "retentionDays": storage::RETENTION_DAYS,
-        "maxRecords": storage::MAX_RECORDS,
+        "success": true,
+        "data": {
+            "tasks": tasks,
+            "latest": latest,
+            "records": records,
+            "retentionDays": storage::RETENTION_DAYS,
+            "maxRecords": storage::MAX_RECORDS,
+        },
     }))
     .into_response())
 }
@@ -58,7 +63,7 @@ pub async fn record_detail(
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     match storage::detail(&state.maintenance.store, &id) {
-        Ok(detail) => Ok(Json(json!(detail)).into_response()),
+        Ok(detail) => Ok(Json(json!({ "success": true, "data": detail })).into_response()),
         Err(error) => {
             let status = if error == "维护记录不存在或已清理" {
                 StatusCode::NOT_FOUND
@@ -84,7 +89,7 @@ pub async fn run_task(
         maintenance::launch_async(state.clone(), maintenance::Request::full(&task_id, true))
             .await
             .map_err(|error| safe_error(StatusCode::BAD_REQUEST, &error))?;
-    Ok(Json(json!(detail)).into_response())
+    Ok(Json(json!({ "success": true, "data": detail })).into_response())
 }
 
 /// `POST /api/maintenance/records/{id}/retry` `{itemId?}`
@@ -109,7 +114,7 @@ pub async fn retry_record(
     let detail = maintenance::retry_async(state.clone(), &id, item_id.as_deref())
         .await
         .map_err(|error| safe_error(StatusCode::BAD_REQUEST, &error))?;
-    Ok(Json(json!(detail)).into_response())
+    Ok(Json(json!({ "success": true, "data": detail })).into_response())
 }
 
 /// 维护管理面路由。

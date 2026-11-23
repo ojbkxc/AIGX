@@ -43,6 +43,19 @@ fn ticket_json(t: &Ticket) -> Value {
     })
 }
 
+/// 工单 JSON + 提交人邮箱（管理员视图）：按 `user_id` 从 user_store 取 email 注入
+/// `email` 字段，供「全部工单」列表/详情展示提交人具体邮箱。查不到用户时不加该键，
+/// 前端回退显示 `user_id`（`tk.email || tk.user_id`）。
+fn ticket_json_with_email(state: &AppState, t: &Ticket) -> Value {
+    let mut value = ticket_json(t);
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(user) = state.user_store.get_by_id(&t.user_id) {
+            obj.insert("email".into(), Value::String(user.email));
+        }
+    }
+    value
+}
+
 // ── 用户侧 ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -254,7 +267,7 @@ pub async fn handle_admin_list_tickets(
     } else {
         all[start..total.min(start + page_size)]
             .iter()
-            .map(ticket_json)
+            .map(|t| ticket_json_with_email(&state, t))
             .collect()
     };
     Ok(Json(json!({

@@ -149,6 +149,8 @@ interface Filters {
   status: string;
   /** 关键词：模糊匹配模型/渠道/错误/用户 */
   keyword: string;
+  /** 客户端过滤：模糊匹配 client_name / client_version（全局，admin/普通均可用） */
+  client: string;
   start: string;
   end: string;
 }
@@ -190,7 +192,7 @@ function logsAuditColDefs(admin: boolean): TableColumnDef[] {
   ];
 }
 /** 筛选默认值（空串 = 全部 / 不限；记忆按此收窄，存坏回落默认） */
-const DEFAULT_LOGS_FILTERS: Filters = { user: '', model: '', channel: '', status: '', keyword: '', start: '', end: '' };
+const DEFAULT_LOGS_FILTERS: Filters = { user: '', model: '', channel: '', status: '', keyword: '', client: '', start: '', end: '' };
 
 export default function Logs(): JSX.Element {
   const admin = isAdmin();
@@ -328,6 +330,7 @@ export default function Logs(): JSX.Element {
         if (f.channel) params.channel = f.channel;
         if (f.status) params.status = f.status;
         if (f.keyword.trim()) params.keyword = f.keyword.trim();
+        if (f.client.trim()) params.client = f.client.trim();
         // 时间范围筛选：datetime-local 值（本地时区）→ unix 秒
         if (f.start) params.start = Math.floor(new Date(f.start).getTime() / 1000);
         if (f.end) params.end = Math.floor(new Date(f.end).getTime() / 1000);
@@ -907,6 +910,24 @@ export default function Logs(): JSX.Element {
                 />
               </div>
             )}
+            {/* 客户端过滤：匹配 client_name / client_version（管理员与普通用户均可用） */}
+            <div className="lg-search">
+              <Search size={13} className="lg-search-icon" />
+              <input
+                className="form-input"
+                value={filters.client}
+                onChange={(e) => setFilters({ ...filters, client: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    if (page === 1) void load();
+                    else setPage(1);
+                  }
+                }}
+                placeholder={t('按客户端过滤')}
+                title={t('客户端')}
+                aria-label={t('客户端')}
+              />
+            </div>
             {/* 关键词：Enter 即查询（与「查询」按钮同口径） */}
             <div className="lg-search">
               <input

@@ -603,10 +603,10 @@ fn paths_tools_maintenance() -> Value {
         "/api/tools/mcp-bridge/image-generation.cjs": {
             "get": op("工具服务", "图片生成 MCP 桥接脚本（供客户端 MCP 配置引用；纯文本 JS）")
         },
-        // ── 维护任务：凭证维护 / 模型目录刷新 ───────────────────────
+        // ── 维护任务：凭证维护 / 模型目录刷新 / 软件版本检查 / 社区插件检查（4 类）──
         "/api/maintenance": {
             "get": op_params("维护", "维护任务总览 + 执行记录（可按任务/来源/状态/关键词筛选、分页）", &[
-                query_param("taskId", "string", "credentialMaintenance | modelRefresh"),
+                query_param("taskId", "string", "credentialMaintenance | modelRefresh | updateCheck | pluginCatalog"),
                 query_param("source", "string", "manual | automatic"),
                 query_param("status", "string", "执行状态过滤"),
                 query_param("keyword", "string", "关键词"),
@@ -615,10 +615,10 @@ fn paths_tools_maintenance() -> Value {
             ])
         },
         "/api/maintenance/records/{id}": {
-            "get": op("维护", "单次执行明细：逐账号结果 + 耗时 + 错误")
+            "get": op("维护", "单次执行明细：逐账号/逐项结果 + 耗时 + 错误")
         },
         "/api/maintenance/run/{task}": {
-            "post": op("维护", "立即执行一次维护任务（credentialMaintenance | modelRefresh）")
+            "post": op("维护", "立即执行一次维护任务（credentialMaintenance | modelRefresh | updateCheck | pluginCatalog）")
         },
         "/api/maintenance/records/{id}/retry": {
             "post": op_body("维护", "重试一次执行（可只重试单条账号）", "{ itemId?: string }")

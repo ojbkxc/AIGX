@@ -37,7 +37,12 @@ pub async fn list_handler(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    Ok(Json(scheduled_tasks::list(&state).await).into_response())
+    // 成功分支统一套 `{success:true, data:<payload>}` 信封（对齐 A2A `ok_json`；
+    // 前端 getScheduledTasks 读 `res.data.tasks`）。
+    Ok(
+        Json(json!({ "success": true, "data": scheduled_tasks::list(&state).await }))
+            .into_response(),
+    )
 }
 
 /// `PATCH /api/scheduled-tasks/{id}`：改一条任务（只改传进来的字段）。
@@ -109,7 +114,9 @@ pub async fn configure_handler(
         }
     }
     match scheduled_tasks::configure(&state, &id, patch).await {
-        Ok(task) => Ok(Json(task).into_response()),
+        // 成功分支套 `{success:true, data:<task>}` 信封（前端 patchScheduledTask
+        // 读 `res.success` + `res.data`）。
+        Ok(task) => Ok(Json(json!({ "success": true, "data": task })).into_response()),
         Err(message) => Err(error_response(&message, StatusCode::BAD_REQUEST)),
     }
 }
@@ -127,8 +134,11 @@ pub async fn run_handler(
     verify_admin(&state, &headers).await?;
     match scheduled_tasks::run_now(&state, &id).await {
         Ok(summary) => Ok(Json(json!({
-            "summary": summary,
-            "task": scheduled_tasks::task_by_id(&state, &id).await,
+            "success": true,
+            "data": {
+                "summary": summary,
+                "task": scheduled_tasks::task_by_id(&state, &id).await,
+            },
         }))
         .into_response()),
         Err(message) => Err(error_response(&message, StatusCode::BAD_REQUEST)),

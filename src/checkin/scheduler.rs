@@ -1130,7 +1130,10 @@ fn keepalive_hits(benefit: &BenefitResult) -> usize {
         .unwrap_or(0) as usize
 }
 
-/// 收集参与签到的账号（启用 + 凭证未过期 + provider 在白名单内）。
+/// 收集参与签到的账号（凭证未过期 + provider 在白名单内）。
+///
+/// 注：**已停用（disabled）账号也参与签到**（用户要求「没启动状态的账号也要签到」——
+/// 仍可领签到积分/福利）；仅排除凭证过期（过期凭证签到必失败）。
 pub fn collect_targets(
     sessions: &AccountSessionStore,
     providers: &[String],
@@ -1139,7 +1142,7 @@ pub fn collect_targets(
     sessions
         .all()
         .into_iter()
-        .filter(|s| s.is_enabled() && !s.is_expired(now))
+        .filter(|s| !s.is_expired(now))
         .filter(|s| is_implemented(&s.provider))
         .filter(|s| providers.is_empty() || providers.iter().any(|p| p == &s.provider))
         .collect()
