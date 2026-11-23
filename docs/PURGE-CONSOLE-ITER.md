@@ -102,5 +102,10 @@ M frontend/src/i18n/zh.json / en.json  # +16 键（复用安全页 2 键）
   真实盲区。实现后测试证伪（name 总是第一个关键词），已整体回滚。
   未来加「关键词质量」类体检时，请从 `body_chars == 0` 或「全部关键词
   均 <2 字符」这类真实可达态入手。
+- **`skill_body_empty` 告警（正文全空技能）**：同样不可达。`parse_skill`
+  在 `body.trim().is_empty()` 时直接返回 `None`（SKILL.md 只有 frontmatter
+  根本进不了 entries）——实现前忘了核对解析层的防御，10 分钟即撤。教训：
+  加体检项前先读 `parse_skill`/`keywords_of` 的入口防御，**解析层已挡掉
+  的形态不会出现在体检输入里**。
 - **`preset_missing` 最近 id 建议（已落地 `3e1c52db`）**：编辑距离 ≤2 提示、
   >2 坚决不猜——与 `preset_for_model` 的不猜立场一致，勿改成模糊自动纠正。
