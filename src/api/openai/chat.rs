@@ -1,4 +1,7 @@
 use super::*;
+// attempt_provider（attempt 明细的 provider 回退）定义在 resolve，chat 的
+// failover 16 处调用点里有 8 处在这——不带这条 mod 级 use 就是 E0425。
+use super::resolve::attempt_provider;
 use crate::api::common::extract_client_ip;
 use crate::bridge::{tool_repair, Bridge, BridgeContext, ChatFormat};
 use crate::channel::ChannelStore;
@@ -645,7 +648,7 @@ pub(crate) async fn handle_chat_completions(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
-                                            ch_ref.as_deref(),
+                                            ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
                                         account: String::new(),
@@ -694,7 +697,7 @@ pub(crate) async fn handle_chat_completions(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
-                                            ch_ref.as_deref(),
+                                            ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
                                         account: String::new(),
@@ -737,7 +740,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -794,7 +797,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1527,7 +1530,7 @@ pub(crate) async fn handle_chat_completions(
                                         .as_ref()
                                         .map(|c| c.name.clone())
                                         .unwrap_or_default(),
-                                    provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                                    provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                                     account: String::new(),
                                     model: upstream.clone(),
                                     sticky_hit,
@@ -1584,7 +1587,7 @@ pub(crate) async fn handle_chat_completions(
                                     .as_ref()
                                     .map(|c| c.name.clone())
                                     .unwrap_or_default(),
-                                provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                                provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                                 account: String::new(),
                                 model: upstream.clone(),
                                 sticky_hit,
@@ -1628,7 +1631,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1670,7 +1673,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,

@@ -24,6 +24,8 @@ use crate::bridge::{BridgeContext, ChatFormat, ChatMessage, FinishReason, Role};
 // Anthropic 协议优先 x-api-key，故使用 xapi_first 变体。
 use super::common::extract_api_key_xapi_first as extract_api_key;
 use super::common::extract_client_ip;
+// attempt_provider 定义在 openai::resolve（AttemptDetail.provider 的兜底）。
+use super::openai::resolve::attempt_provider;
 
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
 ///
@@ -929,7 +931,7 @@ pub async fn handle_messages(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
-                                            ch_ref.as_deref(),
+                                            ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
                                         account: String::new(),
@@ -975,7 +977,7 @@ pub async fn handle_messages(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
-                                            ch_ref.as_deref(),
+                                            ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
                                         account: String::new(),
@@ -1027,7 +1029,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1068,7 +1070,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1843,7 +1845,7 @@ pub async fn handle_messages(
                                         .as_ref()
                                         .map(|c| c.name.clone())
                                         .unwrap_or_default(),
-                                    provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                                    provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                                     account: String::new(),
                                     model: upstream.clone(),
                                     sticky_hit,
@@ -1898,7 +1900,7 @@ pub async fn handle_messages(
                                     .as_ref()
                                     .map(|c| c.name.clone())
                                     .unwrap_or_default(),
-                                provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                                provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                                 account: String::new(),
                                 model: upstream.clone(),
                                 sticky_hit,
@@ -1941,7 +1943,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1982,7 +1984,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
+                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
