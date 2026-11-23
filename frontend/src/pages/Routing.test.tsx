@@ -1,11 +1,18 @@
 /**
- * 路由页 rail 骨架回归。
+ * 路由页骨架回归（v1.0.93 起对齐 A2A 工作台形态）。
  *
  * 钉住三件事：
- * 1. **rail 五项**（配置 / 回放 / 压缩 / 标题 / 视觉）都在，且切走再切回
- *    不丢未保存的档案草稿（草稿存页面 state、切 rail 只是不渲染，不是重置）。
- * 2. **时间窗切换**会带新的 minutes 重新请求 /routing/flow。
- * 3. 既有能力面（分层档案 / 三态 / 预演）在 rail 化后仍原样可用。
+ * 1. **模式分段 + 配置 rail**：顶部「路由配置 / 请求回放」两段；配置模式下
+ *    左栏 rail = 全局默认 / 错误处理 / 压缩上下文 / 图片兼容 / 标题生成
+ *    （特殊三项来自 SPECIAL_RAIL），且切走再切回不丢未保存的档案草稿
+ *    （草稿存页面 state、切 rail 只是不渲染，不是重置）。
+ * 2. **回放模式**：切到「请求回放」呈现最近请求列表；时间窗切 30 分钟用
+ *    新 minutes 重新请求 /routing/flow。
+ * 3. 既有能力面（分层档案 / 三态控件）在新 rail 下仍原样可用。
+ *
+ * 注：预演（preview）工作台自 v1.0.93 起按「严格对齐 A2A」隐藏
+ * （Routing.tsx 的 SHOW_ROUTING_ENHANCED=false），不再测试预演交互，
+ * 只断言页面不渲染预演入口 —— 防止它悄悄回来。
  *
  * mock 按后端 serde 的真实形状构造（RoutingProfiles 三层、字段全 Option、
  * AccountSortRule 内部标签 {on,dir}），页面必须在该形状下不崩 —— 本仓出过
@@ -37,6 +44,11 @@ const apiMock = vi.hoisted(() => ({
   saveTitleRoutes: vi.fn(),
   getVisionCompatibility: vi.fn(),
   saveVisionCompatibility: vi.fn(),
+  // v1.0.93 错误处理面板
+  getRoutingErrors: vi.fn(),
+  saveRoutingErrors: vi.fn(),
+  // 请求回放模式：左栏「最近请求」走 requestLogs 列表端点
+  listRequestLogs: vi.fn(),
 }));
 vi.mock('../api', () => ({ api: apiMock }));
 vi.mock('../components/Toast', () => ({
@@ -141,9 +153,20 @@ describe('Routing 页冒烟', () => {
     });
     apiMock.getRoutingFlow.mockResolvedValue(FLOW);
     apiMock.getRoutingTrace.mockResolvedValue(TRACE);
+    apiMock.getRoutingErrors.mockResolvedValue({ success: true, data: { rules: [] } });
+    apiMock.listRequestLogs.mockResolvedValue({ success: true, data: [] });
   });
   afterEach(() => cleanup());
 
+  /** 模式分段按钮（顶部 tablist）：按可见文本找。 */
+  const modeButton = (container: HTMLElement, label: string): HTMLElement => {
+    const found = Array.from(container.querySelectorAll<HTMLElement>('.rt-mode-btn')).find(
+      (el) => el.textContent?.trim().includes(label),
+    );
+    if (!found) throw new Error(`mode button not found: ${label}`);
+    return found;
+  };
+  /** 左栏 rail 按钮：按可见文本找。 */
   const railButton = (container: HTMLElement, label: string): HTMLElement => {
     const found = Array.from(container.querySelectorAll<HTMLElement>('.rt-nav-item')).find(
       (el) => el.textContent?.trim() === label,
@@ -152,23 +175,35 @@ describe('Routing 页冒烟', () => {
     return found;
   };
 
-  it('rail 五项在 + 配置页能力保留 + 切 rail 不丢未保存草稿', async () => {
+  it('模式分段两项 + 配置 rail 五区 + 切 rail 不丢未保存草稿 + 预演不出现', async () => {
     const { container } = render(<Routing /> as ReactElement);
     await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
 
-    // 五项 rail（配置 / 回放 / 压缩 / 标题 / 视觉）
+    // 顶部模式分段：路由配置 / 请求回放
+    expect(modeButton(container, '路由配置')).toBeTruthy();
+    expect(modeButton(container, '请求回放')).toBeTruthy();
+
+    // 配置 rail：全局默认 / 错误处理 + 特殊三项（压缩上下文 / 图片兼容 / 标题生成）
+    // 注：动态的「模型路由 gpt-4o」「路由组 g1」条目不进这一断言（数量随数据变）
     const labels = Array.from(container.querySelectorAll('.rt-nav-label')).map((el) =>
       el.textContent?.trim(),
     );
-    expect(labels).toEqual(['配置', '回放', '压缩', '标题', '视觉']);
+    ['全局默认', '错误处理', '压缩上下文', '图片兼容', '标题生成'].forEach((want) =>
+      expect(labels).toContain(want),
+    );
 
     // 总开关提示（enabled=true 走「已启用」分支）
     expect(container.textContent).toContain('多规则已启用');
-    // 层栏：全局 + 模型级 gpt-4o + 路由组
-    expect(screen.getByText('gpt-4o')).toBeTruthy();
+    // 层栏：全局 + 模型级 gpt-4o（rail 里模型条目；模型档案区还会出现同名
+    // 副本 —— 用 getAllByText 防多命中）
+    expect(screen.getAllByText('gpt-4o').length).toBeGreaterThanOrEqual(1);
 
-    // 切到模型级层 → ProfileForm 渲染三态控件；改一笔草稿（清空）
-    fireEvent.click(screen.getByText('gpt-4o'));
+    // 切到模型级层 → ProfileForm 渲染三态控件；改一笔草稿（清空）。
+    // gpt-4o 会出现在多个位置（模型路由 rail 条目 + 模型档案区），取全部
+    // 里的第一个可点击项。
+    const modelEntries = screen.getAllByText('gpt-4o');
+    expect(modelEntries.length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(modelEntries[0]);
     await waitFor(() => expect(screen.getByText('选路策略')).toBeTruthy());
     expect(container.textContent).toContain('模型名请填客户端的请求名');
     expect(container.querySelectorAll('.rt-seg').length).toBeGreaterThanOrEqual(6);
@@ -180,44 +215,33 @@ describe('Routing 页冒烟', () => {
     fireEvent.click(clearBtns[0]);
     await waitFor(() => expect(container.textContent).toContain('有未保存的修改'));
 
-    // 切到「压缩」再切回「配置」：草稿仍在（rail 切换不是重置）
-    fireEvent.click(railButton(container, '压缩'));
+    // 切到「压缩上下文」再切回「全局默认」：草稿仍在（rail 切换不是重置）
+    fireEvent.click(railButton(container, '压缩上下文'));
     await waitFor(() => expect(container.textContent).toContain('压缩上下文'));
-    fireEvent.click(railButton(container, '配置'));
+    fireEvent.click(railButton(container, '全局默认'));
     await waitFor(() => expect(container.textContent).toContain('有未保存的修改'));
+
+    // 预演工作台自 v1.0.93 隐藏：页面不应渲染预演输入/按钮
+    expect(
+      container.querySelector('input[placeholder="模型名（请求名）"]'),
+    ).toBeNull();
+    expect(screen.queryAllByText('预演').length).toBe(0);
   });
 
-  it('回放 rail：时间窗切到 30 分钟会用新 minutes 重新请求流向', async () => {
-    apiMock.getRoutingFlow.mockClear();
+  it('回放模式：进入拉最近请求列表；空态提示 + 选中请求后不回退空态', async () => {
+    apiMock.getRouteReplay.mockClear();
     const { container } = render(<Routing /> as ReactElement);
     await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
 
-    fireEvent.click(railButton(container, '回放'));
-    await waitFor(() => expect(container.textContent).toContain('请求流向'));
-    await waitFor(() => expect(apiMock.getRoutingFlow).toHaveBeenCalled());
-    // 默认 10 分钟
-    expect(apiMock.getRoutingFlow.mock.calls.some((c) => c[0]?.minutes === 10)).toBe(true);
+    // 切到回放模式
+    fireEvent.click(modeButton(container, '请求回放'));
+    await waitFor(() => expect(container.textContent).toContain('暂无可回放的请求'));
+    // 左栏「最近请求」走 requestLogs 列表端点
+    expect(apiMock.listRequestLogs).toHaveBeenCalled();
 
-    apiMock.getRoutingFlow.mockClear();
-    const win30 = container.querySelector('[data-window="30"]') as HTMLElement;
-    expect(win30).toBeTruthy();
-    fireEvent.click(win30);
-    await waitFor(() =>
-      expect(apiMock.getRoutingFlow.mock.calls.some((c) => c[0]?.minutes === 30)).toBe(true),
-    );
-  });
-
-  it('预演端点 404 → 明确告知未就绪', async () => {
-    apiMock.previewRouting.mockRejectedValue(Object.assign(new Error('nf'), { status: 404 }));
-    const { container } = render(<Routing /> as ReactElement);
-    await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
-    fireEvent.change(container.querySelector('input[placeholder="模型名（请求名）"]') as HTMLElement, {
-      target: { value: 'gpt-4o' },
-    });
-    const btns = screen.getAllByText('预演');
-    fireEvent.click(btns[btns.length - 1]);
-    await waitFor(() => expect(container.textContent).toContain('预演端点尚未就绪'), {
-      timeout: 3000,
-    });
+    // 右栏默认是按 ID 回放面板（输入框提示在）；空列表不渲染请求按钮
+    expect(container.querySelectorAll('.rt-replay-item').length).toBe(0);
+    // 回放明细端点未被拉（未选中任何请求）
+    expect(apiMock.getRouteReplay).not.toHaveBeenCalled();
   });
 });
