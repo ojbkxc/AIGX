@@ -787,6 +787,7 @@ const PresetsSection = memo(function PresetsSection({
   const [debouncedQ, setDebouncedQ] = useState('');
   const [vendor, setVendor] = useState('');
   const [list, setList] = useState<PurgePresetList | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PurgePresetDetail | null>(null);
@@ -851,6 +852,28 @@ const PresetsSection = memo(function PresetsSection({
       alive = false;
     };
   }, [addToast, debouncedQ, defaultModel, modelReady, t, vendor]);
+
+  /** 加载更多：按当前已加载条数作为 offset 拉下一页并追加（total 以服务端为准） */
+  const loadMorePresets = useCallback(async (): Promise<void> => {
+    const current = list;
+    if (!current || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await api.listPurgePresets({
+        q: debouncedQ || undefined,
+        vendor: vendor || undefined,
+        model: defaultModel || undefined,
+        offset: current.items.length,
+      });
+      if (!res.success || !res.data) throw new Error('load-more failed');
+      const merged = [...current.items, ...res.data.items];
+      setList({ ...res.data, items: merged });
+    } catch {
+      addToast(t('预设列表加载失败'), 'error');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [addToast, debouncedQ, defaultModel, list, loadingMore, t, vendor]);
 
   // 详情：选中项变化时拉全文
   useEffect(() => {
@@ -1067,6 +1090,16 @@ const PresetsSection = memo(function PresetsSection({
           })}
         </ul>
       )}
+      {/* 加载更多：服务端 total 大于已加载条数时显示（默认每页 50 条） */}
+      {modelReady && !loading && items.length > 0 && (list?.total ?? 0) > items.length ? (
+        <div className="purge-actions">
+          <Button variant="outline" size="sm" disabled={loadingMore} onClick={() => void loadMorePresets()}>
+            {loadingMore
+              ? t('加载中…')
+              : t('加载更多（还有 {{n}} 条）', { n: (list?.total ?? 0) - items.length })}
+          </Button>
+        </div>
+      ) : null}
     </Card>
   );
 });

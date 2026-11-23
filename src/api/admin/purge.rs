@@ -79,10 +79,11 @@ pub async fn handle_list_purge_presets(
     verify_admin(&state, &headers).await?;
 
     let limit = query.limit.unwrap_or(presets::DEFAULT_LIMIT);
-    let (items, vendors, total) = presets::list(
+    let (items, vendors, total) = presets::list_page(
         query.q.as_deref(),
         query.vendor.as_deref(),
         query.model.as_deref(),
+        query.offset.unwrap_or(0),
         limit,
     );
 
@@ -304,6 +305,8 @@ pub struct PresetQuery {
     q: Option<String>,
     vendor: Option<String>,
     model: Option<String>,
+    /// 跳过前 N 条（「加载更多」用；缺省 0 = 第一页）。
+    offset: Option<usize>,
     limit: Option<usize>,
 }
 

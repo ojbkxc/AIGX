@@ -348,6 +348,20 @@ pub fn list(
     model: Option<&str>,
     limit: usize,
 ) -> (Vec<PresetBrief>, Vec<VendorCount>, usize) {
+    list_page(q, vendor, model, 0, limit)
+}
+
+/// 分页版列表：`offset` 跳过前 N 条过滤结果（clamp 到过滤后总数）。
+///
+/// `list` 是它的 `offset=0` 薄壳——既有调用方与测试零改动。
+/// 「加载更多」语义：前端按已加载条数递增 offset 拉下一页。
+pub fn list_page(
+    q: Option<&str>,
+    vendor: Option<&str>,
+    model: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> (Vec<PresetBrief>, Vec<VendorCount>, usize) {
     let needle = q.map(str::trim).filter(|s| !s.is_empty());
     let vendor = vendor.map(str::trim).filter(|s| !s.is_empty());
     let active_model = model.map(str::trim).filter(|s| !s.is_empty());
@@ -385,6 +399,7 @@ pub fn list(
 
     let items = filtered
         .into_iter()
+        .skip(offset.min(total))
         .take(limit)
         .map(|preset| {
             let mut brief = to_brief(preset);
@@ -628,6 +643,23 @@ mod tests {
         for (index, item) in plain.iter().enumerate() {
             assert_eq!(item.id, BUILTIN_PRESETS[index].id, "无检索词必须保持目录序");
         }
+    }
+
+    /// 分页：offset 跳过、limit 截断、total 恒为过滤后总数；
+    /// offset 越过总数返回空页（不是报错）。
+    #[test]
+    fn list_page_offsets_within_total() {
+        let (page1, _, total) = list_page(None, None, None, 0, 3);
+        assert_eq!(page1.len(), 3.min(total));
+        let (page2, _, total2) = list_page(None, None, None, 3, 3);
+        assert_eq!(total2, total, "分页不改 total");
+        if total > 3 {
+            assert_eq!(page2[0].id, BUILTIN_PRESETS[3].id, "第二页从第 4 条起");
+            assert_ne!(page2[0].id, page1[0].id);
+        }
+        let (empty, _, total3) = list_page(None, None, None, total + 10, 5);
+        assert!(empty.is_empty(), "越过总数应为空页");
+        assert_eq!(total3, total);
     }
 
     #[test]
