@@ -32,6 +32,7 @@ type LimiterMode = NonNullable<AccountBatchRequest['limiter_mode']>;
 const BATCH_OPS: Array<{ value: AccountBatchOp; label: string }> = [
   { value: 'enable', label: '启用' },
   { value: 'disable', label: '停用' },
+  { value: 'refresh_token', label: '刷新 Token' },
   { value: 'set_proxy', label: '修改代理' },
   { value: 'set_max_concurrency', label: '设置并发上限' },
   { value: 'query_settings', label: '查询设置' },
@@ -171,6 +172,10 @@ export default function AccountBatchDialog({
         case 'disable':
           await api.patchAccountSession(id, { status: req.op });
           break;
+        case 'refresh_token':
+          // 逐账号走单条刷新端点（后端无批量刷新 token op；等价于行内「刷新 Token」）
+          await api.refreshAccountSession(id, true);
+          break;
         case 'delete':
           await api.deleteAccountSession(id);
           break;
@@ -218,13 +223,18 @@ export default function AccountBatchDialog({
     setReceipts(null);
     try {
       let list: AccountBatchReceipt[];
-      try {
-        const res = await api.batchAccountSessions(req);
-        list = Array.isArray(res.data) ? res.data : [];
-        if (!list.length) throw new Error(t('批量端点返回空回执'));
-      } catch {
-        // 批量端点未上线（404/501）或异常 → 循环降级，回执口径不变
+      if (req.op === 'refresh_token') {
+        // 后端批量端点无 refresh_token op：直接走逐账号刷新端点，不经批量请求
         list = await runFallback(req);
+      } else {
+        try {
+          const res = await api.batchAccountSessions(req);
+          list = Array.isArray(res.data) ? res.data : [];
+          if (!list.length) throw new Error(t('批量端点返回空回执'));
+        } catch {
+          // 批量端点未上线（404/501）或异常 → 循环降级，回执口径不变
+          list = await runFallback(req);
+        }
       }
       const failed = list.filter((r) => !r.ok);
       if (failed.length === 0) {

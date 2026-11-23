@@ -1010,6 +1010,101 @@ body.as-col-resizing {
   white-space: nowrap;
 }
 
+/* 账号格邮箱副行（A2A 账号列只留邮箱：截断防撑行） */
+.as-name-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 余额明细：逐份积分包到期徽标 */
+.as-pack-expiry {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.as-pack-expiry.expired {
+  color: var(--danger, #dc2626);
+}
+
+/* 余额明细：已用完 / 已过期折叠组 */
+.as-pack-spent {
+  margin-top: 6px;
+  border-top: 1px dashed var(--border-color);
+  padding-top: 4px;
+}
+
+.as-pack-spent > summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.as-pack-spent .as-wallet-row.is-spent {
+  opacity: 0.6;
+}
+
+/* 余额明细：窗口分组小标题 */
+.as-pop-subsection {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 4px 0 2px;
+}
+
+/* 冷却明细：来源 / 原因说明行 */
+.as-limit-source {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 代理「测试出口」行 */
+.proxy-test-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 工具条「更多筛选」折叠抽屉（冷门区间筛选默认收起，降密度） */
+.as-adv-filters {
+  flex-basis: 100%;
+  width: 100%;
+}
+
+.as-adv-summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+  list-style: none;
+  user-select: none;
+}
+
+.as-adv-summary::-webkit-details-marker {
+  display: none;
+}
+
+.as-adv-summary::before {
+  content: '▸ ';
+}
+
+.as-adv-filters[open] .as-adv-summary::before {
+  content: '▾ ';
+}
+
+.as-adv-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+
 /* 供应商格（logo + 名） */
 .provider-cell {
   display: flex;

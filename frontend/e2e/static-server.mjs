@@ -129,6 +129,7 @@ const MANAGE_VIEW = {
       provider: 'openai_compatible',
       provider_label: 'OpenAI 兼容',
       id: 'glm-4.7-flash',
+      source: 'builtin',
       enabled: true,
       // SPEC-1.0.46 §2.1：default_enabled = 默认绑定（id→id）那颗开关；
       // enabled = default_enabled OR 任一条别名开着（后端 build_view 派生）。
@@ -145,6 +146,7 @@ const MANAGE_VIEW = {
       provider: 'openai_compatible',
       provider_label: 'OpenAI 兼容',
       id: 'unpriced-model',
+      source: 'manual',
       // 默认绑定开着，且 alias-free 也开着 ⇒ 即便关掉默认绑定，行仍不压淡（A2A 口径）
       enabled: true,
       default_enabled: true,
@@ -165,6 +167,7 @@ const MANAGE_VIEW = {
       provider: 'workbuddy',
       provider_label: 'WorkBuddy 国内版',
       id: 'wb-coder',
+      source: 'remote',
       enabled: true,
       default_enabled: true,
       sources: [{ kind: 'account', channel_id: 'ch-3', name: 'workbuddy-1', account_id: 'acc-1' }],

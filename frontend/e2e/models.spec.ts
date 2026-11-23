@@ -60,9 +60,14 @@ test.describe('模型管理', () => {
     await expect(page.locator('.mm-tr-group')).toHaveCount(2);
     await expect(dataRows(page)).toHaveCount(3);
 
-    // 渠道来源与账号来源的徽标
-    await expect(page.locator('.mm-src-tag.provider', { hasText: 'lxchat-glm' })).toBeVisible();
-    await expect(page.locator('.mm-src-tag:not(.provider)', { hasText: 'workbuddy-1' })).toBeVisible();
+    // 来源列展示「清单来源」三态（manual/remote/builtin），承载方（渠道/账号名）收进 title
+    const glmRow = dataRows(page).filter({ hasText: 'glm-4.7-flash' });
+    await expect(glmRow.locator('.mm-c-source .mm-src-tag')).toContainText('内置');
+    const wbRow = dataRows(page).filter({ hasText: 'wb-coder' });
+    await expect(wbRow.locator('.mm-c-source .mm-src-tag')).toContainText('远程');
+    // 承载方名称仍在 title 里（渠道 lxchat-glm / 账号 workbuddy-1）
+    await expect(glmRow.locator('.mm-c-source')).toHaveAttribute('title', /lxchat-glm/);
+    await expect(wbRow.locator('.mm-c-source')).toHaveAttribute('title', /workbuddy-1/);
 
     // 未定价模型显示占位
     await expect(page.locator('.mm-price-empty')).toHaveCount(1);

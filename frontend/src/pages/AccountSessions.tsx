@@ -8,6 +8,7 @@ import {
 import { api } from '../api';
 import { providerIcon } from '../lib/providerIcons';
 import { addConfigOf, cardKindOf, isCardHidden } from '../lib/addAccountConfigs';
+import { fmtCompact } from '../lib/utils';
 import { balanceWalletOf } from '../lib/balanceWallet';
 import { CHECKIN_PROVIDERS } from '../lib/checkinProviders';
 import { useToast } from '../components/Toast';
@@ -200,6 +201,20 @@ function maskName(name: string): string {
   return `${s[0]}***${s[s.length - 1]}`;
 }
 
+/* ══ 金额 / 额度读数格式（对齐 A2A numberText + compactNumber：两位小数上限 + 万/亿紧凑） ══ */
+
+/**
+ * 金额 / 额度 / 组余额统一读数：≥ 1 万走中文紧凑单位（万/亿，复用 MM 的 fmtCompact），
+ * 其余最多两位小数并带千分位。null / 非数 → 「—」（对齐 A2A 读不到就留空占位）。
+ */
+function fmtAmount(val: number | null | undefined): string {
+  if (val == null) return '—';
+  const n = Number(val);
+  if (!Number.isFinite(n)) return '—';
+  if (Math.abs(n) >= 1e4) return fmtCompact(n);
+  return n.toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
 /* ══ 余额主额度桶（对齐 Agent2API .usage-pool 两行形态：套餐名 + 进度条 + 读数） ══ */
 
 /** 余额单元格的两行形态视图 */
@@ -231,7 +246,7 @@ function usagePoolOf(bal: AccountBalance | null | undefined): UsagePoolView | nu
   const plan = (main && typeof main.displayName === 'string' && main.displayName) || subPlan;
   return {
     plan,
-    text: `${available}${bal.unit ? ` ${bal.unit}` : ''}`,
+    text: `${fmtAmount(available)}${bal.unit ? ` ${bal.unit}` : ''}`,
     ratio: total > 0 ? Math.max(0, Math.min(1, available / total)) : null,
     low: available <= 0,
   };
@@ -484,7 +499,7 @@ function groupBalanceText(rows: AccountSessionItem[]): string {
     }
   }
   const parts = [...sums.entries()].map(
-    ([unit, sum]) => `${Math.round(sum * 100) / 100} ${unit}`,
+    ([unit, sum]) => `${fmtAmount(sum)} ${unit}`,
   );
   if (unlimited > 0) parts.push(`不限 ×${unlimited}`);
   if (failed > 0) parts.push(`失败 ${failed}`);
@@ -826,6 +841,8 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     | { state: 'ok'; pool: UsagePoolView | null; text: string; windows?: AccountUsageWindow[]; raw?: AccountBalance | null }
     | { state: 'err'; text: string };
   const [balances, setBalances] = useState<Record<string, BalanceView>>({});
+  /** 单行余额查询的中断控制器（「取消余额查询」客户端中断在途请求，A2A per-row cancel） */
+  const balanceAbortRef = useRef<Map<string, AbortController>>(new Map());
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   // 拖拽排序（HTML5 DnD，落盘后重赋 priority 落盘）
   const [dragId, setDragId] = useState<string | null>(null);
@@ -1790,6 +1807,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     if (!needle) return true;
     return (
       s.name.toLowerCase().includes(needle) ||
+      (s.email || '').toLowerCase().includes(needle) ||
       (s.channel_name || '').toLowerCase().includes(needle) ||
       (s.provider || '').toLowerCase().includes(needle) ||
       (s.base_url || '').toLowerCase().includes(needle)
@@ -2042,22 +2060,48 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     });
   };
 
-  /** 查询余额（后端支持 12 家；不支持的 provider 内联显示原因） */
+  /** 查询余额（后端支持 12 家；不支持的 provider 内联显示原因）。
+   *  每次查询挂一个 AbortController，供 ⋯「取消余额查询」中断在途请求。 */
   const handleBalance = useCallback(async (session: AccountSessionItem): Promise<void> => {
+    const prevCtrl = balanceAbortRef.current.get(session.id);
+    if (prevCtrl) prevCtrl.abort();
+    const ctrl = new AbortController();
+    balanceAbortRef.current.set(session.id, ctrl);
     setBalances((prev) => ({ ...prev, [session.id]: { state: 'loading' } }));
     try {
-      const res = await api.getAccountSessionBalance(session.id);
+      const res = await api.getAccountSessionBalance(session.id, ctrl.signal);
       const d = res.data;
       const pool = usagePoolOf(d);
       const text = pool?.text ?? t('读数不可用');
+      if (ctrl.signal.aborted) return;
       setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', pool, text, windows: d?.windows, raw: d ?? null } }));
     } catch (err) {
+      if (ctrl.signal.aborted) return; // 用户主动取消：不报错、保持上次读数
       setBalances((prev) => ({
         ...prev,
         [session.id]: { state: 'err', text: err instanceof Error ? err.message : String(err) },
       }));
+    } finally {
+      if (balanceAbortRef.current.get(session.id) === ctrl) {
+        balanceAbortRef.current.delete(session.id);
+      }
     }
   }, [t]);
+
+  /** 取消某账号在途的余额查询（客户端中断；回落到上次读数） */
+  const cancelBalanceQuery = (session: AccountSessionItem): void => {
+    const ctrl = balanceAbortRef.current.get(session.id);
+    if (ctrl) {
+      ctrl.abort();
+      balanceAbortRef.current.delete(session.id);
+    }
+    setBalances((prev) => {
+      if (prev[session.id]?.state !== 'loading') return prev;
+      const next = { ...prev };
+      delete next[session.id];
+      return next;
+    });
+  };
 
   /** 查询全部（仅支持余额的 provider；并发受限，避免同时打爆上游） */
   const queryAllBalances = useCallback(async (list: AccountSessionItem[]): Promise<void> => {
@@ -2154,11 +2198,12 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     }
   };
 
-  /** 导单文件：按 provider 分组导出逐账号凭证文件（A2A POST /api/accounts/export-files） */
-  const handleExportFiles = async (): Promise<void> => {
+  /** 导单文件：按 provider 分组导出逐账号凭证文件（A2A POST /api/accounts/export-files）。
+   *  providerOverride 供「导出本组账号」直接指定某组，缺省回落到当前供应商筛选。 */
+  const handleExportFiles = async (providerOverride?: string): Promise<void> => {
     setError('');
     try {
-      const provider = providerFilter || '';
+      const provider = providerOverride || providerFilter || '';
       if (!provider) {
         addToast(t('请先在供应商筛选里选定一家，再导出该组的凭证文件'), 'error');
         return;
@@ -2616,15 +2661,24 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       ? visibleSorted
       : visibleSorted.slice((page - 1) * pageSize, page * pageSize);
 
-  /** §2.8 账号详情气泡：本页数据能提供的「邮箱/标识、更新于、来源、桌面登录态」 */
+  /** §2.8 账号详情气泡：邮箱 / 昵称 / 标识 / 凭证 / 代理 / 更新于 / 来源 / 桌面登录态 */
   const accountTitleLines = (s: AccountSessionItem): string[] => {
     const lines: string[] = [];
     if (s.name) lines.push(t('账号：{{name}}', { name: nameMasked ? maskName(s.name) : s.name }));
-    // P1（ACCOUNT-POOL-FIELD-PARITY §1 name）：A2A 账号列副行/悬停展示 email 与来源。
-    // 后端 AccountSession 无结构化 email 字段——仅插件账号在 `plugin` 公开投影里可能带 email；
-    // 原生账号以 name/identifier 承载邮箱（无独立字段可出）。
-    const email = typeof s.plugin?.email === 'string' ? s.plugin.email.trim() : '';
+    // 邮箱：原生账号取后端派生字段 s.email（v1.0.91 #69），插件账号回退 plugin 公开投影。
+    const email = (s.email || (typeof s.plugin?.email === 'string' ? s.plugin.email : '') || '').trim();
     if (email && email !== s.name) lines.push(t('邮箱：{{email}}', { email }));
+    // 昵称 / 标识：仅插件公开投影里可能带（A2A tooltip 昵称/标识）；后端无则跳过。
+    const plugin = (s.plugin ?? {}) as Record<string, unknown>;
+    const nick = typeof plugin.nickname === 'string' ? plugin.nickname.trim() : '';
+    if (nick) lines.push(t('昵称：{{nick}}', { nick }));
+    const ident = typeof plugin.identifier === 'string'
+      ? plugin.identifier.trim()
+      : typeof plugin.uid === 'string' ? plugin.uid.trim() : '';
+    if (ident) lines.push(t('标识：{{id}}', { id: ident }));
+    // 凭证 / 代理已从账号格副行移入气泡（降行高、对齐 A2A 只留邮箱副行）。
+    if (s.api_key) lines.push(t('凭证：{{key}}', { key: s.api_key }));
+    if (s.proxy) lines.push(t('代理：{{proxy}}', { proxy: s.proxy }));
     if (s.updated_at) {
       const raw = Number(s.updated_at);
       const at = raw < 1e11 ? raw * 1000 : raw;
@@ -2707,7 +2761,14 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     }
   };
 
-  /** §2.9 余额明细：wallets[] 逐桶 + windows[] 逐窗口；都空 → 「上游未返回明细」 */
+  /**
+   * §2.9 余额明细（对齐 A2A accounts-credit-detail 的信息量）：
+   * - wallets[] 逐份积分包：面额 / 已用 / 剩余 + 到期徽标；
+   * - 「已用完 / 已过期」折叠组（A2A 的 spent 折叠）；
+   * - windows[] 逐窗口，按 group 分节（A2A「分组窗口」视图；逐模型配额卡片需后端
+   *   逐模型额度读数，当前数据无此维度，故仅出分组窗口）。
+   * 都空 → 「上游未返回明细」。
+   */
   const balanceDetailRows = (bal: AccountBalance | null | undefined): ReactNode => {
     const wallets = Array.isArray(bal?.wallets) ? bal.wallets : [];
     // 同一基础模型的不同思考等级先合并，避免明细弹层里重复列同一模型。
@@ -2716,47 +2777,103 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       return <div className="as-pop-empty">{t('上游未返回明细')}</div>;
     }
     const unit = bal?.unit ? ` ${bal.unit}` : '';
+    const nowMs = Date.now();
+
+    // 每份积分包归一：剩余/面额/已用 + 到期时刻 + 是否已用完/已过期
+    const packs = wallets.map((w, i) => {
+      const balance = Number(w?.balance);
+      const total = Number(w?.total) || 0;
+      const used = Number(w?.used) || 0;
+      const expMs = expiryMillis(w?.expireAt ?? w?.expiresAt ?? w?.expire_at);
+      const expired = expMs != null && expMs <= nowMs;
+      const usedUp = Number.isFinite(balance) && (balance <= 0 || (total > 0 && used >= total));
+      return {
+        i,
+        balance,
+        total,
+        used,
+        expMs,
+        expired,
+        usedUp,
+        name: String(w?.displayName || w?.type || t('额度')),
+      };
+    });
+    const livePacks = packs.filter((p) => !p.expired && !p.usedUp);
+    const spentPacks = packs.filter((p) => p.expired || p.usedUp);
+
+    const packRow = (p: (typeof packs)[number], dim: boolean): ReactNode => (
+      <div key={`w-${p.i}`} className={`as-wallet-row${dim ? ' is-spent' : ''}`}>
+        <span className="as-wallet-name" title={p.name}>{p.name}</span>
+        <span className="as-wallet-view">
+          {Number.isFinite(p.balance) ? `${fmtAmount(p.balance)}${unit}` : '—'}
+          {p.total > 0 ? ` / ${fmtAmount(p.total)}${unit}` : ''}
+          {p.used > 0 ? ` · ${t('已用')} ${fmtAmount(p.used)}${unit}` : ''}
+        </span>
+        {p.expMs != null && (
+          <span
+            className={`as-pack-expiry${p.expired ? ' expired' : ''}`}
+            title={`${t('到期时间：')}${new Date(p.expMs).toLocaleString()}`}
+          >
+            {p.expired ? t('已过期') : `${t('到期')} ${new Date(p.expMs).toLocaleDateString()}`}
+          </span>
+        )}
+      </div>
+    );
+
+    // 窗口按 group 分节（有 group 时出分组标题；无 group 时维持平铺）
+    const winGroups = new Map<string, AccountUsageWindow[]>();
+    for (const w of wins) {
+      const g = (w.group || '').trim();
+      const arr = winGroups.get(g);
+      if (arr) arr.push(w);
+      else winGroups.set(g, [w]);
+    }
+    const showGroupHeads = [...winGroups.keys()].some((g) => g.length > 0);
+
+    const windowRow = (w: AccountUsageWindow, i: number): ReactNode => {
+      const label = usageWindowTitle(w);
+      const pct = typeof w.remaining_percent === 'number' ? Math.round(w.remaining_percent) : null;
+      const remaining = typeof w.remaining === 'number' ? w.remaining : null;
+      const reset = w.resets_at && w.resets_at > 0 ? new Date(w.resets_at * 1000).toLocaleString() : '';
+      return (
+        <div key={w.key || `win-${i}`} className="as-wallet-row">
+          <span className="as-wallet-name" title={label}>{label}</span>
+          <span className="as-wallet-view">
+            {pct != null ? t('剩 {{pct}}%', { pct }) : ''}
+            {remaining != null ? ` · ${fmtAmount(remaining)}` : ''}
+            {reset ? ` · ${t('重置于 {{time}}', { time: reset })}` : ''}
+          </span>
+        </div>
+      );
+    };
+
     return (
       <>
-        {wallets.length > 0 && (
+        {packs.length > 0 && (
           <>
             <div className="as-pop-section">{t('额度桶')}</div>
-            {wallets.map((w, i) => {
-              const balance = Number(w?.balance);
-              const total = Number(w?.total) || 0;
-              const used = Number(w?.used) || 0;
-              return (
-                <div key={`w-${i}`} className="as-wallet-row">
-                  <span className="as-wallet-name">{String(w?.displayName || w?.type || t('额度'))}</span>
-                  <span className="as-wallet-view">
-                    {Number.isFinite(balance) ? `${balance}${unit}` : '—'}
-                    {total > 0 ? ` / ${total}${unit}` : ''}
-                    {used > 0 ? ` · ${t('已用')} ${used}${unit}` : ''}
-                  </span>
-                </div>
-              );
-            })}
+            {livePacks.length > 0
+              ? livePacks.map((p) => packRow(p, false))
+              : (
+                <div className="as-pop-empty">{t('可用额度已用完或已过期')}</div>
+              )}
+            {spentPacks.length > 0 && (
+              <details className="as-pack-spent">
+                <summary>{t('已用完 / 已过期 {{n}} 份', { n: spentPacks.length })}</summary>
+                {spentPacks.map((p) => packRow(p, true))}
+              </details>
+            )}
           </>
         )}
         {wins.length > 0 && (
           <>
             <div className="as-pop-section">{t('用量窗口')}</div>
-            {wins.map((w, i) => {
-              const label = usageWindowTitle(w);
-              const pct = typeof w.remaining_percent === 'number' ? Math.round(w.remaining_percent) : null;
-              const remaining = typeof w.remaining === 'number' ? w.remaining : null;
-              const reset = w.resets_at && w.resets_at > 0 ? new Date(w.resets_at * 1000).toLocaleString() : '';
-              return (
-                <div key={w.key || `win-${i}`} className="as-wallet-row">
-                  <span className="as-wallet-name">{label}</span>
-                  <span className="as-wallet-view">
-                    {pct != null ? t('剩 {{pct}}%', { pct }) : ''}
-                    {remaining != null ? ` · ${remaining}` : ''}
-                    {reset ? ` · ${t('重置于 {{time}}', { time: reset })}` : ''}
-                  </span>
-                </div>
-              );
-            })}
+            {[...winGroups.entries()].map(([g, list]) => (
+              <Fragment key={`wg-${g || 'default'}`}>
+                {showGroupHeads && g && <div className="as-pop-subsection">{g}</div>}
+                {list.map((w, i) => windowRow(w, i))}
+              </Fragment>
+            ))}
           </>
         )}
       </>
@@ -2789,21 +2906,20 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       }
       case 'name': {
         const titleLines = accountTitleLines(s);
-        // P1（§1 name）：插件账号的 email 副行（原生账号无结构化 email 字段，见 accountTitleLines 注释）
-        const emailSub = typeof s.plugin?.email === 'string' ? s.plugin.email.trim() : '';
+        // A2A 账号列副行只留邮箱（email ≠ 主名时）。原生账号用后端派生 s.email，
+        // 插件账号回退 plugin 公开投影。凭证 / 代理已移入悬停气泡以降行高。
+        const emailSub = (s.email || (typeof s.plugin?.email === 'string' ? s.plugin.email : '') || '').trim();
         return (
           <td key={col} className="as-c-name">
-            {/* §2.8 悬停气泡：名称上显示账号详情（邮箱/标识、更新于、来源、桌面登录态） */}
+            {/* §2.8 悬停气泡：名称上显示账号详情（邮箱/昵称/标识/凭证/代理、更新于、来源、桌面登录态） */}
             <div className="as-name" title={titleLines.length ? titleLines.join('\n') : undefined}>
               {nameMasked ? maskName(s.name) : s.name}
             </div>
             {emailSub && emailSub !== s.name && (
-              <div className="form-hint" title={emailSub}>
+              <div className="form-hint as-name-email" title={emailSub}>
                 {emailSub}
               </div>
             )}
-            <div className="form-hint">{s.api_key || '—'}</div>
-            {s.proxy && <div className="form-hint">{s.proxy}</div>}
             {s.last_error && (
               <div className="form-hint" title={s.last_error}>
                 {shortError(s.last_error)}
@@ -3420,6 +3536,19 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                 </button>
                 {menuOpen && (
                   <div className="as-act-menu">
+                    {/* P2 单行取消余额查询（对齐 A2A 菜单 cancelUsage）：仅在途时可点 */}
+                    {balances[s.id]?.state === 'loading' && (
+                      <button
+                        type="button"
+                        className="as-act-menu-item"
+                        onClick={() => {
+                          setActMenuFor(null);
+                          cancelBalanceQuery(s);
+                        }}
+                      >
+                        {t('取消余额查询')}
+                      </button>
+                    )}
                     {/* 手动刷新凭证：仅持有续期令牌的账号可用（qoder/autoclaw/trae/codearts 等） */}
                     <button
                       type="button"
@@ -3933,52 +4062,59 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               </button>
             ))}
           </div>
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
-            {t('到期')}
-            <input
-              type="date"
-              className="form-input"
-              style={{ width: 138 }}
-              value={advExpiryFrom}
-              onChange={(e) => { setAdvExpiryFrom(e.target.value); setExpirySeg('all'); }}
-              aria-label={t('到期起')}
-            />
-            ~
-            <input
-              type="date"
-              className="form-input"
-              style={{ width: 138 }}
-              value={advExpiryTo}
-              onChange={(e) => { setAdvExpiryTo(e.target.value); setExpirySeg('all'); }}
-              aria-label={t('到期止')}
-            />
-          </label>
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
-            {t('已用 %')}
-            <input
-              type="number"
-              min={0}
-              max={100}
-              className="form-input"
-              style={{ width: 64 }}
-              value={advUsageMin}
-              onChange={(e) => { setAdvUsageMin(e.target.value); setUsageSeg('all'); }}
-              placeholder={t('下限')}
-              aria-label={t('已用百分比下限')}
-            />
-            ~
-            <input
-              type="number"
-              min={0}
-              max={100}
-              className="form-input"
-              style={{ width: 64 }}
-              value={advUsageMax}
-              onChange={(e) => { setAdvUsageMax(e.target.value); setUsageSeg('all'); }}
-              placeholder={t('上限')}
-              aria-label={t('已用百分比上限')}
-            />
-          </label>
+          {/* 冷门区间筛选收进可折叠「更多筛选」抽屉（对齐 A2A 窄屏收 ResponsiveSheet 的思路，
+              桌面默认收起以降工具条密度；到期/用量分档段仍在主行，区间是全量精确筛选才展开）。 */}
+          <details className="as-adv-filters">
+            <summary className="as-adv-summary">{t('更多筛选')}</summary>
+            <div className="as-adv-body">
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+                {t('到期')}
+                <input
+                  type="date"
+                  className="form-input"
+                  style={{ width: 138 }}
+                  value={advExpiryFrom}
+                  onChange={(e) => { setAdvExpiryFrom(e.target.value); setExpirySeg('all'); }}
+                  aria-label={t('到期起')}
+                />
+                ~
+                <input
+                  type="date"
+                  className="form-input"
+                  style={{ width: 138 }}
+                  value={advExpiryTo}
+                  onChange={(e) => { setAdvExpiryTo(e.target.value); setExpirySeg('all'); }}
+                  aria-label={t('到期止')}
+                />
+              </label>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+                {t('已用 %')}
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  className="form-input"
+                  style={{ width: 64 }}
+                  value={advUsageMin}
+                  onChange={(e) => { setAdvUsageMin(e.target.value); setUsageSeg('all'); }}
+                  placeholder={t('下限')}
+                  aria-label={t('已用百分比下限')}
+                />
+                ~
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  className="form-input"
+                  style={{ width: 64 }}
+                  value={advUsageMax}
+                  onChange={(e) => { setAdvUsageMax(e.target.value); setUsageSeg('all'); }}
+                  placeholder={t('上限')}
+                  aria-label={t('已用百分比上限')}
+                />
+              </label>
+            </div>
+          </details>
           {/* §2.3 清除筛选：只重置筛选维度（分组/排序/余额间隔/列设置是偏好，不动） */}
           <button
             type="button"
@@ -4010,6 +4146,17 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
         {picked.size > 0 && (
           <div className="batch-bar">
             <span>{t('已选 {{count}} 个账号', { count: picked.size })}</span>
+            {/* P2 选择全部筛选结果（对齐 A2A selectAllFiltered）：把当前筛选结果全部纳入选择 */}
+            {picked.size < visible.length && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPicked(new Set(visible.map((s) => s.id)))}
+                title={t('把当前筛选结果里的全部 {{n}} 个账号加入选择', { n: visible.length })}
+              >
+                {t('选择全部筛选结果（{{n}}）', { n: visible.length })}
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -4250,6 +4397,31 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                                       {t('全部停用（{{n}}）', { n: groupRows.length })}
                                     </button>
                                     <div className="as-group-menu-sep" />
+                                    {/* P2 整组「批量操作本组」：把本组账号勾选后打开批量弹窗（对齐 A2A group batch） */}
+                                    <button
+                                      type="button"
+                                      className="as-group-menu-item"
+                                      disabled={batchRunning || groupRows.length === 0}
+                                      onClick={() => {
+                                        setGroupMenuFor(null);
+                                        setPicked(new Set(groupRows.map((r) => r.id)));
+                                        setBatchDlgOpen(true);
+                                      }}
+                                    >
+                                      {t('批量操作本组（{{n}}）', { n: groupRows.length })}
+                                    </button>
+                                    {/* P2 整组「导出本组账号」：按 provider 导单文件（A2A 分组导出） */}
+                                    <button
+                                      type="button"
+                                      className="as-group-menu-item"
+                                      onClick={() => {
+                                        setGroupMenuFor(null);
+                                        void handleExportFiles(g.provider);
+                                      }}
+                                    >
+                                      {t('导出本组账号')}
+                                    </button>
+                                    <div className="as-group-menu-sep" />
                                     <button
                                       type="button"
                                       className="as-group-menu-item"
@@ -4304,26 +4476,41 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                           <div className="as-panel-body">{t('当前没有限流中的模型。')}</div>
                         ) : (
                           <div className="as-panel-list">
-                            {entries.map(([model, rem]) => (
-                              <div key={model} className="as-limit-row">
-                                <code className="as-limit-model">{model === '*' ? t('全部模型') : model}</code>
-                                <span className="as-badge-cooling">{t('冷却中')}</span>
-                                <span className="form-hint">{t('剩 {{time}}', { time: fmtDuration(rem) })}</span>
-                                <button
-                                  type="button"
-                                  className="as-clear-one"
-                                  onClick={() => void handleClearOneCooldown(open, model)}
-                                >
-                                  {t('清除标记')}
-                                </button>
-                              </div>
-                            ))}
+                            {entries.map(([model, rem]) => {
+                              // 倒计时 + 绝对恢复时刻 + 原因 + 来源（对齐 A2A limit-detail：
+                              // 逐模型「还有 N 分钟 / 恢复于 HH:MM / 原因 / 来源」）。
+                              // rem 为后端「剩余秒数」，本地按秒表往前推（cooldownLoadedAt）；
+                              // 绝对时刻 = 现在 + rem。冷却原始时长后端未下发，故不出进度线。
+                              const resumeAt = new Date(Date.now() + rem * 1000);
+                              return (
+                                <div key={model} className="as-limit-row">
+                                  <code className="as-limit-model">{model === '*' ? t('全部模型') : model}</code>
+                                  <span className="as-badge-cooling">{t('冷却中')}</span>
+                                  <span className="form-hint" title={t('原因：上游返回 429 / 限额失败')}>
+                                    {t('还有 {{time}}', { time: fmtDuration(rem) })}
+                                  </span>
+                                  <span className="form-hint" title={t('恢复时刻（本机估算）')}>
+                                    {t('恢复于 {{time}}', { time: resumeAt.toLocaleString() })}
+                                  </span>
+                                  <span className="form-hint as-limit-source">
+                                    {t('来源：上游 429 / 限额（本机估算恢复时刻）')}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="as-clear-one"
+                                    onClick={() => void handleClearOneCooldown(open, model)}
+                                  >
+                                    {t('清除标记')}
+                                  </button>
+                                </div>
+                              );
+                            })}
                             {skipModels.map((model) => (
                               <div key={`skip-${model}`} className="as-limit-row">
                                 <code className="as-limit-model">{model}</code>
                                 <span className="as-skip-badge">{t('限制器跳过')}</span>
-                                <span className="form-hint">
-                                  {t('窗口重置或余额回升后自动恢复')}
+                                <span className="form-hint as-limit-source">
+                                  {t('原因：限制器规则命中（窗口重置或余额回升后自动恢复）')}
                                 </span>
                               </div>
                             ))}
@@ -4569,6 +4756,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                       value={form.proxy || editing?.proxy || ''}
                       onChange={(next) => setForm({ ...form, proxy: next, clear_proxy: false })}
                       placeholder={editing?.proxy || 'socks5h://127.0.0.1:1080'}
+                      accountId={editing?.id}
                     />
                   </>
                 )}

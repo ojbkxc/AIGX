@@ -262,9 +262,10 @@ export const endpoints = {
       `${API_BASE}/account-sessions/${encodeURIComponent(id)}/reset-cooldown`,
       model ? { model } : undefined,
     ),
-  /** 账号余额/额度（支持 12 家；不支持返回 400 错误信息） */
-  getAccountSessionBalance: (id: string): Promise<ApiResponse<AccountBalance>> =>
-    request<ApiResponse<AccountBalance>>('GET', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/balance`),
+  /** 账号余额/额度（支持 12 家；不支持返回 400 错误信息）。
+   *  signal 支持单行「取消余额查询」客户端中断（A2A per-row cancelUsage）。 */
+  getAccountSessionBalance: (id: string, signal?: AbortSignal): Promise<ApiResponse<AccountBalance>> =>
+    request<ApiResponse<AccountBalance>>('GET', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/balance`, { signal }),
   /** 手动刷新账号凭证（qoder/autoclaw/trae；force=true 无条件刷新） */
   refreshAccountSession: (id: string, force = false): Promise<ApiResponse<{ refreshed?: boolean; skipped?: boolean; message?: string }>> =>
     request<ApiResponse<{ refreshed?: boolean; skipped?: boolean; message?: string }>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/refresh`, { force }),
@@ -289,6 +290,10 @@ export const endpoints = {
     request<ApiResponse<ProxyPoolResult>>('POST', `${API_BASE}/proxy-pool/remove`, { id }),
   testProxyEntry: (id: string): Promise<ApiResponse<ProxyTestResult & { items?: ProxyPoolItem[] }>> =>
     request<ApiResponse<ProxyTestResult & { items?: ProxyPoolItem[] }>>('POST', `${API_BASE}/proxy-pool/test`, { id }),
+  /** 手动同步 Clash Verge 出口到池（POST /api/proxy-pool/sync-clash）。
+   *  返回最新池列表 + `changes`（本次变更条数）+ `syncError`（Clash 没装/解析失败的说明，null = 成功）。 */
+  syncClashProxyPool: (): Promise<ProxyPoolResult & { changes?: number; syncError?: string | null }> =>
+    request<ProxyPoolResult & { changes?: number; syncError?: string | null }>('POST', `${API_BASE}/proxy-pool/sync-clash`),
   testAccountProxy: (data: { account_id?: string; proxy?: string | null }): Promise<ApiResponse<ProxyTestResult>> =>
     request<ApiResponse<ProxyTestResult>>('POST', `${API_BASE}/proxy-pool/test-account`, data),
   /** 代理连通性测试设置（A2A `/api/proxies/settings`） */
@@ -306,6 +311,8 @@ export const endpoints = {
     force?: boolean;
     apply?: boolean;
     replace?: boolean;
+    /** 拉取成功后是否自动清理失效映射（后端缺省 true；本页按账号拉目录时传 false 只刷目录不删映射） */
+    cleanup?: boolean;
   }): Promise<ApiResponse<CatalogSyncResult>> =>
     request<ApiResponse<CatalogSyncResult>>('POST', `${API_BASE}/account-sessions/catalog/sync`, data),
   /** 扫描本机可导入的账号来源（cc-switch） */

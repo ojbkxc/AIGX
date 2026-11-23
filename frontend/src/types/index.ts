@@ -696,6 +696,13 @@ export interface ManagedModel {
   provider_label: string;
   id: string;
   /**
+   * 逐模型清单来源（对齐 Agent2API per-model `source` 三态/四档）：
+   * `manual`（手动登记）> `remote`（上游目录/发现拉回）> `builtin`（渠道声明/账号白名单）
+   * > `modelsdev`（仅 models.dev 元数据兜底）。后端 `ManageModel.source` 总会下发一档
+   * （build 收尾把空串补成 `modelsdev`）；旧后端可能不带 → 前端按空串兜底。
+   */
+  source?: string;
+  /**
    * 派生启用态（对齐 Agent2API rowEnabled）：默认绑定开着 **或** 任一条别名开着即为 true。
    * 存储仍是 model_rules.disabled（零迁移），此值由后端 `build_view` 收尾时派生。
    */
@@ -1484,6 +1491,11 @@ export interface AccountSessionItem {
   channel_id: string;
   channel_name?: string;
   name: string;
+  /**
+   * 账号邮箱（后端 `account_email_of` 由 `credential.fields["email"]` 派生，
+   * 空白归一为 null；v1.0.91 #69 起随 session_json 下发）。原生账号也可有值。
+   */
+  email?: string | null;
   provider: string;
   base_url?: string;
   /** 账号级对话路径覆盖（如 /api/chat），null = 默认 /chat/completions */
@@ -1663,6 +1675,7 @@ export type AccountBatchOp =
   | 'set_max_concurrency'
   | 'query_settings'
   | 'limiter'
+  | 'refresh_token'
   | 'delete';
 
 /** 批量操作请求（POST /api/account-sessions/batch；逐条执行、部分失败不影响成功项） */
@@ -1758,6 +1771,10 @@ export interface ProxyPoolItem {
   id: string;
   name: string;
   enabled: boolean;
+  /** 来源：`manual`（手填）/ `clash`（从 Clash Verge 镜像而来） */
+  source?: string;
+  /** clash 来源条目的监听器 uid（manual 来源缺省） */
+  listener_uid?: string;
   /** http / https / socks5 */
   protocol: string;
   host: string;

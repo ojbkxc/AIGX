@@ -45,7 +45,7 @@ import {
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
 import { usePageSize, TablePaginationFooter, CLIENT_PAGE_SIZES } from '../components/ui/TableShell';
-import type { AliasEntry, ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
+import type { AliasEntry, ManageView, ManagedModel, ModelMetaOverride, ChannelItem, AccountSessionItem } from '../types';
 import './ModelManage.css';
 
 // ── 常量 ─────────────────────────────────────────────────────────────
@@ -64,6 +64,8 @@ const LS_PAGE_SIZE = 'aigx-mm-pagesize';
 const LS_TCOLS = 'aigx-tbl-cols.models';
 /** 公共每页条数键（usePageSize；旧 aigx-mm-pagesize 搬迁源） */
 const LS_PSZ = 'aigx-tbl-pagesize.models';
+/** 获取模型弹窗「模型来源账号」选择记忆（渠道 id → 账号 id） */
+const LS_FETCH_ACCPICK = 'aigx-mm-fetch-acctpick';
 
 /** 公共层列声明（定义在 COL_DEFAULT_ALIGN 之后；见下方 MM_COL_DEFS） */
 
@@ -146,20 +148,20 @@ const CAP_DOTS: Array<{ key: string; match: RegExp; label: string; icon: typeof 
   { key: 'reasoning', match: /reason|think/i, label: '思考', icon: Lightbulb },
 ];
 
-/** 来源色点三态：远程品牌蓝 / 内置灰 / 手动琥珀（对齐 Agent2API .src i） */
-const SOURCE_DOTS: Record<string, { label: string; className: string }> = {
-  remote: { label: '远程拉取', className: 'mm-src-dot remote' },
-  builtin: { label: '内置', className: 'mm-src-dot builtin' },
-  manual: { label: '手动', className: 'mm-src-dot manual' },
+/** 清单来源三态/四档（对齐 Agent2API per-model `source`：manual/remote/builtin/modelsdev） */
+const SOURCE_DOTS: Record<string, { label: string; short: string; className: string }> = {
+  remote: { label: '远程拉取', short: '远程', className: 'mm-src-dot remote' },
+  builtin: { label: '内置', short: '内置', className: 'mm-src-dot builtin' },
+  manual: { label: '手动登记', short: '手动', className: 'mm-src-dot manual' },
   // models.dev 社区目录补齐（A2A models-cells 的独立来源档：能力/上下文由社区目录回填）
-  modelsdev: { label: 'models.dev 社区目录', className: 'mm-src-dot modelsdev' },
+  modelsdev: { label: 'models.dev 社区目录', short: '社区', className: 'mm-src-dot modelsdev' },
 };
 
-/** 来源列色点：有 kind 细分时按三态取色，否则按承载方（account=琥珀）兜底 */
-function srcDotClass(s: { kind: string; source?: string }): string {
-  const hit = SOURCE_DOTS[s.source ?? ''];
-  if (hit) return hit.className;
-  return s.kind === 'account' ? 'mm-src-dot manual' : 'mm-src-dot builtin';
+/** 取一行的清单来源档：后端总会给一档；旧后端空串时按承载方兜底到手动/内置 */
+function modelSourceKey(row: { source?: string; sources: { kind: string; source?: string }[] }): string {
+  if (row.source && SOURCE_DOTS[row.source]) return row.source;
+  if (row.sources.some((s) => s.source === 'manual')) return 'manual';
+  return 'builtin';
 }
 
 /**
@@ -421,6 +423,8 @@ export default function ModelManage(): JSX.Element {
   const [sortMode, setSortMode] = useState<SortMode>(mmFilters.sort as SortMode);
   const [channelFilter, setChannelFilter] = useState('all');
   const [query, setQuery] = useState<string>(mmFilters.query || '');
+  /** 左栏 provider 搜索（对齐 Agent2API prov-rail 的搜索框；只过滤左栏，不动表格筛选） */
+  const [railQuery, setRailQuery] = useState('');
 
   // 筛选变更即落盘（navKey 分组 / query 搜索同记，对齐 models-filters 的 provider / search）
   useEffect(() => {
@@ -495,6 +499,14 @@ export default function ModelManage(): JSX.Element {
   /** 单渠道失败标记（重试即清除），对照 Agent2API 获取弹窗的状态徽标 */
   const [fetchFailed, setFetchFailed] = useState<Record<string, string>>({});
   const [fetchAllRunning, setFetchAllRunning] = useState(false);
+  /** 账号池型渠道的可选账号（A2A「模型来源账号」下拉：用哪个账号去拉目录） */
+  const [fetchAccounts, setFetchAccounts] = useState<AccountSessionItem[]>([]);
+  /** 每渠道选中的模型来源账号（落盘记忆，key=渠道 id） */
+  const [fetchAccountPick, setFetchAccountPick] = useState<Record<string, string>>(
+    readLS<Record<string, string>>(LS_FETCH_ACCPICK, {}),
+  );
+  /** 按账号拉取的在途渠道 id */
+  const [fetchingAccountCid, setFetchingAccountCid] = useState<string | null>(null);
 
   // 添加自定义模型弹窗
   const [addModelOpen, setAddModelOpen] = useState(false);
@@ -517,6 +529,23 @@ export default function ModelManage(): JSX.Element {
   const [savingAlias, setSavingAlias] = useState(false);
   const [pendingAlias, setPendingAlias] = useState<string | null>(null);
 
+  /** 当前映射行的「同家」模型清单（A2A 映射 target 锁定同家清单，避免建出跨家调不通的映射）。
+   *  为空（该家仅此一行 / 旧后端）时回退到全局候选并允许自由输入。 */
+  const aliasProviderOptions = useMemo(() => {
+    const provider = aliasTarget?.provider;
+    if (!provider) return [] as string[];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const m of view?.models ?? []) {
+      if (m.provider !== provider) continue;
+      const k = m.id.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(m.id);
+    }
+    return out.sort((a, b) => a.localeCompare(b));
+  }, [view, aliasTarget]);
+
   const [testTarget, setTestTarget] = useState<ManagedModel | null>(null);
 
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
@@ -524,11 +553,9 @@ export default function ModelManage(): JSX.Element {
 
   const [tab, setTab] = useState<MainTab>('catalog');
 
-  // ── 自定义模型（对齐 Agent2API addCustomModel / removeCustomModel） ──
-  const [customModal, setCustomModal] = useState(false);
-  const [customForm, setCustomForm] = useState({ id: '', provider: '' });
-  const [customError, setCustomError] = useState('');
-  const [savingCustom, setSavingCustom] = useState(false);
+  // ── 自定义模型（对齐 Agent2API addCustomModel / removeCustomModel）──
+  // 「新建自定义模型」与「添加模型」两个弹窗已合并为同一个（provider 可搜下拉 + 模型 ID），
+  // 两个入口（左栏沉底 / 标题栏）都打开它。状态在下方 addModel* 一组里。
 
 
   // ── 批量映射前缀（对齐 Agent2API 批量加映射的「前缀 + 同名合并」选项） ──
@@ -874,33 +901,12 @@ export default function ModelManage(): JSX.Element {
     return customProviders.some((p) => p.id === row.provider);
   };
 
-  const openCustomCreate = () => {
-    setCustomForm({ id: '', provider: '' });
-    setCustomError('');
-    setCustomModal(true);
-  };
-
-  const saveCustom = async () => {
-    setCustomError('');
-    const id = customForm.id.trim();
-    const provider = customForm.provider.trim() || 'custom';
-    if (!id) {
-      setCustomError(t('模型 ID 为必填项'));
-      return;
-    }
-    setSavingCustom(true);
-    try {
-      // 远程 addCustomModel 为 (provider, id) 两参形状；弹窗中的 owned_by 字段远程后端暂不支持，暂不传
-      await api.addCustomModel(provider, id);
-      addToast(t('自定义模型已添加') + `：${id}`);
-      setCustomModal(false);
-      await load();
-    } catch (err) {
-      // 失败只报错不崩页面
-      setCustomError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSavingCustom(false);
-    }
+  /** 打开「添加自定义模型」弹窗（原「新建自定义模型」入口已合并到这一个弹窗） */
+  const openAddModel = () => {
+    setAddModelProvider('');
+    setAddModelId('');
+    setAddModelError('');
+    setAddModelOpen(true);
   };
 
   const deleteCustom = (row: ManagedModel) => {
@@ -1047,6 +1053,50 @@ export default function ModelManage(): JSX.Element {
       setFetchChannels(list.filter((c) => c.status === 'enabled'));
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+    // 账号池型渠道的「模型来源账号」候选（失败不阻塞渠道级拉取，静默降级为空）
+    try {
+      const accRes = await api.listAccountSessions({ page: 1, page_size: 500 });
+      setFetchAccounts((accRes?.data ?? []) as AccountSessionItem[]);
+    } catch {
+      setFetchAccounts([]);
+    }
+  };
+
+  /** 记住「模型来源账号」选择（落盘，A2A 同款「哪个账号去拉 + 落盘记忆」） */
+  useEffect(() => {
+    setFilter(LS_FETCH_ACCPICK, fetchAccountPick);
+  }, [fetchAccountPick]);
+
+  /** 按选定账号拉取该家目录（A2A「模型来源账号」映射：syncAccountCatalog 只刷缓存、
+   *  不写白名单、不清映射，与渠道级「全部账号」拉取并存）。 */
+  const fetchOneAccount = async (ch: ChannelItem, accountId: string) => {
+    const cid = String(ch.id);
+    if (fetchingAccountCid) return;
+    const acc = fetchAccounts.find((a) => a.id === accountId);
+    setFetchingAccountCid(cid);
+    try {
+      const res = await api.syncAccountCatalog({ account_id: accountId, apply: false, cleanup: false });
+      const data = res?.data;
+      const ok = Number(data?.ok_count ?? 0);
+      const fail = Number(data?.error_count ?? 0);
+      const firstErr = data?.errors?.[0]?.error;
+      if (fail > 0 && ok === 0) {
+        setFetchFailed((f) => ({ ...f, [cid]: firstErr || t('拉取失败') }));
+      } else {
+        setFetchDone((d) => ({ ...d, [cid]: true }));
+        setFetchFailed((f) => {
+          const next = { ...f };
+          delete next[cid];
+          return next;
+        });
+        addToast(t('已按账号拉取模型目录') + `：${acc?.name ?? accountId}`);
+        await load();
+      }
+    } catch (err) {
+      setFetchFailed((f) => ({ ...f, [cid]: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      setFetchingAccountCid(null);
     }
   };
 
@@ -1300,6 +1350,18 @@ export default function ModelManage(): JSX.Element {
     [view],
   );
 
+  /** 左栏按 provider 名过滤（只动左栏导航，不影响右侧表格的筛选/搜索） */
+  const railFilter = useMemo(() => {
+    const q = railQuery.trim().toLowerCase();
+    const match = (s: string): boolean => !q || s.toLowerCase().includes(q);
+    return {
+      active: q.length > 0,
+      channels: channelRails.filter((c) => match(c.name)),
+      builtins: builtinRails.filter((g) => match(g.label)),
+      customs: customProviders.filter((p) => match(p.label)),
+    };
+  }, [railQuery, channelRails, builtinRails, customProviders]);
+
   const providerStats = useMemo(() => {
     const groupsList = view?.providers ?? [];
     return {
@@ -1516,38 +1578,39 @@ export default function ModelManage(): JSX.Element {
             )}
           </td>
         );
-      case 'source':
+      case 'source': {
+        // 行内展示「清单来源」三态/四档（manual/remote/builtin/modelsdev，对齐 A2A models-cells）；
+        // 承载方（渠道/账号名）收进 td 的 title（A2A 承载方另处）。
+        const srcKey = modelSourceKey(row);
+        const srcMeta = SOURCE_DOTS[srcKey] ?? SOURCE_DOTS.builtin;
+        const srcLabel =
+          srcKey === 'remote' ? t('远程')
+            : srcKey === 'manual' ? t('手动')
+              : srcKey === 'modelsdev' ? t('社区')
+                : t('内置');
+        const carriers = row.sources.map((s) => s.name).filter(Boolean).join('、');
         return (
-          <td key={col} className={`mm-c-source ta-${colAlign.source}`}>
-            <div className="mm-sources">
-              {row.sources.slice(0, 3).map((s, i) => (
-                <Tooltip
-                  key={`${s.kind}-${s.channel_id}-${s.account_id ?? ''}-${i}`}
-                  label={`${s.kind === 'account' ? t('账号') : t('供应商')}：${s.name}`}
-                >
-                  <span className={`mm-src-tag${s.kind === 'account' ? '' : ' provider'}`}>
-                    {/* 来源色点：远程蓝 / 内置灰 / 手动琥珀（Agent2API .src i 三态） */}
-                    <i className={srcDotClass(s)} />
-                    {s.name}
-                  </span>
-                </Tooltip>
-              ))}
-              {row.sources.length > 3 && (
-                <Tooltip label={row.sources.map((s) => s.name).join('\n')}>
-                  <span className="mm-src-more">+{row.sources.length - 3}</span>
-                </Tooltip>
-              )}
-              {row.sources.length === 0 && <span className="mm-src-none">—</span>}
-            </div>
+          <td
+            key={col}
+            className={`mm-c-source ta-${colAlign.source}`}
+            title={
+              carriers ? `${srcLabel} · ${t('承载方')}：${carriers}` : `${srcLabel} · ${t('无承载方')}`
+            }
+          >
+            <span className="mm-src-tag model-source">
+              <i className={srcMeta.className} />
+              {srcLabel}
+            </span>
           </td>
         );
+      }
       case 'caps':
         return (
           <td key={col} className={`mm-c-caps ta-${colAlign.caps}`}>
             <button
               type="button"
               className="mm-caps-btn"
-              title={t('查看 / 覆盖能力声明（继承内置推断，覆盖后以下游声明为准）')}
+              title={t('目录级元信息覆盖：按模型 ID，覆盖该模型在所有来源的默认展示（归属 / 上下文 / 能力）')}
               onClick={() => openMetaForRow(row)}
             >
               {CAP_DOTS.map((c) => {
@@ -1598,14 +1661,14 @@ export default function ModelManage(): JSX.Element {
               })()}
             </button>
             {/* 三态编辑入口：按 (provider, model) 显式声明能力位，
-                与上面的「元信息覆盖」（按模型 id 的目录级声明）并存 —— 前者管
-                这一条链，后者管该模型在所有链上的默认展示 */}
+                与上面的「目录级元信息覆盖」（按模型 id 的全局默认声明）职责不同 ——
+                前者只管 {provider} 这一条链，后者管该模型在所有链上的默认展示 */}
             <button
               type="button"
               className="mm-cap-edit"
-              title={t('按提供商编辑能力位（继承 / 是 / 否 三态）')}
+              title={t('按当前提供商（{{p}}）编辑能力位：只作用于这条链，继承 / 是 / 否 三态', { p: row.provider_label })}
               onClick={() => setCapTarget(row)}
-              aria-label={t('按提供商编辑能力位')}
+              aria-label={t('按当前提供商编辑能力位')}
             >
               <SlidersHorizontal size={11} />
             </button>
@@ -1871,11 +1934,24 @@ export default function ModelManage(): JSX.Element {
               <span className="mm-rail-count">{providerStats.total}</span>
             </button>
 
+            <div className="mm-rail-search">
+              <Search size={12} className="mm-rail-search-icon" />
+              <input
+                className="form-input"
+                value={railQuery}
+                onChange={(e) => setRailQuery(e.target.value)}
+                placeholder={t('搜索 provider…')}
+                aria-label={t('搜索 provider')}
+              />
+            </div>
+
             <div className="mm-rail-title">{t('供应商')}</div>
-            {channelRails.length === 0 ? (
-              <div className="mm-rail-empty">{t('暂无启用的供应商')}</div>
+            {railFilter.channels.length === 0 ? (
+              <div className="mm-rail-empty">
+                {railFilter.active ? t('无匹配的供应商') : t('暂无启用的供应商')}
+              </div>
             ) : (
-              channelRails.map((c) => (
+              railFilter.channels.map((c) => (
                 <button
                   key={c.id}
                   type="button"
@@ -1899,10 +1975,12 @@ export default function ModelManage(): JSX.Element {
             )}
 
             <div className="mm-rail-title">{t('账号池提供商')}</div>
-            {builtinRails.length === 0 ? (
-              <div className="mm-rail-empty">{t('暂无账号池供应商')}</div>
+            {railFilter.builtins.length === 0 ? (
+              <div className="mm-rail-empty">
+                {railFilter.active ? t('无匹配的供应商') : t('暂无账号池供应商')}
+              </div>
             ) : (
-              builtinRails.map((g) => (
+              railFilter.builtins.map((g) => (
                 <button
                   key={g.id}
                   type="button"
@@ -1928,10 +2006,12 @@ export default function ModelManage(): JSX.Element {
             )}
 
             <div className="mm-rail-title">{t('自定义提供商')}</div>
-            {customProviders.length === 0 ? (
-              <div className="mm-rail-empty">{t('暂无自定义提供商')}</div>
+            {railFilter.customs.length === 0 ? (
+              <div className="mm-rail-empty">
+                {railFilter.active ? t('无匹配的供应商') : t('暂无自定义提供商')}
+              </div>
             ) : (
-              customProviders.map((p) => (
+              railFilter.customs.map((p) => (
                 <button
                   key={p.id}
                   type="button"
@@ -1953,8 +2033,8 @@ export default function ModelManage(): JSX.Element {
                 </button>
               ))
             )}
-            {/* 新建自定义提供商/模型（对齐 Agent2API「+新建」沉底动作） */}
-            <button type="button" className="mm-rail-add" onClick={openCustomCreate}>
+            {/* 新建自定义模型（对齐 Agent2API「+新建」沉底动作）；与标题栏「添加模型」同一个弹窗 */}
+            <button type="button" className="mm-rail-add" onClick={openAddModel}>
               <Plus size={12} /> {t('新建自定义模型')}
             </button>
           </nav>
@@ -1985,7 +2065,7 @@ export default function ModelManage(): JSX.Element {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setAddModelOpen(true)}
+                  onClick={openAddModel}
                   style={{ gap: 6 }}
                   title={t('手动登记自定义模型')}
                 >
@@ -2653,11 +2733,21 @@ export default function ModelManage(): JSX.Element {
                 <label>{t('转发到上游模型')} *</label>
                 <Combobox
                   value={aliasForm.target}
-                  options={modelIdOptions}
-                  placeholder={t('搜索或输入目标模型名')}
+                  options={aliasProviderOptions.length ? aliasProviderOptions : modelIdOptions}
+                  allowFreeText={aliasProviderOptions.length === 0}
+                  placeholder={
+                    aliasProviderOptions.length
+                      ? t('从当前提供商的模型清单中选择目标')
+                      : t('搜索或输入目标模型名')
+                  }
                   onChange={(v) => setAliasForm({ ...aliasForm, target: v })}
                   disabled={savingAlias}
                 />
+                {aliasProviderOptions.length > 0 && (
+                  <span className="form-hint">
+                    {t('目标限定在当前提供商的模型清单内，避免建出跨家调不通的映射。')}
+                  </span>
+                )}
               </div>
               <div className="form-group">
                 <label>{t('映射级思考等级（不覆盖 = 跟随客户端）')}</label>
@@ -2734,56 +2824,6 @@ export default function ModelManage(): JSX.Element {
               </Button>
               <Button variant="primary" onClick={() => void saveAlias()} disabled={savingAlias}>
                 {savingAlias ? t('保存中...') : t('保存')}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── 自定义模型弹窗（对齐 Agent2API addCustomModel） ── */}
-      {customModal && (
-        <div className="modal-overlay" onClick={() => setCustomModal(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3>{t('新建自定义模型')}</h3>
-              <button className="modal-close" onClick={() => setCustomModal(false)}>
-                &times;
-              </button>
-            </div>
-            <div className="modal-body">
-              {customError && <div className="error-message">{customError}</div>}
-              <div className="form-group">
-                <label>{t('模型 ID')} *</label>
-                <input
-                  className="form-input"
-                  value={customForm.id}
-                  onChange={(e) => setCustomForm({ ...customForm, id: e.target.value })}
-                  placeholder="my-model"
-                  disabled={savingCustom}
-                  autoFocus
-                />
-              </div>
-              <div className="form-group">
-                <label>{t('提供商（可选，默认 custom）')}</label>
-                <input
-                  className="form-input"
-                  value={customForm.provider}
-                  onChange={(e) => setCustomForm({ ...customForm, provider: e.target.value })}
-                  placeholder="custom"
-                  disabled={savingCustom}
-                />
-              </div>
-              {/* #67：移除「归属方 owned_by」死字段（后端 addCustomModel 仅收 provider+id，不提交该值）。*/}
-              <p className="mm-dialog-note">
-                {t('自定义模型登记后可在目录中启停、定价与映射；来源色点为手动（琥珀）。')}
-              </p>
-            </div>
-            <div className="modal-footer">
-              <Button variant="outline" onClick={() => setCustomModal(false)} disabled={savingCustom}>
-                {t('取消')}
-              </Button>
-              <Button variant="primary" onClick={() => void saveCustom()} disabled={savingCustom}>
-                {savingCustom ? t('保存中...') : t('保存')}
               </Button>
             </div>
           </div>
@@ -2908,6 +2948,10 @@ export default function ModelManage(): JSX.Element {
                     {fetchChannels.map((ch) => {
                       const cid = String(ch.id);
                       const busy = fetchingId === cid || (fetchAllRunning && fetchingId === null && !fetchDone[cid] && !fetchFailed[cid]);
+                      const accs = ch.channel_type === 'account'
+                        ? fetchAccounts.filter((a) => a.channel_id === cid)
+                        : [];
+                      const accPick = fetchAccountPick[cid] ?? '';
                       return (
                         <div key={cid} className="mm-fetch-row">
                           <div className="mm-fetch-info">
@@ -2915,6 +2959,41 @@ export default function ModelManage(): JSX.Element {
                             <span className="mm-model-sub">
                               {ch.channel_type === 'account' ? t('账号池') : ch.channel_type} · {t('已发现')} {(ch.discovered_models ?? []).length}
                             </span>
+                            {accs.length > 0 && (
+                              <div className="mm-fetch-acct">
+                                <select
+                                  className="form-input mm-mini-select"
+                                  value={accPick}
+                                  aria-label={t('模型来源账号')}
+                                  onChange={(e) =>
+                                    setFetchAccountPick((prev) => ({ ...prev, [cid]: e.target.value }))
+                                  }
+                                >
+                                  <option value="">{t('模型来源账号：全部账号')}</option>
+                                  {accs.map((a) => (
+                                    <option key={a.id} value={a.id}>
+                                      {a.name || a.id}
+                                    </option>
+                                  ))}
+                                </select>
+                                {accPick && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={fetchingAccountCid !== null}
+                                    onClick={() => void fetchOneAccount(ch, accPick)}
+                                  >
+                                    {fetchingAccountCid === cid ? (
+                                      <>
+                                        <Loader2 size={12} className="spin" /> {t('拉取中...')}
+                                      </>
+                                    ) : (
+                                      t('按账号拉取')
+                                    )}
+                                  </Button>
+                                )}
+                              </div>
+                            )}
                             {fetchFailed[cid] && (
                               <span className="mm-fetch-err" title={fetchFailed[cid]}>
                                 {fetchFailed[cid].length > 60 ? `${fetchFailed[cid].slice(0, 60)}…` : fetchFailed[cid]}
@@ -2979,27 +3058,28 @@ export default function ModelManage(): JSX.Element {
               {addModelError && <div className="error-message">{addModelError}</div>}
               <div className="form-group">
                 <label>{t('Provider')} *</label>
-                <select
-                  className="form-input"
+                <Combobox
                   value={addModelProvider}
-                  onChange={(e) => setAddModelProvider(e.target.value)}
+                  options={Array.from(
+                    new Set([
+                      ...(view?.providers ?? []).map((p) => p.id),
+                      'openai',
+                      'anthropic',
+                      'deepseek',
+                      'zhipu',
+                      'gemini',
+                      'moonshot',
+                      'qwen',
+                      'custom',
+                    ]),
+                  ).sort((a, b) => a.localeCompare(b))}
+                  placeholder={t('搜索或输入 provider（如 openai / zhipu / custom）')}
+                  onChange={(v) => setAddModelProvider(v)}
                   disabled={addingModel}
-                >
-                  <option value="">{t('请选择 provider')}</option>
-                  {(view?.providers ?? []).map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label}
-                    </option>
-                  ))}
-                  {/* 常见 provider 补充（不在渠道清单里的也能登记） */}
-                  {['openai', 'anthropic', 'deepseek', 'zhipu', 'gemini', 'moonshot', 'qwen'].filter(
-                    (p) => !(view?.providers ?? []).some((vp) => vp.id === p)
-                  ).map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
+                />
+                <span className="form-hint">
+                  {t('provider 标识（默认 custom）；自定义模型登记后可在目录中启停、定价与映射。')}
+                </span>
               </div>
               <div className="form-group">
                 <label>{t('模型 ID')} *</label>

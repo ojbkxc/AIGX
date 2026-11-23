@@ -16,7 +16,15 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import type { ProxyPoolItem } from '../types';
 
-type Mode = 'direct' | 'pool' | 'rotateAll' | 'rotateIds' | 'custom';
+type Mode = 'direct' | 'pool' | 'rotateAll' | 'rotateIds' | 'custom' | 'clash';
+
+/** GET /api/proxy-pool 响应里的 clash 快照（clash_proxy_options）。 */
+interface ClashInfo {
+  available?: boolean;
+  error?: string | null;
+  dir?: string | null;
+  options?: Array<{ uid: string; name: string; port: number; kind: string; enabled: boolean }>;
+}
 
 interface Props {
   /** 当前 proxy 值（编码串）；编辑时从后端来（脱敏的 userinfo 占位） */
@@ -24,6 +32,8 @@ interface Props {
   onChange: (next: string) => void;
   /** 编辑态：原值占位提示（后端不回传密码，留空 = 保持） */
   placeholder?: string;
+  /** 编辑态：账号 id（「测试出口」用它按账号现配代理探测；新增态无 id 只测当前串） */
+  accountId?: string;
 }
 
 function detectMode(raw: string): Mode {
@@ -41,13 +51,14 @@ function parseRotateIds(raw: string): string[] {
   return spec.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
-export default function ProxySelector({ value, onChange, placeholder }: Props): JSX.Element {
+export default function ProxySelector({ value, onChange, placeholder, accountId }: Props): JSX.Element {
   const { t } = useTranslation();
   const [items, setItems] = useState<ProxyPoolItem[]>([]);
   const [mode, setMode] = useState<Mode>(detectMode(value));
   const [poolId, setPoolId] = useState<string>('');
   const [rotateIds, setRotateIds] = useState<Set<string>>(new Set());
   const [custom, setCustom] = useState<string>('');
+  const [clashInfo, setClashInfo] = useState<ClashInfo | null>(null);
 
   // 首次挂载按现有值回填各模式的状态
   useEffect(() => {
@@ -59,13 +70,16 @@ export default function ProxySelector({ value, onChange, placeholder }: Props): 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 拉代理池（轻量，弹窗打开时一次）
+  // 拉代理池（轻量，弹窗打开时一次）；顺带取 clash 快照
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const res = await api.listProxyPool();
-        if (!cancelled) setItems((res as { items?: ProxyPoolItem[] })?.items ?? []);
+        if (cancelled) return;
+        const r = res as { items?: ProxyPoolItem[]; clash?: ClashInfo };
+        setItems(r?.items ?? []);
+        setClashInfo(r?.clash ?? null);
       } catch {
         // 池拉失败不阻塞账号表单：退化成自定义串模式
       }
@@ -75,9 +89,35 @@ export default function ProxySelector({ value, onChange, placeholder }: Props): 
     };
   }, []);
 
+  // Clash 出口镜像到池（POST /api/proxy-pool/sync-clash）。成功后刷新池 + clash 快照。
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const syncClash = async (): Promise<void> => {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const res = await api.syncClashProxyPool();
+      setItems(res?.items ?? []);
+      setClashInfo((res as { clash?: ClashInfo })?.clash ?? null);
+      const changes = Number(res?.changes ?? 0);
+      const syncError = res?.syncError;
+      if (syncError) {
+        setSyncMsg({ ok: false, text: t('同步失败：{{reason}}', { reason: String(syncError) }) });
+      } else {
+        setSyncMsg({ ok: true, text: t('已同步 Clash 出口，变更 {{n}} 条', { n: changes }) });
+      }
+    } catch (err) {
+      setSyncMsg({ ok: false, text: t('同步失败：{{reason}}', { reason: err instanceof Error ? err.message : String(err) }) });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const emit = (m: Mode, id: string, ids: Set<string>, raw: string) => {
     if (m === 'direct') onChange('');
-    else if (m === 'pool') onChange(id ? `pool:${id}` : '');
+    else if (m === 'pool' || m === 'clash') onChange(id ? `pool:${id}` : '');
     else if (m === 'rotateAll') onChange('rotate');
     else if (m === 'rotateIds') onChange(`rotate:${[...ids].join(',')}`);
     else onChange(raw);
@@ -118,6 +158,34 @@ export default function ProxySelector({ value, onChange, placeholder }: Props): 
     }
   };
 
+  // 「测试出口」：沿用 A2A test-account，按账号现配代理（或无 id 时按当前串）探测出口
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const testExit = async (): Promise<void> => {
+    if (testBusy) return;
+    setTestBusy(true);
+    setTestResult(null);
+    try {
+      const res = await api.testAccountProxy({ account_id: accountId, proxy: value || null });
+      const d = res?.data;
+      if (d?.success) {
+        const bits = [
+          d.ip ? `IP ${d.ip}` : '',
+          d.duration_ms != null ? `${d.duration_ms}ms` : '',
+          d.proxy ? `· ${d.proxy}` : '',
+        ].filter(Boolean).join(' ');
+        setTestResult({ ok: true, text: t('出口可用：{{detail}}', { detail: bits || t('连通') }) });
+      } else {
+        setTestResult({ ok: false, text: t('出口不可用：{{reason}}', { reason: d?.error || t('连接失败') }) });
+      }
+    } catch (err) {
+      setTestResult({ ok: false, text: t('出口不可用：{{reason}}', { reason: err instanceof Error ? err.message : String(err) }) });
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
   return (
     <div className="proxy-selector">
       <div className="form-group">
@@ -129,6 +197,7 @@ export default function ProxySelector({ value, onChange, placeholder }: Props): 
         >
           <option value="direct">{t('直连（不走代理）')}</option>
           <option value="pool">{t('引用代理池条目')}</option>
+          <option value="clash">{t('Clash Verge 出口（同步进池）')}</option>
           <option value="rotateAll">{t('轮询全部启用条目（换 IP）')}</option>
           <option value="rotateIds">{t('轮询指定条目')}</option>
           <option value="custom">{t('自定义代理串')}</option>
@@ -225,6 +294,74 @@ export default function ProxySelector({ value, onChange, placeholder }: Props): 
             : t('池里没有启用条目；账号请求会报错，请先去启用至少一条')}
         </div>
       )}
+
+      {/* clash 档（对齐 A2A accounts-proxy-form）：Clash Verge 出口镜像进池后选择。
+          同步走 POST /api/proxy-pool/sync-clash（读取 verge.yaml 的混合端口 + 各监听器）。 */}
+      {mode === 'clash' && (
+        <div className="form-group">
+          <label>{t('Clash Verge 出口')}</label>
+          <div className="form-hint">
+            {clashInfo?.available
+              ? t('检测到 Clash Verge 配置（{{dir}}）。点「同步 Clash」把当前出口镜像进池后选择。', { dir: clashInfo.dir || '—' })
+              : t('未检测到 Clash Verge 配置（{{reason}}）。安装并运行后点「同步 Clash」。', { reason: clashInfo?.error || t('未知原因') })}
+          </div>
+          <div className="proxy-test-row">
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={syncing}
+              onClick={() => void syncClash()}
+            >
+              {syncing ? t('同步中…') : t('同步 Clash')}
+            </button>
+            {syncMsg && (
+              <span className="form-hint" style={{ color: syncMsg.ok ? 'var(--success, #16a34a)' : 'var(--danger, #dc2626)' }}>
+                {syncMsg.ok ? '✓ ' : '✗ '}{syncMsg.text}
+              </span>
+            )}
+          </div>
+          {(() => {
+            const clashItems = items.filter((it) => it.source === 'clash');
+            if (clashItems.length === 0) {
+              return <div className="form-hint">{t('池里还没有 Clash 出口，请先点上方「同步 Clash」。')}</div>;
+            }
+            return (
+              <select
+                className="form-input"
+                value={poolId}
+                onChange={(e) => {
+                  setPoolId(e.target.value);
+                  emit('clash', e.target.value, rotateIds, custom);
+                }}
+              >
+                <option value="">{t('— 请选择 Clash 出口 —')}</option>
+                {clashItems.map((it) => (
+                  <option key={it.id} value={it.id}>
+                    {it.name}（{it.protocol}://{it.host}:{it.port}）{it.enabled ? '' : ` · ${t('已禁用')}`}
+                  </option>
+                ))}
+              </select>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* P2「测试出口」：按当前配置探测代理是否连通（A2A accounts-proxy-form test-account）。 */}
+      <div className="form-group proxy-test-row">
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={testBusy}
+          onClick={() => void testExit()}
+        >
+          {testBusy ? t('测试中…') : t('测试出口')}
+        </button>
+        {testResult && (
+          <span className="form-hint" style={{ color: testResult.ok ? 'var(--success, #16a34a)' : 'var(--danger, #dc2626)' }}>
+            {testResult.ok ? '✓ ' : '✗ '}{testResult.text}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

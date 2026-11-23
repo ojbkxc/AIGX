@@ -112,6 +112,27 @@
   background: var(--accent-soft, rgba(99, 102, 241, 0.08));
 }
 
+/* 左栏 provider 搜索框（对齐 Agent2API prov-rail 搜索） */
+.mm-rail-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 2px 2px 6px;
+}
+
+.mm-rail-search-icon {
+  position: absolute;
+  left: 12px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.mm-rail-search .form-input {
+  width: 100%;
+  padding-left: 28px;
+  font-size: 12px;
+}
+
 /* provider 色相 monogram（Agent2API 同款：无官方图标时的稳定彩色字块） */
 .mm-mono {
   display: inline-flex;
@@ -562,6 +583,12 @@
 
 .mm-src-none {
   color: var(--text-faint);
+}
+
+/* 清单来源胶囊（manual/remote/builtin/modelsdev）：中性底 + 左侧色点（对齐 A2A .src） */
+.mm-src-tag.model-source {
+  background: var(--chip-bg, rgba(128, 128, 128, 0.12));
+  color: var(--text-muted);
 }
 
 /* ── 能力列：四枚圆点（工具/图像/音频/思考）+ 上下文，整格可点 ── */
@@ -1160,6 +1187,18 @@ body.mm-colset-dragging {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 「模型来源账号」下拉 + 按账号拉取（账号池型渠道） */
+.mm-fetch-acct {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.mm-fetch-acct .mm-mini-select {
+  max-width: 220px;
 }
 
 /* 全部拉取工具条 + 单渠道失败提示 */
