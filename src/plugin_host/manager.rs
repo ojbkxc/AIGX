@@ -751,7 +751,13 @@ impl PluginHostManager {
             slot.crashes = 0;
         }
         // 任务声明：失败只 warn，不阻断启用（插件可能没声明 tasks.v1）。
+        //
+        // 但失败时必须摘掉上一版留下的声明（A2A v3.5.0 #38 同义）：插件升级后
+        // 不再申报 tasks.v1 时 load 会报「未声明任务能力」，若留着旧声明，
+        // 管理面会继续列出这些任务 —— 而调度侧已按能力门禁跳过它们，形成
+        // 「有任务、跑不动」的幽灵条目。先 forget 再报警，两边状态一致。
         if let Err(error) = crate::plugin_host::wasm::tasks::load(&provider).await {
+            crate::plugin_host::wasm::tasks::forget(&provider);
             tracing::warn!("[PluginHost] Wasm 包 {} 任务声明加载失败: {error}", meta.id);
         }
         // 目录并集回推：账号状态里已落盘的 `host.catalog.v1`（上一次成功

@@ -320,6 +320,12 @@ fn current(provider: &str, task: &Definition) -> Definition {
 }
 
 /// 任务 + 每账号运行状态快照（管理面 `/api/plugins/tasks` 的数据源）。
+///
+/// 过滤两道门（与 `load` / `configure` 同口径）：`owns(provider)` 之外还要
+/// `has_capability(provider, "tasks.v1")`（A2A v3.5.0 #38 同义）。只按 owns
+/// 过滤会漏一种遗留态：插件升级后不再申报 `tasks.v1`，但 `definitions()` 表
+/// 里还留着上一版声明的任务 —— 这些任务已无执行侧（调度按能力门禁跳过），
+/// 快照却照旧列出，管理面会出现「有任务、跑不动」的幽灵条目。
 pub fn snapshot() -> Value {
     let table = definitions()
         .lock()
@@ -328,7 +334,7 @@ pub fn snapshot() -> Value {
     let states = task_state::read_all().unwrap_or_default();
     json!(table
         .into_iter()
-        .filter(|(provider, _)| super::owns(provider))
+        .filter(|(provider, _)| super::has_capability(provider, "tasks.v1"))
         .flat_map(|(provider, tasks)| {
             let states = &states;
             tasks
