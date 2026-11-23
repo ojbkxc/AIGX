@@ -356,7 +356,7 @@ async fn apply_categories(
         Err(error)
             if matches!(
                 error.code.as_deref(),
-                Some(code) if code == super::wire::NO_METHOD || code == "unsupported"
+                Some(code) if code == super::WireError::NO_METHOD || code == "unsupported"
             ) =>
         {
             return
