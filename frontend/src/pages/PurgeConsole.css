@@ -208,13 +208,24 @@
 
 .purge-rule-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
 }
 
 .purge-rule-row .form-group {
   margin: 0;
+}
+
+/* 单条停用：整行降透明度但不藏（草稿历史可见） */
+.purge-rule-row.is-disabled {
+  opacity: 0.55;
+}
+
+.purge-rule-toggle {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
 }
 
 .purge-arrow {
@@ -288,8 +299,7 @@
   line-height: 1.6;
 }
 
-/* 预览 diff 视图：与 .purge-preview-out 同框，行级 + 词级染色 */
-.purge-preview-diff {
+/* 预览输出 diff 视图：与 .purge-preview-out 同框，行级 + 词级染色 */.purge-preview-diff {
   margin: 8px 0 0;
   padding: 12px;
   border: 1px solid var(--border-color);

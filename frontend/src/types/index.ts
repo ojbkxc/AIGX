@@ -2726,6 +2726,8 @@ export interface ChatSessionSummary {
 export interface PurgeRewriteRule {
   from: string;
   to: string;
+  /** 单条启停（缺省 true：旧后端不返回该字段时按启用处理） */
+  enabled?: boolean;
 }
 
 /** 破甲控制台 · 结构化提示模板（active_template 命中时替代 structured_suffix） */

@@ -5006,6 +5006,7 @@
   "模板已导入：新增 {{added}} / 覆盖同名 {{replaced}}（保存后生效）": "Templates imported: {{added}} added / {{replaced}} overwritten by name (click Save to apply)",
   "{{n}} 个命中技能因长度上限未注入": "{{n}} matched skills not injected (length limit)",
   "加载更多（还有 {{n}} 条）": "Load more ({{n}} left)",
+  "启用该条改写规则": "Enable this rewrite rule",
   "导入的 {{count}} 条规则的原文全部与当前词表重复，未追加（可能导错了文件？）": "All {{count}} imported rules duplicate existing 'from' entries in this word list; nothing appended (wrong file?)",
   "其中 {{n}} 条与现有词表原文重复（保存时后端只保留最早一条）": "{{n}} of them duplicate existing 'from' entries (backend keeps the earliest on save)"
 }

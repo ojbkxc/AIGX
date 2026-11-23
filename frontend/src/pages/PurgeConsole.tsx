@@ -542,6 +542,7 @@ const RuleRow = memo(function RuleRow({
   fromLabel,
   toLabel,
   removeLabel,
+  enableLabel,
   dupHint,
   onPatch,
   onRemove,
@@ -551,13 +552,16 @@ const RuleRow = memo(function RuleRow({
   fromLabel: string;
   toLabel: string;
   removeLabel: string;
+  /** 单条启停的无障碍标签 */
+  enableLabel: string;
   /** 与其他行原文重复时的行内提示（后端会静默截断重复规则，前端显式提示） */
   dupHint?: string;
   onPatch: (index: number, part: Partial<PurgeRewriteRule>) => void;
   onRemove: (index: number) => void;
 }): JSX.Element {
+  const enabled = rule.enabled ?? true;
   return (
-    <div className="purge-rule-row">
+    <div className={`purge-rule-row${enabled ? '' : ' is-disabled'}`}>
       <div>
         <Input
           placeholder={fromLabel}
@@ -574,6 +578,14 @@ const RuleRow = memo(function RuleRow({
         value={rule.to}
         onChange={(event) => onPatch(index, { to: event.target.value })}
       />
+      <label className="purge-rule-toggle" title={enableLabel}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          aria-label={enableLabel}
+          onChange={(event) => onPatch(index, { enabled: event.target.checked })}
+        />
+      </label>
       <Button variant="outline" size="sm" onClick={() => onRemove(index)}>
         {removeLabel}
       </Button>
@@ -1972,6 +1984,7 @@ export default function PurgeConsole(): JSX.Element {
                 fromLabel={t('原文')}
                 toLabel={t('改写为')}
                 removeLabel={t('删除')}
+                enableLabel={t('启用该条改写规则')}
                 dupHint={
                   dupRules.get(rule.from.trim().toLowerCase())
                     ? t('与其他行的原文重复，保存时后端只保留最早出现的一条')
@@ -2023,6 +2036,7 @@ export default function PurgeConsole(): JSX.Element {
                 fromLabel={t('敏感词')}
                 toLabel={t('同义词')}
                 removeLabel={t('删除')}
+                enableLabel={t('启用该条改写规则')}
                 dupHint={
                   dupSynonyms.get(rule.from.trim().toLowerCase())
                     ? t('与其他行的敏感词重复，保存时后端只保留最早出现的一条')

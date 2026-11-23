@@ -463,6 +463,7 @@ fn normalize(mut cfg: PurgeSettings) -> PurgeSettings {
             Some(RewriteRule {
                 from,
                 to: rule.to.trim().to_string(),
+                enabled: rule.enabled,
             })
         })
         .take(200)
@@ -479,6 +480,7 @@ fn normalize(mut cfg: PurgeSettings) -> PurgeSettings {
             Some(RewriteRule {
                 from,
                 to: rule.to.trim().to_string(),
+                enabled: rule.enabled,
             })
         })
         .take(200)
