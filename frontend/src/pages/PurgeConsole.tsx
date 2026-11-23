@@ -143,6 +143,9 @@ const REASONING_FLOORS: Array<{ value: string; label: string }> = [
   { value: 'minimal', label: 'minimal' },
 ];
 
+/** 后端 `normalize` 对两张词表的保留上限（超出静默截断，前端据此提前警示） */
+const RULE_TABLE_CAP = 200;
+
 /**
  * 配置体检告警 code → 修复入口锚点（`data-purge-fix` 属性值）。
  * 与后端 `config_warning_items` 的 code 注释保持同步。
@@ -1700,11 +1703,22 @@ export default function PurgeConsole(): JSX.Element {
           kind === 'dead_zone'
             ? t('已追加 {{count}} 条死区词到草稿，检查无误后点「保存」生效', { count: parsed.length })
             : t('已追加 {{count}} 条同义词到草稿，检查无误后点「保存」生效', { count: parsed.length });
+        // 导入后总数超过后端保留上限 → 明确告知会被截断（剩余行白填）
+        const mergedLen =
+          (kind === 'dead_zone' ? existing?.rewrite_rules.length ?? 0 : existing?.synonym_pairs.length ?? 0) +
+          parsed.length;
+        const capWarn =
+          mergedLen > RULE_TABLE_CAP
+            ? ` · ${t('导入后共 {{n}} 条，超过上限 {{cap}} 条：保存只保留前 {{cap}} 条', {
+                n: mergedLen,
+                cap: RULE_TABLE_CAP,
+              })}`
+            : '';
         addToast(
-          dupCount > 0
-            ? `${base} · ${t('其中 {{n}} 条与现有词表原文重复（保存时后端只保留最早一条）', { n: dupCount })}`
+          dupCount > 0 || capWarn
+            ? `${base}${dupCount > 0 ? ` · ${t('其中 {{n}} 条与现有词表原文重复（保存时后端只保留最早一条）', { n: dupCount })}` : ''}${capWarn}`
             : base,
-          dupCount > 0 ? 'warning' : 'success',
+          dupCount > 0 || capWarn ? 'warning' : 'success',
         );
       } catch {
         addToast(t('导入失败：无法读取文件'), 'error');
@@ -2064,6 +2078,14 @@ export default function PurgeConsole(): JSX.Element {
           </>
         }
       >
+        {draft.rewrite_rules.length > RULE_TABLE_CAP ? (
+          <p className="purge-cap-hint" role="alert" data-testid="purge-rules-over-cap">
+            {t(
+              '当前 {{n}} 条，超过上限 {{cap}} 条：保存时只保留前 {{cap}} 条，其余会被丢弃。',
+              { n: draft.rewrite_rules.length, cap: RULE_TABLE_CAP },
+            )}
+          </p>
+        ) : null}
         {draft.rewrite_rules.length === 0 ? (
           <p className="purge-empty" data-purge-fix="dead-zone-table">{t('暂无改写规则，点击右上角「添加规则」新建一条')}</p>
         ) : (
@@ -2116,6 +2138,14 @@ export default function PurgeConsole(): JSX.Element {
           </>
         }
       >
+        {draft.synonym_pairs.length > RULE_TABLE_CAP ? (
+          <p className="purge-cap-hint" role="alert" data-testid="purge-synonyms-over-cap">
+            {t(
+              '当前 {{n}} 条，超过上限 {{cap}} 条：保存时只保留前 {{cap}} 条，其余会被丢弃。',
+              { n: draft.synonym_pairs.length, cap: RULE_TABLE_CAP },
+            )}
+          </p>
+        ) : null}
         {draft.synonym_pairs.length === 0 ? (
           <p className="purge-empty">{t('暂无同义词，点击右上角「添加规则」新建一条')}</p>
         ) : (

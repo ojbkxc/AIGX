@@ -418,6 +418,17 @@
   flex: 1 1 320px;
 }
 
+/* 词表超上限警示（后端 normalize 只保留前 200 条） */
+.purge-cap-hint {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--danger-color, #dc2626);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger-color, #dc2626) 8%, transparent);
+  color: var(--danger-color, #dc2626);
+  font-size: 12px;
+}
+
 /* 体检全通过提示：绿色一行，与告警框同位置 */
 .purge-check-ok {
   margin: 0 0 12px;
