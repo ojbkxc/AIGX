@@ -503,6 +503,20 @@ export function previewHistoryLabel(sample: string): string {
   return prefix + (text.length > 46 ? `${text.slice(0, 46)}…` : text);
 }
 
+/** 历史写回（删除/清空共用）：`items` 为空时直接移除 key，不留空数组。 */
+export function persistPreviewHistory(
+  items: string[],
+  set: (k: string, v: string) => void,
+  remove: (k: string) => void,
+): void {
+  try {
+    if (items.length === 0) remove(PREVIEW_HISTORY_KEY);
+    else set(PREVIEW_HISTORY_KEY, JSON.stringify(items));
+  } catch {
+    // localStorage 满/禁用：静默，历史不进不删也不影响预览本体
+  }
+}
+
 /**
  * 模板 JSON 导入解析：接受单对象 `{name, text}`、数组 `[{...}]` 或配置级
  * `{structured_templates: [...]}`（本页「导出配置」的产物反过来可导）。
@@ -1234,6 +1248,22 @@ export default function PurgeConsole(): JSX.Element {
   );
   /** 「按已保存配置预览」：对比「线上现在会怎样」vs「保存后会怎样」 */
   const [previewSavedOnly, setPreviewSavedOnly] = useState(false);
+
+  const lsSet = (k: string, v: string): void => window.localStorage.setItem(k, v);
+  const lsRemove = (k: string): void => window.localStorage.removeItem(k);
+  /** 删除一条历史样例（按下标，不改当前输入内容） */
+  const removePreviewHistory = useCallback((index: number): void => {
+    setPreviewHistory((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      persistPreviewHistory(next, lsSet, lsRemove);
+      return next;
+    });
+  }, []);
+  /** 清空全部历史（localStorage key 一并移除，不留空数组） */
+  const clearPreviewHistory = useCallback((): void => {
+    persistPreviewHistory([], lsSet, lsRemove);
+    setPreviewHistory([]);
+  }, []);
   const [previewing, setPreviewing] = useState(false);
   const [previewMeta, setPreviewMeta] = useState<{ changed: boolean; skill_hit: boolean } | null>(null);
   /**
@@ -1650,7 +1680,7 @@ export default function PurgeConsole(): JSX.Element {
       // 试跑成功才入历史（失败/校验不过的输入不记）；超长样例不入库
       if (previewInput.length <= PREVIEW_HISTORY_ITEM_MAX) {
         setPreviewHistory((prev) =>
-          writePreviewHistory(prev, previewInput, (k, v) => window.localStorage.setItem(k, v)),
+          writePreviewHistory(prev, previewInput, lsSet),
         );
       }
     } catch {
@@ -2449,20 +2479,38 @@ export default function PurgeConsole(): JSX.Element {
       </Card>
 
       <Card title={t('改写预览')}>
-        {/* 样例历史：点回填；再次点击同一条 = 无操作（已是输入内容） */}
+        {/* 样例历史：点回填；右侧「删除 ×」单条移除，「清空」整表清掉。
+            样例可能含敏感正文，历史必须可删（localStorage 会跨会话留存）。 */}
         {previewHistory.length > 0 && (
           <div className="purge-window-picker" data-testid="purge-preview-history" role="group" aria-label={t('最近样例')}>
             {previewHistory.map((sample, index) => (
-              <button
-                key={`${index}-${sample.slice(0, 12)}`}
-                type="button"
-                className={`purge-preset-chip${sample === previewInput ? ' is-active' : ''}`}
-                title={sample.slice(0, 200)}
-                onClick={() => setPreviewInput(sample)}
-              >
-                {previewHistoryLabel(sample)}
-              </button>
+              <span key={`${index}-${sample.slice(0, 12)}`} className="purge-history-item">
+                <button
+                  type="button"
+                  className={`purge-preset-chip${sample === previewInput ? ' is-active' : ''}`}
+                  title={sample.slice(0, 200)}
+                  onClick={() => setPreviewInput(sample)}
+                >
+                  {previewHistoryLabel(sample)}
+                </button>
+                <button
+                  type="button"
+                  className="purge-history-remove"
+                  aria-label={t('删除这条样例')}
+                  title={t('删除这条样例')}
+                  onClick={() => removePreviewHistory(index)}
+                >
+                  ×
+                </button>
+              </span>
             ))}
+            <button
+              type="button"
+              className="purge-history-clear"
+              onClick={() => clearPreviewHistory()}
+            >
+              {t('清空历史')}
+            </button>
           </div>
         )}
         <Textarea

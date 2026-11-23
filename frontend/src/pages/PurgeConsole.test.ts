@@ -6,11 +6,30 @@ import {
   parsePreviewMessages,
   parseRulesCsv,
   parseTemplateJson,
+  persistPreviewHistory,
   presetApplyNeedsConfirm,
   previewHistoryLabel,
   readPreviewHistory,
   writePreviewHistory,
 } from './PurgeConsole';
+
+describe('persistPreviewHistory', () => {
+  const store = new Map<string, string>();
+  const set = (k: string, v: string): void => {
+    store.set(k, v);
+  };
+  const remove = (k: string): void => {
+    store.delete(k);
+  };
+
+  it('非空 → 写 JSON；为空 → 移除 key（不留空数组）', () => {
+    persistPreviewHistory(['a', 'b'], set, remove);
+    expect(JSON.parse(store.get('aigx.purge.previewHistory') ?? '[]')).toEqual(['a', 'b']);
+
+    persistPreviewHistory([], set, remove);
+    expect(store.has('aigx.purge.previewHistory')).toBe(false);
+  });
+});
 
 describe('capError', () => {
   it('未超限 / 空 / undefined → 无提示', () => {

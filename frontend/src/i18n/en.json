@@ -5016,6 +5016,8 @@
   "当前 {{n}} 条，超过上限 {{cap}} 条：保存时只保留前 {{cap}} 条，其余会被丢弃。": "{{n}} entries exceed the limit of {{cap}}; only the first {{cap}} are kept on save, the rest are dropped.",
   "导入后共 {{n}} 条，超过上限 {{cap}} 条：保存只保留前 {{cap}} 条": "After import there are {{n}} entries, above the {{cap}} limit; only the first {{cap}} are kept",
   "已填 {{n}} 个，上限 {{cap}} 个：保存只保留前 {{cap}} 个": "{{n}} filled, limit {{cap}}; only the first {{cap}} are kept on save",
+  "删除这条样例": "Delete this sample",
+  "清空历史": "Clear history",
   "导入的 {{count}} 条规则的原文全部与当前词表重复，未追加（可能导错了文件？）": "All {{count}} imported rules duplicate existing 'from' entries in this word list; nothing appended (wrong file?)",
   "其中 {{n}} 条与现有词表原文重复（保存时后端只保留最早一条）": "{{n}} of them duplicate existing 'from' entries (backend keeps the earliest on save)"
 }
