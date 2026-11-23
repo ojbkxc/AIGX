@@ -413,6 +413,8 @@ fn payload(state: &AppState) -> Value {
             // 时间窗计数（beta 迭代：1h / 24h；前端切换统计口径用）
             "stats_1h": crate::purge::windowed_snapshot(3_600_000),
             "stats_24h": crate::purge::windowed_snapshot(86_400_000),
+            // 上次运行（关机时落盘）的统计快照；无记录 → null
+            "stats_last_run": state.purge.last_run(),
             // 配置体检：「开了但不生效 / 自相矛盾」的静态检查结果。
             // `config_warning_items` 带 code（前端跳修复入口）；`config_warnings`
             // 旧字符串形态保留（旧前端兼容）。

@@ -1453,6 +1453,8 @@ async fn main() -> anyhow::Result<()> {
         .await?;
         plugin_host.shutdown_all().await;
         crate::plugin_host::wasm::tasks::shutdown();
+        // 破甲统计的「上次运行」快照：进程内累计重启即丢，关机时落一次盘
+        crate::purge::save_last_run(&store);
         log_store.flush();
         tracing::info!("Graceful shutdown complete");
         return Ok(());

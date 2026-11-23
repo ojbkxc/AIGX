@@ -499,9 +499,46 @@ impl PurgeStore {
         *self.current.write() = Arc::new(cfg.clone());
         Ok(cfg)
     }
+
+    /// 上次运行统计快照（无持久化后端 / 无记录 → None）。
+    pub fn last_run(&self) -> Option<RunSnapshot> {
+        self.store.as_deref().and_then(load_last_run)
+    }
 }
 
 // ── 统计（进程内计数，重启归零）────────────────────────────────
+
+/// 「上次运行」的统计快照：进程关机时把累计值落盘，下次启动读出来。
+///
+/// 用途：跨重启看趋势（本次 vs 上次各跑了多少），不需要时序库。
+/// `saved_at` 是落盘时刻（unix 秒），`uptime_secs` 是那次运行时长。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunSnapshot {
+    pub saved_at: i64,
+    pub uptime_secs: u64,
+    #[serde(flatten)]
+    pub stats: PurgeStats,
+}
+
+/// 上次运行快照的 KV 键。
+pub const PURGE_LAST_RUN_KEY: &str = "purge:last-run";
+
+/// 读取上次运行快照（无记录 / 解析失败 → None）。启动时调一次即可。
+pub fn load_last_run(store: &FileStore) -> Option<RunSnapshot> {
+    store.get::<RunSnapshot>(PURGE_LAST_RUN_KEY).ok().flatten()
+}
+
+/// 落盘本次运行的统计快照（关机路径调用；失败只记日志，不影响关机）。
+pub fn save_last_run(store: &FileStore) {
+    let snapshot = RunSnapshot {
+        saved_at: chrono::Utc::now().timestamp(),
+        uptime_secs: uptime_secs(),
+        stats: snapshot(),
+    };
+    if let Err(error) = store.put(PURGE_LAST_RUN_KEY, &snapshot) {
+        tracing::warn!("[Purge] 上次运行统计落盘失败（不影响关机）：{error}");
+    }
+}
 
 /// 终态失败分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -525,7 +562,7 @@ impl FailureCategory {
 }
 
 /// 控制台统计快照。
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PurgeStats {
     pub responses: u64,
     pub retries: u64,

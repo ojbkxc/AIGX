@@ -12,6 +12,7 @@ import type {
   PurgeRewriteRule,
   PurgeSettings,
   PurgeStats,
+  PurgeWindowedStats,
   PurgeTemplate,
 } from '../types';
 import {
@@ -1217,7 +1218,7 @@ export default function PurgeConsole(): JSX.Element {
   >([]);
   const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
-  const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h'>('all');
+  const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
   // 导入配置文件选择
   const importInputRef = useRef<HTMLInputElement | null>(null);
   // 词表 CSV 导入（死区词/同义词各一个 input，value 清空允许连续导同名文件）
@@ -1832,11 +1833,24 @@ export default function PurgeConsole(): JSX.Element {
   }
 
   // 旧后端无 stats_1h/24h → 窗口选项禁用（只有全程可看）。
-  const windowed = statsWindow === '1h' ? data.stats_1h : statsWindow === '24h' ? data.stats_24h : undefined;
+  const windowed =
+    statsWindow === '1h'
+      ? data.stats_1h
+      : statsWindow === '24h'
+        ? data.stats_24h
+        : statsWindow === 'last'
+          ? (data.stats_last_run ?? undefined)
+          : undefined;
   const stats = windowed ?? data.stats;
   const retryRate = stats.responses > 0 ? ((stats.retries / stats.responses) * 100).toFixed(2) : '0.00';
   const windowLabel =
-    statsWindow === '1h' ? t('近 1 小时') : statsWindow === '24h' ? t('近 24 小时') : undefined;
+    statsWindow === '1h'
+      ? t('近 1 小时')
+      : statsWindow === '24h'
+        ? t('近 24 小时')
+        : statsWindow === 'last'
+          ? t('上次运行')
+          : undefined;
   const uptime = formatUptime(data.runtime.uptime_secs, {
     sec: t('秒'),
     min: t('分钟'),
@@ -1903,6 +1917,7 @@ export default function PurgeConsole(): JSX.Element {
           { key: 'all', label: t('全程'), unavailable: false },
           { key: '1h', label: t('近 1 小时'), unavailable: !data.stats_1h },
           { key: '24h', label: t('近 24 小时'), unavailable: !data.stats_24h },
+          { key: 'last', label: t('上次运行'), unavailable: !data.stats_last_run },
         ] as const).map((opt) => (
           <button
             key={opt.key}
@@ -1921,7 +1936,12 @@ export default function PurgeConsole(): JSX.Element {
         stats={stats}
         retryRate={retryRate}
         suffix={windowLabel}
-        atLeast={windowed?.truncated}
+        // 只有窗口档（事件环）会带 truncated；「上次运行」是精确快照
+        atLeast={
+          statsWindow === '1h' || statsWindow === '24h'
+            ? (windowed as PurgeWindowedStats | undefined)?.truncated
+            : undefined
+        }
         t={t}
       />
 
