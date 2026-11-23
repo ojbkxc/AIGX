@@ -48,6 +48,10 @@ impl HubBridge {
     }
 
     /// 该兜底对应的提供商标识（写日志用）。
+    ///
+    /// CI clippy -D warnings：真实调用方还没接线（观测性消费点在请求日志
+    /// provider 列），先标注允许，接线后移除。
+    #[allow(dead_code)]
     pub fn provider(&self) -> &'static str {
         self.provider
     }
@@ -170,8 +174,25 @@ mod tests {
     async fn errors_pass_through_unchanged() {
         let wrapped = HubBridge::new(Arc::new(Stub), "hub:cloudflare");
         let ctx = BridgeContext::new("req-1", "m");
+        // ChatFormat 无 Default（含 Option 字段 + Arc 共享语义），手工构造
+        // 最小形状即可——stub 对请求体内容零消费。
+        let req = ChatFormat {
+            model: "m".into(),
+            messages: Vec::new(),
+            tools: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
+        };
         let err = wrapped
-            .chat_stream(&ChatFormat::default(), &ctx)
+            .chat_stream(&req, &ctx)
             .await
             .err()
             .expect("stub 必须失败");

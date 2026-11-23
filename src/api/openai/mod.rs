@@ -24,7 +24,9 @@ pub(crate) use needs::from_chat_body;
 mod rerank;
 // 私有：跨模块用 RouteCapture 的调用方（api::anthropic）走下面 `pub use resolve::*`
 // 的再导出，不用 `resolve::` 模块路径 —— 那要求 mod 至少 pub(crate)。
-mod resolve;
+// fd61d337 后 anthropic.rs 直接 `use super::openai::resolve::attempt_provider`，
+// 该路径要求 resolve 可见，故升为 pub(crate)（再导出保持不变，双入口同一符号）。
+pub(crate) mod resolve;
 mod responses;
 // SPEC-1.0.49 §3（流 B）：Responses ↔ Chat 纯转换层。只在 `responses_passthrough`
 // 返回 `Err(Config)`（该上游不支持 Responses）时被 responses.rs 用作降级路径。

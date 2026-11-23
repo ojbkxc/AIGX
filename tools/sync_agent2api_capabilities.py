@@ -47,6 +47,29 @@ ALIASES = {
     "raccoon": "xiaohuanxiong",
 }
 
+# ── 豁免表（上游存在、AIGX 决定不跟的项）────────────────────────────
+# 与 sync_agent2api_providers.py 的「表单豁免」同型：不是漏跟，是产品决策。
+# 每条必须给理由，豁免项仍会在巡检输出里以 [豁免] 行出现（不静默）。
+
+# 目录不移植的家：上游有 providers/<家>/models.rs，AIGX 无对应实现。
+# 对齐结论见 docs/BETA7-ALIGN-PARITY.md §3「不适用（未移植订阅 provider）」
+# 与 docs/ACCOUNT-CATALOG-AUDIT.md —— 订阅 provider 的接入依赖
+# chatgpt/codex 订阅登录链 + Responses 线协议，AIGX 未引入该产品面。
+CATALOG_EXEMPT = {
+    "chatgpt_subscription": ("订阅 provider，依赖订阅登录链与 Responses 线协议（AIGX 未引入）"),
+    "claude_subscription": ("订阅 provider，依赖订阅登录链（AIGX 未引入）"),
+    "codex_subscription": ("订阅 provider，依赖订阅登录链与 Responses 线协议（AIGX 未引入）"),
+}
+
+# 签到名单 AIGX 多于上游、但有意保留的家（上游删除 ≠ AIGX 必删，
+# 只有确认真废弃才从 CHECKIN_PROVIDERS 摘除）。zcode 两地：上游把每日
+# 签到移入未发布的 agent2api-providers 插件（catalog_legacy 证据），
+# AIGX 的原生 zcode 套餐领取仍有效（benefits/zcode_claim.rs 有实现与测试）。
+CHECKIN_EXTRA_KEEP = {
+    "zcode": ("上游签到已随订阅插件迁移；AIGX 原生套餐领取链仍有效并被线上使用"),
+    "zcode-intl": ("同上（国际版）"),
+}
+
 # 上游 providers 目录的相对位置。
 UPSTREAM_PROVIDERS = Path(
     "desktop-tauri/src-tauri/server/src/server/core/providers"
@@ -206,15 +229,23 @@ def compute_capability_drift(
         if not matched:
             endpoint_diff.append((kind, aigx_path, ", ".join(sorted(up_paths))))
 
+    # 豁免表：上游有、AIGX 决定不跟的家（产品决策，见 CATALOG_EXEMPT 注释）。
+    driven = sorted(up_catalog - ai_catalog - set(CATALOG_EXEMPT))
+    exempt_hit = sorted(up_catalog & set(CATALOG_EXEMPT))
     return {
         # 上游有签到、AIGX 没有
         "checkin_missing": sorted(up_checkin - ai_checkin),
-        # AIGX 有签到、上游已删（或改名）
-        "checkin_extra": sorted(ai_checkin - up_checkin),
-        # 上游有模型目录实现、AIGX 没接
-        "catalog_missing": sorted(up_catalog - ai_catalog),
+        # AIGX 有签到、上游已删（或改名）——豁免保留的家不算漂移
+        "checkin_extra": sorted(ai_checkin - up_checkin - set(CHECKIN_EXTRA_KEEP)),
+        # 上游有模型目录实现、AIGX 没接（豁免的不算）
+        "catalog_missing": driven,
         # 目录端点不一致
         "catalog_endpoint_diff": endpoint_diff,
+        # 巡检输出用（不算 dirty）：本次命中的豁免家，打印时展示理由
+        "catalog_exempt_hit": exempt_hit,
+        "checkin_extra_keep_hit": sorted(
+            (ai_checkin - up_checkin) & set(CHECKIN_EXTRA_KEEP)
+        ),
     }
 
 
@@ -295,8 +326,12 @@ def main() -> int:
         print(f"\n[签到缺] {', '.join(drift['checkin_missing'])}")
     if drift["checkin_extra"]:
         print(f"\n[签到多] {', '.join(drift['checkin_extra'])}（上游已删，确认后可移除）")
+    if drift["checkin_extra_keep_hit"]:
+        print(f"\n[签到保留] {', '.join(drift['checkin_extra_keep_hit'])}（豁免保留：AIGX 侧实现仍有效）")
     if drift["catalog_missing"]:
         print(f"\n[目录缺] {', '.join(drift['catalog_missing'])}")
+    if drift.get("catalog_exempt_hit"):
+        print(f"\n[目录豁免] {', '.join(drift['catalog_exempt_hit'])}（订阅 provider，AIGX 未引入该产品面）")
     for kind, aigx_path, up_paths in drift["catalog_endpoint_diff"]:
         print(f"\n[端点不一致] {kind}: AIGX={aigx_path} 上游={up_paths}")
 
@@ -310,7 +345,7 @@ def main() -> int:
         or drift["checkin_extra"]
         or drift["catalog_missing"]
         or drift["catalog_endpoint_diff"]
-    )
+    )  # 豁免命中（exempt_hit / keep_hit）不算漂移——它们是记录在案的产品决策
     if args.check and dirty:
         return 1
     return 0
