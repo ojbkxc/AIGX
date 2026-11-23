@@ -80,6 +80,38 @@ impl PackMeta {
     pub fn provider_enabled(&self, provider: &str) -> bool {
         self.enabled && !self.disabled_providers.iter().any(|id| id == provider)
     }
+
+    /// 只声明一家 provider 的包 id（A2A v3.5.0 `single_provider_id` 同义）。
+    ///
+    /// 单家包的特殊性：包级 `enabled` 就是那一家的开关，`disabled_providers`
+    /// 里出现它对用户是**矛盾态**（界面显示包开着、路由却把这家当停用）。
+    pub fn single_provider_id(&self) -> Option<&str> {
+        match self.providers.as_slice() {
+            [only] => Some(only.id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// 单家包归一化：把「包启用 + 唯一 provider 在停用名单」折成包停用并清空
+    /// 子标记（A2A v3.5.0 `normalize_single_provider` 同义）。
+    ///
+    /// 为什么要归一而不是各读一处自行判断：`provider_enabled()` 按名单判、
+    /// `enabled` 按包判，两处判据在矛盾态下给出互相矛盾的答案（`enabled=true`
+    /// 但该家不可用）。折成包停用后两处一致：用户「关掉唯一那家」的意图保留
+    /// （包停用），下次开包也不会被隐藏的子开关卡住。
+    ///
+    /// 返回 `true` = 本次确实改了状态（调用方据此决定是否回写）。
+    pub fn normalize_single_provider(&mut self) -> bool {
+        let Some(only) = self.single_provider_id().map(str::to_string) else {
+            return false;
+        };
+        if !self.enabled || !self.disabled_providers.iter().any(|id| id == &only) {
+            return false;
+        }
+        self.enabled = false;
+        self.disabled_providers.clear();
+        true
+    }
 }
 
 /// 包声明的一家 provider。
@@ -116,13 +148,30 @@ impl PackRegistry {
     }
 
     /// 从 KV 加载（启动时一次）。
+    ///
+    /// 读入即按 [`PackMeta::normalize_single_provider`] 归一（A2A v3.5.0
+    /// `PackRegistry::load` 同口径）：历史数据里可能存着「包启用 + 唯一
+    /// provider 被逐家停用」的矛盾态，它在启动瞬间就该折成包停用，否则
+    /// 界面显示包开着、数据面却把这家当停用（`is_plugin_owned` 走
+    /// `provider_enabled`，返回 false 而 `enabled` 仍为 true）。
+    ///
+    /// 归一是幂等的：已是自洽态的包不受影响。持久化留到下一次写操作
+    /// （与上游一致——load 只修正内存视图，避免启动即写盘）。
     pub fn load(&self) -> Result<(), String> {
-        let packs = self
+        let mut packs = self
             .inner
             .store
             .get::<Vec<PackMeta>>(KV_PACKS)
             .map_err(|e| format!("读取插件包注册表失败: {e}"))?
             .unwrap_or_default();
+        for pack in &mut packs {
+            if pack.normalize_single_provider() {
+                tracing::info!(
+                    "[Plugin] 包 {} 存在「启用 + 唯一 provider 被停用」矛盾态，已折合为包停用",
+                    pack.id
+                );
+            }
+        }
         *self.inner.packs.write() = packs;
         Ok(())
     }
@@ -169,12 +218,21 @@ impl PackRegistry {
     }
 
     /// 设置包的启用状态（持久化）。
+    ///
+    /// 写侧也走单家包归一（A2A v3.5.0 同口径）：只改读侧会造成「读入归一、
+    /// 写回又写脏」——开关行为在重启前后反复。单家包开包时清空残留的
+    /// 逐家停用标记，避免「包开着但唯一那家仍停用」的矛盾态被写回。
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, String> {
         let changed = {
             let mut packs = self.inner.packs.write();
             match packs.iter_mut().find(|p| p.id == id) {
                 Some(p) if p.enabled != enabled => {
                     p.enabled = enabled;
+                    // 单家包：包开关即那家的开关，子标记必须跟着清（否则
+                    // provider_enabled() 仍判 false，界面说开着、路由说停用）
+                    if p.single_provider_id().is_some() {
+                        p.disabled_providers.clear();
+                    }
                     true
                 }
                 _ => false,
@@ -188,9 +246,17 @@ impl PackRegistry {
 
     /// 单独启停包内某一家 provider（持久化；上游 `set_provider_enabled` 同义）。
     ///
-    /// 只改 `disabled_providers`，不动包级 `enabled`：包停用时仍可预配置逐家
-    /// 开关，等包启用后按这份名单生效。provider 必须由该包声明，否则报错
-    /// （静默写入一条不存在的家只会在界面造出幽灵开关）。
+    /// 多提供商包只改 `disabled_providers`，不动包级 `enabled`：包停用时仍可
+    /// 预配置逐家开关，等包启用后按这份名单生效。
+    ///
+    /// **单提供商包例外**（A2A v3.5.0 同口径）：包级 `enabled` 是那家唯一的
+    /// 开关，停这家 = 停整包（包关掉、子标记清空），开这家 = 开整包。不这么
+    /// 折会出现「包开着 + 唯一那家停用」的矛盾态：界面显示插件启用、数据面
+    /// `provider_enabled()` 返回 false 不路由，用户点包开关也解不开（子开关是
+    /// 隐藏的）。`clear` 而非 `push` 也保证再开包不被残留标记卡住。
+    ///
+    /// provider 必须由该包声明，否则报错（静默写入一条不存在的家只会在界面
+    /// 造出幽灵开关）。
     ///
     /// 返回 `true` = 状态确有变化（调用方据此决定是否记日志）。
     pub fn set_provider_enabled(
@@ -208,17 +274,25 @@ impl PackRegistry {
             if !pack.providers.iter().any(|pp| pp.id == provider) {
                 return Err(format!("插件包「{pack_id}」未声明提供商「{provider}」"));
             }
-            let listed = pack.disabled_providers.iter().any(|id| id == provider);
-            match (enabled, listed) {
-                (true, true) => {
-                    pack.disabled_providers.retain(|id| id != provider);
-                    true
+            if pack.single_provider_id() == Some(provider) {
+                // 单家包：改包级 enabled，子标记恒空
+                let next = (enabled, pack.enabled, pack.disabled_providers.is_empty());
+                pack.enabled = enabled;
+                pack.disabled_providers.clear();
+                matches!(next, (true, false, _) | (false, true, _) | (_, _, false))
+            } else {
+                let listed = pack.disabled_providers.iter().any(|id| id == provider);
+                match (enabled, listed) {
+                    (true, true) => {
+                        pack.disabled_providers.retain(|id| id != provider);
+                        true
+                    }
+                    (false, false) => {
+                        pack.disabled_providers.push(provider.to_string());
+                        true
+                    }
+                    _ => false,
                 }
-                (false, false) => {
-                    pack.disabled_providers.push(provider.to_string());
-                    true
-                }
-                _ => false,
             }
         };
         if changed {
@@ -580,6 +654,137 @@ mod tests {
         assert_eq!(
             m.entry_path(root),
             root.join("p").join("3.4.2").join("bin/plugin")
+        );
+    }
+
+    /* ─── 单提供商包归一（A2A v3.5.0 #40 #43 #45 同口径）───────── */
+
+    /// `single_provider_id()` 只对「恰好一家」给出 Some。
+    #[test]
+    fn single_provider_id_only_matches_exactly_one() {
+        assert_eq!(
+            meta("p", &["kiro"], true).single_provider_id(),
+            Some("kiro")
+        );
+        assert_eq!(
+            meta("p", &["kiro", "astudio"], true).single_provider_id(),
+            None
+        );
+        assert_eq!(meta("p", &[], true).single_provider_id(), None);
+    }
+
+    /// 矛盾态（包启用 + 唯一那家在停用名单）→ 折成包停用并清子标记。
+    /// 这是本次修复的核心：修复前 `enabled=true` 与 `provider_enabled=false`
+    /// 同时成立，界面说「插件已启用」、数据面却完全不路由这家。
+    #[test]
+    fn normalize_folds_single_provider_contradiction() {
+        let mut m = meta("p", &["kiro"], true);
+        m.disabled_providers = vec!["kiro".into()];
+        assert!(m.normalize_single_provider(), "矛盾态应被归一");
+        assert!(!m.enabled, "折成包停用");
+        assert!(m.disabled_providers.is_empty(), "子标记必须清空");
+
+        // 幂等：再归一一次无变化
+        assert!(!m.normalize_single_provider(), "已是自洽态，不应再改");
+    }
+
+    /// 自洽态 / 多提供商包 / 空包都不该被归一（避免误伤）。
+    #[test]
+    fn normalize_leaves_consistent_and_multi_provider_alone() {
+        // 包启用 + 子标记空 = 自洽
+        let mut consistent = meta("p", &["kiro"], true);
+        assert!(!consistent.normalize_single_provider());
+        assert!(consistent.enabled);
+
+        // 多提供商包：逐家停用是合法态，不能折成包停用
+        let mut multi = meta("p", &["kiro", "astudio"], true);
+        multi.disabled_providers = vec!["kiro".into()];
+        assert!(!multi.normalize_single_provider());
+        assert!(multi.enabled, "多提供商包保持启用");
+        assert_eq!(multi.disabled_providers, vec!["kiro".to_string()]);
+
+        // 包本就停用：无需再折
+        let mut already_off = meta("p", &["kiro"], false);
+        already_off.disabled_providers = vec!["kiro".into()];
+        assert!(!already_off.normalize_single_provider());
+    }
+
+    /// load() 读入即归一：磁盘上的历史矛盾态在启动时被修正，
+    /// 且修正结果落进内存视图（get 可见）。
+    #[test]
+    fn load_normalizes_historical_contradiction() {
+        let reg = temp_registry();
+        // 直接写入矛盾态（绕过 upsert 的归一——模拟历史数据）
+        {
+            let mut m = meta("p", &["kiro"], true);
+            m.disabled_providers = vec!["kiro".into()];
+            reg.inner.store.put(KV_PACKS, &vec![m]).unwrap();
+        }
+        reg.load().unwrap();
+        let m = reg.get("p").expect("包应还在");
+        assert!(!m.enabled, "load 应把矛盾态折成包停用");
+        assert!(m.disabled_providers.is_empty());
+        assert!(!reg.is_plugin_owned("kiro"));
+    }
+
+    /// 单家包 `set_provider_enabled`：改包级 enabled，子标记恒空（不写名单）。
+    /// 修复前这里是 push 进 disabled_providers，包仍 enabled=true →
+    /// `provider_enabled()` 返回 false，用户点包开关也解不开（子开关隐藏）。
+    #[test]
+    fn set_provider_enabled_folds_single_provider_pack() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        reg.upsert(meta("p", &["kiro"], true)).unwrap();
+        assert!(reg.is_plugin_owned("kiro"));
+
+        // 停唯一那家 = 停整包
+        assert!(reg.set_provider_enabled("p", "kiro", false).unwrap());
+        let m = reg.get("p").unwrap();
+        assert!(!m.enabled, "单家包应折成包停用");
+        assert!(m.disabled_providers.is_empty(), "不得写进子标记名单");
+        assert!(!reg.is_plugin_owned("kiro"));
+
+        // 再开 = 开整包（不被残留子开关卡住）
+        assert!(reg.set_provider_enabled("p", "kiro", true).unwrap());
+        assert!(reg.get("p").unwrap().enabled);
+        assert!(reg.is_plugin_owned("kiro"));
+
+        // 重复设置同值 = 无变化
+        assert!(!reg.set_provider_enabled("p", "kiro", true).unwrap());
+    }
+
+    /// 单家包 `set_enabled(true)` 必须清残留子标记：否则「开包」后
+    /// `provider_enabled()` 仍判 false（包开了但插件没跑）。
+    #[test]
+    fn set_enabled_clears_stale_provider_marker() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        // 造一个「包停用 + 唯一那家被列进子标记」的历史残留
+        let mut m = meta("p", &["kiro"], false);
+        m.disabled_providers = vec!["kiro".into()];
+        reg.inner.store.put(KV_PACKS, &vec![m]).unwrap();
+        reg.load().unwrap();
+        assert!(!reg.is_plugin_owned("kiro"));
+
+        assert!(reg.set_enabled("p", true).unwrap());
+        let m = reg.get("p").unwrap();
+        assert!(m.enabled);
+        assert!(
+            m.disabled_providers.is_empty(),
+            "开单家包时残留子标记必须清掉，否则 provider_enabled 仍 false"
+        );
+        assert!(reg.is_plugin_owned("kiro"), "包开了就该接管");
+
+        // 多提供商包不受此影响：逐家停用是合法预配置
+        reg.upsert(meta("q", &["kiro", "astudio"], false)).unwrap();
+        reg.set_provider_enabled("q", "kiro", false).unwrap();
+        reg.set_enabled("q", true).unwrap();
+        let q = reg.get("q").unwrap();
+        assert!(q.enabled);
+        assert_eq!(
+            q.disabled_providers,
+            vec!["kiro".to_string()],
+            "多提供商包的逐家停用不该被 set_enabled 清掉"
         );
     }
 }
