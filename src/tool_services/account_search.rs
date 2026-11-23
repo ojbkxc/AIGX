@@ -207,9 +207,81 @@ impl AccountSearchHost for PluginHostSearchBridge {
 
 /* ─── 能力探测 ─────────────────────────────────────────────── */
 
+/// 插件 `web-search.capabilities` 申报的能力边界（A2A v3.5.0
+/// `providers/adapter.rs::WebSearchCapability` 同口径）。
+///
+/// `max_query_chars` 是必备项（缺省/越界视整个声明无效）；`supports_max_results`
+/// 与两条条数参数是 v3.5.0 新增的可选项——旧插件不申报时保持兼容关闭。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WebSearchCapability {
+    /// 单条 query 的字符上限（1..=16000，校验在解析处完成）。
+    max_query_chars: usize,
+    /// 是否支持 `max_results` 参数（默认 false = 插件自定条数）。
+    supports_max_results: bool,
+    /// 插件推荐的默认条数（仅 supports_max_results 时有意义）。
+    default_max_results: Option<usize>,
+    /// 插件接受的条数上限（缺省 10；`default_max_results` 被夹在此上限内）。
+    max_results_limit: Option<usize>,
+}
+
+/// 解析 `web-search.capabilities` 元数据；不完整/不认识的形态整体判
+/// 「插件不支持」（configuration 错误），不退化成猜测值。
+///
+/// 与上游逐字段同口径：`version==1 && search==true` 是门槛；
+/// `max_query_chars ∈ 1..=16000` 必备；`supports_max_results` 缺省 false；
+/// `max_results_limit ∈ 1..=50`（上限与 [`source_rows`] 的 take(50) 对齐）；
+/// `default_max_results` 夹到 `1..=limit`，缺省取 `min(limit, 10)`。
+pub(super) fn parse_capability(metadata: &Value) -> Option<WebSearchCapability> {
+    if metadata.get("version").and_then(Value::as_u64) != Some(1)
+        || metadata.get("search").and_then(Value::as_bool) != Some(true)
+    {
+        return None;
+    }
+    let max_query_chars = metadata
+        .get("max_query_chars")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| (1..=16000).contains(value))?;
+    let supports_max_results = metadata
+        .get("supports_max_results")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let max_results_limit = if supports_max_results {
+        metadata
+            .get("max_results_limit")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .map(|value| value.clamp(1, 50))
+    } else {
+        None
+    };
+    let default_max_results = if supports_max_results {
+        let limit = max_results_limit.unwrap_or(10);
+        Some(
+            metadata
+                .get("default_max_results")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .map(|value| value.clamp(1, limit))
+                .unwrap_or_else(|| limit.min(10)),
+        )
+    } else {
+        None
+    };
+    Some(WebSearchCapability {
+        max_query_chars,
+        supports_max_results,
+        default_max_results,
+        max_results_limit,
+    })
+}
+
 /// 沿用上游能力探测口径：`version = 1`、`search = true`、
 /// `max_query_chars ∈ 1..=16000`；探测不发上游请求。
-async fn capability(services: &ToolServices, provider: &str) -> Result<usize, SearchError> {
+async fn capability(
+    services: &ToolServices,
+    provider: &str,
+) -> Result<WebSearchCapability, SearchError> {
     let host = services
         .account_search_host()
         .ok_or_else(host_unavailable)?;
@@ -230,17 +302,8 @@ async fn capability(services: &ToolServices, provider: &str) -> Result<usize, Se
                 "无法确认插件搜索能力，请更新或重启提供商插件",
             ),
         })?;
-    if metadata.get("version").and_then(Value::as_u64) != Some(1)
-        || metadata.get("search").and_then(Value::as_bool) != Some(true)
-    {
-        return Err(configuration("当前提供商插件不支持账号搜索，请更新插件"));
-    }
-    metadata
-        .get("max_query_chars")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| (1..=16000).contains(value))
-        .ok_or_else(|| configuration("插件搜索能力声明不完整，请更新插件"))
+    parse_capability(&metadata)
+        .ok_or_else(|| configuration("当前提供商插件不支持账号搜索，请更新插件"))
 }
 
 pub(super) async fn provider_row(
@@ -272,7 +335,16 @@ pub(super) async fn provider_row(
         "account_id": entry.account_id,
         "account_name": account_name,
         "accounts": options,
-        "max_query_chars": support.as_ref().ok().map(|chars| json!(chars)),
+        "max_query_chars": support.as_ref().ok().map(|cap| json!(cap.max_query_chars)),
+        "supports_max_results": support.as_ref().ok().map(|cap| json!(cap.supports_max_results)),
+        "default_max_results": support
+            .as_ref()
+            .ok()
+            .and_then(|cap| cap.default_max_results.map(|v| json!(v))),
+        "max_results_limit": support
+            .as_ref()
+            .ok()
+            .and_then(|cap| cap.max_results_limit.map(|v| json!(v))),
         "unavailable_reason": error.map(|error| error.message.as_str()),
         "key_hint": Value::Null,
         "updated_at": if entry.updated_at > 0 { json!(entry.updated_at) } else { Value::Null },
@@ -289,8 +361,8 @@ pub(super) enum SearchSource {
         provider: String,
         /// 插件 `admin.action` 点名用的账号 id（凭证由账号库与插件管理）。
         account_id: String,
-        /// 插件声明的单条 query 字符上限。
-        max_chars: usize,
+        /// 插件申报的能力边界（query 上限 + 条数参数）。
+        capability: WebSearchCapability,
     },
 }
 
@@ -316,19 +388,26 @@ impl SearchSource {
             Self::Account {
                 provider,
                 account_id,
-                max_chars,
+                capability,
             } => {
-                if query.chars().count() > *max_chars {
+                if query.chars().count() > capability.max_query_chars {
                     return Err(SearchError::new(
                         SearchErrorCode::InvalidInput,
-                        format!("该搜索来源最多接受 {max_chars} 个字符"),
+                        format!("该搜索来源最多接受 {} 个字符", capability.max_query_chars),
                     ));
                 }
                 validate_account(sessions, provider, account_id)?;
                 let host = services
                     .account_search_host()
                     .ok_or_else(host_unavailable)?;
-                let payload = json!({ "query": query, "timeout_seconds": timeout });
+                let mut payload = json!({ "query": query, "timeout_seconds": timeout });
+                // 条数参数只在插件申报支持时透传（A2A v3.5.0 同口径）：
+                // default_max_results 是插件自己的推荐值，不达标时网关不猜测。
+                if capability.supports_max_results {
+                    if let Some(default) = capability.default_max_results {
+                        payload["max_results"] = json!(default);
+                    }
+                }
                 let result = host
                     .admin_action(
                         provider,
@@ -352,11 +431,11 @@ pub(super) async fn prepare(
 ) -> Result<SearchSource, SearchError> {
     if super::is_account_provider(provider) {
         validate_account(sessions, provider, &entry.account_id)?;
-        let max_chars = capability(services, provider).await?;
+        let capability = capability(services, provider).await?;
         Ok(SearchSource::Account {
             provider: provider.to_string(),
             account_id: entry.account_id.clone(),
-            max_chars,
+            capability,
         })
     } else {
         if !super::provider_keys::has_keys(entry) {
@@ -711,5 +790,138 @@ mod tests {
     #[test]
     fn invalid_payload_is_error() {
         assert!(source_rows("kiro", &json!({})).is_err());
+    }
+
+    /* ─── WebSearchCapability 解析（A2A v3.5.0 对齐）────────────── */
+
+    /// 完整申报（含条数三参数）逐字段还原；clamp 语义与上游一致。
+    #[test]
+    fn capability_full_metadata_roundtrip() {
+        let cap = parse_capability(&json!({
+            "version": 1, "search": true,
+            "max_query_chars": 16000,
+            "supports_max_results": true,
+            "max_results_limit": 25,
+            "default_max_results": 8
+        }))
+        .expect("完整申报应解析成功");
+        assert_eq!(cap.max_query_chars, 16000);
+        assert!(cap.supports_max_results);
+        assert_eq!(cap.max_results_limit, Some(25));
+        assert_eq!(cap.default_max_results, Some(8));
+    }
+
+    /// 旧插件只申报三必备字段：条数参数保持关闭（None），不猜默认值。
+    #[test]
+    fn capability_legacy_metadata_keeps_count_params_closed() {
+        let cap = parse_capability(good_metadata()).expect("旧口径必备字段齐全");
+        assert_eq!(cap.max_query_chars, 4000);
+        assert!(!cap.supports_max_results);
+        assert_eq!(cap.max_results_limit, None);
+        assert_eq!(cap.default_max_results, None);
+    }
+
+    /// 门槛不满足（版本/开关/query 上限缺失或越界）→ 整体判不支持。
+    #[test]
+    fn capability_rejects_incomplete_or_invalid_metadata() {
+        for bad in [
+            json!({ "version": 2, "search": true, "max_query_chars": 100 }),
+            json!({ "version": 1, "search": false, "max_query_chars": 100 }),
+            json!({ "version": 1, "search": true, "max_query_chars": 0 }),
+            json!({ "version": 1, "search": true, "max_query_chars": 16001 }),
+            json!({ "version": 1, "search": true }),
+            json!({}),
+        ] {
+            assert!(parse_capability(&bad).is_none(), "应整体判不支持: {bad}");
+        }
+    }
+
+    /// supports_max_results=true 但未给 default → 取 min(limit, 10)；
+    /// limit 也未给 → 缺省 10。default 超过 limit 被夹回。
+    #[test]
+    fn capability_count_defaults_follow_upstream_clamping() {
+        let no_default = parse_capability(&json!({
+            "version": 1, "search": true, "max_query_chars": 100,
+            "supports_max_results": true, "max_results_limit": 4
+        }))
+        .unwrap();
+        // default 缺省 → min(limit=4, 10) = 4
+        assert_eq!(no_default.default_max_results, Some(4));
+        let no_limit = parse_capability(&json!({
+            "version": 1, "search": true, "max_query_chars": 100,
+            "supports_max_results": true
+        }))
+        .unwrap();
+        // limit 缺省 10 → default 也 10
+        assert_eq!(no_limit.max_results_limit, None);
+        assert_eq!(no_limit.default_max_results, Some(10));
+        let clamped = parse_capability(&json!({
+            "version": 1, "search": true, "max_query_chars": 100,
+            "supports_max_results": true, "max_results_limit": 5,
+            "default_max_results": 99
+        }))
+        .unwrap();
+        // default=99 > limit=5 → 夹到 5
+        assert_eq!(clamped.default_max_results, Some(5));
+    }
+
+    /// 申报 supports_max_results 时搜索 payload 才带 max_results
+    /// （取插件的 default，不猜）。
+    #[tokio::test]
+    async fn search_passes_max_results_only_when_declared() {
+        let (services, sessions, _dir) = harness();
+        let account_id = bind_account(&sessions, "workbuddy");
+        // 带条数申报的桩
+        let host = Arc::new(StubHost::new(
+            json!({
+                "version": 1, "search": true, "max_query_chars": 4000,
+                "supports_max_results": true, "max_results_limit": 20,
+                "default_max_results": 5
+            }),
+            json!({ "sources": [] }),
+        ));
+        services.set_account_search_host(host.clone());
+        let source = prepare(&services, &sessions, "workbuddy", &entry(&account_id))
+            .await
+            .unwrap();
+        source
+            .search(
+                &services,
+                &sessions,
+                &crate::test_http_client(),
+                "hello",
+                30,
+            )
+            .await
+            .unwrap();
+        let calls = host.calls();
+        assert_eq!(calls[1].0, SEARCH);
+        assert_eq!(calls[1].2["max_results"], json!(5), "应透传插件的 default");
+        drop(source);
+
+        // 对照组：旧口径（无条数申报）不携带 max_results
+        let (services2, sessions2, _dir2) = harness();
+        let account2 = bind_account(&sessions2, "workbuddy");
+        let host2 = Arc::new(StubHost::new(good_metadata(), json!({ "sources": [] })));
+        services2.set_account_search_host(host2.clone());
+        let source2 = prepare(&services2, &sessions2, "workbuddy", &entry(&account2))
+            .await
+            .unwrap();
+        source2
+            .search(
+                &services2,
+                &sessions2,
+                &crate::test_http_client(),
+                "hello",
+                30,
+            )
+            .await
+            .unwrap();
+        let calls2 = host2.calls();
+        assert!(
+            calls2[1].2.get("max_results").is_none(),
+            "旧口径不得凭空带 max_results: {}",
+            calls2[1].2
+        );
     }
 }
