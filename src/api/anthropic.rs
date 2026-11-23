@@ -928,10 +928,10 @@ pub async fn handle_messages(
                                             .as_ref()
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
-                                        provider: ch_ref
-                                            .as_ref()
-                                            .map(|c| c.channel_type.as_str().to_string())
-                                            .unwrap_or_default(),
+                                        provider: attempt_provider(
+                                            ch_ref.as_deref(),
+                                            bridge.as_ref(),
+                                        ),
                                         account: String::new(),
                                         model: upstream.clone(),
                                         sticky_hit,
@@ -974,10 +974,10 @@ pub async fn handle_messages(
                                             .as_ref()
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
-                                        provider: ch_ref
-                                            .as_ref()
-                                            .map(|c| c.channel_type.as_str().to_string())
-                                            .unwrap_or_default(),
+                                        provider: attempt_provider(
+                                            ch_ref.as_deref(),
+                                            bridge.as_ref(),
+                                        ),
                                         account: String::new(),
                                         model: upstream.clone(),
                                         sticky_hit,
@@ -1027,10 +1027,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: ch_ref
-                                .as_ref()
-                                .map(|c| c.channel_type.as_str().to_string())
-                                .unwrap_or_default(),
+                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1071,10 +1068,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: ch_ref
-                                .as_ref()
-                                .map(|c| c.channel_type.as_str().to_string())
-                                .unwrap_or_default(),
+                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1849,10 +1843,7 @@ pub async fn handle_messages(
                                         .as_ref()
                                         .map(|c| c.name.clone())
                                         .unwrap_or_default(),
-                                    provider: ch_ref
-                                        .as_ref()
-                                        .map(|c| c.channel_type.as_str().to_string())
-                                        .unwrap_or_default(),
+                                    provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
                                     account: String::new(),
                                     model: upstream.clone(),
                                     sticky_hit,
@@ -1907,10 +1898,7 @@ pub async fn handle_messages(
                                     .as_ref()
                                     .map(|c| c.name.clone())
                                     .unwrap_or_default(),
-                                provider: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.channel_type.as_str().to_string())
-                                    .unwrap_or_default(),
+                                provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
                                 account: String::new(),
                                 model: upstream.clone(),
                                 sticky_hit,
@@ -1953,10 +1941,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: ch_ref
-                                .as_ref()
-                                .map(|c| c.channel_type.as_str().to_string())
-                                .unwrap_or_default(),
+                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1997,10 +1982,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: ch_ref
-                                .as_ref()
-                                .map(|c| c.channel_type.as_str().to_string())
-                                .unwrap_or_default(),
+                            provider: attempt_provider(ch_ref.as_deref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,

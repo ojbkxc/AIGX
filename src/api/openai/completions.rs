@@ -15,11 +15,12 @@ use serde_json::Value;
 pub(crate) async fn handle_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip(&headers).or_else(|| connect.map(|c| c.0.ip().to_string()));
     // 客户端识别（只读请求头；不改转发/计费行为）
     let client = crate::api::client_id::identify(&headers);
 

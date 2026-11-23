@@ -23,6 +23,9 @@ pub mod anthropic;
 pub mod cf;
 /// Google Gemini 原生 bridge（`/v1beta/models/{model}:generateContent`）
 pub mod gemini;
+/// Hub 无渠道兜底的观测性包装（`hub:cloudflare`）：见 `hub_fallback` 模块头——
+/// 兜底候选没有渠道 id，不包装时线上日志会出现 `channel None` 与空 provider。
+pub mod hub_fallback;
 pub mod openai;
 /// 插件渠道 Bridge（请求由插件子进程构造并发出，网关只解析/聚合帧）
 pub mod plugin;

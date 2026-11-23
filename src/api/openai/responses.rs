@@ -49,11 +49,12 @@ enum ResponsesAttempt {
 pub(crate) async fn handle_responses(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Json(body): Json<Value>,
 ) -> Response {
     let request_start = std::time::Instant::now();
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip(&headers).or_else(|| connect.map(|c| c.0.ip().to_string()));
     // 客户端识别（只读请求头；不改转发/计费行为）
     let client = crate::api::client_id::identify(&headers);
     // 「回答完自动折叠过程」：只对严格识别为 Codex 的客户端 + 管理员开启时生效。

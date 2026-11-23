@@ -78,6 +78,22 @@ impl RouteCapture {
     }
 }
 
+/// 尝试明细的 `provider` 字段取值：渠道引用优先（`channel_type`），
+/// Hub 兜底候选没有渠道引用时用 bridge 自报身份（如 `hub:cloudflare`）。
+///
+/// 为什么必须有这一层：兜底候选是 `(bridge, None, None)`，`ch_ref` 为
+/// `None` 时直接 `unwrap_or_default()` 会把 provider 写成空串——线上请求
+/// 日志里 provider 列为空，排障时会被误判成「供应商返回空」。见
+/// `bridge::hub_fallback` 模块头。
+pub(crate) fn attempt_provider(
+    ch_ref: Option<&crate::channel::Channel>,
+    bridge: &dyn crate::bridge::Bridge,
+) -> String {
+    ch_ref
+        .map(|c| c.channel_type.as_str().to_string())
+        .unwrap_or_else(|| bridge.name().to_string())
+}
+
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
 ///
 /// 参照 new-api token.go 的校验逻辑。返回 ApiKey 实例供计费使用。
@@ -482,7 +498,15 @@ pub(crate) fn resolve_bridges_needs(
         && (model_declared_by_channel(state, model) || state.model_mapper.is_active(model))
     {
         if let Some(b) = state.hub.get_specialized("cloudflare") {
-            result.push((b, None, None));
+            // 兜底候选必须带上可自述的身份（`hub:cloudflare`）：
+            // 不包装时它是 `(bridge, None, None)`，上层日志打出
+            // `channel None failed: …`、请求日志 provider 列为空——
+            // 线上排障会误判成「供应商返回空」。见 `bridge::hub_fallback`。
+            result.push((
+                crate::bridge::hub_fallback::HubBridge::new(b, "hub:cloudflare"),
+                None,
+                None,
+            ));
         }
     }
     // 渠道级重试上限：最多尝试 `max_retries + 1` 个候选渠道（0 = 只试一个）
