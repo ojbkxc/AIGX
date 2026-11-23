@@ -145,6 +145,8 @@ const REASONING_FLOORS: Array<{ value: string; label: string }> = [
 
 /** 后端 `normalize` 对两张词表的保留上限（超出静默截断，前端据此提前警示） */
 const RULE_TABLE_CAP = 200;
+/** 后端 `normalize` 对异源模型列表的保留上限（同上） */
+const FALLBACK_MODELS_CAP = 16;
 
 /**
  * 配置体检告警 code → 修复入口锚点（`data-purge-fix` 属性值）。
@@ -2201,6 +2203,15 @@ export default function PurgeConsole(): JSX.Element {
             label={t('异源模型（逗号分隔）')}
             value={draft.fallback_models.join(', ')}
             onChange={(event) => patch({ fallback_models: splitList(event.target.value) })}
+            // 后端 normalize take(16)：超出的模型保存时被丢弃，必须当场提示
+            error={
+              draft.fallback_models.length > FALLBACK_MODELS_CAP
+                ? t('已填 {{n}} 个，上限 {{cap}} 个：保存只保留前 {{cap}} 个', {
+                    n: draft.fallback_models.length,
+                    cap: FALLBACK_MODELS_CAP,
+                  })
+                : undefined
+            }
             data-purge-fix="fallback-models"
           />
           <Input
