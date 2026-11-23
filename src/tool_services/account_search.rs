@@ -814,7 +814,7 @@ mod tests {
     /// 旧插件只申报三必备字段：条数参数保持关闭（None），不猜默认值。
     #[test]
     fn capability_legacy_metadata_keeps_count_params_closed() {
-        let cap = parse_capability(good_metadata()).expect("旧口径必备字段齐全");
+        let cap = parse_capability(&good_metadata()).expect("旧口径必备字段齐全");
         assert_eq!(cap.max_query_chars, 4000);
         assert!(!cap.supports_max_results);
         assert_eq!(cap.max_results_limit, None);

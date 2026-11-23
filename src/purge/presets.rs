@@ -333,15 +333,11 @@ pub fn assert_body_allowed(body: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-/// 列表检索。
+/// 列表检索（第一页薄壳 = `list_page(…, 0, …)`）。
 ///
-/// 返回 `(条目, 厂商计数, 过滤后总数)`。厂商计数按**过滤后**的结果统计，
-/// 这样 UI 上的 chip 数量会跟着搜索词变，不会出现「chip 显示 8 条但列表空」。
-/// `total` 是过滤后的总数（`items` 已被 `limit` 截断），供前端显示「共 N 条」。
-///
-/// `model` 是**双职字段**：只用来写 `PresetBrief::model_match`（提示哪条预设与
-/// 当前生效模型同源），**不参与筛选、不重排、不改分页**——不传 `model` 时返回的
-/// 列表与字段与历史版本逐字段一致（`model_match` 字段整个跳过）。
+/// crate 内现行走 `list_page`；保留此签名是既有测试与潜在外部调用的
+/// 稳定面（`pub` 不因内部切分而 break）。
+#[allow(dead_code)]
 pub fn list(
     q: Option<&str>,
     vendor: Option<&str>,
