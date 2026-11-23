@@ -1368,15 +1368,56 @@ pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
     if cfg.auto_preset {
         let pinned = cfg.auto_preset_id.trim();
         if !pinned.is_empty() && presets::get(pinned).is_none() {
+            // 拼写救生索：编辑距离 ≤2 的最近预设 id（大小写不敏感）。
+            // 只做提示不做自动纠正——`preset_for_model` 坚决不猜，这里也一样；
+            // 管理员看一眼 toast 就能改对。
+            let hint = nearest_preset_id(pinned).map_or_else(String::new, |id| {
+                format!("最接近的现有预设 id 是「{id}」，是不是想填它？")
+            });
             warnings.push(ConfigWarning {
                 code: "preset_missing",
                 message: format!(
-                    "按模型自动套用已开启，但固定预设 id「{pinned}」不存在：不会套用任何内容，请检查 id 或留空改按模型匹配。"
+                    "按模型自动套用已开启，但固定预设 id「{pinned}」不存在：不会套用任何内容，请检查 id 或留空改按模型匹配。{hint}"
                 ),
             });
         }
     }
     warnings
+}
+
+/// 编辑距离（字符级，经典 DP 两行滚动）。输入串都会先小写（预选 id 全 ASCII）。
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().flat_map(char::to_lowercase).collect();
+    let b: Vec<char> = b.chars().flat_map(char::to_lowercase).collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// 与目标串编辑距离 ≤2 的最近预设 id（取距离最小者；并列取目录顺序首个）。
+/// 距离超限 → None（不猜）。预设目录 53 条 × O(len²) 一次性跑在体检/保存
+/// 路径（非请求热路径），无需缓存。
+fn nearest_preset_id(target: &str) -> Option<&'static str> {
+    crate::purge::preset_catalog::BUILTIN_PRESETS
+        .iter()
+        .map(|p| (p.id, edit_distance(target, p.id)))
+        .filter(|&(_, d)| d <= 2)
+        .min_by_key(|&(_, d)| d)
+        .map(|(id, _)| id)
 }
 
 /// 兼容入口：只取 message 文本（既有单测与旧消费方用）。
@@ -1956,6 +1997,46 @@ mod tests {
         cfg.structured_suffix = "  ".to_string();
         let warns = config_warnings(&cfg);
         assert!(warns.iter().any(|w| w.contains("默认后缀为空且未选中模板")));
+    }
+
+    /// 预设 id 拼写救生索：距离 ≤2 给提示、>3 不猜、精确大小写不敏感。
+    #[test]
+    fn preset_missing_warning_suggests_nearest_id() {
+        let real = crate::purge::preset_catalog::BUILTIN_PRESETS[0]
+            .id
+            .to_string();
+        // 拼错一位（删字符）
+        let typo: String = real.chars().take(real.len() - 1).collect();
+        let mut cfg = enabled();
+        cfg.auto_preset = true;
+        cfg.auto_preset_id = typo.clone();
+        let items = config_warning_items(&cfg);
+        let hit = items
+            .iter()
+            .find(|w| w.code == "preset_missing")
+            .expect("应提示 preset_missing");
+        assert!(
+            hit.message.contains("最接近的现有预设 id"),
+            "应带最近 id 提示: {}",
+            hit.message
+        );
+
+        // 完全无关的 id → 不带提示（距离 >2 坚决不猜）
+        cfg.auto_preset_id = "zzz-no-such-thing-at-all-9q7".to_string();
+        let items = config_warning_items(&cfg);
+        let hit = items.iter().find(|w| w.code == "preset_missing").unwrap();
+        assert!(
+            !hit.message.contains("最接近的现有预设 id"),
+            "距离过远不得提示: {}",
+            hit.message
+        );
+
+        // edit_distance 基础向量
+        assert_eq!(edit_distance("", ""), 0);
+        assert_eq!(edit_distance("abc", "abc"), 0);
+        assert_eq!(edit_distance("abc", "abX"), 1);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("ABC", "abc"), 0, "大小写不敏感");
     }
 
     #[test]
