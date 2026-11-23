@@ -107,8 +107,8 @@ pub use account_access::AccountSessionAccess;
 pub use egress::{ChannelSink, TransportEgress};
 #[allow(unused_imports)]
 pub use host::{
-    host_for_provider, hosts, start, stop, stop_all, ProviderCapabilities, StreamHandle, WasmHost,
-    WasmOptions, WasmProviderInfo,
+    host_for_provider, host_providers, hosts, start, stop, stop_all, ProviderCapabilities,
+    StreamHandle, WasmHost, WasmOptions, WasmProviderInfo,
 };
 #[allow(unused_imports)]
 pub use manifest::{read_manifest, WasmManifest, ABI, CAPABILITIES, TARGET};

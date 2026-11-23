@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 /**
  * useListKeyboard — 列表页键盘导航（cc-haha Dialog/列表键盘体系模式）。
  * - `/` 聚焦搜索框（输入框内不响应，避免吞内容）
- * - ↑↓/j k 在当前页行间移动高亮（输入框内 ↑↓ 留给光标/历史）
+ * - ↑↓/j k 在当前页行间移动高亮（输入框内所有导航键一律交还输入框，j/k 是正文）
  * - Enter 打开当前行（onEnter）
  * 纯增量：不拦截表单输入态；行点击交互不受影响。
  *
@@ -53,8 +53,10 @@ export function useListKeyboard(
         return;
       }
 
-      // 输入态下 ↑↓ 交还给输入框（光标移动/历史）
-      if (inInput && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return;
+      // 输入态（含聚焦的搜索框）把所有导航键交还给输入框：↑↓ 移光标，
+      // j/k 是打字内容（修复：搜索框输入 ojbkxc 时打不出 j）。行间导航
+      // 只在非输入态生效，与 cc-haha 的「输入框内不响应」口径一致。
+      if (inInput) return;
 
       if (!['ArrowUp', 'ArrowDown', 'j', 'k', 'Enter'].includes(e.key)) return;
       if (total <= 0) return;
@@ -69,8 +71,8 @@ export function useListKeyboard(
         setActiveIndex(activeIndex >= total - 1 ? 0 : activeIndex + 1);
         return;
       }
-      // Enter：非输入态且已有高亮行才触发
-      if (e.key === 'Enter' && !inInput && activeIndex >= 0) {
+      // Enter：非输入态且已有高亮行才触发（inInput 已在上面统一早退，此处仅高亮行校验）
+      if (e.key === 'Enter' && activeIndex >= 0) {
         e.preventDefault();
         onEnterRef.current(activeIndex);
       }

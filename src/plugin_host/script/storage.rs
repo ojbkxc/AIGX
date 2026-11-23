@@ -105,8 +105,23 @@ pub fn replace_all(
 }
 
 /// 读全部已装包（KV 为准）。
+///
+/// 读取时归一化（A2A v3.5.0 `normalize_single_provider` 对齐）：历史数据里
+/// 「包启用 + 唯一 provider 被子级停用」是一个矛盾态（宿主不会路由这家，
+/// 界面却显示包开着）。折合成包停用：保留用户的停用选择，同时再开包时
+/// 不会被残留的子开关卡住。
 pub fn load_packages(store: &crate::storage::FileStore) -> Vec<ScriptPackage> {
-    store.get(KV_KEY).ok().flatten().unwrap_or_default()
+    let mut packages: Vec<ScriptPackage> = store.get(KV_KEY).ok().flatten().unwrap_or_default();
+    for package in &mut packages {
+        if package.enabled && package.providers.len() == 1 {
+            let only = &package.providers[0].id;
+            if package.disabled_providers.iter().any(|id| id == only) {
+                package.enabled = false;
+                package.disabled_providers.clear();
+            }
+        }
+    }
+    packages
 }
 
 /// 删除一个包：KV + 投影 + 磁盘目录。
@@ -264,6 +279,46 @@ mod tests {
         register(&store, data_dir, pkg("pkg-a", "1.0.0")).unwrap();
         register(&store, data_dir, pkg("pkg-a", "2.0.0")).unwrap();
         assert_eq!(load_packages(&store).len(), 2);
+    }
+
+    /// v3.5.0 对齐：单提供商包「包开 + 子停」的矛盾态在读取时折合成包停
+    ///（保留用户的停用选择，且再开包不被隐藏子开关卡住）。
+    #[test]
+    fn load_normalizes_single_provider_conflict() {
+        let (dir, store) = temp_store();
+        let mut conflicted = pkg("single", "1.0.0");
+        conflicted.enabled = true;
+        conflicted.providers = vec![crate::plugin_host::script::types::ScriptProviderInfo {
+            id: "kiro".into(),
+            ..Default::default()
+        }];
+        conflicted.disabled_providers = vec!["kiro".into()];
+        register(&store, dir.path(), conflicted).unwrap();
+
+        let packages = load_packages(&store);
+        assert_eq!(packages.len(), 1);
+        assert!(!packages[0].enabled, "矛盾态折合为包停用");
+        assert!(packages[0].disabled_providers.is_empty(), "子开关清空");
+
+        // 多提供商包不受影响：只有那家被停，包照开。
+        let (dir2, store2) = temp_store();
+        let mut multi = pkg("multi", "1.0.0");
+        multi.enabled = true;
+        multi.providers = vec![
+            crate::plugin_host::script::types::ScriptProviderInfo {
+                id: "a".into(),
+                ..Default::default()
+            },
+            crate::plugin_host::script::types::ScriptProviderInfo {
+                id: "b".into(),
+                ..Default::default()
+            },
+        ];
+        multi.disabled_providers = vec!["a".into()];
+        register(&store2, dir2.path(), multi).unwrap();
+        let packages = load_packages(&store2);
+        assert!(packages[0].enabled, "多提供商包不折合");
+        assert_eq!(packages[0].disabled_providers, vec!["a".to_string()]);
     }
 
     #[test]

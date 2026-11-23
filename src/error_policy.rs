@@ -1,5 +1,5 @@
 //! 统一错误处理策略（对齐 Agent2API v3.5.0-beta.2 `config/error_policy*` 与
-//! `core/upstream/error_policy*`）。
+//! `core/upstream/error_policy*`；beta.8 补齐插件申报层）。
 //!
 //! 这里是 **配置面 + 决策面**：
 //! - 配置结构 [`ErrorPolicyConfig`]（持久化键语义 = `routingErrorPolicy`）：
@@ -9,7 +9,11 @@
 //! - 校验 [`ErrorPolicyConfig::validate`]：区间钳制 + 9 条全局规则唯一 + 例外 ≤100；
 //! - 旧字段迁移：缺 `[error_policy]` 段时按既有 `[usage]` 重试字段投影成 legacy 快照；
 //! - 决策：[`decide`] 把 状态码/业务码 → [`ErrorKind`] → 命中规则 → `action`/`cooldown`，
-//!   供 `bridge/account.rs` 的自重试/换号与冷却链路消费。
+//!   供 `bridge/account.rs` 的自重试/换号与冷却链路消费；
+//! - **beta.8 插件层**：插件在 `init` 握手里申报的默认错误规则与识别映射
+//!   （[`PluginErrorRule`] / [`PluginErrorClassification`]，由
+//!   `plugin_host::error_rules` 解析）参与三层解析
+//!   （用户例外 > 插件默认 > 全局），见 [`ErrorPolicyConfig::resolve_with`]。
 //!
 //! AIGX 的 `error_translate` 只负责把上游错误渲染成客户端可见的 OpenAI 错误体；
 //! 本模块补的是**重试 / 换号 / 冷却 / 停用**的决策层，两者职责不重叠。
@@ -294,6 +298,52 @@ pub fn default_rules() -> Vec<ErrorRule> {
     ]
 }
 
+// ── 插件申报的错误规则（对齐参考树 `PluginErrorRule` / `DeclaredErrorPolicy`）──
+
+/// 规则来源：`override`（用户例外）> `plugin`（插件申报默认）> `global`（全局）。
+/// 对齐参考树 `RuleSource`（snake_case 序列化，路由记录用）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSource {
+    Override,
+    Plugin,
+    Global,
+}
+
+/// 插件在 `init` 握手里申报的一条错误规则（对齐参考树 `PluginErrorRule`）。
+///
+/// `rule.id` 是网关侧规范化 id（`plugin:{provider}:{本地 id}`）；
+/// `plugin_rule_id` 保留插件本地 id（用户界面显示 / 例外对齐用）；`reason`
+/// 是插件给的说明文字。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginErrorRule {
+    #[serde(flatten)]
+    pub rule: ErrorRule,
+    pub plugin_rule_id: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// 插件申报的「错误识别映射」：状态码/业务码 → 错误大类（含作用域与
+/// hard-stop 建议）。对齐参考树 `PluginErrorClassification`。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginErrorClassification {
+    pub kind: ErrorKind,
+    pub statuses: Vec<u16>,
+    pub codes: Vec<String>,
+    pub scope: Option<CooldownScope>,
+    pub hard_stop: bool,
+}
+
+/// 一个 provider 的插件申报快照：规则 + 识别映射。
+/// 对齐参考树 `DeclaredErrorPolicy`（`Default` = 两边都空）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeclaredErrorPolicy {
+    pub rules: Vec<PluginErrorRule>,
+    pub classifications: Vec<PluginErrorClassification>,
+}
+
 impl ErrorPolicyConfig {
     /// 校验（区间 + 唯一性 + 语义约束），与参考树 `validate` 同口径。
     pub fn validate(&self) -> Result<(), String> {
@@ -398,28 +448,126 @@ impl ErrorPolicyConfig {
         provider: &str,
         model: &str,
     ) -> &ErrorRule {
-        self.overrides
+        self.resolve_with(&[], kind, status, code, provider, model)
+            .0
+    }
+
+    /// 三层解析（对齐参考树 `resolve_with`）：
+    /// 用户例外（override）→ 插件申报默认（plugin）→ 全局同类 → 兜底 Unknown。
+    ///
+    /// 插件层取**特异性最高**的命中（model > code > statuses 三元评分），
+    /// 且被同 id 用户例外屏蔽的插件规则不参与（用户改过的优先）。
+    /// 返回命中的规则与来源（路由记录 / 「插件默认」标签用）。
+    pub fn resolve_with<'a>(
+        &'a self,
+        plugin_rules: &'a [PluginErrorRule],
+        kind: ErrorKind,
+        status: u16,
+        code: &str,
+        provider: &str,
+        model: &str,
+    ) -> (&'a ErrorRule, RuleSource) {
+        if let Some(rule) = self.overrides.iter().find(|rule| {
+            rule.kind == kind && rule_matches_condition(rule, status, code, provider, model)
+        }) {
+            return (rule, RuleSource::Override);
+        }
+        let overridden = |id: &str| self.overrides.iter().any(|over| over.id == id);
+        let mut best: Option<&PluginErrorRule> = None;
+        let mut best_score = (false, false, false);
+        for item in plugin_rules {
+            let rule = &item.rule;
+            if rule.kind != kind || overridden(&rule.id) || overridden(&item.plugin_rule_id) {
+                continue;
+            }
+            if !rule_matches_condition(rule, status, code, provider, model) {
+                continue;
+            }
+            let score = (
+                !rule.model.is_empty(),
+                !rule.code.is_empty(),
+                !rule.statuses.is_empty(),
+            );
+            if best.is_none() || score > best_score {
+                best = Some(item);
+                best_score = score;
+            }
+        }
+        if let Some(item) = best {
+            return (&item.rule, RuleSource::Plugin);
+        }
+        let global = self
+            .rules
             .iter()
-            .find(|rule| {
-                rule.enabled
-                    && rule.kind == kind
-                    && (rule.provider == "*" || rule.provider == provider)
-                    && (rule.model.is_empty() || rule.model == model)
-                    && (rule.code.is_empty() || rule.code == code)
-                    && (rule.statuses.is_empty() || rule.statuses.contains(&status))
-            })
-            .or_else(|| {
-                self.rules
-                    .iter()
-                    .find(|rule| rule.enabled && rule.kind == kind)
-            })
+            .find(|rule| rule.enabled && rule.kind == kind)
             .or_else(|| {
                 self.rules
                     .iter()
                     .find(|rule| rule.kind == ErrorKind::Unknown)
             })
-            .unwrap_or(&self.rules[0])
+            .unwrap_or(&self.rules[0]);
+        (global, RuleSource::Global)
     }
+
+    /// 未识别错误（Unknown / 400·403·409 的 BadRequest）从例外与插件规则里
+    /// 反推错误大类（对齐参考树 `infer_exception_kind`）：只看「带 code 或
+    /// statuses 条件」的规则，返回其 kind。
+    pub fn infer_exception_kind(
+        &self,
+        plugin_rules: &[PluginErrorRule],
+        status: u16,
+        code: &str,
+        provider: &str,
+        model: &str,
+    ) -> Option<ErrorKind> {
+        if let Some(rule) = self.overrides.iter().find(|rule| {
+            rule.provider == provider
+                && (!rule.code.is_empty() || !rule.statuses.is_empty())
+                && rule_matches_condition(rule, status, code, provider, model)
+        }) {
+            return Some(rule.kind);
+        }
+        let overridden = |id: &str| self.overrides.iter().any(|over| over.id == id);
+        let mut best: Option<&PluginErrorRule> = None;
+        let mut best_score = (false, false, false);
+        for item in plugin_rules {
+            let rule = &item.rule;
+            if rule.provider != provider
+                || (rule.code.is_empty() && rule.statuses.is_empty())
+                || overridden(&rule.id)
+                || overridden(&item.plugin_rule_id)
+                || !rule_matches_condition(rule, status, code, provider, model)
+            {
+                continue;
+            }
+            let score = (
+                !rule.model.is_empty(),
+                !rule.code.is_empty(),
+                !rule.statuses.is_empty(),
+            );
+            if best.is_none() || score > best_score {
+                best = Some(item);
+                best_score = score;
+            }
+        }
+        best.map(|item| item.rule.kind)
+    }
+}
+
+/// 条件命中判定（对齐参考树 `matches_condition`；`enabled` 在 override 层
+/// 由调用方逐层短路，插件层在此统一判）。
+fn rule_matches_condition(
+    rule: &ErrorRule,
+    status: u16,
+    code: &str,
+    provider: &str,
+    model: &str,
+) -> bool {
+    rule.enabled
+        && (rule.provider == "*" || rule.provider == provider)
+        && (rule.model.is_empty() || rule.model == model)
+        && (rule.code.is_empty() || rule.code == code)
+        && (rule.statuses.is_empty() || rule.statuses.contains(&status))
 }
 
 // ── 快照 ─────────────────────────────────────────────────────────────
@@ -624,10 +772,12 @@ pub fn hard_stop(status: u16, code: &str) -> bool {
         )
 }
 
-/// 错误决策（对齐参考树 `ErrorDecision`）。
+/// 错误决策（对齐参考树 `ErrorDecision`；`rule_source` 为 beta.8 新增的
+/// 规则来源标记，路由记录里展示「插件默认」用）。
 #[derive(Clone, Debug)]
 pub struct ErrorDecision {
     pub rule: ErrorRule,
+    pub rule_source: RuleSource,
     pub kind: ErrorKind,
     pub action: ErrorAction,
     pub scope: CooldownScope,
@@ -678,7 +828,9 @@ impl ErrorDecision {
 
 /// 用当前进程快照对一次上游失败做决策。
 pub fn decide(provider: &str, model: &str, status: u16, code: &str) -> ErrorDecision {
-    decide_with(&snapshot(), provider, model, status, code)
+    let snapshot = snapshot();
+    let declared = crate::plugin_host::error_rules::for_provider(provider);
+    decide_with_declared(&snapshot, &declared, provider, model, status, code)
 }
 
 /// 显式指定快照做决策（单测 / 预演用）。
@@ -689,13 +841,53 @@ pub fn decide_with(
     status: u16,
     code: &str,
 ) -> ErrorDecision {
+    let declared = crate::plugin_host::error_rules::for_provider(provider);
+    decide_with_declared(snapshot, &declared, provider, model, status, code)
+}
+
+/// 显式指定快照 + 插件申报做决策（三层解析 + 插件识别映射；
+/// 对齐参考树 `decide_with_declared`，AIGX 的证据层无上游 body 候选码
+/// 集合，只取单一 code）。
+pub fn decide_with_declared(
+    snapshot: &ErrorPolicySnapshot,
+    declared: &DeclaredErrorPolicy,
+    provider: &str,
+    model: &str,
+    status: u16,
+    code: &str,
+) -> ErrorDecision {
     let settings = &snapshot.settings;
-    let kind = kind_from_status(status, code);
-    let rule = settings
-        .resolve(kind, status, code, provider, model)
-        .clone();
-    let stopped =
-        hard_stop(status, code) || matches!(kind, ErrorKind::BadRequest | ErrorKind::Content);
+    // 1. 插件识别映射优先于状态码推断（上游同样的顺序）。
+    let classified = declared
+        .classifications
+        .iter()
+        .find(|entry| {
+            entry.statuses.contains(&status)
+                || (!code.is_empty() && entry.codes.iter().any(|item| item == code))
+        })
+        .cloned();
+    let mut kind = match &classified {
+        Some(entry) => entry.kind,
+        None => kind_from_status(status, code),
+    };
+    // 2. Unknown / 400·403·409 的 BadRequest 用例外与插件规则反推大类。
+    if kind == ErrorKind::Unknown
+        || (matches!(status, 400 | 403 | 409) && kind == ErrorKind::BadRequest)
+    {
+        if let Some(inferred) =
+            settings.infer_exception_kind(&declared.rules, status, code, provider, model)
+        {
+            kind = inferred;
+        }
+    }
+    // 3. 三层解析。
+    let (resolved, rule_source) =
+        settings.resolve_with(&declared.rules, kind, status, code, provider, model);
+    let rule = resolved.clone();
+    let stopped = hard_stop(status, code)
+        || matches!(kind, ErrorKind::BadRequest | ErrorKind::Content)
+        // 4. 插件识别映射的 hard_stop 建议仅对非例外来源生效（用户改过的不被覆盖）。
+        || (rule_source != RuleSource::Override && classified.as_ref().is_some_and(|entry| entry.hard_stop));
     let action = if stopped {
         ErrorAction::ReturnError
     } else {
@@ -705,6 +897,16 @@ pub fn decide_with(
     let mut scope = rule.scope;
     if kind == ErrorKind::Unsupported && scope == CooldownScope::Auto {
         scope = CooldownScope::Provider;
+    }
+    // Auto 作用域且无上游建议时采纳插件识别映射的 scope 建议。
+    if scope == CooldownScope::Auto {
+        if let Some(entry) = classified.as_ref() {
+            if let Some(suggested) = entry.scope {
+                if suggested != CooldownScope::Auto {
+                    scope = suggested;
+                }
+            }
+        }
     }
     if matches!(kind, ErrorKind::Auth | ErrorKind::Balance)
         && scope == CooldownScope::Auto
@@ -717,9 +919,14 @@ pub fn decide_with(
     } else {
         action
     };
-    let exception = settings.overrides.iter().any(|item| item.id == rule.id);
+    let exception = match rule_source {
+        RuleSource::Override => true,
+        RuleSource::Plugin => false,
+        RuleSource::Global => settings.overrides.iter().any(|item| item.id == rule.id),
+    };
     ErrorDecision {
         rule,
+        rule_source,
         kind,
         action,
         scope,
@@ -874,5 +1081,191 @@ mod tests {
         let snap = build_snapshot(&config);
         assert!(snap.configured);
         assert!(!snap.legacy);
+    }
+
+    // ── beta.8 插件申报层：三层解析 / 识别映射 / hard-stop ────────────────
+
+    fn plugin_rule(id: &str, kind: ErrorKind, action: ErrorAction) -> PluginErrorRule {
+        PluginErrorRule {
+            rule: ErrorRule {
+                id: format!("plugin:acme:{id}"),
+                name: format!("插件规则 {id}"),
+                kind,
+                statuses: vec![429],
+                code: String::new(),
+                provider: "acme".into(),
+                model: String::new(),
+                enabled: true,
+                action,
+                cooldown: CooldownMode::Upstream,
+                fallback_seconds: 300,
+                exponential: false,
+                fallback_cap_seconds: 1800,
+                scope: CooldownScope::Auto,
+            },
+            plugin_rule_id: id.into(),
+            reason: "插件申报".into(),
+        }
+    }
+
+    #[test]
+    fn resolve_layer_order_override_plugin_global() {
+        let cfg = ErrorPolicyConfig::default();
+        let plugins = vec![plugin_rule(
+            "rl",
+            ErrorKind::RateLimit,
+            ErrorAction::ReturnError,
+        )];
+
+        // 插件层命中（provider=acme 且 429）
+        let (hit, source) = cfg.resolve_with(&plugins, ErrorKind::RateLimit, 429, "", "acme", "m");
+        assert_eq!(hit.id, "plugin:acme:rl");
+        assert_eq!(source, RuleSource::Plugin);
+
+        // 其它 provider 不命中插件层 → 全局
+        let (global, source) =
+            cfg.resolve_with(&plugins, ErrorKind::RateLimit, 429, "", "other", "m");
+        assert_eq!(global.id, "rate_limit");
+        assert_eq!(source, RuleSource::Global);
+
+        // 用户例外（同 id 覆盖插件规则）最优先
+        let mut with_override = cfg.clone();
+        with_override.overrides.push(ErrorRule {
+            id: "plugin:acme:rl".into(),
+            name: "我改过的".into(),
+            kind: ErrorKind::RateLimit,
+            statuses: vec![429],
+            code: String::new(),
+            provider: "acme".into(),
+            model: String::new(),
+            enabled: true,
+            action: ErrorAction::SwitchProvider,
+            cooldown: CooldownMode::None,
+            fallback_seconds: 60,
+            exponential: false,
+            fallback_cap_seconds: 1800,
+            scope: CooldownScope::Provider,
+        });
+        let (hit, source) =
+            with_override.resolve_with(&plugins, ErrorKind::RateLimit, 429, "", "acme", "m");
+        assert_eq!(hit.id, "plugin:acme:rl");
+        assert_eq!(
+            hit.action,
+            ErrorAction::SwitchProvider,
+            "用户改写后的动作生效"
+        );
+        assert_eq!(source, RuleSource::Override);
+    }
+
+    #[test]
+    fn plugin_specificity_model_beats_statuses() {
+        let cfg = ErrorPolicyConfig::default();
+        let mut narrow = plugin_rule("narrow", ErrorKind::RateLimit, ErrorAction::RetryThenSwitch);
+        narrow.rule.model = "acme-pro".into();
+        let broad = plugin_rule("broad", ErrorKind::RateLimit, ErrorAction::ReturnError);
+        // narrow 在前也会被 broad 先命中？不——特异性评分 model > code > statuses，
+        // 窄者胜，与顺序无关。
+        let plugins = vec![broad, narrow];
+        let (hit, _) =
+            cfg.resolve_with(&plugins, ErrorKind::RateLimit, 429, "", "acme", "acme-pro");
+        assert_eq!(
+            hit.id, "plugin:acme:narrow",
+            "带 model 条件的插件规则特异性更高"
+        );
+    }
+
+    #[test]
+    fn declared_classifications_reclassify_and_hard_stop() {
+        let snap = ErrorPolicySnapshot::default();
+        // 插件说 418 + code=tea_time 是限流 → AIGX 静态推断 418 = Unknown，
+        // 识别映射应把 kind 改成 RateLimit。
+        let declared = DeclaredErrorPolicy {
+            rules: vec![plugin_rule(
+                "rl",
+                ErrorKind::RateLimit,
+                ErrorAction::SwitchAccount,
+            )],
+            classifications: vec![PluginErrorClassification {
+                kind: ErrorKind::RateLimit,
+                statuses: vec![418],
+                codes: vec![],
+                scope: Some(CooldownScope::Model),
+                hard_stop: false,
+            }],
+        };
+        let d = decide_with_declared(&snap, &declared, "acme", "m", 418, "");
+        assert_eq!(
+            d.kind,
+            ErrorKind::RateLimit,
+            "识别映射改写 Unknown → RateLimit"
+        );
+        assert_eq!(d.action, ErrorAction::SwitchAccount, "三层解析命中插件规则");
+        assert!(!d.hard_stop);
+
+        // hard_stop 建议：非例外来源采纳
+        let stopping = DeclaredErrorPolicy {
+            rules: vec![],
+            classifications: vec![PluginErrorClassification {
+                kind: ErrorKind::Unknown,
+                statuses: vec![599],
+                codes: vec![],
+                scope: None,
+                hard_stop: true,
+            }],
+        };
+        let d2 = decide_with_declared(&snap, &stopping, "acme", "m", 599, "");
+        assert!(d2.hard_stop, "插件 hard_stop 建议生效");
+        assert_eq!(d2.action, ErrorAction::ReturnError);
+    }
+
+    #[test]
+    fn infer_exception_kind_from_plugin_conditions() {
+        let cfg = ErrorPolicyConfig::default();
+        let mut conditioned =
+            plugin_rule("secret-code", ErrorKind::Quota, ErrorAction::SwitchAccount);
+        conditioned.rule.statuses.clear();
+        conditioned.rule.code = "acme_daily_cap".into();
+        // 未知状态码 500 + 业务码 → 插件条件规则反推出 Quota
+        let inferred = cfg.infer_exception_kind(&[conditioned], 500, "acme_daily_cap", "acme", "m");
+        assert_eq!(inferred, Some(ErrorKind::Quota));
+    }
+
+    #[test]
+    fn plugin_hard_stop_ignored_when_user_overrode() {
+        let mut snap = ErrorPolicySnapshot::default();
+        // 用户对同一插件规则 id 建了例外 → 插件的 hard_stop 不再压过用户选择。
+        snap.settings.overrides.push(ErrorRule {
+            id: "plugin:acme:rl".into(),
+            name: "用户例外".into(),
+            kind: ErrorKind::RateLimit,
+            statuses: vec![418],
+            code: String::new(),
+            provider: "acme".into(),
+            model: String::new(),
+            enabled: true,
+            action: ErrorAction::SwitchAccount,
+            cooldown: CooldownMode::None,
+            fallback_seconds: 60,
+            exponential: false,
+            fallback_cap_seconds: 1800,
+            scope: CooldownScope::Auto,
+        });
+        let declared = DeclaredErrorPolicy {
+            rules: vec![],
+            classifications: vec![PluginErrorClassification {
+                kind: ErrorKind::RateLimit,
+                statuses: vec![418],
+                codes: vec![],
+                scope: None,
+                hard_stop: true,
+            }],
+        };
+        let d = decide_with_declared(&snap, &declared, "acme", "m", 418, "");
+        assert_eq!(
+            d.action,
+            ErrorAction::SwitchAccount,
+            "用户例外动作生效（插件 hard_stop 不覆盖）"
+        );
+        assert!(!d.hard_stop);
     }
 }

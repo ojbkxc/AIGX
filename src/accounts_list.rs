@@ -714,14 +714,54 @@ fn expiring_amounts(packs: &[Value]) -> Vec<Value> {
 }
 
 /// 百分比读数（A2A `ratio_of` 口径：短窗口被周/月额度耗尽时按 0% 计）。
+///
+/// v3.5.0 对齐：① 窗口行按「同组聚拢、组内 5h→daily→weekly→monthly」排序，
+/// 悬停读数不再因为上游乱序而交错；② 周/月耗尽但**没有**对应短窗口行的组，
+/// 本身就该按 0% 计入总百分比（上游新增 `exhausted_without_short` 链）。
 fn ratio_of(balance: &Value, value: Option<f64>) -> Option<Value> {
-    let rows: Vec<&Value> = balance
+    let mut rows: Vec<&Value> = balance
         .get("windows")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|row| row["aside"] != true)
         .collect();
+    // 同组聚拢：按每组首次出现的下标做主键，组内按窗口大小升序。
+    let mut first_group_index: HashMap<&str, usize> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(group) = row["group"]
+            .as_str()
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+        {
+            first_group_index.entry(group).or_insert(index);
+        }
+    }
+    let window_order_rank = |window: Option<&str>| -> u8 {
+        match window.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+            "5h" => 0,
+            "daily" => 1,
+            "weekly" => 2,
+            "monthly" => 3,
+            _ => 4,
+        }
+    };
+    let mut ordered: Vec<(usize, &Value)> = rows.iter().copied().enumerate().collect();
+    ordered.sort_by_key(|(index, row)| {
+        let group_slot = row["group"]
+            .as_str()
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+            .and_then(|group| first_group_index.get(group).copied())
+            .unwrap_or(*index);
+        (
+            group_slot,
+            window_order_rank(row["window"].as_str()),
+            *index,
+        )
+    });
+    rows = ordered.into_iter().map(|(_, row)| row).collect();
+
     let exhausted: HashSet<&str> = rows
         .iter()
         .filter(|row| {
@@ -761,6 +801,14 @@ fn ratio_of(balance: &Value, value: Option<f64>) -> Option<Value> {
             })
         })
         .collect();
+    // 「耗尽但无短窗口行」的组：组本身就该按 0% 计入（上游 v3.5.0 新增）。
+    let exhausted_without_short = exhausted.iter().any(|group| {
+        !rows.iter().any(|row| {
+            row["group"].as_str().unwrap_or("") == *group
+                && matches!(row["window"].as_str(), Some("daily" | "5h"))
+                && (row["unlimited"] == true || number(&row["remainingPercent"]).is_some())
+        })
+    });
     let short = windows.iter().any(|row| {
         row["shortWindow"] == true
             && (row["unlimited"] == true || number(&row["percent"]).is_some())
@@ -775,6 +823,8 @@ fn ratio_of(balance: &Value, value: Option<f64>) -> Option<Value> {
                 number(&row["percent"])
             }
         })
+        // 存在短窗口且某组耗尽无短行 → 总读数被压到 0%
+        .chain((short && exhausted_without_short).then_some(0.0))
         .reduce(f64::min);
     if let Some(percent) = percent {
         return Some(json!({
@@ -801,6 +851,52 @@ fn ratio_of(balance: &Value, value: Option<f64>) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ratio_of（v3.5.0 对齐：窗口行排序 + 无短窗口的耗尽组归零）────────
+
+    #[test]
+    fn ratio_of_orders_short_window_before_weekly_within_each_group() {
+        let usage = serde_json::json!({
+            "windows": [
+                { "group": "Gemini", "window": "weekly", "remainingPercent": 60.25 },
+                { "group": "Gemini", "window": "5h", "remainingPercent": 13.13 },
+                { "group": "Claude/GPT", "window": "weekly", "remainingPercent": 100.0 },
+                { "group": "Claude/GPT", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Gemini 4 Argon", "window": "weekly", "remainingPercent": 1.06 }
+            ]
+        });
+        let ratio = ratio_of(&usage, None).expect("ratio");
+        let labels: Vec<&str> = ratio["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Gemini · 5h",
+                "Gemini · weekly",
+                "Claude/GPT · 5h",
+                "Claude/GPT · weekly",
+                "Gemini 4 Argon · weekly",
+            ]
+        );
+        assert_eq!(ratio["percent"].as_f64(), Some(13.13));
+    }
+
+    #[test]
+    fn ratio_of_counts_exhausted_group_without_short_window_as_zero() {
+        let usage = serde_json::json!({
+            "windows": [
+                { "group": "Gemini", "window": "weekly", "remainingPercent": 43.2 },
+                { "group": "Gemini", "window": "5h", "remainingPercent": 100.0 },
+                { "group": "Claude/GPT", "window": "weekly", "remainingPercent": 0.0 }
+            ]
+        });
+        let ratio = ratio_of(&usage, None).expect("ratio");
+        assert_eq!(ratio["percent"].as_f64(), Some(0.0));
+    }
 
     fn session(id: &str, provider: &str, status: &str) -> AccountSession {
         let mut s = AccountSession::new("ch", id);

@@ -35,6 +35,11 @@
 //!   插件未装/停用/加载失败时兜底（硬保留集合除外，见 `registry`）
 
 pub mod callbacks;
+/// 插件申报的「错误识别映射 + 默认错误处理例外」解析与查询（对齐
+/// beta.8 `plugin_host/error_rules`）。只消费受信任的 `init` 握手 JSON，
+/// 条数 / 状态码 / 业务码 / 冷却边界严格裁剪；单个插件声明格式有误仅跳过
+/// 无效条目，不影响插件装载。
+pub(crate) mod error_rules;
 pub mod install;
 pub mod manager;
 /// provider 维度的插件模型目录（`wasm::catalog` 并集的落点与读取面）。

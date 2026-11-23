@@ -100,7 +100,8 @@ pub const CAPABILITIES: &[&str] = &[
     "desktop.launch.v1",
     "resources.cookie-file.v1",
     "credential.kiro-external-refresh.v1",
-    "credentials.legacy-import.v1",
+    // beta.8 变更：上游删除了 `credentials.legacy-import.v1`（legacy_credentials
+    // 模块整体移除，旧环境凭据导入改走别的路径），本表同步删除。
 ];
 
 /// 宿主**实际落地的能力**（其余声明在 [`CAPABILITIES`] 里只做前向兼容放行，
@@ -650,13 +651,15 @@ mod tests {
     }
 
     #[test]
-    fn capability_whitelist_matches_beta6() {
-        // 对齐 Agent2API v3.5.0-beta.6 CAPABILITIES 全集（beta.4 移除
-        // credential.cline-free-refresh.v1，beta.6 移除 credential.codearts-refresh.v1），
-        // +crypto.deepseek-pow.v1（#62，AIGX 扩展超 beta6）=> 55 项。
-        assert_eq!(CAPABILITIES.len(), 55);
+    fn capability_whitelist_matches_beta8() {
+        // 对齐 Agent2API v3.5.0-beta.8 CAPABILITIES 全集（beta.4 移除
+        // credential.cline-free-refresh.v1，beta.6 移除 credential.codearts-refresh.v1，
+        // beta.8 移除 credentials.legacy-import.v1），+crypto.deepseek-pow.v1
+        // （AIGX 扩展超上游）=> 54 项。
+        assert_eq!(CAPABILITIES.len(), 54);
         assert!(!CAPABILITIES.contains(&"credential.cline-free-refresh.v1"));
         assert!(!CAPABILITIES.contains(&"credential.codearts-refresh.v1"));
+        assert!(!CAPABILITIES.contains(&"credentials.legacy-import.v1"));
         let unique: std::collections::HashSet<_> = CAPABILITIES.iter().collect();
         assert_eq!(unique.len(), CAPABILITIES.len());
         // 已服务能力必须是白名单子集，不能广告白名单外的东西。

@@ -245,6 +245,13 @@ pub async fn set_enabled(
     }
     let previous = package.enabled;
     package.enabled = enabled;
+    // v3.5.0 对齐：重新启用时把单提供商包残留的子级停用清掉，否则包开了
+    // 但那家 provider 仍在 disabled_providers 里，界面显示包已启用、数据面
+    // 却不路由——被隐藏的子开关卡住。
+    if enabled && package.providers.len() == 1 {
+        package.disabled_providers.clear();
+        packages[index].disabled_providers.clear();
+    }
     packages[index] = package.clone();
     persist_packages(manager, &packages)?;
 
@@ -438,7 +445,13 @@ pub async fn set_provider_enabled(
     if !packages[index].providers.iter().any(|p| p.id == provider) {
         return Err(format!("提供商不属于该脚本插件：{provider}"));
     }
-    if enabled {
+    // v3.5.0 对齐（单提供商包折叠）：只声明一家 provider 的包，包级
+    // `enabled` 是唯一真相——停这家 = 停整包（包关掉、`disabled_providers`
+    // 清空），再开包不会被隐藏的子开关卡住。多提供商包维持子开关语义。
+    if packages[index].providers.len() == 1 {
+        packages[index].enabled = enabled;
+        packages[index].disabled_providers.clear();
+    } else if enabled {
         packages[index]
             .disabled_providers
             .retain(|id| id != provider);

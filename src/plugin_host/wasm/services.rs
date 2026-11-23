@@ -59,7 +59,11 @@ const UNSERVED_METHODS: &[(&str, &str)] = &[
         "runtime.client_fingerprint",
         "runtime.client-fingerprint.v1",
     ),
-    ("credentials.legacy.take", "credentials.legacy-import.v1"),
+    // `credentials.legacy.take` 与其能力 `credentials.legacy-import.v1` 已随
+    // 上游 beta.8 删除（legacy_credentials 模块移除）；名字留在这里只为让
+    // 装了旧版插件的调用拿到指名报错而不是 NO_METHOD。能力已不在
+    // CAPABILITIES 里，插件清单也不再放行该声明。
+    ("credentials.legacy.take", "已随上游删除"),
     ("crypto.monkeycode.cap.solve", "crypto.monkeycode-cap.v1"),
 ];
 
@@ -781,6 +785,10 @@ mod tests {
     fn unserved_table_never_claims_a_served_capability() {
         use crate::plugin_host::wasm::manifest;
         for &(method, capability) in UNSERVED_METHODS {
+            // 「已随上游删除」的占位条目指名的是说明而不是能力，跳过两道能力断言。
+            if capability == "已随上游删除" {
+                continue;
+            }
             assert!(
                 manifest::CAPABILITIES.contains(&capability),
                 "{method} 指向的能力 {capability} 必须仍在可声明全集里（否则应整条删除）"

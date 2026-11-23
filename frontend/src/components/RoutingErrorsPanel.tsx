@@ -62,6 +62,14 @@ interface ErrorPolicyView {
   configured: boolean;
   legacy: boolean;
   providers: Array<{ id: string; label: string }>;
+  /** beta.8：已启动插件在握手里申报的默认错误规则（只读展示 + 三层解析参考） */
+  providerRules?: PluginErrorRule[];
+}
+
+/** 插件申报规则（camelCase；对齐后端 `PluginErrorRule` 序列化） */
+interface PluginErrorRule extends ErrorRule {
+  pluginRuleId: string;
+  reason?: string;
 }
 
 const KIND_LABEL: Record<ErrorKind, string> = {
@@ -461,7 +469,7 @@ function ErrorsCard(): JSX.Element {
           </label>
         </div>
 
-        {/* 规则列表：按错误类型配置处理动作 */}
+        {/* 按错误类型的处理规则 */}
         <div className="form-group">
           <label>{t('按错误类型的处理规则')}</label>
           <span className="form-hint" style={{ marginBottom: 8 }}>
@@ -511,6 +519,42 @@ function ErrorsCard(): JSX.Element {
             ))}
           </div>
         </div>
+
+        {/* beta.8：插件申报的默认错误规则（只读）。解析顺序：我的例外 > 插件默认 > 全局 */}
+        {(view.providerRules ?? []).length > 0 ? (
+          <div className="form-group">
+            <label>{t('插件申报的默认规则（只读）')}</label>
+            <span className="form-hint" style={{ marginBottom: 8 }}>
+              {t('已启动插件在握手时申报的默认错误处理；解析顺序为「我的例外 → 插件默认 → 全局规则」。如需改写某条，在例外中按相同规则标识配置即可覆盖。')}
+            </span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {(view.providerRules ?? []).map((pr) => {
+                const overridden = draft.overrides.some((o) => o.id === pr.id || o.id === pr.pluginRuleId);
+                return (
+                  <div
+                    key={pr.id}
+                    style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', border: '1px dashed var(--border-color)', borderRadius: 8, padding: '8px 10px', opacity: overridden ? 0.6 : 1 }}
+                    title={pr.reason || undefined}
+                  >
+                    <Badge tone={overridden ? 'neutral' : 'info'}>{t(KIND_LABEL[pr.kind] || pr.name)}</Badge>
+                    <span className="form-hint">
+                      {pr.name}
+                      {pr.reason ? ` — ${pr.reason}` : ''}
+                    </span>
+                    {/* rule.provider 即申报插件的 provider id */}
+                    <span className="form-hint" style={{ marginLeft: 'auto' }}>{pr.provider}</span>
+                    <span className="form-hint">{t(ACTION_LABEL[pr.action] || pr.action)}</span>
+                    {overridden ? (
+                      <Badge tone="success">{t('已被我的例外覆盖')}</Badge>
+                    ) : (
+                      <Badge tone="info">{t('插件默认')}</Badge>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
 
         {error ? <div className="error-message">{error}</div> : null}
 

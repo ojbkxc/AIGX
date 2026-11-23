@@ -166,6 +166,9 @@ pub struct WasmHost {
     providers: Mutex<Vec<WasmProviderInfo>>,
     /// 插件自报的设置 schema（`init` 后填充）。
     settings: Mutex<Value>,
+    /// 插件申报的错误规则与识别映射（`init` 后填充；beta.8）。
+    error_rules:
+        Mutex<std::collections::BTreeMap<String, crate::error_policy::DeclaredErrorPolicy>>,
     /// 关停中标志（拒绝新调用）。
     closing: AtomicBool,
     /// 就绪标志（`init` 成功）。
@@ -192,6 +195,16 @@ impl WasmHost {
             .lock()
             .map(|settings| settings.clone())
             .unwrap_or(Value::Null)
+    }
+
+    /// 插件申报的错误规则与识别映射（beta.8 `error_rules::for_provider` 的
+    /// 读取口；锁失败 / 未申报时回空策略）。
+    pub fn error_rules(&self) -> crate::error_policy::DeclaredErrorPolicy {
+        self.error_rules
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&self.manifest.provider).cloned())
+            .unwrap_or_default()
     }
 
     pub fn ready(&self) -> bool {
@@ -572,6 +585,14 @@ pub fn hosts() -> Vec<Arc<WasmHost>> {
         .unwrap_or_default()
 }
 
+/// 全部已启动宿主的 provider id（错误规则聚合用）。
+pub fn host_providers() -> Vec<String> {
+    hosts_table()
+        .lock()
+        .map(|table| table.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// 启动一个 Wasm 宿主：编译 → `init` 握手 → 登记清单与注册表。
 pub async fn start(options: WasmOptions) -> Result<Arc<WasmHost>, String> {
     let provider = options.manifest.provider.clone();
@@ -593,6 +614,7 @@ pub async fn start(options: WasmOptions) -> Result<Arc<WasmHost>, String> {
         shared: shared.clone(),
         providers: Mutex::new(Vec::new()),
         settings: Mutex::new(Value::Null),
+        error_rules: Mutex::new(std::collections::BTreeMap::new()),
         closing: AtomicBool::new(false),
         ready: AtomicBool::new(false),
         next_id: AtomicI64::new(1),
@@ -642,6 +664,27 @@ pub async fn start(options: WasmOptions) -> Result<Arc<WasmHost>, String> {
         .lock()
         .unwrap_or_else(|error| error.into_inner()) =
         value.get("settings").cloned().unwrap_or(Value::Null);
+    // beta.8：解析插件申报的错误规则/识别映射（`error_rules` 键或嵌在
+    // providers 元数据里，上游在 `init` 应答里随 providers 一起返回）。
+    // 解析失败不阻断装载——申报格式有误只影响错误策略的三层解析，
+    // 插件本体功能照常。
+    {
+        let declared = value
+            .get("errorRules")
+            .or_else(|| value.get("error_rules"))
+            .and_then(|raw| raw.as_array().cloned())
+            .map(|items| {
+                // 上游形状：[{id, errorRules, errorClassifications}]；AIGX 的
+                // 握手应答里 provider 元数据数组即该形状的载体。
+                serde_json::Value::Array(items)
+            })
+            .unwrap_or_else(|| value.clone());
+        *host
+            .error_rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            super::super::error_rules::parse(&declared);
+    }
     host.ready.store(true, Ordering::Release);
     super::register_manifest(options.manifest.clone());
     super::install_accounts(options.accounts.clone());

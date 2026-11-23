@@ -1442,12 +1442,16 @@ pub async fn handle_update_sanitize(
 // ── 统一错误处理策略（routingErrorPolicy，对齐 beta.2 /api/routing/errors）───
 
 /// 错误策略视图（对齐参考树 `routing_errors::view`）：
-/// `settings/defaults/revision/configured/legacy/providers`。
+/// `settings/defaults/revision/configured/legacy/providers/providerRules`
+/// （beta.8：`providerRules` 是已启动插件申报的默认错误规则）。
 fn error_policy_view(snapshot: &crate::error_policy::ErrorPolicySnapshot) -> Value {
     let providers: Vec<Value> = crate::account_session::registry::all()
         .iter()
         .map(|spec| json!({ "id": spec.kind, "label": spec.label }))
         .collect();
+    // 插件申报的默认错误规则（beta.8）：只读展示 + 三层解析参考，
+    // 用户改写按 `plugin:{provider}:{本地 id}` 落成自己的例外。
+    let provider_rules = crate::plugin_host::error_rules::all_provider_rules();
     json!({
         "settings": snapshot.settings,
         "defaults": crate::error_policy::ErrorPolicyConfig::default(),
@@ -1455,6 +1459,7 @@ fn error_policy_view(snapshot: &crate::error_policy::ErrorPolicySnapshot) -> Val
         "configured": snapshot.configured,
         "legacy": snapshot.legacy,
         "providers": providers,
+        "providerRules": provider_rules,
     })
 }
 
