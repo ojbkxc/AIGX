@@ -93,3 +93,14 @@ M frontend/src/pages/PurgeConsole.test.ts（新增）
 M frontend/src/types/index.ts          # PurgeAppliedDetail/WindowedStats/ConfigWarning
 M frontend/src/i18n/zh.json / en.json  # +16 键（复用安全页 2 键）
 ```
+
+## 负结论（做过但回滚，防重复踩）
+
+- **`skill_keyword_empty` 告警（技能扫到但全无关键词）**：不可达。`keywords_of`
+  从 `name`（非空即取）+ `description`（≥2 字符 token）**派生**关键词，
+  frontmatter 不写 keywords 键也永远有候选——`skill_dir_empty` 已覆盖全部
+  真实盲区。实现后测试证伪（name 总是第一个关键词），已整体回滚。
+  未来加「关键词质量」类体检时，请从 `body_chars == 0` 或「全部关键词
+  均 <2 字符」这类真实可达态入手。
+- **`preset_missing` 最近 id 建议（已落地 `3e1c52db`）**：编辑距离 ≤2 提示、
+  >2 坚决不猜——与 `preset_for_model` 的不猜立场一致，勿改成模糊自动纠正。
