@@ -1201,6 +1201,8 @@ export default function PurgeConsole(): JSX.Element {
   const [previewHistory, setPreviewHistory] = useState<string[]>(() =>
     readPreviewHistory((k) => window.localStorage.getItem(k)),
   );
+  /** 「按已保存配置预览」：对比「线上现在会怎样」vs「保存后会怎样」 */
+  const [previewSavedOnly, setPreviewSavedOnly] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [previewMeta, setPreviewMeta] = useState<{ changed: boolean; skill_hit: boolean } | null>(null);
   /**
@@ -1584,6 +1586,11 @@ export default function PurgeConsole(): JSX.Element {
   const runPreview = useCallback(async (): Promise<void> => {
     const current = draftRef.current;
     if (!current || previewing) return;
+    // 「按已保存配置预览」：草稿有未保存编辑时，用它区分「线上现在会怎样」
+    // 与「保存后会怎样」——两者输出不同正是排障要看的对比。
+    const saved = dataRef.current?.settings;
+    const usingSaved = previewSavedOnly && saved;
+    const settings = usingSaved ? saved : current;
     const parsed = parsePreviewMessages(previewInput);
     if (parsed.length === 0) {
       addToast(t('请输入预览样例'), 'warning');
@@ -1592,7 +1599,7 @@ export default function PurgeConsole(): JSX.Element {
     setPreviewing(true);
     try {
       const res = await api.previewPurge({
-        settings: current,
+        settings,
         messages: parsed,
       });
       if (!res.success || !res.data) throw new Error('preview failed');
@@ -1620,7 +1627,7 @@ export default function PurgeConsole(): JSX.Element {
     } finally {
       setPreviewing(false);
     }
-  }, [addToast, previewInput, previewing, t]);
+  }, [addToast, previewInput, previewing, previewSavedOnly, t]);
 
   // ── 词表 CSV 导入导出（死区词/同义词单表，进草稿不直接保存）──────────────
   //
@@ -2369,6 +2376,15 @@ export default function PurgeConsole(): JSX.Element {
           <Button variant="outline" disabled={previewing || saving} onClick={() => void runPreview()}>
             {previewing ? t('预览中…') : t('预览改写')}
           </Button>
+          <label className="purge-rule-toggle" title={t('用已保存的配置试跑（对比未保存草稿的效果）')}>
+            <input
+              type="checkbox"
+              checked={previewSavedOnly}
+              disabled={previewing}
+              onChange={(event) => setPreviewSavedOnly(event.target.checked)}
+            />
+            <span className="purge-hint">{t('按已保存配置')}</span>
+          </label>
         </div>
         {previewOut !== null ? (
           <>
