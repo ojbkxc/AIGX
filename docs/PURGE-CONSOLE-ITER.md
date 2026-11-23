@@ -60,6 +60,59 @@
 ### 8. 「设为结构化模板」落点导航
 - 预设库写入模板草稿后自动滚动到模板编辑区并闪烁高亮（复用 purge-fix-flash）。
 
+### 9. 模板 JSON 导入（同名 upsert + 配置级反导）
+- `parseTemplateJson` 三形态：`{name,text}` / 数组 / 配置级 `{structured_templates:[…]}`
+  （本页「导出配置」产物可直接反导回模板）。校验 name 非空 ≤64、text ≤128KB、
+  文件内同名后者跳过；写入时已有同名**覆盖**并报「新增 N / 覆盖 M」。
+
+### 10. 词表 CSV 导入冲突预检
+- 导入前对同表做 from 冲突统计（trim + 大小写不敏感）：全重复 → 拒收并警告
+  （多因导错文件/错表）；部分重复 → 正常追加但降为 warning 并附重复条数。
+- 三层防线：导入预检 → 行内 dupHint → 运行时按表序（后者不再匹配）。
+
+### 11. 预设库检索相关性排序
+- `relevance` 五档（标题全等 > 前缀 > 包含 > 厂商/模型 > 仅标签/id），
+  **仅排序不匹配**（`matches` 仍是唯一判据），在 `take(limit)` 之前排——
+  否则标题精确命中项会被翻页截掉。无检索词保持目录原序。
+
+### 12. 预设库分页（加载更多）
+- `list_page(q,vendor,model,offset,limit)`；`list` 为 offset=0 薄壳。
+  前端按 `items.length` 增量拉取并追加，按钮显示「还有 N 条」，
+  筛选变更自动回第一页。55 条目录的最后 5 条此前永远不可见。
+
+### 13. 词表单条启停（RewriteRule.enabled）
+- `#[serde(default)] enabled=true`：旧数据只有 from/to，反序列化后全启用，
+  **行为逐字节不变**；引擎跳过禁用行、明细不计；前端行内 checkbox +
+  整行降透明度（不隐藏，草稿历史可见）。
+
+### 14. 词表 200 条 / 异源 16 条 / 其余 5 处上限前置提示
+- 后端 `normalize` 的 `take(N)` 会静默丢弃超出部分。前端三档覆盖：
+  `RULE_TABLE_CAP=200`（两表顶部红条 + CSV 导入 toast 降级）、
+  `FALLBACK_MODELS_CAP=16`（输入框 error 槽）、`capError()` 统一处理
+  `LIST_CAP=64`×4（剥离前缀/拒绝话术/过滤词/空答词）与 `TEMPLATES_CAP=32`。
+  现在**所有 take(N) 截断点都有前置提示**。
+
+### 15. 预设落模板前覆盖同名确认
+- `presetApplyNeedsConfirm` 三段：无同名 → 直落；同名同文 → 静默幂等；
+  同名异文 → 就地二段确认（覆盖/取消），不引弹窗栈。
+
+### 16. 预览可切「按已保存配置」
+- 勾选后用已保存快照试跑，与默认草稿试跑形成对照——同一输入两次跑，
+  差异即「保存会改变什么」，避免拿未保存配置误判线上行为。
+
+### 17. 统计口径第四档「上次运行」+ 快照持久化
+- `RunSnapshot{saved_at, uptime_secs, 展平 PurgeStats}`，KV `purge:last-run`；
+  优雅关机 + **cron 每 10 分钟**双写（崩溃/kill 也不丢）；读侧校验
+  （saved_at>0、uptime≤一年，坏值当无记录）；`GET /api/purge` 出
+  `stats_last_run`，前端四档切换（该档是精确快照，不带 truncated）。
+
+### 18. 体检扩到 10 类 + 全通过态 + 启用感知
+- 新增：`skill_keyword_short`（单字符关键词命中面过宽）、
+  `dead_zone_all_disabled` / `synonym_all_disabled`（开关开着但整表被单条
+  停用）、`fallback_duplicate`（异源模型重复项）。
+- `chained_rewrite` 只看**启用行**（停用行正是用户掐链的手段，报警是噪音）。
+- 无告警且总开关开 → 绿字「配置体检通过」；总开关关 → 不显示。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
@@ -70,17 +123,25 @@
   不黏进上一条消息）——有回归测试钉住。
 - 词表 CSV 是**追加**导入：与「添加规则」同口径；改成替换前先想清楚
   用户手工行会不会被导入文件吞掉。
+- **加体检项前先读入口防御**（`parse_skill`/`keywords_of`）：解析层已挡掉
+  的形态不会出现在体检输入里（见负结论两条）。
+- **重复行不会被后端删**：`normalize` 只 trim/丢空/截断，重复项靠「按表序
+  后一条匹配不上」自然失效；前端提示文案必须这么写，别误导成「后端会清」。
+- 上限常量必须与后端 `take(N)` 逐一对齐并注明来源；新增字段时同步加提示。
 
 ## 验证汇总（本机 mingw / pnpm，2026-11-24 实测）
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test --bin aigx` | **2519 passed / 0 failed**（含 purge:: 72） |
+| `cargo test --bin aigx` | **2546 passed / 0 failed**（含 purge:: 81） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **204 passed / 0 failed**（PurgeConsole 28） |
+| vitest 全量 | **215 passed / 0 failed**（PurgeConsole 41） |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
+| static 零漂移 | 双重构建后 `git status static/` 为空 |
+
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 18 批收口值）。
 
 ## 文件清单（本批 Purge 相关）
 
