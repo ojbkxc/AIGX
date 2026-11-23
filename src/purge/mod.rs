@@ -1327,6 +1327,30 @@ pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
             ),
         });
     }
+    // 技能只有单字符关键词（典型：技能 name 是单个汉字，description 又没写
+    // 任何 ≥2 字符词）：`keyword_matches` 是子串匹配，单字关键词意味着
+    // **消息里出现任何一个同字就触发**——命中面过宽，注入会频繁误触发。
+    // 这是真实可达态（keywords 的 name 项不做长度过滤）。只点名，不代改。
+    if cfg.skill_inject {
+        let entries = skills_for(&cfg.skill_dir);
+        let singles: Vec<&str> = entries
+            .iter()
+            .filter(|entry| {
+                !entry.keywords.is_empty()
+                    && entry.keywords.iter().all(|k| k.trim().chars().count() <= 1)
+            })
+            .map(|entry| entry.name.as_str())
+            .collect();
+        if !singles.is_empty() {
+            warnings.push(ConfigWarning {
+                code: "skill_keyword_short",
+                message: format!(
+                    "这些技能只有单字符关键词（子串匹配命中面过宽，消息里出现同字就会误触发）：{}。给对应 SKILL.md 的 description 补上更长的关键词即可收窄。",
+                    singles.iter().take(3).copied().collect::<Vec<_>>().join("、")
+                ),
+            });
+        }
+    }
     if cfg.dead_zone_rewrite && cfg.synonym_enabled {
         // 链式改写：A 表的 to 是 B 表的 from（或同表内互为前后缀）时，
         // 同一段文本会被改两次，最终结果与管理员预期可能不一致。
@@ -1961,6 +1985,57 @@ mod tests {
                 .unwrap()
                 .text
         );
+    }
+
+    /// 单字符关键词技能（name 单字 + description 无 ≥2 字符词）→ 命中面过宽告警。
+    /// 真实可达：keywords 的 name 项不做长度过滤（区别于已证伪的两条技能告警）。
+    #[test]
+    fn skill_keyword_short_warning_for_single_char_keywords() {
+        let dir = std::env::temp_dir().join(format!(
+            "aigx-purge-kw-short-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 技能名单字「译」、description 没有任何 ≥2 字符词 → keywords = ["译"]
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: 译\ndescription: 译\n---\n翻译技巧正文",
+        )
+        .unwrap();
+
+        let mut cfg = enabled();
+        cfg.skill_inject = true;
+        cfg.skill_dir = dir.to_string_lossy().to_string();
+        let items = config_warning_items(&cfg);
+        assert!(
+            items
+                .iter()
+                .any(|w| w.code == "skill_keyword_short" && w.message.contains("译")),
+            "单字关键词应点名技能: {items:?}"
+        );
+
+        // 修复路径：description 补上 ≥2 字符词 → 不再告警
+        //（缓存 30s — 换目录重扫）
+        let dir2 = dir.with_extension("2");
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::write(
+            dir2.join("SKILL.md"),
+            "---\nname: 译\ndescription: 翻译 translate\n---\n翻译技巧正文",
+        )
+        .unwrap();
+        cfg.skill_dir = dir2.to_string_lossy().to_string();
+        let items = config_warning_items(&cfg);
+        assert!(
+            items.iter().all(|w| w.code != "skill_keyword_short"),
+            "有长关键词后不应再告警: {items:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     #[test]

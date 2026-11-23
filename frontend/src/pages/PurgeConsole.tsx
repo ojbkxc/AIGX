@@ -150,6 +150,7 @@ const FIX_TARGETS: Record<string, string> = {
   fallback_empty: 'fallback-models',
   fallback_after_retry: 'fallback-attempts',
   skill_dir_empty: 'skill-dir',
+  skill_keyword_short: 'skill-snapshot',
   chained_rewrite: 'dead-zone-table',
   structured_empty: 'templates',
   preset_missing: 'auto-preset-id',
@@ -2139,7 +2140,7 @@ export default function PurgeConsole(): JSX.Element {
       {/* 技能扫描快照：让 skill_inject 配置可验证（目录里到底扫到了什么） */}
       {skills.length > 0 && (
         <Card title={t('技能扫描快照')}>
-          <ul className="purge-skill-list">
+          <ul className="purge-skill-list" data-purge-fix="skill-snapshot">
             {skills.map((skill) => (
               <li key={skill.name}>
                 <strong>{skill.name}</strong>
