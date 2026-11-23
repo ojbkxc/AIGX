@@ -260,6 +260,10 @@ impl PluginBridge {
             "stream": true,
             "session": forwarded_session(ctx),
             "wire_model": req.model,
+            // `request.context` 的取值来源：客户端**是否要流式**。与 `stream`
+            // 不同——`stream` 是「本轮走流式通道」，`client_stream` 是「客户端
+            // 原本要什么」，插件据此区分「客户端要流」和「宿主为统一处理而流」。
+            "client_stream": req.stream,
             "proxy": Value::Null,
         });
         match &self.backend {

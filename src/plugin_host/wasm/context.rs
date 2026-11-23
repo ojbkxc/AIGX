@@ -85,6 +85,11 @@ pub struct Context {
     pub proxy: Value,
     pub proxy_selected: bool,
     pub user_agent: Option<String>,
+    /// 客户端原本是否要求流式（`request.context` 的唯一取值来源）。
+    ///
+    /// `None` = 本次调用不是对话请求（模型目录、签到、登录等），插件问
+    /// `request.context` 时应拿到 `forbidden` 而不是编一个默认值。
+    pub client_stream: Option<bool>,
     pub trace: Value,
     pub sink: Option<Sink>,
     pub head_sent: bool,
@@ -111,6 +116,7 @@ impl Context {
             proxy: params.get("proxy").cloned().unwrap_or(Value::Null),
             proxy_selected: params.get("proxy").is_some(),
             user_agent: None,
+            client_stream: params.get("client_stream").and_then(Value::as_bool),
             trace: params.get("plugin_trace").cloned().unwrap_or(Value::Null),
             sink,
             head_sent: false,

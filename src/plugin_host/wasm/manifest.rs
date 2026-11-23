@@ -131,12 +131,30 @@ pub const SERVED_CAPABILITIES: &[&str] = &[
     "login.interaction.v1",
     "login.callback.v1",
     "login.captcha.geetest.v1",
-    "checkin.rolling.v1",
+    // 注意：`checkin.rolling.v1` **不在**已服务表里。上游把它当作「插件执行签到调用」
+    // 的闸门（`invoke_checkin` 路径）；AIGX 的签到在原生 `src/checkin/*` 里完成，
+    // wasm 宿主没有对应的 checkin 执行入口。声明放行（`CAPABILITIES`）保留前向兼容，
+    // 但不在这里虚报已服务——否则插件会以为签到走宿主，实际拿到 NO_METHOD。
     "errors.v1",
-    "verification.claim.v1",
+    // `verification.claim.v1` 同样不进已服务表：它闸的是 `captcha.push` /
+    // `claim.verification.poll|complete` 这三个**验证执行上下文内**的动作，
+    // AIGX 只落地了租约（`verification.lease.*`），没有验证执行器，
+    // 三个动作在服务端无处可达。声明放行保留，已服务不虚报。
     "http.managed-task.v1",
     "http.account-origin.v1",
     "crypto.deepseek-pow.v1",
+    // 本机客户端登录态读取（`desktop.credentials.read`）：只读固定来源，服务
+    // workbuddy / raccoon / kiro / kuku / loomy / catpaw 等本机账号池导入。
+    "desktop.credentials.v1",
+    // 运行环境两项（`runtime.platform` / `runtime.architecture`）：只回本进程常量。
+    "runtime.platform.v1",
+    "runtime.architecture.v1",
+    // 请求上下文（`request.context`）：仅对话请求有值，其余调用如实 forbidden。
+    "request.context.v1",
+    // Kiro 外部 IdP 续期：端点由插件写进凭据，宿主用注入 egress 换证 + CAS 防重。
+    "credential.kiro-external-refresh.v1",
+    // 插件侧公网图片下载：只产本次调用资源，不支持的文件类型/跳转一律失败。
+    "resources.fetch-public.v1",
 ];
 
 /// 某项能力是否由宿主实际服务。
@@ -342,7 +360,10 @@ pub fn read_manifest(dir: &Path, pack: &serde_json::Value) -> Result<Option<Wasm
     {
         return Err("Wasm 原生辅助能力声明无效".into());
     }
-    if spec.origins.len() > 32 {
+    // 上限 64（原 32）：多区域 OIDC provider（如 kiro 声明 41 个：kiro.dev 的
+    // app/auth/management/runtime + 各 AWS 区域 oidc 端点）是合法需求，32 会误伤。
+    // 仍严格逐条校验（https、无通配符、无路径），64 个明确 HTTPS origin 不构成滥用。
+    if spec.origins.len() > 64 {
         return Err("Wasm 网络地址声明过多".into());
     }
     for origin in &spec.origins {

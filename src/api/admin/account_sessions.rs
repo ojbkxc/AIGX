@@ -4910,6 +4910,34 @@ async fn plugin_login_call(
     params: Value,
     cancel: Option<&crate::plugin_host::CancellationToken>,
 ) -> Result<Value, String> {
+    // 插件登录是「新增导入」路径：本次调用链内允许插件读**本机**客户端登录态
+    // （`desktop.credentials.read`，固定来源、只读）。作用域只在这次 RPC 内有效，
+    // 离开即失效——不是常开的全局开关。
+    //
+    // 未启用 `sqlite-kv` 的构建里本机读取模块整块不编（它依赖 rusqlite），
+    // 此时没有作用域可开，登录调用照常直发。
+    #[cfg(feature = "sqlite-kv")]
+    {
+        crate::plugin_host::wasm::desktop_credentials::import_scope(
+            provider,
+            true,
+            plugin_login_dispatch(state, provider, method, params, cancel),
+        )
+        .await
+    }
+    #[cfg(not(feature = "sqlite-kv"))]
+    {
+        plugin_login_dispatch(state, provider, method, params, cancel).await
+    }
+}
+
+async fn plugin_login_dispatch(
+    state: &AppState,
+    provider: &str,
+    method: &str,
+    params: Value,
+    cancel: Option<&crate::plugin_host::CancellationToken>,
+) -> Result<Value, String> {
     if let Some(route) = state.script_host.route_for_provider(provider) {
         return route.channel.call(method, params).await.map_err(|error| {
             match error.code.as_deref() {

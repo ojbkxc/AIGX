@@ -31,6 +31,46 @@ fn deepseek_pow_difficulty_allowed(difficulty: i64) -> bool {
     (1..=2_000_000).contains(&difficulty)
 }
 
+/// 已知**未服务**的方法命名空间 → 它对应的能力名。
+///
+/// 为什么需要这张表：这些名字在上游 ABI 里存在，AIGX 的 `CAPABILITIES` 也放行
+/// 声明，但宿主没实现（`SERVED_CAPABILITIES` 里没有对应项，`contract()` 里的
+/// `served` 也是 false）。此前它们落进兜底分支只回 `NO_METHOD`「未支持的主程序
+/// 能力」，插件作者分不清「名字写错」和「网关这家没做」——登录流走到一半撞上
+/// 尤其难查。这里改成显式 `unsupported` + 指名能力，语义与 `contract()` 一致，
+/// 不改变任何「已服务」判定。
+const UNSERVED_METHODS: &[(&str, &str)] = &[
+    ("login.context", "login.managed.v1"),
+    ("login.input.take", "login.managed.v1"),
+    ("login.step.publish", "login.managed.v1"),
+    ("login.loopback.open", "login.managed.v1"),
+    ("login.loopback.close", "login.managed.v1"),
+    ("login.desktop.credentials.take", "login.desktop.chatglm.v1"),
+    ("protocol.request", "protocol.convert.v1"),
+    ("protocol.open", "protocol.convert.v1"),
+    ("protocol.push", "protocol.convert.v1"),
+    ("protocol.close", "protocol.convert.v1"),
+    ("checkin.claim", "checkin.rolling.v1"),
+    ("claim.status", "verification.claim.v1"),
+    ("claim.verification.poll", "verification.account.v1"),
+    ("claim.verification.complete", "verification.account.v1"),
+    ("resource.cookie-file.take", "resources.cookie-file.v1"),
+    ("runtime.client_fingerprint", "runtime.client-fingerprint.v1"),
+    ("credentials.legacy.take", "credentials.legacy-import.v1"),
+    ("crypto.monkeycode.cap.solve", "crypto.monkeycode-cap.v1"),
+];
+
+/// 兜底分支的错误：未服务的方法按能力名明说，其余仍是 `NO_METHOD`。
+fn unsupported_method(method: &str) -> WireError {
+    match UNSERVED_METHODS.iter().find(|(name, _)| *name == method) {
+        Some((_, capability)) => WireError::with_code(
+            format!("网关未实现该方法（能力 {capability} 未服务）"),
+            "unsupported",
+        ),
+        None => WireError::with_code("插件请求了未支持的主程序能力", WireError::NO_METHOD),
+    }
+}
+
 impl Context {
     pub(super) fn permission(&self, name: &str) -> Result<(), WireError> {
         if self.shared.manifest.allows(name) {
@@ -83,6 +123,28 @@ impl Context {
             "clock.now" => {
                 self.permission("clock.v1")?;
                 Ok(json!(super::now_ms()))
+            }
+            // `runtime.platform`：插件按宿主平台分支（上游取值 `win`/`mac`/`linux`/`other`）。
+            // 只回本进程常量，零参数、不泄露任何环境细节。
+            "runtime.platform" => {
+                self.permission("runtime.platform.v1")?;
+                if params.as_object().is_none_or(|fields| !fields.is_empty()) {
+                    return Err(WireError::with_code("系统类型查询不接受参数", "bad_params"));
+                }
+                Ok(json!(match std::env::consts::OS {
+                    "windows" => "win",
+                    "macos" => "mac",
+                    "linux" => "linux",
+                    _ => "other",
+                }))
+            }
+            // `runtime.architecture`：CPU 架构三元组里的 arch 段，零参数。
+            "runtime.architecture" => {
+                self.permission("runtime.architecture.v1")?;
+                if params.as_object().is_none_or(|fields| !fields.is_empty()) {
+                    return Err(WireError::with_code("运行环境查询不接受参数", "bad_params"));
+                }
+                Ok(json!(std::env::consts::ARCH))
             }
             "random.bytes" => {
                 self.permission("random.v1")?;
@@ -489,13 +551,50 @@ impl Context {
             | "managed_task.end"
             | "managed_task.abort" => self.managed_task(method, &params).await,
             "http.open_account" => self.open_account(&params).await,
+            // 账号池「从本机客户端导入」：插件没有令牌，要求宿主读本机官方客户端的
+            // 登录态（workbuddy / raccoon / kiro / kuku / loomy …）。零参数、只读、
+            // 固定来源，见 `desktop_credentials` 模块头。
+            "desktop.credentials.read" => {
+                #[cfg(feature = "sqlite-kv")]
+                {
+                    Box::pin(super::desktop_credentials::invoke(self, &params)).await
+                }
+                // 未启用 `sqlite-kv` 的构建里客户端库（SQLite）根本读不了：
+                // 如实说"本机构建不支持"，而不是假装读失败。
+                #[cfg(not(feature = "sqlite-kv"))]
+                {
+                    Err(WireError::with_code(
+                        "本机构建未启用 sqlite-kv，无法读取本机客户端登录态",
+                        "unsupported",
+                    ))
+                }
+            }
             // DeepSeek 网页版 DeepSeekHashV1 PoW 求解（复用原生
             // `bridge::session::deepseek_pow`，仅把既有哈希/穷举暴露给插件宿主）。
             "crypto.deepseek.pow.solve" => self.deepseek_pow_solve(&params).await,
-            _ => Err(WireError::with_code(
-                "插件请求了未支持的主程序能力",
-                WireError::NO_METHOD,
-            )),
+            // Kiro `external-idp` 续期：端点只有插件知道，用注入 egress 换证；
+            // 一次性 refresh_token 靠账号级 CAS 占位防重复消耗。
+            "credential.kiro.external.refresh" => {
+                Box::pin(super::external_refresh::invoke(self, &params)).await
+            }
+            // `request.context`：插件问「本次请求原本是不是客户端要的流式」。
+            // 只有对话请求带这个值；其余调用（目录/签到/登录）如实 forbidden，
+            // 不编默认值——插件据此分支的行为必须建立在真实语义上。
+            "request.context" => {
+                self.permission("request.context.v1")?;
+                if params.as_object().is_none_or(|fields| !fields.is_empty()) {
+                    return Err(WireError::with_code("请求上下文查询不接受参数", "bad_params"));
+                }
+                let client_stream = self.client_stream.ok_or_else(|| {
+                    WireError::with_code("当前调用没有原始对话请求上下文", "forbidden")
+                })?;
+                Ok(json!({ "client_stream": client_stream }))
+            }
+            // 公网图片：只产本次调用资源，不借账号 UA/代理/凭据；见 `resource_fetch`。
+            "resource.fetch_public" => {
+                Box::pin(super::resource_fetch::fetch_public(self, &params)).await
+            }
+            _ => Err(unsupported_method(method)),
         }
     }
 
@@ -647,5 +746,51 @@ mod tests {
         assert_eq!(value["algorithm"], "DeepSeekHashV1");
         assert_eq!(value["answer"], answer);
         assert_eq!(value["target_path"], "/api/v0/chat/completion");
+    }
+
+    // ── 未服务方法的诊断（UNSERVED_METHODS 表）─────────────────────────
+    //
+    // 这张表的价值在于「同名不同因」：名字拼错 → NO_METHOD；名字对但网关没做
+    // → unsupported + 指名能力。再加一道静态自检，防止有人把已经服务的能力
+    // 又写回表里（那会让真能用的方法被误报为未实现）。
+
+    #[test]
+    fn unserved_methods_name_their_capability() {
+        let error = unsupported_method("login.context");
+        assert_eq!(error.code.as_deref(), Some("unsupported"));
+        assert!(
+            error.message.contains("login.managed.v1"),
+            "必须指名是哪项能力未服务，实际: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn unknown_methods_stay_no_method() {
+        let error = unsupported_method("nope.not_a_method");
+        assert_eq!(error.code.as_deref(), Some(WireError::NO_METHOD));
+    }
+
+    #[test]
+    fn unserved_table_never_claims_a_served_capability() {
+        use crate::plugin_host::wasm::manifest;
+        for &(method, capability) in UNSERVED_METHODS {
+            assert!(
+                manifest::CAPABILITIES.iter().any(|item| *item == capability),
+                "{method} 指向的能力 {capability} 必须仍在可声明全集里（否则应整条删除）"
+            );
+            assert!(
+                !manifest::served(capability),
+                "{method} 指向的能力 {capability} 已在已服务表里 —— 要么删掉这条，要么真的实现它"
+            );
+        }
+    }
+
+    #[test]
+    fn unserved_table_has_no_duplicates() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (method, _) in UNSERVED_METHODS {
+            assert!(seen.insert(*method), "UNSERVED_METHODS 里重复登记: {method}");
+        }
     }
 }

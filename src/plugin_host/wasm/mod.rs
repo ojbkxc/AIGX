@@ -46,7 +46,18 @@ pub(crate) mod account_access;
 pub(crate) mod account_origin;
 pub(crate) mod catalog;
 mod context;
+/// 本机客户端登录态读取（`desktop.credentials.read`，账号池「从桌面客户端导入」）。
+///
+/// 依赖 `rusqlite`（quwork / kiro-cli / kuku / doubao 的客户端库都是 SQLite），
+/// 而 `rusqlite` 在 `sqlite-kv` feature 下才是可选依赖 —— 未启用的构建里这个
+/// 模块整块不编，`desktop.credentials.read` 由 `services.rs` 如实回 `unsupported`，
+/// 与仓库里其它 rusqlite 用法（`storage`、`account_login::chatglm`）同一口径。
+#[cfg(feature = "sqlite-kv")]
+pub(crate) mod desktop_credentials;
 pub(crate) mod egress;
+/// Kiro 外部 IdP 续期（`credential.kiro.external.refresh`）：插件注册时写进凭据的
+/// `tokenURL` 只有插件知道，原生续期无从推断。
+pub(crate) mod external_refresh;
 pub(crate) mod errors;
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -63,6 +74,8 @@ pub(crate) mod native;
 #[cfg(test)]
 mod probe;
 mod public_view;
+/// 插件侧公网图片下载（`resource.fetch_public`）：只产本次调用资源，不借账号身份。
+pub(crate) mod resource_fetch;
 mod resources;
 mod runtime;
 mod services;
