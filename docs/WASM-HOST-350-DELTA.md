@@ -152,13 +152,18 @@ AIGX 对齐情况：
 
 ### P1（7 条）
 
-**5. `install.rs` + `operations/management.rs` + `packages.rs` — 单提供商包归一化（#40 #43 #45）**
+**5. `install.rs` + `operations/management.rs` + `packages.rs` — 单提供商包归一化（#40 #43 #45）** ✅ 已落地（2026-11-24）
 
 - 上游在四处同口径落地：`InstalledPack::single_provider_id/normalize_single_provider`（install.rs L298-317）、`PackRegistry::load` 遍历归一（L349-355）、`set_pack_enabled`/`set_provider_enabled` 写回（L608-641）、`operations/management.rs` 的 `PackChange` 分支（L49-70）、`packages.rs` 构造后归一（L143-155）。
-- AIGX 落点：`install.rs`（包注册表）+ `operations.rs`（等价于上游 `operations/management.rs`）两处必须同改，否则读入归一了、写回又写脏。
-- 理由：只改读侧会造成"改完开关下次启动被折回"，开关行为反复。
+- AIGX 实际落点（与审计预设不同）：**脚本包**早已有读写两侧归一（`script/storage.rs:113` 读 + `script/operations.rs:451` 写）；
+  真正缺的是**wasm/原生插件包注册表** `plugin_host/registry.rs`（不是 `script/install.rs`）。已补：
+  `PackMeta::single_provider_id()` / `normalize_single_provider()`（含幂等）、`load()` 读入归一、
+  `set_enabled()` 单家包开包清残留子标记、`set_provider_enabled()` 单家包改包级 `enabled` 且不写子标记名单。
+- 修复的问题：单家包「`enabled=true` + 唯一那家在 `disabled_providers`」的矛盾态下，`provider_enabled()` 判 false
+  不路由，界面显示插件已启用，而该家的子开关在单家包上是隐藏的 → 用户点包开关也解不开。
+- 验收：`registry.rs` 新增 5 个测试（边界/折合幂等/不误伤/load 路径/两个写侧入口自洽，含多提供商包不受影响的反向断言），CI 全绿（67a3a6a8）。
 
-**6. `rpc.rs` — 提供商 web-search 能力未探测（#46）**
+**6. `rpc.rs` — 提供商 web-search 能力未探测（#46）** ✅ 已落地（2026-11-24，探测 + 码透传两面）
 
 - 上游语义：握手后发 `ADMIN_ACTION{action:"web-search.capabilities"}` 拿 `WebSearchCapability` 并实现 `ProviderAdapter::web_search_capability()`（L271-284/L629-634）。
 - AIGX 落点：`rpc.rs` 的 adapter 元数据初始化 + `providers/adapter.rs` 的 trait 实现。
