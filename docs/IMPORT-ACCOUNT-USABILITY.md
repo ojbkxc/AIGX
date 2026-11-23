@@ -189,3 +189,14 @@
 - 仍不可用 33 = 无模型 22（trae/chatglm/codar/catpaw/custom/qwenwork/teleagent/doubaowork）+ 非法模型 5（autoclaw）+ request illegal 3（workbuddy-intl）+ antigravity chat400 1 + trae 上游400 2。
 - 需充值 4（zcode3/xiaohuanxiong1）、需重登 8（qoder）、需最新客户端 1（cline-free）——均为账号态，充值/重登/升级客户端后可复跑。
 - DeepSeek 网页 wasm（#62）宿主已就绪；迁移账号无 deepseek-web 账号，未硬测（插件能力层已通过）。
+
+## 6. 部署后复探活（v1.0.91，2026-11-23）
+
+> 方法：focused 复探（非全量 162）。version.json 确认 = **1.0.91**。autoclaw 5 条 enabled 逐个 `POST /api/account-sessions/catalog/sync {force:true,apply:true}` → 间隔2s → `POST /api/account-sessions/{id}/test`；codearts 取 2 条 expired 账号 `sync {force:true}` 验签名器。严格串行，不打印凭证。
+
+| provider | 覆盖 | sync 结果 | test 结果 | 结论 |
+|---|---|---|---|---|
+| autoclaw | 5/5 enabled | OK(1, count=2)，models=`['glm-5.3','glm-5.3-flash']`（v1.0.90 为 routeId `zaicoding_glm-5.3`） | **仍 FAIL 400「非法模型」**，model=`GLM-5.3`，延迟 268–5544ms | **未转可用**；upstream_key（routeId→真实 name）修复已生效，但 #58 **未闭环**，次因（auth header/body 可能仍需 routeId），根治留 v1.0.92（见 `CATALOG-SYNC-TRIAGE.md §10`） |
+| codearts | 2/10（全 expired） | 两条均 HTTP200，**ok=0 err=1「codearts 三个目录源都没有返回可用模型」**，models 空 | — | **#65 签名器未能端到端验证**；STS 过期，需重登刷新后复验 |
+
+- **可用大盘不变**：v1.0.91 未改变 enabled 121 的可用数（仍 **75 可用**，见 §0）；autoclaw/codearts 受账号态/上游口径限制，非本次发版回归。

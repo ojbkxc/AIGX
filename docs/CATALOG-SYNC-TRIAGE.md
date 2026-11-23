@@ -234,3 +234,64 @@
 - 步骤：`POST /api/account-sessions/catalog/sync`（`force=true`），预期 2xx 且目录含 `agent`/`builtin`（及福利开启时的 `benefit`）来源的模型；再发一条最小对话（`POST /v1/chat/completions`，model 取目录里的名），预期 200。
 - 若 401：先确认 STS 是否过期（24h），再核对 `SignedHeaders` 是否与上游收到的头一致（尤其 `!*'()` 编码与 Host/domain 头取舍）。
 
+## 10. #58 · autoclaw 真实目录 spec 根治 + 鉴权头（后续波，v1.0.92）
+
+> 现状（v1.0.91）：autoclaw 仍走**静态兜底**（`catalog.rs` `spec_for("autoclaw")` 的 `path=""`）。
+> 本轮只把兜底表 `upstream_key` 由路由 id 改成真实 `name`（`GLM-5.3` / `GLM-5.3-FlashX-Legal`），
+> 属**受控尝试**；部署后由 verifier 复探活决定收/不收，**不预先宣称可用**。
+
+### 10.1 实测事实（2026-11-23；只读一次 GET，token 未落文档）
+
+- 端点：`GET https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw-model-config`
+  （A2A `core/providers/adapter.rs:824,837`：目录在“同 host 的 `/proxy/` 一级”，不是对话用的 `/proxy/autoclaw`）。
+- **鉴权头（关键）**：只有 `Authorization: Bearer <jwt>` 返回 200；`x-authorization: Bearer <jwt>` → 401 `{code:401001,"Invalid token"}`。
+  而 `registry.rs` 现有 autoclaw `SessionMeta.headers` 用的是 `x-authorization`。**拉真实目录前必须补/换成 `Authorization`**。
+- 响应 `{"models":[…]}`（顶层 `models` 数组；缺它插件报「上游返回的模型目录缺少 models 数组」）。实测 4 条，字段：
+  `id, name, reasoning, input, contextWindow, maxTokens, icon, iconURL, tooltip,
+   creditConsumptionLevel, creditCostFactor, reasoningLevel, metadata`
+- **id/name 语义**：`id` = 路由键（如 `zaicoding_glm-5.3`），`name` = chat 认的模型名（如 `GLM-5.3`）。
+  把 `id` 当 `model` 发上游 → HTTP 400「非法模型」（业务码 81009）。实测条目：
+  - `zai_auto` / `Auto`（metadata.auto_model_name=deepseek-v4-pro）
+  - `zai_auto-fast` / `Auto-Fast`
+  - `zaicoding_glm-5.3` / `GLM-5.3`（contextWindow=1048576, maxTokens=393216, reasoning=true, input=[text]）
+  - `zai_glm-5.3-flashx-legal` / `GLM-5.3-FlashX-Legal`
+
+### 10.2 根治方案（#56 catalog sync spec 域；勿在 v1.0.91 动）
+
+1. `CatalogSpec.path` 从 `""` 改为命中 `autoclaw-model-config` 的构造。注意它是 chat base
+   `…/proxy/autoclaw` 的**兄弟** `…/proxy/autoclaw-model-config`，**不能**用简单 `base+path` 拼接；
+   需在 `catalog_base_url`/spec 里特判（或调整默认 base 口径）。
+2. 目录请求的鉴权头补 `Authorization: Bearer {credential}`（或为该路径单独覆盖头）。
+3. 解析 `models[]`：`upstream` = `name`（chat 模型名），`id` 作客户端可见名候选；
+   `contextWindow`→context_length、`maxTokens`→输出上限、`reasoning`/`input`(含 `image`)→能力位。
+4. 静态兜底表仅作回源失败兜底；并修正当前 id（`glm-5.3-flash` 并非真实目录 id，
+   真实为 `zai_glm-5.3-flashx-legal`）。
+5. 复验：拉目录含 4 个模型；发一条最小对话（model 取 `name`，如 `GLM-5.3`）预期 200。
+   若仍 400，再核 chat body 是否需 session/agent/route 字段（插件 `plugins/autoclaw/models.rs`+`catalog.rs`，闭源）。
+
+### 10.3 关联
+
+- #58 的探活/数据面已统一走 `resolve_upstream_model` + 账号 `model_aliases`（v1.0.90 已并入）。
+- v1.0.91 的 2 行数据修正见 `catalog.rs` `AUTOCLAW_FALLBACK`（注释 + 两条 `upstream_key`）。
+- 边界：本条属后续波，v1.0.91 的 autoclaw 保持静态兜底，鉴权头不进入该版。
+
+### 10.4 v1.0.92 受控探测更新（chat 契约 —— 结论修正）
+
+2026-11-23 补充（本地 token、未打印）。**推翻了“模型名改对就可用”的假设**：
+
+- **两个端点鉴权不同**：catalog 只认 `Authorization: Bearer`；**chat 端点只认 `x-authorization: Bearer`**（`Authorization` → chat 401 Invalid token；`x-authorization` → 才进模型校验返回 400）。AIGX 现有 chat 用 `x-authorization` 是**对的**。
+- **在正确 chat 鉴权（x-authorization）下，模型值无论取目录哪个都不通**：
+  `GLM-5.3`、`GLM-5.3 + routeId:"zaicoding_glm-5.3"`、`Auto`、`zai_auto`、
+  `GLM-5.3-FlashX-Legal`、`zaicoding_glm-5.3` **全部 400「非法模型」**。
+  → 不是 model 字符串/字段问题，是**请求形态/端点不对**。
+- 插件二进制（`agent2api-providers`）自述：autoclaw chat 走**自定义 OpenClaw agent 协议**——
+  自定义头 `x-autoclaw-session-id` / `x-autoclaw-agent-id` / `x-autoclaw-zcode-invocation-id`、
+  体字段 `routeId`/`sessionId`、系统提示 "You are a personal assistant running inside OpenClaw."；
+  且二进制里 **`/chat/completions` 只出现在 workbuddy/atomcode/lobsterai，没有 autoclaw 的 chat/completions**——
+  autoclaw 的对话很可能是直接 POST 到 `…/autoclaw-proxy/proxy/autoclaw`（自定 RPC），不是 OpenAI 方言。
+
+**修正后的定案**：autoclaw **不能**用通用 OpenAI bridge + 改模型名修好。要真正可用，需从闭源插件移植
+**专用 chat 适配（OpenClaw 协议：session/agent 头 + 自定义 body）**，属**独立波**，超出“最小改动”。
+本波（v1.0.92）可做的仅限：把目录**拉取**接上（catalog 用 `Authorization`）以拿到真实模型清单；
+`/test` 200 需等专用 chat 适配。v1.0.91 已发的 `upstream_key=GLM-5.3` 修正无害但不足以转可用。
+
