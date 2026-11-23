@@ -763,6 +763,22 @@ const ParamGrid = memo(function ParamGrid({
 });
 
 /**
+ * 预设落成模板前是否需要用户确认覆盖。
+ *
+ * 只有「同名模板已存在 **且** 正文不同」才需要确认：
+ * - 不存在同名 → 纯新增，无覆盖风险，直接落。
+ * - 同名且正文完全一致 → 重复点击同一预设，静默幂等（不弹确认）。
+ */
+export function presetApplyNeedsConfirm(
+  templates: Array<{ name: string; text: string }> | undefined,
+  name: string,
+  text: string,
+): boolean {
+  const hit = (templates ?? []).find((tpl) => tpl.name === name);
+  return hit !== undefined && hit.text !== text;
+}
+
+/**
  * 列表条目 + `model_match`。
  *
  * `model_match` 是后端「模型→预设」匹配结果（exact / vendor / mismatch / unknown），
@@ -789,11 +805,14 @@ const PresetsSection = memo(function PresetsSection({
   addToast,
   onApplyTemplate,
   onSkillWritten,
+  currentTemplates,
 }: {
   t: TFunction;
   addToast: (message: string, type?: 'success' | 'error' | 'warning') => void;
   onApplyTemplate: (name: string, text: string) => void;
   onSkillWritten: () => void;
+  /** 草稿里的现有模板（覆盖同名时先确认） */
+  currentTemplates?: Array<{ name: string; text: string }>;
 }): JSX.Element {
   const [q, setQ] = useState('');
   const [debouncedQ, setDebouncedQ] = useState('');
@@ -805,6 +824,10 @@ const PresetsSection = memo(function PresetsSection({
   const [detail, setDetail] = useState<PurgePresetDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  /** 待确认的覆盖（同名模板正文不同；null = 无待确认） */
+  const [confirmOverwrite, setConfirmOverwrite] = useState<
+    { id: string; name: string; text: string } | null
+  >(null);
   /**
    * 当前默认模型（后端 settings 的 default_model）：预设列表按它做模型匹配。
    * 取数口径与「系统设置 → 运维 → 客户端兼容」一致，走 api.getLimits() 的 defaultModel。
@@ -934,6 +957,11 @@ const PresetsSection = memo(function PresetsSection({
       try {
         const full = await fetchBody(id);
         if (!full) throw new Error('detail failed');
+        // 同名且正文不同 → 覆盖前确认（就地二段按钮，不引弹窗栈）
+        if (presetApplyNeedsConfirm(currentTemplates, full.title, full.body)) {
+          setConfirmOverwrite({ id, name: full.title, text: full.body });
+          return;
+        }
         onApplyTemplate(full.title, full.body);
         addToast(t('已写入模板草稿，点底部「保存」后生效'), 'success');
         // 写入后立即把模板编辑区带到眼前并闪一下（词表很长时落点在页面底部）
@@ -944,8 +972,18 @@ const PresetsSection = memo(function PresetsSection({
         setBusy(null);
       }
     },
-    [addToast, fetchBody, onApplyTemplate, t],
+    [addToast, currentTemplates, fetchBody, onApplyTemplate, t],
   );
+
+  /** 用户在覆盖确认里点「覆盖」：真正落草稿 */
+  const confirmOverwriteAndApply = useCallback((): void => {
+    const pending = confirmOverwrite;
+    if (!pending) return;
+    setConfirmOverwrite(null);
+    onApplyTemplate(pending.name, pending.text);
+    addToast(t('已覆盖同名模板草稿，点底部「保存」后生效'), 'success');
+    focusFixTarget('templates');
+  }, [addToast, confirmOverwrite, onApplyTemplate, t]);
 
   const handleCopy = useCallback(
     async (id: string): Promise<void> => {
@@ -1088,6 +1126,24 @@ const PresetsSection = memo(function PresetsSection({
                         {busy === `skill:${item.id}` ? t('处理中…') : t('写入技能目录')}
                       </Button>
                     </div>
+                    {/* 覆盖同名模板的就地二段确认（不引弹窗栈） */}
+                    {confirmOverwrite && confirmOverwrite.id === item.id ? (
+                      <div className="purge-warning-box" role="alert" data-testid="purge-preset-overwrite-confirm">
+                        <p className="purge-warning-row">
+                          <span>
+                            {t('草稿里已有同名模板「{{name}}」且内容不同，继续将覆盖它。', {
+                              name: confirmOverwrite.name,
+                            })}
+                          </span>
+                          <Button variant="outline" size="sm" onClick={confirmOverwriteAndApply}>
+                            {t('覆盖')}
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={() => setConfirmOverwrite(null)}>
+                            {t('取消')}
+                          </Button>
+                        </p>
+                      </div>
+                    ) : null}
                     {detailLoading ? (
                       <SkeletonList rows={6} />
                     ) : (
@@ -2209,6 +2265,7 @@ export default function PurgeConsole(): JSX.Element {
         t={t}
         addToast={addToast}
         onApplyTemplate={applyPresetTemplate}
+        currentTemplates={draft?.structured_templates}
         onSkillWritten={() => void refreshSkills()}
       />
 

@@ -5,10 +5,35 @@ import {
   parsePreviewMessages,
   parseRulesCsv,
   parseTemplateJson,
+  presetApplyNeedsConfirm,
   previewHistoryLabel,
   readPreviewHistory,
   writePreviewHistory,
 } from './PurgeConsole';
+
+describe('presetApplyNeedsConfirm', () => {
+  const existing = [
+    { name: 'A', text: 'text-a' },
+    { name: 'B', text: 'text-b' },
+  ];
+
+  it('无同名 → 不需要确认（纯新增）', () => {
+    expect(presetApplyNeedsConfirm(existing, 'C', 'whatever')).toBe(false);
+  });
+
+  it('同名同正文 → 不需要确认（幂等重复点击）', () => {
+    expect(presetApplyNeedsConfirm(existing, 'A', 'text-a')).toBe(false);
+  });
+
+  it('同名不同正文 → 需要确认（会覆盖用户手改）', () => {
+    expect(presetApplyNeedsConfirm(existing, 'A', 'edited')).toBe(true);
+  });
+
+  it('空/未定义模板表 → 不需要确认', () => {
+    expect(presetApplyNeedsConfirm(undefined, 'A', 'x')).toBe(false);
+    expect(presetApplyNeedsConfirm([], 'A', 'x')).toBe(false);
+  });
+});
 
 describe('parseTemplateJson', () => {
   it('单对象 / 数组 / 配置级 {structured_templates} 三形态', () => {

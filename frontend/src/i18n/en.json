@@ -5007,6 +5007,8 @@
   "{{n}} 个命中技能因长度上限未注入": "{{n}} matched skills not injected (length limit)",
   "加载更多（还有 {{n}} 条）": "Load more ({{n}} left)",
   "启用该条改写规则": "Enable this rewrite rule",
+  "草稿里已有同名模板「{{name}}」且内容不同，继续将覆盖它。": "A draft template named \"{{name}}\" already exists with different content; continuing will overwrite it.",
+  "已覆盖同名模板草稿，点底部「保存」后生效": "Overwrote the same-named template draft; click Save to apply",
   "导入的 {{count}} 条规则的原文全部与当前词表重复，未追加（可能导错了文件？）": "All {{count}} imported rules duplicate existing 'from' entries in this word list; nothing appended (wrong file?)",
   "其中 {{n}} 条与现有词表原文重复（保存时后端只保留最早一条）": "{{n}} of them duplicate existing 'from' entries (backend keeps the earliest on save)"
 }
