@@ -1684,7 +1684,13 @@ export default function PurgeConsole(): JSX.Element {
         );
       }
     } catch {
-      addToast(t('预览失败'), 'error');
+      // 失败要清掉上一次的结果区：否则界面留着旧 diff，而输入框已经是
+      // 新内容——看上去像「这个新输入预览出来是这样」，属误导。
+      setPreviewOut(null);
+      setPreviewBase(null);
+      setPreviewMeta(null);
+      setPreviewDetail(null);
+      addToast(t('预览失败（上一次结果已清空，避免与新输入混淆）'), 'error');
     } finally {
       setPreviewing(false);
     }
