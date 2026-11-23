@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_unknown_provider_with_unavailable_code() {
-        let error = read("qwen").err().expect("未知 provider 必须失败");
+        let error = read("qwen").expect_err("未知 provider 必须失败");
         assert_eq!(
             error.code.as_deref(),
             Some("desktop_credentials_unavailable")

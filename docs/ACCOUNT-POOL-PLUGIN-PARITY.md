@@ -1,4 +1,4 @@
-# 账号池插件能力对齐：AIGX × Agent2API v3.5.0-beta.7（WASM 宿主面）
+﻿# 账号池插件能力对齐：AIGX × Agent2API v3.5.0-beta.7（WASM 宿主面）
 
 > 审计日期：2026-11-23
 > 上游：`D:\GitHub\Agent2API` tag `v3.5.0-beta.7`（`HEAD` 与 tag 同一提交 `d20e8501`）
@@ -13,7 +13,7 @@
 | `plugin_host/wasm` 文件数 | 218 | 26 | 39 |
 | `plugin_host/wasm` 行数 | 39 149 | 9 164 | 12 402 |
 | `services.rs` 能力分派臂 | 38 | 22 | 25 |
-| 已服务能力（`SERVED_CAPABILITIES`） | 见上游表 | 27 项 | 31 项（+`desktop.credentials.v1`、+`runtime.platform.v1`、+`runtime.architecture.v1`、+`request.context.v1`、+`credential.kiro-external-refresh.v1`、+`resources.fetch-public.v1`，−`checkin.rolling.v1`、−`verification.claim.v1` 两项虚报） |
+| 已服务能力（`SERVED_CAPABILITIES`） | 见上游表 | 27 项 | 32 项（+`desktop.credentials.v1`、+`runtime.platform.v1`、+`runtime.architecture.v1`、+`request.context.v1`、+`credential.kiro-external-refresh.v1`、+`resources.fetch-public.v1`，−`checkin.rolling.v1` 虚报；`verification.claim.v1` 复核后保留——它闸的租约 AIGX 真服务，三个动作由 `servedActions` 单独标 false） |
 
 **本轮落地（账号池主线）**：`desktop.credentials.read` —— 本机客户端登录态读取，
 **17 家 provider** 的固定来源读取器（含 `autoclaw`/`autoclaw-intl`/`doubaowork` 的
@@ -163,7 +163,7 @@ node tools/account-pool-plugin-parity.mjs --write-baseline   # 人工确认后�
 | `cargo check`（改动中段，含 12 个读取器 + 闸门 + 分派） | ✅ `Finished dev profile`，零 error | 本机增量检查（此后按全局约定停止本机编译；后续 `runtime.*` 两臂与 autoclaw/doubao 三文件未本机编译） |
 | `cargo fmt` | ✅ 已应用、`--check` 清洁 | 本机 |
 | `cargo clippy --all-targets -- -D warnings` | ⏳ 待远端/CI | 本机仅跑到「5 条 lint 全在 `loomy.rs`」，已逐条修掉（doc list 缩进、`is_multiple_of`、两处 `chunks_exact→as_chunks`、`collapsible_if`），修复后**未再本机编译** |
-| `SERVED_CAPABILITIES` | ✅ 27→31：新增 `desktop.credentials.v1`/`runtime.platform.v1`/`runtime.architecture.v1`/`request.context.v1`/`credential.kiro-external-refresh.v1`/`resources.fetch-public.v1`；**移除两项虚报** `checkin.rolling.v1`、`verification.claim.v1` | 代码审阅 + 静态扫描（`servedWithoutGuard` = 0） |
+| `SERVED_CAPABILITIES` | ✅ 27→32：新增 `desktop.credentials.v1`/`runtime.platform.v1`/`runtime.architecture.v1`/`request.context.v1`/`credential.kiro-external-refresh.v1`/`resources.fetch-public.v1`；移除虚报 `checkin.rolling.v1`；`verification.claim.v1` 保留（租约真服务，动作由 `servedActions` 标 false） | 代码审阅 + 静态扫描（`servedWithoutGuard` = 0） |
 | 手工核对：插件调用面 | `desktop.credentials.read` 走 `permission("desktop.credentials.v1")` + `helpers` 声明 + 归属/作用域 | 代码审阅 |
 | 单元测试（新增，`desktop_credentials.rs` 内 `mod tests`） | 8 个：helper 表覆盖 17 家与命名段、未知 provider 的 `desktop_credentials_unavailable`、`project` 投影只留白名单键、`content` 信封形状、`object` 上限/非对象/空文件、unix symlink 拒收、`catpaw_field` 头注入字符、导入作用域一次性 | 待 CI（`cargo test --offline plugin_host::wasm`） |
 
@@ -243,7 +243,7 @@ cargo check --no-default-features --features sea-orm,mysql
 ```text
 M src/plugin_host/wasm/mod.rs          # 模块声明（desktop_credentials 按 sqlite-kv 门控）
 M src/plugin_host/wasm/services.rs     # 7 条新分派臂 + UNSERVED_METHODS 诊断表 + 4 个测试
-M src/plugin_host/wasm/manifest.rs     # 已服务能力 27→31，移除 2 项虚报，注释写明理由
+M src/plugin_host/wasm/manifest.rs     # 已服务能力 27→32，移除 1 项虚报（checkin.rolling.v1），注释写明理由
 M src/plugin_host/wasm/context.rs      # Context.client_stream
 M src/bridge/plugin.rs                 # 对话请求参数补 client_stream
 M src/api/admin/account_sessions.rs    # 插件登录 RPC 包 import_scope（按 feature 分支）

@@ -51,7 +51,7 @@ const UNSERVED_METHODS: &[(&str, &str)] = &[
     ("protocol.push", "protocol.convert.v1"),
     ("protocol.close", "protocol.convert.v1"),
     ("checkin.claim", "checkin.rolling.v1"),
-    ("claim.status", "verification.claim.v1"),
+    ("captcha.push", "verification.account.v1"),
     ("claim.verification.poll", "verification.account.v1"),
     ("claim.verification.complete", "verification.account.v1"),
     ("resource.cookie-file.take", "resources.cookie-file.v1"),
@@ -782,9 +782,7 @@ mod tests {
         use crate::plugin_host::wasm::manifest;
         for &(method, capability) in UNSERVED_METHODS {
             assert!(
-                manifest::CAPABILITIES
-                    .iter()
-                    .any(|item| *item == capability),
+                manifest::CAPABILITIES.contains(&capability),
                 "{method} 指向的能力 {capability} 必须仍在可声明全集里（否则应整条删除）"
             );
             assert!(

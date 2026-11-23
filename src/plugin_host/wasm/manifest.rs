@@ -136,10 +136,11 @@ pub const SERVED_CAPABILITIES: &[&str] = &[
     // wasm 宿主没有对应的 checkin 执行入口。声明放行（`CAPABILITIES`）保留前向兼容，
     // 但不在这里虚报已服务——否则插件会以为签到走宿主，实际拿到 NO_METHOD。
     "errors.v1",
-    // `verification.claim.v1` 同样不进已服务表：它闸的是 `captcha.push` /
-    // `claim.verification.poll|complete` 这三个**验证执行上下文内**的动作，
-    // AIGX 只落地了租约（`verification.lease.*`），没有验证执行器，
-    // 三个动作在服务端无处可达。声明放行保留，已服务不虚报。
+    // `verification.claim.v1` 闸两样东西：租约（`verification.lease.*`，AIGX 已实现）
+    // 与三个验证执行动作（`captcha.push` / `claim.verification.poll|complete`，AIGX
+    // 没有验证执行器）。租约是真服务的，所以这项留在已服务表；三个动作在
+    // `contract()` 里由 `servedActions`（= `verification.account.v1`）单独标 false。
+    "verification.claim.v1",
     "http.managed-task.v1",
     "http.account-origin.v1",
     "crypto.deepseek-pow.v1",
