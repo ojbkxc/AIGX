@@ -111,8 +111,7 @@ fn projected(token: String, refresh: String, original: &Value) -> Value {
 
 /// `desktop.credentials.read` 的 AutoClaw 分支：定位 → 读 → 解封 → 投影 → 包信封。
 pub(super) fn read(provider: &str) -> Result<Value, WireError> {
-    let root = absolute_env("AUTOCLAW_USER_DATA_DIR")
-        .unwrap_or(app_data()?.join("AutoClaw"));
+    let root = absolute_env("AUTOCLAW_USER_DATA_DIR").unwrap_or(app_data()?.join("AutoClaw"));
     let path = root.join("auth.json");
     let mut response = if path.exists() {
         let value = object(&path, AUTH_MAXIMUM)?;

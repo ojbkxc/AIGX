@@ -55,7 +55,10 @@ const UNSERVED_METHODS: &[(&str, &str)] = &[
     ("claim.verification.poll", "verification.account.v1"),
     ("claim.verification.complete", "verification.account.v1"),
     ("resource.cookie-file.take", "resources.cookie-file.v1"),
-    ("runtime.client_fingerprint", "runtime.client-fingerprint.v1"),
+    (
+        "runtime.client_fingerprint",
+        "runtime.client-fingerprint.v1",
+    ),
     ("credentials.legacy.take", "credentials.legacy-import.v1"),
     ("crypto.monkeycode.cap.solve", "crypto.monkeycode-cap.v1"),
 ];
@@ -583,7 +586,10 @@ impl Context {
             "request.context" => {
                 self.permission("request.context.v1")?;
                 if params.as_object().is_none_or(|fields| !fields.is_empty()) {
-                    return Err(WireError::with_code("请求上下文查询不接受参数", "bad_params"));
+                    return Err(WireError::with_code(
+                        "请求上下文查询不接受参数",
+                        "bad_params",
+                    ));
                 }
                 let client_stream = self.client_stream.ok_or_else(|| {
                     WireError::with_code("当前调用没有原始对话请求上下文", "forbidden")
@@ -776,7 +782,9 @@ mod tests {
         use crate::plugin_host::wasm::manifest;
         for &(method, capability) in UNSERVED_METHODS {
             assert!(
-                manifest::CAPABILITIES.iter().any(|item| *item == capability),
+                manifest::CAPABILITIES
+                    .iter()
+                    .any(|item| *item == capability),
                 "{method} 指向的能力 {capability} 必须仍在可声明全集里（否则应整条删除）"
             );
             assert!(
@@ -790,7 +798,10 @@ mod tests {
     fn unserved_table_has_no_duplicates() {
         let mut seen = std::collections::BTreeSet::new();
         for (method, _) in UNSERVED_METHODS {
-            assert!(seen.insert(*method), "UNSERVED_METHODS 里重复登记: {method}");
+            assert!(
+                seen.insert(*method),
+                "UNSERVED_METHODS 里重复登记: {method}"
+            );
         }
     }
 }

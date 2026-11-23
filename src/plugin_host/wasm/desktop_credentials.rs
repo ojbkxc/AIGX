@@ -412,7 +412,10 @@ mod tests {
                 id.starts_with("desktop.credentials."),
                 "{provider} 的 helper id 命名越界: {id}"
             );
-            assert!(id.ends_with(".v1"), "{provider} 的 helper id 缺版本段: {id}");
+            assert!(
+                id.ends_with(".v1"),
+                "{provider} 的 helper id 缺版本段: {id}"
+            );
         }
         assert_eq!(helper("qwen"), None, "未知 provider 不能有 helper");
         assert_eq!(helper(""), None);
@@ -421,7 +424,10 @@ mod tests {
     #[test]
     fn dispatch_rejects_unknown_provider_with_unavailable_code() {
         let error = read("qwen").err().expect("未知 provider 必须失败");
-        assert_eq!(error.code.as_deref(), Some("desktop_credentials_unavailable"));
+        assert_eq!(
+            error.code.as_deref(),
+            Some("desktop_credentials_unavailable")
+        );
         // 大小写不敏感不能放宽：分派只认注册表里的小写 id。
         assert!(read("Kiro").is_err(), "provider 必须精确匹配");
     }
@@ -445,8 +451,8 @@ mod tests {
             json!(digest(path.to_string_lossy().as_bytes()))
         );
         assert_eq!(envelope["sourceRevision"], json!(expected_revision));
-        let inner: Value =
-            serde_json::from_str(envelope["content"].as_str().unwrap_or("")).expect("content 是 JSON");
+        let inner: Value = serde_json::from_str(envelope["content"].as_str().unwrap_or(""))
+            .expect("content 是 JSON");
         assert_eq!(inner, json!({"token": "t"}));
     }
 

@@ -115,8 +115,8 @@ fn form_encode(pairs: &[(&str, &str)]) -> String {
                 out.push('=');
             }
             for byte in part.as_bytes() {
-                let keep = byte.is_ascii_alphanumeric()
-                    || matches!(*byte, b'-' | b'.' | b'_' | b'~');
+                let keep =
+                    byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~');
                 if keep {
                     out.push(*byte as char);
                 } else {
@@ -200,7 +200,11 @@ pub(super) async fn invoke(context: &mut Context, params: &Value) -> Result<Valu
         return Err(unavailable());
     }
     let account = context.account()?.to_string();
-    let record = context.shared.accounts.store_get(&provider, &account).await?;
+    let record = context
+        .shared
+        .accounts
+        .store_get(&provider, &account)
+        .await?;
     let secret = secret_of(&record);
     if text(&secret, &["method"]) != "external-idp" {
         return Err(unavailable());
@@ -255,10 +259,7 @@ pub(super) async fn invoke(context: &mut Context, params: &Value) -> Result<Valu
         return Err(unavailable());
     }
     let access = text(&value, &["access_token"]);
-    if access.is_empty()
-        || access.len() > 8192
-        || access.chars().any(char::is_control)
-    {
+    if access.is_empty() || access.len() > 8192 || access.chars().any(char::is_control) {
         return Err(unavailable());
     }
     let next_refresh = text(&value, &["refresh_token"]);
@@ -269,7 +270,11 @@ pub(super) async fn invoke(context: &mut Context, params: &Value) -> Result<Valu
         .and_then(|value| super::now_ms().checked_add(value));
 
     // ── 换证期间账号被改过就作废结果（同上游 `current()`）────────────
-    let after = context.shared.accounts.store_get(&provider, &account).await?;
+    let after = context
+        .shared
+        .accounts
+        .store_get(&provider, &account)
+        .await?;
     if secret_of(&after) != secret {
         return Err(changed());
     }

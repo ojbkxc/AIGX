@@ -55,10 +55,10 @@ mod context;
 #[cfg(feature = "sqlite-kv")]
 pub(crate) mod desktop_credentials;
 pub(crate) mod egress;
+pub(crate) mod errors;
 /// Kiro 外部 IdP 续期（`credential.kiro.external.refresh`）：插件注册时写进凭据的
 /// `tokenURL` 只有插件知道，原生续期无从推断。
 pub(crate) mod external_refresh;
-pub(crate) mod errors;
 #[cfg(test)]
 pub(crate) mod fixture;
 mod host;

@@ -131,7 +131,10 @@ pub(super) async fn fetch_public(
 ) -> Result<Value, WireError> {
     context.permission("resources.fetch-public.v1")?;
     context.permission("resources.v1")?;
-    if params.as_object().is_none_or(|fields| fields.len() != 1 || !fields.contains_key("url")) {
+    if params
+        .as_object()
+        .is_none_or(|fields| fields.len() != 1 || !fields.contains_key("url"))
+    {
         return Err(bad_params("公共图片下载只接受 url 参数"));
     }
     let url = params["url"]
@@ -252,6 +255,10 @@ mod tests {
     fn chunk_size_stays_within_append_limit() {
         // 分片 base64 后必须 ≤ resources 的 96 KiB 上限，否则 append 会整批失败。
         let encoded = base64::engine::general_purpose::STANDARD.encode(vec![0u8; CHUNK_BYTES]);
-        assert!(encoded.len() <= 96 * 1024, "分片编码后 {} 字节超限", encoded.len());
+        assert!(
+            encoded.len() <= 96 * 1024,
+            "分片编码后 {} 字节超限",
+            encoded.len()
+        );
     }
 }

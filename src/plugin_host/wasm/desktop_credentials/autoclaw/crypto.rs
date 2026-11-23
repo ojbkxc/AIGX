@@ -71,7 +71,9 @@ pub(super) fn decrypt(raw: &str, local_state: &[u8]) -> Result<String, WireError
     let token = token.strip_prefix("Bearer ").unwrap_or(token);
     if token.is_empty()
         || token.len() > 32768
-        || token.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        || token
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
     {
         return Err(invalid());
     }

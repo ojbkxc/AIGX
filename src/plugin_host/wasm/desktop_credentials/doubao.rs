@@ -140,11 +140,12 @@ mod windows {
             let copy = snapshot(&source)?;
             let path = copy.join("Cookies");
             // 一致性副本只读打开：与父模块 `database()` 同口径，绝不给客户端库加写锁。
-    let db = rusqlite::Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| invalid())?;
+            let db = rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|_| invalid())?;
             let version: i64 = db
                 .query_row(
                     "SELECT CAST(value AS INTEGER) FROM meta WHERE key='version'",
@@ -435,8 +436,7 @@ mod windows {
         for suffix in SUFFIXES {
             let from = sidecar(source, suffix);
             if from.try_exists().map_err(|_| invalid())? {
-                std::fs::copy(&from, sidecar(&target, suffix))
-                    .map_err(|_| invalid())?;
+                std::fs::copy(&from, sidecar(&target, suffix)).map_err(|_| invalid())?;
             }
         }
         let info = std::fs::metadata(&target).map_err(|_| invalid())?;
