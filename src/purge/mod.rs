@@ -523,9 +523,26 @@ pub struct RunSnapshot {
 /// 上次运行快照的 KV 键。
 pub const PURGE_LAST_RUN_KEY: &str = "purge:last-run";
 
-/// 读取上次运行快照（无记录 / 解析失败 → None）。启动时调一次即可。
+/// 读取上次运行快照（无记录 / 解析失败 / 值不合理 → None）。
+///
+/// **校验**：`saved_at` 必须是正数（unix 秒），`uptime_secs` 不得超过
+/// 一年——磁盘被人手改坏、或早期版本写过别的形状时，宁可当作「无记录」
+/// 也不要把离谱数字喂给管理面（界面上会出现「运行 584 年」这类内容）。
 pub fn load_last_run(store: &FileStore) -> Option<RunSnapshot> {
-    store.get::<RunSnapshot>(PURGE_LAST_RUN_KEY).ok().flatten()
+    let snapshot = store
+        .get::<RunSnapshot>(PURGE_LAST_RUN_KEY)
+        .ok()
+        .flatten()?;
+    const MAX_UPTIME_SECS: u64 = 366 * 24 * 3600;
+    if snapshot.saved_at <= 0 || snapshot.uptime_secs > MAX_UPTIME_SECS {
+        tracing::warn!(
+            "[Purge] 上次运行快照数值不合理（saved_at={}, uptime={}），按无记录处理",
+            snapshot.saved_at,
+            snapshot.uptime_secs
+        );
+        return None;
+    }
+    Some(snapshot)
 }
 
 /// 落盘本次运行的统计快照（关机路径调用；失败只记日志，不影响关机）。
@@ -2386,6 +2403,63 @@ mod tests {
             messages[0].content.as_deref(),
             Some("prompt\n\nDEFAULT-SUFFIX")
         );
+    }
+
+    /// 上次运行快照的读侧校验：坏值当无记录（不把离谱数字送到管理面）。
+    #[test]
+    fn load_last_run_rejects_implausible_values() {
+        let dir = std::env::temp_dir().join(format!(
+            "aigx-purge-lastrun-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::storage::FileStore::new(dir.clone());
+
+        // 无记录
+        assert!(load_last_run(&store).is_none(), "空库应返回 None");
+
+        // 合理值 → 读回
+        let ok = RunSnapshot {
+            saved_at: 1_800_000_000,
+            uptime_secs: 3_600,
+            stats: PurgeStats::default(),
+        };
+        store.put(PURGE_LAST_RUN_KEY, &ok).unwrap();
+        let read = load_last_run(&store).expect("合理值应能读回");
+        assert_eq!(read.saved_at, 1_800_000_000);
+        assert_eq!(read.uptime_secs, 3_600);
+
+        // saved_at <= 0 → 拒收
+        store
+            .put(
+                PURGE_LAST_RUN_KEY,
+                &RunSnapshot {
+                    saved_at: 0,
+                    uptime_secs: 10,
+                    stats: PurgeStats::default(),
+                },
+            )
+            .unwrap();
+        assert!(load_last_run(&store).is_none(), "saved_at=0 应拒收");
+
+        // uptime 超过一年 → 拒收（界面不显示「运行 584 年」）
+        store
+            .put(
+                PURGE_LAST_RUN_KEY,
+                &RunSnapshot {
+                    saved_at: 1_800_000_000,
+                    uptime_secs: 366 * 24 * 3600 + 1,
+                    stats: PurgeStats::default(),
+                },
+            )
+            .unwrap();
+        assert!(load_last_run(&store).is_none(), "超长 uptime 应拒收");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
