@@ -70,6 +70,8 @@ pub const CAPABILITIES: &[&str] = &[
     "login.callback.v1",
     "login.captcha.geetest.v1",
     "login.captcha.alicom4.v1",
+    // v3.5.1 新增：codar 的短信 Alicom4 人机验证流（挑战应答链）。
+    "login.sms.alicom4.v1",
     "native.helpers.v1",
     "settings.schema.v1",
     "login.sms.v1",
@@ -342,10 +344,18 @@ pub fn read_manifest(dir: &Path, pack: &serde_json::Value) -> Result<Option<Wasm
         ("desktop.launch.v1", &["accounts.cas.v1"][..]),
         ("login.interaction.v1", &["login.forms.v1", "state.v1"][..]),
         ("login.captcha.geetest.v1", &["login.interaction.v1"][..]),
+        // v3.5.1：短信 Alicom4 人机验证 — 依赖短信与 Alicom4 验证码声明。
+        (
+            "login.sms.alicom4.v1",
+            &["login.sms.v1", "login.captcha.alicom4.v1"][..],
+        ),
     ] {
         if requires(capability) && dependencies.iter().any(|dependency| !requires(dependency)) {
             return Err(format!("Wasm 能力 {capability} 缺少依赖声明"));
         }
+    }
+    if requires("login.sms.alicom4.v1") && providers[0] != "codar" {
+        return Err("短信 Alicom4 人机验证能力不能跨提供商使用".into());
     }
     if !(8..=128).contains(&spec.memory_mib) || !(1..=16).contains(&spec.concurrency) {
         return Err("Wasm 资源声明超出允许范围（内存 8–128 MiB，并发 1–16）".into());
@@ -651,12 +661,12 @@ mod tests {
     }
 
     #[test]
-    fn capability_whitelist_matches_beta8() {
-        // 对齐 Agent2API v3.5.0-beta.8 CAPABILITIES 全集（beta.4 移除
+    fn capability_whitelist_matches_v351() {
+        // 对齐 Agent2API v3.5.1 CAPABILITIES 全集（beta.4 移除
         // credential.cline-free-refresh.v1，beta.6 移除 credential.codearts-refresh.v1，
-        // beta.8 移除 credentials.legacy-import.v1），+crypto.deepseek-pow.v1
-        // （AIGX 扩展超上游）=> 54 项。
-        assert_eq!(CAPABILITIES.len(), 54);
+        // beta.8 移除 credentials.legacy-import.v1，v3.5.1 新增 login.sms.alicom4.v1
+        // +crypto.deepseek-pow.v1（AIGX 扩展超上游）=> 55 项。
+        assert_eq!(CAPABILITIES.len(), 55);
         assert!(!CAPABILITIES.contains(&"credential.cline-free-refresh.v1"));
         assert!(!CAPABILITIES.contains(&"credential.codearts-refresh.v1"));
         assert!(!CAPABILITIES.contains(&"credentials.legacy-import.v1"));
