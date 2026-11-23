@@ -2293,7 +2293,7 @@ export default function PurgeConsole(): JSX.Element {
                         const names = previewDetail.skill_names
                           .map((n) => (kw.has(n) ? `${n}（${t('命中关键词')} "${kw.get(n)}"）` : n))
                           .join(', ');
-                        return `${t('命中技能')}：${names}${previewDetail.skill_truncated ? ` (${t('已截断')})` : ''}`;
+                        return `${t('命中技能')}：${names}${previewDetail.skill_truncated ? ` (${t('已截断')})` : ''}${previewDetail.skill_dropped ? ` · ${t('{{n}} 个命中技能因长度上限未注入', { n: previewDetail.skill_dropped })}` : ''}`;
                       })()
                     : '',
                 ]

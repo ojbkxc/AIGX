@@ -443,6 +443,10 @@ pub struct AppliedDetail {
     /// 每个命中技能触发匹配的关键词（`(技能名, 关键词)`；同一技能多词命中
     /// 只记第一个）。与 `skill_names` 同序，预览面回显「为什么命中了它」。
     pub skill_keywords: Vec<(String, String)>,
+    /// 因 `skill_inject_limit` 长度上限**没被注入**的命中技能个数
+    /// （与 `skill_truncated` 的 16 个名额上限是两回事）。预览面提示
+    /// 「还有 N 个命中技能因长度上限未注入」。
+    pub skill_dropped: u32,
 }
 
 /// 进程级持有者：每请求快照（Arc clone），保存即生效。
@@ -1500,7 +1504,10 @@ fn inject_skills(
         );
         let remaining = limit.saturating_sub(used);
         if remaining == 0 {
-            break;
+            // 长度上限已满：这个技能虽命中但装不下了。继续数完剩余命中
+            //（只计数，不再拼正文）——预览面要报「还有 N 个没进去」。
+            detail.skill_dropped += 1;
+            continue;
         }
         let piece: String = if candidate.chars().count() > remaining {
             candidate.chars().take(remaining).collect()
@@ -1510,7 +1517,7 @@ fn inject_skills(
         used += piece.chars().count();
         block.push_str(&piece);
         if used >= limit {
-            break;
+            continue;
         }
     }
 
@@ -1915,6 +1922,54 @@ mod tests {
         let content = messages[0].content.as_deref().unwrap();
         let appended = content.strip_prefix("network problem").unwrap();
         assert!(appended.chars().count() <= 40, "追加块超上限: {appended}");
+        // 单技能被截断装填：没有「额外命中被丢」——dropped 计 0
+        assert_eq!(applied.detail.skill_dropped, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 长度上限装满后**还有其它命中技能** → skill_dropped 计数「没进去的」。
+    #[test]
+    fn skill_dropped_counts_hits_beyond_length_limit() {
+        let dir = std::env::temp_dir().join(format!(
+            "aigx-purge-drop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 三个技能都命中关键词 net；limit 只够第一条装满。
+        // 扫描只认各子目录里的 SKILL.md（数据面同一入口），不能同目录改名。
+        for (name, suffix) in [("first", "-1"), ("second", "-2"), ("third", "-3")] {
+            let sub = dir.join(suffix);
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(
+                sub.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\ndescription: net\n---\n{}",
+                    "Y".repeat(100)
+                ),
+            )
+            .unwrap();
+        }
+
+        let mut messages = vec![user("network problem")];
+        let mut cfg = enabled();
+        cfg.skill_inject = true;
+        cfg.skill_dir = dir.to_string_lossy().to_string();
+        cfg.skill_inject_limit = 50;
+
+        let applied = apply_messages(&mut messages, &cfg);
+        assert!(applied.skill_hit);
+        // 三个技能都命中（skill_names 满额记录），只有第一个完整进块
+        assert_eq!(applied.detail.skill_names.len(), 3);
+        assert_eq!(applied.detail.skill_dropped, 2, "后两个装不下应计数");
+        // 注入块仍不超 limit
+        let content = messages[0].content.as_deref().unwrap();
+        let appended = content.strip_prefix("network problem").unwrap();
+        assert!(appended.chars().count() <= 50);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -2783,6 +2783,8 @@ export interface PurgeAppliedDetail {
   skill_truncated?: boolean;
   /** 每个命中技能触发匹配的关键词 `[技能名, 关键词]`（与 skill_names 同序） */
   skill_keywords?: Array<[string, string]>;
+  /** 因 skill_inject_limit 长度上限未被注入的命中技能个数 */
+  skill_dropped?: number;
 }
 
 /** POST /api/purge/preview 的 data 结构（dry-run 试跑结果） */
