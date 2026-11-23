@@ -1391,6 +1391,27 @@ pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
             ),
         });
     }
+    // 异源模型列表里有重复项：`normalize` 只 trim/去空不去重，重复项会让
+    // 候选计划对同一模型反复尝试（同渠道虽被去重挡掉，但每次都要重解析
+    // 一次桥接与定价），既浪费又是配置脏信号。
+    if cfg.cross_source_fallback {
+        let mut seen = std::collections::HashSet::new();
+        let dupes: Vec<&str> = cfg
+            .fallback_models
+            .iter()
+            .map(|m| m.as_str())
+            .filter(|m| !seen.insert(m.to_ascii_lowercase()))
+            .collect();
+        if !dupes.is_empty() {
+            warnings.push(ConfigWarning {
+                code: "fallback_duplicate",
+                message: format!(
+                    "异源模型列表里有重复项：{}。重复项会让同一模型被反复尝试，请去重。",
+                    dupes.join("、")
+                ),
+            });
+        }
+    }
     if cfg.skill_inject && skills_for(&cfg.skill_dir).is_empty() {
         warnings.push(ConfigWarning {
             code: "skill_dir_empty",
@@ -2432,6 +2453,31 @@ mod tests {
             messages[0].content.as_deref(),
             Some("prompt\n\nDEFAULT-SUFFIX")
         );
+    }
+
+    /// 异源模型列表重复项告警（大小写不敏感）；无重复/关着时不报。
+    #[test]
+    fn warns_on_duplicate_fallback_models() {
+        let mut cfg = enabled();
+        cfg.cross_source_fallback = true;
+        cfg.fallback_models = vec!["glm-5".into(), "GLM-5".into(), "qwen-max".into()];
+        let items = config_warning_items(&cfg);
+        assert!(
+            items.iter().any(|w| w.code == "fallback_duplicate"),
+            "大小写不同的重复项应告警: {items:?}"
+        );
+
+        cfg.fallback_models = vec!["glm-5".into(), "qwen-max".into()];
+        assert!(config_warning_items(&cfg)
+            .iter()
+            .all(|w| w.code != "fallback_duplicate"));
+
+        // 关掉异源递进 → 不告警（配置留着但未启用）
+        cfg.cross_source_fallback = false;
+        cfg.fallback_models = vec!["a".into(), "a".into()];
+        assert!(config_warning_items(&cfg)
+            .iter()
+            .all(|w| w.code != "fallback_duplicate"));
     }
 
     /// 开关开着但整表被单条停用 → 实际 0 生效（须告警）；空表不告警。

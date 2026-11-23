@@ -150,6 +150,7 @@ const REASONING_FLOORS: Array<{ value: string; label: string }> = [
 const FIX_TARGETS: Record<string, string> = {
   fallback_empty: 'fallback-models',
   fallback_after_retry: 'fallback-attempts',
+  fallback_duplicate: 'fallback-models',
   skill_dir_empty: 'skill-dir',
   skill_keyword_short: 'skill-snapshot',
   chained_rewrite: 'dead-zone-table',
