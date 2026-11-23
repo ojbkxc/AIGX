@@ -147,6 +147,28 @@ const REASONING_FLOORS: Array<{ value: string; label: string }> = [
 const RULE_TABLE_CAP = 200;
 /** 后端 `normalize` 对异源模型列表的保留上限（同上） */
 const FALLBACK_MODELS_CAP = 16;
+/** 后端 `normalize` 对若干字符串列表（剥离前缀/拒绝话术/失败关键词）的保留上限 */
+const LIST_CAP = 64;
+/** 后端 `normalize` 对结构化模板的保留上限 */
+const TEMPLATES_CAP = 32;
+
+/**
+ * 列表字段超限提示（`null` = 未超限）。
+ *
+ * 与后端 `normalize` 的 `take(N)` 一一对齐：超限部分保存时被丢弃，
+ * 必须在输入框当场告知（静默截断是本模块反复踩的坑）。
+ */
+export function capError(
+  items: readonly unknown[] | undefined,
+  cap: number,
+  label?: string,
+): string | undefined {
+  const n = items?.length ?? 0;
+  if (n <= cap) return undefined;
+  return label
+    ? `${label}：已填 ${n} 项，上限 ${cap} 项，保存只保留前 ${cap} 项`
+    : `已填 ${n} 项，上限 ${cap} 项：保存只保留前 ${cap} 项`;
+}
 
 /**
  * 配置体检告警 code → 修复入口锚点（`data-purge-fix` 属性值）。
@@ -2237,6 +2259,7 @@ export default function PurgeConsole(): JSX.Element {
             label={t('system 剥离前缀（逗号分隔）')}
             value={draft.normalize_strip_prefixes.join(', ')}
             onChange={(event) => patch({ normalize_strip_prefixes: splitList(event.target.value) })}
+            error={capError(draft.normalize_strip_prefixes, LIST_CAP)}
           />
           <Select
             label={t('降档目标（reasoning_floor）')}
@@ -2256,6 +2279,7 @@ export default function PurgeConsole(): JSX.Element {
           rows={4}
           value={(draft.refusal_patterns ?? []).join('\n')}
           onChange={(event) => patch({ refusal_patterns: splitLines(event.target.value) })}
+          error={capError(draft.refusal_patterns, LIST_CAP)}
         />
         <div className="purge-form-grid">
           <Textarea
@@ -2263,12 +2287,14 @@ export default function PurgeConsole(): JSX.Element {
             rows={3}
             value={(draft.failure_filter_keywords ?? []).join('\n')}
             onChange={(event) => patch({ failure_filter_keywords: splitLines(event.target.value) })}
+            error={capError(draft.failure_filter_keywords, LIST_CAP)}
           />
           <Textarea
             label={t('「空答」类失败关键词（每行一条）')}
             rows={3}
             value={(draft.failure_empty_keywords ?? []).join('\n')}
             onChange={(event) => patch({ failure_empty_keywords: splitLines(event.target.value) })}
+            error={capError(draft.failure_empty_keywords, LIST_CAP)}
           />
         </div>
         <Textarea
@@ -2369,6 +2395,11 @@ export default function PurgeConsole(): JSX.Element {
           </>
         }
       >
+        {capError(draft.structured_templates, TEMPLATES_CAP) ? (
+          <p className="purge-cap-hint" role="alert">
+            {capError(draft.structured_templates, TEMPLATES_CAP)}
+          </p>
+        ) : null}
         <Select
           label={t('当前启用模板')}
           hint={t('结构化提示开启时，命中模板则用其文本替代默认后缀；选「使用默认后缀」即回退')}

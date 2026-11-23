@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  capError,
   diffLines,
   diffTokensInLine,
   parsePreviewMessages,
@@ -10,6 +11,26 @@ import {
   readPreviewHistory,
   writePreviewHistory,
 } from './PurgeConsole';
+
+describe('capError', () => {
+  it('未超限 / 空 / undefined → 无提示', () => {
+    expect(capError([], 3)).toBeUndefined();
+    expect(capError(undefined, 3)).toBeUndefined();
+    expect(capError(['a', 'b'], 3)).toBeUndefined();
+    expect(capError(['a', 'b', 'c'], 3)).toBeUndefined();
+  });
+
+  it('超限 → 提示含实际条数与上限', () => {
+    const msg = capError(['a', 'b', 'c', 'd'], 3);
+    expect(msg).toContain('4');
+    expect(msg).toContain('3');
+    expect(msg).toContain('只保留前 3 项');
+  });
+
+  it('可带字段名前缀', () => {
+    expect(capError(['a', 'b'], 1, '前缀')).toContain('前缀：');
+  });
+});
 
 describe('presetApplyNeedsConfirm', () => {
   const existing = [
