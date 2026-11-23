@@ -1088,6 +1088,24 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // 破甲统计「上次运行」快照的周期落盘：优雅关机已写一次，但崩溃/kill
+        // 会丢；每 10 分钟写一次（幂等覆盖同一 key，写量可忽略），
+        // 崩溃后重启仍能看到「崩溃前那次运行」的统计。
+        {
+            let snapshot_store = store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "purge-last-run-snapshot",
+                interval: Duration::from_secs(600),
+                first_run_delay: Duration::from_secs(300),
+                run: Box::new(move || {
+                    let store = snapshot_store.clone();
+                    Box::pin(async move {
+                        crate::purge::save_last_run(&store);
+                        0
+                    })
+                }),
+            });
+        }
         // 账号 token 自动刷新：临期（qoder/autoclaw 5 分钟、trae 24 小时）即刷，
         // 凭证自动维护：已迁入 scheduled_tasks 间隔型定时任务循环（`scheduled_tasks::spawn`），
         // 开关与间隔在「定时任务」页可配，排期跨重启保留（见 scheduled_tasks 模块）。
