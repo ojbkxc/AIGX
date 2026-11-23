@@ -197,8 +197,13 @@ pub async fn handle_checkin_center(
         "keepalive": center::keepalive_view(store),
         // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果
         "travel": travel_state(&state),
-        // 插件申报的签到窗口任务（AIGX 由本仓调度接管，形状占位空数组）
-        "pluginTasks": [],
+        // 插件申报的签到侧任务（成长 / 奖励类；A2A v3.5.0 `checkin_snapshot` 同口径）
+        //
+        // 此前是硬编码空数组 —— 装了申报 tasks.v1 的插件（含成长/奖励类任务）
+        // 时签到中心看不到它们，只能去插件页翻。现在走 wasm 宿主的分类投影：
+        // 只列「非签到窗口 + 分类属签到侧」的任务，签到窗口本身仍由上面的
+        // daily/auto 驱动，不会重复。
+        "pluginTasks": crate::plugin_host::wasm::tasks::checkin_snapshot(),
         // 轮次时间线（新条目在前；只记批量轮次）
         "history": history::list(store),
         // 面板可见性（对齐 A2A adminPanels）：没装/没账号时不显示面板
