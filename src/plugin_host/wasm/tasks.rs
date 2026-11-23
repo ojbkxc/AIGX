@@ -356,7 +356,7 @@ async fn apply_categories(
         Err(error)
             if matches!(
                 error.code.as_deref(),
-                Some(super::wire::NO_METHOD) | Some("unsupported")
+                Some(code) if code == super::wire::NO_METHOD || code == "unsupported"
             ) =>
         {
             return
@@ -934,98 +934,98 @@ mod tests {
         .expect("已取消时 tick_or_cancel 必须立即返回");
         shutdown();
         assert!(scheduler_token().is_cancelled());
+    }
 
-        /* ─── 任务分类（A2A v3.5.0 tasks/category.rs 同口径）────────── */
+    /* ─── 任务分类（A2A v3.5.0 tasks/category.rs 同口径）────────── */
 
-        /// `belongs_to_checkin` 的边界：签到/成长/奖励进中心，维护与未知不进。
-        #[test]
-        fn category_belongs_to_checkin_boundaries() {
-            for category in [Category::Checkin, Category::Growth, Category::Rewards] {
-                assert!(category.belongs_to_checkin(), "{category:?} 应归签到中心");
-            }
-            for category in [Category::Maintenance, Category::Other] {
-                assert!(
-                    !category.belongs_to_checkin(),
-                    "{category:?} 不该进签到中心"
-                );
-            }
+    /// `belongs_to_checkin` 的边界：签到/成长/奖励进中心，维护与未知不进。
+    #[test]
+    fn category_belongs_to_checkin_boundaries() {
+        for category in [Category::Checkin, Category::Growth, Category::Rewards] {
+            assert!(category.belongs_to_checkin(), "{category:?} 应归签到中心");
         }
-
-        /// 未知类别落到 `Other`（`#[serde(other)]`），不因插件多报新类别解析失败。
-        #[test]
-        fn category_unknown_falls_back_to_other() {
-            let parsed: Category = serde_json::from_value(json!("brand_new_kind")).unwrap();
-            assert_eq!(parsed, Category::Other);
-            let snake: Category = serde_json::from_value(json!("growth")).unwrap();
-            assert_eq!(snake, Category::Growth);
-        }
-
-        /// 兜底表：只认已发布的旧任务身份，其余落 `Other`；`checkin` 布尔优先。
-        #[test]
-        fn legacy_category_covers_known_tasks_only() {
-            let mut travel = Definition {
-                id: "travel".into(),
-                label: "旅行".into(),
-                enabled: true,
-                times: vec!["09:00".into()],
-                interval_ms: None,
-                utc_offset_minutes: 480,
-                checkin: false,
-                legacy_config: None,
-                category: Category::Other,
-            };
-            assert_eq!(legacy_category("workbuddy", &travel), Category::Growth);
-            travel.id = "growth-streak".into();
-            assert_eq!(legacy_category("workbuddy", &travel), Category::Rewards);
-            // 同 id 但不同家：不按名字猜业务
-            travel.id = "travel".into();
-            assert_eq!(legacy_category("kiro", &travel), Category::Other);
-            // checkin=true 优先于身份表
-            travel.checkin = true;
-            assert_eq!(legacy_category("kiro", &travel), Category::Checkin);
-        }
-
-        /// `tasks.categories` 解析：全部合法才生效。
-        #[test]
-        fn parse_categories_accepts_only_declared_tasks() {
-            let tasks = vec![Definition {
-                id: "travel".into(),
-                label: "旅行".into(),
-                enabled: true,
-                times: vec![],
-                interval_ms: Some(60_000),
-                utc_offset_minutes: 480,
-                checkin: false,
-                legacy_config: None,
-                category: Category::Other,
-            }];
-            let ok = parse_categories(&json!({ "travel": "growth" }), &tasks).unwrap();
-            assert_eq!(ok, vec![("travel".to_string(), Category::Growth)]);
-
-            // 引用未声明任务 → 整份拒绝
-            assert!(parse_categories(&json!({ "nope": "growth" }), &tasks).is_err());
-            // 非字符串类别 → 整份拒绝
-            assert!(parse_categories(&json!({ "travel": 1 }), &tasks).is_err());
-            // 映射比声明还多 → 整份拒绝（有限映射约束）
-            assert!(parse_categories(&json!({ "a": "growth", "b": "growth" }), &tasks).is_err());
-        }
-
-        /// `category` 不参与声明 JSON 形状（`serde(skip)`）：序列化不出现、
-        /// 反序列化遇未知字段仍按 `deny_unknown_fields` 拒绝。
-        #[test]
-        fn category_is_not_part_of_wire_shape() {
-            let declared = json!({
-                "id": "travel", "label": "旅行", "enabled": true,
-                "times": ["09:00"], "interval_ms": null,
-                "utc_offset_minutes": 480, "checkin": false
-            });
-            let task: Definition = serde_json::from_value(declared).unwrap();
-            assert_eq!(task.category, Category::Other, "skip 字段取 Default");
-            let out = serde_json::to_value(&task).unwrap();
+        for category in [Category::Maintenance, Category::Other] {
             assert!(
-                out.get("category").is_none(),
-                "序列化不该吐 category: {out}"
+                !category.belongs_to_checkin(),
+                "{category:?} 不该进签到中心"
             );
         }
+    }
+
+    /// 未知类别落到 `Other`（`#[serde(other)]`），不因插件多报新类别解析失败。
+    #[test]
+    fn category_unknown_falls_back_to_other() {
+        let parsed: Category = serde_json::from_value(json!("brand_new_kind")).unwrap();
+        assert_eq!(parsed, Category::Other);
+        let snake: Category = serde_json::from_value(json!("growth")).unwrap();
+        assert_eq!(snake, Category::Growth);
+    }
+
+    /// 兜底表：只认已发布的旧任务身份，其余落 `Other`；`checkin` 布尔优先。
+    #[test]
+    fn legacy_category_covers_known_tasks_only() {
+        let mut travel = Definition {
+            id: "travel".into(),
+            label: "旅行".into(),
+            enabled: true,
+            times: vec!["09:00".into()],
+            interval_ms: None,
+            utc_offset_minutes: 480,
+            checkin: false,
+            legacy_config: None,
+            category: Category::Other,
+        };
+        assert_eq!(legacy_category("workbuddy", &travel), Category::Growth);
+        travel.id = "growth-streak".into();
+        assert_eq!(legacy_category("workbuddy", &travel), Category::Rewards);
+        // 同 id 但不同家：不按名字猜业务
+        travel.id = "travel".into();
+        assert_eq!(legacy_category("kiro", &travel), Category::Other);
+        // checkin=true 优先于身份表
+        travel.checkin = true;
+        assert_eq!(legacy_category("kiro", &travel), Category::Checkin);
+    }
+
+    /// `tasks.categories` 解析：全部合法才生效。
+    #[test]
+    fn parse_categories_accepts_only_declared_tasks() {
+        let tasks = vec![Definition {
+            id: "travel".into(),
+            label: "旅行".into(),
+            enabled: true,
+            times: vec![],
+            interval_ms: Some(60_000),
+            utc_offset_minutes: 480,
+            checkin: false,
+            legacy_config: None,
+            category: Category::Other,
+        }];
+        let ok = parse_categories(&json!({ "travel": "growth" }), &tasks).unwrap();
+        assert_eq!(ok, vec![("travel".to_string(), Category::Growth)]);
+
+        // 引用未声明任务 → 整份拒绝
+        assert!(parse_categories(&json!({ "nope": "growth" }), &tasks).is_err());
+        // 非字符串类别 → 整份拒绝
+        assert!(parse_categories(&json!({ "travel": 1 }), &tasks).is_err());
+        // 映射比声明还多 → 整份拒绝（有限映射约束）
+        assert!(parse_categories(&json!({ "a": "growth", "b": "growth" }), &tasks).is_err());
+    }
+
+    /// `category` 不参与声明 JSON 形状（`serde(skip)`）：序列化不出现、
+    /// 反序列化遇未知字段仍按 `deny_unknown_fields` 拒绝。
+    #[test]
+    fn category_is_not_part_of_wire_shape() {
+        let declared = json!({
+            "id": "travel", "label": "旅行", "enabled": true,
+            "times": ["09:00"], "interval_ms": null,
+            "utc_offset_minutes": 480, "checkin": false
+        });
+        let task: Definition = serde_json::from_value(declared).unwrap();
+        assert_eq!(task.category, Category::Other, "skip 字段取 Default");
+        let out = serde_json::to_value(&task).unwrap();
+        assert!(
+            out.get("category").is_none(),
+            "序列化不该吐 category: {out}"
+        );
     }
 }
