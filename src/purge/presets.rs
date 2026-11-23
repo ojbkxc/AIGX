@@ -187,6 +187,30 @@ fn preview_of(body: &str) -> String {
     out
 }
 
+/// 检索相关性档位（数字越小越靠前）：
+/// 0 = 标题完全一致、1 = 标题前缀、2 = 标题包含、3 = 厂商/模型命中、
+/// 4 = 仅标签/id 命中。**只用于排序，不参与是否匹配**（`matches` 仍是
+/// 唯一判定）。无检索词时全部返回 0，保留目录原序。
+fn relevance(preset: &BuiltinPreset, needle: Option<&str>) -> u8 {
+    let Some(needle) = needle else {
+        return 0;
+    };
+    let n = needle.to_lowercase();
+    let title = preset.title.to_lowercase();
+    if title == n {
+        0
+    } else if title.starts_with(&n) {
+        1
+    } else if title.contains(&n) {
+        2
+    } else if preset.vendor.to_lowercase().contains(&n) || preset.model.to_lowercase().contains(&n)
+    {
+        3
+    } else {
+        4
+    }
+}
+
 fn matches(preset: &BuiltinPreset, needle: &str) -> bool {
     let needle = needle.to_lowercase();
     preset.id.to_lowercase().contains(&needle)
@@ -334,6 +358,13 @@ pub fn list(
         .filter(|p| needle.is_none_or(|n| matches(p, n)))
         .filter(|p| vendor.is_none_or(|v| p.vendor.eq_ignore_ascii_case(v)))
         .collect();
+
+    // 检索词存在时按相关性稳定排序（同档保留目录原序）；无检索词不动。
+    // 必须在 `take(limit)` 之前排，否则被截断掉的恰是标题精确命中项。
+    let mut filtered = filtered;
+    if let Some(n) = needle {
+        filtered.sort_by_key(|p| relevance(p, Some(n)));
+    }
 
     let total = filtered.len();
 
@@ -574,6 +605,29 @@ mod tests {
             || p.model.to_lowercase().contains(target.id)
             || p.title.to_lowercase().contains(target.id)
             || p.tags.iter().any(|t| t.contains(target.id))));
+    }
+
+    /// 检索相关性排序：标题完全命中排第一（不被 limit 截掉），
+    /// 仅标签/id 命中的排最后；无检索词时严格保持目录原序。
+    #[test]
+    fn list_orders_by_title_relevance_before_limit() {
+        let target = BUILTIN_PRESETS
+            .iter()
+            .find(|p| p.title.chars().count() >= 2)
+            .expect("目录里应有带标题的预设");
+        // 用完整标题做检索：完全命中必须排在第一位
+        let (items, _, total) = list(Some(target.title), None, None, 1);
+        assert!(total >= 1);
+        assert_eq!(
+            items[0].id, target.id,
+            "标题完全命中应排在首位（limit=1 也不能被别的模糊命中挤掉）"
+        );
+
+        // 无检索词 → 目录原序（前 3 条与 BUILTIN_PRESETS[0..3] 一致）
+        let (plain, _, _) = list(None, None, None, 3);
+        for (index, item) in plain.iter().enumerate() {
+            assert_eq!(item.id, BUILTIN_PRESETS[index].id, "无检索词必须保持目录序");
+        }
     }
 
     #[test]
