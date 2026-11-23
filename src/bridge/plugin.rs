@@ -437,16 +437,41 @@ fn parse_error_body(text: &str) -> Option<UpstreamErrorView> {
         return Some(UpstreamErrorView {
             kind: err.get("type").and_then(Value::as_str).map(String::from),
             message: err.get("message").and_then(Value::as_str).map(String::from),
-            code: None,
+            // 信封层也可能带 code（A2A v3.5.0 口径：信封优先，内层兜底）。
+            // 之前这里硬写 None，插件把业务码放在信封上时就丢码——
+            // 上层拿不到 code 只能按 502 泛化，排障看不到插件自述的错误类别。
+            code: error_code(&v, err),
             param: None,
         });
     }
     Some(UpstreamErrorView {
         kind: err.get("type").and_then(Value::as_str).map(String::from),
         message: err.get("message").and_then(Value::as_str).map(String::from),
-        code: err.get("code").and_then(Value::as_str).map(String::from),
+        code: error_code(&v, err),
         param: err.get("param").and_then(Value::as_str).map(String::from),
     })
+}
+
+/// 错误体里的业务码：按 `error.code` → 顶层 `code` → 顶层 `providerCode`
+/// 的顺序取第一个合法值（A2A v3.5.0 `rpc.rs` 同口径）。
+///
+/// 为什么要三级回退：各插件把码放在不同层——OpenAI 方言在
+/// `error.code`，Anthropic 方言常在信封的 `code`，还有插件用
+/// `providerCode` 区分自家业务（如 `plugin_busy` 的变体）。只读一层会让
+/// 另外两层的码在网关侧消失，最终退化成 502 泛化错误。
+///
+/// 校验与上游一致：非空且 ≤ 256 字节（防插件塞超长串当码）。
+fn error_code(envelope: &Value, error: &Value) -> Option<String> {
+    [
+        error.get("code"),
+        envelope.get("code"),
+        envelope.get("providerCode"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_str)
+    .filter(|text| !text.is_empty() && text.len() <= 256)
+    .map(String::from)
 }
 
 /// ChatFormat → OpenAI chat 请求体。
@@ -990,6 +1015,79 @@ mod tests {
             code: Some("whatever".into()),
         });
         assert!(matches!(err, BridgeError::Transport(_)));
+    }
+
+    /* ─── 错误体业务码三级回退（A2A v3.5.0 rpc.rs 同口径）──────── */
+
+    /// `error.code` 优先：OpenAI 方言直取。
+    #[test]
+    fn error_code_prefers_inner_error_code() {
+        let view = parse_error_body(r#"{"error":{"message":"m","code":"plugin_busy"}}"#)
+            .expect("应解析出错误视图");
+        assert_eq!(view.code.as_deref(), Some("plugin_busy"));
+    }
+
+    /// Anthropic 信封：`code` 在信封层（内层无 code）→ 回退到信封。
+    /// 修复前这里硬写 None，插件自述的码被整个丢掉。
+    #[test]
+    fn error_code_falls_back_to_envelope_for_anthropic_shape() {
+        let view = parse_error_body(
+            r#"{"type":"error","code":"plugin_resource_limit","error":{"type":"rate_limit_error","message":"m"}}"#,
+        )
+        .expect("Anthropic 信封应解析");
+        assert_eq!(view.code.as_deref(), Some("plugin_resource_limit"));
+        assert_eq!(view.kind.as_deref(), Some("rate_limit_error"));
+    }
+
+    /// 第三级 `providerCode`（插件自定义业务码）。
+    #[test]
+    fn error_code_falls_back_to_provider_code() {
+        let view =
+            parse_error_body(r#"{"error":{"message":"m"},"providerCode":"plugin_unavailable"}"#)
+                .expect("应解析");
+        assert_eq!(view.code.as_deref(), Some("plugin_unavailable"));
+    }
+
+    /// 内层优先于信封：两层都有时取内层（更具体）。
+    #[test]
+    fn error_code_inner_wins_over_envelope() {
+        let view = parse_error_body(
+            r#"{"error":{"message":"m","code":"inner"},"code":"outer","providerCode":"third"}"#,
+        )
+        .expect("应解析");
+        assert_eq!(view.code.as_deref(), Some("inner"));
+    }
+
+    /// 空串 / 超长（>256）的码视同没有（防插件塞垃圾串当码）。
+    #[test]
+    fn error_code_rejects_empty_and_oversized() {
+        let empty = parse_error_body(r#"{"error":{"message":"m","code":""}}"#).unwrap();
+        assert_eq!(empty.code, None, "空串不算码");
+        let long = "x".repeat(257);
+        let body = format!(r#"{{"error":{{"message":"m","code":"{long}"}}}}"#);
+        let oversized = parse_error_body(&body).unwrap();
+        assert_eq!(oversized.code, None, "超 256 字节不算码");
+        // 边界：256 字节仍接受
+        let edge = "y".repeat(256);
+        let body = format!(r#"{{"error":{{"message":"m","code":"{edge}"}}}}"#);
+        assert_eq!(parse_error_body(&body).unwrap().code, Some(edge));
+    }
+
+    /// 端到端：信封层的 code 经 `error_body_to_bridge` 落到
+    /// `UpstreamErrorView`，上层可据此分类（而非退化成 502 泛化）。
+    #[test]
+    fn error_body_to_bridge_keeps_envelope_code() {
+        let err = error_body_to_bridge(
+            400,
+            br#"{"type":"error","code":"plugin_busy","error":{"type":"invalid_request_error","message":"bad"}}"#,
+        );
+        match err {
+            BridgeError::UpstreamStatus { parsed, .. } => {
+                let view = parsed.expect("应带解析视图");
+                assert_eq!(view.code.as_deref(), Some("plugin_busy"));
+            }
+            other => panic!("应为 UpstreamStatus: {other:?}"),
+        }
     }
 
     /// beta.4 忙拒绝：`WireError` 的 `reason`/`retry_after` 必须被真实消费——
