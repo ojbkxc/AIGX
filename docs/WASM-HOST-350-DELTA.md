@@ -26,12 +26,16 @@ AIGX 对齐情况：
 
 | 状态 | 数量 | 说明 |
 |---|---|---|
-| 已对齐 | 12 | 语义在 AIGX 已存在，无需动作 |
-| 部分 | 1 | AIGX 有相近实现但缺本次关键语义（desktop_credentials/doubao 的 `iid`） |
-| 未对齐 | 15 | AIGX 缺失或语义未跟上，需跟进 |
+| 已对齐 | 13 | 语义在 AIGX 已存在，无需动作（含 P0 #2 单提供商包归一，2026-11-24 复核补记） |
+| 部分 | 1 | AIGX 有相近实现但缺本次关键语义（desktop_credentials/doubao 的 `iid`）——**已在本轮补齐**，见 §2 #8 |
+| 未对齐 | 11 | AIGX 缺失或语义未跟上，需跟进（原 15 项中 P0 的 #1/#3/#4 复核为「不成立」，见下） |
 | 不适用 | 28 | AIGX 明确未做的能力域（checkin_call / doubao_turn / catpaw_turn / workbuddy_http / desktop_launch / conversation 等） |
 
-优先级分布：**P0 = 4**（#51 #52 #53 #54，插件安装/更新闭环），**P1 = 7**（#15 #25 #38 #40 #43 #45 #46），**P2 = 5**（#1 #27 #42 #44 #50），其余 `N/A`。
+> **2026-11-24 复核更正**：原审计把 4 条判为 P0。逐条读 AIGX 代码后——
+> #2 已实现（读+写两侧），#1/#3/#4 的前提在 AIGX 架构里不成立（AIGX 没有目录 commit
+> 回退层、也没有 updates 缓存层，缺陷无法发生）。**P0 实际为 0 条**，详见 §2。
+
+优先级分布（2026-11-24 复核后）：**P0 = 0**（原 #51 #52 #53 #54 全部复核为「已对齐/不成立」，见 §2），**P1 = 6**（#15 #38 #40 #43 #45 #46；#25 `iid` 已在本轮补齐），**P2 = 5**（#1 #27 #42 #44 #50），其余 `N/A`。
 
 > 备注：AIGX 的 `wasm/` 采用与上游不同的模块切分（`access.rs` / `egress.rs` / `native.rs` / `probe.rs` / `verification.rs` 等自有模块），因此"已对齐"按**语义**判定而非文件同构。
 
@@ -110,31 +114,41 @@ AIGX 对齐情况：
 
 > 落点均为 `D:\GitHub\AIGX\src\plugin_host\` 下相对路径；行号为上游 v3.5.0 行号。
 
-### P0（4 条，插件安装/更新闭环的静默故障）
+### P0（4 条）——**复核更正：全部为误判，AIGX 不存在对应缺陷（2026-11-24）**
 
-**1. `script/source.rs` — 更新/重装回退到旧目录缓存 commit（#52）**
+> 本节 4 条在原审计里按「上游有、AIGX 疑似没有」判 P0。逐条读 AIGX 代码后确认：
+> 三条的**前提在 AIGX 架构里不成立**（AIGX 根本没实现那层缓存/回退，缺陷无法发生），
+> 一条**已实现**。**不要照 P0 去移植**——那会凭空造出一层缓存并引入上游才有的 bug。
+> 证据如下（文件:行均为 AIGX 当前树）。
 
-- 上游语义：`allow_catalog_fallback` 仅对"无预期 id + GitHub 来源 + 该仓库此前未安装"为真；命中则回退 `catalog_github_commit_for()` 并标记 `resolved_live=false`；更新与重装路径一律不允许回退，直接抛原始网络错误（L130-141/L143-157）。
-- 失败模式：AIGX 现有的 `script/source.rs` 若无此门禁，网络抖动时会用目录缓存的旧 commit 静默重装同一版本，插件永远显示"可更新"但点更新无效。
-- 落点建议：在 `script/source.rs` 的 GitHub 解析链上引入同签名 `allow_catalog_fallback: bool`，由调用方传入；`catalog_github_commit_for` 的调用点收敛到唯一的 `github_commit_fallback()`；同时把 `parse_github_commit_sha()` 抽成纯函数便于单测（上游有 2 条）。
+**1. `script/source.rs` 目录缓存回退（#52）→ 不成立**
 
-**2. `script/storage.rs` — 单提供商包"包启用 + 唯一提供商停用"状态不自洽（#53）**
+- 上游：`allow_catalog_fallback` 在更新/重装路径为 false，只有「无预期 id + GitHub + 未装过」才回退目录缓存 commit。
+- AIGX 现状：`script/source.rs:202` 的 `resolve_github()` **只走 GitHub API**，AIGX 侧不存在
+  `catalog_github_commit_for()` 这类目录 commit 缓存，也就没有「静默重装旧 commit」的路径
+  （`source.rs:162` 明写「解析层不联网查目录（目录缓存归 magpie-catalog）」）。
+- 结论：**N/A**。若未来给 source 引入目录回退，必须同时引入本门禁。
 
-- 上游语义：`Package::single_provider_id()` 判定 `providers` 恰为 1 个；`normalize_single_provider()` 在 `read()` 时把 `disabled_providers` 命中唯一 provider 的情况折为 `enabled=false` 并从列表移除该项（L54-70/L84-90）。
-- 失败模式：不做归一，用户关掉唯一子开关后包仍算启用，下次打开包开关会被隐藏子开关卡住，表现为"开关打开但插件没跑"。
-- 落点建议：AIGX `script/storage.rs` 增加两个同名方法并在 `read()` 反序列化后遍历归一；`Package` 结构新增字段时保持 `serde(default)` 兼容旧登记文件。
+**2. `script/storage.rs` 单提供商包归一（#53）→ 已实现**
 
-**3. `script/updates.rs` — 更新状态缓存无安装/卸载即时同步，且旧快照覆盖新结果（#54）**
+- AIGX：`storage.rs:113 load_packages()` 读 KV 后遍历归一——`enabled && providers.len()==1`
+  且该 provider 在 `disabled_providers` 里 → `enabled=false` 并清空子开关（L116-121），
+  与上游 `normalize_single_provider` 同语义同口径；写侧 `operations.rs:451` 的
+  `set_provider_enabled` 也按同一规则折叠（单家包改包级 `enabled`，多家属保持子开关）。
+- 结论：**已对齐（读+写两侧都在）**。
 
-- 上游语义：① `record_installed()` 在安装/更新成功后立即把该条写成 `available=false`（`installed_latest=true` 时直接用 commit 前 12 位，否则 8s 超时兜底），② `remove_entry()` 卸载后清条目，③ `refresh_inner()` 记 `initial_fingerprints`，回写前比对磁盘注册表，指纹变化则改用磁盘缓存而非旧快照覆盖（L128-156/L230-273）。
-- 失败模式：AIGX 缺 `script/updates.rs` 的这层，会出现"刚更新完界面仍提示可更新"以及"检查期间安装/卸载被旧快照覆盖回去"两类回归。
-- 落点建议：在 AIGX 脚本插件更新模块补 `record_installed` / `remove_entry` 两个入口 + `PackageFingerprint` 比对；`save_cache()` 统一出口，避免多处直接 `atomic_write`。
+**3/4. `script/updates.rs` 更新状态缓存（#54）+ `operations.rs` 接线（#51）→ 不成立**
 
-**4. `script/operations.rs` — 安装结果未回写更新状态、卸载未清缓存（#51）**
-
-- 上游语义：`allow_catalog_fallback()` 决定是否允许目录回退（L59-74）；`install()` 返回 `(Package, installed_latest)` 并调 `updates::record_installed`（L108-151）；`change()` 在 `remove` 成功后调 `updates::remove_entry`（L202-218）；`finished()` 不再无条件触发全量 `updates::wake(true)`（L50-53 删除）。
-- 失败模式：只有 #54 的缓存能力、没有 #51 的接线，#54 永远不被调用，等于没修。
-- 落点建议：#54 落地后，在 AIGX `script/operations.rs` 的安装/卸载成功分支接入两个入口，并删掉 `finished()` 里的无条件 `wake(true)`（改由状态表精确更新）。
+- 上游：有独立 `updates.rs` 缓存层，需 `record_installed` / `remove_entry` 在安装/卸载后
+  即时同步，否则「刚更新完仍显示可更新」。
+- AIGX 现状：**没有 updates 缓存模块**（`src/plugin_host/script/updates.rs` 不存在）。
+  更新检查走 `operations.rs:495 check_updates()` → `check_update_outcomes()`，
+  **每次实时**从 registry 现算：Magpie 来源比目录条目版本，GitHub 来源用
+  `github_outcome()` 拿最新 commit 与已装 `source_ref` 比对（`commit_update()` 只认
+  40 位 SHA，非 SHA 引用「宁可漏报」并已有单测钉死）。
+  因为没有跨请求缓存，就没有「旧快照覆盖新结果」的窗口，也没有需要在安装后失效的条目。
+- 结论：**N/A**（架构不同）。AIGX 侧代价是每次检查要问一次目录/GitHub——属性能取舍，
+  若要优化应做**带失效的缓存**，而不是照搬上游那套（它正是靠 record_installed 打补丁）。
 
 ### P1（7 条）
 
@@ -156,11 +170,13 @@ AIGX 对齐情况：
 - AIGX 落点：`wasm/tasks.rs`（AIGX 把 travel 合并在单文件里，需自建等价 `state_with`）。
 - 理由：签到中心单次构建会多次 `read_all()`，属可观测的性能与一致性缺陷；能力门禁缺失会让未申报 `tasks.v1` 的插件读到旅行任务。
 
-**8. `wasm/desktop_credentials/doubao.rs` — 缺 `iid`（install_id）提取（#25）**
+**8. `wasm/desktop_credentials/doubao.rs` — 缺 `iid`（install_id）提取（#25）** ✅ 已补齐（2026-11-24）
 
 - 上游语义：`device_id` 单点提取改为 `[("device_id","deviceId"),("install_id","iid")]` 双键循环，字符串/整数两形态都落盘（L205-221）。
-- AIGX 落点：AIGX `wasm/desktop_credentials/doubao.rs` L232 目前只读 `aha.device.device_id`。
-- 理由：`iid` 是豆包新版本签到的必需参数，缺失会导致 AIGX 侧豆包凭据在新版客户端上不被接受（AIGX 已有 17 家 desktop_credentials，此项是其中一家的字段补齐，非新域）。
+- AIGX 落点：`wasm/desktop_credentials/doubao.rs` 的设备标识段改为同口径双键循环（原只读 `aha.device.device_id`），
+  `valid_device()` 校验（1..=64 字节 ASCII 字母数字 / `-` / `_`）对两键共用；模块头投影字段同步写上 `iid`。
+- 理由：`iid` 是豆包新版本签到的必需参数，缺失会导致 AIGX 侧豆包凭据在新版客户端上不被接受。
+- 验收：`rustfmt --check` 通过；行为变化仅「多吐一个 `iid` 字段」，旧客户端（无 `install_id`）不受影响。
 
 ### P2（5 条）
 

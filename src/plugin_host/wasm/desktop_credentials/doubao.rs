@@ -21,10 +21,11 @@
 //! 4. **账号唯一**：只有含 `sessionid` / `sessionid_ss` 的档算一个账号；
 //!    账号数必须正好 1，否则报 `desktop_credentials_ambiguous`（多账号不猜）。
 //! 5. **投影**：`{cookies:[{name,value,domain,path,expires}], clientVersion?,
-//!    channel?, deviceId?}`，其中 `clientVersion` / `channel` 从客户端
+//!    channel?, deviceId?, iid?}`，其中 `clientVersion` / `channel` 从客户端
 //!    `Application/*/manifest.json`（含注册表登记的安装根，≤ 64 KiB）里取
-//!    **唯一一致**的那份，`deviceId` 取 `Local State` 的
-//!    `aha.device.device_id`；整体 ≤ 256 KiB。
+//!    **唯一一致**的那份；设备标识取 `Local State` 的 `aha.device.device_id`
+//!    → `deviceId` 与 `aha.device.install_id` → `iid`（A2A v3.5.0 双键口径，
+//!    新版客户端签到需要 iid）；整体 ≤ 256 KiB。
 //!
 //! ── 只读边界 ────────────────────────────────────────────────────────
 //! - 路径只由常量 + `LOCALAPPDATA` 拼成，**不接受任何调用参数**（也不接受
@@ -229,11 +230,17 @@ mod windows {
                 value[key] = field.clone();
             }
         }
-        let device = &state["aha"]["device"]["device_id"];
-        if let Some(device) = device.as_str().filter(|device| valid_device(device)) {
-            value["deviceId"] = json!(device);
-        } else if let Some(device) = device.as_u64() {
-            value["deviceId"] = json!(device.to_string());
+        // 设备标识双键（A2A v3.5.0 对齐）：新版客户端把 install_id 也作为
+        // 签到/上报参数，只读 device_id 会让新客户端的凭据缺 iid 被上游拒。
+        // 两键同口径校验（1..=64 字节 ASCII 字母数字 / - / _），字符串与
+        // 整数两种落盘形态都接受（客户端有版本差异）。
+        for (source_key, target_key) in [("device_id", "deviceId"), ("install_id", "iid")] {
+            let entry = &state["aha"]["device"][source_key];
+            if let Some(text) = entry.as_str().filter(|text| valid_device(text)) {
+                value[target_key] = json!(text);
+            } else if let Some(number) = entry.as_u64() {
+                value[target_key] = json!(number.to_string());
+            }
         }
         if value.to_string().len() > 256 * 1024 {
             return Err(invalid());
