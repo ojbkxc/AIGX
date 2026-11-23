@@ -2050,7 +2050,7 @@ export default function PurgeConsole(): JSX.Element {
                 enableLabel={t('启用该条改写规则')}
                 dupHint={
                   dupRules.get(rule.from.trim().toLowerCase())
-                    ? t('与其他行的原文重复，保存时后端只保留最早出现的一条')
+                    ? t('与其他行的原文重复：改写按表序执行，只有最靠前的那条会真正生效')
                     : undefined
                 }
                 onPatch={patchRule}
@@ -2102,7 +2102,7 @@ export default function PurgeConsole(): JSX.Element {
                 enableLabel={t('启用该条改写规则')}
                 dupHint={
                   dupSynonyms.get(rule.from.trim().toLowerCase())
-                    ? t('与其他行的敏感词重复，保存时后端只保留最早出现的一条')
+                    ? t('与其他行的敏感词重复：改写按表序执行，只有最靠前的那条会真正生效')
                     : undefined
                 }
                 onPatch={patchSynonymRule}
