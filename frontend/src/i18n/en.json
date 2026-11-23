@@ -4999,5 +4999,9 @@
   "粘贴 user 消息试跑；或用 system:/user:/assistant: 行前缀粘贴整段对话（多消息参与归一化与改写）。dry-run，不发送请求、不写统计": "Paste a user message to try; or paste a whole conversation with system:/user:/assistant: line prefixes (multi-message normalization and rewriting). Dry-run: no request sent, no stats written",
   "去修复": "Fix it",
   "命中关键词": "matched keyword",
-  "最近样例": "Recent samples"
+  "最近样例": "Recent samples",
+  "导入 JSON": "Import JSON",
+  "导入失败：不是有效的 JSON": "Import failed: not valid JSON",
+  "导入失败：没有可用的模板（需 {name, text} 字段）": "Import failed: no usable templates ({name, text} fields required)",
+  "模板已导入：新增 {{added}} / 覆盖同名 {{replaced}}（保存后生效）": "Templates imported: {{added}} added / {{replaced}} overwritten by name (click Save to apply)"
 }

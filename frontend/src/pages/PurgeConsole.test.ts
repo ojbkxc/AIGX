@@ -4,10 +4,50 @@ import {
   diffTokensInLine,
   parsePreviewMessages,
   parseRulesCsv,
+  parseTemplateJson,
   previewHistoryLabel,
   readPreviewHistory,
   writePreviewHistory,
 } from './PurgeConsole';
+
+describe('parseTemplateJson', () => {
+  it('单对象 / 数组 / 配置级 {structured_templates} 三形态', () => {
+    expect(parseTemplateJson('{"name":"a","text":"T"}')).toEqual({
+      templates: [{ name: 'a', text: 'T' }], skipped: 0,
+    });
+    expect(parseTemplateJson('[{"name":"a","text":"T"},{"name":"b","text":""}]')).toEqual({
+      templates: [{ name: 'a', text: 'T' }, { name: 'b', text: '' }], skipped: 0,
+    });
+    expect(parseTemplateJson('{"structured_templates":[{"name":"c","text":"X"}]}'))
+      .toEqual({ templates: [{ name: 'c', text: 'X' }], skipped: 0 });
+  });
+
+  it('坏 JSON → not-json；无有效条目 → no-valid', () => {
+    expect(parseTemplateJson('not json')).toEqual({ error: 'not-json' });
+    expect(parseTemplateJson('[]')).toEqual({ error: 'no-valid' });
+    expect(parseTemplateJson('{"name":123,"text":"T"}')).toEqual({ error: 'no-valid' });
+    expect(parseTemplateJson('{"name":"  ","text":"T"}')).toEqual({ error: 'no-valid' });
+  });
+
+  it('非法条目跳过计数：非对象/空名/超长名/重名（大小写不敏感）', () => {
+    const raw = JSON.stringify([
+      { name: 'ok', text: 'T' },
+      42,
+      { text: 'no-name' },
+      { name: 'x'.repeat(70), text: 'T' },
+      { name: 'OK', text: 'dup' },
+    ]);
+    expect(parseTemplateJson(raw)).toEqual({
+      templates: [{ name: 'ok', text: 'T' }], skipped: 4,
+    });
+  });
+
+  it('name 前后空白剥离', () => {
+    expect(parseTemplateJson('{"name":"  a  ","text":"T"}')).toEqual({
+      templates: [{ name: 'a', text: 'T' }], skipped: 0,
+    });
+  });
+});
 
 describe('preview history', () => {
   const store = new Map<string, string>();

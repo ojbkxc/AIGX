@@ -471,6 +471,47 @@ export function previewHistoryLabel(sample: string): string {
   return prefix + (text.length > 46 ? `${text.slice(0, 46)}…` : text);
 }
 
+/**
+ * 模板 JSON 导入解析：接受单对象 `{name, text}`、数组 `[{...}]` 或配置级
+ * `{structured_templates: [...]}`（本页「导出配置」的产物反过来可导）。
+ *
+ * 校验：name/text 必须字符串；name 去空白后非空、≤64 字符；text ≤128KB；
+ * name 相同（大小写不敏感）→后者跳过（同名 upsert 由调用方做 UI 提示）。
+ * 返回 `{ templates, skipped }` 或错误串。
+ */
+export function parseTemplateJson(
+  raw: string,
+): { templates: Array<{ name: string; text: string }>; skipped: number } | { error: string } {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { error: 'not-json' };
+  }
+  // 配置级形态取内嵌数组
+  const holder = value as { structured_templates?: unknown };
+  if (holder && typeof holder === 'object' && Array.isArray(holder.structured_templates)) {
+    value = holder.structured_templates;
+  }
+  const list = Array.isArray(value) ? value : [value];
+  const out: Array<{ name: string; text: string }> = [];
+  let skipped = 0;
+  const seen = new Set<string>();
+  for (const item of list) {
+    if (!item || typeof item !== 'object') { skipped += 1; continue; }
+    const rec = item as { name?: unknown; text?: unknown };
+    const name = typeof rec.name === 'string' ? rec.name.trim() : '';
+    const text = typeof rec.text === 'string' ? rec.text : '';
+    if (!name || name.length > 64 || text.length > 128 * 1024) { skipped += 1; continue; }
+    const key = name.toLowerCase();
+    if (seen.has(key)) { skipped += 1; continue; }
+    seen.add(key);
+    out.push({ name, text });
+  }
+  if (out.length === 0) return { error: 'no-valid' };
+  return { templates: out, skipped };
+}
+
 /** 数字字段字符串镜像初值（从服务端配置派生） */
 function numRawOf(s: PurgeSettings): Record<NumKey, string> {
   return {
@@ -1078,6 +1119,8 @@ export default function PurgeConsole(): JSX.Element {
   // 词表 CSV 导入（死区词/同义词各一个 input，value 清空允许连续导同名文件）
   const deadZoneCsvRef = useRef<HTMLInputElement | null>(null);
   const synonymCsvRef = useRef<HTMLInputElement | null>(null);
+  // 模板 JSON 导入（预设粘贴 / 配置级 JSON 复用）
+  const templateJsonRef = useRef<HTMLInputElement | null>(null);
   // 技能包导入（ZIP/TAR/TGZ → 技能目录）
   const [skillPkgName, setSkillPkgName] = useState('');
   const [skillPkgOverwrite, setSkillPkgOverwrite] = useState(false);
@@ -1375,6 +1418,58 @@ export default function PurgeConsole(): JSX.Element {
       return { ...d, structured_templates: templates, active_template: active ?? '' };
     });
   }, []);
+
+  /** 导入模板 JSON：同名 upsert（已有同名被覆盖计数 skipped-over），新名追加 */
+  const importTemplateJson = useCallback(
+    async (file: File | null): Promise<void> => {
+      if (!file) return;
+      const raw = await file.text().catch(() => null);
+      if (raw === null) {
+        addToast(t('导入失败：无法读取文件'), 'error');
+        return;
+      }
+      const parsed = parseTemplateJson(raw);
+      if ('error' in parsed) {
+        addToast(
+          parsed.error === 'not-json'
+            ? t('导入失败：不是有效的 JSON')
+            : t('导入失败：没有可用的模板（需 {name, text} 字段）'),
+          'error',
+        );
+        return;
+      }
+      setDirty(true);
+      setDraft((d) => {
+        if (!d) return d;
+        const existing = [...(d.structured_templates ?? [])];
+        const keys = new Set(existing.map((tpl) => tpl.name.trim().toLowerCase()));
+        let replaced = 0;
+        let appended = 0;
+        for (const tpl of parsed.templates) {
+          const key = tpl.name.toLowerCase();
+          const idx = existing.findIndex((e) => e.name.trim().toLowerCase() === key);
+          if (idx >= 0) {
+            existing[idx] = tpl;
+            replaced += 1;
+          } else {
+            existing.push(tpl);
+            keys.add(key);
+            appended += 1;
+          }
+        }
+        addToast(
+          t('模板已导入：新增 {{added}} / 覆盖同名 {{replaced}}（保存后生效）', {
+            added: appended,
+            replaced,
+          }),
+          'success',
+        );
+        return { ...d, structured_templates: existing };
+      });
+      focusFixTarget('templates');
+    },
+    [addToast, t],
+  );
 
   /**
    * 改写预览：以当前草稿为配置试跑样例输入（dry-run，不写统计、不落库）。
@@ -2051,9 +2146,24 @@ export default function PurgeConsole(): JSX.Element {
       <Card
         title={t('结构化模板')}
         actions={
-          <Button variant="outline" size="sm" onClick={addTemplate}>
-            {t('添加模板')}
-          </Button>
+          <>
+            <Button variant="outline" size="sm" onClick={addTemplate}>
+              {t('添加模板')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => templateJsonRef.current?.click()}>
+              {t('导入 JSON')}
+            </Button>
+            <input
+              ref={templateJsonRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                void importTemplateJson(event.target.files?.[0] ?? null);
+                event.target.value = '';
+              }}
+            />
+          </>
         }
       >
         <Select
