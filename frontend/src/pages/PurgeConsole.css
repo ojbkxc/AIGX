@@ -418,8 +418,18 @@
   flex: 1 1 320px;
 }
 
-/* 「去修复」目标闪烁提示（1.8s；由 focusFixTarget 添加/移除） */
-.purge-fix-flash {
+/* 体检全通过提示：绿色一行，与告警框同位置 */
+.purge-check-ok {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--success-color, #16a34a) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--success-color, #16a34a) 7%, transparent);
+  color: var(--success-color, #16a34a);
+  font-size: 13px;
+}
+
+/* 「去修复」目标闪烁提示（1.8s；由 focusFixTarget 添加/移除） */.purge-fix-flash {
   outline: 2px solid var(--warning-color, #d97706);
   outline-offset: 4px;
   border-radius: 6px;

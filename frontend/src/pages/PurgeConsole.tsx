@@ -1957,8 +1957,10 @@ export default function PurgeConsole(): JSX.Element {
       />
 
       {/* 配置体检告警：开了但不生效 / 配置自相矛盾（静态可判定项）。
-          结构化告警带 code → 「去修复」滚动并聚焦对应控件；旧后端纯文本。 */}
-      {(configWarningItems.length > 0 || configWarnings.length > 0) && (
+          结构化告警带 code → 「去修复」滚动并聚焦对应控件；旧后端纯文本。
+          全部通过时给一行绿字：让运维确认「体检确实跑过且当前无问题」，
+          而不是面对一片空白猜后端到底检查了什么。 */}
+      {configWarningItems.length > 0 || configWarnings.length > 0 ? (
         <div className="purge-warning-box" role="alert">
           {(configWarningItems.length > 0
             ? configWarningItems.map((w) => ({ code: w.code, message: w.message }))
@@ -1978,7 +1980,11 @@ export default function PurgeConsole(): JSX.Element {
             </p>
           ))}
         </div>
-      )}
+      ) : draft.enabled ? (
+        <p className="purge-check-ok" role="status">
+          {t('配置体检通过：当前没有「开了但不生效」或自相矛盾的项目。')}
+        </p>
+      ) : null}
 
       <Card
         title={t('开关')}

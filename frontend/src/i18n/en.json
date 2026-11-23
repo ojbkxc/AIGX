@@ -5012,6 +5012,7 @@
   "按已保存配置": "Use saved config",
   "用已保存的配置试跑（对比未保存草稿的效果）": "Preview with the saved config (compare against unsaved draft)",
   "上次运行": "Last run",
+  "配置体检通过：当前没有「开了但不生效」或自相矛盾的项目。": "Config check passed: nothing enabled-but-ineffective or self-contradictory right now.",
   "导入的 {{count}} 条规则的原文全部与当前词表重复，未追加（可能导错了文件？）": "All {{count}} imported rules duplicate existing 'from' entries in this word list; nothing appended (wrong file?)",
   "其中 {{n}} 条与现有词表原文重复（保存时后端只保留最早一条）": "{{n}} of them duplicate existing 'from' entries (backend keeps the earliest on save)"
 }
