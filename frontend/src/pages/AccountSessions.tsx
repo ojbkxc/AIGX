@@ -1743,12 +1743,6 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     return `${((ok / total) * 100).toFixed(0)}%`;
   };
 
-  // 最近错误过长会撑破单元格：截断展示，完整内容放 title
-  const shortError = (raw?: string | null): string => {
-    if (!raw) return '';
-    return raw.length > 48 ? `${raw.slice(0, 48)}…` : raw;
-  };
-
   const needle = search.trim().toLowerCase();
   /** 账号是否处于冷却中（任一上游真名还有剩余冷却秒数） */
   const isCooling = (s: AccountSessionItem): boolean =>
@@ -2676,9 +2670,10 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       ? plugin.identifier.trim()
       : typeof plugin.uid === 'string' ? plugin.uid.trim() : '';
     if (ident) lines.push(t('标识：{{id}}', { id: ident }));
-    // 凭证 / 代理已从账号格副行移入气泡（降行高、对齐 A2A 只留邮箱副行）。
+    // 凭证 / 代理 / 最近错误已从账号格副行移入气泡（降行高、对齐 A2A 只留邮箱副行）。
     if (s.api_key) lines.push(t('凭证：{{key}}', { key: s.api_key }));
     if (s.proxy) lines.push(t('代理：{{proxy}}', { proxy: s.proxy }));
+    if (s.last_error) lines.push(t('最近错误：{{error}}', { error: s.last_error }));
     if (s.updated_at) {
       const raw = Number(s.updated_at);
       const at = raw < 1e11 ? raw * 1000 : raw;
@@ -2906,23 +2901,17 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       }
       case 'name': {
         const titleLines = accountTitleLines(s);
-        // A2A 账号列副行只留邮箱（email ≠ 主名时）。原生账号用后端派生 s.email，
-        // 插件账号回退 plugin 公开投影。凭证 / 代理已移入悬停气泡以降行高。
+        // A2A 账号列副行口径：邮箱（≠主名时）。凭证 / 代理 / 最近错误已移入悬停气泡。
         const emailSub = (s.email || (typeof s.plugin?.email === 'string' ? s.plugin.email : '') || '').trim();
         return (
           <td key={col} className="as-c-name">
-            {/* §2.8 悬停气泡：名称上显示账号详情（邮箱/昵称/标识/凭证/代理、更新于、来源、桌面登录态） */}
+            {/* §2.8 悬停气泡：名称上显示账号详情（邮箱/昵称/标识/凭证/代理/最近错误、更新于、来源、桌面登录态） */}
             <div className="as-name" title={titleLines.length ? titleLines.join('\n') : undefined}>
               {nameMasked ? maskName(s.name) : s.name}
             </div>
             {emailSub && emailSub !== s.name && (
               <div className="form-hint as-name-email" title={emailSub}>
                 {emailSub}
-              </div>
-            )}
-            {s.last_error && (
-              <div className="form-hint" title={s.last_error}>
-                {shortError(s.last_error)}
               </div>
             )}
             {modelStatusNode(s)}

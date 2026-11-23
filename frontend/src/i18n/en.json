@@ -4940,5 +4940,6 @@
   "池里还没有 Clash 出口，请先点上方「同步 Clash」。": "No Clash exits in the pool yet; click \"Sync Clash\" above first.",
   "— 请选择 Clash 出口 —": "— Select a Clash exit —",
   "同步失败：{{reason}}": "Sync failed: {{reason}}",
-  "已同步 Clash 出口，变更 {{n}} 条": "Clash exits synced, {{n}} changed"
+  "已同步 Clash 出口，变更 {{n}} 条": "Clash exits synced, {{n}} changed",
+  "最近错误：{{error}}": "Recent error: {{error}}"
 }
