@@ -35,7 +35,7 @@ AIGX 对齐情况：
 > #2 已实现（读+写两侧），#1/#3/#4 的前提在 AIGX 架构里不成立（AIGX 没有目录 commit
 > 回退层、也没有 updates 缓存层，缺陷无法发生）。**P0 实际为 0 条**，详见 §2。
 
-优先级分布（2026-11-24 复核后）：**P0 = 0**（原 #51 #52 #53 #54 全部复核为「已对齐/不成立」，见 §2），**P1 = 2**（#15 #38；#25 `iid` / #40 #43 #45 单提供商包归一 / #46 web-search 探测+码透传 均已落地），**P2 = 5**（#1 #27 #42 #44 #50），其余 `N/A`。
+优先级分布（2026-11-24 复核后）：**P0 = 0**（原 #51 #52 #53 #54 全部复核为「已对齐/不成立」，见 §2），**P1 = 0**（#25 #38 #40 #43 #45 #46 已落地；#15 复核不成立），**P2 = 4**（#1 #27 #42 #44；#50 复核不适用），其余 `N/A`。
 
 > 备注：AIGX 的 `wasm/` 采用与上游不同的模块切分（`access.rs` / `egress.rs` / `native.rs` / `probe.rs` / `verification.rs` 等自有模块），因此"已对齐"按**语义**判定而非文件同构。
 
@@ -169,11 +169,19 @@ AIGX 对齐情况：
 - AIGX 落点：`rpc.rs` 的 adapter 元数据初始化 + `providers/adapter.rs` 的 trait 实现。
 - 理由：这是新增能力缺失（不是回归），但直接影响联网搜索类插件在 AIGX 的可用性探测。
 
-**7. `wasm/tasks.rs` — 任务快照重复读盘与 provider label 重复求值（#15 #38）**
+**7. `wasm/tasks.rs` — 任务快照重复读盘与 provider label 重复求值（#15 #38）**：#38 ✅ 已落地（2026-11-24）；#15 **不成立**
 
 - 上游语义：`build_snapshot(checkin_only, records)` 接受外部 `records` 快照，`provider_label` 每 provider 惰性求值一次；`checkin_snapshot_with(records)` 与 `travel_state_with(&states)` 供上层一次性构建多份视图（tasks.rs L105-158、tasks/travel.rs L11-20）；`travel::state()` 增 `has_capability("tasks.v1")` 门禁。
-- AIGX 落点：`wasm/tasks.rs`（AIGX 把 travel 合并在单文件里，需自建等价 `state_with`）。
-- 理由：签到中心单次构建会多次 `read_all()`，属可观测的性能与一致性缺陷；能力门禁缺失会让未申报 `tasks.v1` 的插件读到旅行任务。
+- **#15（重复读盘）不成立**：AIGX 的 `tasks::snapshot()` 每次调用**只** `task_state::read_all()` 一次（tasks.rs:328），
+  且没有 `provider_label` 这层抽象（快照直接吐 provider id）。上游需要 `*_with(records)` 是因为它把签到、旅行、
+  插件任务三份视图一起构建；AIGX 的签到中心是**原生实现**（`api/admin/checkin_center.rs` 走自己的状态源，
+  不读 `task_state`），只有 `/api/plugins/tasks` 这一个消费者调 `snapshot()` —— 单次构建单次读盘，无重复。
+- **#38（能力门禁）已落地**，落点与审计预设不同（AIGX 的 travel 是原生实现，不是 wasm 任务）：
+  ① `wasm/tasks.rs::snapshot()` 的过滤从 `owns(provider)` 改为 `has_capability(provider, "tasks.v1")`
+  （后者内部已含 `owns`，语义严格更强）；② `manager.rs` 的 `tasks::load` 失败分支改为**先 `forget` 再 warn**，
+  摘掉上一版残留声明。两处合起来封住「插件升级后不再申报 tasks.v1，但旧任务声明还在表里」的幽灵条目
+  （管理面显示有任务、调度侧却已按能力门禁跳过）。
+- 验收：CI 全绿（a5640f4f）。
 
 **8. `wasm/desktop_credentials/doubao.rs` — 缺 `iid`（install_id）提取（#25）** ✅ 已补齐（2026-11-24）
 
@@ -193,7 +201,16 @@ AIGX 对齐情况：
 
 **12. `pack_view.rs` — `provider_label` 未走注册表缓存（#44）**：上游新增 `pack_view::provider_label()`，先短路 `availability::is_suspended` 再查注册表缓存/清单，避免逐次扫描图标（L196-227）。AIGX 无 `pack_view.rs`，label 逻辑在 `mod.rs`。理由：性能项，标签结果一致。
 
-**13. `model_catalog.rs` — 模型目录仍硬编码 models.dev（#50）**：上游改官方 CDN 主 + API 备、加 `models_dev_enabled()` 开关、`refresh_if_active()` 只在宿主就绪或已有缓存时刷新、`force` 时忽略退避、下载加 `Accept` 与 60s 超时（L9-84）。AIGX 落点 `model_catalog.rs`。理由：可用性与可配置性改进，非阻断。
+**13. `model_catalog.rs` — 模型目录仍硬编码 models.dev（#50）** → **不适用（架构不同，2026-11-24 复核）**
+
+- 上游：`script/model_catalog.rs` 的 `PRIMARY_URL/FALLBACK_URL` 指向 `official::CDN_MODELS_CATALOG_URL` /
+  `API_MODELS_CATALOG_URL`，即**上游自家官网**的公共模型目录（agent2api.dev 系列），配 `refresh_if_active(bool)` 网关。
+- AIGX 现实：同名的 `plugin_host/script/model_catalog.rs` 是**插件包自己的模型目录**（按 provider 缓存），
+  与上游那个「官网公共目录」不是一回事；AIGX 的 models.dev 体系在 `src/model/models_dev.rs`——
+  自建 `MODELS_DEV_URL`（`https://models.dev/models.json`）+ 内嵌保底快照 `modelsdev.json` +
+  `usage.models_dev_enabled` 开关 + `MIN_REFRESH_INTERVAL_MS` 退避，已覆盖上游「开关 / 退避 / 缓存源」三个要点。
+- 照搬不合适的理由：上游那两个 URL 是 **agent2api 自家 CDN**，AIGX 接过去等于把模型元数据的可用性
+  绑在竞品域名上；AIGX 已有内嵌快照兜底，断网也不会空表。真要改进应做「多源 + 校验」，而不是换 URL。
 
 ---
 
