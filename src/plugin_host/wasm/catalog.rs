@@ -249,6 +249,20 @@ fn merge(target: &mut Value, source: &Value) {
             target[key] = Value::Bool(true);
         }
     }
+    // `toolEmulation`（A2A v3.5.0 同口径）：目标缺省或为 null 时由源补齐。
+    //
+    // 它不是布尔位而是对象（模拟工具调用的策略声明），所以不能像上面四位那样
+    // 只做 `true` 取或；也不能无脑覆盖（多账号并集时后一个账号的说法会盖掉前
+    // 一个，结果取决于账号遍历顺序）。取「首个非 null 值」= 谁申报就用谁，
+    // 顺序无关且不丢字段。漏掉这一项会让并集后的模型目录缺该能力声明，
+    // 上层据此判断「这模型能不能模拟工具调用」时拿到空值。
+    if target.get("toolEmulation").is_none_or(Value::is_null)
+        && source
+            .get("toolEmulation")
+            .is_some_and(|value| !value.is_null())
+    {
+        target["toolEmulation"] = source["toolEmulation"].clone();
+    }
     for key in ["maxInputTokens", "maxOutputTokens"] {
         if let Some(value) = source[key].as_u64() {
             if value > target[key].as_u64().unwrap_or(0) {
@@ -367,6 +381,38 @@ mod tests {
         assert_eq!(target["maxOutputTokens"], 50);
         assert_eq!(target["supportsImages"], true);
         assert_eq!(target["reasoningEffortLevels"].as_array().unwrap().len(), 2);
+    }
+
+    /// `toolEmulation` 合并（A2A v3.5.0 口径）：目标缺省或 null 时由源补齐，
+    /// 已有值时不被覆盖（顺序无关）。
+    #[test]
+    fn merge_fills_tool_emulation_only_when_absent() {
+        // 目标缺省 → 由源补齐
+        let mut target = json!({ "id": "m" });
+        let source = json!({ "id": "m", "toolEmulation": { "mode": "prompt" } });
+        merge(&mut target, &source);
+        assert_eq!(target["toolEmulation"]["mode"], "prompt");
+
+        // 目标为 null → 同样补齐
+        let mut target = json!({ "id": "m", "toolEmulation": null });
+        merge(&mut target, &source);
+        assert_eq!(target["toolEmulation"]["mode"], "prompt");
+
+        // 目标已有值 → 不被覆盖（先到先得，与账号遍历顺序无关）
+        let mut target = json!({ "id": "m", "toolEmulation": { "mode": "native" } });
+        merge(&mut target, &source);
+        assert_eq!(
+            target["toolEmulation"]["mode"], "native",
+            "已有值不得被后一个账号的说法盖掉"
+        );
+
+        // 源为 null / 缺省 → 目标保持缺省（不写 null 进去）
+        let mut target = json!({ "id": "m" });
+        merge(&mut target, &json!({ "id": "m", "toolEmulation": null }));
+        assert!(
+            target.get("toolEmulation").is_none(),
+            "源无有效值时不该凭空写入该字段"
+        );
     }
 
     /// 选号权限门的证据来自账号目录状态槽（上游同名函数读的是
