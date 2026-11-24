@@ -247,6 +247,21 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('33 · 页面明写「配置是全局的」（没有按用户隔离）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const note = page.getByTestId('purge-scope-note');
+  await expect(note).toBeVisible();
+  // 三个要点都得说到：全局 / 无按用户隔离 / 保存即影响线上
+  await expect(note).toContainText(/全局/);
+  await expect(note).toContainText(/没有按用户/);
+  await expect(note).toContainText(/立即影响线上/);
+  // 总开关关闭时这句仍然在（作用域与开关状态无关）
+  await page.getByRole('switch').first().click();
+  await expect(page.getByTestId('purge-scope-note')).toBeVisible();
+});
+
 test('32 · 空原文行保存前告知会被丢弃', async ({ page }) => {
   // 一行 from 为空：后端 filter_map 会静默剔除，前端要提前说
   const rules = [{ from: 'a', to: 'b' }, { from: '   ', to: 'c' }];

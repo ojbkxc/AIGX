@@ -3722,6 +3722,14 @@ export default function PurgeConsole(): JSX.Element {
             {t('破甲控制台当前关闭，请求不会被改写。')}
           </p>
         ) : null}
+        {/* 作用域说明：网关只有一份全局配置（`PurgeStore.current`），没有按账号/按
+            密钥的隔离。新接手的人最容易误判成「只影响我这个号」，从而以为可以随便
+            试——这句话必须在改第一个开关之前就能看到。 */}
+        <p className="purge-scope-note" data-testid="purge-scope-note">
+          {t(
+            '这份配置是全局的：对所有账号、所有上游请求一律生效，没有按用户或按密钥的隔离。改动保存后立即影响线上流量。',
+          )}
+        </p>
         {/* 与出厂默认的差异：接手别人配置时，「哪几项偏离默认」才是要看的 */}
         {defaultsDiff ? (
           <div className="purge-warning-box" role="status" data-testid="purge-defaults-diff">

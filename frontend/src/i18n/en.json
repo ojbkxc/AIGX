@@ -413,6 +413,7 @@
   "{{detail}}，保存时这些行会被丢弃。继续？": "{{detail}}; these rows are dropped on save. Continue?",
   "死区词改写 {{n}} 行未填原文": "{{n}} dead-zone row(s) have an empty source",
   "同义词 {{n}} 行未填原文": "{{n}} synonym row(s) have an empty source",
+  "这份配置是全局的：对所有账号、所有上游请求一律生效，没有按用户或按密钥的隔离。改动保存后立即影响线上流量。": "This config is global: it applies to every account and every upstream request — there is no per-user or per-key scoping. Saving a change affects live traffic immediately.",
   "死区词改写": "Dead-zone rewrites",
   "异源模型": "Fallback models",
   "system 剥离前缀": "system strip prefixes",

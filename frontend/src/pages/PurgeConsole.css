@@ -851,3 +851,12 @@
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
+/* 作用域说明：常驻的一句，弱化成辅助信息而不是警告条（它每天都成立） */
+.purge-scope-note {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
