@@ -109,7 +109,8 @@ test.describe('签到计划编辑器（契约字段）', () => {
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/checkin');
     await page.locator('.sub-tab', { hasText: '定时签到' }).click();
-    await page.locator('.ck-sched-row', { hasText: '每日 09:00' }).getByRole('button', { name: '编辑' }).click();
+    // v3.5.1：非编辑态是 SchedulePlanCard（`.ck-sched-row` 只在编辑态），编辑按钮在计划卡里
+    await page.getByRole('button', { name: '编辑' }).first().click();
 
     // 逐家覆盖行：workbuddy 已覆盖 10:05 → 显示恢复默认；平台专属徽章只在无覆盖时出现
     const pickRow = page.locator('.ck-provider-pick-row', { hasText: 'workbuddy' });
@@ -162,7 +163,7 @@ test.describe('签到计划编辑器（契约字段）', () => {
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/checkin');
     await page.locator('.sub-tab', { hasText: '定时签到' }).click();
-    await page.getByRole('button', { name: '添加条目' }).click();
+    await page.getByRole('button', { name: '新建签到计划' }).click();
 
     await expect(page.locator('.ck-editor').getByText('随机签到区间（可选）')).toBeVisible();
     await expect(page.locator('.ck-editor').getByText('补签与重试')).toBeVisible();

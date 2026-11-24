@@ -3,12 +3,13 @@ import { test, expect, loginAsAdmin } from './fixtures';
 /**
  * 签到中心 —— 功能级回归。
  *
- * 这是「代账号池里的上游账号去签到」的管理面（与钱包页的用户签到不是一回事）：
- * - 顶部统计（今日完成 / 可签到账号 / 支持的上游 / 定时签到）
- * - 按 provider 分组列账号，已签/未签徽章
- * - 「立即全部签到」「签到本组」「单账号签到」都打对应的运行端点
- * - 签到记录 Tab 渲染台账，结果按 outcome 着色
- * - 定时签到 Tab 有总开关与间隔
+ * v3.5.1 对齐后页面是 A2A 的四任务分区打头（每日签到/新手福利/活动福利/
+ * 成长任务）+ 三个二级页（定时签到/定时补签/签到记录）+ AIGX 保留的福利通道：
+ * - 顶部四张统计卡（今日签到 / 定时签到 / 待领新手福利 / 累计签到记录）
+ * - 分区内左 rail 列 provider（含「全部提供商」），右 main 是行列表
+ * - 状态三档筛选（全部/已签到/未签到，带计数）
+ * - 「立即全部签到」「单账号签到」都打 /api/checkin-center/run
+ * - 签到记录页仍是表格（.ck-table），结果按 outcome 着色
  */
 
 test.describe('签到中心', () => {
@@ -17,29 +18,28 @@ test.describe('签到中心', () => {
     await page.goto('/checkin');
     // 新 IA：/checkin 重定向到供应商页「签到」Tab（embedded 无 h1），
     // 用签到页自己的二级 Tab 作为就绪信号（standalone 与 embedded 通用）。
-    await expect(page.locator('.ck-sub-tabs .sub-tab', { hasText: '签到中心' })).toBeVisible();
+    // v3.5.1 起首 Tab 由「签到中心」改为「每日签到」（四任务分区打头）。
+    await expect(page.locator('.ck-sub-tabs .sub-tab', { hasText: '每日签到' })).toBeVisible();
   });
 
-  test('顶部统计与分组账号表渲染', async ({ page, pageErrors }) => {
-    // 五张统计卡：今日完成 1/2、可签到账号 2、支持上游 2、累计记录数、定时计划启用 1/1
-    await expect(page.locator('.ck-stat')).toHaveCount(5);
+  test('顶部统计与分区行列表渲染', async ({ page, pageErrors }) => {
+    // 四张统计卡（v3.5.1 口径：今日签到 / 定时签到 / 待领新手福利 / 累计签到记录）
+    await expect(page.locator('.ck-stat')).toHaveCount(4);
     const statsText = await page.locator('.ck-stats').innerText();
-    expect(statsText).toContain('今日完成');
-    expect(statsText).toContain('可签到账号');
-    expect(statsText).toContain('支持的上游');
+    expect(statsText).toContain('今日签到');
+    expect(statsText).toContain('定时签到');
+    expect(statsText).toContain('累计签到记录');
 
-    // provider 分组卡：默认折叠，账号表在展开后才渲染
-    await expect(page.locator('.ck-prov-block')).toHaveCount(1);
-    await expect(page.locator('.ck-prov-name')).toContainText('WorkBuddy 国内版');
-    await expect(page.locator('.ck-prov-sub')).toContainText('已签 1');
-    await page.locator('.ck-prov-row').click();
+    // 左 rail：除「全部提供商」外应有 WorkBuddy 国内版这一项
+    const rail = page.locator('.ck-provider-rail');
+    await expect(rail).toBeVisible();
+    await expect(rail.locator('.ck-rail-item', { hasText: 'WorkBuddy 国内版' })).toHaveCount(1);
 
-    // 展开后两个账号行，一个已签一个待签
-    const rows = page.locator('.ck-table tbody tr');
-    await expect(rows).toHaveCount(2);
-    await expect(rows.nth(0)).toContainText('已签');
-    await expect(rows.nth(1)).toContainText('待签');
-    await expect(rows.nth(0)).toContainText('签到成功 +100');
+    // 右 main 渲染两个账号行，一个已签一个待签（行内文案来自 row 的状态徽标）
+    const main = page.locator('.ck-center-main');
+    await expect(main).toBeVisible();
+    await expect(main).toContainText('workbuddy-1');
+    await expect(main).toContainText('workbuddy-2');
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -52,10 +52,10 @@ test.describe('签到中心', () => {
       }
     });
 
-    // 先展开 provider 分组，账号表才渲染
-    await page.locator('.ck-prov-row').click();
-    const row = page.locator('.ck-table tbody tr', { hasText: 'workbuddy-2' });
-    await row.getByRole('button', { name: '签到' }).click();
+    // v3.5.1 起分区默认展示全部账号，不需要先展开 provider 分组
+    const main = page.locator('.ck-center-main');
+    const row = main.locator('div', { hasText: 'workbuddy-2' }).last();
+    await row.getByRole('button', { name: '签到' }).first().click();
 
     await expect.poll(() => calls.length, { timeout: 5000 }).toBeGreaterThan(0);
     // 单账号签到的请求体里应带该账号 id
@@ -91,7 +91,7 @@ test.describe('签到中心', () => {
 
   test('定时签到 Tab 有总开关与间隔设置', async ({ page, pageErrors }) => {
     await page.locator('.sub-tab', { hasText: '定时签到' }).click();
-    await expect(page.locator('.ck-setting-row').first()).toBeVisible();
+    // v3.5.1 起定时页是「总开关卡 + 计划卡 + 执行规则卡」，不再是单张设置行
     await expect(page.locator('.main-content')).toContainText('启用定时签到');
     await expect(page.locator('.main-content')).toContainText('账号间隔');
     // 至少一个开关控件
