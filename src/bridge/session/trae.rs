@@ -24,7 +24,31 @@ use crate::bridge::{
 const CHAT_PATH: &str = "/api/agent/v3/llm_utils_chat";
 const DEFAULT_MODEL: &str = "glm-5.2";
 const DEFAULT_MAX_TOKENS: i64 = 1_000_000;
-const DEFAULT_USER_AGENT: &str = "Trae/1.0 antigravity-cockpit-tools";
+/// 真实 Trae 客户端 UA。
+///
+/// 上游 WAF 会校验客户端身份：AIGX 早先用 `Trae/1.0 antigravity-cockpit-tools`
+/// 一律被拦成 `{"code":"11-128","msg":"request illegal","displayMsg":{"zh":"请求
+/// 被拦截，请重新发送"}}` —— 不是 token 失效（那是 401），是请求被判成非法客户端。
+/// 取值来自 A2A `agent2api-wasm-trae` 0.1.1 wasm 里的字面量（`trae/src/headers.rs`）。
+const DEFAULT_USER_AGENT: &str = "VSCode 1.107.1 (TRAE CN)";
+
+/// 真实客户端固定随请求带的身份/渠道头。同样是 wasm 里的字面量，缺一个都可能被
+/// 判非法客户端。`x-request-id` / `x-trae-request-id` 每次请求现生成（见 `request`）。
+const DEFAULT_HEADERS: &[(&str, &str)] = &[
+    ("accept", "*/*"),
+    ("x-user-region", "CN"),
+    ("package-type", "stable_cn"),
+    ("x-lgw-req-sdk-type", "3"),
+    ("x-market-client-id", "VSCode 1.107.1"),
+    ("x-device-type", "x-app-version"),
+    ("x-ide-version-type", "stable"),
+    ("x-ide-version-code", "20260917"),
+    ("x-plugin-channel", "icube-ai"),
+    ("request-traffic-type", "prod"),
+    ("sec-fetch-dest", "empty"),
+    ("sec-fetch-mode", "no-cors"),
+    ("sec-fetch-site", "same-origin"),
+];
 
 pub struct TraeBridge {
     base: String,
@@ -47,6 +71,15 @@ impl TraeBridge {
         {
             merged.push(("user-agent".to_string(), DEFAULT_USER_AGENT.to_string()));
         }
+        // 客户端身份/渠道头：账号里显式配了同名头的以账号为准（下面 only 判断）
+        for (name, value) in DEFAULT_HEADERS {
+            if !merged
+                .iter()
+                .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+            {
+                merged.push((name.to_string(), value.to_string()));
+            }
+        }
         Self {
             base,
             client,
@@ -67,6 +100,12 @@ impl TraeBridge {
             }
             req = req.header(name.as_str(), value.as_str());
         }
+        // 每请求现生成的两个追踪 id：真实客户端每次都换（wasm `trae/src/headers.rs`
+        // 里 `x-request-id` / `x-trae-request-id`）。复用同一个值会被当成重放。
+        let request_id = uuid::Uuid::new_v4().to_string();
+        req = req
+            .header("x-request-id", &request_id)
+            .header("x-trae-request-id", request_id.as_str());
         req.json(body)
     }
 }
