@@ -9,7 +9,11 @@
  *
  * 判据（两条都满足才算静止）：
  *   1. `static/index.html` 的 mtime 距今 ≥ `--min-idle` 秒（默认 20）
- *   2. `git status --porcelain -- static` 为空（没有构建产物等待提交）
+ *   2. `git status --porcelain --untracked-files=no -- static` 为空
+ *      —— **只看已跟踪文件的改动**。未跟踪的新 chunk 不影响页面：`index.html`
+ *      引用的是它自己那份产物，多出来的文件没人加载。把 `??` 也算 dirty 会
+ *      在「别人新增页面产出新 chunk」时误拦，明明可以跑。
+ *      需要连未跟踪一起严格判定时加 `--strict-untracked`。
  *
  * 用法：
  *   node scripts/wait-static-still.mjs            # 检查，不满足直接退出 1
@@ -26,6 +30,7 @@ const flag = (name, fallback) => {
 };
 const minIdleSec = flag('--min-idle', 20);
 const maxWaitSec = flag('--wait', 0);
+const strictUntracked = args.includes('--strict-untracked');
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const indexPath = path.join(repoRoot, 'static', 'index.html');
@@ -37,7 +42,9 @@ function snapshot() {
   const idleSec = (Date.now() - fs.statSync(indexPath).mtimeMs) / 1000;
   let dirty = '';
   try {
-    dirty = execFileSync('git', ['status', '--porcelain', '--', 'static'], {
+    const gitArgs = ['status', '--porcelain', '--untracked-files=no', '--', 'static'];
+    if (strictUntracked) gitArgs.splice(2, 1); // 去掉 --untracked-files=no
+    dirty = execFileSync('git', gitArgs, {
       cwd: repoRoot,
       encoding: 'utf8',
     }).trim();
@@ -46,7 +53,8 @@ function snapshot() {
   }
   if (dirty) {
     const count = dirty.split('\n').length;
-    return { ok: false, why: `static 有 ${count} 个未提交改动（可能正在重建）` };
+    const scope = strictUntracked ? '改动（含未跟踪）' : '已跟踪文件的改动';
+    return { ok: false, why: `static 有 ${count} 个${scope}（可能正在重建）` };
   }
   if (idleSec < minIdleSec) {
     return { ok: false, why: `index.html 刚被改过 ${idleSec.toFixed(0)}s 前（阈值 ${minIdleSec}s）` };

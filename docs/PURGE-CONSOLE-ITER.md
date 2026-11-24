@@ -313,8 +313,15 @@ mtime 在最近一分钟内变过、或 static 有未提交改动 → **先等�
 ```bash
 node scripts/wait-static-still.mjs            # 不静止则退出 1，并说明卡在哪一条
 node scripts/wait-static-still.mjs --wait 90  # 最多等 90s，静止后再返回
+node scripts/wait-static-still.mjs --strict-untracked   # 连未跟踪也算 dirty
 ```
-两条判据都要满足：`static/index.html` 静置 ≥ 20s、`git status -- static` 为空。
+两条判据都要满足：`static/index.html` 静置 ≥ 20s、**已跟踪文件**无改动
+（`--untracked-files=no`）。
+
+**为什么默认不看未跟踪**：并发会话新增页面时会产出新的 hash chunk（`??`），
+这些文件**不会**被当前 `index.html` 引用 —— 把它们算 dirty 会在明明可以跑的时候
+拦下来（实测被拦了两次，白等）。需要严格判定时用 `--strict-untracked`。
+
 **不塞进 `package.json` 的 pretest**——那是共享文件，多 agent 同树时改它等于制造冲突；
 按需手动前置调用即可。
 
