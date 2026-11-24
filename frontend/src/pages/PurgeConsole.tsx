@@ -1311,6 +1311,9 @@ export default function PurgeConsole(): JSX.Element {
   // 同时让 toggle 保持稳定引用（Switch 行 memo 才有意义），故不闭包捕获 state。
   const dataRef = useRef<PurgeData | null>(null);
   const draftRef = useRef<PurgeSettings | null>(null);
+  /** dirty / save 的实时快照：Ctrl+S 监听只挂一次，不能依赖会变的闭包 */
+  const dirtyRef = useRef(false);
+  const saveRef = useRef<() => Promise<void>>(async () => {});
   useEffect(() => {
     dataRef.current = data;
     draftRef.current = draft;
@@ -1349,6 +1352,20 @@ export default function PurgeConsole(): JSX.Element {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
+
+  // Ctrl/Cmd+S 保存（破甲页最常用的收尾动作；不拦浏览器默认会弹「另存为」）
+  useEffect(() => {
+    const handler = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's') return;
+      // 未改动时放行默认行为：让用户还能用浏览器自带的页面保存
+      if (!dirtyRef.current) return;
+      event.preventDefault();
+      void saveRef.current();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -1419,6 +1436,12 @@ export default function PurgeConsole(): JSX.Element {
       setSaving(false);
     }
   }, [addToast, dupTemplates.size, numRaw, t]);
+
+  // 把最新的 dirty / save 交给 Ctrl+S 监听（监听只挂一次，读 ref 拿实时值）
+  useEffect(() => {
+    dirtyRef.current = dirty;
+    saveRef.current = save;
+  }, [dirty, save]);
 
   /**
    * 开关：乐观翻本键，失败只回滚该键。
