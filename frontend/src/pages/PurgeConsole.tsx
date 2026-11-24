@@ -1258,6 +1258,8 @@ export default function PurgeConsole(): JSX.Element {
   );
   /** 「按已保存配置预览」：对比「线上现在会怎样」vs「保存后会怎样」 */
   const [previewSavedOnly, setPreviewSavedOnly] = useState(false);
+  /** 预览时套用的模型（非空则一并预演「按模型自动套用」的预设前插） */
+  const [previewModel, setPreviewModel] = useState('');
 
   const lsSet = (k: string, v: string): void => window.localStorage.setItem(k, v);
   const lsRemove = (k: string): void => window.localStorage.removeItem(k);
@@ -1672,6 +1674,8 @@ export default function PurgeConsole(): JSX.Element {
       const res = await api.previewPurge({
         settings,
         messages: parsed,
+        // 空串不传：后端按纯治理处理（旧行为）
+        model: previewModel.trim() || undefined,
       });
       if (!res.success || !res.data) throw new Error('preview failed');
       const back = res.data.messages;
@@ -1704,7 +1708,7 @@ export default function PurgeConsole(): JSX.Element {
     } finally {
       setPreviewing(false);
     }
-  }, [addToast, previewInput, previewing, previewSavedOnly, t]);
+  }, [addToast, previewInput, previewModel, previewing, previewSavedOnly, t]);
 
   // ── 词表 CSV 导入导出（死区词/同义词单表，进草稿不直接保存）──────────────
   //
@@ -2572,6 +2576,19 @@ export default function PurgeConsole(): JSX.Element {
             />
             <span className="purge-hint">{t('按已保存配置')}</span>
           </label>
+          {/* 模型：非空则一并预演「按模型自动套用」的预设前插（与数据面同链） */}
+          <label className="purge-rule-toggle" title={t('填写模型名可预演「按模型自动套用」的预设前插')}>
+            <span className="purge-hint">{t('模型')}</span>
+            <input
+              type="text"
+              className="form-input"
+              style={{ width: 180, marginLeft: 6 }}
+              placeholder={t('留空则不套预设')}
+              value={previewModel}
+              disabled={previewing}
+              onChange={(event) => setPreviewModel(event.target.value)}
+            />
+          </label>
         </div>
         {previewOut !== null ? (
           <>
@@ -2593,6 +2610,7 @@ export default function PurgeConsole(): JSX.Element {
                     ? `${t('同义词')} ${previewDetail.synonym_rules}/${previewDetail.synonym_replacements}`
                     : '',
                   previewDetail.structured_appended ? t('结构化提示已追加') : '',
+                  previewDetail.auto_preset_applied ? t('已套用模型预设') : '',
                   previewDetail.skill_names && previewDetail.skill_names.length > 0
                     ? (() => {
                         // 技能名 + 命中关键词（skill_keywords 与 names 同序；旧后端无则只报名）

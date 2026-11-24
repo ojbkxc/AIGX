@@ -2787,6 +2787,8 @@ export interface PurgeAppliedDetail {
   skill_keywords?: Array<[string, string]>;
   /** 因 skill_inject_limit 长度上限未被注入的命中技能个数 */
   skill_dropped?: number;
+  /** 是否套用了「按模型自动套用」的预设正文（预览指定 model 时才有意义） */
+  auto_preset_applied?: boolean;
 }
 
 /** POST /api/purge/preview 的 data 结构（dry-run 试跑结果） */

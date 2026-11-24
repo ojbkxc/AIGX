@@ -378,7 +378,15 @@ pub async fn handle_preview_purge(
         })
         .collect();
 
-    let applied = crate::purge::preview_messages(&mut messages, &cfg);
+    // `model` 可选：给了就一并预演「按模型自动套用」的预设前插（与数据面同链），
+    // 不给则只跑治理（旧行为逐字节不变）。
+    let model = body
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let applied = crate::purge::preview_request(&mut messages, &cfg, &model);
 
     let out: Vec<Value> = messages
         .iter()

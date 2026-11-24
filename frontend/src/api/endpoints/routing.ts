@@ -146,6 +146,8 @@ export const endpoints = {
   previewPurge: (payload: {
     settings?: PurgeSettings;
     messages: Array<{ role: string; content: string }>;
+    /** 可选：给了就一并预演「按模型自动套用」的预设前插（与数据面同链） */
+    model?: string;
   }): Promise<ApiResponse<PurgePreviewResult>> =>
     request<ApiResponse<PurgePreviewResult>>('POST', `${API_BASE}/purge/preview`, payload),
   // 破甲预设库（内置 prompt 集合：检索 / 详情 / 应用）

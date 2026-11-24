@@ -459,6 +459,9 @@ pub struct AppliedDetail {
     /// （与 `skill_truncated` 的 16 个名额上限是两回事）。预览面提示
     /// 「还有 N 个命中技能因长度上限未注入」。
     pub skill_dropped: u32,
+    /// 是否套用了「按模型自动套用」的预设正文（仅预览面在指定 model 时有意义；
+    /// 数据面不做区分，`apply_request` 只把它算进 `changed`）。
+    pub auto_preset_applied: bool,
 }
 
 /// 进程级持有者：每请求快照（Arc clone），保存即生效。
@@ -842,6 +845,25 @@ pub fn apply_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) -> A
 /// （synonym 命中计数等副作用不生效），供改写规则试跑使用。
 pub fn preview_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) -> Applied {
     apply_inner(messages, cfg, false)
+}
+
+/// 带模型的预览（dry-run）：治理 + 按模型套预设正文，**不写任何统计**。
+///
+/// 为什么需要它：数据面 [`apply_request`] 会在治理后把预设正文前插到 system，
+/// 而旧预览只跑治理——管理员调好「按模型自动套用」后，预览里看不到那段预设，
+/// 会误判「预设没生效」。这里补上同一条链，`model` 为空则退回纯治理（旧行为）。
+pub fn preview_request(
+    messages: &mut Vec<ChatMessage>,
+    cfg: &PurgeSettings,
+    model: &str,
+) -> Applied {
+    let mut applied = apply_inner(messages, cfg, false);
+    if !model.trim().is_empty() && apply_auto_preset(messages, cfg, model) {
+        applied.changed = true;
+        applied.detail.auto_preset_applied = true;
+        // 注意：**不**调 record_auto_preset_hit()——预览不写统计（与 synonym 同口径）
+    }
+    applied
 }
 
 /// 数据面唯一入口：治理全部已启用项，再按模型前插预设正文。
@@ -2582,6 +2604,41 @@ mod tests {
         assert!(load_last_run(&store).is_none(), "超长 uptime 应拒收");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 预览带 model：预设正文确实前插进 system，但统计不增（dry-run）。
+    #[test]
+    fn preview_request_applies_auto_preset_without_stats() {
+        let model = first_preset_model();
+        let mut cfg = enabled();
+        cfg.auto_preset = true;
+        let before = snapshot().auto_preset_hits;
+
+        // 带 model：system 前插预设正文
+        let mut messages = vec![sys("宿主提示词"), user("hi")];
+        let applied = preview_request(&mut messages, &cfg, &model);
+        assert!(applied.changed, "套了预设应当算有改动");
+        assert!(applied.detail.auto_preset_applied, "明细要标出套了预设");
+        let system = messages
+            .iter()
+            .find(|m| m.role == Role::System)
+            .and_then(|m| m.content.as_deref())
+            .unwrap_or_default();
+        assert!(
+            system.contains("宿主提示词"),
+            "宿主提示词不能被吞掉: {system}"
+        );
+        assert!(system.len() > "宿主提示词".len(), "预设正文应已前插");
+        assert_eq!(
+            snapshot().auto_preset_hits,
+            before,
+            "预览不得写自动套用统计"
+        );
+
+        // 不带 model：退回纯治理（旧行为）
+        let mut plain = vec![user("hi")];
+        let applied = preview_request(&mut plain, &cfg, "");
+        assert!(!applied.detail.auto_preset_applied);
     }
 
     #[test]
