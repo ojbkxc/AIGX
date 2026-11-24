@@ -208,6 +208,42 @@ test('6 · 「只看变更行」隐藏上下文并报出隐藏行数', async ({ 
   await expect(page.locator('.pdl-hidden-hint')).toHaveCount(0);
 });
 
+test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) => {
+  const preset = {
+    id: 'p-recent',
+    vendor: 'V',
+    model: 'm',
+    title: 'Recent preset',
+    tags: [],
+    bytes: 12,
+    sha256: 'cafe'.repeat(16),
+    preview: 'body preview',
+  };
+  await page.route(/\/api\/purge\/presets\/[^/]+\/apply$/, (r) =>
+    r.fulfill({ json: { success: true, data: { applied: {}, settings: SETTINGS } } }),
+  );
+  await page.route(/\/api\/purge\/presets\/[^/]+$/, (r) =>
+    r.fulfill({ json: { success: true, data: { ...preset, body: 'preset body' } } }),
+  );
+  await page.route(/\/api\/purge\/presets(\?|$)/, (r) =>
+    r.fulfill({
+      json: { success: true, data: { items: [preset], vendors: [{ vendor: 'V', count: 1 }], total: 1 } },
+    }),
+  );
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  // 应用前没有徽标
+  await expect(page.getByText('最近用过')).toHaveCount(0);
+
+  // 展开 → 设为结构化模板（走 noteRecent）
+  await page.getByText('Recent preset').first().click();
+  await page.getByTestId('purge-preset-apply-template').click();
+
+  // 应用后该条打标
+  await expect(page.getByText('最近用过')).toBeVisible();
+});
+
 test('9 · 搜到正文时展开给出命中片段并高亮', async ({ page }) => {
   const body = '前置上下文'.repeat(12) + 'UniqueNeedleToken' + '后置上下文'.repeat(12);
   await page.route(/\/api\/purge\/presets\/[^/]+$/, (r) =>
