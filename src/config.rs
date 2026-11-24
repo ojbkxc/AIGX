@@ -16,6 +16,20 @@ use crate::payment::EpayConfig;
 /// Workers AI。本地址即 cf-ai-gw Worker 的部署地址。
 pub const DEFAULT_CF_BINDING_URL: &str = "http://127.0.0.1:8787";
 
+/// 换账号次数默认值：失败后最多换 32 个账号（对齐 Agent2API v3.5.1
+/// `DEFAULT_RETRY_SWITCH_COUNT`，此前是 5）。
+///
+/// 比同账号重发那档宽得多是刻意的：换号的成本主要在「等到下一个可用账号」，
+/// 而一个账号失败往往说明它这份额度确实不通，多换几个比快速失败更符合预期。
+pub const DEFAULT_RETRY_SWITCH_COUNT: u32 = 32;
+/// 换账号次数的上界（对齐上游 `RETRY_MAX_SWITCH_COUNT`，此前借用
+/// 「同账号重发」的 10）。与转发层单请求尝试上限同源，避免配置能填、
+/// 转发层却提前截断。
+pub const RETRY_MAX_SWITCH_COUNT: u32 = 100;
+/// 单请求最多尝试的账号数 = 首发 1 次 + 最多换 [`RETRY_MAX_SWITCH_COUNT`] 个
+/// （= 上游转发层 `MAX_ROUTE_ATTEMPTS + 1` 的循环口径）。
+pub const MAX_SWITCH_ATTEMPTS: u32 = RETRY_MAX_SWITCH_COUNT + 1;
+
 // ── Default value functions ──────────────────────────────────────────
 
 fn default_host() -> String {
@@ -618,7 +632,7 @@ pub struct UsageConfig {
     /// （`RotationPolicy.max_attempts`）单独控制，两者职责不重叠。
     #[serde(default = "default_retry_self_count")]
     pub retry_self_count: u32,
-    /// 切换账号重试次数（0~10，默认 5）——单次请求最多尝试几个账号。
+    /// 切换账号重试次数（0~100，默认 32）——单次请求最多尝试几个账号。
     /// 映射到 `RotationPolicy.max_attempts`（账号池路由），保存即生效。
     #[serde(default = "default_retry_switch_count")]
     pub retry_switch_count: u32,
@@ -829,7 +843,7 @@ fn default_retry_self_count() -> u32 {
 }
 
 fn default_retry_switch_count() -> u32 {
-    5
+    DEFAULT_RETRY_SWITCH_COUNT
 }
 
 fn default_retry_on_status() -> Vec<u16> {
@@ -1744,17 +1758,21 @@ pub fn set_retry_self_count(v: u32) {
 }
 
 /// 切换账号重试次数的进程级快照（映射到 `RotationPolicy.max_attempts`）。
-static RETRY_SWITCH_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
+static RETRY_SWITCH_COUNT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(DEFAULT_RETRY_SWITCH_COUNT);
 
-/// 读取切换账号重试次数（0~10）。
+/// 读取切换账号重试次数（0~[`RETRY_MAX_SWITCH_COUNT`]）。
 #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
 pub fn retry_switch_count() -> u32 {
     RETRY_SWITCH_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// 写入切换账号重试次数（上限 10）。
+/// 写入切换账号重试次数（上限 [`RETRY_MAX_SWITCH_COUNT`]）。
 pub fn set_retry_switch_count(v: u32) {
-    RETRY_SWITCH_COUNT.store(v.min(10), std::sync::atomic::Ordering::Relaxed);
+    RETRY_SWITCH_COUNT.store(
+        v.min(RETRY_MAX_SWITCH_COUNT),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// 「直接换号/换渠道状态码」的进程级快照（数据面同步判定）。
@@ -2184,6 +2202,24 @@ fn apply_env_overrides_from(mut config: AppConfig, var: fn(&str) -> Option<Strin
 mod tests {
     use super::redact_url_credentials;
     use super::SecurityPolicyConfig;
+
+    /// v3.5.1：换账号上限口径 = 默认 32 / 上界 100，且进程快照按上界钳制
+    /// （设置页能填到 100，快照就不能只存到 10）。
+    #[test]
+    fn retry_switch_count_defaults_and_clamps_to_v351_bounds() {
+        assert_eq!(super::DEFAULT_RETRY_SWITCH_COUNT, 32);
+        assert_eq!(super::RETRY_MAX_SWITCH_COUNT, 100);
+        assert_eq!(super::MAX_SWITCH_ATTEMPTS, 101);
+        // 默认配置里的值必须跟默认常量一致（两边写死会漂）
+        let cfg = super::AppConfig::default();
+        assert_eq!(cfg.usage.retry_switch_count, 32);
+
+        super::set_retry_switch_count(101);
+        assert_eq!(super::retry_switch_count(), 100, "超上界钳到 100");
+        super::set_retry_switch_count(7);
+        assert_eq!(super::retry_switch_count(), 7, "界内保留原值");
+        super::set_retry_switch_count(super::DEFAULT_RETRY_SWITCH_COUNT);
+    }
 
     /// captcha provider 归一化：大小写/空白容忍，未知值回落自托管的 altcha
     /// （配置手滑不能把登录打到第三方）；site key 去空白。

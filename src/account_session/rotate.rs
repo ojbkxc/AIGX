@@ -16,8 +16,18 @@ const DEFAULT_MAX_COOLDOWN_SECS: u64 = 1800;
 const DEFAULT_AUTH_COOLDOWN_SECS: u64 = 900;
 /// 指数退避的指数上限（2^5 = 32 倍基础值）。
 const MAX_BACKOFF_EXPONENT: u32 = 5;
-/// 单次请求最多的账号尝试次数。
-const DEFAULT_MAX_ATTEMPTS: usize = 5;
+/// 单次请求最多的账号尝试次数默认值（首发 1 次 + 默认换 32 个）。
+///
+/// 上游 v3.5.1 把「换账号」那一档从 5 抬到 32：换号的成本主要在等下一个
+/// 可用账号，而一个账号失败往往说明它这份额度确实不通，多换几个比快速失败
+/// 更符合预期。上界另由 [`MAX_ATTEMPTS_CEILING`] 收。
+const DEFAULT_MAX_ATTEMPTS: usize = crate::config::DEFAULT_RETRY_SWITCH_COUNT as usize + 1;
+/// 单次请求最多的账号尝试次数上界（与配置面同源）。
+///
+/// 这里若比配置上界小，管理员在设置里填的换号上限就会被路由层默默截断
+/// （v3.5.1 上游把 `MAX_SWITCHES` 与转发层 `MAX_ROUTE_ATTEMPTS` 对齐到
+/// 100/101 就是这个原因）。
+const MAX_ATTEMPTS_CEILING: usize = crate::config::MAX_SWITCH_ATTEMPTS as usize;
 
 /// 账号级轮换参数（管理台「账号路由」可调，落盘后重启仍生效）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,14 +46,14 @@ impl RotationPolicy {
     /// 归一化到安全区间，避免管理台误填出「永不冷却 / 无限重试」：
     /// - 基础冷却 5s–1h；上限至少等于基础值、最多 24h
     /// - 认证冷却 60s–24h（密钥失效需人工介入，不宜太短）
-    /// - 单请求最多尝试账号 1–20 次
+    /// - 单请求最多尝试账号 1–101 次（与配置面换号上限 100 同源）
     pub fn clamped(mut self) -> Self {
         self.base_cooldown_secs = self.base_cooldown_secs.clamp(5, 3_600);
         self.max_cooldown_secs = self
             .max_cooldown_secs
             .clamp(self.base_cooldown_secs, 86_400);
         self.auth_cooldown_secs = self.auth_cooldown_secs.clamp(60, 86_400);
-        self.max_attempts = self.max_attempts.clamp(1, 20);
+        self.max_attempts = self.max_attempts.clamp(1, MAX_ATTEMPTS_CEILING);
         self
     }
 }
@@ -102,6 +112,26 @@ mod tests {
         RotationPolicy::default()
     }
 
+    /// v3.5.1：默认换号 5 → 32（尝试次数 6 → 33），上界 20 → 101。
+    ///
+    /// 这三个数字必须跟配置面同源，否则「设置里能填 100、路由层只认 20」。
+    #[test]
+    fn attempt_budget_follows_v351_defaults_and_ceiling() {
+        assert_eq!(RotationPolicy::default().max_attempts, 33);
+        assert_eq!(MAX_ATTEMPTS_CEILING, 101);
+        assert_eq!(
+            RotationPolicy::default().max_attempts,
+            crate::config::DEFAULT_RETRY_SWITCH_COUNT as usize + 1
+        );
+        // 记录到上界也不被意外削减（默认值本身不能被 clamp 缩水）
+        let p = RotationPolicy {
+            max_attempts: MAX_ATTEMPTS_CEILING,
+            ..RotationPolicy::default()
+        }
+        .clamped();
+        assert_eq!(p.max_attempts, MAX_ATTEMPTS_CEILING);
+    }
+
     #[test]
     fn rate_limit_prefers_upstream_retry_after() {
         let p = policy();
@@ -153,12 +183,12 @@ mod tests {
             base_cooldown_secs: 99_999,
             max_cooldown_secs: 99_999,
             auth_cooldown_secs: 99_999,
-            max_attempts: 99,
+            max_attempts: 99_999,
         }
         .clamped();
         assert_eq!(p.base_cooldown_secs, 3_600);
         assert_eq!(p.max_cooldown_secs, 86_400);
         assert_eq!(p.auth_cooldown_secs, 86_400);
-        assert_eq!(p.max_attempts, 20);
+        assert_eq!(p.max_attempts, 101);
     }
 }

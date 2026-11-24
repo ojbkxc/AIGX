@@ -131,6 +131,12 @@ fn enabled() -> bool {
     true
 }
 
+/// 「换账号上限」的上界（对齐 Agent2API v3.5.1 `MAX_SWITCHES` = 100）。
+///
+/// 与转发层单请求尝试上限（[`crate::config::MAX_SWITCH_ATTEMPTS`]）同源：
+/// 配置上界比转发层小的话，管理员填了也用不上。
+pub const MAX_SWITCHES: u64 = 100;
+
 /// 统一错误处理设置（对齐参考树 `ErrorSettings`）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -157,7 +163,7 @@ impl Default for ErrorPolicyConfig {
     fn default() -> Self {
         Self {
             resends: 3,
-            switches: 5,
+            switches: crate::config::DEFAULT_RETRY_SWITCH_COUNT as u64,
             interval_seconds: 5,
             wait_budget_seconds: 30,
             cooldown_floor_seconds: 30,
@@ -349,7 +355,7 @@ impl ErrorPolicyConfig {
     pub fn validate(&self) -> Result<(), String> {
         let bounds = [
             (self.resends, 0, 10, "原账号重发次数"),
-            (self.switches, 0, 10, "换账号上限"),
+            (self.switches, 0, MAX_SWITCHES, "换账号上限"),
             (self.interval_seconds, 0, 300, "重发间隔"),
             (self.wait_budget_seconds, 0, 300, "累计等待上限"),
             (self.cooldown_floor_seconds, 1, 60, "最短冷却"),
@@ -633,7 +639,7 @@ pub fn build_snapshot(config: &AppConfig) -> ErrorPolicySnapshot {
     // 与 `UsageConfig::default` 逐项对比：只有偏离默认才视为「运维显式改过旧
     // 重试字段」，据此做 legacy 投影（默认配置不标 legacy）。
     let legacy = usage.retry_self_count != 1
-        || usage.retry_switch_count != 5
+        || usage.retry_switch_count != crate::config::DEFAULT_RETRY_SWITCH_COUNT
         || usage.retry_interval_ms != 0
         || usage.retry_on_status != vec![402u16];
     let mut settings = ErrorPolicyConfig::default();
@@ -1019,6 +1025,36 @@ mod tests {
         let mut cfg = ErrorPolicyConfig::default();
         cfg.rules.pop();
         assert!(cfg.validate().is_err());
+    }
+
+    /// v3.5.1：换账号上限默认 5 → 32，上界 10 → 100（上游 `MAX_SWITCHES`）。
+    ///
+    /// 两个数字必须和配置面同源：默认值跟 `DEFAULT_RETRY_SWITCH_COUNT` 走，
+    /// 上界不能比转发层尝试上限小（否则填了也用不上）。
+    #[test]
+    fn switch_limit_follows_v351_defaults_and_bound() {
+        let defaults = ErrorPolicyConfig::default();
+        assert_eq!(defaults.switches, 32);
+        assert_eq!(
+            defaults.switches,
+            u64::from(crate::config::DEFAULT_RETRY_SWITCH_COUNT)
+        );
+        assert!(defaults.validate().is_ok());
+
+        assert_eq!(MAX_SWITCHES, 100);
+        let mut at_max = ErrorPolicyConfig::default();
+        at_max.switches = MAX_SWITCHES;
+        assert!(at_max.validate().is_ok(), "上界本身必须可保存");
+        let mut over_max = at_max;
+        over_max.switches = MAX_SWITCHES + 1;
+        assert!(over_max.validate().is_err(), "超上界必须拒绝");
+
+        // 转发层的尝试次数上界要比配置上界多容纳「首发那次」
+        assert_eq!(
+            crate::config::MAX_SWITCH_ATTEMPTS,
+            crate::config::RETRY_MAX_SWITCH_COUNT + 1
+        );
+        assert!(crate::config::MAX_SWITCH_ATTEMPTS as u64 > MAX_SWITCHES);
     }
 
     #[test]

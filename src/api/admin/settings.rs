@@ -51,7 +51,7 @@ pub struct LimitsRequest {
     pub max_retries: Option<u32>,
     /// 同一账号内的重试次数（0~10）
     pub retry_self_count: Option<u32>,
-    /// 切换账号重试次数（0~10，默认 5）——单次请求最多尝试几个账号
+    /// 切换账号重试次数（0~100，默认 32）——单次请求最多尝试几个账号
     pub retry_switch_count: Option<u32>,
     pub retry_interval_ms: Option<u64>,
     pub retry_on_status: Option<Vec<u16>>,
@@ -264,7 +264,7 @@ pub async fn handle_update_limits(
             config.usage.retry_self_count = v.min(10);
         }
         if let Some(v) = body.retry_switch_count {
-            config.usage.retry_switch_count = v.min(10);
+            config.usage.retry_switch_count = v.min(crate::config::RETRY_MAX_SWITCH_COUNT);
         }
         if let Some(v) = body.retry_interval_ms {
             config.usage.retry_interval_ms = v.min(10_000);
@@ -378,7 +378,9 @@ pub async fn handle_update_limits(
     crate::config::set_retry_self_count(usage.retry_self_count);
     crate::config::set_retry_switch_count(usage.retry_switch_count);
     let mut policy = state.account_sessions.policy();
-    policy.max_attempts = (usage.retry_switch_count as usize + 1).clamp(1, 20);
+    // 换号上限 → 账号尝试次数（+1 是首发那次），上界与配置面同源
+    policy.max_attempts = (usage.retry_switch_count as usize + 1)
+        .clamp(1, crate::config::MAX_SWITCH_ATTEMPTS as usize);
     let _ = state.account_sessions.set_policy(policy);
     crate::config::set_body_timeout_secs(usage.body_timeout_secs);
     crate::config::set_retry_on_status_codes(usage.retry_on_status.clone());
@@ -1506,6 +1508,8 @@ pub async fn handle_update_error_policy(
         .and_then(|v| v.as_str())
         .ok_or_else(|| error_response("缺少设置版本，请重新读取", StatusCode::BAD_REQUEST))?
         .to_string();
+    // `validate()` 已保证 ≤ MAX_SWITCHES；min 是双保险（上限不该由客户端 JSON 决定）。
+    let switches = settings.switches.min(crate::error_policy::MAX_SWITCHES) as u32;
     // CAS：在写锁内比对，避免并发覆盖。
     let current_revision = crate::error_policy::revision(&crate::error_policy::snapshot());
     if current_revision != revision {
@@ -1515,12 +1519,22 @@ pub async fn handle_update_error_policy(
         ));
     }
     let config = update_admin_config(&state, &headers, move |config| {
+        // 上游 v3.5.1 `config/error_policy.rs::write_settings` 同口径：错误处理页
+        // 的「换账号上限」回写旧重试字段。不写的话这一格只是 UI 展示——数据面
+        // 读的是 `retry_switch_count` → `RotationPolicy.max_attempts`，改了不生效。
+        config.usage.retry_switch_count = switches.min(crate::config::RETRY_MAX_SWITCH_COUNT);
         config.error_policy = Some(settings);
         Ok(())
     })
     .await?;
     let snapshot = crate::error_policy::build_snapshot(&config);
     crate::error_policy::install_snapshot(std::sync::Arc::new(snapshot.clone()));
+    // 立即生效（不等重启）：换号上限 → 账号池单请求尝试次数（+1 是首发那次）。
+    crate::config::set_retry_switch_count(config.usage.retry_switch_count);
+    let mut policy = state.account_sessions.policy();
+    policy.max_attempts = (config.usage.retry_switch_count as usize + 1)
+        .clamp(1, crate::config::MAX_SWITCH_ATTEMPTS as usize);
+    let _ = state.account_sessions.set_policy(policy);
     Ok(Json(json!({
         "success": true,
         "data": error_policy_view(&snapshot),
