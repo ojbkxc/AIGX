@@ -631,6 +631,7 @@ fn validate_provider_max_results(
     Ok(Some(Some(value)))
 }
 
+#[allow(clippy::too_many_arguments)] // v3.5.1 对齐加 max_results 三态后为 8 参；同上，只保留语义
 pub fn update_provider(
     services: &ToolServices,
     sessions: &AccountSessionStore,

@@ -843,6 +843,11 @@ pub fn apply_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) -> A
 
 /// 管理面预览（dry-run）：应用全部已启用治理项，但**不写统计**
 /// （synonym 命中计数等副作用不生效），供改写规则试跑使用。
+/// 无模型的预览（dry-run）：只跑治理，**不写任何统计**。
+///
+/// 旧接口，保留供外部调用方/旧测试使用；新链路请用 [`preview_request`]
+/// （可一并预演按模型自动套用的预设前插）。
+#[allow(dead_code)]
 pub fn preview_messages(messages: &mut Vec<ChatMessage>, cfg: &PurgeSettings) -> Applied {
     apply_inner(messages, cfg, false)
 }

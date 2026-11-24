@@ -825,6 +825,9 @@ mod shapes_tests {
             capabilities: vec!["chat".to_string(), "tools".to_string()],
             reasoning_levels: vec!["low".to_string(), "high".to_string()],
             tool_calling_mode: None,
+            // 这些用例验的是 list_item 的布尔键与上下文，不涉及可见性判据；
+            // None = 未声明（管理页落「—」），与目录无该字段时的行为一致。
+            visibility: None,
         }
     }
 

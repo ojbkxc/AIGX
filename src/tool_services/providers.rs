@@ -72,8 +72,11 @@ pub fn api_provider_meta(provider: &str) -> Option<ApiProviderMeta> {
 /// 配置为空 → 用 meta 的默认值；配置值一律夹到 `1..=limit`（手工改过的配置
 /// 也不会把上游打出 400）。没有 meta 的来源（插件型）返回 `None`。
 pub fn effective_max_results(provider: &str, configured: Option<usize>) -> Option<usize> {
-    api_provider_meta(provider)
-        .map(|meta| configured.unwrap_or(meta.default_max_results).clamp(1, meta.max_results_limit))
+    api_provider_meta(provider).map(|meta| {
+        configured
+            .unwrap_or(meta.default_max_results)
+            .clamp(1, meta.max_results_limit)
+    })
 }
 
 pub fn display_name(provider: &str) -> &'static str {
@@ -435,7 +438,10 @@ async fn ollama_search(
     limit: usize,
 ) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request
-        .post_json(OLLAMA_SEARCH, json!({ "query": query, "max_results": limit }))
+        .post_json(
+            OLLAMA_SEARCH,
+            json!({ "query": query, "max_results": limit }),
+        )
         .await?;
     Ok(array_of(&body, "results")
         .iter()
@@ -604,7 +610,8 @@ pub async fn test_provider(
             .await
             .map(|_| 1)
     } else {
-        search_with_request(provider, &request, "AIGX connectivity check")
+        // 连通性检查只需确认该来源可用：取 1 条即可，不为诊断多占上游配额。
+        search_with_request(provider, &request, "AIGX connectivity check", 1)
             .await
             .and_then(|sources| {
                 if sources.is_empty() {

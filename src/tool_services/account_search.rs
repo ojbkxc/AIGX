@@ -558,6 +558,9 @@ pub async fn test_provider(
                     client,
                     "AIGX connectivity check",
                     super::timeout_seconds(services, super::WEB_SEARCH_SERVICE_ID),
+                    // 连通性检查用固定探针词，长度不触长词上限；取策略默认值
+                    // （与配置未显式指定时的运行行为一致，不做额外分支）。
+                    crate::tool_services::search::LongQueryPolicy::Truncate,
                 )
                 .await
         }
@@ -758,6 +761,7 @@ mod tests {
                 &crate::test_http_client(),
                 "hello",
                 30,
+                crate::tool_services::search::LongQueryPolicy::Truncate,
             )
             .await
             .unwrap();
@@ -793,6 +797,9 @@ mod tests {
                 &crate::test_http_client(),
                 "hello",
                 30,
+                // 该用例验的是「超长 query → InvalidInput」，只有 Error 策略会报错
+                // （Truncate 会截断后照常返回，Skip 报的是跳过语义），故显式取 Error。
+                crate::tool_services::search::LongQueryPolicy::Error,
             )
             .await
             .unwrap_err();
@@ -923,6 +930,7 @@ mod tests {
                 &crate::test_http_client(),
                 "hello",
                 30,
+                crate::tool_services::search::LongQueryPolicy::Truncate,
             )
             .await
             .unwrap();
@@ -946,6 +954,7 @@ mod tests {
                 &crate::test_http_client(),
                 "hello",
                 30,
+                crate::tool_services::search::LongQueryPolicy::Truncate,
             )
             .await
             .unwrap();

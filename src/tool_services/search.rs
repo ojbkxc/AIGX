@@ -204,6 +204,7 @@ struct QueryOutcome {
     warnings: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)] // v3.5.1 对齐加 policy 后为 8 参；打包成结构体属签名设计变更，留给该模块负责人（此处只保留语义）
 async fn search_one_query(
     services: &ToolServices,
     sessions: &AccountSessionStore,
@@ -283,7 +284,10 @@ pub struct SearchRun {
 /// 跨 query 的全局编号与去重（纯函数，单测直接覆盖）。
 ///
 /// `max_global_sources` 来自配置（设置页「单次汇总总条数上限」），不再写死 100。
-fn assemble_searches(outcomes: Vec<QueryOutcome>, max_global_sources: usize) -> (Vec<Value>, usize) {
+fn assemble_searches(
+    outcomes: Vec<QueryOutcome>,
+    max_global_sources: usize,
+) -> (Vec<Value>, usize) {
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut next_number = 1usize;
     let mut searches = Vec::new();
