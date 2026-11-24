@@ -2529,6 +2529,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         // 破甲改写试跑（dry-run：不写统计、不落库）
         .route("/api/purge/preview", post(api::admin::handle_preview_purge))
+        // 破甲统计导出（四档宽表 CSV：全程 / 近1h / 近24h / 上次运行）
+        .route(
+            "/api/purge/stats.csv",
+            get(api::admin::handle_export_purge_stats),
+        )
         // 破甲预设库：检索 / 详情 / 应用到结构化模板或技能目录
         .route(
             "/api/purge/presets",

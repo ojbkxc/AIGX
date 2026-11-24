@@ -28,6 +28,32 @@ pub async fn handle_get_purge(
     Ok(Json(payload(&state)))
 }
 
+/// GET /api/purge/stats.csv —— 四档统计导出（运维报表）。
+///
+/// 单独一个端点而不是塞进 GET /api/purge：导出的消费方是「下载成文件」，
+/// 与 JSON 快照的生命周期不同（前者进 Excel/BI，后者是页面渲染数据）。
+/// Content-Disposition 带文件名，浏览器直接落盘为 .csv。
+pub async fn handle_export_purge_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<([(axum::http::HeaderName, String); 2], String), (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let csv = crate::purge::stats_csv(state.purge.last_run().as_ref());
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"aigx-purge-stats.csv\"".to_string(),
+            ),
+        ],
+        csv,
+    ))
+}
+
 /// PUT /api/purge —— 全量保存配置（热生效）。
 ///
 /// 请求体既可以是配置对象本身，也可以是 `{ "settings": {...} }`；

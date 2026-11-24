@@ -617,6 +617,83 @@ static STAT_FAILURE_OTHER: AtomicU64 = AtomicU64::new(0);
 static STAT_SYNONYM_HITS: AtomicU64 = AtomicU64::new(0);
 static STAT_AUTO_PRESET_HITS: AtomicU64 = AtomicU64::new(0);
 
+/// 统计导出的列顺序（表头与每行取值共用，防两处漂移）。
+const STATS_CSV_COLUMNS: [&str; 13] = [
+    "window",
+    "responses",
+    "retries",
+    "early_success",
+    "skill_hits",
+    "refusals",
+    "failure_refusal",
+    "failure_empty",
+    "failure_filter",
+    "failure_other",
+    "synonym_hits",
+    "auto_preset_hits",
+    "lower_bound",
+];
+
+/// 单档统计的 CSV 行（窗口名 + 11 个计数 + 下界标记）。
+fn stats_csv_row(label: &str, stats: &PurgeStats, truncated: bool) -> String {
+    format!(
+        "{label},{},{},{},{},{},{},{},{},{},{},{},{}",
+        stats.responses,
+        stats.retries,
+        stats.early_success,
+        stats.skill_hits,
+        stats.refusals,
+        stats.failure_refusal,
+        stats.failure_empty,
+        stats.failure_filter,
+        stats.failure_other,
+        stats.synonym_hits,
+        stats.auto_preset_hits,
+        if truncated { 1 } else { 0 },
+    )
+}
+
+/// 四档统计导出为 CSV（运维报表用；前端「导出统计」直接下载）。
+///
+/// 为什么是**宽表**（一档一行、每列一个计数）而不是「指标,值」两列：
+/// 报表里最常见的是「同一指标跨档对比」（近 1h 拒答 3 次、全程 40 次），
+/// 宽表用 Excel 数据透视直接可用，两列形态还要先转置。
+///
+/// `last_run` 由调用方传入（本函数不碰存储，便于测试）：无记录则不出该行，
+/// 而不是出一行全 0——「没有上次运行」与「上次运行全是 0」是两件事。
+pub fn stats_csv(last_run: Option<&RunSnapshot>) -> String {
+    let mut out = String::with_capacity(512);
+    out.push_str(&STATS_CSV_COLUMNS.join(","));
+    out.push('\n');
+    // 全程：累计计数器，无窗口下界概念
+    out.push_str(&stats_csv_row("all", &snapshot(), false));
+    out.push('\n');
+    for (label, window_ms) in [("1h", 3_600_000u64), ("24h", 86_400_000u64)] {
+        let windowed = windowed_snapshot(window_ms);
+        let as_stats = PurgeStats {
+            responses: windowed.responses,
+            retries: windowed.retries,
+            early_success: windowed.early_success,
+            skill_hits: windowed.skill_hits,
+            refusals: windowed.refusals,
+            failure_refusal: windowed.failure_refusal,
+            failure_empty: windowed.failure_empty,
+            failure_filter: windowed.failure_filter,
+            failure_other: windowed.failure_other,
+            synonym_hits: windowed.synonym_hits,
+            auto_preset_hits: windowed.auto_preset_hits,
+        };
+        out.push_str(&stats_csv_row(label, &as_stats, windowed.truncated));
+        out.push('\n');
+    }
+    if let Some(last) = last_run {
+        // 上次运行是精确快照（关机/周期落盘时写的累计值），不是窗口估计
+        out.push_str(&stats_csv_row("last_run", &last.stats, false));
+        out.push('\n');
+    }
+    out
+}
+
 // ── 时间窗统计（1h / 24h）────────────────────────────────────────
 //
 // 既有 `AtomicU64` 累计值不动（管理面 / 旧前端契约不变）；新增一条**事件环**
@@ -2609,6 +2686,67 @@ mod tests {
         assert!(load_last_run(&store).is_none(), "超长 uptime 应拒收");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CSV 导出：表头列数、档数、以及「上次运行」行逐列值对齐。
+    ///
+    /// 全程/窗口两档读的是进程级计数器（测试里不可控），所以只断言结构与列位；
+    /// `last_run` 行由夹具构造，可逐列精确断言——它正是最容易错位的一行
+    /// （列顺序改了而测试只看行数，就会静默串列）。
+    #[test]
+    fn stats_csv_shape_and_last_run_columns_align() {
+        let snapshot = RunSnapshot {
+            saved_at: 1_800_000_000,
+            uptime_secs: 3_600,
+            stats: PurgeStats {
+                responses: 11,
+                retries: 22,
+                early_success: 33,
+                skill_hits: 44,
+                refusals: 55,
+                failure_refusal: 66,
+                failure_empty: 77,
+                failure_filter: 88,
+                failure_other: 99,
+                synonym_hits: 111,
+                auto_preset_hits: 222,
+            },
+        };
+        let csv = stats_csv(Some(&snapshot));
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 5, "表头 + 全程 + 1h + 24h + 上次运行: {csv}");
+        // 表头与每行列数一致（漏一列会让下游解析整行错位）
+        let width = STATS_CSV_COLUMNS.len();
+        for line in &lines {
+            assert_eq!(line.split(',').count(), width, "列数不一致: {line}");
+        }
+        assert!(lines[0].starts_with("window,"), "首列是窗口名");
+        assert!(lines[0].ends_with(",lower_bound"), "末列是下界标记");
+        // 档名顺序固定（前端/BI 依赖）
+        assert_eq!(lines[1].split(',').next(), Some("all"));
+        assert_eq!(lines[2].split(',').next(), Some("1h"));
+        assert_eq!(lines[3].split(',').next(), Some("24h"));
+        assert_eq!(lines[4].split(',').next(), Some("last_run"));
+        // 上次运行行：11 个计数逐列对齐 + 下界标记为 0（精确快照，不是估计）
+        let last: Vec<&str> = lines[4].split(',').collect();
+        assert_eq!(
+            &last[1..12],
+            &["11", "22", "33", "44", "55", "66", "77", "88", "99", "111", "222"],
+            "列顺序必须与表头一致"
+        );
+        assert_eq!(last[12], "0", "上次运行是精确值，不该标下界");
+    }
+
+    /// 无上次运行记录 → 不出该行（不是出一行全 0）。
+    #[test]
+    fn stats_csv_omits_last_run_row_when_absent() {
+        let csv = stats_csv(None);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 4, "表头 + 三档: {csv}");
+        assert!(
+            !csv.contains("last_run"),
+            "无记录时不该出现 last_run 行: {csv}"
+        );
     }
 
     /// 预览带 model：预设正文确实前插进 system，但统计不增（dry-run）。

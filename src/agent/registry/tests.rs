@@ -379,6 +379,10 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "破甲控制台改写试跑（dry-run：不落库、不计统计、不改数据面）：属 /api/purge 配置页的保存前预演动作，未单开 AI 面工具",
         ),
         (
+            "/api/purge/stats.csv",
+            "破甲统计导出（四档宽表 CSV）：只读进程内计数与上次运行快照，无副作用；数据面已由 /api/purge GET 覆盖，不另开 AI 面工具",
+        ),
+        (
             "/api/model-key-source",
             "模型 Key 进程内权威状态与重建代（撤销闸）：重建代等于批量撤销/放行 Key，属安全边界，须人工在环",
         ),
