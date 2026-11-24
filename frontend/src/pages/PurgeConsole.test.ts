@@ -13,6 +13,7 @@ import {
   readPresetFilter,
   readRecentPresets,
   snapshotReportText,
+  statsExportNote,
   sortWarningsBySeverity,
   tidyRules,
   warningReportText,
@@ -133,6 +134,34 @@ describe('settingsEqual', () => {
 
   it('值不同 → 不等价', () => {
     expect(settingsEqual({ a: 1 } as never, { a: 2 } as never)).toBe(false);
+  });
+});
+
+describe('statsExportNote', () => {
+  it('没有下界档 → null（不弹无意义的提示）', () => {
+    expect(statsExportNote([{ label: '近 1 小时' }, { label: '近 24 小时', truncated: false }])).toBeNull();
+  });
+
+  it('只列出下界的档位（精确档不点名）', () => {
+    expect(
+      statsExportNote([
+        { label: '近 1 小时', truncated: true },
+        { label: '近 24 小时', truncated: false },
+      ]),
+    ).toBe('近 1 小时');
+  });
+
+  it('多档都是下界时用 / 连接', () => {
+    expect(
+      statsExportNote([
+        { label: '近 1 小时', truncated: true },
+        { label: '近 24 小时', truncated: true },
+      ]),
+    ).toBe('近 1 小时 / 近 24 小时');
+  });
+
+  it('空列表 → null', () => {
+    expect(statsExportNote([])).toBeNull();
   });
 });
 

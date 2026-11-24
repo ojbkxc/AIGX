@@ -130,6 +130,19 @@ export function clampNumInput(
   return { corrected: trimmed, notice: null };
 }
 
+/**
+ * 统计导出后的提示：有下界档时**说清楚哪几档不准**。
+ *
+ * CSV 里 `lower_bound` 只是一个 0/1 列——运维拿到表不知道它是「下界标记」，
+ * 看到「近 1h 拒答 3 次」会当成精确值。事件环被覆盖后那几档只会**少算**，
+ * 不会多算，这个方向必须说明。
+ */
+export function statsExportNote(windows: Array<{ label: string; truncated?: boolean }>): string | null {
+  const truncated = windows.filter((w) => w.truncated).map((w) => w.label);
+  if (truncated.length === 0) return null;
+  return truncated.join(' / ');
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -3033,6 +3046,20 @@ export default function PurgeConsole(): JSX.Element {
         text,
       );
       addToast(t('统计已导出为 CSV'), 'success');
+      // 有下界档要说清楚哪几档不准：CSV 里 lower_bound 只是 0/1，运维不知道它是
+      // 「下界标记」，会把「近 1h 拒答 3 次」当精确值。事件环覆盖后只会少算。
+      const lowerBound = statsExportNote([
+        { label: t('近 1 小时'), truncated: dataRef.current?.stats_1h?.truncated },
+        { label: t('近 24 小时'), truncated: dataRef.current?.stats_24h?.truncated },
+      ]);
+      if (lowerBound) {
+        addToast(
+          t('{{windows}} 是下界估计（事件环被覆盖），lower_bound=1 表示该档只会少算', {
+            windows: lowerBound,
+          }),
+          'warning',
+        );
+      }
     } catch {
       addToast(t('统计导出失败'), 'error');
     }
