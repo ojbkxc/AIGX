@@ -230,6 +230,35 @@
 `visible` 的溢出可能只是绝对定位的触摸区撑大了 `scrollWidth`（开关的 44×44），
 既不产生滚动条也不裁剪；把它算缺陷会逼人砍可达性——本末倒置。
 
+### 37. 真实后端契约联调（不是 mock）
+此前所有前端验证都跑在 mock 上——mock 的形状是我们**以为**的契约。本轮起真实
+二进制、隔离数据目录，逐接口核对：
+
+```
+AIGX_SERVER__PORT=18096 AIGX_SECURITY__CAPTCHA_ENABLED=false \
+  AIGX_SERVER__DATA_DIR=D:\tmp\aigx-real2  target\debug\aigx.exe
+# 一次性 admin 密码在 stdout 的 WARN 行
+```
+
+**两个前置坑（真联调必踩）**：
+1. 首次登录后**必须改密码**，否则管理面一律 `403 PASSWORD_CHANGE_REQUIRED`
+   ——不是 401、不是空数据，容易误判成「接口坏了」。
+2. 改密会 **revoke 旧会话**，必须用新密码重新登录拿 token。
+
+**实测结果（全部 200，逐字段核对）**：
+| 接口 | 结果 |
+|---|---|
+| `GET /api/purge` | 11 个字段齐全、类型全对（`settings/stats/runtime/config_warnings/skills/skill_dir_resolved/stats_1h/stats_24h/stats_since/stats_last_run/config_warning_items`） |
+| `GET /api/purge/presets` | `total=53`，条目字段与 `PurgePresetBrief` 完全一致 |
+| 正文检索 `q=vanta` | 命中 4 条，`body_match` 全为 true（元数据都不含该词） |
+| `GET /api/purge/presets/{id}` | `body` 长度 25462 |
+| `GET /api/purge/defaults` | 200，含 settings |
+| `GET /api/purge/stats.csv` | 表头 13 列与 `STATS_CSV_COLUMNS` 一致；无 `last_run` 行（从未关机，符合设计） |
+| `POST /api/purge/preview` | 返回 1 条 messages + `detail`，`changed=false`（默认配置下无改写，符合预期） |
+| `POST /api/purge/stats/reset` | 200，`responses` 归零 |
+
+**结论**：mock 与真实契约**没有偏差**——这批功能在真后端上可直接用。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
