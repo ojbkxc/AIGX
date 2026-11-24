@@ -2396,6 +2396,14 @@ export default function PurgeConsole(): JSX.Element {
   const [batchText, setBatchText] = useState('');
   /** 上次未保存的草稿备份（与服务器配置不同时才出现） */
   const [draftBackup, setDraftBackup] = useState<DraftBackup | null>(null);
+  /**
+   * 本会话内「上次保存成功」的时刻。
+   *
+   * 为什么只记内存、不落 localStorage：它回答的是「我这一次改完存了没有」，
+   * 而不是「这个配置历史上被谁改过」——后者后端没存审计，前端编一个时间戳
+   * 反而会误导。刷新后从空白开始是对的（那时用户该看的是服务器上的值）。
+   */
+  const [savedAt, setSavedAt] = useState<number | null>(null);
   /** 与出厂默认的差异（null=没比过；空数组=完全一致） */
   const [defaultsDiff, setDefaultsDiff] = useState<SettingsDiffItem[] | null>(null);
   /**
@@ -2581,6 +2589,7 @@ export default function PurgeConsole(): JSX.Element {
       setDirty(false);
       // 落库成功 → 备份没有存在意义了（留着反而下次弹「恢复」误导）
       writeDraftBackup(null, lsSetStable, lsRemoveStable);
+      setSavedAt(Date.now());
       addToast(t('已保存'), 'success');
     } catch {
       addToast(t('保存失败'), 'error');
@@ -3547,6 +3556,12 @@ export default function PurgeConsole(): JSX.Element {
         <div className="purge-meta">
           PID {runtime.pid} · {uptime} · {t('上游')}{' '}
           {runtime.upstream || '—'}{' '}
+          {/* 存了还是没存：dirty 只说「有未保存修改」，不说「上次存于何时」 */}
+          {savedAt ? (
+            <span className="purge-saved-at" data-testid="purge-saved-at">
+              {t('上次保存：{{time}}', { time: new Date(savedAt).toLocaleTimeString() })} ·{' '}
+            </span>
+          ) : null}
           {/* 刷新统计：load 会重置草稿，有未保存编辑时禁用避免吞掉改动 */}
           <Button
             variant="outline"

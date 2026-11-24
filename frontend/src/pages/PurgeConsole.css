@@ -846,3 +846,8 @@
     display: none;
   }
 }
+/* 「上次保存」时间戳：弱化为辅助信息 */
+.purge-saved-at {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

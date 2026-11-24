@@ -247,6 +247,29 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('28 · 保存成功后 header 出现「上次保存」时间戳', async ({ page }) => {
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') {
+      await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+      return;
+    }
+    await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+  });
+  await gotoPurge(page);
+
+  // 未保存过：没有时间戳（不编造历史）
+  await expect(page.getByTestId('purge-saved-at')).toHaveCount(0);
+
+  await page.getByLabel('重试上限').fill('6');
+  await page.getByRole('button', { name: '保存' }).click();
+
+  const stamp = page.getByTestId('purge-saved-at');
+  await expect(stamp).toBeVisible();
+  await expect(stamp).toContainText(/上次保存/);
+  // 保存后不再显示「有未保存修改」
+  await expect(page.locator('.purge-dirty-bar')).toHaveCount(0);
+});
+
 test('27 · 词表批量粘贴后可一键撤销回变更前', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
