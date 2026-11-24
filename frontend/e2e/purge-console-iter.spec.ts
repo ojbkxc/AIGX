@@ -284,6 +284,31 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('50 · 有未保存修改时导出的是「已保存」配置，并明说', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  // 改一处但不保存，然后导出
+  await page.getByLabel('重试上限').fill('9');
+  await expect(page.locator('.purge-dirty-bar')).toBeVisible();
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: '导出配置' }).click();
+  const download = await downloadPromise;
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(chunk as Buffer);
+  const body = Buffer.concat(chunks).toString('utf8');
+  const parsed = JSON.parse(body.replace(/^\uFEFF/, '')) as {
+    settings: { retry_limit: number };
+  };
+
+  // 导出的是**已保存**值（8），不是草稿（9）
+  expect(parsed.settings.retry_limit).toBe(8);
+  // 并且**明说**了这件事，不让用户以为导出的就是屏幕上这套
+  await expect(page.locator('.toast', { hasText: '未保存修改未包含在内' })).toHaveCount(1);
+});
+
 test('49 · 导入配置前确认：确认则用导入值替换', async ({ page }) => {
   page.on('dialog', (d) => void d.accept());
   await mockPurge(page);

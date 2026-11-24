@@ -3832,7 +3832,21 @@ export default function PurgeConsole(): JSX.Element {
     if (!snapshot) return;
     const filename = `aigx-purge-config-${new Date().toISOString().slice(0, 10)}.json`;
     downloadText(filename, JSON.stringify({ version: 1, settings: snapshot.settings }, null, 2) + '\n');
-    addToast(t('配置已导出'), 'success');
+    // 导出的是**已保存**的配置（迁移/备份要的是生效值），不是眼前草稿。有未保存
+    // 修改时必须说清楚，否则用户以为导出的就是屏幕上这套。
+    const changed = importOverwriteItems(
+      snapshot.settings,
+      draftRef.current,
+      dirtyRef.current,
+    );
+    if (changed.length > 0) {
+      addToast(
+        t('已导出「已保存」的配置（当前 {{n}} 项未保存修改未包含在内）', { n: changed.length }),
+        'warning',
+      );
+    } else {
+      addToast(t('配置已导出'), 'success');
+    }
   }, [addToast, t]);
 
   /** 导入配置：读取 JSON → 校验结构 → 填入草稿（不直接保存，确认后再点保存） */

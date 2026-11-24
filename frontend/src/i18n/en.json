@@ -439,6 +439,7 @@
   "原因：{{detail}}": "Reason: {{detail}}",
   "技能目录里已有同名技能「{{id}}」，继续写入会覆盖它的 SKILL.md。继续？": "A skill with the same name \"{{id}}\" already exists in the skill directory; writing will overwrite its SKILL.md. Continue?",
   "导入会覆盖当前 {{n}} 项未保存的修改（{{preview}}{{more}}）。继续？": "Importing will overwrite {{n}} unsaved change(s) ({{preview}}{{more}}). Continue?",
+  "已导出「已保存」的配置（当前 {{n}} 项未保存修改未包含在内）": "Exported the SAVED config ({{n}} unsaved change(s) are not included)",
   "批量停用异常行": "Disable problem rows",
   "将停用 {{n}} 条异常行（不删除，之后可再启用）。继续？": "This disables {{n}} problem row(s) without deleting them; you can re-enable them later. Continue?",
   "已停用 {{n}} 条异常行": "Disabled {{n}} problem row(s)",
