@@ -245,6 +245,27 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('14 · 「清零统计」只清计数、不动配置', async ({ page }) => {
+  let resetCalls = 0;
+  let putCalls = 0;
+  await page.route(/\/api\/purge\/stats\/reset$/, (r) => {
+    resetCalls += 1;
+    return r.fulfill({ json: { success: true, data: { stats: { ...PURGE_DATA.stats } } } });
+  });
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') putCalls += 1;
+    await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+  });
+  await gotoPurge(page);
+
+  page.on('dialog', (d) => void d.accept());
+  await page.getByTestId('purge-stats-reset').click();
+  await expect(page.locator('.toast').first()).toContainText(/统计已清零/);
+  expect(resetCalls).toBe(1);
+  // 清零不等于保存配置：不该有任何 PUT
+  expect(putCalls).toBe(0);
+});
+
 test('13 · 整页无横向溢出（窄视口下最容易暴露布局问题）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);

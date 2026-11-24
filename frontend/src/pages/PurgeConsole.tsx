@@ -2630,6 +2630,25 @@ export default function PurgeConsole(): JSX.Element {
    * 走后端 /api/purge/stats.csv 而不是在前端拼字符串：窗口档依赖服务端
    * 事件环（前端只有当前档的快照），只有后端能一次给全四档。
    */
+  /**
+   * 清零统计：把此刻作为新的观察基线。
+   *
+   * 为什么需要：累计值是进程级的，改完配置想验证「生效后有没有效果」时，旧历史
+   * 混在里面比不出来；等重启清零不现实。只清计数，不动配置、不动「上次运行」快照。
+   */
+  const resetStats = useCallback(async (): Promise<void> => {
+    if (!window.confirm(t('清零后累计统计与时间窗计数都会归零（不影响配置）。继续？'))) return;
+    try {
+      const res = await api.resetPurgeStats();
+      if (!res.success) throw new Error('reset failed');
+      addToast(t('统计已清零，之后的数据从零开始累计'), 'success');
+      // 重新拉一次整页快照：stats / stats_1h / stats_24h 都要跟着变
+      await load();
+    } catch {
+      addToast(t('统计清零失败'), 'error');
+    }
+  }, [addToast, load, t]);
+
   const exportStatsCsv = useCallback(async (): Promise<void> => {
     try {
       const res = await fetch(`${API_BASE}/purge/stats.csv`, { headers: authHeaders() });
@@ -3018,6 +3037,16 @@ export default function PurgeConsole(): JSX.Element {
           onClick={() => void exportStatsCsv()}
         >
           {t('导出统计 CSV')}
+        </Button>
+        {/* 清零基线：改完配置想看「生效后有没有效果」，旧历史混在累计值里比不出来 */}
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="purge-stats-reset"
+          disabled={saving}
+          onClick={() => void resetStats()}
+        >
+          {t('清零统计')}
         </Button>
       </div>
 

@@ -741,6 +741,19 @@ impl EventRing {
         }
     }
 
+    /// 清空全部槽位并把写指针归零（`reset_stats` 用）。
+    ///
+    /// 槽位写成 `(0, …)` 而不是靠写指针归零「逻辑清空」：读侧靠 `at != 0` 判定
+    /// 有效条目，零值槽天然被忽略——两条路都成立才不会有残留旧计数。
+    fn clear(&self) {
+        if let Ok(mut slots) = self.slots.write() {
+            for slot in slots.iter_mut() {
+                *slot = (0u64, EventKind::Responses);
+            }
+        }
+        self.next.store(0, Ordering::Relaxed);
+    }
+
     /// 记一次事件（数据面热路径：一次原子读 + 一次锁内两字段写）。
     fn push(&self, kind: EventKind, now_ms: u64) {
         let index = self.next.fetch_add(1, Ordering::Relaxed) as usize % Self::CAPACITY;
@@ -840,8 +853,33 @@ pub fn snapshot() -> PurgeStats {
     }
 }
 
-/// 窗口内计数（`PurgeStats` 字段子集：管理面时间窗切换用）。
+/// 清零全部统计（累计计数器 + 事件环），把此刻作为新的观察基线。
 ///
+/// 场景：改完配置想看「生效后到底有没有效果」，但累计值里混着改之前的历史，
+/// 对比不出来。清一次基线比等重启现实。
+///
+/// **只清零计数，不动配置**；也**不写 `last_run` 快照**——那是关机值，与这条
+/// 显式管理动作无关（否则「上次运行」会被一次清零污染）。
+pub fn reset_stats() {
+    for counter in [
+        &STAT_RESPONSES,
+        &STAT_RETRIES,
+        &STAT_EARLY_SUCCESS,
+        &STAT_SKILL_HITS,
+        &STAT_REFUSALS,
+        &STAT_FAILURE_REFUSAL,
+        &STAT_FAILURE_EMPTY,
+        &STAT_FAILURE_FILTER,
+        &STAT_FAILURE_OTHER,
+        &STAT_SYNONYM_HITS,
+        &STAT_AUTO_PRESET_HITS,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    ring().clear();
+}
+
+/// 窗口内计数（`PurgeStats` 字段子集：管理面时间窗切换用）。///
 /// `window_ms` 是窗口宽度（`truncated=false` 表示精确；
 /// 事件环溢出覆盖时为下界估计，`truncated=true` 由读侧给出）。
 #[derive(Debug, Clone, Default, Serialize)]
@@ -2704,6 +2742,32 @@ mod tests {
         assert_eq!(fresh[0].name, "fresh-demo");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `reset_stats` 把累计计数与事件环一起清零；清零后窗口值也应为 0。
+    ///
+    /// 断言两件事：**累计值归零**、**窗口值也归零**（后者证明事件环被清，
+    /// 而不只是计数器被清——只清计数器时窗口档还会显示旧增量）。
+    #[test]
+    fn reset_stats_clears_counters_and_event_ring() {
+        record_response();
+        record_retry();
+        record_synonym_hit();
+        assert!(snapshot().responses >= 1);
+        assert!(windowed_snapshot(3_600_000).responses >= 1);
+
+        reset_stats();
+
+        let after = snapshot();
+        assert_eq!(after.responses, 0, "累计响应数应清零");
+        assert_eq!(after.retries, 0);
+        assert_eq!(after.synonym_hits, 0);
+        assert_eq!(
+            windowed_snapshot(3_600_000).responses,
+            0,
+            "事件环也须清空（否则窗口档仍显示旧增量）"
+        );
+        assert_eq!(windowed_snapshot(86_400_000).retries, 0);
     }
 
     /// 技能目录展开成绝对路径：`~` 前缀必须被替换掉（否则前端显示 `~/...`

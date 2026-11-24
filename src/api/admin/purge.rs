@@ -52,6 +52,19 @@ pub async fn handle_get_purge_defaults(
     Ok(Json(json!({ "success": true, "settings": defaults })))
 }
 
+/// POST /api/purge/stats/reset -- 清零统计，把此刻作为新的观察基线。
+///
+/// 只清计数（含事件环），不动配置、不写 `last_run` 快照。
+pub async fn handle_reset_purge_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    crate::purge::reset_stats();
+    Ok(Json(
+        json!({ "success": true, "stats": crate::purge::snapshot() }),
+    ))
+}
 pub async fn handle_export_purge_stats(
     State(state): State<AppState>,
     headers: HeaderMap,

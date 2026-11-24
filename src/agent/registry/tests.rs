@@ -387,6 +387,10 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "破甲出厂默认配置：只读默认值，无副作用；与 /api/purge GET 同为配置读取面，不另开 AI 面工具",
         ),
         (
+            "/api/purge/stats/reset",
+            "破甲统计清零：POST 但只清进程内计数与事件环，不动配置也不写 last_run 快照；属运维手动建立观察基线的动作，不给 AI 面开放（自动清零会破坏趋势观测）",
+        ),
+        (
             "/api/model-key-source",
             "模型 Key 进程内权威状态与重建代（撤销闸）：重建代等于批量撤销/放行 Key，属安全边界，须人工在环",
         ),

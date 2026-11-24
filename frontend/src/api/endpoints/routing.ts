@@ -30,6 +30,7 @@ import type {
   PurgeData,
   PurgePreviewResult,
   PurgeSettings,
+  PurgeStats,
   PurgePresetApplyResult,
   PurgePresetApplyTarget,
   PurgePresetDetail,
@@ -153,6 +154,9 @@ export const endpoints = {
     model?: string;
   }): Promise<ApiResponse<PurgePreviewResult>> =>
     request<ApiResponse<PurgePreviewResult>>('POST', `${API_BASE}/purge/preview`, payload),
+  // 清零破甲统计（把此刻作为新的观察基线；只清计数，不动配置）
+  resetPurgeStats: (): Promise<ApiResponse<{ stats: PurgeStats }>> =>
+    request<ApiResponse<{ stats: PurgeStats }>>('POST', `${API_BASE}/purge/stats/reset`),
   // 破甲出厂默认配置（重置动作用；只读，不写库）
   getPurgeDefaults: (): Promise<ApiResponse<{ settings: PurgeSettings }>> =>
     request<ApiResponse<{ settings: PurgeSettings }>>('GET', `${API_BASE}/purge/defaults`),
