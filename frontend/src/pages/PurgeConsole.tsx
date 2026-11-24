@@ -372,6 +372,17 @@ export function ruleRowHint(
   return undefined;
 }
 
+/** 交换第 index 与第 index+delta 条规则（越界时原样返回）。 */
+export function swapRules<T>(rules: readonly T[], index: number, delta: -1 | 1): T[] {
+  const target = index + delta;
+  if (index < 0 || index >= rules.length || target < 0 || target >= rules.length) {
+    return [...rules];
+  }
+  const next = [...rules];
+  [next[index], next[target]] = [next[target], next[index]];
+  return next;
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -1694,6 +1705,11 @@ const RuleRow = memo(function RuleRow({
   dupHint,
   onPatch,
   onRemove,
+  onMove,
+  canMoveUp,
+  canMoveDown,
+  moveUpLabel,
+  moveDownLabel,
   onProbe,
   probeLabel,
 }: {
@@ -1710,6 +1726,13 @@ const RuleRow = memo(function RuleRow({
   dupHint?: string;
   onPatch: (index: number, part: Partial<PurgeRewriteRule>) => void;
   onRemove: (index: number) => void;
+  /** 上移/下移（改写按表序执行，顺序有意义时才需要） */
+  onMove?: (index: number, delta: -1 | 1) => void;
+  /** 是否为第一行/最后一行（决定移动按钮是否可用） */
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
+  moveUpLabel?: string;
+  moveDownLabel?: string;
   /** 用这一条的原文做预览样例（验证它到底命中没命中） */
   onProbe?: (rule: PurgeRewriteRule) => void;
 }): JSX.Element {
@@ -1735,6 +1758,33 @@ const RuleRow = memo(function RuleRow({
       {/* 开关 + 试 + 删除包成一组：桌面上占网格最后一列（横排），窄屏时整行横排
           —— 否则单列布局下三个控件各占一行，一条规则要占 7 行高 */}
       <div className="purge-rule-ops">
+        {/* 调序：改写按表序执行，顺序决定谁先命中（重复 from 只有最靠前生效） */}
+        {onMove ? (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid={`purge-rule-up-${index}`}
+              disabled={canMoveUp === false}
+              title={moveUpLabel}
+              aria-label={moveUpLabel}
+              onClick={() => onMove(index, -1)}
+            >
+              ↑
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid={`purge-rule-down-${index}`}
+              disabled={canMoveDown === false}
+              title={moveDownLabel}
+              aria-label={moveDownLabel}
+              onClick={() => onMove(index, 1)}
+            >
+              ↓
+            </Button>
+          </>
+        ) : null}
         <label className="purge-rule-toggle" title={enableLabel}>
           <input
             type="checkbox"
@@ -2892,6 +2942,37 @@ export default function PurgeConsole(): JSX.Element {
         ? {
             ...d,
             rewrite_rules: d.rewrite_rules.map((rule, i) => (i === index ? { ...rule, ...part } : rule)),
+          }
+        : d,
+    );
+  }, []);
+
+  /**
+   * 上移/下移一条规则。
+   *
+   * 为什么要可调序：改写**按表序执行**，重复 `from` 只有最靠前那条生效（`ruleRowHint`
+   * 已经这么告诉用户了）。若没有调序入口，用户看到「只有最靠前的生效」却无从把想
+   * 要的那条挪上去——提示就成了风凉话。
+   */
+  const moveRule = useCallback((index: number, delta: -1 | 1): void => {
+    setDirty(true);
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            rewrite_rules: swapRules(d.rewrite_rules, index, delta),
+          }
+        : d,
+    );
+  }, []);
+
+  const moveSynonymRule = useCallback((index: number, delta: -1 | 1): void => {
+    setDirty(true);
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            synonym_pairs: swapRules(d.synonym_pairs, index, delta),
           }
         : d,
     );
@@ -4367,6 +4448,11 @@ export default function PurgeConsole(): JSX.Element {
                 enableLabel={t('启用该条改写规则')}
                 probeLabel={t('试')}
                 onProbe={probeRule}
+                onMove={moveRule}
+                canMoveUp={index > 0}
+                canMoveDown={index < draft.rewrite_rules.length - 1}
+                moveUpLabel={t('上移（改写按表序执行，越靠前越先命中）')}
+                moveDownLabel={t('下移')}
                 dupHint={ruleRowHint(
                   rule,
                   Boolean(dupRules.get(rule.from.trim().toLowerCase())),
@@ -4487,6 +4573,11 @@ export default function PurgeConsole(): JSX.Element {
                 enableLabel={t('启用该条改写规则')}
                 probeLabel={t('试')}
                 onProbe={probeRule}
+                onMove={moveSynonymRule}
+                canMoveUp={index > 0}
+                canMoveDown={index < draft.synonym_pairs.length - 1}
+                moveUpLabel={t('上移（改写按表序执行，越靠前越先命中）')}
+                moveDownLabel={t('下移')}
                 dupHint={ruleRowHint(
                   rule,
                   Boolean(dupSynonyms.get(rule.from.trim().toLowerCase())),

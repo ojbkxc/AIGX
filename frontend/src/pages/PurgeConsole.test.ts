@@ -29,6 +29,7 @@ import {
   undoSnapshot,
   warningReportText,
   settingsEqual,
+  swapRules,
   tidySummary,
   writeDraftBackup,
   diffLines,
@@ -251,6 +252,29 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('swapRules', () => {
+  const rules = [{ from: 'a' }, { from: 'b' }, { from: 'c' }];
+
+  it('上移：与上一条互换', () => {
+    expect(swapRules(rules, 1, -1).map((r) => r.from)).toEqual(['b', 'a', 'c']);
+  });
+
+  it('下移：与下一条互换', () => {
+    expect(swapRules(rules, 1, 1).map((r) => r.from)).toEqual(['a', 'c', 'b']);
+  });
+
+  it('首行上移 / 末行下移 → 原样返回（不越界、不报错）', () => {
+    expect(swapRules(rules, 0, -1).map((r) => r.from)).toEqual(['a', 'b', 'c']);
+    expect(swapRules(rules, 2, 1).map((r) => r.from)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('返回新数组（不改原数组，避免就地变异掩盖问题）', () => {
+    const next = swapRules(rules, 0, 1);
+    expect(next).not.toBe(rules);
+    expect(rules.map((r) => r.from)).toEqual(['a', 'b', 'c']);
   });
 });
 

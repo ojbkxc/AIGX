@@ -429,6 +429,8 @@
   "原文未填：保存时会被丢弃": "Source is empty — it is dropped on save",
   "改写为空：保存后该词会从消息里删掉（「整理」会把这类行删除）": "Rewrite is empty — on save the term is deleted from messages (Tidy removes such rows)",
   "与其他行的原文重复：改写按表序执行，只有最靠前的那条会真正生效": "Duplicate source — rewrites run in table order, only the first one takes effect",
+  "上移（改写按表序执行，越靠前越先命中）": "Move up (rewrites run in table order; earlier ones match first)",
+  "下移": "Move down",
   "回看当前生效项": "Back to active items",
   "死区词改写": "Dead-zone rewrites",
   "异源模型": "Fallback models",

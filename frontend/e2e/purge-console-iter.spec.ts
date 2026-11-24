@@ -247,6 +247,44 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('41 · 词表可调序（改写按表序执行，顺序决定谁先命中）', async ({ page }) => {
+  const rules = [
+    { from: 'first', to: '1' },
+    { from: 'second', to: '2' },
+    { from: 'third', to: '3' },
+    { from: 'fourth', to: '4' },
+  ];
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+
+  const table = page.locator('[data-purge-fix="dead-zone-table"]');
+  const fromValues = () =>
+    table.getByLabel('原文').evaluateAll((els) => els.map((el) => (el as HTMLInputElement).value));
+
+  // 首行上移按钮应被禁用（不越界）
+  await expect(table.getByTestId('purge-rule-up-0')).toBeDisabled();
+  await expect(table.getByTestId('purge-rule-down-3')).toBeDisabled();
+
+  // 把第 2 条上移 → 顺序变化，且标记为未保存
+  await table.getByTestId('purge-rule-up-1').click();
+  expect(await fromValues()).toEqual(['second', 'first', 'third', 'fourth']);
+  // 断「未保存状态」本身（dirty bar）而不是它内部的明细块：明细还要求
+  // savedForDiff 有值，条件更严，与本条要验的「调序生效」无关
+  await expect(page.locator('.purge-dirty-bar')).toBeVisible();
+
+  // 再下移回去 → 恢复原序
+  await table.getByTestId('purge-rule-down-0').click();
+  expect(await fromValues()).toEqual(['first', 'second', 'third', 'fourth']);
+});
+
 test('40 · 预览区的「回看当前生效项」能跳回摘要区', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
