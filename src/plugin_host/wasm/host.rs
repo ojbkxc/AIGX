@@ -169,6 +169,10 @@ pub struct WasmHost {
     /// 插件申报的错误规则与识别映射（`init` 后填充；beta.8）。
     error_rules:
         Mutex<std::collections::BTreeMap<String, crate::error_policy::DeclaredErrorPolicy>>,
+    /// 插件申报的余额查询策略（`init` 后填充；v3.5.1）。
+    usage_policies: Mutex<
+        std::collections::BTreeMap<String, crate::plugin_host::usage_policy::UsageQueryPolicy>,
+    >,
     /// 关停中标志（拒绝新调用）。
     closing: AtomicBool,
     /// 就绪标志（`init` 成功）。
@@ -204,6 +208,19 @@ impl WasmHost {
             .lock()
             .ok()
             .and_then(|map| map.get(&self.manifest.provider).cloned())
+            .unwrap_or_default()
+    }
+
+    /// 插件申报的余额查询策略（v3.5.1 `usage_policy::for_provider` 的读取口；
+    /// 未申报 → 默认策略）。
+    pub fn usage_query_policy(
+        &self,
+        provider: &str,
+    ) -> crate::plugin_host::usage_policy::UsageQueryPolicy {
+        self.usage_policies
+            .lock()
+            .ok()
+            .and_then(|map| map.get(provider).copied())
             .unwrap_or_default()
     }
 
@@ -615,6 +632,7 @@ pub async fn start(options: WasmOptions) -> Result<Arc<WasmHost>, String> {
         providers: Mutex::new(Vec::new()),
         settings: Mutex::new(Value::Null),
         error_rules: Mutex::new(std::collections::BTreeMap::new()),
+        usage_policies: Mutex::new(std::collections::BTreeMap::new()),
         closing: AtomicBool::new(false),
         ready: AtomicBool::new(false),
         next_id: AtomicI64::new(1),
@@ -684,6 +702,13 @@ pub async fn start(options: WasmOptions) -> Result<Arc<WasmHost>, String> {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) =
             super::super::error_rules::parse(&declared);
+        // v3.5.1：余额查询策略（每家的并发上限与最小间隔）。与错误规则同一
+        // 载体（握手应答的 provider 元数据数组），格式有误只影响限流策略。
+        *host
+            .usage_policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            super::super::usage_policy::parse(&declared);
     }
     host.ready.store(true, Ordering::Release);
     super::register_manifest(options.manifest.clone());

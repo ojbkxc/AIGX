@@ -58,6 +58,9 @@ pub mod script;
 /// 消费者。整模块 allow(dead_code)，切流后应移除。
 #[allow(dead_code)]
 mod stream_events;
+/// 插件申报的余额查询策略（对齐 v3.5.1 `plugin_host/usage_policy`）：
+/// 每家的查询并发上限与最小间隔，供账号池余额巡检按家限流。
+pub mod usage_policy;
 #[allow(unused_imports)] // 公开别名：消费者在 main.rs/bridge（当前未接线）
 pub(crate) use stream_events::StreamEvents;
 /// 包支持状态（对齐 beta.2 `support`）。

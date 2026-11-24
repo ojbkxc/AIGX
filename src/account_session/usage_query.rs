@@ -15,6 +15,7 @@ use futures::StreamExt;
 use reqwest::Client;
 
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::balance::{self, AccountBalance};
@@ -23,6 +24,41 @@ use super::store::AccountSessionStore;
 
 /// 一轮巡检里并发查询的账号数（余额接口普遍 20s 超时，并发太高会把上游打疼）。
 const CONCURRENCY: usize = 3;
+
+/// 单家限流闸：保证同一 provider 相邻两次查询的**启动**间隔不小于申报值。
+///
+/// 只锁「取号」这一段（几十微秒），请求本身在锁外并发执行——所以它限制的是
+/// 启动间隔与在飞数量，不是串行化整轮查询。`min_interval = 0` 时直接放行
+/// （未申报策略的家零额外开销，行为与从前一致）。
+struct ProviderGate {
+    min_interval: Duration,
+    /// 上一次放行时刻；`None` = 本轮第一次。
+    last: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+impl ProviderGate {
+    fn new(min_interval: Duration) -> Self {
+        Self {
+            min_interval,
+            last: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn wait_turn(&self) {
+        if self.min_interval.is_zero() {
+            return;
+        }
+        let mut guard = self.last.lock().await;
+        if let Some(previous) = *guard {
+            let ready_at = previous + self.min_interval;
+            let now = tokio::time::Instant::now();
+            if ready_at > now {
+                tokio::time::sleep(ready_at - now).await;
+            }
+        }
+        *guard = Some(tokio::time::Instant::now());
+    }
+}
 
 /// 单账号查询（带「每账号」的超时 + 重试；口径与 `usage_jobs` 的
 /// `query_with_retries` 一致，任一次成功即收口）。
@@ -79,6 +115,11 @@ fn snapshot(balance: &AccountBalance) -> serde_json::Value {
 }
 
 /// 巡检一轮：查所有到期账号的余额并写回快照。返回成功查询数。
+///
+/// **按家限流**（对齐上游 v3.5.1 `usage_policy`）：到期账号先按 provider 分组，
+/// 同一家的并发上限 = `min(宿主 CONCURRENCY, 插件申报 concurrency)`，相邻两次
+/// 查询启动间隔 ≥ 插件申报的 `minIntervalMs`。组间顺序执行（总并发因此仍受
+/// `CONCURRENCY` 约束），未申报策略的家行为与从前逐字节一致。
 pub async fn sweep(pool: &AccountSessionStore, client: &Client) -> u64 {
     let now = chrono::Utc::now().timestamp();
     let targets: Vec<AccountSession> = pool
@@ -90,20 +131,48 @@ pub async fn sweep(pool: &AccountSessionStore, client: &Client) -> u64 {
         return 0;
     }
 
-    let results = futures::stream::iter(targets)
-        .map(|session| {
-            let client = client.clone();
-            async move {
-                let config = session.usage_query.normalized();
-                let outcome =
-                    query_with_settings(&client, &session, config.retries, config.timeout_seconds)
-                        .await;
-                (session.id, outcome)
-            }
-        })
-        .buffer_unordered(CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+    let mut by_provider: std::collections::BTreeMap<String, Vec<AccountSession>> =
+        std::collections::BTreeMap::new();
+    for session in targets {
+        by_provider
+            .entry(session.provider.clone())
+            .or_default()
+            .push(session);
+    }
+
+    let mut results = Vec::new();
+    for (provider, group) in by_provider {
+        let policy = crate::plugin_host::usage_policy::for_provider(&provider);
+        let cap = policy
+            .concurrency
+            .map_or(CONCURRENCY, |declared| declared.min(CONCURRENCY))
+            .max(1);
+        let gate = Arc::new(ProviderGate::new(Duration::from_millis(
+            policy.min_interval_ms,
+        )));
+        let batch = futures::stream::iter(group)
+            .map(|session| {
+                let client = client.clone();
+                let gate = gate.clone();
+                async move {
+                    // 同一家的相邻请求先排队（间隔不够就补足），再并发执行
+                    gate.wait_turn().await;
+                    let config = session.usage_query.normalized();
+                    let outcome = query_with_settings(
+                        &client,
+                        &session,
+                        config.retries,
+                        config.timeout_seconds,
+                    )
+                    .await;
+                    (session.id, outcome)
+                }
+            })
+            .buffer_unordered(cap)
+            .collect::<Vec<_>>()
+            .await;
+        results.extend(batch);
+    }
 
     let mut done = 0u64;
     for (id, outcome) in results {
@@ -314,5 +383,40 @@ mod tests {
         // 不支持余额的家即使配了间隔也不查
         session.provider = "openai".to_string();
         assert!(!is_due(&session, 1_000_000 + 100_000));
+    }
+
+    /// 单家限流闸：第二次放行必须等满 min_interval。
+    #[tokio::test]
+    async fn provider_gate_enforces_min_interval() {
+        let gate = Arc::new(ProviderGate::new(Duration::from_millis(120)));
+        let started = tokio::time::Instant::now();
+        gate.wait_turn().await;
+        let first = started.elapsed();
+        gate.wait_turn().await;
+        let second = started.elapsed();
+        assert!(first < Duration::from_millis(80), "首次不该等待: {first:?}");
+        assert!(
+            second >= Duration::from_millis(120),
+            "第二次必须等满间隔: {second:?}"
+        );
+        assert!(
+            second < Duration::from_millis(400),
+            "不该被额外拖长: {second:?}"
+        );
+    }
+
+    /// 间隔为 0（未申报策略）→ 直接放行，零等待。
+    #[tokio::test]
+    async fn provider_gate_zero_interval_never_waits() {
+        let gate = Arc::new(ProviderGate::new(Duration::ZERO));
+        let started = tokio::time::Instant::now();
+        for _ in 0..50 {
+            gate.wait_turn().await;
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(60),
+            "0 间隔不该累积等待: {:?}",
+            started.elapsed()
+        );
     }
 }
