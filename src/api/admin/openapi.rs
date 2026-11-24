@@ -1097,6 +1097,9 @@ fn paths_settings_ops() -> Value {
         "/api/purge/defaults": {
             "get": op("破甲", "读取破甲默认值（新建规则时的初值）")
         },
+        "/api/purge/stats/reset": {
+            "post": op("破甲", "清零统计并建立新的观察基线（写操作）")
+        },
         "/api/purge/stats.csv": {
             "get": op("破甲", "导出破甲统计 CSV（四档宽表）")
         },
@@ -2353,6 +2356,7 @@ mod tests {
         add("/api/purge/skills/import", &["post"]);
         add("/api/purge/defaults", &["get"]);
         add("/api/purge/stats.csv", &["get"]);
+        add("/api/purge/stats/reset", &["post"]);
         add("/api/cline-headers", &["get", "put"]);
         add("/api/queue", &["get", "put"]);
         add("/api/security/policy", &["get", "put"]);

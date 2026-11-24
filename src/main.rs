@@ -2539,7 +2539,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/purge/defaults",
             get(api::admin::handle_get_purge_defaults),
-        ).route(
+        )
+        .route(
             "/api/purge/stats/reset",
             post(api::admin::handle_reset_purge_stats),
         )
