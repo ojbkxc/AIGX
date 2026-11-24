@@ -770,6 +770,55 @@ export function writePresetFilter(
   }
 }
 
+/** localStorage 读写器：模块级常量（引用恒定，可安全进 useCallback 依赖）。 */
+const lsSetStable = (k: string, v: string): void => window.localStorage.setItem(k, v);
+const lsRemoveStable = (k: string): void => window.localStorage.removeItem(k);
+
+/** 预览样例历史的导出/导入（团队共享同一批测试用例）。 */
+export const PREVIEW_HISTORY_FILE_VERSION = 1;
+
+/** 导出为 JSON 文本（带 version，便于以后兼容演进）。 */
+export function exportPreviewHistory(items: string[]): string {
+  return `${JSON.stringify({ version: PREVIEW_HISTORY_FILE_VERSION, samples: items }, null, 2)}\n`;
+}
+
+/**
+ * 解析导入的样例历史文件。
+ *
+ * 接受三种形态：本页导出的 `{version, samples:[...]}`、裸数组、单个字符串。
+ * 校验与写历史同一套口径（非空、单条 ≤4KB、去重保序、截断到 8 条）——
+ * 导入路径如果比写入路径宽松，就会出现「导进来 20 条、刷新后只剩 8 条」的
+ * 静默截断。无法解析返回 `null`（调用方区分「格式错」与「空文件」）。
+ */
+export function parsePreviewHistoryJson(text: string): string[] | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const list = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === 'object' && Array.isArray((raw as { samples?: unknown }).samples)
+      ? (raw as { samples: unknown[] }).samples
+      : typeof raw === 'string'
+        ? [raw]
+        : null;
+  if (list === null) return null;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of list) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || trimmed.length > PREVIEW_HISTORY_ITEM_MAX) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(item);
+    if (out.length >= PREVIEW_HISTORY_MAX) break;
+  }
+  return out;
+}
+
 /** 历史条目的展示摘要：首行截 46 字符（角色前缀形态保留前缀可读性）。 */
 export function previewHistoryLabel(sample: string): string {
   const first = sample.split(/\r?\n/, 1)[0] ?? '';
@@ -1537,21 +1586,70 @@ export default function PurgeConsole(): JSX.Element {
   /** 预览时套用的模型（非空则一并预演「按模型自动套用」的预设前插） */
   const [previewModel, setPreviewModel] = useState('');
 
-  const lsSet = (k: string, v: string): void => window.localStorage.setItem(k, v);
-  const lsRemove = (k: string): void => window.localStorage.removeItem(k);
+  /** 样例历史导入用的文件选择器 */
+  const previewHistoryFileRef = useRef<HTMLInputElement>(null);
   /** 删除一条历史样例（按下标，不改当前输入内容） */
   const removePreviewHistory = useCallback((index: number): void => {
     setPreviewHistory((prev) => {
       const next = prev.filter((_, i) => i !== index);
-      persistPreviewHistory(next, lsSet, lsRemove);
+      persistPreviewHistory(next, lsSetStable, lsRemoveStable);
       return next;
     });
   }, []);
   /** 清空全部历史（localStorage key 一并移除，不留空数组） */
   const clearPreviewHistory = useCallback((): void => {
-    persistPreviewHistory([], lsSet, lsRemove);
+    persistPreviewHistory([], lsSetStable, lsRemoveStable);
     setPreviewHistory([]);
   }, []);
+
+  /** 导出历史为 JSON（团队共享同一批测试用例） */
+  const exportPreviewHistoryFile = useCallback((): void => {
+    if (previewHistory.length === 0) {
+      addToast(t('没有可导出的样例'), 'warning');
+      return;
+    }
+    downloadText(
+      `aigx-purge-samples-${new Date().toISOString().slice(0, 10)}.json`,
+      exportPreviewHistory(previewHistory),
+    );
+    addToast(t('样例历史已导出'), 'success');
+  }, [addToast, previewHistory, t]);
+
+  /**
+   * 导入样例历史（**合并**而非替换：团队共享时各自的样例都该留下）。
+   *
+   * 合并后按「新的在前、去重、截到 8 条」收敛——与 `writePreviewHistory`
+   * 同一口径，避免「导入 20 条、刷新后只剩 8 条」的静默截断。
+   */
+  const importPreviewHistoryFile = useCallback(
+    async (file: File | null): Promise<void> => {
+      if (!file) return;
+      try {
+        const parsed = parsePreviewHistoryJson(await file.text());
+        if (parsed === null) {
+          addToast(t('导入失败：不是有效的样例历史文件'), 'error');
+          return;
+        }
+        if (parsed.length === 0) {
+          addToast(t('导入失败：文件里没有可用样例'), 'error');
+          return;
+        }
+        setPreviewHistory((prev) => {
+          let next = prev;
+          // 逐条走 writePreviewHistory：它已实现「去重置顶 + 截断到 8 条」
+          for (const sample of parsed) {
+            next = writePreviewHistory(next, sample, lsSetStable);
+          }
+          persistPreviewHistory(next, lsSetStable, lsRemoveStable);
+          return next;
+        });
+        addToast(t('已合并 {{count}} 条样例（上限 8 条，新的在前）', { count: parsed.length }), 'success');
+      } catch {
+        addToast(t('导入失败：无法读取文件'), 'error');
+      }
+    },
+    [addToast, t],
+  );
   const [previewing, setPreviewing] = useState(false);
   const [previewMeta, setPreviewMeta] = useState<{ changed: boolean; skill_hit: boolean } | null>(null);
   /**
@@ -2019,7 +2117,7 @@ export default function PurgeConsole(): JSX.Element {
       // 试跑成功才入历史（失败/校验不过的输入不记）；超长样例不入库
       if (previewInput.length <= PREVIEW_HISTORY_ITEM_MAX) {
         setPreviewHistory((prev) =>
-          writePreviewHistory(prev, previewInput, lsSet),
+          writePreviewHistory(prev, previewInput, lsSetStable),
         );
       }
     } catch {
@@ -3016,6 +3114,30 @@ export default function PurgeConsole(): JSX.Element {
             >
               {t('清空历史')}
             </button>
+            <button
+              type="button"
+              className="purge-history-clear"
+              onClick={() => exportPreviewHistoryFile()}
+            >
+              {t('导出样例')}
+            </button>
+            <button
+              type="button"
+              className="purge-history-clear"
+              onClick={() => previewHistoryFileRef.current?.click()}
+            >
+              {t('导入样例')}
+            </button>
+            <input
+              ref={previewHistoryFileRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                void importPreviewHistoryFile(event.target.files?.[0] ?? null);
+                event.target.value = '';
+              }}
+            />
           </div>
         )}
         <Textarea

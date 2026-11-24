@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildActiveSummary,
   capError,
+  exportPreviewHistory,
+  parsePreviewHistoryJson,
   readPresetFilter,
   sortWarningsBySeverity,
   diffLines,
@@ -18,6 +20,38 @@ import {
   writePreviewHistory,
   writePresetFilter,
 } from './PurgeConsole';
+
+describe('exportPreviewHistory / parsePreviewHistoryJson', () => {
+  it('导出再导回等价（保留原始空白）', () => {
+    const samples = ['第一行\n第二行', '单行样例'];
+    const back = parsePreviewHistoryJson(exportPreviewHistory(samples));
+    expect(back).toEqual(samples);
+  });
+
+  it('接受裸数组与单字符串', () => {
+    expect(parsePreviewHistoryJson('["a","b"]')).toEqual(['a', 'b']);
+    expect(parsePreviewHistoryJson('"only"')).toEqual(['only']);
+  });
+
+  it('去重保序、跳过空与非字符串、截到 8 条', () => {
+    const many = Array.from({ length: 12 }, (_, i) => `s${i}`);
+    const parsed = parsePreviewHistoryJson(JSON.stringify({ samples: ['a', 'a', '', 123, ...many] }));
+    expect(parsed?.[0]).toBe('a');
+    expect(parsed?.length).toBe(8);
+    expect(parsed?.filter((s) => s === 'a').length).toBe(1);
+  });
+
+  it('坏 JSON / 结构不符 → null（与「空文件」区分）', () => {
+    expect(parsePreviewHistoryJson('not json')).toBeNull();
+    expect(parsePreviewHistoryJson('{"foo":1}')).toBeNull();
+    expect(parsePreviewHistoryJson('{"samples":[]}')).toEqual([]);
+  });
+
+  it('超长单条被跳过（与写入路径同一上限）', () => {
+    const long = 'x'.repeat(5000);
+    expect(parsePreviewHistoryJson(JSON.stringify({ samples: [long, 'ok'] }))).toEqual(['ok']);
+  });
+});
 
 describe('readPresetFilter / writePresetFilter', () => {
   const store = new Map<string, string>();
