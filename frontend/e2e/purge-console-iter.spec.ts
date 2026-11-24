@@ -247,6 +247,24 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('24 · 统计字段形状畸形时显示「—」，不漏 undefined/0.00%', async ({ page }) => {
+  await mockPurge(page);
+  // 字符串形状不会崩（`'oops'.responses` 只是 undefined），但会渲染畸形值
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({ json: { success: true, data: { ...PURGE_DATA, stats: 'oops' } } }),
+  );
+  await gotoPurge(page);
+
+  const grid = page.locator('.purge-stats');
+  await expect(grid).toBeVisible();
+  // 不该把内部值漏给用户
+  await expect(grid).not.toContainText('undefined');
+  await expect(grid).not.toContainText('NaN');
+  // 重试率也不该显示成 0.00%（那会被读成「零重试」，与「没数据」相反）
+  await expect(grid).not.toContainText('0.00%');
+  await expect(grid).toContainText('—');
+});
+
 test('23 · stats 缺失时页面不崩（零值兜底，不是区块边界救场）', async ({ page }) => {
   await mockPurge(page);
   // stats 给 null：派生阶段（retryRate = stats.responses ...）就在渲染函数体里，

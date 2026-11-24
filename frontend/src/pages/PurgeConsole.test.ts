@@ -12,6 +12,7 @@ import {
   readDraftBackup,
   readPresetFilter,
   readRecentPresets,
+  retryRateText,
   snapshotReportText,
   statsExportNote,
   sortWarningsBySeverity,
@@ -240,6 +241,22 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('retryRateText', () => {
+  it('正常数字 → 两位小数百分比', () => {
+    expect(retryRateText(200, 3)).toBe('1.50');
+    expect(retryRateText(0, 0)).toBe('0.00');
+  });
+
+  it('responses/retries 不是有效数字 → null（显示 — 而不是 0.00%）', () => {
+    // 关键：`undefined > 0` 是 false，旧写法会算出 '0.00' —— 把「没数据」
+    // 显示成「0% 重试」，正好是最容易被误读的那个结论
+    expect(retryRateText(undefined, 3)).toBeNull();
+    expect(retryRateText('oops', 3)).toBeNull();
+    expect(retryRateText(200, null)).toBeNull();
+    expect(retryRateText(Number.NaN, 1)).toBeNull();
   });
 });
 

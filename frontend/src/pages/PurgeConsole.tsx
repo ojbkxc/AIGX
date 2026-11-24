@@ -161,6 +161,16 @@ const EMPTY_STATS: PurgeStats = {
   auto_preset_hits: 0,
 };
 
+/**
+ * 重试率文案。`responses` 不是有效数字时给 `—`——否则会算出 `0.00`，
+ * 把「没数据」显示成「0% 重试」，正好是最容易被误读的那个结论。
+ */
+export function retryRateText(responses: unknown, retries: unknown): string | null {
+  if (typeof responses !== 'number' || !Number.isFinite(responses)) return null;
+  if (typeof retries !== 'number' || !Number.isFinite(retries)) return null;
+  return responses > 0 ? ((retries / responses) * 100).toFixed(2) : '0.00';
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -1544,17 +1554,25 @@ const StatsGrid = memo(function StatsGrid({
   t,
 }: {
   stats: PurgeStats;
-  retryRate: string;
+  retryRate: string | null;
   suffix?: string;
   atLeast?: boolean;
   t: TFunction;
 }): JSX.Element {
   const mk = (base: string): string => (suffix ? `${base} · ${suffix}` : base);
-  const v = (n: number): string => (atLeast ? `≥ ${n}` : String(n));
+  // 非数字显示 `—` 而不是 `undefined`/`NaN`：后端字段形状异常时，界面不该把
+  // 内部值原样漏给用户（显示 `undefined` 会像页面的 bug，`—` 才是「没数据」）
+  const v = (n: number): string => {
+    if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+    return atLeast ? `≥ ${n}` : String(n);
+  };
   return (
     <div className="purge-stats" role="group" aria-label={t('统计')}>
       <StatCard title={mk(t('响应总数'))} value={v(stats.responses)} />
-      <StatCard title={mk(t('重试率'))} value={`${atLeast ? '≥ ' : ''}${retryRate}%`} />
+      <StatCard
+        title={mk(t('重试率'))}
+        value={retryRate === null ? '—' : `${atLeast ? '≥ ' : ''}${retryRate}%`}
+      />
       <StatCard title={mk(t('重试次数'))} value={v(stats.retries)} />
       <StatCard title={mk(t('提前收效'))} value={v(stats.early_success)} />
       <StatCard title={mk(t('技能命中'))} value={v(stats.skill_hits)} />
@@ -3404,7 +3422,8 @@ export default function PurgeConsole(): JSX.Element {
           : undefined;
   // 缺 `stats` 时用零值兜底：这里崩的话区块边界也接不住（异常在边界父层）
   const stats = windowed ?? data.stats ?? EMPTY_STATS;
-  const retryRate = stats.responses > 0 ? ((stats.retries / stats.responses) * 100).toFixed(2) : '0.00';
+  // 字段形状异常（如后端把 stats 返成字符串）时给 null，卡片显示 `—`
+  const retryRate = retryRateText(stats.responses, stats.retries);
   const windowLabel =
     statsWindow === '1h'
       ? t('近 1 小时')
