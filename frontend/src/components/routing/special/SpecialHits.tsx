@@ -11,62 +11,27 @@
  * 浏览记录只留「请求回放」一个入口（右上角「查看全部」切到回放 rail）。配置页里
  * 再做一套点开详情的交互，两处迟早会走偏，而配置页的主角应该是规则。
  */
-import type { TFunction } from 'i18next';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 import { api } from '../../../api';
 import { Button } from '../../ui';
 import type { RoutingTraceRow } from '../../../types/routing-workspace';
+import { requestRewrite, type Rewrite, type RewriteKind } from '../trace-rewrite';
 import './SpecialHits.css';
 
-export type SpecialHitsKind = 'compact' | 'title' | 'vision';
+export type SpecialHitsKind = RewriteKind;
 
-/** 取一页最近请求：命中可能稀疏（一条路由的命中混在全部请求里），取宽一点。 */
+/** 取一页最近请求：命中可能稀疏（一条路由的命中混进全部请求里），取宽一点。 */
 const WINDOW = 50;
 /** 右栏最多列几条：再多就该去请求回放页看了。 */
 const SHOWN = 6;
 const REFRESH_MS = 15_000;
 
-type Rewrite = { kind: SpecialHitsKind; from: string; to: string };
-
 /** 秒/毫秒自适应（<1e11 视为秒，与账号页/回放页同口径） */
 function toMillis(v: number | undefined): number | null {
   if (v == null || !Number.isFinite(v)) return null;
   return v < 1e11 ? v * 1000 : v;
-}
-
-function requestModel(row: RoutingTraceRow): string {
-  return row.clientModel || row.model || row.upstreamModel || '';
-}
-
-/** 从 route 快照里读出这次请求发生过的模型改写（与上游 requestRewrite 同口径）。 */
-function requestRewrite(row: RoutingTraceRow, t: TFunction): Rewrite | null {
-  const route = row.route;
-  if (!route) return null;
-
-  const compact = route.compactRoute;
-  if (compact?.source && compact.target) {
-    return { kind: 'compact', from: compact.source, to: compact.target };
-  }
-  const title = route.titleRoute;
-  if (title?.source && title.target) {
-    return { kind: 'title', from: title.source, to: title.target };
-  }
-  const vision = route.visionCompatibility;
-  if (vision?.mode) {
-    // 图片兼容不改「请求的模型」：辅助识图是另起一次读图调用，整体接管才是换模型。
-    const calls = Array.isArray(vision.calls) ? vision.calls.length : 0;
-    const assist = vision.mode === 'assist_call' || vision.mode === 'assist';
-    return {
-      kind: 'vision',
-      from: requestModel(row),
-      to: assist
-        ? t('辅助识图 · {{n}} 次读图', { n: calls })
-        : (vision.target?.model || t('视觉模型接管')),
-    };
-  }
-  return null;
 }
 
 export default function SpecialHits({

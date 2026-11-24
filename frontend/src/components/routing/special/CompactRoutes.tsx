@@ -23,7 +23,7 @@ import {
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
 import RuleDialog from './RuleDialog';
-import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead } from './shared';
+import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead, RuleSwitchRow } from './shared';
 
 /** 规则行内编辑态：index = -1 表示新增 */
 interface Editing {
@@ -96,7 +96,7 @@ export default function CompactRoutes({ active }: { active: boolean }): JSX.Elem
         count={t('{{n}} 条', { n: rules.length })}
         actions={
           <AddRuleButton
-            disabled={saving || full || !clients.length}
+            disabled={saving || full || !models.length}
             onClick={() => setEditing({ rule: blankRule(), index: -1 })}
           />
         }
@@ -127,12 +127,12 @@ export default function CompactRoutes({ active }: { active: boolean }): JSX.Elem
 
       {!models.length ? (
         <div className="rt-notice rt-notice-warn">
-          {t('没有可选的对话模型，请先启用模型和对应账号（当前仍可手填模型名保存）。')}
+          {t('没有可选的对话模型，请先启用模型和对应账号。')}
         </div>
       ) : null}
       {full ? (
         <div className="rt-notice rt-notice-warn">
-          {t('规则已达上限 {{n}} 条。', { n: maxRules })}
+          {t('规则最多 {{n}} 条。', { n: maxRules })}
         </div>
       ) : null}
 
@@ -161,7 +161,7 @@ export default function CompactRoutes({ active }: { active: boolean }): JSX.Elem
   );
 }
 
-/** 弹窗内表单：客户端 + 原模型 + 压缩模型 + 启用开关（受控，提交由弹窗底栏负责） */
+/** 弹窗内表单：启用开关 + 客户端 + 原模型 + 压缩模型（受控，提交由弹窗底栏负责） */
 function RuleEditor({
   value,
   clients,
@@ -177,9 +177,18 @@ function RuleEditor({
 }): JSX.Element {
   const { t } = useTranslation();
   const patch = (part: Partial<CompactRouteRule>): void => onChange({ ...value, ...part });
+  // 对齐 A2A `CompactRuleDialog`：原模型 / 压缩模型互相排除（同一只模型压缩自己没有意义，
+  // 列出来只会让用户配出一条永远原地转发的规则）。
+  const without = (id: string): Array<{ id: string; label: string }> =>
+    models.filter((m) => m.id !== id);
 
   return (
     <div className="rt-dialog-fields">
+      <RuleSwitchRow
+        enabled={value.enabled}
+        disabled={saving}
+        onChange={(enabled) => patch({ enabled })}
+      />
       <div className="rt-special-editor-fields">
         <div className="rt-subfield">
           <label>{t('触发客户端')}</label>
@@ -201,7 +210,7 @@ function RuleEditor({
           <label>{t('原模型')}</label>
           <ModelSelect
             value={value.source}
-            options={models}
+            options={without(value.target)}
             disabled={saving}
             ariaLabel={t('原模型')}
             onChange={(source) => patch({ source })}
@@ -211,25 +220,13 @@ function RuleEditor({
           <label>{t('压缩模型')}</label>
           <ModelSelect
             value={value.target}
-            options={models}
+            options={without(value.source)}
             disabled={saving}
             ariaLabel={t('压缩模型')}
             onChange={(target) => patch({ target })}
           />
         </div>
       </div>
-      <label className="rt-special-check">
-        <input
-          type="checkbox"
-          checked={value.enabled}
-          disabled={saving}
-          onChange={(e) => patch({ enabled: e.target.checked })}
-        />
-        <span>{t('启用规则')}</span>
-      </label>
-      {!value.enabled ? (
-        <div className="form-hint">{t('停用的规则不参与匹配，但仍保留在列表里。')}</div>
-      ) : null}
     </div>
   );
 }

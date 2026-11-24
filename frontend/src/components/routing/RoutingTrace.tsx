@@ -1,34 +1,58 @@
 /**
- * RoutingTrace —— 请求跟踪：列表 + 详情（对照 A2A `routing-request-list` 的
- * 列表 / 分页 + `routing-exec-timeline` 的详情骨架，但数据源是 AIGX 的
- * trace 端点，形状对齐回放快照的扁平字段）。
+ * RoutingTrace —— 请求跟踪：列表 + 详情。
+ *
+ * 详情区照 A2A `RoutingExecTimeline` 的分段与顺序落地（这是本面板与上游 1:1 对齐的部分）：
+ *   ① 头（模型 / 状态 / 客户端 / 时间 / HTTP）→
+ *   ② 模型改写（特殊请求路由改写，排在承载之前 —— 请求真实经过的顺序就是「先改写模型、再选账号」）→
+ *   ③ 承载（谁最终接了这次请求、为什么是它）→
+ *   ④ 执行耗时（逐次尝试的分段条）→
+ *   ⑤ 选路情况（候选清单里每个账号这一次的角色）→
+ *   ⑥ 当时配置（选路方式 / 会话粘滞；AIGX 未记录配置范围与成员快照，照实显示「未记录」）。
  *
  * 数据源（be-routing）：
  *   GET /api/routing/trace?offset=&limit=&search=  → { entries[], matched, available }
- *   GET /api/routing/trace/request?id=&ts=                 → 单条详情
+ *   GET /api/routing/trace/request?id=&ts=         → 单条详情
  * 三态降级：`available === false` / 404 未就绪 / 请求失败。
  * 列表手动刷新与翻页；运行中的行不轮询（AIGX 管理面刷新节奏比桌面端保守）。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft, ChevronRight, Loader2, RefreshCw } from 'lucide-react';
 import { api } from '../../api';
-import { Button, Card, EmptyState } from '../ui';
+import { Badge, Button, Card, EmptyState } from '../ui';
 import {
   type RoutingTraceList,
   type RoutingTraceRow,
 } from '../../types/routing-workspace';
+import {
+  errorText,
+  formatDuration,
+  formatTraceTokens,
+  isTraceCancelled,
+  isTraceRunning,
+  isTraceSuccess,
+  requestModel,
+  toMillis,
+  traceAttempts,
+  traceCandidates,
+  traceProvider,
+} from './trace-model';
+import {
+  execAccounts,
+  execAttemptName,
+  execCarrier,
+  execScopeLabel,
+  execStickyLabel,
+  execStrategyLabel,
+  execTiming,
+} from './trace-exec-model';
+import { requestRewrite, clientText } from './trace-rewrite';
+import './trace-exec.css';
 
 const PAGE = 30;
 
 function statusOf(err: unknown): number | undefined {
   return (err as { status?: number } | null)?.status;
-}
-
-/** 秒/毫秒自适应（<1e11 视为秒，对齐账号页口径） */
-function toMillis(v: number | undefined): number | null {
-  if (v == null || !Number.isFinite(v)) return null;
-  return v < 1e11 ? v * 1000 : v;
 }
 
 function rowState(row: RoutingTraceRow): 'running' | 'success' | 'failed' | 'unknown' {
@@ -38,17 +62,7 @@ function rowState(row: RoutingTraceRow): 'running' | 'success' | 'failed' | 'unk
   return 'failed';
 }
 
-function rowModel(row: RoutingTraceRow): string {
-  return row.clientModel || row.model || row.upstreamModel || '';
-}
-
-function fmtDuration(ms: number | undefined): string {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const m = Math.floor(ms / 60_000);
-  return `${m}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, '0')}s`;
-}
+const fmtDuration = formatDuration;
 
 export default function RoutingTrace({ active }: { active: boolean }): JSX.Element {
   const { t } = useTranslation();
@@ -192,7 +206,7 @@ export default function RoutingTrace({ active }: { active: boolean }): JSX.Eleme
                   onClick={() => void openRow(row)}
                 >
                   <span className="rt-trace-row-line">
-                    <b>{rowModel(row) || t('模型未记录')}</b>
+                    <b>{requestModel(row) || t('模型未记录')}</b>
                     <span className={`rt-trace-state is-${state}`}>
                       {state === 'running'
                         ? t('进行中')
@@ -256,107 +270,267 @@ export default function RoutingTrace({ active }: { active: boolean }): JSX.Eleme
             {t('读取详情…')}
           </div>
         ) : detailAttrs ? (
-          <div>
+          <>
             {detailError ? (
               <div className="rt-notice rt-notice-warn">
                 {t('详情加载失败：{{msg}}。以下为列表摘要。', { msg: detailError })}
               </div>
             ) : null}
-
-            <div className="rt-trace-detail-head">
-              <h3>{rowModel(detailAttrs) || t('模型未记录')}</h3>
-              <span className={`rt-trace-state is-${rowState(detailAttrs)}`}>
-                {detailAttrs.status != null ? `HTTP ${detailAttrs.status}` : t('未记录')}
-              </span>
-            </div>
-
-            <div className="rt-trace-metrics">
-              <div>
-                <b>{detailAttrs.attempts ?? '—'}</b>
-                <span>{t('尝试次数')}</span>
-              </div>
-              <div>
-                <b>{fmtDuration(detailAttrs.durationMs)}</b>
-                <span>{t('总耗时')}</span>
-              </div>
-              <div>
-                <b>{detailAttrs.route?.ordered?.length ?? '—'}</b>
-                <span>{t('候选')}</span>
-              </div>
-              <div>
-                <b>{detailAttrs.route?.blocked?.length ?? '—'}</b>
-                <span>{t('被跳过')}</span>
-              </div>
-            </div>
-
-            <div className="rt-trace-kv">
-              <span>{t('提供商：{{v}}', { v: detailAttrs.providerLabel || detailAttrs.provider || '—' })}</span>
-              <span>{t('账号：{{v}}', { v: detailAttrs.accountName || detailAttrs.accountId || '—' })}</span>
-              {detailAttrs.upstreamModel ? (
-                <span>{t('上游模型：{{v}}', { v: detailAttrs.upstreamModel })}</span>
-              ) : null}
-              {toMillis(detailAttrs.ts) != null ? (
-                <span>
-                  {t('请求时间 {{time}}', {
-                    time: new Date(toMillis(detailAttrs.ts) as number).toLocaleString(),
-                  })}
-                </span>
-              ) : null}
-            </div>
-
-            {detailAttrs.error ? (
-              <div className="rt-notice rt-notice-warn" style={{ marginTop: 8 }}>
-                {detailAttrs.error}
-              </div>
-            ) : null}
-
-            {Array.isArray(detailAttrs.attemptDetails) && detailAttrs.attemptDetails.length ? (
-              <div style={{ marginTop: 12 }}>
-                <div className="rt-rail-title">{t('尝试明细')}</div>
-                <ol className="rt-trace-attempts">
-                  {detailAttrs.attemptDetails.map((a, i) => (
-                    <li key={`${a.index ?? i}-${a.channel_id ?? ''}`}>
-                      <b>{a.channel_name || a.channel_id || t('未知供应商')}</b>
-                      {a.status != null ? (
-                        <span className={`rt-trace-state ${a.status >= 200 && a.status < 300 ? 'is-success' : 'is-failed'}`}>
-                          {a.status}
-                        </span>
-                      ) : null}
-                      {a.stickyHit ? (
-                        <span className="rt-chip rt-chip-model rt-chip-sm">{t('粘滞命中')}</span>
-                      ) : null}
-                      <span className="rt-muted">
-                        {a.finishedAt != null && a.startedAt != null
-                          ? ` · ${fmtDuration((a.finishedAt - a.startedAt) * 1000)}`
-                          : ''}
-                      </span>
-                      {a.error ? <p className="rt-trace-err">{a.error}</p> : null}
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            ) : (
-              <div className="form-hint" style={{ marginTop: 10 }}>
-                {t('没有逐次尝试明细（该记录未保存或快照未启用）。')}
-              </div>
-            )}
-
-            {detailAttrs.route?.ordered?.length ? (
-              <div style={{ marginTop: 12 }}>
-                <div className="rt-rail-title">{t('候选顺序')}</div>
-                <ol className="rt-trace-attempts">
-                  {detailAttrs.route.ordered.map((c, i) => (
-                    <li key={c.id ?? i}>
-                      <b>{`${i + 1}. ${c.name ?? c.id ?? ''}`}</b>
-                      <span className="rt-muted">{` · ${c.provider ?? ''}${c.state ? ` · ${c.state}` : ''}`}</span>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            ) : null}
-          </div>
+            <TraceDetail row={detailAttrs} />
+          </>
         ) : null}
       </Card>
+    </div>
+  );
+}
+
+/* ═══════════════ 详情：与 A2A RoutingExecTimeline 同序 ═══════════════ */
+
+/** 详情分段容器（对齐上游 `.routing-exec-section`：上边框 + 段头）。 */
+function TraceSection({
+  title,
+  note,
+  children,
+}: {
+  title: string;
+  note?: ReactNode;
+  children: ReactNode;
+}): JSX.Element {
+  return (
+    <section className="rt-exec-section">
+      <div className="rt-exec-section-head">
+        <h3>{title}</h3>
+        {note ? <span className="rt-exec-section-note">{note}</span> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** ② 模型改写：特殊请求路由改写过这次请求时才有内容；普通请求整块不渲染。 */
+function TraceRewriteBlock({ row }: { row: RoutingTraceRow }): JSX.Element | null {
+  const { t } = useTranslation();
+  const rewrite = requestRewrite(row, t);
+  if (!rewrite) return null;
+  return (
+    <section className="rt-exec-rewrite" data-kind={rewrite.kind}>
+      <header className="rt-exec-rewrite-head">
+        <b>{t('模型改写')}</b>
+        <Badge tone={rewrite.kind === 'vision' ? 'warning' : rewrite.kind === 'title' ? 'info' : 'neutral'}>
+          {rewrite.label}
+        </Badge>
+        <span>{rewrite.detail}</span>
+      </header>
+      <div className="rt-exec-rewrite-flow">
+        <div className="rt-exec-rewrite-node">
+          <span>{t('客户端模型')}</span>
+          <b>{rewrite.from || '—'}</b>
+        </div>
+        <span className="rt-exec-rewrite-arrow" aria-hidden="true">→</span>
+        <div className="rt-exec-rewrite-node is-accent">
+          <span>{t('实际使用')}</span>
+          <b>{rewrite.to || '—'}</b>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** ④ 执行耗时：逐次尝试的分段条（等待响应 → 响应到达后）。 */
+function TraceDuration({ row }: { row: RoutingTraceRow }): JSX.Element {
+  const { t } = useTranslation();
+  const now = Date.now();
+  const { total, firstFrame, response, scale, timings } = execTiming(row, now, t);
+  const attempts = row.attempts ?? timings.length;
+  const recorded = timings.filter((timing) => !timing.attempt.inferred).length;
+  const multi = Math.max(attempts, timings.length) > 1;
+  const metrics = [
+    `${isTraceRunning(row) ? t('已用时') : t('总耗时')} ${formatDuration(total)}`,
+    `${t('首帧')} ${firstFrame == null ? '—' : formatDuration(firstFrame)}`,
+    `${t('输出')} ${formatTraceTokens(null)} tokens`,
+  ];
+  return (
+    <TraceSection title={t('执行耗时')} note={metrics.join(' · ')}>
+      <div className="rt-exec-bars">
+        {timings.map((timing) => {
+          const { attempt, segments } = timing;
+          const info = [
+            multi ? `${t('本次用时')} ${formatDuration(timing.duration)}` : '',
+            `${t('响应到达')} ${timing.response == null ? '—' : `+${formatDuration(timing.response)}`}`,
+          ].filter(Boolean).join(' · ');
+          return (
+            <div className="rt-exec-bar-row" data-multi={multi ? '' : undefined} key={attempt.index}>
+              {multi ? (
+                <span
+                  className="rt-exec-bar-owner"
+                  title={[traceProvider(attempt.provider, null, (k) => t(k)), execAttemptName(attempt, t), attempt.model].filter(Boolean).join(' · ')}
+                >
+                  {execAttemptName(attempt, t)}
+                </span>
+              ) : null}
+              <div className="rt-exec-bar-cell">
+                {segments.length ? (
+                  <div className="rt-exec-bar-track" role="img" aria-label={segments.map((segment) => segment.label).join(' · ')}>
+                    {segments.map((segment, index) => (
+                      <span
+                        key={index}
+                        data-tone={segment.tone}
+                        title={segment.label}
+                        style={{
+                          left: `${(segment.start / scale) * 100}%`,
+                          width: `${((segment.end - segment.start) / scale) * 100}%`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                <span className="rt-exec-bar-note">{info}</span>
+                {!multi && attempt.notice ? (
+                  <span className="rt-exec-bar-note">{errorText(attempt.notice)}</span>
+                ) : null}
+              </div>
+              {multi ? <span className="rt-exec-bar-result" data-tone={timing.tone}>{timing.label}</span> : null}
+            </div>
+          );
+        })}
+        {!timings.length ? (
+          <p className="rt-exec-note">
+            {t('响应到达')} {formatDuration(response)} · {t('没有保存调用明细')}
+          </p>
+        ) : null}
+        {attempts > recorded ? (
+          <p className="rt-exec-note">
+            {t('共尝试 {{total}} 次，保存了 {{saved}} 条明细', { total: attempts, saved: recorded })}
+          </p>
+        ) : null}
+      </div>
+    </TraceSection>
+  );
+}
+
+/** ⑤ 选路情况：候选清单里每个账号这一次的角色 + 原因。 */
+function TraceCandidates({ row }: { row: RoutingTraceRow }): JSX.Element {
+  const { t } = useTranslation();
+  const entries = execAccounts(row, t);
+  const route = row.route;
+  const saved = (route?.ordered?.length || 0) + (route?.blocked?.length || 0);
+  const recordedTotal = (route?.ordered?.length || 0) + (route?.blocked?.length || 0);
+  const partial = saved < recordedTotal;
+  const empty = !entries.length
+    ? t('没有保存其他候选信息')
+    : entries.some((item) => item.current)
+      ? t('没有其他候选账号')
+      : t('没有保存调用明细');
+  return (
+    <TraceSection title={t('选路情况')} note={t('已保存 {{n}} 个候选', { n: traceCandidates(row).length })}>
+      {entries.length ? (
+        <div className="rt-exec-candidates" role="table" aria-label={t('选路情况')}>
+          <div className="rt-exec-candidate is-heading" role="row">
+            <span role="columnheader">{t('账号')}</span>
+            <span role="columnheader">{t('本次状态')}</span>
+            <span role="columnheader">{t('原因')}</span>
+          </div>
+          <div role="rowgroup">
+            {entries.map((item) => (
+              <div className="rt-exec-candidate" role="row" key={item.key}>
+                <div className="rt-exec-candidate-account" role="cell">
+                  <div>
+                    <b>{item.name}</b>
+                    <span>{item.provider}</span>
+                  </div>
+                  {item.model && item.model !== requestModel(row) ? <code>{item.model}</code> : null}
+                </div>
+                <span className="rt-exec-candidate-state" role="cell" data-tone={item.tone}>{item.label}</span>
+                <span className="rt-exec-candidate-reason" role="cell">{item.reason}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="rt-exec-note">{empty}</p>
+      )}
+      {partial ? <p className="rt-exec-note">{t('候选快照仅保存部分记录，未保存的账号无法回放')}</p> : null}
+    </TraceSection>
+  );
+}
+
+/** ⑥ 当时配置：AIGX 的 trace 行只记 strategy / sticky，其余照实显示「未记录」。 */
+function TraceSnapshot({ row }: { row: RoutingTraceRow }): JSX.Element {
+  const { t } = useTranslation();
+  const strategy = row.route?.strategy;
+  const sticky = row.route?.sticky;
+  return (
+    <TraceSection title={t('当时配置')}>
+      <dl className="rt-exec-definitions">
+        <div>
+          <dt>{t('配置范围')}</dt>
+          <dd>{execScopeLabel(row, t)}</dd>
+        </div>
+        <div>
+          <dt>{t('选路方式')}</dt>
+          <dd>{execStrategyLabel(strategy, t)}</dd>
+        </div>
+        <div>
+          <dt>{t('会话粘滞')}</dt>
+          <dd>{execStickyLabel(sticky, t)}</dd>
+        </div>
+        {row.upstreamModel ? (
+          <div className="is-wide">
+            <dt>{t('上游模型')}</dt>
+            <dd className="rt-exec-mono">{row.upstreamModel}</dd>
+          </div>
+        ) : null}
+      </dl>
+    </TraceSection>
+  );
+}
+
+/** 详情主体：① 头 → ② 改写 → ③ 承载 → ④ 耗时 → ⑤ 选路 → ⑥ 当时配置。 */
+function TraceDetail({ row }: { row: RoutingTraceRow }): JSX.Element {
+  const { t } = useTranslation();
+  const carrier = execCarrier(row, t);
+  const failed = !isTraceRunning(row) && !isTraceSuccess(row) && !isTraceCancelled(row);
+  const ts = toMillis(row.ts);
+  const state = rowState(row);
+  const attempts = traceAttempts(row);
+  return (
+    <div className="rt-exec">
+      <header className="rt-exec-head">
+        <div className="rt-exec-heading">
+          <h2>{requestModel(row) || t('模型未记录')}</h2>
+          <div className="rt-exec-meta">
+            <span className={`rt-trace-state is-${state}`}>
+              {state === 'running'
+                ? t('进行中')
+                : state === 'success'
+                  ? t('成功')
+                  : state === 'failed'
+                    ? t('失败')
+                    : t('未记录')}
+            </span>
+            <span>{clientText(row.client, t)}</span>
+            <time title={ts != null ? new Date(ts).toLocaleString() : undefined}>
+              {ts != null ? new Date(ts).toLocaleTimeString() : '—'}
+            </time>
+            {row.status ? <span>{`HTTP ${row.status}`}</span> : null}
+            {row.attempts ? <span>{t('尝试 {{n}} 次', { n: row.attempts })}</span> : null}
+            {attempts.length && !row.attempts ? <span>{t('尝试 {{n}} 次', { n: attempts.length })}</span> : null}
+          </div>
+        </div>
+      </header>
+
+      {/* 模型改写排在承载之前：请求真实经过的顺序就是「先改写模型、再选账号」 */}
+      <TraceRewriteBlock row={row} />
+
+      <section className="rt-exec-carrier" data-failed={failed ? '' : undefined}>
+        <p className="rt-exec-label">{carrier.label}</p>
+        <p className="rt-exec-carrier-name">{carrier.name}</p>
+        <p className="rt-exec-carrier-reason">{carrier.reason}</p>
+      </section>
+
+      <TraceDuration row={row} />
+      <TraceCandidates row={row} />
+      <TraceSnapshot row={row} />
     </div>
   );
 }

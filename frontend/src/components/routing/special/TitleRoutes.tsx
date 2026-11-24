@@ -23,7 +23,7 @@ import {
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
 import RuleDialog from './RuleDialog';
-import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead } from './shared';
+import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead, RuleSwitchRow } from './shared';
 
 interface Editing {
   rule: TitleRouteRule;
@@ -87,7 +87,7 @@ export default function TitleRoutes({ active }: { active: boolean }): JSX.Elemen
         count={t('{{n}} 条', { n: rules.length })}
         actions={
           <AddRuleButton
-            disabled={saving || full || !clients.length}
+            disabled={saving || full || !models.length}
             onClick={() => setEditing({ rule: blankRule(), index: -1 })}
           />
         }
@@ -126,12 +126,12 @@ export default function TitleRoutes({ active }: { active: boolean }): JSX.Elemen
 
       {!models.length ? (
         <div className="rt-notice rt-notice-warn">
-          {t('没有可选的对话模型，请先启用模型和对应账号（当前仍可手填模型名保存）。')}
+          {t('没有可选的对话模型，请先启用模型和对应账号。')}
         </div>
       ) : null}
       {full ? (
         <div className="rt-notice rt-notice-warn">
-          {t('规则已达上限 {{n}} 条。', { n: maxRules })}
+          {t('规则最多 {{n}} 条。', { n: maxRules })}
         </div>
       ) : null}
 
@@ -191,6 +191,11 @@ function RuleEditor({
 
   return (
     <div className="rt-dialog-fields">
+      <RuleSwitchRow
+        enabled={value.enabled}
+        disabled={saving}
+        onChange={(enabled) => patch({ enabled })}
+      />
       <div className="rt-subfield">
         <label>{t('识别客户端')}</label>
         <div className="rt-special-checks">
@@ -199,6 +204,7 @@ function RuleEditor({
               <input
                 type="checkbox"
                 checked={value.clients.includes(c.id)}
+                disabled={saving || (!c.supported && !value.clients.includes(c.id))}
                 onChange={(e) => toggleClient(c.id, e.target.checked)}
               />
               <span>{c.label}</span>
@@ -238,16 +244,6 @@ function RuleEditor({
           </span>
         </div>
       </div>
-
-      <label className="rt-special-check">
-        <input
-          type="checkbox"
-          checked={value.enabled}
-          disabled={saving}
-          onChange={(e) => patch({ enabled: e.target.checked })}
-        />
-        <span>{t('启用规则')}</span>
-      </label>
     </div>
   );
 }

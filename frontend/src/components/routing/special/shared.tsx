@@ -74,6 +74,11 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
         </label>
       </header>
 
+      {/* 对齐 A2A `RulePanel` 的那句常驻说明：规则不改选账号规则、也不越过网关 Key 权限。 */}
+      <p className="rt-special-note">
+        {t('规则全局生效，不受原路由池限制；指定模型按自己的路由选账号，网关 Key 权限仍然生效。')}
+      </p>
+
       {serverError ? (
         <div className="rt-notice rt-notice-warn" role="alert">
           <strong>{t('服务端已存配置解析失败：')}</strong>
@@ -113,20 +118,55 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
         </div>
       )}
 
-      <footer className="rt-savebar">
-        <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving || !draft || blockedByServerError}>
-          {saving ? <Loader2 size={13} className="spin" /> : null}
-          {t('保存')}
-        </Button>
-        <Button variant="outline" onClick={discard} disabled={!dirty || saving}>
-          {t('放弃更改')}
-        </Button>
-        <Button variant="outline" disabled={loading || saving} onClick={() => void reload()}>
-          {t('重新读取')}
-        </Button>
-        <span className="rt-dirty">{dirty ? t('有未保存的修改') : t('已保存')}</span>
+      {/* 底栏口径照 A2A `RulePanel`：状态字在左，动作在右，顺序「重新读取 → 撤销修改 → 保存」。
+          保存条留在面板底部而不是提到页头工具条：三块配置各有一份修订号、各自独立保存，
+          页头那一格同时只能属于一块，「保存」离它管的内容太远反而容易点错。 */}
+      <footer className="rt-savebar rt-special-foot">
+        <span className="rt-special-foot-state">{dirty ? t('有未保存的修改') : t('已保存')}</span>
+        <div className="rt-special-foot-actions">
+          <Button variant="secondary" size="sm" disabled={loading || saving} onClick={() => void reload()}>
+            {t('重新读取')}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={discard} disabled={!dirty || saving}>
+            {t('撤销修改')}
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => void save()}
+            disabled={!dirty || saving || !draft || blockedByServerError}
+          >
+            {saving ? <Loader2 size={13} className="spin" /> : null}
+            {saving ? t('保存中…') : t('保存')}
+          </Button>
+        </div>
       </footer>
     </section>
+  );
+}
+
+/**
+ * 弹窗顶部那条「启用规则」：开关在左、状态右对齐。
+ *
+ * 对齐 A2A `RuleSwitchRow` —— 启用状态是这条规则的头等属性，单独一行放在弹窗最上面，
+ * 而不是混在表单字段网格里（混在一起时读者要扫完整个表单才知道这条规则是开是关）。
+ */
+export function RuleSwitchRow({
+  enabled,
+  disabled,
+  onChange,
+}: {
+  enabled: boolean;
+  disabled?: boolean;
+  onChange: (next: boolean) => void;
+}): JSX.Element {
+  const { t } = useTranslation();
+  return (
+    <div className="rt-special-switch-row">
+      <Switch checked={enabled} disabled={disabled} ariaLabel={t('启用规则')} onChange={onChange} />
+      <span>{t('启用规则')}</span>
+      <small>{enabled ? t('已启用') : t('已停用')}</small>
+    </div>
   );
 }
 

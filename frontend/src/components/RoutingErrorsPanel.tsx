@@ -13,6 +13,7 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Badge, Button, Card, Input, Select } from '../components/ui';
+import '../components/routing/trace-exec.css';
 
 type ErrorKind = 'rate_limit' | 'quota' | 'auth' | 'balance' | 'transient' | 'unsupported' | 'bad_request' | 'content' | 'unknown';
 type ErrorAction = 'switch_account' | 'retry_then_switch' | 'refresh_then_switch' | 'switch_provider' | 'return_error';
@@ -337,8 +338,8 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
   const [notReady, setNotReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  /** 分类（对齐 A2A RoutingErrorsPanel：处理规则 / 失败保护；「安全边界」本仓无数据源，不落） */
-  const [tab, setTab] = useState<'rules' | 'protection'>('rules');
+  /** 分类（对齐 A2A RoutingErrorsPanel：处理规则 / 失败保护 / 安全边界） */
+  const [tab, setTab] = useState<'rules' | 'protection' | 'boundaries'>('rules');
   const edited = useRef(false);
 
   /**
@@ -465,7 +466,7 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
       }
     >
       <div className="settings-form">
-        {/* 分类分段（A2A 的 SegmentedControl；本仓有 Tabs，但只两档时分段更省位） */}
+        {/* 分类分段（A2A 的 SegmentedControl：处理规则 / 失败保护 / 安全边界） */}
         <div className="rt-seg" role="tablist" aria-label={t('错误处理分类')} style={{ marginBottom: 12 }}>
           <button
             type="button"
@@ -485,6 +486,35 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
           >
             {t('失败保护')}
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'boundaries'}
+            className={`rt-seg-btn${tab === 'boundaries' ? ' is-on' : ''}`}
+            onClick={() => setTab('boundaries')}
+          >
+            {t('安全边界')}
+          </button>
+        </div>
+        {/* 每条请求的重试上限（对齐 A2A `re-limit-strip`）：四个最常调的字段常驻在
+            分类之上 —— 切到哪个分类都看得到，不必为了改「最多再换账号」先切回某个 tab。 */}
+        <div className="re-limit-strip" role="group" aria-label={t('每条请求的重试上限')}>
+          <div className="re-compact-fields">
+            {LIMIT_FIELDS.slice(0, 4).map((f) => (
+              <div key={f.key} className="form-group">
+                <label>{t(f.label)}</label>
+                <Input
+                  type="number"
+                  min={f.min}
+                  max={f.max}
+                  value={draft[f.key] as number}
+                  disabled={busy}
+                  aria-label={t(f.label)}
+                  onChange={(e) => patch({ [f.key]: Number(e.target.value) } as Partial<ErrorSettings>)}
+                />
+              </div>
+            ))}
+          </div>
         </div>
         <span className="form-hint">
           {t('上游失败后按规则换账号或跳过提供商；每条请求的重试与换号受下列上限约束。保存后下一个请求生效。')}
@@ -495,86 +525,222 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
 
         {tab === 'protection' ? (
           <>
-        {/* 重试 / 换号 / 冷却上限 */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 }}>
-          {LIMIT_FIELDS.map((f) => (
-            <div key={f.key} className="form-group">
-              <label>{t(f.label)}</label>
+        {/* 失败保护（对齐 A2A `ErrorProtection` 的四张卡：失败退避 / 限流后降低优先级 /
+            连续失败保护 / 限流恢复保护）。前四个「每条请求的重试上限」已提到分类之上，
+            这里只剩冷却与保护三格。 */}
+        <div className="rt-card-group">
+          <div className="rt-group-card">
+            <div className="rt-group-head">
+              <div className="rt-group-title"><b>{t('冷却与保护')}</b></div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16, marginTop: 10 }}>
+              {LIMIT_FIELDS.slice(4).map((f) => (
+                <div key={f.key} className="form-group">
+                  <label>{t(f.label)}</label>
+                  <Input
+                    type="number"
+                    min={f.min}
+                    max={f.max}
+                    value={draft[f.key] as number}
+                    disabled={busy}
+                    aria-label={t(f.label)}
+                    onChange={(e) => patch({ [f.key]: Number(e.target.value) } as Partial<ErrorSettings>)}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rt-group-card">
+            <div className="rt-group-head">
+              <div className="rt-group-title"><b>{t('失败退避')}</b></div>
+            </div>
+            <label className="rt-special-check" style={{ marginTop: 8 }}>
+              <input type="checkbox" checked={draft.backoff} disabled={busy} onChange={(e) => patch({ backoff: e.target.checked })} />
+              <span>{t('失败后暂时休息')}</span>
+            </label>
+            <span className="form-hint">{t('只统计连接和服务异常，不惩罚请求参数、内容拒绝或能力缺失。连续失败逐次延长；成功后清零。')}</span>
+          </div>
+
+          <div className="rt-group-card">
+            <div className="rt-group-head">
+              <div className="rt-group-title"><b>{t('限流后降低优先级')}</b></div>
+            </div>
+            <label className="rt-special-check" style={{ marginTop: 8 }}>
+              <input type="checkbox" checked={draft.sink} disabled={busy} onChange={(e) => patch({ sink: e.target.checked })} />
+              <span>{t('限流后暂时排到后面')}</span>
+            </label>
+            <div className="form-group" style={{ marginTop: 8 }}>
+              <label>{t('最长保留时间')}</label>
               <Input
                 type="number"
-                min={f.min}
-                max={f.max}
-                value={draft[f.key] as number}
-                disabled={busy}
-                onChange={(e) => patch({ [f.key]: Number(e.target.value) } as Partial<ErrorSettings>)}
+                min={30}
+                max={3600}
+                value={draft.sinkSeconds}
+                disabled={busy || !draft.sink}
+                aria-label={t('最长保留时间')}
+                onChange={(e) => patch({ sinkSeconds: Number(e.target.value) })}
               />
             </div>
-          ))}
-        </div>
+            <span className="form-hint">{t('只影响选路顺序，不延长上游明确的冷却时间；到点自动恢复原顺序，成功一次可提前恢复。')}</span>
+          </div>
 
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input type="checkbox" checked={draft.backoff} disabled={busy} onChange={(e) => patch({ backoff: e.target.checked })} />
-            {t('失败后退避休息')}
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input type="checkbox" checked={draft.breaker} disabled={busy} onChange={(e) => patch({ breaker: e.target.checked })} />
-            {t('熔断保护')}
-          </label>
+          <div className="rt-group-card">
+            <div className="rt-group-head">
+              <div className="rt-group-title"><b>{t('连续失败保护')}</b></div>
+            </div>
+            <label className="rt-special-check" style={{ marginTop: 8 }}>
+              <input type="checkbox" checked={draft.breaker} disabled={busy} onChange={(e) => patch({ breaker: e.target.checked })} />
+              <span>{t('启用连续失败保护')}</span>
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12, marginTop: 8 }}>
+              <div className="form-group">
+                <label>{t('连续失败阈值')}</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={draft.breakerFailures}
+                  disabled={busy || !draft.breaker}
+                  aria-label={t('连续失败阈值')}
+                  onChange={(e) => patch({ breakerFailures: Number(e.target.value) })}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('保护时长')}</label>
+                <Input
+                  type="number"
+                  min={10}
+                  max={600}
+                  value={draft.breakerSeconds}
+                  disabled={busy || !draft.breaker}
+                  aria-label={t('保护时长')}
+                  onChange={(e) => patch({ breakerSeconds: Number(e.target.value) })}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('恢复所需成功次数')}</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={draft.breakerSuccesses}
+                  disabled={busy || !draft.breaker}
+                  aria-label={t('恢复所需成功次数')}
+                  onChange={(e) => patch({ breakerSuccesses: Number(e.target.value) })}
+                />
+              </div>
+            </div>
+            <span className="form-hint">{t('只统计连接和服务异常；生效时间取较晚的一项，不叠加等待。')}</span>
+          </div>
         </div>
 
         </>
+        ) : tab === 'boundaries' ? (
+        /* 安全边界（对齐 A2A `ErrorBoundaries`）：静态说明，没有可编辑字段 —— 这些是
+           网关无论如何都不会做的四件事，写出来是为了让人知道「重试/换号」的能力边界。 */
+        <div className="rt-group-card">
+          <div className="rt-group-head">
+            <div className="rt-group-title"><b>{t('始终保留的保护')}</b></div>
+          </div>
+          <ul className="rt-boundaries">
+            <li>
+              <strong>{t('已经开始输出')}</strong>
+              <span>{t('不从头重发，不拼接另一个账号的回答。')}</span>
+            </li>
+            <li>
+              <strong>{t('任务或计费结果不确定')}</strong>
+              <span>{t('没有可靠的安全重放依据时，不重复提交。')}</span>
+            </li>
+            <li>
+              <strong>{t('验证、风控与明确拒绝')}</strong>
+              <span>{t('不通过换号绕过；保留原因，返回客户端。')}</span>
+            </li>
+            <li>
+              <strong>{t('既有权限与路由范围')}</strong>
+              <span>{t('不扩大网关密钥授权，不擅自改指定账号，不新增付费操作。')}</span>
+            </li>
+          </ul>
+        </div>
         ) : (
         <>
-        {/* 按错误类型的处理规则 */}
+        {/* 按错误类型的处理规则（对齐 A2A `ErrorRules` 的表格：错误类型 / 处理方式 / 冷却 / 编辑）。
+            A2A 的「编辑」是弹窗编辑器；AIGX 把启用与动作直接摊在行内 —— 一屏能扫完九类错误，
+            改一个下拉即可生效，比逐个开弹窗更省事。 */}
         <div className="form-group">
           <label>{t('按错误类型的处理规则')}</label>
           <span className="form-hint" style={{ marginBottom: 8 }}>
             {t('每种错误类型的默认动作与冷却方式；规则由后端编译执行，启用/停用与动作调整即时生效。')}
           </span>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {draft.rules.map((rule, index) => (
-              <div
-                key={rule.id}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', border: '1px solid var(--border-color)', borderRadius: 8, padding: '8px 10px' }}
-              >
-                <Badge tone={rule.enabled ? 'info' : 'neutral'}>{t(KIND_LABEL[rule.kind] || rule.name)}</Badge>
-                <span className="form-hint">{rule.name}</span>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
-                  <input
-                    type="checkbox"
-                    checked={rule.enabled}
-                    disabled={busy}
-                    onChange={(e) => patchRule(index, { enabled: e.target.checked })}
-                  />
-                  {t('启用')}
-                </label>
-                <Select
-                  style={{ maxWidth: 180 }}
-                  value={rule.action}
-                  disabled={busy}
-                  aria-label={t('处理动作')}
-                  onChange={(e) => patchRule(index, { action: e.target.value as ErrorAction })}
-                >
-                  {(Object.keys(ACTION_LABEL) as ErrorAction[]).map((a) => (
-                    <option key={a} value={a}>{t(ACTION_LABEL[a])}</option>
-                  ))}
-                </Select>
-                {rule.cooldown !== 'none' ? (
-                  <Input
-                    type="number"
-                    style={{ width: 100 }}
-                    min={1}
-                    max={3600}
-                    value={rule.fallbackSeconds}
-                    disabled={busy}
-                    aria-label={t('冷却秒数')}
-                    onChange={(e) => patchRule(index, { fallbackSeconds: Number(e.target.value) })}
-                  />
-                ) : null}
-              </div>
-            ))}
+          <div className="rt-table-wrap">
+            <table className="rt-table rt-error-rules">
+              <thead>
+                <tr>
+                  <th>{t('错误类型')}</th>
+                  <th>{t('处理方式')}</th>
+                  <th>{t('冷却')}</th>
+                  <th>{t('编辑')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {draft.rules.map((rule, index) => (
+                  <tr key={rule.id}>
+                    <td>
+                      <div className="rt-error-rule-name">
+                        <Badge tone={rule.enabled ? 'info' : 'neutral'}>
+                          {t(KIND_LABEL[rule.kind] || rule.name)}
+                        </Badge>
+                        <span className="form-hint">{rule.name}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <Select
+                        style={{ maxWidth: 180 }}
+                        value={rule.action}
+                        disabled={busy}
+                        aria-label={t('处理动作')}
+                        onChange={(e) => patchRule(index, { action: e.target.value as ErrorAction })}
+                      >
+                        {(Object.keys(ACTION_LABEL) as ErrorAction[]).map((a) => (
+                          <option key={a} value={a}>{t(ACTION_LABEL[a])}</option>
+                        ))}
+                      </Select>
+                    </td>
+                    <td>
+                      {rule.cooldown === 'none' ? (
+                        <span className="rt-muted">{t('不冷却')}</span>
+                      ) : (
+                        <Input
+                          type="number"
+                          style={{ width: 100 }}
+                          min={1}
+                          max={3600}
+                          value={rule.fallbackSeconds}
+                          disabled={busy}
+                          aria-label={t('冷却秒数')}
+                          onChange={(e) => patchRule(index, { fallbackSeconds: Number(e.target.value) })}
+                        />
+                      )}
+                    </td>
+                    <td>
+                      <label className="rt-special-check">
+                        <input
+                          type="checkbox"
+                          checked={rule.enabled}
+                          disabled={busy}
+                          onChange={(e) => patchRule(index, { enabled: e.target.checked })}
+                        />
+                        <span>{t('启用')}</span>
+                      </label>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
+          <span className="form-hint">
+            {t('501 来自网关缺少能力时直接返回；账号模型权限不足只跳过对应账号与模型。')}
+          </span>
         </div>
 
         {/* beta.8：插件申报的默认错误规则（只读）。解析顺序：我的例外 > 插件默认 > 全局 */}

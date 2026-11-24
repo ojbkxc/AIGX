@@ -34,7 +34,7 @@ import {
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
 import RuleDialog from './RuleDialog';
-import { AddRuleButton, RulePanel, RuleRow, RuleSectionHead } from './shared';
+import { AddRuleButton, RulePanel, RuleRow, RuleSectionHead, RuleSwitchRow } from './shared';
 
 interface Editing {
   rule: VisionRule;
@@ -335,15 +335,20 @@ function RuleEditor({
     });
   }, [draft, onSave, registerSubmit, saving]);
 
-  const [listModels, targetModels] = useMemo(() => {
-    const list = models;
-    const able = models.filter((m) => m.supportsImages === true);
-    // 能力位未知的模型也允许当目标（后端能力位可能缺声明），但排在有声明的后面
-    const targets = able.length
-      ? able
-      : models.filter((m) => m.supportsImages !== false);
-    return [list, targets];
-  }, [models]);
+  /**
+   * 两个候选面（照 A2A `VisionRuleDialog` 的取法，刻意不对称）：
+   *   · 「哪些模型用这种方式」= 看不了图 / 能力位未声明的模型（`supportsImages !== true`）；
+   *   · 「用哪只模型识图 / 接管回答」= 只有明确声明能看图的模型（`supportsImages === true`）。
+   * 不对称是对的：能力位缺失时不能拿来当视觉目标（那会把图片丢给一只看不了图的模型），
+   * 但它仍然该出现在「需要兼容」的名单里。
+   */
+  const [listModels, targetModels] = useMemo(
+    () => [
+      models.filter((m) => m.supportsImages !== true),
+      models.filter((m) => m.supportsImages === true),
+    ],
+    [models],
+  );
 
   const targetKey = (target: VisionTarget): string =>
     `${target.provider.toLowerCase()}\u0000${target.model.toLowerCase()}`;
@@ -388,6 +393,11 @@ function RuleEditor({
 
   return (
     <div className="rt-special-editor">
+      <RuleSwitchRow
+        enabled={draft.enabled}
+        disabled={saving}
+        onChange={(enabled) => patch({ enabled })}
+      />
       <div className="rt-subfield">
         <label>{t('哪些模型用这种方式')}</label>
         <ModelRefPicker
@@ -398,29 +408,18 @@ function RuleEditor({
         />
       </div>
 
-      <div className="rt-grid2">
-        <div className="rt-subfield">
-          <label>{t('处理方式')}</label>
-          <select
-            className="form-input"
-            aria-label={t('处理方式')}
-            value={draft.mode}
-            onChange={(e) => patch({ mode: e.target.value as VisionRule['mode'] })}
-          >
-            <option value="assist">{t('辅助识图')}</option>
-            <option value="reroute">{t('整体接管')}</option>
-          </select>
-        </div>
-        <div className="rt-subfield">
-          <label className="rt-special-check" style={{ height: 36, alignItems: 'center' }}>
-            <input
-              type="checkbox"
-              checked={draft.enabled}
-              onChange={(e) => patch({ enabled: e.target.checked })}
-            />
-            <span>{t('启用这条规则')}</span>
-          </label>
-        </div>
+      <div className="rt-subfield">
+        <label>{t('处理方式')}</label>
+        <select
+          className="form-input"
+          aria-label={t('处理方式')}
+          value={draft.mode}
+          disabled={saving}
+          onChange={(e) => patch({ mode: e.target.value as VisionRule['mode'] })}
+        >
+          <option value="assist">{t('辅助识图')}</option>
+          <option value="reroute">{t('整体接管')}</option>
+        </select>
       </div>
 
       {draft.mode === 'assist' ? (

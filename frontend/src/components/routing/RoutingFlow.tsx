@@ -16,10 +16,10 @@ import { api } from '../../api';
 import { Button, Card, EmptyState } from '../ui';
 import {
   FLOW_WINDOWS,
-  type RoutingFlowPath,
   type RoutingFlowScope,
   type RoutingFlowSnapshot,
 } from '../../types/routing-workspace';
+import { clientLabel, flowPaths, sumPaths } from './flow-model';
 
 function statusOf(err: unknown): number | undefined {
   return (err as { status?: number } | null)?.status;
@@ -70,8 +70,15 @@ export default function RoutingFlow({ active }: { active: boolean }): JSX.Elemen
     );
   }
 
-  const paths: RoutingFlowPath[] = Array.isArray(data?.paths) ? data?.paths ?? [] : [];
+  const paths = flowPaths(data?.paths);
   const unavailable = data?.available === false;
+  /**
+   * 汇总口径照 A2A `sumPaths`：路径行的统计加起来必须与顶部指标同源。
+   * 后端已给顶层 `requests` / `running` 时优先用它（它含未归类请求），
+   * 缺省时退回路径求和 —— 两条口径都写在界面上，不混着显示。
+   */
+  const pathRequests = sumPaths(paths, 'requests');
+  const pathRunning = sumPaths(paths, 'running');
 
   return (
     <Card
@@ -136,11 +143,11 @@ export default function RoutingFlow({ active }: { active: boolean }): JSX.Elemen
         <>
           <div className="rt-flow-stats">
             <div>
-              <b>{data?.requests ?? '—'}</b>
+              <b>{data?.requests ?? pathRequests}</b>
               <span>{t('请求数')}</span>
             </div>
             <div>
-              <b>{data?.running ?? '—'}</b>
+              <b>{data?.running ?? pathRunning}</b>
               <span>{t('在途')}</span>
             </div>
             <div>
@@ -177,7 +184,7 @@ export default function RoutingFlow({ active }: { active: boolean }): JSX.Elemen
                 <tbody>
                   {paths.map((p, i) => (
                     <tr key={p.id ?? `${p.model ?? ''}-${p.accountId ?? ''}-${i}`}>
-                      <td>{p.clientLabel || p.client || '—'}</td>
+                      <td>{p.clientLabel || (p.client ? clientLabel(p.client, t) : '—')}</td>
                       <td>{p.model || '—'}</td>
                       <td>
                         {`${p.providerLabel || p.provider || '—'}`}
