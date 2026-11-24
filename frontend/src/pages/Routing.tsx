@@ -49,6 +49,17 @@ import RoutingPanel from '../components/RoutingPanel';
 import RoutingErrorsPanel from '../components/RoutingErrorsPanel';
 import ProfileForm from '../components/routing/ProfileForm';
 import GroupEditor from '../components/routing/GroupEditor';
+import {
+  RoutingCanvasGroups,
+  RoutingCanvasLayout,
+  RoutingConfigShell,
+} from '../components/routing/RoutingCanvas';
+import {
+  isGlobalRunning,
+  isGroupRunning,
+  isModelRunning,
+  useRoutingCanvasActivity,
+} from '../components/routing/RoutingCanvasActivity';
 import { LayerChip } from '../components/routing/TriStateField';
 import {
   PROFILE_FIELD_LABELS,
@@ -113,6 +124,9 @@ const STATUS_HINT: Record<string, string> = {
 function emptyProfiles(): RoutingProfiles {
   return { global: emptyProfile(), models: {}, groups: [] };
 }
+
+/** 稳定的空组列表引用（useMemo 依赖不能每次新建数组，否则每渲染都重算） */
+const EMPTY_GROUPS: RoutingGroup[] = [];
 
 function statusOf(err: unknown): number | undefined {
   return (err as { status?: number } | null)?.status;
@@ -435,9 +449,10 @@ export default function Routing(): JSX.Element {
   };
 
   /**
-   * 策略 / 粘滞的人话标签（对齐 A2A routing-ui 的 strategyLabel / stickyLabel 职责，
-   * 但取值用 AIGX 自己的策略枚举与既有文案：AIGX 的 session 是「长会话 6h」，
-   * 与 A2A 的「会话内」不是同一时长，所以不搬它的词）。
+   * 策略 / 粘滞的人话标签（对齐 A2A routing-ui 的 strategyLabel / stickyLabel 职责）。
+   * 取值用 AIGX 自己的策略枚举，但**文案与 A2A 同义同词**：`session` 在 A2A 叫
+   * 「会话内」，本仓的 6h 窗口是同一档位的不同时长参数，故用同一个词，
+   * 时长差异靠 tooltip / 说明表达，不靠换名字（换名字等于同一概念两种叫法）。
    */
   const strategyText = (s: string | undefined): string => {
     switch (s) {
@@ -450,7 +465,7 @@ export default function Routing(): JSX.Element {
   const stickyText = (s: string | undefined): string => {
     switch (s) {
       case 'auto': return t('自动');
-      case 'session': return t('长会话');
+      case 'session': return t('会话内');
       case 'turn': return t('每轮');
       case 'off': return t('关闭');
       default: return s ? s : t('未记录');
@@ -482,6 +497,54 @@ export default function Routing(): JSX.Element {
     if (layerSel === 'global' || !profiles) return baseProfile;
     return mergeProfiles(baseProfile, profiles.global);
   }, [layerSel, profiles, baseProfile]);
+
+  /* ── 配置画布（对齐 A2A RoutingConfigShell / RoutingCanvasLayout）────────
+   * 点阵底 + SVG 连线只用于「账号路由」这两块（全局/模型级层、路由组）；
+   * 特殊请求路由与错误处理走 plain —— 去点阵、不画线，与 A2A
+   * `RoutingConfigShell({ plain })` 同名同语义。
+   *
+   * 画布上的「连通」不是装饰：判据是本层**真的**引用了哪个组
+   * （全局/模型级的 `default_group`，或正在编辑的那个组）。
+   * 「流动」只认在途请求能归因到的那一层；归不到的（成员槽位行 —— 日志没有
+   * 账号标识）一律静态，不假装有请求在跑（见 RoutingCanvasActivity.ts 的口径）。 */
+  const canvasActive = mode === 'config' && (panel === 'global' || panel === 'group');
+  const activity = useRoutingCanvasActivity(canvasActive);
+  const groupList = profiles?.groups ?? EMPTY_GROUPS;
+  const activeGroupId = panel === 'group' ? groupSel || null : null;
+  const activeGroup = activeGroupId
+    ? groupList.find((g) => g.id === activeGroupId) ?? null
+    : null;
+
+  /** 本层真正引用到的组（连线的 `data-route-connected` 判据） */
+  const connectedGroupIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (activeGroupId) {
+      if (activeGroup) ids.add(activeGroup.id);
+      return ids;
+    }
+    const referenced = currentProfile?.default_group?.trim();
+    if (referenced) ids.add(referenced);
+    return ids;
+  }, [activeGroupId, activeGroup, currentProfile]);
+
+  /** 有在途请求落到的组（连线的 `data-route-running` 判据） */
+  const runningGroupIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!canvasActive) return ids;
+    for (const group of groupList) {
+      if (isGroupRunning(activity, group, profiles)) ids.add(group.id);
+    }
+    return ids;
+  }, [canvasActive, activity, groupList, profiles]);
+
+  /** 源卡是否有在途：组面板看该组；模型级看本模型；全局层只认没独立档案的模型 */
+  const sourceRunning =
+    canvasActive &&
+    (activeGroup
+      ? isGroupRunning(activity, activeGroup, profiles)
+      : modelKey != null
+        ? isModelRunning(activity, modelKey)
+        : isGlobalRunning(activity, modelNames));
 
   const patchGroupList = (next: RoutingGroup[]): void => {
     if (!profiles) return;
@@ -652,69 +715,47 @@ export default function Routing(): JSX.Element {
             {t('合并口径（逐字段三态）：自左向右取最右侧「不是继承」的那一层的值。全局 → 模型级 → 路由组，后面的层可以只覆盖其中几个字段，其余继续继承。')}
           </div>
 
-          <div className="rt-layout" style={{ marginTop: 12 }}>
-            <div className="rt-rail">
-              <div className="rt-rail-title">{t('层')}</div>
-              <button
-                type="button"
-                className={`rt-rail-item${layerSel === 'global' ? ' is-on' : ''}`}
-                onClick={() => setLayerSel('global')}
-              >
-                <span className="rt-rail-name">{t('全局（所有模型）')}</span>
-                {profiles ? (
-                  <span className="rt-count">{profileOverrideCount(profiles.global)}</span>
-                ) : null}
-              </button>
-
-              <div className="rt-rail-title" style={{ marginTop: 8 }}>
-                {t('模型级（{{n}}）', { n: modelNames.length })}
-              </div>
-              {modelNames.length === 0 ? (
-                <div className="rt-count" style={{ padding: '0 6px 4px' }}>
-                  {t('还没有模型级档案')}
-                </div>
-              ) : null}
-              {modelNames.map((name) => (
-                <button
-                  key={name}
-                  type="button"
-                  className={`rt-rail-item${layerSel === `m:${name}` ? ' is-on' : ''}`}
-                  title={name}
-                  onClick={() => setLayerSel(`m:${name}`)}
-                >
-                  <span className="rt-rail-name">{name}</span>
-                  <span className="rt-count">
-                    {profileOverrideCount(profiles?.models[name] ?? emptyProfile())}
-                  </span>
-                </button>
-              ))}
-              <div className="rt-rail-add">
-                <input
-                  className="form-input"
-                  placeholder={t('新增模型档案名')}
-                  value={newModel}
-                  onChange={(e) => setNewModel(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') addModel();
+          {/*
+            画布布局（对齐 A2A RoutingCanvasLayout）：
+              左列 = 本层配置（源卡，连线的起点）  右列 = 路由组节点  底行 = 三句图例。
+            原来这一块的「层」小 rail 由页面左栏承担（全局默认 / 模型路由 / 自定义路由组），
+            两处同义重复，故收进画布一列；层切换仍走左栏，不丢入口。
+          */}
+          <div style={{ marginTop: 12 }}>
+            <RoutingCanvasLayout
+              title={
+                layerSel === 'groups'
+                  ? t('自定义路由组')
+                  : layerSel === 'global'
+                    ? t('全局默认')
+                    : modelKey ?? ''
+              }
+              note={
+                layerSel === 'groups'
+                  ? t('只影响这个路由成员，不改变账号启用状态，也不影响其他模型。新增账号需要手动加入。')
+                  : layerSel === 'global'
+                    ? t('账号启停与账号页同步，立即影响所有路由；策略与排序需保存。')
+                    : t('仅影响此路由的后续请求')
+              }
+              groups={
+                <RoutingCanvasGroups
+                  groups={groupList}
+                  connectedIds={connectedGroupIds}
+                  runningIds={runningGroupIds}
+                  activeGroupId={activeGroupId}
+                  onOpen={(id) => {
+                    setPanel('group');
+                    setLayerSel('groups');
+                    setGroupSel(id);
                   }}
                 />
-                <Button variant="outline" size="sm" onClick={addModel} disabled={!newModel.trim()}>
-                  <Plus size={13} />
-                </Button>
-              </div>
-
-              <button
-                type="button"
-                className={`rt-rail-item${layerSel === 'groups' && !groupSel ? ' is-on' : ''}`}
-                style={{ marginTop: 8 }}
-                onClick={() => { setLayerSel('groups'); setGroupSel(''); }}
+              }
+            >
+              <div
+                className="routing-canvas-source"
+                data-route-source
+                data-route-running={sourceRunning ? '' : undefined}
               >
-                <span className="rt-rail-name">{t('路由组')}</span>
-                <span className="rt-count">{profiles?.groups.length ?? 0}</span>
-              </button>
-            </div>
-
-            <div>
               {layerSel === 'groups' ? (
                 profiles ? (
                   <GroupEditor groups={profiles.groups} onChange={patchGroupList} focusId={groupSel || null} />
@@ -766,6 +807,8 @@ export default function Routing(): JSX.Element {
                   ) : null}
                 </>
               ) : null}
+            </div>
+            </RoutingCanvasLayout>
 
               <div className="rt-savebar">
                 <Button
@@ -808,7 +851,6 @@ export default function Routing(): JSX.Element {
                 />
               ) : null}
             </div>
-          </div>
         </Card>
       </div>
 
@@ -1201,6 +1243,10 @@ export default function Routing(): JSX.Element {
       </div>
 
       {mode === 'replay' ? replayView : (
+      <div className="routing-config-view">
+      {/* 画布外壳（对齐 A2A RoutingConfigShell）：账号路由带点阵底 + 连线层；
+          特殊请求路由 / 错误处理走 plain —— 去点阵、不挂连线层 */}
+      <RoutingConfigShell plain={!canvasActive}>
       <div className="rt-shell">
         <nav className="rt-shell-rail" aria-label={t('路由分区')}>
           {/* rail 头：标题 + 条目总数 + 新增（对齐 A2A RoutingRail 的 SidebarHeader） */}
@@ -1221,11 +1267,18 @@ export default function Routing(): JSX.Element {
           <div className="rt-rail-title">{t('默认规则')}</div>
           <button
             type="button"
+            // data-route-scope / data-active：画布连线层的「作用域 → 源卡」起点判据
+            // （A2A 用 `.routing-config-scope-item[data-active]`，本仓挂在 rail 条目上）
+            data-route-scope="global"
+            data-active={panel === 'global' && layerSel === 'global' ? '' : undefined}
             className={`rt-nav-item${panel === 'global' && layerSel === 'global' ? ' is-on' : ''}`}
             onClick={() => { setPanel('global'); setLayerSel('global'); }}
           >
             <SlidersHorizontal size={14} className="rt-nav-icon" aria-hidden="true" />
             <span className="rt-nav-label">{t('全局默认')}</span>
+            {profiles ? (
+              <span className="rt-nav-count">{profileOverrideCount(profiles.global)}</span>
+            ) : null}
             {globalDirty ? <span className="rt-nav-dirty" title={t('有未保存的修改')} /> : null}
           </button>
           <button
@@ -1256,11 +1309,16 @@ export default function Routing(): JSX.Element {
             <button
               key={`m:${name}`}
               type="button"
+              data-route-scope={`m:${name}`}
+              data-active={panel === 'global' && layerSel === `m:${name}` ? '' : undefined}
               className={`rt-nav-item${panel === 'global' && layerSel === `m:${name}` ? ' is-on' : ''}`}
               title={name}
               onClick={() => { setPanel('global'); setLayerSel(`m:${name}`); }}
             >
               <span className="rt-nav-label">{name}</span>
+              <span className="rt-nav-count">
+                {profileOverrideCount(profiles?.models[name] ?? emptyProfile())}
+              </span>
               {modelLayerDirty(name) ? (
                 <span className="rt-nav-dirty" title={t('有未保存的修改')} />
               ) : null}
@@ -1272,11 +1330,16 @@ export default function Routing(): JSX.Element {
             <button
               key={`g:${g.id}`}
               type="button"
+              data-route-scope={`g:${g.id}`}
+              data-active={panel === 'group' && groupSel === g.id ? '' : undefined}
               className={`rt-nav-item${panel === 'group' && groupSel === g.id ? ' is-on' : ''}`}
               title={g.id}
               onClick={() => { setPanel('group'); setLayerSel('groups'); setGroupSel(g.id); }}
             >
               <span className="rt-nav-label">{g.name || g.id}</span>
+              <span className="rt-nav-count" title={t('{{n}} 个成员槽位', { n: g.members.length })}>
+                {g.members.filter((m) => m.included).length}
+              </span>
               {groupLayerDirty(g.id) ? (
                 <span className="rt-nav-dirty" title={t('有未保存的修改')} />
               ) : null}
@@ -1304,8 +1367,11 @@ export default function Routing(): JSX.Element {
         </nav>
 
         <div className="rt-shell-main">
-          {/* 全局默认 / 模型路由 / 路由组：复用既有配置编辑器（由 layerSel 驱动选层） */}
-          <div hidden={!(panel === 'global' || panel === 'group')}>{configView}</div>
+          {/* 全局默认 / 模型路由 / 路由组：复用既有配置编辑器（由 layerSel 驱动选层）。
+              这里用条件渲染而不是 hidden：plain 视图（特殊请求路由 / 错误处理）必须**真的**
+              没有画布 DOM（点阵与连线层都不挂），否则 `hidden` 元素里仍留着一份图例与 SVG。
+              草稿存在页面 state 里，卸载配置视图不会丢草稿（切回来仍在）。 */}
+          {panel === 'global' || panel === 'group' ? configView : null}
           {panel === 'errors' ? <RoutingErrorsPanel onDirty={setErrorsDirty} /> : null}
           {panel === 'compact' ? (
             <div className="rt-special-split">
@@ -1332,6 +1398,8 @@ export default function Routing(): JSX.Element {
             </div>
           ) : null}
         </div>
+      </div>
+      </RoutingConfigShell>
       </div>
       )}
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />

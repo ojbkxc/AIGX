@@ -49,6 +49,8 @@ const apiMock = vi.hoisted(() => ({
   saveRoutingErrors: vi.fn(),
   // 请求回放模式：左栏「最近请求」走 requestLogs 列表端点
   listRequestLogs: vi.fn(),
+  // 画布「流动」的数据源（GET /api/logs/inflight）
+  listInflightRequests: vi.fn(),
 }));
 vi.mock('../api', () => ({ api: apiMock }));
 vi.mock('../components/Toast', () => ({
@@ -155,6 +157,7 @@ describe('Routing 页冒烟', () => {
     apiMock.getRoutingTrace.mockResolvedValue(TRACE);
     apiMock.getRoutingErrors.mockResolvedValue({ success: true, data: { rules: [] } });
     apiMock.listRequestLogs.mockResolvedValue({ success: true, data: [] });
+    apiMock.listInflightRequests.mockResolvedValue({ success: true, total: 0, data: [] });
   });
   afterEach(() => cleanup());
 
@@ -166,10 +169,10 @@ describe('Routing 页冒烟', () => {
     if (!found) throw new Error(`mode button not found: ${label}`);
     return found;
   };
-  /** 左栏 rail 按钮：按可见文本找。 */
+  /** 左栏 rail 按钮：按可见文本找（计数徽标在 .rt-nav-count，不参与匹配） */
   const railButton = (container: HTMLElement, label: string): HTMLElement => {
     const found = Array.from(container.querySelectorAll<HTMLElement>('.rt-nav-item')).find(
-      (el) => el.textContent?.trim() === label,
+      (el) => el.querySelector('.rt-nav-label')?.textContent?.trim() === label,
     );
     if (!found) throw new Error(`rail item not found: ${label}`);
     return found;
@@ -202,10 +205,8 @@ describe('Routing 页冒烟', () => {
 
     // 路由组条目显示组名（不是组 id），id 留在 title 里供定位
     expect(labels).toContain('快速组');
-    const groupItem = Array.from(container.querySelectorAll<HTMLElement>('.rt-nav-item')).find(
-      (el) => el.textContent?.trim() === '快速组',
-    );
-    expect(groupItem?.getAttribute('title')).toBe('g1');
+    const groupItem = railButton(container, '快速组');
+    expect(groupItem.getAttribute('title')).toBe('g1');
 
     // 页头策略摘要（对齐 A2A routing-page-policy）：策略 · 粘滞 模式
     expect(container.querySelector('.rt-pagebar-policy')?.textContent).toContain('加权随机');
@@ -381,9 +382,7 @@ describe('Routing 页冒烟', () => {
     await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
 
     // 先制造一处草稿修改：切到模型级层（gpt-4o），清空一个三态字段
-    const modelNav = Array.from(container.querySelectorAll<HTMLElement>('.rt-nav-item')).find(
-      (el) => el.textContent?.trim() === 'gpt-4o',
-    );
+    const modelNav = railButton(container, 'gpt-4o');
     expect(modelNav).toBeTruthy();
     fireEvent.click(modelNav as HTMLElement);
     await waitFor(() => expect(screen.getAllByText('路由策略').length).toBeGreaterThanOrEqual(1));
@@ -408,5 +407,119 @@ describe('Routing 页冒烟', () => {
     // 未确认前不发新请求（草稿还在）
     expect(apiMock.getRoutingPolicy).not.toHaveBeenCalled();
     expect(container.textContent).toContain('有未保存的修改');
+  });
+
+  /**
+   * 配置画布（对齐 A2A RoutingConfigShell / RoutingCanvasLayout）。
+   *
+   * 钉住四件事，缺一条这套结构就会退化成「看起来像画布」：
+   * 1. 账号路由视图 = 点阵外壳 + 连线层 + 三句图例（文案与图标形态照 A2A）
+   * 2. 连线的 data 判据真的落在 DOM 上（源卡 / 组节点 / 成员槽位 / 作用域条目）
+   * 3. 没有在途数据时**不画流动**（不许静态线冒充实时线）
+   * 4. 特殊请求路由走 plain：去点阵、不挂连线层、不显示图例
+   */
+  it('画布外壳：点阵 + 连线层 + 三句图例，连线的 data 判据落在 DOM 上', async () => {
+    const { container } = render(<Routing /> as ReactElement);
+    await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
+
+    // ① 外壳与画布布局
+    const shell = container.querySelector('.routing-config-shell');
+    expect(shell).toBeTruthy();
+    expect(shell?.classList.contains('is-plain')).toBe(false);
+    const canvas = container.querySelector('.routing-canvas');
+    expect(canvas).toBeTruthy();
+    // 点阵只挂在 shell 上（A2A 点径 .8px / 间距 20px 在 CSS 里，这里钉结构归属）
+    expect(shell?.querySelector('.routing-canvas-edges')).toBeTruthy();
+
+    // ② 三句图例：连线表示参与本路由 / 流动：有请求在途 / 保存后才会影响真实请求
+    const legend = container.querySelector('.routing-canvas-legend');
+    expect(legend).toBeTruthy();
+    expect(legend?.textContent).toContain('连线表示参与本路由');
+    expect(legend?.textContent).toContain('流动：有请求在途');
+    expect(legend?.textContent).toContain('保存后才会影响真实请求');
+    // 图例三种形态：<i/> 静态线段、<svg><path d='M 0 4 H 22'/> 流动示例
+    expect(legend?.querySelector('i')).toBeTruthy();
+    expect(legend?.querySelector('svg path')?.getAttribute('d')).toBe('M 0 4 H 22');
+
+    // ③ 源卡 = 左列配置（连线的起点），组节点列 = 右列
+    expect(container.querySelector('[data-route-source]')).toBeTruthy();
+    const nodes = Array.from(container.querySelectorAll<HTMLElement>('[data-route-node]'));
+    expect(nodes.map((n) => n.dataset.routeNode)).toEqual(['g1']);
+    // 全局层没有 default_group → 组不连通；成员槽位行也标了 data-route-account
+    expect(nodes[0].hasAttribute('data-route-connected')).toBe(false);
+    expect(nodes[0].hasAttribute('data-route-expanded')).toBe(true);
+    expect(
+      Array.from(nodes[0].querySelectorAll<HTMLElement>('[data-route-account]')).map(
+        (a) => a.dataset.routeAccount,
+      ),
+    ).toEqual(['g1:0']);
+    // 作用域条目（rail 上被选中的层）带 data-active，连线起点靠它
+    const scope = container.querySelector('[data-route-scope][data-active]');
+    expect(scope?.getAttribute('data-route-scope')).toBe('global');
+
+    // ④ 没有在途数据 → 一条流动线都不许有
+    expect(container.querySelector('.routing-canvas-edges .is-running')).toBeNull();
+  });
+
+  it('画布连通判据：模型级层引用了 g1（default_group）→ 组节点与成员槽位连通', async () => {
+    const { container } = render(<Routing /> as ReactElement);
+    await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
+
+    // 切到模型级 gpt-4o（它的 default_group = g1）
+    fireEvent.click(railButton(container, 'gpt-4o'));
+    await waitFor(() =>
+      expect(container.querySelector('[data-route-scope][data-active]')?.getAttribute('data-route-scope')).toBe('m:gpt-4o'),
+    );
+
+    const node = container.querySelector<HTMLElement>('[data-route-node="g1"]');
+    expect(node).toBeTruthy();
+    expect(node?.hasAttribute('data-route-connected')).toBe(true);
+    // 成员槽位 included=true → 槽位行也连通
+    expect(
+      container.querySelector('[data-route-account="g1:0"]')?.hasAttribute('data-route-connected'),
+    ).toBe(true);
+    // 仍然没有在途 → 静态线
+    expect(container.querySelector('.routing-canvas-edges .is-running')).toBeNull();
+  });
+
+  it('画布流动态：有在途请求落到该组时才 is-running（数据缺失就保持静态）', async () => {
+    // 在途模型 = gpt-4o，且模型级档案的 default_group = g1 → 组与源卡都在途
+    apiMock.listInflightRequests.mockResolvedValue({
+      success: true,
+      total: 1,
+      data: [{ id: 'inflight-1', model: 'gpt-4o', started_at: 1, elapsed_ms: 1000, stream: true }],
+    });
+    const { container } = render(<Routing /> as ReactElement);
+    await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
+
+    fireEvent.click(railButton(container, 'gpt-4o'));
+    await waitFor(() =>
+      expect(container.querySelector('[data-route-node="g1"]')?.hasAttribute('data-route-running')).toBe(
+        true,
+      ),
+    );
+    // 源卡同样在途（A2A 的 data-route-running → is-running 连线）
+    expect(container.querySelector('[data-route-source]')?.hasAttribute('data-route-running')).toBe(
+      true,
+    );
+    // 成员槽位行不置 running：日志里没有账号↔成员的归因依据（宁可静态）
+    expect(
+      container.querySelector('[data-route-account="g1:0"]')?.hasAttribute('data-route-running'),
+    ).toBe(false);
+  });
+
+  it('特殊请求路由走 plain：去点阵、不挂连线层、不显示图例', async () => {
+    const { container } = render(<Routing /> as ReactElement);
+    await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
+
+    fireEvent.click(railButton(container, '压缩上下文'));
+    await waitFor(() =>
+      expect(container.querySelector('.routing-config-shell')?.classList.contains('is-plain')).toBe(
+        true,
+      ),
+    );
+    expect(container.querySelector('.routing-canvas-edges')).toBeNull();
+    expect(container.querySelector('.routing-canvas-legend')).toBeNull();
+    expect(container.querySelector('.routing-canvas')).toBeNull();
   });
 });

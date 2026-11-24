@@ -90,6 +90,21 @@
   padding: 3px 8px;
 }
 
+/* rail 条目右侧的密度计数（A2A 的 routing-config-scope-item 同样带一个计数）：
+   本页把它放在「层表过态的字段数 / 组成员启用数」上，切层前先看见哪层配了东西。 */
+.rt-nav-item .rt-nav-count {
+  flex: 0 0 auto;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  text-align: center;
+}
+
 /* ── 回放左栏头与筛选（对齐 A2A routing-request-head / -tools） ── */
 .rt-replay-rail-title {
   display: flex;
