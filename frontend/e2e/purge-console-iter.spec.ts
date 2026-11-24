@@ -247,6 +247,45 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('37 · 「只看异常」先看清整理会删掉哪些行', async ({ page }) => {
+  // 搜索行只在 >3 条时出现，所以要自备 5 条（含 1 条重复 + 1 条空改写）
+  const rules = [
+    { from: 'dup', to: '1' },
+    { from: 'dup', to: '2' },
+    { from: 'ok', to: '3' },
+    { from: 'emptyTo', to: '' },
+    { from: 'okay', to: '4' },
+  ];
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+  const rows = page.locator('[data-purge-fix="dead-zone-table"] .purge-rule-row');
+  const total = await rows.count();
+  expect(total).toBe(5);
+
+  const toggle = page.getByTestId('purge-dead-zone-issues-only');
+  await expect(toggle).toBeVisible();
+  await toggle.check();
+
+  // 异常 = 重复的后一条 + 空改写 = 2 条，与开关上的计数一致
+  const label = await page.locator('.purge-issues-only').first().innerText();
+  const expected = Number(/(\d+)\s*条/.exec(label)?.[1] ?? '-1');
+  expect(expected).toBe(2);
+  await expect(rows).toHaveCount(2);
+  expect(expected).toBeLessThan(total);
+
+  // 取消勾选 → 全部回来
+  await toggle.uncheck();
+  await expect(rows).toHaveCount(total);
+});
+
 test('36 · 词表搜索过滤不改变编辑目标（下标仍是真实的）', async ({ page }) => {
   // 造 5 条规则（>3 才显示搜索框）。**先 mockPurge 再覆盖**：同一路径的 route
   // 后注册者优先，顺序反了就会被基础 mock 盖掉。

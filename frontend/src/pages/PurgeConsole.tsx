@@ -294,6 +294,42 @@ export function filterRules<T extends { from: string; to: string }>(
   );
 }
 
+/**
+ * 标记「整理时会被删掉」的行（空原文 / 空改写 / 原文重复）。
+ *
+ * 为什么要有它：`tidyRules` 一套就删，用户**看不到删之前长什么样**——只能先按
+ * 「整理」再后悔。有了标记+筛选，就能在动手前逐条看过再决定。
+ *
+ * 判据与 `tidyRules` 必须一致（重复按 trim+小写比较、空值按 trim 后为空），
+ * 否则「高亮的」与「真被删的」不是同一批，比不标更误导。
+ */
+export function ruleIssues<T extends { from: string; to: string }>(
+  rules: readonly T[],
+): Array<{ index: number; reason: 'emptyFrom' | 'emptyTo' | 'duplicate' }> {
+  const seen = new Map<string, number>();
+  const issues: Array<{ index: number; reason: 'emptyFrom' | 'emptyTo' | 'duplicate' }> = [];
+  rules.forEach((rule, index) => {
+    const from = rule.from.trim();
+    if (!from) {
+      issues.push({ index, reason: 'emptyFrom' });
+      return;
+    }
+    if (!rule.to.trim()) {
+      issues.push({ index, reason: 'emptyTo' });
+      return;
+    }
+    const key = from.toLowerCase();
+    const first = seen.get(key);
+    if (first !== undefined) {
+      // 只标后面那条：tidyRules 保留最早一条
+      issues.push({ index, reason: 'duplicate' });
+      return;
+    }
+    seen.set(key, index);
+  });
+  return issues;
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -2499,6 +2535,9 @@ export default function PurgeConsole(): JSX.Element {
   /** 词表搜索关键词（两张表各一份；只影响显示，不参与保存） */
   const [deadZoneQuery, setDeadZoneQuery] = useState('');
   const [synonymQuery, setSynonymQuery] = useState('');
+  /** 「只看会被整理删掉的行」开关（两张表各一份） */
+  const [deadZoneIssuesOnly, setDeadZoneIssuesOnly] = useState(false);
+  const [synonymIssuesOnly, setSynonymIssuesOnly] = useState(false);
   /**
    * 词表「撤销上一次批量变更」的快照。
    *
@@ -2552,6 +2591,15 @@ export default function PurgeConsole(): JSX.Element {
   const dupRules = useMemo(
     () => findDuplicates(draft?.rewrite_rules.map((r) => r.from) ?? []),
     [draft?.rewrite_rules],
+  );
+  // 「整理会删掉哪些行」——与 tidyRules 同判据，供筛选预览
+  const deadZoneIssues = useMemo(
+    () => new Set(ruleIssues(draft?.rewrite_rules ?? []).map((item) => item.index)),
+    [draft?.rewrite_rules],
+  );
+  const synonymIssues = useMemo(
+    () => new Set(ruleIssues(draft?.synonym_pairs ?? []).map((item) => item.index)),
+    [draft?.synonym_pairs],
   );
   const dupSynonyms = useMemo(
     () => findDuplicates(draft?.synonym_pairs.map((r) => r.from) ?? []),
@@ -4209,6 +4257,16 @@ export default function PurgeConsole(): JSX.Element {
                 })}
               </span>
             ) : null}
+            {/* 「整理」会直接删，先让人看清删哪些再动手 */}
+            <label className="purge-issues-only">
+              <input
+                type="checkbox"
+                data-testid="purge-dead-zone-issues-only"
+                checked={deadZoneIssuesOnly}
+                onChange={(event) => setDeadZoneIssuesOnly(event.target.checked)}
+              />
+              {t('只看异常 {{n}} 条', { n: deadZoneIssues.size })}
+            </label>
           </div>
         ) : null}
         {batchPaste === 'dead_zone' ? (
@@ -4247,7 +4305,9 @@ export default function PurgeConsole(): JSX.Element {
           <p className="purge-empty" data-purge-fix="dead-zone-table">{t('暂无改写规则，点击右上角「添加规则」新建一条')}</p>
         ) : (
           <div className="purge-rules" ref={rulesRef} data-purge-fix="dead-zone-table">
-            {filterRules(draft.rewrite_rules, deadZoneQuery).map(({ rule, index }) => (
+            {filterRules(draft.rewrite_rules, deadZoneQuery)
+              .filter(({ index }) => !deadZoneIssuesOnly || deadZoneIssues.has(index))
+              .map(({ rule, index }) => (
               <RuleRow
                 key={index}
                 rule={rule}
@@ -4350,13 +4410,24 @@ export default function PurgeConsole(): JSX.Element {
                 })}
               </span>
             ) : null}
+            <label className="purge-issues-only">
+              <input
+                type="checkbox"
+                data-testid="purge-synonym-issues-only"
+                checked={synonymIssuesOnly}
+                onChange={(event) => setSynonymIssuesOnly(event.target.checked)}
+              />
+              {t('只看异常 {{n}} 条', { n: synonymIssues.size })}
+            </label>
           </div>
         ) : null}
         {draft.synonym_pairs.length === 0 ? (
           <p className="purge-empty">{t('暂无同义词，点击右上角「添加规则」新建一条')}</p>
         ) : (
           <div className="purge-rules" ref={synRulesRef} data-purge-fix="synonym-table">
-            {filterRules(draft.synonym_pairs, synonymQuery).map(({ rule, index }) => (
+            {filterRules(draft.synonym_pairs, synonymQuery)
+              .filter(({ index }) => !synonymIssuesOnly || synonymIssues.has(index))
+              .map(({ rule, index }) => (
               <RuleRow
                 key={index}
                 rule={rule}

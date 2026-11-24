@@ -421,6 +421,7 @@
   "搜索同义词表": "Search synonym table",
   "搜索原文或改写": "Search source or rewrite",
   "匹配 {{n}} / {{total}} 条": "{{n}} of {{total}} match",
+  "只看异常 {{n}} 条": "Only problem rows ({{n}})",
   "死区词改写": "Dead-zone rewrites",
   "异源模型": "Fallback models",
   "system 剥离前缀": "system strip prefixes",

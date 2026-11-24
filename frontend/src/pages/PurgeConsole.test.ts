@@ -18,6 +18,7 @@ import {
   readPresetFilter,
   readRecentPresets,
   retryRateText,
+  ruleIssues,
   rulesToText,
   snapshotReportText,
   statsExportNote,
@@ -248,6 +249,49 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('ruleIssues', () => {
+  it('空原文 / 空改写 / 重复 各自标记，且判据与 tidyRules 一致', () => {
+    const issues = ruleIssues([
+      { from: 'a', to: 'x' },
+      { from: '   ', to: 'y' }, // emptyFrom
+      { from: 'b', to: '  ' }, // emptyTo
+      { from: 'A', to: 'z' }, // 与第 0 条重复（trim+忽略大小写）
+    ]);
+    expect(issues).toEqual([
+      { index: 1, reason: 'emptyFrom' },
+      { index: 2, reason: 'emptyTo' },
+      { index: 3, reason: 'duplicate' },
+    ]);
+  });
+
+  it('同一个 from 出现三次：只标后面两条（tidyRules 保留最早一条）', () => {
+    const issues = ruleIssues([
+      { from: 'k', to: '1' },
+      { from: 'k', to: '2' },
+      { from: 'k', to: '3' },
+    ]);
+    expect(issues.map((i) => i.index)).toEqual([1, 2]);
+  });
+
+  it('干净表 → 空（不误报）', () => {
+    expect(ruleIssues([{ from: 'a', to: 'b' }, { from: 'c', to: 'd' }])).toEqual([]);
+  });
+
+  it('标记的条数等于 tidyRules 将删除的条数（两把刀必须同口径）', () => {
+    const rules = [
+      { from: 'a', to: 'b' },
+      { from: 'a', to: 'c' },
+      { from: '', to: 'd' },
+      { from: 'e', to: '' },
+      { from: 'f', to: 'g' },
+    ];
+    const tidy = tidyRules(rules);
+    const tidyRemoved =
+      tidy.droppedEmptyFrom + tidy.droppedEmptyTo + tidy.droppedDuplicate;
+    expect(ruleIssues(rules).length).toBe(tidyRemoved);
   });
 });
 

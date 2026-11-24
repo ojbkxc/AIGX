@@ -871,3 +871,13 @@
   margin: 0;
   flex: 1;
 }
+/* 「只看异常」开关：与搜索框同一行，弱化不抢注意力 */
+.purge-issues-only {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
