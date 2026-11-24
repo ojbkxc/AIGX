@@ -28,7 +28,7 @@
 |---|---|---|---|
 | 注册表层 | `src/account_session/registry.rs`（`PROVIDERS` / `SESSION_PROVIDERS` / `AGENT2API_PROVIDERS` / `CREDENTIAL_FIELDS`） | `core/providers/mod.rs` 的 `PROVIDERS` | `tools/sync_agent2api_providers.py --check` |
 | 表单层 | `frontend/src/lib/addAccountConfigs.ts` 的 `SESSION_ADD_CONFIGS` | `ui-islands/src/islands/add-account-configs.ts` | 同上（表单覆盖比对） |
-| 字段层 | `registry.rs` 的 `CREDENTIAL_FIELDS` | `core/account_store/` 的凭证字段 | `tools/sync_agent2api_credential_fields.py --check` |
+| 字段层 | `registry.rs` 的 `CREDENTIAL_FIELDS` | `core/providers/<家>/credentials.rs`（legacy 布局；v3.4.2+ 主仓已无，见下） | `tools/sync_agent2api_credential_fields.py --check` |
 | 签到层 | `src/checkin/claim.rs` 的 `CHECKIN_PROVIDERS` / `CHECKIN_CONTRACTS` | `core/auto_checkin.rs` 的 `CHECKIN_PROVIDERS` | `tools/sync_agent2api_capabilities.py --check` |
 
 > 目录层（`catalog.rs` 的 `spec_for` ↔ 上游 `providers/<家>/models.rs`）也由
@@ -53,6 +53,17 @@ python tools/sync_agent2api_providers.py --upstream D:\GitHub\Agent2API-upstream
 python tools/sync_agent2api_capabilities.py --upstream D:\GitHub\Agent2API-upstream-main --check
 python tools/sync_agent2api_credential_fields.py --upstream D:\GitHub\Agent2API-upstream-main --check
 ```
+
+> **字段层脚本的口径（2026-11-24 校准）**：`credential_fields.py` 只能解析
+> **legacy 布局**（`core/providers/<家>/credentials.rs`，一家一个凭证结构；
+> 实测 `D:\GitHub\Agent2API-main` = 3.0.8 上 9 家全解析）。上游 **v3.4.2 起**
+> 主仓只剩 `chatgpt_subscription` / `codex_subscription` 两家 `credentials.rs`，
+> 其余执行体（连同凭证解析）搬进闭源插件仓；`account_store/<家>_accounts.rs`
+> 是**公开形态投影**（混着 priority/enabled/addedAt 等运营字段），不能当凭证
+> 模板用。所以对 3.4.2+ 上游该脚本的正确答案是 **exit 3「不适用」**（打印已
+> 探测的路径与原因），不是 exit 0「一致」——旧版静默 exit 0 属于巡检空转，
+> 2026-11-24 已修（空转保护 + CI 三态分流）。要真正对拍字段模板，请指向
+> legacy 布局的上游副本（如 `Agent2API-main`），或 `--strict` 逼出失败。
 
 **脚本豁免机制**：`tools/sync_agent2api_providers.py` 的 `INTENTIONAL_FORM_GAPS`
 是能力边界的**可执行标注** —— 有意不实现的上游表单入口在脚本里豁免并记录原因；

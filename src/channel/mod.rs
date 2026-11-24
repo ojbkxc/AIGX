@@ -1879,11 +1879,27 @@ impl ChannelStore {
         }
     }
 
-    /// 计入渠道请求失败 — 同步更新断路器与健康管理器，并按失败类型决定是否清除亲和性。
+    /// 计入渠道请求失败 — 同步更新断路器与健康管理器，并**解除会话粘性绑定**。
     ///
-    /// 参照 burncloud P0-1 策略：ServerError/Timeout/ConnectionError → 清除亲和性
-    /// （病渠道不应再被粘到）；RateLimited/AuthFailed/PaymentRequired/ModelNotFound/
-    /// EmptyResponse → 保留亲和性（临时或永久故障，下次可能恢复）。
+    /// 粘性解绑对齐上游 Agent2API v3.5.1 `error_policy_finish::forget_sticky`：
+    /// 判据是「这个渠道这一轮确实失败了」，**不是**失败类型 —— 上游在
+    /// `finish_failure`（所有换号/中止分支的公共入口）与 8 个直接 return 的
+    /// 失败分支里一律解绑，例外只有「固定指定账号测试」（`pinned_account`）
+    /// 与用户手动终止；AIGX 没有 pinned 概念，故这里对所有失败类型解绑。
+    ///
+    /// 删除本身仍是**条件删除**（`evict_if`：仅当当前绑定正是本渠道），
+    /// 并发下不会抹掉别的请求刚写好的健康绑定。
+    ///
+    /// 为什么不再按类型挑（旧口径 burncloud P0-1：只有
+    /// ServerError/Timeout/ConnectionError 清，其余「下次可能恢复」保留）：
+    /// - `ModelNotFound` 与本地构造类失败（`BridgeError::Config` → ClientError）
+    ///   在本项目属**不可重试**：调用方直接 break、且**不置冷却** —— 渠道仍留在
+    ///   候选池，粘性也仍指向它，该会话对这个模型的每次请求都会先撞它再整单
+    ///   失败。上游 v3.5.1 正是在「构造期本地失败」分支显式解绑。
+    /// - 401/402/429 虽会置冷却（粘性暂时失效），但冷却到期后粘性会把会话按回
+    ///   这条刚失败过的渠道；上游同样解绑，交给正常选路重排。
+    ///
+    /// 断路器/健康口径**不变**：ClientError 仍不计入断路器、不冷却、不进失败归档。
     pub fn record_channel_failure(
         &self,
         channel_id: &str,
@@ -1895,8 +1911,15 @@ impl ChannelStore {
         // P1 指标：渠道级成功率计数（客户端错误同样计失败——渠道确实
         // 交付了错误响应；失败样本不计延迟分桶，见 record_channel_result）
         crate::metrics::global().record_channel_result(channel_id, false, 0);
+        // 粘性解绑先于下面所有早退分支：失败就是这个渠道这一轮的结论，
+        // 与失败类型无关（理由见方法注释）。条件删除 + 空参数防御在
+        // `evict_if` 里，不会误伤别的会话/别的渠道的绑定。
+        if let (Some(sid), Some(m)) = (session_id, model) {
+            self.affinity_cache.evict_if(sid, m, channel_id);
+        }
         // 客户端请求错误（400/413/422…）：只留排障信息，**不影响渠道健康、
-        // 不记失败归档、不打开断路器、不清亲和性**。渠道本身是健康的。
+        // 不记失败归档、不打开断路器、不冷却**（粘性已在上方解绑）。
+        // 渠道本身是健康的。
         if matches!(failure_type, circuit_breaker::FailureType::ClientError) {
             self.circuit_breaker
                 .record_failure(channel_id, failure_type.clone());
@@ -1920,21 +1943,6 @@ impl ChannelStore {
         // 批次3：限速类失败同步喂给 AIMD（降限额/进冷却）
         if let circuit_breaker::FailureType::RateLimited { retry_after, .. } = &failure_type {
             self.aimd_on_rate_limited(channel_id, *retry_after);
-        }
-
-        // P0-1 亲和性清除策略
-        let should_evict = matches!(
-            failure_type,
-            circuit_breaker::FailureType::ServerError
-                | circuit_breaker::FailureType::Timeout
-                | circuit_breaker::FailureType::ConnectionError
-        );
-        if should_evict {
-            if let (Some(sid), Some(m)) = (session_id, model) {
-                // 条件删除：同会话并发里可能已有别的请求把这条绑定改成健康渠道，
-                // 无条件删会把那份新绑定一起抹掉（对齐上游 v3.5.1 forget 语义）。
-                self.affinity_cache.evict_if(sid, m, channel_id);
-            }
         }
     }
 
@@ -2042,6 +2050,10 @@ impl ChannelStore {
             BridgeError::UpstreamDecode(_)
             | BridgeError::InvalidUpstreamConfig(_)
             | BridgeError::AllAccountsFailed(_) => circuit_breaker::FailureType::ServerError,
+            // 全忙：渠道本身没任何问题（只是账号槽位占满），**绝不能因此
+            // 给渠道记一笔失败** —— 那会把一条健康渠道熔断进冷却。按
+            // `ClientError` 口径处理（不计入断路器、不冷却），与 `Config` 同档。
+            BridgeError::AccountBusy(_) => circuit_breaker::FailureType::ClientError,
         }
     }
 
@@ -2768,6 +2780,69 @@ mod tests {
                 h.join().expect("并发线程不应 panic");
             }
             assert!(!s.snapshot().is_empty());
+        });
+    }
+
+    /// v3.5.1 对齐（上游 `error_policy_finish::forget_sticky`）：候选失败即解除该
+    /// 会话粘性绑定，**与失败类型无关** —— 旧口径只在 ServerError/Timeout/
+    /// ConnectionError 解绑，ModelNotFound（AIGX 不可重试、不冷却）会留着粘性
+    /// 把会话反复按回同一个 404 渠道。
+    #[test]
+    fn failure_evicts_sticky_regardless_of_failure_type() {
+        use crate::channel::circuit_breaker::{FailureType, RateLimitScope};
+        with_secret_dir("sticky-evict", || {
+            let s = store();
+            let cases = [
+                FailureType::ClientError,
+                FailureType::ModelNotFound,
+                FailureType::AuthFailed,
+                FailureType::PaymentRequired,
+                FailureType::EmptyResponse,
+                FailureType::RateLimited {
+                    scope: RateLimitScope::Unknown,
+                    retry_after: None,
+                },
+                FailureType::ServerError,
+            ];
+            for (i, ft) in cases.into_iter().enumerate() {
+                let sid = format!("s{i}");
+                s.affinity_cache().insert(&sid, "m1", "ch-a");
+                s.record_channel_failure(
+                    "ch-a",
+                    Some("m1"),
+                    ft.clone(),
+                    "boom",
+                    Some(sid.as_str()),
+                );
+                assert!(
+                    s.affinity_cache().lookup(&sid, "m1").is_none(),
+                    "{ft:?} 失败后应解除粘性"
+                );
+            }
+            // 条件删除：只删「绑定正是本渠道」那条，并发写入的健康绑定不能被旧失败抹掉
+            s.affinity_cache().insert("s-keep", "m1", "ch-good");
+            s.record_channel_failure(
+                "ch-bad",
+                Some("m1"),
+                FailureType::ServerError,
+                "boom",
+                Some("s-keep"),
+            );
+            assert_eq!(
+                s.affinity_cache().lookup("s-keep", "m1").as_deref(),
+                Some("ch-good")
+            );
+            // 无 session（agent 面/管理面）不产生粘性动作，且不报错
+            s.affinity_cache().insert("s-none", "m1", "ch-a");
+            s.record_channel_failure("ch-a", Some("m1"), FailureType::ServerError, "boom", None);
+            s.record_channel_failure(
+                "ch-a",
+                None,
+                FailureType::ServerError,
+                "boom",
+                Some("s-none"),
+            );
+            assert!(s.affinity_cache().lookup("s-none", "m1").is_some());
         });
     }
 

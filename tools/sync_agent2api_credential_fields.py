@@ -8,6 +8,18 @@ Agent2API → AIGX 凭证字段模板同步巡检。
 
 ## 上游字段从哪来（按优先级）
 
+> **口径（重要）**：本节描述的解析规则只对**一家一个 `credentials.rs`** 的
+> 上游布局成立 —— 即 `core/providers/<家>/credentials.rs`，实测到 v3.3.x
+> （`Agent2API-main` = 3.0.8 上 9 家全解析）。上游 **v3.4.2 起**把各家执行体
+> 搬进闭源插件仓（`agent2api-providers`），主仓只剩
+> `providers/chatgpt_subscription|codex_subscription/credentials.rs` 两家 +
+> `login/managed/<家>/identity.rs`；`account_store/<家>_accounts.rs` 里的是
+> **公开形态投影**（`for key in [...]`，混着 `priority`/`enabled`/`addedAt`
+> 等运营字段），不能当凭证字段模板用。
+>
+> 因此本脚本对 v3.4.2+ 的**正确行为是「不适用」而不是「0 漂移」**：
+> 解析不到任何一家时 exit 3 并打印口径说明，绝不谎报绿。
+
 1. `Credential::patch_fields()` 里的 `("key", ...)` 字面量 —— 落库键的权威
    来源（trae 等家用它做字段补丁式写回）。
 2. `from_payload()` 里 `secret(payload, &["key", ...])` / `identity(...)`
@@ -37,6 +49,14 @@ BEGIN/END 标记之间是**生成区**（手工改动会被 --write 冲掉）。
     --check   只检测；有差异 exit 1（适合 CI 定期巡检）
     --write   重写 registry.rs 生成区（只动上游能解析到的家，其余原样保留）
     --report  生成 docs/upstream-credential-fields-diff.md
+    --strict  「无法校验」也算失败（exit 1）；默认只是「不适用」（exit 3）
+    --dump    打印解析明细后退出
+
+退出码三态（CI 按此分流，别把「不适用」当「通过」）：
+
+    0  已比对且一致（必然解析到 ≥1 家）
+    1  发现漂移（或 --strict 下的「无法校验」）
+    3  无法校验/不适用 —— 上游主仓没有可解析的凭证字段源（v3.4.2+ 布局）
 
 **只比对/生成字段名与用途说明，不拷贝上游实现代码**（上游 LICENSE 为
 MIT + 附加使用声明）。
@@ -53,9 +73,32 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-UPSTREAM_PROVIDERS = Path(
-    "desktop-tauri/src-tauri/server/src/server/core/providers"
-)
+UPSTREAM_CORE = Path("desktop-tauri/src-tauri/server/src/server/core")
+
+# 上游凭证字段源布局探测表：(口径标签, 根目录, glob, 说明)。
+# 命中的第一条即采用；都不命中 → 口径 none（exit 3，见模块 docstring）。
+LAYOUTS: list[tuple[str, Path, str, str]] = [
+    (
+        "legacy-providers",
+        UPSTREAM_CORE / "providers",
+        "*/credentials.rs",
+        "providers/<家>/credentials.rs（一家一个凭证结构，实测 v3.0.8/v3.3.x）",
+    ),
+]
+
+# 新布局里「看起来像凭证字段、其实不是模板」的落点，仅在口径说明里点名，
+# 说明为什么本脚本不去解析它。
+NEW_LAYOUT_HINTS: list[tuple[Path, str]] = [
+    (
+        UPSTREAM_CORE / "account_store",
+        "account_store/<家>_accounts.rs 是公开形态投影（混着 priority/enabled/"
+        "addedAt 等运营字段），不是凭证字段模板 —— 不解析",
+    ),
+    (
+        UPSTREAM_CORE / "login" / "managed",
+        "login/managed/<家>/identity.rs 只有登录期嵌套 secret 键，非落库模板",
+    ),
+]
 
 REGISTRY_RS = REPO_ROOT / "src/account_session/registry.rs"
 
@@ -321,20 +364,99 @@ def parse_upstream_provider(cred_rs: Path) -> ProviderFields:
     return result
 
 
+@dataclass
+class LayoutProbe:
+    """上游布局探测结果（口径 + 命中的凭证文件 + 未得到字段时的诊断）。"""
+
+    label: str
+    base: Path
+    files: list[Path]
+    desc: str = ""  # 口径描述（命中时用）
+    diagnostic: str = ""  # 一家都没解析出来时的完整诊断
+
+    @property
+    def usable(self) -> bool:
+        return bool(self.files)
+
+
+def probe_layout(upstream: Path) -> LayoutProbe:
+    """探测上游凭证字段源布局。
+
+    只认「一家一个 credentials.rs」的 legacy 布局；一条都不命中时返回口径
+    ``none``（附带每个候选根的命中数与为什么不解析新布局），由调用方决定
+    exit 3 而不是静默 0 家。
+    """
+    tried: list[str] = []
+    hit: tuple[str, Path, list[Path], str] | None = None
+    for label, rel_base, pattern, desc in LAYOUTS:
+        base = upstream / rel_base
+        files = sorted(base.glob(pattern)) if base.is_dir() else []
+        if files and hit is None:
+            hit = (label, base, files, desc)
+        if not files:
+            tried.append(
+                f"{rel_base}/{pattern}（{'目录不存在' if not base.is_dir() else '0 命中'}）"
+            )
+
+    # 诊断区：不管命中与否都拼好 —— 命中但提取 0 字段（如只剩订阅两家）
+    # 与根本没命中，是两种不同的「无法校验」，都要能说清。
+    lines: list[str] = []
+    if tried:
+        lines.append("已探测：")
+        lines += [f"  - {t}" for t in tried]
+    if hit:
+        label, base, files, _desc = hit
+        rel = [str(f.relative_to(upstream)).replace("\\", "/") for f in files]
+        lines.append(f"命中 {label} 的 {len(files)} 个文件，但未提取到任何字段：")
+        lines += [f"  - {r}" for r in rel]
+        lines.append(
+            "  （v3.4.2+ 主仓只剩 chatgpt_subscription / codex_subscription 两家，"
+            "其余执行体已搬进闭源插件仓，凭证字段模板不再随主仓发布）"
+        )
+    present_hints = [
+        hint for rel, hint in NEW_LAYOUT_HINTS if (upstream / rel).exists()
+    ]
+    if present_hints:
+        lines.append("上游新布局（v3.4.2+）落点及为何不当模板解析：")
+        lines += [f"  - {h}" for h in present_hints]
+    if lines:
+        lines.append(
+            "  → 凭证模板已随执行体搬进闭源插件仓（agent2api-providers），"
+            "主仓无可比对源；本次判定「不适用」（exit 3）而非「一致」。"
+        )
+
+    if hit:
+        label, base, files, desc = hit
+        return LayoutProbe(
+            label=label,
+            base=base,
+            files=files,
+            desc=desc,
+            diagnostic="\n".join(lines),
+        )
+    return LayoutProbe(
+        label="none",
+        base=upstream / LAYOUTS[0][1],
+        files=[],
+        desc="",
+        diagnostic="\n".join(lines),
+    )
+
+
 def parse_upstream(upstream: Path) -> dict[str, ProviderFields]:
     """上游全部 provider 的字段模板 → {家(归一后): ProviderFields}。"""
-    base = upstream / UPSTREAM_PROVIDERS
+    probe = probe_layout(upstream)
     out: dict[str, ProviderFields] = {}
-    if not base.is_dir():
+    if not probe.usable:
         return out
-    for cred_rs in sorted(base.glob("*/credentials.rs")):
+    for cred_rs in probe.files:
         provider = ALIASES.get(cred_rs.parent.name, cred_rs.parent.name)
         parsed = parse_upstream_provider(cred_rs)
         if parsed.fields:
             out[provider] = parsed
     # 凭证结构旁路（officeace/signer.rs 等）
     for provider, filename in EXTRA_FILES.items():
-        alt = base / provider / filename
+        alt = probe.base / provider / filename
         if provider in out or not alt.exists():
             continue
         parsed = parse_upstream_provider(alt)
@@ -518,15 +640,33 @@ def main() -> int:
     ap.add_argument(
         "--dump", action="store_true", help="打印解析到的上游字段模板明细后退出"
     )
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="「无法校验」也算失败（exit 1）；默认只报不适用（exit 3）",
+    )
     args = ap.parse_args()
 
     upstream_dir = Path(args.upstream)
     if not upstream_dir.is_dir():
         raise SystemExit(f"上游目录不存在：{upstream_dir}")
 
+    probe = probe_layout(upstream_dir)
     upstream = parse_upstream(upstream_dir)
+    parsed_fields = sum(len(p.fields) for p in upstream.values())
+
+    # 口径行：始终先说「这次到底拿哪份上游、对得上几家」。
+    # 口径行：只报验过的口径，不把「命中文件但未提取字段」说成已校对。
+    if probe.usable and upstream:
+        print(f"上游凭证字段源口径：{probe.label} —— {probe.desc}")
+        print(f"命中 {len(probe.files)} 个 credentials.rs（解析出 {len(upstream)} 家）")
+    else:
+        print("上游凭证字段源口径：none（无可解析的凭证字段源）")
 
     if args.dump:
+        if not upstream:
+            print(probe.diagnostic)
+            return 1 if args.strict else 3
         for kind in sorted(upstream):
             parsed = upstream[kind]
             print(f"=== {kind}（{','.join(sorted(parsed.sources))}）===")
@@ -538,9 +678,22 @@ def main() -> int:
     existing = parse_aigx_registry(text)
 
     print(
-        f"上游字段模板 {len(upstream)} 家（{sum(len(p.fields) for p in upstream.values())} 个字段）；"
+        f"上游字段模板 {len(upstream)} 家（{parsed_fields} 个字段）；"
         f"AIGX 声明 {len(existing)} 家"
     )
+
+    # 空转保护：一家都没解析到时，「0 漂移」并不等于「已对齐」——这是上游布局
+    # 变了（v3.4.2+ 把凭证模板搬进闭源插件仓），必须报得出来而不是静默 exit 0。
+    if not upstream:
+        print()
+        print(probe.diagnostic)
+        print(
+            f"\n[无法校验] 本次未比对任何一家（AIGX 声明 {len(existing)} 家仍按原样保留）；"
+            "这不是「一致」。——拿一份 legacy 布局的上游（含 providers/<家>/credentials.rs）重跑才有效。"
+        )
+        if args.write:
+            print("[中止] 无上游可对拍时拒绝 --write（否则会把生成区改写为空）。")
+        return 1 if args.strict else 3
 
     drift = compute_drift(upstream, existing)
     for kind in drift["missing_providers"]:

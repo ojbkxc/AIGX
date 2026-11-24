@@ -157,6 +157,29 @@ impl SkipReasons {
             parts.join("、")
         }
     }
+
+    /// 选不出的原因**只有并发满**（其余每一个过滤器都没拦人）。
+    ///
+    /// 对齐 Agent2API v3.5.1 `core/routing.rs` 的那条语义分界：
+    /// 「并发已满 ≠ 不可用」——满员账号只是暂时挤不出槽位，账号本身
+    /// 没任何问题。这决定了两件事：
+    ///
+    /// 1. **错误码**：上层据此把「全忙」报成可重试的 `account_busy`（503），
+    ///    而不是不可重试的 `all_accounts_failed`；
+    /// 2. **要不要等**：全忙值得排队等一个在途回落（见
+    ///    `AccountBridge::pick_account_or_wait`），而「冷却中」「凭证过期」
+    ///    这类原因等待无用，不该把请求挂在队列里。
+    ///
+    /// 只要还掺了别的档位就不算「只有并发满」：比如 3 个账号并发满 +
+    /// 1 个凭证过期，那个过期的不会因为再等几秒就变得可用，报 busy 反而
+    /// 掩盖了真因。
+    pub fn only_concurrency_blocked(&self) -> bool {
+        let only_busy = SkipReasons {
+            concurrency: self.concurrency,
+            ..SkipReasons::default()
+        };
+        self.concurrency > 0 && *self == only_busy
+    }
 }
 
 struct Inner {
@@ -780,6 +803,8 @@ impl AccountSessionStore {
             Some(self.inner.capabilities.read())
         };
         let mut candidates: Vec<usize> = Vec::new();
+        // 并发满、但其余档位全部通过的账号（队尾兜底池，见下面的收集处）
+        let mut queued: Vec<usize> = Vec::new();
         let mut reasons = SkipReasons::default();
         let mut in_channel = 0usize;
         for (index, session) in sessions.iter().enumerate() {
@@ -911,7 +936,12 @@ impl AccountSessionStore {
             if session.max_concurrency > 0
                 && self.inner.in_flight_of(&session.id) >= session.max_concurrency
             {
+                // 并发已满 ≠ 不可用（对齐 Agent2API v3.5.1 `core/routing.rs`）：
+                // 账号其余每一个档位都过了，只是暂时挤不出槽位。收回 `queued`
+                // 作队尾兜底，而不是像旧口径那样当「不可用」直接丢掉：
+                // 空闲候选一个都占不到时，它可能就是那个刚空出槽位的账号。
                 reasons.concurrency += 1;
+                queued.push(index);
                 if let Some(cap) = detail.as_mut() {
                     cap.push(self.skip_detail(session, "concurrency"));
                 }
@@ -922,7 +952,7 @@ impl AccountSessionStore {
         if in_channel == 0 {
             reasons.no_accounts = true;
         }
-        if candidates.is_empty() {
+        if candidates.is_empty() && queued.is_empty() {
             return (None, reasons);
         }
         // 最高优先级组内：权重随机（同组内再让空闲最久的账号权重更高）。
@@ -952,34 +982,57 @@ impl AccountSessionStore {
         // 同时看到一个空位（原实现靠写锁串行免掉这个窗口）。这里对选中的
         // 账号做原子的「检查 + 自增」，失败就把该账号踢出候选再选一次 ——
         // 并发上限仍是硬约束，也不至于因一个热门账号占满就整渠道失败。
-        let mut contended: Vec<&str> = Vec::new();
-        let mut claimed: Option<(usize, u32)> = None;
-        loop {
-            let available: Vec<usize> = group
-                .iter()
-                .copied()
-                .filter(|index| !contended.contains(&sessions[*index].id.as_str()))
-                .collect();
-            if available.is_empty() {
-                break;
-            }
-            let pick = pick_by_rules(&sessions, &available, order, sort_rules)
-                .unwrap_or_else(|| pick_weighted(&sessions, &available, now));
-            match self.inner.try_acquire_runtime(
-                &sessions[pick].id,
-                sessions[pick].max_concurrency,
-                now,
-            ) {
-                Some(next_in_flight) => {
-                    claimed = Some((pick, next_in_flight));
-                    break;
+        let claimed = {
+            // 抽成闭包：让「空闲候选」与「满员兜底」用**同一套**抢占语义
+            // （两处各写一遍迟早分叉）。返回 `None` = 池里抢不到。
+            let mut contended: Vec<&str> = Vec::new();
+            let mut try_claim = |pool: &[usize]| -> Option<(usize, u32)> {
+                loop {
+                    let available: Vec<usize> = pool
+                        .iter()
+                        .copied()
+                        .filter(|index| !contended.contains(&sessions[*index].id.as_str()))
+                        .collect();
+                    if available.is_empty() {
+                        return None;
+                    }
+                    let pick = pick_by_rules(&sessions, &available, order, sort_rules)
+                        .unwrap_or_else(|| pick_weighted(&sessions, &available, now));
+                    match self.inner.try_acquire_runtime(
+                        &sessions[pick].id,
+                        sessions[pick].max_concurrency,
+                        now,
+                    ) {
+                        Some(next_in_flight) => return Some((pick, next_in_flight)),
+                        None => contended.push(&sessions[pick].id),
+                    }
                 }
-                None => contended.push(&sessions[pick].id),
+            };
+            let mut claimed = try_claim(&group);
+            // 第二轮：满员但其余全过的账号兜底。快照过滤与原子占位之间存在
+            // 窗口 —— 那期间可能刚要结束的请求把槽位放回去了，而
+            // `try_acquire_runtime` 自己会再判一次，兜底**不会**越过硬上限。
+            if claimed.is_none() && !queued.is_empty() {
+                let queued_max_priority = queued
+                    .iter()
+                    .map(|index| sessions[*index].priority)
+                    .max()
+                    .unwrap_or(0);
+                let queued_group: Vec<usize> = queued
+                    .iter()
+                    .copied()
+                    .filter(|index| sessions[*index].priority == queued_max_priority)
+                    .collect();
+                let queued_group = narrow_to_top_sort_order(&sessions, queued_group);
+                claimed = try_claim(&queued_group);
             }
-        }
+            if claimed.is_none() {
+                // 两轮都在窗口内被抢光：与快速过滤同口径计数
+                reasons.concurrency += contended.len();
+            }
+            claimed
+        };
         let Some((pick, next_in_flight)) = claimed else {
-            // 全部候选都在窗口内被抢光：与快速过滤同口径计数
-            reasons.concurrency += contended.len();
             return (None, reasons);
         };
         // 快照上的两个字段是**投影**，在下面克隆前同步回读到的值，
@@ -2010,6 +2063,35 @@ mod tests {
         });
     }
 
+    /// 并发满的账号进队尾兜底，但**兜底不能越过硬上限**；同时选不出的原因
+    /// 必须能让上层认出来「只是忙」（而不是「账号不可用」）。
+    ///
+    /// 两条一起钉的是 Agent2API v3.5.1 `core/routing.rs` 的那条分界：
+    /// 「并发已满 ≠ 不可用」—— 前者值得排队等槽位 / 让客户端重试，后者不值得。
+    /// 槽位真被活着的租约占着时，兜底那一轮也必须抢不到（`try_acquire_runtime`
+    /// 自己会再判一次，不会因为走了兜底路径就放行）。
+    #[test]
+    fn busy_only_pool_keeps_the_hard_cap_and_reports_busy() {
+        with_secret_dir("busy-only", || {
+            let pool = pool();
+            let mut only = session("ch", "only", 0);
+            only.max_concurrency = 1;
+            pool.upsert(only).unwrap();
+            let lease = pool.acquire("ch", "m", None).expect("首个租约");
+
+            let (next, reasons) = pool.acquire_with_reasons("ch", "m", None, |_| true);
+            assert!(next.is_none(), "槽位还被占着 —— 兜底不得超上限");
+            assert!(
+                reasons.only_concurrency_blocked(),
+                "只因为忙（其它档位一个都没拦）：{reasons:?}"
+            );
+
+            drop(lease);
+            let (next, _) = pool.acquire_with_reasons("ch", "m", None, |_| true);
+            assert!(next.is_some(), "槽位放开后立刻可占");
+        });
+    }
+
     /// 回归（R3）：并发上限是硬约束 —— 选路改读锁后，多线程同时抢同一个
     /// 账号也不能越过 `max_concurrency`（检查+自增在 runtime 分片锁内原子）。
     #[test]
@@ -2039,6 +2121,53 @@ mod tests {
             drop(leases);
             assert_eq!(pool.all()[0].in_flight, 0);
         });
+    }
+
+    /// 选不出账号时，「只有并发满」与「掺了别的不可用原因」必须区分得开。
+    ///
+    /// 这个判定直接决定两件事（对齐 Agent2API v3.5.1 `core/routing.rs` 的
+    /// 「并发已满 ≠ 不可用」）：上报可重试的 `account_busy` 还是「账号耗尽」，
+    /// 以及该不该排队等一个在途回落（见 `AccountBridge::pick_account_or_wait`）。
+    #[test]
+    fn only_concurrency_blocked_separates_busy_from_truly_unavailable() {
+        // 只有并发满：值得等一个槽位、也值得让客户端重试
+        let busy = SkipReasons {
+            concurrency: 3,
+            ..SkipReasons::default()
+        };
+        assert!(busy.only_concurrency_blocked());
+
+        // 什么都没拦 = 没有「只有并发满」这回事
+        assert!(!SkipReasons::default().only_concurrency_blocked());
+
+        // 掺了等不好的原因（过期 / 冷却 / 禁用）：不算「只是忙」——
+        // 再等几秒那个账号也不会回来，报 busy 只会掩盖真因
+        let with_expired = SkipReasons {
+            concurrency: 2,
+            expired: 1,
+            ..SkipReasons::default()
+        };
+        assert!(!with_expired.only_concurrency_blocked(), "凭证过期不是只是忙");
+
+        let with_cooling = SkipReasons {
+            concurrency: 2,
+            cooling: 1,
+            ..SkipReasons::default()
+        };
+        assert!(!with_cooling.only_concurrency_blocked(), "冷却不是只是忙");
+
+        let with_disabled = SkipReasons {
+            concurrency: 2,
+            disabled: 1,
+            ..SkipReasons::default()
+        };
+        assert!(!with_disabled.only_concurrency_blocked(), "禁用不是只是忙");
+
+        let empty_channel = SkipReasons {
+            no_accounts: true,
+            ..SkipReasons::default()
+        };
+        assert!(!empty_channel.only_concurrency_blocked(), "空渠道不是只是忙");
     }
 
     /// 回归（R3）：在途计数从 `sessions` 拆到独立 `runtime` 表后，

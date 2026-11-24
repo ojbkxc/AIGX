@@ -391,14 +391,18 @@ mod tests {
             let store = Arc::clone(&store);
             async move { sweep(&store, &client).await }
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        // 直接观测「查询确实在途」：mock 已至少收到一次请求（fixture 的
-        // in_flight_max 计数器）。不这样做的话「在途窗口」只靠 delay 排
-        // 在 read_request_head 之后的间接推理，fixture 一改就悄悄退化。
-        assert!(
-            mock.in_flight_max.load(Ordering::Relaxed) >= 1,
-            "查询应在 remove 前已出发（fixture 时序前提）"
-        );
+        // 轮询等待「查询确实在途」：**不用固定 sleep**——固定等待在并发负载下
+        // 会假红（spawn + list + 建连在忙时可能超过 50ms，本用例曾因此偶发失败），
+        // 而在空载时又白等。这里「一旦观测到就继续，最多等 2s」：判据不变
+        // （2s 内没出发就是真失败），但消除了时间竞态。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while mock.in_flight_max.load(Ordering::Relaxed) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "查询应在 remove 前已出发（2s 内未观测到在途请求）"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         // 失败方向：若 sweep 没在 remove 前 poll 到，list() 空 →
         // targets.is_empty() 早退 → done=0 → 下面的断言必红（硬失败，
         // 不是假绿）——这条不变量不能破坏。

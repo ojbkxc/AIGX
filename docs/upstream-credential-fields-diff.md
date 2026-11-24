@@ -1,5 +1,13 @@
 # Agent2API → AIGX 凭证字段模板漂移报告
 
+> **口径（2026-11-24 标注）**：本报告是 2026-11-01 在 **legacy 布局**上游
+> （`core/providers/<家>/credentials.rs`，实测 3.0.8）上生成的快照 —— 9 家全解析、
+> 无漂移。上游 **v3.4.2 起**主仓已无这 9 家的 `credentials.rs`（只剩
+> `chatgpt_subscription` / `codex_subscription`），凭证模板随执行体搬进闭源插件仓
+> （`agent2api-providers`），所以**这份报告无法用当前上游重生成**：
+> `--report` 在解析到 0 家时会直接拒绝写入（避免用空报告覆盖本节）。
+> 当前结论请见 `docs/V351-VERIFY.md`。
+
 生成时间：2026-11-01 16:25
 
 本报告由 `tools/sync_agent2api_credential_fields.py --report` 生成。

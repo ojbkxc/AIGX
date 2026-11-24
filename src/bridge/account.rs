@@ -88,6 +88,13 @@ fn rotation_timeout(started_at: Instant) -> BridgeError {
     }
 }
 
+/// 「等一个槽位空出来」的总时长硬上限。
+///
+/// 即使管理员把「轮数 × 每轮秒数」配得很大（10 × 120s），单个请求也不会
+/// 在这里耗掉几分钟 —— 那段时间客户端大概率已经断开，等下去只是占着连接。
+/// 量级与同文件的 [`ROTATION_BUDGET`] 同一思路：给「账号级重试」一个上限。
+const BUSY_WAIT_CAP: Duration = Duration::from_secs(30);
+
 impl AccountBridge {
     pub fn new(channel_id: impl Into<String>, sessions: AccountSessionStore) -> Self {
         Self {
@@ -248,6 +255,55 @@ impl AccountBridge {
             crate::log::cap_account_skip_groups(&mut buf);
         }
         (lease, reasons)
+    }
+
+    /// 选号一次；若「唯一选不出人的原因就是并发满」，按排队设置等一个
+    /// 槽位空出来再选。
+    ///
+    /// ── 为什么需要这一层（对齐 Agent2API v3.5.1）────────────────
+    /// 上游 `core/routing.rs` 把并发满从「不可用」里拆了出来（满员账号进
+    /// `ordered` 队尾等槽位），再由 `core/upstream/account_admission.rs::select`
+    /// 在 `runtimeCapacity.queueWaitSeconds` 的截止时间内循环重选，超时才算忙
+    /// 并回 503 `account_busy`。AIGX 的 `acquire` 是同步单次判定（快照过滤 +
+    /// `try_acquire_runtime` 原子占位），没有等待环节 —— 账号刚满的那一瞬间
+    /// 就整渠道 502 耗尽，而它大概率几十毫秒后就有槽位。
+    ///
+    /// 所以等待放在这里（异步层），不入 `acquire`：`acquire` 保持纯同步、
+    /// 零 await，不把锁/租约带进异步链路。
+    ///
+    /// ── 默认配置下不等待 ──────────────────────────────
+    /// `queueMaxWaits=2` 但 `queueWaitSeconds=0`（= 不排队，见 `/api/queue`），
+    /// 所以默认在第一个 `if` 就返回：选号延迟与接线前逐字节一致，只多了
+    /// 「错误码从 `all_accounts_failed` 变成 `account_busy`」这一项语义修正。
+    async fn pick_account_or_wait(
+        &self,
+        model: &str,
+        alias: Option<&str>,
+    ) -> (Option<AccountLease>, crate::account_session::store::SkipReasons) {
+        let (lease, mut reasons) = self.pick_account(model, alias);
+        if lease.is_some() || !reasons.only_concurrency_blocked() {
+            return (lease, reasons);
+        }
+        let (max_waits, wait_seconds) = crate::config::queue_settings();
+        let deadline = Instant::now() + BUSY_WAIT_CAP;
+        for _ in 0..max_waits {
+            // 每轮睡 `wait_seconds`，但不越过总上限
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if wait_seconds == 0 || remaining.is_zero() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(wait_seconds).min(remaining)).await;
+            let (lease, next) = self.pick_account(model, alias);
+            reasons = next;
+            if lease.is_some() {
+                return (lease, reasons);
+            }
+            // 等完之后阻碍变成了别的东西（比如刚被打进冷却）—— 再等无用
+            if !reasons.only_concurrency_blocked() {
+                break;
+            }
+        }
+        (None, reasons)
     }
 
     /// 单次请求最多尝试的账号数（来自轮换策略）。
@@ -427,6 +483,26 @@ impl AccountBridge {
         ))
     }
 
+    /// 选不出账号时的最终错误：**全忙**报可重试的 [`BridgeError::AccountBusy`]
+    /// （503 + `account_busy`），其余仍是「账号耗尽」。
+    ///
+    /// 与 [`Self::all_failed`] 的分工就是上游 v3.5.1 那个分界：并发满不是账号
+    /// 不可用，而是暂时挤不出槽位 —— 客户端应当「稍后重试」而非当作永久失败。
+    fn exhausted(
+        &self,
+        model: &str,
+        reasons: &crate::account_session::store::SkipReasons,
+    ) -> BridgeError {
+        if reasons.only_concurrency_blocked() {
+            return BridgeError::AccountBusy(format!(
+                "当前路由内的账号均忙，排队等待超时，请稍后重试（channel {} / model {model}：{}）",
+                self.channel_id,
+                reasons.summary()
+            ));
+        }
+        self.all_failed(model, reasons)
+    }
+
     /// 透传类接口（embed/rerank/complete/image/responses）的账号轮换。
     async fn dispatch<T, F, Fut>(
         &self,
@@ -450,7 +526,7 @@ impl AccountBridge {
                 last = Some(rotation_timeout(started_at));
                 break;
             }
-            let (lease, reasons) = self.pick_account(model, alias);
+            let (lease, reasons) = self.pick_account_or_wait(model, alias).await;
             last_reasons = reasons;
             let Some(lease) = lease else {
                 break;
@@ -479,7 +555,7 @@ impl AccountBridge {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| self.all_failed(model, &last_reasons)))
+        Err(last.unwrap_or_else(|| self.exhausted(model, &last_reasons)))
     }
 }
 
@@ -506,7 +582,7 @@ impl Bridge for AccountBridge {
                 last = Some(rotation_timeout(started_at));
                 break;
             }
-            let (lease, reasons) = self.pick_account(&req.model, alias);
+            let (lease, reasons) = self.pick_account_or_wait(&req.model, alias).await;
             last_reasons = reasons;
             let Some(lease) = lease else {
                 break;
@@ -554,7 +630,7 @@ impl Bridge for AccountBridge {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| self.all_failed(&req.model, &last_reasons)))
+        Err(last.unwrap_or_else(|| self.exhausted(&req.model, &last_reasons)))
     }
 
     async fn chat_stream(
@@ -574,7 +650,7 @@ impl Bridge for AccountBridge {
                 last = Some(rotation_timeout(started_at));
                 break;
             }
-            let (lease, reasons) = self.pick_account(&req.model, alias);
+            let (lease, reasons) = self.pick_account_or_wait(&req.model, alias).await;
             last_reasons = reasons;
             let Some(lease) = lease else {
                 break;
@@ -626,7 +702,7 @@ impl Bridge for AccountBridge {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| self.all_failed(&req.model, &last_reasons)))
+        Err(last.unwrap_or_else(|| self.exhausted(&req.model, &last_reasons)))
     }
 
     async fn embed(
@@ -696,9 +772,48 @@ impl Bridge for AccountBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account_session::store::SkipReasons;
 
     fn should_skip(e: &BridgeError) -> bool {
         AccountBridge::should_skip_self_retry_for_test(e)
+    }
+
+    /// 并发满必须报**可重试的** `account_busy`，而其余「真的不可用」仍走
+    /// 「账号耗尽」。
+    ///
+    /// 钉的是 Agent2API v3.5.1 `core/routing.rs` 那条分界：「并发已满 ≠ 不可用」
+    /// —— 满员账号只是暂时挤不出槽位，等几十毫秒就可能有。混因（如「2 个满员
+    /// + 1 个凭证过期」）不能报忙：过期的那一个等多久都不会好，报 `account_busy`
+    /// 只会把客户端引去重试一个永远不会成功的请求。
+    ///
+    /// 构造只依赖账号池的空壳（不 upsert 任何账号）：被测的是选哪种错误，
+    /// 不涉及选号本身。
+    #[test]
+    fn only_busy_reasons_report_account_busy() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pool = AccountSessionStore::new(Arc::new(crate::storage::FileStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let bridge = AccountBridge::new("ch-1", pool);
+
+        let busy = SkipReasons {
+            concurrency: 2,
+            ..SkipReasons::default()
+        };
+        match bridge.exhausted("m", &busy) {
+            BridgeError::AccountBusy(msg) => assert!(msg.contains("均忙"), "{msg}"),
+            other => panic!("并发满必须报 account_busy，实际：{other:?}"),
+        }
+
+        let mixed = SkipReasons {
+            concurrency: 2,
+            expired: 1,
+            ..SkipReasons::default()
+        };
+        match bridge.exhausted("m", &mixed) {
+            BridgeError::AllAccountsFailed(msg) => assert!(msg.contains("凭证过期"), "{msg}"),
+            other => panic!("混因必须报账号耗尽，实际：{other:?}"),
+        }
     }
 
     /// 404 是按模型名/路由拒收的确定性失败：跳过同账号重试直接换号

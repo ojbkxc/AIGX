@@ -121,6 +121,14 @@ pub fn render_openai_error(error: &BridgeError) -> (u16, ErrorBody) {
             param: None,
             code: None,
         },
+        // 全忙（账号池 `max_concurrency` 全占满）：没发过上游请求，客户端
+        // 稍后重试即可 —— 错误码独立成 `account_busy`，与「账号耗尽」分开。
+        BridgeError::AccountBusy(msg) => ErrorBody {
+            message: msg.clone(),
+            kind: "account_busy".into(),
+            param: None,
+            code: Some("account_busy".into()),
+        },
     };
     (status, body)
 }
@@ -631,5 +639,18 @@ mod tests {
         assert_eq!(status, 404);
         assert_eq!(body.kind, "model_not_found");
         assert_eq!(body.code.as_deref(), Some("model_not_found"));
+    }
+
+    /// 全忙：503 + 独立错误码 `account_busy`（与「账号耗尽」同状态码却不同语义
+    /// —— 前者可重试、后者不可）。
+    /// 对齐 Agent2API v3.5.1 `account_admission::busy()`。
+    #[test]
+    fn account_busy_maps_to_503_with_its_own_code() {
+        let error = BridgeError::AccountBusy("当前路由内的账号均忙，排队等待超时，请稍后重试".into());
+        let (status, body) = render_openai_error(&error);
+        assert_eq!(status, 503, "全忙是「稍后重试」，不能折成 502");
+        assert_eq!(body.kind, "account_busy");
+        assert_eq!(body.code.as_deref(), Some("account_busy"));
+        assert!(body.message.contains("账号均忙"), "{}", body.message);
     }
 }

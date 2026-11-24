@@ -565,6 +565,9 @@ pub(crate) fn is_retryable_bridge_error(e: &crate::bridge::BridgeError) -> bool 
         | BridgeError::StreamAborted
         | BridgeError::RateLimited
         | BridgeError::AllAccountsFailed(_)
+        // 全忙：选号阶段就没占到槽位，**任何上游都没收到过这条请求**，
+        // 换下一个渠道完全安全（不会重复计费）且很可能成功（别家未必忙）。
+        | BridgeError::AccountBusy(_)
         | BridgeError::UpstreamDecode(_)
         | BridgeError::AuthError(_)
         | BridgeError::InvalidUpstreamCredentials(_) => true,

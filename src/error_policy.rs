@@ -1042,11 +1042,17 @@ mod tests {
         assert!(defaults.validate().is_ok());
 
         assert_eq!(MAX_SWITCHES, 100);
-        let mut at_max = ErrorPolicyConfig::default();
-        at_max.switches = MAX_SWITCHES;
+        // clippy::field_reassign_with_default：Default 之后逐字段赋值会被判警告，
+        // 直接在构造器里给（值语义不变）
+        let at_max = ErrorPolicyConfig {
+            switches: MAX_SWITCHES,
+            ..ErrorPolicyConfig::default()
+        };
         assert!(at_max.validate().is_ok(), "上界本身必须可保存");
-        let mut over_max = at_max;
-        over_max.switches = MAX_SWITCHES + 1;
+        let over_max = ErrorPolicyConfig {
+            switches: MAX_SWITCHES + 1,
+            ..at_max.clone()
+        };
         assert!(over_max.validate().is_err(), "超上界必须拒绝");
 
         // 转发层的尝试次数上界要比配置上界多容纳「首发那次」

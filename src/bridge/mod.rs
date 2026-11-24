@@ -545,6 +545,18 @@ pub enum BridgeError {
 
     #[error("all accounts failed: {0}")]
     AllAccountsFailed(String),
+
+    /// 账号池里的可用账号**全忙**（各自的 `max_concurrency` 都占满）。
+    ///
+    /// 与 [`Self::AllAccountsFailed`] 是两件事：这一档**没有向上游发出过任何
+    /// 请求**（选号阶段就没占到槽位），因此重试是安全的，客户端应当「稍后再来」
+    /// 而不是把这条请求当作已失败处理（换渠道重发也不会重复计费）。
+    ///
+    /// 对齐 Agent2API v3.5.1 `core/upstream/account_admission.rs::busy()`：
+    /// HTTP 503 + 错误码 `account_busy` + `Retry-After: 1`。上线前的旧口径把
+    /// 「全忙」混进 `all_accounts_failed`，客户端只能看到一个不可重试的耗尽错误。
+    #[error("all accounts busy: {0}")]
+    AccountBusy(String),
 }
 
 impl BridgeError {
@@ -602,7 +614,9 @@ impl BridgeError {
             BridgeError::AuthError(_) => 401,
             BridgeError::RateLimited => 429,
             BridgeError::ModelNotFound(_) => 404,
-            BridgeError::AllAccountsFailed(_) => 503,
+            // 全忙 = 可重试：与 `all_accounts_failed` 同为 503，但错误码区分
+            // （见变体文档），客户端据此知道「过一会再来」而不是「这条请求死了」。
+            BridgeError::AllAccountsFailed(_) | BridgeError::AccountBusy(_) => 503,
         }
     }
 
@@ -621,6 +635,7 @@ impl BridgeError {
             BridgeError::RateLimited => "rate_limit_error",
             BridgeError::ModelNotFound(_) => "model_not_found",
             BridgeError::AllAccountsFailed(_) => "all_accounts_failed",
+            BridgeError::AccountBusy(_) => "account_busy",
         }
     }
 }

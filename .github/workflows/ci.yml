@@ -309,13 +309,21 @@ jobs:
           rc_cap=$?
           python tools/sync_agent2api_credential_fields.py --upstream upstream-agent2api --check
           rc_fields=$?
+          # 字段模板三态：0=已对拍一致；1=漂移；3=不适用（上游 v3.4.2+ 主仓
+          # 已无 providers/<家>/credentials.rs，凭证模板随执行体搬进闭源插件仓）。
+          # 3 不能当红——上游结构性搬迁不是 AIGX 的漂移；但也绝不能当绿：
+          # 旧版脚本静默 exit 0，等于这块巡检长期空转。
+          if [ $rc_fields -eq 3 ]; then
+            echo "::warning::凭证字段模板对拍不适用（上游主仓已无 legacy 凭证字段源），本项本次未校验"
+            rc_fields=0
+          fi
           if [ $rc_data -ne 0 ] || [ $rc_cap -ne 0 ] || [ $rc_fields -ne 0 ]; then
             echo "::error::Agent2API 上游有 AIGX 尚未跟上的 provider 能力（数据层、能力层或凭证字段模板）。"
             echo "::error::数据层=provider id/展示名；能力层=签到名单/模型目录/目录端点；字段模板=账号记录的具名凭证字段。"
-            echo "::error::字段模板可用 tools/sync_agent2api_credential_fields.py --write 半自动对齐；其余按 docs/agent2api-porting.md 的契约逐家移植后重跑本 job。"
+            echo "::error::字段模板可用 tools/sync_agent2api_credential_fields.py --write 半自动对齐（需指向含 providers/<家>/credentials.rs 的 legacy 上游）；其余按 docs/agent2api-porting.md 的契约逐家移植后重跑本 job。"
             exit 1
           fi
-          echo "upstream drift check passed: provider / capability / credential-field 均与上游一致"
+          echo "upstream drift check passed: provider / capability 与上游一致；credential-field 见上方结论（一致或不适用）"
       - name: Note drift detection skipped
         if: steps.upstream.outcome != 'success'
         run: echo "::warning::上游 Agent2API 拉取失败，本次漂移巡检跳过（网络问题，不阻断 CI，但漂移不会被检出）"
