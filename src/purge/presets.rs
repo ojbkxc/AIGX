@@ -43,6 +43,16 @@ pub struct PresetBrief {
     /// 这样不传 model 的旧调用返回的 JSON 逐字段不变）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_match: Option<PresetModelMatch>,
+    /// 命中是否来自**正文**（只在有检索词、且该条是靠正文才命中的时候出现）。
+    ///
+    /// 为什么单独给一个标记：正文纳入检索后，列表里一条「标题里根本没有这个词」
+    /// 的条目也会出现，用户第一反应是「为什么搜出来了」。这个字段让 UI 能标
+    /// 「正文命中」，而不是让人逐条点开找。
+    ///
+    /// 只在 `Some(true)` 时序列化（`false`/`None` 都不出）——与 `model_match`
+    /// 同一套「不影响旧调用返回形状」的立场。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_match: Option<bool>,
 }
 
 /// 详情（含完整正文）。
@@ -159,6 +169,8 @@ fn to_brief(preset: &BuiltinPreset) -> PresetBrief {
         preview: preview_of(preset.body),
         // 默认不带匹配度：由 `list` 在收到 model 时补上。
         model_match: None,
+        // 默认不带正文命中标记：由 `list` 在有检索词时补上。
+        body_match: None,
     }
 }
 
@@ -407,6 +419,22 @@ pub fn list_page(
             if let Some(active) = active_model {
                 brief.model_match =
                     Some(preset_match_for_model(preset.vendor, preset.model, active));
+            }
+            // 有检索词时标记「是否靠正文命中」：元数据里搜不到、正文里搜得到，
+            // 才置 true（元数据已命中就不必解释，避免每条都挂徽标）
+            if let Some(needle) = needle {
+                let lowered = needle.to_lowercase();
+                let in_meta = preset.id.to_lowercase().contains(&lowered)
+                    || preset.vendor.to_lowercase().contains(&lowered)
+                    || preset.model.to_lowercase().contains(&lowered)
+                    || preset.title.to_lowercase().contains(&lowered)
+                    || preset
+                        .tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&lowered));
+                if !in_meta && preset.body.to_lowercase().contains(&lowered) {
+                    brief.body_match = Some(true);
+                }
             }
             brief
         })
@@ -666,6 +694,56 @@ mod tests {
     ///
     /// 断言分两步是刻意的：先证明这个词**确实不在元数据里**（否则这个测试
     /// 在旧实现下也会绿，等于没测），再断言检索命中。
+    /// `body_match` 只在「元数据搜不到、正文搜得到」时为 true；
+    /// 元数据已命中或无检索词时整个字段不出现（旧调用返回形状不变）。
+    #[test]
+    fn body_match_flag_only_when_body_is_the_reason() {
+        let target = BUILTIN_PRESETS
+            .iter()
+            .find(|preset| preset.body.len() > 2000)
+            .expect("目录里应有长正文预设");
+
+        let meta_text = format!(
+            "{} {} {} {} {}",
+            target.id,
+            target.vendor,
+            target.model,
+            target.title,
+            target.tags.join(" ")
+        )
+        .to_lowercase();
+        let needle = target
+            .body
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .filter(|token| token.len() >= 8 && token.chars().all(|c| c.is_ascii_alphabetic()))
+            .map(str::to_lowercase)
+            .find(|token| !meta_text.contains(token))
+            .expect("正文里应有元数据之外的词");
+
+        // 正文命中 → 标记为 true
+        let (items, _, _) = list(Some(&needle), None, None, MAX_LIMIT);
+        let hit = items
+            .iter()
+            .find(|p| p.id == target.id)
+            .expect("应命中目标预设");
+        assert_eq!(hit.body_match, Some(true), "靠正文命中应打标");
+
+        // 元数据命中（用 id 当检索词）→ 不打标（否则每条都挂徽标，噪音）
+        let (items, _, _) = list(Some(&target.id), None, None, MAX_LIMIT);
+        let hit = items
+            .iter()
+            .find(|p| p.id == target.id)
+            .expect("id 应命中自身");
+        assert_eq!(hit.body_match, None, "元数据命中不该打正文徽标");
+
+        // 无检索词 → 不打标
+        let (items, _, _) = list_page(None, None, None, 0, 3);
+        assert!(
+            items.iter().all(|p| p.body_match.is_none()),
+            "无检索词时不该出现 body_match"
+        );
+    }
+
     #[test]
     fn list_query_matches_body_text_not_only_metadata() {
         let target = BUILTIN_PRESETS

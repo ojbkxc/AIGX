@@ -744,3 +744,9 @@
   color: var(--text-muted);
   overflow-wrap: anywhere;
 }
+/* 「正文命中」徽标：与「默认模型」同形但配色区分 */
+.purge-preset-match.is-body {
+  color: var(--text-muted);
+  border-color: var(--border-color);
+  background: transparent;
+}

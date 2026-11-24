@@ -1379,6 +1379,8 @@ export function presetApplyNeedsConfirm(
  */
 type PresetBriefWithMatch = PurgePresetBrief & {
   model_match?: 'exact' | 'vendor' | 'mismatch' | 'unknown' | null;
+  /** 命中来自正文（后端只在「元数据搜不到、正文搜得到」时给 true） */
+  body_match?: boolean | null;
 };
 
 /**
@@ -1687,6 +1689,14 @@ const PresetsSection = memo(function PresetsSection({
                       <strong>{item.title}</strong>
                       {item.model_match === 'exact' ? (
                         <span className="purge-preset-match">{t('默认模型')}</span>
+                      ) : null}
+                      {item.body_match ? (
+                        <span
+                          className="purge-preset-match is-body"
+                          title={t('标题/厂商/模型/标签里没有这个词，是正文里命中的')}
+                        >
+                          {t('正文命中')}
+                        </span>
                       ) : null}
                     </span>
                     <span className="purge-preset-item-meta">
