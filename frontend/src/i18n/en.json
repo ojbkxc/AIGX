@@ -4562,6 +4562,8 @@
   "首次登录需先修改密码，之后才能使用破甲控制台": "Change the initial password first; the purge console stays locked until then",
   "首次登录必须修改密码后才能使用管理面（后端返回 403）。请到「个人资料」修改密码，然后回到本页重试。": "The admin API returns 403 until the initial password is changed. Update it under Profile, then come back and retry.",
   "已改好，重试": "Done, retry",
+  "复制为文本": "Copy as text",
+  "已复制生效项清单": "Active items copied",
   "统计": "Stats",
   "你最近应用过这条预设": "You applied this preset recently",
   "标题/厂商/模型/标签里没有这个词，是正文里命中的": "Not in title/vendor/model/tags; matched inside the body",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  activeSummaryText,
   buildActiveSummary,
   capError,
   exportPreviewHistory,
@@ -66,6 +67,23 @@ describe('readRecentPresets / noteRecentPreset', () => {
       throw new Error('quota');
     };
     expect(() => noteRecentPreset([], 'x', boom, boom)).not.toThrow();
+  });
+});
+
+describe('activeSummaryText', () => {
+  it('每行一条、带 `- ` 前缀，参数已插值（贴出去可直接读）', () => {
+    const items = [
+      { key: '死区词改写（{{n}} 条启用）', params: { n: 3 } },
+      { key: 'system 归一化' },
+    ];
+    const text = activeSummaryText(items, (key, params) =>
+      params ? key.replace('{{n}}', String(params.n)) : key,
+    );
+    expect(text).toBe('- 死区词改写（3 条启用）\n- system 归一化');
+  });
+
+  it('空清单 → 空串（不产出只有装饰的文本）', () => {
+    expect(activeSummaryText([], (k) => k)).toBe('');
   });
 });
 

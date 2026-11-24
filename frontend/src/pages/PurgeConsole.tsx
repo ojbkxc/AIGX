@@ -406,6 +406,14 @@ export function findBodySnippet(
   };
 }
 
+/** 生效项摘要导出成纯文本（贴给同事/贴进工单时用，不带 UI 装饰）。 */
+export function activeSummaryText(
+  items: ActiveItem[],
+  translate: (key: string, params?: Record<string, string | number>) => string,
+): string {
+  return items.map((item) => `- ${translate(item.key, item.params)}`).join('\n');
+}
+
 /** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值，
  *  `anchor` 是 `data-purge-fix` 锚点（点了滚到对应配置区）。 */
 export interface ActiveItem {
@@ -2644,6 +2652,18 @@ export default function PurgeConsole(): JSX.Element {
    * 走后端 /api/purge/stats.csv 而不是在前端拼字符串：窗口档依赖服务端
    * 事件环（前端只有当前档的快照），只有后端能一次给全四档。
    */
+  /** 复制生效项为纯文本（贴工单/群聊时不用手动抄） */
+  const copyActiveSummary = useCallback(async (): Promise<void> => {
+    const current = draftRef.current;
+    if (!current) return;
+    const text = activeSummaryText(buildActiveSummary(current), (key, params) => t(key, params));
+    const copied = await copyText(text);
+    addToast(
+      copied ? t('已复制生效项清单') : t('复制失败（浏览器可能禁用了剪贴板权限）'),
+      copied ? 'success' : 'error',
+    );
+  }, [addToast, t]);
+
   /**
    * 清零统计：把此刻作为新的观察基线。
    *
@@ -3150,7 +3170,19 @@ export default function PurgeConsole(): JSX.Element {
 
       {/* 当前生效项：8 开关 + 两张词表 + 模板/预设/技能，配到十几项后没人能一眼
           说出「现在到底哪些在生效」；这里按数据面真实语义汇总（词表只算启用行）。 */}
-      <Card title={t('当前生效项')}>
+      <Card
+        title={t('当前生效项')}
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="purge-active-copy"
+            onClick={() => void copyActiveSummary()}
+          >
+            {t('复制为文本')}
+          </Button>
+        }
+      >
         <ul className="purge-active-list" data-testid="purge-active-summary">
           {buildActiveSummary(draft).map((item, index) => (
             <li key={`${item.key}-${index}`}>
