@@ -182,7 +182,7 @@ pub use security::{handle_security_events, handle_security_summary};
 pub use purge::{
     handle_apply_purge_preset, handle_export_purge_stats, handle_get_purge,
     handle_get_purge_defaults, handle_get_purge_preset, handle_import_purge_skills,
-    handle_list_purge_presets, handle_preview_purge, handle_update_purge,
+    handle_list_purge_presets, handle_preview_purge, handle_update_purge, PurgeQuery,
 };
 
 // 护栏（输入/输出黑名单 + 200 假答复门控：GET/PUT 配置 + 解除降级）

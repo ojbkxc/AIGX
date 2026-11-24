@@ -2330,7 +2330,7 @@ export default function PurgeConsole(): JSX.Element {
    */
   const refreshSkills = useCallback(async (): Promise<void> => {
     try {
-      const res = await api.getPurge();
+      const res = await api.getPurge({ skills: 'fresh' });
       if (res.success && res.data) {
         setSkills(res.data.skills ?? []);
         setSkillDirResolved(res.data.skill_dir_resolved ?? '');

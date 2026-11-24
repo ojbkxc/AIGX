@@ -638,7 +638,16 @@ pub(super) fn tools() -> Vec<ToolDef> {
                             )
                             .await
                         }
-                        "purge" => admin::handle_get_purge(State(s.clone()), h.clone()).await,
+                        "purge" => {
+                            // registry 内部的观察调用不吃「强制刷新」通道：它读的是
+                            // 数据面用的那份缓存快照，与页面「重新扫描」语义不同。
+                            admin::handle_get_purge(
+                                State(s.clone()),
+                                h.clone(),
+                                Query(admin::PurgeQuery::default()),
+                            )
+                            .await
+                        }
                         "networkConfig" => admin::health_check(State(s.clone()), h.clone()).await,
                         _ => return Err((-32602, format!("Invalid params: unknown config key {key}"))),
                     })

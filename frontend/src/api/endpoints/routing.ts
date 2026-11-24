@@ -138,8 +138,11 @@ export const endpoints = {
   saveSanitize: (data: Record<string, unknown>): Promise<ApiResponse<SanitizeHeadersItem>> =>
     request<ApiResponse<SanitizeHeadersItem>>('PUT', `${API_BASE}/sanitize`, data),
   // 破甲控制台（请求治理总控：归一化/改写/降档/异源/技能注入；热生效）
-  getPurge: (): Promise<ApiResponse<PurgeData>> =>
-    request<ApiResponse<PurgeData>>('GET', `${API_BASE}/purge`),
+  // 破甲控制台读取（`skills: 'fresh'` 跳过技能扫描的 30 秒缓存）
+  getPurge: (params?: { skills?: 'fresh' }): Promise<ApiResponse<PurgeData>> => {
+    const qs = params?.skills ? `?skills=${params.skills}` : '';
+    return request<ApiResponse<PurgeData>>('GET', `${API_BASE}/purge${qs}`);
+  },
   savePurge: (data: PurgeSettings): Promise<ApiResponse<PurgeData>> =>
     request<ApiResponse<PurgeData>>('PUT', `${API_BASE}/purge`, data),
   // 破甲改写试跑（dry-run：不写统计、不落库）

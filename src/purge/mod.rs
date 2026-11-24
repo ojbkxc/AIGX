@@ -1292,8 +1292,7 @@ static SKILL_CACHE: OnceLock<parking_lot::RwLock<SkillCache>> = OnceLock::new();
 
 /// 技能目录扫描结果（30 秒进程内缓存）。
 ///
-/// 命中只做 Arc 克隆（引用计数 +1），不逐请求深拷贝全部技能正文；
-/// 目录变更或超期时在读锁外重新扫描，再持写锁整体替换。
+/// 命中只做 Arc 克隆（引用计数 +1），不逐请求深拷贝全部技能正文；/// 目录变更或超期时在读锁外重新扫描，再持写锁整体替换。
 /// 并发请求同时看到过期 → 各自扫描一次（最后一次写者胜），正确性无虞。
 fn skills_for(dir: &str) -> Arc<Vec<SkillEntry>> {
     let cache = SKILL_CACHE.get_or_init(|| {
@@ -1451,7 +1450,24 @@ pub fn expanded_skill_dir(dir: &str) -> String {
     expand_home(dir).to_string_lossy().to_string()
 }
 
+/// 技能目录扫描快照（走 30 秒缓存）。
+///
+/// 生产路径现在都调 [`skill_briefs_with`]（payload 需要区分是否强制刷新）；
+/// 这个薄壳保留给「只要快照」的调用方与测试，语义与 `_with(dir, false)` 等价。
+#[allow(dead_code)]
 pub fn skill_briefs(dir: &str) -> Vec<SkillBrief> {
+    skill_briefs_with(dir, false)
+}
+
+/// `fresh = true` 时**跳过 30 秒缓存**强制重扫。
+///
+/// 为什么必须有这条通道：控制台的「重新扫描」按钮如果还走缓存，用户放好
+/// `SKILL.md` 点一下、界面仍是空的——按钮看起来是坏的。缓存本身是对的
+/// （数据面每请求都要读技能），但**用户显式要求刷新时必须真的刷新**。
+pub fn skill_briefs_with(dir: &str, fresh: bool) -> Vec<SkillBrief> {
+    if fresh {
+        invalidate_skill_cache(dir);
+    }
     skills_for(dir)
         .iter()
         .map(|entry| SkillBrief {
@@ -1460,6 +1476,20 @@ pub fn skill_briefs(dir: &str) -> Vec<SkillBrief> {
             body_chars: entry.body.chars().count(),
         })
         .collect()
+}
+
+/// 让该目录的缓存立即失效（下一次 `skills_for` 必然重扫）。
+///
+/// 只清「同目录」的缓存：换目录时 `skills_for` 本来就因 `dir != guard.dir` 重扫，
+/// 这里清掉是为了让**同目录**的强制刷新也生效。
+fn invalidate_skill_cache(dir: &str) {
+    if let Some(cache) = SKILL_CACHE.get() {
+        let mut guard = cache.write();
+        if guard.dir == dir {
+            guard.loaded_at = None;
+            guard.entries = Arc::new(Vec::new());
+        }
+    }
 }
 
 /// 配置体检：找出「开了但不生效 / 配置自相矛盾」的项，逐条返回中文警示。
@@ -2635,6 +2665,45 @@ mod tests {
         assert!(config_warning_items(&cfg)
             .iter()
             .all(|w| w.code != "fallback_duplicate"));
+    }
+
+    /// `skill_briefs_with(dir, true)` 必须**绕过 30 秒缓存**。
+    ///
+    /// 这是「重新扫描」按钮的真实语义：用户放好 `SKILL.md` 点一下，界面必须
+    /// 立刻看到——若仍走缓存，按钮看起来就是坏的（缓存本身对数据面是对的）。
+    #[test]
+    fn skill_briefs_with_fresh_bypasses_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "aigx-purge-skill-fresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy().to_string();
+
+        // 首次扫描：空目录
+        assert!(skill_briefs_with(&root, true).is_empty());
+
+        // 放一个 SKILL.md 后：普通路径仍命中缓存（空），强制刷新能看到
+        let skill_dir = dir.join("demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: fresh-demo\n---\n正文",
+        )
+        .unwrap();
+        assert!(
+            skill_briefs(&root).is_empty(),
+            "普通读取应命中 30 秒缓存（仍是空）"
+        );
+        let fresh = skill_briefs_with(&root, true);
+        assert_eq!(fresh.len(), 1, "强制刷新必须立刻看到新文件");
+        assert_eq!(fresh[0].name, "fresh-demo");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 技能目录展开成绝对路径：`~` 前缀必须被替换掉（否则前端显示 `~/...`

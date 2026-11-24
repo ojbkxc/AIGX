@@ -23,9 +23,14 @@ use crate::purge::{PurgeSettings, RewriteRule};
 pub async fn handle_get_purge(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<PurgeQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    Ok(Json(payload(&state)))
+    // `?skills=fresh` 跳过技能扫描的 30 秒缓存。
+    // 「重新扫描」按钮若仍走缓存，用户放好 SKILL.md 点一下界面还是空的，
+    // 按钮看起来就是坏的——显式刷新必须真的刷新。
+    let fresh = query.skills.as_deref() == Some("fresh");
+    Ok(Json(payload_with(&state, fresh)))
 }
 
 /// GET /api/purge/stats.csv —— 四档统计导出（运维报表）。
@@ -451,7 +456,19 @@ pub async fn handle_preview_purge(
     })))
 }
 
+/// `GET /api/purge` 的查询参数。
+///
+/// `?skills=fresh`：跳过技能目录扫描的 30 秒缓存（控制台「重新扫描」用）。
+#[derive(Debug, Default, Deserialize)]
+pub struct PurgeQuery {
+    skills: Option<String>,
+}
+
 fn payload(state: &AppState) -> Value {
+    payload_with(state, false)
+}
+
+fn payload_with(state: &AppState, fresh_skills: bool) -> Value {
     let settings = state.purge.snapshot();
     json!({
         "success": true,
@@ -481,7 +498,7 @@ fn payload(state: &AppState) -> Value {
                 })
                 .collect::<Vec<_>>(),
             // 技能目录扫描快照（名称+关键词+正文字符数；skill_inject 配置的可验证性）
-            "skills": crate::purge::skill_briefs(&settings.skill_dir),
+            "skills": crate::purge::skill_briefs_with(&settings.skill_dir, fresh_skills),
             // 技能目录的展开后绝对路径：`~` 的展开依赖服务进程的 HOME，
             // 与用户交互式 shell 可能不同——放错目录时靠这个才能定位
             "skill_dir_resolved": crate::purge::expanded_skill_dir(&settings.skill_dir),
