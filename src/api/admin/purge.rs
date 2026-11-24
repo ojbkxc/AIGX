@@ -453,7 +453,19 @@ fn payload(state: &AppState) -> Value {
             // `config_warning_items` 带 code（前端跳修复入口）；`config_warnings`
             // 旧字符串形态保留（旧前端兼容）。
             "config_warnings": crate::purge::config_warnings(&settings),
-            "config_warning_items": crate::purge::config_warning_items(&settings),
+            // 体检项补 `severity`：由 code 纯函数推导（不存进结构体，避免两处
+            // 来源不一致）；前端按级排序着色，Error 优先。
+            "config_warning_items": crate::purge::config_warning_items(&settings)
+                .into_iter()
+                .map(|item| {
+                    let severity = crate::purge::severity_of(item.code);
+                    json!({
+                        "code": item.code,
+                        "message": item.message,
+                        "severity": severity,
+                    })
+                })
+                .collect::<Vec<_>>(),
             // 技能目录扫描快照（名称+关键词+正文字符数；skill_inject 配置的可验证性）
             "skills": crate::purge::skill_briefs(&settings.skill_dir),
             "runtime": {

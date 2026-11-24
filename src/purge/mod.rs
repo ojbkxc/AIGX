@@ -1470,6 +1470,42 @@ pub struct ConfigWarning {
     pub message: String,
 }
 
+/// 体检告警严重级（前端据此排序与着色）。
+///
+/// - `Error`：功能**静默失效**——开关开着但永远不会生效，用户以为配好了。
+/// - `Warn`：仍工作，但结果可能不符预期或有浪费。
+/// - `Info`：配置脏但当前无害。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Error,
+    Warn,
+    Info,
+}
+
+/// `code` → 严重级。
+///
+/// **刻意做成纯函数而不塞进 `ConfigWarning` 结构体**：severity 完全由 code
+/// 决定，存一份字段就多一处可能与 code 不一致的来源；调用点（10 处
+/// `warnings.push`）也不必逐个补字段。有测试钉住「code 集合与分支集合相等」，
+/// 新增 code 忘了分类会红。
+pub fn severity_of(code: &str) -> Severity {
+    match code {
+        // 开了但一定不生效
+        "fallback_empty"
+        | "fallback_after_retry"
+        | "structured_empty"
+        | "dead_zone_all_disabled"
+        | "synonym_all_disabled" => Severity::Error,
+        // 生效了，但效果可能不符预期 / 有重复开销
+        "chained_rewrite" | "fallback_duplicate" => Severity::Warn,
+        // 配置脏，当前无害
+        "skill_dir_empty" | "preset_missing" | "skill_keyword_short" => Severity::Info,
+        // 未登记的新 code：按最保守的 Error 处理（宁严不宽）
+        _ => Severity::Error,
+    }
+}
+
 /// 机器码 → 前端修复入口约定：
 /// - `fallback_empty` / `fallback_after_retry` → 异源模型输入框
 /// - `skill_dir_empty` → 技能目录输入框
@@ -2589,6 +2625,51 @@ mod tests {
         assert!(config_warning_items(&cfg)
             .iter()
             .all(|w| w.code != "fallback_duplicate"));
+    }
+
+    /// 严重级分类：code 集合与 `severity_of` 分支必须一一对应。
+    ///
+    /// 这是**防漂移锁步**：新增一个体检 code 却忘了分类时，它会落到 `_` 分支
+    /// 被当 Error（宁严不宽），但本测试会点名「未登记」，逼着显式分类。
+    #[test]
+    fn severity_covers_every_known_code() {
+        // 源码里出现的 code 字面量全集（`config_warning_items` 的 push 点）
+        let source = include_str!("mod.rs");
+        let mut codes: Vec<&str> = Vec::new();
+        let mut rest = source;
+        while let Some(index) = rest.find("code: \"") {
+            let after = &rest[index + 7..];
+            if let Some(end) = after.find('"') {
+                let code = &after[..end];
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+            rest = &after[..];
+        }
+        assert!(codes.len() >= 10, "code 抽取异常（{codes:?}）");
+
+        // 每个 code 都必须在 severity_of 里显式出现（不能只靠 `_` 兜底）
+        let fn_start = source
+            .find("pub fn severity_of")
+            .expect("severity_of 必须存在");
+        let fn_body = &source[fn_start..];
+        let fn_end = fn_body.find("\n}").expect("severity_of 结束位置");
+        let body = &fn_body[..fn_end];
+        for code in &codes {
+            assert!(
+                body.contains(&format!("\"{code}\"")),
+                "体检 code `{code}` 未在 severity_of 里分类（会落到兜底 Error）"
+            );
+        }
+
+        // 分类抽查：静默失效必须是 Error，脏配置是 Info
+        assert_eq!(severity_of("fallback_empty"), Severity::Error);
+        assert_eq!(severity_of("structured_empty"), Severity::Error);
+        assert_eq!(severity_of("chained_rewrite"), Severity::Warn);
+        assert_eq!(severity_of("skill_dir_empty"), Severity::Info);
+        // 未知 code 兜底为 Error（宁严不宽）
+        assert_eq!(severity_of("brand_new_code"), Severity::Error);
     }
 
     /// 开关开着但整表被单条停用 → 实际 0 生效（须告警）；空表不告警。
