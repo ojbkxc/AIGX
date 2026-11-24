@@ -208,9 +208,17 @@
 
 .purge-rule-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
+}
+
+/* 开关/试/删除成组：桌面占网格最后一列，窄屏整行横排 */
+.purge-rule-ops {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .purge-rule-row .form-group {
@@ -261,12 +269,21 @@
 
 /* 窄屏（≤768）：词表行纵向堆叠，箭头隐藏（上下两个输入靠 placeholder 辨识） */
 @media (max-width: 768px) {
+  /* 两行布局：原文单独一行（它可能带重复提示），改写+操作组同一行 */
   .purge-rule-row {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .purge-rule-row > div:first-child {
+    grid-column: 1 / -1;
   }
 
   .purge-arrow {
     display: none;
+  }
+
+  .purge-rule-ops {
+    justify-content: flex-end;
   }
 }
 

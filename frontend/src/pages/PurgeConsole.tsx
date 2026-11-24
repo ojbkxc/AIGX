@@ -1232,27 +1232,31 @@ const RuleRow = memo(function RuleRow({
         value={rule.to}
         onChange={(event) => onPatch(index, { to: event.target.value })}
       />
-      <label className="purge-rule-toggle" title={enableLabel}>
-        <input
-          type="checkbox"
-          checked={enabled}
-          aria-label={enableLabel}
-          onChange={(event) => onPatch(index, { enabled: event.target.checked })}
-        />
-      </label>
-      {onProbe && rule.from.trim() ? (
-        <Button
-          variant="outline"
-          size="sm"
-          title={`用「${rule.from}」做预览样例`}
-          onClick={() => onProbe(rule)}
-        >
-          {probeLabel}
+      {/* 开关 + 试 + 删除包成一组：桌面上占网格最后一列（横排），窄屏时整行横排
+          —— 否则单列布局下三个控件各占一行，一条规则要占 7 行高 */}
+      <div className="purge-rule-ops">
+        <label className="purge-rule-toggle" title={enableLabel}>
+          <input
+            type="checkbox"
+            checked={enabled}
+            aria-label={enableLabel}
+            onChange={(event) => onPatch(index, { enabled: event.target.checked })}
+          />
+        </label>
+        {onProbe && rule.from.trim() ? (
+          <Button
+            variant="outline"
+            size="sm"
+            title={`用「${rule.from}」做预览样例`}
+            onClick={() => onProbe(rule)}
+          >
+            {probeLabel}
+          </Button>
+        ) : null}
+        <Button variant="outline" size="sm" onClick={() => onRemove(index)}>
+          {removeLabel}
         </Button>
-      ) : null}
-      <Button variant="outline" size="sm" onClick={() => onRemove(index)}>
-        {removeLabel}
-      </Button>
+      </div>
     </div>
   );
 });
