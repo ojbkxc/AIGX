@@ -284,6 +284,34 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('54 · 快速连点「试」只发一次预览请求（state 异步会穿透判据）', async ({ page }) => {
+  let previewCalls = 0;
+  await mockPurge(page);
+  // 在基础 mock 之后再挂一层：统计 preview 请求次数，并**延迟返回**制造并发窗口
+  await page.route(/\/api\/purge\/preview$/, async (r) => {
+    previewCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await r.fulfill({ json: { success: true, data: PREVIEW_RESULT } });
+  });
+  await gotoPurge(page);
+
+  // 连点必须在**同一个 tick 内**发出：Playwright 的 `click()` 自带 actionability
+  // 等待，三次 click 会被拉开，state 早已更新完 —— 那样测不出竞态（第一版就是
+  // 假绿，变异验证时把判据改回 state 仍然通过）。
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('button')).find((el) =>
+      /^试/.test((el.textContent ?? '').trim()),
+    );
+    if (!btn) throw new Error('找不到「试」按钮');
+    btn.click();
+    btn.click();
+    btn.click();
+  });
+  await page.waitForTimeout(1500);
+
+  expect(previewCalls).toBe(1);
+});
+
 test('53 · 批量粘贴面板打开后焦点自动落在输入框', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
