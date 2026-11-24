@@ -284,6 +284,68 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('55 · 连点「写入技能目录」只发一次 apply（确认框之前就要挡住）', async ({ page }) => {
+  let applyCalls = 0;
+  const preset = {
+    id: 'p-skill',
+    vendor: 'V',
+    model: 'm',
+    title: 'Skill preset',
+    tags: [],
+    bytes: 12,
+    sha256: 'beef'.repeat(16),
+    preview: 'body preview',
+  };
+  await mockPurge(page);
+  // **必须让快照里已有同名技能**，否则根本不弹确认框、点击就直接写盘
+  // （第一版漏了这层，dismiss 无效，看到「已写入技能目录」的成功 toast）。
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: {
+          ...PURGE_DATA,
+          skills: [{ name: 'p-skill', keywords: ['p-skill'], body_chars: 12 }],
+        },
+      },
+    }),
+  );
+  await page.route(/\/api\/purge\/presets\/[^/]+\/apply$/, async (r) => {
+    applyCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await r.fulfill({
+      json: { success: true, data: { applied: { path: '/x' }, settings: PURGE_DATA.settings } },
+    });
+  });
+  await page.route(/\/api\/purge\/presets\/[^/]+$/, (r) =>
+    r.fulfill({ json: { success: true, data: { ...preset, body: 'preset body' } } }),
+  );
+  await page.route(/\/api\/purge\/presets(\?|$)/, (r) =>
+    r.fulfill({
+      json: { success: true, data: { items: [preset], vendors: [{ vendor: 'V', count: 1 }], total: 1 } },
+    }),
+  );
+  await gotoPurge(page);
+  await page.getByText('Skill preset').first().click();
+
+  // 同一 tick 内连点两次，**两次都 accept**：
+  // 第一次通过判据 → 置 busyRef → 发请求（mock 悬停 500ms 制造并发窗口）
+  // 第二次必须被 busyRef 挡在 confirm 之前 → 最终只有 1 次 apply
+  // （第一版两次都 dismiss，全部在 confirm 处返回、busyRef 从未置位，并发路径根本
+  // 没被走到，属于假绿。）
+  page.on('dialog', (d) => void d.accept());
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll('button')).find((el) =>
+      /写入技能目录/.test(el.textContent ?? ''),
+    );
+    if (!btn) throw new Error('找不到「写入技能目录」按钮');
+    btn.click();
+    btn.click();
+  });
+  await page.waitForTimeout(1800);
+  expect(applyCalls).toBe(1);
+});
+
 test('54 · 快速连点「试」只发一次预览请求（state 异步会穿透判据）', async ({ page }) => {
   let previewCalls = 0;
   await mockPurge(page);

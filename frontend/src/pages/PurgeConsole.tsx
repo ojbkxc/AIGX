@@ -2293,6 +2293,8 @@ const PresetsSection = memo(function PresetsSection({
   const [detail, setDetail] = useState<PurgePresetDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  /** 同步并发判据（state 异步，连点会穿透） */
+  const busyRef = useRef<string | null>(null);
   /** 待确认的覆盖（同名模板正文不同；null = 无待确认） */
   const [confirmOverwrite, setConfirmOverwrite] = useState<
     { id: string; name: string; text: string } | null
@@ -2476,6 +2478,9 @@ const PresetsSection = memo(function PresetsSection({
 
   const handleApplySkill = useCallback(
     async (id: string): Promise<void> => {
+      // 并发判据用 ref：`busy` 是 state，确认框之后才 set，两个快速点击会在
+      // **确认框之前**双双通过判据，然后两次 `fs::write` 同时覆盖同一个 SKILL.md。
+      if (busyRef.current !== null) return;
       // 后端 `apply(skill_file)` 是 `std::fs::write` **直接覆盖** `<skill_dir>/<id>/SKILL.md`。
       // 技能目录里的文件可能有人手写过——覆盖前必须问一句，否则一次点击就没了。
       // 判断依据是 `skills` 快照里的同名技能（解析自 SKILL.md 的 name，缺省退父目录名）；
@@ -2488,6 +2493,7 @@ const PresetsSection = memo(function PresetsSection({
       ) {
         return;
       }
+      busyRef.current = `skill:${id}`;
       setBusy(`skill:${id}`);
       try {
         const res = await api.applyPurgePreset(id, 'skill_file');
@@ -2501,6 +2507,7 @@ const PresetsSection = memo(function PresetsSection({
       } catch {
         addToast(t('写入技能目录失败'), 'error');
       } finally {
+        busyRef.current = null;
         setBusy(null);
       }
     },
