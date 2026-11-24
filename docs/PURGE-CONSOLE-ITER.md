@@ -347,13 +347,13 @@ mtime 在最近一分钟内变过、或 static 有未提交改动 → **先等�
 | `cargo test --bin aigx` | **2575 passed / 0 failed**（含 purge:: 87） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **279 passed / 0 failed**（PurgeConsole 84） |
+| vitest 全量 | **315 passed / 0 failed**（PurgeConsole 109） |
 | e2e（破甲页两个 spec，desktop） | **18 passed / 0 failed** |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
-> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 36 批收口值）。
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 40 批收口值；Rust 侧数字来自 CI，本机按 AGENTS.md 不编译）。
 > **已修**：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
 > 曾偶发假红——固定 `sleep(50ms)` 当同步手段，并发负载下不够。已改为轮询等待
 > （每 5ms 查一次、最多 2s，判据不变），单跑 5 次 + 全量连跑 3 次全绿。
