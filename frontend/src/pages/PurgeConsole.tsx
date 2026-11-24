@@ -466,6 +466,27 @@ export function normalizeBooleanFields<T extends Record<string, unknown>>(settin
   return next as T;
 }
 
+/**
+ * 导出文件的元信息（不含业务配置）。
+ *
+ * 为什么需要：多环境迁移时对方拿到一个 `aigx-purge-config-2026-11-25.json`，
+ * 只能从文件名猜新旧。写进去导出的**绝对时刻**与**网关身份**（PID/上游），
+ * 让「这份是从哪台的什么时候导的」有据可查。导入时**不校验也不使用**这些字段
+ * —— 它们只是线索，旧文件没有也照常导入。
+ */
+export interface PurgeExportMeta {
+  exported_at: string;
+  pid: number;
+  upstream: string;
+}
+
+export function buildConfigExport(
+  settings: PurgeSettings,
+  meta: PurgeExportMeta,
+): string {
+  return JSON.stringify({ version: 1, exported_at: meta.exported_at, runtime: { pid: meta.pid, upstream: meta.upstream }, settings }, null, 2) + '\n';
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -3850,7 +3871,14 @@ export default function PurgeConsole(): JSX.Element {
     const snapshot = dataRef.current;
     if (!snapshot) return;
     const filename = `aigx-purge-config-${new Date().toISOString().slice(0, 10)}.json`;
-    downloadText(filename, JSON.stringify({ version: 1, settings: snapshot.settings }, null, 2) + '\n');
+    downloadText(
+      filename,
+      buildConfigExport(snapshot.settings, {
+        exported_at: new Date().toISOString(),
+        pid: snapshot.runtime?.pid ?? 0,
+        upstream: snapshot.runtime?.upstream ?? '',
+      }),
+    );
     // 导出的是**已保存**的配置（迁移/备份要的是生效值），不是眼前草稿。有未保存
     // 修改时必须说清楚，否则用户以为导出的就是屏幕上这套。
     const changed = importOverwriteItems(

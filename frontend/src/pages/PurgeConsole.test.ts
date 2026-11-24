@@ -3,6 +3,7 @@ import {
   activeSummaryText,
   applyUndo,
   buildActiveSummary,
+  buildConfigExport,
   clampNumInput,
   confirmSkillOverwrite,
   collectCapOverflows,
@@ -372,6 +373,38 @@ describe('validateImportedSettings · 导出-导入自洽', () => {
   it('字符串数组本身不是数组 → fatal', () => {
     const verdict = validateImportedSettings({ fallback_models: 'glm-5' });
     expect(verdict.fatal.length).toBeGreaterThan(0);
+  });
+});
+
+describe('buildConfigExport', () => {
+  const settings = { enabled: true, retry_limit: 8 } as never;
+  const meta = { exported_at: '2026-11-25T00:00:00.000Z', pid: 42, upstream: 'e2e' };
+
+  it('带上导出时刻与网关身份（多环境迁移能判断新旧）', () => {
+    const parsed = JSON.parse(buildConfigExport(settings, meta)) as {
+      version: number;
+      exported_at: string;
+      runtime: { pid: number; upstream: string };
+      settings: unknown;
+    };
+    expect(parsed.version).toBe(1);
+    expect(parsed.exported_at).toBe(meta.exported_at);
+    expect(parsed.runtime).toEqual({ pid: 42, upstream: 'e2e' });
+    expect(parsed.settings).toEqual(settings);
+  });
+
+  it('以换行结尾（与其他导出文件一致，便于 diff）', () => {
+    expect(buildConfigExport(settings, meta).endsWith('\n')).toBe(true);
+  });
+
+  it('元信息不影响导入：新旧文件都能被校验放行', () => {
+    // 新文件（含 exported_at/runtime）
+    expect(validateImportedSettings(settings).fatal).toEqual([]);
+    // 旧文件（只有 version+settings）同样能过——元信息是线索，不是校验条件
+    const old = JSON.parse(buildConfigExport(settings, meta)) as Record<string, unknown>;
+    delete old.exported_at;
+    delete old.runtime;
+    expect(validateImportedSettings(old.settings).fatal).toEqual([]);
   });
 });
 
