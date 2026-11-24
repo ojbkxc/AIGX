@@ -1028,12 +1028,24 @@ export function buildActiveSummary(settings: PurgeSettings): ActiveItem[] {
 }
 
 /** 必须是「数组，且每个元素都是对象」的字段（渲染期会 `.map` 或取属性）。 */
-const ARRAY_FIELDS = [
+/** **元素是对象**的数组字段（词表两表 + 模板表）：非对象条目会让渲染报错。 */
+const OBJECT_ARRAY_FIELDS = [
   'rewrite_rules',
   'synonym_pairs',
+  'structured_templates',
+] as const;
+
+/**
+ * **元素是字符串**的数组字段。
+ *
+ * 为什么要分开：这里原本和对象数组混在同一个 `ARRAY_FIELDS` 里，用「元素必须是
+ * 对象」校验 —— 于是本页导出的配置（`fallback_models: ["glm-5"]`）**再导回来会被
+ * 判「结构有问题」直接拒绝**，导出的文件自己导不进去。这是导出-导入闭环的自洽性
+ * 问题，不是使用者的错。
+ */
+const STRING_ARRAY_FIELDS = [
   'fallback_models',
   'normalize_strip_prefixes',
-  'structured_templates',
   'refusal_patterns',
   'failure_filter_keywords',
   'failure_empty_keywords',
@@ -1063,7 +1075,7 @@ export function validateImportedSettings(raw: unknown): ImportVerdict {
   }
   const settings = raw as Record<string, unknown>;
 
-  for (const field of ARRAY_FIELDS) {
+  for (const field of OBJECT_ARRAY_FIELDS) {
     const value = settings[field];
     if (value === undefined) continue;
     if (!Array.isArray(value)) {
@@ -1072,6 +1084,19 @@ export function validateImportedSettings(raw: unknown): ImportVerdict {
     }
     if (value.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
       fatal.push(`${field} 里存在非对象条目`);
+    }
+  }
+  for (const field of STRING_ARRAY_FIELDS) {
+    const value = settings[field];
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) {
+      fatal.push(`${field} 不是数组`);
+      continue;
+    }
+    // 非字符串条目**只警告**：渲染层会 `.join()`/`.map()`，不会白屏；
+    // 判 fatal 会把「手改时写错一项」整份拒掉，与「先看一眼再修」的工作流冲突。
+    if (value.some((item) => typeof item !== 'string')) {
+      warnings.push(`${field} 里有非字符串条目（会在界面上显示为文本）`);
     }
   }
   for (const field of RULE_TABLE_FIELDS) {

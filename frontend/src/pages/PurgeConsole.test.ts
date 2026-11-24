@@ -290,6 +290,43 @@ describe('disableRulesAt', () => {
   });
 });
 
+describe('validateImportedSettings · 导出-导入自洽', () => {
+  it('**本页导出的配置能导回来**（字符串数组不该被当成对象数组）', () => {
+    // 这就是之前的真实缺陷：`fallback_models: ['glm-5']` 被按「元素必须是对象」
+    // 校验 → 判 fatal → 导出的文件自己导不进去。
+    const exported = {
+      enabled: true,
+      rewrite_rules: [{ from: 'a', to: 'b' }],
+      synonym_pairs: [{ from: 'x', to: 'y' }],
+      structured_templates: [{ name: 't', text: 'body' }],
+      fallback_models: ['glm-5', 'gpt-4o'],
+      normalize_strip_prefixes: ['Current time'],
+      refusal_patterns: ['抱歉'],
+      failure_filter_keywords: ['filtered'],
+      failure_empty_keywords: ['empty'],
+    };
+    const verdict = validateImportedSettings(exported);
+    expect(verdict.fatal).toEqual([]);
+    expect(verdict.warnings).toEqual([]);
+  });
+
+  it('字符串数组里混入非字符串 → 只警告（不整份拒绝）', () => {
+    const verdict = validateImportedSettings({ fallback_models: ['ok', 42] });
+    expect(verdict.fatal).toEqual([]);
+    expect(verdict.warnings.length).toBeGreaterThan(0);
+  });
+
+  it('对象数组里混入非对象 → 仍然 fatal（那会渲染报错）', () => {
+    const verdict = validateImportedSettings({ rewrite_rules: ['oops'] });
+    expect(verdict.fatal.length).toBeGreaterThan(0);
+  });
+
+  it('字符串数组本身不是数组 → fatal', () => {
+    const verdict = validateImportedSettings({ fallback_models: 'glm-5' });
+    expect(verdict.fatal.length).toBeGreaterThan(0);
+  });
+});
+
 describe('importOverwriteItems', () => {
   const saved = { enabled: true, retry_limit: 8 } as never;
   const draft = { enabled: true, retry_limit: 9 } as never;

@@ -260,6 +260,51 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ page }) => {
+  // 根因修复前这条跑不通：`fallback_models` 被按「元素必须是对象」校验 → 导出的
+  // 配置判 fatal → 在 confirm 之前就 return 了（所以 dialogs=0）。
+  page.on('dialog', (d) => void d.dismiss());
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  await page.getByLabel('重试上限').fill('9');
+  await expect(page.locator('.purge-dirty-bar')).toBeVisible();
+
+  const importInput = page.locator('input[type="file"][accept*="json"]').first();
+  await importInput.setInputFiles({
+    name: 'cfg.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(
+      JSON.stringify({ version: 1, settings: { ...PURGE_DATA.settings, retry_limit: 11 } }),
+    ),
+  });
+  await page.waitForTimeout(900);
+
+  // 取消 → 草稿保持 9
+  await expect(page.getByLabel('重试上限')).toHaveValue('9');
+});
+
+test('49 · 导入配置前确认：确认则用导入值替换', async ({ page }) => {
+  page.on('dialog', (d) => void d.accept());
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  await page.getByLabel('重试上限').fill('9');
+  await expect(page.locator('.purge-dirty-bar')).toBeVisible();
+
+  const importInput = page.locator('input[type="file"][accept*="json"]').first();
+  await importInput.setInputFiles({
+    name: 'cfg.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(
+      JSON.stringify({ version: 1, settings: { ...PURGE_DATA.settings, retry_limit: 11 } }),
+    ),
+  });
+  await page.waitForTimeout(900);
+
+  await expect(page.getByLabel('重试上限')).toHaveValue('11');
+});
+
 test('47 · 写同名 SKILL.md 前先确认（后端是直接覆盖）', async ({ page }) => {
   // 技能目录里已有 `p-skill` 同名技能 → 点「写入技能目录」应先弹确认
   const preset = {
