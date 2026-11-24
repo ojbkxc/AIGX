@@ -309,8 +309,16 @@
 /* ── 表格（12.5px 紧凑密度 + sticky 表头 + 列宽拖动） ── */
 .mm-table-wrap {
   overflow: auto;
-  max-height: calc(100vh - 250px);
+  /* 再扣掉底部常驻状态条的高度（.statusline 是 fixed 26px, z-index 90）——
+     只加 padding-bottom 不够：滚动发生在 wrap 内部，最后由 wrap 底边决定，
+     底边压在状态条下时最后一行永远滚不出来（实测按钮中心 y=712 / 视口 720）。 */
+  max-height: calc(100vh - 250px - 26px);
   overflow-anchor: none; /* 行内开关切换时视口不跳 */
+  /* 底部常驻状态条 `.statusline` 是 fixed 26px（z-index 90）。表格内滚到最底时
+     最后一行正好压在它下面：实测按钮中心 y=712 / 视口 720，元素命中 statusline，
+     点「测试/计价/删除」全部落空。给滚动内容留出状态条高度 + 余量，让最后一行
+     能滚到条子上方。 */
+  padding-bottom: 34px;
 }
 
 .mm-table {
@@ -690,6 +698,17 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 4px;
+  /* flex 子项默认 min-width:auto —— chip 里的长映射名会把它撑破，内容溢出到
+     右侧「操作」列之上，用户点测试/计价/删除时被 chip 接走点击（实测 Playwright
+     报 `.mm-alias-cell ... subtree intercepts pointer events`）。这里把列宽当硬
+     边界：子项允许收缩、超出部分裁掉（chip 自身仍是 title 可读全文）。 */
+  min-width: 0;
+  overflow: hidden;
+}
+
+.mm-alias-cell > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .mm-alias {

@@ -391,8 +391,17 @@ code, pre, .mono {
 }
 
 /* 底部常驻状态行（fixed，26px）会盖住内容，admin 下预留其高度。
- * 非 admin 不渲染状态行，故不加这个类，避免底部 26px 空白。 */
-.main-content-full.has-statusline {
+ * 非 admin 不渲染状态行，故不加这个类，避免底部 26px 空白。
+ *
+ * 注：.main-content-full.has-statusline 这条规则此前**没有任何组件用上**
+ * （全仓只有这一处 CSS 定义，没有使用方）——于是只要页面内容高度刚好等于
+ * 视口（比如模型管理只有 3 行），最后一行就被状态条压住、行内按钮点不到。
+ * 2026-11-24 实测：按钮中心 y=712 / 视口 720，elementFromPoint 命中的是
+ * .statusline，Playwright 报「intercepts pointer events」。
+ *
+ * 改成用 :has() 按「状态条是否真的渲染」来加内边距：admin 有状态条 → 留位；
+ * 非 admin 不渲染 → 不加，不留空白。不依赖 JS 判断，也不再要求页面记得加类。 */
+.app-container:has(> .statusline) .main-content {
   padding-bottom: 26px;
 }
 

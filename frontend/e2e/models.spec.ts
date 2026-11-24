@@ -390,13 +390,14 @@ test.describe('模型管理', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('列设置可以关掉「定价」列', async ({ page, pageErrors }) => {
+  test('列设置可以关掉「计价」列', async ({ page, pageErrors }) => {
     await expect(page.locator('.mm-h-price')).toHaveCount(1);
     await page.locator('.mm-colset > button').click();
     const panel = page.locator('.tbl-colset');
     await expect(panel).toBeVisible();
     // 公共面板：原生 checkbox 开关（对齐 TableColumnSettings），按行内列名定位
-    await panel.locator('.tbl-colset-row', { hasText: '定价' }).locator('input[type="checkbox"]').click();
+    // v3.5.1：该列表头文案是「计价」（A2A 的 pricing），不再是「定价」
+    await panel.locator('.tbl-colset-row', { hasText: '计价' }).locator('input[type="checkbox"]').click();
     await expect(page.locator('.mm-h-price')).toHaveCount(0);
     // 恢复默认，避免 localStorage 影响后续用例
     await panel.locator('.tbl-colset-reset').click();
@@ -433,14 +434,15 @@ test.describe('模型管理', () => {
     await expect(page.locator('.mm-h-enable')).toHaveCount(0);
     await expect(page.locator('.mm-c-enable')).toHaveCount(0);
 
-    // 列设置面板不崩：7 列（选择/模型/定价/来源/能力/映射/操作），无「启用」
+    // 列设置面板不崩：v3.5.1 共 10 列（选择/上游模型/倍率/计价/可见性/来源/
+    // 上下文-输出/能力/模型映射/操作），且不得出现已删的「启用」
     await page.locator('.mm-colset > button').click();
     const panel = page.locator('.tbl-colset');
     await expect(panel).toBeVisible();
     await expect(panel.locator('.tbl-colset-row', { hasText: '启用' })).toHaveCount(0);
-    await expect(panel.locator('.tbl-colset-row')).toHaveCount(7);
+    await expect(panel.locator('.tbl-colset-row')).toHaveCount(10);
     // 面板仍可用：改一次对齐 → 触发回写；清洗后的存储不再残留 enable
-    await panel.locator('.tbl-colset-row', { hasText: '定价' })
+    await panel.locator('.tbl-colset-row', { hasText: '计价' })
       .locator('.tbl-colset-align button', { hasText: '中' }).click();
     await expect(page.locator('.mm-h-price')).toHaveClass(/ta-center/);
     const persisted = await page.evaluate(() => localStorage.getItem('aigx-tbl-cols.models'));
@@ -473,7 +475,7 @@ test.describe('模型管理', () => {
     await expect(panel).toBeVisible();
     await expect(panel.locator('.tbl-colset-row', { hasText: '启用' })).toHaveCount(0);
     // 旧键里的 model / alias 顺序偏好仍被迁移保留（列仍按声明集合齐全）
-    await expect(panel.locator('.tbl-colset-row')).toHaveCount(7);
+    await expect(panel.locator('.tbl-colset-row')).toHaveCount(10);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -621,4 +623,6 @@ test.describe('模型管理 · 思考等级下拉与悬空映射', () => {
     await expect(section.locator('.mm-dg-item', { hasText: 'alias-free' })).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
+
+
 });

@@ -106,10 +106,11 @@ const COL_ORDER: AnyCol[] = ['check', 'model', 'rate', 'price', 'visibility', 's
  * check 3.5 / model 14.5 / rate 6 / pricing 10.5 / visibility 6 / source 5.5 /
  * budget 9.5 / caps 11 / alias 25 / act 8.5。
  *
- * 唯一保留的 AIGX 差异在**实现层**而不是数值层：act 那 8.5% 放不下本仓三颗按钮
- * （测试 / 计价 / 删除，~145px 内容）时，表格靠外层 `.mm-table-wrap` 横向滚动兜住
- * —— 与 A2A「列宽是绝对量、装不下就滚」同一条取舍（见 ui/table-columns.js 模块头），
- * 不再像早先那样把 act 改成 170px 定宽去挤压别列的比例。
+ * **act 例外，用 170px 定宽**：8.5%（≈70px）放不下本仓三颗按钮（测试 / 计价 /
+ * 删除 ≈145px），内容会向左溢出进映射列把「测试」盖住（真人点不到）。A2A 的 act
+ * 只有两颗按钮所以 8.5% 够；这是 AIGX 多一颗按钮的必然结果，不是数值抄错。
+ * 其余列的超宽部分由 `.mm-table-wrap` 横向滚动兜住 —— 与 A2A「列宽是绝对量、
+ * 装不下就滚」同一条取舍（见 ui/table-columns.js 模块头）。
  */
 const COL_DEFAULT_W: Record<AnyCol, string> = {
   check: '3.5%',
@@ -121,7 +122,11 @@ const COL_DEFAULT_W: Record<AnyCol, string> = {
   budget: '9.5%',
   caps: '11%',
   alias: '25%',
-  act: '8.5%',
+  // 唯一不由 A2A 数值决定的列：A2A 的 act 只有「测试/删除」两颗按钮，8.5%（≈70px）
+  // 够用；AIGX 多一颗「计价」，三颗 ≈145px，8.5% 会让内容向左溢出进映射列、
+  // 「测试」被 chip 盖住（真人点不到，Playwright 报 subtree intercepts pointer
+  // events）。这里改回文件头已记录过的定宽方案：170px —— td 内宽 150px ≥ 145px。
+  act: '170px',
 };
 /** 锁定列：恒显示（表不能没有勾选框 / 模型名 / 操作），但可参与拖序 */
 const LOCKED_COLS: AnyCol[] = ['check', 'model', 'act'];
