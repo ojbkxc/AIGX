@@ -85,6 +85,58 @@ pub enum PresetModelMatch {
     Unknown,
 }
 
+/// 厂商 → 线上模型名里的产品名词干。
+///
+/// 预设的 `vendor` 是**厂商名**（`Anthropic` / `Google` / `Zhipu AI` …），而 AIGX
+/// 线上模型名是**产品名**（`claude-sonnet-4-6` / `gemini-2.5-pro` / `glm-5.3` …），
+/// 两边没有任何公共子串 —— 只做字符串包含时，`Anthropic` 永远等不到 `claude`。
+///
+/// 2026-11-24 实测（线上 137 模型 × 53 预设）：exact 0.9% / vendor 0.6% /
+/// mismatch 98.4%；36 条预设在线上**一条都命不中**，137 个模型里 75 个无预设可套。
+/// 破甲控制台的「按模型自动套预设」因此对现有模型基本失效。
+///
+/// 这张表只做「这家厂商的模型」判定（落 `PresetModelMatch::Vendor`），不改变
+/// `Exact`「模型名真命中」的优先级。新增厂商时在这里补一行。
+const VENDOR_FAMILIES: &[(&str, &[&str])] = &[
+    ("anthropic", &["claude", "opus", "sonnet", "haiku"]),
+    ("openai", &["gpt", "o1", "o3", "o4", "chatgpt", "davinci"]),
+    ("google", &["gemini", "gemma", "palm"]),
+    ("zhipu", &["glm", "zcode", "chatglm"]),
+    ("alibaba", &["qwen", "qwq", "tongyi"]),
+    ("moonshot", &["kimi", "moonshot"]),
+    ("deepseek", &["deepseek"]),
+    ("xai", &["grok"]),
+    ("mistral", &["mistral", "mixtral", "codestral"]),
+    ("meta", &["llama", "muse"]),
+    ("xiaomi", &["mimo"]),
+    ("meituan", &["longcat"]),
+    ("tencent", &["hunyuan", "hy4"]),
+    ("stepfun", &["step"]),
+    ("bytedance", &["seed", "doubao", "skylark"]),
+    ("baidu", &["ernie", "wenxin"]),
+    ("minimax", &["minimax", "abab"]),
+    ("nvidia", &["nemotron"]),
+    ("microsoft", &["phi"]),
+    ("ling", &["ling"]),
+];
+
+/// 厂商名（预设侧，可能带作者前缀如 `0x8D jailbreaks`）→ 该厂商的产品名词干集合。
+///
+/// 判定方式：厂商名折叠后**包含**表中任一项的 key 即算这家。`0x8D jailbreaks`
+/// 这类作者签名不命中任何厂商，返回空集（这些预设只能靠模型名本身命中）。
+fn vendor_family_terms(vendor: &str) -> &'static [&'static str] {
+    let folded = fold_for_match(vendor);
+    if folded.is_empty() {
+        return &[];
+    }
+    for (key, terms) in VENDOR_FAMILIES {
+        if folded.contains(key) {
+            return terms;
+        }
+    }
+    &[]
+}
+
 /// 折叠大小写与分隔符：只保留字母数字。
 ///
 /// `Claude-3.5 Sonnet` / `claude_3_5_sonnet` / `claude35sonnet` 三者折叠后相同，
@@ -123,8 +175,20 @@ pub fn preset_match_for_model(vendor: &str, model: &str, active_model: &str) -> 
     if folded_model.is_empty() && folded_vendor.is_empty() {
         return PresetModelMatch::Unknown;
     }
+    // ① 字符串层：厂商名本身出现在模型名里（少见，但 `deepseek` / `qwen` 这类
+    //    既是厂商又是产品词的会走到这里）
     if overlaps(&folded_vendor, &active) {
         return PresetModelMatch::Vendor;
+    }
+    // ② 厂商族层：预设写的是厂商名（`Anthropic` / `Google` / `Zhipu AI`），线上
+    //    模型名是产品名（`claude-sonnet-4-6` / `gemini-2.5-pro` / `glm-5.3`），两边
+    //    没有公共子串 —— 必须靠 VENDOR_FAMILIES 把厂商映射到产品名词干才能命中。
+    //    没有这一层时实测 98.4% 的配对落 Mismatch，破甲「按模型自动套预设」对
+    //    线上模型基本失效。
+    for term in vendor_family_terms(vendor) {
+        if overlaps(&fold_for_match(term), &active) {
+            return PresetModelMatch::Vendor;
+        }
     }
     PresetModelMatch::Mismatch
 }
@@ -471,6 +535,14 @@ pub fn normalize_model_id(value: &str) -> String {
 pub enum PresetMatch {
     /// 同名模型（含「一行覆盖多模型」的双向包含写法）。
     Exact,
+    /// 同一个厂商族里的模型（`Anthropic` 的 Claude 系、`Google` 的 Gemini 系…）。
+    ///
+    /// 预设库写的是「某家某个型号」的破甲词（`opus v2` / `Gemini-4-Argon`），而
+    /// AIGX 线上跑的是产品名（`claude-sonnet-4-6` / `gemini-2.5-pro`）。这两套命名
+    /// 没有公共子串，只做同名比对时绝大多数模型套不上 —— 破甲控制台的「按模型
+    /// 自动套预设」对现有模型基本失效。族命中是它的兜底：同一家的破甲词对同家
+    /// 其它型号同样成立。
+    Family,
     /// 操作者在 `auto_preset_id` 里点名的预设。
     Pinned,
 }
@@ -501,7 +573,35 @@ pub fn preset_for_model(model: &str, pinned_id: &str) -> Option<(PresetDetail, P
             return Some((to_detail(preset), PresetMatch::Exact));
         }
     }
+    // 同名没命中 → 退到「同厂商族」。预设库里写的是某家某个型号（`opus v2`、
+    // `Gemini-4-Argon`、`grok-4.7`），线上跑的是产品名（`claude-sonnet-4-6`、
+    // `gemini-2.5-pro`），两套命名没有公共子串；不补这一层，破甲对绝大多数
+    // 现有模型都套不上（实测 137 个模型只有 62 个能被 Exact 命中）。
+    // 族内取**第一条**：目录已按 (vendor, model) 排序，同族多条时取排序最前的
+    // 那条，保证同一模型每次都命中同一个预设（不能随机漂）。
+    for preset in BUILTIN_PRESETS {
+        if vendor_family_matches(preset.vendor, &active) {
+            return Some((to_detail(preset), PresetMatch::Family));
+        }
+    }
     None
+}
+
+/// 厂商族命中判定：预设的 vendor 换算成产品名词干后，是否出现在模型名里。
+///
+/// `active` 必须是已经 `normalize_model_id` 过的值（只留字母数字并小写）。
+fn vendor_family_matches(vendor: &str, active: &str) -> bool {
+    if active.is_empty() {
+        return false;
+    }
+    vendor_family_terms(vendor).iter().any(|term| {
+        let folded: String = term
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .flat_map(char::to_lowercase)
+            .collect();
+        !folded.is_empty() && (active.contains(&folded) || folded.contains(active))
+    })
 }
 
 /// id 是否可安全用作单级目录名。
@@ -1111,6 +1211,89 @@ mod tests {
         assert!(preset_for_model("zzz-unknown-model-9", "").is_none());
         // 空模型：不猜。
         assert!(preset_for_model("   ", "").is_none());
+    }
+
+    /// 线上真实模型名 → 同厂商族的预设必须能套上。
+    ///
+    /// 这条钉的是 2026-11-24 修的那个洞：`preset_for_model` 原先只做「同名模型」
+    /// 双向包含，而预设库写的是某家某型号（`opus v2` / `Gemini-4-Argon` /
+    /// `grok-4.7`），线上跑的是产品名（`claude-sonnet-4-6` / `gemini-2.5-pro`），
+    /// 两套命名零公共子串 —— 实测 137 个线上模型只有 62 个（45%）能套上，破甲
+    /// 控制台的「按模型自动套预设」对现有模型基本失效。
+    #[test]
+    fn preset_for_model_falls_back_to_vendor_family() {
+        // 只能靠族兜底命中的：预设库里写的是同厂商的**别的型号**，模型名没公共子串。
+        // 这些在加族兜底之前是 Mismatch（线上 137 个模型里 75 个无预设可套）。
+        let family_cases = [
+            ("claude-sonnet-4-6", "anthropic"),
+            ("claude-opus-4-6-thinking", "anthropic"),
+            ("gemini-2.5-pro", "google"),
+            ("gemini-3.1-flash-lite", "google"),
+            ("claude-sonnet-4", "anthropic"),
+        ];
+        for (model, vendor_keyword) in family_cases {
+            let hit = preset_for_model(model, "")
+                .unwrap_or_else(|| panic!("{model} 应当能命中同厂商族的预设"));
+            assert_eq!(hit.1, PresetMatch::Family, "{model} 应落 Family 档");
+            assert!(
+                hit.0.vendor.to_lowercase().contains(vendor_keyword),
+                "{model} 命中的预设厂商是 {}，不含 {vendor_keyword}",
+                hit.0.vendor
+            );
+        }
+
+        // 同名能命中的仍走 Exact —— 族兜底不能抢在它前面。
+        let exact_cases = [
+            ("GLM-5.3-Flash", "zhipu"),
+            ("kimi-k3", "moonshot"),
+            ("Qwen3.8-Max", "alibaba"),
+            ("deepseek-v4.1-flash", "deepseek"),
+        ];
+        for (model, vendor_keyword) in exact_cases {
+            let hit =
+                preset_for_model(model, "").unwrap_or_else(|| panic!("{model} 应当能命中预设"));
+            assert_eq!(hit.1, PresetMatch::Exact, "{model} 应落 Exact 档");
+            assert!(
+                hit.0.vendor.to_lowercase().contains(vendor_keyword),
+                "{model} 命中的预设厂商是 {}，不含 {vendor_keyword}",
+                hit.0.vendor
+            );
+        }
+    }
+
+    /// 同一模型每次必须命中同一个预设（不能随机漂）。
+    #[test]
+    fn family_fallback_is_deterministic() {
+        let first = preset_for_model("claude-sonnet-4-6", "").map(|(d, k)| (d.id, k));
+        for _ in 0..5 {
+            assert_eq!(
+                preset_for_model("claude-sonnet-4-6", "").map(|(d, k)| (d.id, k)),
+                first
+            );
+        }
+    }
+
+    /// 族兜底不能把「真的一点关系都没有」的模型硬套上。
+    #[test]
+    fn family_fallback_still_declines_unrelated_models() {
+        // 这三个名字里不含任何厂商族词干，必须**明确返回 None** —— 不写
+        // `is_none() || Family` 那种几乎恒真的松断言，否则兜底一旦放宽成「什么都套」
+        // 这条测试照样绿。
+        for model in ["zzz-unknown-model-9", "poolside/laguna-s-2.1:free", "auto"] {
+            assert!(
+                preset_for_model(model, "").is_none(),
+                "{model} 不含任何厂商族词干，不该被套上预设"
+            );
+        }
+    }
+
+    /// 同名命中永远优先于族兜底（Family 只是兜底，不能抢 Exact）。
+    #[test]
+    fn exact_still_wins_over_family() {
+        let target = &BUILTIN_PRESETS[0];
+        let hit = preset_for_model(target.model, "").expect("同名模型应当命中");
+        assert_eq!(hit.1, PresetMatch::Exact);
+        assert_eq!(hit.0.id, target.id);
     }
 
     #[test]
