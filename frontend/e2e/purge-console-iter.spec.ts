@@ -247,6 +247,23 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('15 · 首次未改密的 403 要给改密引导，不是「加载失败」', async ({ page }) => {
+  // 只 mock 这一个接口：返回 403 + PASSWORD_CHANGE_REQUIRED（真后端的实际形状）
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      status: 403,
+      json: { code: 'PASSWORD_CHANGE_REQUIRED', error: 'Password change required', success: false },
+    }),
+  );
+  await loginAsAdmin(page);
+  await page.goto('/purge');
+
+  await expect(page.getByTestId('purge-need-password-change')).toBeVisible();
+  await expect(page.getByTestId('purge-need-password-change')).toContainText(/修改密码/);
+  // 反向：不该出现通用失败文案
+  await expect(page.getByText('网络异常或服务不可用，请稍后重试')).toHaveCount(0);
+});
+
 test('14 · 「清零统计」只清计数、不动配置', async ({ page }) => {
   let resetCalls = 0;
   let putCalls = 0;

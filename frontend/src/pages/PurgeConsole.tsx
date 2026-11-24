@@ -2049,6 +2049,8 @@ export default function PurgeConsole(): JSX.Element {
   const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
   /** 技能目录展开后的绝对路径（旧后端不返回 → 空串，不渲染那一行） */
   const [skillDirResolved, setSkillDirResolved] = useState('');
+  /** 管理面 403「必须先改密码」：整页给引导，而不是只说「加载失败」 */
+  const [needsPasswordChange, setNeedsPasswordChange] = useState(false);
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
   const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
   // 导入配置文件选择
@@ -2140,8 +2142,20 @@ export default function PurgeConsole(): JSX.Element {
       setSkills(res.data.skills ?? []);
       setSkillDirResolved(res.data.skill_dir_resolved ?? '');
       setDirty(false);
-    } catch {
-      addToast(t('加载失败'), 'error');
+    } catch (error) {
+      // 首次登录未改密时，管理面一律 403 PASSWORD_CHANGE_REQUIRED（不是 401）。
+      // 直接报「加载失败」会让人以为接口坏了——这里显式指路。
+      const err = error as { status?: number; message?: string } | undefined;
+      const mustChange =
+        err?.status === 403 &&
+        (localStorage.getItem('must_change_password') === '1' ||
+          /password/i.test(err?.message ?? ''));
+      if (mustChange) {
+        setNeedsPasswordChange(true);
+        addToast(t('首次登录需先修改密码，之后才能使用破甲控制台'), 'warning');
+      } else {
+        addToast(t('加载失败'), 'error');
+      }
     } finally {
       setLoading(false);
     }
@@ -2898,10 +2912,23 @@ export default function PurgeConsole(): JSX.Element {
           <h1>{t('破甲控制台')}</h1>
         </div>
         <Card>
-          <p className="purge-empty">{t('网络异常或服务不可用，请稍后重试')}</p>
-          <Button variant="primary" onClick={() => void load()}>
-            {t('重试')}
-          </Button>
+          {needsPasswordChange ? (
+            <>
+              <p className="purge-empty" data-testid="purge-need-password-change">
+                {t('首次登录必须修改密码后才能使用管理面（后端返回 403）。请到「个人资料」修改密码，然后回到本页重试。')}
+              </p>
+              <Button variant="primary" onClick={() => void load()}>
+                {t('已改好，重试')}
+              </Button>
+            </>
+          ) : (
+            <>
+              <p className="purge-empty">{t('网络异常或服务不可用，请稍后重试')}</p>
+              <Button variant="primary" onClick={() => void load()}>
+                {t('重试')}
+              </Button>
+            </>
+          )}
         </Card>
       </div>
     );
