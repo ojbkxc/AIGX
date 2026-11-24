@@ -247,6 +247,48 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('16 · 三个复制入口真的把内容写进剪贴板', async ({ page }) => {
+  // 剪贴板在无头环境不可靠：拦 writeText 记录内容，断言「复制出来的东西」而不只是按钮存在
+  await page.addInitScript(() => {
+    (window as unknown as { __copied: string[] }).__copied = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: (t: string) => {
+          (window as unknown as { __copied: string[] }).__copied.push(t);
+          return Promise.resolve();
+        },
+      },
+    });
+  });
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const read = () => page.evaluate(() => (window as unknown as { __copied: string[] }).__copied);
+
+  // ① 生效项：每行 `- ` 前缀
+  await page.getByTestId('purge-active-copy').click();
+  await expect.poll(async () => (await read()).length).toBe(1);
+  expect((await read())[0]).toMatch(/^- /m);
+
+  // ② 体检结果：mock 里有 3 条告警（info/error/warn）→ 按级分组输出
+  await page.getByTestId('purge-warning-copy').click();
+  await expect.poll(async () => (await read()).length).toBe(2);
+  const report = (await read())[1];
+  expect(report).toContain('## 不生效');
+  expect(report).toContain('异源递推空了');
+  expect(report).toContain('## 需确认');
+  expect(report).toContain('## 提示');
+
+  // ③ 现状快照：四段标题齐全
+  await page.getByTestId('purge-snapshot-copy').click();
+  await expect.poll(async () => (await read()).length).toBe(3);
+  const snapshot = (await read())[2];
+  for (const heading of ['## 运行', '## 当前生效项', '## 配置体检', '## 统计']) {
+    expect(snapshot).toContain(heading);
+  }
+});
+
 test('15 · 首次未改密的 403 要给改密引导，不是「加载失败」', async ({ page }) => {
   // 只 mock 这一个接口：返回 403 + PASSWORD_CHANGE_REQUIRED（真后端的实际形状）
   await page.route(/\/api\/purge(\?|$)/, (r) =>
