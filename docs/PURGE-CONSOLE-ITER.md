@@ -371,7 +371,7 @@ index（他们 staged 但还没 commit），`git commit` 把**整个 index** 提
 | `cargo test --bin aigx` | **2575 passed / 0 failed**（含 purge:: 87） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **315 passed / 0 failed**（PurgeConsole 109） |
+| vitest 全量 | **321 passed / 0 failed**（PurgeConsole 115） |
 | e2e（破甲页两个 spec，desktop） | **18 passed / 0 failed** |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
