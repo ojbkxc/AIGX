@@ -3496,7 +3496,7 @@ export default function PurgeConsole(): JSX.Element {
     // **用 ref 而不是 state 做并发判据**：`setPreviewing(true)` 是异步的，快速连点
     // 两次时第二次调用读到的还是旧的 `previewing=false`，会穿透判据发出两个请求；
     // 结果谁后到谁覆盖，用户看到的是「点了一下却跳了个别的结果」。
-    if (!current || previewing) return; // MUTANT2
+    if (!current || previewingRef.current) return;
     previewingRef.current = true;
     // 「按已保存配置预览」：草稿有未保存编辑时，用它区分「线上现在会怎样」
     // 与「保存后会怎样」——两者输出不同正是排障要看的对比。
