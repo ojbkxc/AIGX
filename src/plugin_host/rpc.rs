@@ -1913,17 +1913,22 @@ mod tests {
     async fn shutdown_fails_pending_call_instead_of_hanging() {
         let (client_read, client_write, plugin_read, plugin_write) = duplex_pair();
         let client = RpcChannel::new(client_read, client_write, Arc::new(NoopCallbacks));
-        // 插件侧：读走请求但不回帧（进程活着、卡住）
+        // 插件侧：读走请求但不回帧（进程活着、卡住）。读到帧即发信号，
+        // 让测试**确定性地**在「请求已写出」之后再 shutdown——原来靠
+        // `sleep(50ms)` 赌时序：慢机器上 call 可能还没登记就已经 shutdown，
+        // 断言照样绿（两条路径都给 `closed`），等于悄悄换了被覆盖的路径。
+        let (frame_seen_tx, frame_seen_rx) = tokio::sync::oneshot::channel::<()>();
         let mock = tokio::spawn(async move {
             let mut reader = BufReader::new(plugin_read);
             let _ = read_one_frame(&mut reader).await;
+            let _ = frame_seen_tx.send(());
             tokio::time::sleep(Duration::from_secs(30)).await;
             drop(plugin_write);
         });
         let call = client.call("ping", Value::Null);
         let shutdown = async {
-            // 让 call 先登记 pending 并进入等待
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // 等「请求帧已被读走」，而不是睡固定时间
+            frame_seen_rx.await.expect("mock 应读到请求帧");
             client.shutdown();
         };
         let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
