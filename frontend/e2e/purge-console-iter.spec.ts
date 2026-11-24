@@ -247,6 +247,48 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('36 · 词表搜索过滤不改变编辑目标（下标仍是真实的）', async ({ page }) => {
+  // 造 5 条规则（>3 才显示搜索框）。**先 mockPurge 再覆盖**：同一路径的 route
+  // 后注册者优先，顺序反了就会被基础 mock 盖掉。
+  const rules = [
+    { from: 'alpha', to: '1' },
+    { from: 'beta', to: '2' },
+    { from: 'gamma', to: '3' },
+    { from: 'delta', to: '4' },
+    { from: 'epsilon', to: '5' },
+  ];
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+
+  // 选择器必须限定到死区表：两张词表共用 `.purge-rules` class，
+  // 只写 `.purge-rules .purge-rule-row` 会把同义词表的行一并算进来
+  const rows = page.locator('[data-purge-fix="dead-zone-table"] .purge-rule-row');
+  await expect(rows).toHaveCount(5);
+
+  // 过滤到只剩 1 行，并显示匹配计数
+  await page.getByLabel('搜索死区词表').fill('gamma');
+  await expect(rows).toHaveCount(1);
+  await expect(page.getByText(/匹配 1 \/ 5 条/)).toBeVisible();
+
+  // 改这一行的「改写为」→ 必须写到**原来那一条**（下标 2），不能写到下标 0
+  await rows.first().getByLabel('改写为').fill('3-changed');
+  await page.getByLabel('搜索死区词表').fill('');
+  await expect(rows).toHaveCount(5);
+  const toValues = await rows.getByLabel('改写为').evaluateAll((els) =>
+    els.map((el) => (el as HTMLInputElement).value),
+  );
+  expect(toValues[2]).toBe('3-changed');
+  expect(toValues[0]).toBe('1');
+});
+
 test('35 · 「复制整表」输出 Tab 分隔文本，能粘回批量粘贴', async ({ page }) => {
   await page.addInitScript(() => {
     (window as unknown as { __copied: string[] }).__copied = [];

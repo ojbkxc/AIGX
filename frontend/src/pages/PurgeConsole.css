@@ -860,3 +860,14 @@
   font-size: 12px;
   line-height: 1.6;
 }
+/* 词表搜索行：输入框 + 匹配计数 */
+.purge-rule-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+.purge-rule-search .form-group {
+  margin: 0;
+  flex: 1;
+}

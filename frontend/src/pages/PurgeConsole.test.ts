@@ -8,6 +8,7 @@ import {
   countEmptyFromRules,
   capError,
   exportPreviewHistory,
+  filterRules,
   findBodySnippet,
   parseBatchRules,
   parsePreviewHistoryJson,
@@ -247,6 +248,38 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('filterRules', () => {
+  const rules = [
+    { from: 'Alpha', to: 'x' },
+    { from: 'b', to: 'Beta' },
+    { from: 'gamma', to: 'y' },
+  ];
+
+  it('空关键词返回全部（保持原序与原下标）', () => {
+    expect(filterRules(rules, '')).toEqual([
+      { rule: rules[0], index: 0 },
+      { rule: rules[1], index: 1 },
+      { rule: rules[2], index: 2 },
+    ]);
+    expect(filterRules(rules, '   ').length).toBe(3);
+  });
+
+  it('大小写不敏感，原文与改写都匹配', () => {
+    expect(filterRules(rules, 'alpha').map((i) => i.index)).toEqual([0]);
+    expect(filterRules(rules, 'BETA').map((i) => i.index)).toEqual([1]);
+  });
+
+  it('**保留原始下标**（过滤后编辑仍写真实位置）', () => {
+    const hit = filterRules(rules, 'gamma')[0];
+    expect(hit.index).toBe(2);
+    expect(hit.rule).toBe(rules[2]);
+  });
+
+  it('无命中 → 空数组', () => {
+    expect(filterRules(rules, 'zzz')).toEqual([]);
   });
 });
 

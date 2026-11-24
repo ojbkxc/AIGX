@@ -273,6 +273,27 @@ export function rulesToText(rules: ReadonlyArray<{ from: string; to: string }>):
   return rules.map((rule) => `${rule.from}\t${rule.to}`).join('\n');
 }
 
+/**
+ * 词表按关键词过滤（大小写不敏感，同时匹配原文与改写）。
+ *
+ * **保留原始下标**：过滤只是「看不看得到」，行内的编辑/删除/启停仍要写到
+ * 真实位置。用过滤后的下标去 patch 会把改动写到别的行上——这是列表过滤最
+ * 常见的错。
+ */
+export function filterRules<T extends { from: string; to: string }>(
+  rules: readonly T[],
+  keyword: string,
+): Array<{ rule: T; index: number }> {
+  const needle = keyword.trim().toLowerCase();
+  const indexed = rules.map((rule, index) => ({ rule, index }));
+  if (!needle) return indexed;
+  return indexed.filter(
+    (item) =>
+      item.rule.from.toLowerCase().includes(needle) ||
+      item.rule.to.toLowerCase().includes(needle),
+  );
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -2475,6 +2496,9 @@ export default function PurgeConsole(): JSX.Element {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   /** 与出厂默认的差异（null=没比过；空数组=完全一致） */
   const [defaultsDiff, setDefaultsDiff] = useState<SettingsDiffItem[] | null>(null);
+  /** 词表搜索关键词（两张表各一份；只影响显示，不参与保存） */
+  const [deadZoneQuery, setDeadZoneQuery] = useState('');
+  const [synonymQuery, setSynonymQuery] = useState('');
   /**
    * 词表「撤销上一次批量变更」的快照。
    *
@@ -4168,6 +4192,25 @@ export default function PurgeConsole(): JSX.Element {
             )}
           </p>
         ) : null}
+        {/* 词表搜索：50+ 条时找一条要滚很久；过滤只影响显示，编辑仍写真实下标 */}
+        {draft.rewrite_rules.length > 3 ? (
+          <div className="purge-rule-search">
+            <Input
+              aria-label={t('搜索死区词表')}
+              placeholder={t('搜索原文或改写')}
+              value={deadZoneQuery}
+              onChange={(event) => setDeadZoneQuery(event.target.value)}
+            />
+            {deadZoneQuery.trim() ? (
+              <span className="purge-hint">
+                {t('匹配 {{n}} / {{total}} 条', {
+                  n: filterRules(draft.rewrite_rules, deadZoneQuery).length,
+                  total: draft.rewrite_rules.length,
+                })}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {batchPaste === 'dead_zone' ? (
           <div className="purge-warning-box" role="group" data-testid="purge-batch-paste-panel">
             <p className="purge-warning-row">
@@ -4204,7 +4247,7 @@ export default function PurgeConsole(): JSX.Element {
           <p className="purge-empty" data-purge-fix="dead-zone-table">{t('暂无改写规则，点击右上角「添加规则」新建一条')}</p>
         ) : (
           <div className="purge-rules" ref={rulesRef} data-purge-fix="dead-zone-table">
-            {draft.rewrite_rules.map((rule, index) => (
+            {filterRules(draft.rewrite_rules, deadZoneQuery).map(({ rule, index }) => (
               <RuleRow
                 key={index}
                 rule={rule}
@@ -4291,11 +4334,29 @@ export default function PurgeConsole(): JSX.Element {
             )}
           </p>
         ) : null}
+        {draft.synonym_pairs.length > 3 ? (
+          <div className="purge-rule-search">
+            <Input
+              aria-label={t('搜索同义词表')}
+              placeholder={t('搜索原文或改写')}
+              value={synonymQuery}
+              onChange={(event) => setSynonymQuery(event.target.value)}
+            />
+            {synonymQuery.trim() ? (
+              <span className="purge-hint">
+                {t('匹配 {{n}} / {{total}} 条', {
+                  n: filterRules(draft.synonym_pairs, synonymQuery).length,
+                  total: draft.synonym_pairs.length,
+                })}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {draft.synonym_pairs.length === 0 ? (
           <p className="purge-empty">{t('暂无同义词，点击右上角「添加规则」新建一条')}</p>
         ) : (
           <div className="purge-rules" ref={synRulesRef} data-purge-fix="synonym-table">
-            {draft.synonym_pairs.map((rule, index) => (
+            {filterRules(draft.synonym_pairs, synonymQuery).map(({ rule, index }) => (
               <RuleRow
                 key={index}
                 rule={rule}
