@@ -311,6 +311,34 @@ describe('validateImportedSettings · 导出-导入自洽', () => {
     expect(verdict.warnings).toEqual([]);
   });
 
+  it('启用模板悬空 → 警告（后端会静默回退到 fixed suffix）', () => {
+    const verdict = validateImportedSettings({
+      active_template: 'missing-one',
+      structured_templates: [{ name: 't1', text: 'body' }],
+    });
+    expect(verdict.fatal).toEqual([]);
+    expect(verdict.warnings.some((w) => w.includes('missing-one'))).toBe(true);
+    expect(verdict.warnings.some((w) => w.includes('structured_suffix'))).toBe(true);
+  });
+
+  it('启用模板命中模板表 → 不警告', () => {
+    const verdict = validateImportedSettings({
+      active_template: 't1',
+      structured_templates: [{ name: 't1', text: 'body' }],
+    });
+    expect(verdict.warnings).toEqual([]);
+  });
+
+  it('启用模板为空/仅空白 → 不警告（用固定后缀是正常状态）', () => {
+    for (const v of ['', '   ', undefined]) {
+      const verdict = validateImportedSettings({
+        active_template: v,
+        structured_templates: [{ name: 't1', text: 'body' }],
+      });
+      expect(verdict.warnings).toEqual([]);
+    }
+  });
+
   it('降档目标非法值 → 警告（后端不清洗非空值）', () => {
     const verdict = validateImportedSettings({ reasoning_floor: 'extreme' });
     expect(verdict.fatal).toEqual([]);

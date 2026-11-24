@@ -1185,6 +1185,25 @@ export function validateImportedSettings(raw: unknown): ImportVerdict {
     if (unnamed > 0) warnings.push(`${unnamed} 个结构化模板没有名称，无法被「当前启用模板」选中`);
   }
 
+  // 启用的模板名悬空：后端会**静默回退**到 `structured_suffix`，用户以为在用自己的
+  // 模板，实际走的是另一套文本。（体检里已有 `preset_missing` 管「固定预设 id 悬空」，
+  // 这条是它的同族，之前漏了。）
+  if (typeof settings.active_template === 'string' && settings.active_template.trim()) {
+    const wanted = settings.active_template.trim();
+    const names = Array.isArray(settings.structured_templates)
+      ? settings.structured_templates
+          .map((tpl) =>
+            tpl && typeof tpl === 'object' ? String((tpl as { name?: unknown }).name ?? '') : '',
+          )
+          .filter(Boolean)
+      : [];
+    if (!names.includes(wanted)) {
+      warnings.push(
+        `「当前启用模板」指向「${wanted}」，但模板表里没有这个名字：后端会回退到固定后缀（structured_suffix）`,
+      );
+    }
+  }
+
   // 布尔字段非布尔：会被当 falsy，开关静默关闭
   const boolKeys = [
     'enabled',
