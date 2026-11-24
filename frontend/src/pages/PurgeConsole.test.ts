@@ -10,8 +10,22 @@ import {
   presetApplyNeedsConfirm,
   previewHistoryLabel,
   readPreviewHistory,
+  skillKeywordSample,
   writePreviewHistory,
 } from './PurgeConsole';
+
+describe('skillKeywordSample', () => {
+  it('关键词原样嵌入（子串匹配，多余包装不影响命中）', () => {
+    const sample = skillKeywordSample('troubleshooting');
+    expect(sample).toContain('troubleshooting');
+    expect(sample.trim()).not.toBe('troubleshooting');
+  });
+
+  it('首尾空白剔除；空关键词给空串（不产生伪装样例）', () => {
+    expect(skillKeywordSample('  net  ')).toContain(' net '.trim());
+    expect(skillKeywordSample('   ')).toBe('');
+  });
+});
 
 describe('persistPreviewHistory', () => {
   const store = new Map<string, string>();

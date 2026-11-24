@@ -153,6 +153,16 @@ const LIST_CAP = 64;
 const TEMPLATES_CAP = 32;
 
 /**
+ * 关键词 → 预览样例。技能命中是**子串**匹配（`keyword_matches` 走
+ * `contains`），所以样例只需把这个词原样包进一句自然语言里，既能验证
+ * 「这个词命中」，也看得出注入块插在消息尾部的位置。
+ */
+export function skillKeywordSample(keyword: string): string {
+  const trimmed = keyword.trim();
+  return trimmed ? `请帮我处理一下 ${trimmed} 相关的问题` : '';
+}
+
+/**
  * 列表字段超限提示（`null` = 未超限）。
  *
  * 与后端 `normalize` 的 `take(N)` 一一对齐：超限部分保存时被丢弃，
@@ -2379,7 +2389,8 @@ export default function PurgeConsole(): JSX.Element {
         </div>
       </Card>
 
-      {/* 技能扫描快照：让 skill_inject 配置可验证（目录里到底扫到了什么） */}
+      {/* 技能扫描快照：让 skill_inject 配置可验证（目录里到底扫到了什么）。
+          关键词可点：填进预览样例并滚到预览区——直接验证「这个词会不会命中」。 */}
       {skills.length > 0 && (
         <Card title={t('技能扫描快照')}>
           <ul className="purge-skill-list" data-purge-fix="skill-snapshot">
@@ -2392,7 +2403,27 @@ export default function PurgeConsole(): JSX.Element {
                     chars: skill.body_chars,
                   })}
                 </span>
-                <span className="purge-skill-keywords">{skill.keywords.slice(0, 6).join(' / ')}</span>
+                <span className="purge-skill-keywords">
+                  {skill.keywords.slice(0, 6).map((keyword) => (
+                    <button
+                      key={`${skill.name}-${keyword}`}
+                      type="button"
+                      className="purge-skill-keyword"
+                      title={t('用「{{keyword}}」做预览样例', { keyword })}
+                      onClick={() => {
+                        setPreviewInput(skillKeywordSample(keyword));
+                        focusFixTarget('preview');
+                      }}
+                    >
+                      {keyword}
+                    </button>
+                  ))}
+                  {skill.keywords.length > 6 ? (
+                    <span className="purge-skill-more">
+                      {t('另有 {{n}} 个', { n: skill.keywords.length - 6 })}
+                    </span>
+                  ) : null}
+                </span>
               </li>
             ))}
           </ul>
@@ -2485,6 +2516,7 @@ export default function PurgeConsole(): JSX.Element {
       </Card>
 
       <Card title={t('改写预览')}>
+        <span data-purge-fix="preview" />
         {/* 样例历史：点回填；右侧「删除 ×」单条移除，「清空」整表清掉。
             样例可能含敏感正文，历史必须可删（localStorage 会跨会话留存）。 */}
         {previewHistory.length > 0 && (
