@@ -215,6 +215,21 @@
   id 表，`total` 与翻页都会错。这条写进代码注释防后人误改。
 - e2e 补齐「应用预设 → 记录 → 徽标出现」真链路（纯函数单测只验了读写）。
 
+### 36. 真实部署环境审计（内网 http / 缓存 / 下载 / 移动端）
+这一批不是新功能，而是把「本地开发看不出、真实部署必踩」的入口逐个打穿：
+
+| 问题 | 症状 | 修法 |
+|---|---|---|
+| 内置 30s 技能缓存挡住「重新扫描」 | 放好 `SKILL.md` 点一下，界面仍空 —— 按钮像坏的 | `skill_briefs_with(dir, true)` + `GET /api/purge?skills=fresh` |
+| `navigator.clipboard` 在非安全上下文不存在 | 内网 `http://192.168.x.x` 下「复制全文」必失败，还提示「权限问题」 | `lib/clipboard.ts::copyText` 降级 textarea+execCommand |
+| `downloadText` 三处隐患 | 0 字节下载 / 老 Firefox 不触发 / 不可见 BOM 字面量 | revoke 延后 1s、append→click→remove、显式 `'\uFEFF'` |
+| 词表行窄屏 5 行高 | 加了「试」按钮后单列布局每控件一行 | 操作组收成 `.purge-rule-ops`，窄屏两行（83px→54px） |
+| 缺布局回归防线 | 再加控件挤爆窄屏没人发现 | e2e 第 13 条：页面级不溢出 + 容器级只报「被裁剪」 |
+
+**判据取舍（写进 e2e 注释）**：容器级溢出只报 `overflow-x: hidden` 那类。
+`visible` 的溢出可能只是绝对定位的触摸区撑大了 `scrollWidth`（开关的 44×44），
+既不产生滚动条也不裁剪；把它算缺陷会逼人砍可达性——本末倒置。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
@@ -246,13 +261,13 @@
 | `cargo test --bin aigx` | **2575 passed / 0 failed**（含 purge:: 87） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **272 passed / 0 failed**（PurgeConsole 84） |
-| e2e（破甲页两个 spec，desktop） | **17 passed / 0 failed** |
+| vitest 全量 | **279 passed / 0 failed**（PurgeConsole 84） |
+| e2e（破甲页两个 spec，desktop） | **18 passed / 0 failed** |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
-> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 35 批收口值）。
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 36 批收口值）。
 > **已修**：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
 > 曾偶发假红——固定 `sleep(50ms)` 当同步手段，并发负载下不够。已改为轮询等待
 > （每 5ms 查一次、最多 2s，判据不变），单跑 5 次 + 全量连跑 3 次全绿。
