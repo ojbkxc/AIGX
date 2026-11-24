@@ -776,3 +776,26 @@
   border-color: color-mix(in srgb, var(--accent-color, #4f46e5) 40%, transparent);
   background: transparent;
 }
+/* 页内导航条：横向可滚动（窄屏不换行挤成一堆） */
+.purge-pagenav {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding-bottom: 4px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.purge-pagenav-item {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.purge-pagenav-item:hover {
+  color: var(--accent-color, #4f46e5);
+  border-color: var(--accent-color, #4f46e5);
+}

@@ -244,6 +244,19 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('11 · 页内导航条可跳到各区块', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const nav = page.getByTestId('purge-pagenav');
+  await expect(nav).toBeVisible();
+  await expect(nav.getByRole('button')).toHaveCount(7);
+
+  // 点「改写预览」→ 落点拿到闪烁类（与体检「去修复」同一套机制）
+  await nav.getByRole('button', { name: '改写预览' }).click();
+  await expect(page.locator('[data-purge-fix="preview"].purge-fix-flash')).toHaveCount(1);
+});
+
 test('9 · 搜到正文时展开给出命中片段并高亮', async ({ page }) => {
   const body = '前置上下文'.repeat(12) + 'UniqueNeedleToken' + '后置上下文'.repeat(12);
   await page.route(/\/api\/purge\/presets\/[^/]+$/, (r) =>

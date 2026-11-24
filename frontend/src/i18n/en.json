@@ -4552,6 +4552,8 @@
   "搜索标题 / 厂商 / 模型 / 标签 / 正文": "Search title / vendor / model / tags / body",
   "正文命中": "Body match",
   "最近用过": "Recently used",
+  "页内导航": "In-page navigation",
+  "统计": "Stats",
   "你最近应用过这条预设": "You applied this preset recently",
   "标题/厂商/模型/标签里没有这个词，是正文里命中的": "Not in title/vendor/model/tags; matched inside the body",
   "搜索预设": "Search presets",

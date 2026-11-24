@@ -1441,6 +1441,39 @@ export function presetApplyNeedsConfirm(
   return hit !== undefined && hit.text !== text;
 }
 
+/** 破甲页的页内导航锚点（顺序 = 页面从上到下的顺序）。 */
+const PAGE_SECTIONS: Array<{ anchor: string; label: string }> = [
+  { anchor: 'stats', label: '统计' },
+  { anchor: 'switches', label: '开关' },
+  { anchor: 'dead-zone-table', label: '死区词表' },
+  { anchor: 'synonym-table', label: '同义词表' },
+  { anchor: 'skill-dir', label: '技能与模板' },
+  { anchor: 'presets', label: '预设库' },
+  { anchor: 'preview', label: '改写预览' },
+];
+
+/**
+ * 页内导航条：破甲页有 8 个区块、十几屏，滚到底想回顶部改一个开关要滑很久。
+ *
+ * 复用 `focusFixTarget`（同一次滚动 + 闪烁），不引入第二套跳转实现。
+ */
+const PageNav = memo(function PageNav({ t }: { t: TFunction }): JSX.Element {
+  return (
+    <nav className="purge-pagenav" aria-label={t('页内导航')} data-testid="purge-pagenav">
+      {PAGE_SECTIONS.map((section) => (
+        <button
+          key={section.anchor}
+          type="button"
+          className="purge-pagenav-item"
+          onClick={() => focusFixTarget(section.anchor)}
+        >
+          {t(section.label)}
+        </button>
+      ))}
+    </nav>
+  );
+});
+
 /**
  * 列表条目 + `model_match`。
  *
@@ -2942,6 +2975,9 @@ export default function PurgeConsole(): JSX.Element {
         </div>
       )}
 
+      {/* 页内导航：十几个屏的页面，跳转比滚轮快 */}
+      <PageNav t={t} />
+
       {/* 统计口径切换（旧后端无窗口数据 → 窗口档禁用并提示） */}
       <div className="purge-window-picker" role="group" aria-label={t('统计时间窗')}>
         {([
@@ -2972,6 +3008,7 @@ export default function PurgeConsole(): JSX.Element {
         </Button>
       </div>
 
+      <span data-purge-fix="stats" />
       <StatsGrid
         stats={stats}
         retryRate={retryRate}
@@ -3458,6 +3495,7 @@ export default function PurgeConsole(): JSX.Element {
       </Card>
 
       {/* 预设库：内置 prompt 集合浏览 + 一键落盘（放在结构化模板之上，应用后直接在下方看到结果） */}
+      <span data-purge-fix="presets" />
       <PresetsSection
         t={t}
         addToast={addToast}
