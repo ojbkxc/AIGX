@@ -247,6 +247,36 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('38 · 切到「上次运行」档时说明是哪一次（没有则说清为什么空）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  // mock 的 stats_last_run 为 null → 档位禁用；先把数据换成有快照
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: {
+          ...PURGE_DATA,
+          stats_last_run: {
+            ...PURGE_DATA.stats,
+            saved_at: 1_780_000_000,
+            uptime_secs: 3 * 3600 + 25 * 60,
+          },
+        },
+      },
+    }),
+  );
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(2000);
+
+  await page.getByRole('button', { name: '上次运行' }).click();
+  const note = page.getByTestId('purge-last-run-note');
+  await expect(note).toBeVisible();
+  await expect(note).toContainText(/上次运行快照/);
+  await expect(note).toContainText(/3 小时 25 分/);
+});
+
 test('37 · 「只看异常」先看清整理会删掉哪些行', async ({ page }) => {
   // 搜索行只在 >3 条时出现，所以要自备 5 条（含 1 条重复 + 1 条空改写）
   const rules = [

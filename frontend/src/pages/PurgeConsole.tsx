@@ -330,6 +330,23 @@ export function ruleIssues<T extends { from: string; to: string }>(
   return issues;
 }
 
+/** 「上次运行」档的说明文案（时间 + 那次进程活了多久）。 */
+export function lastRunNote(
+  snapshot: { saved_at: number; uptime_secs: number } | null | undefined,
+  tr: (key: string, params?: Record<string, string | number>) => string,
+): string {
+  if (!snapshot || !snapshot.saved_at) {
+    // 没有快照时**说明为什么空**，而不是让用户面对一排 0 猜「是没数据还是真没流量」
+    return tr('本进程还没关机过，所以没有「上次运行」快照。');
+  }
+  const when = new Date(snapshot.saved_at * 1000).toLocaleString();
+  const secs = snapshot.uptime_secs;
+  const hours = Math.floor(secs / 3600);
+  const mins = Math.floor((secs % 3600) / 60);
+  const span = hours > 0 ? tr('{{h}} 小时 {{m}} 分', { h: hours, m: mins }) : tr('{{m}} 分钟', { m: mins });
+  return tr('上次运行快照：{{when}}（那次进程运行了 {{span}}）', { when, span });
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -4008,6 +4025,12 @@ export default function PurgeConsole(): JSX.Element {
           {t('统计基线：{{time}}', {
             time: new Date(data.stats_since * 1000).toLocaleString(),
           })}
+        </p>
+      ) : null}
+      {/* 「上次运行」档：不说清是哪一次，一排数字等于没意义 */}
+      {statsWindow === 'last' ? (
+        <p className="purge-hint" data-testid="purge-last-run-note">
+          {lastRunNote(data.stats_last_run, (key, params) => t(key, params))}
         </p>
       ) : null}
       <SectionGuard title={t('统计')}>

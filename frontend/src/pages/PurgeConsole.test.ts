@@ -12,6 +12,7 @@ import {
   findBodySnippet,
   parseBatchRules,
   parsePreviewHistoryJson,
+  lastRunNote,
   normalizeSettingsArrays,
   noteRecentPreset,
   readDraftBackup,
@@ -249,6 +250,28 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('lastRunNote', () => {
+  const tr = (key: string, params?: Record<string, string | number>): string =>
+    params ? key.replace(/\{\{(\w+)\}\}/g, (_m, k: string) => String(params[k] ?? '')) : key;
+
+  it('没有快照 → 说明「没关机过」，而不是留一排 0 让人猜', () => {
+    expect(lastRunNote(null, tr)).toContain('还没关机过');
+    expect(lastRunNote({ saved_at: 0, uptime_secs: 99 }, tr)).toContain('还没关机过');
+  });
+
+  it('有快照 → 给出时刻与那次运行时长（小时档）', () => {
+    const note = lastRunNote({ saved_at: 1_780_000_000, uptime_secs: 3 * 3600 + 25 * 60 }, tr);
+    expect(note).toContain('上次运行快照');
+    expect(note).toContain('3 小时 25 分');
+  });
+
+  it('不足一小时走分钟档', () => {
+    const note = lastRunNote({ saved_at: 1_780_000_000, uptime_secs: 42 * 60 }, tr);
+    expect(note).toContain('42 分钟');
+    expect(note).not.toContain('小时');
   });
 });
 
