@@ -383,6 +383,21 @@ export function swapRules<T>(rules: readonly T[], index: number, delta: -1 | 1):
   return next;
 }
 
+/**
+ * 把指定下标的行停用（而不是删除）。
+ *
+ * 「异常行」多是空原文/空改写/重复：直接删是不可逆的，而**停用**既让它们不再参与
+ * 改写，又保留了用户可能想回填的内容。批量操作要给这个中间档，而不是只有「整理掉」。
+ */
+export function disableRulesAt<T extends { enabled?: boolean }>(
+  rules: readonly T[],
+  indices: ReadonlySet<number>,
+): T[] {
+  return rules.map((rule, index) =>
+    indices.has(index) ? { ...rule, enabled: false } : rule,
+  );
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -2978,6 +2993,30 @@ export default function PurgeConsole(): JSX.Element {
     );
   }, []);
 
+  /** 批量停用异常行（不删：删是不可逆的，停用还能回填后再启用） */
+  const disableIssues = useCallback(
+    (kind: 'dead_zone' | 'synonym'): void => {
+      const issues = kind === 'dead_zone' ? deadZoneIssues : synonymIssues;
+      if (issues.size === 0) return;
+      if (
+        !window.confirm(
+          t('将停用 {{n}} 条异常行（不删除，之后可再启用）。继续？', { n: issues.size }),
+        )
+      ) {
+        return;
+      }
+      setDirty(true);
+      setDraft((d) => {
+        if (!d) return d;
+        return kind === 'dead_zone'
+          ? { ...d, rewrite_rules: disableRulesAt(d.rewrite_rules, issues) }
+          : { ...d, synonym_pairs: disableRulesAt(d.synonym_pairs, issues) };
+      });
+      addToast(t('已停用 {{n}} 条异常行', { n: issues.size }), 'success');
+    },
+    [addToast, deadZoneIssues, synonymIssues, t],
+  );
+
   /** 撤销上一次词表批量变更（整理 / 批量粘贴 / 导入 CSV 共用一条撤销） */
   const undoTableChange = useCallback((): void => {
     const snapshot = tableUndo;
@@ -4397,6 +4436,16 @@ export default function PurgeConsole(): JSX.Element {
               />
               {t('只看异常 {{n}} 条', { n: deadZoneIssues.size })}
             </label>
+            {deadZoneIssues.size > 0 ? (
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="purge-dead-zone-disable-issues"
+                onClick={() => disableIssues('dead_zone')}
+              >
+                {t('批量停用异常行')}
+              </Button>
+            ) : null}
           </div>
         ) : null}
         {batchPaste === 'dead_zone' ? (
@@ -4554,6 +4603,16 @@ export default function PurgeConsole(): JSX.Element {
               />
               {t('只看异常 {{n}} 条', { n: synonymIssues.size })}
             </label>
+            {synonymIssues.size > 0 ? (
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="purge-synonym-disable-issues"
+                onClick={() => disableIssues('synonym')}
+              >
+                {t('批量停用异常行')}
+              </Button>
+            ) : null}
           </div>
         ) : null}
         {draft.synonym_pairs.length === 0 ? (

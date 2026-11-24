@@ -9,6 +9,7 @@ import {
   capError,
   exportPreviewHistory,
   filterRules,
+  disableRulesAt,
   findBodySnippet,
   parseBatchRules,
   parsePreviewHistoryJson,
@@ -252,6 +253,38 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('disableRulesAt', () => {
+  const rules = [
+    { from: 'a', to: '1', enabled: true },
+    { from: 'b', to: '2' }, // enabled 缺省（视为启用）
+    { from: 'c', to: '3', enabled: true },
+  ];
+
+  it('只停用指定下标，其余行不动', () => {
+    const next = disableRulesAt(rules, new Set([0, 2]));
+    expect(next[0].enabled).toBe(false);
+    expect(next[1]).toEqual({ from: 'b', to: '2' }); // 缺省行不被塞进 enabled:true
+    expect(next[2].enabled).toBe(false);
+  });
+
+  it('空集合 → 内容等价、但不返回原数组', () => {
+    const next = disableRulesAt(rules, new Set());
+    expect(next).toEqual(rules);
+    expect(next).not.toBe(rules);
+  });
+
+  it('不改原数组（避免就地变异掩盖问题）', () => {
+    disableRulesAt(rules, new Set([0]));
+    expect(rules[0].enabled).toBe(true);
+  });
+
+  it('**不删除行**（停用是中间档，删不可逆）', () => {
+    const next = disableRulesAt(rules, new Set([1]));
+    expect(next).toHaveLength(rules.length);
+    expect(next.map((r) => r.from)).toEqual(['a', 'b', 'c']);
   });
 });
 

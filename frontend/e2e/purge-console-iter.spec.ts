@@ -247,6 +247,42 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('42 · 「批量停用异常行」只停用不删除（可回填后再启用）', async ({ page }) => {
+  const rules = [
+    { from: 'dup', to: '1', enabled: true },
+    { from: 'dup', to: '2', enabled: true },
+    { from: 'ok', to: '3', enabled: true },
+    { from: '   ', to: 'emptyFrom', enabled: true },
+  ];
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+
+  const table = page.locator('[data-purge-fix="dead-zone-table"]');
+  const rows = table.locator('.purge-rule-row');
+  await expect(rows).toHaveCount(4);
+
+  page.once('dialog', (d) => void d.accept());
+  await page.getByTestId('purge-dead-zone-disable-issues').click();
+
+  // 行数不变（不删除），但异常行的启用勾选被去掉
+  await expect(rows).toHaveCount(4);
+  const enabled = await rows
+    .locator('input[type="checkbox"]')
+    .evaluateAll((els) => els.map((el) => (el as HTMLInputElement).checked));
+  // 只停用异常行：第 0 条 dup 是最早出现的（不重复，保持启用），
+  // 第 1 条重复、第 3 条空原文被停用
+  expect(enabled).toEqual([true, false, true, false]);
+  await expect(page.locator('.toast', { hasText: '已停用' })).toHaveCount(1);
+});
+
 test('41 · 词表可调序（改写按表序执行，顺序决定谁先命中）', async ({ page }) => {
   const rules = [
     { from: 'first', to: '1' },
