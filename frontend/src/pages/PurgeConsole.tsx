@@ -2675,7 +2675,11 @@ export default function PurgeConsole(): JSX.Element {
       setNumRaw(numRawOf(res.data.settings));
       setNumErrors({});
       setDirty(false);
-      // 落库成功 → 备份没有存在意义了（留着反而下次弹「恢复」误导）
+      // 保存成功后旧的词表撤销快照就过期了：它指向的是**已落库之前**的状态，
+      // 再点撤销等于把已保存的结果改回去（还不会自动落库），语义上不是「撤销
+      // 我刚才那一下」，而是「悄悄改回去」。宁可让入口消失。
+      setTableUndo(null);
+      // 落库成功 → 草稿备份没有存在意义了（留着反而下次弹「恢复」误导）
       writeDraftBackup(null, lsSetStable, lsRemoveStable);
       setSavedAt(Date.now());
       addToast(t('已保存'), 'success');

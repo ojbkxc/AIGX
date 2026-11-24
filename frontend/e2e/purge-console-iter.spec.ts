@@ -247,6 +247,28 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('34 · 保存成功后词表撤销入口失效（不能撤销已落库的结果）', async ({ page }) => {
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') {
+      await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+      return;
+    }
+    await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+  });
+  await gotoPurge(page);
+
+  // 批量粘贴产生可撤销快照
+  await page.getByTestId('purge-batch-paste-open').click();
+  await page.getByLabel('批量粘贴内容').fill('甲\tA');
+  await page.getByRole('button', { name: '解析并添加' }).click();
+  await expect(page.getByTestId('purge-table-undo')).toBeVisible();
+
+  // 保存 → 快照过期，入口消失（否则点它会把已落库的结果改回去）
+  await page.getByRole('button', { name: '保存' }).click();
+  await expect(page.getByTestId('purge-saved-at')).toBeVisible();
+  await expect(page.getByTestId('purge-table-undo')).toHaveCount(0);
+});
+
 test('33 · 页面明写「配置是全局的」（没有按用户隔离）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
