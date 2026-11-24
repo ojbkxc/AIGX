@@ -59,7 +59,7 @@ pub struct TraeBridge {
 impl TraeBridge {
     pub fn new(
         base: impl Into<String>,
-        _credential: impl Into<String>,
+        credential: impl Into<String>,
         headers: Vec<(String, String)>,
         client: reqwest::Client,
     ) -> Self {
@@ -78,6 +78,28 @@ impl TraeBridge {
                 .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
             {
                 merged.push((name.to_string(), value.to_string()));
+            }
+        }
+        // 认证头：真实客户端把 token 同时放在三处（`authorization` +
+        // `x-cloudide-token` + `x-ide-token`）。早先这里把 credential 参数写成
+        // `_credential` 整个忽略掉，请求里没有 authorization → 上游一律
+        // `{"code":"11-128","msg":"request illegal"}`（不是 401，是「非法客户端」）。
+        // 账号里显式配了同名头的以账号为准，不覆盖。
+        let credential = credential.into();
+        let credential = credential.trim();
+        if !credential.is_empty() {
+            let auth_value = format!("Cloud-IDE-JWT {credential}");
+            for (name, value) in [
+                ("authorization", auth_value.as_str()),
+                ("x-cloudide-token", credential),
+                ("x-ide-token", credential),
+            ] {
+                if !merged
+                    .iter()
+                    .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+                {
+                    merged.push((name.to_string(), value.to_string()));
+                }
             }
         }
         Self {
