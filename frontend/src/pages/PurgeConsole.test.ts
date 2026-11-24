@@ -9,6 +9,7 @@ import {
   tidyRules,
   tidySummary,
   diffLines,
+  diffSettings,
   diffTokensInLine,
   parsePreviewMessages,
   parseRulesCsv,
@@ -22,6 +23,83 @@ import {
   writePreviewHistory,
   writePresetFilter,
 } from './PurgeConsole';
+
+describe('diffSettings', () => {
+  const base = {
+    enabled: true,
+    system_normalize: false,
+    dead_zone_rewrite: false,
+    synonym_enabled: false,
+    reduce_reasoning: false,
+    cross_source_fallback: false,
+    skill_inject: false,
+    structured_prompt: false,
+    reasoning_floor: 'low',
+    retry_limit: 8,
+    fallback_trigger_attempt: 3,
+    fallback_models: [],
+    rewrite_rules: [],
+    synonym_pairs: [],
+    normalize_strip_prefixes: [],
+    skill_dir: '',
+    skill_inject_limit: 4000,
+    structured_suffix: '',
+    structured_templates: [],
+    active_template: '',
+    auto_preset: false,
+    auto_preset_id: '',
+    upstream_label: '',
+  };
+
+  it('完全相同 → 空数组', () => {
+    expect(diffSettings(base, { ...base })).toEqual([]);
+  });
+
+  it('布尔/数字/字符串各报一条，带 from→to', () => {
+    const items = diffSettings(base, {
+      ...base,
+      enabled: false,
+      retry_limit: 12,
+      reasoning_floor: 'medium',
+    });
+    expect(items).toHaveLength(3);
+    const joined = items.map((i) => JSON.stringify(i.params)).join();
+    expect(joined).toContain('"from":"开"');
+    expect(joined).toContain('"to":"12"');
+    expect(joined).toContain('"to":"medium"');
+  });
+
+  it('词表按条数+启用数报告（含停用行不计入启用）', () => {
+    const items = diffSettings(base, {
+      ...base,
+      rewrite_rules: [
+        { from: 'a', to: 'x' },
+        { from: 'b', to: 'y', enabled: false },
+      ],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].params).toMatchObject({ fromN: 0, fromE: 0, toN: 2, toE: 1 });
+  });
+
+  it('模板按名称集合比较（改名算变化）', () => {
+    const saved = { ...base, structured_templates: [{ name: 'A', text: 't' }] };
+    const draft = { ...base, structured_templates: [{ name: 'B', text: 't' }] };
+    expect(diffSettings(saved, draft)).toHaveLength(1);
+    // 仅改正文、名称不变 → 不报（模板正文编辑不在这条口径里）
+    expect(
+      diffSettings(saved, { ...base, structured_templates: [{ name: 'A', text: 'changed' }] }),
+    ).toEqual([]);
+  });
+
+  it('异源模型逐个比较', () => {
+    const items = diffSettings(
+      { ...base, fallback_models: ['a', 'b'] },
+      { ...base, fallback_models: ['a', 'c'] },
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].params).toEqual({ from: 'a,b', to: 'a,c' });
+  });
+});
 
 describe('tidyRules / tidySummary', () => {
   const rule = (from: string, to: string, enabled?: boolean) => ({ from, to, enabled });

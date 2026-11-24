@@ -198,6 +198,141 @@ export function tidySummary(result: RulesTidyResult): {
   };
 }
 
+/** 配置项对比结论的一行：`key` 是 i18n 文案，`params` 插值。 */
+export interface SettingsDiffItem {
+  key: string;
+  params?: Record<string, string | number>;
+}
+
+/**
+ * 对比「已保存」与「草稿」，列出改了什么（纯函数）。
+ *
+ * 为什么需要：破甲有 8 个开关 + 两张词表 + 模板/预设/技能，改完十几项之后
+ * 「我到底动了哪些」靠记忆；`dirty` 只告诉你有改动，不告诉你是哪几项。
+ *
+ * 口径刻意在**数据面语义层**而不是逐字段比对：
+ * - 两张词表按「条数 + 启用行数」报（改一行的 to 也要能看出来 → 再加 `sha` 式
+ *   全量比较不现实，改为「条数或启用数变化」才报）
+ * - 模板按名称集合比较（改名/增删都算变化）
+ * - `fallback_models` 按数组内容比较
+ */
+export function diffSettings(
+  saved: PurgeSettings,
+  draft: PurgeSettings,
+): SettingsDiffItem[] {
+  const items: SettingsDiffItem[] = [];
+  const bools: Array<[keyof PurgeSettings, string]> = [
+    ['enabled', '总开关'],
+    ['system_normalize', 'system 归一化'],
+    ['dead_zone_rewrite', '死区词改写'],
+    ['synonym_enabled', '同义词替换'],
+    ['reduce_reasoning', '降思考'],
+    ['cross_source_fallback', '异源递进'],
+    ['skill_inject', '技能注入'],
+    ['structured_prompt', '结构化提示'],
+    ['auto_preset', '按模型套预设'],
+  ];
+  for (const [field, label] of bools) {
+    if (saved[field] !== draft[field]) {
+      items.push({
+        key: '{{label}}：{{from}} → {{to}}',
+        params: {
+          label,
+          from: saved[field] ? '开' : '关',
+          to: draft[field] ? '开' : '关',
+        },
+      });
+    }
+  }
+
+  const nums: Array<[keyof PurgeSettings, string]> = [
+    ['retry_limit', '重试上限'],
+    ['fallback_trigger_attempt', '异源触发轮次'],
+    ['skill_inject_limit', '技能注入上限'],
+  ];
+  for (const [field, label] of nums) {
+    if (saved[field] !== draft[field]) {
+      items.push({
+        key: '{{label}}：{{from}} → {{to}}',
+        params: { label, from: String(saved[field]), to: String(draft[field]) },
+      });
+    }
+  }
+
+  const strs: Array<[keyof PurgeSettings, string]> = [
+    ['reasoning_floor', '降档目标'],
+    ['skill_dir', '技能目录'],
+    ['active_template', '启用模板'],
+    ['auto_preset_id', '固定预设 id'],
+    ['upstream_label', '上游标签'],
+  ];
+  for (const [field, label] of strs) {
+    if (saved[field] !== draft[field]) {
+      items.push({
+        key: '{{label}}：{{from}} → {{to}}',
+        params: {
+          label,
+          from: String(saved[field] || '—'),
+          to: String(draft[field] || '—'),
+        },
+      });
+    }
+  }
+
+  // 词表：条数或启用行数变化才报（逐行 diff 对「改了哪行」帮助有限，噪音更大）
+  const tables: Array<[keyof PurgeSettings, string]> = [
+    ['rewrite_rules', '死区词表'],
+    ['synonym_pairs', '同义词表'],
+  ];
+  for (const [field, label] of tables) {
+    const before = (saved[field] as PurgeRewriteRule[] | undefined) ?? [];
+    const after = (draft[field] as PurgeRewriteRule[] | undefined) ?? [];
+    const enabledOf = (rules: PurgeRewriteRule[]): number =>
+      rules.filter((rule) => rule.enabled !== false).length;
+    if (before.length !== after.length || enabledOf(before) !== enabledOf(after)) {
+      items.push({
+        key: '{{label}}：{{fromN}} 条（{{fromE}} 启用）→ {{toN}} 条（{{toE}} 启用）',
+        params: {
+          label,
+          fromN: before.length,
+          fromE: enabledOf(before),
+          toN: after.length,
+          toE: enabledOf(after),
+        },
+      });
+    }
+  }
+
+  // 模板：按名称集合比较（改名 / 增删都算变化）
+  const namesOf = (templates: Array<{ name: string }> | undefined): string =>
+    (templates ?? [])
+      .map((tpl) => tpl.name.trim())
+      .filter(Boolean)
+      .sort()
+      .join('|');
+  if (namesOf(saved.structured_templates) !== namesOf(draft.structured_templates)) {
+    items.push({
+      key: '结构化模板组发生变化（当前 {{n}} 个）',
+      params: { n: (draft.structured_templates ?? []).length },
+    });
+  }
+
+  // 异源模型：逐个比较（用户最关心「换了哪个模型」）
+  const beforeModels = (saved.fallback_models ?? []).join(',');
+  const afterModels = (draft.fallback_models ?? []).join(',');
+  if (beforeModels !== afterModels) {
+    items.push({
+      key: '异源模型：{{from}} → {{to}}',
+      params: {
+        from: beforeModels || '—',
+        to: afterModels || '—',
+      },
+    });
+  }
+
+  return items;
+}
+
 /** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值，
  *  `anchor` 是 `data-purge-fix` 锚点（点了滚到对应配置区）。 */
 export interface ActiveItem {
@@ -1672,6 +1807,7 @@ export default function PurgeConsole(): JSX.Element {
   const [previewSavedOnly, setPreviewSavedOnly] = useState(false);
   /** 预览时套用的模型（非空则一并预演「按模型自动套用」的预设前插） */
   const [previewModel, setPreviewModel] = useState('');
+  const savedForDiff = data?.settings;
   /** diff 只看变更行（长样例里上下文占绝大多数，遮住真正的改写点） */
   const [diffChangedOnly, setDiffChangedOnly] = useState(false);
 
@@ -2644,6 +2780,18 @@ export default function PurgeConsole(): JSX.Element {
       {dirty && (
         <div className="purge-dirty-bar" role="status">
           <span>{t('有未保存的修改')}</span>
+          {/* 改了什么：dirty 只说明「有改动」，这里列出来（换人接手/隔天回来看） */}
+          {savedForDiff ? (
+            <span className="purge-dirty-changes" data-testid="purge-dirty-changes">
+              {diffSettings(savedForDiff, draft)
+                .slice(0, 6)
+                .map((item) => t(item.key, item.params))
+                .join(' · ')}
+              {diffSettings(savedForDiff, draft).length > 6
+                ? ` · ${t('另有 {{n}} 项', { n: diffSettings(savedForDiff, draft).length - 6 })}`
+                : ''}
+            </span>
+          ) : null}
           <Button
             variant="outline"
             size="sm"
