@@ -96,27 +96,26 @@ const COL_ORDER: AnyCol[] = ['check', 'model', 'rate', 'price', 'visibility', 's
  *  act=170px 定宽（td 内宽 150px ≥ 按钮 ~145px）；% 列之和 ≈ (表宽−act)/表宽
  *  （822px 视口下 act 170 → % 之和 79%），余量给唯一的弹性富余列 alias。见 §9。 */
 /**
- * 列宽：**按 Agent2API page-gateway.css 的 `.c-*` 逐列比例**落（check 3.5 / model 14.5 /
- * rate 6 / pricing 10.5 / visibility 6 / source 5.5 / budget 9.5 / caps 11 / alias 25 /
- * act 8.5，合计 100%）。
+ * 列宽：**逐列照 Agent2API page-gateway.css 的 `.c-*`**（v3.5.1 实测值，合计 100%）：
+ * check 3.5 / model 14.5 / rate 6 / pricing 10.5 / visibility 6 / source 5.5 /
+ * budget 9.5 / caps 11 / alias 25 / act 8.5。
  *
- * 唯一的有意偏离：`act` 不用 8.5% 而用 170px。A2A 的 act 只有「测试/删除」两颗小按钮，
- * 11%≈90px 放得下；本仓是三颗（测试/计价/删除，~145px 内容），% 档在 822px 视口下会
- * 让「测试」向左溢出进映射列、真人点不到（历史实测）。所以 act 定宽 170px，其余九列
- * 按 A2A 的**相对比例**等比缩到 78.5%（79% 减去 act 后的等价预算），列与列的宽窄关系
- * 与 A2A 一致，只是整体让出 act 多要的那一截。见 §9 与交付说明。
+ * 唯一保留的 AIGX 差异在**实现层**而不是数值层：act 那 8.5% 放不下本仓三颗按钮
+ * （测试 / 计价 / 删除，~145px 内容）时，表格靠外层 `.mm-table-wrap` 横向滚动兜住
+ * —— 与 A2A「列宽是绝对量、装不下就滚」同一条取舍（见 ui/table-columns.js 模块头），
+ * 不再像早先那样把 act 改成 170px 定宽去挤压别列的比例。
  */
 const COL_DEFAULT_W: Record<AnyCol, string> = {
-  check: '3%',
-  model: '12.5%',
-  rate: '5%',
-  price: '9%',
-  visibility: '5%',
-  source: '4.5%',
-  budget: '8%',
-  caps: '9.5%',
-  alias: '21.5%',
-  act: '170px',
+  check: '3.5%',
+  model: '14.5%',
+  rate: '6%',
+  price: '10.5%',
+  visibility: '6%',
+  source: '5.5%',
+  budget: '9.5%',
+  caps: '11%',
+  alias: '25%',
+  act: '8.5%',
 };
 /** 锁定列：恒显示（表不能没有勾选框 / 模型名 / 操作），但可参与拖序 */
 const LOCKED_COLS: AnyCol[] = ['check', 'model', 'act'];
@@ -1467,8 +1466,12 @@ export default function ModelManage(): JSX.Element {
     }
   }, [searchParams]);
 
-  const toggleSelectAllPage = () => {
-    const keys = (groupedMode ? filtered : pageRows).map(rowKey);
+  /**
+   * 表头全选：作用域是**当前筛选出的全部行（跨分页）**，与 Agent2API allPickNode 一致
+   * （见 renderHeadCell 里那颗勾选框的 title）。聚合视图下 filtered 已经是分组展开前的全集。
+   */
+  const toggleSelectAllFiltered = () => {
+    const keys = filtered.map(rowKey);
     setSelected((prev) => {
       const next = new Set(prev);
       const allSelected = keys.length > 0 && keys.every((k) => next.has(k));
@@ -1577,18 +1580,64 @@ export default function ModelManage(): JSX.Element {
           </td>
         );
       case 'rate': {
-        // 「倍率」列（对齐 Agent2API `.c-rate` 的一格读数形态：短文本 + 无读数时给 `—`）。
-        // 数据源不同：A2A 读清单上的 credits 文本，本仓读 pricing 条目的 model_ratio。
-        // 1 倍是「没加价」而不是「有读数」—— 与 A2A 未声明时落 `—` 同一取舍。
-        const ratio = Number(row.model_ratio);
-        const hasRatio = Number.isFinite(ratio) && ratio !== 1;
+        // 「倍率」列：**照 Agent2API models-cells.tsx 的 rate 分支落**——渲染清单上的
+        // `credits` 文本（formatCredits），没有就读 `—`。
+        //
+        // 本仓的定价倍率 `model_ratio` 是另一个字段（后端 `ratio_config.model_ratio`，
+        // 语义是「价格倍率」而不是上游 credits）。严格 1:1 对齐时这一列只认 credits，
+        // model_ratio 仍在计价格里显示 ×N —— 两个字段语义不同，留哪个见「AIGX 独有项」。
+        //
+        // credits 目前不在 ManagedModel 声明里（后端也没下发）：按未知键读，读到什么
+        // 显示什么，读不到落 `—`，不猜。
+        const credits = (row as unknown as { credits?: unknown }).credits;
+        const rateText = typeof credits === 'string' && credits.trim() ? credits.trim() : '';
         return (
           <td key={col} className={`mm-c-rate ta-${colAlign.rate}`}>
-            {hasRatio ? (
-              <span className="mm-price-ratio" title={t('模型倍率：×{r}', { r: ratio })}>×{ratio}</span>
-            ) : (
-              <span className="mm-price-empty" title={t('未设置倍率（按 1 倍计价）')}>—</span>
-            )}
+            {rateText
+              ? <span className="mm-price" title={rateText}>{rateText}</span>
+              : <span className="mm-price-empty" title={t('这条清单没有倍率读数')}>—</span>}
+          </td>
+        );
+      }
+      case 'visibility': {
+        // 「可见性」列：三档 + 一档「没有判据」（照 A2A visibilityCell 的口径：
+        // hidden → 不展示、shown/visible → 可见、其余 → 没有判据）。
+        //
+        // 本仓后端暂不下发 `visibility`（ManageModel 里没有这个字段），所以当前所有行
+        // 都落最后一档；字段一旦补上，这里不用改 —— 归一化已按 A2A 的取值域写好了。
+        const raw = (row as unknown as { visibility?: unknown }).visibility;
+        const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+        if (value === 'hidden') {
+          return (
+            <td key={col} className={`mm-c-visibility ta-${colAlign.visibility}`}>
+              <span
+                className="mm-src-tag model-source"
+                title={t('上游能列出这个模型，但官方客户端不展示它；本仓已默认关闭它的默认绑定（点这一行的开关可以手动打开）')}
+              >
+                <i className="mm-src-dot manual" />
+                {t('不展示')}
+              </span>
+            </td>
+          );
+        }
+        if (value === 'shown' || value === 'visible') {
+          return (
+            <td key={col} className={`mm-c-visibility ta-${colAlign.visibility}`}>
+              <span className="mm-src-tag model-source" title={t('官方客户端会展示这个模型')}>
+                <i className="mm-src-dot builtin" />
+                {t('可见')}
+              </span>
+            </td>
+          );
+        }
+        return (
+          <td key={col} className={`mm-c-visibility ta-${colAlign.visibility}`}>
+            <span
+              className="mm-price-empty"
+              title={t('这条记录没有可见性判据（本仓后端暂未下发该字段；A2A 只有部分内置家有这一维）')}
+            >
+              —
+            </span>
           </td>
         );
       }
@@ -1614,10 +1663,21 @@ export default function ModelManage(): JSX.Element {
                   {t('免费')}
                 </span>
               ) : (
-                <span className="mm-price">
-                  {row.price.price_type === 'count'
-                    ? `$${fmtPrice(row.price.input_price)}/${t('次')}`
-                    : `$${fmtPrice(row.price.input_price)}/$${fmtPrice(row.price.output_price)}`}
+                // 两行制（对齐 A2A pricing 单元格：第一行读数、第二行是「这个读数怎么来的」）：
+                // A2A 第二行给计价来源 + 倍率；本仓没有 pricing.source 这一维，第二行就只放
+                // 定价倍率（`model_ratio`）—— 它是本仓唯一会修正最终价格的因子，属于「AIGX 独有项」，
+                // 见交付说明第 ③ 段（倍率列本身已按 A2A 改用 credits，这里是它原来的位置）。
+                <span className="mm-price" style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', lineHeight: 1.25 }}>
+                  <span>
+                    {row.price.price_type === 'count'
+                      ? `$${fmtPrice(row.price.input_price)}/${t('次')}`
+                      : `$${fmtPrice(row.price.input_price)}/$${fmtPrice(row.price.output_price)}`}
+                  </span>
+                  {row.model_ratio !== 1 && (
+                    <span className="mm-price-ratio" style={{ fontSize: 10.5, opacity: 0.85 }} title={`${t('定价倍率')}：×${row.model_ratio}`}>
+                      ×{row.model_ratio}
+                    </span>
+                  )}
                 </span>
               )
             ) : (
@@ -1893,7 +1953,8 @@ export default function ModelManage(): JSX.Element {
     rate: { label: t('倍率'), tip: t('按提供商分组排序，已启用模型优先；未知倍率排在末尾') },
     price: {
       label: t('计价'),
-      tip: t('点击任意单元格可覆盖单价；单位：美元（USD），按量价为每 1k tokens'),
+      // A2A 的 th title 逐字（单位信息在单元格自己的 title 里，见 renderCell 的 price 分支）
+      tip: t('点击任意单元格可覆盖单价或设置参考模型'),
     },
     // A2A 的 th title（逐字）：这一列在本仓尚无后端数据源，单元格落 `—` 并另挂一句说明
     visibility: {
@@ -1903,7 +1964,7 @@ export default function ModelManage(): JSX.Element {
     source: { label: t('来源') },
     budget: {
       label: t('上下文 / 输出'),
-      tip: t('数字带虚线底 = 由 models.dev 补齐；— = 未声明。点这一格可改。'),
+      tip: t('数字带虚线底 = 由 models.dev 补齐；右上角小点 = 你手动覆盖过；— = 未声明。点任意一格可改。'),
     },
     caps: {
       label: t('能力'),
@@ -1918,22 +1979,64 @@ export default function ModelManage(): JSX.Element {
 
   const renderHeadCell = (col: AnyCol): JSX.Element => {
     const def = COL_HEAD[col];
+    // 「倍率」表头可点排序（对齐 A2A models-page 的 `<TableHead data-col='rate'
+    //   sortDirection=… sortLabel=… onSortChange=…>`）：点一下升序、再点降序。
+    // 排序档位复用本页既有的 sortMode（default / rate-asc / rate-desc），所以表头与
+    // 筛选行里那三档「默认 / 倍率升序 / 倍率降序」分段控件**同源**，不会各排一套。
+    const rateSorting = col === 'rate';
+    const rateDir: 'asc' | 'desc' | null =
+      sortMode === 'ratio-asc' ? 'asc' : sortMode === 'ratio-desc' ? 'desc' : null;
+    const rateSortLabel = rateDir === 'asc'
+      ? t('倍率升序，点击切换为降序')
+      : rateDir === 'desc'
+        ? t('倍率降序，点击切换为升序')
+        : t('按倍率升序排列');
     return (
       <th
         key={col}
         className={`mm-h-${col} ta-${colAlign[col] ?? COL_DEFAULT_ALIGN[col]}`}
         title={def.tip}
+        aria-sort={rateSorting ? (rateDir === 'asc' ? 'ascending' : rateDir === 'desc' ? 'descending' : 'none') : undefined}
       >
         {col === 'check' ? (
           <input
             type="checkbox"
             aria-label={t('全选')}
-            checked={
-              (groupedMode ? filtered : pageRows).length > 0 &&
-              (groupedMode ? filtered : pageRows).every((r) => selected.has(rowKey(r)))
-            }
-            onChange={toggleSelectAllPage}
+            // 表头那颗勾选框的作用域 = **当前筛选出的全部行**（跨分页），与 A2A
+            // allPickNode 同一口径（它的 title 原文就是「全选当前筛选出的模型（跨分页）；再点取消」）。
+            // 早先只勾「当前页」，用户在分页视图里点它再删，会以为清掉了筛选结果。
+            title={t('全选当前筛选出的模型（跨分页）；再点取消')}
+            checked={filtered.length > 0 && filtered.every((r) => selected.has(rowKey(r)))}
+            onChange={toggleSelectAllFiltered}
           />
+        ) : rateSorting ? (
+          <button
+            type="button"
+            // 表头排序按钮**不用新 CSS 类**（本波不动 .css）：外观内联到既有观感 ——
+            // 透明底、继承字重、箭头只在有方向时着色，未排序时淡出。
+            style={{
+              border: 0,
+              background: 'transparent',
+              padding: 0,
+              font: 'inherit',
+              color: 'inherit',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+            }}
+            title={rateSortLabel}
+            aria-label={rateSortLabel}
+            onClick={() => setSortMode(rateDir === 'asc' ? 'ratio-desc' : 'ratio-asc')}
+          >
+            {def.label}
+            <span
+              aria-hidden="true"
+              style={{ fontSize: 10, opacity: rateDir ? 1 : 0.35, lineHeight: 1 }}
+            >
+              {rateDir === 'desc' ? '↓' : '↑'}
+            </span>
+          </button>
         ) : (
           def.label
         )}

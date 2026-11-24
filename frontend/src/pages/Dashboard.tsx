@@ -187,6 +187,16 @@ export default function Dashboard(): JSX.Element {
         <p>{admin ? t('AI 网关使用概览') : t('我的用量概览')}</p>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        {/* 时间窗口径说明（对齐 A2A report-page 的 `.report-date-caption` + TIP_RANGE 问号）：
+            窗口本身（RangeSwitcher）不在本波改动面，但「这段数字到底覆盖哪几天」这层口径
+            必须写在页面上 —— A2A 的原话：「近 N 天」含今天在内往前数，不是「不含今天的 N 天」。 */}
+        <span
+          className="report-date-caption"
+          title={t('时间范围。「今天」是本地自然日今天 0 点到现在；「近 7 日 / 近 30 日」含今天在内往前数，不是「不含今天的 7 / 30 天」。')}
+          style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
+        >
+          {win.start && win.end ? `${win.start} — ${win.end}` : t(rLabel)}
+        </span>
         <RangeSwitcher range={range} custom={custom} onChange={setRange} onCustomChange={setCustom} />
         {/* 页面自动刷新（beta.7）：报表任务，就地读写 scheduled-tasks */}
         <PageAutoRefreshControl taskId="reportAutoRefresh" />
