@@ -140,22 +140,29 @@ impl DatabaseManager {
 }
 
 /// 隐藏 URL 中的密码部分用于日志输出。
+///
+/// 只处理 **authority 段**（`scheme://` 之后到第一个 `/ ? #` 之前），且取该段里
+/// **最后一个** `@`：密码里带 `@`（`postgres://user:p@ss@host/db`）时，按第一个
+/// `@` 切会把 `ss@host` 当主机名原样打出来 —— 密码后半段进日志，而这一段的
+/// 唯一职责就是「别把密码写进日志」。authority 之外出现的 `@`（路径/query 里的
+/// 邮箱之类）不参与判定，避免把无凭据的 URL 改坏。
 fn sanitize_url(url: &str) -> String {
-    // 简单处理：如果包含 @，隐藏 :...@ 之间的密码
-    if let Some(at_pos) = url.find('@') {
-        if let Some(scheme_end) = url.find("://") {
-            let after_scheme = scheme_end + 3;
-            if after_scheme < at_pos {
-                let (scheme_part, rest) = url.split_at(after_scheme);
-                let (credentials, host_part) = rest.split_at(at_pos - after_scheme);
-                if let Some(colon_pos) = credentials.find(':') {
-                    let user = &credentials[..colon_pos];
-                    return format!("{}{}:***{}", scheme_part, user, host_part);
-                }
-            }
-        }
-    }
-    url.to_string()
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let after_scheme = scheme_end + 3;
+    let rest = &url[after_scheme..];
+    let authority_len = rest
+        .find(|ch| ch == '/' || ch == '?' || ch == '#')
+        .unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_len);
+    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+        return url.to_string();
+    };
+    let Some((user, _password)) = userinfo.split_once(':') else {
+        return url.to_string();
+    };
+    format!("{}://{}:***@{}{}", &url[..scheme_end], user, host, tail)
 }
 
 #[cfg(test)]
@@ -194,6 +201,41 @@ mod tests {
         assert_eq!(
             sanitize_url("sqlite://./data/aigx.db"),
             "sqlite://./data/aigx.db"
+        );
+    }
+
+    /// 密码里带 `@` 时按第一个 `@` 切会把密码后半段当主机名原样打出来。
+    #[test]
+    fn test_sanitize_url_password_containing_at() {
+        assert_eq!(
+            sanitize_url("postgres://user:p@ss@localhost:5432/aigx"),
+            "postgres://user:***@localhost:5432/aigx"
+        );
+        assert_eq!(
+            sanitize_url("mysql://root:a@b@c@10.0.0.1/db"),
+            "mysql://root:***@10.0.0.1/db"
+        );
+    }
+
+    /// authority 之外的 `@`（路径/query 里的邮箱）不参与判定，也不改坏 URL。
+    #[test]
+    fn test_sanitize_url_ignores_at_outside_authority() {
+        assert_eq!(
+            sanitize_url("postgres://localhost/db?owner=ops@example.com"),
+            "postgres://localhost/db?owner=ops@example.com"
+        );
+        assert_eq!(
+            sanitize_url("sqlite://./data/a@b/aigx.db"),
+            "sqlite://./data/a@b/aigx.db"
+        );
+    }
+
+    /// 用户名是多字节字符时按字符边界切片（`&url[..scheme_end]` 只取 ASCII scheme）。
+    #[test]
+    fn test_sanitize_url_multibyte_user() {
+        assert_eq!(
+            sanitize_url("postgres://运维:密码@localhost/db"),
+            "postgres://运维:***@localhost/db"
         );
     }
 }
