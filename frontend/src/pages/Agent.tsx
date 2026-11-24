@@ -13,7 +13,9 @@ import { MobileDrawer } from '../components/ui';
 import { usePasteGuard } from '../hooks/usePasteGuard';
 import MessageViewer from '../components/MessageViewer';
 import { api } from '../api';
+import { A2aAgentPanel } from './agent-a2a-panel';
 import './Agent.css';
+import './agent-a2a.css';
 
 /** SSE 推的事件（后端 AgentEvent 序列化形状） */
 interface AgentEvent {
@@ -440,7 +442,13 @@ export default function Agent(): JSX.Element {
   const hasMessages = messages.length > 0;
 
   return (
-    <div className="agent-shell">
+    <div className="agent-page">
+      {/* A2A（Agent2API v3.5.1）Agent 页主体：客户端检测 + 配置管理分区。
+          结构、分区、字段顺序、按钮与文案、空态、交互形态全部照 A2A v3.5.1。 */}
+      <A2aAgentPanel />
+
+      {/* AIGX 独有项（待评审）：AI 运维对话工作台，保留不动 */}
+      <div className="agent-shell">
       {/* 会话抽屉（共享 SessionDrawer：桌面侧栏 / 移动端覆盖层，删除带二次确认） */}
       <SessionDrawer
         variant="sidebar"
@@ -680,6 +688,7 @@ export default function Agent(): JSX.Element {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
