@@ -2569,6 +2569,30 @@ export default function PurgeConsole(): JSX.Element {
       addToast(t('存在重复的模板名称，请先修改再保存'), 'warning');
       return;
     }
+    // 超上限**保存前必须确认**：后端 normalize 会静默截断，只靠常驻提示的话
+    // 用户照样点保存、然后发现后半段词没了。
+    const overCap = [
+      { label: t('死区词改写'), n: current.rewrite_rules.length },
+      { label: t('同义词'), n: current.synonym_pairs.length },
+    ].filter((item) => item.n > RULE_TABLE_CAP);
+    if (overCap.length > 0) {
+      const detail = overCap
+        .map((item) =>
+          t('{{label}} {{n}} 条（将丢弃 {{drop}} 条）', {
+            label: item.label,
+            n: item.n,
+            drop: item.n - RULE_TABLE_CAP,
+          }),
+        )
+        .join('；');
+      if (
+        !window.confirm(
+          t('{{detail}}。保存只保留前 {{cap}} 条，继续？', { detail, cap: RULE_TABLE_CAP }),
+        )
+      ) {
+        return;
+      }
+    }
     let next = current;
     const rawNext = { ...numRaw };
     for (const f of NUM_FIELDS) {

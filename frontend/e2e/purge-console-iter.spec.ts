@@ -247,6 +247,40 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('30 · 词表超上限时保存前确认，取消则不保存', async ({ page }) => {
+  // 造 201 条规则（上限 200）：常驻警示之外，保存要走确认
+  const many = Array.from({ length: 201 }, (_, i) => ({ from: `k${i}`, to: `v${i}` }));
+  let puts = 0;
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') {
+      puts += 1;
+      await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+      return;
+    }
+    await r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: many } },
+      },
+    });
+  });
+  await gotoPurge(page);
+
+  await expect(page.getByTestId('purge-rules-over-cap')).toBeVisible();
+  await page.getByLabel('重试上限').fill('6');
+
+  // ① 取消 → 不发 PUT
+  page.once('dialog', (d) => void d.dismiss());
+  await page.getByRole('button', { name: '保存' }).click();
+  await page.waitForTimeout(600);
+  expect(puts).toBe(0);
+
+  // ② 确认 → 发 PUT
+  page.once('dialog', (d) => void d.accept());
+  await page.getByRole('button', { name: '保存' }).click();
+  await expect.poll(() => puts).toBe(1);
+});
+
 test('29 · 「放弃修改」先确认，取消则改动保留', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
