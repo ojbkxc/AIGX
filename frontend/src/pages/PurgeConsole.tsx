@@ -2808,6 +2808,8 @@ export default function PurgeConsole(): JSX.Element {
   const [loadErrorDetail, setLoadErrorDetail] = useState('');
   /** 批量粘贴面板：null=关，否则是哪张词表（就地展开，不引弹窗栈） */
   const [batchPaste, setBatchPaste] = useState<'dead_zone' | 'synonym' | null>(null);
+  /** 批量粘贴的 textarea（面板打开时把焦点送进去，省掉一次 Tab） */
+  const batchTextRef = useRef<HTMLTextAreaElement | null>(null);
   const [batchText, setBatchText] = useState('');
   /** 上次未保存的草稿备份（与服务器配置不同时才出现） */
   const [draftBackup, setDraftBackup] = useState<DraftBackup | null>(null);
@@ -3218,8 +3220,7 @@ export default function PurgeConsole(): JSX.Element {
     const closers: Array<{ isOpen: boolean; close: () => void }> = [
       { isOpen: batchPaste !== null, close: () => setBatchPaste(null) },
     ];
-    const active = closers.find((item) => item.isOpen);
-    if (!active) return;
+    const active = closers.find((item) => item.isOpen);    if (!active) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return;
       // 正在文本框里打字时也允许 Esc 收起面板（textarea 的 Esc 没有其他用途）
@@ -3228,6 +3229,12 @@ export default function PurgeConsole(): JSX.Element {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
+  }, [batchPaste]);
+
+  /** 面板打开就把焦点送进 textarea：键盘用户点开就能直接粘，不用再 Tab 一次 */
+  useEffect(() => {
+    if (batchPaste === null) return;
+    batchTextRef.current?.focus();
   }, [batchPaste]);
 
   /** 撤销上一次词表批量变更（整理 / 批量粘贴 / 导入 CSV 共用一条撤销） */
@@ -4783,6 +4790,7 @@ export default function PurgeConsole(): JSX.Element {
             <textarea
               className="purge-batch-text"
               aria-label={t('批量粘贴内容')}
+              ref={batchTextRef}
               rows={6}
               value={batchText}
               onChange={(event) => setBatchText(event.target.value)}

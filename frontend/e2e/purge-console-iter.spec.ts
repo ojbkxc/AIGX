@@ -284,6 +284,24 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('53 · 批量粘贴面板打开后焦点自动落在输入框', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  await page.getByTestId('purge-batch-paste-open').click();
+  // 打开就能直接打字（不用再 Tab 一次）
+  await expect(page.getByLabel('批量粘贴内容')).toBeFocused();
+  // 直接输入即可生效，无需先点击
+  await page.keyboard.type('甲');
+  await expect(page.getByLabel('批量粘贴内容')).toHaveValue('甲');
+
+  // 关掉再打开仍然聚焦（不是只有第一次）
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('purge-batch-paste-panel')).toHaveCount(0);
+  await page.getByTestId('purge-batch-paste-open').click();
+  await expect(page.getByLabel('批量粘贴内容')).toBeFocused();
+});
+
 test('52 · Esc 能收起批量粘贴面板（键盘用户不必找关闭按钮）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
