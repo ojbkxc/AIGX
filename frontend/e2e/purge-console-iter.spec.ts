@@ -247,6 +247,30 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('40 · 预览区的「回看当前生效项」能跳回摘要区', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const jump = page.getByTestId('purge-jump-active-summary');
+  await expect(jump).toBeVisible();
+
+  // 先滚到底（预览区），确认摘要不在视口内，再点跳转
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  const summaryTopBefore = await page
+    .locator('[data-purge-fix="active-summary"]')
+    .evaluate((el) => el.getBoundingClientRect().top);
+  expect(summaryTopBefore).toBeLessThan(0);
+
+  await jump.click();
+  await expect
+    .poll(async () =>
+      page.locator('[data-purge-fix="active-summary"]').evaluate((el) => el.getBoundingClientRect().top),
+    )
+    .toBeGreaterThan(-50);
+  // 复用同一套闪烁提示：落点会被标出来
+  await expect(page.locator('[data-purge-fix="active-summary"].purge-fix-flash')).toHaveCount(1);
+});
+
 test('39 · 「只看异常」的行会说明异常原因（不是只筛出来不解释）', async ({ page }) => {
   const rules = [
     { from: 'dup', to: '1' },

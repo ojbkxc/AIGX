@@ -4138,6 +4138,7 @@ export default function PurgeConsole(): JSX.Element {
 
       {/* 当前生效项：8 开关 + 两张词表 + 模板/预设/技能，配到十几项后没人能一眼
           说出「现在到底哪些在生效」；这里按数据面真实语义汇总（词表只算启用行）。 */}
+      <span data-purge-fix="active-summary" />
       <Card
         title={t('当前生效项')}
         actions={
@@ -4802,7 +4803,20 @@ export default function PurgeConsole(): JSX.Element {
         )}
       </Card>
 
-      <Card title={t('改写预览')}>
+      <Card
+        title={t('改写预览')}
+        actions={
+          // 预览在最底部、摘要在最上面：改完词表想确认「现在到底哪些在生效」要滚十几屏
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="purge-jump-active-summary"
+            onClick={() => focusFixTarget('active-summary')}
+          >
+            {t('回看当前生效项')}
+          </Button>
+        }
+      >
         <span data-purge-fix="preview" />
         {/* 样例历史：点回填；右侧「删除 ×」单条移除，「清空」整表清掉。
             样例可能含敏感正文，历史必须可删（localStorage 会跨会话留存）。 */}
