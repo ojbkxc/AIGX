@@ -426,6 +426,46 @@ export function importOverwriteItems(
   return diffSettings(saved, draft);
 }
 
+/** 布尔字段名（与 `SWITCHES` 同源的名字集合，导入时用来规范化）。 */
+const BOOLEAN_FIELDS = [
+  'enabled',
+  'system_normalize',
+  'dead_zone_rewrite',
+  'synonym_enabled',
+  'reduce_reasoning',
+  'cross_source_fallback',
+  'skill_inject',
+  'structured_prompt',
+  'auto_preset',
+] as const;
+
+/**
+ * 把布尔字段里的「非布尔值」规范化成明确布尔。
+ *
+ * 为什么必须显式做：界面用 `Boolean(draft[key])` 求值，而 **`Boolean('false')` 是
+ * `true`**（非空字符串恒真）。导入一个 `enabled: "false"` 会显示成**开启**，与用户
+ * 的理解相反，而且保存时后端反序列化会直接失败。靠隐式转换等于把错误藏起来。
+ *
+ * 认定规则（只认明确表示真值的写法，其余一律 false —— 宁关不开）：
+ * `true` / `1` / `'true'` / `'1'` / `'yes'` / `'on'`（大小写与首尾空白忽略）。
+ */
+export function normalizeBooleanFields<T extends Record<string, unknown>>(settings: T): T {
+  const truthy = new Set(['true', '1', 'yes', 'on']);
+  const next: Record<string, unknown> = { ...settings };
+  for (const key of BOOLEAN_FIELDS) {
+    const value = next[key];
+    if (value === undefined || typeof value === 'boolean') continue;
+    if (typeof value === 'string') {
+      next[key] = truthy.has(value.trim().toLowerCase());
+    } else if (typeof value === 'number') {
+      next[key] = value === 1;
+    } else {
+      next[key] = false;
+    }
+  }
+  return next as T;
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -1161,7 +1201,10 @@ export function validateImportedSettings(raw: unknown): ImportVerdict {
     (key) => settings[key] !== undefined && typeof settings[key] !== 'boolean',
   );
   if (badBool.length > 0) {
-    warnings.push(`这些开关不是布尔值，导入后会被当作关闭：${badBool.join('、')}`);
+    warnings.push(
+      `这些开关不是布尔值，已按「明确表示真」的写法归一（true / 1 / "true" / "yes" / "on" 为开，其余为关）：` +
+        badBool.join('、'),
+    );
   }
 
   return { fatal, warnings };
@@ -3831,7 +3874,11 @@ export default function PurgeConsole(): JSX.Element {
           return;
         }
       }
-      setDraft(normalizeSettingsArrays(settings));
+      setDraft(
+        normalizeSettingsArrays(
+          normalizeBooleanFields(settings as unknown as Record<string, unknown>) as unknown as PurgeSettings,
+        ),
+      );
       setNumRaw(numRawOf(settings));
       setNumErrors({});
       setDirty(true);

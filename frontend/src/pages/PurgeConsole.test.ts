@@ -17,6 +17,7 @@ import {
   parsePreviewHistoryJson,
   lastRunNote,
   normalizeSettingsArrays,
+  normalizeBooleanFields,
   noteRecentPreset,
   readDraftBackup,
   readPresetFilter,
@@ -343,6 +344,40 @@ describe('validateImportedSettings · 导出-导入自洽', () => {
   it('字符串数组本身不是数组 → fatal', () => {
     const verdict = validateImportedSettings({ fallback_models: 'glm-5' });
     expect(verdict.fatal.length).toBeGreaterThan(0);
+  });
+});
+
+describe('normalizeBooleanFields', () => {
+  it('**字符串 "false" 必须变成 false**（`Boolean("false")` 是 true）', () => {
+    expect(normalizeBooleanFields({ enabled: 'false' }).enabled).toBe(false);
+    expect(normalizeBooleanFields({ enabled: '0' }).enabled).toBe(false);
+  });
+
+  it('认可的真值写法归一为 true', () => {
+    for (const v of [true, 1, 'true', 'TRUE', ' yes ', 'on', '1']) {
+      expect(normalizeBooleanFields({ enabled: v }).enabled).toBe(true);
+    }
+  });
+
+  it('布尔值原样保留（不做无谓转换）', () => {
+    expect(normalizeBooleanFields({ enabled: true, skill_inject: false })).toMatchObject({
+      enabled: true,
+      skill_inject: false,
+    });
+  });
+
+  it('缺省字段不塞值（旧配置缺键时保持 undefined）', () => {
+    expect('enabled' in normalizeBooleanFields({})).toBe(false);
+  });
+
+  it('非字符串/非数字/非布尔 → false（宁关不开）', () => {
+    expect(normalizeBooleanFields({ enabled: null }).enabled).toBe(false);
+    expect(normalizeBooleanFields({ enabled: {} }).enabled).toBe(false);
+  });
+
+  it('其余字段原样带过', () => {
+    const out = normalizeBooleanFields({ enabled: 'true', retry_limit: 7 });
+    expect(out.retry_limit).toBe(7);
   });
 });
 
