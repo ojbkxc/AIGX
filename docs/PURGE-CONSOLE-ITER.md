@@ -347,6 +347,76 @@ index（他们 staged 但还没 commit），`git commit` 把**整个 index** 提
 
 多条 agent 同树时，index 是共享的，任何「只加自己的文件」的假设都不成立。
 
+### 42. 数字输入失焦就收敛并说明原因
+- 三个数字字段原先只在**保存时**统一 clamp：填 999 一路看着 999，点保存后变 32，
+  **没有任何说明**——会让人以为值丢了
+- `clampNumInput(field, raw)` 区分两种原因：整数值被范围收紧（`clamped`）vs 小数
+  被取整（`rounded`），提示文案说得准
+- 失焦收敛而不是 onChange：打「20」时中途是「2」，边打边 clamp 会打断输入
+
+### 43. 未保存草稿本地备份
+- `aigx.purge.draftBackup`（带 `savedAt`、**超 24h 视为过期**）
+- `dirty` 时 800ms 防抖写入；保存成功后立即清除
+- 加载时若备份与服务器配置不同 → 给恢复条（恢复 / 丢弃），**不静默套用也不静默丢弃**
+
+### 44. 「对比出厂默认」
+- 拉 `GET /api/purge/defaults`，与当前**草稿**比对（比的是「眼前这套 vs 默认」）
+- 有差异列出全部偏离项；无差异明确写「完全一致」，不给空列表
+
+### 45. Ctrl+S 快捷键提示
+- `Ctrl/⌘+S` 保存早就实现了，界面上零提示——能力藏着等于没有
+- 提示挂在**始终渲染**的 header 上（第一版放进「有未保存修改才出现」的警示条，
+  无改动时根本不渲染）；触屏设备隐藏
+- e2e 同时锁住两件事：未改动时不发 PUT、有改动才保存
+
+### 46. 区块级错误隔离 + 三层防御的边界
+- `SectionBoundary`（class + `componentDidCatch`）：只占坏掉那块，带区块名与重试
+- **本轮最大的认知**：`ErrorBoundary` 只能捕获「子组件渲染时」的异常，
+  **捕获不到「父组件构造 children 时」求值 props 的异常** ——
+  `<ParamGrid inflight={data.runtime.inflight} />` 的属性求值发生在当前组件渲染里，
+  包多少层 guard 都没用。派生阶段必须自己兜底。
+- 三层防御最终形态：
+  | 崩溃位置 | 有效手段 |
+  |---|---|
+  | 子组件渲染时 | 区块边界 |
+  | 父层构造 children 时 | **派生阶段零值兜底**（`EMPTY_STATS`/`EMPTY_RUNTIME`/`savedSettings`） |
+  | 不崩但数据畸形 | **显示层逐字段判据**（非数字给 `—`） |
+
+### 47. 数组字段在进入点规范化
+- 词表/模板/异源模型在 JSX 里到处 `.map()`/`.length`/`.join()`，都在父层渲染作用域
+- `normalizeSettingsArrays` 在**六个外部数据进入点**统一兜成真数组，渲染层一处不改
+- 已是数组时保持原内容与原引用（不深拷贝，避免破坏引用相等）
+
+### 48. 词表批量变更可一键撤销
+- 整理 / 批量粘贴 / CSV 替换 / CSV 追加 各记一次快照，label 点名是哪一次操作
+- 只保留**一步**（不做栈）；撤销本身也置 dirty
+- **保存成功时清掉快照**：否则能撤销已落库的结果（实测是漏洞）
+
+### 49. 「放弃修改」先确认并报清丢几项
+- 确认弹窗列出**具体项数和前 5 项**，而不是只问「要丢弃吗」
+- 无改动时不弹；放弃时一并清掉撤销快照
+
+### 50. 静默截断/丢弃的保存前拦截
+后端 `normalize` 有 8 个会静默截断的字段 + 空 `from` 会被静默剔除：
+- `collectCapOverflows` 集中汇总 8 个字段，**每项带自己的上限**（不是统一一个数）
+- `countEmptyFromRules` 数空原文行（`to` 为空是有效语义，不算）
+- 合并成一次保存前确认，文案按情况二选一；取消则不保存
+- **警示不等于防护**：常驻红字只提醒，真正的丢失发生在点保存那一刻
+
+### 51. 词表搜索 / 只看异常 / 复制整表
+- `filterRules` 返回**带原始下标**的条目：过滤只影响显示，编辑写真实位置
+  （用过滤后下标 patch 会写到别的行——列表过滤最常见的错）
+- `ruleIssues` 标出整理会删的行，**判据用测试钉死与 `tidyRules` 同口径**
+- `rulesToText` 输出 **Tab 分隔**（不是 CSV）：`parseBatchRules` 认 Tab，
+  所以能直接粘进另一张表的「批量粘贴」，也能粘进 Excel
+
+### 52. 状态可见性与作用域说明
+- header 显示「上次保存：HH:MM:SS」——**只记内存不落盘**（它回答「我这次存了没有」，
+  不是「历史上谁改过」；刷新后从空白开始才对）
+- 页面明写「这份配置是全局的，没有按用户/按密钥隔离」——新接手的人最容易误判成
+  「只影响我这个号」，从而随手试
+- 「上次运行」档给出快照时刻与那次运行时长；无快照时说明**为什么空**
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
@@ -378,13 +448,13 @@ index（他们 staged 但还没 commit），`git commit` 把**整个 index** 提
 | `cargo test --bin aigx` | **2575 passed / 0 failed**（含 purge:: 87） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **321 passed / 0 failed**（PurgeConsole 115） |
-| e2e（破甲页两个 spec，desktop） | **18 passed / 0 failed** |
+| vitest 全量 | **377 passed / 0 failed**（PurgeConsole 147） |
+| e2e（`purge-console-iter` 单 spec，desktop / mobile 各一次） | **38 passed / 0 failed**（×2 project） |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
-> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 40 批收口值；Rust 侧数字来自 CI，本机按 AGENTS.md 不编译）。
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 52 批收口值；Rust 侧数字来自 CI，本机按 AGENTS.md 不编译）。
 > **已修**：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
 > 曾偶发假红——固定 `sleep(50ms)` 当同步手段，并发负载下不够。已改为轮询等待
 > （每 5ms 查一次、最多 2s，判据不变），单跑 5 次 + 全量连跑 3 次全绿。
