@@ -3412,6 +3412,7 @@ export default function PurgeConsole(): JSX.Element {
             <label className="purge-rule-toggle" title={t('长样例里上下文行会遮住真正的改写点')}>
               <input
                 type="checkbox"
+                data-testid="purge-diff-changed-only"
                 checked={diffChangedOnly}
                 onChange={(event) => setDiffChangedOnly(event.target.checked)}
               />
