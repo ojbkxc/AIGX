@@ -2147,7 +2147,10 @@ mod tests {
             expired: 1,
             ..SkipReasons::default()
         };
-        assert!(!with_expired.only_concurrency_blocked(), "凭证过期不是只是忙");
+        assert!(
+            !with_expired.only_concurrency_blocked(),
+            "凭证过期不是只是忙"
+        );
 
         let with_cooling = SkipReasons {
             concurrency: 2,
@@ -2167,7 +2170,10 @@ mod tests {
             no_accounts: true,
             ..SkipReasons::default()
         };
-        assert!(!empty_channel.only_concurrency_blocked(), "空渠道不是只是忙");
+        assert!(
+            !empty_channel.only_concurrency_blocked(),
+            "空渠道不是只是忙"
+        );
     }
 
     /// 回归（R3）：在途计数从 `sessions` 拆到独立 `runtime` 表后，

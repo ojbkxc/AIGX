@@ -646,7 +646,8 @@ mod tests {
     /// 对齐 Agent2API v3.5.1 `account_admission::busy()`。
     #[test]
     fn account_busy_maps_to_503_with_its_own_code() {
-        let error = BridgeError::AccountBusy("当前路由内的账号均忙，排队等待超时，请稍后重试".into());
+        let error =
+            BridgeError::AccountBusy("当前路由内的账号均忙，排队等待超时，请稍后重试".into());
         let (status, body) = render_openai_error(&error);
         assert_eq!(status, 503, "全忙是「稍后重试」，不能折成 502");
         assert_eq!(body.kind, "account_busy");

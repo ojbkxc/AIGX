@@ -279,7 +279,10 @@ impl AccountBridge {
         &self,
         model: &str,
         alias: Option<&str>,
-    ) -> (Option<AccountLease>, crate::account_session::store::SkipReasons) {
+    ) -> (
+        Option<AccountLease>,
+        crate::account_session::store::SkipReasons,
+    ) {
         let (lease, mut reasons) = self.pick_account(model, alias);
         if lease.is_some() || !reasons.only_concurrency_blocked() {
             return (lease, reasons);
