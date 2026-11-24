@@ -64,9 +64,9 @@ export default function ToolVisionPanel({ onSharedError }: ToolVisionPanelProps)
       setView(modelRes?.data ?? null);
       if (payload?.config) {
         setProvider(payload.config.provider);
-        setModel(payload.config.upstream_model);
+        setModel(payload.config.upstreamModel);
         setReasoning(payload.config.reasoning ?? '');
-        setApiKeyId(payload.config.api_key_id ?? '');
+        setApiKeyId(payload.config.apiKeyId ?? '');
       }
       setNotReady(false);
       setError('');
@@ -280,10 +280,10 @@ export default function ToolVisionPanel({ onSharedError }: ToolVisionPanelProps)
         <div className="tvp-current">
           <span className="tvp-current-label">{t('当前绑定')}</span>
           <span>
-            {config.provider_label || config.provider} · {config.upstream_model}
+            {config.providerLabel || config.provider} · {config.upstreamModel}
             {config.reasoning ? ` · ${config.reasoning}` : ''}
           </span>
-          {config.api_key_name ? <span className="tvp-current-key">{config.api_key_name}</span> : null}
+          {config.apiKeyName ? <span className="tvp-current-key">{config.apiKeyName}</span> : null}
           {config.key_available === false ? (
             <Badge tone="warning">{t('所选 Key 已不可用')}</Badge>
           ) : null}

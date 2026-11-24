@@ -294,21 +294,39 @@ function InstalledScriptCard({
   );
 }
 
-/** 选项声明里的多语文案取值（labels/descriptions/confirms 优先，回退单语字段） */
+/**
+ * 选项声明里的文案取值。
+ *
+ * 取数顺序：**同一键**的多语对象 → 旧的复数键（`labels`/`descriptions`/`confirms`，
+ * 后端从未下发，只兼容手工构造的响应）→ 同一键的纯串。
+ *
+ * 关键点：后端（`provider_settings::schema::text`）允许 `label` / `description`
+ * 直接是**本地化对象** `{zh: "…", en: "…"}`。早前这里只把复数键当对象、把
+ * `option[key]` 当字符串，于是插件发对象时两路都不命中，界面退回渲染原始
+ * `option.key`（如 `fast`）——一句人话文案都没有。
+ */
 function optionWord(
   option: ScriptProviderOption,
   key: 'label' | 'description' | 'confirm',
   lang: string,
 ): string {
-  const map =
-    key === 'label' ? option.labels : key === 'description' ? option.descriptions : option.confirms;
-  if (map && typeof map === 'object') {
+  const pick = (map: Record<string, string> | undefined): string => {
+    if (!map || typeof map !== 'object') return '';
     for (const candidate of [lang, lang.split('-')[0], 'zh', 'zh-CN', 'en']) {
       const hit = map[candidate];
       if (typeof hit === 'string' && hit.trim()) return hit;
     }
-  }
+    return '';
+  };
   const single = option[key];
+  if (single && typeof single === 'object') {
+    const hit = pick(single);
+    if (hit) return hit;
+  }
+  const legacy =
+    key === 'label' ? option.labels : key === 'description' ? option.descriptions : option.confirms;
+  const legacyHit = pick(legacy);
+  if (legacyHit) return legacyHit;
   return typeof single === 'string' ? single : '';
 }
 

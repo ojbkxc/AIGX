@@ -3754,6 +3754,46 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     </tr>
   );
 
+  /**
+   * 编辑弹窗「公开信息（只读，由插件回报）」的行。
+   *
+   * 后端**不下发顶层 `public`**：`session_json` 只把公开投影放进 `plugin` 段
+   * （`plugin_account_view` 的返回值）。而 `plugin` 是「插件公开字段 + 网关事实」
+   * 的合并投影，里面还有 id/provider/models/rateLimits 这些已经被表单别处
+   * 展示过的网关键——整块平铺会和「由插件回报」的标题对不上。这里剔掉网关
+   * 注入的那批键（`plugin_account_view` 里 `public.insert(...)` 的那一组），
+   * 只留插件自己报的展示字段（email / nickname / edition / expiresAt 等）。
+   */
+  const pluginPublicFields = useMemo<Array<[string, unknown]>>(() => {
+    const raw = editing?.plugin as Record<string, unknown> | null | undefined;
+    if (!raw || typeof raw !== 'object') return [];
+    const GATEWAY_KEYS = new Set([
+      'id',
+      'provider',
+      'name',
+      'identity',
+      'source',
+      'enabled',
+      'hidden',
+      'needsRelogin',
+      'priority',
+      'weight',
+      'sortOrder',
+      'maxConcurrent',
+      'allowRouteSkip',
+      'rateLimits',
+      'models',
+      'addedAt',
+      'updatedAt',
+      'proxy',
+      // 下面四个是「有没有 / 能不能」的判据位，不是插件展示字段
+      'hasAccessToken',
+      'hasRefreshToken',
+      'canRefresh',
+    ]);
+    return Object.entries(raw).filter(([key]) => !GATEWAY_KEYS.has(key));
+  }, [editing]);
+
   if (loading) return <SkeletonTable columns={7} rows={5} />;
 
   return (
@@ -4672,11 +4712,11 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                 {dlgSeg === 'credential' && (
                   <>
                     {/* 插件账号：public 只读回显 + secret 只写（后端不回明文） */}
-                    {editing?.public && Object.keys(editing.public).length > 0 ? (
+                    {pluginPublicFields.length > 0 ? (
                       <div className="form-group as-plugin-public">
                         <label>{t('公开信息（只读，由插件回报）')}</label>
                         <ul className="as-public-list">
-                          {Object.entries(editing.public).map(([key, value]) => (
+                          {pluginPublicFields.map(([key, value]) => (
                             <li key={key}>
                               <span className="as-public-key">{key}</span>
                               <span className="as-public-value">

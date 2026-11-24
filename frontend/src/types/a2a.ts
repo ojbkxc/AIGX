@@ -250,16 +250,30 @@ export interface ToolProviderTestResult {
   duration_ms?: number;
 }
 
-/** 视觉分析绑定（provider + upstream_model + 思考等级 + 内部 Key） */
+/**
+ * 视觉分析绑定（provider + upstream_model + 思考等级 + 内部 Key）
+ *
+ * 字段名以**后端实际下发**为准：`tool_services::vision::VisionConfig` 带
+ * `#[serde(rename_all = "camelCase")]`，所以 `GET/PUT /api/tools/vision/config`
+ * 的 `config` 是 camelCase（`providerLabel` / `upstreamModel` / `downstreamModel` /
+ * `apiKeyId` / `apiKeyName`）。早前这里声明成 snake_case，前端读
+ * `config.upstream_model` / `config.api_key_id` 永远是 `undefined` —— 编辑弹窗
+ * 打开时「上游模型」「内部 Key」两格恒空（保存按钮因此被禁用），当前绑定摘要
+ * 那一行也恒为空。
+ *
+ * 只有后端在 `vision_config()` 里动态补的两个键是 snake_case：
+ * `configured` / `key_available`（`src/tool_services/vision.rs:162-163`）。
+ */
 export interface ToolVisionConfig {
   provider: string;
-  provider_label?: string;
-  upstream_model: string;
-  downstream_model?: string;
+  providerLabel?: string;
+  upstreamModel: string;
+  downstreamModel?: string;
   reasoning?: string;
-  api_key_id?: string;
-  api_key_name?: string;
+  apiKeyId?: string;
+  apiKeyName?: string;
   configured?: boolean;
+  /** 后端动态补的键（刻意 snake_case，与上游同口径） */
   key_available?: boolean;
 }
 

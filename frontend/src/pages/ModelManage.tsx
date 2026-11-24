@@ -1578,10 +1578,24 @@ export default function ModelManage(): JSX.Element {
     }
     const liveIds = new Set(v.models.map((m) => m.id.toLowerCase()));
     const out: Array<{ alias: string; target: string; fromBackend: boolean }> = [];
-    for (const [alias, raw] of Object.entries(v.mappings || {})) {
-      // 条目值兼容两种形态：纯串 / 对象（对象优先看 dangling 标记）
-      const target = typeof raw === 'string' ? raw : String(raw?.target || '');
-      if (typeof raw === 'object' && raw?.dangling === true) {
+    // 兜底推断：后端 `mappings` 是**逐条数组**（MappingView[]），旧扁平对象在
+    // `mappingsFlat`。两种形态都读，绝不对数组做 Object.entries（那会拿到下标串）。
+    const entries: Array<{ alias: string; target: string; dangling?: boolean }> = Array.isArray(
+      v.mappings,
+    )
+      ? v.mappings.map((m) => ({
+          alias: m.alias,
+          target: String(m.target || ''),
+          dangling: m.dangling === true,
+        }))
+      : Object.entries(v.mappingsFlat || {}).map(([alias, target]) => ({
+          alias,
+          target: String(target || ''),
+          dangling: false,
+        }));
+    for (const { alias, target, dangling } of entries) {
+      if (!alias) continue;
+      if (dangling) {
         out.push({ alias, target, fromBackend: true });
         continue;
       }

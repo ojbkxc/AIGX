@@ -786,15 +786,34 @@ export interface ManagedProviderGroup {
 export interface ManageView {
   providers: ManagedProviderGroup[];
   models: ManagedModel[];
-  /** 全局别名映射 alias → target（条目值也接受对象形态，新后端可带悬空标记） */
-  mappings: Record<string, string | { target?: string; dangling?: boolean; enabled?: boolean }>;
+  /**
+   * 逐条映射（后端 `view_json` 的 `"mappings"` 键 = `ManageView.mapping_entries`，
+   * **数组**，含 provider 维度 / 关闭 / 悬空）。
+   *
+   * 注意形状：后端 T5 起把 `mappings` 改成了数组，旧的扁平对象搬到了
+   * `mappingsFlat`。此处按后端实际下发声明为数组；只读扁平对象的地方
+   * （如 `RatioPanel` 的候选并集）必须读 `mappingsFlat`，否则
+   * `Object.keys(数组)` 会拿到 `"0"/"1"` 下标串并当成模型名。
+   */
+  mappings: Array<{
+    alias: string;
+    target: string;
+    provider?: string | null;
+    enabled?: boolean;
+    dangling?: boolean;
+    reasoning?: string | null;
+    is_default?: boolean;
+    carried?: boolean;
+  }>;
+  /** 旧扁平表 `{alias: target}`（后端 `view_json` 的 `"mappingsFlat"` 键） */
+  mappingsFlat?: Record<string, string>;
   /** 未定价的模型数 */
   unpriced: number;
   /**
-   * 后端逐条映射（后端 `mapping_entries`，含 provider 维度 / 关闭 / 悬空）。
-   * 新前端按这一份渲染 chip 与开关；旧后端不下发。
+   * 后端 `capability_store_ready`（camelCase `capabilityStoreReady`）。
+   * false = 能力三态存储未初始化，覆盖写入一律 500；管理页必须显示出来。
    */
-  mapping_entries?: Array<{ alias: string; target: string; provider?: string | null; enabled?: boolean; dangling?: boolean }>;
+  capabilityStoreReady?: boolean;
   /**
    * 后端标记的悬空映射（后端 `dangling`；目标模型不在清单里）。
    * #51 P1#8：后端字段名是 `dangling`，旧前端误读 `dangling_mappings` 只能自行推断。
@@ -1188,10 +1207,21 @@ export interface CheckinRecord {
   streakDays?: number;
 }
 
+/**
+ * POST /api/auth/totp/setup 响应。
+ *
+ * 后端实际只发 `secret` + `otpauth_uri` + `qr_content`（`src/api/admin/auth.rs:1558-1561`）。
+ * `otpauth_url` 是 A2A 侧的别名，AIGX **从不下发**——早前这里把它声明成必填 string，
+ * 读点一旦只认它就会拿到 `undefined`（现有读点 `otpauth_uri || otpauth_url` 侥幸没踩到）。
+ */
 export interface TotpSetupResult {
   secret: string;
-  otpauth_url: string;
+  /** 后端下发的 otpauth URI（扫码用） */
   otpauth_uri?: string;
+  /** 同一份 otpauth URI 的别名（后端同发；qr 前端可用） */
+  qr_content?: string;
+  /** 旧字段名：AIGX 不下发，仅为兼容保留 */
+  otpauth_url?: string;
 }
 
 export interface TotpEnableResult {
@@ -1615,17 +1645,19 @@ export interface AccountSessionItem {
   };
   /* ── 插件账号字段（A2A 对齐：secret 只写 / public 只读）── */
   /**
-   * 只读公开字段（插件申报的公开账号信息：昵称 / uid / 版本 / 到期时间等）。
-   * 后端**永不**回 secret；编辑时按只读展示，前端不参与写。
+   * **后端不下发顶层 `public`。** `session_json`（`src/api/admin/account_sessions.rs:961`）
+   * 只把公开投影塞进 `plugin` 段（`plugin_account_view` 的返回值，键含
+   * `hasAccessToken` / `hasRefreshToken` / `canRefresh` / `expiresAt` / `email`
+   * 与插件自报展示字段）。此字段只为「旧后端 / 手工构造的响应」保留，
+   * 读公开信息请用 `plugin`。
    */
   public?: Record<string, unknown> | null;
-  /** 是否有插件 secret（只回布尔，不回内容；编辑时 `secret` 输入框留空 = 不修改） */
-  has_secret?: boolean;
   /** 是否插件账号（后端 `is_plugin_account`；仅插件账号的 `plugin` 段有值） */
   is_plugin_account?: boolean;
   /**
    * 插件公开投影（后端 `plugin`；仅插件账号下发，含 hasAccessToken / hasRefreshToken /
    * canRefresh / expiresAt 与插件自报展示字段如 email/nickname）。#50 账号列 email 副行取它。
+   * 编辑弹窗的「公开信息（只读）」区块也读这一份。
    */
   plugin?: Record<string, unknown> | null;
   /** 登录态推算的「需要重新登录」提醒时刻（unix 秒；仅登录态型账号有，后端 relogin_due_at） */
@@ -2627,16 +2659,29 @@ export interface ScriptPackageView {
   error?: string | null;
 }
 
-/** 脚本包的单个 provider 选项声明（`settingsSchema.providerOptions` 项） */
+/**
+ * 脚本包的单个 provider 选项声明（`settingsSchema.providerOptions` 项）
+ *
+ * 宿主/A2A 只发 `label` / `description` 两个文案键，而且它们**既可以是字符串，
+ * 也可以是多语对象** `{zh: "…", en: "…"}`（后端 `provider_settings::schema::text`
+ * 就是这么校验的：纯串或本地化对象，最多 16 个 locale）。早前这里把 `label`
+ * 声明成 `string`，并另立了从未下发过的 `labels` / `descriptions` / `confirms`
+ * 复数键 —— 插件发本地化对象时 `typeof label === 'string'` 不成立，界面直接
+ * 回落到原始 `option.key`（如 `fast`），一句人话文案都没有。
+ */
 export interface ScriptProviderOption {
   key: string;
-  /** 多语标签（`labels` 优先，缺省 `label` 单语） */
-  label?: string;
+  /** 标签：纯串或多语对象 */
+  label?: string | Record<string, string>;
+  /** 旧的复数键：后端从未下发，仅为兼容手工构造的响应保留 */
   labels?: Record<string, string>;
-  description?: string;
+  /** 说明：纯串或多语对象 */
+  description?: string | Record<string, string>;
+  /** 旧的复数键：后端从未下发 */
   descriptions?: Record<string, string>;
-  /** 开启前的二次确认文案 */
-  confirm?: string;
+  /** 开启前的二次确认文案：纯串或多语对象 */
+  confirm?: string | Record<string, string>;
+  /** 旧的复数键：后端从未下发 */
   confirms?: Record<string, string>;
   default?: boolean;
 }

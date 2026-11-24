@@ -237,7 +237,15 @@ export default function RatioPanel(): JSX.Element {
     );
   };
 
-  /** 模型倍率候选：模型目录 ∪ 全局别名 ∪ 价格目录 ∪ 已配置倍率键（大小写不敏感去重） */
+  /**
+   * 模型倍率候选：模型目录 ∪ 全局别名 ∪ 价格目录 ∪ 已配置倍率键（大小写不敏感去重）
+   *
+   * 别名来源只认**扁平对象** `mappingsFlat`（后端 `view_json` 的
+   * `"mappingsFlat": view.mappings`）。后端 T5 起 `mappings` 是**逐条数组**
+   * （`MappingView[]`），对它做 `Object.keys` 只会拿到 `"0"/"1"` 下标串，
+   * 会被当成模型名塞进候选下拉——既丢全部真别名，又多出假候选。
+   * 旧后端没有 `mappingsFlat` 时回落到数组形态取 `alias`。
+   */
   const modelOptions = useMemo(() => {
     const seen = new Map<string, string>();
     const push = (name?: string) => {
@@ -250,7 +258,12 @@ export default function RatioPanel(): JSX.Element {
       push(m.id);
       m.aliases.forEach(push);
     });
-    Object.keys(manageView?.mappings ?? {}).forEach(push);
+    const flat = manageView?.mappingsFlat;
+    if (flat && typeof flat === 'object' && !Array.isArray(flat)) {
+      Object.keys(flat).forEach(push);
+    } else if (Array.isArray(manageView?.mappings)) {
+      manageView.mappings.forEach((entry) => push(entry?.alias));
+    }
     priceKeys.forEach(push);
     modelRows.forEach((r) => push(r.key));
     return [...seen.values()].sort((a, b) => a.localeCompare(b));
