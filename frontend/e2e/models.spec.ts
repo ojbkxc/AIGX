@@ -69,9 +69,16 @@ test.describe('模型管理', () => {
     await expect(glmRow.locator('.mm-c-source')).toHaveAttribute('title', /lxchat-glm/);
     await expect(wbRow.locator('.mm-c-source')).toHaveAttribute('title', /workbuddy-1/);
 
-    // 未定价模型显示占位
-    await expect(page.locator('.mm-price-empty')).toHaveCount(1);
-    await expect(dataRows(page).filter({ hasText: 'unpriced-model' })).toContainText('未定价');
+    // 未定价模型显示占位。注意 `.mm-price-empty` 这个类现在被三处复用
+    // （倍率列空读数 / 可见性列无判据 / 计价列未定价），全局计数会被无关格子
+    // 抬高，所以按列限定到计价格。
+    const unpricedRow = dataRows(page).filter({ hasText: 'unpriced-model' });
+    await expect(unpricedRow.locator('.mm-c-price .mm-price-empty')).toHaveCount(1);
+    await expect(unpricedRow).toContainText('未定价');
+    // 已定价的行不该有该占位
+    await expect(
+      dataRows(page).filter({ hasText: 'glm-4.7-flash' }).locator('.mm-c-price .mm-price-empty'),
+    ).toHaveCount(0);
 
     // 已定价模型显示输入/输出价
     await expect(dataRows(page).filter({ hasText: 'glm-4.7-flash' })).toContainText('0.001');
@@ -341,8 +348,13 @@ test.describe('模型管理', () => {
     });
 
     // wb-coder 行有一个账号来源（workbuddy-1）
-    const row = dataRows(page).filter({ hasText: 'wb-coder' });
-    await row.locator('.mm-act-btn', { hasText: '测试' }).click();
+    const row = dataRows(page).filter({ hasText: 'wb-coder' }).first();
+    // v3.5.1 的表格多了 visibility 列，操作列更靠右：横向滚动容器里直接 click
+    // 会在「元素位置不稳定」上耗到超时。显式滚到该格再点。
+    const testBtn = row.locator('.mm-act-btn', { hasText: '测试' });
+    await testBtn.scrollIntoViewIfNeeded();
+    await expect(testBtn).toBeEnabled();
+    await testBtn.click();
 
     const modal = page.locator('.mt-modal');
     await expect(modal).toBeVisible();

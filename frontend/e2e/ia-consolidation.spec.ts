@@ -243,9 +243,11 @@ test.describe('IA 整合 · 用户管理 / 系统设置 / 模型管理', () => {
     await page.goto('/settings');
     const nav = page.locator('.settings-nav');
     await expect(nav).toBeVisible();
-    // v1.0.82 起「定时任务」分类已升级为顶级「自动维护」页，设置页不再有该分类
+    // v1.0.82 起「定时任务」分类已升级为顶级「自动维护」页，设置页不再有该分类。
+    // 注意「账户」在 v3.5.1 对齐后**是**合法分类（A2A 的 12 分类含 account /
+    // notifications，AIGX 按同一顺序重排），旧断言「不含账户」已随这次对齐失效。
     await expect(nav).not.toContainText('定时任务');
-    await expect(nav).not.toContainText('账户');
+    await expect(nav).toContainText('账户');
 
     // 旧 ?tab=scheduled 书签重定向到顶级「自动维护」页
     await page.goto('/settings?tab=scheduled');
