@@ -208,6 +208,19 @@ test('6 · 「只看变更行」隐藏上下文并报出隐藏行数', async ({ 
   await expect(page.locator('.pdl-hidden-hint')).toHaveCount(0);
 });
 
+test('8 · 预设库搜索框告知检索范围覆盖正文', async ({ page }) => {
+  await mockPurge(page);
+  // 预设列表本身由另一个 spec 覆盖；这里只要搜索框的检索范围提示正确
+  await page.route(/\/api\/purge\/presets(\?|$)/, (r) =>
+    r.fulfill({ json: { success: true, data: { items: [], vendors: [], total: 0 } } }),
+  );
+  await gotoPurge(page);
+
+  const search = page.getByLabel('搜索预设');
+  await expect(search).toBeVisible();
+  await expect(search).toHaveAttribute('placeholder', /正文/);
+});
+
 test('7 · 「重置为默认」先确认再填草稿（不直接保存）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);

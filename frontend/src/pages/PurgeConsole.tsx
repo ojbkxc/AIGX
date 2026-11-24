@@ -1635,7 +1635,7 @@ const PresetsSection = memo(function PresetsSection({
       </p>
       <div className="purge-preset-toolbar">
         <Input
-          placeholder={t('搜索标题 / 厂商 / 模型 / 标签')}
+          placeholder={t('搜索标题 / 厂商 / 模型 / 标签 / 正文')}
           aria-label={t('搜索预设')}
           value={q}
           onChange={(event) => setQ(event.target.value)}
