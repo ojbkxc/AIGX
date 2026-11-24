@@ -383,6 +383,10 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "破甲统计导出（四档宽表 CSV）：只读进程内计数与上次运行快照，无副作用；数据面已由 /api/purge GET 覆盖，不另开 AI 面工具",
         ),
         (
+            "/api/purge/defaults",
+            "破甲出厂默认配置：只读默认值，无副作用；与 /api/purge GET 同为配置读取面，不另开 AI 面工具",
+        ),
+        (
             "/api/model-key-source",
             "模型 Key 进程内权威状态与重建代（撤销闸）：重建代等于批量撤销/放行 Key，属安全边界，须人工在环",
         ),

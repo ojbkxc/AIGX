@@ -1712,6 +1712,32 @@ export default function PurgeConsole(): JSX.Element {
     }
   }, [addToast, dupTemplates.size, numRaw, t]);
 
+  /**
+   * 重置为默认：拉出厂默认配置填进**草稿**（不直接保存）。
+   *
+   * 为什么走服务端取默认值而不是前端硬编码：默认值是有语义的（总开关默认开、
+   * 子开关默认组合、词表初始内容），前端硬编码会与后端 `PurgeSettings::default()`
+   * 漂移；服务端还做了 normalize，与「全新安装首次保存」结果一致。
+   */
+  const resetToDefaults = useCallback(async (): Promise<void> => {
+    if (!window.confirm(t('将把出厂默认配置填入草稿（未保存的编辑会丢失）。继续？'))) return;
+    try {
+      const res = await api.getPurgeDefaults();
+      if (!res.success || !res.data) throw new Error('defaults failed');
+      setDraft(res.data.settings);
+      setNumRaw(numRawOf(res.data.settings));
+      setNumErrors({});
+      setDirty(true);
+      setPreviewOut(null);
+      setPreviewBase(null);
+      setPreviewMeta(null);
+      setPreviewDetail(null);
+      addToast(t('已填入出厂默认配置，确认无误后点「保存」生效'), 'success');
+    } catch {
+      addToast(t('读取出厂默认配置失败'), 'error');
+    }
+  }, [addToast, t]);
+
   // 把最新的 dirty / save 交给 Ctrl+S 监听（监听只挂一次，读 ref 拿实时值）
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -2368,6 +2394,15 @@ export default function PurgeConsole(): JSX.Element {
             }}
           >
             {t('放弃修改')}
+          </Button>
+          {/* 重置为默认：只填草稿（用户确认后再点保存），不直接写库 */}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={saving}
+            onClick={() => void resetToDefaults()}
+          >
+            {t('重置为默认')}
           </Button>
         </div>
       )}

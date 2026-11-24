@@ -2534,6 +2534,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/purge/stats.csv",
             get(api::admin::handle_export_purge_stats),
         )
+        .route(
+            "/api/purge/defaults",
+            get(api::admin::handle_get_purge_defaults),
+        )
         // 破甲预设库：检索 / 详情 / 应用到结构化模板或技能目录
         .route(
             "/api/purge/presets",

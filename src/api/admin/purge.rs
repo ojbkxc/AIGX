@@ -33,6 +33,20 @@ pub async fn handle_get_purge(
 /// 单独一个端点而不是塞进 GET /api/purge：导出的消费方是「下载成文件」，
 /// 与 JSON 快照的生命周期不同（前者进 Excel/BI，后者是页面渲染数据）。
 /// Content-Disposition 带文件名，浏览器直接落盘为 .csv。
+/// GET /api/purge/defaults -- 出厂默认配置（只读，不碰存储）。
+///
+/// 用途：控制台「重置为默认」把默认值填进**草稿**（用户确认后再点保存），
+/// 所以这里不返回当前配置、也不写库。默认值经 `normalize` 归一，与「全新
+/// 安装首次保存」的结果一致——否则重置出来的配置与出厂态会有微妙差异。
+pub async fn handle_get_purge_defaults(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let defaults = normalize(PurgeSettings::default());
+    Ok(Json(json!({ "success": true, "settings": defaults })))
+}
+
 pub async fn handle_export_purge_stats(
     State(state): State<AppState>,
     headers: HeaderMap,

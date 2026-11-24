@@ -150,6 +150,9 @@ export const endpoints = {
     model?: string;
   }): Promise<ApiResponse<PurgePreviewResult>> =>
     request<ApiResponse<PurgePreviewResult>>('POST', `${API_BASE}/purge/preview`, payload),
+  // 破甲出厂默认配置（重置动作用；只读，不写库）
+  getPurgeDefaults: (): Promise<ApiResponse<{ settings: PurgeSettings }>> =>
+    request<ApiResponse<{ settings: PurgeSettings }>>('GET', `${API_BASE}/purge/defaults`),
   // 破甲预设库（内置 prompt 集合：检索 / 详情 / 应用）
   listPurgePresets: (params?: {
     q?: string;
