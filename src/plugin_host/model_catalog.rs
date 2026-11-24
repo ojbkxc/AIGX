@@ -454,6 +454,21 @@ mod tests {
         remove(&provider);
     }
 
+    /// 轮询等待条件成立（最多 2s，每 5ms 查一次）。
+    ///
+    /// 测试里**不要用固定 sleep 当同步**：spawn/后台任务在并发负载下随时可能
+    /// 超过固定等待，造成假红；空载时又白等。判据保留在调用点（超时即失败）。
+    async fn wait_until(mut cond: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !cond() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "等待条件在 2s 内未成立（疑似后台任务未执行或去抖窗口未到）"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     /// 通知 → 去抖 → 触发一次：同一 provider 在窗口内的多次 `models_changed`
     /// 合并；窗口过后再通知会再次触发。
     #[tokio::test]
@@ -470,7 +485,9 @@ mod tests {
         for _ in 0..6 {
             notify_models_changed_after(&provider, "acc", Duration::from_millis(20));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // 轮询等「触发发生了」而不是固定睡 100ms：去抖是后台任务，窗口到点后
+        // 还要排到执行，固定等待在负载下会假红（本仓已有同类先例）。
+        wait_until(|| HITS.load(Ordering::SeqCst) == 1).await;
         assert_eq!(
             HITS.load(Ordering::SeqCst),
             1,
@@ -478,11 +495,12 @@ mod tests {
         );
         // 新窗口 → 再次触发（去抖只合并窗口内，不是永久去重）
         notify_models_changed_after(&provider, "acc", Duration::from_millis(10));
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        wait_until(|| HITS.load(Ordering::SeqCst) == 2).await;
         assert_eq!(HITS.load(Ordering::SeqCst), 2, "新窗口应再次触发");
-        // 空 provider 直接忽略
+        // 空 provider 直接忽略：这里必须**等**一段固定时间再断言「计数没变」
+        // ——「没有发生」无法轮询观测，只能等一个上界（与前两处不同）。
         notify_models_changed_after("   ", "acc", Duration::from_millis(10));
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(HITS.load(Ordering::SeqCst), 2, "空 provider 不应触发");
     }
 }

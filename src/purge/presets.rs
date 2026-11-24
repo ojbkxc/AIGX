@@ -729,7 +729,7 @@ mod tests {
         assert_eq!(hit.body_match, Some(true), "靠正文命中应打标");
 
         // 元数据命中（用 id 当检索词）→ 不打标（否则每条都挂徽标，噪音）
-        let (items, _, _) = list(Some(&target.id), None, None, MAX_LIMIT);
+        let (items, _, _) = list(Some(target.id), None, None, MAX_LIMIT);
         let hit = items
             .iter()
             .find(|p| p.id == target.id)
