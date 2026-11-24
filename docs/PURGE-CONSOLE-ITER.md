@@ -113,6 +113,62 @@
 - `chained_rewrite` 只看**启用行**（停用行正是用户掐链的手段，报警是噪音）。
 - 无告警且总开关开 → 绿字「配置体检通过」；总开关关 → 不显示。
 
+### 19. 统计导出 CSV（四档宽表）
+- `GET /api/purge/stats.csv`：`stats_csv(last_run)` 纯函数产出表头 + 全程 +
+  近 1h + 近 24h + 上次运行（**无记录则不出该行**——「没有上次运行」与
+  「上次运行全是 0」是两件事）。
+- 宽表而非「指标,值」两列：报表最常见的是同一指标跨档对比，透视表直接可用。
+- `lower_bound` 列标出窗口值是否为下界估计；表头与取值共用 `STATS_CSV_COLUMNS`。
+
+### 20. Ctrl/Cmd+S 保存
+- dirty 才拦截（未改动时放行浏览器自带保存）；监听只挂一次，读
+  `dirtyRef`/`saveRef`——否则 `save` 依赖 `numRaw`，每敲一个字都重挂监听。
+
+### 21. 配置导入两级结构校验
+- `validateImportedSettings`：**fatal**（拒收并点名）= 根非对象、8 个数组字段
+  非数组或含非对象条目、词表行 from/to 非字符串（点名第几条）；**warnings**
+  （照导，toast 说全）= 数字越界/非数字、模板缺名、布尔非布尔。
+- 缺省字段一律不算问题（旧导出文件必须能导回）。
+
+### 22. 「当前生效项」摘要 + 每条可点
+- `buildActiveSummary(settings)` 按数据面真实语义汇总（词表只算启用行、开关开着
+  无启用行要明说）；返回 `{key, params, anchor}` 而非拼好的中文串。
+- `anchor` 复用体检告警的 `data-purge-fix`，点击滚动到对应配置区；总开关关闭
+  那条不带锚点（无处可跳，不给可点的假象）。
+
+### 23. 体检告警 severity 分级
+- 后端 `Severity{Error,Warn,Info}` + `severity_of(code)` 纯函数（**刻意不塞进
+  `ConfigWarning` 结构体**：severity 完全由 code 决定，存字段就多一处不一致
+  来源）。Error = 静默失效、Warn = 效果不符预期、Info = 脏但无害、未登记兜底 Error。
+- 前端 `sortWarningsBySeverity` 稳定排序（Error 先），每行加徽标与色条。
+- **锁步测试**：从源码抽 code 字面量全集，断言每个都在 `severity_of` 显式出现。
+
+### 24. 技能快照空态常驻 + 手动重新扫描
+- 原条件 `skills.length > 0` 让空目录时卡片完全不出现，看起来像「扫描成功但没
+  内容」；改常驻 + 空态文案 + 「重新扫描」按钮（复用 `refreshSkills`）。
+
+### 25. 词表 CSV 导入「替换」模式
+- 默认追加（既有语义）；勾「替换」则整表换掉，**跳过「全部重复就拒收」预检**
+  —— 那个判据是为「追加时导错文件」设计的，替换场景里「全部重复」是正常情况。
+- 表非空先 `confirm` 并报出「N 条替换当前 M 条（含未保存编辑）」。
+
+### 26. 预设库筛选持久化 + 样例历史导出/导入
+- `aigx.purge.presetFilter`：两项都空时**移除键**；坏值 → 空筛选；搜索词读写
+  都截 200 字符。
+- 样例历史导出 `{version, samples}`；导入接受三种形态，**校验口径与写历史完全
+  一致**（否则「导进 20 条、刷新只剩 8 条」），导入是合并而非替换。
+
+### 27. 「重置为默认」
+- `GET /api/purge/defaults` 返回**经 normalize 的** `PurgeSettings::default()`
+  （不读当前配置、不写库）；前端填进**草稿**并清预览四态，用户再点保存。
+- 默认值必须服务端取：前端硬编码会与 `PurgeSettings::default()` 漂移。
+
+### 28. 移动端开关触摸目标（跨页面修复）
+- 根因是页面级覆盖把开关缩得更小：`.mm-alias-switch` 22×12、两处
+  `transform: scale(0.72)` → 实测 25.9×14.4。
+- `@media (hover: none) and (pointer: coarse)` 下撤销这些缩放 + `.glass-switch::before`
+  补 44×44 触摸区；桌面零回归（实测对照见 §本地真服务冒烟）。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
@@ -128,20 +184,28 @@
 - **重复行不会被后端删**：`normalize` 只 trim/丢空/截断，重复项靠「按表序
   后一条匹配不上」自然失效；前端提示文案必须这么写，别误导成「后端会清」。
 - 上限常量必须与后端 `take(N)` 逐一对齐并注明来源；新增字段时同步加提示。
+- **severity / anchor 这类「从 code 派生」的属性不要存进结构体**：存一份就多一处
+  可能与来源不一致的副本。纯函数 + API 输出层补键，配锁步测试防漏分类。
+- **移动端触摸目标 ≥44×44**：页面级 `transform: scale()` 与小尺寸覆盖在桌面是
+  紧凑，在手机上是点不中；修法一律用 `@media (hover:none) and (pointer:coarse)`，
+  不要用 `max-width`（会误伤桌面窄窗口）。
+- **改 TSX 一律用 `edit` 工具**：PowerShell here-string 会被 `${}` 插值吞掉、
+  CRLF 与 LF 混用导致 `Replace` 静默不生效、行数组手术会误删相邻声明
+  （第 51/55/58 轮各踩一次，行号与 `ReadAllLines` 索引也对不上 `Select-String`）。
 
 ## 验证汇总（本机 mingw / pnpm，2026-11-24 实测）
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test --bin aigx` | **2546 passed / 0 failed**（含 purge:: 81） |
+| `cargo test --bin aigx` | **2565 passed / 0 failed**（含 purge:: 85） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **215 passed / 0 failed**（PurgeConsole 41） |
+| vitest 全量 | **256 passed / 0 failed**（PurgeConsole 68） |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
-> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 18 批收口值）。
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 28 批收口值）。
 
 ## 文件清单（本批 Purge 相关）
 
