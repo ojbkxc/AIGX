@@ -310,6 +310,25 @@ describe('validateImportedSettings · 导出-导入自洽', () => {
     expect(verdict.warnings).toEqual([]);
   });
 
+  it('降档目标非法值 → 警告（后端不清洗非空值）', () => {
+    const verdict = validateImportedSettings({ reasoning_floor: 'extreme' });
+    expect(verdict.fatal).toEqual([]);
+    expect(verdict.warnings.some((w) => w.includes('extreme'))).toBe(true);
+    expect(verdict.warnings.some((w) => w.includes('low'))).toBe(true);
+  });
+
+  it('降档目标合法值（四个档位）→ 不警告', () => {
+    for (const floor of ['low', 'medium', 'high', 'minimal']) {
+      const verdict = validateImportedSettings({ reasoning_floor: floor });
+      expect(verdict.warnings).toEqual([]);
+    }
+  });
+
+  it('降档目标不是字符串 → 警告', () => {
+    const verdict = validateImportedSettings({ reasoning_floor: 42 });
+    expect(verdict.warnings.length).toBeGreaterThan(0);
+  });
+
   it('字符串数组里混入非字符串 → 只警告（不整份拒绝）', () => {
     const verdict = validateImportedSettings({ fallback_models: ['ok', 42] });
     expect(verdict.fatal).toEqual([]);

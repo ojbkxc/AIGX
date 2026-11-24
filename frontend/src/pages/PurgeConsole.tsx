@@ -1123,6 +1123,19 @@ export function validateImportedSettings(raw: unknown): ImportVerdict {
     }
   }
 
+  // 枚举字段：非法值既不会被后端纠正（只兜空串），界面上又会变成「选不中任何一项」
+  // 的下拉 —— 等于悄悄换了个档位，而用户以为自己导入的就是文件里写的那个。
+  if (settings.reasoning_floor !== undefined) {
+    const allowed = REASONING_FLOORS.map((item) => item.value);
+    const value = settings.reasoning_floor;
+    if (typeof value !== 'string' || !allowed.includes(value)) {
+      warnings.push(
+        `降档目标「${String(value)}」不是有效值（${allowed.join(' / ')}）：后端不清洗非空值，` +
+          `保存后这个下拉会选不中任何一项`,
+      );
+    }
+  }
+
   // 模板缺名：能渲染但选不中（active_template 按名匹配）
   if (Array.isArray(settings.structured_templates)) {
     const unnamed = settings.structured_templates.filter(
