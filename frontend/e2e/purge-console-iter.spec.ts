@@ -245,6 +245,35 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('13 · 整页无横向溢出（窄视口下最容易暴露布局问题）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  // 展开最有内容的几块：词表带「试」按钮、预设库带 chips、统计 8 卡
+  const overflow = await page.evaluate(() => {
+    const doc = document.documentElement;
+    const clipped: string[] = [];
+    document.querySelectorAll<HTMLElement>('.purge-console *').forEach((el) => {
+      const style = getComputedStyle(el);
+      const spills = el.scrollWidth - el.clientWidth > 1 && el.clientWidth > 0;
+      if (!spills) return;
+      // `overflow-x: visible`：内容溢出但不产生滚动条、也不裁剪（开关的 44×44
+      // 透明触摸区就会让父容器的 scrollWidth 比 clientWidth 大几像素）——不是缺陷。
+      // `auto/scroll`：本来就是可横向滚动的容器（页内导航、代码块）——设计如此。
+      // 真正要拦的是 `hidden`：内容被裁掉，用户看不到也滚不到。
+      if (style.overflowX !== 'hidden') return;
+      clipped.push(`${el.className || el.tagName}:${el.scrollWidth}>${el.clientWidth}`);
+    });
+    return {
+      page: doc.scrollWidth - doc.clientWidth,
+      clipped: clipped.slice(0, 5),
+    };
+  });
+
+  expect(overflow.page).toBeLessThanOrEqual(1);
+  expect(overflow.clipped).toEqual([]);
+});
+
 test('12 · 技能卡显示「实际扫描目录」（放错目录时靠它定位）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
