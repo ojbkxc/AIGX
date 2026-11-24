@@ -247,6 +247,26 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('29 · 「放弃修改」先确认，取消则改动保留', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  await page.getByLabel('重试上限').fill('9');
+  await expect(page.getByTestId('purge-dirty-changes')).toBeVisible();
+
+  // ① 取消 → 草稿不变、仍是未保存状态
+  page.once('dialog', (d) => void d.dismiss());
+  await page.getByRole('button', { name: '放弃修改' }).click();
+  await expect(page.getByLabel('重试上限')).toHaveValue('9');
+  await expect(page.locator('.purge-dirty-bar')).toBeVisible();
+
+  // ② 确认 → 回服务器值、未保存提示消失
+  page.once('dialog', (d) => void d.accept());
+  await page.getByRole('button', { name: '放弃修改' }).click();
+  await expect(page.getByLabel('重试上限')).toHaveValue('8');
+  await expect(page.locator('.purge-dirty-bar')).toHaveCount(0);
+});
+
 test('28 · 保存成功后 header 出现「上次保存」时间戳', async ({ page }) => {
   await page.route(/\/api\/purge(\?|$)/, async (r) => {
     if (r.request().method() === 'PUT') {

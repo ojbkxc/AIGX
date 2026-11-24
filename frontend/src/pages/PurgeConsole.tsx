@@ -3687,11 +3687,33 @@ export default function PurgeConsole(): JSX.Element {
             disabled={saving}
             onClick={() => {
               const snapshot = dataRef.current;
+              const current = draftRef.current;
               if (!snapshot) return;
+              // 确认里报**具体项数**：只说「要丢弃修改吗」，用户不知道丢多少
+              const changed = current ? diffSettings(snapshot.settings, current) : [];
+              if (changed.length > 0) {
+                const preview = changed
+                  .slice(0, 5)
+                  .map((item) => t(item.key, item.params))
+                  .join('、');
+                const more = changed.length > 5 ? ` 等 ${changed.length} 项` : '';
+                if (
+                  !window.confirm(
+                    t('将丢弃 {{n}} 项未保存的修改（{{preview}}{{more}}），恢复为服务器上的配置。继续？', {
+                      n: changed.length,
+                      preview,
+                      more,
+                    }),
+                  )
+                ) {
+                  return;
+                }
+              }
               setDraft(normalizeSettingsArrays(snapshot.settings));
               setNumRaw(numRawOf(snapshot.settings));
               setNumErrors({});
               setDirty(false);
+              setTableUndo(null);
               setPreviewOut(null);
               setPreviewBase(null);
               setPreviewMeta(null);
