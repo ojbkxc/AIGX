@@ -309,6 +309,15 @@ build` 的那十几秒里 `static/` 是被文件替换覆盖的**——这期间
 mtime 在最近一分钟内变过、或 static 有未提交改动 → **先等它静止**。失败条数随重跑
 变化本身就是「环境在动」的信号，不是 flaky。
 
+已把这条判据做成可执行脚本（`frontend/scripts/wait-static-still.mjs`）：
+```bash
+node scripts/wait-static-still.mjs            # 不静止则退出 1，并说明卡在哪一条
+node scripts/wait-static-still.mjs --wait 90  # 最多等 90s，静止后再返回
+```
+两条判据都要满足：`static/index.html` 静置 ≥ 20s、`git status -- static` 为空。
+**不塞进 `package.json` 的 pretest**——那是共享文件，多 agent 同树时改它等于制造冲突；
+按需手动前置调用即可。
+
 顺带记两个诊断坑：
 - 用 `--grep-invert` 排除新用例后失败**更多**（3→5），一度误以为是新用例污染——
   实际是那几分钟 static 还在被替换，排除法在这种环境下没有意义。
