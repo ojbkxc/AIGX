@@ -4,6 +4,7 @@ import {
   applyUndo,
   buildActiveSummary,
   clampNumInput,
+  confirmSkillOverwrite,
   collectCapOverflows,
   countEmptyFromRules,
   capError,
@@ -285,6 +286,27 @@ describe('disableRulesAt', () => {
     const next = disableRulesAt(rules, new Set([1]));
     expect(next).toHaveLength(rules.length);
     expect(next.map((r) => r.from)).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('confirmSkillOverwrite', () => {
+  it('确认文案点名具体技能（不笼统问「要覆盖吗」）', () => {
+    const asked: string[] = [];
+    confirmSkillOverwrite('my-skill', (m) => {
+      asked.push(m);
+      return true;
+    }, (key, params) => `${key}|${params?.id ?? ''}`);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('my-skill');
+    expect(asked[0]).toContain('SKILL.md');
+  });
+
+  it('用户取消 → 返回 false（调用方据此中止写入）', () => {
+    expect(confirmSkillOverwrite('x', () => false)).toBe(false);
+  });
+
+  it('用户确认 → 返回 true', () => {
+    expect(confirmSkillOverwrite('x', () => true)).toBe(true);
   });
 });
 

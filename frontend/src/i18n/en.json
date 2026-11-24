@@ -437,6 +437,7 @@
   "第 {{n}} 条（共 {{total}} 处重复）": "Row {{n}} ({{total}} duplicate row(s) total)",
   "下面的开关与词表可以先配好，但只有打开总开关后才会真正生效。": "You can configure the switches and tables below first — they only take effect once the master switch is on.",
   "原因：{{detail}}": "Reason: {{detail}}",
+  "技能目录里已有同名技能「{{id}}」，继续写入会覆盖它的 SKILL.md。继续？": "A skill with the same name \"{{id}}\" already exists in the skill directory; writing will overwrite its SKILL.md. Continue?",
   "批量停用异常行": "Disable problem rows",
   "将停用 {{n}} 条异常行（不删除，之后可再启用）。继续？": "This disables {{n}} problem row(s) without deleting them; you can re-enable them later. Continue?",
   "已停用 {{n}} 条异常行": "Disabled {{n}} problem row(s)",

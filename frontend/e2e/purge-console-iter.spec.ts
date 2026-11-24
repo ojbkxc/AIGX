@@ -260,6 +260,58 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('47 · 写同名 SKILL.md 前先确认（后端是直接覆盖）', async ({ page }) => {
+  // 技能目录里已有 `p-skill` 同名技能 → 点「写入技能目录」应先弹确认
+  const preset = {
+    id: 'p-skill',
+    vendor: 'V',
+    model: 'm',
+    title: 'Skill preset',
+    tags: [],
+    bytes: 12,
+    sha256: 'beef'.repeat(16),
+    preview: 'body preview',
+  };
+  let applyCalls = 0;
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: {
+          ...PURGE_DATA,
+          // 技能快照里已有同名（name 来自 SKILL.md，缺省退目录名）
+          skills: [{ name: 'p-skill', keywords: ['p-skill'], body_chars: 12 }],
+        },
+      },
+    }),
+  );
+  await page.route(/\/api\/purge\/presets\/[^/]+\/apply$/, (r) => {
+    applyCalls += 1;
+    return r.fulfill({ json: { success: true, data: { applied: { path: '/x' }, settings: PURGE_DATA.settings } } });
+  });
+  await page.route(/\/api\/purge\/presets\/[^/]+$/, (r) =>
+    r.fulfill({ json: { success: true, data: { ...preset, body: 'preset body' } } }),
+  );
+  await page.route(/\/api\/purge\/presets(\?|$)/, (r) =>
+    r.fulfill({ json: { success: true, data: { items: [preset], vendors: [{ vendor: 'V', count: 1 }], total: 1 } } }),
+  );
+  await gotoPurge(page);
+
+  await page.getByText('Skill preset').first().click();
+
+  // 取消 → 不发 apply 请求
+  page.once('dialog', (d) => void d.dismiss());
+  await page.getByRole('button', { name: /写入技能目录/ }).first().click();
+  await page.waitForTimeout(800);
+  expect(applyCalls).toBe(0);
+
+  // 确认 → 发 apply
+  page.once('dialog', (d) => void d.accept());
+  await page.getByRole('button', { name: /写入技能目录/ }).first().click();
+  await expect.poll(() => applyCalls).toBe(1);
+});
+
 test('46 · 加载失败时带出真实原因（不把 500 说成网络异常）', async ({ page }) => {
   await loginAsAdmin(page);
   // 500 + 后端文案：应同时展示状态码与文案

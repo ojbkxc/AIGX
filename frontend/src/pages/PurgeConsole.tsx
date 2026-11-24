@@ -398,6 +398,17 @@ export function disableRulesAt<T extends { enabled?: boolean }>(
   );
 }
 
+/** 覆盖同名技能的确认（抽出来便于单测与复用文案）。 */
+export function confirmSkillOverwrite(
+  id: string,
+  ask: (message: string) => boolean = (message) => window.confirm(message),
+  tr: (key: string, params?: Record<string, string>) => string = (key) => key,
+): boolean {
+  return ask(
+    tr('技能目录里已有同名技能「{{id}}」，继续写入会覆盖它的 SKILL.md。继续？', { id }),
+  );
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -2082,6 +2093,7 @@ const PresetsSection = memo(function PresetsSection({
   onApplyTemplate,
   onSkillWritten,
   currentTemplates,
+  existingSkills,
 }: {
   t: TFunction;
   addToast: (message: string, type?: 'success' | 'error' | 'warning') => void;
@@ -2089,6 +2101,8 @@ const PresetsSection = memo(function PresetsSection({
   onSkillWritten: () => void;
   /** 草稿里的现有模板（覆盖同名时先确认） */
   currentTemplates?: Array<{ name: string; text: string }>;
+  /** 技能目录里已有的技能名（写同名 SKILL.md 前先确认，后端是直接覆盖） */
+  existingSkills?: Array<{ name: string }>;
 }): JSX.Element {
   // 筛选条件跨刷新保留（运维常按某厂商反复查；刷新归零等于每次重打）
   const initialFilter = readPresetFilter((k) => window.localStorage.getItem(k));
@@ -2308,6 +2322,18 @@ const PresetsSection = memo(function PresetsSection({
 
   const handleApplySkill = useCallback(
     async (id: string): Promise<void> => {
+      // 后端 `apply(skill_file)` 是 `std::fs::write` **直接覆盖** `<skill_dir>/<id>/SKILL.md`。
+      // 技能目录里的文件可能有人手写过——覆盖前必须问一句，否则一次点击就没了。
+      // 判断依据是 `skills` 快照里的同名技能（解析自 SKILL.md 的 name，缺省退父目录名）；
+      // 不保证覆盖「文件名不同但内容手改」的情形，所以文案只说「已存在同名技能」。
+      if (
+        (existingSkills ?? []).some((skill) => skill.name === id) &&
+        !confirmSkillOverwrite(id, (message) => window.confirm(message), (key, params) =>
+          t(key, params),
+        )
+      ) {
+        return;
+      }
       setBusy(`skill:${id}`);
       try {
         const res = await api.applyPurgePreset(id, 'skill_file');
@@ -2324,7 +2350,7 @@ const PresetsSection = memo(function PresetsSection({
         setBusy(null);
       }
     },
-    [addToast, noteRecent, onSkillWritten, t],
+    [addToast, existingSkills, noteRecent, onSkillWritten, t],
   );
 
   return (
@@ -4972,6 +4998,7 @@ export default function PurgeConsole(): JSX.Element {
         addToast={addToast}
         onApplyTemplate={applyPresetTemplate}
         currentTemplates={draft?.structured_templates}
+        existingSkills={skills}
         onSkillWritten={() => void refreshSkills()}
         />
       </SectionGuard>
