@@ -5,7 +5,7 @@ import { SUPPORTED_LANGS, setLanguage } from '../i18n';
 import {
   Monitor, Sun, Moon,
   SlidersHorizontal, Network, ShieldCheck, Download,
-  MessageSquare, Info, Database,
+  MessageSquare, Info, Database, Bell, Layers, Timer, UserRound,
 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
@@ -50,6 +50,48 @@ interface DataResponse<T> {
 }
 
 /**
+ * 「超时」分类的四个字段（A2A v3.5.1 TIMEOUT_FIELDS 逐项对齐：连接中 / 等待响应 /
+ * 流式空闲 / 非流式响应体）。
+ *
+ * 取值范围跟 **AIGX 后端**走：`settings.rs::handle_update_limits` 对
+ * connect 钳在 1..=300、其余三项 1..=600（A2A 是统一 1..=3600）。这里按后端区间
+ * 校验并在提示里写明真实上限——写 3600 会被后端静默钳到 600，界面若声称 3600
+ * 就是撒谎。
+ */
+const TIMEOUT_FIELDS: Array<{ field: TimeoutField; labelKey: string; hintKey: string; max: number }> = [
+  {
+    field: 'connect_timeout_secs',
+    labelKey: '连接中超时',
+    hintKey: '建立上游 TCP/TLS 连接或代理隧道的最大等待时间（秒），范围 1~300。',
+    max: 300,
+  },
+  {
+    field: 'headers_timeout_secs',
+    labelKey: '等待响应超时',
+    hintKey: '请求发出后等待上游响应头的最大时间（秒），范围 1~600。',
+    max: 600,
+  },
+  {
+    field: 'stream_idle_secs',
+    labelKey: '流式响应空闲超时',
+    hintKey: '流式响应相邻数据之间允许的最大空闲时间（秒），收到新数据后重新计时，范围 1~600。',
+    max: 600,
+  },
+  {
+    field: 'body_timeout_secs',
+    labelKey: '非流式响应超时',
+    hintKey: '读取完整非流式响应体允许的最大时间（秒），范围 1~600。',
+    max: 600,
+  },
+];
+
+type TimeoutField =
+  | 'connect_timeout_secs'
+  | 'headers_timeout_secs'
+  | 'stream_idle_secs'
+  | 'body_timeout_secs';
+
+/**
  * 汇率（`GET/PUT /api/pricing/exchange-rates`，扁平对象 `{USD, CNY, ...}`）。
  *
  * A2A v3.5.1 在「设置 → 通用 → 计量单位」里加了计价货币与汇率刷新；AIGX 的
@@ -71,12 +113,16 @@ interface ExchangeRatesShape {
  * 个人中心已完整），提供商不建（已是顶级 /channels）。
  */
 type SettingsTab =
+  | 'account'
+  | 'notifications'
   | 'general'
   | 'display'
-  | 'feedback'
   | 'gateway'
-  | 'data'
+  | 'providers'
+  | 'timeout'
   | 'security'
+  | 'data'
+  | 'feedback'
   | 'system'
   | 'update';
 
@@ -92,16 +138,18 @@ const LIMIT_FIELDS: Array<{ field: 'daily_limit' | 'monthly_limit' | 'threshold'
   { field: 'threshold', labelKey: '告警阈值 (%)', hintKey: '触发告警的限额使用百分比（0-100）。', min: 0, max: 100 },
 ];
 
-/** 设置分类：左栏导航，对齐 Agent2API settings-page 的 CATEGORIES。 */
+/** 设置分类：左栏导航，对齐 Agent2API v3.5.1 settings-model 的 CATEGORIES（顺序逐项一致）。 */
 const SETTINGS_CATEGORIES: Array<{ key: SettingsTab; label: string; icon: typeof Sun }> = [
-  // 账户：不建（A2A AccountPane 的对应物 = AIGX /profile 个人中心，完整实现已在，
-  // 设置里重复建就是空壳；拍板 A）。提供商：不建（已是顶级 /channels，记分叉）。
+  { key: 'account', label: '账户', icon: UserRound },
+  { key: 'notifications', label: '通知', icon: Bell },
   { key: 'general', label: '通用', icon: SlidersHorizontal },
   { key: 'display', label: '显示', icon: Monitor },
-  { key: 'feedback', label: '反馈与需求', icon: MessageSquare },
   { key: 'gateway', label: '网关', icon: Network },
+  { key: 'providers', label: '提供商', icon: Layers },
+  { key: 'timeout', label: '超时', icon: Timer },
   { key: 'security', label: '安全', icon: ShieldCheck },
   { key: 'data', label: '数据', icon: Database },
+  { key: 'feedback', label: '反馈与需求', icon: MessageSquare },
   { key: 'system', label: '版本信息', icon: Info },
   { key: 'update', label: '更新', icon: Download },
 ];
@@ -119,6 +167,15 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // 超时四字段（独立保存：改超时不该顺带重提交每日/每月限额）
+  const [timeouts, setTimeoutValues] = useState<Record<TimeoutField, string>>({
+    connect_timeout_secs: '',
+    headers_timeout_secs: '',
+    stream_idle_secs: '',
+    body_timeout_secs: '',
+  });
+  const [timeoutSaving, setTimeoutSaving] = useState(false);
+  const [timeoutError, setTimeoutError] = useState('');
   const addToast = useToast();
   const { t, i18n } = useTranslation();
 
@@ -294,10 +351,52 @@ export default function Settings() {
         threshold: data.threshold != null ? String(data.threshold * 100) : '',
         max_request_body_mb: data.max_request_body_mb != null ? String(data.max_request_body_mb) : '',
       });
+      // 超时四字段同源（同一份 /limits）：缺省/0 一律渲染成空串，空 = 跟随网关默认
+      const raw = (res.data ?? res) as Record<string, unknown>;
+      const pick = (key: TimeoutField): string => {
+        const value = raw?.[key];
+        return typeof value === 'number' && value > 0 ? String(value) : '';
+      };
+      setTimeoutValues({
+        connect_timeout_secs: pick('connect_timeout_secs'),
+        headers_timeout_secs: pick('headers_timeout_secs'),
+        stream_idle_secs: pick('stream_idle_secs'),
+        body_timeout_secs: pick('body_timeout_secs'),
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+    }
+  };
+
+  /** 保存超时：只提交非空且落在后端区间内的字段，越界先在前端挡 */
+  const handleSaveTimeouts = async (): Promise<void> => {
+    const payload: Record<string, number> = {};
+    for (const item of TIMEOUT_FIELDS) {
+      const raw = timeouts[item.field].trim();
+      if (raw === '') continue;
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < 1 || value > item.max) {
+        setTimeoutError(t('{{label}}需在 1~{{max}} 秒之间', { label: t(item.labelKey), max: item.max }));
+        return;
+      }
+      payload[item.field] = value;
+    }
+    if (!Object.keys(payload).length) {
+      setTimeoutError(t('没有可保存的超时设置'));
+      return;
+    }
+    setTimeoutSaving(true);
+    setTimeoutError('');
+    try {
+      await api.updateLimits(payload);
+      addToast(t('超时设置已保存'));
+      await loadLimits();
+    } catch (err) {
+      setTimeoutError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTimeoutSaving(false);
     }
   };
 
@@ -379,6 +478,42 @@ export default function Settings() {
         </nav>
 
         <div className="settings-pane">
+      {/* 账户（A2A v3.5.1 AccountPane）：AIGX 的账户面完整落在 /profile 个人中心，
+          这里只落**结构占位**——分类、标题、入口与文案按 A2A 摆好，点进去是真的，
+          但不在设置里重复建一套表单（重复建必然两处漂移）。 */}
+      {activeTab === 'account' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('账户')}</h2>
+            <p className="card-subtitle">{t('账户资料、密码与登录态在「个人中心」管理。')}</p>
+          </div>
+          <div className="card-body">
+            <div className="settings-actions">
+              <button type="button" className="btn btn-primary" onClick={() => navigate('/profile')}>
+                {t('前往个人中心')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 通知（A2A v3.5.1 notifications 分类）：AIGX 的通知配置在顶级「通知」页 */}
+      {activeTab === 'notifications' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('通知')}</h2>
+            <p className="card-subtitle">{t('余额预警、签到提醒与投递渠道在「通知」页配置。')}</p>
+          </div>
+          <div className="card-body">
+            <div className="settings-actions">
+              <button type="button" className="btn btn-primary" onClick={() => navigate('/notify')}>
+                {t('前往通知设置')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {activeTab === 'general' && (
         <>
           {/* 通用 = 使用限额 + 界面（主题 / 缩放） */}
@@ -731,6 +866,73 @@ export default function Settings() {
         </>
       )}
 
+
+      {/* 提供商（A2A v3.5.1 settings-providers）：AIGX 的提供商管理是顶级「渠道」页 */}
+      {activeTab === 'providers' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('提供商')}</h2>
+            <p className="card-subtitle">{t('提供商渠道、密钥与模型映射在「渠道」页维护。')}</p>
+          </div>
+          <div className="card-body">
+            <div className="settings-actions">
+              <button type="button" className="btn btn-primary" onClick={() => navigate('/channels')}>
+                {t('前往渠道管理')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 超时（A2A v3.5.1 TimeoutPane）：四项字段逐个对齐，取值上限按 AIGX 后端区间 */}
+      {activeTab === 'timeout' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('请求超时')}</h2>
+            <p className="card-subtitle">
+              {t('数据面转发到上游时的各阶段等待上限；留空 = 跟随网关默认值。保存后下一个请求生效。')}
+            </p>
+          </div>
+          <div className="card-body">
+            <div className="settings-form">
+              {TIMEOUT_FIELDS.map((item) => (
+                <div key={item.field} className="form-group">
+                  <label htmlFor={`timeout-${item.field}`}>{t(item.labelKey)}</label>
+                  <input
+                    id={`timeout-${item.field}`}
+                    className="form-input"
+                    type="number"
+                    min={1}
+                    max={item.max}
+                    placeholder={t('跟随默认')}
+                    value={timeouts[item.field]}
+                    onChange={(e) =>
+                      setTimeoutValues((prev) => ({ ...prev, [item.field]: e.target.value }))
+                    }
+                  />
+                  <span className="form-hint">{t(item.hintKey)}</span>
+                </div>
+              ))}
+              {timeoutError ? (
+                <div className="form-group">
+                  <span className="form-hint" style={{ color: 'var(--danger-color, #dc2626)' }}>
+                    {timeoutError}
+                  </span>
+                </div>
+              ) : null}
+              <div className="settings-actions">
+                <button
+                  className="btn btn-primary"
+                  onClick={() => void handleSaveTimeouts()}
+                  disabled={timeoutSaving}
+                >
+                  {timeoutSaving ? t('保存中...') : t('保存更改')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* AI 助手 → 助手页自带设置抽屉（v1.0.93 迁出）；聊天 → /chat 页；报表 → 仪表盘 Tab；
           图片兼容（ImageCompatPanel）→ 路由「特殊请求路由 → 图片兼容」 */}
