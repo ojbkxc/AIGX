@@ -488,6 +488,8 @@ fn payload_with(state: &AppState, fresh_skills: bool) -> Value {
         "data": {
             "settings": settings.as_ref(),
             "stats": crate::purge::snapshot(),
+            // 统计基线（unix 秒）：清零过就是清零时刻，否则是进程启动时刻
+            "stats_since": crate::purge::stats_baseline_at(),
             // 时间窗计数（beta 迭代：1h / 24h；前端切换统计口径用）
             "stats_1h": crate::purge::windowed_snapshot(3_600_000),
             "stats_24h": crate::purge::windowed_snapshot(86_400_000),

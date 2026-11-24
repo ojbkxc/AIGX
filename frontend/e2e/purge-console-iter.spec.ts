@@ -95,6 +95,8 @@ const PURGE_DATA = {
     truncated: false,
   },
   stats_last_run: null,
+  // 统计基线（清零过就是清零时刻）
+  stats_since: 1_780_000_000,
   // 三类严重级各一条：error 必须排在 info 前面
   config_warning_items: [
     { code: 'preset_missing', message: '预设 id 不存在', severity: 'info' },
@@ -264,6 +266,8 @@ test('14 · 「清零统计」只清计数、不动配置', async ({ page }) => 
   expect(resetCalls).toBe(1);
   // 清零不等于保存配置：不该有任何 PUT
   expect(putCalls).toBe(0);
+  // 基线时刻可见（清零后「全程」不再等于「进程启动至今」）
+  await expect(page.getByTestId('purge-stats-since')).toBeVisible();
 });
 
 test('13 · 整页无横向溢出（窄视口下最容易暴露布局问题）', async ({ page }) => {

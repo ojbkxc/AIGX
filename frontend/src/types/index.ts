@@ -2885,6 +2885,8 @@ export interface PurgeData {
   /** 时间窗统计（近 1h / 24h；旧版后端不返回时统计卡只有全程口径） */
   stats_1h?: PurgeWindowedStats;
   stats_24h?: PurgeWindowedStats;
+  /** 统计基线（unix 秒）：清零过是清零时刻，否则是进程启动时刻；旧后端不返回 */
+  stats_since?: number;
   /** 上次运行（上次关机时落盘）的统计快照；null/缺省 = 无记录 */
   stats_last_run?: PurgeRunSnapshot | null;
   /** 配置体检告警（结构化：带 code；旧后端只有 config_warnings 字符串） */

@@ -3051,6 +3051,14 @@ export default function PurgeConsole(): JSX.Element {
       </div>
 
       <span data-purge-fix="stats" />
+      {/* 基线时刻：清零后「全程」不再是「进程启动至今」，写准免得误读 */}
+      {data.stats_since ? (
+        <p className="purge-hint" data-testid="purge-stats-since">
+          {t('统计基线：{{time}}', {
+            time: new Date(data.stats_since * 1000).toLocaleString(),
+          })}
+        </p>
+      ) : null}
       <StatsGrid
         stats={stats}
         retryRate={retryRate}

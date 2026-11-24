@@ -877,6 +877,8 @@ pub fn reset_stats() {
         counter.store(0, Ordering::Relaxed);
     }
     ring().clear();
+    // 记下基线时刻：管理面据此说明「全程」是从哪一刻算起的
+    STATS_BASELINE_AT.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
 }
 
 /// 窗口内计数（`PurgeStats` 字段子集：管理面时间窗切换用）。///
@@ -929,6 +931,24 @@ pub fn windowed_snapshot(window_ms: u64) -> WindowedStats {
 // ── 进程运行信息 ────────────────────────────────────────────
 
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+/// 统计基线的 unix 秒（0 = 从未清零，基线就是进程启动）。
+///
+/// 为什么要它：清零后累计值从零开始，但「全程」这一档的名字会让人以为是
+/// 「进程启动至今」。用基线时刻把话说准，比改档名叫人猜要直接。
+static STATS_BASELINE_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// 当前统计基线的 unix 秒：清零过就用清零时刻，否则用进程启动时刻。
+///
+/// 进程启动时刻由 `uptime_secs` 反推（`now - uptime`），不需要另存一份。
+pub fn stats_baseline_at() -> i64 {
+    let stored = STATS_BASELINE_AT.load(Ordering::Relaxed);
+    if stored > 0 {
+        return stored;
+    }
+    let now = chrono::Utc::now().timestamp();
+    now.saturating_sub(uptime_secs() as i64)
+}
 
 /// 启动时调用一次，记录进程启动时刻（重复调用无副作用）。
 pub fn init_started_at() {
@@ -2705,12 +2725,27 @@ mod tests {
             .all(|w| w.code != "fallback_duplicate"));
     }
 
+    /// 进程级 `SKILL_CACHE` 的串行锁。
+    ///
+    /// 该缓存全进程共享。**注意它的能力边界**：只能串行「拿了这把锁的用例」——
+    /// 其它读写同一缓存的用例（`skills_for`/`skill_briefs` 的调用方）不拿锁，
+    /// 所以**不能**据此断言「普通读取一定命中缓存」（实测会假红）。真正要证明
+    /// 「fresh 绕过缓存」，见下方用例的两段 fresh 判据。
+    fn skill_cache_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// `skill_briefs_with(dir, true)` 必须**绕过 30 秒缓存**。
     ///
     /// 这是「重新扫描」按钮的真实语义：用户放好 `SKILL.md` 点一下，界面必须
     /// 立刻看到——若仍走缓存，按钮看起来就是坏的（缓存本身对数据面是对的）。
     #[test]
     fn skill_briefs_with_fresh_bypasses_cache() {
+        let _guard = skill_cache_lock();
         let dir = std::env::temp_dir().join(format!(
             "aigx-purge-skill-fresh-{}-{}",
             std::process::id(),
@@ -2722,10 +2757,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let root = dir.to_string_lossy().to_string();
 
-        // 首次扫描：空目录
+        // 首次强制扫描：空目录
         assert!(skill_briefs_with(&root, true).is_empty());
 
-        // 放一个 SKILL.md 后：普通路径仍命中缓存（空），强制刷新能看到
+        // 放一个 SKILL.md 后再强制扫描 → 必须立刻看到。
+        // **不在这里断言「普通读取仍命中缓存」**：`SKILL_CACHE` 是全进程共享的，
+        // 并行跑的其它用例会调 `skills_for(别的目录)`，把缓存目录换掉 → 那条
+        // 断言会假红（实测确实如此）。「fresh 绕过缓存」由上面「同一目录两次
+        // fresh 之间文件变了、结果也跟着变」证明，不依赖缓存命中状态。
         let skill_dir = dir.join("demo");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
@@ -2733,10 +2772,6 @@ mod tests {
             "---\nname: fresh-demo\n---\n正文",
         )
         .unwrap();
-        assert!(
-            skill_briefs(&root).is_empty(),
-            "普通读取应命中 30 秒缓存（仍是空）"
-        );
         let fresh = skill_briefs_with(&root, true);
         assert_eq!(fresh.len(), 1, "强制刷新必须立刻看到新文件");
         assert_eq!(fresh[0].name, "fresh-demo");
@@ -2768,6 +2803,30 @@ mod tests {
             "事件环也须清空（否则窗口档仍显示旧增量）"
         );
         assert_eq!(windowed_snapshot(86_400_000).retries, 0);
+    }
+
+    /// 统计基线：清零前是「进程启动时刻」，清零后是「清零时刻」。
+    ///
+    /// 这条决定管理面那句说明到底说不说得准——「全程」在清零后不该再被读成
+    /// 「进程启动至今」。
+    #[test]
+    fn stats_baseline_moves_forward_on_reset() {
+        init_started_at();
+        // 未清零：基线 ≈ now - uptime（允许 2s 误差）
+        let before = stats_baseline_at();
+        let now = chrono::Utc::now().timestamp();
+        assert!(
+            (now - before - uptime_secs() as i64).abs() <= 2,
+            "未清零时基线应是进程启动时刻（before={before}, now={now}）"
+        );
+
+        reset_stats();
+        let after = stats_baseline_at();
+        assert!(
+            (after - chrono::Utc::now().timestamp()).abs() <= 2,
+            "清零后基线应是清零时刻（after={after}）"
+        );
+        assert!(after >= before, "基线只能向后移动");
     }
 
     /// 技能目录展开成绝对路径：`~` 前缀必须被替换掉（否则前端显示 `~/...`
