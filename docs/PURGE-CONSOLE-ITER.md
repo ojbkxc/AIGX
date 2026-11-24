@@ -208,6 +208,13 @@
   `GET 200 → PUT 200（返回 settings）→ GET 200` 幂等且值稳定。
 - **验证写入时用「原值幂等回写」**：只证明链路通，不改用户配置。
 
+### 35. 预设「最近用过」徽标 + e2e 第 10 条
+- `aigx.purge.presetRecent`（去重置顶、上限 5、坏值容错、写失败静默）；
+  「设为结构化模板」与「写入技能目录」成功后各记一次。
+- **只做标记不做筛选**：改成「最近」筛选会与后端分页冲突——后端不认识这份
+  id 表，`total` 与翻页都会错。这条写进代码注释防后人误改。
+- e2e 补齐「应用预设 → 记录 → 徽标出现」真链路（纯函数单测只验了读写）。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
@@ -239,13 +246,13 @@
 | `cargo test --bin aigx` | **2575 passed / 0 failed**（含 purge:: 87） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **268 passed / 0 failed**（PurgeConsole 80） |
-| e2e（破甲页两个 spec，desktop） | **16 passed / 0 failed** |
+| vitest 全量 | **272 passed / 0 failed**（PurgeConsole 84） |
+| e2e（破甲页两个 spec，desktop） | **17 passed / 0 failed** |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
-> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 34 批收口值）。
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 35 批收口值）。
 > **已修**：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
 > 曾偶发假红——固定 `sleep(50ms)` 当同步手段，并发负载下不够。已改为轮询等待
 > （每 5ms 查一次、最多 2s，判据不变），单跑 5 次 + 全量连跑 3 次全绿。
