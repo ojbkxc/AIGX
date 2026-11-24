@@ -262,6 +262,17 @@ export function countEmptyFromRules(settings: {
   return { deadZone: count(settings.rewrite_rules), synonym: count(settings.synonym_pairs) };
 }
 
+/**
+ * 整张词表 → 纯文本（Tab 分隔、一行一条）。
+ *
+ * 为什么用 Tab 而不是 CSV：`parseBatchRules` 认 Tab 作为分隔符，所以这份文本能
+ * **直接粘进另一张表的「批量粘贴」**，也能直接粘进 Excel 两列。用它做表间搬运，
+ * 比「导出文件 → 再导入」少两步。
+ */
+export function rulesToText(rules: ReadonlyArray<{ from: string; to: string }>): string {
+  return rules.map((rule) => `${rule.from}\t${rule.to}`).join('\n');
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -3163,6 +3174,27 @@ export default function PurgeConsole(): JSX.Element {
   //
   // 两列 `from,to`（表头可选）；RFC 4180 转义复用 toCsv / downloadText。
 
+  /** 复制整张词表为 Tab 分隔文本（可直接粘进 Excel 或另一张表的「批量粘贴」） */
+  const copyRulesTable = useCallback(
+    async (kind: 'dead_zone' | 'synonym'): Promise<void> => {
+      const draftNow = draftRef.current;
+      if (!draftNow) return;
+      const rules = kind === 'dead_zone' ? draftNow.rewrite_rules : draftNow.synonym_pairs;
+      if (rules.length === 0) {
+        addToast(t('词表为空，无可复制内容'), 'warning');
+        return;
+      }
+      const copied = await copyText(rulesToText(rules));
+      addToast(
+        copied
+          ? t('已复制 {{n}} 行（Tab 分隔，可直接粘进 Excel）', { n: rules.length })
+          : t('复制失败（浏览器可能禁用了剪贴板权限）'),
+        copied ? 'success' : 'error',
+      );
+    },
+    [addToast, t],
+  );
+
   const exportRulesCsv = useCallback(
     (kind: 'dead_zone' | 'synonym'): void => {
       const draftNow = draftRef.current;
@@ -4096,6 +4128,14 @@ export default function PurgeConsole(): JSX.Element {
             <Button variant="outline" size="sm" onClick={() => exportRulesCsv('dead_zone')}>
               {t('导出 CSV')}
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-copy-rules-dead-zone"
+              onClick={() => void copyRulesTable('dead_zone')}
+            >
+              {t('复制整表')}
+            </Button>
             <Button variant="outline" size="sm" onClick={() => deadZoneCsvRef.current?.click()}>
               {t('导入 CSV')}
             </Button>
@@ -4210,6 +4250,14 @@ export default function PurgeConsole(): JSX.Element {
             </Button>
             <Button variant="outline" size="sm" onClick={() => exportRulesCsv('synonym')}>
               {t('导出 CSV')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-copy-rules-synonym"
+              onClick={() => void copyRulesTable('synonym')}
+            >
+              {t('复制整表')}
             </Button>
             <Button variant="outline" size="sm" onClick={() => synonymCsvRef.current?.click()}>
               {t('导入 CSV')}

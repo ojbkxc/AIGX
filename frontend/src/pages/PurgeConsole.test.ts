@@ -17,6 +17,7 @@ import {
   readPresetFilter,
   readRecentPresets,
   retryRateText,
+  rulesToText,
   snapshotReportText,
   statsExportNote,
   sortWarningsBySeverity,
@@ -246,6 +247,35 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('rulesToText', () => {
+  it('Tab 分隔、一行一条（能直接粘进 Excel 两列）', () => {
+    expect(
+      rulesToText([
+        { from: '甲', to: 'A' },
+        { from: '乙', to: 'B' },
+      ]),
+    ).toBe('甲\tA\n乙\tB');
+  });
+
+  it('输出能被 parseBatchRules 原样吃回去（表间搬运的闭环）', () => {
+    const rules = [
+      { from: '甲', to: 'A' },
+      { from: 'b', to: 'B' },
+    ];
+    const { rules: back, skipped } = parseBatchRules(rulesToText(rules));
+    expect(back).toEqual(rules);
+    expect(skipped).toBe(0);
+  });
+
+  it('空表 → 空串', () => {
+    expect(rulesToText([])).toBe('');
+  });
+
+  it('保留空改写（from→空 是「删掉这个词」的有效语义）', () => {
+    expect(rulesToText([{ from: 'x', to: '' }])).toBe('x\t');
   });
 });
 

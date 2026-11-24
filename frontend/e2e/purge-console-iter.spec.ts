@@ -247,6 +247,39 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('35 · 「复制整表」输出 Tab 分隔文本，能粘回批量粘贴', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __copied: string[] }).__copied = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: (t: string) => {
+          (window as unknown as { __copied: string[] }).__copied.push(t);
+          return Promise.resolve();
+        },
+      },
+    });
+  });
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  await page.getByTestId('purge-copy-rules-dead-zone').click();
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __copied: string[] }).__copied.length))
+    .toBe(1);
+  const text = await page.evaluate(
+    () => (window as unknown as { __copied: string[] }).__copied[0],
+  );
+  // mock 里的一条规则 → Tab 分隔的一行
+  expect(text).toContain('\t');
+  expect(text.split('\n').length).toBeGreaterThan(0);
+  // 闭环：把它粘回「批量粘贴」应能解析（不出现「格式不对」）
+  await page.getByTestId('purge-batch-paste-open').click();
+  await page.getByLabel('批量粘贴内容').fill(text);
+  await page.getByRole('button', { name: '解析并添加' }).click();
+  await expect(page.locator('.toast').first()).not.toContainText(/格式不对/);
+});
+
 test('34 · 保存成功后词表撤销入口失效（不能撤销已落库的结果）', async ({ page }) => {
   await page.route(/\/api\/purge(\?|$)/, async (r) => {
     if (r.request().method() === 'PUT') {
