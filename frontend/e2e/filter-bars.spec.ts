@@ -45,8 +45,11 @@ test.describe('筛选工具条观感统一', () => {
     expect((await cssOf(bar, 'display')).trim()).toBe('flex');
     expect((await cssOf(bar, 'align-items')).trim()).toBe('center');
 
-    // 状态：分段控件（全部 / 成功 / 失败）
-    await expect(bar.locator('.lg-seg-btn')).toHaveText(['全部', '成功', '失败']);
+    // 状态：分段控件。v3.5.1 起页面上有两组 .lg-seg-btn —— 时间范围（7 档 chips）
+    // 与状态筛选（3 档），所以必须按 aria-label 限定到状态那一组；首档文案也从
+    // 「全部」改为「全部状态」。
+    const statusSeg = bar.locator('.lg-seg[aria-label="状态筛选"]');
+    await expect(statusSeg.locator('.lg-seg-btn')).toHaveText(['全部状态', '成功', '失败']);
 
     // 筛选输入统一 30px（全局 .form-input 是 40px —— 必须被页内规则压回）
     const heights = await bar.locator('.form-input').evaluateAll((els) =>
@@ -58,8 +61,8 @@ test.describe('筛选工具条观感统一', () => {
     await expect(bar.locator('.lg-filters-count')).toContainText('条');
 
     // 点「失败」→ 点「查询」→ GET /api/logs/requests 带 status=error
-    await bar.locator('.lg-seg-btn', { hasText: '失败' }).click();
-    await expect(bar.locator('.lg-seg-btn.active')).toHaveText('失败');
+    await statusSeg.locator('.lg-seg-btn', { hasText: '失败' }).click();
+    await expect(statusSeg.locator('.lg-seg-btn.active')).toHaveText('失败');
     const [req] = await Promise.all([
       page.waitForRequest((r) => r.url().includes('/api/logs/requests') && r.method() === 'GET'),
       bar.getByRole('button', { name: '查询' }).click(),

@@ -287,10 +287,10 @@ test.describe('签到时区边界（page.clock 定针）', () => {
     // v3.5.1：非编辑态是 SchedulePlanCard，「下一次」由 `.ck-sched-next` 改为卡内
     // `.form-hint` 的「下一账号：MM-DD HH:MM」；时区边界的断言口径不变。
     const cardNight = page.locator('.ck-sched-name', { hasText: '夜班' });
-    await expect(cardNight.locator('xpath=ancestor::div[contains(@class,"card")][1]'))
+    await expect(cardNight.locator('xpath=ancestor::div[contains(concat(" ",normalize-space(@class)," ")," card ")][1]'))
       .toContainText(todayLabel);
     const cardMorning = page.locator('.ck-sched-name', { hasText: '早班' });
-    await expect(cardMorning.locator('xpath=ancestor::div[contains(@class,"card")][1]'))
+    await expect(cardMorning.locator('xpath=ancestor::div[contains(concat(" ",normalize-space(@class)," ")," card ")][1]'))
       .toContainText(tomorrowLabel);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);

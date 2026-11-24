@@ -165,13 +165,18 @@ test.describe('IA 整合 · 供应商页', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('签到 Tab 嵌入后保留 5 个二级 Tab', async ({ page, pageErrors }) => {
+  test('签到 Tab 嵌入后保留 8 个二级 Tab', async ({ page, pageErrors }) => {
     await page.goto('/channels?tab=checkin');
     const subTabs = page.locator('.ck-sub-tabs .sub-tab');
-    // 二级 Tab 由 CheckinCenter.tabs 驱动（签到中心/定时签到/定时补签/
-    // 签到记录/福利通道）；「定时补签」后加，断言需跟源码同步。
-    await expect(subTabs).toHaveCount(5);
-    for (const name of ['签到中心', '定时签到', '定时补签', '签到记录', '福利通道']) {
+    // v3.5.1 起 Tab 分两段：四任务分区（每日签到/新手福利/活动福利/成长任务）
+    // 打头 + 三个二级页（定时签到/定时补签/签到记录）+ AIGX 保留的福利通道。
+    // 数量与文案由 `checkin-shared.ts` 的 CHECKIN_SECTION_TABS / CHECKIN_VIEW_TABS
+    // 决定，改那边要同步改这里。
+    await expect(subTabs).toHaveCount(8);
+    for (const name of [
+      '每日签到', '新手福利', '活动福利', '成长任务',
+      '定时签到', '定时补签', '签到记录', '福利通道',
+    ]) {
       await expect(page.locator('.ck-sub-tabs .sub-tab', { hasText: name })).toHaveCount(1);
     }
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
