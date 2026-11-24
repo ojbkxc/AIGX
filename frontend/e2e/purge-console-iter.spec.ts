@@ -247,6 +247,30 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('19 · 数字输入失焦就地收敛并说明原因（不是保存时才悄悄改）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const retry = page.getByLabel('重试上限');
+  // 超上限：输入 999 → 失焦后变成上限 32，且弹提示说明「已调整为 32」
+  await retry.fill('999');
+  await retry.blur();
+  await expect(retry).toHaveValue('32');
+  await expect(page.locator('.toast', { hasText: '已调整为 32' })).toHaveCount(1);
+
+  // 小数：3.7 → 3，提示换一种说法（取整，而不是范围）。
+  // 注意按内容定位而不是 .first()：上一条 toast 还没消失时 .first() 会一直拿到它。
+  await retry.fill('3.7');
+  await retry.blur();
+  await expect(retry).toHaveValue('3');
+  await expect(page.locator('.toast', { hasText: '已取整为 3' })).toHaveCount(1);
+
+  // 范围内：原样保留、不弹新提示
+  await retry.fill('7');
+  await retry.blur();
+  await expect(retry).toHaveValue('7');
+});
+
 test('18 · 有未保存备份时给恢复条，恢复后变回 dirty', async ({ page }) => {
   // 备份与 mock 的 settings 必须不同，才会弹恢复条
   const backupSettings = { ...PURGE_DATA.settings, retry_limit: 42 };
