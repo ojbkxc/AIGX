@@ -1604,6 +1604,10 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       if (!form.plugin_provider) { setError(t('插件渠道必须选择接管的提供商')); return; }
     } else if (
       form.channel_type !== 'cloudflare' &&
+      // 账号池型供应商的选择器里没有 base_url 这个入口（凭证与上游地址都在账号上，
+      // 后端 add/update 对空 base_url 合法）；不豁免就会让「键盘 Enter 打开编辑」
+      // 的账号池供应商永远卡在「需填写 Base URL」而存不了。
+      form.channel_type !== 'account' &&
       !form.base_url
     ) {
       setError(t('非 Cloudflare 供应商需填写 Base URL'));

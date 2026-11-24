@@ -179,14 +179,18 @@ export default function Groups(): JSX.Element {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
+      // 倍率 0 是合法值（0 = 该分组不收费），不能用 `Number(x) || 1`：
+      // 那会把用户填的 0 静默改成 1（免费组变成原价），而输入框 min="0" 明明允许 0。
+      const ratioNum = form.ratio.trim() === '' ? 1 : Number(form.ratio);
+      const ratio = Number.isFinite(ratioNum) ? ratioNum : 1;
       const payload = {
         name: form.name.trim(),
-        ratio: Number(form.ratio) || 1,
+        ratio,
         allowed_models: allowedModels,
         description: form.description || '',
       };
       await api.upsertGroup(payload);
-      await syncGroupRatio(form.name.trim(), Number(form.ratio) || 1);
+      await syncGroupRatio(form.name.trim(), ratio);
       addToast(t('用户分组已保存'));
       closeModal();
       void loadGroups();
