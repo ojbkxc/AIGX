@@ -296,13 +296,21 @@ export function saveCustomRange(range: CustomRange): void {
 
 /** 下载一份文本（BOM 前缀让 Excel 认 UTF-8） */
 export function downloadText(filename: string, content: string): void {
-  const blob = new Blob(['' + content], { type: 'text/csv;charset=utf-8' });
+  // BOM 显式写成 `\uFEFF`：Excel/WPS 认它才按 UTF-8 解码，否则中文表头乱码。
+  // （原先是不可见字符字面量，读代码的人无法确认那是 BOM。）
+  const blob = new Blob(['\uFEFF' + content], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  // 必须挂进文档再 click：老 Firefox 对游离节点的 click() 不触发下载
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  // revoke 延后：部分浏览器在 click 返回后才真正开始读 blob，
+  // 同步 revoke 会让下载变成 0 字节或直接失败
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /** 数组 → CSV（表头取键序；null 空值；引号转义照 RFC 4180） */
