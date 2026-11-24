@@ -29,10 +29,16 @@ export default function Tooltip({
   const tipId = useId();
 
   const show = (): void => {
+    // 先清旧计时器：同一目标上 mouseenter 与 focus 会各自排一次 show（键盘用户
+    // 点进输入框时两者接连发生）。直接覆盖 timer.current 会让前一个计时器失去
+    // 句柄、hide() 只清得掉最后一个 —— 残留的那一个在鼠标/焦点离开后把
+    // visible 置回 true，提示卡住不消失。
+    if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => setVisible(true), delay);
   };
   const hide = (): void => {
     if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
     setVisible(false);
   };
 

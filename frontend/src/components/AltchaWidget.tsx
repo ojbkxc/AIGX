@@ -29,6 +29,20 @@ export default function AltchaWidget({
       role={state === 'error' ? 'button' : undefined}
       tabIndex={state === 'error' ? 0 : undefined}
       onClick={state === 'error' ? onRetry : undefined}
+      // role="button" + tabIndex 只是让元素进 Tab 序列；不补键盘处理的话
+      // 键盘用户 Tab 上来按 Enter/Space 毫无反应——"验证失败，请重试"对
+      // 纯键盘用户等于死路。
+      onKeyDown={
+        state === 'error'
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                // Space 默认会滚动页面，必须拦
+                e.preventDefault();
+                onRetry();
+              }
+            }
+          : undefined
+      }
       style={{
         display: 'flex',
         alignItems: 'center',

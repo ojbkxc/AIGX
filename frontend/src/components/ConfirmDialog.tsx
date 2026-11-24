@@ -112,7 +112,17 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
       setPasswordError(t('请输入登录密码'));
       return;
     }
-    const result = requirePassword ? onConfirm?.(password) : onConfirm?.();
+    // onConfirm **同步**抛错（校验不通过、缺前置条件）也必须走同一条错误通道：
+    // 它在 async 函数里抛出会变成 rejected promise，调用方写的是
+    // `void handleConfirm()`，于是异常被丢掉——弹窗不关、也没有任何文案，
+    // 用户只看到按钮从「处理中…」恢复，以为操作成功。
+    let result: void | Promise<void>;
+    try {
+      result = requirePassword ? onConfirm?.(password) : onConfirm?.();
+    } catch (err) {
+      setPasswordError(err instanceof Error ? err.message : String(err));
+      return;
+    }
     // 异步确认：loading 中防重复点击/关闭，完成后再关弹窗
     if (result instanceof Promise) {
       setConfirming(true);

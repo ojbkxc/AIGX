@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId } from 'react';
 import { cn } from '../../lib/utils';
 
 export interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
@@ -12,9 +12,12 @@ export interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextArea
 
 /**
  * Textarea — 多行文本输入，复用 App.css 的 .form-input 样式体系。
+ *
+ * id 口径同 Input：显式 `id` 优先，否则 `useId()` 兜底（不从 label 派生）。
  */
 export default function Textarea({ label, hint, error, className, id, ...rest }: TextareaProps) {
-  const areaId = id ?? (label ? 'textarea-' + label.replace(/\s+/g, '-') : undefined);
+  const reactId = useId();
+  const areaId = id ?? (label ? `textarea-${reactId}` : undefined);
   return (
     <div className="form-group">
       {label && <label htmlFor={areaId}>{label}</label>}

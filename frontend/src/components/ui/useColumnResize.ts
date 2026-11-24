@@ -12,7 +12,7 @@
  * 性能：pointermove 直接写 DOM（col 元素 style.width），不经过 React state
  * ——10k 行表格拖列宽零重渲染；pointerup 才 setState+落盘一次。
  */
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 /** col 元素类型（lib.dom 缺 HTMLColElement，用 ElementType 兜底） */
 type ColElement = HTMLElement & { width?: string };
@@ -53,6 +53,21 @@ export function useColumnResize(options: {
   // 拖拽把手高亮需要一次重渲染；拖拽中 move 路径零 setState（性能红线）
   const [, setRenderStamp] = useState(0);
   const forceRender = useCallback(() => setRenderStamp((n) => n + 1), []);
+  /**
+   * 进行中的拖拽会话拆解函数。
+   *
+   * 拖拽期间监听器挂在 window 上，若不持有句柄：拖到一半组件卸载（切路由 /
+   * 关掉所在弹窗）时 `pointermove`/`pointerup` 会一直留在 window 上，松手时
+   * `onUp` 对已卸载组件 `setWidths` 并 `onCommit` —— 等于把一次没人看见的
+   * 拖拽结果写进了 localStorage。`pointercancel`（触屏被系统手势接管、
+   * 窗口失焦）下 pointerup 根本不触发，同样会漏。
+   */
+  const dragCleanup = useRef<(() => void) | null>(null);
+
+  // 卸载即收摊：不留 window 监听、不把拖拽态留在半路
+  useEffect(() => () => {
+    dragCleanup.current?.();
+  }, []);
 
   const effectiveWidth = useCallback(
     (key: string): number | undefined => {
@@ -75,10 +90,18 @@ export function useColumnResize(options: {
           if (e.button !== 0) return;
           e.preventDefault();
           e.stopPropagation();
+          // 上一次会话若还挂着（异常路径），先收掉再开新的
+          dragCleanup.current?.();
           const startX = e.clientX;
           const base = startWidth();
           const grip = e.currentTarget;
           const containerW = containerRef?.current?.clientWidth;
+          const colElOf = (): ColElement | null =>
+            grip.closest('table')?.querySelector<ColElement>(
+              `col[data-col-key="${cssEscape(key)}"]`,
+            ) ?? null;
+          // 取消时要还原到拖拽前的 DOM 宽度：状态没变，DOM 不能自己停在中间值
+          const originalInlineWidth = colElOf()?.style.width ?? '';
           draggingKey.current = key;
           forceRender();
           const totalBase = Object.keys(defaultWidths).reduce((sum, k) => {
@@ -96,19 +119,21 @@ export function useColumnResize(options: {
               if (maxThis >= MIN_COL_PX && next > maxThis) next = maxThis;
             }
             // 直写 DOM：拖拽路径零 React 重渲染（性能红线）
-            const colEl = grip.closest('table')?.querySelector<ColElement>(
-              `col[data-col-key="${cssEscape(key)}"]`,
-            );
+            const colEl = colElOf();
             if (colEl) colEl.style.width = `${next}px`;
           };
-          const onUp = (): void => {
+          /** 摘监听 + 复位拖拽态（松手与取消共用；不碰 state） */
+          const teardown = (): void => {
             window.removeEventListener('pointermove', onMove);
             window.removeEventListener('pointerup', onUp);
+            window.removeEventListener('pointercancel', onCancel);
             draggingKey.current = null;
+            dragCleanup.current = null;
+          };
+          const onUp = (): void => {
+            teardown();
             // 松手才读一次 DOM 终值进 state + 落盘
-            const colEl = grip.closest('table')?.querySelector<ColElement>(
-              `col[data-col-key="${cssEscape(key)}"]`,
-            );
+            const colEl = colElOf();
             const finalW = colEl ? parseFloat(colEl.style.width) : NaN;
             if (Number.isFinite(finalW) && finalW > 0) {
               setWidths({ ...widths, [key]: Math.round(finalW) });
@@ -116,8 +141,18 @@ export function useColumnResize(options: {
             }
             forceRender();
           };
+          const onCancel = (): void => {
+            // 取消（系统手势接管 / 窗口失焦）：不落盘、不改进 state，
+            // 把被直写过的 DOM 宽度还原回拖拽前的样子，视觉与状态保持一致
+            teardown();
+            const colEl = colElOf();
+            if (colEl) colEl.style.width = originalInlineWidth;
+            forceRender();
+          };
+          dragCleanup.current = teardown;
           window.addEventListener('pointermove', onMove);
           window.addEventListener('pointerup', onUp);
+          window.addEventListener('pointercancel', onCancel);
         },
         onDoubleClick: (e: React.MouseEvent<HTMLElement>) => {
           e.preventDefault();

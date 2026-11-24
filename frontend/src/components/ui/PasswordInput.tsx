@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
@@ -16,6 +16,9 @@ export interface PasswordInputProps
  * PasswordInput — 带明文切换的密码输入框。
  * 右侧眼睛按钮切换 type=password/text；复用 .form-input 体系，
  * 登录/注册/改密等场景防「输错一次全部重来」。
+ *
+ * id 口径同 Input：显式 `id` 优先，否则 `useId()` 兜底（不从 label 派生，
+ * 避免同页两个「密码」字段产出重复 DOM id）。
  */
 export default function PasswordInput({
   label,
@@ -26,7 +29,8 @@ export default function PasswordInput({
   ...rest
 }: PasswordInputProps): JSX.Element {
   const [visible, setVisible] = useState(false);
-  const inputId = id ?? (label ? 'pwd-' + label.replace(/\s+/g, '-') : undefined);
+  const reactId = useId();
+  const inputId = id ?? (label ? `pwd-${reactId}` : undefined);
   return (
     <div className="form-group">
       {label && <label htmlFor={inputId}>{label}</label>}

@@ -194,6 +194,18 @@ export default function DebugTrafficPanel(): JSX.Element {
                     style={{ padding: 10, border: '1px solid var(--border, #333)', cursor: 'pointer' }}
                     onClick={() => void openDetail(entry)}
                     title={t('点击查看详情')}
+                    // 这张卡是「打开报文详情」的唯一入口：只给 onClick 时
+                    // 纯键盘用户永远进不去（Tab 跳不过去，也没有等价按钮）。
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${entry.method} ${entry.url}`}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                        // Space 默认滚动页面，必须拦
+                        e.preventDefault();
+                        void openDetail(entry);
+                      }
+                    }}
                   >
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span style={{ fontSize: 12, opacity: 0.65 }}>

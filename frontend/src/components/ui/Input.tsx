@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId } from 'react';
 import { cn } from '../../lib/utils';
 
 export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
@@ -13,9 +13,14 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
 /**
  * Input — 通用文本输入框，复用 App.css 的 .form-input 体系。
  * 与页面现有 <input className="form-input"> 完全兼容，标签/提示可选。
+ *
+ * id 口径：显式 `id` 优先；否则由 `useId()` 兜底，**不再从 label 文本派生**。
+ * 旧做法（`'input-' + label`）在同一页出现两个同 label 字段时会产出重复 DOM id，
+ * `htmlFor` 只认第一个，点第二个标签会聚焦到第一个输入框。
  */
 export default function Input({ label, hint, error, className, id, ...rest }: InputProps) {
-  const inputId = id ?? (label ? 'input-' + label.replace(/\s+/g, '-') : undefined);
+  const reactId = useId();
+  const inputId = id ?? (label ? `input-${reactId}` : undefined);
   return (
     <div className="form-group">
       {label && <label htmlFor={inputId}>{label}</label>}

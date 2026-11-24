@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach } from 'vitest';
-import { fmtCost } from './format';
+import { fmtCost, toCsv } from './format';
 import { setQuotaPerYuan } from './quotaRate';
 
 describe('fmtCost（分 → 元，统一两位小数）', () => {
@@ -31,6 +31,27 @@ describe('fmtCost（分 → 元，统一两位小数）', () => {
     expect(fmtCost(123450)).toBe('¥1,234.50');
     expect(fmtCost(200)).toBe('¥2.00');
     setQuotaPerYuan(200);
+  });
+});
+
+describe('toCsv 转义（RFC 4180）', () => {
+  it('裸 CR 进引号分支（否则一行会被拆成两行）', () => {
+    const csv = toCsv([{ a: 'x\ry', b: '2' }]);
+    // 单元格必须被引号包住；不加引号时 CSV 里就是 "x" + CR + "y,2"
+    expect(csv).toBe('a,b\n"x\ry",2');
+  });
+
+  it('Windows CRLF 同样进引号分支', () => {
+    const csv = toCsv([{ a: '第一行\r\n第二行', b: '2' }]);
+    expect(csv).toBe('a,b\n"第一行\r\n第二行",2');
+  });
+
+  it('正例对照：普通值与逗号/引号/换行的既有口径不变', () => {
+    expect(toCsv([{ a: 'plain', b: 1 }])).toBe('a,b\nplain,1');
+    expect(toCsv([{ a: 'has,comma' }])).toBe('a\n"has,comma"');
+    expect(toCsv([{ a: 'say "hi"' }])).toBe('a\n"say ""hi"""');
+    expect(toCsv([{ a: 'line\nbreak' }])).toBe('a\n"line\nbreak"');
+    expect(toCsv([{ a: null, b: undefined }])).toBe('a,b\n,');
   });
 });
 

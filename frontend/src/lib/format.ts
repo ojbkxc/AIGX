@@ -319,7 +319,9 @@ export function toCsv(rows: Array<Record<string, unknown>>): string {
   const heads = Object.keys(rows[0]);
   const esc = (v: unknown): string => {
     const s = v == null ? '' : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    // `\r` 必须一起进引号分支：单元格里带裸 CR（或 Windows 的 CRLF）时不加引号，
+    // Excel/解析器会把一行拆成两行，列数随之错位。RFC 4180 要求 CR 也算特殊字符。
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   return [heads.join(','), ...rows.map((r) => heads.map((h) => esc(r[h])).join(','))].join('\n');
 }

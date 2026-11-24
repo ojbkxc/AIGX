@@ -14,7 +14,16 @@ interface RealtimeStats {
 interface ChannelHealth {
   id?: string | number;
   name?: string;
-  error_rate?: number | null;
+  /**
+   * 健康追踪快照里的错误率（`health_manager.rs::error_rate` 口径：**0~1 比例**）。
+   *
+   * 注意：后端 `handle_channel_health` 的**顶层**没有 `error_rate` 字段——
+   * 顶层只有按日窗口算的 `success_rate`（0~100 百分数）与 `health` 子对象。
+   * 旧代码读 `c.error_rate`，拿到恒 undefined，加权错误率永远是 0、
+   * 状态行永远显示 `0.0%` 且永不标红（错误率这一整列等于没接）。
+   */
+  success_rate?: number | null;
+  health?: { error_rate?: number | null; last_error?: string } | null;
   circuit_breaker?: string;
   total_requests?: number;
   requests?: number;
@@ -36,6 +45,23 @@ interface StatusData {
  * 仅管理员可见：今日请求 / 错误率 / 熔断渠道数 / 实时 RPS / 平均延迟。
  * 30s 轮询 + 300ms 防抖合并渲染；指标越阈值变色（错误率>5% 或熔断渠道>0 变警告色）。
  */
+/**
+ * 单渠道错误率（0~1 比例，供加权聚合用）。
+ *
+ * 优先 `health.error_rate`（健康追踪快照，本身就是 0~1）；没有快照时按
+ * `100 - success_rate` 反推（`success_rate` 是 0~100 百分数）。
+ * 两者都缺 → 0（无数据不等于全错）。
+ */
+function errorRateOf(c: ChannelHealth): number {
+  const tracked = c.health?.error_rate;
+  if (typeof tracked === 'number' && Number.isFinite(tracked)) {
+    return Math.max(0, Math.min(1, tracked));
+  }
+  if (typeof c.success_rate === 'number' && Number.isFinite(c.success_rate)) {
+    return Math.max(0, Math.min(1, (100 - c.success_rate) / 100));
+  }
+  return 0;
+}
 export default function StatusLine(): JSX.Element | null {
   const { t } = useTranslation();
   const [data, setData] = useState<StatusData>({ realtime: null, channels: null, today: null });
@@ -91,9 +117,14 @@ export default function StatusLine(): JSX.Element | null {
 
   // 聚合：总请求数 / 加权错误率 / 熔断渠道数
   const totalReq = channels.reduce((s, c) => s + (c.total_requests ?? c.requests ?? 0), 0);
-  const weightedError = channels.reduce((s, c) => s + (c.error_rate ?? 0) * (c.total_requests ?? c.requests ?? 0), 0);
+  const weightedError = channels.reduce(
+    (s, c) => s + errorRateOf(c) * (c.total_requests ?? c.requests ?? 0),
+    0,
+  );
   const errorRate = totalReq > 0 ? weightedError / totalReq : 0;
-  const openBreakers = channels.filter((c) => c.circuit_breaker === 'open').length;
+  const openBreakers = channels.filter(
+    (c) => String(c.circuit_breaker || '').toLowerCase() === 'open',
+  ).length;
 
   const errorBad = errorRate > 0.05;
   const latencyBad = latency > 3000;

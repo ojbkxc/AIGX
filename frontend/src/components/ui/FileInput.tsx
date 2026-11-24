@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useId, useRef, useState } from 'react';
 import { cn } from '../../lib/utils';
 
 export interface FileInputProps {
@@ -13,6 +13,8 @@ export interface FileInputProps {
 /**
  * FileInput — 文件选择控件，复用 App.css 的 .form-input 样式体系。
  * 选中后显示文件名，便于在表单中内联使用。
+ *
+ * id 口径同 Input：`useId()` 兜底（不从 label 派生，避免同页同 label 撞 id）。
  */
 export default function FileInput({
   label,
@@ -22,7 +24,8 @@ export default function FileInput({
   className,
   onChange
 }: FileInputProps) {
-  const inputId = label ? 'file-' + label.replace(/\s+/g, '-') : undefined;
+  const reactId = useId();
+  const inputId = label ? `file-${reactId}` : undefined;
   const inputRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState<string>('');
 
