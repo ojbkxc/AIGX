@@ -1094,6 +1094,12 @@ fn paths_settings_ops() -> Value {
             "get": op("网关", "查询破甲控制台配置 / 进程统计 / 运行信息"),
             "put": op_body("网关", "全量更新破甲控制台配置（热生效）", "enabled/system_normalize/dead_zone_rewrite/reduce_reasoning/cross_source_fallback/skill_inject/structured_prompt 等")
         },
+        "/api/purge/defaults": {
+            "get": op("破甲", "读取破甲默认值（新建规则时的初值）")
+        },
+        "/api/purge/stats.csv": {
+            "get": op("破甲", "导出破甲统计 CSV（四档宽表）")
+        },
         "/api/purge/skills/import": {
             "post": op("网关", "导入技能包（ZIP/TAR/TGZ）到破甲技能目录（multipart 表单：file / name / overwrite）")
         },
@@ -2345,6 +2351,8 @@ mod tests {
         add("/api/purge/presets/{id}", &["get"]);
         add("/api/purge/presets/{id}/apply", &["post"]);
         add("/api/purge/skills/import", &["post"]);
+        add("/api/purge/defaults", &["get"]);
+        add("/api/purge/stats.csv", &["get"]);
         add("/api/cline-headers", &["get", "put"]);
         add("/api/queue", &["get", "put"]);
         add("/api/security/policy", &["get", "put"]);

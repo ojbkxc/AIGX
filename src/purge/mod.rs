@@ -2645,7 +2645,7 @@ mod tests {
                     codes.push(code);
                 }
             }
-            rest = &after[..];
+            rest = after;
         }
         assert!(codes.len() >= 10, "code 抽取异常（{codes:?}）");
 
