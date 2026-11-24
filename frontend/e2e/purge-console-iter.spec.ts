@@ -247,6 +247,26 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('20 · 「对比出厂默认」列出偏离项，一致时说一致', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  // ① 先制造一处偏离（重试上限 9），再比对
+  await page.getByLabel('重试上限').fill('9');
+  await page.getByTestId('purge-compare-defaults').click();
+  const panel = page.getByTestId('purge-defaults-diff');
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText(/相对出厂默认改了 1 项/);
+  await expect(panel).toContainText('重试上限');
+
+  // ② 收起后再点：把重试上限填回 mock 里 defaults 的值（8）→ 完全一致
+  await page.getByTestId('purge-defaults-diff-close').click();
+  await expect(panel).toHaveCount(0);
+  await page.getByLabel('重试上限').fill('8');
+  await page.getByTestId('purge-compare-defaults').click();
+  await expect(page.getByTestId('purge-defaults-diff')).toContainText(/完全一致/);
+});
+
 test('19 · 数字输入失焦就地收敛并说明原因（不是保存时才悄悄改）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);

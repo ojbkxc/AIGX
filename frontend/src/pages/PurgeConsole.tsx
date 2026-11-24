@@ -2307,6 +2307,8 @@ export default function PurgeConsole(): JSX.Element {
   const [batchText, setBatchText] = useState('');
   /** 上次未保存的草稿备份（与服务器配置不同时才出现） */
   const [draftBackup, setDraftBackup] = useState<DraftBackup | null>(null);
+  /** 与出厂默认的差异（null=没比过；空数组=完全一致） */
+  const [defaultsDiff, setDefaultsDiff] = useState<SettingsDiffItem[] | null>(null);
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
   const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
   // 导入配置文件选择
@@ -2957,6 +2959,27 @@ export default function PurgeConsole(): JSX.Element {
    * 走后端 /api/purge/stats.csv 而不是在前端拼字符串：窗口档依赖服务端
    * 事件环（前端只有当前档的快照），只有后端能一次给全四档。
    */
+  /**
+   * 与出厂默认比对当前草稿。
+   *
+   * 场景：接手别人的破甲配置时，「有改动」没有信息量——要知道**偏离默认的是哪
+   * 几项**，才能判断哪些是刻意调过的、哪些是忘在那儿的。
+   *
+   * 用草稿而不是已保存值：用户此刻看到的就是草稿，比的是「眼前这套 vs 默认」。
+   */
+  const compareDefaults = useCallback(async (): Promise<void> => {
+    const current = draftRef.current;
+    if (!current) return;
+    try {
+      const res = await api.getPurgeDefaults();
+      if (!res.success || !res.data?.settings) throw new Error('defaults failed');
+      const items = diffSettings(res.data.settings, current);
+      setDefaultsDiff(items);
+    } catch {
+      addToast(t('读取出厂默认失败'), 'error');
+    }
+  }, [addToast, t]);
+
   /** 复制破甲现状快照（交接/报障：运行 + 生效项 + 体检 + 统计一次带走） */
   const copySnapshot = useCallback(async (): Promise<void> => {
     const current = draftRef.current;
@@ -3452,6 +3475,35 @@ export default function PurgeConsole(): JSX.Element {
             {t('破甲控制台当前关闭，请求不会被改写。')}
           </p>
         ) : null}
+        {/* 与出厂默认的差异：接手别人配置时，「哪几项偏离默认」才是要看的 */}
+        {defaultsDiff ? (
+          <div className="purge-warning-box" role="status" data-testid="purge-defaults-diff">
+            <p className="purge-warning-row">
+              <span>
+                {defaultsDiff.length === 0
+                  ? t('当前配置与出厂默认完全一致。')
+                  : t('相对出厂默认改了 {{n}} 项：', { n: defaultsDiff.length })}
+              </span>
+            </p>
+            {defaultsDiff.length > 0 ? (
+              <ul className="purge-active-list">
+                {defaultsDiff.map((item, index) => (
+                  <li key={`${item.key}-${index}`}>{t(item.key, item.params)}</li>
+                ))}
+              </ul>
+            ) : null}
+            <div className="purge-actions">
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="purge-defaults-diff-close"
+                onClick={() => setDefaultsDiff(null)}
+              >
+                {t('收起')}
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {/* 未保存编辑警示条：离开保护之外的页内显性提示，提供「放弃修改」出口 */}
@@ -3488,6 +3540,15 @@ export default function PurgeConsole(): JSX.Element {
             }}
           >
             {t('放弃修改')}
+          </Button>
+          {/* 与出厂默认比：接手别人的配置时，光看「有改动」不够——改了什么才是问题 */}
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="purge-compare-defaults"
+            onClick={() => void compareDefaults()}
+          >
+            {t('对比出厂默认')}
           </Button>
           {/* 重置为默认：只填草稿（用户确认后再点保存），不直接写库 */}
           <Button
