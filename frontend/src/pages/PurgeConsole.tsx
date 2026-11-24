@@ -100,8 +100,115 @@ const NUM_FIELDS: Array<{ key: NumKey; label: string; min: number; max: number }
   { key: 'retry_limit', label: '重试上限', min: 1, max: 32 },
 ];
 
-function splitList(value: string): string[] {
-  return value
+/** 导入校验结论：`fatal` 非空 = 拒绝导入；`warnings` = 可导入但有风险。 */
+export interface ImportVerdict {
+  fatal: string[];
+  warnings: string[];
+}
+
+/** 必须是「数组，且每个元素都是对象」的字段（渲染期会 `.map` 或取属性）。 */
+const ARRAY_FIELDS = [
+  'rewrite_rules',
+  'synonym_pairs',
+  'fallback_models',
+  'normalize_strip_prefixes',
+  'structured_templates',
+  'refusal_patterns',
+  'failure_filter_keywords',
+  'failure_empty_keywords',
+] as const;
+
+/** 必须是「数组元素都带 string 型 from/to」的字段（词表两表）。 */
+const RULE_TABLE_FIELDS = ['rewrite_rules', 'synonym_pairs'] as const;
+
+/**
+ * 导入配置的结构校验（纯函数，便于单测）。
+ *
+ * 两级判定是刻意的：
+ * - **fatal**：结构坏了就渲染不出来（`synonym_pairs` 不是数组 → `.map` 抛错
+ *   整页白屏；规则行 from 是数字 → React 渲染对象报错）。这类必须拒绝导入。
+ * - **warnings**：能渲染但语义可疑（数字字段越界/是字符串 → 保存时被 clamp，
+ *   用户看不到差异；模板缺名 → 无法被 `active_template` 选中）。提示但仍导入，
+ *   因为「先看一眼再修」比「拒之门外」更符合导出-手改-再导入的工作流。
+ *
+ * 缺省字段一律不算问题：旧后端不返回 `structured_templates` 等，导出的旧文件
+ * 本来就该能导回来。
+ */
+export function validateImportedSettings(raw: unknown): ImportVerdict {
+  const fatal: string[] = [];
+  const warnings: string[] = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { fatal: ['配置根节点不是对象'], warnings };
+  }
+  const settings = raw as Record<string, unknown>;
+
+  for (const field of ARRAY_FIELDS) {
+    const value = settings[field];
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) {
+      fatal.push(`${field} 不是数组`);
+      continue;
+    }
+    if (value.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
+      fatal.push(`${field} 里存在非对象条目`);
+    }
+  }
+  for (const field of RULE_TABLE_FIELDS) {
+    const value = settings[field];
+    if (!Array.isArray(value)) continue;
+    const bad = value.findIndex((rule) => {
+      if (!rule || typeof rule !== 'object') return false; // 上一轮已按 fatal 处理
+      const row = rule as Record<string, unknown>;
+      return typeof row.from !== 'string' || typeof row.to !== 'string';
+    });
+    if (bad >= 0) fatal.push(`${field} 第 ${bad + 1} 条的原文/改写不是字符串`);
+  }
+
+  // 数字字段：越界或非数字都会被保存时静默 clamp，导入时就要说清楚
+  for (const field of NUM_FIELDS) {
+    const value = settings[field.key];
+    if (value === undefined) continue;
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      warnings.push(`${field.label} 不是有效数字，保存时会回落默认值`);
+    } else if (value < field.min || value > field.max) {
+      warnings.push(
+        `${field.label} 为 ${value}，超出 ${field.min}–${field.max}，保存时会被夹到边界`,
+      );
+    }
+  }
+
+  // 模板缺名：能渲染但选不中（active_template 按名匹配）
+  if (Array.isArray(settings.structured_templates)) {
+    const unnamed = settings.structured_templates.filter(
+      (tpl) => !tpl || typeof tpl !== 'object' || typeof (tpl as { name?: unknown }).name !== 'string'
+        || !(tpl as { name: string }).name.trim(),
+    ).length;
+    if (unnamed > 0) warnings.push(`${unnamed} 个结构化模板没有名称，无法被「当前启用模板」选中`);
+  }
+
+  // 布尔字段非布尔：会被当 falsy，开关静默关闭
+  const boolKeys = [
+    'enabled',
+    'system_normalize',
+    'dead_zone_rewrite',
+    'synonym_enabled',
+    'reduce_reasoning',
+    'cross_source_fallback',
+    'skill_inject',
+    'structured_prompt',
+    'auto_preset',
+  ] as const;
+  const badBool = boolKeys.filter(
+    (key) => settings[key] !== undefined && typeof settings[key] !== 'boolean',
+  );
+  if (badBool.length > 0) {
+    warnings.push(`这些开关不是布尔值，导入后会被当作关闭：${badBool.join('、')}`);
+  }
+
+  return { fatal, warnings };
+}
+
+function splitList(value: string): string[] {  return value
     .split(/[,，\s]+/)
     .map((item) => item.trim())
     .filter(Boolean);
@@ -1860,11 +1967,14 @@ export default function PurgeConsole(): JSX.Element {
     if (!file) return;
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text) as { version?: number; settings?: PurgeSettings };
-      const settings = parsed?.settings;
-      if (!settings || typeof settings !== 'object' || !Array.isArray(settings.rewrite_rules)) {
-        throw new Error('invalid shape');
+      const parsed = JSON.parse(text) as { version?: number; settings?: unknown };
+      const verdict = validateImportedSettings(parsed?.settings);
+      if (verdict.fatal.length > 0) {
+        // 结构坏了导不进来（渲染期会白屏）；逐条点名，不让用户猜哪里错
+        addToast(`${t('导入失败：配置结构有问题')} — ${verdict.fatal.join('；')}`, 'error');
+        return;
       }
+      const settings = parsed.settings as PurgeSettings;
       setDraft(settings);
       setNumRaw(numRawOf(settings));
       setNumErrors({});
@@ -1873,7 +1983,15 @@ export default function PurgeConsole(): JSX.Element {
       setPreviewBase(null);
       setPreviewMeta(null);
       setPreviewDetail(null);
-      addToast(t('配置已导入草稿，检查无误后点「保存」生效'), 'success');
+      if (verdict.warnings.length > 0) {
+        // 能渲染但语义可疑：导入照做，把风险一次说全（保存时才 clamp 的话用户看不到）
+        addToast(
+          `${t('配置已导入草稿，但有 {{n}} 处需要确认', { n: verdict.warnings.length })} — ${verdict.warnings.join('；')}`,
+          'warning',
+        );
+      } else {
+        addToast(t('配置已导入草稿，检查无误后点「保存」生效'), 'success');
+      }
     } catch {
       addToast(t('导入失败：不是有效的破甲配置文件'), 'error');
     }

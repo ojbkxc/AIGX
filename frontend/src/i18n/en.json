@@ -5023,6 +5023,8 @@
   "导出统计 CSV": "Export stats CSV",
   "统计已导出为 CSV": "Stats exported as CSV",
   "统计导出失败": "Failed to export stats",
+  "导入失败：配置结构有问题": "Import failed: the config structure is invalid",
+  "配置已导入草稿，但有 {{n}} 处需要确认": "Draft imported, but {{n}} item(s) need review",
   "预览失败（上一次结果已清空，避免与新输入混淆）": "Preview failed (previous result cleared so it is not confused with the new input)",
   "导入的 {{count}} 条规则的原文全部与当前词表重复，未追加（可能导错了文件？）": "All {{count}} imported rules duplicate existing 'from' entries in this word list; nothing appended (wrong file?)",
   "其中 {{n}} 条与现有词表原文重复（保存时后端只保留最早一条）": "{{n}} of them duplicate existing 'from' entries (backend keeps the earliest on save)",

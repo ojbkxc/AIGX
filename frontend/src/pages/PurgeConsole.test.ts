@@ -11,8 +11,66 @@ import {
   previewHistoryLabel,
   readPreviewHistory,
   skillKeywordSample,
+  validateImportedSettings,
   writePreviewHistory,
 } from './PurgeConsole';
+
+describe('validateImportedSettings', () => {
+  const base = {
+    rewrite_rules: [{ from: 'a', to: 'b' }],
+    synonym_pairs: [],
+    retry_limit: 8,
+  };
+
+  it('结构正常 → 无 fatal 无 warning', () => {
+    const v = validateImportedSettings(base);
+    expect(v.fatal).toEqual([]);
+    expect(v.warnings).toEqual([]);
+  });
+
+  it('根节点不是对象 → fatal', () => {
+    expect(validateImportedSettings(null).fatal.length).toBe(1);
+    expect(validateImportedSettings('x').fatal.length).toBe(1);
+    expect(validateImportedSettings([]).fatal.length).toBe(1);
+  });
+
+  it('数组字段不是数组 → fatal（渲染期会 .map 抛错白屏）', () => {
+    const v = validateImportedSettings({ ...base, synonym_pairs: 'oops' });
+    expect(v.fatal.some((m) => m.includes('synonym_pairs'))).toBe(true);
+  });
+
+  it('规则行 from 不是字符串 → fatal 且点名第几条', () => {
+    const v = validateImportedSettings({
+      ...base,
+      rewrite_rules: [{ from: 1, to: 'b' }],
+    });
+    expect(v.fatal.some((m) => m.includes('第 1 条'))).toBe(true);
+  });
+
+  it('数字越界/非数字 → warning（不阻断导入）', () => {
+    const v = validateImportedSettings({ ...base, retry_limit: 99, skill_inject_limit: 'x' });
+    expect(v.fatal).toEqual([]);
+    expect(v.warnings.length).toBe(2);
+    expect(v.warnings.join()).toContain('99');
+  });
+
+  it('模板缺名 / 布尔非布尔 → warning', () => {
+    const v = validateImportedSettings({
+      ...base,
+      structured_templates: [{ name: '', text: 't' }],
+      enabled: 'yes',
+    });
+    expect(v.fatal).toEqual([]);
+    expect(v.warnings.some((m) => m.includes('没有名称'))).toBe(true);
+    expect(v.warnings.some((m) => m.includes('enabled'))).toBe(true);
+  });
+
+  it('缺省字段不算问题（旧导出文件必须能导回）', () => {
+    const v = validateImportedSettings({ rewrite_rules: [] });
+    expect(v.fatal).toEqual([]);
+    expect(v.warnings).toEqual([]);
+  });
+});
 
 describe('skillKeywordSample', () => {
   it('关键词原样嵌入（子串匹配，多余包装不影响命中）', () => {
