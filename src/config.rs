@@ -1926,10 +1926,38 @@ impl ConfigManager {
                 }
             }
         }
-        let content = tokio::fs::read_to_string(&self.path)
-            .await
-            .unwrap_or_default();
-        let config: AppConfig = toml::from_str(&content).unwrap_or_default();
+        // 读不到（首启）/ 读坏了（权限、编码）/ 解析不了（TOML 语法或类型错）
+        // 三条路都回落默认配置，但**不能都静默**：后两条是「用户写的配置被
+        // 整份丢弃」—— 渠道、密钥、管理员账号全在文件里，而进程照常起来、
+        // 页面看起来只是「配置没了」。更糟的是下一次 `save()` 会把内存里的
+        // 默认值写回磁盘，原文件不可恢复。默认行为仍是回落（不 fail，存量
+        // 部署照常可用），但每条非首启路径都要留一行可诊断的日志。
+        let content = match tokio::fs::read_to_string(&self.path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                tracing::error!(
+                    path = %self.path.display(),
+                    %error,
+                    "config file unreadable; falling back to default configuration"
+                );
+                String::new()
+            }
+        };
+        let config: AppConfig = match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(error) => {
+                // 空内容（首启）解析不会失败（每个字段都有 `#[serde(default)]`），
+                // 走到这里说明文件真的坏了。
+                tracing::error!(
+                    path = %self.path.display(),
+                    %error,
+                    "config file is not valid TOML for AppConfig; falling back to default \
+                     configuration (the next save will overwrite the file — fix or restore it first)"
+                );
+                AppConfig::default()
+            }
+        };
         let config = apply_env_overrides_from(config, var);
         let cfg = config.clone();
         *self.config.write().await = config;
