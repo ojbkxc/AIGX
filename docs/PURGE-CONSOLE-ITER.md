@@ -325,6 +325,21 @@ node scripts/wait-static-still.mjs --wait 90  # 最多等 90s，静止后再返�
   `channels.reduce` 打崩，制造出「破甲页崩在 `d.reduce`」的假象。**mock 的兜底
   范围越大，越容易伪造出别人的 bug。**
 
+### 41. `git add -- <paths>` 不够：**commit 也要带 pathspec**
+本轮犯的错，值得单独记一节。
+
+`git add -- <我的 4 个文件>` + `git commit -F msg` —— 表面上只加了自己的文件，
+实际提交出去 **25 个文件**：并发会话早已把 21 个 `components/routing/**` 放进
+index（他们 staged 但还没 commit），`git commit` 把**整个 index** 提交了。
+
+- 后果：不是丢东西（内容都在），而是**替别人做了提交**——他们下次 commit 时
+  工作树已干净，会困惑「我改的东西哪去了」
+- 正确写法：`git commit -- <paths>`（**paths 出现在 add 和 commit 两处**）
+- 发现方式：`git show --stat --oneline <sha>` 数文件数。**提交后立刻核对文件数**，
+  是最便宜的自查
+
+多条 agent 同树时，index 是共享的，任何「只加自己的文件」的假设都不成立。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
