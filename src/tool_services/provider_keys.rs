@@ -256,9 +256,18 @@ pub(super) fn provider_row(provider: &str, entry: &ProviderConfig) -> Value {
     let key_hint = search_key
         .or_else(|| entry.keys.first())
         .map(|key| key.key_hint.as_str());
+    // 单次返回条数（A2A `provider_keys::row` 同形状）：能力边界来自 meta，
+    // 生效值 = 配置值（缺省用默认值）夹到上限；没有 meta 的来源一律 None。
+    let meta = super::providers::api_provider_meta(provider);
+    let max_results = super::providers::effective_max_results(provider, entry.max_results);
     json!({
         "provider": provider, "display_name": super::provider_display_name(provider),
         "auth_type": "api_key", "supports_search": true, "supports_fetch": true,
+        "supports_max_results": meta.is_some(),
+        "max_results": max_results,
+        "default_max_results": meta.map(|item| item.default_max_results),
+        "max_results_limit": meta.map(|item| item.max_results_limit),
+        "max_query_chars": meta.and_then(|item| item.max_query_chars),
         "available": true, "configured": has_keys(entry), "enabled": entry.enabled,
         "usable": search_key.is_some(), "fetch_usable": fetch_key.is_some(),
         "key_hint": key_hint, "updated_at": (entry.updated_at > 0).then_some(entry.updated_at),

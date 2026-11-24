@@ -206,7 +206,7 @@ pub async fn get_selection(
     Ok(Json(tool_services::provider_selection(services(&state))).into_response())
 }
 
-/// `PUT /api/tools/provider-selection` `{search_providers?, fetch_provider?}`
+/// `PUT /api/tools/provider-selection` `{search_providers?, fetch_provider?, max_global_sources?, long_query_policy?}`
 pub async fn put_selection(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -230,7 +230,37 @@ pub async fn put_selection(
         .get("fetch_provider")
         .and_then(Value::as_str)
         .map(str::to_string);
-    match tool_services::update_selection(services(&state), search, fetch) {
+    // 单次汇总总条数上限：A2A 同一口径——必须是正整数，值域校验留给
+    // `update_selection`（同一条错误消息，避免两处各写一份范围）。
+    let max_global_sources = match object.get("max_global_sources") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64() {
+            Some(number) => Some(number as usize),
+            None => {
+                return Err(error_response(
+                    "max_global_sources 必须是正整数",
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        },
+    };
+    let long_query_policy = match object.get("long_query_policy") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(error_response(
+                "long_query_policy 必须是字符串",
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    };
+    match tool_services::update_selection(
+        services(&state),
+        search,
+        fetch,
+        max_global_sources,
+        long_query_policy.map(str::to_string),
+    ) {
         Ok(value) => Ok(Json(value).into_response()),
         Err(error) => Err(error_response(&error, StatusCode::BAD_REQUEST)),
     }
@@ -294,6 +324,23 @@ pub async fn put_provider(
             ))
         }
     };
+    // 单次最多返回条数（三态，与 A2A `max_results: Option<Option<usize>>` 同语义）：
+    //   字段缺省        → None（不修改）
+    //   `"max_results": null` → Some(None)（清空，回落到来源默认值）
+    //   `"max_results": 20`   → Some(Some(20))（设定值，值域由 update_provider 校验）
+    let max_results: Option<Option<usize>> = match object.get("max_results") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(value) => match value.as_u64() {
+            Some(number) => Some(Some(number as usize)),
+            None => {
+                return Err(error_response(
+                    "max_results 必须是正整数或 null",
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        },
+    };
     match tool_services::update_provider(
         services(&state),
         &state.account_sessions,
@@ -302,6 +349,7 @@ pub async fn put_provider(
         enabled,
         account_id,
         keys,
+        max_results,
     ) {
         Ok(value) => Ok(Json(value).into_response()),
         Err(error) => Err(error_response(&error, StatusCode::BAD_REQUEST)),

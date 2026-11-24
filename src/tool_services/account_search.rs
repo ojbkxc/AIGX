@@ -337,6 +337,17 @@ pub(super) async fn provider_row(
         "accounts": options,
         "max_query_chars": support.as_ref().ok().map(|cap| json!(cap.max_query_chars)),
         "supports_max_results": support.as_ref().ok().map(|cap| json!(cap.supports_max_results)),
+        // 生效值：插件申报支持条数时，用配置值（缺省插件默认值）夹到插件上限
+        // （A2A `account_search` 的 effective_account_limit 同口径）。
+        "max_results": support
+            .as_ref()
+            .ok()
+            .filter(|cap| cap.supports_max_results)
+            .map(|cap| {
+                let upper = cap.max_results_limit.unwrap_or(10);
+                let fallback = cap.default_max_results.unwrap_or_else(|| upper.min(10));
+                entry.max_results.unwrap_or(fallback).clamp(1, upper)
+            }),
         "default_max_results": support
             .as_ref()
             .ok()
@@ -363,6 +374,8 @@ pub(super) enum SearchSource {
         account_id: String,
         /// 插件申报的能力边界（query 上限 + 条数参数）。
         capability: WebSearchCapability,
+        /// 管理面配置的单次返回条数（`None` = 用插件默认值）。
+        max_results: Option<usize>,
     },
 }
 
@@ -380,33 +393,51 @@ impl SearchSource {
         client: &reqwest::Client,
         query: &str,
         timeout: u64,
+        policy: super::search::LongQueryPolicy,
     ) -> Result<Vec<SourceDraft>, SearchError> {
         match self {
             Self::Key { provider } => {
-                super::providers::search(services, client, provider, query, timeout).await
+                // 密钥型来源的字数上限与条数上限都来自 provider meta（四家内置源）；
+                // 没有 meta 的来源（插件型 key）两处都是 None/兜底值，策略不介入。
+                let meta = super::providers::api_provider_meta(provider);
+                let effective = super::search::apply_query_policy(
+                    query,
+                    meta.and_then(|item| item.max_query_chars),
+                    policy,
+                )?;
+                let config = services.load();
+                let entry = config.providers.get(provider).cloned().unwrap_or_default();
+                let limit = super::providers::effective_max_results(provider, entry.max_results)
+                    .unwrap_or(super::normalize::MAX_QUERY_RESULT_LIMIT);
+                super::providers::search(services, client, provider, &effective, timeout, limit)
+                    .await
             }
             Self::Account {
                 provider,
                 account_id,
                 capability,
+                max_results,
             } => {
-                if query.chars().count() > capability.max_query_chars {
-                    return Err(SearchError::new(
-                        SearchErrorCode::InvalidInput,
-                        format!("该搜索来源最多接受 {} 个字符", capability.max_query_chars),
-                    ));
-                }
+                // 超长查询按设置页策略处理（截断 / 跳过 / 报错），不再一律报错。
+                let effective = super::search::apply_query_policy(
+                    query,
+                    Some(capability.max_query_chars),
+                    policy,
+                )?;
                 validate_account(sessions, provider, account_id)?;
                 let host = services
                     .account_search_host()
                     .ok_or_else(host_unavailable)?;
-                let mut payload = json!({ "query": query, "timeout_seconds": timeout });
-                // 条数参数只在插件申报支持时透传（A2A v3.5.0 同口径）：
-                // default_max_results 是插件自己的推荐值，不达标时网关不猜测。
+                let mut payload = json!({ "query": effective, "timeout_seconds": timeout });
+                // 条数参数只在插件申报支持时透传：优先用管理面配置值，缺省用插件推荐的
+                // 默认值（A2A `effective_account_limit` 同口径，夹到插件上限）。
                 if capability.supports_max_results {
-                    if let Some(default) = capability.default_max_results {
-                        payload["max_results"] = json!(default);
-                    }
+                    let upper = capability.max_results_limit.unwrap_or(10);
+                    let fallback = capability
+                        .default_max_results
+                        .unwrap_or_else(|| upper.min(10));
+                    let limit = max_results.unwrap_or(fallback).clamp(1, upper);
+                    payload["max_results"] = json!(limit);
                 }
                 let result = host
                     .admin_action(
@@ -436,6 +467,7 @@ pub(super) async fn prepare(
             provider: provider.to_string(),
             account_id: entry.account_id.clone(),
             capability,
+            max_results: entry.max_results,
         })
     } else {
         if !super::provider_keys::has_keys(entry) {

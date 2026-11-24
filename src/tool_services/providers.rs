@@ -25,6 +25,57 @@ const FIRECRAWL_SCRAPE: &str = "https://api.firecrawl.dev/v2/scrape";
 const OLLAMA_SEARCH: &str = "https://ollama.com/api/web_search";
 const OLLAMA_FETCH: &str = "https://ollama.com/api/web_fetch";
 
+/// 四家内置 API 搜索提供商的真实上游能力边界（A2A `ApiProviderMeta` 逐值一致）。
+///
+/// `max_results`/`max_query_chars` 之前在各家请求体里硬编码（一律 10 条），
+/// 用户配不了也看不到；这里把边界搬成 meta，row 与管理面按它渲染，请求期按
+/// 生效值下发。数值来源是上游文档：
+///   · Tavily 单次最多 20 条、查询词 400 字；
+///   · Firecrawl 最多 100 条、查询词 500 字（按每 10 条结果计费）；
+///   · Querit 最多 100 条（免费套餐实际只回 10 条）；
+///   · Ollama Web Search 固定 10 条。
+#[derive(Clone, Copy, Debug)]
+pub struct ApiProviderMeta {
+    pub default_max_results: usize,
+    pub max_results_limit: usize,
+    pub max_query_chars: Option<usize>,
+}
+
+pub fn api_provider_meta(provider: &str) -> Option<ApiProviderMeta> {
+    match provider {
+        "tavily" => Some(ApiProviderMeta {
+            default_max_results: 20,
+            max_results_limit: 20,
+            max_query_chars: Some(400),
+        }),
+        "querit" => Some(ApiProviderMeta {
+            default_max_results: 10,
+            max_results_limit: 100,
+            max_query_chars: None,
+        }),
+        "firecrawl" => Some(ApiProviderMeta {
+            default_max_results: 20,
+            max_results_limit: 100,
+            max_query_chars: Some(500),
+        }),
+        "ollama" => Some(ApiProviderMeta {
+            default_max_results: 10,
+            max_results_limit: 10,
+            max_query_chars: None,
+        }),
+        _ => None,
+    }
+}
+
+/// 该来源**生效**的单次返回条数（A2A `provider_keys::row` 同一算式）。
+///
+/// 配置为空 → 用 meta 的默认值；配置值一律夹到 `1..=limit`（手工改过的配置
+/// 也不会把上游打出 400）。没有 meta 的来源（插件型）返回 `None`。
+pub fn effective_max_results(provider: &str, configured: Option<usize>) -> Option<usize> {
+    api_provider_meta(provider)
+        .map(|meta| configured.unwrap_or(meta.default_max_results).clamp(1, meta.max_results_limit))
+}
+
 pub fn display_name(provider: &str) -> &'static str {
     match provider {
         "tavily" => "Tavily",
@@ -56,6 +107,7 @@ fn nested<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
 async fn tavily_search(
     request: &ProviderRequest<'_>,
     query: &str,
+    limit: usize,
 ) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request
         .post_json(
@@ -64,7 +116,7 @@ async fn tavily_search(
                 "query": query,
                 "topic": "general",
                 "search_depth": "basic",
-                "max_results": 10,
+                "max_results": limit,
                 "include_answer": false,
                 "include_raw_content": false,
                 "include_images": false,
@@ -173,9 +225,10 @@ fn querit_published_date(item: &Value) -> String {
 async fn querit_search(
     request: &ProviderRequest<'_>,
     query: &str,
+    limit: usize,
 ) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request
-        .post_json(QUERIT_SEARCH, json!({ "query": query, "count": 10 }))
+        .post_json(QUERIT_SEARCH, json!({ "query": query, "count": limit }))
         .await?;
     let results = nested(&body, &["results", "result"]).and_then(Value::as_array);
     Ok(results
@@ -255,11 +308,12 @@ async fn querit_fetch(
 async fn firecrawl_search(
     request: &ProviderRequest<'_>,
     query: &str,
+    limit: usize,
 ) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request
         .post_json(
             FIRECRAWL_SEARCH,
-            json!({ "query": query, "limit": 10, "sources": ["web"] }),
+            json!({ "query": query, "limit": limit, "sources": ["web"] }),
         )
         .await?;
     let results = nested(&body, &["data", "web"]).and_then(Value::as_array);
@@ -378,9 +432,10 @@ async fn firecrawl_fetch(
 async fn ollama_search(
     request: &ProviderRequest<'_>,
     query: &str,
+    limit: usize,
 ) -> Result<Vec<SourceDraft>, SearchError> {
     let body = request
-        .post_json(OLLAMA_SEARCH, json!({ "query": query, "max_results": 10 }))
+        .post_json(OLLAMA_SEARCH, json!({ "query": query, "max_results": limit }))
         .await?;
     Ok(array_of(&body, "results")
         .iter()
@@ -467,21 +522,23 @@ pub async fn search(
     provider: &str,
     query: &str,
     timeout: u64,
+    limit: usize,
 ) -> Result<Vec<SourceDraft>, SearchError> {
     let request = ProviderRequest::new(services, client, provider, "search", timeout);
-    search_with_request(provider, &request, query).await
+    search_with_request(provider, &request, query, limit).await
 }
 
 async fn search_with_request(
     provider: &str,
     request: &ProviderRequest<'_>,
     query: &str,
+    limit: usize,
 ) -> Result<Vec<SourceDraft>, SearchError> {
     match provider {
-        "tavily" => tavily_search(request, query).await,
-        "querit" => querit_search(request, query).await,
-        "firecrawl" => firecrawl_search(request, query).await,
-        "ollama" => ollama_search(request, query).await,
+        "tavily" => tavily_search(request, query, limit).await,
+        "querit" => querit_search(request, query, limit).await,
+        "firecrawl" => firecrawl_search(request, query, limit).await,
+        "ollama" => ollama_search(request, query, limit).await,
         _ => Err(SearchError::new(
             SearchErrorCode::ProviderUnavailable,
             "Unknown search provider",

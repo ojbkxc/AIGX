@@ -4,7 +4,8 @@
 //!
 //! ── 搜索 ────────────────────────────────────────────────────
 //! queries 1~10 条，可并发；每条 query 并发后台选中的**全部**提供商，单条
-//! query 内先合并各家重复来源；跨 query 再按全局编号去重（最多 100 条来源）。
+//! query 内先合并各家重复来源；跨 query 再按全局编号去重（上限来自
+//! `ToolConfig::max_global_sources`，默认 200，可在设置页调）。
 //! 部分上游失败时返回成功结果 + warnings；全部 query 失败时由 HTTP 层回错误
 //! 状态。响应形状与上游 Skill 端点逐字段一致。
 //!
@@ -14,12 +15,59 @@
 use serde_json::{json, Value};
 
 use super::normalize::{
-    dedupe_strings, deduplicate_sources, normalize_fetch_urls, web_source_dedup_key, SourceDraft,
-    FETCH_NOTICE, MAX_BATCH_ITEMS, MAX_GLOBAL_SOURCES, SEARCH_NOTICE,
+    dedupe_strings, deduplicate_sources, normalize_fetch_urls, truncate_query,
+    web_source_dedup_key, SourceDraft, FETCH_NOTICE, MAX_BATCH_ITEMS, SEARCH_NOTICE,
 };
 use super::ToolServices;
 use super::{account_search, providers};
 use crate::account_session::AccountSessionStore;
+
+/// 搜索词超出该来源字数上限时的处理（A2A `LongQueryPolicy` 同义同值）。
+///
+/// 三档对应设置页「搜索词超长处理」：截断后搜索（默认）/ 跳过该来源 / 直接报错。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LongQueryPolicy {
+    Truncate,
+    Skip,
+    Error,
+}
+
+impl LongQueryPolicy {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "skip" => Self::Skip,
+            "error" => Self::Error,
+            _ => Self::Truncate,
+        }
+    }
+}
+
+/// 按策略处理「query 超出来源字数上限」（A2A `search::apply_query_policy` 同行为）。
+///
+/// `max_chars = None`（来源没申报上限）一律原样放行——这是唯一不会误伤的分支。
+pub(super) fn apply_query_policy(
+    query: &str,
+    max_chars: Option<usize>,
+    policy: LongQueryPolicy,
+) -> Result<String, SearchError> {
+    let Some(max_chars) = max_chars else {
+        return Ok(query.to_string());
+    };
+    if query.chars().count() <= max_chars {
+        return Ok(query.to_string());
+    }
+    match policy {
+        LongQueryPolicy::Truncate => Ok(truncate_query(query, max_chars)),
+        LongQueryPolicy::Skip => Err(SearchError::new(
+            SearchErrorCode::InvalidInput,
+            format!("搜索词超过 {max_chars} 个字符上限，已跳过"),
+        )),
+        LongQueryPolicy::Error => Err(SearchError::new(
+            SearchErrorCode::InvalidInput,
+            format!("该搜索来源最多接受 {max_chars} 个字符"),
+        )),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,13 +211,14 @@ async fn search_one_query(
     query: String,
     sources_to_use: &[account_search::SearchSource],
     timeout: u64,
+    policy: LongQueryPolicy,
     skipped: &[String],
 ) -> QueryOutcome {
     let calls = sources_to_use.iter().map(|source| async {
         (
             source.provider(),
             source
-                .search(services, sessions, client, &query, timeout)
+                .search(services, sessions, client, &query, timeout, policy)
                 .await,
         )
     });
@@ -232,7 +281,9 @@ pub struct SearchRun {
 }
 
 /// 跨 query 的全局编号与去重（纯函数，单测直接覆盖）。
-fn assemble_searches(outcomes: Vec<QueryOutcome>) -> (Vec<Value>, usize) {
+///
+/// `max_global_sources` 来自配置（设置页「单次汇总总条数上限」），不再写死 100。
+fn assemble_searches(outcomes: Vec<QueryOutcome>, max_global_sources: usize) -> (Vec<Value>, usize) {
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut next_number = 1usize;
     let mut searches = Vec::new();
@@ -261,7 +312,7 @@ fn assemble_searches(outcomes: Vec<QueryOutcome>) -> (Vec<Value>, usize) {
             } else {
                 index.get(&key).copied()
             };
-            if existing.is_some() || next_number > MAX_GLOBAL_SOURCES {
+            if existing.is_some() || next_number > max_global_sources {
                 duplicates.push(draft);
             } else {
                 let number = next_number;
@@ -334,6 +385,9 @@ pub async fn run_search(
         .copied()
         .unwrap_or(30)
         .clamp(super::TIMEOUT_MIN_SECONDS, super::TIMEOUT_MAX_SECONDS);
+    // 两个搜索行为参数一次取齐：来源上限进入去重编号，超长策略进入单来源分发。
+    let max_global_sources = config.max_global_sources;
+    let policy = LongQueryPolicy::parse(&config.long_query_policy);
     let mut sources = Vec::new();
     let mut skipped = Vec::new();
     let mut denied = false;
@@ -382,12 +436,12 @@ pub async fn run_search(
         .collect();
     let outcomes = futures::future::join_all(queries.iter().cloned().map(|query| {
         search_one_query(
-            services, sessions, client, query, &sources, timeout, &skipped,
+            services, sessions, client, query, &sources, timeout, policy, &skipped,
         )
     }))
     .await;
 
-    let (searches, successful) = assemble_searches(outcomes);
+    let (searches, successful) = assemble_searches(outcomes, max_global_sources);
     Ok(SearchRun {
         payload: json!({
             "notice": SEARCH_NOTICE,
@@ -537,7 +591,7 @@ mod tests {
                 warnings: Vec::new(),
             },
         ];
-        let (searches, successful) = assemble_searches(outcomes);
+        let (searches, successful) = assemble_searches(outcomes, 200);
         assert_eq!(successful, 2);
         assert_eq!(searches[0]["results"].as_array().unwrap().len(), 2);
         assert_eq!(searches[0]["warnings"], json!(["skip1"]));
@@ -562,7 +616,7 @@ mod tests {
             error: Some(SearchError::new(SearchErrorCode::RateLimited, "slow down")),
             warnings: Vec::new(),
         }];
-        let (searches, successful) = assemble_searches(outcomes);
+        let (searches, successful) = assemble_searches(outcomes, 200);
         assert_eq!(successful, 0);
         assert_eq!(searches[0]["error"]["code"], "rate_limited");
     }

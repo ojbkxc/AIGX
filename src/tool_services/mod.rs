@@ -286,6 +286,10 @@ pub struct ProviderConfig {
     pub keys: Vec<ProviderKeyConfig>,
     /// 账号型来源只保存账号引用，凭证仍由账号库与插件管理。
     pub account_id: String,
+    /// 单次最多返回条数（`None` = 用该来源的默认值；A2A `ProviderConfig.max_results`）。
+    /// 仅在来源申报了能力边界（`providers::api_provider_meta` / 插件 capability）时有效。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_results: Option<usize>,
     pub enabled: bool,
     pub updated_at: i64,
 }
@@ -319,6 +323,12 @@ pub struct ToolConfig {
     /// provider → 密钥与启用状态
     pub providers: BTreeMap<String, ProviderConfig>,
     pub selection: Selection,
+    /// 单次汇总总条数上限（A2A `ToolConfig.max_global_sources`）：跨 query 去重后
+    /// 最多保留多少条来源。默认 200，写入侧夹在
+    /// `MIN_GLOBAL_SOURCES..=MAX_GLOBAL_SOURCES_LIMIT`。
+    pub max_global_sources: usize,
+    /// 搜索词超长处理（A2A `ToolConfig.long_query_policy`）：`truncate` / `skip` / `error`。
+    pub long_query_policy: String,
     pub vision: Option<VisionConfig>,
     #[serde(default, deserialize_with = "image_config::deserialize_stored")]
     pub image_generation: Option<ImageConfig>,
@@ -348,6 +358,13 @@ impl ToolConfig {
         for provider in API_KEY_PROVIDERS {
             if let Some(entry) = self.providers.get_mut(provider) {
                 provider_keys::normalize(entry);
+                // 单次返回条数：手工改过的配置也不许把上游打出 400，按能力边界夹回去
+                // （A2A `ToolConfig::normalized` 同口径；没有 meta 的来源原样保留）。
+                if let (Some(limit), Some(meta)) =
+                    (entry.max_results, providers::api_provider_meta(provider))
+                {
+                    entry.max_results = Some(limit.clamp(1, meta.max_results_limit));
+                }
             }
         }
         self.selection
@@ -358,6 +375,18 @@ impl ToolConfig {
         }
         if !is_fetch_provider(&self.selection.fetch) {
             self.selection.fetch = "tavily".into();
+        }
+        // 0（旧配置/手工清空）回落到默认值，其余夹进可配区间；策略不在值域就回默认。
+        self.max_global_sources = if self.max_global_sources == 0 {
+            normalize::DEFAULT_MAX_GLOBAL_SOURCES
+        } else {
+            self.max_global_sources.clamp(
+                normalize::MIN_GLOBAL_SOURCES,
+                normalize::MAX_GLOBAL_SOURCES_LIMIT,
+            )
+        };
+        if !normalize::LONG_QUERY_POLICIES.contains(&self.long_query_policy.as_str()) {
+            self.long_query_policy = normalize::DEFAULT_LONG_QUERY_POLICY.to_string();
         }
         self
     }
@@ -556,7 +585,50 @@ pub fn provider_selection(services: &ToolServices) -> Value {
     json!({
         "search_providers": config_value.selection.search,
         "fetch_provider": config_value.selection.fetch,
+        // A2A v3.5.1 provider_selection 的四键形状：两个选择 + 两个搜索行为参数
+        "max_global_sources": config_value.max_global_sources,
+        "long_query_policy": config_value.long_query_policy,
     })
+}
+
+/// 校验「单次最多返回条数」（A2A `validate_provider_max_results` 同语义）。
+///
+/// 三态：外层 `None` = 不修改；内层 `None` = 清空并回落到来源默认值；
+/// `Some(n)` = 设定，必须落在该来源的能力边界内。
+///
+/// **与 A2A 的已知差异（如实记录）**：A2A 对账号型来源会去插件申报的
+/// `web_search_capability().max_results_limit` 校验，那是一次 `async` 的插件
+/// 调用；本函数保持 `sync`（`update_provider` 也是 sync，改成 async 会波及调用方
+/// 与既有测试），因此账号型来源回落到 A2A 的最后一条分支——通用上限
+/// [`normalize::MAX_QUERY_RESULT_LIMIT`]。这是**更宽松**的校验：插件边界更小时
+/// 这里不会拦，运行期 `account_search` 仍会按插件的 `max_results_limit` 夹一次。
+fn validate_provider_max_results(
+    provider: &str,
+    max_results: Option<Option<usize>>,
+) -> Result<Option<Option<usize>>, String> {
+    let Some(next) = max_results else {
+        return Ok(None);
+    };
+    let Some(value) = next else {
+        return Ok(Some(None));
+    };
+    if let Some(meta) = providers::api_provider_meta(provider) {
+        if !(1..=meta.max_results_limit).contains(&value) {
+            return Err(format!(
+                "{} 单次最多返回条数需在 1～{} 之间",
+                provider_display_name(provider),
+                meta.max_results_limit
+            ));
+        }
+        return Ok(Some(Some(value)));
+    }
+    if !(1..=normalize::MAX_QUERY_RESULT_LIMIT).contains(&value) {
+        return Err(format!(
+            "单次最多返回条数需在 1～{} 之间",
+            normalize::MAX_QUERY_RESULT_LIMIT
+        ));
+    }
+    Ok(Some(Some(value)))
 }
 
 pub fn update_provider(
@@ -567,10 +639,13 @@ pub fn update_provider(
     enabled: Option<bool>,
     account_id: Option<&str>,
     keys: Option<Vec<ProviderKeyUpdate>>,
+    max_results: Option<Option<usize>>,
 ) -> Result<Value, String> {
     if !is_search_provider(provider) {
         return Err("未知的搜索提供商".into());
     }
+    // 单次返回条数：外层 None = 不改；内层 None = 清空回默认；Some(n) = 设定值。
+    let validated_max_results = validate_provider_max_results(provider, max_results)?;
     if is_account_provider(provider) {
         if keys.is_some() || api_key.is_some_and(|key| !key.trim().is_empty()) {
             return Err("该搜索来源使用已有账号，不接受 API Key".into());
@@ -580,7 +655,7 @@ pub fn update_provider(
             account_search::validate_account(sessions, provider, id)
                 .map_err(|error| error.message)?;
         }
-        let config_value = services.update(|config_value| {
+        let config_value = services.try_update(|config_value| {
             let entry = config_value
                 .providers
                 .entry(provider.to_string())
@@ -591,7 +666,11 @@ pub fn update_provider(
             if let Some(enabled) = enabled {
                 entry.enabled = enabled;
             }
+            if let Some(next) = validated_max_results {
+                entry.max_results = next;
+            }
             entry.updated_at = now_ms();
+            Ok(())
         })?;
         let entry = config_value
             .providers
@@ -602,6 +681,7 @@ pub fn update_provider(
             "success": true,
             "provider": provider,
             "account_id": entry.account_id,
+            "max_results": entry.max_results,
         }));
     }
     if account_id.is_some() {
@@ -632,6 +712,9 @@ pub fn update_provider(
         }
         if let Some(enabled) = enabled {
             entry.enabled = enabled;
+        }
+        if let Some(next) = validated_max_results {
+            entry.max_results = next;
         }
         Ok(())
     })?;
@@ -717,6 +800,8 @@ pub fn update_selection(
     services: &ToolServices,
     search: Option<Vec<String>>,
     fetch: Option<String>,
+    max_global_sources: Option<usize>,
+    long_query_policy: Option<String>,
 ) -> Result<Value, String> {
     let mut next_search = None;
     if let Some(items) = search {
@@ -739,12 +824,35 @@ pub fn update_selection(
             return Err("该提供商不支持网页抓取".into());
         }
     }
+    // A2A v3.5.1 同值域：条数 20~1000（不夹取，越界直接 400），策略三选一。
+    if let Some(max_sources) = max_global_sources {
+        if !(normalize::MIN_GLOBAL_SOURCES..=normalize::MAX_GLOBAL_SOURCES_LIMIT)
+            .contains(&max_sources)
+        {
+            return Err(format!(
+                "单次汇总总条数上限需在 {}～{} 之间",
+                normalize::MIN_GLOBAL_SOURCES,
+                normalize::MAX_GLOBAL_SOURCES_LIMIT
+            ));
+        }
+    }
+    if let Some(policy) = long_query_policy.as_deref() {
+        if !normalize::LONG_QUERY_POLICIES.contains(&policy) {
+            return Err("搜索词超长处理方式无效".into());
+        }
+    }
     services.update(|config_value| {
         if let Some(items) = next_search {
             config_value.selection.search = items;
         }
         if let Some(provider) = fetch {
             config_value.selection.fetch = provider;
+        }
+        if let Some(max_sources) = max_global_sources {
+            config_value.max_global_sources = max_sources;
+        }
+        if let Some(policy) = long_query_policy {
+            config_value.long_query_policy = policy;
         }
     })?;
     Ok(provider_selection(services))

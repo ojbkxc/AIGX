@@ -30,6 +30,35 @@ import './ToolProviderPanel.css';
 /** 翻译函数（允许插值参数，便于模块级 helper 复用） */
 type TFn = (key: string, values?: Record<string, string | number>) => string;
 
+/**
+ * 管理面视图的**局部**扩展（`types/a2a.ts` 不在本波写入范围，这里按结构补齐）。
+ *
+ * A2A v3.5.1 的两处形状比 AIGX 的既有类型多几个键：
+ *   · selection 多了 `max_global_sources`（20~1000，默认 200）与
+ *     `long_query_policy`（truncate / skip / error，默认 truncate）；
+ *   · provider 行多了 `supports_max_results` / `max_results` /
+ *     `default_max_results` / `max_results_limit`（单次最多返回条数）。
+ * 后端这两个端点已按同一形状返回（`tool_services::provider_selection`、
+ * `provider_keys::provider_row`），所以这里只补类型、不兜造数据。
+ */
+type ProviderRowView = ToolProviderRow & {
+  supports_max_results?: boolean | null;
+  max_results?: number | null;
+  default_max_results?: number | null;
+  max_results_limit?: number | null;
+};
+
+type SelectionView = ToolProviderSelection & {
+  max_global_sources?: number;
+  long_query_policy?: 'truncate' | 'skip' | 'error';
+};
+
+const LONG_QUERY_POLICY_LABEL: Record<'truncate' | 'skip' | 'error', string> = {
+  truncate: '自动截断后搜索（推荐）',
+  skip: '跳过超限提供商',
+  error: '保留报错提示',
+};
+
 /** 各家官方 API Key 页面（新标签打开） */
 const PROVIDER_KEY_PAGES: Record<string, string> = {
   tavily: 'https://app.tavily.com/home',
@@ -177,14 +206,16 @@ export default function ToolProviderPanel(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
 
-  const [providers, setProviders] = useState<ToolProviderRow[]>([]);
-  const [selection, setSelection] = useState<ToolProviderSelection | null>(null);
+  const [providers, setProviders] = useState<ProviderRowView[]>([]);
+  const [selection, setSelection] = useState<SelectionView | null>(null);
   const [loading, setLoading] = useState(true);
   const [notReady, setNotReady] = useState(false);
   const [error, setError] = useState('');
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
   /** 账号型来源的绑定草稿：provider → account_id（未改动时缺省 = 后端当前绑定） */
   const [accountDrafts, setAccountDrafts] = useState<Record<string, string>>({});
+  /** 单次最多返回条数的编辑草稿：provider → 文本（空串 = 清空回默认） */
+  const [maxResultsDrafts, setMaxResultsDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, ToolProviderTestResult>>({});
   /** 多密钥编辑器：provider → 草稿行（null = 编辑器关闭） */
@@ -201,8 +232,18 @@ export default function ToolProviderPanel(): JSX.Element {
         api.listToolProviders(),
         api.getToolProviderSelection(),
       ]);
-      setProviders(toolPayload<ToolProviderRow[]>(providersRes) ?? []);
-      setSelection(toolPayload<ToolProviderSelection>(selectionRes) ?? null);
+      setProviders(toolPayload<ProviderRowView[]>(providersRes) ?? []);
+      const rawSelection = toolPayload<SelectionView>(selectionRes) ?? null;
+      // 后端给的是真值；缺省键（更老的后端）按 A2A 默认值补齐，避免界面空着
+      setSelection(
+        rawSelection
+          ? {
+              ...rawSelection,
+              max_global_sources: rawSelection.max_global_sources ?? 200,
+              long_query_policy: rawSelection.long_query_policy ?? 'truncate',
+            }
+          : null,
+      );
       setNotReady(false);
       setError('');
     } catch (err) {
@@ -390,10 +431,60 @@ export default function ToolProviderPanel(): JSX.Element {
 
   const saveSelection = async (): Promise<void> => {
     if (!selection) return;
+    // 与后端同一条值域（20~1000）：先在前端挡，错误消息才指得出是哪个字段
+    const maxGlobal = Number(selection.max_global_sources ?? 200);
+    if (!Number.isInteger(maxGlobal) || maxGlobal < 20 || maxGlobal > 1000) {
+      addToast(t('单次汇总总条数上限需在 20～1000 之间'), 'error');
+      return;
+    }
     setBusy('selection');
     try {
-      await api.saveToolProviderSelection(selection);
+      const body: SelectionView = {
+        search_providers: selection.search_providers,
+        fetch_provider: selection.fetch_provider,
+        max_global_sources: maxGlobal,
+        long_query_policy: selection.long_query_policy ?? 'truncate',
+      };
+      await api.saveToolProviderSelection(body);
       addToast(t('提供商选择已保存'));
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * 保存一家的「单次最多返回条数」（A2A `saveProvider` 的 max_results 分支）。
+   *
+   * 空串 = 清空（提交 `null` → 后端回落到该来源默认值）；否则必须落在
+   * `1..=max_results_limit`。账号型来源的边界来自插件申报，同样用这个区间。
+   */
+  const saveMaxResults = async (provider: ProviderRowView): Promise<void> => {
+    const raw = (maxResultsDrafts[provider.provider] ?? '').trim();
+    const upper = provider.max_results_limit ?? 100;
+    let value: number | null = null;
+    if (raw !== '') {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > upper) {
+        addToast(t('单次最多返回条数需在 1～{{max}} 之间', { max: upper }), 'error');
+        return;
+      }
+      value = parsed;
+    }
+    setBusy(provider.provider);
+    try {
+      // `max_results` 是三态键（缺省不改 / null 清空 / 数字设定）；`api.saveToolProvider`
+      // 的声明参数还没带这个键（`api/endpoints/misc.ts` 不在本次写入范围），
+      // 这里按同一 PUT 的实参形状局部放宽，不新增第二条请求路径。
+      await api.saveToolProvider(provider.provider, { max_results: value } as unknown as {
+        api_key?: string;
+        account_id?: string | null;
+        enabled?: boolean;
+        keys?: Array<{ id?: string; api_key?: string }>;
+      });
+      addToast(t('单次最多返回条数已保存'));
       await load();
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
@@ -611,6 +702,38 @@ export default function ToolProviderPanel(): JSX.Element {
               </div>
               ) : null}
 
+              {/* 单次最多返回条数（A2A ProviderDialog 的 max_results 字段）：
+                  只有来源申报了边界才出现；空串 = 清空回默认值。 */}
+              {provider.supports_max_results ? (
+                <div className="tpp-row-edit">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={provider.max_results_limit ?? 100}
+                    placeholder={
+                      provider.default_max_results != null
+                        ? t('默认 {{count}}', { count: provider.default_max_results })
+                        : t('不填按来源默认')
+                    }
+                    value={
+                      maxResultsDrafts[provider.provider] ??
+                      (provider.max_results != null ? String(provider.max_results) : '')
+                    }
+                    disabled={isBusy}
+                    aria-label={t('单次最多返回条数')}
+                    onChange={(e) =>
+                      setMaxResultsDrafts((prev) => ({ ...prev, [provider.provider]: e.target.value }))
+                    }
+                  />
+                  <Button variant="outline" size="sm" disabled={isBusy} onClick={() => void saveMaxResults(provider)}>
+                    {t('保存条数')}
+                  </Button>
+                  <span className="tpp-key-help">
+                    {t('范围 1～{{max}}，留空恢复默认', { max: provider.max_results_limit ?? 100 })}
+                  </span>
+                </div>
+              ) : null}
+
               {/* 多密钥编辑器：按序使用、可上下移 / 移除 / 新增 / 单密钥检查 */}
               {drafts ? (
                 <div className="tpp-key-editor">
@@ -797,6 +920,48 @@ export default function ToolProviderPanel(): JSX.Element {
                 </option>
               ))}
             </select>
+          </div>
+          {/* 两个搜索行为参数（A2A v3.5.1 WebSearchConfig 同两个字段、同提示文案） */}
+          <div className="tpp-selection-row">
+            <span className="tpp-selection-label">{t('单次汇总总条数上限')}</span>
+            <Input
+              type="number"
+              min={20}
+              max={1000}
+              value={String(selection.max_global_sources ?? 200)}
+              disabled={busy !== null}
+              aria-label={t('单次汇总总条数上限')}
+              onChange={(e) =>
+                setSelection({ ...selection, max_global_sources: Number(e.target.value) })
+              }
+            />
+            <span className="tpp-key-help">
+              {t('单次调用去重合并后最多保留的来源数（20～1000，默认 200）。')}
+            </span>
+          </div>
+          <div className="tpp-selection-row">
+            <span className="tpp-selection-label">{t('搜索词超长处理')}</span>
+            <select
+              className="form-input tpp-fetch-select"
+              value={selection.long_query_policy ?? 'truncate'}
+              disabled={busy !== null}
+              aria-label={t('搜索词超长处理')}
+              onChange={(e) =>
+                setSelection({
+                  ...selection,
+                  long_query_policy: e.target.value as 'truncate' | 'skip' | 'error',
+                })
+              }
+            >
+              {(['truncate', 'skip', 'error'] as const).map((policy) => (
+                <option key={policy} value={policy}>
+                  {t(LONG_QUERY_POLICY_LABEL[policy])}
+                </option>
+              ))}
+            </select>
+            <span className="tpp-key-help">
+              {t('超出提供商字数限制（如 Kiro 200 字、Tavily 400 字、Firecrawl 500 字）时的策略。')}
+            </span>
           </div>
           <div className="tpp-selection-actions">
             <Button variant="primary" size="sm" disabled={busy !== null} onClick={() => void saveSelection()}>
