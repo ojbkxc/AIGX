@@ -423,7 +423,10 @@ mod tests {
     /// 第三种拼写时前端会静默归到「未声明」，看起来像「这家没判据」。
     #[test]
     fn visibility_value_domain_is_a2a_verbatim() {
-        assert_eq!(normalize_visibility(Some("hidden")).as_deref(), Some("hidden"));
+        assert_eq!(
+            normalize_visibility(Some("hidden")).as_deref(),
+            Some("hidden")
+        );
         assert_eq!(
             normalize_visibility(Some("  Shown ")).as_deref(),
             Some("shown")
