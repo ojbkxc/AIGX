@@ -169,6 +169,45 @@
 - `@media (hover: none) and (pointer: coarse)` 下撤销这些缩放 + `.glass-switch::before`
   补 44×44 触摸区；桌面零回归（实测对照见 §本地真服务冒烟）。
 
+### 29. 词表行级「试」
+- 每行加「试」按钮（from 非空才显示）：用该条原文生成样例、滚到预览区并
+  **立刻跑一次**。命中受表序/停用/链式改写影响，看代码推不出来。
+- `runPreview(inputOverride?)`：`setState` 异步，直接读 state 会拿到上一次的
+  样例（结果与点的那行对不上）。
+
+### 30. diff「只看变更行」
+- 长样例里上下文行占绝大多数，遮住真正的改写点；勾选后只留 add/del/mod，
+  并提示「已隐藏 N 行未变更内容」（不静默省略）。默认关闭。
+
+### 31. 未保存变更明细
+- `dirty` 只说「有改动」，不说哪几项。`diffSettings(saved, draft)` 按**数据面
+  语义**比对：9 布尔 + 3 数字 + 5 字符串逐项 `旧 → 新`；两张词表按条数+启用
+  行数；模板按**名称集合**（只改正文不报）；异源模型逐个比较。
+- 警示条展示前 6 项，超出「另有 N 项」。
+
+### 32. 预设检索覆盖正文 + 「正文命中」徽标 + 命中片段
+- `matches` 纳入 `preset.body`（`include_str!` 内联的 `&'static str`，零 IO）。
+- `PresetBrief.body_match` 只在「元数据搜不到、正文搜得到」时 `Some(true)`
+  （元数据已命中不挂徽标，否则每条都带标记等于噪音）；`None` 时字段跳过。
+- 展开面板给 `findBodySnippet` 的命中片段（前后 60 字符 + `<mark>` 高亮），
+  大小写不敏感定位但**返回原文切片**。
+
+### 33. 破甲页迭代面 e2e（9 条）
+- `e2e/purge-console-iter.spec.ts`，desktop + mobile 两个 project 各 9 条：
+  生效项摘要语义 / 点击跳转闪烁 / 告警分级排序 / 词表整理回报条数 / 行级「试」/
+  只看变更行 / 重置为默认不直接保存（断言 PUT 计数 0）/ 搜索框提示 / 正文命中
+  片段高亮。
+- **纯函数单测验不到「页面真的这么反应」**：dialog 确认后的草稿变化、toast 文案、
+  diff 渲染条件只有真浏览器能验。
+
+### 34. 跨项目：pi-agent-desktop 破甲页可用性验证
+- 该仓是 Next.js 独立实现（`components/PurgeConsoleSection.tsx` + `app/api/purge/*`），
+  不是引用 AIGX 产物。验证方法：`PI_WEB_PASSWORD=… npm run dev`（端口 30141）→
+  无头浏览器登录 → 设置 → 破甲控制台。
+- 实测：面板完整渲染（43 个交互控件）、提示语由真实配置算出、写入链路
+  `GET 200 → PUT 200（返回 settings）→ GET 200` 幂等且值稳定。
+- **验证写入时用「原值幂等回写」**：只证明链路通，不改用户配置。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
@@ -197,15 +236,18 @@
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test --bin aigx` | **2565 passed / 0 failed**（含 purge:: 85） |
+| `cargo test --bin aigx` | **2575 passed / 0 failed**（含 purge:: 87） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **256 passed / 0 failed**（PurgeConsole 68） |
+| vitest 全量 | **268 passed / 0 failed**（PurgeConsole 80） |
+| e2e（破甲页两个 spec，desktop） | **16 passed / 0 failed** |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
-> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 28 批收口值）。
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 34 批收口值）。
+> 已知 flaky：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
+> 是「查询应在 remove 前已出发」的时序前提，偶发假红（单跑 3 次恒绿，见第 43 轮记录）。
 
 ## 文件清单（本批 Purge 相关）
 
