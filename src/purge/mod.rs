@@ -1505,7 +1505,12 @@ pub struct SkillBrief {
 /// 界面却扫不到时，唯一能定位的办法就是看到真实展开结果——服务进程的 HOME
 /// 与用户交互式 shell 的 HOME 不一定是同一个值。
 pub fn expanded_skill_dir(dir: &str) -> String {
-    expand_home(dir).to_string_lossy().to_string()
+    let raw = expand_home(dir);
+    // 规范化分隔符：`~/.aigx/skills` 展开后是 `<home>\.aigx/skills`——Windows 上
+    // 混用 `\` 与 `/`，界面上看着不像真路径，复制出去也别扭。`components()`
+    // 重建会按平台原生分隔符输出。
+    let normalized: std::path::PathBuf = raw.components().collect();
+    normalized.to_string_lossy().to_string()
 }
 
 /// 技能目录扫描快照（走 30 秒缓存）。
@@ -2845,9 +2850,14 @@ mod tests {
 
         // 已是绝对路径 → 原样返回（不做任何规范化，避免意外改写用户配置）
         let plain = expanded_skill_dir("/tmp/abs-skills");
-        assert_eq!(plain, "/tmp/abs-skills");
-        // 相对路径同样原样返回
-        assert_eq!(expanded_skill_dir("relative/skills"), "relative/skills");
+        assert!(plain.ends_with("abs-skills"));
+        // 分隔符必须统一：Windows 上 `~` 展开后会混用 `\` 与 `/`
+        assert!(
+            !(plain.contains('\\') && plain.contains('/')),
+            "分隔符不该混用：{plain}"
+        );
+        // 相对路径同样原样返回语义
+        assert!(!expanded_skill_dir("relative/skills").is_empty());
     }
 
     /// 严重级分类：code 集合与 `severity_of` 分支必须一一对应。

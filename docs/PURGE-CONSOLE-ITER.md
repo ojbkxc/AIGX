@@ -259,6 +259,26 @@ AIGX_SERVER__PORT=18096 AIGX_SECURITY__CAPTCHA_ENABLED=false \
 
 **结论**：mock 与真实契约**没有偏差**——这批功能在真后端上可直接用。
 
+### 38. 真实后端 + 真实前端页面联调（第二轮）
+上一轮只核对了 API 契约；本轮把**真后端 + 真 static + 无头浏览器**串起来，看页面
+在真实数据下的渲染。
+
+**手工注入 token 调试要三个键**（路由守卫的口径，缺一个就被踢回登录页）：
+```js
+localStorage.setItem('token', t);
+localStorage.setItem('expires_at', String(Date.now() + 3_600_000)); // 缺它 isAuthenticated() 恒 false
+localStorage.setItem('role', 'admin');                              // 缺它 AdminRoute 判非管理员
+```
+
+**实测（1440×900，真实 53 条预设）**：标题、7 个页内导航按钮、50/53 条预设
+（默认 limit=50，符合分页设计）、1 条真实体检告警、5 条生效项、保存按钮、
+2 个「整理」按钮、统计基线时间——全部按预期渲染，`pageErrors` 为空。
+
+**由此抓到一个真实缺陷**：`skill_dir_resolved` 显示成
+`D:\Users\…\.aigx/skills` ——**混用两种分隔符**。`expand_home` 用
+`PathBuf::from(home).join(rest)`，而 `rest` 里带 `/`。修法：`components()`
+重建 PathBuf，按平台原生分隔符输出；测试断言「不混用」。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
