@@ -880,6 +880,42 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     [outOfScope],
   );
 
+  /* ── 总览指标（A2A `CheckinStats`：今日签到 / 定时签到 / 待领新手福利 / 累计记录） ── */
+
+  /** 启用的定时条目数 */
+  const enabledSchedules = useMemo(
+    () => (schedules ?? []).filter((s) => s.enabled).length,
+    [schedules],
+  );
+
+  /** 最近一次将执行的时刻（毫秒；无启用条目 / 总开关关着 = null） */
+  const nextScheduleAt = useMemo(() => {
+    if (data?.auto?.enabled !== true) return null;
+    const stamps = (schedules ?? [])
+      .filter((s) => s.enabled)
+      .map((s) => Number(s.nextRunAt))
+      .filter((n) => Number.isFinite(n) && n > 0)
+      .sort((a, b) => a - b);
+    return stamps[0] ?? null;
+  }, [schedules, data?.auto?.enabled]);
+
+  /** 新手福利待领项数合计（`null` = 还没盘点过，不计入合计但单独计数） */
+  const onboardingPending = useMemo(
+    () =>
+      (data?.extras?.onboarding ?? []).reduce(
+        (sum, row) => sum + (typeof row.pending === 'number' ? row.pending : 0),
+        0,
+      ),
+    [data?.extras?.onboarding],
+  );
+
+  /** 已盘点过的新手福利账号数（盘点过的才有「待领几项」） */
+  const onboardingChecked = useMemo(
+    () =>
+      (data?.extras?.onboarding ?? []).filter((row) => typeof row.pending === 'number').length,
+    [data?.extras?.onboarding],
+  );
+
   const hasRecordFilter = !!kwApplied || !!recordOutcome || !!recordProvider || !!recordKind || !!recordStart || !!recordEnd;
 
   /* 1.0.49 契约字段已冻结：编辑器控件无条件渲染（旧后端 serde(default) 忽略未知字段） */
@@ -1287,7 +1323,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                 <div className="ck-stat-value">
                   {totals.done}/{totals.total}
                 </div>
-                <div className="ck-stat-label">{t('今日完成')}</div>
+                <div className="ck-stat-label">{t('今日签到')}</div>
                 <div className="ck-progress" role="progressbar" aria-valuenow={totals.done} aria-valuemax={totals.total}>
                   <span
                     className="ck-progress-fill"

@@ -192,6 +192,25 @@ describe('Routing 页冒烟', () => {
       expect(labels).toContain(want),
     );
 
+    // 左栏头（对齐 A2A RoutingRail 的 SidebarHeader）：标题 + 条目总数 + 新增
+    const railHead = container.querySelector('.rt-rail-head');
+    expect(railHead).toBeTruthy();
+    expect(railHead?.textContent).toContain('路由配置');
+    // 2 个默认规则项 + 特殊三项 + 1 个模型档案 + 1 个路由组 = 7
+    expect(railHead?.querySelector('.rt-count')?.textContent).toBe('7');
+    expect(railHead?.querySelector('button')?.getAttribute('aria-label')).toBe('新增路由配置');
+
+    // 路由组条目显示组名（不是组 id），id 留在 title 里供定位
+    expect(labels).toContain('快速组');
+    const groupItem = Array.from(container.querySelectorAll<HTMLElement>('.rt-nav-item')).find(
+      (el) => el.textContent?.trim() === '快速组',
+    );
+    expect(groupItem?.getAttribute('title')).toBe('g1');
+
+    // 页头策略摘要（对齐 A2A routing-page-policy）：策略 · 粘滞 模式
+    expect(container.querySelector('.rt-pagebar-policy')?.textContent).toContain('加权随机');
+    expect(container.querySelector('.rt-pagebar-policy')?.textContent).toContain('粘滞 自动');
+
     // 总开关提示（enabled=true 走「已启用」分支）
     expect(container.textContent).toContain('多规则已启用');
     // 层栏：全局 + 模型级 gpt-4o（rail 里模型条目；模型档案区还会出现同名
@@ -243,5 +262,49 @@ describe('Routing 页冒烟', () => {
     expect(container.querySelectorAll('.rt-replay-item').length).toBe(0);
     // 回放明细端点未被拉（未选中任何请求）
     expect(apiMock.getRouteReplay).not.toHaveBeenCalled();
+  });
+
+  it('回放左栏筛选：计数 / 搜索 / 请求模型下拉（对齐 A2A RoutingRequestList）', async () => {
+    apiMock.listRequestLogs.mockResolvedValue({
+      success: true,
+      data: [
+        { id: 'req-aaa', model: 'gpt-4o', created_at: 1_700_000_000 },
+        { id: 'req-bbb', model: 'claude-3', created_at: 1_700_000_600 },
+      ],
+    });
+    const { container } = render(<Routing /> as ReactElement);
+    await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
+
+    fireEvent.click(modeButton(container, '请求回放'));
+    await waitFor(() => expect(container.querySelectorAll('.rt-replay-item').length).toBe(2));
+
+    // 左栏头显示匹配数（未筛选 = 全部）
+    expect(container.querySelector('.rt-replay-rail-title .rt-count')?.textContent).toBe('2');
+
+    // 搜索命中一条（按请求 ID）
+    const search = container.querySelector<HTMLInputElement>(
+      'input[aria-label="搜索请求 ID 或模型"]',
+    );
+    expect(search).toBeTruthy();
+    fireEvent.change(search as HTMLInputElement, { target: { value: 'bbb' } });
+    await waitFor(() => expect(container.querySelectorAll('.rt-replay-item').length).toBe(1));
+    expect(container.querySelector('.rt-replay-item-id')?.textContent).toContain('req-bbb');
+
+    // 搜索无命中 → 明确空态（不是静默空白）
+    fireEvent.change(search as HTMLInputElement, { target: { value: 'zzz' } });
+    await waitFor(() => expect(container.textContent).toContain('没有匹配的请求'));
+
+    // 清空搜索，用「请求模型」下拉筛（候选只列本页出现过的模型）
+    fireEvent.change(search as HTMLInputElement, { target: { value: '' } });
+    const modelSelect = container.querySelector<HTMLSelectElement>('select[aria-label="请求模型"]');
+    expect(modelSelect).toBeTruthy();
+    expect(Array.from(modelSelect?.options ?? []).map((o) => o.value)).toEqual([
+      '',
+      'claude-3',
+      'gpt-4o',
+    ]);
+    fireEvent.change(modelSelect as HTMLSelectElement, { target: { value: 'gpt-4o' } });
+    await waitFor(() => expect(container.querySelectorAll('.rt-replay-item').length).toBe(1));
+    expect(container.querySelector('.rt-replay-item-id')?.textContent).toContain('req-aaa');
   });
 });

@@ -25,18 +25,12 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
   title,
   lede,
   editor,
-  addLabel,
-  addDisabled,
-  onAddRule,
   serverError,
   children,
 }: {
   title: string;
   lede: string;
   editor: SpecialEditorState<T, V>;
-  addLabel?: string;
-  addDisabled?: boolean;
-  onAddRule?: () => void;
   /** 后端解析已存配置失败时的错误（config 为 null）：如实告知，且禁止覆盖保存 */
   serverError?: string | null;
   children: ReactNode;
@@ -115,14 +109,6 @@ export function RulePanel<T, V extends { config?: Partial<T> | null; revision?: 
         </div>
       ) : (
         <div className="rt-special-body">
-          {onAddRule ? (
-            <div className="rt-special-toolbar">
-              <Button variant="outline" size="sm" disabled={saving || addDisabled || blockedByServerError} onClick={onAddRule}>
-                <Plus size={13} />
-                {addLabel ?? t('添加规则')}
-              </Button>
-            </div>
-          ) : null}
           {children}
         </div>
       )}
@@ -160,6 +146,29 @@ export function RuleSectionHead({
       {count ? <span className="rt-count">{count}</span> : null}
       {actions ? <div className="rt-special-section-actions">{actions}</div> : null}
     </div>
+  );
+}
+
+/**
+ * 「添加规则」按钮：挂在 RuleSectionHead 的行尾操作位（对齐 A2A ·
+ * 它的「添加规则」就在规则分组标题右侧，而不是面板顶部另起一条工具条）。
+ * 禁用判据由各面板决定（上限已满 / 无候选模型 / 保存中）。
+ */
+export function AddRuleButton({
+  onClick,
+  disabled,
+  label,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  label?: string;
+}): JSX.Element {
+  const { t } = useTranslation();
+  return (
+    <Button variant="outline" size="sm" disabled={disabled} onClick={onClick}>
+      <Plus size={13} />
+      {label ?? t('添加规则')}
+    </Button>
   );
 }
 

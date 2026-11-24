@@ -149,9 +149,9 @@ export default function ProfileForm({
 
   return (
     <div>
-      {/* 1. 选路策略（枚举 → 无「清空」语义） */}
+      {/* 1. 路由策略（枚举 → 无「清空」语义） */}
       <TriStateField
-        label={t('选路策略')}
+        label={t('路由策略')}
         hint={t('同优先级组内怎么挑供应商。')}
         state={fieldState(value, 'strategy')}
         onStateChange={(s) => setField('strategy', s)}
@@ -176,9 +176,9 @@ export default function ProfileForm({
         </select>
       </TriStateField>
 
-      {/* 2. 会话粘性（枚举 → 无「清空」语义） */}
+      {/* 2. 会话粘滞（枚举 → 无「清空」语义） */}
       <TriStateField
-        label={t('会话粘性')}
+        label={t('会话粘滞')}
         hint={t('同一会话是否跟住同一供应商（复用上游上下文缓存）。')}
         state={fieldState(value, 'sticky')}
         onStateChange={(s) => setField('sticky', s)}

@@ -22,7 +22,7 @@ import { RefreshCw, Search } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from './Toast';
 import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
-import { EmptyState, Loading } from './ui';
+import { Badge, EmptyState, Loading } from './ui';
 import type { RouteStickyList } from '../types/routing-replay';
 
 /** 秒/毫秒自适应（<1e11 视为秒，对齐账号页口径） */
@@ -79,6 +79,17 @@ export default function RouteSticky(): JSX.Element {
   const [applied, setApplied] = useState('');
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const debounceRef = useRef<number | null>(null);
+
+  /**
+   * 活跃绑定数（对齐 A2A 的「{n} 条活跃绑定」）：expires_at 在未来的才计入。
+   * 无 expires_at 的条目（异常形状/旧桩）按活跃计入 —— 列表里既然显示了它，
+   * 就不该在计数上假装它不存在。
+   */
+  const nowMs = Date.now();
+  const activeCount = entries.filter((e) => {
+    const exp = toMillis(e.expires_at);
+    return exp == null || exp > nowMs;
+  }).length;
 
   const load = useCallback(async (q: string): Promise<void> => {
     setLoading(true);
@@ -181,6 +192,14 @@ export default function RouteSticky(): JSX.Element {
         </p>
       </div>
       <div className="card-body">
+        {/* 状态摘要（对齐 A2A RoutingStickyDialog：粘性档位徽标 + 活跃绑定条数）。
+            AIGX 的条目按 expires_at 判活跃；count 只用于展示，不参与清除判据。 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+          <Badge tone="info">{t('粘性：{{mode}}', { mode: stickyMode || t('未记录') })}</Badge>
+          <span className="form-hint" style={{ margin: 0 }}>
+            {t('{{n}} 条活跃绑定', { n: activeCount })}
+          </span>
+        </div>
         <div className="form-group">
           <div style={{ display: 'flex', gap: 8 }}>
             <div style={{ position: 'relative', flex: 1, maxWidth: 360 }}>
@@ -188,7 +207,7 @@ export default function RouteSticky(): JSX.Element {
               <input
                 className="form-input"
                 style={{ paddingLeft: 30 }}
-                placeholder={t('按会话标识或供应商名搜索')}
+                placeholder={t('搜索模型、账号或会话来源')}
                 value={keyword}
                 onChange={(e) => onKeyword(e.target.value)}
               />

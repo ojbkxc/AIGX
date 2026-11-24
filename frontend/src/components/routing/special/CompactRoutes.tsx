@@ -24,7 +24,7 @@ import {
   type CompactRouteRule,
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
-import { ModelSelect, RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
+import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
 
 /** 规则行内编辑态：index = -1 表示新增 */
 interface Editing {
@@ -90,14 +90,17 @@ export default function CompactRoutes({ active }: { active: boolean }): JSX.Elem
       title={t('压缩上下文')}
       lede={t('命中下面规则的上下文压缩请求，会改用指定的模型压缩一次；账号仍按新模型自己的路由挑。')}
       editor={editor}
-      addLabel={t('添加规则')}
-      addDisabled={saving || full || !clients.length}
       serverError={view?.error ?? null}
-      onAddRule={() => setEditing({ rule: blankRule(), index: -1 })}
     >
       <RuleSectionHead
         title={t('规则')}
         count={t('{{n}} 条', { n: rules.length })}
+        actions={
+          <AddRuleButton
+            disabled={saving || full || !clients.length}
+            onClick={() => setEditing({ rule: blankRule(), index: -1 })}
+          />
+        }
       />
       {!rules.length ? (
         <div className="rt-state-note rt-state-inherit">

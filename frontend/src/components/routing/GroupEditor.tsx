@@ -16,6 +16,7 @@
  * 3. 组的 strategy / sticky **只在这里维护**（不在分层档案里再开一处，
  *    避免同一字段两处可改 —— 本仓既有约定）。
  */
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Plus, Trash2 } from 'lucide-react';
 import {
@@ -75,11 +76,20 @@ function emptyGroup(id: string): RoutingGroup {
 export default function GroupEditor({
   groups,
   onChange,
+  focusId = null,
 }: {
   groups: RoutingGroup[];
   onChange: (next: RoutingGroup[]) => void;
+  /**
+   * 左栏 rail 点中的组 id（对齐 A2A：点为 rail 条目，右侧只展开那一个组）。
+   * null / '' = 不聚焦，全部展开（此时行为与旧版逐字节一致）。
+   * 折叠只是显示层：groups 数组照样全量渲染项参与 patch，索引不会错位。
+   */
+  focusId?: string | null;
 }): JSX.Element {
   const { t } = useTranslation();
+  /** 用户手动展开的非聚焦组（focusId 只决定「默认展开谁」，不是只读过滤） */
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   /** 重复 id 检测：后端按 id 查找，重复会让命中结果不确定 */
   const dupIds = new Set(
@@ -101,7 +111,7 @@ export default function GroupEditor({
   return (
     <div>
       <div className="rt-notice rt-notice-info">
-        {t('组的「选路策略 / 会话粘性」是可继承的三态：留「继承上层」表示本组不改这两项，跟随全局/模型级；选了具体值才覆盖。')}
+        {t('组的「路由策略 / 会话粘滞」是可继承的三态：留「继承上层」表示本组不改这两项，跟随全局/模型级；选了具体值才覆盖。')}
       </div>
       <div className="form-hint" style={{ marginTop: 6 }}>
         {t('组目前通过档案的「默认路由组」或请求显式指定命中；把组登记为可直接调用的模型（出现在 /v1/models 供客户端选择）依赖后端后续能力，本期未提供。')}
@@ -129,6 +139,31 @@ export default function GroupEditor({
       {groups.map((g, gi) => {
         const overMembers = g.members.length > ROUTING_CAPS.MAX_MEMBERS;
         const dup = dupIds.has(g.id);
+        // 聚焦模式下非目标组默认收成一行（点 rail 组条目 = 只看这一个组）；
+        // 能手动展开，id 重复的组一律展开（那是要立刻看见的错）。
+        const rowKey = `${g.id}-${gi}`;
+        const collapsed = Boolean(focusId) && g.id !== focusId && !dup && !expanded.has(rowKey);
+        if (collapsed) {
+          return (
+            <div className="rt-group-card rt-group-collapsed" key={rowKey}>
+              <div className="rt-group-head">
+                <div className="rt-group-title">
+                  <span className="rt-group-id">{g.name || g.id || t('（未命名 id）')}</span>
+                  <span className="rt-count">
+                    {t('{{n}} 个成员槽位', { n: g.members.length })}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setExpanded((prev) => new Set(prev).add(rowKey))}
+                >
+                  {t('展开此组')}
+                </button>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="rt-group-card" key={`${g.id}-${gi}`}>
             <div className="rt-group-head">
@@ -192,7 +227,7 @@ export default function GroupEditor({
                 </span>
               </div>
               <div className="rt-subfield">
-                <label>{t('选路策略')}</label>
+                <label>{t('路由策略')}</label>
                 <select
                   className="form-input"
                   value={g.strategy ?? ''}
@@ -211,7 +246,7 @@ export default function GroupEditor({
                 </select>
               </div>
               <div className="rt-subfield">
-                <label>{t('会话粘性')}</label>
+                <label>{t('会话粘滞')}</label>
                 <select
                   className="form-input"
                   value={g.sticky ?? ''}

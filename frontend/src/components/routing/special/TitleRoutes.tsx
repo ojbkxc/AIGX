@@ -24,7 +24,7 @@ import {
   type TitleRoutesView,
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
-import { ModelSelect, RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
+import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
 
 interface Editing {
   rule: TitleRouteRule;
@@ -81,12 +81,18 @@ export default function TitleRoutes({ active }: { active: boolean }): JSX.Elemen
       title={t('标题生成')}
       lede={t('只改写被识别为标题生成的小请求，普通对话不受影响。规则按列表顺序匹配，第一条命中的生效。')}
       editor={editor}
-      addLabel={t('添加规则')}
-      addDisabled={saving || full || !clients.length}
       serverError={view?.error ?? null}
-      onAddRule={() => setEditing({ rule: blankRule(), index: -1 })}
     >
-      <RuleSectionHead title={t('规则')} count={t('{{n}} 条', { n: rules.length })} />
+      <RuleSectionHead
+        title={t('规则')}
+        count={t('{{n}} 条', { n: rules.length })}
+        actions={
+          <AddRuleButton
+            disabled={saving || full || !clients.length}
+            onClick={() => setEditing({ rule: blankRule(), index: -1 })}
+          />
+        }
+      />
       {!rules.length ? (
         <div className="rt-state-note rt-state-inherit">
           {t('还没有规则。标题请求会照常交给原模型。')}

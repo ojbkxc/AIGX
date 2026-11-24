@@ -82,6 +82,9 @@ import {
 import type { RoutingQueueEntryItem, RoutingQueueItem } from '../types';
 import './Routing.css';
 import './RoutingShell.css';
+// 对齐 A2A 新增的页头工具条 / 左栏头零件（本页骨架以外的增量样式，
+// 不改 pages/RoutingShell.css 的既有类）
+import '../components/routing/RoutingShell.css';
 
 /** 顶部模式分段（对齐 Agent2API：路由配置 / 请求回放） */
 type RoutingMode = 'config' | 'replay';
@@ -114,15 +117,64 @@ function statusOf(err: unknown): number | undefined {
   return (err as { status?: number } | null)?.status;
 }
 
+/** 秒/毫秒自适应（<1e11 视为秒，与账号页 / 回放页同一口径） */
+function toMillis(v: number | undefined): number | null {
+  if (v == null || !Number.isFinite(v)) return null;
+  return v < 1e11 ? v * 1000 : v;
+}
+
+/**
+ * 回放左栏的行形状（列集照 A2A routing-request-list 的 ReplayRow 落地）。
+ *
+ * 数据来自 `/request-logs`：能取到 model / status_code / latency_ms / created_at /
+ * channel_id / request_id；**取不到** A2A 的 accountName 与「在途」标记，这两格
+ * 先按占位渲染（不伪造数据），缺口在交付清单里点名。
+ */
+interface ReplayLogRow {
+  /** 内部 id（回放明细端点按它查） */
+  id: string;
+  request_id?: string;
+  model?: string;
+  status_code?: number;
+  latency_ms?: number;
+  created_at?: number;
+  channel_id?: string;
+  /** A2A 行内的账号/提供商格；AIGX 日志只有 channel_id，据此占位 */
+  provider?: string;
+  /** A2A 行内的「在途」判据；AIGX 日志无在途标记（见交付清单） */
+  running?: boolean;
+}
+
+/** 时间范围档位（A2A：5 / 10 / 30 / 60 分钟；本仓多一档「全部时间」，因为日志是历史归档） */
+const REPLAY_WINDOWS = [5, 10, 30, 60] as const;
+/** 每页条数（A2A 固定 30） */
+const REPLAY_PAGE_SIZE = 30;
+
 export default function Routing(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
 
   const [mode, setMode] = useState<RoutingMode>('config');
   const [panel, setPanel] = useState<ConfigPanel>('global');
-  // 回放「最近请求」列表（对齐 Agent2API：左列表 + 右 RouteReplayView）
-  const [replayRows, setReplayRows] = useState<Array<{ id: string; model?: string; created_at?: number }>>([]);
+  /**
+   * 回放左栏「最近请求」的行。
+   *
+   * 列集照 A2A routing-request-list 的行来：模型 / 状态 / 时间 / 账号（提供商）+
+   * 耗时。数据源是本仓 `/request-logs`（服务端支持 keyword / model / status /
+   * start / size 过滤），不是 A2A 的 flow 端点 —— 列结构按 A2A 落，取不到的
+   * 字段（账号名、在途标记）先留空/占位，缺口记在交付清单里。
+   */
+  const [replayRows, setReplayRows] = useState<ReplayLogRow[]>([]);
   const [replayId, setReplayId] = useState<string | null>(null);
+  /** 回放左栏筛选（对齐 A2A RoutingRequestList：搜索 + 请求模型 + 时间范围 + 仅失败 + 翻页） */
+  const [replaySearch, setReplaySearch] = useState('');
+  const [replayModel, setReplayModel] = useState('');
+  const [replayStatus, setReplayStatus] = useState('');
+  const [replayMinutes, setReplayMinutes] = useState<number>(0);
+  const [replayPage, setReplayPage] = useState(0);
+  const [replayMatched, setReplayMatched] = useState(0);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayError, setReplayError] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [policy, setPolicy] = useState<RoutingPolicyWithProfiles | null>(null);
@@ -139,9 +191,16 @@ export default function Routing(): JSX.Element {
   const [profilesEndpointReady, setProfilesEndpointReady] = useState(true);
   const [showJson, setShowJson] = useState(false);
 
+  /** 错误处理面板的「有未保存修改」（由面板上报；面板卸载即清零） */
+  const [errorsDirty, setErrorsDirty] = useState(false);
+  /** rail 头「新增」按钮的落点：把焦点交给 rail 底部的模型档案输入框 */
+  const addModelRef = useRef<HTMLInputElement | null>(null);
+
   // 层选择
   const [layerSel, setLayerSel] = useState<LayerSel>('global');
   const [newModel, setNewModel] = useState('');
+  /** rail 点中的路由组（对齐 A2A：点是条目 → 右侧只展开那一个组） */
+  const [groupSel, setGroupSel] = useState('');
 
   // 预览：候选与命中层（走既有 /api/routing/queue）
   const [queueModel, setQueueModel] = useState('');
@@ -198,31 +257,55 @@ export default function Routing(): JSX.Element {
     void load();
   }, [load]);
 
-  // 进入回放模式时拉「最近请求」列表（对齐 Agent2API：左列表 + 右执行时间线）
+  // 进入回放模式（或改筛选）时拉「最近请求」：列结构对齐 A2A routing-request-list，
+  // 过滤交给服务端（keyword / model / status / start / size），不前端假装筛选。
   useEffect(() => {
-    if (mode !== 'replay') return;
+    if (mode !== 'replay') return undefined;
     let alive = true;
+    setReplayLoading(true);
+    setReplayError('');
     void (async () => {
       try {
-        const res = await api.listRequestLogs({ page: 1, page_size: 50 });
+        const params: Record<string, string | number> = {
+          page: replayPage + 1,
+          size: REPLAY_PAGE_SIZE,
+        };
+        if (replaySearch.trim()) params.keyword = replaySearch.trim();
+        if (replayModel) params.model = replayModel;
+        if (replayStatus) params.status = replayStatus;
+        if (replayMinutes > 0) {
+          params.start = Math.floor((Date.now() - replayMinutes * 60_000) / 1000);
+        }
+        const res = await api.listRequestLogs(params);
         if (!alive) return;
-        const rows = (res?.data ?? [])
+        const rows: ReplayLogRow[] = (res?.data ?? [])
           .map((r) => {
             const row = r as Record<string, unknown>;
+            const num = (v: unknown): number | undefined =>
+              typeof v === 'number' && Number.isFinite(v) ? v : undefined;
             return {
               id: String(row.id ?? row.request_id ?? ''),
+              request_id: typeof row.request_id === 'string' ? row.request_id : undefined,
               model: typeof row.model === 'string' ? row.model : undefined,
-              created_at: typeof row.created_at === 'number' ? row.created_at : undefined,
+              status_code: num(row.status_code),
+              latency_ms: num(row.latency_ms),
+              created_at: num(row.created_at),
+              channel_id: row.channel_id != null ? String(row.channel_id) : undefined,
+              // A2A 行内还有账号名/提供商名；日志里只有 channel_id，先占位（交付清单）
+              provider: row.channel_id != null ? `#${String(row.channel_id)}` : undefined,
             };
           })
           .filter((x) => x.id);
         setReplayRows(rows);
-      } catch {
-        /* 列表拉取失败不影响按 ID 回放 */
+        setReplayMatched(typeof res?.total === 'number' ? res.total : rows.length);
+      } catch (err) {
+        if (alive) setReplayError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (alive) setReplayLoading(false);
       }
     })();
     return () => { alive = false; };
-  }, [mode]);
+  }, [mode, replayPage, replaySearch, replayModel, replayStatus, replayMinutes]);
 
   /** 总开关：PUT /api/routing 是读-改-写，只传 enabled 不碰其他字段 */
   const toggleEnabled = async (next: boolean): Promise<void> => {
@@ -270,6 +353,98 @@ export default function Routing(): JSX.Element {
     () => Object.keys(profiles?.models ?? {}).sort((a, b) => a.localeCompare(b)),
     [profiles],
   );
+
+  /** rail 条目总数（对齐 A2A RoutingRail：2 个默认规则项 + 特殊三项 + 模型 + 路由组） */
+  const railItemCount = 2 + SPECIAL_RAIL.length + modelNames.length + (profiles?.groups.length ?? 0);
+
+  const focusAddModel = (): void => {
+    addModelRef.current?.focus();
+  };
+
+  /**
+   * 回放左栏的筛选候选：只取这一页里出现过的模型（A2A 的候选清单也是「窗口内
+   * 请求过的模型」，窗口内没出现的不列出）。
+   */
+  const replayModels = useMemo(() => {
+    const seen = new Set<string>();
+    replayRows.forEach((r) => { if (r.model) seen.add(r.model); });
+    return [...seen].sort((a, b) => a.localeCompare(b));
+  }, [replayRows]);
+
+  /** 客户端过滤（本页列表端点无 model/search 参数，不额外加请求） */
+  const replayFiltered = useMemo(() => {
+    const kw = replaySearch.trim().toLowerCase();
+    return replayRows.filter((r) => {
+      if (replayModel && r.model !== replayModel) return false;
+      if (!kw) return true;
+      return r.id.toLowerCase().includes(kw) || (r.model ?? '').toLowerCase().includes(kw);
+    });
+  }, [replayRows, replaySearch, replayModel]);
+
+  /** 页头黄标计数：档案草稿 + 错误处理草稿（两个独立的保存域，各算一处） */
+  const dirtyCount = (dirty ? 1 : 0) + (errorsDirty ? 1 : 0);
+
+  /**
+   * 左栏逐条目的「有未保存修改」（对齐 A2A RoutingRail 的 dirtyDot(per item)：
+   * 全局默认 / 每个模型档案 / 每个路由组各自一枚黄点，而不是整栏一枚）。
+   * 判据是「该层档案与已保存值不同」—— 与整体 dirty 同一把尺，只是分到层。
+   */
+  const sameLayer = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const globalDirty = Boolean(profiles && savedProfiles && !sameLayer(profiles.global, savedProfiles.global));
+  const modelLayerDirty = (name: string): boolean =>
+    Boolean(profiles && savedProfiles && !sameLayer(profiles.models[name], savedProfiles.models[name]));
+  const groupLayerDirty = (id: string): boolean =>
+    Boolean(
+      profiles && savedProfiles
+      && !sameLayer(
+        profiles.groups.find((g) => g.id === id),
+        savedProfiles.groups.find((g) => g.id === id),
+      ),
+    );
+
+  /** 粘滞会话卡片在配置视图底部，页头「会话粘滞」用它定位（A2A 是弹窗，AIGX 无弹窗体系） */
+  const stickyRef = useRef<HTMLDivElement | null>(null);
+  const scrollToSticky = (): void => {
+    setMode('config');
+    // 卡片只在全局/路由组视图渲染，先切回全局默认再滚
+    setPanel('global');
+    window.setTimeout(() => {
+      stickyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 0);
+  };
+
+  /**
+   * 策略 / 粘滞的人话标签（对齐 A2A routing-ui 的 strategyLabel / stickyLabel 职责，
+   * 但取值用 AIGX 自己的策略枚举与既有文案：AIGX 的 session 是「长会话 6h」，
+   * 与 A2A 的「会话内」不是同一时长，所以不搬它的词）。
+   */
+  const strategyText = (s: string | undefined): string => {
+    switch (s) {
+      case 'weighted': return t('加权随机');
+      case 'round_robin': return t('组内轮询');
+      case 'ranked': return t('多因子调度');
+      default: return s ? s : t('未记录');
+    }
+  };
+  const stickyText = (s: string | undefined): string => {
+    switch (s) {
+      case 'auto': return t('自动');
+      case 'session': return t('长会话');
+      case 'turn': return t('每轮');
+      case 'off': return t('关闭');
+      default: return s ? s : t('未记录');
+    }
+  };
+
+  /** 页头那行状态摘要（A2A routing-page-policy 同位置同分派口径） */
+  const policyLine = ((): string => {
+    if (mode === 'replay') return t('历史只读，不影响当前配置');
+    if (panel === 'errors') return t('全局错误规则 · 所有路由共用');
+    if (panel === 'compact' || panel === 'vision' || panel === 'title') {
+      return t('特殊请求路由 · 只改写模型，不改选账号规则');
+    }
+    return `${strategyText(policy?.strategy)} · ${t('粘滞')} ${stickyText(policy?.sticky)}`;
+  })();
 
   const modelKey = layerSel.startsWith('m:') ? layerSel.slice(2) : null;
 
@@ -509,9 +684,9 @@ export default function Routing(): JSX.Element {
 
               <button
                 type="button"
-                className={`rt-rail-item${layerSel === 'groups' ? ' is-on' : ''}`}
+                className={`rt-rail-item${layerSel === 'groups' && !groupSel ? ' is-on' : ''}`}
                 style={{ marginTop: 8 }}
-                onClick={() => setLayerSel('groups')}
+                onClick={() => { setLayerSel('groups'); setGroupSel(''); }}
               >
                 <span className="rt-rail-name">{t('路由组')}</span>
                 <span className="rt-count">{profiles?.groups.length ?? 0}</span>
@@ -521,7 +696,7 @@ export default function Routing(): JSX.Element {
             <div>
               {layerSel === 'groups' ? (
                 profiles ? (
-                  <GroupEditor groups={profiles.groups} onChange={patchGroupList} />
+                  <GroupEditor groups={profiles.groups} onChange={patchGroupList} focusId={groupSel || null} />
                 ) : null
               ) : currentProfile && profiles ? (
                 <>
@@ -805,8 +980,8 @@ export default function Routing(): JSX.Element {
       </div>
       </>)}
 
-      {/* ⑦ 粘滞会话（旧 sticky 档，原样保留） */}
-      <div style={{ marginTop: 12 }}>
+      {/* ⑦ 粘滞会话（旧 sticky 档，原样保留）—— 页头「会话粘滞」滚动到这里 */}
+      <div style={{ marginTop: 12 }} ref={stickyRef}>
         <RouteSticky />
       </div>
     </div>
@@ -815,22 +990,56 @@ export default function Routing(): JSX.Element {
   const replayView = (
     <div className="rt-replay-layout">
       <aside className="rt-replay-rail" aria-label={t('最近请求')}>
-        <div className="rt-replay-rail-title">{t('最近请求')}</div>
+        {/* 左栏头：标题 + 匹配数（对齐 A2A routing-request-head 的「最近请求 + matched」） */}
+        <div className="rt-replay-rail-title">
+          <b>{t('最近请求')}</b>
+          <span className="rt-count">{replayFiltered.length}</span>
+        </div>
+        {/* 筛选（对齐 A2A routing-request-tools 的搜索 + 请求模型两枚控件）。
+            时间窗 / 仅在途 / 翻页三项不跟：本页列表端点没有 minutes / scope /
+            offset 参数，前端自造只会与服务端结果不一致（见交付说明）。 */}
+        <div className="rt-replay-tools">
+          <input
+            className="form-input"
+            placeholder={t('搜索请求 ID 或模型')}
+            aria-label={t('搜索请求 ID 或模型')}
+            value={replaySearch}
+            onChange={(e) => setReplaySearch(e.target.value)}
+          />
+          <select
+            className="form-input"
+            aria-label={t('请求模型')}
+            value={replayModel}
+            onChange={(e) => setReplayModel(e.target.value)}
+          >
+            <option value="">{replayModels.length ? t('全部模型') : t('全部模型（窗口内没有请求）')}</option>
+            {replayModels.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </div>
         {replayRows.length === 0 ? (
           <div className="rt-replay-empty">{t('暂无可回放的请求')}</div>
+        ) : replayFiltered.length === 0 ? (
+          <div className="rt-replay-empty">{t('没有匹配的请求')}</div>
         ) : (
-          replayRows.map((r) => (
-            <button
-              key={r.id}
-              type="button"
-              className={`rt-replay-item${replayId === r.id ? ' is-on' : ''}`}
-              onClick={() => setReplayId(r.id)}
-              title={r.id}
-            >
-              <span className="rt-replay-item-model">{r.model || t('（无模型）')}</span>
-              <span className="rt-replay-item-id">{r.id}</span>
-            </button>
-          ))
+          replayFiltered.map((r) => {
+            const when = toMillis(r.created_at);
+            return (
+              <button
+                key={r.id}
+                type="button"
+                className={`rt-replay-item${replayId === r.id ? ' is-on' : ''}`}
+                onClick={() => setReplayId(r.id)}
+                title={[r.model, when != null ? new Date(when).toLocaleString() : '', r.id].filter(Boolean).join(' · ')}
+              >
+                <span className="rt-replay-item-model">{r.model || t('（无模型）')}</span>
+                <span className="rt-replay-item-id">
+                  {when != null ? `${new Date(when).toLocaleTimeString()} · ${r.id}` : r.id}
+                </span>
+              </button>
+            );
+          })
         )}
       </aside>
       <section className="rt-replay-main">
@@ -852,41 +1061,72 @@ export default function Routing(): JSX.Element {
             {t('供应商选路的策略、分层档案（全局 / 按模型 / 路由组）与预演；压缩 / 标题 / 视觉兼容等特殊路由；保存即热生效，无需重启。')}
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="outline" onClick={() => void load()} disabled={loading}>
-            <RefreshCw size={13} /> {t('刷新')}
-          </Button>
-        </div>
+        {/* 刷新/重新读取收在下方工具条（与 A2A routing-page-bar 的动作位一致），
+            这里不再重复一枚同义按钮 */}
       </div>
 
       {error && <div className="error-message">{error}</div>}
 
-      {/* 顶部模式分段：路由配置 / 请求回放（对齐 Agent2API） */}
-      <div className="rt-modebar" role="tablist" aria-label={t('路由模式')}>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={mode === 'config'}
-          className={`rt-mode-btn${mode === 'config' ? ' is-on' : ''}`}
-          onClick={() => setMode('config')}
-        >
-          <SlidersHorizontal size={14} aria-hidden="true" /> {t('路由配置')}
-          {dirty ? <span className="rt-nav-dirty" title={t('有未保存的修改')} /> : null}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={mode === 'replay'}
-          className={`rt-mode-btn${mode === 'replay' ? ' is-on' : ''}`}
-          onClick={() => setMode('replay')}
-        >
-          <History size={14} aria-hidden="true" /> {t('请求回放')}
-        </button>
+      {/*
+        顶部工具条（对齐 A2A routing-page-bar）：模式分段 + 一行策略摘要 + 右侧动作。
+        A2A 的「请求日志」出口在 AIGX 没有独立请求日志页跳转需求（回放左栏即列表），
+        故只保留「会话粘滞」与「刷新 / 重新读取」两枚动作。
+      */}
+      <div className="rt-pagebar">
+        <div className="rt-modebar" role="tablist" aria-label={t('路由模式')}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'config'}
+            className={`rt-mode-btn${mode === 'config' ? ' is-on' : ''}`}
+            onClick={() => setMode('config')}
+          >
+            <SlidersHorizontal size={14} aria-hidden="true" /> {t('路由配置')}
+            {dirtyCount > 0 ? (
+              <span className="rt-mode-count" title={t('有未保存的修改')}>{dirtyCount}</span>
+            ) : null}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'replay'}
+            className={`rt-mode-btn${mode === 'replay' ? ' is-on' : ''}`}
+            onClick={() => setMode('replay')}
+          >
+            <History size={14} aria-hidden="true" /> {t('请求回放')}
+          </button>
+        </div>
+
+        <span className="rt-pagebar-policy">{policyLine}</span>
+
+        <div className="rt-pagebar-actions">
+          <Button variant="outline" size="sm" onClick={scrollToSticky}>
+            {t('会话粘滞')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+            <RefreshCw size={13} /> {mode === 'replay' ? t('刷新') : t('重新读取')}
+          </Button>
+        </div>
       </div>
 
       {mode === 'replay' ? replayView : (
       <div className="rt-shell">
         <nav className="rt-shell-rail" aria-label={t('路由分区')}>
+          {/* rail 头：标题 + 条目总数 + 新增（对齐 A2A RoutingRail 的 SidebarHeader） */}
+          <div className="rt-rail-head">
+            <b>{t('路由配置')}</b>
+            <span className="rt-count">{railItemCount}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="rt-rail-add-btn"
+              title={t('新增路由配置')}
+              aria-label={t('新增路由配置')}
+              onClick={focusAddModel}
+            >
+              <Plus size={13} />
+            </Button>
+          </div>
           <div className="rt-rail-title">{t('默认规则')}</div>
           <button
             type="button"
@@ -895,7 +1135,7 @@ export default function Routing(): JSX.Element {
           >
             <SlidersHorizontal size={14} className="rt-nav-icon" aria-hidden="true" />
             <span className="rt-nav-label">{t('全局默认')}</span>
-            {dirty ? <span className="rt-nav-dirty" title={t('有未保存的修改')} /> : null}
+            {globalDirty ? <span className="rt-nav-dirty" title={t('有未保存的修改')} /> : null}
           </button>
           <button
             type="button"
@@ -904,6 +1144,7 @@ export default function Routing(): JSX.Element {
           >
             <RefreshCw size={14} className="rt-nav-icon" aria-hidden="true" />
             <span className="rt-nav-label">{t('错误处理')}</span>
+            {errorsDirty ? <span className="rt-nav-dirty" title={t('有未保存的修改')} /> : null}
           </button>
 
           <div className="rt-rail-title">{t('特殊请求路由')}</div>
@@ -929,6 +1170,9 @@ export default function Routing(): JSX.Element {
               onClick={() => { setPanel('global'); setLayerSel(`m:${name}`); }}
             >
               <span className="rt-nav-label">{name}</span>
+              {modelLayerDirty(name) ? (
+                <span className="rt-nav-dirty" title={t('有未保存的修改')} />
+              ) : null}
             </button>
           ))}
 
@@ -937,16 +1181,20 @@ export default function Routing(): JSX.Element {
             <button
               key={`g:${g.id}`}
               type="button"
-              className={`rt-nav-item${panel === 'group' ? ' is-on' : ''}`}
+              className={`rt-nav-item${panel === 'group' && groupSel === g.id ? ' is-on' : ''}`}
               title={g.id}
-              onClick={() => { setPanel('group'); setLayerSel('groups'); }}
+              onClick={() => { setPanel('group'); setLayerSel('groups'); setGroupSel(g.id); }}
             >
-              <span className="rt-nav-label">{g.id}</span>
+              <span className="rt-nav-label">{g.name || g.id}</span>
+              {groupLayerDirty(g.id) ? (
+                <span className="rt-nav-dirty" title={t('有未保存的修改')} />
+              ) : null}
             </button>
           ))}
 
           <div className="rt-rail-add">
             <input
+              ref={addModelRef}
               className="form-input"
               placeholder={t('新增模型档案名')}
               value={newModel}
@@ -967,7 +1215,7 @@ export default function Routing(): JSX.Element {
         <div className="rt-shell-main">
           {/* 全局默认 / 模型路由 / 路由组：复用既有配置编辑器（由 layerSel 驱动选层） */}
           <div hidden={!(panel === 'global' || panel === 'group')}>{configView}</div>
-          {panel === 'errors' ? <RoutingErrorsPanel /> : null}
+          {panel === 'errors' ? <RoutingErrorsPanel onDirty={setErrorsDirty} /> : null}
           {panel === 'compact' ? (
             <div className="rt-special-split">
               <div className="rt-special-split-main"><CompactRoutes active={panel === 'compact'} /></div>

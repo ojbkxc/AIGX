@@ -220,7 +220,9 @@ export default function Keys(): JSX.Element {
       );
     },
     defaultWidths: Object.fromEntries(KEYS_COL_DEFS.map((d) => [d.key, d.width])),
-    lockedKeys: new Set(KEYS_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    // 锁定列 = 「列设置里恒显示」，不是「不能拖宽」：Agent2API 的 locked 只管显隐，
+    // 列宽那一层对每一列都给把手（见 ui/table-columns.js 的「末列也有把手」）。
+    lockedKeys: new Set<string>(),
     onCommit: () => { /* 落盘已在 setWidths 内做 */ },
   });
   // 菜单用 fixed 定位挂在 body 层级：Card/table-wrap 的 overflow 会裁掉
@@ -839,9 +841,10 @@ export default function Keys(): JSX.Element {
                 <thead>
                   <tr>
                     {appliedCols.map((c, idx) => {
+                      const isLast = idx === appliedCols.length - 1;
                       const grip = colResize.gripProps(c.key, {
-                        isLast: idx === appliedCols.length - 1,
-                        locked: c.locked,
+                        isLast: false,
+                        locked: false,
                         defaultWidth: c.width,
                       });
                       return (
@@ -860,8 +863,15 @@ export default function Keys(): JSX.Element {
                           ) : (
                             t(KEYS_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)
                           )}
-                          {c.key !== 'select' && c.key !== 'actions' && (
-                            <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                          {c.key !== 'select' && (
+                            // 末列也有把手（对齐 A2A `.col-grip-end`：right:0 往内让，
+                            // 否则 default 的 -4px 会在表格右缘顶出一条横滚）
+                            <span
+                              className="as-col-grip"
+                              title={t('拖动调整列宽 · 双击还原')}
+                              style={isLast ? { right: 0 } : undefined}
+                              {...grip}
+                            />
                           )}
                         </th>
                       );

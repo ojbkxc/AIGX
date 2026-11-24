@@ -138,6 +138,27 @@ impl AffinityCache {
         self.entries.remove(&compound);
     }
 
+    /// 仅当当前绑定**正是** `channel_id` 时清除（对齐上游 v3.5.1
+    /// `route_sticky::forget` 的候选匹配语义）。
+    ///
+    /// 为什么需要条件删除：同一会话 + 同一模型的并发请求里，A 失败时 B 可能
+    /// 已经成功并写入了新的健康绑定；无条件 `evict` 会把 B 刚建立的亲和删掉，
+    /// 下次请求又回到 HRW 首次分配——粘性收益白白丢掉，且表现为「偶发不粘」。
+    /// 返回是否确实删除（供测试与管理面回执）。
+    pub fn evict_if(&self, session_id: &str, model: &str, channel_id: &str) -> bool {
+        if session_id.is_empty() || channel_id.is_empty() {
+            return false;
+        }
+        let compound = (session_id.to_string(), model.to_string());
+        match self.entries.get(&compound) {
+            Some(entry) if entry.channel_id == channel_id => {
+                drop(entry);
+                self.entries.remove(&compound).is_some()
+            }
+            _ => false,
+        }
+    }
+
     /// 管理面：清除指定 `(session_id, model)` 的亲和条目。返回是否确实删除。
     ///
     /// 语义与 [`Self::evict`] 相同（只删内存亲和记录，不动策略配置）；
@@ -317,6 +338,29 @@ mod tests {
         cache.insert("sess-1", "glm-5.1", "ch-7");
         cache.evict("sess-1", "glm-5.1");
         assert_eq!(cache.lookup("sess-1", "glm-5.1"), None);
+    }
+
+    /// 条件删除：只删「当前绑定的正是这个渠道」那条（对齐上游 v3.5.1 forget）。
+    #[test]
+    fn cache_evict_if_only_removes_matching_binding() {
+        let cache = AffinityCache::default();
+        cache.insert("s1", "m1", "ch-bad");
+        // 失败的是 ch-bad，但绑定已被并发请求改写成健康渠道 ch-good
+        cache.insert("s1", "m1", "ch-good");
+        assert!(!cache.evict_if("s1", "m1", "ch-bad"), "不匹配不该删");
+        assert_eq!(
+            cache.lookup("s1", "m1").as_deref(),
+            Some("ch-good"),
+            "并发写入的健康绑定不能被旧失败删掉"
+        );
+        // 匹配时才删
+        assert!(cache.evict_if("s1", "m1", "ch-good"));
+        assert_eq!(cache.lookup("s1", "m1"), None);
+        // 空参数防御（无绑定可删时也不能误伤别的条目）
+        cache.insert("s2", "m1", "ch-x");
+        assert!(!cache.evict_if("", "m1", "ch-x"));
+        assert!(!cache.evict_if("s2", "m1", ""));
+        assert_eq!(cache.lookup("s2", "m1").as_deref(), Some("ch-x"));
     }
 
     #[test]

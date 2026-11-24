@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/pages/Routing.tsx",
+    "src/pages/Routing.test.tsx",
+    "src/components/routing/**/*",
+    "src/components/RoutingErrorsPanel.tsx"
+  ]
+}

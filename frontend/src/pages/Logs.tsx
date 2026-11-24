@@ -153,6 +153,13 @@ interface Filters {
   client: string;
   start: string;
   end: string;
+  /**
+   * 时间档位（对齐 Agent2API requests-page 的 RANGE_OPTIONS：today / yesterday / 7 / 30 /
+   * month / all / custom）。它是 start/end 的**来源**而不是另一份查询条件 —— 点档位就把它
+   * 换算成起止时间，请求仍然只带 start/end；手改起止时间则自动落回 custom。
+   * 默认 all（= 起止都空 = 不限），与加这个档位之前的行为逐字节一致。
+   */
+  range: string;
 }
 
 /** 请求日志筛选的落盘键（filterMemory：跨次启动记忆，四页各自一键） */
@@ -192,7 +199,59 @@ function logsAuditColDefs(admin: boolean): TableColumnDef[] {
   ];
 }
 /** 筛选默认值（空串 = 全部 / 不限；记忆按此收窄，存坏回落默认） */
-const DEFAULT_LOGS_FILTERS: Filters = { user: '', model: '', channel: '', status: '', keyword: '', client: '', start: '', end: '' };
+const DEFAULT_LOGS_FILTERS: Filters = { user: '', model: '', channel: '', status: '', keyword: '', client: '', start: '', end: '', range: 'all' };
+
+/**
+ * 时间档位（对齐 Agent2API requests-page 的 RANGE_OPTIONS，含自定义区间）。
+ *
+ * 与 A2A 的**唯一有意偏离**：默认档是 `all`（不限），不是 `today`。本页原先就没有默认
+ * 时间窗（起止为空 = 全量），改成今天会把历史日志静默藏起来 —— 那是产品决定，不是对齐。
+ */
+const RANGE_OPTIONS: ReadonlyArray<[string, string]> = [
+  ['today', '今天'],
+  ['yesterday', '昨天'],
+  ['7', '近 7 天'],
+  ['30', '近 30 天'],
+  ['month', '本月'],
+  ['all', '全部'],
+  ['custom', '自定义'],
+];
+
+/** 本地日期 → `YYYY-MM-DD`（datetime-local 的日期段） */
+function dayKeyOf(d: Date): string {
+  const p = (n: number): string => (n < 10 ? `0${n}` : String(n));
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/**
+ * 档位 → 起止时间（datetime-local 字符串 `YYYY-MM-DDTHH:mm`）。
+ *
+ * 口径与报表页一致：`7` / `30` 是**含今天在内**往前数（A2A 同一口径），今天从 00:00 起、
+ * 到「现在」为止；`all` 清空起止（后端按不加时间条件处理）；`custom` 原样返回空串 ——
+ * 自定义区间由用户自己在两个输入框里给，这里替它猜日期只会覆盖用户刚填的值。
+ */
+function rangeBounds(range: string, now = new Date()): { start: string; end: string } {
+  const at = (d: Date, h = 0, m = 0): string =>
+    `${dayKeyOf(d)}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const back = (n: number): Date => new Date(today.getFullYear(), today.getMonth(), today.getDate() - n);
+  switch (range) {
+    case 'today':
+      return { start: at(today, 0, 0), end: at(today, 23, 59) };
+    case 'yesterday':
+      return { start: at(back(1), 0, 0), end: at(back(1), 23, 59) };
+    case '7':
+      return { start: at(back(6), 0, 0), end: at(today, 23, 59) };
+    case '30':
+      return { start: at(back(29), 0, 0), end: at(today, 23, 59) };
+    case 'month':
+      return { start: at(new Date(today.getFullYear(), today.getMonth(), 1), 0, 0), end: at(today, 23, 59) };
+    case 'all':
+      return { start: '', end: '' };
+    default:
+      return { start: '', end: '' };
+  }
+}
 
 export default function Logs(): JSX.Element {
   const admin = isAdmin();
@@ -225,9 +284,15 @@ export default function Logs(): JSX.Element {
   // 筛选条件的记忆：启动时从 localStorage 恢复（首查参数随之生效），变更即落盘
   const [filters, setFilters] = useState<Filters>(() => {
     const saved = getFilter(LS_LOGS_FILTERS, DEFAULT_LOGS_FILTERS);
+    // 档位记忆：没有这个键的老存盘按「有没有起止」判 —— 有起止就是自定义区间，
+    // 否则是不限。档位值非法（改坏 / 老版本）同样落回这两档，不猜成「今天」。
+    const range = RANGE_OPTIONS.some(([v]) => v === saved.range)
+      ? saved.range
+      : (saved.start || saved.end ? 'custom' : 'all');
+    const kept: Filters = { ...saved, range };
     // user / channel 是管理员专属筛选维度：非管理员界面不渲染这两个输入，
     // 记忆里残留的旧值会让列表被看不见的筛选悄悄过滤（服务端照单全收），恢复时清掉
-    return admin ? saved : { ...saved, user: '', channel: '' };
+    return admin ? kept : { ...kept, user: '', channel: '' };
   });
   useEffect(() => {
     setFilter(LS_LOGS_FILTERS, filters);
@@ -571,7 +636,39 @@ export default function Logs(): JSX.Element {
     }
   };
 
+  /**
+   * 时间档位是离散选择（对齐 A2A requests-page 的 onRangeChange：点即查询）。
+   *
+   * 档位只负责把 `start/end` 换算出来 —— 请求参数与后端契约一个字都没变（仍然是
+   * start/end 的 unix 秒），查询按钮、回车、导出走的也是同一份 filters。
+   * `custom` 不清空已有起止：用户想接着上一次的自定义区间改，替它清掉更烦人。
+   */
+  const applyRange = (range: string): void => {
+    const bounds = rangeBounds(range);
+    const next: Filters = range === 'custom'
+      ? { ...filters, range }
+      : { ...filters, range, start: bounds.start, end: bounds.end };
+    setFilters(next);
+    if (page === 1) {
+      void load(false, next);
+    } else {
+      setPage(1);
+    }
+  };
+
   const fmtTime = (ts: number | undefined): string => (ts ? new Date(ts * 1000).toLocaleString() : '—');
+  /**
+   * 空态文案（对齐 Agent2API requests-page 的 emptyText 三分）：加载中 / 一条都没有 /
+   * 筛掉了。前两档靠「有没有生效的筛选」区分 —— 只看 `total === 0` 会把「筛完没结果」
+   * 说成「网关没转发过请求」，那是两句意思完全相反的话。
+   */
+  const hasActiveFilter = Boolean(
+    filters.user || filters.model || filters.channel || filters.keyword.trim()
+    || filters.client.trim() || filters.status || filters.start || filters.end,
+  );
+  const emptyText = tab === 'requests'
+    ? (hasActiveFilter ? t('没有符合筛选条件的请求') : t('暂无请求日志，网关还没有转发过请求'))
+    : t('暂无日志');
   // 分页组件在 totalPages<=1 时不渲染；这里仍至少为 1，避免「0 页」出现
   const totalPages = Math.max(1, Math.ceil(total / size));
   const loadInflight = async (): Promise<void> => {
@@ -841,11 +938,32 @@ export default function Logs(): JSX.Element {
       <div className="lg-filters">
         {tab === 'requests' && (
           <>
+            {/* 时间档位：分段控件（对齐 Agent2API requests-page 的 RANGE_OPTIONS；
+                默认 all「全部」= 起止都空，与加这个档位之前的行为一致） */}
+            <div className="lg-seg" role="tablist" aria-label={t('时间范围')}>
+              {RANGE_OPTIONS.map(([v, label]) => (
+                <button
+                  key={v}
+                  type="button"
+                  className={`lg-seg-btn${filters.range === v ? ' active' : ''}`}
+                  title={
+                    v === 'all'
+                      ? t('不限时间（默认）')
+                      : v === 'custom'
+                        ? t('用下面两个时间输入框自己给区间')
+                        : t('点档位即按该区间查询；「近 7 天 / 近 30 天」含今天在内往前数')
+                  }
+                  onClick={() => applyRange(v)}
+                >
+                  {t(label)}
+                </button>
+              ))}
+            </div>
             {/* 状态：分段控件（对齐模型管理 / 供应商页） */}
             <div className="lg-seg" role="tablist" aria-label={t('状态筛选')}>
               {(
                 [
-                  ['', t('全部')],
+                  ['', t('全部状态')],
                   ['ok', t('成功')],
                   ['error', t('失败')],
                 ] as Array<[string, string]>
@@ -949,7 +1067,9 @@ export default function Logs(): JSX.Element {
               type="datetime-local"
               className="form-input lg-time"
               value={filters.start}
-              onChange={(e) => setFilters({ ...filters, start: e.target.value })}
+              // 手改起止 = 自定义区间：档位跟着回到 custom，否则界面上会同时出现
+              // 「近 7 天」这颗高亮的档位和一个与它不符的起止时间
+              onChange={(e) => setFilters({ ...filters, start: e.target.value, range: 'custom' })}
               aria-label={t('开始时间')}
             />
             <span className="lg-range-sep">~</span>
@@ -957,7 +1077,7 @@ export default function Logs(): JSX.Element {
               type="datetime-local"
               className="form-input lg-time"
               value={filters.end}
-              onChange={(e) => setFilters({ ...filters, end: e.target.value })}
+              onChange={(e) => setFilters({ ...filters, end: e.target.value, range: 'custom' })}
               aria-label={t('结束时间')}
             />
             <Button size="sm" onClick={handleSearch}>{t('查询')}</Button>
@@ -1006,7 +1126,7 @@ export default function Logs(): JSX.Element {
         ) : view === 'timeline' && tab === 'requests' ? (
           renderTimeline()
         ) : logs.length === 0 ? (
-          <EmptyState message={t('暂无日志')} />
+          <EmptyState message={emptyText} />
         ) : (
           <div className="table-wrapper table-wrapper-scroll">
             <table className="dense-table">
@@ -1019,9 +1139,13 @@ export default function Logs(): JSX.Element {
                 {tab === 'requests' ? (
                   <tr>
                     {appliedCols.map((c, idx) => {
+                      // 末列也给把手（对齐 A2A table-columns.js 的 `.col-grip-end`）：
+                      // 默认 right:-4px 会在表格右缘顶出 4px 横滚，所以末列改 right:0 往内让。
+                      // 锁定列同理只锁显隐，不锁列宽。
+                      const isLast = idx === appliedCols.length - 1;
                       const grip = colResize.gripProps(c.key, {
-                        isLast: idx === appliedCols.length - 1,
-                        locked: c.locked,
+                        isLast: false,
+                        locked: false,
                         defaultWidth: c.width,
                       });
                       const label = logsReqColDefs(admin).find((d) => d.key === c.key)?.label ?? c.key;
@@ -1042,7 +1166,12 @@ export default function Logs(): JSX.Element {
                             t(label)
                           )}
                           {c.key !== 'check' && (
-                            <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                            <span
+                              className="as-col-grip"
+                              title={t('拖动调整列宽 · 双击还原')}
+                              style={isLast ? { right: 0 } : undefined}
+                              {...grip}
+                            />
                           )}
                         </th>
                       );
@@ -1051,9 +1180,11 @@ export default function Logs(): JSX.Element {
                 ) : (
                   <tr>
                     {appliedCols.map((c, idx) => {
+                      // 审计表的表头同样按「末列也有把手」处理（见请求表那段注释）
+                      const isLast = idx === appliedCols.length - 1;
                       const grip = colResize.gripProps(c.key, {
-                        isLast: idx === appliedCols.length - 1,
-                        locked: c.locked,
+                        isLast: false,
+                        locked: false,
                         defaultWidth: c.width,
                       });
                       const label = logsAuditColDefs(admin).find((d) => d.key === c.key)?.label ?? c.key;
@@ -1074,7 +1205,12 @@ export default function Logs(): JSX.Element {
                             t(label)
                           )}
                           {c.key !== 'check' && (
-                            <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                            <span
+                              className="as-col-grip"
+                              title={t('拖动调整列宽 · 双击还原')}
+                              style={isLast ? { right: 0 } : undefined}
+                              {...grip}
+                            />
                           )}
                         </th>
                       );

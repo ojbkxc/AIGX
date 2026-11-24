@@ -33,7 +33,7 @@ import {
   type VisionTarget,
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
-import { RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
+import { AddRuleButton, RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
 
 interface Editing {
   rule: VisionRule;
@@ -119,9 +119,6 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
       title={t('图片兼容')}
       lede={t('模型看不了图片时，按下面的规则交给视觉模型；没配到的模型、以及本来就能看图的，一律原样放行。')}
       editor={editor}
-      addLabel={t('添加规则')}
-      addDisabled={saving || !models.length}
-      onAddRule={() => setEditing({ rule: blankRule(), index: -1 })}
     >
       <div className="rt-notice rt-notice-warn" role="note">
         <strong>{t('已知差距（与上游视觉兼容对照，避免误以为以下能力已生效）：')}</strong>
@@ -136,9 +133,15 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
         title={t('规则')}
         count={t('{{n}} 条', { n: rules.length })}
         actions={
-          <span className="rt-count">
-            {t('每规则最多 {{n}} 个接管目标', { n: maxTargets })}
-          </span>
+          <>
+            <span className="rt-count">
+              {t('每规则最多 {{n}} 个接管目标', { n: maxTargets })}
+            </span>
+            <AddRuleButton
+              disabled={saving || !models.length}
+              onClick={() => setEditing({ rule: blankRule(), index: -1 })}
+            />
+          </>
         }
       />
       {!rules.length ? (

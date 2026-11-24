@@ -78,22 +78,44 @@ type SourceFilter = 'all' | 'channel' | 'account';
 type SortMode = 'default' | 'ratio-asc' | 'ratio-desc';
 
 /** 可显隐的列（check / model / act 锁定不可关，但可拖动排序） */
-type ColKey = 'price' | 'source' | 'caps' | 'alias';
-/** 全部表格列（含锁定列）——默认渲染顺序与默认宽度（对齐 Agent2API：无「启用」列） */
+type ColKey = 'rate' | 'price' | 'visibility' | 'source' | 'budget' | 'caps' | 'alias';
+/**
+ * 全部表格列（含锁定列）——默认渲染顺序与默认宽度**逐列对齐 Agent2API
+ * models-panel-state.ts 的 COLUMNS**（check / model / rate / pricing / visibility /
+ * source / budget / caps / alias / act，顺序即默认渲染顺序）。
+ *
+ * `visibility` 列照 A2A 建出来（列名、位置、悬停说明一致），但**本仓后端暂无该数据源**
+ * （`src/model/manage.rs` 的 ManageModel 没有 visibility 字段，只有四家内置家有这个
+ * 概念）——单元格落 `—` 并在悬停里说明，等后端补字段；见交付说明第 ② 段。
+ */
 type AnyCol = 'check' | ColKey | 'model' | 'act';
-const COL_ORDER: AnyCol[] = ['check', 'model', 'price', 'source', 'caps', 'alias', 'act'];
+const COL_ORDER: AnyCol[] = ['check', 'model', 'rate', 'price', 'visibility', 'source', 'budget', 'caps', 'alias', 'act'];
 /** 列宽：弹性列对齐 Agent2API page-gateway.css（`.c-*`），**操作列回到 px 定宽**。
  *  A2A 的 act=11% 放得下是因为它操作列按钮更少更小；AIGX 是三颗按钮（测试/定价/删除），
  *  11%≈90px 装不下 ~145px 内容 → 「测试」向左溢出进映射列、真人点不到（verify 实测）。
  *  act=170px 定宽（td 内宽 150px ≥ 按钮 ~145px）；% 列之和 ≈ (表宽−act)/表宽
  *  （822px 视口下 act 170 → % 之和 79%），余量给唯一的弹性富余列 alias。见 §9。 */
+/**
+ * 列宽：**按 Agent2API page-gateway.css 的 `.c-*` 逐列比例**落（check 3.5 / model 14.5 /
+ * rate 6 / pricing 10.5 / visibility 6 / source 5.5 / budget 9.5 / caps 11 / alias 25 /
+ * act 8.5，合计 100%）。
+ *
+ * 唯一的有意偏离：`act` 不用 8.5% 而用 170px。A2A 的 act 只有「测试/删除」两颗小按钮，
+ * 11%≈90px 放得下；本仓是三颗（测试/计价/删除，~145px 内容），% 档在 822px 视口下会
+ * 让「测试」向左溢出进映射列、真人点不到（历史实测）。所以 act 定宽 170px，其余九列
+ * 按 A2A 的**相对比例**等比缩到 78.5%（79% 减去 act 后的等价预算），列与列的宽窄关系
+ * 与 A2A 一致，只是整体让出 act 多要的那一截。见 §9 与交付说明。
+ */
 const COL_DEFAULT_W: Record<AnyCol, string> = {
-  check: '3.5%',
-  model: '19%',
-  price: '8%',
-  source: '6.5%',
-  caps: '11.5%',
-  alias: '30.5%',
+  check: '3%',
+  model: '12.5%',
+  rate: '5%',
+  price: '9%',
+  visibility: '5%',
+  source: '4.5%',
+  budget: '8%',
+  caps: '9.5%',
+  alias: '21.5%',
   act: '170px',
 };
 /** 锁定列：恒显示（表不能没有勾选框 / 模型名 / 操作），但可参与拖序 */
@@ -101,11 +123,14 @@ const LOCKED_COLS: AnyCol[] = ['check', 'model', 'act'];
 /** 列设置面板显示的列名（锁定列也要有名字） */
 const COL_PANEL_LABEL: Record<AnyCol, string> = {
   check: '选择',
-  model: '模型',
-  price: '定价',
+  model: '上游模型',
+  rate: '倍率',
+  price: '计价',
+  visibility: '可见性',
   source: '来源',
+  budget: '上下文 / 输出',
   caps: '能力',
-  alias: '映射',
+  alias: '模型映射',
   act: '操作',
 };
 
@@ -115,11 +140,15 @@ type Align = 'left' | 'center' | 'right';
 const COL_DEFAULT_ALIGN: Record<AnyCol, Align> = {
   check: 'center',
   model: 'left',
+  rate: 'left',
   price: 'left',
+  visibility: 'left',
   source: 'left',
+  budget: 'left',
   caps: 'left',
   alias: 'left',
-  act: 'left',
+  // A2A 的 act 列 align: 'right'（表头 `className='r'`、单元格 cellClass 透传）
+  act: 'right',
 };
 
 /** 公共层列声明：默认宽沿用 COL_DEFAULT_W（px 列参与列宽拖拽记忆，百分比列不参与） */
@@ -1241,7 +1270,7 @@ export default function ModelManage(): JSX.Element {
     setColState(resetTableColumns(LS_TCOLS, MM_COL_DEFS));
   }, []);
 
-  /** 列宽拖动改公共 hook（pointer events + 双击还原 + 末列无把手） */
+  /** 列宽拖动改公共 hook（pointer events + 双击还原） */
   const colResize = useColumnResize({
     widths: Object.fromEntries(
       colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number]),
@@ -1261,7 +1290,10 @@ export default function ModelManage(): JSX.Element {
       );
     },
     defaultWidths: Object.fromEntries(MM_COL_DEFS.map((d) => [d.key, d.width])),
-    lockedKeys: new Set(LOCKED_COLS as string[]),
+    // 锁定列 = 「列设置里恒显示」，**不是**「不能拖宽」：Agent2API 的 locked 只影响显隐，
+    // 列宽那一层对每一列都给把手（见 ui/table-columns.js 的「末列也有把手」）。早先这里传
+    // 了 LOCKED_COLS，model / act 两列因此拖不动，与 A2A 行为不一致。
+    lockedKeys: new Set<string>(),
     onCommit: () => { /* 落盘已在 setWidths 内做 */ },
   });
 
@@ -1544,6 +1576,22 @@ export default function ModelManage(): JSX.Element {
             </span>
           </td>
         );
+      case 'rate': {
+        // 「倍率」列（对齐 Agent2API `.c-rate` 的一格读数形态：短文本 + 无读数时给 `—`）。
+        // 数据源不同：A2A 读清单上的 credits 文本，本仓读 pricing 条目的 model_ratio。
+        // 1 倍是「没加价」而不是「有读数」—— 与 A2A 未声明时落 `—` 同一取舍。
+        const ratio = Number(row.model_ratio);
+        const hasRatio = Number.isFinite(ratio) && ratio !== 1;
+        return (
+          <td key={col} className={`mm-c-rate ta-${colAlign.rate}`}>
+            {hasRatio ? (
+              <span className="mm-price-ratio" title={t('模型倍率：×{r}', { r: ratio })}>×{ratio}</span>
+            ) : (
+              <span className="mm-price-empty" title={t('未设置倍率（按 1 倍计价）')}>—</span>
+            )}
+          </td>
+        );
+      }
       case 'price':
         return (
           <td
@@ -1570,7 +1618,6 @@ export default function ModelManage(): JSX.Element {
                   {row.price.price_type === 'count'
                     ? `$${fmtPrice(row.price.input_price)}/${t('次')}`
                     : `$${fmtPrice(row.price.input_price)}/$${fmtPrice(row.price.output_price)}`}
-                  {row.model_ratio !== 1 && <span className="mm-price-ratio">{row.model_ratio}x</span>}
                 </span>
               )
             ) : (
@@ -1604,6 +1651,41 @@ export default function ModelManage(): JSX.Element {
           </td>
         );
       }
+      case 'budget':
+        return (
+          <td key={col} className={`mm-c-budget ta-${colAlign.budget}`}>
+            {(() => {
+              const flags = row.capability_flags;
+              const inTok = flags?.maxInputTokens ?? row.context_length ?? null;
+              const outTok = flags?.maxOutputTokens ?? null;
+              // 上下文来源（builtin / modelsdev）来自 cap_sources.context_length；
+              // 最大输出没有独立来源标记（后端 cap_sources 只下发 context_length 与
+              // capabilities），所以只给上下文那一半挂来源尾巴 —— 不编造输出侧出处。
+              const ctxSrc = String(row.cap_sources?.context_length ?? '');
+              const hint =
+                `${t('上下文窗口')} ${inTok == null ? t('未声明') : inTok}` +
+                ` / ${t('最大输出 Token')} ${outTok == null ? t('未声明') : outTok}` +
+                ` —— ${t('点击修改模型能力')}` +
+                (ctxSrc === 'modelsdev' ? t('；其中 上下文窗口 由 models.dev 补齐') : '');
+              return (
+                <button
+                  type="button"
+                  className="mm-caps-btn"
+                  title={hint}
+                  onClick={() => openMetaForRow(row)}
+                >
+                  <span className={`mm-cap-ctx${inTok == null ? '' : ' filled'}${ctxSrc === 'modelsdev' ? ' from-modelsdev' : ''}`}>
+                    {inTok != null ? fmtCompact(inTok) : '—'}
+                  </span>
+                  <span className="mm-cap-ctx">/</span>
+                  <span className={`mm-cap-ctx${outTok == null ? '' : ' filled'}`}>
+                    {outTok != null ? fmtCompact(outTok) : '—'}
+                  </span>
+                </button>
+              );
+            })()}
+          </td>
+        );
       case 'caps':
         return (
           <td key={col} className={`mm-c-caps ta-${colAlign.caps}`}>
@@ -1640,25 +1722,6 @@ export default function ModelManage(): JSX.Element {
               {row.sources.some((s) => s.source === 'modelsdev') && (
                 <span className="mm-cap-mark" title={t('能力由 models.dev 社区目录补齐')} />
               )}
-              {/* #51 P1#2：上下文/输出 token 一并展示（后端 capability_flags 已含 maxOutputTokens） */}
-              {(() => {
-                const flags = row.capability_flags;
-                const inTok = flags?.maxInputTokens ?? row.context_length ?? null;
-                const outTok = flags?.maxOutputTokens ?? null;
-                const label =
-                  `${t('上下文')}: ${inTok == null ? t('未声明') : inTok}` +
-                  ` · ${t('输出')}: ${outTok == null ? t('未声明') : outTok}`;
-                // 上下文来源（builtin / modelsdev）来自 cap_sources.context_length
-                const ctxSrc = String(row.cap_sources?.context_length ?? '');
-                return (
-                  <Tooltip label={ctxSrc ? `${label} · ${t('来源')}：${t(CAP_SRC_LABEL[ctxSrc] ?? ctxSrc)}` : label}>
-                    <span className={`mm-cap-ctx${row.context_length == null ? '' : ' filled'}${ctxSrc === 'modelsdev' ? ' from-modelsdev' : ''}`}>
-                      {inTok != null ? fmtCompact(inTok) : '—'}
-                      {outTok != null && <span className="mm-cap-out">/{fmtCompact(outTok)}↑</span>}
-                    </span>
-                  </Tooltip>
-                );
-              })()}
             </button>
             {/* 三态编辑入口：按 (provider, model) 显式声明能力位，
                 与上面的「目录级元信息覆盖」（按模型 id 的全局默认声明）职责不同 ——
@@ -1826,11 +1889,30 @@ export default function ModelManage(): JSX.Element {
 
   const COL_HEAD: Record<AnyCol, { label: string; tip?: string }> = {
     check: { label: '' },
-    model: { label: t('模型') },
-    price: { label: t('定价'), tip: t('单位：美元（USD），按量价为每 1k tokens') },
+    model: { label: t('上游模型') },
+    rate: { label: t('倍率'), tip: t('按提供商分组排序，已启用模型优先；未知倍率排在末尾') },
+    price: {
+      label: t('计价'),
+      tip: t('点击任意单元格可覆盖单价；单位：美元（USD），按量价为每 1k tokens'),
+    },
+    // A2A 的 th title（逐字）：这一列在本仓尚无后端数据源，单元格落 `—` 并另挂一句说明
+    visibility: {
+      label: t('可见性'),
+      tip: t('这个模型在官方客户端里是否会被展列；不展示的那些默认已关闭（含默认绑定）'),
+    },
     source: { label: t('来源') },
-    caps: { label: t('能力'), tip: t('工具 / 图像 / 音频 / 思考 + 上下文长度；点击覆盖') },
-    alias: { label: t('映射'), tip: t('对外名 → 本模型；开关关掉后请求原样透传') },
+    budget: {
+      label: t('上下文 / 输出'),
+      tip: t('数字带虚线底 = 由 models.dev 补齐；— = 未声明。点这一格可改。'),
+    },
+    caps: {
+      label: t('能力'),
+      tip: t('圆点带内侧描边 = 由 models.dev 补齐；右上角小点 = 你手动覆盖过；虚线圈 = 未声明。悬停某一枚可看逐项出处。'),
+    },
+    alias: {
+      label: t('模型映射'),
+      tip: t('每条映射 = 对外名 → 上游模型；原始 ID 与别名有独立开关，默认绑定永远存在（没有映射时是合成的那条）。'),
+    },
     act: { label: t('操作') },
   };
 
@@ -1858,16 +1940,20 @@ export default function ModelManage(): JSX.Element {
         {col !== 'act' && (() => {
           const idx = visibleCols.indexOf(col);
           const colDef = MM_COL_DEFS.find((d) => d.key === col);
-          // 末列（操作列）前不给把手：钉在右缘会顶出横滚条（公共 hook 语义）
+          // 末列也有把手（对齐 Agent2API table-columns.js 的 `.col-grip-end`）：
+          // 默认 right:-4px 钉在表格最右缘会顶出一条 4px 横滚，末列因此改 right:0 往内让。
+          const isLast = idx === visibleCols.length - 1;
+          // locked 只影响列设置里的「恒显示」，不给把手就是另一回事了（见上面 lockedKeys 的注释）
           const grip = colResize.gripProps(col, {
-            isLast: idx === visibleCols.length - 1,
-            locked: colDef?.locked,
+            isLast: false,
+            locked: false,
             defaultWidth: colDef?.width,
           });
           return (
             <span
               className="mm-col-grip"
               title={t('拖动调整列宽 · 双击还原')}
+              style={isLast ? { right: 0 } : undefined}
               {...grip}
             />
           );
@@ -2153,7 +2239,7 @@ export default function ModelManage(): JSX.Element {
                 <Search size={13} className="models-search-icon" />
                 <input
                   className="form-input"
-                  placeholder={t('搜索模型 ID / 别名 / 来源…')}
+                  placeholder={t('搜索模型 ID / 名称 / 映射名 / 来源…')}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   aria-label={t('搜索模型')}
@@ -2289,7 +2375,15 @@ export default function ModelManage(): JSX.Element {
             ) : (
               <>
                 <div className="mm-table-wrap table-wrapper">
-                  <table className="mm-table">
+                  <table
+                    className="mm-table"
+                    // 表格宽度下限（对齐 Agent2API table-columns.js 的 tableMinWidthOf）：
+                    // 拖宽一列之后不再从别处扣 —— 其余列停在 56px 兜底份额上，多出来的部分
+                    // 交给外层横向滚动。不写下限时其余列会被压成 0 宽，表头直接消失。
+                    style={{ minWidth: visibleCols.reduce((sum, col) => (
+                      sum + (colResize.effectiveWidth(col) ?? (MM_COL_DEFS.find((d) => d.key === col)?.width ?? 56))
+                    ), 0) }}
+                  >
                     <colgroup>
                       {visibleCols.map((col) => (
                         <col

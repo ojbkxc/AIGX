@@ -94,7 +94,7 @@ const ACTION_LABEL: Record<ErrorAction, string> = {
 
 const LIMIT_FIELDS: Array<{ key: keyof ErrorSettings; label: string; min: number; max: number }> = [
   { key: 'resends', label: '原账号重发（次）', min: 0, max: 10 },
-  { key: 'switches', label: '最多再换账号（个）', min: 0, max: 10 },
+  { key: 'switches', label: '最多再换账号（个）', min: 0, max: 100 },
   { key: 'intervalSeconds', label: '重发间隔（秒）', min: 0, max: 300 },
   { key: 'waitBudgetSeconds', label: '累计等待上限（秒）', min: 0, max: 300 },
   { key: 'cooldownFloorSeconds', label: '最短限流冷却（秒）', min: 1, max: 60 },
@@ -116,10 +116,15 @@ function validate(settings: ErrorSettings, t: (k: string, v?: Record<string, str
   return null;
 }
 
-export default function RoutingErrorsPanel(): JSX.Element {
+export default function RoutingErrorsPanel({
+  onDirty,
+}: {
+  /** 把「有未保存修改」上报给调用方（路由页左栏的路由项要挂黄点，与 A2A errorsDirty 同口径） */
+  onDirty?: (dirty: boolean) => void;
+} = {}): JSX.Element {
   return (
     <>
-      <ErrorsCard />
+      <ErrorsCard onDirty={onDirty} />
       <div style={{ marginTop: 16 }}>
         {/* v1.0.93：原系统设置「重试」「超时」两分类并入（设置菜单对齐 A2A，超时/重试归路由错误处理） */}
         <RetryTimeoutCard />
@@ -323,7 +328,7 @@ function RetryTimeoutCard(): JSX.Element {
   );
 }
 
-function ErrorsCard(): JSX.Element {
+function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
   const [view, setView] = useState<ErrorPolicyView | null>(null);
@@ -333,6 +338,18 @@ function ErrorsCard(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const edited = useRef(false);
+
+  /**
+   * 草稿与已存设置的差异。本卡有多个提前 return（读取中 / 端点未就绪 / 读失败），
+   * hook 不能放在它们之后 —— 所以在这里先算好，再经 effect 上报给调用方，
+   * 由路由页左栏给「错误处理」挂黄点（与 A2A 的 errorsDirty 同口径）。
+   */
+  const dirty = draft && view ? JSON.stringify(draft) !== JSON.stringify(view.settings) : false;
+  useEffect(() => {
+    onDirty?.(dirty);
+  }, [dirty, onDirty]);
+  // 卸载即丢草稿（草稿是组件内 state），黄点必须跟着消失，不能留下对不存在的草稿的提示
+  useEffect(() => () => onDirty?.(false), [onDirty]);
 
   const adopt = (next: ErrorPolicyView): void => {
     setView(next);
@@ -421,8 +438,6 @@ function ErrorsCard(): JSX.Element {
       </Card>
     );
   }
-
-  const dirty = JSON.stringify(draft) !== JSON.stringify(view.settings);
 
   return (
     <Card
