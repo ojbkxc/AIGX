@@ -921,18 +921,24 @@ const RuleRow = memo(function RuleRow({
   dupHint,
   onPatch,
   onRemove,
+  onProbe,
+  probeLabel,
 }: {
   rule: PurgeRewriteRule;
   index: number;
   fromLabel: string;
   toLabel: string;
   removeLabel: string;
+  /** 「试」按钮文案（用该条原文做预览样例，验证到底命中没命中） */
+  probeLabel: string;
   /** 单条启停的无障碍标签 */
   enableLabel: string;
   /** 与其他行原文重复时的行内提示（后端会静默截断重复规则，前端显式提示） */
   dupHint?: string;
   onPatch: (index: number, part: Partial<PurgeRewriteRule>) => void;
   onRemove: (index: number) => void;
+  /** 用这一条的原文做预览样例（验证它到底命中没命中） */
+  onProbe?: (rule: PurgeRewriteRule) => void;
 }): JSX.Element {
   const enabled = rule.enabled ?? true;
   return (
@@ -961,6 +967,16 @@ const RuleRow = memo(function RuleRow({
           onChange={(event) => onPatch(index, { enabled: event.target.checked })}
         />
       </label>
+      {onProbe && rule.from.trim() ? (
+        <Button
+          variant="outline"
+          size="sm"
+          title={`用「${rule.from}」做预览样例`}
+          onClick={() => onProbe(rule)}
+        >
+          {probeLabel}
+        </Button>
+      ) : null}
       <Button variant="outline" size="sm" onClick={() => onRemove(index)}>
         {removeLabel}
       </Button>
@@ -2087,7 +2103,8 @@ export default function PurgeConsole(): JSX.Element {
    * 多消息时输出整段对话（每条前带 `[role]` 标记），单条时保持原文
    * 不加标记（老习惯：复制粘贴直接可用）。
    */
-  const runPreview = useCallback(async (): Promise<void> => {
+  const runPreview = useCallback(
+    async (inputOverride?: string): Promise<void> => {
     const current = draftRef.current;
     if (!current || previewing) return;
     // 「按已保存配置预览」：草稿有未保存编辑时，用它区分「线上现在会怎样」
@@ -2095,7 +2112,10 @@ export default function PurgeConsole(): JSX.Element {
     const saved = dataRef.current?.settings;
     const usingSaved = previewSavedOnly && saved;
     const settings = usingSaved ? saved : current;
-    const parsed = parsePreviewMessages(previewInput);
+    // 单条词表规则的「试」按钮传 override：setState 是异步的，直接用 state
+    // 会拿到上一次的样例（跑出来的结果对不上点的那一行）。
+    const input = inputOverride ?? previewInput;
+    const parsed = parsePreviewMessages(input);
     if (parsed.length === 0) {
       addToast(t('请输入预览样例'), 'warning');
       return;
@@ -2123,9 +2143,9 @@ export default function PurgeConsole(): JSX.Element {
       setPreviewMeta(res.data.applied);
       setPreviewDetail(res.data.detail ?? null);
       // 试跑成功才入历史（失败/校验不过的输入不记）；超长样例不入库
-      if (previewInput.length <= PREVIEW_HISTORY_ITEM_MAX) {
+      if (input.length <= PREVIEW_HISTORY_ITEM_MAX) {
         setPreviewHistory((prev) =>
-          writePreviewHistory(prev, previewInput, lsSetStable),
+          writePreviewHistory(prev, input, lsSetStable),
         );
       }
     } catch {
@@ -2139,7 +2159,27 @@ export default function PurgeConsole(): JSX.Element {
     } finally {
       setPreviewing(false);
     }
-  }, [addToast, previewInput, previewModel, previewing, previewSavedOnly, t]);
+    },
+    [addToast, previewInput, previewModel, previewing, previewSavedOnly, t],
+  );
+
+  /**
+   * 「试」单条词表规则：用它自己的原文做预览样例并立刻跑一次。
+   *
+   * 为什么直接跑而不是只填样例：用户点「试」就是想立刻看到「这条到底命中没
+   * 命中」（表序、停用、链式改写都会影响结果），再让他手动点一次预览是多余
+   * 的一步。override 参数是为了避开 setState 异步——见 runPreview 的注释。
+   */
+  const probeRule = useCallback(
+    (rule: PurgeRewriteRule): void => {
+      const sample = skillKeywordSample(rule.from);
+      if (!sample) return;
+      setPreviewInput(sample);
+      focusFixTarget('preview');
+      void runPreview(sample);
+    },
+    [runPreview],
+  );
 
   // ── 词表 CSV 导入导出（死区词/同义词单表，进草稿不直接保存）──────────────
   //
@@ -2736,6 +2776,8 @@ export default function PurgeConsole(): JSX.Element {
                 toLabel={t('改写为')}
                 removeLabel={t('删除')}
                 enableLabel={t('启用该条改写规则')}
+                probeLabel={t('试')}
+                onProbe={probeRule}
                 dupHint={
                   dupRules.get(rule.from.trim().toLowerCase())
                     ? t('与其他行的原文重复：改写按表序执行，只有最靠前的那条会真正生效')
@@ -2804,6 +2846,8 @@ export default function PurgeConsole(): JSX.Element {
                 toLabel={t('同义词')}
                 removeLabel={t('删除')}
                 enableLabel={t('启用该条改写规则')}
+                probeLabel={t('试')}
+                onProbe={probeRule}
                 dupHint={
                   dupSynonyms.get(rule.from.trim().toLowerCase())
                     ? t('与其他行的敏感词重复：改写按表序执行，只有最靠前的那条会真正生效')
