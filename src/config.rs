@@ -2162,6 +2162,21 @@ fn apply_env_overrides_from(mut config: AppConfig, var: fn(&str) -> Option<Strin
             }
         }
     }
+    // 机器人校验开关：只认明确的假值（`false`/`0`/`off`/`no`，大小写与空白
+    // 容忍），其它字符串一律忽略——**不能**因为环境变量手滑成 `truee` 就
+    // 把校验关掉。存在意义：无头 e2e / 容器冒烟里没有人能解 ALTCHA 题，
+    // 需要一条不用改配置文件的关闭通道（配置文件路径固定在 `~/.aigx`）。
+    if let Some(v) = var("AIGX_SECURITY__CAPTCHA_ENABLED") {
+        if matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off" | "no"
+        ) {
+            config.security.captcha_enabled = false;
+            tracing::warn!(
+                "[Config] AIGX_SECURITY__CAPTCHA_ENABLED 关闭了登录机器人校验（仅限测试/内网）"
+            );
+        }
+    }
     config
 }
 
