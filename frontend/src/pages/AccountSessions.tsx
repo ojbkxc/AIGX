@@ -400,16 +400,46 @@ function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: Ac
 type AsCol = 'pick' | 'order' | 'name' | 'provider' | 'proxy' | 'conn' | 'status' | 'limiter' | 'expiry' | 'usage' | 'rate' | 'cooldown' | 'act';
 
 /** 全部列：默认宽（px，§9b I-2 表逐项）；flex 列没有用户覆盖时不写宽度，吃表格剩余宽度 */
-const AS_COLS: Array<{ key: AsCol; label: string; w?: number; lock?: boolean; flex?: boolean }> = [
+const AS_COLS: Array<{
+  key: AsCol;
+  label: string;
+  /** 表头悬停说明（对齐 A2A `AccountColumn.title`：列名之外再解释「这列装的是什么」） */
+  title?: string;
+  w?: number;
+  lock?: boolean;
+  flex?: boolean;
+}> = [
   { key: 'pick', label: '选择', w: 47, lock: true },
-  { key: 'order', label: '顺序', w: 84 },
+  {
+    key: 'order',
+    label: '顺序',
+    title: '组内先后：按住左边的把手上下拖动即可调整；整组的先后拖分组带的把手',
+    w: 84,
+  },
   // 唯一的弹性列：账号名长度不可控，不写默认宽、吃表格剩余宽度（A2A FLEX_COLUMNS 同式）
   { key: 'name', label: '账号', lock: true, flex: true },
-  { key: 'provider', label: 'Provider', w: 126 },
-  { key: 'proxy', label: '代理', w: 186 },
-  { key: 'conn', label: '连接数', w: 56 },
+  // A2A 分组模式下线了 provider 列（家名在分组带上），AIGX 默认不分组所以要保留；
+  // 文案与 A2A 分组带/筛选器同用「提供商」，不再用英文 Provider。
+  { key: 'provider', label: '提供商', w: 126 },
+  {
+    key: 'proxy',
+    label: '代理',
+    title: '该账号出网走的代理（已保存的代理 / 自定义 / 直连）；点击可修改',
+    w: 186,
+  },
+  {
+    key: 'conn',
+    label: '连接数',
+    title: '此刻正在使用这个账号的请求数（含还在下发内容的流式请求）；为 0 时不显示',
+    w: 56,
+  },
   { key: 'status', label: '状态', w: 80, lock: true },
-  { key: 'limiter', label: '限流', w: 148 },
+  {
+    key: 'limiter',
+    label: '限流',
+    title: '该账号当前限流中的模型；点徽章看明细',
+    w: 148,
+  },
   { key: 'expiry', label: '有效期', w: 132 },
   { key: 'usage', label: '余额', w: 308 },
   { key: 'rate', label: '成功率', w: 64 },
@@ -4228,6 +4258,14 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                     <th
                       key={col}
                       className={`as-h-${col} ta-${appliedCols.find((c) => c.key === col)?.align ?? 'left'}`}
+                      // 表头悬停说明（对齐 A2A `AccountColumn.title`）：鼠标停在列名上
+                      // 就说明这列装的是什么、能不能点。拖动把手与脱敏按钮是子元素，
+                      // 各自带 title，悬停它们时显示自己的（不会互相盖掉）。
+                      title={
+                        AS_COLS.find((c) => c.key === col)?.title
+                          ? t(AS_COLS.find((c) => c.key === col)!.title!)
+                          : undefined
+                      }
                     >
                       {col === 'pick' ? (
                         <input
