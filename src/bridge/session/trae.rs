@@ -410,7 +410,18 @@ pub fn build_body(req: &ChatFormat) -> Value {
         };
         let mut entry = Map::new();
         entry.insert("role".to_string(), json!(role));
-        entry.insert("content".to_string(), json!(text));
+        // `content` 必须是**数组**，不能是字符串：Trae 端的 Go 类型是
+        // `[]*idecopilot.LLMRawMessageContent`，发字符串会被上游
+        // `json: cannot unmarshal string into Go struct field ... of type
+        // []*idecopilot.LLMRawMessageContent` 直接 400 掉（线上实测）。
+        // 空文本不发空数组 —— 空数组和缺字段在它那边等价，但空数组更容易
+        // 被判定为「消息内容缺失」；省略字段让它按纯 tool_calls 消息处理。
+        if !text.is_empty() {
+            entry.insert(
+                "content".to_string(),
+                json!([{ "type": "text", "text": text }]),
+            );
+        }
         if message.role == Role::Tool {
             if let Some(id) = &message.tool_call_id {
                 entry.insert("tool_call_id".to_string(), json!(id));
@@ -533,6 +544,28 @@ mod tests {
         assert_eq!(body["config_name"], "glm-5.2");
         assert_eq!(body["messages"][0]["role"], "user");
         assert!(body.get("top_k").is_none());
+    }
+
+    /// `content` 必须是数组（线上实测：发字符串被 Trae 以 4001 拒掉，
+    /// 报 `cannot unmarshal string into ... []*idecopilot.LLMRawMessageContent`）。
+    #[test]
+    fn message_content_is_array_of_text_parts() {
+        let body = build_body(&format(vec![user("你好")]));
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "content 必须是数组: {content}");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "你好");
+    }
+
+    /// 空文本不发空 content 数组（省略字段 = 纯 tool_calls 消息）。
+    #[test]
+    fn empty_text_omits_content() {
+        let body = build_body(&format(vec![user("")]));
+        assert!(
+            body["messages"][0].get("content").is_none(),
+            "空文本不该写 content: {}",
+            body["messages"][0]
+        );
     }
 
     #[test]
