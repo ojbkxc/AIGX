@@ -1461,6 +1461,26 @@ function numRawOf(s: PurgeSettings): Record<NumKey, string> {
   };
 }
 
+/**
+ * 把配置里的数组字段兜成真数组。
+ *
+ * 为什么必须在**进入点**做（而不是渲染时逐处 `?.`）：
+ * 词表/模板/异源模型在 JSX 里到处 `.map()`、`.length`、`.join()` —— 那些求值
+ * 都发生在 `PurgeConsole` 自己的渲染作用域，**ErrorBoundary 接不住**（它只捕获
+ * 子组件渲染时的异常）。进入点规范化一次，渲染层就永远拿到规范形状。
+ */
+export function normalizeSettingsArrays(settings: PurgeSettings): PurgeSettings {
+  const arr = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
+  return {
+    ...settings,
+    rewrite_rules: arr<PurgeRewriteRule>(settings.rewrite_rules),
+    synonym_pairs: arr<PurgeRewriteRule>(settings.synonym_pairs),
+    structured_templates: arr<PurgeTemplate>(settings.structured_templates),
+    normalize_strip_prefixes: arr<string>(settings.normalize_strip_prefixes),
+    fallback_models: arr<string>(settings.fallback_models),
+  };
+}
+
 /** 按 NumKey 写回数字字段（显式分支，避免计算键的宽化类型） */
 function withNum(settings: PurgeSettings, key: NumKey, value: number): PurgeSettings {
   const next = { ...settings };
@@ -2440,7 +2460,7 @@ export default function PurgeConsole(): JSX.Element {
       const res = await api.getPurge();
       if (!res.success || !res.data) throw new Error('load failed');
       setData(res.data);
-      setDraft(res.data.settings);
+      setDraft(normalizeSettingsArrays(res.data.settings));
       setNumRaw(numRawOf(res.data.settings));
       setNumErrors({});
       setConfigWarnings(res.data.config_warnings ?? []);
@@ -2522,7 +2542,7 @@ export default function PurgeConsole(): JSX.Element {
       const res = await api.savePurge(next);
       if (!res.success || !res.data) throw new Error('save failed');
       setData(res.data);
-      setDraft(res.data.settings);
+      setDraft(normalizeSettingsArrays(res.data.settings));
       setNumRaw(numRawOf(res.data.settings));
       setNumErrors({});
       setDirty(false);
@@ -2549,7 +2569,7 @@ export default function PurgeConsole(): JSX.Element {
     try {
       const res = await api.getPurgeDefaults();
       if (!res.success || !res.data) throw new Error('defaults failed');
-      setDraft(res.data.settings);
+      setDraft(normalizeSettingsArrays(res.data.settings));
       setNumRaw(numRawOf(res.data.settings));
       setNumErrors({});
       setDirty(true);
@@ -3268,7 +3288,7 @@ export default function PurgeConsole(): JSX.Element {
         return;
       }
       const settings = parsed.settings as PurgeSettings;
-      setDraft(settings);
+      setDraft(normalizeSettingsArrays(settings));
       setNumRaw(numRawOf(settings));
       setNumErrors({});
       setDirty(true);
@@ -3509,7 +3529,7 @@ export default function PurgeConsole(): JSX.Element {
               size="sm"
               data-testid="purge-draft-backup-restore"
               onClick={() => {
-                setDraft(draftBackup.settings);
+                setDraft(normalizeSettingsArrays(draftBackup.settings));
                 setNumRaw(numRawOf(draftBackup.settings));
                 setDirty(true);
                 setDraftBackup(null);
@@ -3594,7 +3614,7 @@ export default function PurgeConsole(): JSX.Element {
             onClick={() => {
               const snapshot = dataRef.current;
               if (!snapshot) return;
-              setDraft(snapshot.settings);
+              setDraft(normalizeSettingsArrays(snapshot.settings));
               setNumRaw(numRawOf(snapshot.settings));
               setNumErrors({});
               setDirty(false);

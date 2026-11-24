@@ -8,6 +8,7 @@ import {
   findBodySnippet,
   parseBatchRules,
   parsePreviewHistoryJson,
+  normalizeSettingsArrays,
   noteRecentPreset,
   readDraftBackup,
   readPresetFilter,
@@ -241,6 +242,33 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('normalizeSettingsArrays', () => {
+  it('五个数组字段非数组时兜成 []，其余字段原样保留', () => {
+    const input = {
+      enabled: true,
+      rewrite_rules: 'oops',
+      synonym_pairs: null,
+      structured_templates: { a: 1 },
+      normalize_strip_prefixes: undefined,
+      fallback_models: 42,
+    } as never;
+    const out = normalizeSettingsArrays(input);
+    expect(out.rewrite_rules).toEqual([]);
+    expect(out.synonym_pairs).toEqual([]);
+    expect(out.structured_templates).toEqual([]);
+    expect(out.normalize_strip_prefixes).toEqual([]);
+    expect(out.fallback_models).toEqual([]);
+    expect(out.enabled).toBe(true);
+  });
+
+  it('已是数组时**保持原引用内容**（不复制、不改内容）', () => {
+    const rules = [{ from: 'a', to: 'b' }];
+    const out = normalizeSettingsArrays({ rewrite_rules: rules } as never);
+    expect(out.rewrite_rules).toEqual(rules);
+    expect(out.rewrite_rules[0]).toBe(rules[0]);
   });
 });
 

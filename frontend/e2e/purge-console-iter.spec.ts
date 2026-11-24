@@ -247,6 +247,25 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('26 · 词表字段给非数组时不崩（进入点兜成空表）', async ({ page }) => {
+  await mockPurge(page);
+  // rewrite_rules 给字符串：`.map()`/`.length` 都在父层渲染作用域，guard 接不住
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: 'oops' } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+
+  await expect(page.getByText('出错了')).toHaveCount(0);
+  // 兜成空表 → 空态文案，而不是崩或者渲染出怪东西
+  await expect(page.getByText(/暂无改写规则/)).toBeVisible();
+  await expect(page.getByRole('button', { name: '保存' })).toBeVisible();
+});
+
 test('25 · runtime 缺失时页面不崩（零值兜底，header 显示 PID 0）', async ({ page }) => {
   await mockPurge(page);
   // runtime 给 null：`formatUptime(data.runtime.uptime_secs)` 在渲染函数体里、
