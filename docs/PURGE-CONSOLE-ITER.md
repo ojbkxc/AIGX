@@ -155,8 +155,30 @@ M frontend/src/types/index.ts          # PurgeAppliedDetail/WindowedStats/Config
 M frontend/src/i18n/zh.json / en.json  # +16 键（复用安全页 2 键）
 ```
 
-## 负结论（做过但回滚，防重复踩）
+## 本地真服务冒烟（怎么跑，踩过什么）
 
+```powershell
+cargo build --bin aigx                     # 约 15 分钟（首次）
+$dir='D:\tmp\aigx-smoke'; New-Item -ItemType Directory $dir -Force
+$env:AIGX_SERVER__PORT='18099'; $env:AIGX_SERVER__HOST='127.0.0.1'
+Start-Process target\debug\aigx.exe -WorkingDirectory $dir `
+  -RedirectStandardOutput "$dir\out.log" -RedirectStandardError "$dir\err.log" -PassThru
+# 探活：GET /livez → 200 ok
+# 鉴权闸：GET /api/purge 无 token → 401
+```
+
+已知坑（实测）：
+
+- **`AIGX_DATA_DIR` 不生效**：数据实际落在 `~/.aigx/data/aigx.db`（SQLite 固定位置），
+  想隔离得另想办法，别指望这个环境变量。因此本地起服务会碰到**真实库**，
+  冒烟只做只读 GET（`/livez`、未鉴权 401），不要写配置/改统计。
+- 登录路由是 **`/api/auth/login`**（不是 `/api/user/login`，后者 405）。
+- 首次启动的默认管理员密码是**一次性随机串**，只在 stdout 打印一次；
+  库中已存在管理员时跳过创建（`Admin account already exists`），
+  所以"起个干净实例来登录"必须先清空/隔离数据库。
+- `Start-Process` 无 `-Environment` 参数（PowerShell 5.1）；用 `$env:` 预设。
+
+## 负结论（做过但回滚，防重复踩）
 - **`skill_keyword_empty` 告警（技能扫到但全无关键词）**：不可达。`keywords_of`
   从 `name`（非空即取）+ `description`（≥2 字符 token）**派生**关键词，
   frontmatter 不写 keywords 键也永远有候选——`skill_dir_empty` 已覆盖全部
