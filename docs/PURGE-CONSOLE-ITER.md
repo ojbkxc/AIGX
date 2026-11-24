@@ -347,6 +347,21 @@ index（他们 staged 但还没 commit），`git commit` 把**整个 index** 提
 
 多条 agent 同树时，index 是共享的，任何「只加自己的文件」的假设都不成立。
 
+### 41b. 带 `static` 目录的 commit 仍然会「扫别人的文件」
+`git commit -- frontend/src/... static` 看着有 pathspec，但 **`static` 是目录**：
+它把目录下所有变动（含并发会话刚构建出的 70+ 个新 chunk）一并提交。实测某次
+commit 因此变成 **78 个文件**，而我的源文件只有 5 个。
+
+这次结果**可接受**（核过：`index.html` 引用的 4 个产物齐全、tracked 无残留），
+因为构建产物是整体生效的，多带的新 chunk 若被入口 bundle 动态 import，反而是
+**需要的**。但流程上应更精确：
+
+- 只提交**我改动对应的那个产物**（如 `static/assets/PurgeConsole-*.js`）
+- 提交后永远做一次自查：`git show --name-only --pretty=format: HEAD | wc -l`
+  与预期文件数对比，不一致就当场查清楚
+- 若产物 hash 名每次构建都变（本仓就是这样），精确到文件很难——此时**接受整目录**
+  并明确记录「本轮 static 含并发会话产物」，比假装精确更诚实
+
 ### 42. 数字输入失焦就收敛并说明原因
 - 三个数字字段原先只在**保存时**统一 clamp：填 999 一路看着 999，点保存后变 32，
   **没有任何说明**——会让人以为值丢了
