@@ -144,6 +144,23 @@ export function statsExportNote(windows: Array<{ label: string; truncated?: bool
   return truncated.join(' / ');
 }
 
+// 后端契约保证有 `stats`，但**渲染函数体里直接解构它**是脆弱点：一旦这个字段
+// 缺失/为 null，异常发生在区块边界**之外**，任何 SectionGuard 都救不了，整页只剩
+// 「出错了」（实测）。派生阶段就用零值兜底，让页面能继续用。
+const EMPTY_STATS: PurgeStats = {
+  responses: 0,
+  retries: 0,
+  early_success: 0,
+  skill_hits: 0,
+  refusals: 0,
+  failure_refusal: 0,
+  failure_empty: 0,
+  failure_filter: 0,
+  failure_other: 0,
+  synonym_hits: 0,
+  auto_preset_hits: 0,
+};
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -3385,7 +3402,8 @@ export default function PurgeConsole(): JSX.Element {
         : statsWindow === 'last'
           ? (data.stats_last_run ?? undefined)
           : undefined;
-  const stats = windowed ?? data.stats;
+  // 缺 `stats` 时用零值兜底：这里崩的话区块边界也接不住（异常在边界父层）
+  const stats = windowed ?? data.stats ?? EMPTY_STATS;
   const retryRate = stats.responses > 0 ? ((stats.retries / stats.responses) * 100).toFixed(2) : '0.00';
   const windowLabel =
     statsWindow === '1h'
@@ -3622,26 +3640,27 @@ export default function PurgeConsole(): JSX.Element {
       ) : null}
       <SectionGuard title={t('统计')}>
         <StatsGrid
-        stats={stats}
-        retryRate={retryRate}
-        suffix={windowLabel}
-        // 只有窗口档（事件环）会带 truncated；「上次运行」是精确快照
-        atLeast={
-          statsWindow === '1h' || statsWindow === '24h'
-            ? (windowed as PurgeWindowedStats | undefined)?.truncated
-            : undefined
-        }
-        t={t}
-      />
+          stats={stats}
+          retryRate={retryRate}
+          suffix={windowLabel}
+          // 只有窗口档（事件环）会带 truncated；「上次运行」是精确快照
+          atLeast={
+            statsWindow === '1h' || statsWindow === '24h'
+              ? (windowed as PurgeWindowedStats | undefined)?.truncated
+              : undefined
+          }
+          t={t}
+        />
+        {/* 失败分类条与统计卡读的是同一个 `stats`：同一个边界内，否则它会在
+            guard 之外解构 null（实测整页崩在这里） */}
+        <FailureBar
+          refusal={stats.failure_refusal}
+          empty={stats.failure_empty}
+          filter={stats.failure_filter}
+          other={stats.failure_other}
+          t={t}
+        />
       </SectionGuard>
-
-      <FailureBar
-        refusal={stats.failure_refusal}
-        empty={stats.failure_empty}
-        filter={stats.failure_filter}
-        other={stats.failure_other}
-        t={t}
-      />
 
       {/* 配置体检告警：开了但不生效 / 配置自相矛盾（静态可判定项）。
           结构化告警带 code → 「去修复」滚动并聚焦对应控件；旧后端纯文本。

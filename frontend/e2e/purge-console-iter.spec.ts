@@ -247,6 +247,25 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('23 · stats 缺失时页面不崩（零值兜底，不是区块边界救场）', async ({ page }) => {
+  await mockPurge(page);
+  // stats 给 null：派生阶段（retryRate = stats.responses ...）就在渲染函数体里，
+  // 那里崩任何 SectionGuard 都接不住 —— 所以这里验的是「零值兜底」而不是降级 UI。
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({ json: { success: true, data: { ...PURGE_DATA, stats: null } } }),
+  );
+  await gotoPurge(page);
+
+  // 整页正常渲染，没有全局错误页
+  await expect(page.getByText('出错了')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '保存' })).toBeVisible();
+  // 统计卡展示零值而不是 undefined
+  await expect(page.locator('.purge-stats')).toContainText('0');
+  // 仍能改并进入未保存状态
+  await page.getByLabel('重试上限').fill('5');
+  await expect(page.getByTestId('purge-dirty-changes')).toBeVisible();
+});
+
 test('22 · 预设库渲染崩了只降级这一块，其余仍可用', async ({ page }) => {
   await mockPurge(page);
   // 覆盖预设列表：items 给非数组 → 预设库子树渲染必崩
