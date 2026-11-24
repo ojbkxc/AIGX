@@ -169,14 +169,26 @@ Start-Process target\debug\aigx.exe -WorkingDirectory $dir `
 
 已知坑（实测）：
 
-- **`AIGX_DATA_DIR` 不生效**：数据实际落在 `~/.aigx/data/aigx.db`（SQLite 固定位置），
-  想隔离得另想办法，别指望这个环境变量。因此本地起服务会碰到**真实库**，
-  冒烟只做只读 GET（`/livez`、未鉴权 401），不要写配置/改统计。
+- **数据目录隔离只认 `AIGX_SERVER__DATA_DIR`**（不是 `AIGX_DATA_DIR`）：
+  `config.server.data_dir` 才是权威；环境覆盖是**逐字段硬编码**的
+  （`config.rs::apply_env_overrides_from`），只认列出的那几个键。
+  用 `AIGX_SERVER__DATA_DIR=D:\tmp\x` 起实例即可得到干净库（实测生效，
+  会新建 `data/aigx.db`、`script-plugins/`、`updates/`）。
+- **首次启动的默认管理员密码是一次性随机串**，只在库中无 admin 时
+  打印到 stdout（`WARN First-time setup: ... password=Aigx-xxxx`），
+  所以「干净库 + 抓日志里的口令」是拿到可用 token 的最短路径。
+- **登录被 ALTCHA 人机校验挡住**：`POST /api/auth/login` 需要 `captcha`
+  字段（ALTCHA proof-of-work 解），无答案直接 400「请先完成机器人校验」。
+  `security.captcha_enabled` **没有环境变量覆盖**（逐字段硬编码里没有它），
+  且配置文件路径固定 `~/.aigx/config.toml`（`HOME`/`USERPROFILE` 重定向
+  对它无效）；settings API 能关但要先登录——鸡生蛋。
+  → **想跑通带鉴权的 e2e，必须在测试里实现 ALTCHA 解题，
+  或先给 `security.captcha_enabled` 加一个环境变量覆盖**（推荐后者）。
 - 登录路由是 **`/api/auth/login`**（不是 `/api/user/login`，后者 405）。
-- 首次启动的默认管理员密码是**一次性随机串**，只在 stdout 打印一次；
-  库中已存在管理员时跳过创建（`Admin account already exists`），
-  所以"起个干净实例来登录"必须先清空/隔离数据库。
 - `Start-Process` 无 `-Environment` 参数（PowerShell 5.1）；用 `$env:` 预设。
+
+**本轮实测到的事实**：`GET /livez` → 200 ok；未鉴权 `GET /api/purge` → 401；
+干净库启动 → 打印一次性 admin 口令；`AIGX_SERVER__DATA_DIR` 生效。
 
 ## 负结论（做过但回滚，防重复踩）
 - **`skill_keyword_empty` 告警（技能扫到但全无关键词）**：不可达。`keywords_of`
