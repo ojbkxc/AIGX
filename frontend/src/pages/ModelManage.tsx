@@ -1588,7 +1588,16 @@ export default function ModelManage(): JSX.Element {
           target: String(m.target || ''),
           dangling: m.dangling === true,
         }))
-      : Object.entries(v.mappingsFlat || {}).map(([alias, target]) => ({
+      : // 对象形态：新后端把扁平表放在 `mappingsFlat`；旧后端与 e2e 静态桩则是
+        // `mappings` 本身就是对象（扁平表）。两处都要读 —— 只认 mappingsFlat 会
+        // 把「对象形态的 mappings」当空表，悬空区一条都推断不出来（实测
+        // `.mm-dangling` 恒不渲染，e2e 因此红）。
+        Object.entries(
+          (v.mappingsFlat && typeof v.mappingsFlat === 'object' && v.mappingsFlat) ||
+            (v.mappings && !Array.isArray(v.mappings) && typeof v.mappings === 'object'
+              ? (v.mappings as Record<string, string>)
+              : {}),
+        ).map(([alias, target]) => ({
           alias,
           target: String(target || ''),
           dangling: false,

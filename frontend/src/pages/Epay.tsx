@@ -60,7 +60,8 @@ export default function Epay() {
 
   useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // load 是组件内定义、每次渲染都会重建，但这里只在挂载时拉一次配置；
+    // exhaustive-deps 对本文件未报警（CI 实测 unused-directive），故不加 disable。
   }, []);
 
   const load = async () => {

@@ -228,6 +228,11 @@ test.describe('模型管理', () => {
         },
       ],
       mappings: { 'keep-alias': 'mapped-model' },
+      // 悬空映射：ass alias-dangling 指向 gone-model（不在 models 清单里）。
+      // 用例「悬空映射提醒区」断言的就是这一区，之前桩里没有这两条数据，
+      // `.mm-dangling` 恒不渲染 —— 该用例此前一直因「缺桩」而红。
+      // 形状照后端 `ManageView.dangling`（逐条数组）给。
+      dangling: [{ alias: 'alias-dangling', target: 'gone-model', provider: 'openai_compatible' }],
       unpriced: 2,
     };
     const recompute = () => {
