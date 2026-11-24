@@ -30,6 +30,7 @@ import {
   Textarea,
 } from '../components/ui';
 import { downloadText, toCsv } from '../lib/format';
+import { copyText } from '../lib/clipboard';
 import { useToast } from '../components/Toast';
 import './PurgeConsole.css';
 
@@ -1715,7 +1716,9 @@ const PresetsSection = memo(function PresetsSection({
       try {
         const full = await fetchBody(id);
         if (!full) throw new Error('detail failed');
-        await navigator.clipboard.writeText(full.body);
+        // 非安全上下文（内网 http）下 clipboard API 不存在，用 copyText 的降级通道
+        const copied = await copyText(full.body);
+        if (!copied) throw new Error('copy failed');
         addToast(t('全文已复制到剪贴板'), 'success');
       } catch {
         addToast(t('复制失败（浏览器可能禁用了剪贴板权限）'), 'error');
