@@ -3620,7 +3620,8 @@ export default function PurgeConsole(): JSX.Element {
           })}
         </p>
       ) : null}
-      <StatsGrid
+      <SectionGuard title={t('统计')}>
+        <StatsGrid
         stats={stats}
         retryRate={retryRate}
         suffix={windowLabel}
@@ -3632,6 +3633,7 @@ export default function PurgeConsole(): JSX.Element {
         }
         t={t}
       />
+      </SectionGuard>
 
       <FailureBar
         refusal={stats.failure_refusal}
@@ -3783,6 +3785,7 @@ export default function PurgeConsole(): JSX.Element {
         />
       </Card>
 
+      <SectionGuard title={t('死区词改写词表')}>
       <Card
         title={t('死区词改写词表')}
         actions={
@@ -3895,7 +3898,9 @@ export default function PurgeConsole(): JSX.Element {
           </div>
         )}
       </Card>
+      </SectionGuard>
 
+      <SectionGuard title={t('同义词表')}>
       <Card
         title={t('同义词表')}
         actions={
@@ -3976,7 +3981,9 @@ export default function PurgeConsole(): JSX.Element {
           </div>
         )}
       </Card>
+      </SectionGuard>
 
+      <SectionGuard title={t('技能与结构化提示')}>
       <Card title={t('技能与结构化提示')}>
         <div className="purge-form-grid">
           <Input
@@ -4088,6 +4095,7 @@ export default function PurgeConsole(): JSX.Element {
           onChange={(event) => patch({ structured_suffix: event.target.value })}
         />
       </Card>
+      </SectionGuard>
 
       {/* 技能包导入：ZIP/TAR/TGZ 安全解压到技能目录（包内须含 SKILL.md） */}
       <Card title={t('导入技能包')}>
