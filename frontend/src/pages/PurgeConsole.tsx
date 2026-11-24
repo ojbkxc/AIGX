@@ -133,6 +133,71 @@ export function sortWarningsBySeverity<T extends { severity?: string }>(items: T
   return [...items].sort((a, b) => rank(a) - rank(b));
 }
 
+/** 词表整理结论（`active` = 原表，`kept` = 整理后）。 */
+export interface RulesTidyResult {
+  kept: PurgeRewriteRule[];
+  /** 原文为空被删的条数 */
+  droppedEmptyFrom: number;
+  /** 改写为空被删的条数 */
+  droppedEmptyTo: number;
+  /** 原文重复被删的条数（保留最早出现的一条） */
+  droppedDuplicate: number;
+}
+
+/**
+ * 整理词表：删空原文 / 删空改写 / 原文去重（保留最早）。
+ *
+ * 为什么需要：`from` 为空的行后端 `normalize` 会丢，`to` 为空等于「删掉这个词」
+ * ——两者都不会报错，长表里越积越多；重复原文更是保存后只留最早一条，界面
+ * 上却还列着。这里做一次显式整理，并**如实报出每类删了几条**（不静默）。
+ *
+ * 判定口径与后端保持一致：`from` 比较用 trim + 小写（后端 `rule.from.trim()`，
+ * 前端 `dupHint` 也用 `toLowerCase()`），避免「界面说不重复、保存后被合并」。
+ */
+export function tidyRules(rules: PurgeRewriteRule[]): RulesTidyResult {
+  const seen = new Set<string>();
+  const kept: PurgeRewriteRule[] = [];
+  let droppedEmptyFrom = 0;
+  let droppedEmptyTo = 0;
+  let droppedDuplicate = 0;
+  for (const rule of rules) {
+    const from = rule.from.trim();
+    if (!from) {
+      droppedEmptyFrom += 1;
+      continue;
+    }
+    if (!rule.to.trim()) {
+      droppedEmptyTo += 1;
+      continue;
+    }
+    const key = from.toLowerCase();
+    if (seen.has(key)) {
+      droppedDuplicate += 1;
+      continue;
+    }
+    seen.add(key);
+    kept.push(rule);
+  }
+  return { kept, droppedEmptyFrom, droppedEmptyTo, droppedDuplicate };
+}
+
+/** 词表整理结论的可读摘要（0 项时返回 null，调用方据此决定是否提示）。 */
+export function tidySummary(result: RulesTidyResult): {
+  removed: number;
+  parts: { emptyFrom: number; emptyTo: number; duplicate: number };
+} {
+  const removed =
+    result.droppedEmptyFrom + result.droppedEmptyTo + result.droppedDuplicate;
+  return {
+    removed,
+    parts: {
+      emptyFrom: result.droppedEmptyFrom,
+      emptyTo: result.droppedEmptyTo,
+      duplicate: result.droppedDuplicate,
+    },
+  };
+}
+
 /** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值，
  *  `anchor` 是 `data-purge-fix` 锚点（点了滚到对应配置区）。 */
 export interface ActiveItem {
@@ -2181,6 +2246,63 @@ export default function PurgeConsole(): JSX.Element {
     [runPreview],
   );
 
+  /**
+   * 整理词表（删空 from / 删空 to / 原文去重）。
+   *
+   * 空 `to` 的语义是「删掉这个词」，容易被当成「还没填」留在表里；空 `from`
+   * 后端 normalize 直接丢。整理前先报出各类条数让用户确认，整理后如实回报。
+   */
+  const tidyTable = useCallback(
+    (kind: 'dead_zone' | 'synonym'): void => {
+      const current = draftRef.current;
+      if (!current) return;
+      const rules = kind === 'dead_zone' ? current.rewrite_rules : current.synonym_pairs;
+      const result = tidyRules(rules);
+      const summary = tidySummary(result);
+      if (summary.removed === 0) {
+        addToast(t('词表已经干净，没有可整理的行'), 'success');
+        return;
+      }
+      const detail = [
+        summary.parts.emptyFrom > 0 ? t('原文为空 {{n}} 条', { n: summary.parts.emptyFrom }) : '',
+        summary.parts.emptyTo > 0 ? t('改写为空 {{n}} 条', { n: summary.parts.emptyTo }) : '',
+        summary.parts.duplicate > 0 ? t('原文重复 {{n}} 条', { n: summary.parts.duplicate }) : '',
+      ]
+        .filter(Boolean)
+        .join('、');
+      if (
+        !window.confirm(
+          t('将删除 {{n}} 行（{{detail}}），剩余 {{kept}} 行。继续？', {
+            n: summary.removed,
+            detail,
+            kept: result.kept.length,
+          }),
+        )
+      ) {
+        return;
+      }
+      setDirty(true);
+      setDraft((d) =>
+        d
+          ? {
+              ...d,
+              rewrite_rules: kind === 'dead_zone' ? result.kept : d.rewrite_rules,
+              synonym_pairs: kind === 'synonym' ? result.kept : d.synonym_pairs,
+            }
+          : d,
+      );
+      addToast(
+        t('已整理：删除 {{n}} 行，剩余 {{kept}} 行（{{detail}}）', {
+          n: summary.removed,
+          kept: result.kept.length,
+          detail,
+        }),
+        'success',
+      );
+    },
+    [addToast, t],
+  );
+
   // ── 词表 CSV 导入导出（死区词/同义词单表，进草稿不直接保存）──────────────
   //
   // 两列 `from,to`（表头可选）；RFC 4180 转义复用 toCsv / downloadText。
@@ -2728,6 +2850,9 @@ export default function PurgeConsole(): JSX.Element {
             <Button variant="outline" size="sm" onClick={addRule}>
               {t('添加规则')}
             </Button>
+            <Button variant="outline" size="sm" onClick={() => tidyTable('dead_zone')}>
+              {t('整理')}
+            </Button>
             <Button variant="outline" size="sm" onClick={() => exportRulesCsv('dead_zone')}>
               {t('导出 CSV')}
             </Button>
@@ -2797,6 +2922,9 @@ export default function PurgeConsole(): JSX.Element {
           <>
             <Button variant="outline" size="sm" onClick={addSynonymRule}>
               {t('添加规则')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => tidyTable('synonym')}>
+              {t('整理')}
             </Button>
             <Button variant="outline" size="sm" onClick={() => exportRulesCsv('synonym')}>
               {t('导出 CSV')}

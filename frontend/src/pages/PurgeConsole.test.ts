@@ -6,6 +6,8 @@ import {
   parsePreviewHistoryJson,
   readPresetFilter,
   sortWarningsBySeverity,
+  tidyRules,
+  tidySummary,
   diffLines,
   diffTokensInLine,
   parsePreviewMessages,
@@ -20,6 +22,36 @@ import {
   writePreviewHistory,
   writePresetFilter,
 } from './PurgeConsole';
+
+describe('tidyRules / tidySummary', () => {
+  const rule = (from: string, to: string, enabled?: boolean) => ({ from, to, enabled });
+
+  it('删空 from / 空 to / 重复（保留最早），并分别计数', () => {
+    const result = tidyRules([
+      rule('a', 'x'),
+      rule('  ', 'y'), // 空 from
+      rule('b', '   '), // 空 to
+      rule('A', 'z'), // 与 a 重复（大小写不敏感）
+      rule('c', 'w'),
+    ]);
+    expect(result.kept.map((r) => r.from)).toEqual(['a', 'c']);
+    expect(result.droppedEmptyFrom).toBe(1);
+    expect(result.droppedEmptyTo).toBe(1);
+    expect(result.droppedDuplicate).toBe(1);
+    expect(tidySummary(result).removed).toBe(3);
+  });
+
+  it('干净表：removed = 0', () => {
+    const summary = tidySummary(tidyRules([rule('a', 'x'), rule('b', 'y')]));
+    expect(summary.removed).toBe(0);
+  });
+
+  it('不改动入参数组', () => {
+    const input = [rule('a', 'x'), rule('a', 'y')];
+    tidyRules(input);
+    expect(input.length).toBe(2);
+  });
+});
 
 describe('exportPreviewHistory / parsePreviewHistoryJson', () => {
   it('导出再导回等价（保留原始空白）', () => {
