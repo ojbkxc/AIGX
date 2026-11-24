@@ -1009,6 +1009,8 @@ mod tests {
             sources: Vec::new(),
             owned_by: "test".to_string(),
             context_length: None,
+            // 夹具不涉及输出上限：None = 未声明（该列显示 —）
+            max_output_tokens: None,
             capabilities: Vec::new(),
             cap_sources: Value::Null,
             capability_flags: Value::Null,
