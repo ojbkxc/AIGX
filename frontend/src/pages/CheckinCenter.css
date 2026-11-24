@@ -1036,3 +1036,10 @@
   color: var(--text-muted);
   font-size: 11px;
 }
+
+/* 触屏：撤销紧凑缩放（同 AccountSessions 的理由：缩到 26×14 点不中） */
+@media (hover: none) and (pointer: coarse) {
+  .ck-sched-switch.glass-switch {
+    transform: none;
+  }
+}

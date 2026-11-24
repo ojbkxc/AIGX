@@ -2802,3 +2802,12 @@ tr[draggable="true"]:active .as-grip {
   color: var(--text-muted);
   font-size: 12px;
 }
+
+/* 触屏：撤销紧凑缩放 —— 0.72 缩放后开关只有 26×14，拇指点不中（WCAG 2.5.8
+   要求 24×24 起，iOS HIG 建议 44×44）。桌面保持紧凑行高不变。 */
+@media (hover: none) and (pointer: coarse) {
+  .as-status-switch.glass-switch,
+  .as-limiter-rule .glass-switch {
+    transform: none;
+  }
+}

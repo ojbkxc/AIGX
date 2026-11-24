@@ -1763,3 +1763,21 @@ body.mm-colset-dragging {
   border-color: var(--border-color);
   color: var(--primary-color);
 }
+
+/* 触屏：22×12 的别名开关拇指点不中，恢复标准 36×20（thumb 同步） */
+@media (hover: none) and (pointer: coarse) {
+  .mm-alias .mm-alias-switch.glass-switch {
+    width: 36px;
+    height: 20px;
+    border-radius: 20px;
+  }
+  .mm-alias .mm-alias-switch .glass-switch-thumb {
+    width: 14px;
+    height: 14px;
+    top: 2px;
+    left: 2px;
+  }
+  .mm-alias .mm-alias-switch.glass-switch-on .glass-switch-thumb {
+    transform: translateX(16px);
+  }
+}

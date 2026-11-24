@@ -75,6 +75,39 @@
     outline-offset: 2px;
   }
 
+  /* 触摸目标扩到 44×44（iOS HIG / WCAG 2.5.8）：视觉仍是 36×20，
+     但手指点得中。伪元素属于 button，点它等于点按钮；只在需要时扩，
+     不改变布局占位（absolute 定位不参与流）。 */
+  .glass-switch::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+
+  /* 触屏设备：开关本体也放大（20px 高在手机上拇指很难瞄准，
+     且与 iOS/Android 原生控件尺寸差距明显）。只命中 coarse 指针，
+     桌面窄窗口不受影响。 */
+  @media (hover: none) and (pointer: coarse) {
+    .glass-switch {
+      width: 44px;
+      height: 24px;
+      border-radius: 24px;
+    }
+
+    .glass-switch-thumb {
+      width: 18px;
+      height: 18px;
+    }
+
+    .glass-switch-on .glass-switch-thumb {
+      transform: translateX(20px);
+    }
+  }
+
   /* 悬停提示（Tooltip 组件） */
   .glass-tooltip {
     position: absolute;
