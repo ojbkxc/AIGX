@@ -20,6 +20,8 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight } from 'lucide-react';
 import { providerIcon } from '../lib/providerIcons';
+// AIGX 独有：签到链路说明表（v3.5.1 重构时丢过，已恢复到 checkin-shared）
+import { providerDesc } from './checkin-shared';
 
 export interface ProviderOption {
   id: string;
@@ -62,24 +64,31 @@ export default function CheckinProviderRail({
     if (hasSelectedEmpty) setEmptyExpanded(true);
   }, [hasSelectedEmpty]);
 
-  const renderOption = (option: ProviderOption): JSX.Element => (
-    <button
-      key={option.id}
-      type="button"
-      className={`ck-rail-item${selected === option.id ? ' is-active' : ''}`}
-      onClick={() => onSelect(option.id)}
-    >
-      <RailLogo id={option.id} label={option.label} />
-      <span className="ck-rail-name">{t(option.label)}</span>
-      <span
-        className={`ck-rail-count${
-          option.done !== null && option.done < option.total ? ' pending' : ''
-        }`}
+  const renderOption = (option: ProviderOption): JSX.Element => {
+    // AIGX 独有：每家的签到链路说明（A2A 的 rail 只有名字）。原先是左栏
+    // provider 行下方的 description 行，v3.5.1 重构时丢了槽位；这里挂到
+    // title 悬停上——信息还在，又不挤占已对齐的 rail 布局。
+    const desc = providerDesc(option.id);
+    return (
+      <button
+        key={option.id}
+        type="button"
+        className={`ck-rail-item${selected === option.id ? ' is-active' : ''}`}
+        title={desc || undefined}
+        onClick={() => onSelect(option.id)}
       >
-        {option.done === null ? option.total : `${option.done}/${option.total}`}
-      </span>
-    </button>
-  );
+        <RailLogo id={option.id} label={option.label} />
+        <span className="ck-rail-name">{t(option.label)}</span>
+        <span
+          className={`ck-rail-count${
+            option.done !== null && option.done < option.total ? ' pending' : ''
+          }`}
+        >
+          {option.done === null ? option.total : `${option.done}/${option.total}`}
+        </span>
+      </button>
+    );
+  };
 
   return (
     <aside className="ck-provider-rail" aria-label={t('提供商')}>

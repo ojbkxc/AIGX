@@ -256,3 +256,33 @@ export const RECORD_KIND_LABEL: Record<string, string> = {
   makeup: '补签',
   retry: '重试',
 };
+
+/**
+ * 各家上游的签到链路说明（**AIGX 独有**：A2A 的 provider rail 只有名字没有说明）。
+ *
+ * 2026-11-24 按 v3.5.1 重构签到中心时这张表被整表删掉过——原左栏的
+ * `group.description || PROVIDER_DESC[id]` 槽位没跟着搬进新的 provider rail。
+ * 它讲的是「这家的签到链路是什么、一次性福利在哪个入口」：UMID 风控组件与
+ * 保活链都指向福利通道，少了这句用户找不到入口。
+ *
+ * 只做静态展示，不参与任何逻辑。新增提供商时在这里补一句。
+ */
+export const PROVIDER_DESC: Record<string, string> = {
+  loomy: '讯飞 Loomy：每日领取会员权益，签到即领',
+  kuku: 'Kuku：每日签到领积分，签到即领',
+  qoder: 'Qoder：每日签到领额度，签到即领',
+  'qoder-intl': 'Qoder 国际版：签到领额度；风控组件 UMID 见福利通道',
+  xiaohuanxiong: '小浣熊：桌面端 / 移动端各领一次登录积分',
+  autoclaw: 'AutoClaw：每日签到领额度，签到即领',
+  'autoclaw-intl': 'AutoClaw 国际版：每日签到领额度，签到即领',
+  workbuddy: 'WorkBuddy：每日签到领额度，签到即领',
+  'workbuddy-intl': 'WorkBuddy 国际版：签到领日活奖励；保活链见福利通道',
+  trae: 'Trae：每日签到领额度，签到即领',
+  codearts: 'CodeArts：每日签到领额度；新人礼见福利通道',
+  officeace: 'OfficeAce：每日签到与新人礼同链，签到即领',
+};
+
+/** 取某家的签到链路说明；没登记返回空串（不编造）。 */
+export function providerDesc(id: string): string {
+  return PROVIDER_DESC[id] ?? '';
+}
