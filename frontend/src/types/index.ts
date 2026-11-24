@@ -2852,6 +2852,8 @@ export interface PurgeSkillBrief {
 export interface PurgeConfigWarning {
   code: string;
   message: string;
+  /** 严重级（后端 `severity_of(code)` 推导；旧后端不返回时按 error 处理） */
+  severity?: 'error' | 'warn' | 'info';
 }
 
 /** 上次运行统计快照（关机时落盘；`stats` 展平） */

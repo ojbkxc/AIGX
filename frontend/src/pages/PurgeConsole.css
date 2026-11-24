@@ -682,3 +682,35 @@
 .purge-active-list li {
   line-height: 1.5;
 }
+/* 体检告警分级：徽标 + 左侧色条（Error 红 / Warn 黄 / Info 灰） */
+.purge-warning-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.purge-warning-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid currentColor;
+}
+.purge-warning-row.is-error .purge-warning-badge {
+  color: var(--danger-color, #dc2626);
+}
+.purge-warning-row.is-warn .purge-warning-badge {
+  color: var(--warning-color, #d97706);
+}
+.purge-warning-row.is-info .purge-warning-badge {
+  color: var(--text-muted);
+}
+.purge-warning-row.is-error {
+  border-left: 3px solid var(--danger-color, #dc2626);
+  padding-left: 8px;
+}
+.purge-warning-row.is-warn {
+  border-left: 3px solid var(--warning-color, #d97706);
+  padding-left: 8px;
+}

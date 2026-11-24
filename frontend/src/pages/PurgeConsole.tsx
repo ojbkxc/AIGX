@@ -6,6 +6,7 @@ import { api } from '../api';
 import { API_BASE, authHeaders } from '../api/client';
 import type {
   PurgeAppliedDetail,
+  PurgeConfigWarning,
   PurgeData,
   PurgePresetBrief,
   PurgePresetDetail,
@@ -99,6 +100,38 @@ const NUM_FIELDS: Array<{ key: NumKey; label: string; min: number; max: number }
   { key: 'fallback_trigger_attempt', label: '异源触发轮次', min: 1, max: 32 },
   { key: 'retry_limit', label: '重试上限', min: 1, max: 32 },
 ];
+
+/** 严重级 → 徽标文案（i18n key 与中文同形）。 */
+const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
+  error: '不生效',
+  warn: '需确认',
+  info: '提示',
+};
+
+/**
+ * 体检告警按严重级排序（Error → Warn → Info，同级保持后端原序）。
+ *
+ * 为什么在前端排而不在后端排：后端 `config_warning_items` 的顺序是「检查代码
+ * 的执行顺序」，对排查有意义（总开关相关的先出现）；分级只是展示优先级，不该
+ * 改动后端产出的语义。前端稳定排序两者兼得。
+ *
+ * 旧后端不返回 `severity` 时按 `error` 处理——与后端「未登记 code 兜底 Error」
+ * 同一立场（宁严不宽）。
+ */
+export function sortWarningsBySeverity<T extends { severity?: string }>(items: T[]): T[] {
+  const rank = (item: T): number => {
+    switch (item.severity) {
+      case 'warn':
+        return 1;
+      case 'info':
+        return 2;
+      default:
+        return 0; // error 或未声明
+    }
+  };
+  // Array.prototype.sort 在现代引擎里稳定，同级保持原序
+  return [...items].sort((a, b) => rank(a) - rank(b));
+}
 
 /** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值。 */
 export interface ActiveItem {
@@ -1468,9 +1501,7 @@ export default function PurgeConsole(): JSX.Element {
   const [previewDetail, setPreviewDetail] = useState<PurgeAppliedDetail | null>(null);
   // 配置体检告警（结构化优先；旧后端只有字符串 → code 为空只读展示） + 技能快照
   const [configWarnings, setConfigWarnings] = useState<string[]>([]);
-  const [configWarningItems, setConfigWarningItems] = useState<
-    Array<{ code: string; message: string }>
-  >([]);
+  const [configWarningItems, setConfigWarningItems] = useState<PurgeConfigWarning[]>([]);
   const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
   const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
@@ -2298,10 +2329,21 @@ export default function PurgeConsole(): JSX.Element {
       {configWarningItems.length > 0 || configWarnings.length > 0 ? (
         <div className="purge-warning-box" role="alert">
           {(configWarningItems.length > 0
-            ? configWarningItems.map((w) => ({ code: w.code, message: w.message }))
-            : configWarnings.map((message) => ({ code: '', message }))
-          ).map(({ code, message }, index) => (
-            <p key={index} className="purge-warning-row">
+            ? sortWarningsBySeverity(
+                configWarningItems.map((w) => ({
+                  code: w.code,
+                  message: w.message,
+                  severity: w.severity ?? 'error',
+                })),
+              )
+            : configWarnings.map((message) => ({
+                code: '',
+                message,
+                severity: 'error' as const,
+              }))
+          ).map(({ code, message, severity }, index) => (
+            <p key={index} className={`purge-warning-row is-${severity}`}>
+              <span className="purge-warning-badge">{t(SEVERITY_LABEL[severity])}</span>
               <span>{message}</span>
               {code && FIX_TARGETS[code] ? (
                 <Button

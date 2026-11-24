@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildActiveSummary,
   capError,
+  sortWarningsBySeverity,
   diffLines,
   diffTokensInLine,
   parsePreviewMessages,
@@ -15,6 +16,39 @@ import {
   validateImportedSettings,
   writePreviewHistory,
 } from './PurgeConsole';
+
+describe('sortWarningsBySeverity', () => {
+  it('Error 在前，Info 在后；同级保持原序（稳定）', () => {
+    const items = [
+      { code: 'a', severity: 'info' },
+      { code: 'b', severity: 'error' },
+      { code: 'c', severity: 'warn' },
+      { code: 'd', severity: 'error' },
+      { code: 'e', severity: 'info' },
+    ];
+    expect(sortWarningsBySeverity(items).map((i) => i.code)).toEqual([
+      'b',
+      'd',
+      'c',
+      'a',
+      'e',
+    ]);
+  });
+
+  it('未声明 severity 按 error 处理（与后端兜底同立场）', () => {
+    const items = [{ code: 'x' }, { code: 'y', severity: 'info' }];
+    expect(sortWarningsBySeverity(items).map((i) => i.code)).toEqual(['x', 'y']);
+  });
+
+  it('不改动入参数组', () => {
+    const items = [
+      { code: 'a', severity: 'info' },
+      { code: 'b', severity: 'error' },
+    ];
+    sortWarningsBySeverity(items);
+    expect(items.map((i) => i.code)).toEqual(['a', 'b']);
+  });
+});
 
 describe('buildActiveSummary', () => {
   const base = {
