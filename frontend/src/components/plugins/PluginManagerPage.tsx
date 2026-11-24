@@ -194,6 +194,14 @@ function InstalledPackCard({
   const [providersOpen, setProvidersOpen] = useState(false);
   const loadedCount = pack.providers.filter((p) => p.loaded).length;
   const crashes = pack.host?.crashes ?? 0;
+  // 单家包折叠（A2A InstalledPluginCard 同口径）：包级 enabled 就是那一家的开关，
+  // 再给一家渲染子开关会出现「同一次写入两个入口」——后端 set_provider_enabled
+  // 对单家包直接改包级 enabled（registry.rs::set_provider_enabled），两个开关互相拨动。
+  // 所以只有多提供商包才展开「提供商」区与启用计数。
+  const multiProvider = pack.providers.length > 1;
+  const singleOverridden = !multiProvider && Boolean(pack.providers[0]?.overriddenBy);
+  const enabledCount = pack.providers.filter((p) => p.enabled && !p.overriddenBy).length;
+  const incompatible = pack.updateRequired === true;
   return (
     <div className="pl-card is-installed">
       <div className="pl-card-head">
@@ -214,28 +222,40 @@ function InstalledPackCard({
           </h3>
           <div className="pl-card-badges">
             <Badge tone={pack.enabled ? 'info' : 'neutral'}>{pack.enabled ? t('已启用') : t('已停用')}</Badge>
-            {pack.signed ? null : <Badge tone="warning">{t('未校验签名')}</Badge>}
-            {pack.version.includes('-') ? <Badge tone="warning">{t('beta 版')}</Badge> : null}
-            {!pack.entryPresent ? <Badge tone="danger">{t('文件缺失')}</Badge> : null}
-            {canUpdate && latestVersion ? (
+            {incompatible ? (
+              <Badge tone="danger">{t('接口不兼容')}</Badge>
+            ) : canUpdate && latestVersion ? (
               <Badge tone="info">{t('可更新到 v{{v}}', { v: latestVersion })}</Badge>
             ) : null}
+            {pack.signed ? null : <Badge tone="warning">{t('未校验签名')}</Badge>}
+            {pack.version.includes('-') ? <Badge tone="warning">{t('beta 版')}</Badge> : null}
+            {singleOverridden ? <Badge tone="neutral">{t('由其他插件接管')}</Badge> : null}
+            {!pack.entryPresent ? <Badge tone="danger">{t('文件缺失')}</Badge> : null}
           </div>
         </div>
       </div>
       {pack.description ? <p className="pl-card-desc">{pack.description}</p> : null}
       <p className="pl-card-meta">
-        {t('{{count}} 家提供商 · 安装于 {{time}}', {
-          count: pack.providers.length,
-          time: fmtInstalledAt(pack.installedAt),
-        })}
+        {multiProvider
+          ? t('{{count}} 家提供商 · 已启用 {{enabled}}/{{count}} · 安装于 {{time}}', {
+              count: pack.providers.length,
+              enabled: enabledCount,
+              time: fmtInstalledAt(pack.installedAt),
+            })
+          : t('安装于 {{time}}', { time: fmtInstalledAt(pack.installedAt) })}
       </p>
       <div className="pl-card-state">
         <span>{pack.host?.running ? t('宿主运行中') : t('宿主未运行')}</span>
-        <span>{t('已加载 {{count}} 家', { count: loadedCount })}</span>
+        {multiProvider ? <span>{t('已加载 {{count}} 家', { count: loadedCount })}</span> : null}
         {crashes > 0 && <span className="pl-crash-count">{t('崩溃 {{n}} 次', { n: crashes })}</span>}
       </div>
-      {pack.compatibilityError ? (
+      {incompatible ? (
+        <p className="pl-card-err">
+          {pack.compatibilityError || t('插件与当前网关的公共接口不兼容，暂未加载。')}
+          {' '}
+          {t('请根据不兼容原因更新插件或网关；不会要求两者版本号一致。')}
+        </p>
+      ) : pack.compatibilityError ? (
         <p className="pl-card-err" title={pack.compatibilityError}>{pack.compatibilityError}</p>
       ) : null}
       {!pack.entryPresent ? (
@@ -257,9 +277,11 @@ function InstalledPackCard({
               ariaLabel={`${t('启用')} ${pack.name}`}
             />
           </label>
-          {pack.providers.length > 0 && (
+          {multiProvider && (
             <Button variant="outline" size="sm" onClick={() => setProvidersOpen((v) => !v)}>
-              {providersOpen ? t('收起提供商') : t('提供商（{{n}}）', { n: pack.providers.length })}
+              {providersOpen
+                ? t('收起提供商')
+                : t('提供商（{{enabled}}/{{n}}）', { enabled: enabledCount, n: pack.providers.length })}
             </Button>
           )}
           <Tooltip label={t('插件声明的可编辑设置（settings_schema）')}>
@@ -289,7 +311,7 @@ function InstalledPackCard({
           </Tooltip>
         </div>
       )}
-      {providersOpen && (
+      {multiProvider && providersOpen && (
         <ul className="pl-providers">
           {pack.providers.map((p) => (
             <li key={p.id} className="pl-provider-row">

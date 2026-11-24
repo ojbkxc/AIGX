@@ -50,6 +50,20 @@ interface DataResponse<T> {
 }
 
 /**
+ * 汇率（`GET/PUT /api/pricing/exchange-rates`，扁平对象 `{USD, CNY, ...}`）。
+ *
+ * A2A v3.5.1 在「设置 → 通用 → 计量单位」里加了计价货币与汇率刷新；AIGX 的
+ * 汇率编辑随计费页迁出后**没有任何调用方**（`getExchangeRates` 全库零消费），
+ * 等于停在一个配不出来的状态。这里按可落地的子集接回来：USD 是基准（后端
+ * 显式忽略写入），只编辑 CNY，写前按后端口径要求正数。
+ */
+interface ExchangeRatesShape {
+  USD?: number;
+  CNY?: number;
+  [key: string]: unknown;
+}
+
+/**
  * 设置分区：对齐 Agent2API settings-page 的 CATEGORIES（通用 / 显示 / 网关 /
  * 安全 / 数据 / 反馈与需求 / 版本信息 / 更新）。v1.0.93 大块迁移：
  * AI 助手/聊天/报表/重试/超时/限流与缓存/计费/通知 八分类迁往顶级页或
@@ -150,6 +164,13 @@ export default function Settings() {
   // ── 通用确认弹窗（用于清空缓存等危险操作）──
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
+  // ── 汇率（USD 基准，CNY 可编辑）──
+  const [fxRate, setFxRate] = useState('');
+  const [fxSaved, setFxSaved] = useState('');
+  const [fxLoading, setFxLoading] = useState(false);
+  const [fxSaving, setFxSaving] = useState(false);
+  const [fxError, setFxError] = useState('');
+
   const selectTheme = (mode: ThemeMode) => {
     setTheme(mode);
     applyTheme(mode);
@@ -166,7 +187,49 @@ export default function Settings() {
   useEffect(() => {
     loadLimits();
     loadEmailWhitelist();
+    void loadExchangeRate();
   }, []);
+
+  /** 读汇率：后端对未配置的币种回 0（「空 = 未配置」），这里渲染成空串 */
+  const loadExchangeRate = async (): Promise<void> => {
+    setFxLoading(true);
+    setFxError('');
+    try {
+      const res = await api.getExchangeRates();
+      const rates = (res?.data ?? {}) as ExchangeRatesShape;
+      const cny = typeof rates.CNY === 'number' && rates.CNY > 0 ? String(rates.CNY) : '';
+      setFxRate(cny);
+      setFxSaved(cny);
+    } catch (err) {
+      setFxError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFxLoading(false);
+    }
+  };
+
+  /** 存汇率：USD 是基准（后端忽略），只提交 CNY；<=0 后端会 400，前端先挡 */
+  const handleSaveExchangeRate = async (): Promise<void> => {
+    const raw = fxRate.trim();
+    if (raw !== '' && (Number.isNaN(Number(raw)) || Number(raw) <= 0)) {
+      setFxError(t('汇率必须是大于 0 的数字'));
+      return;
+    }
+    setFxSaving(true);
+    setFxError('');
+    try {
+      const res = await api.updateExchangeRates(raw === '' ? {} : { CNY: Number(raw) });
+      const rates = (res?.data ?? {}) as ExchangeRatesShape;
+      const next = typeof rates.CNY === 'number' && rates.CNY > 0 ? String(rates.CNY) : '';
+      setFxRate(next);
+      setFxSaved(next);
+      addToast(t('汇率已保存'));
+    } catch (err) {
+      setFxError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFxSaving(false);
+    }
+  };
+  const fxDirty = fxRate.trim() !== fxSaved.trim();
 
   // （限流 / 缓存 / 价格同步 / 汇率 的加载与保存已随 顶级「限流」页 与「套餐与兑换码」计费 Tab 迁出，v1.0.93）
 
@@ -344,6 +407,64 @@ export default function Settings() {
                 <div className="settings-actions">
                   <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                     {saving ? t('保存中...') : t('保存更改')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 汇率：A2A v3.5.1 的「计量单位」面板里带计价货币与汇率刷新；
+              AIGX 侧等价物是 USD→CNY 汇率（后端 USD 为基准、写入忽略 USD）。 */}
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('汇率与计价')}</h2>
+              <p className="card-subtitle">
+                {t('模型价格与账单按美元计价，这里配置 1 美元折算多少人民币，用于人民币口径的展示与结算。')}
+              </p>
+            </div>
+            <div className="card-body">
+              <div className="settings-form">
+                <div className="form-group" style={{ maxWidth: 320 }}>
+                  <label htmlFor="fxCnyRate">{t('人民币汇率（1 USD = ? CNY）')}</label>
+                  <input
+                    id="fxCnyRate"
+                    className="form-input"
+                    type="number"
+                    min="0"
+                    step="0.0001"
+                    placeholder={t('未配置')}
+                    value={fxRate}
+                    disabled={fxLoading || fxSaving}
+                    onChange={(e) => setFxRate(e.target.value)}
+                  />
+                  <span className="form-hint">
+                    {fxSaved
+                      ? t('当前生效：1 USD ≈ ¥{{rate}}', { rate: fxSaved })
+                      : t('尚未配置汇率，人民币口径会按 0 处理。')}
+                  </span>
+                </div>
+                {fxError ? (
+                  <div className="form-group">
+                    <span className="form-hint" style={{ color: 'var(--danger-color, #dc2626)' }}>
+                      {fxError}
+                    </span>
+                  </div>
+                ) : null}
+                <div className="settings-actions">
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => void handleSaveExchangeRate()}
+                    disabled={fxSaving || fxLoading || !fxDirty}
+                  >
+                    {fxSaving ? t('保存中...') : t('保存更改')}
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => void loadExchangeRate()}
+                    disabled={fxLoading || fxSaving}
+                  >
+                    {t('刷新汇率')}
                   </button>
                 </div>
               </div>

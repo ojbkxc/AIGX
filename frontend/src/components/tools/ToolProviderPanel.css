@@ -240,6 +240,11 @@
   line-height: 1.5;
 }
 
+/* 不可用原因独占一行（长文本不挤进 meta 行，读起来仍靠这一档灰字） */
+.tpp-key-help.is-warn {
+  color: var(--danger-color);
+}
+
 .tpp-key-draft {
   display: flex;
   flex-direction: column;

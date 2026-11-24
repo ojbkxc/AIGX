@@ -232,11 +232,17 @@ function InstalledScriptCard({
         </p>
       ) : null}
       <p className="pl-card-meta">
-        <span>{t('{{count}} 家提供商', { count: pkg.providers.length })}</span>
+        {/* 单家包折叠（A2A plugins-script-settings 的 showProviders 同口径）：
+            包级 enabled 就是那一家的开关（storage.rs load_packages 与
+            operations.rs::set_provider_enabled 两侧同口径归一），再列一行
+            「1 家提供商」+ 一个与包开关同义的子开关只会让人以为有两处状态。 */}
+        {pkg.providers.length > 1 ? (
+          <span>{t('{{count}} 家提供商', { count: pkg.providers.length })}</span>
+        ) : null}
         <span>{t('安装于 {{time}}', { time: fmtUnix(pkg.installedAt) })}</span>
         {pkg.repository ? <span>{t('仓库 {{repo}}', { repo: pkg.repository })}</span> : null}
       </p>
-      {pkg.providers.length > 0 ? (
+      {pkg.providers.length > 1 ? (
         <ul className="pl-providers">
           {pkg.providers.map((p) => (
             <li key={p.id} className="pl-provider-row">

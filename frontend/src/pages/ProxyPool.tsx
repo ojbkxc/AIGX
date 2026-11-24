@@ -5,13 +5,13 @@
  * `pool:<id>` / `rotate` / `rotate:<id>,<id>` 编码引用它们（改一处、
  * 多账号生效）；每条可独立做连通性测试（结果记入条目，重启后仍可见）。
  */
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Globe, Loader2, Pencil, Plus, RefreshCw, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { Globe, Loader2, Pencil, Plus, RefreshCw, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, EmptyState, Input, Loading, Select, Switch } from '../components/ui';
+import { Button, Card, EmptyState, Input, Loading, Select, Switch, Tabs } from '../components/ui';
 import type { ProxyPoolItem, ProxyTestResult } from '../types';
 import './ProxyPool.css';
 
@@ -37,6 +37,26 @@ const EMPTY_FORM: EntryForm = {
   password: '',
 };
 
+/** 状态筛选口径（对齐 Agent2API proxies-page.tsx 的 `stateOf`） */
+type ProxyStateFilter = 'all' | 'ok' | 'fail' | 'none' | 'off';
+
+function proxyState(item: ProxyPoolItem): Exclude<ProxyStateFilter, 'all'> {
+  if (!item.enabled) return 'off';
+  const last = item.lastTest ?? null;
+  if (!last || !last.tested_at) return 'none';
+  return last.success ? 'ok' : 'fail';
+}
+
+function fmtTestedAt(value: number | null | undefined): string {
+  if (!value || !Number.isFinite(value)) return '—';
+  const ms = value < 1e11 ? value * 1000 : value;
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return '—';
+  }
+}
+
 export default function ProxyPool(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -53,6 +73,11 @@ export default function ProxyPool(): JSX.Element {
   const [settingsDefault, setSettingsDefault] = useState('');
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState('');
+  // 筛选（A2A 代理池页的 搜索 / 协议 / 状态 三件套）：纯前端派生，不改接口
+  const [keyword, setKeyword] = useState('');
+  const [protocolFilter, setProtocolFilter] = useState('all');
+  const [stateFilter, setStateFilter] = useState<ProxyStateFilter>('all');
+  const [syncingClash, setSyncingClash] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -211,6 +236,67 @@ export default function ProxyPool(): JSX.Element {
 
   const testing = (id: string) => testingIds.has(id);
 
+  /**
+   * 手动同步 Clash Verge 出口（对齐 A2A「同步 EasyClash」）。
+   *
+   * 后端 `POST /api/proxy-pool/sync-clash` 回整份池 + `changes`（本次变更条数）
+   * + `syncError`（Clash 没装 / 配置解析失败的说明，null = 成功）。同步失败时
+   * 池本身不变，所以只提示原因、不改列表。
+   */
+  const syncClash = async (): Promise<void> => {
+    setSyncingClash(true);
+    try {
+      const res = await api.syncClashProxyPool();
+      setItems(res?.items ?? []);
+      if (res?.syncError) addToast(`${t('同步失败')}：${res.syncError}`, 'error');
+      else addToast(t('已同步 {{n}} 条变更', { n: res?.changes ?? 0 }), 'success');
+    } catch (err) {
+      addToast((err as Error).message || t('同步失败'), 'error');
+    } finally {
+      setSyncingClash(false);
+    }
+  };
+
+  /** 协议候选：只列池里真出现过的协议，避免筛出一个恒空的选项 */
+  const protocols = useMemo(
+    () => [...new Set(items.map((item) => item.protocol || 'http'))].sort(),
+    [items],
+  );
+
+  const stateCounts = useMemo(() => {
+    const counts: Record<Exclude<ProxyStateFilter, 'all'>, number> = { ok: 0, fail: 0, none: 0, off: 0 };
+    for (const item of items) counts[proxyState(item)] += 1;
+    return counts;
+  }, [items]);
+
+  const shown = useMemo(() => {
+    const query = keyword.trim().toLowerCase();
+    return items.filter((item) => {
+      if (protocolFilter !== 'all' && (item.protocol || 'http') !== protocolFilter) return false;
+      if (stateFilter !== 'all' && proxyState(item) !== stateFilter) return false;
+      if (!query) return true;
+      return [item.name, item.host, item.protocol, String(item.port), item.username ?? '']
+        .join(' ')
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [items, keyword, protocolFilter, stateFilter]);
+
+  const filtersActive = keyword.trim() !== '' || protocolFilter !== 'all' || stateFilter !== 'all';
+  const clearFilters = (): void => {
+    setKeyword('');
+    setProtocolFilter('all');
+    setStateFilter('all');
+  };
+
+  const stateOptions: Array<{ value: ProxyStateFilter; label: string; count: number }> = [
+    { value: 'all', label: t('全部'), count: items.length },
+    { value: 'ok', label: t('可用'), count: stateCounts.ok },
+    { value: 'fail', label: t('失败'), count: stateCounts.fail },
+    { value: 'none', label: t('未检测'), count: stateCounts.none },
+    { value: 'off', label: t('已禁用'), count: stateCounts.off },
+  ];
+
   return (
     <div className="page-container">
       <div className="page-header">
@@ -223,6 +309,9 @@ export default function ProxyPool(): JSX.Element {
         <div className="page-actions">
           <Button variant="secondary" onClick={openSettings}>
             <SlidersHorizontal size={16} /> {t('连通性测试设置')}
+          </Button>
+          <Button variant="secondary" onClick={() => void syncClash()} disabled={syncingClash}>
+            {syncingClash ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />} {t('同步 EasyClash')}
           </Button>
           <Button variant="secondary" onClick={load}>
             <RefreshCw size={16} /> {t('刷新')}
@@ -268,6 +357,64 @@ export default function ProxyPool(): JSX.Element {
           </form>
         </Card>
       )}
+
+      {/* 筛选栏（A2A 代理池页：搜索 / 协议 / 状态 三段；纯前端派生，接口不变） */}
+      {!loading && items.length > 0 ? (
+        <Card className="proxy-form-card">
+          <div className="proxy-form-row" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <label className="form-group" style={{ minWidth: 220, flex: '1 1 220px' }}>
+              <span>{t('搜索代理')}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Search size={14} aria-hidden="true" />
+                <input
+                  className="form-input"
+                  type="search"
+                  value={keyword}
+                  placeholder={t('搜索名称 / 地址 / 端口')}
+                  aria-label={t('搜索代理')}
+                  onChange={(e) => setKeyword(e.target.value)}
+                />
+              </span>
+            </label>
+            <div className="form-group" style={{ minWidth: 140 }}>
+              <label htmlFor="proxyProtocolFilter">{t('按协议筛选')}</label>
+              <Select
+                id="proxyProtocolFilter"
+                value={protocolFilter}
+                onChange={(e) => setProtocolFilter(e.target.value)}
+              >
+                <option value="all">{t('全部协议')}</option>
+                {protocols.map((protocol) => (
+                  <option key={protocol} value={protocol}>
+                    {protocol.toUpperCase()}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="form-group" style={{ flex: '1 1 320px' }}>
+              <label>{t('按状态筛选')}</label>
+              <Tabs<ProxyStateFilter>
+                ariaLabel={t('按状态筛选')}
+                items={stateOptions.map((option) => ({
+                  key: option.value,
+                  label: `${option.label}（${option.count}）`,
+                }))}
+                active={stateFilter}
+                onChange={(key) => setStateFilter(key)}
+              />
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={!filtersActive}
+              onClick={clearFilters}
+            >
+              {t('清空筛选')}
+            </Button>
+          </div>
+        </Card>
+      ) : null}
 
       {showForm && (
         <Card className="proxy-form-card">
@@ -349,10 +496,21 @@ export default function ProxyPool(): JSX.Element {
           icon="🌐"
           message={t('还没有代理')}
         />
+      ) : shown.length === 0 ? (
+        <EmptyState
+          icon="🌐"
+          message={t('没有匹配当前筛选的出口')}
+          action={
+            <Button variant="secondary" size="sm" onClick={clearFilters}>
+              {t('清空筛选')}
+            </Button>
+          }
+        />
       ) : (
         <div className="proxy-grid">
-          {items.map((entry) => {
+          {shown.map((entry) => {
             const last = entry.lastTest ?? null;
+            const fromClash = entry.source === 'clash';
             return (
               <Card key={entry.id} className={`proxy-card${entry.enabled ? '' : ' proxy-card-disabled'}`}>
                 <div className="proxy-card-head">
@@ -362,6 +520,7 @@ export default function ProxyPool(): JSX.Element {
                       {entry.protocol}://{entry.host}:{entry.port}
                       {entry.username && ` · ${entry.username}`}
                     </span>
+                    {fromClash ? <span className="proxy-usedby">{t('只读：在 EasyClash 里改')}</span> : null}
                   </div>
                   <Switch
                     checked={entry.enabled}
@@ -369,11 +528,20 @@ export default function ProxyPool(): JSX.Element {
                     ariaLabel={t('启用 {{name}}', { name: entry.name })}
                   />
                 </div>
-                {last && (
+                {/* 最近检测：时间 + 耗时 + 出口 IP / 失败原因分开显示。
+                    时间永远在前——长失败原因不该把「什么时候测的」挤掉。 */}
+                {last && last.tested_at ? (
                   <div className={`proxy-test-result${last.success ? ' ok' : ' bad'}`}>
-                    {last.success
-                      ? `✅ ${t('出口 IP')} ${last.ip || '—'} · ${last.duration_ms}ms`
-                      : `❌ ${last.error ?? t('失败')}`}
+                    <span>
+                      {last.success
+                        ? `✅ ${t('可用')} ${last.ip || '—'} · ${last.duration_ms}ms`
+                        : `❌ ${t('失败')}：${last.error ?? t('连接失败')}`}
+                    </span>
+                    <span className="proxy-card-addr">{t('检测于 {{time}}', { time: fmtTestedAt(last.tested_at) })}</span>
+                  </div>
+                ) : (
+                  <div className="proxy-test-result">
+                    {t('未检测')}
                   </div>
                 )}
                 {entry.usedBy && entry.usedBy.length > 0 && (
@@ -388,9 +556,11 @@ export default function ProxyPool(): JSX.Element {
                   <Button variant="secondary" size="sm" onClick={() => copyReference(entry)}>
                     pool:{entry.id.slice(0, 10)}…
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => openEdit(entry)}>
-                    <Pencil size={14} />
-                  </Button>
+                  {fromClash ? null : (
+                    <Button variant="secondary" size="sm" onClick={() => openEdit(entry)}>
+                      <Pencil size={14} />
+                    </Button>
+                  )}
                   <Button variant="danger" size="sm" onClick={() => removeEntry(entry)}>
                     <Trash2 size={14} />
                   </Button>

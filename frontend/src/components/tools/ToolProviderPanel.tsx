@@ -48,6 +48,34 @@ function fmtTime(value: number | null | undefined): string {
   }
 }
 
+/**
+ * 稳定错误码 → 界面文案（A2A tools-config.tsx `TEST_FAILURE_TEXT` 同表）。
+ *
+ * 后端回的是机器码（`provider_errors.rs` 的 SearchErrorCode 投影），直接把码
+ * 甩到界面上运维看不懂「quota_exhausted 到底是没额度还是密钥错」；表里没有的码
+ * 回落到后端附带的 `error` 文本，再空就落到「连接测试失败」。
+ */
+function failureText(result: ToolProviderTestResult, t: TFn): string {
+  const table: Record<string, string> = {
+    invalid_provider_key: t('密钥或账号登录态无效'),
+    quota_exhausted: t('额度已用完'),
+    rate_limited: t('触发上游限流'),
+    timed_out: t('上游请求超时'),
+    no_results: t('上游没有返回结果'),
+    provider_unavailable: t('提供商暂不可用或配置有误'),
+    configuration: t('搜索来源配置不完整'),
+    permission_denied: t('无权使用所选来源'),
+    invalid_input: t('请求参数无效'),
+  };
+  const code = result.code ? table[result.code] : '';
+  return result.error || code || t('连接测试失败');
+}
+
+/** 该家是否可用于搜索（A2A `providerReady`：启用 + 已配置 + 密钥/账号可用） */
+function providerReady(provider: ToolProviderRow): boolean {
+  return provider.enabled && provider.configured && provider.usable !== false;
+}
+
 /** 密钥状态文案（对齐 A2A providerKeyStatusText） */
 function keyStatusText(status: ProviderKeyStatus, t: TFn): string {
   switch (status.status) {
@@ -155,6 +183,8 @@ export default function ToolProviderPanel(): JSX.Element {
   const [notReady, setNotReady] = useState(false);
   const [error, setError] = useState('');
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  /** 账号型来源的绑定草稿：provider → account_id（未改动时缺省 = 后端当前绑定） */
+  const [accountDrafts, setAccountDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, ToolProviderTestResult>>({});
   /** 多密钥编辑器：provider → 草稿行（null = 编辑器关闭） */
@@ -236,6 +266,28 @@ export default function ToolProviderPanel(): JSX.Element {
     }
   };
 
+  /**
+   * 保存账号型来源的绑定（A2A `saveAccount`）。
+   *
+   * 账号型来源（`auth_type === 'account'`，如 Kiro / WorkBuddy）不存密钥，改存
+   * 「复用哪一个已有账号的登录态」；后端 `update_provider` 对这类来源只接受
+   * `account_id`/`enabled`，传 api_key 会直接 400（"该搜索来源使用已有账号"）。
+   * 传空串 = 解除绑定（后端把 account_id 清成 ""）。
+   */
+  const saveAccount = async (provider: ToolProviderRow): Promise<void> => {
+    const accountId = accountDrafts[provider.provider] ?? provider.account_id ?? '';
+    setBusy(provider.provider);
+    try {
+      await api.saveToolProvider(provider.provider, { account_id: accountId || null });
+      addToast(accountId ? t('搜索账号已绑定') : t('已解除账号绑定'));
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const testProvider = async (provider: ToolProviderRow): Promise<void> => {
     setBusy(provider.provider);
     try {
@@ -249,7 +301,7 @@ export default function ToolProviderPanel(): JSX.Element {
                 n: result.result_count ?? 0,
                 ms: result.duration_ms ?? 0,
               })
-            : result.error || t('测试失败'),
+            : failureText(result, t),
           result.success ? 'success' : 'error',
         );
       }
@@ -383,12 +435,43 @@ export default function ToolProviderPanel(): JSX.Element {
     >
       {error && <div className="error-message">{error}</div>}
 
+      {/* 就绪聚合（A2A WebSearchConfig 的两条 alert）：所选来源里有几家真的能用。
+          只提示不拦保存——停用/未配置的来源照样能选上，运行时按名单跳过，
+          所以这里说「哪些会被跳过」比禁掉勾选更有用。 */}
+      {selection ? (() => {
+        const selected = providers.filter((p) => selection.search_providers.includes(p.provider));
+        const ready = selected.filter(providerReady);
+        const unavailable = selected.filter((p) => !providerReady(p));
+        if (!selected.length) {
+          return (
+            <p className="tpp-key-help">
+              {t('还没有选择搜索来源：批量网页搜索会直接报「搜索来源配置不完整」。')}
+            </p>
+          );
+        }
+        return (
+          <p className={`tpp-key-help${ready.length ? '' : ' is-warn'}`}>
+            {ready.length
+              ? t('批量网页搜索可用：将使用 {{ready}}。', {
+                  ready: ready.map((p) => p.display_name || p.provider).join('、'),
+                }) +
+                (unavailable.length
+                  ? ` ${t('暂不可用的 {{missing}} 会自动跳过。', {
+                      missing: unavailable.map((p) => p.display_name || p.provider).join('、'),
+                    })}`
+                  : '')
+              : t('批量网页搜索不可用：请启用来源并配置密钥或绑定可用账号。')}
+          </p>
+        );
+      })() : null}
+
       <div className="tpp-list">
         {providers.map((provider) => {
           const result = testResults[provider.provider];
           const isBusy = busy === provider.provider;
           const drafts = editorOf(provider);
           const multiKey = Array.isArray(provider.keys);
+          const isAccount = provider.auth_type === 'account';
           const maxKeys = provider.max_keys ?? 100;
           return (
             <div key={provider.provider} className={`tpp-row${provider.enabled ? '' : ' is-off'}`}>
@@ -414,30 +497,81 @@ export default function ToolProviderPanel(): JSX.Element {
               </div>
 
               <div className="tpp-row-meta">
-                <span>
-                  {t('密钥')}{' '}
-                  {provider.configured ? (
-                    <code>{provider.key_hint || '••••••'}</code>
-                  ) : (
-                    t('未设置')
-                  )}
-                </span>
+                {isAccount ? (
+                  <span>
+                    {t('搜索账号')}{' '}
+                    <strong>{provider.account_name || t('未选择账号')}</strong>
+                  </span>
+                ) : (
+                  <span>
+                    {t('密钥')}{' '}
+                    {provider.configured ? (
+                      <code>{provider.key_hint || '••••••'}</code>
+                    ) : (
+                      t('未设置')
+                    )}
+                  </span>
+                )}
                 <span>{t('更新于 {{time}}', { time: fmtTime(provider.updated_at) })}</span>
                 {provider.max_query_chars ? (
                   <span>{t('单次查询上限 {{n}} 字符', { n: provider.max_query_chars })}</span>
                 ) : null}
-                {PROVIDER_KEY_PAGES[provider.provider] ? (
+                {isAccount ? (
+                  <span>{t('仅搜索，不支持网页抓取')}</span>
+                ) : PROVIDER_KEY_PAGES[provider.provider] ? (
                   <a href={PROVIDER_KEY_PAGES[provider.provider]} target="_blank" rel="noreferrer noopener">
                     {t('获取 API Key')}
                   </a>
                 ) : null}
               </div>
 
+              {/* 不可用原因（账号停用 / 插件未装载 / 密钥全失效）：A2A 把它压在
+                  提供商标头下，这里跟「更新于」同一行之后独占一行，长文本不挤。 */}
+              {provider.usable === false && provider.unavailable_reason ? (
+                <p className="tpp-key-help is-warn">{provider.unavailable_reason}</p>
+              ) : null}
+
               {/* 多密钥清单（beta.2）：provider.keys 存在且非空才展示 */}
-              {multiKey && (provider.keys?.length ?? 0) > 0 ? <ProviderKeyList provider={provider} t={t} /> : null}
+              {!isAccount && multiKey && (provider.keys?.length ?? 0) > 0 ? (
+                <ProviderKeyList provider={provider} t={t} />
+              ) : null}
+
+              {/* 账号型来源：绑定已有账号（复用登录态，不填密钥） */}
+              {isAccount ? (
+                <div className="tpp-row-edit">
+                  <select
+                    className="form-input tpp-fetch-select"
+                    value={accountDrafts[provider.provider] ?? provider.account_id ?? ''}
+                    onChange={(e) =>
+                      setAccountDrafts((prev) => ({ ...prev, [provider.provider]: e.target.value }))
+                    }
+                    disabled={isBusy}
+                    aria-label={t('搜索账号')}
+                  >
+                    <option value="">{t('未选择账号')}</option>
+                    {(provider.accounts ?? [])
+                      .filter((account) => account.enabled || account.id === provider.account_id)
+                      .map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {account.name || account.id}
+                          {account.enabled ? '' : t('（已停用）')}
+                        </option>
+                      ))}
+                  </select>
+                  <Button variant="outline" size="sm" disabled={isBusy} onClick={() => void saveAccount(provider)}>
+                    {isBusy ? <Loader2 size={12} className="tpp-spin" /> : null}
+                    {t('保存绑定')}
+                  </Button>
+                  <Button variant="primary" size="sm" disabled={isBusy} onClick={() => void testProvider(provider)}>
+                    {isBusy ? <Loader2 size={12} className="tpp-spin" /> : <Play size={12} />}
+                    {t('测试')}
+                  </Button>
+                </div>
+              ) : null}
 
               {/* 单密钥快捷输入（单密钥后端 / 追加一把新密钥共用） */}
-              <div className="tpp-row-edit">
+              {!isAccount ? (
+                <div className="tpp-row-edit">
                 <Input
                   type="password"
                   placeholder={provider.configured ? t('输入新 Key 覆盖（留空 = 不修改）') : t('粘贴 API Key')}
@@ -475,6 +609,7 @@ export default function ToolProviderPanel(): JSX.Element {
                   )
                 ) : null}
               </div>
+              ) : null}
 
               {/* 多密钥编辑器：按序使用、可上下移 / 移除 / 新增 / 单密钥检查 */}
               {drafts ? (
@@ -572,7 +707,7 @@ export default function ToolProviderPanel(): JSX.Element {
                                   </>
                                 ) : (
                                   <>
-                                    {t('失败')}：{testKey.error || testKey.code || '—'}
+                                    {t('失败')}：{failureText(testKey, t)}
                                   </>
                                 )}
                               </div>
@@ -617,7 +752,7 @@ export default function ToolProviderPanel(): JSX.Element {
                     </>
                   ) : (
                     <>
-                      {t('失败')}：{result.error || result.code || '—'}
+                      {t('失败')}：{failureText(result, t)}
                     </>
                   )}
                 </div>
