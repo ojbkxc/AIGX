@@ -1753,7 +1753,7 @@ const RuleRow = memo(function RuleRow({
 }): JSX.Element {
   const enabled = rule.enabled ?? true;
   return (
-    <div className={`purge-rule-row${enabled ? '' : ' is-disabled'}`}>
+    <div className={`purge-rule-row${enabled ? '' : ' is-disabled'}`} data-rule-index={index}>
       <div>
         <Input
           placeholder={fromLabel}
@@ -3747,6 +3747,43 @@ export default function PurgeConsole(): JSX.Element {
     rows[idx]?.querySelector<HTMLInputElement>('input')?.focus();
   }, [draft]);
 
+  /**
+   * 跳到下一条重复行（循环）。
+   *
+   * 为什么需要：「只看异常」筛出来之后，重复行可能有几十条，逐条滚动找**当前这条
+   * 的下一处**很费劲；重复又恰恰是最需要对照着改的（要看清楚前一条写的是什么）。
+   *
+   * 过滤中不启用：过滤后列表里没有相邻行，跳过去也看不到上下文。
+   */
+  const jumpNextDuplicate = useCallback(
+    (kind: 'dead_zone' | 'synonym'): void => {
+      const rules = draftRef.current
+        ? kind === 'dead_zone'
+          ? draftRef.current.rewrite_rules
+          : draftRef.current.synonym_pairs
+        : [];
+      const dupIndices = ruleIssues(rules)
+        .filter((item) => item.reason === 'duplicate')
+        .map((item) => item.index);
+      if (dupIndices.length === 0) {
+        addToast(t('没有重复行'), 'success');
+        return;
+      }
+      const container = kind === 'dead_zone' ? rulesRef.current : synRulesRef.current;
+      const currentIdx = Number(container?.dataset.jumpCursor ?? -1);
+      const next =
+        dupIndices.find((index) => index > currentIdx) ?? dupIndices[0];
+      if (container) container.dataset.jumpCursor = String(next);
+      const row = container?.querySelector<HTMLElement>(`[data-rule-index="${next}"]`);
+      row?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      row?.querySelector<HTMLInputElement>('input')?.focus();
+      row?.classList.add('purge-rule-flash');
+      window.setTimeout(() => row?.classList.remove('purge-rule-flash'), 1200);
+      addToast(t('第 {{n}} 条（共 {{total}} 处重复）', { n: next + 1, total: dupIndices.length }), 'success');
+    },
+    [addToast, t],
+  );
+
   // 同义词词表增删后焦点回归（与死区词表独立）
   useEffect(() => {
     if (focusSynRule.current === null || !draft) return;
@@ -4437,14 +4474,26 @@ export default function PurgeConsole(): JSX.Element {
               {t('只看异常 {{n}} 条', { n: deadZoneIssues.size })}
             </label>
             {deadZoneIssues.size > 0 ? (
-              <Button
-                variant="outline"
-                size="sm"
-                data-testid="purge-dead-zone-disable-issues"
-                onClick={() => disableIssues('dead_zone')}
-              >
-                {t('批量停用异常行')}
-              </Button>
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="purge-dead-zone-disable-issues"
+                  onClick={() => disableIssues('dead_zone')}
+                >
+                  {t('批量停用异常行')}
+                </Button>
+                {deadZoneQuery.trim() || deadZoneIssuesOnly ? null : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="purge-dead-zone-next-dup"
+                    onClick={() => jumpNextDuplicate('dead_zone')}
+                  >
+                    {t('跳到下一个重复')}
+                  </Button>
+                )}
+              </>
             ) : null}
           </div>
         ) : null}
@@ -4612,14 +4661,26 @@ export default function PurgeConsole(): JSX.Element {
               {t('只看异常 {{n}} 条', { n: synonymIssues.size })}
             </label>
             {synonymIssues.size > 0 ? (
-              <Button
-                variant="outline"
-                size="sm"
-                data-testid="purge-synonym-disable-issues"
-                onClick={() => disableIssues('synonym')}
-              >
-                {t('批量停用异常行')}
-              </Button>
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="purge-synonym-disable-issues"
+                  onClick={() => disableIssues('synonym')}
+                >
+                  {t('批量停用异常行')}
+                </Button>
+                {synonymQuery.trim() || synonymIssuesOnly ? null : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="purge-synonym-next-dup"
+                    onClick={() => jumpNextDuplicate('synonym')}
+                  >
+                    {t('跳到下一个重复')}
+                  </Button>
+                )}
+              </>
             ) : null}
           </div>
         ) : null}

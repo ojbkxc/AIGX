@@ -247,6 +247,40 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('44 · 「跳到下一个重复」循环定位到重复行', async ({ page }) => {
+  // 两组重复：dup 3 次（下标 0/1/4）、rep 2 次（2/3）
+  const rules = [
+    { from: 'dup', to: 'a' },
+    { from: 'dup', to: 'b' },
+    { from: 'rep', to: 'c' },
+    { from: 'rep', to: 'd' },
+    { from: 'dup', to: 'e' },
+  ];
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+
+  const jump = page.getByTestId('purge-dead-zone-next-dup');
+  await expect(jump).toBeVisible();
+
+  // 第一次 → 第 1 处重复（下标 1，即第 2 条）；再点 → 第 2 处（下标 3）
+  await jump.click();
+  await expect(page.locator('.toast', { hasText: '第 2 条' })).toHaveCount(1);
+  await jump.click();
+  await expect(page.locator('.toast', { hasText: '第 4 条' })).toHaveCount(1);
+
+  // 过滤期间不显示该按钮（过滤后没有相邻行可对照）
+  await page.getByLabel('搜索死区词表').fill('dup');
+  await expect(jump).toHaveCount(0);
+});
+
 test('43 · 搜索过滤期间移动按钮禁用（交换的是原表相邻行，会看起来没反应）', async ({ page }) => {
   const rules = [
     { from: 'alpha', to: '1' },
