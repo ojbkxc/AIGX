@@ -248,24 +248,34 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
 });
 
 test('45 · 总开关关着时说明「配了但没生效」，且不禁用其他开关', async ({ page }) => {
-  await mockPurge(page);
+  // **写接口必须回显请求体**：开关走「乐观更新 + 以服务端返回为准」，若 mock 在 PUT
+  // 里回一份固定数据，保存成功后状态会被覆盖回去，看起来就是「点了没反应」——
+  // 那是 mock 不真实，不是实现有问题。
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') {
+      const body = JSON.parse(r.request().postData() ?? '{}');
+      await r.fulfill({
+        json: { success: true, data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, ...body } } },
+      });
+      return;
+    }
+    await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+  });
   await gotoPurge(page);
 
   const notice = page.getByTestId('purge-off-notice');
   await expect(notice).toHaveCount(0); // 默认开着
 
-  // 关掉总开关
-  await page.getByRole('switch').first().click();
+  // 关掉总开关（用 aria-label 精确定位，不靠「第一个就是」这种顺序假设）
+  await page.getByRole('switch', { name: '破甲总开关' }).click();
   await expect(notice).toBeVisible();
   // 两句都要在：一句说请求不改写，一句说下面配了也不生效
   await expect(notice).toContainText(/请求不会被改写/);
   await expect(notice).toContainText(/只有打开总开关后才会真正生效/);
 
   // 关键：**不禁用**下面的开关（常见流程是先配好再打开总开关）
-  const otherSwitch = page.getByRole('switch').nth(1);
-  if ((await otherSwitch.count()) > 0) {
-    await expect(otherSwitch).toBeEnabled();
-  }
+  const otherSwitch = page.getByRole('switch', { name: 'system 归一化' });
+  await expect(otherSwitch).toBeEnabled();
 });
 
 test('44 · 「跳到下一个重复」循环定位到重复行', async ({ page }) => {
