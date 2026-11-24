@@ -238,6 +238,21 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// 测试间串行锁：本模块的状态是**进程级单例**（[`state()`]），而 cargo 默认
+    /// 并行跑测试 —— 两个用例各自 `reset()` 再断言，彼此会把对方的批准/失效
+    /// 状态踩掉。CI 上实测过 `approve_then_invalidate_revokes` 偶发
+    /// `assertion failed: is_approved("p1")`（同一进程里另一个用例先 `invalidate()`）。
+    ///
+    /// 用一把锁把用例串起来，而不是让每个用例自己重试：顺序依赖不该靠运气。
+    fn serial() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK.get_or_init(|| Mutex::new(()));
+        // 前一个用例 panic 会毒化这把锁；这里要把毒化恢复掉，否则一次失败
+        // 会让后面所有用例连带 panic（真正的失败原因被淹没）。
+        lock.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
 
     fn reset() {
         if let Ok(mut state) = state().lock() {
@@ -250,6 +265,7 @@ mod tests {
 
     #[test]
     fn approve_then_invalidate_revokes() {
+        let _guard = serial();
         reset();
         approve("p1");
         assert!(is_approved("p1"));
@@ -259,6 +275,7 @@ mod tests {
 
     #[test]
     fn revoke_is_immediate() {
+        let _guard = serial();
         reset();
         approve("p2");
         revoke("p2");
@@ -267,6 +284,7 @@ mod tests {
 
     #[test]
     fn fail_closed_rejects_everything() {
+        let _guard = serial();
         reset();
         approve("p3");
         fail_closed();
@@ -276,6 +294,7 @@ mod tests {
 
     #[test]
     fn generation_increments_on_invalidate() {
+        let _guard = serial();
         reset();
         let before = state().lock().unwrap_or_else(|e| e.into_inner()).generation;
         invalidate();
@@ -285,6 +304,7 @@ mod tests {
 
     #[test]
     fn forget_provider_drops_only_its_tasks() {
+        let _guard = serial();
         reset();
         {
             let mut state = state().lock().unwrap_or_else(|e| e.into_inner());
