@@ -313,6 +313,8 @@ interface MetaForm {
   model: string;
   owned_by: string;
   context_length: string;
+  /** 后端下发的最大输出 token（models.dev limit.output）；缺省 = 未声明 */
+  max_output_tokens?: number | null;
   /** inherit = 能力标签留空（继承内置推断）；custom = 显式声明下方勾选项 */
   capsMode: 'inherit' | 'custom';
   capTool: boolean;
@@ -1772,17 +1774,21 @@ export default function ModelManage(): JSX.Element {
           <td key={col} className={`mm-c-budget ta-${colAlign.budget}`}>
             {(() => {
               const flags = row.capability_flags;
+              // 上下文 = 能力位 ✓ 覆盖 → 元信息 → 空；输出同理。
+              // 2026-11-24：输出侧此前只认 capability_flags.maxOutputTokens，而
+              // 后端从不下发那个键（元信息结构里根本没有 output 维度），线上 136
+              // 个模型该列右半恒为「未声明」。现在后端透出 max_output_tokens
+              // （models.dev `limit.output`），这里直接读它。
               const inTok = flags?.maxInputTokens ?? row.context_length ?? null;
-              const outTok = flags?.maxOutputTokens ?? null;
-              // 上下文来源（builtin / modelsdev）来自 cap_sources.context_length；
-              // 最大输出没有独立来源标记（后端 cap_sources 只下发 context_length 与
-              // capabilities），所以只给上下文那一半挂来源尾巴 —— 不编造输出侧出处。
+              const outTok = row.max_output_tokens ?? flags?.maxOutputTokens ?? null;
               const ctxSrc = String(row.cap_sources?.context_length ?? '');
+              const outSrc = String(row.cap_sources?.max_output_tokens ?? '');
               const hint =
                 `${t('上下文窗口')} ${inTok == null ? t('未声明') : inTok}` +
                 ` / ${t('最大输出 Token')} ${outTok == null ? t('未声明') : outTok}` +
                 ` —— ${t('点击修改模型能力')}` +
-                (ctxSrc === 'modelsdev' ? t('；其中 上下文窗口 由 models.dev 补齐') : '');
+                (ctxSrc === 'modelsdev' ? t('；其中 上下文窗口 由 models.dev 补齐') : '') +
+                (outSrc === 'modelsdev' ? t('；最大输出 Token 由 models.dev 补齐') : '');
               return (
                 <button
                   type="button"

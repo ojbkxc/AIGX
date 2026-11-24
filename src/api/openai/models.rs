@@ -822,6 +822,7 @@ mod shapes_tests {
         ModelMetadata {
             owned_by: "openai".to_string(),
             context_length: Some(128000),
+            max_output_tokens: None,
             capabilities: vec!["chat".to_string(), "tools".to_string()],
             reasoning_levels: vec!["low".to_string(), "high".to_string()],
             tool_calling_mode: None,

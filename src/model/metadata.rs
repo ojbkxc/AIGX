@@ -26,6 +26,15 @@ pub struct ModelMetadata {
     /// 上下文长度（token 数；未知为 None）
     #[serde(default)]
     pub context_length: Option<u32>,
+    /// 最大输出 token 数（未知为 None）。
+    ///
+    /// 2026-11-24 补：模型管理页的「上下文 / 输出」列一直只有前半个数字——
+    /// `models.dev` 的 `limit.output` 早在 `models_dev.rs` 里解析出来了
+    /// （`ModelInfo.output`），但元信息结构没有这个字段，于是整条链路
+    /// （metadata → manage → admin 响应 → 前端 budget 列）都没吐过输出上限。
+    /// 线上实测 136 个模型里 `max_output_tokens` 有值 0 个。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     /// 能力标签（chat / embedding / rerank / image / audio）
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -282,6 +291,7 @@ impl ModelMetadataRegistry {
                 .collect();
             let sources = serde_json::json!({
                 "context_length": if m.context_length.is_some() { serde_json::Value::from("user") } else { serde_json::Value::Null },
+                "max_output_tokens": if m.max_output_tokens.is_some() { serde_json::Value::from("user") } else { serde_json::Value::Null },
                 "capabilities": caps,
                 "reasoning_levels": if m.reasoning_levels.is_empty() { serde_json::Value::Null } else { serde_json::Value::from("user") },
                 // 可见性同样标来源：覆盖了才说 user，没覆盖（= 没判据）是 Null
@@ -300,6 +310,9 @@ impl ModelMetadataRegistry {
         } else {
             ""
         };
+        // 输出上限：内置表不含该维度，只由 models.dev 补（下面的 lookup 里取）
+        let mut max_output_tokens: Option<u32> = None;
+        let mut output_source = "";
         let mut capabilities = infer_capabilities(model);
         let mut cap_sources: serde_json::Map<String, serde_json::Value> = capabilities
             .iter()
@@ -311,6 +324,13 @@ impl ModelMetadataRegistry {
                     context_length = dev.context.and_then(|n| u32::try_from(n).ok());
                     if context_length.is_some() {
                         context_source = "modelsdev";
+                    }
+                }
+                // 输出上限只有 models.dev 有（内置表没这个维度）
+                if max_output_tokens.is_none() {
+                    max_output_tokens = dev.output.and_then(|n| u32::try_from(n).ok());
+                    if max_output_tokens.is_some() {
+                        output_source = "modelsdev";
                     }
                 }
                 // 能力标签只有「默认 chat」（名字没命中任何特征）时才补，
@@ -343,6 +363,7 @@ impl ModelMetadataRegistry {
         }
         let sources = serde_json::json!({
             "context_length": if context_source.is_empty() { serde_json::Value::Null } else { serde_json::Value::from(context_source) },
+            "max_output_tokens": if output_source.is_empty() { serde_json::Value::Null } else { serde_json::Value::from(output_source) },
             "capabilities": cap_sources,
             "reasoning_levels": serde_json::Value::Null,
             // 内置推断路径没有可见性判据（同 reasoning_levels）
@@ -352,6 +373,7 @@ impl ModelMetadataRegistry {
             ModelMetadata {
                 owned_by,
                 context_length,
+                max_output_tokens,
                 capabilities,
                 // 内置推断路径不产出思考等级：由覆盖项 / 前端声明提供
                 reasoning_levels: Vec::new(),
@@ -474,6 +496,7 @@ mod tests {
             ModelMetadata {
                 owned_by: "my-org".into(),
                 context_length: Some(2000),
+                max_output_tokens: None,
                 capabilities: vec!["chat".into()],
                 reasoning_levels: vec!["low".into(), "high".into()],
                 tool_calling_mode: None,
@@ -511,6 +534,7 @@ mod tests {
             ModelMetadata {
                 owned_by: "my-gemini".into(),
                 context_length: Some(2_000_000),
+                max_output_tokens: None,
                 capabilities: vec!["chat".into(), "vision".into()],
                 reasoning_levels: vec![],
                 tool_calling_mode: None,

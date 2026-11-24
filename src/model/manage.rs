@@ -217,6 +217,10 @@ pub struct ManageModel {
     pub sources: Vec<ModelSource>,
     pub owned_by: String,
     pub context_length: Option<u32>,
+    /// 最大输出 token 数（来源：模型元信息覆盖 → models.dev `limit.output`；
+    /// 都没有则 None，前端「上下文 / 输出」列显示 —）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     pub capabilities: Vec<String>,
     /// 能力/上下文来源标记（Phase1-A4 capSources：user > modelsdev >
     /// builtin；null = 该字段无读数）。前端可信度展示用。
@@ -889,6 +893,7 @@ fn new_row(
         sources: Vec::new(),
         owned_by: meta.owned_by,
         context_length: meta.context_length,
+        max_output_tokens: meta.max_output_tokens,
         capabilities,
         cap_sources,
         capability_flags,

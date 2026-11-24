@@ -955,7 +955,9 @@ fn set_legacy_capabilities(
         tags.push(cap.to_string());
     }
     let owned_by = state.model_metadata.get(model, None).owned_by;
-    let context_length = state.model_metadata.get(model, None).context_length;
+    let meta = state.model_metadata.get(model, None);
+    let context_length = meta.context_length;
+    let max_output_tokens = meta.max_output_tokens;
     // 能力覆盖不能顺手清掉思考等级：既有覆盖的 reasoning_levels 原样保留
     //（否则「改个能力标签 → 等级下拉回到空」）。
     let reasoning_levels = state
@@ -982,6 +984,7 @@ fn set_legacy_capabilities(
     let meta = crate::model::metadata::ModelMetadata {
         owned_by,
         context_length,
+        max_output_tokens,
         capabilities: tags.clone(),
         reasoning_levels,
         tool_calling_mode,

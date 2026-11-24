@@ -558,6 +558,8 @@ export interface ModelInfo {
 export interface ModelMetaOverride {
   owned_by: string;
   context_length?: number | null;
+  /** 最大输出 token（对齐 A2A budget 右半 = models.dev `limit.output`） */
+  max_output_tokens?: number | null;
   capabilities?: string[];
   /** 思考等级候选（可选，新后端提供；旧后端忽略该字段） */
   reasoning_levels?: string[];
@@ -720,6 +722,8 @@ export interface ManagedModel {
   sources: ManagedModelSource[];
   owned_by: string;
   context_length?: number | null;
+  /** 最大输出 token（后端 models.dev \limit.output\；缺省 = 未声明） */
+  max_output_tokens?: number | null;
   capabilities: string[];
   /**
    * 能力/上下文取数来源标记（后端 Phase1-A4 `cap_sources`：builtin < modelsdev < user；
@@ -727,12 +731,17 @@ export interface ManagedModel {
    */
   cap_sources?: {
     context_length?: string | null;
+    /** 最大输出 token 的来源标记（user / modelsdev / null） */
+    max_output_tokens?: string | null;
     capabilities?: Record<string, string>;
     reasoning_levels?: unknown;
   } | null;
   /**
    * 能力三态生效值（后端 `capability_flags`，六键；null = 「不知道」≠「不支持」）。
    * #51 P1#2：caps 列补显 maxOutputTokens（输入上下文用 context_length）。
+  * 2026-11-24：输出上限改由后端 `max_output_tokens` 下发（models.dev
+  * `limit.output`）；capability_flags.maxOutputTokens 是「能力位覆盖」，
+   * 后端从未下发过，budget 列此前右半恒为「未声明」。
    */
   capability_flags?: {
     maxInputTokens?: number | null;

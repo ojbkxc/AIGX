@@ -336,6 +336,10 @@ pub struct ModelMetaRequest {
     pub owned_by: String,
     #[serde(default)]
     pub context_length: Option<u32>,
+    /// 最大输出 token（对齐 A2A `models-panel-state` 的 budget 右半：
+    /// models.dev `limit.output`）。缺省不覆盖。
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// 思考等级候选（前端已发送、后端此前缺失 → 保存即丢；见
@@ -373,6 +377,7 @@ pub async fn handle_model_meta_set(
     let meta = crate::model::metadata::ModelMetadata {
         owned_by: body.owned_by,
         context_length: body.context_length,
+        max_output_tokens: body.max_output_tokens,
         capabilities: body.capabilities,
         reasoning_levels: body.reasoning_levels,
         tool_calling_mode: body.tool_calling_mode,
