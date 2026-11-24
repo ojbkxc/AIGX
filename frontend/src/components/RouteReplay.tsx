@@ -211,31 +211,116 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
   const { candidates, filtered, selected, skipsGroups, details } = view;
   const attemptsTruncated = snap?.attempt_details_truncated ?? 0;
 
+  /**
+   * 承载段的「原因」：只在同一渠道既出现在候选又被记录过错误时才有话说。
+   * 没有就留空 —— 不猜（与「provenance 不许猜」同一条纪律）。
+   */
+  const carrierReason = ((): string | null => {
+    if (!selected) return null;
+    const hit = filtered.find((f) => f.channel_id === selected);
+    if (hit?.reason) return hit.reason;
+    const step = details.find((a) => (a.channel_id || '') === selected && a.error);
+    return step?.error ?? null;
+  })();
+
+  /** 执行耗时：逐次明细里最后一条的耗时（A2A 的「总耗时 / 首帧 / 输出」口径） */
+  const totalMs = ((): number | undefined => {
+    const last = details[details.length - 1];
+    if (!last) return undefined;
+    if (last.startedAt > 0 && last.finishedAt != null && last.finishedAt >= last.startedAt) {
+      return (last.finishedAt - last.startedAt) * 1000;
+    }
+    return undefined;
+  })();
+
+  /** 选路情况表：候选（已尝试/待尝试）+ 被跳过（未参与），一行一个账号/渠道 */
+  const routeRows = ((): Array<{ key: string; name: string; state: string; reason: string }> => {
+    const triedIndex = new Map<string, RouteReplayAttemptItem>();
+    details.forEach((a) => {
+      const key = a.channel_id || a.channel_name || '';
+      if (key) triedIndex.set(key, a);
+    });
+    const rows = candidates.map((c) => {
+      const tried = triedIndex.get(c.id);
+      const failed = Boolean(tried?.error);
+      return {
+        key: `c-${c.id}`,
+        name: c.id,
+        state: tried ? (failed ? t('尝试失败') : t('已尝试')) : t('待尝试'),
+        reason: tried?.error || tried?.notice || '',
+      };
+    });
+    filtered.forEach((f) => {
+      rows.push({ key: `f-${f.channel_id}`, name: f.channel_id, state: t('未参与'), reason: f.reason || '' });
+    });
+    return rows;
+  })();
+
+  /** 折叠的「其他候选」：A2A 只先露 2 条 + 折叠其余 */
+  const ROUTE_ROWS_VISIBLE = 6;
+
   return (
     <div className="rr-root">
-      <div className="rr-chips">
-        <span className="rr-badge rr-badge-brand">{strategyLabel(rc?.strategy, t)}</span>
-        <span className="rr-badge rr-badge-mute">
-          {t('会话粘性：{{mode}}', { mode: rc?.sticky_enabled ? t('启用') : t('关闭') })}
-        </span>
-        {selected && (
-          <span className="rr-badge rr-badge-brand">{t('最终承载：{{name}}', { name: selected })}</span>
-        )}
-      </div>
-      <p className="rr-note">{t('这是请求当时保存的选路快照，修改当前路由不会改变这份记录。')}</p>
+      {/* ① 头部（A2A routing-exec-head）：模型 + 状态 + 时间 + HTTP 状态码 */}
+      <header className="rr-exec-head">
+        <div>
+          <h3 className="rr-exec-title">{snap?.origin_model || snap?.model || t('（未记录模型）')}</h3>
+          <div className="rr-exec-meta">
+            <span className={`rr-exec-state${(snap?.status_code ?? 0) >= 400 ? ' is-bad' : ''}`}>
+              {(snap?.status_code ?? 0) >= 400 ? t('失败') : t('成功')}
+            </span>
+            {captured != null ? (
+              <time title={new Date(captured).toLocaleString()}>
+                {new Date(captured).toLocaleTimeString()}
+              </time>
+            ) : null}
+            {snap?.status_code != null ? <span>{`HTTP ${snap.status_code}`}</span> : null}
+            {snap?.request_id || snap?.log_id != null ? (
+              <span className="rr-exec-reqid">{String(snap?.request_id ?? snap?.log_id)}</span>
+            ) : null}
+          </div>
+        </div>
+      </header>
 
-      <div className="rr-metrics">
-        <div><b>{snap?.status_code ?? '—'}</b><span>{t('状态码')}</span></div>
-        <div><b>{snap?.attempts ?? '—'}</b><span>{t('尝试次数')}</span></div>
-        <div><b>{candidates.length || '—'}</b><span>{t('候选供应商')}</span></div>
-        <div><b>{filtered.length || '—'}</b><span>{t('跳过候选')}</span></div>
-      </div>
+      {/* ② 模型改写（A2A routing-exec-rewrite）：客户端模型 → 实际使用；无改写不渲染 */}
+      {snap?.origin_model && snap?.model && snap.origin_model !== snap.model ? (
+        <section className="rr-section rr-exec-rewrite">
+          <header className="rr-exec-rewrite-head">
+            <b>{t('模型改写')}</b>
+          </header>
+          <div className="rr-exec-rewrite-flow">
+            <div className="rr-exec-node">
+              <span>{t('客户端模型')}</span>
+              <b>{snap.origin_model}</b>
+            </div>
+            <span className="rr-exec-arrow" aria-hidden="true">→</span>
+            <div className="rr-exec-node is-accent">
+              <span>{t('实际使用')}</span>
+              <b>{snap.model}</b>
+            </div>
+          </div>
+          <p className="rr-note">
+            {t('改写类型（压缩上下文 / 标题生成 / 图片兼容）由特殊请求路由记录，本页快照未带该字段，故只显示改写前后模型。')}
+          </p>
+        </section>
+      ) : null}
 
-      {/* 执行路径时间线（#32 attempt_details 落库后启用）：缺省无字段 = 整节
-          不渲染（旧日志）；断言口径 details.length ≤ attempts 且 index 连续 */}
-      {details.length > 0 && (
-        <section className="rr-section">
-          <h4>{t('执行路径')}</h4>
+      {/* ③ 承载（A2A routing-exec-carrier）：最终承载 + 原因 */}
+      <section className="rr-section rr-exec-carrier" data-failed={carrierReason ? '' : undefined}>
+        <p className="rr-exec-label">{t('最终承载')}</p>
+        <p className="rr-exec-carrier-name">{selected || t('未记录')}</p>
+        {carrierReason ? <p className="rr-exec-carrier-reason">{carrierReason}</p> : null}
+      </section>
+
+      {/* ④ 执行耗时（A2A routing-exec-duration） */}
+      <section className="rr-section">
+        <div className="rr-exec-section-head">
+          <h4>{t('执行耗时')}</h4>
+          <span className="rr-exec-section-note">
+            {[`${t('总耗时')} ${fmtDuration(totalMs)}`, `${t('首帧')} —`, `${t('输出')} —`].join(' · ')}
+          </span>
+        </div>
+        {details.length ? (
           <ol className="rr-timeline">
             <li className="rr-step rr-step-entry">
               <span className="rr-step-mark" aria-hidden="true" />
@@ -250,67 +335,99 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
             </li>
             {details.map((a, i) => <AttemptStep key={`${a.index}-${i}`} a={a} t={t} />)}
           </ol>
-          {attemptsTruncated > 0 && (
-            <p className="rr-note">
-              {t('尝试明细超过记录上限，还有 {{n}} 条未记录。', { n: attemptsTruncated })}
-            </p>
-          )}
-        </section>
-      )}
-
-      {candidates.length > 0 && (
-        <section className="rr-section">
-          <h4>{t('候选顺序')}</h4>
-          <ol className="rr-ordered">
-            {candidates.map((c, i) => {
-              const picked = selected && c.id === selected;
-              return (
-                <li key={`${c.id}-${i}`} className={picked ? 'is-picked' : ''}>
-                  <span className="rr-rank">{i + 1}</span>
-                  <div className="rr-cand">
-                    <div className="rr-cand-head">
-                      <b className="rr-mono">{c.id}</b>
-                      {picked && <span className="rr-badge rr-badge-brand">{t('选中')}</span>}
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-          </ol>
-        </section>
-      )}
-
-      {filtered.length > 0 && (
-        <section className="rr-section">
-          <h4>{t('被跳过的供应商')}</h4>
-          <div className="rr-blocked">
-            {filtered.map((f, i) => (
-              <div key={`${f.channel_id}-${i}`} className="rr-blocked-item">
-                <code>{f.channel_id}</code>
-                <p>{f.reason}</p>
-              </div>
-            ))}
-          </div>
-          {(snap?.route_truncated ?? 0) > 0 && (
-            <p className="rr-note">
-              {t('候选明细超过记录上限，还有 {{n}} 条未记录。', { n: snap?.route_truncated ?? 0 })}
-            </p>
-          )}
-        </section>
-      )}
-
-      <AccountSkipGroups groups={skipsGroups} t={t} />
-
-      <section className="rr-section">
-        <h4>{t('请求当时的配置')}</h4>
-        <div className="rr-kv">
-          <span>{t('策略：{{s}}', { s: strategyLabel(rc?.strategy, t) })}</span>
-          <span>{t('会话粘性：{{mode}}', { mode: rc?.sticky_enabled ? t('启用') : t('关闭') })}</span>
-        </div>
-        {captured != null && (
-          <p className="rr-note">{t('请求时间 {{time}}', { time: new Date(captured).toLocaleString() })}</p>
+        ) : (
+          <p className="rr-exec-note">{t('没有保存调用明细')}</p>
         )}
+        {attemptsTruncated > 0 ? (
+          <p className="rr-note">
+            {t('尝试明细超过记录上限，还有 {{n}} 条未记录。', { n: attemptsTruncated })}
+          </p>
+        ) : null}
       </section>
+
+      {/* ⑤ 选路情况（A2A routing-exec-candidates）：账号 / 本次状态 / 原因 */}
+      <section className="rr-section">
+        <div className="rr-exec-section-head">
+          <h4>{t('选路情况')}</h4>
+          <span className="rr-exec-section-note">
+            {t('已保存 {{n}} 个候选', { n: candidates.length + filtered.length })}
+          </span>
+        </div>
+        {routeRows.length ? (
+          <>
+            <div className="rr-exec-table" role="table" aria-label={t('选路情况')}>
+              <div className="rr-exec-row is-heading" role="row">
+                <span role="columnheader">{t('账号')}</span>
+                <span role="columnheader">{t('本次状态')}</span>
+                <span role="columnheader">{t('原因')}</span>
+              </div>
+              {routeRows.slice(0, ROUTE_ROWS_VISIBLE).map((row) => (
+                <div className="rr-exec-row" role="row" key={row.key}>
+                  <span role="cell" className="rr-mono">{row.name}</span>
+                  <span role="cell" data-tone={row.state === t('尝试失败') ? 'bad' : row.state === t('未参与') ? 'mute' : 'ok'}>
+                    {row.state}
+                  </span>
+                  <span role="cell" className="rr-exec-reason">{row.reason || '—'}</span>
+                </div>
+              ))}
+            </div>
+            {routeRows.length > ROUTE_ROWS_VISIBLE ? (
+              <details className="rr-exec-more">
+                <summary>{t('查看其他 {{n}} 个候选', { n: routeRows.length - ROUTE_ROWS_VISIBLE })}</summary>
+                <div className="rr-exec-table" role="table">
+                  {routeRows.slice(ROUTE_ROWS_VISIBLE).map((row) => (
+                    <div className="rr-exec-row" role="row" key={row.key}>
+                      <span role="cell" className="rr-mono">{row.name}</span>
+                      <span role="cell" data-tone={row.state === t('尝试失败') ? 'bad' : row.state === t('未参与') ? 'mute' : 'ok'}>
+                        {row.state}
+                      </span>
+                      <span role="cell" className="rr-exec-reason">{row.reason || '—'}</span>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            ) : null}
+          </>
+        ) : (
+          <p className="rr-exec-note">{t('没有保存其他候选信息')}</p>
+        )}
+        {(snap?.route_truncated ?? 0) > 0 ? (
+          <p className="rr-note">
+            {t('候选明细超过记录上限，还有 {{n}} 条未记录。', { n: snap?.route_truncated ?? 0 })}
+          </p>
+        ) : null}
+      </section>
+
+      {/* ⑥ 当时配置（A2A routing-exec-snapshot）：配置范围 / 选路方式 / 会话粘滞 / 上游模型 */}
+      <section className="rr-section">
+        <div className="rr-exec-section-head">
+          <h4>{t('当时配置')}</h4>
+        </div>
+        <dl className="rr-exec-definitions">
+          <div>
+            <dt>{t('配置范围')}</dt>
+            <dd>{t('未记录')}</dd>
+          </div>
+          <div>
+            <dt>{t('选路方式')}</dt>
+            <dd>{rc?.strategy ? strategyLabel(rc.strategy, t) : t('未记录')}</dd>
+          </div>
+          <div>
+            <dt>{t('会话粘滞')}</dt>
+            <dd>{rc ? (rc.sticky_enabled ? t('启用') : t('关闭')) : t('未记录')}</dd>
+          </div>
+          <div className="is-wide">
+            <dt>{t('上游模型')}</dt>
+            <dd className="rr-mono">{snap?.model || '—'}</dd>
+          </div>
+        </dl>
+        {captured != null ? (
+          <p className="rr-note">{t('请求时间 {{time}}', { time: new Date(captured).toLocaleString() })}</p>
+        ) : null}
+      </section>
+
+      {/* AIGX 独有：逐账号跳过明细（A2A 把它并进「选路情况」的原因列） */}
+      <AccountSkipGroups groups={skipsGroups} t={t} />
     </div>
   );
 }

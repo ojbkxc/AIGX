@@ -52,7 +52,8 @@ function addCompactRule(container: HTMLElement): void {
   expect(source).toBeTruthy();
   fireEvent.change(source, { target: { value: 'm1' } });
   fireEvent.change(target, { target: { value: 'm2' } });
-  fireEvent.click(screen.getByText('应用'));
+  // 对齐 A2A：规则编辑在弹窗里，底栏「保存规则」提交（面板底部的「保存」是保存整份配置）
+  fireEvent.click(screen.getByText('保存规则'));
 }
 
 describe('特殊路由面板', () => {
@@ -81,7 +82,9 @@ describe('特殊路由面板', () => {
     await waitFor(() => expect(container.textContent).toContain('m1'));
     expect(container.textContent).toContain('m2');
 
-    fireEvent.click(screen.getByText('删除'));
+    // 删除规则在弹窗底栏（对齐 A2A：行内不再挂删除按钮）
+    fireEvent.click(container.querySelector('.rt-special-row-btn') as HTMLElement);
+    fireEvent.click(screen.getByText('删除规则'));
     await waitFor(() => expect(container.textContent).toContain('还没有规则'));
     expect(container.textContent).not.toContain('m2 的');
   });

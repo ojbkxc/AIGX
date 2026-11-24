@@ -41,6 +41,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Badge, Button, Card, EmptyState, Loading, Switch } from '../components/ui';
 import RouteReplayPanel, { RouteReplayView } from '../components/RouteReplay';
 import RouteSticky from '../components/RouteSticky';
@@ -362,8 +363,8 @@ export default function Routing(): JSX.Element {
   };
 
   /**
-   * 回放左栏的筛选候选：只取这一页里出现过的模型（A2A 的候选清单也是「窗口内
-   * 请求过的模型」，窗口内没出现的不列出）。
+   * 回放左栏的筛选候选：只取这一页里出现过的模型（A2A 的候选清单同样是
+   * 「窗口内请求过的模型」，没出现过的不列出）。过滤本身在服务端做。
    */
   const replayModels = useMemo(() => {
     const seen = new Set<string>();
@@ -371,18 +372,38 @@ export default function Routing(): JSX.Element {
     return [...seen].sort((a, b) => a.localeCompare(b));
   }, [replayRows]);
 
-  /** 客户端过滤（本页列表端点无 model/search 参数，不额外加请求） */
-  const replayFiltered = useMemo(() => {
-    const kw = replaySearch.trim().toLowerCase();
-    return replayRows.filter((r) => {
-      if (replayModel && r.model !== replayModel) return false;
-      if (!kw) return true;
-      return r.id.toLowerCase().includes(kw) || (r.model ?? '').toLowerCase().includes(kw);
-    });
-  }, [replayRows, replaySearch, replayModel]);
+  /** 翻页：A2A 是 30 条一页 + 上一页/下一页 + 「n / m」 */
+  const replayPages = Math.max(1, Math.ceil(replayMatched / REPLAY_PAGE_SIZE));
+  const replayCanPrev = replayPage > 0 && !replayLoading;
+  const replayCanNext = !replayLoading && (replayPage + 1) * REPLAY_PAGE_SIZE < replayMatched;
 
   /** 页头黄标计数：档案草稿 + 错误处理草稿（两个独立的保存域，各算一处） */
   const dirtyCount = (dirty ? 1 : 0) + (errorsDirty ? 1 : 0);
+
+  /**
+   * 「重新读取」的确认（对齐 A2A reloadConfig：有未保存草稿时先确认再丢弃）。
+   * 弹窗用本页既有的 ConfirmDialog 实例，不另起一套。
+   */
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const reloadWithConfirm = (): void => {
+    if (mode === 'replay') {
+      void load();
+      return;
+    }
+    if (dirtyCount === 0) {
+      void load();
+      return;
+    }
+    setConfirmState({
+      title: t('重新读取配置'),
+      message: t('重新读取会丢弃未保存的修改（档案草稿 / 错误处理草稿）。确认重新读取？'),
+      confirmText: t('重新读取'),
+      danger: true,
+      onConfirm: () => {
+        void load();
+      },
+    });
+  };
 
   /**
    * 左栏逐条目的「有未保存修改」（对齐 A2A RoutingRail 的 dirtyDot(per item)：
@@ -987,60 +1008,130 @@ export default function Routing(): JSX.Element {
     </div>
   );
 
+  /** 回放左栏的行状态点（A2A RoutingRequestState：成功 / 失败 / 运行中 / 已取消） */
+  const replayRowState = (r: ReplayLogRow): 'success' | 'failed' | 'running' => {
+    if (r.running) return 'running';
+    if (r.status_code != null) return r.status_code >= 200 && r.status_code < 400 ? 'success' : 'failed';
+    return 'failed';
+  };
+
   const replayView = (
     <div className="rt-replay-layout">
       <aside className="rt-replay-rail" aria-label={t('最近请求')}>
-        {/* 左栏头：标题 + 匹配数（对齐 A2A routing-request-head 的「最近请求 + matched」） */}
+        {/* 左栏头：标题 + 匹配数 + 读取中（对齐 A2A routing-request-head） */}
         <div className="rt-replay-rail-title">
           <b>{t('最近请求')}</b>
-          <span className="rt-count">{replayFiltered.length}</span>
+          <span className="rt-count">{replayMatched}</span>
+          {replayLoading ? <Loader2 size={12} className="spin" /> : null}
         </div>
-        {/* 筛选（对齐 A2A routing-request-tools 的搜索 + 请求模型两枚控件）。
-            时间窗 / 仅在途 / 翻页三项不跟：本页列表端点没有 minutes / scope /
-            offset 参数，前端自造只会与服务端结果不一致（见交付说明）。 */}
+        {/*
+          筛选（对齐 A2A routing-request-tools 的四件套 + 翻页）：
+            搜索请求 / 请求模型 / 时间范围 / 仅失败。
+          A2A 的「仅在途」在本仓没有在途标记，改落为「仅失败」（服务端 status=error 过滤）；
+          该项与 A2A 语义不同，已记入交付清单。
+        */}
         <div className="rt-replay-tools">
           <input
             className="form-input"
-            placeholder={t('搜索请求 ID 或模型')}
-            aria-label={t('搜索请求 ID 或模型')}
+            placeholder={t('搜索请求、模型或账号')}
+            aria-label={t('搜索请求、模型或账号')}
             value={replaySearch}
-            onChange={(e) => setReplaySearch(e.target.value)}
+            onChange={(e) => { setReplaySearch(e.target.value); setReplayPage(0); }}
           />
           <select
             className="form-input"
             aria-label={t('请求模型')}
             value={replayModel}
-            onChange={(e) => setReplayModel(e.target.value)}
+            onChange={(e) => { setReplayModel(e.target.value); setReplayPage(0); }}
           >
             <option value="">{replayModels.length ? t('全部模型') : t('全部模型（窗口内没有请求）')}</option>
             {replayModels.map((m) => (
               <option key={m} value={m}>{m}</option>
             ))}
           </select>
+          <select
+            className="form-input"
+            aria-label={t('已完成请求时间范围')}
+            value={String(replayMinutes)}
+            onChange={(e) => { setReplayMinutes(Number(e.target.value)); setReplayPage(0); }}
+          >
+            <option value="0">{t('全部时间')}</option>
+            {REPLAY_WINDOWS.map((m) => (
+              <option key={m} value={m}>{t('最近 {{n}} 分钟', { n: m })}</option>
+            ))}
+          </select>
+          <label className="rt-replay-only">
+            <input
+              type="checkbox"
+              checked={replayStatus === 'error'}
+              onChange={(e) => { setReplayStatus(e.target.checked ? 'error' : ''); setReplayPage(0); }}
+            />
+            <span>{t('仅失败')}</span>
+          </label>
         </div>
-        {replayRows.length === 0 ? (
-          <div className="rt-replay-empty">{t('暂无可回放的请求')}</div>
-        ) : replayFiltered.length === 0 ? (
-          <div className="rt-replay-empty">{t('没有匹配的请求')}</div>
+        {replayError ? (
+          <div className="rt-replay-empty" role="alert">{t('列表读取失败：{{msg}}', { msg: replayError })}</div>
+        ) : replayRows.length === 0 ? (
+          <div className="rt-replay-empty">
+            {replayLoading ? t('读取中…') : replaySearch || replayModel || replayStatus || replayMinutes > 0
+              ? t('没有匹配的请求')
+              : t('暂无可回放的请求')}
+          </div>
         ) : (
-          replayFiltered.map((r) => {
+          replayRows.map((r) => {
             const when = toMillis(r.created_at);
+            const state = replayRowState(r);
             return (
               <button
                 key={r.id}
                 type="button"
                 className={`rt-replay-item${replayId === r.id ? ' is-on' : ''}`}
                 onClick={() => setReplayId(r.id)}
-                title={[r.model, when != null ? new Date(when).toLocaleString() : '', r.id].filter(Boolean).join(' · ')}
+                aria-pressed={replayId === r.id}
+                title={[
+                  r.model,
+                  when != null ? new Date(when).toLocaleString() : '',
+                  r.provider ?? '',
+                  r.latency_ms != null ? `${r.latency_ms}ms` : '',
+                  r.id,
+                ].filter(Boolean).join(' · ')}
               >
-                <span className="rt-replay-item-model">{r.model || t('（无模型）')}</span>
+                <span className="rt-replay-item-model">
+                  <span>{r.model || t('（无模型）')}</span>
+                  <span className={`rt-replay-state is-${state}`} aria-label={state}>
+                    <i aria-hidden="true" />
+                    {state === 'success' ? t('成功') : state === 'running' ? t('在途') : t('失败')}
+                  </span>
+                </span>
                 <span className="rt-replay-item-id">
-                  {when != null ? `${new Date(when).toLocaleTimeString()} · ${r.id}` : r.id}
+                  {[when != null ? new Date(when).toLocaleTimeString() : null, r.provider, r.request_id || r.id]
+                    .filter(Boolean)
+                    .join(' · ')}
                 </span>
               </button>
             );
           })
         )}
+        {/* 翻页（A2A routing-request-foot：上一页 / n / m / 下一页） */}
+        <div className="rt-replay-foot">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!replayCanPrev}
+            onClick={() => setReplayPage((p) => Math.max(0, p - 1))}
+          >
+            {t('上一页')}
+          </Button>
+          <span>{`${replayPage + 1} / ${replayPages}`}</span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!replayCanNext}
+            onClick={() => setReplayPage((p) => p + 1)}
+          >
+            {t('下一页')}
+          </Button>
+        </div>
       </aside>
       <section className="rt-replay-main">
         {replayId ? (
@@ -1103,7 +1194,7 @@ export default function Routing(): JSX.Element {
           <Button variant="outline" size="sm" onClick={scrollToSticky}>
             {t('会话粘滞')}
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={reloadWithConfirm} disabled={loading}>
             <RefreshCw size={13} /> {mode === 'replay' ? t('刷新') : t('重新读取')}
           </Button>
         </div>
@@ -1243,6 +1334,7 @@ export default function Routing(): JSX.Element {
         </div>
       </div>
       )}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

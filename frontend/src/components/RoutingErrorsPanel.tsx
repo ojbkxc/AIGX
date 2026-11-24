@@ -337,6 +337,8 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
   const [notReady, setNotReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  /** 分类（对齐 A2A RoutingErrorsPanel：处理规则 / 失败保护；「安全边界」本仓无数据源，不落） */
+  const [tab, setTab] = useState<'rules' | 'protection'>('rules');
   const edited = useRef(false);
 
   /**
@@ -443,12 +445,47 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
     <Card
       title={t('错误处理')}
       actions={
-        <Button variant="outline" size="sm" onClick={() => void load()} disabled={busy || dirty}>
-          <RefreshCw size={13} /> {t('重新读取')}
-        </Button>
+        <>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const next = structuredClone(view.defaults);
+              setDraft(next);
+              addToast(t('已填入建议值（保存后才生效，已有账号与冷却记录保持不变）'));
+            }}
+            disabled={busy}
+          >
+            {t('恢复建议值')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={busy || dirty}>
+            <RefreshCw size={13} /> {t('重新读取')}
+          </Button>
+        </>
       }
     >
       <div className="settings-form">
+        {/* 分类分段（A2A 的 SegmentedControl；本仓有 Tabs，但只两档时分段更省位） */}
+        <div className="rt-seg" role="tablist" aria-label={t('错误处理分类')} style={{ marginBottom: 12 }}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'rules'}
+            className={`rt-seg-btn${tab === 'rules' ? ' is-on' : ''}`}
+            onClick={() => setTab('rules')}
+          >
+            {t('处理规则')}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'protection'}
+            className={`rt-seg-btn${tab === 'protection' ? ' is-on' : ''}`}
+            onClick={() => setTab('protection')}
+          >
+            {t('失败保护')}
+          </button>
+        </div>
         <span className="form-hint">
           {t('上游失败后按规则换账号或跳过提供商；每条请求的重试与换号受下列上限约束。保存后下一个请求生效。')}
         </span>
@@ -456,6 +493,8 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
           <span className="form-hint">{t('已保留原重试与失败休息参数，错误处理已统一；429 也计入换号上限。')}</span>
         ) : null}
 
+        {tab === 'protection' ? (
+          <>
         {/* 重试 / 换号 / 冷却上限 */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 }}>
           {LIMIT_FIELDS.map((f) => (
@@ -484,6 +523,9 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
           </label>
         </div>
 
+        </>
+        ) : (
+        <>
         {/* 按错误类型的处理规则 */}
         <div className="form-group">
           <label>{t('按错误类型的处理规则')}</label>
@@ -570,6 +612,7 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
             </div>
           </div>
         ) : null}
+        </>)}
 
         {error ? <div className="error-message">{error}</div> : null}
 

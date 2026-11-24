@@ -172,29 +172,57 @@ export function AddRuleButton({
   );
 }
 
-/** 一条规则行：主体 + 行尾操作（编辑按钮由面板给） */
+/**
+ * 一条规则行：整行可点（真按钮，键盘能 Tab 到），右侧一枚 chevron 暗示「点进去改」。
+ *
+ * 对齐 A2A `RuleRow`：行尾不再挂「编辑 / 删除」两枚按钮（那会让每行右侧变成
+ * 按钮带，且删除是危险动作却与编辑同级），删除收进弹窗底栏的「删除规则」。
+ */
 export function RuleRow({
   off,
   title,
   detail,
   meta,
   actions,
+  onOpen,
 }: {
   off?: boolean;
   title: ReactNode;
   detail?: ReactNode;
   meta?: ReactNode;
-  actions: ReactNode;
+  /** 行尾附加内容（计数/徽标等）；编辑动作本身由 onOpen 承担 */
+  actions?: ReactNode;
+  /** 整行点击：打开该规则的编辑弹窗 */
+  onOpen?: () => void;
 }): JSX.Element {
-  return (
-    <div className={`rt-special-row${off ? ' is-off' : ''}`}>
+  const body = (
+    <>
       <div className="rt-special-row-main">
         <div className="rt-special-row-title">{title}</div>
         {detail ? <div className="rt-special-row-detail">{detail}</div> : null}
       </div>
-      {meta ? <div className="rt-special-row-meta">{meta}</div> : null}
-      <div className="rt-special-row-actions">{actions}</div>
-    </div>
+      {meta || actions ? (
+        <div className="rt-special-row-meta">
+          {meta}
+          {actions}
+        </div>
+      ) : null}
+      {onOpen ? (
+        <span className="rt-special-row-caret" aria-hidden="true">›</span>
+      ) : null}
+    </>
+  );
+  if (!onOpen) {
+    return <div className={`rt-special-row${off ? ' is-off' : ''}`}>{body}</div>;
+  }
+  return (
+    <button
+      type="button"
+      className={`rt-special-row rt-special-row-btn${off ? ' is-off' : ''}`}
+      onClick={onOpen}
+    >
+      {body}
+    </button>
   );
 }
 

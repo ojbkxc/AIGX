@@ -17,9 +17,9 @@
  *   PUT /api/vision-compatibility  ← { config, revision }
  * 视觉模型按 provider+model 引用（同名模型跨提供商时靠 provider 区分）。
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pencil, Plus } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import { Button } from '../../ui';
 import { api } from '../../../api';
 import {
@@ -33,7 +33,8 @@ import {
   type VisionTarget,
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
-import { AddRuleButton, RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
+import RuleDialog from './RuleDialog';
+import { AddRuleButton, RulePanel, RuleRow, RuleSectionHead } from './shared';
 
 interface Editing {
   rule: VisionRule;
@@ -66,6 +67,12 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
   );
   const { view, draft, saving } = editor;
   const [editing, setEditing] = useState<Editing | null>(null);
+  /**
+   * 弹窗底栏「保存规则」的提交口：表单草稿住在 RuleEditor 内部（24 处字段引用），
+   * 由它把 `() => onSave(draft)` 注册到这里，底栏按钮再触发 —— 避免把整张表单
+   * 改成受控而牵动全部字段（也避免把弹窗状态与表单状态耦合）。
+   */
+  const submitRef = useRef<(() => void) | null>(null);
 
   const models = useMemo(() => visionModelChoices(view?.models), [view]);
   const sharedTarget = view?.sharedTarget ?? null;
@@ -150,72 +157,31 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
         </div>
       ) : null}
 
-      {rules.map((rule, index) =>
-        editing && editing.index === index ? (
-          <RuleEditor
-            key={`edit-${index}`}
-            rule={editing.rule}
-            models={models}
-            sharedTarget={sharedTarget}
-            maxTargets={maxTargets}
-            saving={saving}
-            onCancel={() => setEditing(null)}
-            onSave={(next) => {
-              editor.update((current) => ({
-                ...current,
-                rules: current.rules.map((item, at) => (at === index ? next : item)),
-              }));
-              setEditing(null);
-            }}
-          />
-        ) : (
-          <RuleRow
-            key={`row-${index}`}
-            off={!rule.enabled}
-            title={
-              rule.models.length
-                ? t('{{models}} 看不了图时', {
-                    models: rule.models
-                      .map((m) => refLabel(models, m) || `${m.provider} · ${m.model}`)
-                      .join('、'),
-                  })
-                : t('未选择模型')
-            }
-            detail={ruleDetail(rule)}
-            meta={
-              <>
-                <span className="rt-chip rt-chip-model rt-chip-sm">
-                  {rule.mode === 'assist' ? t('辅助识图') : t('整体接管')}
-                </span>
-                {rule.enabled ? null : <span>{t('已停用')}</span>}
-              </>
-            }
-            actions={
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => setEditing({ rule: structuredClone(rule), index })}
-                >
-                  <Pencil size={13} />
-                  {t('编辑')}
-                </Button>
-                <RowDeleteButton
-                  disabled={saving}
-                  onClick={() => {
-                    editor.update((current) => ({
-                      ...current,
-                      rules: current.rules.filter((_, at) => at !== index),
-                    }));
-                    setEditing(null);
-                  }}
-                />
-              </>
-            }
-          />
-        ),
-      )}
+      {rules.map((rule, index) => (
+        <RuleRow
+          key={`row-${index}`}
+          off={!rule.enabled}
+          title={
+            rule.models.length
+              ? t('{{models}} 看不了图时', {
+                  models: rule.models
+                    .map((m) => refLabel(models, m) || `${m.provider} · ${m.model}`)
+                    .join('、'),
+                })
+              : t('未选择模型')
+          }
+          detail={ruleDetail(rule)}
+          meta={
+            <>
+              <span className="rt-chip rt-chip-model rt-chip-sm">
+                {rule.mode === 'assist' ? t('辅助识图') : t('整体接管')}
+              </span>
+              {rule.enabled ? null : <span>{t('已停用')}</span>}
+            </>
+          }
+          onOpen={saving ? undefined : () => setEditing({ rule: structuredClone(rule), index })}
+        />
+      ))}
 
       {!models.length ? (
         <div className="rt-notice rt-notice-warn">
@@ -223,20 +189,44 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
         </div>
       ) : null}
 
-      {editing && editing.index < 0 ? (
-        <RuleEditor
-          key="new"
-          rule={editing.rule}
-          models={models}
-          sharedTarget={sharedTarget}
-          maxTargets={maxTargets}
+      {editing ? (
+        <RuleDialog
+          title={editing.index < 0 ? t('添加规则') : t('编辑规则')}
+          subtitle={t('这条规则里的模型收到图片时按选定的方式处理；没被任何规则选中的模型一律原样放行。')}
           saving={saving}
-          onCancel={() => setEditing(null)}
-          onSave={(next) => {
-            editor.update((current) => ({ ...current, rules: [...current.rules, next] }));
-            setEditing(null);
-          }}
-        />
+          onClose={() => setEditing(null)}
+          onApply={() => submitRef.current?.()}
+          onDelete={
+            editing.index < 0
+              ? undefined
+              : () =>
+                  editor.update((current) => ({
+                    ...current,
+                    rules: current.rules.filter((_, at) => at !== editing.index),
+                  }))
+          }
+        >
+          <RuleEditor
+            rule={editing.rule}
+            models={models}
+            sharedTarget={sharedTarget}
+            maxTargets={maxTargets}
+            saving={saving}
+            registerSubmit={(submit) => {
+              submitRef.current = submit;
+            }}
+            onSave={(next) => {
+              editor.update((current) => ({
+                ...current,
+                rules:
+                  editing.index < 0
+                    ? [...current.rules, next]
+                    : current.rules.map((item, at) => (at === editing.index ? next : item)),
+              }));
+              setEditing(null);
+            }}
+          />
+        </RuleDialog>
       ) : null}
     </RulePanel>
   );
@@ -316,7 +306,7 @@ function RuleEditor({
   sharedTarget,
   maxTargets,
   saving,
-  onCancel,
+  registerSubmit,
   onSave,
 }: {
   rule: VisionRule;
@@ -324,12 +314,26 @@ function RuleEditor({
   sharedTarget?: VisionTarget | null;
   maxTargets: number;
   saving: boolean;
-  onCancel: () => void;
+  /** 把「提交当前草稿」注册给弹窗底栏 */
+  registerSubmit: (submit: () => void) => void;
   onSave: (next: VisionRule) => void;
 }): JSX.Element {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<VisionRule>(rule);
   const patch = (part: Partial<VisionRule>): void => setDraft((d) => ({ ...d, ...part }));
+
+  // 每次草稿变化都重新注册，保证底栏提交拿到的是最新草稿（不是首帧闭包）
+  useEffect(() => {
+    const ready =
+      !saving &&
+      draft.models.length > 0 &&
+      !(draft.mode === 'assist' && draft.source === 'custom' && !draft.target) &&
+      !(draft.mode === 'reroute' && draft.targets.length === 0);
+    registerSubmit(() => {
+      if (!ready) return;
+      onSave(draft);
+    });
+  }, [draft, onSave, registerSubmit, saving]);
 
   const [listModels, targetModels] = useMemo(() => {
     const list = models;
@@ -574,26 +578,6 @@ function RuleEditor({
         </div>
       ) : null}
 
-      <div className="rt-special-editor-foot">
-        <div className="rt-special-editor-actions">
-          <Button variant="outline" size="sm" disabled={saving} onClick={onCancel}>
-            {t('取消')}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={
-              saving ||
-              !draft.models.length ||
-              (draft.mode === 'assist' && draft.source === 'custom' && !draft.target) ||
-              (draft.mode === 'reroute' && !draft.targets.length)
-            }
-            onClick={() => onSave(draft)}
-          >
-            {t('应用')}
-          </Button>
-        </div>
-      </div>
     </div>
   );
 }

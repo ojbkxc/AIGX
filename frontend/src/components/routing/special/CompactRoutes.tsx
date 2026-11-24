@@ -14,8 +14,6 @@
  */
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pencil } from 'lucide-react';
-import { Button } from '../../ui';
 import { api } from '../../../api';
 import {
   modelChoices,
@@ -24,7 +22,8 @@ import {
   type CompactRouteRule,
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
-import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
+import RuleDialog from './RuleDialog';
+import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead } from './shared';
 
 /** 规则行内编辑态：index = -1 表示新增 */
 interface Editing {
@@ -108,50 +107,23 @@ export default function CompactRoutes({ active }: { active: boolean }): JSX.Elem
         </div>
       ) : null}
 
-      {rules.map((rule, index) =>
-        editing && editing.index === index ? (
-          <RuleEditor
-            key={`edit-${index}`}
-            rule={editing.rule}
-            clients={clients}
-            models={models}
-            saving={saving}
-            onCancel={() => setEditing(null)}
-            onSave={(next) => {
-              write(index, next);
-              setEditing(null);
-            }}
-          />
-        ) : (
-          <RuleRow
-            key={`row-${index}`}
-            off={!rule.enabled}
-            title={t('{{client}} 的压缩请求', { client: clientLabel(rule.client) })}
-            detail={
-              <>
-                <code>{rule.source || t('还没选原模型')}</code>
-                <span aria-hidden="true">→</span>
-                <code>{rule.target || t('还没选压缩模型')}</code>
-              </>
-            }
-            meta={rule.enabled ? null : t('已停用')}
-            actions={
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => setEditing({ rule: { ...rule }, index })}
-                >
-                  <Pencil size={13} />
-                  {t('编辑')}
-                </Button>
-                <RowDeleteButton disabled={saving} onClick={() => remove(index)} />
-              </>
-            }
-          />
-        ),
-      )}
+      {rules.map((rule, index) => (
+        <RuleRow
+          key={`row-${index}`}
+          off={!rule.enabled}
+          title={t('{{client}} 的压缩请求', { client: clientLabel(rule.client) })}
+          detail={
+            <>
+              <code>{rule.source || t('还没选原模型')}</code>
+              <span aria-hidden="true">→</span>
+              <code>{rule.target || t('还没选压缩模型')}</code>
+            </>
+          }
+          meta={rule.enabled ? null : t('已停用')}
+          actions={null}
+          onOpen={saving ? undefined : () => setEditing({ rule: { ...rule }, index })}
+        />
+      ))}
 
       {!models.length ? (
         <div className="rt-notice rt-notice-warn">
@@ -164,53 +136,58 @@ export default function CompactRoutes({ active }: { active: boolean }): JSX.Elem
         </div>
       ) : null}
 
-      {editing && editing.index < 0 ? (
-        <RuleEditor
-          key="new"
-          rule={editing.rule}
-          clients={clients}
-          models={models}
+      {editing ? (
+        <RuleDialog
+          title={editing.index < 0 ? t('添加规则') : t('编辑规则')}
+          subtitle={t('命中这条规则的压缩请求会改用「压缩模型」重发一次；改写之后按新模型自己的路由挑账号。')}
           saving={saving}
-          onCancel={() => setEditing(null)}
-          onSave={(next) => {
-            write(-1, next);
+          onClose={() => setEditing(null)}
+          onApply={() => {
+            write(editing.index, editing.rule);
             setEditing(null);
           }}
-        />
+          onDelete={editing.index < 0 ? undefined : () => remove(editing.index)}
+        >
+          <RuleEditor
+            value={editing.rule}
+            clients={clients}
+            models={models}
+            saving={saving}
+            onChange={(next) => setEditing({ ...editing, rule: next })}
+          />
+        </RuleDialog>
       ) : null}
     </RulePanel>
   );
 }
 
-/** 行内编辑器：客户端 + 原模型 + 压缩模型 + 启用开关 */
+/** 弹窗内表单：客户端 + 原模型 + 压缩模型 + 启用开关（受控，提交由弹窗底栏负责） */
 function RuleEditor({
-  rule,
+  value,
   clients,
   models,
   saving,
-  onCancel,
-  onSave,
+  onChange,
 }: {
-  rule: CompactRouteRule;
+  value: CompactRouteRule;
   clients: Array<{ id: string; label: string }>;
   models: Array<{ id: string; label: string }>;
   saving: boolean;
-  onCancel: () => void;
-  onSave: (next: CompactRouteRule) => void;
+  onChange: (next: CompactRouteRule) => void;
 }): JSX.Element {
   const { t } = useTranslation();
-  const [draft, setDraft] = useState<CompactRouteRule>(rule);
-  const patch = (part: Partial<CompactRouteRule>): void => setDraft((d) => ({ ...d, ...part }));
+  const patch = (part: Partial<CompactRouteRule>): void => onChange({ ...value, ...part });
 
   return (
-    <div className="rt-special-editor">
+    <div className="rt-dialog-fields">
       <div className="rt-special-editor-fields">
         <div className="rt-subfield">
           <label>{t('触发客户端')}</label>
           <select
             className="form-input"
             aria-label={t('触发客户端')}
-            value={draft.client}
+            value={value.client}
+            disabled={saving}
             onChange={(e) => patch({ client: e.target.value })}
           >
             {clients.map((c) => (
@@ -223,7 +200,7 @@ function RuleEditor({
         <div className="rt-subfield">
           <label>{t('原模型')}</label>
           <ModelSelect
-            value={draft.source}
+            value={value.source}
             options={models}
             disabled={saving}
             ariaLabel={t('原模型')}
@@ -233,7 +210,7 @@ function RuleEditor({
         <div className="rt-subfield">
           <label>{t('压缩模型')}</label>
           <ModelSelect
-            value={draft.target}
+            value={value.target}
             options={models}
             disabled={saving}
             ariaLabel={t('压缩模型')}
@@ -241,30 +218,16 @@ function RuleEditor({
           />
         </div>
       </div>
-      <div className="rt-special-editor-foot">
-        <label className="rt-special-check">
-          <input
-            type="checkbox"
-            checked={draft.enabled}
-            onChange={(e) => patch({ enabled: e.target.checked })}
-          />
-          <span>{t('启用这条规则')}</span>
-        </label>
-        <div className="rt-special-editor-actions">
-          <Button variant="outline" size="sm" disabled={saving} onClick={onCancel}>
-            {t('取消')}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={saving || !draft.client || !draft.source || !draft.target}
-            onClick={() => onSave(draft)}
-          >
-            {t('应用')}
-          </Button>
-        </div>
-      </div>
-      {!draft.enabled ? (
+      <label className="rt-special-check">
+        <input
+          type="checkbox"
+          checked={value.enabled}
+          disabled={saving}
+          onChange={(e) => patch({ enabled: e.target.checked })}
+        />
+        <span>{t('启用规则')}</span>
+      </label>
+      {!value.enabled ? (
         <div className="form-hint">{t('停用的规则不参与匹配，但仍保留在列表里。')}</div>
       ) : null}
     </div>

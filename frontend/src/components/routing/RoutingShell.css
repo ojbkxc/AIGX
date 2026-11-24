@@ -109,6 +109,59 @@
   font-size: 12px;
 }
 
+/* 「仅失败」勾选（A2A 是「仅在途」开关；本仓无在途标记，落为失败过滤） */
+.rt-replay-only {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* 行内状态点（A2A RoutingRequestState：点 + 文案，不带彩色底） */
+.rt-replay-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.rt-replay-state i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.rt-replay-state.is-success {
+  color: #0d9488;
+}
+
+.rt-replay-state.is-failed {
+  color: var(--danger-color, #dc2626);
+}
+
+.rt-replay-state.is-running {
+  color: var(--primary-color);
+}
+
+/* 翻页（A2A routing-request-foot） */
+.rt-replay-foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── 路由组折叠态（点 rail 组条目后，其余组收成一行） ─────── */
 .rt-group-collapsed {
   opacity: 0.78;
@@ -116,4 +169,39 @@
 
 .rt-group-collapsed .rt-group-head {
   align-items: center;
+}
+
+/* 回放行首行：模型名 + 状态点（A2A 是「模型 …… 状态」两端对齐） */
+.rt-replay-item .rt-replay-item-model {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rt-replay-item .rt-replay-item-model > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 规则编辑弹窗的字段区（A2A DlgField：标签在上、控件在下） ── */
+.rt-dialog-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+.rt-dialog-fields > .rt-special-check {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
+.rt-dialog-fields > .rt-special-checks {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 620px) {
+  .rt-dialog-fields {
+    grid-template-columns: 1fr;
+  }
 }

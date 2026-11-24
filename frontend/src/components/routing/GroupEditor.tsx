@@ -19,6 +19,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Plus, Trash2 } from 'lucide-react';
+import { Button } from '../ui';
 import {
   ROUTING_CAPS,
   type RoutingGroup,
@@ -90,6 +91,8 @@ export default function GroupEditor({
   const { t } = useTranslation();
   /** 用户手动展开的非聚焦组（focusId 只决定「默认展开谁」，不是只读过滤） */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  /** 搜索（对齐 A2A routing-group-panel 的「搜索提供商或模型」）：只筛显示，不改数据 */
+  const [search, setSearch] = useState('');
 
   /** 重复 id 检测：后端按 id 查找，重复会让命中结果不确定 */
   const dupIds = new Set(
@@ -107,6 +110,11 @@ export default function GroupEditor({
   };
 
   const overGroups = groups.length > ROUTING_CAPS.MAX_GROUPS;
+
+  /** 「展开全部 / 折叠全部」的判据：所有组（除聚焦组）都在手动展开集合里 */
+  const allExpanded =
+    groups.length > 0
+    && groups.every((g, i) => g.id === focusId || expanded.has(`${g.id}-${i}`));
 
   return (
     <div>
@@ -130,6 +138,31 @@ export default function GroupEditor({
         </span>
       </div>
 
+      {/* 工具条（对齐 A2A routing-group-panel：搜索 + 折叠全部/展开全部） */}
+      <div className="rt-group-toolbar">
+        <input
+          className="form-input"
+          placeholder={t('搜索提供商或模型')}
+          aria-label={t('搜索提供商或模型')}
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={Boolean(search.trim()) || groups.length === 0}
+          onClick={() => {
+            if (allExpanded) {
+              setExpanded(new Set());
+              return;
+            }
+            setExpanded(new Set(groups.map((g, i) => `${g.id}-${i}`)));
+          }}
+        >
+          {allExpanded ? t('折叠全部') : t('展开全部')}
+        </Button>
+      </div>
+
       {groups.length === 0 ? (
         <div className="rt-state-note rt-state-inherit">
           {t('还没有路由组。没有组时请求只走 global 与模型级档案 —— 需要「某模型专走某批供应商/账号」时才建组。')}
@@ -142,6 +175,17 @@ export default function GroupEditor({
         // 聚焦模式下非目标组默认收成一行（点 rail 组条目 = 只看这一个组）；
         // 能手动展开，id 重复的组一律展开（那是要立刻看见的错）。
         const rowKey = `${g.id}-${gi}`;
+        // 搜索只筛成员行（对齐 A2A：组卡片照旧显示，被筛掉的是候选模型行）；
+        // 保留原始下标 mi，编辑/删除仍按真实位置改，不会因过滤错位。
+        const keyword = search.trim().toLowerCase();
+        const visibleMembers = g.members
+          .map((m, mi) => ({ m, mi }))
+          .filter(
+            ({ m }) =>
+              !keyword
+              || m.provider.toLowerCase().includes(keyword)
+              || m.model.toLowerCase().includes(keyword),
+          );
         const collapsed = Boolean(focusId) && g.id !== focusId && !dup && !expanded.has(rowKey);
         if (collapsed) {
           return (
@@ -178,6 +222,16 @@ export default function GroupEditor({
                   {t('{{n}} 个成员槽位', { n: g.members.length })}
                 </span>
               </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={!g.members.some((m) => m.included)}
+                onClick={() =>
+                  patchGroup(gi, { members: g.members.map((m) => ({ ...m, included: false })) })
+                }
+              >
+                {t('全部移出')}
+              </button>
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
@@ -268,9 +322,18 @@ export default function GroupEditor({
 
             <div style={{ marginTop: 12 }}>
               <div className="rt-rail-title" style={{ padding: '0 0 6px' }}>
-                {t('成员槽位')}
+                {t('成员模型')}
+                <span className="rt-count">
+                  {t('{{n}} 项参与', { n: g.members.filter((m) => m.included).length })}
+                </span>
               </div>
-              {g.members.map((m, mi) => (
+              {g.members.length === 0 ? (
+                <div className="rt-state-note rt-state-inherit">
+                  <b>{t('还没有参与模型')}</b>
+                  {t('可以保存空路由，但请求会明确失败，不会回退全局。')}
+                </div>
+              ) : null}
+              {visibleMembers.map(({ m, mi }) => (
                 <div className="rt-member-row" key={mi} style={{ marginBottom: 8 }}>
                   <input
                     className="form-input"
@@ -312,6 +375,11 @@ export default function GroupEditor({
                   </button>
                 </div>
               ))}
+              {keyword && !visibleMembers.length ? (
+                <div className="rt-state-note rt-state-inherit">
+                  {t('没有匹配的候选')}
+                </div>
+              ) : null}
               <div className="rt-group-actions" style={{ marginTop: 6 }}>
                 <button
                   type="button"
@@ -325,7 +393,7 @@ export default function GroupEditor({
                     })
                   }
                 >
-                  <Plus size={13} /> {t('添加成员槽位')}
+                  <Plus size={13} /> {t('添加模型')}
                 </button>
                 <span className={`rt-count${overMembers ? ' rt-count-over' : ''}`}>
                   {t('{{n}} / 上限 {{cap}} 个成员', { n: g.members.length, cap: ROUTING_CAPS.MAX_MEMBERS })}

@@ -13,8 +13,6 @@
  */
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pencil } from 'lucide-react';
-import { Button } from '../../ui';
 import { api } from '../../../api';
 import {
   modelChoices,
@@ -24,7 +22,8 @@ import {
   type TitleRoutesView,
 } from '../../../types/routing-workspace';
 import { useSpecialRouteEditor } from './useSpecialRouteEditor';
-import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead, RowDeleteButton } from './shared';
+import RuleDialog from './RuleDialog';
+import { AddRuleButton, ModelSelect, RulePanel, RuleRow, RuleSectionHead } from './shared';
 
 interface Editing {
   rule: TitleRouteRule;
@@ -99,68 +98,31 @@ export default function TitleRoutes({ active }: { active: boolean }): JSX.Elemen
         </div>
       ) : null}
 
-      {rules.map((rule, index) =>
-        editing && editing.index === index ? (
-          <RuleEditor
-            key={`edit-${index}`}
-            rule={editing.rule}
-            clients={clients}
-            models={models}
-            saving={saving}
-            onCancel={() => setEditing(null)}
-            onSave={(next) => {
-              write(index, next);
-              setEditing(null);
-            }}
-          />
-        ) : (
-          <RuleRow
-            key={`row-${index}`}
-            off={!rule.enabled}
-            title={
-              rule.clients.length
-                ? t('{{clients}} 的标题请求', {
-                    clients: rule.clients.map(clientLabel).join('、'),
-                  })
-                : t('未选择客户端')
-            }
-            detail={
-              <>
-                <span>{t('改用')}</span>
-                <code>{rule.model || t('还没选标题模型')}</code>
-                <span>·</span>
-                <span>
-                  {rule.fallback === 'original' ? t('失败时退回原模型') : t('失败时直接报错')}
-                </span>
-              </>
-            }
-            meta={rule.enabled ? null : t('已停用')}
-            actions={
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => setEditing({ rule: { ...rule }, index })}
-                >
-                  <Pencil size={13} />
-                  {t('编辑')}
-                </Button>
-                <RowDeleteButton
-                  disabled={saving}
-                  onClick={() => {
-                    editor.update((current) => ({
-                      ...current,
-                      rules: current.rules.filter((_, at) => at !== index),
-                    }));
-                    setEditing(null);
-                  }}
-                />
-              </>
-            }
-          />
-        ),
-      )}
+      {rules.map((rule, index) => (
+        <RuleRow
+          key={`row-${index}`}
+          off={!rule.enabled}
+          title={
+            rule.clients.length
+              ? t('{{clients}} 的标题请求', {
+                  clients: rule.clients.map(clientLabel).join('、'),
+                })
+              : t('未选择客户端')
+          }
+          detail={
+            <>
+              <span>{t('改用')}</span>
+              <code>{rule.model || t('还没选标题模型')}</code>
+              <span>·</span>
+              <span>
+                {rule.fallback === 'original' ? t('失败时退回原模型') : t('失败时直接报错')}
+              </span>
+            </>
+          }
+          meta={rule.enabled ? null : t('已停用')}
+          onOpen={saving ? undefined : () => setEditing({ rule: { ...rule }, index })}
+        />
+      ))}
 
       {!models.length ? (
         <div className="rt-notice rt-notice-warn">
@@ -173,50 +135,62 @@ export default function TitleRoutes({ active }: { active: boolean }): JSX.Elemen
         </div>
       ) : null}
 
-      {editing && editing.index < 0 ? (
-        <RuleEditor
-          key="new"
-          rule={editing.rule}
-          clients={clients}
-          models={models}
+      {editing ? (
+        <RuleDialog
+          title={editing.index < 0 ? t('添加规则') : t('编辑规则')}
+          subtitle={t('这条规则只改写被识别为标题生成的小请求，普通对话不受影响。')}
           saving={saving}
-          onCancel={() => setEditing(null)}
-          onSave={(next) => {
-            write(-1, next);
+          onClose={() => setEditing(null)}
+          onApply={() => {
+            write(editing.index, editing.rule);
             setEditing(null);
           }}
-        />
+          onDelete={
+            editing.index < 0
+              ? undefined
+              : () =>
+                  editor.update((current) => ({
+                    ...current,
+                    rules: current.rules.filter((_, at) => at !== editing.index),
+                  }))
+          }
+        >
+          <RuleEditor
+            value={editing.rule}
+            clients={clients}
+            models={models}
+            saving={saving}
+            onChange={(next) => setEditing({ ...editing, rule: next })}
+          />
+        </RuleDialog>
       ) : null}
     </RulePanel>
   );
 }
 
 function RuleEditor({
-  rule,
+  value,
   clients,
   models,
   saving,
-  onCancel,
-  onSave,
+  onChange,
 }: {
-  rule: TitleRouteRule;
+  value: TitleRouteRule;
   clients: Array<{ id: string; label: string; supported: boolean }>;
   models: Array<{ id: string; label: string }>;
   saving: boolean;
-  onCancel: () => void;
-  onSave: (next: TitleRouteRule) => void;
+  onChange: (next: TitleRouteRule) => void;
 }): JSX.Element {
   const { t } = useTranslation();
-  const [draft, setDraft] = useState<TitleRouteRule>(rule);
-  const patch = (part: Partial<TitleRouteRule>): void => setDraft((d) => ({ ...d, ...part }));
+  const patch = (part: Partial<TitleRouteRule>): void => onChange({ ...value, ...part });
   const toggleClient = (id: string, on: boolean): void => {
     patch({
-      clients: on ? [...new Set([...draft.clients, id])] : draft.clients.filter((c) => c !== id),
+      clients: on ? [...new Set([...value.clients, id])] : value.clients.filter((c) => c !== id),
     });
   };
 
   return (
-    <div className="rt-special-editor">
+    <div className="rt-dialog-fields">
       <div className="rt-subfield">
         <label>{t('识别客户端')}</label>
         <div className="rt-special-checks">
@@ -224,7 +198,7 @@ function RuleEditor({
             <label key={c.id} className="rt-special-check" title={c.supported ? undefined : t('该客户端暂无识别判据，勾选也不会命中')}>
               <input
                 type="checkbox"
-                checked={draft.clients.includes(c.id)}
+                checked={value.clients.includes(c.id)}
                 onChange={(e) => toggleClient(c.id, e.target.checked)}
               />
               <span>{c.label}</span>
@@ -241,7 +215,7 @@ function RuleEditor({
         <div className="rt-subfield">
           <label>{t('标题模型')}</label>
           <ModelSelect
-            value={draft.model}
+            value={value.model}
             options={models}
             disabled={saving}
             ariaLabel={t('标题模型')}
@@ -253,7 +227,7 @@ function RuleEditor({
           <select
             className="form-input"
             aria-label={t('标题模型失败时')}
-            value={draft.fallback}
+            value={value.fallback}
             onChange={(e) => patch({ fallback: e.target.value as TitleRouteRule['fallback'] })}
           >
             <option value="original">{t('退回原模型')}</option>
@@ -265,29 +239,15 @@ function RuleEditor({
         </div>
       </div>
 
-      <div className="rt-special-editor-foot">
-        <label className="rt-special-check">
-          <input
-            type="checkbox"
-            checked={draft.enabled}
-            onChange={(e) => patch({ enabled: e.target.checked })}
-          />
-          <span>{t('启用这条规则')}</span>
-        </label>
-        <div className="rt-special-editor-actions">
-          <Button variant="outline" size="sm" disabled={saving} onClick={onCancel}>
-            {t('取消')}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={saving || !draft.clients.length || !draft.model}
-            onClick={() => onSave(draft)}
-          >
-            {t('应用')}
-          </Button>
-        </div>
-      </div>
+      <label className="rt-special-check">
+        <input
+          type="checkbox"
+          checked={value.enabled}
+          disabled={saving}
+          onChange={(e) => patch({ enabled: e.target.checked })}
+        />
+        <span>{t('启用规则')}</span>
+      </label>
     </div>
   );
 }

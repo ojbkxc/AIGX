@@ -223,7 +223,9 @@ describe('Routing 页冒烟', () => {
     const modelEntries = screen.getAllByText('gpt-4o');
     expect(modelEntries.length).toBeGreaterThanOrEqual(1);
     fireEvent.click(modelEntries[0]);
-    await waitFor(() => expect(screen.getByText('选路策略')).toBeTruthy());
+    // 切到模型级层 → ProfileForm 渲染三态控件（「路由策略」会同时出现在基础策略卡
+    // 与档案表单，故用 getAllByText 防多命中）
+    await waitFor(() => expect(screen.getAllByText('路由策略').length).toBeGreaterThanOrEqual(1));
     expect(container.textContent).toContain('模型名请填客户端的请求名');
     expect(container.querySelectorAll('.rt-seg').length).toBeGreaterThanOrEqual(6);
 
@@ -264,12 +266,29 @@ describe('Routing 页冒烟', () => {
     expect(apiMock.getRouteReplay).not.toHaveBeenCalled();
   });
 
-  it('回放左栏筛选：计数 / 搜索 / 请求模型下拉（对齐 A2A RoutingRequestList）', async () => {
+  it('回放左栏：列结构 + 筛选项 + 服务端过滤参数 + 翻页（对齐 A2A RoutingRequestList）', async () => {
     apiMock.listRequestLogs.mockResolvedValue({
       success: true,
+      total: 45,
       data: [
-        { id: 'req-aaa', model: 'gpt-4o', created_at: 1_700_000_000 },
-        { id: 'req-bbb', model: 'claude-3', created_at: 1_700_000_600 },
+        {
+          id: 'req-aaa',
+          request_id: 'chatcmpl-aaa',
+          model: 'gpt-4o',
+          status_code: 200,
+          latency_ms: 820,
+          created_at: 1_700_000_000,
+          channel_id: 'ch-1',
+        },
+        {
+          id: 'req-bbb',
+          request_id: 'chatcmpl-bbb',
+          model: 'claude-3',
+          status_code: 500,
+          latency_ms: 1200,
+          created_at: 1_700_000_600,
+          channel_id: 'ch-2',
+        },
       ],
     });
     const { container } = render(<Routing /> as ReactElement);
@@ -278,33 +297,116 @@ describe('Routing 页冒烟', () => {
     fireEvent.click(modeButton(container, '请求回放'));
     await waitFor(() => expect(container.querySelectorAll('.rt-replay-item').length).toBe(2));
 
-    // 左栏头显示匹配数（未筛选 = 全部）
-    expect(container.querySelector('.rt-replay-rail-title .rt-count')?.textContent).toBe('2');
+    /** 最近一次列表请求的参数（target 是 ES2020，不用 Array.prototype.at） */
+    const lastParams = (): Record<string, unknown> | undefined => {
+      const calls = apiMock.listRequestLogs.mock.calls;
+      return calls.length ? (calls[calls.length - 1][0] as Record<string, unknown>) : undefined;
+    };
 
-    // 搜索命中一条（按请求 ID）
+    // 头：匹配数来自服务端 total（不是本页条数）
+    expect(container.querySelector('.rt-replay-rail-title .rt-count')?.textContent).toBe('45');
+
+    // 行结构：模型 + 状态点；副行 = 时间 · 渠道 · 请求 id
+    const rows = container.querySelectorAll('.rt-replay-item');
+    expect(rows[0].querySelector('.rt-replay-state.is-success')).toBeTruthy();
+    expect(rows[1].querySelector('.rt-replay-state.is-failed')).toBeTruthy();
+    expect(rows[0].textContent).toContain('chatcmpl-aaa');
+    expect(rows[0].textContent).toContain('#ch-1');
+
+    // 首次请求参数：page 1 / size 30（A2A 每页 30 条）
+    expect(apiMock.listRequestLogs).toHaveBeenLastCalledWith({ page: 1, size: 30 });
+
+    // 搜索 → 服务端 keyword，且页码归零
     const search = container.querySelector<HTMLInputElement>(
-      'input[aria-label="搜索请求 ID 或模型"]',
+      'input[aria-label="搜索请求、模型或账号"]',
     );
     expect(search).toBeTruthy();
-    fireEvent.change(search as HTMLInputElement, { target: { value: 'bbb' } });
-    await waitFor(() => expect(container.querySelectorAll('.rt-replay-item').length).toBe(1));
-    expect(container.querySelector('.rt-replay-item-id')?.textContent).toContain('req-bbb');
+    fireEvent.change(search as HTMLInputElement, { target: { value: 'aaa' } });
+    await waitFor(() =>
+      expect(apiMock.listRequestLogs).toHaveBeenLastCalledWith({ page: 1, size: 30, keyword: 'aaa' }),
+    );
 
-    // 搜索无命中 → 明确空态（不是静默空白）
-    fireEvent.change(search as HTMLInputElement, { target: { value: 'zzz' } });
-    await waitFor(() => expect(container.textContent).toContain('没有匹配的请求'));
-
-    // 清空搜索，用「请求模型」下拉筛（候选只列本页出现过的模型）
-    fireEvent.change(search as HTMLInputElement, { target: { value: '' } });
+    // 请求模型下拉：候选取本页出现过的模型
     const modelSelect = container.querySelector<HTMLSelectElement>('select[aria-label="请求模型"]');
-    expect(modelSelect).toBeTruthy();
     expect(Array.from(modelSelect?.options ?? []).map((o) => o.value)).toEqual([
       '',
       'claude-3',
       'gpt-4o',
     ]);
     fireEvent.change(modelSelect as HTMLSelectElement, { target: { value: 'gpt-4o' } });
-    await waitFor(() => expect(container.querySelectorAll('.rt-replay-item').length).toBe(1));
-    expect(container.querySelector('.rt-replay-item-id')?.textContent).toContain('req-aaa');
+    await waitFor(() =>
+      expect(apiMock.listRequestLogs).toHaveBeenLastCalledWith({
+        page: 1,
+        size: 30,
+        keyword: 'aaa',
+        model: 'gpt-4o',
+      }),
+    );
+
+    // 时间范围：60 分钟档 → start = now - 60min（unix 秒）
+    const before = Math.floor((Date.now() - 60 * 60_000) / 1000);
+    const windowSelect = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="已完成请求时间范围"]',
+    );
+    expect(Array.from(windowSelect?.options ?? []).map((o) => o.value)).toEqual([
+      '0',
+      '5',
+      '10',
+      '30',
+      '60',
+    ]);
+    fireEvent.change(windowSelect as HTMLSelectElement, { target: { value: '60' } });
+    await waitFor(() => {
+      const last = lastParams() as { start?: number } | undefined;
+      expect(last?.start).toBeGreaterThanOrEqual(before);
+      expect(last?.start).toBeLessThanOrEqual(before + 5);
+    });
+
+    // 仅失败 → status=error
+    fireEvent.click(screen.getByText('仅失败'));
+    await waitFor(() => expect(lastParams()).toMatchObject({ status: 'error' }));
+
+    // 翻页：total=45 → 2 页；下一页 → page 2
+    expect(container.querySelector('.rt-replay-foot')?.textContent).toContain('1 / 2');
+    const next = Array.from(container.querySelectorAll<HTMLElement>('.rt-replay-foot button')).find(
+      (b) => b.textContent === '下一页',
+    );
+    expect(next).toBeTruthy();
+    fireEvent.click(next as HTMLElement);
+    await waitFor(() => expect(lastParams()).toMatchObject({ page: 2 }));
+  });
+
+  it('有未保存修改时「重新读取」先确认（对齐 A2A reloadConfig，不静默丢草稿）', async () => {
+    const { container } = render(<Routing /> as ReactElement);
+    await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
+
+    // 先制造一处草稿修改：切到模型级层（gpt-4o），清空一个三态字段
+    const modelNav = Array.from(container.querySelectorAll<HTMLElement>('.rt-nav-item')).find(
+      (el) => el.textContent?.trim() === 'gpt-4o',
+    );
+    expect(modelNav).toBeTruthy();
+    fireEvent.click(modelNav as HTMLElement);
+    await waitFor(() => expect(screen.getAllByText('路由策略').length).toBeGreaterThanOrEqual(1));
+
+    const clearBtns = Array.from(container.querySelectorAll('.rt-seg button')).filter(
+      (b) => b.textContent === '清空',
+    );
+    expect(clearBtns.length).toBeGreaterThan(0);
+    fireEvent.click(clearBtns[0]);
+    await waitFor(() => expect(container.textContent).toContain('有未保存的修改'));
+
+    // 点页头「重新读取」→ 先出确认，不直接重读
+    const reload = Array.from(container.querySelectorAll<HTMLElement>('.rt-pagebar-actions button')).find(
+      (b) => b.textContent?.includes('重新读取'),
+    );
+    expect(reload).toBeTruthy();
+    apiMock.getRoutingPolicy.mockClear();
+    fireEvent.click(reload as HTMLElement);
+    await waitFor(() =>
+      expect(container.textContent).toContain('重新读取会丢弃未保存的修改'),
+    );
+    // 未确认前不发新请求（草稿还在）
+    expect(apiMock.getRoutingPolicy).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('有未保存的修改');
   });
 });
