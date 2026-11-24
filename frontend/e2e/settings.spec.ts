@@ -1,20 +1,23 @@
 import { test, expect, loginAsAdmin } from './fixtures';
 
 /**
- * 系统设置 —— 分类导航回归（v1.0.93 设置菜单迁移后终态）。
+ * 系统设置 —— 分类导航回归（A2A v3.5.1 十二分类对齐后终态）。
  *
- * 迁移口径（docs/ROUTING-MENU-PARITY.md §9，对齐 Agent2API settings-page）：
- * - 保留分类：通用 / 显示 / 反馈与需求 / 网关 / 安全 / 数据 / 版本信息 / 更新
- *   （账户视落地情况另定；提供商不建——供应商已是顶级页 /channels，记分叉）
- * - 已迁出：AI 助手→/agent 抽屉、聊天→/chat、报表→仪表盘 Tab、限流与缓存→/limit、
- *   计费→/products 计费设置 Tab、通知→顶级 /notify、重试+超时→路由页「错误处理」rail 面板
- * - 已删除：流兼容 / 自动续写（A2A 无对应）
+ * 口径（对齐 Agent2API v3.5.1 settings-model 的 CATEGORIES，顺序逐项一致）：
+ *   账户 / 通知 / 通用 / 显示 / 网关 / 提供商 / 超时 / 安全 / 数据 /
+ *   反馈与需求 / 版本信息 / 更新
+ * - 账户、提供商在 AIGX 是**入口占位**（真实面在 /profile 个人中心、/channels 渠道），
+ *   但导航分类本身合法存在（A2A 同款分类表）。
+ * - 通知、超时本轮由「已迁走」回到设置页分类（A2A 有 notifications / timeout 两档）。
+ * - 仍已迁出：AI 助手→/agent 抽屉、聊天→/chat、报表→仪表盘 Tab、限流与缓存→/limit、
+ *   计费→/products 计费设置 Tab。
+ * - 已删除：流兼容 / 自动续写（A2A 无对应）。
  */
 
 /** 设置左栏分类导航 */
 const nav = (page: import('@playwright/test').Page) => page.locator('.settings-nav');
 
-test.describe('系统设置分类（v1.0.93 迁移后）', () => {
+test.describe('系统设置分类（A2A v3.5.1 十二分类）', () => {
   test.beforeEach(async ({ page }) => {
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/settings');
@@ -23,11 +26,16 @@ test.describe('系统设置分类（v1.0.93 迁移后）', () => {
 
   test('左栏渲染终态分类，默认落在通用', async ({ page, pageErrors }) => {
     await expect(nav(page)).toBeVisible();
-    for (const label of ['通用', '显示', '反馈与需求', '网关', '安全', '数据', '版本信息', '更新']) {
+    // 12 个分类全在，且导航项总数恰为 12（多一个少一个都要红）
+    for (const label of [
+      '账户', '通知', '通用', '显示', '网关', '提供商', '超时',
+      '安全', '数据', '反馈与需求', '版本信息', '更新',
+    ]) {
       await expect(nav(page).locator('.settings-nav-item', { hasText: label })).toHaveCount(1);
     }
-    // 迁走的分类不再出现在设置左栏
-    for (const gone of ['AI 助手', '聊天', '报表', '重试', '超时', '限流与缓存', '计费', '通知', '系统信息']) {
+    await expect(nav(page).locator('.settings-nav-item')).toHaveCount(12);
+    // 仍然迁走的分类不出现在设置左栏
+    for (const gone of ['AI 助手', '聊天', '报表', '重试', '限流与缓存', '计费', '系统信息']) {
       await expect(nav(page).locator('.settings-nav-item', { hasText: gone })).toHaveCount(0);
     }
     // 默认分类高亮，右栏是通用（使用限额）
@@ -36,9 +44,18 @@ test.describe('系统设置分类（v1.0.93 迁移后）', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('重试与超时已迁路由页「错误处理」：设置不再有，路由 rail 一级承载', async ({ page, pageErrors }) => {
-    // 设置右栏（通用态）不含任何超时/重试字段
+  test('重试在路由页「错误处理」、超时两处同源：设置「超时」分类 + 路由 rail 各一套字段', async ({ page, pageErrors }) => {
+    // 设置右栏（默认通用态）不含任何超时/重试字段——超时是**独立分类**（A2A TimeoutPane），
+    // 不再埋在通用里（本轮之前「超时」被并进路由页，现已回到设置分类）
     await expect(page.locator('.settings-pane')).not.toContainText('请求总超时');
+
+    // 设置 → 超时：A2A TIMEOUT_FIELDS 四项（取值范围按 AIGX 后端区间）
+    await nav(page).getByRole('button', { name: '超时', exact: true }).click();
+    const timeoutPane = page.locator('.settings-pane');
+    await expect(timeoutPane.locator('h2')).toHaveText('请求超时');
+    for (const field of ['连接中超时', '等待响应超时', '流式响应空闲超时', '非流式响应超时']) {
+      await expect(timeoutPane.getByLabel(field)).toHaveCount(1);
+    }
 
     // 路由页 rail 点「错误处理」→ RoutingErrorsPanel 渲染重试 4 字段 + 超时 5 字段
     await page.goto('/routing');

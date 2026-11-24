@@ -35,11 +35,33 @@ test.describe('设置迁移 · 顶级页冒烟', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('旧 /settings?tab=notify 不再是通知入口（分类已删，重定向或回退通用）', async ({ page, pageErrors }) => {
-    // 通知分类删除后，settings 左栏不应再含「通知」项
-    await page.goto('/settings');
+  test('旧 /settings?tab=notify 不再是通知入口（旧键失效回退通用，通知分类只是跳板）', async ({ page, pageErrors }) => {
+    // A2A v3.5.1 把 notifications 恢复成合法设置分类，但**键名是 notifications**，
+    // 旧书签用的 notify 不在 VALID_SETTINGS_TABS（Settings.tsx:158）里 →
+    // 手改 URL 不会把设置页置空，也不该落到通知面，而是回退「通用」。
+    await page.goto('/settings?tab=notify');
     await expect(page.locator('.settings-layout')).toBeVisible();
-    await expect(page.locator('.settings-nav')).not.toContainText('通知');
+    await expect(page.locator('.settings-nav-item.active')).toHaveText('通用');
+    await expect(page.locator('.settings-pane')).toContainText('使用限额');
+
+    // 「通知」分类确实回来了（12 分类之一），但它只是跳板：不承载通知表单，
+    // 真实配置面在顶级 /notify（.notify-shell 只在那边挂载）。
+    const notifyItem = page.locator('.settings-nav-item', { hasText: '通知' });
+    await expect(notifyItem).toHaveCount(1);
+    await notifyItem.click();
+    await expect(page.locator('.settings-nav-item.active')).toHaveText('通知');
+    const pane = page.locator('.settings-pane');
+    await expect(pane.locator('h2')).toHaveText('通知');
+    // 通知表单本体（总开关）不在设置页内
+    await expect(pane).not.toContainText('启用通知');
+    await expect(page.locator('.notify-shell')).toHaveCount(0);
+
+    // 跳板入口可达：点「前往通知设置」落到顶级 /notify
+    await pane.getByRole('button', { name: '前往通知设置' }).click();
+    await expect(page).toHaveURL(/\/notify$/);
+    await expect(page.locator('.notify-shell')).toBeVisible();
+    await expect(page.locator('.notify-shell h2', { hasText: '通知配置' })).toBeVisible();
+
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });

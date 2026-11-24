@@ -34,14 +34,23 @@ test.describe('网络代理', () => {
 
   test('新建代理', async ({ page, pageErrors }) => {
     await page.getByRole('button', { name: '新建代理' }).click();
-    await page.locator('input[placeholder]').first().fill('测试节点');
-    // 协议下拉
-    await page.locator('select').first().selectOption('socks5');
-    // 主机 + 端口
-    const inputs = page.locator('input.form-input');
-    await inputs.nth(1).fill('10.0.0.1');
-    await inputs.nth(2).fill('9999');
-    await page.getByRole('button', { name: '保存' }).click();
+    // v3.5.1 新增筛选栏（搜索 / 协议筛选 / 状态 Tabs），它渲染在建表表单**之前**，
+    // 且搜索框也是 input.form-input、协议筛选也是 <select>：继续用全局
+    // input[placeholder].first() / select.first() / input.form-input.nth() 会全部
+    // 错位到筛选栏（名称写进搜索框、协议选到筛选器、端口永远空 → required 拦提交）。
+    // 故一律按标题限定到「新建代理」这张表单卡内部。
+    const form = page.locator('.proxy-form-card').filter({
+      has: page.getByRole('heading', { name: '新建代理' }),
+    });
+    await expect(form).toBeVisible();
+
+    // 字段按 label 定位（Input 组件有 htmlFor=label，与 placeholder 无关）
+    await form.getByLabel('名称').fill('测试节点');
+    // 协议下拉（表单内唯一 select）
+    await form.locator('select').selectOption('socks5');
+    await form.getByLabel('主机').fill('10.0.0.1');
+    await form.getByLabel('端口').fill('9999');
+    await form.getByRole('button', { name: '保存', exact: true }).click();
 
     // 列表出现新条目
     await expect(page.locator('.proxy-card-name', { hasText: '测试节点' })).toBeVisible();

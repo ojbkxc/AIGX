@@ -485,8 +485,9 @@ test.describe('模型管理', () => {
     const panel = page.locator('.tbl-colset');
     await expect(panel).toBeVisible();
 
-    // 定价列 → 居中（默认左；公共面板三档文案 左/中/右）
-    const priceRow = panel.locator('.tbl-colset-row', { hasText: '定价' });
+    // 计价格 → 居中（默认左；公共面板三档文案 左/中/右）
+    // v3.5.1 该列表头/面板文案是「计价」（对齐 A2A 的 pricing），旧「定价」已不存在
+    const priceRow = panel.locator('.tbl-colset-row', { hasText: '计价' });
     await priceRow.locator('.tbl-colset-align button', { hasText: '中' }).click();
     await expect(page.locator('.mm-h-price')).toHaveClass(/ta-center/);
 
@@ -495,9 +496,10 @@ test.describe('模型管理', () => {
     await checkRow.locator('.tbl-colset-align button', { hasText: '左' }).click();
     await expect(page.locator('.mm-h-check')).toHaveClass(/ta-left/);
 
-    // 锁定列（选择/模型/操作）开关禁用，点不动
+    // 锁定列（选择/上游模型/操作）开关禁用，点不动
+    // 注意 must 用「上游模型」精确后缀：hasText:'模型' 会同时命中「模型映射」→ strict 歧义
     await expect(checkRow.locator('input[type="checkbox"]')).toBeDisabled();
-    await expect(panel.locator('.tbl-colset-row', { hasText: '模型' }).locator('input[type="checkbox"]')).toBeDisabled();
+    await expect(panel.locator('.tbl-colset-row', { hasText: '上游模型' }).locator('input[type="checkbox"]')).toBeDisabled();
 
     // 恢复默认：对齐回到各列声明值
     await panel.locator('.tbl-colset-reset').click();

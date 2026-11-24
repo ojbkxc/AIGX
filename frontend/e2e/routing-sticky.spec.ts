@@ -91,7 +91,8 @@ test.describe('粘滞会话管理面', () => {
   test('搜索过滤：按渠道名过滤列表（桩 query 生效）', async ({ page, pageErrors }) => {
     await openStickyPanel(page);
 
-    await page.locator('input[placeholder*="按会话标识"]').fill('workbuddy');
+    // v3.5.1 搜索框口径改为「搜索模型、账号或会话来源」（旧「按会话标识」已不存在）
+    await page.getByPlaceholder('搜索模型、账号或会话来源').fill('workbuddy');
     // 去抖 300ms 后才发请求
     await expect(page.locator('.rs-item')).toHaveCount(1);
     await expect(page.locator('.rs-item').first()).toContainText('workbuddy-pool');

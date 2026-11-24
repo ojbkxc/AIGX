@@ -110,33 +110,85 @@ test.describe('路由回放', () => {
       r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FLAT_SNAP) }));
     await openReplayPanel(page, 'req-77');
 
-    // 徽标行：策略 / 粘性启用 / 最终承载（扁平形状只有 id → 显示 id）
-    const chips = page.locator('.rr-chips');
-    await expect(chips).toContainText('多因子调度');
-    await expect(chips).toContainText('最终承载：ch-2');
+    // v3.5.1 回放面板按 A2A routing-exec-* 重排（左右栏收起成单列段落），
+    // 旧的 .rr-chips / .rr-metrics / .rr-ordered / .rr-blocked / .rr-kv 已不存在：
+    //   头部 .rr-exec-head ｜ 改写 .rr-exec-rewrite ｜ 承载 .rr-exec-carrier
+    //   执行耗时 .rr-timeline ｜ 选路情况 .rr-exec-table ｜ 当时配置 .rr-exec-definitions
+    //   逐账号跳过 .rr-askip-group（AIGX 独有，保留）
+    const root = page.locator('.rr-root');
+    await expect(root).toBeVisible();
 
-    // 四格指标：状态码 / 尝试次数（计数 2）/ 候选 3 / 跳过 1
-    const cells = page.locator('.rr-metrics > div');
-    await expect(cells).toHaveCount(4);
-    await expect(cells.nth(0)).toContainText('200');
-    await expect(cells.nth(1)).toContainText('2');
-    await expect(cells.nth(2)).toContainText('3');
-    await expect(cells.nth(3)).toContainText('1');
+    // 头部：标题取 origin_model（改写前的客户端模型）+ 成功徽标 + HTTP 码 + 请求 ID
+    await expect(root.locator('.rr-exec-title')).toHaveText('gpt-4o-raw');
+    await expect(root.locator('.rr-exec-state')).toHaveText('成功');
+    await expect(root.locator('.rr-exec-meta')).toContainText('HTTP 200');
+    await expect(root.locator('.rr-exec-reqid')).toHaveText('req-77');
 
-    // 候选顺序：id 可见（无名字来源）、ch-2 高亮选中；ch-1 在序
-    const ordered = page.locator('.rr-ordered > li');
-    await expect(ordered).toHaveCount(3);
-    await expect(ordered.nth(0)).toContainText('ch-1');
-    await expect(ordered.nth(1)).toHaveClass(/is-picked/);
-    await expect(ordered.nth(1)).toContainText('选中');
+    // 模型改写段：origin_model ≠ model 才渲染
+    const rewrite = root.locator('.rr-exec-rewrite');
+    await expect(rewrite).toBeVisible();
+    await expect(rewrite.locator('.rr-exec-node').nth(0)).toContainText('gpt-4o-raw');
+    await expect(rewrite.locator('.rr-exec-node.is-accent')).toContainText('gpt-4o');
 
-    // 被跳过渠道：id + 原因；截断提示（route_truncated=3）
-    await expect(page.locator('.rr-blocked')).toContainText('ch-9');
-    await expect(page.locator('.rr-blocked')).toContainText('断路器打开');
-    await expect(page.locator('.rr-note', { hasText: '候选明细超过记录上限' })).toContainText('3');
+    // 最终承载：扁平形状只有 id → 显示 id（selected_channel=ch-2）
+    const carrier = root.locator('.rr-exec-carrier');
+    await expect(carrier.locator('.rr-exec-label')).toHaveText('最终承载');
+    await expect(carrier.locator('.rr-exec-carrier-name')).toHaveText('ch-2');
+    // ch-2 既不在 filtered、明细也没记错误 → 承载段不带失败原因标记
+    await expect(carrier).not.toHaveAttribute('data-failed', '');
+
+    // 执行耗时时间线（#32）：请求进入 + 2 次尝试；details.length(2) ≤ attempts 计数(2)
+    const steps = root.locator('.rr-timeline .rr-step');
+    await expect(steps).toHaveCount(3);
+    await expect(root.locator('.rr-timeline').getByText('请求进入')).toBeVisible();
+    const failedStep = root.locator('.rr-timeline .rr-step-failed');
+    await expect(failedStep).toHaveCount(1);
+    await expect(failedStep).toContainText('渠道一');
+    await expect(failedStep).toContainText('502');
+    await expect(failedStep).toContainText('上游 502 Bad Gateway');
+    // 成功步：粘滞命中徽章 + 耗时（finishedAt-startedAt = 1s）+ 上游模型
+    const okStep = steps.nth(2);
+    await expect(okStep).toContainText('渠道二');
+    await expect(okStep).toContainText('粘滞命中');
+    await expect(okStep).toContainText('1.0s');
+    await expect(okStep).toContainText('上游模型 gpt-4o');
+    // attempt_details_truncated=0 → 无「尝试明细超过记录上限」提示
+    await expect(page.locator('.rr-note', { hasText: '尝试明细超过记录上限' })).toHaveCount(0);
+
+    // 选路情况表：候选序（逐行 账号/本次状态/原因）+ 被跳过渠道（未参与）
+    await expect(root.locator('.rr-exec-section-head h4', { hasText: '选路情况' })).toBeVisible();
+    await expect(root.locator('.rr-exec-section-note', { hasText: '已保存 4 个候选' })).toBeVisible();
+    const routeTable = root.locator('.rr-exec-table').first();
+    await expect(routeTable).toBeVisible();
+    // 表头行除外：3 个候选 + 1 个被跳过
+    const rows = routeTable.locator('.rr-exec-row:not(.is-heading)');
+    await expect(rows).toHaveCount(4);
+    // 候选顺序即保存时的顺序：ch-1 → ch-2 → ch-3
+    await expect(rows.nth(0)).toContainText('ch-1');
+    await expect(rows.nth(1)).toContainText('ch-2');
+    await expect(rows.nth(2)).toContainText('ch-3');
+    // 本次状态三档：尝试失败（detail 带 error）/ 已尝试 / 待尝试
+    await expect(rows.nth(0)).toContainText('尝试失败');
+    await expect(rows.nth(0).locator('[data-tone="bad"]')).toHaveCount(1);
+    await expect(rows.nth(1)).toContainText('已尝试');
+    await expect(rows.nth(2)).toContainText('待尝试');
+    // 被跳过渠道：id + 未参与 + 原因原文
+    const blockedRow = rows.nth(3);
+    await expect(blockedRow).toContainText('ch-9');
+    await expect(blockedRow).toContainText('未参与');
+    await expect(blockedRow.locator('.rr-exec-reason')).toHaveText('断路器打开（连续失败 5 次）');
+    // 截断提示（route_truncated=3）
+    await expect(root.locator('.rr-note', { hasText: '候选明细超过记录上限' })).toContainText('3');
+
+    // 当时配置（route_config）：选路方式 / 会话粘滞
+    const cfg = root.locator('.rr-exec-definitions');
+    await expect(cfg).toContainText('选路方式');
+    await expect(cfg).toContainText('多因子调度');
+    await expect(cfg).toContainText('会话粘滞');
+    await expect(cfg).toContainText('启用');
 
     // 逐账号跳过分组（#26）：按渠道折叠 + 截断计数；展开第一组可见账号与原因
-    const groups = page.locator('.rr-askip-group');
+    const groups = root.locator('.rr-askip-group');
     await expect(groups).toHaveCount(2);
     const g0 = groups.nth(0);
     await expect(g0.locator('summary')).toContainText('ch-1');
@@ -144,28 +196,6 @@ test.describe('路由回放', () => {
     await g0.locator('summary').click();
     await expect(g0).toContainText('余额不足');
     await expect(g0).toContainText('冷却中');
-
-    // 策略/粘性卡（route_config）
-    await expect(page.locator('.rr-kv')).toContainText('多因子调度');
-    await expect(page.locator('.rr-kv')).toContainText('启用');
-
-    // 执行路径时间线（#32）：请求进入 + 2 次尝试；断言口径 details.length(2)
-    // ≤ attempts 计数(2) 且 index 连续 1..=n（be-fix 契约）
-    await expect(page.locator('.rr-timeline .rr-step')).toHaveCount(3);
-    await expect(page.locator('.rr-timeline').getByText('请求进入')).toBeVisible();
-    const failedStep = page.locator('.rr-timeline .rr-step-failed');
-    await expect(failedStep).toHaveCount(1);
-    await expect(failedStep).toContainText('渠道一');
-    await expect(failedStep).toContainText('502');
-    await expect(failedStep).toContainText('上游 502 Bad Gateway');
-    // 成功步：粘滞命中徽章 + 耗时（finishedAt-startedAt = 1s）
-    const okStep = page.locator('.rr-timeline .rr-step').nth(2);
-    await expect(okStep).toContainText('渠道二');
-    await expect(okStep).toContainText('粘滞命中');
-    await expect(okStep).toContainText('1.0s');
-    await expect(okStep).toContainText('gpt-4o');
-    // truncated=0 → 无溢出提示
-    await expect(page.locator('.rr-note', { hasText: '尝试明细超过记录上限' })).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
