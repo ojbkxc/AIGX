@@ -4498,10 +4498,18 @@ export default function PurgeConsole(): JSX.Element {
                 probeLabel={t('试')}
                 onProbe={probeRule}
                 onMove={moveRule}
-                canMoveUp={index > 0}
-                canMoveDown={index < draft.rewrite_rules.length - 1}
-                moveUpLabel={t('上移（改写按表序执行，越靠前越先命中）')}
-                moveDownLabel={t('下移')}
+                canMoveUp={index > 0 && !deadZoneQuery.trim()}
+                canMoveDown={index < draft.rewrite_rules.length - 1 && !deadZoneQuery.trim()}
+                moveUpLabel={
+                  deadZoneQuery.trim()
+                    ? t('搜索过滤中不能调序（交换的是原表里的相邻行）——先清空搜索')
+                    : t('上移（改写按表序执行，越靠前越先命中）')
+                }
+                moveDownLabel={
+                  deadZoneQuery.trim()
+                    ? t('搜索过滤中不能调序（交换的是原表里的相邻行）——先清空搜索')
+                    : t('下移')
+                }
                 dupHint={ruleRowHint(
                   rule,
                   Boolean(dupRules.get(rule.from.trim().toLowerCase())),
@@ -4633,10 +4641,18 @@ export default function PurgeConsole(): JSX.Element {
                 probeLabel={t('试')}
                 onProbe={probeRule}
                 onMove={moveSynonymRule}
-                canMoveUp={index > 0}
-                canMoveDown={index < draft.synonym_pairs.length - 1}
-                moveUpLabel={t('上移（改写按表序执行，越靠前越先命中）')}
-                moveDownLabel={t('下移')}
+                canMoveUp={index > 0 && !synonymQuery.trim()}
+                canMoveDown={index < draft.synonym_pairs.length - 1 && !synonymQuery.trim()}
+                moveUpLabel={
+                  synonymQuery.trim()
+                    ? t('搜索过滤中不能调序（交换的是原表里的相邻行）——先清空搜索')
+                    : t('上移（改写按表序执行，越靠前越先命中）')
+                }
+                moveDownLabel={
+                  synonymQuery.trim()
+                    ? t('搜索过滤中不能调序（交换的是原表里的相邻行）——先清空搜索')
+                    : t('下移')
+                }
                 dupHint={ruleRowHint(
                   rule,
                   Boolean(dupSynonyms.get(rule.from.trim().toLowerCase())),

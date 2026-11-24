@@ -247,6 +247,40 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('43 · 搜索过滤期间移动按钮禁用（交换的是原表相邻行，会看起来没反应）', async ({ page }) => {
+  const rules = [
+    { from: 'alpha', to: '1' },
+    { from: 'beta', to: '2' },
+    { from: 'gamma', to: '3' },
+    { from: 'delta', to: '4' },
+  ];
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+
+  const table = page.locator('[data-purge-fix="dead-zone-table"]');
+  // 未过滤时第 2 行可上下移动
+  await expect(table.getByTestId('purge-rule-up-1')).toBeEnabled();
+
+  // 过滤后（只剩 1 行）两个方向都禁用，并给出原因
+  await page.getByLabel('搜索死区词表').fill('gamma');
+  await expect(table.locator('.purge-rule-row')).toHaveCount(1);
+  await expect(table.getByTestId('purge-rule-up-0')).toBeDisabled();
+  await expect(table.getByTestId('purge-rule-down-0')).toBeDisabled();
+  await expect(page.getByTitle(/搜索过滤中不能调序/).first()).toBeVisible();
+
+  // 清空搜索 → 恢复可用
+  await page.getByLabel('搜索死区词表').fill('');
+  await expect(table.getByTestId('purge-rule-up-1')).toBeEnabled();
+});
+
 test('42 · 「批量停用异常行」只停用不删除（可回填后再启用）', async ({ page }) => {
   const rules = [
     { from: 'dup', to: '1', enabled: true },
