@@ -3,6 +3,7 @@ import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { api } from '../api';
+import { API_BASE, authHeaders } from '../api/client';
 import type {
   PurgeAppliedDetail,
   PurgeData,
@@ -1731,6 +1732,27 @@ export default function PurgeConsole(): JSX.Element {
   );
 
   /**
+   * 导出四档统计（宽表 CSV）。
+   *
+   * 走后端 /api/purge/stats.csv 而不是在前端拼字符串：窗口档依赖服务端
+   * 事件环（前端只有当前档的快照），只有后端能一次给全四档。
+   */
+  const exportStatsCsv = useCallback(async (): Promise<void> => {
+    try {
+      const res = await fetch(`${API_BASE}/purge/stats.csv`, { headers: authHeaders() });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const text = await res.text();
+      downloadText(
+        `aigx-purge-stats-${new Date().toISOString().slice(0, 10)}.csv`,
+        text,
+      );
+      addToast(t('统计已导出为 CSV'), 'success');
+    } catch {
+      addToast(t('统计导出失败'), 'error');
+    }
+  }, [addToast, t]);
+
+  /**
    * 导入 CSV → 追加进草稿（与「添加规则」同口径：不整表替换，重复项靠行内提示）。
    * 导入前对现有草稿做 from 冲突预检：全部重复 → 警告口径（可能导错文件/表）；
    * 部分重复 → 成功口径附重复数；行内 `——dupHint` 仍逐行标注。
@@ -2021,6 +2043,15 @@ export default function PurgeConsole(): JSX.Element {
             {opt.label}
           </button>
         ))}
+        {/* 导出四档统计（宽表 CSV）：与页面同一份数据，直接落盘进报表 */}
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="purge-stats-export"
+          onClick={() => void exportStatsCsv()}
+        >
+          {t('导出统计 CSV')}
+        </Button>
       </div>
 
       <StatsGrid
