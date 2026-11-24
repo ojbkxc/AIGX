@@ -588,8 +588,18 @@ export default function Notify() {
                           <input
                             className="form-input"
                             type="number"
+                            min="0"
                             value={r.threshold}
-                            onChange={(e) => updateRule(i, 'threshold', Number(e.target.value))}
+                            onChange={(e) => {
+                              // 清空输入框时 Number('') = 0，而后端判据是
+                              // `current_value < threshold → 不触发`：threshold=0
+                              // 等于「任何值都触发」，一次误清空就变成全量告警。
+                              // 空串视为「未填」，保持原阈值不动。
+                              if (e.target.value.trim() === '') return;
+                              const v = Number(e.target.value);
+                              if (!Number.isFinite(v) || v < 0) return;
+                              updateRule(i, 'threshold', v);
+                            }}
                           />
                         </label>
                         <label className="alert-rule-field">
