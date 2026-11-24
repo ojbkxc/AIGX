@@ -491,17 +491,21 @@ export default function Tickets(): JSX.Element {
                     {admin && visibleKeySet.has('submitter') && (
                     <td>{tk.email || tk.user_id}</td>
                     )}
-                    <td><strong>{tk.subject}</strong></td>
+                    {visibleKeySet.has('subject') && (<td><strong>{tk.subject}</strong></td>)}
+                    {visibleKeySet.has('priority') && (
                     <td><Badge tone={levelTone(tk.level)}>{levelText(t, tk.level)}</Badge></td>
-                    <td>{statusBadge(t, tk.status)}</td>
-                    <td>{replyBadge(t, tk.reply_status)}</td>
-                    <td>{fmtTime(tk.created_at)}</td>
-                    <td>{fmtTime(tk.updated_at)}</td>
+                    )}
+                    {visibleKeySet.has('status') && (<td>{statusBadge(t, tk.status)}</td>)}
+                    {visibleKeySet.has('reply') && (<td>{replyBadge(t, tk.reply_status)}</td>)}
+                    {visibleKeySet.has('created') && (<td>{fmtTime(tk.created_at)}</td>)}
+                    {visibleKeySet.has('updated') && (<td>{fmtTime(tk.updated_at)}</td>)}
+                    {visibleKeySet.has('act') && (
                     <td>
                       <Button variant="outline" size="sm" onClick={() => void openDetail(tk.id)}>
                         {t('展开详情')}
                       </Button>
                     </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
