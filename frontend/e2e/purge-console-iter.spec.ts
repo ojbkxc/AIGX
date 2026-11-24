@@ -284,6 +284,35 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('51 · 规则行的操作按钮带可读名称（几十行同名「删除」无法分辨）', async ({ page }) => {
+  const rules = [
+    { from: 'alpha', to: '1' },
+    { from: 'beta', to: '2' },
+    { from: '   ', to: '3' }, // 空原文 → 名称退成行号
+    { from: 'delta', to: '4' },
+  ];
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+
+  const table = page.locator('[data-purge-fix="dead-zone-table"]');
+  // 删除按钮按名字可精确定位（不是「第一个删除按钮」）
+  await expect(table.getByRole('button', { name: '删除「alpha」' })).toBeVisible();
+  await expect(table.getByRole('button', { name: '删除「delta」' })).toBeVisible();
+  // 空原文那行退成行号（第 3 条）
+  await expect(table.getByRole('button', { name: '删除第 3 条' })).toBeVisible();
+  // 上移/下移同理
+  await expect(table.getByRole('button', { name: /^上移.*「beta」$/ })).toBeVisible();
+  await expect(table.getByRole('button', { name: /^下移.*「alpha」$/ })).toBeVisible();
+});
+
 test('50 · 有未保存修改时导出的是「已保存」配置，并明说', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);

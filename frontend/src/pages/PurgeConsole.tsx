@@ -1930,8 +1930,8 @@ const RuleRow = memo(function RuleRow({
               size="sm"
               data-testid={`purge-rule-up-${index}`}
               disabled={canMoveUp === false}
-              title={moveUpLabel}
-              aria-label={moveUpLabel}
+              title={moveUpLabel ? `${moveUpLabel}「${rule.from}」` : undefined}
+              aria-label={moveUpLabel ? `${moveUpLabel}「${rule.from}」` : undefined}
               onClick={() => onMove(index, -1)}
             >
               ↑
@@ -1941,8 +1941,8 @@ const RuleRow = memo(function RuleRow({
               size="sm"
               data-testid={`purge-rule-down-${index}`}
               disabled={canMoveDown === false}
-              title={moveDownLabel}
-              aria-label={moveDownLabel}
+              title={moveDownLabel ? `${moveDownLabel}「${rule.from}」` : undefined}
+              aria-label={moveDownLabel ? `${moveDownLabel}「${rule.from}」` : undefined}
               onClick={() => onMove(index, 1)}
             >
               ↓
@@ -1967,7 +1967,23 @@ const RuleRow = memo(function RuleRow({
             {probeLabel}
           </Button>
         ) : null}
-        <Button variant="outline" size="sm" onClick={() => onRemove(index)}>
+        <Button
+          variant="outline"
+          size="sm"
+          // 一页可能几十行「删除」：屏幕阅读器读到的是一串同名按钮，无法判断会删哪条。
+          // 名称里带上这一行的原文（空原文时退成行号）。
+          title={
+            rule.from.trim()
+              ? `${removeLabel}「${rule.from}」`
+              : `${removeLabel}第 ${index + 1} 条`
+          }
+          aria-label={
+            rule.from.trim()
+              ? `${removeLabel}「${rule.from}」`
+              : `${removeLabel}第 ${index + 1} 条`
+          }
+          onClick={() => onRemove(index)}
+        >
           {removeLabel}
         </Button>
       </div>
