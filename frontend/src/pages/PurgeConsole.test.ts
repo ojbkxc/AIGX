@@ -3,6 +3,7 @@ import {
   buildActiveSummary,
   capError,
   exportPreviewHistory,
+  findBodySnippet,
   parsePreviewHistoryJson,
   readPresetFilter,
   sortWarningsBySeverity,
@@ -23,6 +24,32 @@ import {
   writePreviewHistory,
   writePresetFilter,
 } from './PurgeConsole';
+
+describe('findBodySnippet', () => {
+  const body = 'A'.repeat(100) + 'NeedleHere' + 'B'.repeat(100);
+
+  it('大小写不敏感定位，但返回原文切片（不改作者写法）', () => {
+    const s = findBodySnippet(body, 'needlehere');
+    expect(s?.hit).toBe('NeedleHere');
+  });
+
+  it('取前后上下文并加省略号标记截断', () => {
+    const s = findBodySnippet(body, 'needlehere', 10);
+    expect(s?.before).toBe('…' + 'A'.repeat(10));
+    expect(s?.after).toBe('B'.repeat(10) + '…');
+  });
+
+  it('命中在开头/结尾时不加多余省略号', () => {
+    expect(findBodySnippet('needle tail', 'needle')?.before).toBe('');
+    expect(findBodySnippet('head needle', 'needle')?.after).toBe('');
+  });
+
+  it('空检索词 / 空正文 / 未命中 → null', () => {
+    expect(findBodySnippet(body, '   ')).toBeNull();
+    expect(findBodySnippet('', 'x')).toBeNull();
+    expect(findBodySnippet(body, 'zzz-not-there')).toBeNull();
+  });
+});
 
 describe('diffSettings', () => {
   const base = {

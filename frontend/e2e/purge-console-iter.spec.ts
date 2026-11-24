@@ -208,6 +208,62 @@ test('6 · 「只看变更行」隐藏上下文并报出隐藏行数', async ({ 
   await expect(page.locator('.pdl-hidden-hint')).toHaveCount(0);
 });
 
+test('9 · 搜到正文时展开给出命中片段并高亮', async ({ page }) => {
+  const body = '前置上下文'.repeat(12) + 'UniqueNeedleToken' + '后置上下文'.repeat(12);
+  await page.route(/\/api\/purge\/presets\/[^/]+$/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: {
+          id: 'p-body',
+          vendor: 'V',
+          model: 'm',
+          title: 'Body hit preset',
+          tags: [],
+          bytes: body.length,
+          sha256: 'deadbeef'.repeat(8),
+          body,
+        },
+      },
+    }),
+  );
+  await page.route(/\/api\/purge\/presets(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: {
+          items: [
+            {
+              id: 'p-body',
+              vendor: 'V',
+              model: 'm',
+              title: 'Body hit preset',
+              tags: [],
+              bytes: body.length,
+              sha256: 'deadbeef'.repeat(8),
+              preview: body.slice(0, 200),
+              body_match: true,
+            },
+          ],
+          vendors: [{ vendor: 'V', count: 1 }],
+          total: 1,
+        },
+      },
+    }),
+  );
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  await page.getByLabel('搜索预设').fill('uniqueneedletoken');
+  await expect(page.getByText('正文命中')).toBeVisible();
+
+  await page.getByText('Body hit preset').first().click();
+  const snippet = page.getByTestId('purge-preset-snippet');
+  await expect(snippet).toBeVisible();
+  // 命中词在 <mark> 里且保留原文大小写
+  await expect(snippet.locator('mark')).toHaveText('UniqueNeedleToken');
+});
+
 test('8 · 预设库搜索框告知检索范围覆盖正文', async ({ page }) => {
   await mockPurge(page);
   // 预设列表本身由另一个 spec 覆盖；这里只要搜索框的检索范围提示正确

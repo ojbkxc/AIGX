@@ -750,3 +750,23 @@
   border-color: var(--border-color);
   background: transparent;
 }
+/* 预设正文命中片段：等宽、弱化上下文、高亮命中 */
+.purge-preset-snippet {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent-color, #4f46e5);
+  background: var(--surface-bg, rgba(127, 127, 127, 0.06));
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.purge-preset-snippet mark {
+  background: color-mix(in srgb, var(--accent-color, #4f46e5) 22%, transparent);
+  color: var(--text-main, inherit);
+  padding: 0 2px;
+  border-radius: 3px;
+}

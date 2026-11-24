@@ -333,6 +333,40 @@ export function diffSettings(
   return items;
 }
 
+/** 命中片段：`before`/`after` 是上下文，`hit` 是原文里那一段（保留原大小写）。 */
+export interface BodySnippet {
+  before: string;
+  hit: string;
+  after: string;
+}
+
+/**
+ * 在正文里定位检索词，取前后各 `radius` 个字符的上下文（纯函数）。
+ *
+ * 为什么需要：列表标了「正文命中」之后，用户还得展开正文自己找那一处——预设
+ * 正文动辄 20KB。这里直接给出命中片段，展开即可看到。
+ *
+ * 大小写不敏感定位（与后端 `matches` 同口径），但**返回原文切片**：正文大小写
+ * 是作者写的，展示时不该被改。
+ */
+export function findBodySnippet(
+  body: string,
+  needle: string,
+  radius = 60,
+): BodySnippet | null {
+  const trimmed = needle.trim();
+  if (!trimmed || !body) return null;
+  const index = body.toLowerCase().indexOf(trimmed.toLowerCase());
+  if (index < 0) return null;
+  const start = Math.max(0, index - radius);
+  const end = Math.min(body.length, index + trimmed.length + radius);
+  return {
+    before: (start > 0 ? '…' : '') + body.slice(start, index),
+    hit: body.slice(index, index + trimmed.length),
+    after: body.slice(index + trimmed.length, end) + (end < body.length ? '…' : ''),
+  };
+}
+
 /** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值，
  *  `anchor` 是 `data-purge-fix` 锚点（点了滚到对应配置区）。 */
 export interface ActiveItem {
@@ -1759,9 +1793,25 @@ const PresetsSection = memo(function PresetsSection({
                     {detailLoading ? (
                       <SkeletonList rows={6} />
                     ) : (
-                      <pre className="purge-preset-preview" data-testid="purge-preset-preview">
-                        {detail && detail.id === item.id ? detail.body : item.preview}
-                      </pre>
+                      <>
+                        {/* 有检索词时先给命中片段：正文动辄 20KB，直接展开等于让人自己找 */}
+                        {(() => {
+                          const snippet = findBodySnippet(
+                            detail && detail.id === item.id ? detail.body : item.preview,
+                            debouncedQ,
+                          );
+                          return snippet ? (
+                            <p className="purge-preset-snippet" data-testid="purge-preset-snippet">
+                              {snippet.before}
+                              <mark>{snippet.hit}</mark>
+                              {snippet.after}
+                            </p>
+                          ) : null;
+                        })()}
+                        <pre className="purge-preset-preview" data-testid="purge-preset-preview">
+                          {detail && detail.id === item.id ? detail.body : item.preview}
+                        </pre>
+                      </>
                     )}
                   </div>
                 ) : null}
