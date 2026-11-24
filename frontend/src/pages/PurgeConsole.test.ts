@@ -9,6 +9,7 @@ import {
   noteRecentPreset,
   readPresetFilter,
   readRecentPresets,
+  snapshotReportText,
   sortWarningsBySeverity,
   tidyRules,
   warningReportText,
@@ -68,6 +69,54 @@ describe('readRecentPresets / noteRecentPreset', () => {
       throw new Error('quota');
     };
     expect(() => noteRecentPreset([], 'x', boom, boom)).not.toThrow();
+  });
+});
+
+describe('snapshotReportText', () => {
+  const tr = (k: string): string => k;
+  const base = {
+    runtime: { pid: 42, uptime_secs: 90, upstream: 'relay-a' },
+    activeItems: ['死区词改写（3 条启用）'],
+    warnings: [],
+    stats: { responses: 12, retries: 1 },
+    translate: tr,
+  };
+
+  it('四段齐全且顺序固定：运行 → 生效项 → 体检 → 统计', () => {
+    const text = snapshotReportText({ ...base, baselineAt: 1_780_000_000 });
+    const order = ['## 运行', '## 当前生效项', '## 配置体检', '## 统计'].map((h) => text.indexOf(h));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it('运行段带 PID/运行时长/上游，有基线时多一行', () => {
+    const withBaseline = snapshotReportText({ ...base, baselineAt: 1_780_000_000 });
+    expect(withBaseline).toContain('PID 42');
+    expect(withBaseline).toContain('90s');
+    expect(withBaseline).toContain('relay-a');
+    expect(withBaseline).toContain('统计基线');
+    const noBaseline = snapshotReportText(base);
+    expect(noBaseline).not.toContain('统计基线');
+  });
+
+  it('无告警 → 体检段写「通过」；有告警 → 带级别前缀', () => {
+    expect(snapshotReportText(base)).toContain('通过：没有「开了但不生效」或自相矛盾的项目');
+    const withWarn = snapshotReportText({
+      ...base,
+      warnings: [{ message: '死区词表为空', severity: 'warn' }],
+    });
+    expect(withWarn).toContain('- [warn] 死区词表为空');
+  });
+
+  it('空生效项/空统计 → 写「（无）」而不是留空段', () => {
+    const text = snapshotReportText({ ...base, activeItems: [], stats: {} });
+    expect(text).toContain('- （无）');
+  });
+
+  it('统计按后端键序输出（不排序，避免与页面卡片顺序错位）', () => {
+    const text = snapshotReportText({ ...base, stats: { responses: 5, retries: 2, refusals: 1 } });
+    expect(text.indexOf('- responses: 5')).toBeLessThan(text.indexOf('- retries: 2'));
+    expect(text.indexOf('- retries: 2')).toBeLessThan(text.indexOf('- refusals: 1'));
   });
 });
 

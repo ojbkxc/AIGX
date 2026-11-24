@@ -432,6 +432,53 @@ export function warningReportText(
   return lines.join('\n');
 }
 
+/**
+ * 破甲现状快照（一次复制全部）：交接/报障时要的是「全景」，不是三个片段。
+ *
+ * 结构固定为四段（运行 → 生效项 → 体检 → 统计），每段都带标题，粘到工单里
+ * 对方能按段读。**不做任何计算**：只用传进来的快照值，避免「复制出来的数和
+ * 页面上显示的不一致」。
+ */
+export function snapshotReportText(input: {
+  runtime: { pid: number; uptime_secs: number; upstream: string };
+  activeItems: string[];
+  warnings: Array<{ message: string; severity?: string }>;
+  stats: Record<string, number>;
+  baselineAt?: number;
+  translate: (key: string) => string;
+}): string {
+  const { runtime, activeItems, warnings, stats, baselineAt, translate: tr } = input;
+  const lines: string[] = [];
+
+  lines.push(`## ${tr('运行')}`);
+  lines.push(`- PID ${runtime.pid} · ${tr('已运行')} ${runtime.uptime_secs}s · ${tr('上游')} ${runtime.upstream || '—'}`);
+  if (baselineAt) {
+    lines.push(`- ${tr('统计基线')} ${new Date(baselineAt * 1000).toLocaleString()}`);
+  }
+
+  lines.push(`## ${tr('当前生效项')}`);
+  if (activeItems.length === 0) lines.push(`- ${tr('（无）')}`);
+  for (const item of activeItems) lines.push(`- ${item}`);
+
+  lines.push(`## ${tr('配置体检')}`);
+  if (warnings.length === 0) {
+    lines.push(`- ${tr('通过：没有「开了但不生效」或自相矛盾的项目')}`);
+  } else {
+    for (const warning of warnings) {
+      const level = warning.severity ?? 'error';
+      lines.push(`- [${level}] ${warning.message}`);
+    }
+  }
+
+  lines.push(`## ${tr('统计')}`);
+  // 键序按后端 JSON 顺序（Object.entries 保序），不排序以免和页面卡片顺序对不上
+  const entries = Object.entries(stats);
+  if (entries.length === 0) lines.push(`- ${tr('（无）')}`);
+  for (const [key, value] of entries) lines.push(`- ${key}: ${value}`);
+
+  return lines.join('\n');
+}
+
 /** 生效项摘要导出成纯文本（贴给同事/贴进工单时用，不带 UI 装饰）。 */
 export function activeSummaryText(
   items: ActiveItem[],
@@ -2678,6 +2725,36 @@ export default function PurgeConsole(): JSX.Element {
    * 走后端 /api/purge/stats.csv 而不是在前端拼字符串：窗口档依赖服务端
    * 事件环（前端只有当前档的快照），只有后端能一次给全四档。
    */
+  /** 复制破甲现状快照（交接/报障：运行 + 生效项 + 体检 + 统计一次带走） */
+  const copySnapshot = useCallback(async (): Promise<void> => {
+    const current = draftRef.current;
+    if (!current || !data) return;
+    const warnings =
+      configWarningItems.length > 0
+        ? sortWarningsBySeverity(
+            configWarningItems.map((w) => ({
+              message: w.message,
+              severity: w.severity ?? 'error',
+            })),
+          )
+        : configWarnings.map((message) => ({ message, severity: 'error' }));
+    const text = snapshotReportText({
+      runtime: data.runtime,
+      activeItems: buildActiveSummary(current).map((item) => t(item.key, item.params)),
+      warnings,
+      // 用 `data.stats`（全程累计）而不是页面上被窗口切换后的 `stats`：
+      // 快照要的是「这段基线以来一共怎样」，跟当前视图口径无关
+      stats: data.stats as unknown as Record<string, number>,
+      baselineAt: data.stats_since,
+      translate: (key) => t(key),
+    });
+    const copied = await copyText(text);
+    addToast(
+      copied ? t('已复现现状快照') : t('复制失败（浏览器可能禁用了剪贴板权限）'),
+      copied ? 'success' : 'error',
+    );
+  }, [addToast, configWarningItems, configWarnings, data, t]);
+
   /** 复制体检结果为纯文本（工单证据：出了什么问题、按级分组） */
   const copyWarningReport = useCallback(async (): Promise<void> => {
     const items =
@@ -3040,6 +3117,15 @@ export default function PurgeConsole(): JSX.Element {
             onClick={() => void load()}
           >
             {t('刷新')}
+          </Button>
+          {/* 现状快照：交接/报障要全景（运行 + 生效项 + 体检 + 统计） */}
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="purge-snapshot-copy"
+            onClick={() => void copySnapshot()}
+          >
+            {t('复制现状快照')}
           </Button>
         </div>
         {/* 总开关关闭提示：放在页面标题下方独立成行（请求不会被改写这件事必须一眼看到，
