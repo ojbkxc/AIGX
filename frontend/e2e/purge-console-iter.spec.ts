@@ -247,6 +247,39 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('21 · Ctrl+S 真的有提示、也真的保存', async ({ page }, testInfo) => {
+  let puts = 0;
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') {
+      puts += 1;
+      await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+      return;
+    }
+    await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+  });
+  await gotoPurge(page);
+
+  // 提示可见（能力藏着等于没有）。触屏 project 里它被 `hover:none` 媒体查询隐藏
+  // ——设备没有键盘，不提示才是对的，所以断言按 project 分支。
+  const hint = page.getByTestId('purge-shortcut-hint');
+  if (testInfo.project.name === 'mobile') {
+    await expect(hint).toBeHidden();
+  } else {
+    await expect(hint).toBeVisible();
+  }
+
+  // 未改动时按 Ctrl+S 不该发 PUT（放行浏览器默认行为）
+  await page.keyboard.press('Control+s');
+  await page.waitForTimeout(800);
+  expect(puts).toBe(0);
+
+  // 有改动时 Ctrl+S 才保存
+  await page.getByLabel('重试上限').fill('7');
+  await page.keyboard.press('Control+s');
+  await expect.poll(() => puts).toBe(1);
+  await expect(page.locator('.toast', { hasText: '已保存' })).toHaveCount(1);
+});
+
 test('20 · 「对比出厂默认」列出偏离项，一致时说一致', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);

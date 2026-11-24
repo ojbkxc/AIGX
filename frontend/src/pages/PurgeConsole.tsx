@@ -3427,6 +3427,11 @@ export default function PurgeConsole(): JSX.Element {
           >
             {t('复制现状快照')}
           </Button>
+          {/* Ctrl/Cmd+S 一直可用但界面零提示——能力藏着等于没有。
+              放在 header（始终渲染），不要放进「有未保存改动才出现」的警示条 */}
+          <kbd className="purge-kbd-hint" data-testid="purge-shortcut-hint">
+            {t('Ctrl/⌘ + S 保存')}
+          </kbd>
         </div>
         {/* 未保存草稿备份：刷新/关页丢掉改动的唯一补救入口 */}
       {draftBackup ? (
