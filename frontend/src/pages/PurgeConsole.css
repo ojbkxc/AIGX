@@ -729,3 +729,11 @@
 .purge-active-jump:hover {
   text-decoration-style: solid;
 }
+/* diff：隐藏了多少行上下文 */
+.pdl-hidden-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 0 4px;
+  border-bottom: 1px dashed var(--border-color);
+  margin-bottom: 4px;
+}

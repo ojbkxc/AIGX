@@ -1591,6 +1591,8 @@ export default function PurgeConsole(): JSX.Element {
   const [previewSavedOnly, setPreviewSavedOnly] = useState(false);
   /** 预览时套用的模型（非空则一并预演「按模型自动套用」的预设前插） */
   const [previewModel, setPreviewModel] = useState('');
+  /** diff 只看变更行（长样例里上下文占绝大多数，遮住真正的改写点） */
+  const [diffChangedOnly, setDiffChangedOnly] = useState(false);
 
   /** 样例历史导入用的文件选择器 */
   const previewHistoryFileRef = useRef<HTMLInputElement>(null);
@@ -3235,29 +3237,52 @@ export default function PurgeConsole(): JSX.Element {
               </div>
             ) : null}
             {/* 改写前后有差异 → 行级/词级 diff 染色；无差异（或无基线）→ 原文 */}
+            <label className="purge-rule-toggle" title={t('长样例里上下文行会遮住真正的改写点')}>
+              <input
+                type="checkbox"
+                checked={diffChangedOnly}
+                onChange={(event) => setDiffChangedOnly(event.target.checked)}
+              />
+              <span className="purge-hint">{t('只看变更行')}</span>
+            </label>
             {previewBase !== null && previewBase !== previewOut ? (
               <div className="purge-preview-diff" data-testid="purge-preview-diff" aria-label={t('改写结果')}>
-                {diffLines(previewBase, previewOut).map((row, index) => {
-                  if (row.kind === 'ctx') {
-                    return <div key={index} className="pdl-ctx">{row.text}</div>;
-                  }
-                  if (row.kind === 'del') {
-                    return <div key={index} className="pdl-del">{'- '}{row.text}</div>;
-                  }
-                  if (row.kind === 'add') {
-                    return <div key={index} className="pdl-add">{'+ '}{row.text}</div>;
-                  }
-                  const w = diffTokensInLine(row.del, row.add);
+                {(() => {
+                  const rows = diffLines(previewBase, previewOut);
+                  // 「只看变更」：上下文行在长样例里占绝大多数，遮蔽真正的改写点
+                  const shown = diffChangedOnly ? rows.filter((r) => r.kind !== 'ctx') : rows;
+                  const hidden = rows.length - shown.length;
                   return (
-                    <div key={index} className="pdl-mod">
-                      <span className="pdl-w-keep">{w.keep1}</span>
-                      {w.del ? <span className="pdl-w-del">{w.del}</span> : null}
-                      <span className="pdl-w-keep">{w.keep2}</span>
-                      {w.add ? <span className="pdl-w-add">{w.add}</span> : null}
-                      <span className="pdl-w-keep">{w.keep3}</span>
-                    </div>
+                    <>
+                      {hidden > 0 ? (
+                        <div className="pdl-hidden-hint">
+                          {t('已隐藏 {{n}} 行未变更内容', { n: hidden })}
+                        </div>
+                      ) : null}
+                      {shown.map((row, index) => {
+                        if (row.kind === 'ctx') {
+                          return <div key={index} className="pdl-ctx">{row.text}</div>;
+                        }
+                        if (row.kind === 'del') {
+                          return <div key={index} className="pdl-del">{'- '}{row.text}</div>;
+                        }
+                        if (row.kind === 'add') {
+                          return <div key={index} className="pdl-add">{'+ '}{row.text}</div>;
+                        }
+                        const w = diffTokensInLine(row.del, row.add);
+                        return (
+                          <div key={index} className="pdl-mod">
+                            <span className="pdl-w-keep">{w.keep1}</span>
+                            {w.del ? <span className="pdl-w-del">{w.del}</span> : null}
+                            <span className="pdl-w-keep">{w.keep2}</span>
+                            {w.add ? <span className="pdl-w-add">{w.add}</span> : null}
+                            <span className="pdl-w-keep">{w.keep3}</span>
+                          </div>
+                        );
+                      })}
+                    </>
                   );
-                })}
+                })()}
               </div>
             ) : (
               <pre className="purge-preview-out" aria-label={t('改写结果')}>
