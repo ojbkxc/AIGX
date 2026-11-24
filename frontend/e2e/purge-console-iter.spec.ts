@@ -247,6 +247,21 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('25 · runtime 缺失时页面不崩（零值兜底，header 显示 PID 0）', async ({ page }) => {
+  await mockPurge(page);
+  // runtime 给 null：`formatUptime(data.runtime.uptime_secs)` 在渲染函数体里、
+  // 边界之外 —— 必须靠派生阶段的零值兜底
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({ json: { success: true, data: { ...PURGE_DATA, runtime: null } } }),
+  );
+  await gotoPurge(page);
+
+  await expect(page.getByText('出错了')).toHaveCount(0);
+  // header 用零值兜底而不是把 null 漏成 TypeError 页
+  await expect(page.locator('.purge-meta')).toContainText('PID 0');
+  await expect(page.getByRole('button', { name: '保存' })).toBeVisible();
+});
+
 test('24 · 统计字段形状畸形时显示「—」，不漏 undefined/0.00%', async ({ page }) => {
   await mockPurge(page);
   // 字符串形状不会崩（`'oops'.responses` 只是 undefined），但会渲染畸形值

@@ -14,6 +14,7 @@ import type {
   PurgeRewriteRule,
   PurgeSettings,
   PurgeStats,
+  PurgeRuntime,
   PurgeWindowedStats,
   PurgeTemplate,
 } from '../types';
@@ -170,6 +171,17 @@ export function retryRateText(responses: unknown, retries: unknown): string | nu
   if (typeof retries !== 'number' || !Number.isFinite(retries)) return null;
   return responses > 0 ? ((retries / responses) * 100).toFixed(2) : '0.00';
 }
+
+/** 缺 `runtime` 时的零值兜底（同 `EMPTY_STATS`：派生阶段解构崩了区块边界接不住）。 */
+const EMPTY_RUNTIME: PurgeRuntime = { pid: 0, uptime_secs: 0, upstream: '', inflight: 0 };
+
+/** 缺 `settings` 时的零值兜底（只读参数区读的是服务端快照，不在区块边界内）。 */
+const EMPTY_SETTINGS_SNAPSHOT = {
+  retry_limit: 0,
+  fallback_trigger_attempt: 0,
+  skill_inject_limit: 0,
+  fallback_models: [] as string[],
+};
 
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
@@ -3432,7 +3444,17 @@ export default function PurgeConsole(): JSX.Element {
         : statsWindow === 'last'
           ? t('上次运行')
           : undefined;
-  const uptime = formatUptime(data.runtime.uptime_secs, {
+  // `runtime` 也在派生阶段被解构（uptime / header 的 PID）——同样在边界之外
+  const runtime = data.runtime ?? EMPTY_RUNTIME;
+  // 只读参数区读的是**服务端快照**（不读草稿）；这里崩同样在边界之外。
+  // 注意：ErrorBoundary 只能捕获「子组件渲染时」的异常，**捕获不到「父组件构造
+  // children 时」的异常** —— `<ParamGrid inflight={data.runtime.inflight} />`
+  // 的 prop 求值发生在当前组件的渲染里，包多少层 guard 都没用。
+  const savedSettings = data.settings ?? EMPTY_SETTINGS_SNAPSHOT;
+  const savedFallbackModels = Array.isArray(savedSettings.fallback_models)
+    ? savedSettings.fallback_models
+    : [];
+  const uptime = formatUptime(runtime.uptime_secs, {
     sec: t('秒'),
     min: t('分钟'),
     hour: t('小时'),
@@ -3444,8 +3466,8 @@ export default function PurgeConsole(): JSX.Element {
       <div className="page-header">
         <h1>{t('破甲控制台')}</h1>
         <div className="purge-meta">
-          PID {data.runtime.pid} · {uptime} · {t('上游')}{' '}
-          {data.runtime.upstream || '—'}{' '}
+          PID {runtime.pid} · {uptime} · {t('上游')}{' '}
+          {runtime.upstream || '—'}{' '}
           {/* 刷新统计：load 会重置草稿，有未保存编辑时禁用避免吞掉改动 */}
           <Button
             variant="outline"
@@ -3778,6 +3800,7 @@ export default function PurgeConsole(): JSX.Element {
         <span data-purge-fix="switches" />
         <SwitchRows flags={flags} disabled={saving} onToggle={toggle} t={t} />
       </Card>
+      <SectionGuard title={t('只读参数')}>
       <Card
         title={t('只读参数')}
         actions={
@@ -3809,19 +3832,20 @@ export default function PurgeConsole(): JSX.Element {
         {/* 只读区一律读服务端快照（data.settings），不读草稿——未保存的编辑
             不应提前出现在「只读」区（与失败分类、在途数等运行时字段同口径）。 */}
         <ParamGrid
-          retryLimit={data.settings.retry_limit}
+          retryLimit={savedSettings.retry_limit}
           failureRefusal={stats.failure_refusal}
           failureEmpty={stats.failure_empty}
           failureFilter={stats.failure_filter}
           failureOther={stats.failure_other}
-          fallbackModels={data.settings.fallback_models.join(', ')}
-          fallbackTriggerAttempt={data.settings.fallback_trigger_attempt}
-          skillInjectLimit={data.settings.skill_inject_limit}
-          inflight={data.runtime.inflight}
-          upstream={data.runtime.upstream}
+          fallbackModels={savedFallbackModels.join(', ')}
+          fallbackTriggerAttempt={savedSettings.fallback_trigger_attempt}
+          skillInjectLimit={savedSettings.skill_inject_limit}
+          inflight={runtime.inflight}
+          upstream={runtime.upstream}
           t={t}
         />
       </Card>
+      </SectionGuard>
 
       <SectionGuard title={t('死区词改写词表')}>
       <Card
