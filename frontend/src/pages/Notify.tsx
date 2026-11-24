@@ -95,6 +95,13 @@ export default function Notify() {
   const [testingAlertKind, setTestingAlertKind] = useState('memory_high');
   const [testingAlert, setTestingAlert] = useState(false);
   const [alertsError, setAlertsError] = useState('');
+  /**
+   * 首屏配置是否读取成功过。
+   * 读取失败时 notify 仍是 `{}`，而保存按钮会把 `smtp_host` / `telegram_chat_id` /
+   * `webhook_url` 等以 `?? ''` 兜底后整份提交 ⇒ 一次「只想改测试邮箱」的保存
+   * 就会把已配好的通知渠道全部清空。载入成功前不给保存入口。
+   */
+  const [configLoaded, setConfigLoaded] = useState(false);
 
   useEffect(() => { loadConfig(); loadAlerts(); }, []);
 
@@ -104,6 +111,7 @@ export default function Notify() {
     try {
       const res = (await api.getNotifyConfig()) as ListResponse<NotifyConfig> | NotifyConfig;
       setNotify((res as ListResponse<NotifyConfig>).data || (res as NotifyConfig));
+      setConfigLoaded(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -679,9 +687,14 @@ export default function Notify() {
 
         {/* 保存按钮 */}
         <div className="notify-save-bar">
-          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving || !configLoaded}>
             {saving ? t('保存中...') : t('保存通知配置')}
           </button>
+          {!configLoaded && (
+            <span className="form-hint" style={{ marginLeft: 8, color: 'var(--danger-text, #c0392b)' }}>
+              {t('通知配置尚未读取成功，禁止保存以免覆盖已有配置；请刷新页面重试')}
+            </span>
+          )}
         </div>
       </div>
     </div>

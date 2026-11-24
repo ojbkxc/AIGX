@@ -227,32 +227,7 @@ export default function Security(): JSX.Element {
 
       {/* 系统资源监控（CPU/内存/负载，自动轮询） */}
       <Card title={t('系统资源')} bodyClassName="">
-
-        actions={
-          <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
-            <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
-              <button
-                type="button"
-                className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
-                onClick={() => setColPanelOpen((v) => !v)}
-                aria-label={t('列设置')}
-              >
-                <Columns3 size={14} />
-              </button>
-            </Tooltip>
-            {colPanelOpen && (
-              <TableColumnSettings
-                open
-                onClose={() => setColPanelOpen(false)}
-                defs={SEC_COL_DEFS}
-                items={colState.items}
-                onChange={commitCols}
-                onReset={resetCols}
-                anchorRef={colPanelRef}
-              />
-            )}
-          </div>
-        }        <SystemMonitorPanel />
+        <SystemMonitorPanel />
       </Card>
 
       {/* 概览卡片 */}
@@ -305,7 +280,34 @@ export default function Security(): JSX.Element {
       </Card>
 
       {/* 事件列表 */}
-      <Card title={`${t('安全事件')} (${total})`}>
+      <Card
+        title={`${t('安全事件')} (${total})`}
+        actions={
+          <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+            <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+              <button
+                type="button"
+                className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                onClick={() => setColPanelOpen((v) => !v)}
+                aria-label={t('列设置')}
+              >
+                <Columns3 size={14} />
+              </button>
+            </Tooltip>
+            {colPanelOpen && (
+              <TableColumnSettings
+                open
+                onClose={() => setColPanelOpen(false)}
+                defs={SEC_COL_DEFS}
+                items={colState.items}
+                onChange={commitCols}
+                onReset={resetCols}
+                anchorRef={colPanelRef}
+              />
+            )}
+          </div>
+        }
+      >
         {loading ? (
           <SkeletonTable columns={6} rows={8} />
         ) : events.length === 0 ? (
@@ -313,12 +315,12 @@ export default function Security(): JSX.Element {
         ) : (
           <div className="table-wrapper">
             <table>
+              <colgroup>
+                {appliedCols.map((c) => (
+                  <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                ))}
+              </colgroup>
               <thead>
-                <colgroup>
-                  {appliedCols.map((c) => (
-                    <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
-                  ))}
-                </colgroup>
                 <tr>
                   {appliedCols.map((c, idx) => {
                     const grip = colResize.gripProps(c.key, {

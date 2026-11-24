@@ -106,9 +106,10 @@ function fmtPct(val: number | null | undefined): string {
 }
 
 function fmtRate(val: number | null | undefined): string {
-  // 后端 success_rate 已是 0~100 的百分数
+  // 后端 archive.success_rate = ((success/total) * 100).round() / 100，
+  // 即「0~1 的比例保留两位小数」，不是 0~100 的百分数；这里要乘 100 才是百分比。
   if (val === undefined || val === null) return '—';
-  return val.toFixed(1) + '%';
+  return (val * 100).toFixed(1) + '%';
 }
 
 export default function NetworkLayer(): JSX.Element {
@@ -386,10 +387,12 @@ export default function NetworkLayer(): JSX.Element {
                   <div className="flex items-center justify-between text-xs text-gray-400">
                     <span>{t('当日建流成功率')}</span>
                     <span className="text-green-500">
+                      {/* 无请求时不能填 1（=100%）：那是「一次都没建流却显示全部成功」的假数字，
+                          与后端「无数据不编数」口径一致，这里显示「—」。 */}
                       {fmtPercent(
                         cp && cp.successful_requests + cp.failed_requests > 0
                           ? cp.successful_requests / (cp.successful_requests + cp.failed_requests)
-                          : 1,
+                          : null,
                       )}
                     </span>
                   </div>
@@ -746,12 +749,14 @@ export default function NetworkLayer(): JSX.Element {
                   const state = ch.breaker?.state;
                   return (
                     <tr key={ch.id} className="border-b border-gray-800">
+                      {nlKeySet.has('channel') && (
                       <td className="py-2 pr-4 text-white">
                         <div className="font-medium">{ch.name || ch.id}</div>
                         <div className="text-gray-500 text-xs">
                           {ch.channel_type} · {ch.enabled ? t('启用') : t('停用')} · W{ch.weight}
                         </div>
                       </td>
+                      )}
                       {nlKeySet.has('breaker') && (
 <td className="py-2 pr-4">
                         <span className="inline-flex items-center gap-1.5">
@@ -807,7 +812,7 @@ export default function NetworkLayer(): JSX.Element {
                       {nlKeySet.has('success') && (
 <td className="py-2 pr-4">
                         {ch.archive ? (
-                          <span style={{ color: ch.archive.success_rate >= 95 ? 'rgb(34,197,94)' : ch.archive.success_rate >= 80 ? 'rgb(234,179,8)' : 'rgb(239,68,68)' }}>
+                          <span style={{ color: ch.archive.success_rate >= 0.95 ? 'rgb(34,197,94)' : ch.archive.success_rate >= 0.8 ? 'rgb(234,179,8)' : 'rgb(239,68,68)' }}>
                             {fmtRate(ch.archive.success_rate)}
                           </span>
                         ) : (

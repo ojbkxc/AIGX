@@ -93,20 +93,26 @@ export default function Register() {
     if (usernameTimerRef.current) {
       clearTimeout(usernameTimerRef.current);
     }
-    if (!value.trim()) {
+    const name = value.trim();
+    // 记下「当前最新一次检查的目标」：防抖只能取消还没发出的定时器，
+    // 已经发出的请求仍会返回。返回时若目标已不是最新值，就丢弃这次响应
+    // （否则旧响应会把新输入的状态覆盖成上一个用户名的结论）。
+    usernameCheckedRef.current = name;
+    if (!name) {
       setUsernameStatus('idle');
       return;
     }
     setUsernameStatus('checking');
     usernameTimerRef.current = setTimeout(async () => {
       try {
-        const res = (await api.checkUsername(value.trim())) as UsernameCheckResponse;
+        const res = (await api.checkUsername(name)) as UsernameCheckResponse;
+        if (usernameCheckedRef.current !== name) return;
         // 后端返回 { available: true/false } 或 { data: { available: ... } }
         const data = res?.data ?? res;
         const available = data?.available ?? !data?.exists;
         setUsernameStatus(available ? 'available' : 'taken');
-        usernameCheckedRef.current = value.trim();
       } catch {
+        if (usernameCheckedRef.current !== name) return;
         setUsernameStatus('error');
       }
     }, 300);

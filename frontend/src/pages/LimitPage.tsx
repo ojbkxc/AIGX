@@ -110,7 +110,15 @@ export default function LimitPage(): JSX.Element {
   }, [loadRateLimitConfig, loadCacheStats]);
 
   const handleRlChange = (field: keyof RateLimitConfig, value: string): void => {
-    setRlConfig({ ...(rlConfig as RateLimitConfig), [field]: value === '' ? null : Number(value) });
+    // 页面提示写的是「留空或 0 = 不限制」，但后端 `Option<u64>` 里 0 与缺省**不等价**：
+    // `check_and_increment` 判 `count + 1 > limit`，limit=0 时第一个请求就被拒
+    // （Some(0) = 全量拦截，None = 不限制）。所以 0 必须按 null 发，否则用户照提示
+    // 填 0 等于把该维度配成「一律拒绝」。
+    const n = Number(value);
+    setRlConfig({
+      ...(rlConfig as RateLimitConfig),
+      [field]: value.trim() === '' || n === 0 ? null : n,
+    });
   };
 
   const handleRlSave = async (): Promise<void> => {
@@ -237,7 +245,12 @@ export default function LimitPage(): JSX.Element {
                 <div className="form-group">
                   <label>{t('内存占用')}</label>
                   <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
-                    {fmtBytes(cacheStats.memory_bytes || cacheStats.size_bytes || 0)}
+                    {/* 后端 /api/cache/stats 恒返回 memory_bytes=0 并在源码里注明
+                        「由前端显示「—」，不编一个假数字」——这里必须照契约显示「—」，
+                        显示 0 B 等于声称「缓存不占内存」。 */}
+                    {cacheStats.memory_bytes || cacheStats.size_bytes
+                      ? fmtBytes(cacheStats.memory_bytes || cacheStats.size_bytes || 0)
+                      : '—'}
                   </div>
                 </div>
               </div>

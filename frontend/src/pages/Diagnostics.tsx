@@ -295,8 +295,11 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
               <>
                 <div className="dx-probe-summary">
                   <span>
-                    {t('探测 {{n}} 个供应商，存活 {{alive}} 个')}（
-                    {t('截止 {{s}}s')}）
+                    {t('探测 {{n}} 个供应商，存活 {{alive}} 个', {
+                      n: probes.probed,
+                      alive: probes.alive,
+                    })}（
+                    {t('截止 {{s}}s', { s: probes.deadline_secs })}）
                   </span>
                 </div>
                 {probes.channels.length === 0 ? (
@@ -343,7 +346,11 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
                 <>
                   <div className="dx-probe-summary">
                     <span>
-                      {t('跟踪 {{n}} 个供应商：熔断 {{o}} · 半开 {{h}}')}
+                      {t('跟踪 {{n}} 个供应商：熔断 {{o}} · 半开 {{h}}', {
+                        n: breakers.tracked,
+                        o: breakers.open,
+                        h: breakers.halfopen,
+                      })}
                     </span>
                   </div>
                   <table className="dx-table">

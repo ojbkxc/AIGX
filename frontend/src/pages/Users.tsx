@@ -265,11 +265,13 @@ export default function Users(): JSX.Element {
       if (editing) {
         const payload: Record<string, string | number> = {
           role: form.role,
-          quota: Number(form.quota),
           status: form.status,
           group: form.group,
           remark: form.remark.trim(),
         };
+        // 配额留空 = 不修改。绝不能 Number('') 落成 0：那会把用户额度静默清零，
+        // 而后端 quota 是 Option<i64>（缺省 = 保持原值），语义正好对得上。
+        if (form.quota.trim() !== '') payload.quota = Number(form.quota);
         if (form.email.trim() !== editing.email) payload.email = form.email.trim();
         if (form.username.trim()) payload.username = form.username.trim();
         if (form.password) payload.password = form.password;
@@ -281,7 +283,7 @@ export default function Users(): JSX.Element {
           username: form.username.trim() || undefined,
           password: form.password,
           role: form.role,
-          quota: Number(form.quota),
+          quota: Number(form.quota || 0),
           group: form.group,
           remark: form.remark.trim() || undefined,
         });

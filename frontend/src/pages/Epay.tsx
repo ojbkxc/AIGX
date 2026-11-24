@@ -47,16 +47,26 @@ export default function Epay() {
   const [showKey, setShowKey] = useState(false);
   // 后端返回掩码（含 ***）表示已配置过商户密钥
   const [keyConfigured, setKeyConfigured] = useState(false);
+  /**
+   * 首屏读取是否成功过。
+   * 读取失败时 cfg 仍是初始默认值（pay_address 空、price 1、pay_methods 默认两项…），
+   * 此时若照常渲染表单，管理员一按保存就会把这些空值/默认值写回后端，
+   * 把已配好的商户参数整份覆盖掉。载入成功前不给表单（与 LogRetention 同口径）。
+   */
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const load = async () => {
     setLoading(true);
     setError('');
+    setLoadError('');
     try {
       const res = (await api.getEpayConfig()) as EpayConfigResponse;
       const d = res.data || {};
@@ -76,8 +86,11 @@ export default function Epay() {
         server_address: d.server_address || '',
       });
       setKeyConfigured(!!d.epay_key && d.epay_key.includes('***'));
+      setLoadedOnce(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      setLoadError(msg);
     } finally {
       setLoading(false);
     }
@@ -144,6 +157,29 @@ export default function Epay() {
   };
 
   if (loading) return <div className="loading">{t('加载易支付配置')}</div>;
+
+  // 首屏读取失败：表单里全是初始默认值，此时提交等于把商户参数覆盖成空/默认值。
+  // 只给错误 + 重试入口（与 LogRetention 同口径）。
+  if (!loadedOnce) {
+    return (
+      <div className="card">
+        <div className="card-header"><h2>{t('商户参数')}</h2></div>
+        <div className="card-body">
+          <div className="error-message">
+            {t('易支付配置加载失败：{{msg}}', { msg: loadError || error })}
+          </div>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            style={{ marginTop: 12 }}
+            onClick={() => void load()}
+          >
+            {t('重试')}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
