@@ -529,10 +529,17 @@ pub const PURGE_LAST_RUN_KEY: &str = "purge:last-run";
 /// 一年——磁盘被人手改坏、或早期版本写过别的形状时，宁可当作「无记录」
 /// 也不要把离谱数字喂给管理面（界面上会出现「运行 584 年」这类内容）。
 pub fn load_last_run(store: &FileStore) -> Option<RunSnapshot> {
-    let snapshot = store
-        .get::<RunSnapshot>(PURGE_LAST_RUN_KEY)
-        .ok()
-        .flatten()?;
+    let snapshot = match store.get::<RunSnapshot>(PURGE_LAST_RUN_KEY) {
+        Ok(Some(snapshot)) => snapshot,
+        // 无记录是正常态（首次部署 / 从未关机写入），不记日志
+        Ok(None) => return None,
+        // 读/解析失败是**异常**：与「无记录」区分开，否则运维排查时
+        // 只能看到界面上「没有上次运行」，无从判断是没写过还是读坏了。
+        Err(error) => {
+            tracing::warn!("[Purge] 上次运行快照读取失败（按无记录处理）：{error}");
+            return None;
+        }
+    };
     const MAX_UPTIME_SECS: u64 = 366 * 24 * 3600;
     if snapshot.saved_at <= 0 || snapshot.uptime_secs > MAX_UPTIME_SECS {
         tracing::warn!(
