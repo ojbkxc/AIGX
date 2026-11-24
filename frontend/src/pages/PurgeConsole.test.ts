@@ -201,6 +201,32 @@ describe('buildActiveSummary', () => {
     const items = buildActiveSummary({ ...base, structured_prompt: true });
     expect(items.some((i) => i.key.includes('默认后缀'))).toBe(true);
   });
+
+  it('除总开关关闭外，每条都带 anchor（否则点了不跳）', () => {
+    const items = buildActiveSummary({
+      ...base,
+      system_normalize: true,
+      dead_zone_rewrite: true,
+      rewrite_rules: [{ from: 'a', to: 'b' }],
+      synonym_enabled: true,
+      synonym_pairs: [{ from: 'c', to: 'd' }],
+      reduce_reasoning: true,
+      cross_source_fallback: true,
+      fallback_models: ['m'],
+      skill_inject: true,
+      structured_prompt: true,
+      auto_preset: true,
+    });
+    expect(items.length).toBeGreaterThan(5);
+    for (const item of items) {
+      expect(item.anchor, `缺 anchor：${item.key}`).toBeTruthy();
+    }
+  });
+
+  it('总开关关闭那条不带 anchor（无处可跳）', () => {
+    const items = buildActiveSummary({ ...base, enabled: false });
+    expect(items[0].anchor).toBeUndefined();
+  });
 });
 
 describe('validateImportedSettings', () => {

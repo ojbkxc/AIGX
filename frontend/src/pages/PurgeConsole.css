@@ -714,3 +714,18 @@
   border-left: 3px solid var(--warning-color, #d97706);
   padding-left: 8px;
 }
+/* 生效项可点：点了跳到对应配置区 */
+.purge-active-jump {
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--accent-color, #4f46e5);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.purge-active-jump:hover {
+  text-decoration-style: solid;
+}

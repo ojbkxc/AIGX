@@ -133,10 +133,13 @@ export function sortWarningsBySeverity<T extends { severity?: string }>(items: T
   return [...items].sort((a, b) => rank(a) - rank(b));
 }
 
-/** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值。 */
+/** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值，
+ *  `anchor` 是 `data-purge-fix` 锚点（点了滚到对应配置区）。 */
 export interface ActiveItem {
   key: string;
   params?: Record<string, string | number>;
+  /** 点了跳到哪：复用它旁边体检告警的锚点值 */
+  anchor?: string;
 }
 
 /**
@@ -150,27 +153,28 @@ export interface ActiveItem {
 export function buildActiveSummary(settings: PurgeSettings): ActiveItem[] {
   if (!settings.enabled) return [{ key: '总开关关闭：数据面不做任何治理' }];
   const items: ActiveItem[] = [];
-  if (settings.system_normalize) items.push({ key: 'system 归一化' });
+  if (settings.system_normalize) items.push({ key: 'system 归一化', anchor: 'switches' });
   const deadZone = (settings.rewrite_rules ?? []).filter((rule) => rule.enabled !== false);
   if (settings.dead_zone_rewrite) {
     items.push(
       deadZone.length > 0
-        ? { key: '死区词改写（{{n}} 条启用）', params: { n: deadZone.length } }
-        : { key: '死区词改写（开关开着但无启用行）' },
+        ? { key: '死区词改写（{{n}} 条启用）', params: { n: deadZone.length }, anchor: 'dead-zone-table' }
+        : { key: '死区词改写（开关开着但无启用行）', anchor: 'dead-zone-table' },
     );
   }
   const synonyms = (settings.synonym_pairs ?? []).filter((rule) => rule.enabled !== false);
   if (settings.synonym_enabled) {
     items.push(
       synonyms.length > 0
-        ? { key: '同义词替换（{{n}} 条启用）', params: { n: synonyms.length } }
-        : { key: '同义词替换（开关开着但无启用行）' },
+        ? { key: '同义词替换（{{n}} 条启用）', params: { n: synonyms.length }, anchor: 'synonym-table' }
+        : { key: '同义词替换（开关开着但无启用行）', anchor: 'synonym-table' },
     );
   }
   if (settings.reduce_reasoning) {
     items.push({
       key: '降思考档位 → {{floor}}',
       params: { floor: settings.reasoning_floor || '—' },
+      anchor: 'switches',
     });
   }
   if (settings.cross_source_fallback) {
@@ -180,30 +184,32 @@ export function buildActiveSummary(settings: PurgeSettings): ActiveItem[] {
         ? {
             key: '异源递进（{{n}} 个模型，第 {{attempt}} 轮起）',
             params: { n: models.length, attempt: settings.fallback_trigger_attempt },
+            anchor: 'fallback-models',
           }
-        : { key: '异源递进（开关开着但无候选模型）' },
+        : { key: '异源递进（开关开着但无候选模型）', anchor: 'fallback-models' },
     );
   }
   if (settings.skill_inject) {
     items.push({
       key: '技能注入（上限 {{limit}} 字符）',
       params: { limit: settings.skill_inject_limit },
+      anchor: 'skill-dir',
     });
   }
   if (settings.structured_prompt) {
     const template = settings.active_template?.trim();
     items.push(
       template
-        ? { key: '结构化提示（模板「{{name}}」）', params: { name: template } }
-        : { key: '结构化提示（默认后缀）' },
+        ? { key: '结构化提示（模板「{{name}}」）', params: { name: template }, anchor: 'templates' }
+        : { key: '结构化提示（默认后缀）', anchor: 'templates' },
     );
   }
   if (settings.auto_preset) {
     const pinned = settings.auto_preset_id?.trim();
     items.push(
       pinned
-        ? { key: '按模型套预设（固定「{{id}}」）', params: { id: pinned } }
-        : { key: '按模型套预设（自动匹配）' },
+        ? { key: '按模型套预设（固定「{{id}}」）', params: { id: pinned }, anchor: 'auto-preset-id' }
+        : { key: '按模型套预设（自动匹配）', anchor: 'auto-preset-id' },
     );
   }
   return items;
@@ -2602,7 +2608,21 @@ export default function PurgeConsole(): JSX.Element {
       <Card title={t('当前生效项')}>
         <ul className="purge-active-list" data-testid="purge-active-summary">
           {buildActiveSummary(draft).map((item, index) => (
-            <li key={`${item.key}-${index}`}>{t(item.key, item.params)}</li>
+            <li key={`${item.key}-${index}`}>
+              {item.anchor ? (
+                // 点了跳到对应配置区（复用体检告警的锚点与闪烁提示）
+                <button
+                  type="button"
+                  className="purge-active-jump"
+                  title={t('跳到这一项对应的配置')}
+                  onClick={() => focusFixTarget(item.anchor as string)}
+                >
+                  {t(item.key, item.params)}
+                </button>
+              ) : (
+                t(item.key, item.params)
+              )}
+            </li>
           ))}
         </ul>
       </Card>
@@ -2611,6 +2631,7 @@ export default function PurgeConsole(): JSX.Element {
         title={t('开关')}
         actions={<span className="purge-hint">{t('点一下立即生效，重启后保留')}</span>}
       >
+        <span data-purge-fix="switches" />
         <SwitchRows flags={flags} disabled={saving} onToggle={toggle} t={t} />
       </Card>
       <Card
