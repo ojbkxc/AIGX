@@ -1,5 +1,6 @@
 /**
- * GroupEditor —— 路由组编辑器（#40 契约 §1 `RoutingGroup`）。
+ * GroupEditor —— 路由组面板（对齐 Agent2API v3.5.1 `routing-group-panel.tsx`
+ * + `routing-member-card.tsx` + `routing-model-picker.tsx` 的卡片面）。
  *
  * 路由组 = 管理员配的**候选集**：一组 (提供商, 模型) 槽位，槽位里可以再点名账号。
  * 组的 `id` 是唯一查找键（后端 `RoutingProfiles::find_group`）。
@@ -9,23 +10,36 @@
  * 1. **`model` 是「限定」不是「继承」**：后端 `find_group(id, requested_model)`
  *    的判据是 `g.model.is_empty() || g.model == requested_model` ——
  *    留空 = 任何模型都能用这个组；写了模型名 = 只有请求名等于它的请求能用。
+ *    （A2A 的「对外模型 ID」是必填入口名，语义不同，见交付清单。）
  * 2. **组的 strategy / sticky 是三态**（后端字段是 `Option`）：`null` = 继承
- *    上层（组不覆盖策略）；有值 = 组内显式覆盖。早先「组总会覆盖上层」的
- *    口径已随后端改成 `Option` 而废弃 —— 本组件必须给「继承」档，否则用户
- *    会误以为「组没配策略 = 强制 weighted/auto」。
- * 3. 组的 strategy / sticky **只在这里维护**（不在分层档案里再开一处，
- *    避免同一字段两处可改 —— 本仓既有约定）。
+ *    上层（组不覆盖策略）；有值 = 组内显式覆盖。
+ * 3. 组的 strategy / sticky **只在这里维护**（不在分层档案里再开一处）。
+ *
+ * 卡片结构（照 A2A）：组头（跨模型组合 / 组名 / 更多）→ 对外模型 ID →
+ * 路由策略 + 会话粘滞 → 参与模型列（搜索 / 折叠全部 / 添加模型 / 全部移出 /
+ * 成员卡 / 未参与折叠区 / 空态）。
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, Trash2 } from 'lucide-react';
-import { Button } from '../ui';
+import { ChevronsDownUp, ChevronsUpDown, Copy, Plus } from 'lucide-react';
+import Button from '../ui/Button';
+import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
+import { useToast } from '../Toast';
 import {
   ROUTING_CAPS,
   type RoutingGroup,
   type RoutingMember,
 } from '../../types/routing-profile';
 import type { RouteStrategy, StickyMode } from '../../types';
+import { RoutingGroupDialog, RoutingMemberAccounts, RoutingMemberDialog } from './routing-group-dialogs';
+import { RoutingGroupCreateDialog } from './routing-create-dialog';
+import type { RouteModelChoice } from './routing-model-picker';
+import { RoutingMemberCard } from './routing-member-card';
+import { RoutingSelect } from './routing-select';
+import { routeModelKey } from './routing-group-form';
+import { RoutingDragOverlay, reorderRoute, useRoutingDrag, type RoutingDrop } from './routing-drag';
+import { RoutingActions } from './routing-actions';
+import './RoutingCards.css';
 
 const STRATEGY_LABELS: Record<RouteStrategy, string> = {
   weighted: '加权随机',
@@ -35,7 +49,7 @@ const STRATEGY_LABELS: Record<RouteStrategy, string> = {
 
 const STICKY_LABELS: Record<StickyMode, string> = {
   auto: '自动',
-  session: '长会话',
+  session: '会话内',
   turn: '每轮',
   off: '关闭',
 };
@@ -50,34 +64,12 @@ function nextGroupId(groups: RoutingGroup[]): string {
   return `group-${used.size + 1}`;
 }
 
-/** 成员账号输入：逗号/空格分隔（比多行文本更适合表格行内） */
-function parseAccounts(text: string): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of text.split(/[,\s]+/)) {
-    const v = raw.trim();
-    if (!v || seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-  }
-  return out;
-}
-
-function emptyGroup(id: string): RoutingGroup {
-  return {
-    id,
-    name: '',
-    model: '',
-    strategy: null,
-    sticky: null,
-    members: [],
-  };
-}
-
 export default function GroupEditor({
   groups,
   onChange,
   focusId = null,
+  /** 模型目录候选（provider + model）；缺省 = 目录未接入，选择器展示空态 */
+  catalog = [],
 }: {
   groups: RoutingGroup[];
   onChange: (next: RoutingGroup[]) => void;
@@ -87,37 +79,140 @@ export default function GroupEditor({
    * 折叠只是显示层：groups 数组照样全量渲染项参与 patch，索引不会错位。
    */
   focusId?: string | null;
+  catalog?: RouteModelChoice[];
 }): JSX.Element {
   const { t } = useTranslation();
+  const addToast = useToast();
   /** 用户手动展开的非聚焦组（focusId 只决定「默认展开谁」，不是只读过滤） */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  /** 搜索（对齐 A2A routing-group-panel 的「搜索提供商或模型」）：只筛显示，不改数据 */
+  /** 搜索（对齐 A2A「搜索提供商或模型」）：只筛显示，不改数据 */
   const [search, setSearch] = useState('');
+  /** 成员卡展开集合（键 = `${组 id}:${成员键}`） */
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
+  /** 当前弹窗 */
+  const [dialog, setDialog] = useState<{ kind: 'group' | 'add' | 'example' | 'create'; group: string } | null>(null);
+  const [accountTarget, setAccountTarget] = useState<{ group: string; member: string } | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
-  /** 重复 id 检测：后端按 id 查找，重复会让命中结果不确定 */
-  const dupIds = new Set(
-    groups.map((g) => g.id).filter((id, i, arr) => arr.indexOf(id) !== i),
-  );
+  const keyword = search.trim().toLowerCase();
+  const locked = false;
 
-  const patchGroup = (i: number, p: Partial<RoutingGroup>): void =>
-    onChange(groups.map((g, idx) => (idx === i ? { ...g, ...p } : g)));
+  const dupIds = new Set(groups.map((g) => g.id).filter((id, i, arr) => arr.indexOf(id) !== i));
+  const overGroups = groups.length > ROUTING_CAPS.MAX_GROUPS;
 
-  const patchMember = (gi: number, mi: number, p: Partial<RoutingMember>): void => {
-    const g = groups[gi];
-    patchGroup(gi, {
-      members: g.members.map((m, idx) => (idx === mi ? { ...m, ...p } : m)),
+  const patchGroup = (index: number, patch: Partial<RoutingGroup>): void =>
+    onChange(groups.map((group, idx) => (idx === index ? { ...group, ...patch } : group)));
+
+  const patchMember = (groupIndex: number, memberKey: string, mutate: (member: RoutingMember) => void): void => {
+    const group = groups[groupIndex];
+    patchGroup(groupIndex, {
+      members: group.members.map((member) => {
+        if (routeModelKey(member) !== memberKey) return member;
+        const next = { ...member, accounts: [...member.accounts] };
+        mutate(next);
+        return next;
+      }),
     });
   };
 
-  const overGroups = groups.length > ROUTING_CAPS.MAX_GROUPS;
+  const findGroupIndex = (id: string): number => groups.findIndex((group) => group.id === id);
 
-  /** 「展开全部 / 折叠全部」的判据：所有组（除聚焦组）都在手动展开集合里 */
-  const allExpanded =
-    groups.length > 0
-    && groups.every((g, i) => g.id === focusId || expanded.has(`${g.id}-${i}`));
+  /** 成员落点：只有参与中的成员参与排序，其余（未参与）保持在后 */
+  const applyDrop = (drop: RoutingDrop): void => {
+    if (drop.kind === 'member') {
+      const index = findGroupIndex(drop.provider);
+      if (index < 0) return;
+      const group = groups[index];
+      const ids = group.members.filter((member) => member.included).map((member) => routeModelKey(member));
+      reorderRoute(ids, drop.id, drop.target, drop.after);
+      const byKey = new Map(group.members.map((member) => [routeModelKey(member), member]));
+      const ordered = [
+        ...ids.flatMap((key) => (byKey.has(key) ? [byKey.get(key) as RoutingMember] : [])),
+        ...group.members.filter((member) => !member.included),
+      ];
+      patchGroup(index, { members: ordered });
+      return;
+    }
+    // 账号落点：找到该成员，重排它的 accounts
+    const groupIndex = groups.findIndex((group) =>
+      group.members.some((member) => routeModelKey(member) === drop.provider));
+    if (groupIndex < 0) return;
+    patchMember(groupIndex, drop.provider, (member) => {
+      reorderRoute(member.accounts, drop.id, drop.target, drop.after);
+    });
+  };
+
+  const drag = useRoutingDrag(!locked, keyword, applyDrop);
+
+  const moveMember = (groupIndex: number, memberKey: string, direction: number): void => {
+    const group = groups[groupIndex];
+    const peers = group.members.filter((member) => member.included);
+    const at = peers.findIndex((member) => routeModelKey(member) === memberKey);
+    const target = peers[at + direction];
+    if (!target) return;
+    applyDrop({
+      kind: 'member',
+      provider: group.id,
+      id: memberKey,
+      target: routeModelKey(target),
+      after: direction > 0,
+    });
+  };
+
+  const removeAll = (groupIndex: number): void => {
+    setConfirmState({
+      title: t('全部移出本路由'),
+      message: t('只移出本路由，账号状态和其他路由不变；保存后此入口将没有可用路由。'),
+      confirmText: t('全部移出'),
+      danger: true,
+      onConfirm: () => {
+        patchGroup(groupIndex, {
+          members: groups[groupIndex].members.map((member) => ({ ...member, included: false })),
+        });
+      },
+    });
+  };
+
+  const copy = async (value: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(value);
+      addToast(t('已复制'));
+    } catch {
+      addToast(t('复制失败，请手动选择并复制'), 'error');
+    }
+  };
+
+  const snippetOf = (group: RoutingGroup): string => {
+    const request = JSON.stringify(
+      { model: group.model || '<请求模型>', messages: [{ role: 'user', content: 'Hello' }], stream: true },
+      null,
+      2,
+    );
+    return `POST /v1/chat/completions\nAuthorization: Bearer <YOUR_GATEWAY_KEY>\nContent-Type: application/json\n\n${request}`;
+  };
+
+  /** 「展开全部 / 折叠全部」的判据：所有可见成员卡都已展开 */
+  const allExpanded = useMemo(() => {
+    const keys = groups.flatMap((group) => group.members
+      .filter((member) => !keyword || `${member.model} ${member.provider}`.toLowerCase().includes(keyword))
+      .map((member) => `${group.id}:${routeModelKey(member)}`));
+    return keys.length > 0 && keys.every((key) => opened[key]);
+  }, [groups, keyword, opened]);
+
+  /** 聚焦组默认展开；id 重复的组一律展开（那是要立刻看见的错） */
+  const isCollapsed = (group: RoutingGroup, index: number): boolean =>
+    Boolean(focusId) && group.id !== focusId && !dupIds.has(group.id) && !expanded.has(`${group.id}-${index}`);
+
+  const dialogGroup = dialog ? groups[findGroupIndex(dialog.group)] : undefined;
+  const accountMember = accountTarget
+    ? groups[findGroupIndex(accountTarget.group)]?.members.find(
+      (member) => routeModelKey(member) === accountTarget.member,
+    )
+    : undefined;
+  const accountGroupIndex = accountTarget ? findGroupIndex(accountTarget.group) : -1;
 
   return (
-    <div>
+    <div className="rt-group-panel">
       <div className="rt-notice rt-notice-info">
         {t('组的「路由策略 / 会话粘滞」是可继承的三态：留「继承上层」表示本组不改这两项，跟随全局/模型级；选了具体值才覆盖。')}
       </div>
@@ -125,82 +220,71 @@ export default function GroupEditor({
         {t('组目前通过档案的「默认路由组」或请求显式指定命中；把组登记为可直接调用的模型（出现在 /v1/models 供客户端选择）依赖后端后续能力，本期未提供。')}
       </div>
 
-      <div className="rt-group-actions" style={{ margin: '10px 0' }}>
-        <button
-          type="button"
-          className="btn btn-secondary btn-sm"
-          onClick={() => onChange([...groups, emptyGroup(nextGroupId(groups))])}
-        >
-          <Plus size={13} /> {t('新增路由组')}
-        </button>
-        <span className={`rt-count${overGroups ? ' rt-count-over' : ''}`}>
-          {t('{{n}} / 上限 {{cap}} 个组', { n: groups.length, cap: ROUTING_CAPS.MAX_GROUPS })}
-        </span>
-      </div>
-
-      {/* 工具条（对齐 A2A routing-group-panel：搜索 + 折叠全部/展开全部） */}
       <div className="rt-group-toolbar">
         <input
           className="form-input"
           placeholder={t('搜索提供商或模型')}
           aria-label={t('搜索提供商或模型')}
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(event) => setSearch(event.target.value)}
         />
         <Button
           variant="outline"
           size="sm"
-          disabled={Boolean(search.trim()) || groups.length === 0}
+          disabled={Boolean(keyword) || groups.length === 0}
           onClick={() => {
             if (allExpanded) {
-              setExpanded(new Set());
+              setOpened({});
               return;
             }
-            setExpanded(new Set(groups.map((g, i) => `${g.id}-${i}`)));
+            const next: Record<string, boolean> = {};
+            for (const group of groups) {
+              for (const member of group.members) next[`${group.id}:${routeModelKey(member)}`] = true;
+            }
+            setOpened(next);
           }}
         >
+          {allExpanded ? <ChevronsDownUp size={13} /> : <ChevronsUpDown size={13} />}
           {allExpanded ? t('折叠全部') : t('展开全部')}
         </Button>
+        <span className={`rt-count${overGroups ? ' rt-count-over' : ''}`}>
+          {t('{{n}} / 上限 {{cap}} 个组', { n: groups.length, cap: ROUTING_CAPS.MAX_GROUPS })}
+        </span>
       </div>
 
       {groups.length === 0 ? (
-        <div className="rt-state-note rt-state-inherit">
+        <div className="rt-config-note rt-state-note">
           {t('还没有路由组。没有组时请求只走 global 与模型级档案 —— 需要「某模型专走某批供应商/账号」时才建组。')}
         </div>
       ) : null}
 
-      {groups.map((g, gi) => {
-        const overMembers = g.members.length > ROUTING_CAPS.MAX_MEMBERS;
-        const dup = dupIds.has(g.id);
-        // 聚焦模式下非目标组默认收成一行（点 rail 组条目 = 只看这一个组）；
-        // 能手动展开，id 重复的组一律展开（那是要立刻看见的错）。
-        const rowKey = `${g.id}-${gi}`;
-        // 搜索只筛成员行（对齐 A2A：组卡片照旧显示，被筛掉的是候选模型行）；
-        // 保留原始下标 mi，编辑/删除仍按真实位置改，不会因过滤错位。
-        const keyword = search.trim().toLowerCase();
-        const visibleMembers = g.members
-          .map((m, mi) => ({ m, mi }))
-          .filter(
-            ({ m }) =>
-              !keyword
-              || m.provider.toLowerCase().includes(keyword)
-              || m.model.toLowerCase().includes(keyword),
-          );
-        const collapsed = Boolean(focusId) && g.id !== focusId && !dup && !expanded.has(rowKey);
-        if (collapsed) {
+      {groups.map((group, groupIndex) => {
+        const members = group.members;
+        const active = members.filter((member) => member.included);
+        const visible = members.filter((member) => {
+          if (!keyword) return true;
+          if (member.included) {
+            return `${member.model} ${member.provider}`.toLowerCase().includes(keyword)
+              || member.accounts.some((id) => id.toLowerCase().includes(keyword));
+          }
+          return `${member.model} ${member.provider}`.toLowerCase().includes(keyword);
+        });
+        const activeVisible = visible.filter((member) => member.included);
+        const excludedVisible = visible.filter((member) => !member.included);
+        const overMembers = members.length > ROUTING_CAPS.MAX_MEMBERS;
+        const dup = dupIds.has(group.id);
+        if (isCollapsed(group, groupIndex)) {
           return (
-            <div className="rt-group-card rt-group-collapsed" key={rowKey}>
+            <div className="rt-config-card rt-group-collapsed" key={`${group.id}-${groupIndex}`}>
               <div className="rt-group-head">
                 <div className="rt-group-title">
-                  <span className="rt-group-id">{g.name || g.id || t('（未命名 id）')}</span>
-                  <span className="rt-count">
-                    {t('{{n}} 个成员槽位', { n: g.members.length })}
-                  </span>
+                  <span className="rt-group-id">{group.name || group.id || t('（未命名 id）')}</span>
+                  <span className="rt-count">{t('{{n}} 个成员槽位', { n: members.length })}</span>
                 </div>
                 <button
                   type="button"
                   className="btn btn-secondary btn-sm"
-                  onClick={() => setExpanded((prev) => new Set(prev).add(rowKey))}
+                  onClick={() => setExpanded((prev) => new Set(prev).add(`${group.id}-${groupIndex}`))}
                 >
                   {t('展开此组')}
                 </button>
@@ -209,200 +293,291 @@ export default function GroupEditor({
           );
         }
         return (
-          <div className="rt-group-card" key={`${g.id}-${gi}`}>
-            <div className="rt-group-head">
-              <div className="rt-group-title">
-                <span className="rt-group-id">{g.id || t('（未命名 id）')}</span>
-                {dup ? (
-                  <span className="rt-chip rt-chip-default rt-chip-sm">
-                    {t('id 重复')}
-                  </span>
-                ) : null}
-                <span className="rt-count">
-                  {t('{{n}} 个成员槽位', { n: g.members.length })}
-                </span>
+          <section className="rt-config-card" data-route-source key={`${group.id}-${groupIndex}`}>
+            <header className="rt-config-head">
+              <div>
+                <span className="rt-config-eyebrow">{t('跨模型组合')}</span>
+                <h2>{group.name || group.id || t('（未命名 id）')}</h2>
               </div>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                disabled={!g.members.some((m) => m.included)}
-                onClick={() =>
-                  patchGroup(gi, { members: g.members.map((m) => ({ ...m, included: false })) })
-                }
-              >
-                {t('全部移出')}
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => onChange(groups.filter((_, idx) => idx !== gi))}
-              >
-                <Trash2 size={13} /> {t('删除此组')}
-              </button>
-            </div>
-
+              <RoutingActions
+                label={t('路由配置操作')}
+                actions={[
+                  { label: t('编辑路由组'), disabled: locked, onClick: () => setDialog({ kind: 'group', group: group.id }) },
+                  { label: t('调用示例'), disabled: locked, onClick: () => setDialog({ kind: 'example', group: group.id }) },
+                  {
+                    label: t('删除路由组'),
+                    destructive: true,
+                    disabled: locked,
+                    onClick: () => onChange(groups.filter((_, idx) => idx !== groupIndex)),
+                  },
+                ]}
+              />
+            </header>
             {dup ? (
-              <div className="rt-notice rt-notice-warn" style={{ marginTop: 8 }}>
+              <div className="rt-notice rt-notice-warn" style={{ margin: '0 16px 12px' }}>
                 {t('有两处用了同一个组 id。后端按 id 查找，重复 id 会让命中的是哪一个组变得不确定 —— 请改成唯一 id。')}
               </div>
             ) : null}
-
-            <div className="rt-grid3" style={{ marginTop: 10 }}>
-              <div className="rt-subfield">
-                <label>{t('组 id')}</label>
-                <input
-                  className="form-input"
-                  value={g.id}
-                  placeholder="gpt4o-fast"
-                  onChange={(e) => patchGroup(gi, { id: e.target.value })}
-                />
-                <span className="form-hint">
-                  {t('档案的「默认路由组」与请求头都用它引用本组。改 id 会让已有引用失效。')}
-                </span>
-              </div>
-              <div className="rt-subfield">
-                <label>{t('组名')}</label>
-                <input
-                  className="form-input"
-                  value={g.name}
-                  onChange={(e) => patchGroup(gi, { name: e.target.value })}
-                />
-              </div>
-              <div className="rt-subfield">
-                <label>{t('限定模型（留空 = 不限）')}</label>
-                <input
-                  className="form-input"
-                  value={g.model}
-                  placeholder={t('留空 = 任何模型都能用此组')}
-                  onChange={(e) => patchGroup(gi, { model: e.target.value })}
-                />
-                <span className="form-hint">
-                  {t('填了模型名后，只有请求名等于它的请求才能命中此组（不是上游真名）。')}
-                </span>
-              </div>
-              <div className="rt-subfield">
+            <div className="rt-config-alias">
+              <span>{t('对外模型 ID')}</span>
+              <code title={group.model}>{group.model || t('未限定（任何模型都能用此组）')}</code>
+              <button
+                type="button"
+                className="rt-link-btn"
+                title={t('复制')}
+                aria-label={t('复制')}
+                onClick={() => void copy(group.model)}
+              >
+                <Copy size={13} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="rt-config-rules">
+              <div className="rt-rule-field">
                 <label>{t('路由策略')}</label>
-                <select
-                  className="form-input"
-                  value={g.strategy ?? ''}
-                  onChange={(e) =>
-                    patchGroup(gi, {
-                      strategy: (e.target.value || null) as RouteStrategy | null,
-                    })
-                  }
-                >
-                  <option value="">{t('继承上层（不覆盖）')}</option>
-                  {(Object.keys(STRATEGY_LABELS) as RouteStrategy[]).map((k) => (
-                    <option key={k} value={k}>
-                      {t(STRATEGY_LABELS[k])}
-                    </option>
-                  ))}
-                </select>
+                <RoutingSelect
+                  label={t('路由策略')}
+                  value={group.strategy ?? ''}
+                  disabled={locked}
+                  options={[
+                    ['', t('继承上层（不覆盖）')],
+                    ...(Object.keys(STRATEGY_LABELS) as RouteStrategy[]).map(
+                      (key): [string, string] => [key, t(STRATEGY_LABELS[key])],
+                    ),
+                  ]}
+                  onChange={(value) => patchGroup(groupIndex, { strategy: (value || null) as RouteStrategy | null })}
+                />
               </div>
-              <div className="rt-subfield">
+              <div className="rt-rule-field">
                 <label>{t('会话粘滞')}</label>
-                <select
-                  className="form-input"
-                  value={g.sticky ?? ''}
-                  onChange={(e) =>
-                    patchGroup(gi, {
-                      sticky: (e.target.value || null) as StickyMode | null,
-                    })
-                  }
-                >
-                  <option value="">{t('继承上层（不覆盖）')}</option>
-                  {(Object.keys(STICKY_LABELS) as StickyMode[]).map((k) => (
-                    <option key={k} value={k}>
-                      {t(STICKY_LABELS[k])}
-                    </option>
-                  ))}
-                </select>
+                <RoutingSelect
+                  label={t('会话粘滞')}
+                  value={group.sticky ?? ''}
+                  disabled={locked}
+                  options={[
+                    ['', t('继承上层（不覆盖）')],
+                    ...(Object.keys(STICKY_LABELS) as StickyMode[]).map(
+                      (key): [string, string] => [key, t(STICKY_LABELS[key])],
+                    ),
+                  ]}
+                  onChange={(value) => patchGroup(groupIndex, { sticky: (value || null) as StickyMode | null })}
+                />
               </div>
             </div>
+            <p className="rt-config-note rt-config-note-pad">
+              {group.sticky === 'auto' || group.sticky === 'session'
+                ? t('同一会话优先保持模型与账号，不可用时才顺延。')
+                : t('每轮重新选路，不保留跨请求的账号绑定。')}
+            </p>
+            <button
+              type="button"
+              className="rt-link-btn rt-group-example"
+              onClick={() => setDialog({ kind: 'example', group: group.id })}
+            >
+              {t('调用示例')}
+            </button>
 
-            <div style={{ marginTop: 12 }}>
-              <div className="rt-rail-title" style={{ padding: '0 0 6px' }}>
-                {t('成员模型')}
-                <span className="rt-count">
-                  {t('{{n}} 项参与', { n: g.members.filter((m) => m.included).length })}
-                </span>
-              </div>
-              {g.members.length === 0 ? (
-                <div className="rt-state-note rt-state-inherit">
-                  <b>{t('还没有参与模型')}</b>
-                  {t('可以保存空路由，但请求会明确失败，不会回退全局。')}
+            <div className="rt-groups-column">
+              <div className="rt-column-head">
+                <b>{t('成员模型')}</b>
+                <span className="rt-count">{t('{{n}} 项参与', { n: active.length })}</span>
+                <div className="right">
+                  <RoutingActions
+                    label={t('路由参与操作')}
+                    actions={[
+                      { label: t('添加模型'), icon: <Plus size={14} />, disabled: locked, onClick: () => setDialog({ kind: 'add', group: group.id }) },
+                      { label: t('全部移出'), disabled: locked || !active.length, onClick: () => removeAll(groupIndex) },
+                    ]}
+                  />
                 </div>
-              ) : null}
-              {visibleMembers.map(({ m, mi }) => (
-                <div className="rt-member-row" key={mi} style={{ marginBottom: 8 }}>
-                  <input
-                    className="form-input"
-                    placeholder={t('提供商，如 openai')}
-                    value={m.provider}
-                    onChange={(e) => patchMember(gi, mi, { provider: e.target.value })}
-                  />
-                  <input
-                    className="form-input"
-                    placeholder={t('模型名（上游真名）')}
-                    value={m.model}
-                    onChange={(e) => patchMember(gi, mi, { model: e.target.value })}
-                  />
-                  <input
-                    className="form-input"
-                    placeholder={t('点名账号，逗号分隔（留空 = 该槽位全部账号）')}
-                    value={m.accounts.join(', ')}
-                    onChange={(e) => patchMember(gi, mi, { accounts: parseAccounts(e.target.value) })}
-                  />
-                  <label
-                    style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}
-                    title={t('取消勾选 = 该槽位参与选路时被排除（保留记录便于再启用）')}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={m.included}
-                      onChange={(e) => patchMember(gi, mi, { included: e.target.checked })}
-                    />
-                    <span>{t('参与')}</span>
-                  </label>
+              </div>
+              <p className="rt-groups-hint">{t('拖动把手或按 Alt + 方向键调整顺序，更多操作在右侧菜单。')}</p>
+              <div className="rt-config-listcol" data-route-scroll>
+                <div className="rt-config-participants" data-route-list>
+                  {activeVisible.map((member) => {
+                    const memberKey = routeModelKey(member);
+                    const openKey = `${group.id}:${memberKey}`;
+                    const peers = active;
+                    return (
+                      <RoutingMemberCard
+                        key={memberKey}
+                        member={member}
+                        label={member.provider}
+                        name={member.model}
+                        index={peers.findIndex((item) => routeModelKey(item) === memberKey)}
+                        first={peers[0] === member}
+                        last={peers[peers.length - 1] === member}
+                        open={Boolean(keyword) || Boolean(opened[openKey])}
+                        locked={locked}
+                        query={keyword}
+                        drag={drag}
+                        accounts={[]}
+                        onOpen={(next) => setOpened((current) => ({ ...current, [openKey]: next }))}
+                        onJoin={(on) => patchMember(groupIndex, memberKey, (item) => { item.included = on; })}
+                        onMove={(direction) => moveMember(groupIndex, memberKey, direction)}
+                        onAccounts={() => setAccountTarget({ group: group.id, member: memberKey })}
+                        onToggleAccount={(id) => patchMember(groupIndex, memberKey, (item) => {
+                          item.accounts = item.accounts.includes(id)
+                            ? item.accounts.filter((value) => value !== id)
+                            : [...item.accounts, id];
+                        })}
+                        onMoveAccount={(id, direction) => patchMember(groupIndex, memberKey, (item) => {
+                          const target = item.accounts[item.accounts.indexOf(id) + direction];
+                          if (target) reorderRoute(item.accounts, id, target, direction > 0);
+                        })}
+                      />
+                    );
+                  })}
+                </div>
+                {!active.length ? (
+                  <div className="rt-state-note rt-state-inherit">
+                    <b>{t('还没有参与模型')}</b>
+                    <span>{t('可以保存空路由，但请求会明确失败，不会回退全局。')}</span>
+                  </div>
+                ) : null}
+                {excludedVisible.length ? (
+                  <div className="rt-config-excluded">
+                    <div className="rt-excluded-trigger">
+                      {t('未参与本路由')} · {excludedVisible.length}
+                    </div>
+                    <div data-route-list>
+                      {excludedVisible.map((member) => {
+                        const memberKey = routeModelKey(member);
+                        const openKey = `${group.id}:${memberKey}`;
+                        return (
+                          <RoutingMemberCard
+                            key={memberKey}
+                            member={member}
+                            label={member.provider}
+                            name={member.model}
+                            index={-1}
+                            first={false}
+                            last={false}
+                            open={Boolean(opened[openKey])}
+                            locked={locked}
+                            query={keyword}
+                            drag={drag}
+                            accounts={[]}
+                            onOpen={(next) => setOpened((current) => ({ ...current, [openKey]: next }))}
+                            onJoin={(on) => patchMember(groupIndex, memberKey, (item) => { item.included = on; })}
+                            onMove={() => undefined}
+                            onAccounts={() => setAccountTarget({ group: group.id, member: memberKey })}
+                            onToggleAccount={(id) => patchMember(groupIndex, memberKey, (item) => {
+                              item.accounts = item.accounts.includes(id)
+                                ? item.accounts.filter((value) => value !== id)
+                                : [...item.accounts, id];
+                            })}
+                            onMoveAccount={(id, direction) => patchMember(groupIndex, memberKey, (item) => {
+                              const target = item.accounts[item.accounts.indexOf(id) + direction];
+                              if (target) reorderRoute(item.accounts, id, target, direction > 0);
+                            })}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+                {keyword && !visible.length ? (
+                  <div className="rt-state-note rt-state-inherit">{t('没有匹配的候选')}</div>
+                ) : null}
+                <div className="rt-group-actions">
                   <button
                     type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() =>
-                      patchGroup(gi, { members: g.members.filter((_, idx) => idx !== mi) })
-                    }
+                    className="btn btn-secondary btn-sm rt-add-member"
+                    disabled={locked}
+                    onClick={() => setDialog({ kind: 'add', group: group.id })}
                   >
-                    {t('删除')}
+                    <Plus size={13} /> {t('添加模型')}
                   </button>
+                  <span className={`rt-count${overMembers ? ' rt-count-over' : ''}`}>
+                    {t('{{n}} / 上限 {{cap}} 个成员', { n: members.length, cap: ROUTING_CAPS.MAX_MEMBERS })}
+                  </span>
                 </div>
-              ))}
-              {keyword && !visibleMembers.length ? (
-                <div className="rt-state-note rt-state-inherit">
-                  {t('没有匹配的候选')}
-                </div>
-              ) : null}
-              <div className="rt-group-actions" style={{ marginTop: 6 }}>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  onClick={() =>
-                    patchGroup(gi, {
-                      members: [
-                        ...g.members,
-                        { provider: '', model: '', included: true, accounts: [] },
-                      ],
-                    })
-                  }
-                >
-                  <Plus size={13} /> {t('添加模型')}
-                </button>
-                <span className={`rt-count${overMembers ? ' rt-count-over' : ''}`}>
-                  {t('{{n}} / 上限 {{cap}} 个成员', { n: g.members.length, cap: ROUTING_CAPS.MAX_MEMBERS })}
-                </span>
               </div>
             </div>
-          </div>
+          </section>
         );
       })}
+
+      <div className="rt-group-toolbar">
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          onClick={() => setDialog({ kind: 'create', group: '' })}
+        >
+          <Plus size={13} /> {t('新增路由组')}
+        </button>
+      </div>
+
+      <RoutingDragOverlay state={drag.state} />
+
+      {dialog?.kind === 'create' ? (
+        <RoutingGroupCreateDialog
+          existingIds={groups.map((group) => group.id)}
+          catalog={catalog}
+          defaultId={nextGroupId(groups)}
+          onSave={(created) => onChange([...groups, created])}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+
+      {dialog?.kind === 'group' && dialogGroup ? (
+        <RoutingGroupDialog
+          fields={{ id: dialogGroup.id, name: dialogGroup.name, model: dialogGroup.model }}
+          otherIds={groups.filter((group) => group.id !== dialogGroup.id).map((group) => group.id)}
+          onSave={(fields) => patchGroup(findGroupIndex(dialogGroup.id), fields)}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+      {dialog?.kind === 'add' && dialogGroup ? (
+        <RoutingMemberDialog
+          choices={catalog.filter(
+            (choice) => !dialogGroup.members.some(
+              (member) => member.provider === choice.provider && member.model.toLowerCase() === choice.model.toLowerCase(),
+            ),
+          )}
+          members={dialogGroup.members}
+          onAdd={(added) => patchGroup(findGroupIndex(dialogGroup.id), { members: [...dialogGroup.members, ...added] })}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+      {dialog?.kind === 'example' && dialogGroup ? (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('调用示例')}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setDialog(null);
+          }}
+        >
+          <div className="modal" style={{ maxWidth: 620, width: '92%' }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('调用示例')}</h3>
+              <button type="button" className="modal-close" aria-label={t('关闭')} onClick={() => setDialog(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p className="rt-config-note">
+                {t('保存路由后，在客户端填写此模型 ID。密钥使用你自己的网关 Key。')}
+              </p>
+              <pre className="rt-group-code">{snippetOf(dialogGroup)}</pre>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-outline" onClick={() => setDialog(null)}>{t('关闭')}</button>
+              <button type="button" className="btn btn-primary" onClick={() => void copy(snippetOf(dialogGroup))}>
+                {t('复制')}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {accountMember && accountGroupIndex >= 0 ? (
+        <RoutingMemberAccounts
+          member={accountMember}
+          onSave={(ids) => patchMember(accountGroupIndex, routeModelKey(accountMember), (item) => { item.accounts = ids; })}
+          onClose={() => setAccountTarget(null)}
+        />
+      ) : null}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

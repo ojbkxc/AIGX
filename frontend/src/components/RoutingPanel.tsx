@@ -49,7 +49,7 @@ const STICKY_OPTIONS: Array<{ value: StickyMode; label: string; tip: string }> =
   },
   {
     value: 'session',
-    label: '长会话',
+    label: '会话内',
     tip: '同一会话 6 小时内跟住同一供应商。适合一坐几个小时的长会话，上游的上下文缓存能吃到更多。',
   },
   {

@@ -1,16 +1,31 @@
 /**
  * ProfileForm —— 单层路由档案的字段编辑器（#40 契约 §1/§2.1）。
  *
+ * 字段面按 Agent2API v3.5.1 `routing-config-panel.tsx` 的**顺序与分组**对齐：
+ *
+ *   路由策略 · 会话粘滞（双列）
+ *   → 参与名单（参与方式 → 提供商卡片列（搜索 / 参与 / 排除 / 上下移）→ 账号 id 名单）
+ *   → 能力需求
+ *   → 排序规则
+ *   → 默认路由组
+ *   → [可选] 模型筛选（A2A 只影响展示，不改配置）
+ *   → [可选] 全局保护设置摘要（A2A routing-protection-summary）
+ *
  * 六个字段全部经 [`TriStateField`] 呈现三态（枚举类两态）。每个字段的
- * 「清空」含义各不相同，故清空说明逐字段给死 —— 用户不该去猜。
+ * 「清空」含义各不相同，故清空说明逐字段给死 —— 用户不该去猜。三态是
+ * **AIGX 独有项**（A2A 没有档案分层），不对齐、不削弱。
  *
  * ⚠ 本组件只负责「本层怎么写」，**不负责算生效结果**：合并后的生效值与
  * 逐字段来源一律以后端 `resolve_profile` / `plan_route` 为唯一口径
  * （本仓 #31 的教训：界面不许自己再算一遍）。这里的 `inherited` 仅用于
  * 「不表态时会得到什么」的输入提示。
  */
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Plus } from 'lucide-react';
 import TriStateField from './TriStateField';
+import { RoutingProviderList } from './routing-provider-card';
+import { RoutingModelFilter } from './routing-model-filter';
 import {
   EMPTY_NEEDS,
   EMPTY_SCOPE,
@@ -39,7 +54,7 @@ const STRATEGY_LABELS: Record<RouteStrategy, string> = {
 
 const STICKY_LABELS: Record<StickyMode, string> = {
   auto: '自动',
-  session: '长会话',
+  session: '会话内',
   turn: '每轮',
   off: '关闭',
 };
@@ -112,6 +127,102 @@ function ItemLines({
   );
 }
 
+/** 提供商卡片区：搜索 + 参与/排除两段 + 「添加提供商」 */
+function ProviderScopeCards({
+  scope,
+  disabled,
+  onChange,
+}: {
+  scope: RoutingScope;
+  disabled: boolean;
+  onChange(next: Partial<RoutingScope>): void;
+}): JSX.Element {
+  const { t } = useTranslation();
+  const [search, setSearch] = useState('');
+  const [input, setInput] = useState('');
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
+  const included = scope.providers;
+  const excluded = scope.disabled_providers;
+  const join = (id: string, on: boolean): void => {
+    if (on) {
+      onChange({
+        providers: included.includes(id) ? included : [...included, id],
+        disabled_providers: excluded.filter((value) => value !== id),
+      });
+      return;
+    }
+    onChange({
+      providers: included.filter((value) => value !== id),
+      disabled_providers: excluded.includes(id) ? excluded : [...excluded, id],
+    });
+  };
+  const move = (id: string, direction: number): void => {
+    const next = [...included];
+    const index = next.indexOf(id);
+    const to = index + direction;
+    if (index < 0 || to < 0 || to >= next.length) return;
+    next[index] = next[to];
+    next[to] = id;
+    onChange({ providers: next });
+  };
+  const add = (): void => {
+    const id = input.trim();
+    if (!id) return;
+    setInput('');
+    onChange({
+      providers: included.includes(id) ? included : [...included, id],
+      disabled_providers: excluded.filter((value) => value !== id),
+    });
+  };
+  return (
+    <div className="rt-provider-scope">
+      <div className="rt-subfield">
+        <input
+          className="form-input"
+          value={search}
+          placeholder={t('搜索提供商')}
+          aria-label={t('搜索提供商')}
+          onChange={(event) => setSearch(event.currentTarget.value)}
+        />
+      </div>
+      <RoutingProviderList
+        included={included}
+        excluded={excluded}
+        locked={disabled}
+        query={search.trim().toLowerCase()}
+        opened={opened}
+        onOpen={(id, open) => setOpened((current) => ({ ...current, [id]: open }))}
+        onJoin={join}
+        onMove={move}
+      />
+      <div className="rt-account-add">
+        <input
+          className="form-input"
+          value={input}
+          placeholder={t('提供商 id，如 openai')}
+          aria-label={t('添加提供商')}
+          disabled={disabled}
+          onChange={(event) => setInput(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              add();
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={disabled || !input.trim() || included.length >= ROUTING_CAPS.MAX_PROVIDERS}
+          onClick={add}
+        >
+          <Plus size={13} /> {t('添加提供商')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export interface ProfileFormProps {
   value: RoutingProfile;
   onChange: (next: RoutingProfile) => void;
@@ -126,6 +237,15 @@ export interface ProfileFormProps {
   groupIds: string[];
   /** 该字段的权威来源；`undefined` = 后端未提供（此时不显示徽章，也不猜） */
   provenance?: ProfileProvenance | null;
+  /** 模型筛选候选（A2A routing-model-filter；缺省 = 不渲染该块） */
+  models?: string[];
+  /** 最近使用时间（排序用；缺省 = 字典序） */
+  modelLastUsed?: Record<string, number>;
+  /** 当前筛选的模型（空串 = 全部）；与 onModelChange 成对出现才渲染 */
+  modelFilter?: string;
+  onModelChange?(model: string): void;
+  /** 全局保护设置摘要（A2A routing-protection-summary）；缺省 = 不渲染 */
+  protection?: { labels: string[]; onOpen?(): void };
 }
 
 export default function ProfileForm({
@@ -135,6 +255,11 @@ export default function ProfileForm({
   inheritSource,
   groupIds,
   provenance,
+  models,
+  modelLastUsed,
+  modelFilter,
+  onModelChange,
+  protection,
 }: ProfileFormProps): JSX.Element {
   const { t } = useTranslation();
 
@@ -148,62 +273,65 @@ export default function ProfileForm({
     provenance ? provenance[f] : undefined;
 
   return (
-    <div>
-      {/* 1. 路由策略（枚举 → 无「清空」语义） */}
-      <TriStateField
-        label={t('路由策略')}
-        hint={t('同优先级组内怎么挑供应商。')}
-        state={fieldState(value, 'strategy')}
-        onStateChange={(s) => setField('strategy', s)}
-        allowClear={false}
-        clearNote=""
-        inheritNote={t('沿用{{src}}的策略：当前为「{{v}}」。下层改了这里跟着变。', {
-          src: inheritSource,
-          v: t(STRATEGY_LABELS[inherited.strategy ?? 'weighted']),
-        })}
-        provenance={prov('strategy')}
-      >
-        <select
-          className="form-input"
-          value={value.strategy ?? inherited.strategy ?? 'weighted'}
-          onChange={(e) => patch({ strategy: e.target.value as RouteStrategy })}
+    <div className="rt-profile-form">
+      {/* A2A 配置面板：策略与粘滞并排成两列 */}
+      <div className="rt-field-grid">
+        {/* 1. 路由策略（枚举 → 无「清空」语义） */}
+        <TriStateField
+          label={t('路由策略')}
+          hint={t('同优先级组内怎么挑供应商。')}
+          state={fieldState(value, 'strategy')}
+          onStateChange={(s) => setField('strategy', s)}
+          allowClear={false}
+          clearNote=""
+          inheritNote={t('沿用{{src}}的策略：当前为「{{v}}」。下层改了这里跟着变。', {
+            src: inheritSource,
+            v: t(STRATEGY_LABELS[inherited.strategy ?? 'weighted']),
+          })}
+          provenance={prov('strategy')}
         >
-          {(Object.keys(STRATEGY_LABELS) as RouteStrategy[]).map((k) => (
-            <option key={k} value={k}>
-              {t(STRATEGY_LABELS[k])}
-            </option>
-          ))}
-        </select>
-      </TriStateField>
+          <select
+            className="form-input"
+            value={value.strategy ?? inherited.strategy ?? 'weighted'}
+            onChange={(e) => patch({ strategy: e.target.value as RouteStrategy })}
+          >
+            {(Object.keys(STRATEGY_LABELS) as RouteStrategy[]).map((k) => (
+              <option key={k} value={k}>
+                {t(STRATEGY_LABELS[k])}
+              </option>
+            ))}
+          </select>
+        </TriStateField>
 
-      {/* 2. 会话粘滞（枚举 → 无「清空」语义） */}
-      <TriStateField
-        label={t('会话粘滞')}
-        hint={t('同一会话是否跟住同一供应商（复用上游上下文缓存）。')}
-        state={fieldState(value, 'sticky')}
-        onStateChange={(s) => setField('sticky', s)}
-        allowClear={false}
-        clearNote=""
-        inheritNote={t('沿用{{src}}的粘性档位：当前为「{{v}}」。', {
-          src: inheritSource,
-          v: t(STICKY_LABELS[inherited.sticky ?? 'auto']),
-        })}
-        provenance={prov('sticky')}
-      >
-        <select
-          className="form-input"
-          value={value.sticky ?? inherited.sticky ?? 'auto'}
-          onChange={(e) => patch({ sticky: e.target.value as StickyMode })}
+        {/* 2. 会话粘滞（枚举 → 无「清空」语义） */}
+        <TriStateField
+          label={t('会话粘滞')}
+          hint={t('同一会话是否跟住同一供应商（复用上游上下文缓存）。')}
+          state={fieldState(value, 'sticky')}
+          onStateChange={(s) => setField('sticky', s)}
+          allowClear={false}
+          clearNote=""
+          inheritNote={t('沿用{{src}}的粘性档位：当前为「{{v}}」。', {
+            src: inheritSource,
+            v: t(STICKY_LABELS[inherited.sticky ?? 'auto']),
+          })}
+          provenance={prov('sticky')}
         >
-          {(Object.keys(STICKY_LABELS) as StickyMode[]).map((k) => (
-            <option key={k} value={k}>
-              {t(STICKY_LABELS[k])}
-            </option>
-          ))}
-        </select>
-      </TriStateField>
+          <select
+            className="form-input"
+            value={value.sticky ?? inherited.sticky ?? 'auto'}
+            onChange={(e) => patch({ sticky: e.target.value as StickyMode })}
+          >
+            {(Object.keys(STICKY_LABELS) as StickyMode[]).map((k) => (
+              <option key={k} value={k}>
+                {t(STICKY_LABELS[k])}
+              </option>
+            ))}
+          </select>
+        </TriStateField>
+      </div>
 
-      {/* 3. 参与名单 */}
+      {/* 3. 参与名单（A2A 参与方式 + 提供商卡片 + 账号 id 名单） */}
       <TriStateField
         label={t('参与名单')}
         hint={t('限定这个模型能走哪些提供商与账号；名单外的供应商在选路前就被裁掉。')}
@@ -218,43 +346,33 @@ export default function ProfileForm({
       >
         {(() => {
           const s = value.scope ?? EMPTY_SCOPE;
-          const setScope = (next: Partial<RoutingScope>): void =>
-            patch({ scope: { ...s, ...next } });
-          const noProvider =
-            s.provider_scope === 'listed' && s.providers.length === 0;
+          const setScope = (next: Partial<RoutingScope>): void => patch({ scope: { ...s, ...next } });
+          const noProvider = s.provider_scope === 'listed' && s.providers.length === 0;
           return (
             <>
               <div className="rt-subfield" style={{ marginBottom: 10 }}>
-                <label>{t('提供商范围')}</label>
+                <label>{t('参与方式')}</label>
                 <select
                   className="form-input"
                   value={s.provider_scope}
-                  onChange={(e) =>
-                    setScope({ provider_scope: e.target.value as RoutingScope['provider_scope'] })
-                  }
+                  onChange={(e) => setScope({ provider_scope: e.target.value as RoutingScope['provider_scope'] })}
                 >
                   <option value="all">{t('全部提供商（自动并入新出现的）')}</option>
-                  <option value="listed">{t('仅下方列出的提供商')}</option>
+                  <option value="listed">{t('仅加入的参与')}</option>
                 </select>
+                <span className="form-hint">
+                  {s.provider_scope === 'all'
+                    ? t('新增提供商自动参与；移出本路由的不会自动加回。')
+                    : t('只有加入的提供商参与，新增提供商需要手动加入。')}
+                </span>
               </div>
               {noProvider ? (
                 <div className="rt-notice rt-notice-warn" style={{ marginBottom: 10 }}>
                   {t('已选「仅列出的提供商」但列表为空 —— 该模型将没有任何候选供应商。槽位名请填供应商的「提供商」值（如 openai / anthropic）。')}
                 </div>
               ) : null}
-              <div className="rt-grid2">
-                <ItemLines
-                  label={t('参与的提供商')}
-                  items={s.providers}
-                  cap={ROUTING_CAPS.MAX_PROVIDERS}
-                  onChange={(v) => setScope({ providers: v })}
-                />
-                <ItemLines
-                  label={t('排除的提供商')}
-                  items={s.disabled_providers}
-                  cap={ROUTING_CAPS.MAX_PROVIDERS}
-                  onChange={(v) => setScope({ disabled_providers: v })}
-                />
+              <ProviderScopeCards scope={s} disabled={false} onChange={setScope} />
+              <div className="rt-grid2" style={{ marginTop: 10 }}>
                 <ItemLines
                   label={t('账号优先顺序')}
                   hint={t('按行序先试靠前的账号；不在名单里的账号排在后面。')}
@@ -324,8 +442,8 @@ export default function ProfileForm({
           src: inheritSource,
           v: inherited.sort_rules?.length
             ? inherited.sort_rules
-                .map((r) => `${t(SORT_ON_LABELS[r.on])} ${r.dir === 'asc' ? t('升序') : t('降序')}`)
-                .join(' → ')
+              .map((r) => `${t(SORT_ON_LABELS[r.on])} ${r.dir === 'asc' ? t('升序') : t('降序')}`)
+              .join(' → ')
             : t('（下层未设置）'),
         })}
         provenance={prov('sort_rules')}
@@ -420,6 +538,33 @@ export default function ProfileForm({
           {t('必须是已存在的路由组 id（见下方「路由组」）；写错 = 找不到组，只会走 global。')}
         </div>
       </TriStateField>
+
+      {/* A2A 配置面板：模型筛选（只影响展示） */}
+      {models && onModelChange ? (
+        <div className="rt-config-filter">
+          <RoutingModelFilter
+            value={modelFilter ?? ''}
+            models={models}
+            lastUsed={modelLastUsed}
+            onChange={onModelChange}
+          />
+        </div>
+      ) : null}
+
+      {/* A2A 配置面板：全局保护设置摘要 */}
+      {protection ? (
+        <div className="rt-protection-summary">
+          <span>{t('全局保护设置')}</span>
+          <span className="rt-protection-badge">
+            {protection.labels.length ? protection.labels.join(' · ') : t('关闭')}
+          </span>
+          {protection.onOpen ? (
+            <button type="button" className="rt-link-btn" onClick={protection.onOpen}>
+              {t('设置')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

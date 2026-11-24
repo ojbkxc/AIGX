@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   activeSummaryText,
   buildActiveSummary,
+  clampNumInput,
   capError,
   exportPreviewHistory,
   findBodySnippet,
@@ -132,6 +133,45 @@ describe('settingsEqual', () => {
 
   it('值不同 → 不等价', () => {
     expect(settingsEqual({ a: 1 } as never, { a: 2 } as never)).toBe(false);
+  });
+});
+
+describe('clampNumInput', () => {
+  const field = { min: 1, max: 32, label: '重试上限' };
+
+  it('范围内原样返回（不改动、不提示）', () => {
+    expect(clampNumInput(field, '5')).toEqual({ corrected: '5', notice: null });
+  });
+
+  it('超上限 → 收敛到上限并报 clamped（说明范围而不是悄悄改）', () => {
+    expect(clampNumInput(field, '999')).toEqual({
+      corrected: '32',
+      notice: { kind: 'clamped', value: 32 },
+    });
+  });
+
+  it('低于下限 → 收敛到下限', () => {
+    expect(clampNumInput(field, '0')).toEqual({
+      corrected: '1',
+      notice: { kind: 'clamped', value: 1 },
+    });
+  });
+
+  it('小数 → 取整（报 rounded，与范围收紧区分开）', () => {
+    expect(clampNumInput(field, '3.7')).toEqual({
+      corrected: '3',
+      notice: { kind: 'rounded', value: 3 },
+    });
+  });
+
+  it('空串与非数字不做处理（那是保存前的正常中间态）', () => {
+    expect(clampNumInput(field, '')).toEqual({ corrected: '', notice: null });
+    expect(clampNumInput(field, '  ')).toEqual({ corrected: '', notice: null });
+    expect(clampNumInput(field, 'abc')).toEqual({ corrected: '', notice: null });
+  });
+
+  it('首尾空格被清掉但不触发提示', () => {
+    expect(clampNumInput(field, '  12  ')).toEqual({ corrected: '12', notice: null });
   });
 });
 

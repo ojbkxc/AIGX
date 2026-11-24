@@ -1,0 +1,973 @@
+/* 路由卡片与面板（对齐 Agent2API `page-routing-config.css` 的卡片段：
+ * `routing-config-provider` / `routing-config-account` / `routing-model-*` 等）。
+ *
+ * 为什么不写进 pages/Routing.css 或 RoutingShell.css：后两者分别是页面私有样式
+ * 与另一位成员的写入范围；本文件只承载「卡片 / 成员 / 选择器」这套零件，
+ * 与 `routing-*.tsx` 一一对应，由组件自身 import（页面上没挂这些卡片时
+ * 也不会白白加载画布样式）。
+ *
+ * 取值全部走 AIGX 既有令牌（--border-color / --text-muted / --primary-color /
+ * --accent-soft / --hover-bg / --danger-color），不引入第二套设计语言。
+ * 类名带 `rt-` 前缀，与页面既有 .rt-* 同域。 */
+
+/* ── 组面板骨架 ─────────────────────────────────────────── */
+.rt-group-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rt-group-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rt-group-toolbar .form-input {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+/* ── 组卡（A2A routing-config-card） ─────────────────────── */
+.rt-config-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 28%, var(--border-color));
+  border-radius: 12px;
+  background: var(--card-bg);
+}
+
+.rt-config-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px 16px 10px;
+}
+
+.rt-config-head > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.rt-config-eyebrow {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rt-config-head h2 {
+  margin: 5px 0 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.rt-config-alias {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 16px 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--hover-bg, rgba(128, 128, 128, 0.06));
+}
+
+.rt-config-alias > span {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rt-config-alias code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.rt-config-rules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 8px;
+  padding: 0 16px 10px;
+}
+
+.rt-rule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rt-rule-field > label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.rt-config-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.rt-config-note-pad {
+  padding: 0 16px 10px;
+}
+
+.rt-config-error {
+  margin: 0;
+  color: var(--danger-color, #dc2626);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.rt-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary-color);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.rt-link-btn:disabled {
+  color: var(--text-muted);
+  cursor: default;
+  opacity: 0.6;
+}
+
+.rt-group-example {
+  margin: 0 16px 12px;
+}
+
+/* ── 参与模型列（A2A routing-groups-column） ─────────────── */
+.rt-groups-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 12px 12px;
+}
+
+.rt-column-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.rt-column-head > b {
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rt-column-head > .right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.rt-groups-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.rt-config-listcol {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 1px 3px 4px;
+}
+
+.rt-config-participants {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rt-add-member {
+  width: 100%;
+  margin-top: 8px;
+}
+
+/* 折叠区（A2A routing-config-excluded / routing-excluded-trigger） */
+.rt-config-excluded {
+  margin-top: 8px;
+}
+
+.rt-excluded-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 5px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+/* ── 成员卡 / 提供商卡（A2A routing-config-provider） ───── */
+.rt-config-provider {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+}
+
+.rt-config-provider.is-off {
+  border-style: dashed;
+  background: var(--hover-bg, rgba(128, 128, 128, 0.06));
+}
+
+.rt-config-provider > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 8px;
+}
+
+.rt-config-rank {
+  flex: none;
+  width: 20px;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rt-provider-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--accent-soft, rgba(99, 102, 241, 0.12));
+  color: var(--primary-color);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.rt-provider-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.rt-provider-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.rt-provider-name b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.rt-provider-name small {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rt-chevron {
+  flex: none;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.rt-provider-toggle[aria-expanded='true'] .rt-chevron {
+  transform: rotate(180deg);
+}
+
+/* 把手 / 开关：用原生 checkbox 承载，样式与页面其余控件同密度 */
+.rt-grip {
+  flex: none;
+  width: 20px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  opacity: 0.6;
+  cursor: grab;
+  touch-action: none;
+}
+
+.rt-grip:hover,
+.rt-grip:focus-visible {
+  opacity: 1;
+}
+
+.rt-grip:active {
+  cursor: grabbing;
+}
+
+.rt-grip:disabled {
+  cursor: default;
+  opacity: 0.25;
+}
+
+.rt-switch,
+.rt-account-toggle {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.rt-switch input,
+.rt-account-toggle input {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+/* ── 展开体：账号行（A2A routing-config-account） ────────── */
+.rt-config-accounts {
+  border-top: 1px solid var(--border-color);
+  padding: 4px 6px 8px;
+}
+
+.rt-member-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rt-member-summary .rt-link-btn {
+  margin-left: auto;
+}
+
+.rt-config-account {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 6px 2px;
+  border-radius: 8px;
+}
+
+.rt-config-account + .rt-config-account {
+  border-top: 1px solid var(--border-color);
+}
+
+.rt-config-account.is-excluded {
+  color: var(--text-muted);
+}
+
+.rt-account-rank {
+  flex: none;
+  width: 14px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rt-account-avatar {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 23px;
+  height: 23px;
+  border-radius: 999px;
+  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rt-config-account-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.rt-config-account-name b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.rt-config-account-name small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* ── 「⋯」更多菜单（原生 details） ──────────────────────── */
+.rt-more {
+  position: relative;
+  flex: none;
+}
+
+.rt-more > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.rt-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.rt-more > summary:hover {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+  color: var(--text-main);
+}
+
+.rt-actions-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 148px;
+  padding: 5px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-bg);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.18);
+}
+
+.rt-action-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rt-action-item:hover:not(:disabled) {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+}
+
+.rt-action-item:disabled {
+  color: var(--text-muted);
+  opacity: 0.55;
+  cursor: default;
+}
+
+.rt-action-item.is-destructive {
+  color: var(--danger-color, #dc2626);
+}
+
+/* ── 拖拽态 / 落点线 / 浮层 ─────────────────────────────── */
+.is-dragging {
+  opacity: 0.45;
+}
+
+.drop-before::before,
+.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--primary-color);
+  z-index: 3;
+  pointer-events: none;
+}
+
+.drop-before::before {
+  top: -5px;
+}
+
+.drop-after::after {
+  bottom: -5px;
+}
+
+.rt-drag-preview {
+  position: fixed;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 300px;
+  padding: 10px 14px;
+  border: 1px solid var(--primary-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+  font-size: 13px;
+}
+
+.rt-drag-preview span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ── 消耗顺序行（A2A routing-consumption-order） ─────────── */
+.rt-consumption-order {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 12px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rt-consumption-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rt-consumption-link:hover:not(:disabled) {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+  color: var(--text-main);
+}
+
+.rt-consumption-link:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.rt-consumption-note {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/* ── 状态点 + 文案（A2A RoutingStateText） ──────────────── */
+.rt-state-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.rt-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.rt-tone-success {
+  color: #0d9488;
+}
+
+.rt-tone-warning {
+  color: #d97706;
+}
+
+.rt-tone-danger {
+  color: var(--danger-color, #dc2626);
+}
+
+/* ── 模型选择器（A2A routing-model-selection） ──────────── */
+.rt-model-picker {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.rt-model-columns {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  height: clamp(240px, 34vh, 360px);
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.rt-model-providers,
+.rt-model-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px;
+}
+
+.rt-model-providers {
+  border-right: 1px solid var(--border-color);
+  background: var(--hover-bg, rgba(128, 128, 128, 0.06));
+}
+
+.rt-model-providers > input,
+.rt-model-choices > input {
+  flex: none;
+  font-size: 12px;
+}
+
+.rt-model-provider-list {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.rt-model-provider {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rt-model-provider:hover:not(:disabled) {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+}
+
+.rt-model-provider.is-on {
+  border-color: color-mix(in srgb, var(--primary-color) 35%, transparent);
+  background: var(--accent-soft, rgba(99, 102, 241, 0.1));
+}
+
+.rt-model-provider:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.rt-model-provider-all {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--card-bg);
+}
+
+.rt-model-provider-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rt-model-choices-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rt-model-choices-head > b {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-main);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.rt-model-choice-list {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.rt-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.rt-picker-row:hover {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.1));
+}
+
+.rt-picker-row[data-checked] {
+  border-color: color-mix(in srgb, var(--primary-color) 35%, transparent);
+  background: var(--accent-soft, rgba(99, 102, 241, 0.1));
+}
+
+.rt-picker-row input[type='checkbox'] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.rt-picker-model-id {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+}
+
+.rt-picker-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.rt-picker-row-main b {
+  display: block;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.rt-picker-row-main small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rt-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.rt-picker-empty {
+  margin: 0;
+  padding: 10px 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.rt-model-selection-summary {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 6px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.rt-picker-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  padding-top: 4px;
+}
+
+/* ── 组表单 / 调用示例 / 弹窗内账号编辑 ─────────────────── */
+.rt-group-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rt-group-form label {
+  font-size: 12px;
+}
+
+.rt-group-code {
+  max-height: 300px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--hover-bg, rgba(128, 128, 128, 0.08));
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rt-account-add {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.rt-account-add .form-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── 档案字段面（ProfileForm：对齐 A2A routing-config-panel 的分组密度） ── */
+.rt-profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rt-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rt-field-grid > .rt-field + .rt-field {
+  margin-top: 0;
+}
+
+.rt-provider-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.rt-provider-scope > .rt-subfield .form-input {
+  font-size: 12px;
+}
+
+.rt-config-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.rt-model-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rt-model-filter-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.rt-model-filter-select {
+  font-size: 12px;
+}
+
+/* A2A routing-protection-summary：一行灰字 + 徽标 + 设置 */
+.rt-protection-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rt-protection-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+  color: var(--text-main);
+  font-size: 11px;
+}
+
+.rt-protection-summary .rt-link-btn {
+  margin-left: auto;
+}
+
+/* ── 窄屏折叠（与页面断点同口径） ───────────────────────── */
+@media (max-width: 900px) {
+  .rt-config-rules {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rt-field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rt-model-columns {
+    grid-template-columns: minmax(120px, 34%) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .rt-config-account .rt-account-avatar {
+    display: none;
+  }
+  .rt-config-provider > header {
+    flex-wrap: wrap;
+  }
+}

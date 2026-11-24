@@ -102,6 +102,34 @@ const NUM_FIELDS: Array<{ key: NumKey; label: string; min: number; max: number }
   { key: 'retry_limit', label: '重试上限', min: 1, max: 32 },
 ];
 
+/**
+ * 数字输入失焦时的即时校验与收敛（纯函数）。
+ *
+ * 现状缺口：输入框只在**保存时**统一 clamp，用户填 999 一路看着 999，点保存后
+ * 数值变成 32 却没有任何说明——他会以为值丢了或者被谁改回去了。
+ *
+ * 返回 `corrected`（收敛后的字符串，``=不改动``）与 `reason`（提示文案 key 的
+ * 参数，null=不需要提示）。空串与非数字不做处理：那是保存前的正常中间态，
+ * 在失焦时就报错会打断输入。
+ */
+export function clampNumInput(
+  field: { min: number; max: number; label: string },
+  raw: string,
+): { corrected: string; notice: { kind: 'clamped' | 'rounded'; value: number } | null } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { corrected: '', notice: null };
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return { corrected: '', notice: null };
+  const truncated = Math.trunc(parsed);
+  const clamped = Math.min(field.max, Math.max(field.min, truncated));
+  if (clamped !== parsed) {
+    // 区分两种原因：整数值被范围收紧 vs 小数被截断（提示词要说准）
+    const kind = truncated !== parsed ? 'rounded' : 'clamped';
+    return { corrected: String(clamped), notice: { kind, value: clamped } };
+  }
+  return { corrected: trimmed, notice: null };
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -3198,6 +3226,37 @@ export default function PurgeConsole(): JSX.Element {
     }
   }, []);
 
+  /**
+   * 失焦收敛：把超范围/小数输入就地修正并**说明原因**。
+   *
+   * 为什么不在 onChange 里收敛：用户打「20」时中途是「2」，边打边被 clamp 会把
+   * 输入打断。失焦是「我填完了」的信号，这时修正才不会碍事。
+   */
+  const handleNumBlur = useCallback(
+    (field: { key: NumKey; label: string; min: number; max: number }): void => {
+      const raw = numRaw[field.key];
+      const { corrected, notice } = clampNumInput(field, raw);
+      if (corrected === '') return;
+      if (notice) {
+        setNumRaw((prev) => ({ ...prev, [field.key]: corrected }));
+        setDirty(true);
+        setDraft((d) => (d ? withNum(d, field.key, notice.value) : d));
+        addToast(
+          notice.kind === 'rounded'
+            ? t('{{label}} 只接受整数，已取整为 {{value}}', { label: t(field.label), value: notice.value })
+            : t('{{label}} 超出 {{min}}–{{max}} 范围，已调整为 {{value}}', {
+                label: t(field.label),
+                min: field.min,
+                max: field.max,
+                value: notice.value,
+              }),
+          'warning',
+        );
+      }
+    },
+    [addToast, numRaw, t],
+  );
+
   // 开关行入参：按 8 个原语派生，数组引用只在开关本身变化时改变——
   // 文本/词表编辑不会让 SwitchRows 命中重渲染（memo 才有意义）。
   const flags = useMemo(
@@ -3848,6 +3907,7 @@ export default function PurgeConsole(): JSX.Element {
             value={numRaw.skill_inject_limit}
             error={numErrors.skill_inject_limit}
             onChange={(event) => handleNumChange('skill_inject_limit', event.target.value)}
+            onBlur={() => handleNumBlur(NUM_FIELDS[0])}
           />
           <Input
             label={t('异源模型（逗号分隔）')}
@@ -3872,6 +3932,7 @@ export default function PurgeConsole(): JSX.Element {
             value={numRaw.fallback_trigger_attempt}
             error={numErrors.fallback_trigger_attempt}
             onChange={(event) => handleNumChange('fallback_trigger_attempt', event.target.value)}
+            onBlur={() => handleNumBlur(NUM_FIELDS[1])}
             data-purge-fix="fallback-attempts"
           />
           <Input
@@ -3882,6 +3943,7 @@ export default function PurgeConsole(): JSX.Element {
             value={numRaw.retry_limit}
             error={numErrors.retry_limit}
             onChange={(event) => handleNumChange('retry_limit', event.target.value)}
+            onBlur={() => handleNumBlur(NUM_FIELDS[2])}
           />
           <Input
             label={t('system 剥离前缀（逗号分隔）')}

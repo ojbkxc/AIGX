@@ -4580,6 +4580,8 @@
   "丢弃": "Discard",
   "已恢复未保存的草稿，记得点保存": "Draft restored — remember to save",
   "已丢弃未保存的草稿": "Unsaved draft discarded",
+  "{{label}} 只接受整数，已取整为 {{value}}": "{{label}} accepts integers only; rounded to {{value}}",
+  "{{label}} 超出 {{min}}–{{max}} 范围，已调整为 {{value}}": "{{label}} is outside {{min}}–{{max}}; adjusted to {{value}}",
   "已复现现状快照": "Snapshot copied",
   "运行": "Runtime",
   "已运行": "uptime",
