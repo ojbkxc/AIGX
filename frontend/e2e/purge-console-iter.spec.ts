@@ -269,11 +269,11 @@ test('43 · 搜索过滤期间移动按钮禁用（交换的是原表相邻行�
   // 未过滤时第 2 行可上下移动
   await expect(table.getByTestId('purge-rule-up-1')).toBeEnabled();
 
-  // 过滤后（只剩 1 行）两个方向都禁用，并给出原因
+  // 过滤后只剩 1 行（gamma，真实下标 2）→ 两个方向都禁用，并给出原因
   await page.getByLabel('搜索死区词表').fill('gamma');
   await expect(table.locator('.purge-rule-row')).toHaveCount(1);
-  await expect(table.getByTestId('purge-rule-up-0')).toBeDisabled();
-  await expect(table.getByTestId('purge-rule-down-0')).toBeDisabled();
+  await expect(table.getByTestId('purge-rule-up-2')).toBeDisabled();
+  await expect(table.getByTestId('purge-rule-down-2')).toBeDisabled();
   await expect(page.getByTitle(/搜索过滤中不能调序/).first()).toBeVisible();
 
   // 清空搜索 → 恢复可用
