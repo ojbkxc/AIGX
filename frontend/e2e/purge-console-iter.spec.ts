@@ -260,6 +260,23 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('46 · 加载失败时带出真实原因（不把 500 说成网络异常）', async ({ page }) => {
+  await loginAsAdmin(page);
+  // 500 + 后端文案：应同时展示状态码与文案
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({ status: 500, json: { success: false, error: '数据库连接失败' } }),
+  );
+  await page.goto('/purge');
+
+  const detail = page.getByTestId('purge-load-error-detail');
+  await expect(detail).toBeVisible();
+  await expect(detail).toContainText('HTTP 500');
+  await expect(detail).toContainText('数据库连接失败');
+  // 通用文案仍在（不丢掉「可以重试」这层意思）
+  await expect(page.getByText(/网络异常或服务不可用/)).toBeVisible();
+  await expect(page.getByRole('button', { name: '重试' })).toBeVisible();
+});
+
 test('45 · 总开关关着时说明「配了但没生效」，且不禁用其他开关', async ({ page }) => {
   // `mockPurge` 的 PUT 已回显请求体（见其注释），这里不必再覆盖
   await mockPurge(page);

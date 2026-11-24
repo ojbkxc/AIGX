@@ -2624,6 +2624,8 @@ export default function PurgeConsole(): JSX.Element {
   const [skillDirResolved, setSkillDirResolved] = useState('');
   /** 管理面 403「必须先改密码」：整页给引导，而不是只说「加载失败」 */
   const [needsPasswordChange, setNeedsPasswordChange] = useState(false);
+  /** 加载失败的具体原因（脱敏后展示；空串=没失败或与改密无关时不显示） */
+  const [loadErrorDetail, setLoadErrorDetail] = useState('');
   /** 批量粘贴面板：null=关，否则是哪张词表（就地展开，不引弹窗栈） */
   const [batchPaste, setBatchPaste] = useState<'dead_zone' | 'synonym' | null>(null);
   const [batchText, setBatchText] = useState('');
@@ -2775,8 +2777,16 @@ export default function PurgeConsole(): JSX.Element {
           /password/i.test(err?.message ?? ''));
       if (mustChange) {
         setNeedsPasswordChange(true);
+        setLoadErrorDetail('');
         addToast(t('首次登录需先修改密码，之后才能使用破甲控制台'), 'warning');
       } else {
+        // 带上状态码与后端文案（都是给人看的，不含凭据）：只说「加载失败」会把
+        // 「后端 500」和「网线掉了」混成一类
+        const parts: string[] = [];
+        if (typeof err?.status === 'number') parts.push(`HTTP ${err.status}`);
+        const msg = (err?.message ?? '').trim();
+        if (msg && !/^Request failed with status/i.test(msg)) parts.push(msg.slice(0, 120));
+        setLoadErrorDetail(parts.join(' · '));
         addToast(t('加载失败'), 'error');
       }
     } finally {
@@ -3896,6 +3906,13 @@ export default function PurgeConsole(): JSX.Element {
           ) : (
             <>
               <p className="purge-empty">{t('网络异常或服务不可用，请稍后重试')}</p>
+              {/* 把真实原因带出来：只说「网络异常」会把「后端 500」和「网线掉了」
+                  混成一类，用户不知道该重试还是该找人。 */}
+              {loadErrorDetail ? (
+                <p className="purge-hint" data-testid="purge-load-error-detail">
+                  {t('原因：{{detail}}', { detail: loadErrorDetail })}
+                </p>
+              ) : null}
               <Button variant="primary" onClick={() => void load()}>
                 {t('重试')}
               </Button>
