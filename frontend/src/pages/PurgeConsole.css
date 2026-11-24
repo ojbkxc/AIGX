@@ -816,3 +816,18 @@
   color: var(--accent-color, #4f46e5);
   border-color: var(--accent-color, #4f46e5);
 }
+/* 批量粘贴输入区 */
+.purge-batch-text {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 6px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--input-bg, transparent);
+  color: var(--text-main, inherit);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  resize: vertical;
+}

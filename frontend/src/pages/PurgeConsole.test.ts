@@ -5,6 +5,7 @@ import {
   capError,
   exportPreviewHistory,
   findBodySnippet,
+  parseBatchRules,
   parsePreviewHistoryJson,
   noteRecentPreset,
   readPresetFilter,
@@ -69,6 +70,45 @@ describe('readRecentPresets / noteRecentPreset', () => {
       throw new Error('quota');
     };
     expect(() => noteRecentPreset([], 'x', boom, boom)).not.toThrow();
+  });
+});
+
+describe('parseBatchRules', () => {
+  it('Tab 分隔（Excel 两列直接粘贴）', () => {
+    const { rules, skipped } = parseBatchRules('原文A\t改写A\n原文B\t改写B');
+    expect(rules).toEqual([
+      { from: '原文A', to: '改写A' },
+      { from: '原文B', to: '改写B' },
+    ]);
+    expect(skipped).toBe(0);
+  });
+
+  it('认箭头/等号分隔符', () => {
+    const { rules } = parseBatchRules('a -> b\nc => d\ne → f\ng ⇒ h');
+    expect(rules.map((r) => `${r.from}=${r.to}`)).toEqual(['a=b', 'c=d', 'e=f', 'g=h']);
+  });
+
+  it('空行跳过但不计入 skipped', () => {
+    const { rules, skipped } = parseBatchRules('\n\na\tb\n   \n');
+    expect(rules).toHaveLength(1);
+    expect(skipped).toBe(0);
+  });
+
+  it('分不出两段的行计入 skipped（如实回报）', () => {
+    const { rules, skipped } = parseBatchRules('原文\t改写\n只有一段\n表头\n缺右边\t');
+    expect(rules).toHaveLength(1);
+    expect(skipped).toBe(3);
+  });
+
+  it('与现有规则重复（忽略大小写与首尾空格）的丢弃', () => {
+    const { rules } = parseBatchRules('Foo\tbar\nfoo\tbaz', [{ from: ' FOO ', to: 'x' }]);
+    expect(rules).toHaveLength(0);
+  });
+
+  it('逗号不作为分隔符（改写内容常含逗号，劈开会比不识别更坏）', () => {
+    const { rules, skipped } = parseBatchRules('好的, then');
+    expect(rules).toHaveLength(0);
+    expect(skipped).toBe(1);
   });
 });
 

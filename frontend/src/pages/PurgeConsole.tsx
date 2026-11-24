@@ -479,6 +479,61 @@ export function snapshotReportText(input: {
   return lines.join('\n');
 }
 
+/** 批量粘贴解析结果：`rules` 可直接追加，`skipped` 是没能解析的行数。 */
+export interface BatchParseResult {
+  rules: PurgeRewriteRule[];
+  skipped: number;
+}
+
+/**
+ * 批量粘贴解析：一行一条 `原文 <分隔符> 改写`。
+ *
+ * 为什么要它：真实词表动辄几十条，界面上只能一条条点「添加规则」手填——这是
+ * 破甲页最耗时的操作，而用户手上通常已经有 Excel / 文档里的两列表。
+ *
+ * 认的分隔符按优先级：**Tab**（从 Excel 直接粘贴就是这个）、`->`、`=>`、`→`、
+ * 全角箭头 `⇒`。**不认逗号**：改写内容本身常含中英文逗号（「好的，」「, then」），
+ * 拿它当分隔符会把一条规则劈成两半，比不识别更坏。
+ *
+ * 空行跳过（不计入 skipped）；分不出两段的行计入 skipped，让调用方如实回报。
+ * 与现有规则 `from` 重复（trim + 忽略大小写）的行**丢弃**——重复项在词表里
+ * 没有额外作用，却会让「整理」时又要删一遍。
+ */
+export function parseBatchRules(
+  text: string,
+  existing: PurgeRewriteRule[] = [],
+): BatchParseResult {
+  const SEPARATORS = ['\t', '->', '=>', '→', '⇒'];
+  const seen = new Set(existing.map((rule) => rule.from.trim().toLowerCase()));
+  const rules: PurgeRewriteRule[] = [];
+  let skipped = 0;
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    // 表头行（「原文 / 改写」这类）没有分隔符，会自然落进 skipped——不特殊处理，
+    // 免得把真实规则「坏->坏」误判成表头
+    let from = '';
+    let to = '';
+    const separator = SEPARATORS.find((sep) => line.includes(sep));
+    if (separator) {
+      const at = line.indexOf(separator);
+      from = line.slice(0, at).trim();
+      to = line.slice(at + separator.length).trim();
+    }
+    if (!from || !to) {
+      skipped += 1;
+      continue;
+    }
+    const key = from.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rules.push({ from, to });
+  }
+
+  return { rules, skipped };
+}
+
 /** 生效项摘要导出成纯文本（贴给同事/贴进工单时用，不带 UI 装饰）。 */
 export function activeSummaryText(
   items: ActiveItem[],
@@ -2132,6 +2187,9 @@ export default function PurgeConsole(): JSX.Element {
   const [skillDirResolved, setSkillDirResolved] = useState('');
   /** 管理面 403「必须先改密码」：整页给引导，而不是只说「加载失败」 */
   const [needsPasswordChange, setNeedsPasswordChange] = useState(false);
+  /** 批量粘贴面板：null=关，否则是哪张词表（就地展开，不引弹窗栈） */
+  const [batchPaste, setBatchPaste] = useState<'dead_zone' | 'synonym' | null>(null);
+  const [batchText, setBatchText] = useState('');
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
   const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
   // 导入配置文件选择
@@ -2372,6 +2430,43 @@ export default function PurgeConsole(): JSX.Element {
         : d,
     );
   }, []);
+
+  /** 批量粘贴：解析后追加到对应词表（去重、跳过坏行并如实回报） */
+  const applyBatchPaste = useCallback((): void => {
+    const current = draft;
+    if (!batchPaste || !current) return;
+    const table: 'rewrite_rules' | 'synonym_pairs' =
+      batchPaste === 'dead_zone' ? 'rewrite_rules' : 'synonym_pairs';
+    const existing: PurgeRewriteRule[] =
+      table === 'rewrite_rules' ? current.rewrite_rules : current.synonym_pairs;
+    // 注意：**不要**在 `setDraft(updater)` 里收集计数——React 的 updater 是异步
+    // 执行的，toast 会在计数还是 0 的时候弹出去（实测会报「没有可添加」，而规则
+    // 其实已经加进去了）。计数必须在这里同步算完。
+    const { rules, skipped } = parseBatchRules(batchText, existing);
+    if (rules.length === 0) {
+      addToast(
+        skipped > 0
+          ? t('没有解析出规则：{{skipped}} 行格式不对', { skipped })
+          : t('没有可添加的规则（可能都与现有行重复）'),
+        'error',
+      );
+      return;
+    }
+    setDirty(true);
+    setDraft(
+      table === 'rewrite_rules'
+        ? { ...current, rewrite_rules: [...existing, ...rules] }
+        : { ...current, synonym_pairs: [...existing, ...rules] },
+    );
+    addToast(
+      skipped > 0
+        ? t('已添加 {{n}} 条，{{skipped}} 行未能解析', { n: rules.length, skipped })
+        : t('已添加 {{n}} 条规则', { n: rules.length }),
+      'success',
+    );
+    setBatchPaste(null);
+    setBatchText('');
+  }, [addToast, batchPaste, batchText, draft, t]);
 
   const addRule = useCallback((): void => {
     setDirty(true);
@@ -3406,6 +3501,14 @@ export default function PurgeConsole(): JSX.Element {
             <Button variant="outline" size="sm" onClick={addRule}>
               {t('添加规则')}
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-batch-paste-open"
+              onClick={() => setBatchPaste('dead_zone')}
+            >
+              {t('批量粘贴')}
+            </Button>
             <Button variant="outline" size="sm" onClick={() => tidyTable('dead_zone')}>
               {t('整理')}
             </Button>
@@ -3444,6 +3547,38 @@ export default function PurgeConsole(): JSX.Element {
             )}
           </p>
         ) : null}
+        {batchPaste === 'dead_zone' ? (
+          <div className="purge-warning-box" role="group" data-testid="purge-batch-paste-panel">
+            <p className="purge-warning-row">
+              <span>
+                {t('一行一条，原文与改写之间用 Tab 或 -> 分隔（从 Excel 直接粘贴两列即可）')}
+              </span>
+            </p>
+            <textarea
+              className="purge-batch-text"
+              aria-label={t('批量粘贴内容')}
+              rows={6}
+              value={batchText}
+              onChange={(event) => setBatchText(event.target.value)}
+              placeholder={'原文\t改写'}
+            />
+            <div className="purge-actions">
+              <Button variant="primary" size="sm" onClick={applyBatchPaste}>
+                {t('解析并添加')}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setBatchPaste(null);
+                  setBatchText('');
+                }}
+              >
+                {t('取消')}
+              </Button>
+            </div>
+          </div>
+        ) : null}
         {draft.rewrite_rules.length === 0 ? (
           <p className="purge-empty" data-purge-fix="dead-zone-table">{t('暂无改写规则，点击右上角「添加规则」新建一条')}</p>
         ) : (
@@ -3478,6 +3613,14 @@ export default function PurgeConsole(): JSX.Element {
           <>
             <Button variant="outline" size="sm" onClick={addSynonymRule}>
               {t('添加规则')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-batch-paste-open-synonym"
+              onClick={() => setBatchPaste('synonym')}
+            >
+              {t('批量粘贴')}
             </Button>
             <Button variant="outline" size="sm" onClick={() => tidyTable('synonym')}>
               {t('整理')}

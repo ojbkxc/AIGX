@@ -247,6 +247,26 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('17 · 批量粘贴：Excel 两列一次加完，坏行如实回报', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const before = await page.locator('.purge-rules .purge-rule-row').count();
+  await page.getByTestId('purge-batch-paste-open').click();
+  const panel = page.getByTestId('purge-batch-paste-panel');
+  await expect(panel).toBeVisible();
+
+  // 三行有效（Tab / 箭头都认）+ 一行格式不对
+  await page.getByLabel('批量粘贴内容').fill('甲\tA\n乙 -> B\n丙 → C\n这一行没有分隔符');
+  await page.getByRole('button', { name: '解析并添加' }).click();
+
+  await expect(page.locator('.toast').first()).toContainText(/已添加 3 条/);
+  await expect(page.locator('.toast').first()).toContainText(/1 行未能解析/);
+  await expect(page.locator('.purge-rules .purge-rule-row')).toHaveCount(before + 3);
+  // 面板自动收起（加完不该还占着屏幕）
+  await expect(panel).toHaveCount(0);
+});
+
 test('16 · 三个复制入口真的把内容写进剪贴板', async ({ page }) => {
   // 剪贴板在无头环境不可靠：拦 writeText 记录内容，断言「复制出来的东西」而不只是按钮存在
   await page.addInitScript(() => {
