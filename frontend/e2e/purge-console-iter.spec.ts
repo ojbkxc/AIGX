@@ -247,6 +247,25 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('18 · 有未保存备份时给恢复条，恢复后变回 dirty', async ({ page }) => {
+  // 备份与 mock 的 settings 必须不同，才会弹恢复条
+  const backupSettings = { ...PURGE_DATA.settings, retry_limit: 42 };
+  await page.addInitScript((payload) => {
+    localStorage.setItem('aigx.purge.draftBackup', JSON.stringify(payload));
+  }, { settings: backupSettings, savedAt: Date.now() });
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const banner = page.getByTestId('purge-draft-backup');
+  await expect(banner).toBeVisible();
+
+  // 恢复 → 草稿变成备份值，且标记为未保存
+  await page.getByTestId('purge-draft-backup-restore').click();
+  await expect(banner).toHaveCount(0);
+  await expect(page.getByLabel('重试上限')).toHaveValue('42');
+  await expect(page.locator('.purge-dirty-bar')).toBeVisible();
+});
+
 test('17 · 批量粘贴：Excel 两列一次加完，坏行如实回报', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
