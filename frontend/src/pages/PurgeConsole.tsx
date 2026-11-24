@@ -4025,8 +4025,13 @@ export default function PurgeConsole(): JSX.Element {
       {/* 总开关关闭提示：放在页面标题下方独立成行（请求不会被改写这件事必须一眼看到，
             只靠开关行的颜色区分太弱） */}
         {!draft.enabled ? (
-          <p className="purge-off-notice" role="status">
+          <p className="purge-off-notice" role="status" data-testid="purge-off-notice">
             {t('破甲控制台当前关闭，请求不会被改写。')}
+            {/* 不禁用下面的开关：常见流程是「先配好、最后打开总开关」。
+                但必须说清「现在配了也不会生效」，否则用户会以为已经生效。 */}
+            <span className="purge-off-hint">
+              {t('下面的开关与词表可以先配好，但只有打开总开关后才会真正生效。')}
+            </span>
           </p>
         ) : null}
         {/* 作用域说明：网关只有一份全局配置（`PurgeStore.current`），没有按账号/按

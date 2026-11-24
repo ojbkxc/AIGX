@@ -247,6 +247,27 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('45 · 总开关关着时说明「配了但没生效」，且不禁用其他开关', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const notice = page.getByTestId('purge-off-notice');
+  await expect(notice).toHaveCount(0); // 默认开着
+
+  // 关掉总开关
+  await page.getByRole('switch').first().click();
+  await expect(notice).toBeVisible();
+  // 两句都要在：一句说请求不改写，一句说下面配了也不生效
+  await expect(notice).toContainText(/请求不会被改写/);
+  await expect(notice).toContainText(/只有打开总开关后才会真正生效/);
+
+  // 关键：**不禁用**下面的开关（常见流程是先配好再打开总开关）
+  const otherSwitch = page.getByRole('switch').nth(1);
+  if ((await otherSwitch.count()) > 0) {
+    await expect(otherSwitch).toBeEnabled();
+  }
+});
+
 test('44 · 「跳到下一个重复」循环定位到重复行', async ({ page }) => {
   // 两组重复：dup 3 次（下标 0/1/4）、rep 2 次（2/3）
   const rules = [

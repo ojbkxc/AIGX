@@ -42,8 +42,18 @@ function snapshot() {
   const idleSec = (Date.now() - fs.statSync(indexPath).mtimeMs) / 1000;
   let dirty = '';
   try {
-    const gitArgs = ['status', '--porcelain', '--untracked-files=no', '--', 'static'];
-    if (strictUntracked) gitArgs.splice(2, 1); // 去掉 --untracked-files=no
+    const gitArgs = [
+      'status',
+      '--porcelain',
+      '--untracked-files=no',
+      '--',
+      'static/assets',
+    ];
+    if (strictUntracked) {
+      // 严格模式看整个 static（含 index.html 与未跟踪）
+      gitArgs.splice(2, 1);
+      gitArgs[gitArgs.length - 1] = 'static';
+    }
     dirty = execFileSync('git', gitArgs, {
       cwd: repoRoot,
       encoding: 'utf8',
@@ -53,7 +63,7 @@ function snapshot() {
   }
   if (dirty) {
     const count = dirty.split('\n').length;
-    const scope = strictUntracked ? '改动（含未跟踪）' : '已跟踪文件的改动';
+    const scope = strictUntracked ? '改动（含未跟踪）' : 'chunk 的改动';
     return { ok: false, why: `static 有 ${count} 个${scope}（可能正在重建）` };
   }
   if (idleSec < minIdleSec) {

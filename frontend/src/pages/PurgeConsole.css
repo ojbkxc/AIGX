@@ -888,3 +888,10 @@
   border-radius: 6px;
   transition: outline-color 0.3s ease;
 }
+/* 关闭态补充说明：与主提示同一行但更弱 */
+.purge-off-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
