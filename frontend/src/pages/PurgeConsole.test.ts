@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildActiveSummary,
   capError,
   diffLines,
   diffTokensInLine,
@@ -14,6 +15,82 @@ import {
   validateImportedSettings,
   writePreviewHistory,
 } from './PurgeConsole';
+
+describe('buildActiveSummary', () => {
+  const base = {
+    enabled: true,
+    system_normalize: false,
+    dead_zone_rewrite: false,
+    synonym_enabled: false,
+    reduce_reasoning: false,
+    cross_source_fallback: false,
+    skill_inject: false,
+    structured_prompt: false,
+    reasoning_floor: 'low',
+    retry_limit: 8,
+    fallback_trigger_attempt: 3,
+    fallback_models: [],
+    rewrite_rules: [],
+    synonym_pairs: [],
+    normalize_strip_prefixes: [],
+    skill_dir: '',
+    skill_inject_limit: 4000,
+    structured_suffix: '',
+    upstream_label: '',
+  };
+
+  it('总开关关闭 → 只出一条「全关」', () => {
+    const items = buildActiveSummary({ ...base, enabled: false, system_normalize: true });
+    expect(items).toHaveLength(1);
+    expect(items[0].key).toContain('总开关关闭');
+  });
+
+  it('词表只算启用行（停用行不计入条数）', () => {
+    const items = buildActiveSummary({
+      ...base,
+      dead_zone_rewrite: true,
+      rewrite_rules: [
+        { from: 'a', to: 'b', enabled: true },
+        { from: 'c', to: 'd', enabled: false },
+        { from: 'e', to: 'f' },
+      ],
+    });
+    const item = items.find((i) => i.key.includes('死区词改写'));
+    expect(item?.params?.n).toBe(2);
+  });
+
+  it('开关开着但无启用行 → 明确说出来，不显示 0 条', () => {
+    const items = buildActiveSummary({
+      ...base,
+      synonym_enabled: true,
+      synonym_pairs: [{ from: 'a', to: 'b', enabled: false }],
+    });
+    expect(items.some((i) => i.key.includes('开关开着但无启用行'))).toBe(true);
+  });
+
+  it('模板/预设/异源各自带上关键参数', () => {
+    const items = buildActiveSummary({
+      ...base,
+      cross_source_fallback: true,
+      fallback_models: ['m1', 'm2'],
+      structured_prompt: true,
+      active_template: 'T1',
+      auto_preset: true,
+      auto_preset_id: 'p-9',
+      reduce_reasoning: true,
+      reasoning_floor: 'medium',
+    });
+    expect(items.find((i) => i.key.includes('异源递进'))?.params).toEqual({ n: 2, attempt: 3 });
+    expect(items.find((i) => i.key.includes('结构化提示'))?.params).toEqual({ name: 'T1' });
+    expect(items.find((i) => i.key.includes('按模型套预设'))?.params).toEqual({ id: 'p-9' });
+    expect(items.find((i) => i.key.includes('降思考'))?.params).toEqual({ floor: 'medium' });
+  });
+
+  it('未选模板 → 回退默认后缀文案', () => {
+    const items = buildActiveSummary({ ...base, structured_prompt: true });
+    expect(items.some((i) => i.key.includes('默认后缀'))).toBe(true);
+  });
+});
 
 describe('validateImportedSettings', () => {
   const base = {

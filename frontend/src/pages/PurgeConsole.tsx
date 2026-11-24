@@ -100,8 +100,83 @@ const NUM_FIELDS: Array<{ key: NumKey; label: string; min: number; max: number }
   { key: 'retry_limit', label: '重试上限', min: 1, max: 32 },
 ];
 
-/** 导入校验结论：`fatal` 非空 = 拒绝导入；`warnings` = 可导入但有风险。 */
-export interface ImportVerdict {
+/** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值。 */
+export interface ActiveItem {
+  key: string;
+  params?: Record<string, string | number>;
+}
+
+/**
+ * 「当前生效项」摘要（纯函数，便于单测）。
+ *
+ * 为什么需要：破甲有 8 个开关 + 两张词表 + 模板/预设/技能四块配置，配到
+ * 十几项之后没人能一眼说出「现在到底哪些治理在生效」——只能逐个开关去数。
+ * 这里按**数据面的真实语义**汇总（词表只算启用行、异源要看有没有模型），
+ * 总开关关闭时明确说「全关」而不是列出零散项。
+ */
+export function buildActiveSummary(settings: PurgeSettings): ActiveItem[] {
+  if (!settings.enabled) return [{ key: '总开关关闭：数据面不做任何治理' }];
+  const items: ActiveItem[] = [];
+  if (settings.system_normalize) items.push({ key: 'system 归一化' });
+  const deadZone = (settings.rewrite_rules ?? []).filter((rule) => rule.enabled !== false);
+  if (settings.dead_zone_rewrite) {
+    items.push(
+      deadZone.length > 0
+        ? { key: '死区词改写（{{n}} 条启用）', params: { n: deadZone.length } }
+        : { key: '死区词改写（开关开着但无启用行）' },
+    );
+  }
+  const synonyms = (settings.synonym_pairs ?? []).filter((rule) => rule.enabled !== false);
+  if (settings.synonym_enabled) {
+    items.push(
+      synonyms.length > 0
+        ? { key: '同义词替换（{{n}} 条启用）', params: { n: synonyms.length } }
+        : { key: '同义词替换（开关开着但无启用行）' },
+    );
+  }
+  if (settings.reduce_reasoning) {
+    items.push({
+      key: '降思考档位 → {{floor}}',
+      params: { floor: settings.reasoning_floor || '—' },
+    });
+  }
+  if (settings.cross_source_fallback) {
+    const models = settings.fallback_models ?? [];
+    items.push(
+      models.length > 0
+        ? {
+            key: '异源递进（{{n}} 个模型，第 {{attempt}} 轮起）',
+            params: { n: models.length, attempt: settings.fallback_trigger_attempt },
+          }
+        : { key: '异源递进（开关开着但无候选模型）' },
+    );
+  }
+  if (settings.skill_inject) {
+    items.push({
+      key: '技能注入（上限 {{limit}} 字符）',
+      params: { limit: settings.skill_inject_limit },
+    });
+  }
+  if (settings.structured_prompt) {
+    const template = settings.active_template?.trim();
+    items.push(
+      template
+        ? { key: '结构化提示（模板「{{name}}」）', params: { name: template } }
+        : { key: '结构化提示（默认后缀）' },
+    );
+  }
+  if (settings.auto_preset) {
+    const pinned = settings.auto_preset_id?.trim();
+    items.push(
+      pinned
+        ? { key: '按模型套预设（固定「{{id}}」）', params: { id: pinned } }
+        : { key: '按模型套预设（自动匹配）' },
+    );
+  }
+  return items;
+}
+
+/** 导入校验结论：`fatal` 非空 = 拒绝导入；`warnings` = 可导入但有风险。 */export interface ImportVerdict {
   fatal: string[];
   warnings: string[];
 }
@@ -2246,13 +2321,22 @@ export default function PurgeConsole(): JSX.Element {
         </p>
       ) : null}
 
+      {/* 当前生效项：8 开关 + 两张词表 + 模板/预设/技能，配到十几项后没人能一眼
+          说出「现在到底哪些在生效」；这里按数据面真实语义汇总（词表只算启用行）。 */}
+      <Card title={t('当前生效项')}>
+        <ul className="purge-active-list" data-testid="purge-active-summary">
+          {buildActiveSummary(draft).map((item, index) => (
+            <li key={`${item.key}-${index}`}>{t(item.key, item.params)}</li>
+          ))}
+        </ul>
+      </Card>
+
       <Card
         title={t('开关')}
         actions={<span className="purge-hint">{t('点一下立即生效，重启后保留')}</span>}
       >
         <SwitchRows flags={flags} disabled={saving} onToggle={toggle} t={t} />
       </Card>
-
       <Card
         title={t('只读参数')}
         actions={

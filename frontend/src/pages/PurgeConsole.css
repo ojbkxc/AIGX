@@ -669,3 +669,16 @@
   font-size: 12px;
   line-height: 1.6;
 }
+/* 当前生效项：紧凑列表，一行一项 */
+.purge-active-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.purge-active-list li {
+  line-height: 1.5;
+}
