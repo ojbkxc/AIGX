@@ -125,7 +125,13 @@ export default function LimitPage(): JSX.Element {
     setRlSaving(true);
     setError('');
     try {
-      await api.updateRateLimitConfig(rlConfig as unknown as Record<string, unknown>);
+      // 存量配置可能是历史版本存下的 Some(0)（或后端把 0 存进来）：那等于「该维度一律拦截」。
+      // 提交前统一把 0 归一成 null（= 不限制），否则「打开页面点保存」就会把全站请求拦掉。
+      const payload: Record<string, unknown> = { ...(rlConfig as RateLimitConfig) };
+      for (const f of RL_FIELDS) {
+        if (payload[f.field] === 0) payload[f.field] = null;
+      }
+      await api.updateRateLimitConfig(payload);
       addToast(t('限流配置更新成功'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
