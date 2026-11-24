@@ -213,10 +213,14 @@ fn relevance(preset: &BuiltinPreset, needle: Option<&str>) -> u8 {
 
 fn matches(preset: &BuiltinPreset, needle: &str) -> bool {
     let needle = needle.to_lowercase();
+    // 正文也参与检索：正文由 `include_str!` 编译期内联为 `&'static str`，
+    // 没有 IO 成本。不含正文时「搜某个具体措辞」只能靠记得标题——而预设
+    // 的价值恰恰在于正文写法（同一家、同一模型可以有十几条不同思路）。
     preset.id.to_lowercase().contains(&needle)
         || preset.vendor.to_lowercase().contains(&needle)
         || preset.model.to_lowercase().contains(&needle)
         || preset.title.to_lowercase().contains(&needle)
+        || preset.body.to_lowercase().contains(&needle)
         || preset
             .tags
             .iter()
@@ -656,6 +660,50 @@ mod tests {
         let (empty, _, total3) = list_page(None, None, None, total + 10, 5);
         assert!(empty.is_empty(), "越过总数应为空页");
         assert_eq!(total3, total);
+    }
+
+    /// 正文参与检索：正文独有的词也能命中（此前只搜 id/vendor/model/title/tags）。
+    ///
+    /// 断言分两步是刻意的：先证明这个词**确实不在元数据里**（否则这个测试
+    /// 在旧实现下也会绿，等于没测），再断言检索命中。
+    #[test]
+    fn list_query_matches_body_text_not_only_metadata() {
+        let target = BUILTIN_PRESETS
+            .iter()
+            .find(|preset| {
+                // 找一个正文长度足够、且能取到一个够长的 ASCII 词做 needle 的预设
+                preset.body.len() > 2000
+            })
+            .expect("目录里应有长正文预设");
+
+        // 从正文里取一个 ≥8 字符的纯 ASCII 词
+        let needle = target
+            .body
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .filter(|token| token.len() >= 8 && token.chars().all(|c| c.is_ascii_alphabetic()))
+            .map(str::to_lowercase)
+            .find(|token| {
+                // 前提：这个词在元数据里找不到（否则测不出正文检索）
+                !format!(
+                    "{} {} {} {} {}",
+                    target.id,
+                    target.vendor,
+                    target.model,
+                    target.title,
+                    target.tags.join(" ")
+                )
+                .to_lowercase()
+                .contains(token)
+            })
+            .expect("正文里应有元数据之外的词");
+
+        let (items, _, total) = list(Some(&needle), None, None, MAX_LIMIT);
+        assert!(total > 0, "正文里的词 `{needle}` 应能检到预设");
+        assert!(
+            items.iter().any(|p| p.id == target.id),
+            "命中项里应包含正文含该词的预设 `{}`",
+            target.id
+        );
     }
 
     #[test]
