@@ -11,6 +11,7 @@ import {
   readRecentPresets,
   sortWarningsBySeverity,
   tidyRules,
+  warningReportText,
   tidySummary,
   diffLines,
   diffSettings,
@@ -67,6 +68,40 @@ describe('readRecentPresets / noteRecentPreset', () => {
       throw new Error('quota');
     };
     expect(() => noteRecentPreset([], 'x', boom, boom)).not.toThrow();
+  });
+});
+
+describe('warningReportText', () => {
+  const tr = (k: string): string => k;
+
+  it('按严重级分组，同级保持原序', () => {
+    const text = warningReportText(
+      [
+        { message: 'info-1', severity: 'info' },
+        { message: 'error-1', severity: 'error' },
+        { message: 'error-2', severity: 'error' },
+        { message: 'warn-1', severity: 'warn' },
+      ],
+      tr,
+    );
+    expect(text).toBe('## 不生效\n- error-1\n- error-2\n## 需确认\n- warn-1\n## 提示\n- info-1');
+  });
+
+  it('未声明 severity 按 error 分组（与后端兜底同立场）', () => {
+    const text = warningReportText([{ message: 'legacy' }], tr);
+    expect(text).toContain('## 不生效');
+    expect(text).toContain('- legacy');
+  });
+
+  it('无告警 → 给「已通过」结论，而不是空串', () => {
+    const text = warningReportText([], tr);
+    expect(text).not.toBe('');
+    expect(text).toContain('配置体检通过');
+  });
+
+  it('只有某一级时不输出空分组标题', () => {
+    const text = warningReportText([{ message: 'only-warn', severity: 'warn' }], tr);
+    expect(text).toBe('## 需确认\n- only-warn');
   });
 });
 

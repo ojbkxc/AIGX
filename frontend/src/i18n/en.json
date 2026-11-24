@@ -4564,6 +4564,8 @@
   "已改好，重试": "Done, retry",
   "复制为文本": "Copy as text",
   "已复制生效项清单": "Active items copied",
+  "复制体检结果": "Copy config check",
+  "已复制体检结果": "Config check copied",
   "统计": "Stats",
   "你最近应用过这条预设": "You applied this preset recently",
   "标题/厂商/模型/标签里没有这个词，是正文里命中的": "Not in title/vendor/model/tags; matched inside the body",

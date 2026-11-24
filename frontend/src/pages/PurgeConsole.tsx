@@ -406,6 +406,32 @@ export function findBodySnippet(
   };
 }
 
+/**
+ * 体检结果导出成纯文本（贴工单/群聊时用）。
+ *
+ * 按严重级分组输出，**同级保持原序**；无告警时给一行「已通过」——空串会让人
+ * 以为复制失败，而「没有告警」本身就是结论。
+ */
+export function warningReportText(
+  items: Array<{ message: string; severity?: string }>,
+  translate: (key: string) => string,
+): string {
+  if (items.length === 0) return translate('配置体检通过：当前没有「开了但不生效」或自相矛盾的项目。');
+  const groups: Array<{ severity: string; label: string }> = [
+    { severity: 'error', label: '不生效' },
+    { severity: 'warn', label: '需确认' },
+    { severity: 'info', label: '提示' },
+  ];
+  const lines: string[] = [];
+  for (const group of groups) {
+    const hits = items.filter((item) => (item.severity ?? 'error') === group.severity);
+    if (hits.length === 0) continue;
+    lines.push(`## ${translate(group.label)}`);
+    for (const hit of hits) lines.push(`- ${hit.message}`);
+  }
+  return lines.join('\n');
+}
+
 /** 生效项摘要导出成纯文本（贴给同事/贴进工单时用，不带 UI 装饰）。 */
 export function activeSummaryText(
   items: ActiveItem[],
@@ -2652,6 +2678,24 @@ export default function PurgeConsole(): JSX.Element {
    * 走后端 /api/purge/stats.csv 而不是在前端拼字符串：窗口档依赖服务端
    * 事件环（前端只有当前档的快照），只有后端能一次给全四档。
    */
+  /** 复制体检结果为纯文本（工单证据：出了什么问题、按级分组） */
+  const copyWarningReport = useCallback(async (): Promise<void> => {
+    const items =
+      configWarningItems.length > 0
+        ? sortWarningsBySeverity(
+            configWarningItems.map((w) => ({
+              message: w.message,
+              severity: w.severity ?? 'error',
+            })),
+          )
+        : configWarnings.map((message) => ({ message, severity: 'error' }));
+    const copied = await copyText(warningReportText(items, (key) => t(key)));
+    addToast(
+      copied ? t('已复制体检结果') : t('复制失败（浏览器可能禁用了剪贴板权限）'),
+      copied ? 'success' : 'error',
+    );
+  }, [addToast, configWarningItems, configWarnings, t]);
+
   /** 复制生效项为纯文本（贴工单/群聊时不用手动抄） */
   const copyActiveSummary = useCallback(async (): Promise<void> => {
     const current = draftRef.current;
@@ -3166,6 +3210,19 @@ export default function PurgeConsole(): JSX.Element {
         <p className="purge-check-ok" role="status">
           {t('配置体检通过：当前没有「开了但不生效」或自相矛盾的项目。')}
         </p>
+      ) : null}
+      {/* 体检结果可复制（工单证据）；无告警时也给出「已通过」结论而不是空串 */}
+      {draft.enabled ? (
+        <div className="purge-actions">
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="purge-warning-copy"
+            onClick={() => void copyWarningReport()}
+          >
+            {t('复制体检结果')}
+          </Button>
+        </div>
       ) : null}
 
       {/* 当前生效项：8 开关 + 两张词表 + 模板/预设/技能，配到十几项后没人能一眼
