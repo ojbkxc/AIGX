@@ -4551,6 +4551,8 @@
   "内置 {{count}} 条第三方公开 prompt 原文，仅供授权的防御性安全评估使用。内容原样搬运、不改写；合规责任在使用方。": "{{count}} third-party public prompts, bundled verbatim for authorized defensive security assessment only. No rewriting is applied; compliance is the operator's responsibility.",
   "搜索标题 / 厂商 / 模型 / 标签 / 正文": "Search title / vendor / model / tags / body",
   "正文命中": "Body match",
+  "最近用过": "Recently used",
+  "你最近应用过这条预设": "You applied this preset recently",
   "标题/厂商/模型/标签里没有这个词，是正文里命中的": "Not in title/vendor/model/tags; matched inside the body",
   "搜索预设": "Search presets",
   "共 {{total}} 条": "{{total}} total",

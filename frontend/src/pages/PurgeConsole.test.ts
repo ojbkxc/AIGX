@@ -5,7 +5,9 @@ import {
   exportPreviewHistory,
   findBodySnippet,
   parsePreviewHistoryJson,
+  noteRecentPreset,
   readPresetFilter,
+  readRecentPresets,
   sortWarningsBySeverity,
   tidyRules,
   tidySummary,
@@ -24,6 +26,48 @@ import {
   writePreviewHistory,
   writePresetFilter,
 } from './PurgeConsole';
+
+describe('readRecentPresets / noteRecentPreset', () => {
+  const store = new Map<string, string>();
+  const set = (k: string, v: string): void => {
+    store.set(k, v);
+  };
+  const remove = (k: string): void => {
+    store.delete(k);
+  };
+
+  it('记一次使用：去重置顶', () => {
+    store.clear();
+    let ids = noteRecentPreset([], 'a', set, remove);
+    ids = noteRecentPreset(ids, 'b', set, remove);
+    ids = noteRecentPreset(ids, 'a', set, remove); // 再用 a → 置顶
+    expect(ids).toEqual(['a', 'b']);
+    expect(readRecentPresets((k) => store.get(k) ?? null)).toEqual(['a', 'b']);
+  });
+
+  it('超过上限截断（保留最近的）', () => {
+    store.clear();
+    let ids: string[] = [];
+    for (const id of ['1', '2', '3', '4', '5', '6', '7']) {
+      ids = noteRecentPreset(ids, id, set, remove);
+    }
+    expect(ids).toHaveLength(5);
+    expect(ids[0]).toBe('7');
+  });
+
+  it('坏 JSON / 非字符串元素 → 空表（不拿脏值渲染徽标）', () => {
+    expect(readRecentPresets(() => 'not-json')).toEqual([]);
+    expect(readRecentPresets(() => '{"a":1}')).toEqual([]);
+    expect(readRecentPresets(() => '[1,"ok",null,""]')).toEqual(['ok']);
+  });
+
+  it('写失败静默（localStorage 满/禁用不影响使用）', () => {
+    const boom = (): void => {
+      throw new Error('quota');
+    };
+    expect(() => noteRecentPreset([], 'x', boom, boom)).not.toThrow();
+  });
+});
 
 describe('findBodySnippet', () => {
   const body = 'A'.repeat(100) + 'NeedleHere' + 'B'.repeat(100);

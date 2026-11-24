@@ -770,3 +770,9 @@
   padding: 0 2px;
   border-radius: 3px;
 }
+/* 「最近用过」徽标：比「正文命中」更淡，只是便利标记 */
+.purge-preset-match.is-recent {
+  color: var(--accent-color, #4f46e5);
+  border-color: color-mix(in srgb, var(--accent-color, #4f46e5) 40%, transparent);
+  background: transparent;
+}

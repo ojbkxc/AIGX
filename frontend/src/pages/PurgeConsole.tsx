@@ -333,6 +333,44 @@ export function diffSettings(
   return items;
 }
 
+/** 最近用过的预设 id（最多 5 条）。 */
+export const PRESET_RECENT_KEY = 'aigx.purge.presetRecent';
+export const PRESET_RECENT_MAX = 5;
+
+/**
+ * 读「最近用过」的预设 id。
+ *
+ * 为什么值得存：预设库有 50+ 条，实际在用的就那么几条；每次翻页都在长列表里
+ * 重新找。这里只做**标记**（条目上挂「最近用过」），不改筛选也不改分页——
+ * 改筛选会与后端分页冲突（后端不认识这份 id 表，`total` 与翻页都会错）。
+ */
+export function readRecentPresets(get: (k: string) => string | null): string[] {
+  try {
+    const raw = JSON.parse(get(PRESET_RECENT_KEY) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((x): x is string => typeof x === 'string' && x.length > 0).slice(0, PRESET_RECENT_MAX);
+  } catch {
+    return [];
+  }
+}
+
+/** 记一次使用：去重置顶、截到上限、空表时移除键。 */
+export function noteRecentPreset(
+  prev: string[],
+  id: string,
+  set: (k: string, v: string) => void,
+  remove: (k: string) => void,
+): string[] {
+  const next = [id, ...prev.filter((x) => x !== id)].slice(0, PRESET_RECENT_MAX);
+  try {
+    if (next.length === 0) remove(PRESET_RECENT_KEY);
+    else set(PRESET_RECENT_KEY, JSON.stringify(next));
+  } catch {
+    // localStorage 满/禁用：静默，标记只是便利
+  }
+  return next;
+}
+
 /** 命中片段：`before`/`after` 是上下文，`hit` 是原文里那一段（保留原大小写）。 */
 export interface BodySnippet {
   before: string;
@@ -1447,6 +1485,20 @@ const PresetsSection = memo(function PresetsSection({
   const [debouncedQ, setDebouncedQ] = useState(initialFilter.q);
   const [vendor, setVendor] = useState(initialFilter.vendor);
   const [list, setList] = useState<PurgePresetList | null>(null);
+  // 「最近用过」的预设 id：只做标记，不参与筛选/分页（后端不认识这份表）
+  const [recentIds, setRecentIds] = useState<string[]>(() =>
+    readRecentPresets((k) => window.localStorage.getItem(k)),
+  );
+  const noteRecent = useCallback((id: string): void => {
+    setRecentIds((prev) =>
+      noteRecentPreset(
+        prev,
+        id,
+        (k, v) => window.localStorage.setItem(k, v),
+        (k) => window.localStorage.removeItem(k),
+      ),
+    );
+  }, []);
 
   // 筛选变化即落盘（写失败静默；本会话内筛选照常工作）
   useEffect(() => {
@@ -1601,6 +1653,7 @@ const PresetsSection = memo(function PresetsSection({
           return;
         }
         onApplyTemplate(full.title, full.body);
+        noteRecent(id);
         addToast(t('已写入模板草稿，点底部「保存」后生效'), 'success');
         // 写入后立即把模板编辑区带到眼前并闪一下（词表很长时落点在页面底部）
         focusFixTarget('templates');
@@ -1610,7 +1663,7 @@ const PresetsSection = memo(function PresetsSection({
         setBusy(null);
       }
     },
-    [addToast, currentTemplates, fetchBody, onApplyTemplate, t],
+    [addToast, currentTemplates, fetchBody, noteRecent, onApplyTemplate, t],
   );
 
   /** 用户在覆盖确认里点「覆盖」：真正落草稿 */
@@ -1650,6 +1703,7 @@ const PresetsSection = memo(function PresetsSection({
           t('已写入技能目录：{{path}}', { path: res.data.applied.path ?? '' }),
           'success',
         );
+        noteRecent(id);
         onSkillWritten();
       } catch {
         addToast(t('写入技能目录失败'), 'error');
@@ -1657,7 +1711,7 @@ const PresetsSection = memo(function PresetsSection({
         setBusy(null);
       }
     },
-    [addToast, onSkillWritten, t],
+    [addToast, noteRecent, onSkillWritten, t],
   );
 
   return (
@@ -1730,6 +1784,11 @@ const PresetsSection = memo(function PresetsSection({
                           title={t('标题/厂商/模型/标签里没有这个词，是正文里命中的')}
                         >
                           {t('正文命中')}
+                        </span>
+                      ) : null}
+                      {recentIds.includes(item.id) ? (
+                        <span className="purge-preset-match is-recent" title={t('你最近应用过这条预设')}>
+                          {t('最近用过')}
                         </span>
                       ) : null}
                     </span>
