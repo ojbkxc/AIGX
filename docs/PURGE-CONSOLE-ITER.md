@@ -246,8 +246,10 @@
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
 > 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 34 批收口值）。
-> 已知 flaky：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
-> 是「查询应在 remove 前已出发」的时序前提，偶发假红（单跑 3 次恒绿，见第 43 轮记录）。
+> **已修**：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
+> 曾偶发假红——固定 `sleep(50ms)` 当同步手段，并发负载下不够。已改为轮询等待
+> （每 5ms 查一次、最多 2s，判据不变），单跑 5 次 + 全量连跑 3 次全绿。
+> 教训：**测试里不要用固定 sleep 当同步**，一律「观测到就继续 + 超时即失败」。
 
 ## 文件清单（本批 Purge 相关）
 
