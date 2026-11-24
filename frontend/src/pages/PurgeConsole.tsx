@@ -409,6 +409,23 @@ export function confirmSkillOverwrite(
   );
 }
 
+/**
+ * 导入前要确认的「将被覆盖的未保存改动」。
+ *
+ * 抽成纯函数是为了能测：这条 e2e 在静态服务器环境里始终跑不通（`confirm` 不被调用，
+ * 根因未定位），但**判断「该不该问」这件事可以单测**，不能因为没有 e2e 就放着不管。
+ *
+ * 返回空数组 = 无需确认（没改动，或根本没有草稿）；否则返回差异项供文案使用。
+ */
+export function importOverwriteItems(
+  saved: PurgeSettings | null | undefined,
+  draft: PurgeSettings | null | undefined,
+  dirty: boolean,
+): SettingsDiffItem[] {
+  if (!dirty || !saved || !draft) return [];
+  return diffSettings(saved, draft);
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -3750,6 +3767,32 @@ export default function PurgeConsole(): JSX.Element {
         return;
       }
       const settings = parsed.settings as PurgeSettings;
+      // 导入会**整份替换**草稿：当前有未保存编辑时先问清楚，否则改了一轮的配置
+      // 会悄无声息地消失（toast 还只说「已导入」）。判断抽在 importOverwriteItems
+      // 里（可单测），这里只负责问与中止。
+      const changed = importOverwriteItems(
+        dataRef.current?.settings,
+        draftRef.current,
+        dirtyRef.current,
+      );
+      if (changed.length > 0) {
+        const preview = changed
+          .slice(0, 5)
+          .map((item) => t(item.key, item.params))
+          .join('、');
+        const more = changed.length > 5 ? ` 等 ${changed.length} 项` : '';
+        if (
+          !window.confirm(
+            t('导入会覆盖当前 {{n}} 项未保存的修改（{{preview}}{{more}}）。继续？', {
+              n: changed.length,
+              preview,
+              more,
+            }),
+          )
+        ) {
+          return;
+        }
+      }
       setDraft(normalizeSettingsArrays(settings));
       setNumRaw(numRawOf(settings));
       setNumErrors({});

@@ -50,7 +50,6 @@ function snapshot() {
       'static/assets',
     ];
     if (strictUntracked) {
-      // 严格模式看整个 static（含 index.html 与未跟踪）
       gitArgs.splice(2, 1);
       gitArgs[gitArgs.length - 1] = 'static';
     }
@@ -61,10 +60,17 @@ function snapshot() {
   } catch (err) {
     return { ok: false, why: `git status 失败：${err.message}` };
   }
-  if (dirty) {
-    const count = dirty.split('\n').length;
-    const scope = strictUntracked ? '改动（含未跟踪）' : 'chunk 的改动';
-    return { ok: false, why: `static 有 ${count} 个${scope}（可能正在重建）` };
+  // **只统计 M（修改）**：`D`（删除旧 hash chunk）与 `??`（新增 chunk）都是本进程
+  // 刚 build 完的正常副产物。前两版判据把 D/?? 也算进去，结果每次都拦住自己的构建
+  // ——判据过严和过松一样坏：它会教人「别信它，硬闯」。
+  const modified = dirty
+    .split('\n')
+    .filter((line) => /^ ?M/.test(line));
+  if (modified.length > 0) {
+    return {
+      ok: false,
+      why: `static 有 ${modified.length} 个 chunk 正被改写（可能正在重建）`,
+    };
   }
   if (idleSec < minIdleSec) {
     return { ok: false, why: `index.html 刚被改过 ${idleSec.toFixed(0)}s 前（阈值 ${minIdleSec}s）` };

@@ -10,6 +10,7 @@ import {
   capError,
   exportPreviewHistory,
   filterRules,
+  importOverwriteItems,
   disableRulesAt,
   findBodySnippet,
   parseBatchRules,
@@ -286,6 +287,32 @@ describe('disableRulesAt', () => {
     const next = disableRulesAt(rules, new Set([1]));
     expect(next).toHaveLength(rules.length);
     expect(next.map((r) => r.from)).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('importOverwriteItems', () => {
+  const saved = { enabled: true, retry_limit: 8 } as never;
+  const draft = { enabled: true, retry_limit: 9 } as never;
+
+  it('有未保存改动 → 返回差异项（调用方据此确认）', () => {
+    const items = importOverwriteItems(saved, draft, true);
+    expect(items.length).toBeGreaterThan(0);
+    // key 是 i18n 模板、字段名在 params.label 里（不是 key 文本）
+    expect(items.some((item) => item.params?.label === '重试上限')).toBe(true);
+    expect(items.some((item) => item.params?.from === '8' && item.params?.to === '9')).toBe(true);
+  });
+
+  it('**不 dirty 时不问**（没有会被覆盖的东西）', () => {
+    expect(importOverwriteItems(saved, draft, false)).toEqual([]);
+  });
+
+  it('草稿或快照缺失时不问（还没加载完，没有可比对象）', () => {
+    expect(importOverwriteItems(null, draft, true)).toEqual([]);
+    expect(importOverwriteItems(saved, null, true)).toEqual([]);
+  });
+
+  it('dirty 但两值相同 → 空数组（不弹无意义确认）', () => {
+    expect(importOverwriteItems(saved, saved, true)).toEqual([]);
   });
 });
 
