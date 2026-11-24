@@ -8,13 +8,16 @@ import {
   parseBatchRules,
   parsePreviewHistoryJson,
   noteRecentPreset,
+  readDraftBackup,
   readPresetFilter,
   readRecentPresets,
   snapshotReportText,
   sortWarningsBySeverity,
   tidyRules,
   warningReportText,
+  settingsEqual,
   tidySummary,
+  writeDraftBackup,
   diffLines,
   diffSettings,
   diffTokensInLine,
@@ -70,6 +73,65 @@ describe('readRecentPresets / noteRecentPreset', () => {
       throw new Error('quota');
     };
     expect(() => noteRecentPreset([], 'x', boom, boom)).not.toThrow();
+  });
+});
+
+describe('readDraftBackup / writeDraftBackup', () => {
+  const store = new Map<string, string>();
+  const set = (k: string, v: string): void => {
+    store.set(k, v);
+  };
+  const remove = (k: string): void => {
+    store.delete(k);
+  };
+  const sample = { enabled: true } as never;
+
+  it('写入后能读回，带 savedAt', () => {
+    store.clear();
+    writeDraftBackup(sample, set, remove, 1_000);
+    const backup = readDraftBackup((k) => store.get(k) ?? null, 2_000);
+    expect(backup?.settings).toEqual(sample);
+    expect(backup?.savedAt).toBe(1_000);
+  });
+
+  it('超过 24h 视为过期（不拿上次遗留误导恢复）', () => {
+    store.clear();
+    writeDraftBackup(sample, set, remove, 1_000);
+    expect(readDraftBackup((k) => store.get(k) ?? null, 1_000 + 24 * 3600 * 1000 + 1)).toBeNull();
+  });
+
+  it('传 null 时移除键（不留无意义条目）', () => {
+    store.clear();
+    writeDraftBackup(sample, set, remove, 1_000);
+    writeDraftBackup(null, set, remove);
+    expect(store.has('aigx.purge.draftBackup')).toBe(false);
+  });
+
+  it('坏 JSON / 缺字段 → null（不拿脏值渲染恢复条）', () => {
+    expect(readDraftBackup(() => 'not-json')).toBeNull();
+    expect(readDraftBackup(() => '{"savedAt":1}')).toBeNull();
+    expect(readDraftBackup(() => '{"settings":{}}')).toBeNull();
+  });
+
+  it('写失败静默（localStorage 满不能反过来打断编辑）', () => {
+    const boom = (): void => {
+      throw new Error('quota');
+    };
+    expect(() => writeDraftBackup(sample, boom, boom)).not.toThrow();
+  });
+});
+
+describe('settingsEqual', () => {
+  it('键序不同但内容相同 → 等价（否则会误弹恢复条）', () => {
+    expect(settingsEqual({ a: 1, b: 2 } as never, { b: 2, a: 1 } as never)).toBe(true);
+  });
+
+  it('数组顺序不同 → 不等价（词表顺序有意义）', () => {
+    expect(settingsEqual({ a: [1, 2] } as never, { a: [2, 1] } as never)).toBe(false);
+  });
+
+  it('值不同 → 不等价', () => {
+    expect(settingsEqual({ a: 1 } as never, { a: 2 } as never)).toBe(false);
   });
 });
 

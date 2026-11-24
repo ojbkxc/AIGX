@@ -534,6 +534,80 @@ export function parseBatchRules(
   return { rules, skipped };
 }
 
+/** 两份配置是否等价（只比数据面关心的字段，忽略纯展示差异）。 */
+export function settingsEqual(a: PurgeSettings, b: PurgeSettings): boolean {
+  return JSON.stringify(sortSettings(a)) === JSON.stringify(sortSettings(b));
+}
+
+/** 稳定化：键排序后再序列化，避免键序不同被误判为「有差异」。 */
+function sortSettings(value: PurgeSettings): unknown {
+  const walk = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(walk);
+    if (input && typeof input === 'object') {
+      return Object.fromEntries(
+        Object.entries(input as Record<string, unknown>)
+          .sort(([x], [y]) => x.localeCompare(y))
+          .map(([k, v]) => [k, walk(v)]),
+      );
+    }
+    return input;
+  };
+  return walk(value);
+}
+
+/** 未保存草稿的本地备份（防误刷新/误关页丢改动）。 */
+export const DRAFT_BACKUP_KEY = 'aigx.purge.draftBackup';
+
+/** 备份存活上限：超过一天基本是上次遗留，恢复它比丢掉更危险。 */
+export const DRAFT_BACKUP_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface DraftBackup {
+  settings: PurgeSettings;
+  savedAt: number;
+}
+
+/**
+ * 读草稿备份。**过期/坏值一律当作没有**。
+ *
+ * 为什么需要它：破甲页的改动只存在内存里，点「保存」才落库——用户编辑十分钟、
+ * 顺手刷新看统计，草稿全丢且没有任何提示。这类损失看不见（没有报错），最难
+ * 事后追。
+ */
+export function readDraftBackup(
+  get: (k: string) => string | null,
+  now: number = Date.now(),
+): DraftBackup | null {
+  try {
+    const raw = get(DRAFT_BACKUP_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<DraftBackup>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.savedAt !== 'number' || !parsed.settings) return null;
+    if (now - parsed.savedAt > DRAFT_BACKUP_TTL_MS) return null;
+    return { settings: parsed.settings as PurgeSettings, savedAt: parsed.savedAt };
+  } catch {
+    return null;
+  }
+}
+
+/** 写草稿备份；空草稿（没有实际改动）时移除键，不留无意义条目。 */
+export function writeDraftBackup(
+  settings: PurgeSettings | null,
+  set: (k: string, v: string) => void,
+  remove: (k: string) => void,
+  now: number = Date.now(),
+): void {
+  try {
+    if (!settings) {
+      remove(DRAFT_BACKUP_KEY);
+      return;
+    }
+    set(DRAFT_BACKUP_KEY, JSON.stringify({ settings, savedAt: now }));
+  } catch {
+    // localStorage 满/禁用：静默。备份是便利，不能反过来打断编辑
+  }
+}
+
 /** 生效项摘要导出成纯文本（贴给同事/贴进工单时用，不带 UI 装饰）。 */
 export function activeSummaryText(
   items: ActiveItem[],
@@ -2190,6 +2264,8 @@ export default function PurgeConsole(): JSX.Element {
   /** 批量粘贴面板：null=关，否则是哪张词表（就地展开，不引弹窗栈） */
   const [batchPaste, setBatchPaste] = useState<'dead_zone' | 'synonym' | null>(null);
   const [batchText, setBatchText] = useState('');
+  /** 上次未保存的草稿备份（与服务器配置不同时才出现） */
+  const [draftBackup, setDraftBackup] = useState<DraftBackup | null>(null);
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
   const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
   // 导入配置文件选择
@@ -2280,6 +2356,14 @@ export default function PurgeConsole(): JSX.Element {
       setConfigWarningItems(res.data.config_warning_items ?? []);
       setSkills(res.data.skills ?? []);
       setSkillDirResolved(res.data.skill_dir_resolved ?? '');
+      // 有未保存备份且与服务器配置不同 → 让用户决定是否恢复（不静默套用，
+      // 也不静默丢弃：两种都会让「我上次改的东西哪去了」无从回答）
+      const backup = readDraftBackup((k) => window.localStorage.getItem(k));
+      if (backup && !settingsEqual(backup.settings, res.data.settings)) {
+        setDraftBackup(backup);
+      } else {
+        setDraftBackup(null);
+      }
       setDirty(false);
     } catch (error) {
       // 首次登录未改密时，管理面一律 403 PASSWORD_CHANGE_REQUIRED（不是 401）。
@@ -2305,6 +2389,16 @@ export default function PurgeConsole(): JSX.Element {
   }, [load]);
 
   /** 底部保存：校验数字 → 夹取到合法区间 → PUT 整份草稿 */
+  /** 编辑中把草稿写进本地备份（dirty 才写；保存成功后清掉） */
+  useEffect(() => {
+    if (!draft) return;
+    if (!dirty) return;
+    const timer = window.setTimeout(() => {
+      writeDraftBackup(draft, lsSetStable, lsRemoveStable);
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [draft, dirty]);
+
   const save = useCallback(async (): Promise<void> => {
     const snapshot = dataRef.current;
     const current = draftRef.current;
@@ -2341,6 +2435,8 @@ export default function PurgeConsole(): JSX.Element {
       setNumRaw(numRawOf(res.data.settings));
       setNumErrors({});
       setDirty(false);
+      // 落库成功 → 备份没有存在意义了（留着反而下次弹「恢复」误导）
+      writeDraftBackup(null, lsSetStable, lsRemoveStable);
       addToast(t('已保存'), 'success');
     } catch {
       addToast(t('保存失败'), 'error');
@@ -3223,7 +3319,47 @@ export default function PurgeConsole(): JSX.Element {
             {t('复制现状快照')}
           </Button>
         </div>
-        {/* 总开关关闭提示：放在页面标题下方独立成行（请求不会被改写这件事必须一眼看到，
+        {/* 未保存草稿备份：刷新/关页丢掉改动的唯一补救入口 */}
+      {draftBackup ? (
+        <div className="purge-warning-box" role="alert" data-testid="purge-draft-backup">
+          <p className="purge-warning-row">
+            <span>
+              {t('检测到未保存的草稿（{{time}}），与当前服务器配置不同。要恢复吗？', {
+                time: new Date(draftBackup.savedAt).toLocaleString(),
+              })}
+            </span>
+          </p>
+          <div className="purge-actions">
+            <Button
+              variant="primary"
+              size="sm"
+              data-testid="purge-draft-backup-restore"
+              onClick={() => {
+                setDraft(draftBackup.settings);
+                setNumRaw(numRawOf(draftBackup.settings));
+                setDirty(true);
+                setDraftBackup(null);
+                addToast(t('已恢复未保存的草稿，记得点保存'), 'success');
+              }}
+            >
+              {t('恢复草稿')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-draft-backup-discard"
+              onClick={() => {
+                writeDraftBackup(null, lsSetStable, lsRemoveStable);
+                setDraftBackup(null);
+                addToast(t('已丢弃未保存的草稿'));
+              }}
+            >
+              {t('丢弃')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {/* 总开关关闭提示：放在页面标题下方独立成行（请求不会被改写这件事必须一眼看到，
             只靠开关行的颜色区分太弱） */}
         {!draft.enabled ? (
           <p className="purge-off-notice" role="status">
