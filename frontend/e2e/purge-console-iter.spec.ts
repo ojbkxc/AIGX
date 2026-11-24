@@ -247,6 +247,36 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('31 · 异源模型超上限也走保存前确认（不只词表）', async ({ page }) => {
+  // 17 个异源模型（上限 16）：这类字段原本只有输入框下红字，不挡保存
+  const models = Array.from({ length: 17 }, (_, i) => `m${i}`);
+  let puts = 0;
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') {
+      puts += 1;
+      await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+      return;
+    }
+    await r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, fallback_models: models } },
+      },
+    });
+  });
+  await gotoPurge(page);
+
+  await page.getByLabel('重试上限').fill('6');
+  page.once('dialog', (d) => void d.dismiss());
+  await page.getByRole('button', { name: '保存' }).click();
+  await page.waitForTimeout(600);
+  expect(puts).toBe(0);
+
+  page.once('dialog', (d) => void d.accept());
+  await page.getByRole('button', { name: '保存' }).click();
+  await expect.poll(() => puts).toBe(1);
+});
+
 test('30 · 词表超上限时保存前确认，取消则不保存', async ({ page }) => {
   // 造 201 条规则（上限 200）：常驻警示之外，保存要走确认
   const many = Array.from({ length: 201 }, (_, i) => ({ from: `k${i}`, to: `v${i}` }));

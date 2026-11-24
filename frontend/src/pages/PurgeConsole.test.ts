@@ -4,6 +4,7 @@ import {
   applyUndo,
   buildActiveSummary,
   clampNumInput,
+  collectCapOverflows,
   capError,
   exportPreviewHistory,
   findBodySnippet,
@@ -244,6 +245,43 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('collectCapOverflows', () => {
+  const base = {
+    rewrite_rules: [] as unknown[],
+    synonym_pairs: [] as unknown[],
+    fallback_models: [] as unknown[],
+    normalize_strip_prefixes: [] as unknown[],
+  };
+
+  it('全部未超限 → 空（不弹无意义确认）', () => {
+    expect(collectCapOverflows(base)).toEqual([]);
+  });
+
+  it('逐个字段各自报自己的上限（不是统一一个数）', () => {
+    const out = collectCapOverflows({
+      ...base,
+      rewrite_rules: Array(201).fill({}),
+      fallback_models: Array(17).fill('m'),
+      structured_templates: Array(33).fill({}),
+    });
+    expect(out.map((o) => `${o.key}:${o.n}/${o.cap}`)).toEqual([
+      'rewrite_rules:201/200',
+      'fallback_models:17/16',
+      'structured_templates:33/32',
+    ]);
+  });
+
+  it('恰好等于上限 → 不算超限（边界不误报）', () => {
+    expect(collectCapOverflows({ ...base, rewrite_rules: Array(200).fill({}) })).toEqual([]);
+    expect(collectCapOverflows({ ...base, fallback_models: Array(16).fill('m') })).toEqual([]);
+  });
+
+  it('可选字段缺省时按空数组处理（旧后端不返回也不误报）', () => {
+    const out = collectCapOverflows({ ...base, rewrite_rules: Array(205).fill({}) });
+    expect(out).toHaveLength(1);
   });
 });
 

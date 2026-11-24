@@ -204,6 +204,46 @@ export function applyUndo(
     : { ...draft, synonym_pairs: undo.rules };
 }
 
+/** 一处超限的描述（保存前汇总用）。 */
+export interface CapOverflow {
+  key: string;
+  label: string;
+  n: number;
+  cap: number;
+}
+
+/**
+ * 汇总所有「后端会静默截断」的字段超限。
+ *
+ * 为什么集中一处：这些上限散在 6 个字段上（两张词表、异源模型、四处字符列表、
+ * 模板表），各自只在自己输入框下显示一行红字，**都不阻止保存**——用户照点，
+ * 后端 `normalize` 静默截断，事后才发现尾巴没了。集中汇总才能一次问清。
+ */
+export function collectCapOverflows(settings: {
+  rewrite_rules: readonly unknown[];
+  synonym_pairs: readonly unknown[];
+  fallback_models: readonly unknown[];
+  normalize_strip_prefixes: readonly unknown[];
+  refusal_patterns?: readonly unknown[];
+  failure_filter_keywords?: readonly unknown[];
+  failure_empty_keywords?: readonly unknown[];
+  structured_templates?: readonly unknown[];
+}): CapOverflow[] {
+  const checks: Array<[string, string, readonly unknown[] | undefined, number]> = [
+    ['rewrite_rules', '死区词改写', settings.rewrite_rules, RULE_TABLE_CAP],
+    ['synonym_pairs', '同义词', settings.synonym_pairs, RULE_TABLE_CAP],
+    ['fallback_models', '异源模型', settings.fallback_models, FALLBACK_MODELS_CAP],
+    ['normalize_strip_prefixes', 'system 剥离前缀', settings.normalize_strip_prefixes, LIST_CAP],
+    ['refusal_patterns', '拒绝话术', settings.refusal_patterns ?? [], LIST_CAP],
+    ['failure_filter_keywords', '失败关键词', settings.failure_filter_keywords ?? [], LIST_CAP],
+    ['failure_empty_keywords', '空答关键词', settings.failure_empty_keywords ?? [], LIST_CAP],
+    ['structured_templates', '结构化模板', settings.structured_templates ?? [], TEMPLATES_CAP],
+  ];
+  return checks
+    .filter(([, , items, cap]) => (items?.length ?? 0) > cap)
+    .map(([key, label, items, cap]) => ({ key, label, n: items?.length ?? 0, cap }));
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -2569,27 +2609,20 @@ export default function PurgeConsole(): JSX.Element {
       addToast(t('存在重复的模板名称，请先修改再保存'), 'warning');
       return;
     }
-    // 超上限**保存前必须确认**：后端 normalize 会静默截断，只靠常驻提示的话
-    // 用户照样点保存、然后发现后半段词没了。
-    const overCap = [
-      { label: t('死区词改写'), n: current.rewrite_rules.length },
-      { label: t('同义词'), n: current.synonym_pairs.length },
-    ].filter((item) => item.n > RULE_TABLE_CAP);
-    if (overCap.length > 0) {
-      const detail = overCap
+    // 超上限**保存前必须确认**：后端 normalize 会静默截断，只靠输入框下的红字提示
+    // 用户照样点保存、然后发现尾巴没了。集中汇总所有会被截断的字段，一次问清。
+    const overflows = collectCapOverflows(current);
+    if (overflows.length > 0) {
+      const detail = overflows
         .map((item) =>
-          t('{{label}} {{n}} 条（将丢弃 {{drop}} 条）', {
-            label: item.label,
+          t('{{label}} {{n}} 项（将丢弃 {{drop}} 项）', {
+            label: t(item.label),
             n: item.n,
-            drop: item.n - RULE_TABLE_CAP,
+            drop: item.n - item.cap,
           }),
         )
         .join('；');
-      if (
-        !window.confirm(
-          t('{{detail}}。保存只保留前 {{cap}} 条，继续？', { detail, cap: RULE_TABLE_CAP }),
-        )
-      ) {
+      if (!window.confirm(t('{{detail}}。保存只保留各字段的上限，继续？', { detail }))) {
         return;
       }
     }
