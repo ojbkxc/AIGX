@@ -1,124 +1,66 @@
+/**
+ * 签到中心（页级容器）。
+ *
+ * ── 这一页的结构照 Agent2API v3.5.1 ─────────────────────────
+ * 一级 Tab 顺序：每日签到 / 新手福利 / 活动福利 / 成长任务（四个「任务」分区，
+ * 由 `checkin-sections.tsx` 渲染）+ 定时签到 / 定时补签 / 签到记录（三个视图）。
+ * 顶部是四格总览（今日签到 / 定时签到 / 待领新手福利 / 累计签到记录），
+ * 每格可点，跳到对应页。
+ *
+ * ── 本文件只剩「壳」────────────────────────────────────────
+ * 数据加载、定时/补签的写动作、旅行巡检、签到后的自动链都留在这里；四个分区与
+ * 三个视图各自独立成文件（`checkin-sections` / `checkin-schedule` /
+ * `checkin-makeup` / `checkin-records`），判据与文案表在 `checkin-shared`。
+ *
+ * ── AIGX 独有（评审项）─────────────────────────────────────
+ * 1. 「福利通道」第 8 个 Tab（一次性/限时动作的手动入口，A2A 把这些并进分区行）；
+ * 2. 签到设置卡（账号间隔 / 签到时区 / 全局重试间隔 / 台账保留天数）；
+ * 3. 猫猫旅行定时排程（A2A 的 travel 由插件面板驱动，不在签到页）；
+ * 4. 逐账号福利预览卡与轮次时间线（A2A 快照同样带 extras / history，但页面不渲染）；
+ * 5. 活动福利卡（`CheckinCampaignCard`：A2A 用 plans section 内的 CampaignRow）；
+ * 6. 签到后的自动链（AIGX 用 `AUTO_CHAIN` 串一次性福利，A2A 无此链路）。
+ */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CalendarCheck, ChevronRight, Play, Plus, RefreshCw, Trash2, X, Columns3 } from 'lucide-react';
+import { CalendarCheck, RefreshCw } from 'lucide-react';
 import { api } from '../api';
-import { providerIcon } from '../lib/providerIcons';
 import { useToast } from '../components/Toast';
-import { Badge, Card, EmptyState, Loading, Switch } from '../components/ui';
-import {
-  applyTableColumns,
-  readTableColumns,
-  resetTableColumns,
-  writeTableColumns,
-  type TableColumnDef,
-  type TableColumnItem,
-  type TableColumnState,
-} from '../lib/tableColumns';
-import TableColumnSettings from '../components/ui/TableColumnSettings';
-import { Tooltip } from '../components/ui';
+import { Badge, Card, EmptyState, Loading } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import BenefitsPanel from '../components/BenefitsPanel';
 import CheckinCampaignCard from '../components/CheckinCampaignCard';
-import { useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 import type {
   CheckinCenterData,
   CheckinHistoryRow,
-  CheckinRecord,
   CheckinRunResult,
   CheckinScheduleEntry,
 } from '../types';
+import CheckinCenterSections from './checkin-sections';
+import CheckinScheduleView from './checkin-schedule';
+import CheckinMakeupView from './checkin-makeup';
+import CheckinRecordsView from './checkin-records';
+import CheckinScheduleEditor, {
+  EMPTY_SCHEDULE,
+  formOf,
+  type ScheduleForm,
+} from './checkin-editor';
+import {
+  CHECKIN_SECTION_TABS,
+  CHECKIN_VIEW_TABS,
+  formatTime,
+  normalizeCheckinTab,
+  type CheckinTab,
+} from './checkin-shared';
 import './CheckinCenter.css';
 
-type TabKey = 'center' | 'schedule' | 'makeup' | 'records' | 'benefits';
+type TabKey = CheckinTab;
 
 const TAB_STORAGE_KEY = 'aigx-checkin-tab';
 
-const OUTCOME_TONE: Record<string, 'success' | 'info' | 'warning' | 'danger'> = {
-  success: 'success',
-  already: 'info',
-  pending: 'warning',
-  failed: 'danger',
-  captcha: 'warning',
-};
-
-const OUTCOME_LABEL: Record<string, string> = {
-  success: '成功领取',
-  already: '今日已领',
-  pending: '待重试',
-  failed: '失败',
-  // 1.0.49 契约新增：上游要求人机验证（is_ok=false，需管理员介入）
-  captcha: '需人机验证',
-};
-
-/** 台账「类型」列（与 source 同值双写：manual | schedule | makeup | retry） */
-const KIND_LABEL: Record<string, string> = {
-  manual: '手动',
-  schedule: '定时',
-  makeup: '补签',
-  retry: '重试',
-};
-
-const SOURCE_LABEL: Record<string, string> = {
-  schedule: '定时',
-  manual: '手动',
-  startup: '补签',
-  makeup: '补签',
-  single: '单签',
-  activity: '活动',
-};
-
-/** 签到时区偏移候选（小时）。0 = 跟随系统本地时区（语义见后端 store.rs：
- *  beijing() 只在 0 时用本地时区，其余按固定偏移执行——缺省 8 = UTC+8） */
-const TZ_OFFSETS = [-12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
-
-const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
-
-/** 起止日期（<input type="date"> 的 "YYYY-MM-DD"）→ unix 毫秒。
- *  起始取当日 00:00:00、结束取当日 23:59:59（含当天，与后端闭区间 [start,end] 对齐）。
- *  A2A 的 `/api/checkin-records` 的 start/end 是**毫秒**（AIGX 旧端点用秒）。 */
-const dateToStartMs = (d: string): number | undefined => {
-  if (!d) return undefined;
-  const ms = new Date(`${d}T00:00:00`).getTime();
-  return Number.isFinite(ms) ? ms : undefined;
-};
-const dateToEndMs = (d: string): number | undefined => {
-  if (!d) return undefined;
-  const ms = new Date(`${d}T23:59:59`).getTime();
-  return Number.isFinite(ms) ? ms + 999 : undefined;
-};
-
-/** 快捷时间档（1/7/30/全部）→ 起始毫秒（本地 00:00）。全部 = undefined。 */
-const quickStartMs = (days: number): number | undefined => {
-  if (days >= 3650) return undefined;
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  return start.getTime() - (days - 1) * 86_400_000;
-};
-
 /**
- * 各家上游的签到链路说明（对齐 Agent2API 提供商行的一句话说明）。
- * 只做静态展示，不参与任何逻辑。
- */
-const PROVIDER_DESC: Record<string, string> = {
-  loomy: '讯飞 Loomy：每日领取会员权益，签到即领',
-  kuku: 'Kuku：每日签到领积分，签到即领',
-  qoder: 'Qoder：每日签到领额度，签到即领',
-  'qoder-intl': 'Qoder 国际版：签到领额度；风控组件 UMID 见福利通道',
-  xiaohuanxiong: '小浣熊：桌面端 / 移动端各领一次登录积分',
-  autoclaw: 'AutoClaw：每日签到领额度，签到即领',
-  'autoclaw-intl': 'AutoClaw 国际版：每日签到领额度，签到即领',
-  workbuddy: 'WorkBuddy：每日签到领额度，签到即领',
-  'workbuddy-intl': 'WorkBuddy 国际版：签到领日活奖励；保活链见福利通道',
-  trae: 'Trae：每日签到领额度，签到即领',
-  codearts: 'CodeArts：每日签到领额度；新人礼见福利通道',
-  officeace: 'OfficeAce：每日签到与新人礼同链，签到即领',
-};
-
-/**
- * 签到后的自动链（对齐 Agent2API「签到后自动领福利」）。
- * 各家签到之外还有一次性/限时福利可领：codearts 新人礼、loomy 新手任务、
- * 小浣熊登录积分、workbuddy-intl 保活+领取 —— 签到成功即串行跑一遍，
- * 不用管理员再切到「福利」页逐个点。
+ * 签到后的自动链（AIGX 独有）：签到成功即串行跑一遍该家的一次性/限时福利，
+ * 不用管理员再切到「福利通道」逐个点。单个动作失败即停（不拖垮后续）。
  */
 const AUTO_CHAIN: Record<string, string[]> = {
   codearts: ['newbie'],
@@ -127,69 +69,12 @@ const AUTO_CHAIN: Record<string, string[]> = {
   'workbuddy-intl': ['keepalive_claim'],
 };
 
-interface ScheduleForm {
-  id: string;
-  label: string;
-  enabled: boolean;
-  time: string;
-  providers: string[];
-  /** 逐家时刻覆盖（仅非空项提交；空 = 回落内置专属/条目时刻） */
-  providerTimes: Record<string, string>;
-  /* ── 1.0.49 契约字段（GET/POST schedules 均带同名 5 字段）── */
-  /** 随机签到区间结束 HH:MM（空 = 无窗口，仅按 time 固定执行） */
-  timeEnd: string;
-  /** true = 每个账号在 [time, timeEnd] 内取确定性随机时刻 */
-  randomize: boolean;
-  /** 每账号每天重试上限（0 = 关闭重试；缺省 3，与后端 default_retry_limit 一致） */
-  retryLimit: string;
-  /** 重试间隔（分钟；<=0 回落全局 retry_gap_ms；缺省 5） */
-  retryGapMinutes: string;
-  /** 补签轮时刻 HH:MM（空 = 不跑补签轮） */
-  makeupTime: string;
-}
-
-const EMPTY_SCHEDULE: ScheduleForm = {
-  id: '',
-  label: '每日签到',
-  enabled: true,
-  time: '09:00',
-  providers: [],
-  providerTimes: {},
-  timeEnd: '',
-  randomize: false,
-  retryLimit: '3',
-  retryGapMinutes: '5',
-  makeupTime: '',
-};
-
-/* 「下次执行 / 今日已执行」的时区口径已抽到 src/lib/checkinTz.ts（纯函数 +
- * 边界值单测 checkinTz.test.ts）：按 settings.timezone_offset 计算（缺省 8
- * = UTC+8；0 = 跟随系统本地时区），与后端执行口径一致——此前硬编码
- * Asia/Shanghai，设置 offset=0 后展示与执行脱钩（#21 补做项）。 */
-import { nextRunLabel } from '../lib/checkinTz';
-
-
-const LS_TCOLS = 'aigx-tbl-cols.checkin-records';
-/** 签到记录表列声明（时间/说明锁定） */
-const CK_REC_COL_DEFS: TableColumnDef[] = [
-  { key: 'time', label: '时间', width: 150, locked: true },
-  { key: 'account', label: '账号', width: 180 },
-  { key: 'provider', label: '上游', width: 110 },
-  { key: 'source', label: '来源', width: 90 },
-  // 1.0.49 契约：kind 与 source 同值双写，单列展示记录类型
-  { key: 'kind', label: '类型', width: 80 },
-  { key: 'result', label: '结果', width: 100 },
-  { key: 'note', label: '说明', width: 260 },
-  // 1.0.49 契约：失败原文（成功 / 今日已领时为空）
-  { key: 'error', label: '失败原因', width: 260 },
-];
-
 interface CheckinCenterProps {
-  /** 作为供应商页「签到」子页内嵌时隐藏自身标题区（页内 4 个二级 Tab 保留） */
+  /** 作为供应商页「签到」子页内嵌时隐藏自身标题区（页内二级 Tab 保留） */
   embedded?: boolean;
 }
 
-/** 轮次时间线（A2A `history`）：新条目在前，前端按序渲染。 */
+/** 轮次时间线（A2A `history`；AIGX 独有渲染面）：新条目在前 */
 function CheckinHistoryTimeline({ rows }: { rows: CheckinHistoryRow[] }): JSX.Element | null {
   const { t } = useTranslation();
   if (rows.length === 0) return null;
@@ -223,11 +108,9 @@ function CheckinHistoryTimeline({ rows }: { rows: CheckinHistoryRow[] }): JSX.El
   );
 }
 
-/** 逐账号福利预览（A2A `extras`）：快照只给入口清单，明细走福利通道。 */
+/** 逐账号福利预览（A2A `extras`；AIGX 独有渲染面）：入口清单零上游请求 */
 function CheckinExtrasPreview({ center }: { center: CheckinCenterData }): JSX.Element | null {
   const { t } = useTranslation();
-  // extras 是 A2A 后来的契约新增字段：旧后端/旧桩不返回时，缺一个可选区块
-  // 不应把整页打成「出错了」。缺失按空清单处理（组件随后 return null）。
   const { onboarding, plans, campaigns, growth } = center.extras ?? {
     onboarding: [],
     plans: [],
@@ -294,7 +177,7 @@ function CheckinExtrasPreview({ center }: { center: CheckinCenterData }): JSX.El
   }
   return (
     <Card title={t('福利预览（逐账号）')}>
-      <p className="ck-extra-hint">
+      <p className="form-hint">
         {t('入口清单来自快照（零上游请求）；任务明细与领取在「福利通道」页执行。')}
       </p>
       <div className="ck-extra-groups">
@@ -310,38 +193,19 @@ function CheckinExtrasPreview({ center }: { center: CheckinCenterData }): JSX.El
 }
 
 export default function CheckinCenter({ embedded = false }: CheckinCenterProps = {}): JSX.Element {
-  // 签到记录表列设置（公共层；分页为服务端 offset/limit 原口径不动）
-  const [recCols, setRecCols] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, CK_REC_COL_DEFS));
-  const [recPanelOpen, setRecPanelOpen] = useState(false);
-  const recPanelRef = useRef<HTMLDivElement | null>(null);
-  const commitRecCols = useCallback((next: TableColumnItem[], persist: boolean) => {
-    setRecCols((prev) => {
-      const nextState: TableColumnState = { ...prev, items: next };
-      if (persist) writeTableColumns(LS_TCOLS, nextState);
-      return nextState;
-    });
-  }, []);
-  const resetRecCols = useCallback(() => setRecCols(resetTableColumns(LS_TCOLS, CK_REC_COL_DEFS)), []);
-  const appliedRecCols = useMemo(() => applyTableColumns(recCols, CK_REC_COL_DEFS), [recCols]);
-  const recKeySet = useMemo(() => new Set(appliedRecCols.map((c) => c.key)), [appliedRecCols]);
   const { t } = useTranslation();
   const addToast = useToast();
 
-  const [tab, setTab] = useState<TabKey>(() => {
-    const saved = localStorage.getItem(TAB_STORAGE_KEY);
-    return saved === 'schedule' || saved === 'makeup' || saved === 'records' || saved === 'benefits'
-      ? saved
-      : 'center';
-  });
+  const [tab, setTab] = useState<TabKey>(() =>
+    normalizeCheckinTab(localStorage.getItem(TAB_STORAGE_KEY)),
+  );
   const [data, setData] = useState<CheckinCenterData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   // 单飞：一次只允许一个签到动作在途（上游有全局 running 防重），
   // 但按钮级 busy 只落在对应行上，不让一颗在跑拖灰整页
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  // 签到后的自动链在途：按钮禁用并显示进度，避免与手动点福利打架
   const [autoChaining, setAutoChaining] = useState(false);
-  /** 自动链逐个动作进度（done=已完成数，action=当前动作名） */
   const [autoChainProgress, setAutoChainProgress] = useState<null | {
     total: number;
     done: number;
@@ -349,55 +213,35 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     stopped: boolean;
   }>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  // 定时计划：行内编辑（editingId='new' 显示首行新建表单）
+  // 定时条目编辑（行内表单：editingId='new' 显示首行新建）
   const [editingId, setEditingId] = useState<string | null>(null);
   const [scheduleForm, setScheduleForm] = useState<ScheduleForm>(EMPTY_SCHEDULE);
   const [savingSchedule, setSavingSchedule] = useState(false);
 
-  // 账号间隔（gap_ms）编辑：独立于 data 快照，避免整卡片重渲染
+  // 设置卡的三个输入（独立于 data 快照，避免整卡重渲染）
   const [gapMsEdit, setGapMsEdit] = useState('');
   const [gapSaving, setGapSaving] = useState(false);
-  // 失败/窗口重试间隔（分钟）与台账保留天数（后端 retry_gap_ms 毫秒 / keep_days 天）
   const [retryMinEdit, setRetryMinEdit] = useState('');
   const [keepDaysEdit, setKeepDaysEdit] = useState('');
   const [advSaving, setAdvSaving] = useState(false);
+  const [travelTimesDraft, setTravelTimesDraft] = useState<string | null>(null);
+  /** 设置卡是否已按首份快照播种（回读不再覆盖用户正在填的值） */
+  const settingsSeeded = useRef(false);
 
-  /** 提供商分类栏（A2A checkin-provider-rail）：'' = 全部；只影响「每日签到」Tab 的列表 */
-  const [railProvider, setRailProvider] = useState('');
-  /** 活动福利卡的当前账号（默认第一个带 campaigns 动作的账号） */
-  const [campaignAccountId, setCampaignAccountId] = useState('');
-  // 记录
-  const [records, setRecords] = useState<CheckinRecord[]>([]);
-  const [recordsLoading, setRecordsLoading] = useState(false);
-  const [recordDays, setRecordDays] = useState(7);
-  const [recordOutcome, setRecordOutcome] = useState('');
-  const [recordProvider, setRecordProvider] = useState('');
-  // 1.0.49 契约：类型（kind）与起止日期（→ unix 秒 start/end）
-  const [recordKind, setRecordKind] = useState('');
-  const [recordStart, setRecordStart] = useState('');
-  const [recordEnd, setRecordEnd] = useState('');
-  const [keyword, setKeyword] = useState('');
-  // 关键词走后端过滤（与分页同口径）；kwApplied 是「已提交」的关键词
-  const [kwApplied, setKwApplied] = useState('');
-  // 分页（服务端真分页，0-based 后端口径由 hook 的 1-based 页码换算）：
-  // 公共 hook 统一承担越界钳位 / size 变更回第 1 页 / 筛选变化回第 1 页 + 档位记忆。
-  const { page, setPage, pageSize, size, setSize, total, setTotal, totalPages } = useServerPaging({
-    key: 'aigx-tbl-pagesize.checkin',
-    sizes: SERVER_PAGE_SIZES,
-    fallback: 50,
-    resetDeps: [recordDays, recordProvider, recordOutcome, recordKind, recordStart, recordEnd, kwApplied],
-  });
-
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError('');
     try {
-      // A2A 契约：flat 响应（daily / extras / auto / history …）
       const d = await api.getCheckinCenter();
       setData(d);
-      if (d?.settings) {
+      /*
+       * 设置卡的三个输入只在**首次**读数时播种：A2A v3.5.1 的同类修复
+       * （`checkin-store` 保留未保存草稿）—— 后台回读/保存后的刷新不该把
+       * 用户正在填的间隔或保留天数清空。
+       */
+      if (d?.settings && !settingsSeeded.current) {
+        settingsSeeded.current = true;
         setGapMsEdit(String(d.settings.gap_ms ?? 800));
         setRetryMinEdit(String(Math.round((d.settings.retry_gap_ms ?? 600_000) / 60_000)));
         setKeepDaysEdit(String(d.settings.keep_days ?? 0));
@@ -417,80 +261,178 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     localStorage.setItem(TAB_STORAGE_KEY, tab);
   }, [tab]);
 
-  const loadRecords = useCallback(async () => {
-    setRecordsLoading(true);
-    // 起止日期 → unix 毫秒（闭区间：起 00:00:00 / 止 23:59:59.999）
-    const explicitStart = dateToStartMs(recordStart);
-    const explicitEnd = dateToEndMs(recordEnd);
-    // 快捷档只在没有显式起止时生效；「全部」= 不限下界
-    const start = explicitStart ?? quickStartMs(recordDays);
+  /* ── 派生 ─────────────────────────────────────────────── */
+
+  const providers = useMemo(() => data?.daily?.providers ?? [], [data?.daily?.providers]);
+  const outOfScope = useMemo(() => data?.daily?.outOfScope ?? [], [data?.daily?.outOfScope]);
+  const supported = useMemo(() => data?.supportedProviders ?? [], [data?.supportedProviders]);
+  const unsupported = useMemo(() => data?.unsupportedProviders ?? [], [data?.unsupportedProviders]);
+  const schedules = useMemo(() => data?.auto?.schedules ?? [], [data?.auto?.schedules]);
+  /** 范围复选框清单（A2A `available_checkin_providers` → `providerOptions`） */
+  const pickOptions = useMemo(() => data?.auto?.providerOptions ?? [], [data?.auto?.providerOptions]);
+
+  /** provider id → 展示名（左栏 / 分组 / 记录筛选共用） */
+  const labels = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const option of pickOptions) map[option.id] = option.label;
+    for (const group of providers) map[group.id] = group.label || group.id;
+    return map;
+  }, [pickOptions, providers]);
+
+  /** 内置专属时刻（A2A `providerOptions[].builtinTime` → {provider: "HH:MM"}） */
+  const builtinTimes = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const option of pickOptions) if (option.builtinTime) map[option.id] = option.builtinTime;
+    return map;
+  }, [pickOptions]);
+
+  const totals = useMemo(
+    () => ({
+      done: data?.daily?.todayDone ?? 0,
+      total: data?.daily?.todayEligible ?? 0,
+      accounts: providers.reduce((n, group) => n + group.accounts.length, 0),
+    }),
+    [data?.daily?.todayDone, data?.daily?.todayEligible, providers],
+  );
+
+  const outOfScopeCount = useMemo(
+    () => outOfScope.reduce((sum, item) => sum + (Number(item.count) || 0), 0),
+    [outOfScope],
+  );
+
+  /** 启用的定时条目数（总览第二格） */
+  const enabledSchedules = useMemo(
+    () => schedules.filter((entry) => entry.enabled).length,
+    [schedules],
+  );
+
+  /** 最近一次将执行的时刻（总开关关着 / 无启用条目 = null） */
+  const nextScheduleAt = useMemo(() => {
+    if (data?.auto?.enabled !== true) return null;
+    const stamps = schedules
+      .filter((entry) => entry.enabled)
+      .map((entry) => Number(entry.nextRunAt))
+      .filter((stamp) => Number.isFinite(stamp) && stamp > 0)
+      .sort((a, b) => a - b);
+    return stamps[0] ?? null;
+  }, [schedules, data?.auto?.enabled]);
+
+  /** 新手福利待领项合计（`null` = 还没盘点过，不计入合计） */
+  const onboardingPending = useMemo(
+    () =>
+      (data?.extras?.onboarding ?? []).reduce(
+        (sum, row) => sum + (typeof row.pending === 'number' ? row.pending : 0),
+        0,
+      ),
+    [data?.extras?.onboarding],
+  );
+  const onboardingChecked = useMemo(
+    () => (data?.extras?.onboarding ?? []).filter((row) => typeof row.pending === 'number').length,
+    [data?.extras?.onboarding],
+  );
+
+  /** 顶栏徽标（对齐 A2A `AutoBadge`：执行中 / 已暂停 / 还有 N 个平台未执行 / 已开启） */
+  const autoBadge = useMemo(() => {
+    const auto = data?.auto;
+    if (!auto) return null;
+    if (auto.running) {
+      return <span className="ck-tab-badge is-on">{t('自动签到执行中…')}</span>;
+    }
+    if (!auto.enabled) return <span className="ck-tab-badge is-off">{t('定时已关闭')}</span>;
+    const pending = (auto.schedules ?? [])
+      .filter((entry) => entry.enabled)
+      .reduce((sum, entry) => sum + (entry.pendingProviders?.length ?? 0), 0);
+    const firedToday = (auto.schedules ?? []).some((entry) => entry.enabled && entry.lastFiredToday);
+    if (pending > 0) {
+      return <span className="ck-tab-badge is-on">{t('还有 {{n}} 个平台未执行', { n: pending })}</span>;
+    }
+    return (
+      <span className={`ck-tab-badge ${firedToday ? 'is-ok' : 'is-on'}`}>
+        {firedToday ? t('已开启 · 今日已执行') : t('定时已开启')}
+      </span>
+    );
+  }, [data?.auto, t]);
+
+  /* ── 签到（每日全量 / 单账号）+ 自动链 ────────────────── */
+
+  const autoChain = useCallback(
+    async (results: CheckinRunResult[]): Promise<void> => {
+      const chain = results
+        .filter((row) => row.success && AUTO_CHAIN[row.provider])
+        .flatMap((row) => (AUTO_CHAIN[row.provider] ?? []).map((action) => ({ row, action })));
+      if (chain.length === 0) return;
+      setAutoChaining(true);
+      setAutoChainProgress({ total: chain.length, done: 0, action: '', stopped: false });
+      try {
+        for (let i = 0; i < chain.length; i++) {
+          const { row, action } = chain[i];
+          setAutoChainProgress({ total: chain.length, done: i, action, stopped: false });
+          const res = await api.runCheckinBenefit(row.account_id, action);
+          const result = res?.data;
+          if (result && !result.ok) {
+            setAutoChainProgress({ total: chain.length, done: i + 1, action, stopped: true });
+            break;
+          }
+          // workbuddy-intl 保活+领取成功后回写台账（保活标记）
+          if (action === 'keepalive_claim' && result?.ok) {
+            try {
+              await api.markKeptActive(row.account_id, row.provider);
+            } catch {
+              // 回写失败不影响主流程（记录仍可手动标记）
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        addToast(t('自动链完成'), 'success');
+      } catch {
+        // 自动链失败不拖垮签到结果展示
+      } finally {
+        setAutoChaining(false);
+      }
+    },
+    [addToast, t],
+  );
+
+  const runAll = useCallback(async (): Promise<void> => {
+    setBusyKey('all');
     try {
-      const res = await api.getCheckinRecords({
-        provider: recordProvider || undefined,
-        outcome: recordOutcome || undefined,
-        kind: recordKind || undefined,
-        start,
-        end: explicitEnd,
-        keyword: kwApplied || undefined,
-        offset: (page - 1) * size,
-        limit: size,
-      });
-      setRecords(res?.records ?? []);
-      setTotal(res?.total ?? 0);
+      const res = await api.runCheckin({ providers: [] });
+      const d = res?.data;
+      if (d) {
+        addToast(`${t('签到完成')}：${d.done}/${d.total}`);
+        void autoChain(d.results);
+      }
+      await load();
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
-      setRecordsLoading(false);
+      setBusyKey(null);
     }
-  }, [recordDays, recordProvider, recordOutcome, recordKind, recordStart, recordEnd, kwApplied, page, size, setTotal, addToast]);
+  }, [addToast, autoChain, load, t]);
 
-  useEffect(() => {
-    if (tab === 'records') void loadRecords();
-  }, [tab, loadRecords]);
-
-  /**
-   * 签到后的自动链：把签到结果里各家的一次性/限时福利串行跑一遍。
-   * 间隔 300ms 让上游看清「逐个执行」的画像；单个动作失败即停（不拖垮后续）。
-   * keepalive_claim 成功后回写台账（保活标记），让「保活」在记录里可见。
-   */
-  const autoChain = async (results: CheckinRunResult[]): Promise<void> => {
-    const chain = results
-      .filter((r) => r.success && AUTO_CHAIN[r.provider])
-      .flatMap((r) => (AUTO_CHAIN[r.provider] ?? []).map((action) => ({ r, action })));
-    if (chain.length === 0) return;
-    setAutoChaining(true);
-    setAutoChainProgress({ total: chain.length, done: 0, action: '', stopped: false });
-    try {
-      for (let i = 0; i < chain.length; i++) {
-        const { r, action } = chain[i];
-        setAutoChainProgress({ total: chain.length, done: i, action, stopped: false });
-        const res = await api.runCheckinBenefit(r.account_id, action);
-        const result = res?.data;
-        if (result && !result.ok) {
-          // 失败即停：标记停步原因，进度停在失败动作
-          setAutoChainProgress({ total: chain.length, done: i + 1, action, stopped: true });
-          break;
+  const runOne = useCallback(
+    async (accountId: string): Promise<void> => {
+      setBusyKey(`sign:${accountId}`);
+      try {
+        const res = await api.runCheckin({ account_ids: [accountId] });
+        const row = res?.data?.results?.[0];
+        if (row) {
+          addToast(`${row.account_name}：${row.message}`, row.success ? 'success' : 'error');
+          if (res.data) void autoChain(res.data.results);
         }
-        // workbuddy-intl 保活+领取成功后回写台账（保活标记）
-        if (action === 'keepalive_claim' && result?.ok) {
-          try {
-            await api.markKeptActive(r.account_id, r.provider);
-          } catch {
-            // 回写失败不影响主流程（记录仍可手动标记）
-          }
-        }
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await load();
+      } catch (err) {
+        addToast(err instanceof Error ? err.message : String(err), 'error');
+      } finally {
+        setBusyKey(null);
       }
-      addToast(t('自动链完成'), 'success');
-    } catch {
-      // 自动链失败不拖垮签到结果展示
-    } finally {
-      setAutoChaining(false);
-    }
-  };
+    },
+    [addToast, autoChain, load],
+  );
 
-  /** 保存账号间隔：校验非负数字后整份 settings 回写（与启用开关同接口） */
-  const saveGapMs = async (): Promise<void> => {
+  /* ── 设置写入 ─────────────────────────────────────────── */
+
+  const saveGapMs = useCallback(async (): Promise<void> => {
     if (!data) return;
     const n = Number(gapMsEdit);
     if (!Number.isFinite(n) || n < 0) {
@@ -507,10 +449,9 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     } finally {
       setGapSaving(false);
     }
-  };
+  }, [addToast, data, gapMsEdit, load, t]);
 
-  /** 保存重试间隔（分钟→毫秒）与台账保留天数（0 = 永久）；两字段一次回写 */
-  const saveAdvanced = async (): Promise<void> => {
+  const saveAdvanced = useCallback(async (): Promise<void> => {
     if (!data) return;
     const min = Number(retryMinEdit);
     const days = Number(keepDaysEdit);
@@ -536,48 +477,156 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     } finally {
       setAdvSaving(false);
     }
-  };
+  }, [addToast, data, keepDaysEdit, load, retryMinEdit, t]);
 
-  /** 切换签到时区（小时偏移；0 = 跟随系统本地时区）。改完即存，下次执行生效。 */
-  const changeTimezone = async (offset: number): Promise<void> => {
-    if (!data) return;
-    try {
-      await api.updateCheckinSettings({ ...data.settings, timezone_offset: offset });
-      addToast(t('时区已保存（对下一次计划执行生效）'));
-      await load();
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    }
-  };
+  const changeTimezone = useCallback(
+    async (offset: number): Promise<void> => {
+      if (!data) return;
+      try {
+        await api.updateCheckinSettings({ ...data.settings, timezone_offset: offset });
+        addToast(t('时区已保存（对下一次计划执行生效）'));
+        await load();
+      } catch (err) {
+        addToast(err instanceof Error ? err.message : String(err), 'error');
+      }
+    },
+    [addToast, data, load, t],
+  );
 
-  /* ── 旅行/成长巡检（be-fix #16-B 契约；data.travel 缺省 = 不渲染该卡）── */
+  const toggleSetting = useCallback(
+    async (enabled: boolean): Promise<void> => {
+      if (!data) return;
+      try {
+        await api.updateCheckinSettings({ ...data.settings, enabled });
+        await load();
+        addToast(enabled ? t('已开启定时签到') : t('已关闭定时签到'));
+      } catch (err) {
+        addToast(err instanceof Error ? err.message : String(err), 'error');
+      }
+    },
+    [addToast, data, load, t],
+  );
+
+  /* ── 定时条目写动作 ───────────────────────────────────── */
+
+  /** 全量 upsert 一条（未传字段由后端继承存量；这里始终给全量，语义最清楚） */
+  const upsertEntry = useCallback(
+    async (
+      entry: CheckinScheduleEntry,
+      changes: Partial<{
+        enabled: boolean;
+        retryTime: string;
+        retryLimit: number;
+        retryGapMinutes: number;
+      }>,
+    ): Promise<void> => {
+      setSavingSchedule(true);
+      try {
+        await api.upsertCheckinSchedule({
+          id: entry.id,
+          label: entry.label,
+          enabled: changes.enabled ?? entry.enabled,
+          time: entry.time,
+          providers: entry.providers,
+          provider_times: entry.providerTimes ?? {},
+          time_end: entry.timeEnd ?? '',
+          randomize: entry.randomize ?? false,
+          retry_limit: changes.retryLimit ?? entry.retryLimit ?? 0,
+          retry_gap_minutes: changes.retryGapMinutes ?? entry.retryGapMinutes ?? 0,
+          makeup_time: changes.retryTime ?? entry.retryTime ?? '',
+        });
+        await load();
+      } catch (err) {
+        addToast(err instanceof Error ? err.message : String(err), 'error');
+      } finally {
+        setSavingSchedule(false);
+      }
+    },
+    [addToast, load],
+  );
+
+  const runSchedule = useCallback(
+    async (entry: CheckinScheduleEntry): Promise<void> => {
+      setBusyKey(`sched:${entry.id}`);
+      try {
+        const d = await api.runCheckinSchedule(entry.id);
+        addToast(
+          `${entry.displayLabel || entry.label}：${d?.summary ?? ''}` +
+            (d ? `（成功 ${d.ok}·保活 ${d.keepalive}·失败 ${d.failed}）` : ''),
+        );
+        await load();
+      } catch (err) {
+        addToast(err instanceof Error ? err.message : String(err), 'error');
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [addToast, load],
+  );
+
+  const removeSchedule = useCallback(
+    (entry: CheckinScheduleEntry): void => {
+      setConfirmState({
+        title: t('删除签到计划'),
+        message: t('确定删除「{{name}}」？对应的定时补签与活动重试也会一并移除，签到记录保留。', {
+          name: entry.displayLabel || entry.label,
+        }),
+        confirmText: t('删除'),
+        danger: true,
+        onConfirm: async () => {
+          await api.removeCheckinSchedule(entry.id);
+          addToast(t('已删除'));
+          await load();
+        },
+      });
+    },
+    [addToast, load, t],
+  );
+
+  const openNewSchedule = useCallback((): void => {
+    setScheduleForm({ ...EMPTY_SCHEDULE });
+    setEditingId('new');
+  }, []);
+
+  const openEditSchedule = useCallback((entry: CheckinScheduleEntry): void => {
+    setScheduleForm(formOf(entry));
+    setEditingId(entry.id);
+  }, []);
+
+  /* ── 旅行巡检（AIGX 独有） ───────────────────────────── */
+
   const travel = data?.travel;
-  const [travelTimesDraft, setTravelTimesDraft] = useState<string | null>(null);
-  const travelTimesValue = travelTimesDraft ?? (travel?.times ?? []).join('\n');
+  const travelTimesValue = travelTimesDraft ?? (travel?.times ?? []).join(', ');
 
-  const saveTravel = async (body: { enabled?: boolean; times?: string[] }): Promise<void> => {
-    try {
-      await api.updateCheckinTravel(body);
-      addToast(t('巡检设置已保存'));
-      setTravelTimesDraft(null);
-      await load();
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    }
-  };
+  const saveTravel = useCallback(
+    async (body: { enabled?: boolean; times?: string[] }): Promise<void> => {
+      try {
+        await api.updateCheckinTravel(body);
+        addToast(t('巡检设置已保存'));
+        // 只清「本次提交过时刻」的草稿，未提交的编辑不被回读冲掉
+        if (body.times) setTravelTimesDraft(null);
+        await load();
+      } catch (err) {
+        addToast(err instanceof Error ? err.message : String(err), 'error');
+      }
+    },
+    [addToast, load, t],
+  );
 
-  const commitTravelTimes = (): void => {
-    const raw = travelTimesValue.split('\n').map((s) => s.trim()).filter(Boolean);
-    if (raw.some((s) => !HHMM_RE.test(s))) {
+  const commitTravelTimes = useCallback((): void => {
+    const raw = travelTimesValue
+      .split(/[,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (raw.some((item) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(item))) {
       addToast(t('巡检时刻格式应为 HH:MM（每行一个）'), 'error');
       return;
     }
     void saveTravel({ times: raw });
-  };
+  }, [addToast, saveTravel, t, travelTimesValue]);
 
-  const runTravel = async (): Promise<void> => {
+  const runTravel = useCallback(async (): Promise<void> => {
     try {
-      // A2A 契约：flat `{outcome, message?, summary?, schedule?}`
       const d = await api.runCheckinTravelNow();
       if (d?.outcome === 'skipped') {
         addToast(t('本轮已跳过：{{reason}}', { reason: d.message || '—' }));
@@ -591,688 +640,39 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     }
-  };
+  }, [addToast, load, t]);
 
-  const runAll = async (providers: string[] = [], key = 'all') => {
-    setBusyKey(key);
-    try {
-      const res = await api.runCheckin({ providers });
-      const d = res?.data;
-      if (d) {
-        addToast(`${t('签到完成')}：${d.done}/${d.total}`);
-        void autoChain(d.results);
-      }
-      await load();
-      if (tab === 'records') await loadRecords();
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setBusyKey(null);
-    }
-  };
+  /* ── 视图 ─────────────────────────────────────────────── */
 
-  const runOne = async (accountId: string) => {
-    setBusyKey(accountId);
-    try {
-      const res = await api.runCheckin({ account_ids: [accountId] });
-      const r = res?.data?.results?.[0];
-      if (r) {
-        addToast(`${r.account_name}：${r.message}`, r.success ? 'success' : 'error');
-        if (res.data) void autoChain(res.data.results);
-      }
-      await load();
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setBusyKey(null);
-    }
-  };
-
-  const toggleSetting = async (enabled: boolean) => {
-    if (!data) return;
-    try {
-      await api.updateCheckinSettings({ ...data.settings, enabled });
-      await load();
-      addToast(enabled ? t('已开启定时签到') : t('已关闭定时签到'));
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    }
-  };
-
-  /** 定时条目行内开关：直接 upsert 同 id 其余字段不动 */
-  const toggleSchedule = async (schedule: CheckinScheduleEntry, enabled: boolean) => {
-    try {
-      await api.upsertCheckinSchedule({
-        id: schedule.id,
-        label: schedule.label,
-        enabled,
-        time: schedule.time,
-        providers: schedule.providers,
-      });
-      await load();
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    }
-  };
-
-  const openNewSchedule = () => {
-    setScheduleForm({ ...EMPTY_SCHEDULE });
-    setEditingId('new');
-  };
-
-  const openEditSchedule = (schedule: CheckinScheduleEntry) => {
-    setScheduleForm({
-      id: schedule.id,
-      label: schedule.label,
-      enabled: schedule.enabled,
-      time: schedule.time,
-      providers: schedule.providers,
-      providerTimes: { ...(schedule.providerTimes ?? {}) },
-      timeEnd: schedule.timeEnd ?? '',
-      randomize: schedule.randomize ?? false,
-      retryGapMinutes: String(schedule.retryGapMinutes ?? 5),
-      retryLimit: String(schedule.retryLimit ?? 3),
-      makeupTime: schedule.retryTime ?? '',
-    });
-    setEditingId(schedule.id);
-  };
-
-  const saveSchedule = async () => {
-    // 逐家覆盖校验：填了就必须是合法 HH:MM（空串 = 撤销覆盖）
-    for (const [p, v] of Object.entries(scheduleForm.providerTimes)) {
-      if (v && !HHMM_RE.test(v)) {
-        addToast(t('{{provider}} 的覆盖时刻格式应为 HH:MM', { provider: p }), 'error');
-        return;
-      }
-    }
-    // 校验：区间结束 / 补签时刻须为合法 HH:MM；开区间随机时结束须晚于开始（后端 400 前置拦截）
-    if (scheduleForm.timeEnd && !HHMM_RE.test(scheduleForm.timeEnd)) {
-      addToast(t('区间结束时刻格式应为 HH:MM'), 'error');
-      return;
-    }
-    if (scheduleForm.makeupTime && !HHMM_RE.test(scheduleForm.makeupTime)) {
-      addToast(t('补签时刻格式应为 HH:MM'), 'error');
-      return;
-    }
-    if (
-      scheduleForm.randomize &&
-      (!scheduleForm.timeEnd || scheduleForm.timeEnd <= scheduleForm.time)
-    ) {
-      addToast(t('开启区间随机时，结束时刻须晚于开始时刻'), 'error');
-      return;
-    }
-    // 契约已冻结（1.0.49）：5 字段一律提交；旧后端虽有 serde(default) 会忽略未知字段，
-    // 但前后端同版本发布，不再做 feature-detect（否则「零条目」时新建表单会缺控件）。
-    const providerTimes = Object.fromEntries(
-      Object.entries(scheduleForm.providerTimes).filter(([, v]) => v),
-    );
-    setSavingSchedule(true);
-    try {
-      await api.upsertCheckinSchedule({
-        id: scheduleForm.id,
-        label: scheduleForm.label,
-        enabled: scheduleForm.enabled,
-        time: scheduleForm.time,
-        providers: scheduleForm.providers,
-        provider_times: providerTimes,
-        time_end: scheduleForm.timeEnd,
-        randomize: scheduleForm.randomize,
-        retry_limit: Number(scheduleForm.retryLimit) || 0,
-        retry_gap_minutes: Number(scheduleForm.retryGapMinutes) || 0,
-        makeup_time: scheduleForm.makeupTime,
-      });
-      addToast(t('计划已保存'));
-      setEditingId(null);
-      setScheduleForm({ ...EMPTY_SCHEDULE });
-      await load();
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setSavingSchedule(false);
-    }
-  };
-
-  const removeSchedule = (schedule: CheckinScheduleEntry) => {
-    setConfirmState({
-      title: t('删除签到计划'),
-      message: `${schedule.displayLabel || schedule.label}（${schedule.time}）`,
-      confirmText: t('删除'),
-      danger: true,
-      onConfirm: async () => {
-        await api.removeCheckinSchedule(schedule.id);
-        addToast(t('已删除'));
-        await load();
-      },
-    });
-  };
-
-  const runSchedule = async (schedule: CheckinScheduleEntry) => {
-    setBusyKey(`sched:${schedule.id}`);
-    try {
-      // A2A 契约：flat 响应（summary / ok / keepalive / failed / lastResult / state）
-      const d = await api.runCheckinSchedule(schedule.id);
-      addToast(
-        `${schedule.displayLabel || schedule.label}：${d?.summary ?? ''}` +
-          (d ? `（成功 ${d.ok}·保活 ${d.keepalive}·失败 ${d.failed}）` : ''),
-      );
-      await load();
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setBusyKey(null);
-    }
-  };
-
-  const clearRecords = () => {
-    // 快捷时间档（1/7/30 天）也算筛选：只删该窗口命中的记录；
-    // 「全部」+ 无其它筛选 = 显式全清（后端要求 all=1 护栏）。
-    const filtered = hasRecordFilter || recordDays < 3650;
-    setConfirmState({
-      title: t('清空签到记录'),
-      message: filtered
-        ? t('将删除当前筛选命中的全部签到记录（与「筛出什么就删什么」同一过滤链），不可恢复。')
-        : t('未设置筛选：将清空全部签到记录，不可恢复。'),
-      confirmText: t('清空'),
-      danger: true,
-      onConfirm: async () => {
-        const res = await api.clearCheckinRecords(
-          filtered
-            ? {
-                outcome: recordOutcome || undefined,
-                kind: recordKind || undefined,
-                provider: recordProvider || undefined,
-                keyword: kwApplied || undefined,
-                start: dateToStartMs(recordStart) ?? quickStartMs(recordDays),
-                end: dateToEndMs(recordEnd),
-              }
-            : { all: true },
-        );
-        addToast(`${t('已删除')} ${res?.removed ?? 0} ${t('条记录')}`);
-        await loadRecords();
-      },
-    });
-  };
-
-  const providers = useMemo(
-    () => data?.daily?.providers ?? [],
-    [data?.daily?.providers],
-  );
-  const outOfScope = useMemo(
-    () => data?.daily?.outOfScope ?? [],
-    [data?.daily?.outOfScope],
-  );
-  const supported = useMemo(
-    () => data?.supportedProviders ?? [],
-    [data?.supportedProviders],
-  );
-  /** 1.0.49 契约：实现未进主仓的三家（不出现在可选范围，见下方说明） */
-  const unsupported = useMemo(
-    () => data?.unsupportedProviders ?? [],
-    [data?.unsupportedProviders],
-  );
-  const schedules = useMemo(
-    () => data?.auto?.schedules ?? [],
-    [data?.auto?.schedules],
-  );
-  /** 范围复选框清单（A2A `available_checkin_providers` → `providerOptions`）：
-   *  只列**实际可用**的家（有实现且有账号），没账号的家不出现。 */
-  const pickOptions = useMemo(
-    () => data?.auto?.providerOptions ?? [],
-    [data?.auto?.providerOptions],
-  );
-  /** 条目范围的展示文案：全部可用家 / 或逐家名。 */
-  const scopeLabel = useCallback(
-    (providers: string[]): string => {
-      const all = pickOptions.map((option) => option.id);
-      const isAll =
-        providers.length === 0 ||
-        (all.length > 0 && all.every((id) => providers.includes(id)));
-      if (isAll) {
-        return t('全部 {{n}} 家', { n: all.length || providers.length || supported.length });
-      }
-      return providers.join('、');
-    },
-    [pickOptions, supported.length, t],
+  const tabs = useMemo(
+    () => [
+      ...CHECKIN_SECTION_TABS.map((item) => ({ ...item, label: t(item.label) })),
+      ...CHECKIN_VIEW_TABS.map((item) => ({ ...item, label: t(item.label) })),
+    ],
+    [t],
   );
 
-  /** 提供商分类栏过滤后的分组（'' = 全部；只影响「每日签到」Tab 的列表渲染） */
-  const railGroups = useMemo(
-    () => (railProvider ? providers.filter((g) => g.id === railProvider) : providers),
-    [providers, railProvider],
-  );
+  const isSection = CHECKIN_SECTION_TABS.some((item) => item.value === tab);
 
-  /** 活动福利卡的目标账号清单（A2A：campaigns 由插件申报；这里按「可签家」保守给出） */
-  const campaignAccounts = useMemo(
-    () =>
-      providers.flatMap((g) =>
-        g.accounts.map((a) => ({ id: a.id, name: a.name || a.id, provider: g.id })),
-      ),
-    [providers],
-  );
-
-  /** 默认活动账号：清单变化时兜底选第一个，避免卡里空挂 */
-  useEffect(() => {
-    if (!campaignAccountId && campaignAccounts.length > 0) {
-      setCampaignAccountId(campaignAccounts[0].id);
-    } else if (campaignAccountId && !campaignAccounts.some((a) => a.id === campaignAccountId)) {
-      setCampaignAccountId(campaignAccounts[0]?.id ?? '');
-    }
-  }, [campaignAccounts, campaignAccountId]);
-
-  const campaignTarget = useMemo(
-    () => campaignAccounts.find((a) => a.id === campaignAccountId),
-    [campaignAccounts, campaignAccountId],
-  );
-
-  const totals = useMemo(() => {
-    // A2A 契约：todayDone / todayEligible 由后端算好（判据与批量签到同一对）
-    const accounts = providers.reduce((n, p) => n + p.accounts.length, 0);
-    return {
-      done: data?.daily?.todayDone ?? 0,
-      total: data?.daily?.todayEligible ?? 0,
-      accounts,
-    };
-  }, [data?.daily?.todayDone, data?.daily?.todayEligible, providers]);
-
-  /** 范围外账号总数（统计卡「另有 N 个账号不参与」） */
-  const outOfScopeCount = useMemo(
-    () => outOfScope.reduce((sum, item) => sum + (Number(item.count) || 0), 0),
-    [outOfScope],
-  );
-
-  /* ── 总览指标（A2A `CheckinStats`：今日签到 / 定时签到 / 待领新手福利 / 累计记录） ── */
-
-  /** 启用的定时条目数 */
-  const enabledSchedules = useMemo(
-    () => (schedules ?? []).filter((s) => s.enabled).length,
-    [schedules],
-  );
-
-  /** 最近一次将执行的时刻（毫秒；无启用条目 / 总开关关着 = null） */
-  const nextScheduleAt = useMemo(() => {
-    if (data?.auto?.enabled !== true) return null;
-    const stamps = (schedules ?? [])
-      .filter((s) => s.enabled)
-      .map((s) => Number(s.nextRunAt))
-      .filter((n) => Number.isFinite(n) && n > 0)
-      .sort((a, b) => a - b);
-    return stamps[0] ?? null;
-  }, [schedules, data?.auto?.enabled]);
-
-  /** 新手福利待领项数合计（`null` = 还没盘点过，不计入合计但单独计数） */
-  const onboardingPending = useMemo(
-    () =>
-      (data?.extras?.onboarding ?? []).reduce(
-        (sum, row) => sum + (typeof row.pending === 'number' ? row.pending : 0),
-        0,
-      ),
-    [data?.extras?.onboarding],
-  );
-
-  /** 已盘点过的新手福利账号数（盘点过的才有「待领几项」） */
-  const onboardingChecked = useMemo(
-    () =>
-      (data?.extras?.onboarding ?? []).filter((row) => typeof row.pending === 'number').length,
-    [data?.extras?.onboarding],
-  );
-
-  const hasRecordFilter = !!kwApplied || !!recordOutcome || !!recordProvider || !!recordKind || !!recordStart || !!recordEnd;
-
-  /* 1.0.49 契约字段已冻结：编辑器控件无条件渲染（旧后端 serde(default) 忽略未知字段） */
-  /** 内置专属时刻（A2A `providerOptions[].builtinTime` → {provider: "HH:MM"}） */
-  const builtinTimes = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const option of data?.auto?.providerOptions ?? []) {
-      if (option.builtinTime) map[option.id] = option.builtinTime;
-    }
-    return map;
-  }, [data?.auto?.providerOptions]);
-
-  /** 生效时刻三档回落：逐家覆盖 > 内置专属 > 条目时刻（对齐上游 effectiveScheduleTime） */
-  const effectiveTime = useCallback(
-    (provider: string, form: ScheduleForm): string =>
-      form.providerTimes[provider] || builtinTimes[provider] || form.time,
-    [builtinTimes],
-  );
-
-  /** 实际签到安排预览：按生效时刻分组（对齐上游「实际签到安排」侧栏） */
-  const schedulePreview = useMemo(() => {
-    if (!scheduleForm.providers.length) return [];
-    const groups = new Map<string, string[]>();
-    for (const p of scheduleForm.providers) {
-      const t = effectiveTime(p, scheduleForm);
-      groups.set(t, [...(groups.get(t) ?? []), p]);
-    }
-    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [scheduleForm, effectiveTime]);
-
-  /** 顶栏徽标（对齐 Agent2API AutoBadge：三态 —— 执行中 / 已关闭 / 已开启） */
-  const autoBadge = useMemo(() => {
-    const auto = data?.auto;
-    if (!auto) return null;
-    if (auto.running) {
-      return <span className="ck-tab-badge is-on">{t('自动签到执行中…')}</span>;
-    }
-    if (!auto.enabled) {
-      return <span className="ck-tab-badge is-off">{t('定时已关闭')}</span>;
-    }
-    const pending = (auto.schedules ?? [])
-      .filter((s) => s.enabled)
-      .reduce((sum, s) => sum + (s.pendingProviders?.length ?? 0), 0);
-    const firedToday = (auto.schedules ?? []).some((s) => s.enabled && s.lastFiredToday);
-    if (pending > 0) {
-      return <span className="ck-tab-badge is-on">{t('还有 {{n}} 个平台未执行', { n: pending })}</span>;
-    }
-    return (
-      <span className={`ck-tab-badge ${firedToday ? 'is-ok' : 'is-on'}`}>
-        {firedToday ? t('已开启 · 今日已执行') : t('定时已开启')}
-      </span>
-    );
-  }, [data?.auto, t]);
-
-  const toggleGroup = (provider: string): void => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(provider)) next.delete(provider);
-      else next.add(provider);
-      return next;
-    });
-  };
-
-  // 四个一级 Tab 对齐 A2A checkin-page（center / schedule / makeup / records）；
-  // AIGX 保留「福利通道」作为第五个（A2A 的 activity 卡片并入此处）
-  const tabs = [
-    { key: 'center' as TabKey, label: t('签到中心') },
-    { key: 'schedule' as TabKey, label: t('定时签到') },
-    { key: 'makeup' as TabKey, label: t('定时补签') },
-    { key: 'records' as TabKey, label: t('签到记录') },
-    { key: 'benefits' as TabKey, label: t('福利通道') },
-  ];
-
-  /** 提供商行徽章（对齐 Agent2API GroupBadge） */
-  const groupBadge = (done: number, total: number): JSX.Element => {
-    if (total === 0) return <Badge tone="neutral">{t('无账号')}</Badge>;
-    if (done === total) return <Badge tone="success">{t('已签')}</Badge>;
-    if (done > 0) return <Badge tone="warning">{t('部分')}</Badge>;
-    return <Badge tone="info">{t('待签')}</Badge>;
-  };
-
-  const scheduleEditor = (
-    <div className="ck-editor">
-      <div className="ck-editor-grid">
-        <label className="form-group">
-          <span className="ck-editor-label">{t('名称')}</span>
-          <input
-            className="form-input"
-            value={scheduleForm.label}
-            onChange={(e) => setScheduleForm({ ...scheduleForm, label: e.target.value })}
-          />
-        </label>
-        <label className="form-group">
-          <span className="ck-editor-label">{t('每天时刻（按下方时区·错过自动补签）')}</span>
-          <input
-            type="time"
-            className="form-input ck-time-input"
-            value={scheduleForm.time}
-            onChange={(e) => setScheduleForm({ ...scheduleForm, time: e.target.value })}
-          />
-        </label>
-        <label className="ck-editor-enabled">
-          <Switch
-            checked={scheduleForm.enabled}
-            onChange={(next) => setScheduleForm({ ...scheduleForm, enabled: next })}
-            ariaLabel={t('启用')}
-          />
-          <span>{t('启用')}</span>
-        </label>
-      </div>
-      <div className="form-group">
-        <div className="ck-scope-head">
-          <span className="ck-editor-label">{t('签到范围（可逐家覆盖时刻）')}</span>
-          <span className="ck-scope-tools">
-            <button
-              type="button"
-              onClick={() =>
-                setScheduleForm({
-                  ...scheduleForm,
-                  // 全选 = 当前可用清单（A2A providerOptions）
-                  providers: pickOptions.map((option) => option.id),
-                })
-              }
-            >
-              {t('全选')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setScheduleForm({ ...scheduleForm, providers: [] })}
-            >
-              {t('清空')}
-            </button>
-          </span>
-        </div>
-        <div className="ck-provider-picks">
-          {pickOptions.map((option) => {
-            const provider = option.id;
-            const checked = scheduleForm.providers.includes(provider);
-            const override = scheduleForm.providerTimes[provider] ?? '';
-            const eff = effectiveTime(provider, scheduleForm);
-            const isBuiltin = !override && Boolean(builtinTimes[provider] || option.builtinTime);
-            return (
-              <div
-                key={provider}
-                className={`ck-provider-pick ck-provider-pick-row${checked ? ' is-checked' : ''}`}
-              >
-                <label className="ck-provider-pick-name">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={(e) => {
-                      const next = e.target.checked
-                        ? [...scheduleForm.providers, provider]
-                        : scheduleForm.providers.filter((p) => p !== provider);
-                      const times = { ...scheduleForm.providerTimes };
-                      if (!e.target.checked) delete times[provider];
-                      setScheduleForm({ ...scheduleForm, providers: next, providerTimes: times });
-                    }}
-                  />
-                  {option.label || provider}
-                  {isBuiltin && <span className="ck-pick-tag">{t('平台专属')}</span>}
-                </label>
-                {checked && (
-                  <span className="ck-pick-time">
-                    <input
-                      type="time"
-                      className="form-input ck-time-input"
-                      aria-label={t('{{provider}} 签到时刻', { provider: option.label || provider })}
-                      value={override || eff}
-                      onChange={(e) =>
-                        setScheduleForm({
-                          ...scheduleForm,
-                          providerTimes: { ...scheduleForm.providerTimes, [provider]: e.target.value },
-                        })
-                      }
-                    />
-                    {override ? (
-                      <button
-                        type="button"
-                        className="ck-pick-reset"
-                        onClick={() =>
-                          setScheduleForm(() => {
-                            const times = { ...scheduleForm.providerTimes };
-                            delete times[provider];
-                            return { ...scheduleForm, providerTimes: times };
-                          })
-                        }
-                      >
-                        {t('恢复默认')}
-                      </button>
-                    ) : (
-                      <span className="ck-pick-tag ck-pick-tag-mute">
-                        {isBuiltin ? t('内置时刻') : t('跟随默认')}
-                      </span>
-                    )}
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        {scheduleForm.providers.length === 0 && (
-          <span className="form-hint">{t('不选 = 全部可用上游')}</span>
-        )}
-        {unsupported.length > 0 && (
-          <span className="form-hint">
-            {t('以下上游的实现随上游进入插件仓、主仓未接入，不出现在可选范围：')}
-            {unsupported.join('、')}
-          </span>
-        )}
-      </div>
-
-      {/* 实际签到安排预览（对齐上游编辑器右侧栏）：按生效时刻分组 */}
-      {scheduleForm.providers.length > 0 && (
-        <div className="form-group">
-          <span className="ck-editor-label">{t('实际签到安排（按生效时刻分组）')}</span>
-          <div className="ck-preview-groups">
-            {schedulePreview.map(([time, list]) => (
-              <div key={time} className="ck-preview-group">
-                <code>{time}</code>
-                <span>{list.join('、')}</span>
-                <Badge tone="neutral">{t('{{n}} 家', { n: list.length })}</Badge>
-              </div>
-            ))}
-          </div>
-          <span className="form-hint">
-            {t('逐家覆盖或内置专属时刻优先生效；未覆盖的按条目时刻执行。')}
-          </span>
-        </div>
-      )}
-
-      {/* 随机签到区间：time_end + randomize（1.0.49 契约字段） */}
-      <div className="form-group">
-        <span className="ck-editor-label">{t('随机签到区间（可选）')}</span>
-        <div className="ck-editor-grid">
-          <label className="form-group">
-            <span className="ck-editor-label ck-label-with-tip">
-              {t('区间结束时刻')}
-              <Tooltip
-                label={t(
-                  '窗口结束时刻（HH:MM）。开启随机后，每个账号在 [开始, 结束] 内取确定性随机时刻（同账号同日同刻、重启不漂）；留空 = 仅按开始时刻执行。内置专属时刻（如 qoder 10:01）与逐家覆盖的家不参与随机。',
-                )}
-              >
-                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
-              </Tooltip>
-            </span>
-            <input
-              type="time"
-              className="form-input ck-time-input"
-              aria-label={t('区间结束时刻')}
-              value={scheduleForm.timeEnd}
-              onChange={(e) => setScheduleForm({ ...scheduleForm, timeEnd: e.target.value })}
-            />
-          </label>
-          <label className="ck-editor-enabled ck-random-toggle">
-            <Switch
-              checked={scheduleForm.randomize}
-              onChange={(next) => setScheduleForm({ ...scheduleForm, randomize: next })}
-              ariaLabel={t('区间内随机')}
-            />
-            <span className="ck-label-with-tip">
-              {t('区间内随机')}
-              <Tooltip
-                label={t(
-                  '开启后每个账号在 [开始, 结束] 区间内随机取一个时刻执行，避免同刻集中触发上游风控；关闭 = 所有账号按开始时刻执行。',
-                )}
-              >
-                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
-              </Tooltip>
-            </span>
-          </label>
-        </div>
-        <span className="form-hint">
-          {t('开启随机时结束时刻必须晚于开始时刻；留空结束时刻 = 固定时刻执行。')}
-        </span>
-      </div>
-
-      {/* 逐条目重试 + 补签轮：retry_limit / retry_gap_minutes / makeup_time（1.0.49 契约字段） */}
-      <div className="form-group ck-retry-block">
-        <span className="ck-editor-label">{t('补签与重试')}</span>
-        <div className="ck-editor-grid">
-          <label className="form-group">
-            <span className="ck-editor-label ck-label-with-tip">
-              {t('每账号每天最多重试（次）')}
-              <Tooltip
-                label={t('当天未签上时最多重试几次；0 = 关闭本条目重试，仅靠补签轮兜底。次数按账号每天单独计算、次日重置。')}
-              >
-                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
-              </Tooltip>
-            </span>
-            <input
-              type="number"
-              min={0}
-              max={20}
-              className="form-input"
-              value={scheduleForm.retryLimit}
-              onChange={(e) => setScheduleForm({ ...scheduleForm, retryLimit: e.target.value })}
-            />
-          </label>
-          <label className="form-group">
-            <span className="ck-editor-label ck-label-with-tip">
-              {t('重试间隔（分钟）')}
-              <Tooltip
-                label={t('每次失败重试之间等待多少分钟；填 0 = 回落全局「失败/窗口重试间隔」设置。')}
-              >
-                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
-              </Tooltip>
-            </span>
-            <input
-              type="number"
-              min={0}
-              max={120}
-              className="form-input"
-              value={scheduleForm.retryGapMinutes}
-              onChange={(e) => setScheduleForm({ ...scheduleForm, retryGapMinutes: e.target.value })}
-            />
-          </label>
-          <label className="form-group">
-            <span className="ck-editor-label ck-label-with-tip">
-              {t('补签时刻（留空 = 关闭）')}
-              <Tooltip
-                label={t(
-                  '到该时刻挑当天本条目下仍未签上的账号再跑一次（类型记为「补签」），每天至多一轮；留空 = 不跑补签轮。',
-                )}
-              >
-                <span className="ck-tip-dot" aria-label={t('说明')}>?</span>
-              </Tooltip>
-            </span>
-            <input
-              type="time"
-              className="form-input ck-time-input"
-              aria-label={t('补签时刻')}
-              value={scheduleForm.makeupTime}
-              onChange={(e) => setScheduleForm({ ...scheduleForm, makeupTime: e.target.value })}
-            />
-          </label>
-        </div>
-        <span className="form-hint">
-          {t('重试与补签只处理当天未签上的账号；补签轮在指定时刻兜底一次。')}
-        </span>
-      </div>
-
-      <div className="ck-form-actions">
-        <button type="button" className="btn btn-outline btn-sm" onClick={() => setEditingId(null)}>
-          {t('取消')}
-        </button>
-        <button
-          type="button"
-          className="btn btn-primary btn-sm"
-          onClick={() => void saveSchedule()}
-          disabled={savingSchedule}
-        >
-          {savingSchedule ? t('保存中...') : t('保存')}
-        </button>
-      </div>
-    </div>
-  );
+  const editor =
+    editingId !== null ? (
+      <CheckinScheduleEditor
+        form={scheduleForm}
+        onChange={setScheduleForm}
+        onClose={() => setEditingId(null)}
+        onSaved={() => {
+          addToast(t('计划已保存'));
+          setEditingId(null);
+          setScheduleForm({ ...EMPTY_SCHEDULE });
+          void load();
+        }}
+        onError={(message) => addToast(message, 'error')}
+        pickOptions={pickOptions}
+        builtinTimes={builtinTimes}
+        unsupported={unsupported}
+        saving={savingSchedule}
+      />
+    ) : null;
 
   return (
     <div>
@@ -1281,9 +681,7 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
           <div>
             <h1>{t('签到中心')}</h1>
             <p>
-              {t(
-                '替账号池里的上游账号每日领取它们自带的额度。与钱包里的「用户签到」是两套。'
-              )}
+              {t('替账号池里的上游账号每日领取它们自带的额度。与钱包里的「用户签到」是两套。')}
             </p>
           </div>
           <button
@@ -1302,9 +700,9 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
       <div className="sub-tabs ck-sub-tabs">
         {tabs.map((item) => (
           <button
-            key={item.key}
-            className={`sub-tab${tab === item.key ? ' active' : ''}`}
-            onClick={() => setTab(item.key)}
+            key={item.value}
+            className={`sub-tab${tab === item.value ? ' active' : ''}`}
+            onClick={() => setTab(item.value)}
           >
             {item.label}
           </button>
@@ -1312,10 +710,67 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
         <span className="ck-tab-badge-slot">{autoBadge}</span>
       </div>
 
-      {loading ? (
+      {loading && !data ? (
         <Loading text={t('加载签到中心')} />
-      ) : tab === 'center' ? (
+      ) : !data ? (
+        <EmptyState message={t('没有读到签到中心数据，请稍后重试。')} />
+      ) : tab === 'benefits' ? (
+        <BenefitsPanel />
+      ) : tab === 'records' ? (
+        <CheckinRecordsView center={data} onOpenBenefits={() => setTab('benefits')} />
+      ) : tab === 'schedule' ? (
+        <CheckinScheduleView
+          auto={data.auto}
+          settings={data.settings}
+          labels={labels}
+          unsupported={unsupported}
+          busyKey={busyKey}
+          editingId={editingId}
+          editor={editor}
+          gapMsEdit={gapMsEdit}
+          gapSaving={gapSaving}
+          retryMinEdit={retryMinEdit}
+          keepDaysEdit={keepDaysEdit}
+          advSaving={advSaving}
+          onGapMsChange={setGapMsEdit}
+          onSaveGapMs={() => void saveGapMs()}
+          onRetryMinChange={setRetryMinEdit}
+          onKeepDaysChange={setKeepDaysEdit}
+          onSaveAdvanced={() => void saveAdvanced()}
+          onTimezoneChange={(offset) => void changeTimezone(offset)}
+          onToggleMaster={(enabled) => void toggleSetting(enabled)}
+          onToggleEntry={(entry, enabled) => void upsertEntry(entry, { enabled })}
+          onRunEntry={(entry) => void runSchedule(entry)}
+          onEditEntry={openEditSchedule}
+          onDeleteEntry={removeSchedule}
+          onNewEntry={openNewSchedule}
+          onGoMakeup={() => setTab('makeup')}
+          onRunTravel={() => void runTravel()}
+          onSaveTravelTimes={commitTravelTimes}
+          travelTimesValue={travelTimesValue}
+          onTravelTimesChange={setTravelTimesDraft}
+        />
+      ) : tab === 'makeup' ? (
+        <CheckinMakeupView
+          auto={data.auto}
+          saving={savingSchedule}
+          defaultRetryTime={data.auto?.defaultRetryTime || '00:10'}
+          onToggleMakeup={(entry, enabled) =>
+            void upsertEntry(entry, {
+              retryTime: enabled ? data.auto?.defaultRetryTime || '00:10' : '',
+            })
+          }
+          onSaveMakeup={(entry, changes) => void upsertEntry(entry, changes)}
+          onSaveRetry={(entry, changes) => void upsertEntry(entry, changes)}
+          onEditSchedule={(entry) => {
+            openEditSchedule(entry);
+            setTab('schedule');
+          }}
+          onGoSchedule={() => setTab('schedule')}
+        />
+      ) : isSection ? (
         <>
+          {/* 总览指标（A2A `CheckinStats` 四格） */}
           <div className="ck-stats">
             <div className="ck-stat">
               <CalendarCheck size={16} className="ck-stat-icon" />
@@ -1332,253 +787,75 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                     }}
                   />
                 </div>
+                <div className="ck-time-subtle">
+                  {outOfScopeCount > 0
+                    ? t('另有 {{n}} 个账号不参与', { n: outOfScopeCount })
+                    : t('全部账号均可签到')}
+                </div>
               </div>
             </div>
-            <div className="ck-stat">
-              <div className="ck-stat-body">
-                <div className="ck-stat-value">{totals.accounts}</div>
-                <div className="ck-stat-label">{t('可签到账号')}</div>
-              </div>
-            </div>
-            <div className="ck-stat">
-              <div className="ck-stat-body">
-                <div className="ck-stat-value">{supported.length}</div>
-                <div className="ck-stat-label">{t('支持的上游')}</div>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="ck-stat ck-stat-link"
-              onClick={() => setTab('records')}
-            >
-              <div className="ck-stat-body">
-                <div className="ck-stat-value">{data?.recordsTotal ?? 0}</div>
-                <div className="ck-stat-label">{t('累计记录数')}</div>
-              </div>
-            </button>
             <button type="button" className="ck-stat ck-stat-link" onClick={() => setTab('schedule')}>
               <div className="ck-stat-body">
                 <div className="ck-stat-value">
-                  {(schedules ?? []).filter((s) => s.enabled).length}/
-                  {(schedules ?? []).length}
+                  {enabledSchedules > 0 ? enabledSchedules : '—'}
+                  {enabledSchedules > 0 ? ` / ${schedules.length}` : ''}
                 </div>
-                <div className="ck-stat-label">{t('定时计划启用')}</div>
+                <div className="ck-stat-label">{t('定时签到')}</div>
+                <div className="ck-time-subtle">
+                  {data.auto?.enabled !== true
+                    ? t('总开关已关闭')
+                    : nextScheduleAt
+                      ? t('下次 {{time}}', { time: formatTime(nextScheduleAt) })
+                      : t('暂无启用的条目')}
+                </div>
+              </div>
+            </button>
+            <div className="ck-stat">
+              <div className="ck-stat-body">
+                <div className="ck-stat-value">
+                  {(data.extras?.onboarding ?? []).length > 0
+                    ? onboardingChecked > 0
+                      ? onboardingPending
+                      : '—'
+                    : '无'}
+                </div>
+                <div className="ck-stat-label">{t('待领新手福利')}</div>
+                <div className="ck-time-subtle">
+                  {(data.extras?.onboarding ?? []).length > 0
+                    ? t('已查 {{checked}} / {{total}} 个账号', {
+                        checked: onboardingChecked,
+                        total: (data.extras?.onboarding ?? []).length,
+                      })
+                    : t('没有支持新手福利的账号')}
+                </div>
+              </div>
+            </div>
+            <button type="button" className="ck-stat ck-stat-link" onClick={() => setTab('records')}>
+              <div className="ck-stat-body">
+                <div className="ck-stat-value">{data.recordsTotal ?? 0}</div>
+                <div className="ck-stat-label">{t('累计签到记录')}</div>
+                <div className="ck-time-subtle">{t('每账号一条明细')}</div>
               </div>
             </button>
           </div>
 
-          <div className="ck-center-layout">
-          {/* 提供商分类栏（A2A checkin-provider-rail）：只列当前有账号的家 */}
-          {providers.length > 0 && (
-            <aside className="ck-provider-rail" aria-label={t('提供商')}>
-              <div className="ck-rail-head">
-                <h3>{t('提供商')}</h3>
-                <span>{t('{{n}} 家', { n: providers.length })}</span>
-              </div>
-              <button
-                type="button"
-                className={`ck-rail-item${railProvider === '' ? ' is-active' : ''}`}
-                onClick={() => setRailProvider('')}
-              >
-                <span className="ck-rail-name">{t('全部提供商')}</span>
-                <span className="ck-rail-count">{totals.done}/{totals.total}</span>
-              </button>
-              {providers.map((group) => (
-                <button
-                  key={group.id}
-                  type="button"
-                  className={`ck-rail-item${railProvider === group.id ? ' is-active' : ''}`}
-                  onClick={() => setRailProvider(group.id)}
-                >
-                  {providerIcon(group.id) ? (
-                    <img className="ck-rail-logo" src={providerIcon(group.id) as string} alt="" />
-                  ) : (
-                    <span className="ck-rail-logo ck-rail-letter">{(group.label || group.id).slice(0, 1).toUpperCase()}</span>
-                  )}
-                  <span className="ck-rail-name">{group.label || group.id}</span>
-                  <span className={`ck-rail-count${group.doneCount < group.totalCount ? ' pending' : ''}`}>
-                    {group.doneCount}/{group.totalCount}
-                  </span>
-                </button>
-              ))}
-              <p className="ck-rail-note">{t('只列当前任务里有账号的提供商。')}</p>
-            </aside>
-          )}
+          <CheckinCenterSections
+            section={tab}
+            center={data}
+            busyKey={busyKey}
+            onSignOne={(accountId) => void runOne(accountId)}
+            onRunAll={() => void runAll()}
+            onOpenBenefits={() => setTab('benefits')}
+            onReload={() => void load()}
+          />
 
-          <div className="ck-center-main">
-          <Card
-            title={t('每日签到')}
-            actions={
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={() => void runAll()}
-                disabled={busyKey !== null || autoChaining || totals.accounts === 0}
-                style={{ gap: 6 }}
-              >
-                <Play size={12} />
-                {busyKey === 'all' ? t('签到中...') : autoChaining ? t('自动链执行中...') : t('立即全部签到')}
-              </button>
-            }
-          >
-            {providers.length === 0 ? (
-              <EmptyState
-                icon="📅"
-                message={
-                  Object.keys(data?.checkinFeatures ?? {}).length > 0
-                    ? t('签到能力已就绪，但还没有可签到的账号。到「账号」页添加并启用账号后，这里会自动出现。')
-                    : t('还没有可签到的提供商。签到能力由提供商插件/实现提供，支持的上游：' + supported.join('、'))
-                }
-              />
-            ) : (
-              <div className="ck-prov-list">                {railGroups.map((group) => {
-                  const open = expanded.has(group.id);
-                  const icon = providerIcon(group.id);
-                  const description =
-                    group.description || PROVIDER_DESC[group.id] || '';
-                  return (
-                    <div key={group.id} className="ck-prov-block">
-                      <div
-                        className={`ck-prov-row${open ? ' is-open' : ''}`}
-                        role="button"
-                        tabIndex={0}
-                        aria-expanded={open}
-                        onClick={() => toggleGroup(group.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            toggleGroup(group.id);
-                          }
-                        }}
-                      >
-                        {icon ? (
-                          <img className="ck-prov-logo" src={icon as string} alt="" />
-                        ) : (
-                          <span className="ck-prov-logo ck-prov-letter">
-                            {(group.label || group.id).slice(0, 1).toUpperCase()}
-                          </span>
-                        )}
-                        <div className="ck-prov-main">
-                          <span className="ck-prov-name">{group.label}</span>
-                          <span className="ck-prov-sub">
-                            {t('{{n}} 个账号', { n: group.accounts.length })} · {t('已签')} {group.doneCount}
-                          </span>
-                          {description && (
-                            <span className="ck-prov-desc">{description}</span>
-                          )}
-                        </div>
-                        {groupBadge(group.doneCount, group.totalCount)}
-                        <ChevronRight size={14} className={`ck-prov-caret${open ? ' is-open' : ''}`} />
-                      </div>
-                      {open && (
-                        <div className="ck-prov-accounts">
-                          <div className="ck-prov-acts">
-                            <button
-                              type="button"
-                              className="btn btn-outline btn-sm"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void runAll([group.id], `g:${group.id}`);
-                              }}
-                              disabled={busyKey !== null}
-                            >
-                              <Play size={12} />{' '}
-                              {busyKey === `g:${group.id}` ? t('签到中...') : t('签到本组')}
-                            </button>
-                          </div>
-                          <table className="ck-table">
-                            <thead>
-                              <tr>
-                                <th>{t('账号')}</th>
-                                <th style={{ width: 90 }}>{t('今日')}</th>
-                                <th style={{ width: 90 }}>{t('连登')}</th>
-                                <th style={{ width: 150 }}>{t('上次签到')}</th>
-                                <th>{t('最近结果')}</th>
-                                <th style={{ width: 90 }}>{t('操作')}</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {group.accounts.map((account) => (
-                                <tr key={account.id}>
-                                  <td>{account.name || account.id}</td>
-                                  <td>
-                                    {account.available === false ? (
-                                      <Badge tone="warning">{t('不可用')}</Badge>
-                                    ) : account.checkedInToday ? (
-                                      <Badge tone="success">{t('已签')}</Badge>
-                                    ) : (
-                                      <Badge tone="info">{t('待签')}</Badge>
-                                    )}
-                                  </td>
-                                  {/* 连登天数（A2A streakDays；0 = 还没读到过） */}
-                                  <td className="ck-streak">
-                                    {(account.streakDays ?? 0) > 0
-                                      ? t('{{n}} 天', { n: account.streakDays })
-                                      : '—'}
-                                  </td>
-                                  <td className="ck-time-subtle">
-                                    {account.lastTs
-                                      ? new Date(account.lastTs * 1000).toLocaleString()
-                                      : account.checkinAt
-                                        ? new Date(account.checkinAt).toLocaleString()
-                                        : '—'}
-                                  </td>
-                                  <td className="ck-message">
-                                    {account.lastOutcome && (
-                                      <Badge tone={OUTCOME_TONE[account.lastOutcome] ?? 'neutral'}>
-                                        {t(OUTCOME_LABEL[account.lastOutcome] ?? account.lastOutcome)}
-                                      </Badge>
-                                    )}{' '}
-                                    {account.lastMessage || '—'}
-                                  </td>
-                                  <td>
-                                    <button
-                                      type="button"
-                                      className="btn btn-outline btn-sm"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        void runOne(account.id);
-                                      }}
-                                      disabled={busyKey !== null}
-                                    >
-                                      {busyKey === account.id
-                                        ? t('签到中…')
-                                        : account.checkedInToday
-                                          ? t('重签')
-                                          : t('签到')}
-                                    </button>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {/* 范围外账号（A2A outOfScope）：按提供商 + 原因聚合，一点即可看到
-                「为什么这些账号不参与」——不把它们混进每日签到列表 */}
-            {outOfScope.length > 0 && (
-              <div className="ck-out-of-scope">
-                <CalendarCheck size={13} />
-                <span>
-                  {t('另有 {{n}} 个账号不参与签到：', { n: outOfScopeCount })}
-                  {outOfScope
-                    .map((item) => `${item.label}（${item.reason} ×${item.count}）`)
-                    .join('、')}
-                </span>
-              </div>
-            )}
-          </Card>
-
-          {/* 自动链进度：签到成功后逐个动作串行执行的可视化（失败即停标记） */}
+          {/* 签到后的自动链进度（AIGX 独有） */}
           {autoChainProgress && (
             <div className="ck-chain-progress">
               <div className="ck-chain-head">
                 <span className="ck-chain-label">
-                  {t('自动链')}{autoChainProgress.stopped ? t('（已停止）') : ''}
+                  {t('自动链')}
+                  {autoChainProgress.stopped ? t('（已停止）') : ''}
                   {autoChainProgress.action
                     ? `：${autoChainProgress.action}`
                     : autoChainProgress.done === autoChainProgress.total
@@ -1600,779 +877,31 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
                   }}
                 />
               </div>
+              {autoChaining ? <span className="form-hint">{t('正在逐个执行一次性福利…')}</span> : null}
             </div>
           )}
 
-          {/* 活动福利 / 月度赠送（A2A checkin-campaign-rewards）：按账号逐张读，
-              活动不进每日调度，只在这里手动领 */}
-          {campaignTarget && (
+          {/* AIGX 独有：活动福利卡（按账号逐张读；活动不进每日调度） */}
+          {providers.length > 0 && (
             <CheckinCampaignCard
-              accountId={campaignTarget.id}
-              accountName={campaignTarget.name}
-              provider={campaignTarget.provider}
-              accounts={campaignAccounts}
-              onAccountChange={(id) => setCampaignAccountId(id)}
+              accountId={providers[0].accounts[0]?.id ?? ''}
+              accountName={providers[0].accounts[0]?.name ?? ''}
+              provider={providers[0].id}
+              accounts={providers.flatMap((group) =>
+                group.accounts.map((account) => ({ id: account.id, name: account.name || account.id })),
+              )}
             />
           )}
 
-          {/* 逐账号福利预览（A2A extras）：入口清单零上游请求 */}
-          {data && <CheckinExtrasPreview center={data} />}
+          {/* AIGX 独有：逐账号福利预览 + 轮次时间线 */}
+          <CheckinExtrasPreview center={data} />
+          <CheckinHistoryTimeline rows={data.history ?? []} />
 
-          {/* 轮次时间线（A2A history）：批量轮次的成败总览 */}
-          <CheckinHistoryTimeline rows={data?.history ?? []} />
-          </div>
-          </div>
+          <p className="form-hint">
+            {t('支持的上游 {{n}} 家：{{list}}', { n: supported.length, list: supported.join('、') })}
+          </p>
         </>
-      ) : tab === 'schedule' ? (
-        <>
-          <Card title={t('定时签到')}>
-            <div className="ck-setting-row">
-              <div>
-                <div className="ck-setting-label">{t('启用定时签到')}</div>
-                <div className="ck-setting-hint">
-                  {t('开启后按下面计划的时刻（北京时间）自动签到，当天只跑一次。')}
-                </div>
-              </div>
-              <Switch
-                checked={!!data?.settings.enabled}
-                onChange={(next) => void toggleSetting(next)}
-                ariaLabel={t('启用定时签到')}
-              />
-            </div>
-            <div className="ck-setting-row">
-              <div>
-                <div className="ck-setting-label">{t('账号间隔（毫秒）')}</div>
-                <div className="ck-setting-hint">
-                  {t('逐个签到之间的等待，避免并发触发上游风控。')}
-                </div>
-              </div>
-              <div className="ck-gap-edit">
-                <input
-                  type="number"
-                  min={0}
-                  step={100}
-                  className="form-input ck-gap-input"
-                  value={gapMsEdit}
-                  onChange={(e) => setGapMsEdit(e.target.value)}
-                  onBlur={() => {
-                    if (gapMsEdit.trim() === '') setGapMsEdit(String(data?.settings.gap_ms ?? 800));
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void saveGapMs();
-                  }}
-                  aria-label={t('账号间隔（毫秒）')}
-                />
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  onClick={() => void saveGapMs()}
-                  disabled={gapSaving}
-                >
-                  {gapSaving ? t('保存中...') : t('保存')}
-                </button>
-              </div>
-            </div>
-            <div className="ck-setting-row">
-              <div>
-                <div className="ck-setting-label">{t('签到时区')}</div>
-                <div className="ck-setting-hint">
-                  {t('计划与「下次执行」按此时区计算。缺省 UTC+8；选「跟随系统」= 用服务器本地时区（偏移 0）。')}
-                </div>
-              </div>
-              <select
-                className="form-input"
-                style={{ maxWidth: 200 }}
-                value={String(data?.settings.timezone_offset ?? 8)}
-                onChange={(e) => void changeTimezone(Number(e.target.value))}
-                aria-label={t('签到时区')}
-              >
-                {TZ_OFFSETS.map((off) => (
-                  <option key={off} value={off}>
-                    {off === 0 ? t('跟随系统本地时区') : `UTC${off > 0 ? '+' : ''}${off}`}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="ck-setting-row">
-              <div>
-                <div className="ck-setting-label">{t('失败/窗口重试间隔（分钟）')}</div>
-                <div className="ck-setting-hint">
-                  {t('签到失败或窗口未开时，当天按此间隔重试；0 = 关闭重试（签到失败当天不再补）。')}
-                </div>
-              </div>
-              <div className="ck-gap-edit">
-                <input
-                  type="number"
-                  min={0}
-                  max={1440}
-                  className="form-input ck-gap-input"
-                  value={retryMinEdit}
-                  onChange={(e) => setRetryMinEdit(e.target.value)}
-                  aria-label={t('失败/窗口重试间隔（分钟）')}
-                />
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  onClick={() => void saveAdvanced()}
-                  disabled={advSaving}
-                >
-                  {advSaving ? t('保存中...') : t('保存')}
-                </button>
-              </div>
-            </div>
-            <div className="ck-setting-row">
-              <div>
-                <div className="ck-setting-label">{t('台账保留天数')}</div>
-                <div className="ck-setting-hint">
-                  {t('签到记录超过该天数自动清理；0 = 永久保留。')}
-                </div>
-              </div>
-              <div className="ck-gap-edit">
-                <input
-                  type="number"
-                  min={0}
-                  className="form-input ck-gap-input"
-                  value={keepDaysEdit}
-                  onChange={(e) => setKeepDaysEdit(e.target.value)}
-                  aria-label={t('台账保留天数')}
-                />
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  onClick={() => void saveAdvanced()}
-                  disabled={advSaving}
-                >
-                  {advSaving ? t('保存中...') : t('保存')}
-                </button>
-              </div>
-            </div>
-          </Card>
-
-          <Card
-            title={t('签到计划')}
-            actions={
-              <button
-                className="btn btn-outline btn-sm"
-                onClick={openNewSchedule}
-                disabled={editingId !== null}
-                style={{ gap: 6 }}
-              >
-                <Plus size={13} /> {t('添加条目')}
-              </button>
-            }
-          >
-            {(schedules ?? []).length === 0 && editingId !== 'new' ? (
-              <EmptyState icon="⏰" message={t('还没有签到计划')} />
-            ) : (
-              <div className="ck-sched-list">
-                {editingId === 'new' && (
-                  <div className="ck-sched-row is-editing">
-                    <div className="ck-sched-body">{scheduleEditor}</div>
-                  </div>
-                )}
-                {(schedules ?? []).map((schedule) => {
-                  const scope = scopeLabel(schedule.providers);
-                  const last = schedule.lastResult;
-                  const pending = schedule.pendingProviders ?? [];
-                  if (editingId === schedule.id) {
-                    return (
-                      <div key={schedule.id} className="ck-sched-row is-editing">
-                        <div className="ck-sched-body">{scheduleEditor}</div>
-                      </div>
-                    );
-                  }
-                  return (
-                    <div key={schedule.id} className={`ck-sched-row${schedule.enabled ? '' : ' is-off'}`}>
-                      <Switch
-                        className="ck-sched-switch"
-                        checked={schedule.enabled}
-                        ariaLabel={t('启用/停用')}
-                        onChange={(next) => void toggleSchedule(schedule, next)}
-                      />
-                      <div className="ck-sched-main">
-                        <div className="ck-sched-name">
-                          {schedule.displayLabel || schedule.label}
-                          {!schedule.enabled && <Badge tone="neutral">{t('已停用')}</Badge>}
-                        </div>
-                        <div className="ck-sched-desc">
-                          {t('每天 {{time}} · {{scope}}', { time: schedule.time, scope })}
-                          {(schedule.timeEnd || schedule.randomize) &&
-                            ` · ${t('区间至 {{end}}', { end: schedule.timeEnd || '—' })}`}
-                        </div>
-                        {/* 逐家生效时刻与今日状态（A2A providerRows）：界面上每行能
-                            看到「这家到底几点签 / 跑过没有 / 还有几个待执行」 */}
-                        {schedule.providerRows.length > 0 && (
-                          <div className="ck-sched-provider-rows">
-                            {schedule.providerRows.map((row) => (
-                              <span
-                                key={row.id}
-                                className={`ck-sched-provider-row${row.firedToday ? ' is-done' : ''}${row.overdue ? ' is-overdue' : ''}`}
-                                title={
-                                  row.builtin
-                                    ? t('内置专属时刻 {{time}}', { time: row.builtin })
-                                    : undefined
-                                }
-                              >
-                                {row.label}
-                                <span className="ck-sched-provider-time">{row.time}</span>
-                                {row.firedToday ? (
-                                  <Badge tone="success">{t('已跑')}</Badge>
-                                ) : (row.pendingCount ?? 0) > 0 ? (
-                                  <Badge tone="warning">{t('{{n}} 待执行', { n: row.pendingCount })}</Badge>
-                                ) : row.overdue ? (
-                                  <Badge tone="warning">{t('已到点')}</Badge>
-                                ) : (
-                                  <Badge tone="neutral">{t('等窗口')}</Badge>
-                                )}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        <div className="ck-sched-desc ck-sched-last">
-                          {schedule.lastFiredDate
-                            ? t('上次执行：{{d}} · {{r}} · 成功 {{ok}}·保活 {{ka}}·失败 {{f}}', {
-                                d: schedule.lastFiredDate,
-                                r: last?.reason || '—',
-                                ok: last?.succeeded ?? 0,
-                                ka: last?.active ?? 0,
-                                f: last?.failedCount ?? 0,
-                              })
-                            : t('从未执行')}
-                          {pending.length > 0 &&
-                            ` · ${t('待执行：{{list}}', { list: pending.join('、') })}`}
-                          {(schedule.retryCount ?? 0) > 0 &&
-                            ` · ${t('等窗口重试 {{n}} 个', { n: schedule.retryCount })}`}
-                          {(schedule.retryExhausted ?? []).length > 0 &&
-                            ` · ${t('今天重试已用尽 {{n}} 个', { n: schedule.retryExhausted?.length ?? 0 })}`}
-                          {last?.failed && last.failed.length > 0 && (
-                            <span className="ck-sched-failures">
-                              {' '}
-                              {t('失败明细：')}
-                              {last.failed.join('、')}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="ck-sched-next">
-                        {schedule.enabled
-                          ? schedule.nextRunAt
-                            ? t('下次 {{when}}', { when: new Date(schedule.nextRunAt).toLocaleString() })
-                            : nextRunLabel(schedule.time, data?.settings?.timezone_offset ?? 8)
-                          : '—'}
-                      </div>
-                      <div className="ck-sched-ops">
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          onClick={() => openEditSchedule(schedule)}
-                        >
-                          {t('编辑')}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          onClick={() => void runSchedule(schedule)}
-                          disabled={busyKey !== null}
-                        >
-                          {busyKey === `sched:${schedule.id}` ? t('执行中...') : t('立即')}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-danger btn-sm"
-                          onClick={() => removeSchedule(schedule)}
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </Card>
-          {/* 旅行/成长巡检（A2A adminPanels 的 growth_tasks 面板；camelCase 契约） */}
-          {travel && (data?.adminPanels ?? []).includes('growth_tasks') && (
-            <Card title={t('成长巡检（travel / school）')}>
-              {travel.available === false && (
-                <div className="error-message">
-                  {t('自动巡检已暂停：{{reason}}', { reason: travel.pausedReason || travel.paused_reason || t('能力不可用') })}
-                </div>
-              )}
-              <div className="ck-setting-row">
-                <div>
-                  <div className="ck-setting-label">{t('自动巡检')}</div>
-                  <div className="ck-setting-hint">
-                    {travel.enabled
-                      ? t('开着：按下面的时刻自动巡检成长任务（travel/school）并领取')
-                      : t('关着：不自动巡检（仍可手动巡检）')}
-                  </div>
-                </div>
-                <Switch
-                  checked={!!travel.enabled}
-                  onChange={(next) => void saveTravel({ enabled: next })}
-                  ariaLabel={t('自动巡检')}
-                />
-              </div>
-              <div className="ck-setting-row">
-                <div>
-                  <div className="ck-setting-label">{t('巡检时刻（每行一个 HH:MM）')}</div>
-                  <div className="ck-setting-hint">
-                    {t('每天在这些时刻巡检成长任务；今日已跑 {{n}} 次：{{fired}}', {
-                      n: (travel.firedToday ?? travel.fired_today ?? []).length,
-                      fired: (travel.firedToday ?? travel.fired_today ?? []).join('、') || '—',
-                    })}
-                  </div>
-                </div>
-                <div className="ck-gap-edit ck-travel-edit">
-                  <textarea
-                    className="form-input ck-travel-times"
-                    rows={3}
-                    value={travelTimesValue}
-                    placeholder={'09:00\n21:00'}
-                    onChange={(e) => setTravelTimesDraft(e.target.value)}
-                    aria-label={t('巡检时刻（每行一个 HH:MM）')}
-                  />
-                  <div className="ck-travel-actions">
-                    <button type="button" className="btn btn-outline btn-sm" onClick={commitTravelTimes}>
-                      {t('保存时刻')}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-sm"
-                      onClick={() => void runTravel()}
-                      disabled={travel.running}
-                    >
-                      {travel.running ? t('巡检中...') : t('立即巡检全部')}
-                    </button>
-                  </div>
-                </div>
-              </div>
-              {travel.lastResult && (
-                <div className="ck-setting-hint">
-                  {t('上次结果：{{r}}', { r: travel.lastResult })}
-                  {travel.lastError ? ` · ${travel.lastError}` : ''}
-                </div>
-              )}
-            </Card>
-          )}
-        </>
-      ) : tab === 'makeup' ? (
-        <>
-          {/* 定时补签（A2A checkin-makeup-tab）：每个签到条目一条，补签时刻即条目
-              的 makeup_time；这里只读总览 + 立即执行入口，编辑仍在「定时签到」条目里 */}
-          <Card
-            title={t('定时补签')}
-            actions={
-              <span className="ck-makeup-hint">
-                {t('只补当天未签上的账号；补签轮在指定时刻兜底一次。')}
-              </span>
-            }
-          >
-            {(schedules ?? []).length === 0 ? (
-              <EmptyState icon="🌙" message={t('还没有签到计划——先在「定时签到」里建一条。')} />
-            ) : (
-              <div className="ck-makeup-list">
-                {(schedules ?? []).map((schedule) => {
-                  const enabled = !!schedule.retryTime;
-                  const paused = !data?.settings.enabled || !schedule.enabled;
-                  const last = schedule.lastResult;
-                  const scope = scopeLabel(schedule.providers);
-                  return (
-                    <div key={schedule.id} className={`ck-makeup-row${enabled ? '' : ' is-off'}`}>
-                      <div className="ck-makeup-main">
-                        <div className="ck-makeup-name">
-                          {schedule.displayLabel || schedule.label}
-                          <Badge tone={enabled ? 'success' : 'neutral'}>
-                            {enabled ? t('补签已开启') : t('补签已关闭')}
-                          </Badge>
-                          {paused && enabled && <Badge tone="neutral">{t('随签到计划暂停')}</Badge>}
-                        </div>
-                        <div className="ck-makeup-desc">
-                          {enabled
-                            ? t('补签时刻 {{time}} · 主签到 {{main}} · {{scope}}', {
-                                time: schedule.retryTime,
-                                main: schedule.time,
-                                scope,
-                              })
-                            : t('主签到 {{main}} · {{scope}}；未设补签时刻', {
-                                main: schedule.time,
-                                scope,
-                              })}
-                          {schedule.providerRetryTimes &&
-                            Object.keys(schedule.providerRetryTimes).length > 0 &&
-                            ` · ${t('逐家补签：')}${Object.entries(schedule.providerRetryTimes)
-                              .map(([id, time]) => `${id} ${time}`)
-                              .join('、')}`}
-                        </div>
-                        <div className="ck-makeup-desc ck-sched-last">
-                          {schedule.lastFiredDate
-                            ? t('上次执行：{{d}} · 成功 {{ok}}·保活 {{ka}}·失败 {{f}}', {
-                                d: schedule.lastFiredDate,
-                                ok: last?.succeeded ?? 0,
-                                ka: last?.active ?? 0,
-                                f: last?.failedCount ?? 0,
-                              })
-                            : t('从未执行')}
-                        </div>
-                      </div>
-                      <div className="ck-makeup-ops">
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          onClick={() => {
-                            openEditSchedule(schedule);
-                            setTab('schedule');
-                          }}
-                        >
-                          {t('设置补签')}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-primary btn-sm"
-                          onClick={() => void runSchedule(schedule)}
-                          disabled={busyKey !== null}
-                          title={t('立即执行这一条的补签轮（只处理当天未签上的账号）')}
-                        >
-                          {busyKey === `sched:${schedule.id}` ? t('执行中...') : t('立即补签')}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </Card>
-
-          {/* 重试规则总览（A2A activity-retry：每账号每天最多重试 N 次，间隔 M 分钟） */}
-          <Card title={t('活动窗口重试')}>
-            <div className="ck-setting-row">
-              <div>
-                <div className="ck-setting-label">{t('全局重试间隔')}</div>
-                <div className="ck-setting-hint">
-                  {t('等待窗口或活动下发的账号按此间隔自动重试；0 = 关闭全局重试，仅靠条目自身的重试设置。')}
-                </div>
-              </div>
-              <div className="ck-gap-edit">
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
-                  className="form-input ck-gap-input"
-                  value={retryMinEdit}
-                  onChange={(e) => setRetryMinEdit(e.target.value)}
-                  aria-label={t('全局重试间隔（分钟）')}
-                />
-                <span className="ck-gap-unit">{t('分钟')}</span>
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  onClick={() => void saveAdvanced()}
-                  disabled={advSaving}
-                >
-                  {advSaving ? t('保存中...') : t('保存')}
-                </button>
-              </div>
-            </div>
-            <div className="ck-setting-row">
-              <div>
-                <div className="ck-setting-label">{t('每条目的重试上限 / 补签时刻')}</div>
-                <div className="ck-setting-hint">
-                  {t('在「定时签到」编辑条目里逐条设置；下面只列当前值。')}
-                </div>
-              </div>
-            </div>
-            <table className="ck-table">
-              <thead>
-                <tr>
-                  <th>{t('条目')}</th>
-                  <th style={{ width: 120 }}>{t('每账号每天重试')}</th>
-                  <th style={{ width: 120 }}>{t('重试间隔')}</th>
-                  <th style={{ width: 120 }}>{t('补签时刻')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(schedules ?? []).map((schedule) => (
-                  <tr key={schedule.id}>
-                    <td>{schedule.displayLabel || schedule.label}</td>
-                    <td className="ck-time-subtle">
-                      {(schedule.retryLimit ?? 3) > 0
-                        ? t('{{n}} 次', { n: schedule.retryLimit ?? 3 })
-                        : t('关闭')}
-                    </td>
-                    <td className="ck-time-subtle">
-                      {(schedule.retryGapMinutes ?? 5) > 0
-                        ? t('{{n}} 分钟', { n: schedule.retryGapMinutes ?? 5 })
-                        : t('回落全局')}
-                    </td>
-                    <td className="ck-time-subtle">
-                      {schedule.retryTime || '—'}
-                      {(schedule.retryCount ?? 0) > 0 &&
-                        ` · ${t('重试中 {{n}}', { n: schedule.retryCount })}`}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Card>
-        </>
-      ) : tab === 'benefits' ? (
-        <BenefitsPanel />
-      ) : (
-        <Card
-          title={t('签到记录')}
-          actions={
-            <div className="ck-records-tools">
-              {/* 列设置（公共层；签到记录表专用） */}
-              <div className="as-colset" ref={recPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
-                <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
-                  <button
-                    type="button"
-                    className={`btn btn-outline btn-sm${recPanelOpen ? ' as-colset-open' : ''}`}
-                    onClick={() => setRecPanelOpen((v) => !v)}
-                    aria-label={t('列设置')}
-                  >
-                    <Columns3 size={14} />
-                  </button>
-                </Tooltip>
-                {recPanelOpen && (
-                  <TableColumnSettings
-                    open
-                    onClose={() => setRecPanelOpen(false)}
-                    defs={CK_REC_COL_DEFS}
-                    items={recCols.items}
-                    onChange={commitRecCols}
-                    onReset={resetRecCols}
-                    anchorRef={recPanelRef}
-                  />
-                )}
-              </div>
-              <div className="ck-seg" role="group" aria-label={t('时间筛选')}>
-                {[
-                  { v: 1, label: t('今天') },
-                  { v: 7, label: t('7 天') },
-                  { v: 30, label: t('30 天') },
-                  { v: 3650, label: t('全部') },
-                ].map((item) => (
-                  <button
-                    key={item.v}
-                    type="button"
-                    className={`ck-seg-item${recordDays === item.v ? ' is-active' : ''}`}
-                    onClick={() => setRecordDays(item.v)}
-                    // 起止日期生效时以区间为准（避免「7 天」与区间取交集导致查不到）
-                    title={recordStart || recordEnd ? t('起止日期生效时，此快选不参与过滤') : undefined}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-              <select
-                className="form-input"
-                style={{ maxWidth: 120 }}
-                value={recordProvider}
-                onChange={(e) => setRecordProvider(e.target.value)}
-              >
-                <option value="">{t('全部上游')}</option>
-                {supported.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="form-input"
-                style={{ maxWidth: 110 }}
-                value={recordOutcome}
-                onChange={(e) => setRecordOutcome(e.target.value)}
-              >
-                <option value="">{t('全部结果')}</option>
-                <option value="success">{t('成功领取')}</option>
-                <option value="already">{t('今日已领')}</option>
-                <option value="pending">{t('待重试')}</option>
-                <option value="failed">{t('失败')}</option>
-                {/* 1.0.49 契约：上游要求人机验证（is_ok=false） */}
-                <option value="captcha">{t('需人机验证')}</option>
-              </select>
-              <select
-                className="form-input"
-                style={{ maxWidth: 100 }}
-                value={recordKind}
-                onChange={(e) => setRecordKind(e.target.value)}
-                aria-label={t('全部类型')}
-              >
-                <option value="">{t('全部类型')}</option>
-                <option value="manual">{t('手动')}</option>
-                <option value="schedule">{t('定时')}</option>
-                <option value="makeup">{t('补签')}</option>
-                <option value="retry">{t('重试')}</option>
-              </select>
-              {/* 1.0.49 契约：起止日期（本地时区走当日 00:00:00–23:59:59，后端闭区间） */}
-              <input
-                type="date"
-                className="form-input ck-date-input"
-                style={{ maxWidth: 140 }}
-                value={recordStart}
-                onChange={(e) => setRecordStart(e.target.value)}
-                aria-label={t('起始日期')}
-                title={t('起始日期')}
-              />
-              <span className="ck-date-sep">–</span>
-              <input
-                type="date"
-                className="form-input ck-date-input"
-                style={{ maxWidth: 140 }}
-                value={recordEnd}
-                onChange={(e) => setRecordEnd(e.target.value)}
-                aria-label={t('结束日期')}
-                title={t('结束日期')}
-              />
-              <input
-                className="form-input"
-                style={{ maxWidth: 150 }}
-                placeholder={t('搜索账号或说明')}
-                value={keyword}
-                onChange={(e) => {
-                  setKeyword(e.target.value);
-                  if (e.target.value === '') setKwApplied('');
-                }}
-                onBlur={() => setKwApplied(keyword.trim())}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') setKwApplied(keyword.trim());
-                  if (e.key === 'Escape') {
-                    setKeyword('');
-                    setKwApplied('');
-                  }
-                }}
-              />
-              <button className="btn btn-danger btn-sm" onClick={clearRecords}>
-                <X size={12} /> {t('清空')}
-              </button>
-            </div>
-          }
-        >
-          {recordsLoading ? (
-            <Loading text={t('加载记录')} />
-          ) : records.length === 0 ? (
-            <EmptyState
-              icon="📝"
-              message={hasRecordFilter ? t('没有匹配的签到记录') : t('暂无签到记录')}
-            />
-          ) : (
-            <>
-              <table className="ck-table">
-                <colgroup>
-                  {appliedRecCols.map((c) => (
-                    <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
-                  ))}
-                </colgroup>
-                <thead>
-                  <tr>
-                    {appliedRecCols.map((c, idx) => {
-                      const gripProps = { title: t('拖动调整列宽 · 双击还原') };
-                      return (
-                      <th key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined}>
-                        {t(CK_REC_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
-                        {c.key !== 'time' && c.key !== 'note' && idx >= 0 && (
-                          <span className="as-col-grip" {...gripProps} />
-                        )}
-                      </th>
-                      );
-                    })}
-                  </tr>
-                </thead>
-                <tbody>
-                  {records.map((record, index) => (
-                    <tr key={`${record.ts}-${record.accountId}-${index}`}>
-                      {recKeySet.has('time') && (
-                      <td>
-                        {new Date(record.ts * 1000).toLocaleString()}
-                        {record.date && <div className="ck-time-subtle">{record.date}</div>}
-                      </td>
-                      )}
-                      {recKeySet.has('account') && (
-                      <td>
-                        {record.accountName || record.accountId}
-                        {record.keptActive && <Badge tone="info">{t('保活')}</Badge>}
-                      </td>
-                      )}
-                      {recKeySet.has('provider') && (
-                      <td>{record.provider}</td>
-                      )}
-                      {recKeySet.has('source') && (
-                      <td className="ck-record-source">
-                        {t(SOURCE_LABEL[record.source] ?? record.source)}
-                      </td>
-                      )}
-                      {recKeySet.has('kind') && (
-                      <td className="ck-record-kind">
-                        {/* 存量记录 kind 为空串 → 回退按 source 展示 */}
-                        {(() => {
-                          const kindKey = record.kind || record.source || '';
-                          return kindKey ? t(KIND_LABEL[kindKey] ?? kindKey) : '—';
-                        })()}
-                      </td>
-                      )}
-                      {recKeySet.has('result') && (
-                      <td>
-                        <Badge tone={OUTCOME_TONE[record.outcome] ?? 'neutral'}>
-                          {t(OUTCOME_LABEL[record.outcome] ?? record.outcome)}
-                        </Badge>
-                      </td>
-                      )}
-                      {recKeySet.has('note') && (
-                      <td className={record.outcome === 'failed' || record.outcome === 'captcha' ? 'ck-message ck-record-detail-fail' : 'ck-message'}>
-                        {record.message || '—'}
-                      </td>
-                      )}
-                      {recKeySet.has('error') && (
-                      <td className={record.error ? 'ck-message ck-record-detail-fail' : 'ck-message'}>
-                        {record.error || '—'}
-                      </td>
-                      )}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div className="ck-pager">
-                <span className="ck-pager-info">
-                  {t('共 {{n}} 条 · 第 {{page}}/{{pages}} 页', {
-                    n: total,
-                    page,
-                    pages: totalPages,
-                  })}
-                </span>
-                <div className="ck-pager-tools">
-                  <select
-                    className="form-input"
-                    style={{ maxWidth: 90 }}
-                    value={pageSize}
-                    onChange={(e) => setSize(Number(e.target.value))}
-                  >
-                    {SERVER_PAGE_SIZES.map((size) => (
-                      <option key={size} value={size}>
-                        {size} / 页
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    className="btn btn-outline btn-sm"
-                    disabled={page <= 1}
-                    onClick={() => setPage(Math.max(1, page - 1))}
-                  >
-                    {t('上一页')}
-                  </button>
-                  <button
-                    className="btn btn-outline btn-sm"
-                    disabled={page >= totalPages}
-                    onClick={() => setPage(page + 1)}
-                  >
-                    {t('下一页')}
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-        </Card>
-      )}
+      ) : null}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
