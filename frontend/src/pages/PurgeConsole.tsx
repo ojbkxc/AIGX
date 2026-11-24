@@ -244,6 +244,24 @@ export function collectCapOverflows(settings: {
     .map(([key, label, items, cap]) => ({ key, label, n: items?.length ?? 0, cap }));
 }
 
+/**
+ * 统计会被后端**静默丢弃**的空原文行。
+ *
+ * 后端 `normalize` 对两张词表用 `filter_map`：`from` trim 后为空就直接剔除，
+ * 不报错也不回传。用户点「添加规则」留了个空行再保存，那行会凭空消失——他会
+ * 以为是界面丢了自己的输入。
+ *
+ * 只算空 `from`：`to` 为空是**有效语义**（= 把这个词从消息里删掉），后端也保留。
+ */
+export function countEmptyFromRules(settings: {
+  rewrite_rules: ReadonlyArray<{ from?: string; to?: string }>;
+  synonym_pairs: ReadonlyArray<{ from?: string; to?: string }>;
+}): { deadZone: number; synonym: number } {
+  const count = (rules: ReadonlyArray<{ from?: string }>): number =>
+    rules.filter((rule) => (rule.from ?? '').trim() === '').length;
+  return { deadZone: count(settings.rewrite_rules), synonym: count(settings.synonym_pairs) };
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -2612,8 +2630,16 @@ export default function PurgeConsole(): JSX.Element {
     // 超上限**保存前必须确认**：后端 normalize 会静默截断，只靠输入框下的红字提示
     // 用户照样点保存、然后发现尾巴没了。集中汇总所有会被截断的字段，一次问清。
     const overflows = collectCapOverflows(current);
-    if (overflows.length > 0) {
-      const detail = overflows
+    // 空原文行会被后端静默剔除：一起问，别让用户保存完才发现少了一行
+    const empties = countEmptyFromRules(current);
+    const emptyParts = [
+      empties.deadZone > 0
+        ? t('死区词改写 {{n}} 行未填原文', { n: empties.deadZone })
+        : '',
+      empties.synonym > 0 ? t('同义词 {{n}} 行未填原文', { n: empties.synonym }) : '',
+    ].filter(Boolean);
+    if (overflows.length > 0 || emptyParts.length > 0) {
+      const capDetail = overflows
         .map((item) =>
           t('{{label}} {{n}} 项（将丢弃 {{drop}} 项）', {
             label: t(item.label),
@@ -2622,7 +2648,12 @@ export default function PurgeConsole(): JSX.Element {
           }),
         )
         .join('；');
-      if (!window.confirm(t('{{detail}}。保存只保留各字段的上限，继续？', { detail }))) {
+      const detail = [capDetail, ...emptyParts].filter(Boolean).join('；');
+      const question =
+        overflows.length > 0
+          ? t('{{detail}}。保存只保留各字段的上限、并丢弃空原文行，继续？', { detail })
+          : t('{{detail}}，保存时这些行会被丢弃。继续？', { detail });
+      if (!window.confirm(question)) {
         return;
       }
     }

@@ -247,6 +247,39 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('32 · 空原文行保存前告知会被丢弃', async ({ page }) => {
+  // 一行 from 为空：后端 filter_map 会静默剔除，前端要提前说
+  const rules = [{ from: 'a', to: 'b' }, { from: '   ', to: 'c' }];
+  let puts = 0;
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') {
+      puts += 1;
+      await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+      return;
+    }
+    await r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    });
+  });
+  await gotoPurge(page);
+
+  await page.getByLabel('重试上限').fill('6');
+
+  // 取消 → 不保存
+  page.once('dialog', (d) => void d.dismiss());
+  await page.getByRole('button', { name: '保存' }).click();
+  await page.waitForTimeout(600);
+  expect(puts).toBe(0);
+
+  // 确认 → 保存
+  page.once('dialog', (d) => void d.accept());
+  await page.getByRole('button', { name: '保存' }).click();
+  await expect.poll(() => puts).toBe(1);
+});
+
 test('31 · 异源模型超上限也走保存前确认（不只词表）', async ({ page }) => {
   // 17 个异源模型（上限 16）：这类字段原本只有输入框下红字，不挡保存
   const models = Array.from({ length: 17 }, (_, i) => `m${i}`);

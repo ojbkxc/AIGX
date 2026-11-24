@@ -5,6 +5,7 @@ import {
   buildActiveSummary,
   clampNumInput,
   collectCapOverflows,
+  countEmptyFromRules,
   capError,
   exportPreviewHistory,
   findBodySnippet,
@@ -245,6 +246,29 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('countEmptyFromRules', () => {
+  it('只数空原文（trim 后为空），空改写不算', () => {
+    const out = countEmptyFromRules({
+      rewrite_rules: [{ from: 'a', to: 'b' }, { from: '   ', to: 'c' }, { from: '', to: 'd' }],
+      synonym_pairs: [{ from: 'x', to: '' }],
+    });
+    expect(out).toEqual({ deadZone: 2, synonym: 0 });
+  });
+
+  it('缺省 from 也算空（旧数据/手写 JSON 的情况）', () => {
+    const out = countEmptyFromRules({ rewrite_rules: [{ to: 'b' }], synonym_pairs: [] });
+    expect(out.deadZone).toBe(1);
+  });
+
+  it('两张表各自统计', () => {
+    const out = countEmptyFromRules({
+      rewrite_rules: [{ from: '' }],
+      synonym_pairs: [{ from: ' ' }, { from: '' }],
+    });
+    expect(out).toEqual({ deadZone: 1, synonym: 2 });
   });
 });
 
