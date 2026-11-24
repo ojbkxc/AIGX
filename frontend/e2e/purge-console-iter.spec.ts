@@ -247,6 +247,37 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('39 · 「只看异常」的行会说明异常原因（不是只筛出来不解释）', async ({ page }) => {
+  const rules = [
+    { from: 'dup', to: '1' },
+    { from: 'dup', to: '2' },
+    { from: 'ok', to: '3' },
+    { from: '   ', to: 'emptyFrom' },
+    { from: 'emptyTo', to: '' },
+  ];
+  await mockPurge(page);
+  await page.route(/\/api\/purge(\?|$)/, (r) =>
+    r.fulfill({
+      json: {
+        success: true,
+        data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, rewrite_rules: rules } },
+      },
+    }),
+  );
+  await gotoPurge(page);
+
+  await page.getByTestId('purge-dead-zone-issues-only').check();
+  const table = page.locator('[data-purge-fix="dead-zone-table"]');
+
+  // 三种原因各说各的：空原文 / 空改写 / 重复
+  await expect(table.getByText(/原文未填/)).toHaveCount(1);
+  await expect(table.getByText(/改写为空/)).toHaveCount(1);
+  await expect(table.getByText(/原文重复/)).toHaveCount(1);
+  // 关键：空行不能被报成「重复」（报错原因错，修法就错）
+  const emptyRow = table.locator('.purge-rule-row').filter({ hasText: '原文未填' });
+  await expect(emptyRow).not.toContainText(/原文重复/);
+});
+
 test('38 · 切到「上次运行」档时说明是哪一次（没有则说清为什么空）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);

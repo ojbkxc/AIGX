@@ -347,6 +347,31 @@ export function lastRunNote(
   return tr('上次运行快照：{{when}}（那次进程运行了 {{span}}）', { when, span });
 }
 
+/**
+ * 单行的提示文案（优先级：空原文 > 空改写 > 原文重复）。
+ *
+ * 为什么空值必须排在重复前面：空 `from` 在重复检测里也会命中（多个空行互为重复），
+ * 若按重复报，用户看到的是「与其他行的原文重复」——而真正的问题是**没填**。
+ * 报错原因错了，修法也就错了。
+ *
+ * 空 `to` 的语义要**说准**：保存时后端保留它（= 把这个词从消息里删掉），但「整理」
+ * 会把这类行删掉。两件事不同，混着说会让人以为保存也会丢。
+ */
+export function ruleRowHint(
+  rule: { from: string; to: string },
+  isDuplicate: boolean,
+  tr: (key: string) => string,
+): string | undefined {
+  if (!rule.from.trim()) return tr('原文未填：保存时会被丢弃');
+  if (!rule.to.trim()) {
+    return tr('改写为空：保存后该词会从消息里删掉（「整理」会把这类行删除）');
+  }
+  if (isDuplicate) {
+    return tr('与其他行的原文重复：改写按表序执行，只有最靠前的那条会真正生效');
+  }
+  return undefined;
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -4341,11 +4366,11 @@ export default function PurgeConsole(): JSX.Element {
                 enableLabel={t('启用该条改写规则')}
                 probeLabel={t('试')}
                 onProbe={probeRule}
-                dupHint={
-                  dupRules.get(rule.from.trim().toLowerCase())
-                    ? t('与其他行的原文重复：改写按表序执行，只有最靠前的那条会真正生效')
-                    : undefined
-                }
+                dupHint={ruleRowHint(
+                  rule,
+                  Boolean(dupRules.get(rule.from.trim().toLowerCase())),
+                  (key) => t(key),
+                )}
                 onPatch={patchRule}
                 onRemove={removeRule}
               />
@@ -4461,11 +4486,11 @@ export default function PurgeConsole(): JSX.Element {
                 enableLabel={t('启用该条改写规则')}
                 probeLabel={t('试')}
                 onProbe={probeRule}
-                dupHint={
-                  dupSynonyms.get(rule.from.trim().toLowerCase())
-                    ? t('与其他行的敏感词重复：改写按表序执行，只有最靠前的那条会真正生效')
-                    : undefined
-                }
+                dupHint={ruleRowHint(
+                  rule,
+                  Boolean(dupSynonyms.get(rule.from.trim().toLowerCase())),
+                  (key) => t(key),
+                )}
                 onPatch={patchSynonymRule}
                 onRemove={removeSynonymRule}
               />

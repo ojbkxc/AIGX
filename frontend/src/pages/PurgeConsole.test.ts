@@ -20,6 +20,7 @@ import {
   readRecentPresets,
   retryRateText,
   ruleIssues,
+  ruleRowHint,
   rulesToText,
   snapshotReportText,
   statsExportNote,
@@ -250,6 +251,29 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('ruleRowHint', () => {
+  const tr = (k: string): string => k;
+
+  it('空原文优先于重复（报对原因，修法才对）', () => {
+    // 两个空行互为重复，但真问题是「没填」
+    expect(ruleRowHint({ from: '  ', to: 'x' }, true, tr)).toContain('原文未填');
+  });
+
+  it('空改写提示「保存删词、整理删行」两件事区分开', () => {
+    const hint = ruleRowHint({ from: 'a', to: ' ' }, false, tr);
+    expect(hint).toContain('从消息里删掉');
+    expect(hint).toContain('整理');
+  });
+
+  it('正常行重复 → 报重复', () => {
+    expect(ruleRowHint({ from: 'a', to: 'b' }, true, tr)).toContain('重复');
+  });
+
+  it('正常且不重复 → undefined（不留空提示）', () => {
+    expect(ruleRowHint({ from: 'a', to: 'b' }, false, tr)).toBeUndefined();
   });
 });
 
