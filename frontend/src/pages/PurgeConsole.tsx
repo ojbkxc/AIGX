@@ -29,6 +29,7 @@ import {
   Switch,
   Textarea,
 } from '../components/ui';
+import { SectionGuard } from '../components/SectionBoundary';
 import { downloadText, toCsv } from '../lib/format';
 import { copyText } from '../lib/clipboard';
 import { useToast } from '../components/Toast';
@@ -4188,13 +4189,17 @@ export default function PurgeConsole(): JSX.Element {
 
       {/* 预设库：内置 prompt 集合浏览 + 一键落盘（放在结构化模板之上，应用后直接在下方看到结果） */}
       <span data-purge-fix="presets" />
-      <PresetsSection
+      {/* 区块级隔离：预设库解析的是「内置目录 + 后端匹配」两套数据，出错不该拖垮
+          开关和保存（用户可能正急着落库） */}
+      <SectionGuard title={t('破甲预设库')}>
+        <PresetsSection
         t={t}
         addToast={addToast}
         onApplyTemplate={applyPresetTemplate}
         currentTemplates={draft?.structured_templates}
         onSkillWritten={() => void refreshSkills()}
-      />
+        />
+      </SectionGuard>
 
       <Card
         title={t('结构化模板')}

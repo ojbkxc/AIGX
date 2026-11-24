@@ -247,6 +247,24 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('22 · 预设库渲染崩了只降级这一块，其余仍可用', async ({ page }) => {
+  await mockPurge(page);
+  // 覆盖预设列表：items 给非数组 → 预设库子树渲染必崩
+  await page.route(/\/api\/purge\/presets(\?|$)/, (r) =>
+    r.fulfill({ json: { success: true, data: { items: { oops: 1 }, vendors: [], total: 0 } } }),
+  );
+  await gotoPurge(page);
+
+  const fallback = page.getByTestId('purge-section-fallback');
+  await expect(fallback).toBeVisible();
+  await expect(fallback).toContainText(/破甲预设库/);
+  await expect(fallback).toContainText(/其余部分仍可用/);
+
+  // 关键：整页没崩 —— 开关和保存还在，用户能把当前改动落库
+  await expect(page.getByRole('button', { name: '保存' })).toBeVisible();
+  await expect(page.getByLabel('重试上限')).toBeVisible();
+});
+
 test('21 · Ctrl+S 真的有提示、也真的保存', async ({ page }, testInfo) => {
   let puts = 0;
   await page.route(/\/api\/purge(\?|$)/, async (r) => {
