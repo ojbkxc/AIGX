@@ -1501,6 +1501,8 @@ export default function PurgeConsole(): JSX.Element {
   const [previewDetail, setPreviewDetail] = useState<PurgeAppliedDetail | null>(null);
   // 配置体检告警（结构化优先；旧后端只有字符串 → code 为空只读展示） + 技能快照
   const [configWarnings, setConfigWarnings] = useState<string[]>([]);
+  /** CSV 导入模式：false = 追加（默认），true = 整表替换 */
+  const [csvReplace, setCsvReplace] = useState(false);
   const [configWarningItems, setConfigWarningItems] = useState<PurgeConfigWarning[]>([]);
   const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
@@ -2007,13 +2009,52 @@ export default function PurgeConsole(): JSX.Element {
           return;
         }
         const existing = draftRef.current;
+        const currentRules =
+          kind === 'dead_zone' ? existing?.rewrite_rules ?? [] : existing?.synonym_pairs ?? [];
         const existingFroms = new Set(
-          (kind === 'dead_zone' ? existing?.rewrite_rules ?? [] : existing?.synonym_pairs ?? [])
-            .map((r) => r.from.trim().toLowerCase())
-            .filter(Boolean),
+          currentRules.map((r) => r.from.trim().toLowerCase()).filter(Boolean),
         );
         const incomingFroms = parsed.map((r) => r.from.trim().toLowerCase());
         const dupCount = incomingFroms.filter((f) => existingFroms.has(f)).length;
+
+        // 替换模式：整表换成文件内容（导出→Excel 改→导回的标准动作）。
+        // 与追加模式的判据不同——「全部重复」在这里恰恰是正常情况，不能拒收。
+        if (csvReplace) {
+          if (currentRules.length > 0) {
+            const ok = window.confirm(
+              t('将用文件里的 {{next}} 条替换当前 {{prev}} 条（含未保存的编辑）。继续？', {
+                next: parsed.length,
+                prev: currentRules.length,
+              }),
+            );
+            if (!ok) return;
+          }
+          setDirty(true);
+          setDraft((d) =>
+            d
+              ? {
+                  ...d,
+                  rewrite_rules: kind === 'dead_zone' ? parsed : d.rewrite_rules,
+                  synonym_pairs: kind === 'synonym' ? parsed : d.synonym_pairs,
+                }
+              : d,
+          );
+          const replacedBase =
+            kind === 'dead_zone'
+              ? t('已用 {{count}} 条替换死区词表，检查无误后点「保存」生效', {
+                  count: parsed.length,
+                })
+              : t('已用 {{count}} 条替换同义词表，检查无误后点「保存」生效', {
+                  count: parsed.length,
+                });
+          const overCap =
+            parsed.length > RULE_TABLE_CAP
+              ? ` · ${t('超过上限 {{cap}} 条：保存只保留前 {{cap}} 条', { cap: RULE_TABLE_CAP })}`
+              : '';
+          addToast(replacedBase + overCap, overCap ? 'warning' : 'success');
+          return;
+        }
+
         if (dupCount === parsed.length) {
           // 一条都不新：大概率导错了表或旧文件——直接不追加，给出口
           addToast(t('导入的 {{count}} 条规则的原文全部与当前词表重复，未追加（可能导错了文件？）', { count: parsed.length }), 'warning');
@@ -2056,7 +2097,7 @@ export default function PurgeConsole(): JSX.Element {
         addToast(t('导入失败：无法读取文件'), 'error');
       }
     },
-    [addToast, t],
+    [addToast, csvReplace, t],
   );
 
   /** 导出配置：当前服务端快照 → JSON 文件（含全部词表/模板/开关） */
@@ -2437,6 +2478,14 @@ export default function PurgeConsole(): JSX.Element {
             <Button variant="outline" size="sm" onClick={() => deadZoneCsvRef.current?.click()}>
               {t('导入 CSV')}
             </Button>
+            <label className="purge-rule-toggle" title={t('勾选后导入会整表替换，而不是追加')}>
+              <input
+                type="checkbox"
+                checked={csvReplace}
+                onChange={(event) => setCsvReplace(event.target.checked)}
+              />
+              <span className="purge-hint">{t('替换')}</span>
+            </label>
             <input
               ref={deadZoneCsvRef}
               type="file"
@@ -2497,6 +2546,14 @@ export default function PurgeConsole(): JSX.Element {
             <Button variant="outline" size="sm" onClick={() => synonymCsvRef.current?.click()}>
               {t('导入 CSV')}
             </Button>
+            <label className="purge-rule-toggle" title={t('勾选后导入会整表替换，而不是追加')}>
+              <input
+                type="checkbox"
+                checked={csvReplace}
+                onChange={(event) => setCsvReplace(event.target.checked)}
+              />
+              <span className="purge-hint">{t('替换')}</span>
+            </label>
             <input
               ref={synonymCsvRef}
               type="file"
