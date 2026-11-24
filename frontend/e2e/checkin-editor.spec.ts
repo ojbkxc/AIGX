@@ -260,10 +260,14 @@ test.describe('签到时区边界（page.clock 定针）', () => {
     const todayLabel = `${pad(bj.getUTCMonth() + 1)}-${pad(bj.getUTCDate())} 23:45`;
     const tomorrowLabel = `${pad(bjTomorrow.getUTCMonth() + 1)}-${pad(bjTomorrow.getUTCDate())} 09:00`;
 
-    const rowNight = page.locator('.ck-sched-row', { hasText: '夜班' });
-    await expect(rowNight.locator('.ck-sched-next')).toContainText(todayLabel);
-    const rowMorning = page.locator('.ck-sched-row', { hasText: '早班' });
-    await expect(rowMorning.locator('.ck-sched-next')).toContainText(tomorrowLabel);
+    // v3.5.1：非编辑态是 SchedulePlanCard，「下一次」由 `.ck-sched-next` 改为卡内
+    // `.form-hint` 的「下一账号：MM-DD HH:MM」；时区边界的断言口径不变。
+    const cardNight = page.locator('.ck-sched-name', { hasText: '夜班' });
+    await expect(cardNight.locator('xpath=ancestor::div[contains(@class,"card")][1]'))
+      .toContainText(todayLabel);
+    const cardMorning = page.locator('.ck-sched-name', { hasText: '早班' });
+    await expect(cardMorning.locator('xpath=ancestor::div[contains(@class,"card")][1]'))
+      .toContainText(tomorrowLabel);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

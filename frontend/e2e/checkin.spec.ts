@@ -53,9 +53,11 @@ test.describe('签到中心', () => {
     });
 
     // v3.5.1 起分区默认展示全部账号，不需要先展开 provider 分组
+    // 行列表是扁平的 div 列表，按账号 id 精确定位所在行再点该行的「签到」。
+    // 不能用 `div:has-text()` + .last()：外层容器也含该文本，会命中整片区域。
     const main = page.locator('.ck-center-main');
-    const row = main.locator('div', { hasText: 'workbuddy-2' }).last();
-    await row.getByRole('button', { name: '签到' }).first().click();
+    const row = main.locator('div').filter({ hasText: /^workbuddy-2/ }).first();
+    await row.getByRole('button', { name: '签到', exact: true }).click();
 
     await expect.poll(() => calls.length, { timeout: 5000 }).toBeGreaterThan(0);
     // 单账号签到的请求体里应带该账号 id
