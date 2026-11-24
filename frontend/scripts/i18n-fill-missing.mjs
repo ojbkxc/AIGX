@@ -144,7 +144,17 @@ function main() {
   if (CHECK_ONLY) {
     const bad = missingInZh.length + missingInEn.length;
     if (bad > 0) {
-      console.error(`[i18n] 检查失败：仍有 ${missingInBoth.length} 个 key 两边都缺`);
+      // 判据是「单边缺之和」，报错原来只说「两边都缺」——只缺一边时会出现
+      // 「仍有 0 个 key 两边都缺」这种自相矛盾的输出，查不出来问题在哪。
+      const parts = [];
+      if (missingInBoth.length > 0) parts.push(`两边都缺 ${missingInBoth.length} 个`);
+      const onlyZhMissing = missingInEn.length - missingInBoth.length;
+      const onlyEnMissing = missingInZh.length - missingInBoth.length;
+      if (onlyZhMissing > 0) parts.push(`en 缺 ${onlyZhMissing} 个`);
+      if (onlyEnMissing > 0) parts.push(`zh 缺 ${onlyEnMissing} 个`);
+      console.error(`[i18n] 检查失败：${parts.join('，')}`);
+      for (const k of missingInZh.slice(0, 10)) console.error(`  - (无中文) ${k}`);
+      for (const k of missingInEn.slice(0, 10)) console.error(`  - (无英文) ${k}`);
       process.exit(1);
     }
     return;
