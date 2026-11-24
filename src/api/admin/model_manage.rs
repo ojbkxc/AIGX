@@ -972,12 +972,20 @@ fn set_legacy_capabilities(
         .iter()
         .find(|(name, _)| name.as_str() == model)
         .and_then(|(_, meta)| meta.tool_calling_mode.clone());
+    // 同 reasoning_levels / tool_calling_mode：改能力标签不能把可见性判据抹掉
+    let visibility = state
+        .model_metadata
+        .all_overrides()
+        .iter()
+        .find(|(name, _)| name.as_str() == model)
+        .and_then(|(_, meta)| meta.visibility.clone());
     let meta = crate::model::metadata::ModelMetadata {
         owned_by,
         context_length,
         capabilities: tags.clone(),
         reasoning_levels,
         tool_calling_mode,
+        visibility,
     };
     if let Err(e) = state.model_metadata.set_override(model.to_string(), meta) {
         return Err(error_response(

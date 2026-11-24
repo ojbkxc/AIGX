@@ -345,6 +345,11 @@ pub struct ModelMetaRequest {
     /// 工具调用模式（A2A beta.2 对齐；管理员可显式设置）。
     #[serde(default)]
     pub tool_calling_mode: Option<String>,
+    /// 可见性判据（对齐 A2A `providers/*/models.rs` 的 `visibility` 键）：只认
+    /// `hidden` / `shown`，其余（含空串）落 `None` = 没有判据。见
+    /// `model::metadata::normalize_visibility`（值域单点）。
+    #[serde(default)]
+    pub visibility: Option<String>,
 }
 
 /// GET /api/models/meta - 全部模型元信息覆盖项
@@ -371,6 +376,7 @@ pub async fn handle_model_meta_set(
         capabilities: body.capabilities,
         reasoning_levels: body.reasoning_levels,
         tool_calling_mode: body.tool_calling_mode,
+        visibility: crate::model::metadata::normalize_visibility(body.visibility.as_deref()),
     };
     match state
         .model_metadata

@@ -45,6 +45,32 @@ pub struct ModelMetadata {
     /// `None` = 未声明，`list_item` 不输出该键（与上游 `shape.rs` 同判据）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calling_mode: Option<String>,
+    /// 可见性判据（对齐 Agent2API `providers/<kind>/models.rs` 的 `visibility` 键
+    /// 与 `providers/adapter.rs::seed_hidden_visibility_defaults` 的取值域）。
+    ///
+    /// 取值域**逐字**同 A2A：`"hidden"`（上游能列出、官方客户端不展示）/ `"shown"`
+    /// （会展示）；`None` = 这家没有判据（读侧与 A2A 一样归到 `undeclared`）。
+    /// A2A 的判据由各 provider 适配器自己算（Antigravity 按世代、Qoder 读
+    /// `enable`、CodeArts 读 `display_enabled`）—— AIGX 暂未接这几家的目录，
+    /// 所以这里先作为**管理员可覆盖**的字段存在：覆盖了就有判据，没覆盖就是
+    /// `None`（管理页落「—」/「未声明」，不伪造「可见」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+}
+
+/// 可见性取值域（与 A2A 逐字一致；`None` 由调用方表达「无判据」）。
+pub const VISIBILITY_HIDDEN: &str = "hidden";
+/// 可见性取值域：上游说「会展示」。
+pub const VISIBILITY_SHOWN: &str = "shown";
+
+/// 归一化外部传入的可见性值：只认 `hidden` / `shown`（大小写与首尾空白宽容），
+/// 其余（含空串）一律当「没有判据」。
+pub fn normalize_visibility(raw: Option<&str>) -> Option<String> {
+    match raw.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(v) if v == VISIBILITY_HIDDEN => Some(VISIBILITY_HIDDEN.to_string()),
+        Some(v) if v == VISIBILITY_SHOWN => Some(VISIBILITY_SHOWN.to_string()),
+        _ => None,
+    }
 }
 
 // ── 内置推断表 ──────────────────────────────────────────────────────
@@ -258,6 +284,9 @@ impl ModelMetadataRegistry {
                 "context_length": if m.context_length.is_some() { serde_json::Value::from("user") } else { serde_json::Value::Null },
                 "capabilities": caps,
                 "reasoning_levels": if m.reasoning_levels.is_empty() { serde_json::Value::Null } else { serde_json::Value::from("user") },
+                // 可见性同样标来源：覆盖了才说 user，没覆盖（= 没判据）是 Null
+                // —— 与 context_length / capabilities 的「可信度」口径一致
+                "visibility": if m.visibility.is_some() { serde_json::Value::from("user") } else { serde_json::Value::Null },
             });
             return (m.clone(), sources);
         }
@@ -316,6 +345,8 @@ impl ModelMetadataRegistry {
             "context_length": if context_source.is_empty() { serde_json::Value::Null } else { serde_json::Value::from(context_source) },
             "capabilities": cap_sources,
             "reasoning_levels": serde_json::Value::Null,
+            // 内置推断路径没有可见性判据（同 reasoning_levels）
+            "visibility": serde_json::Value::Null,
         });
         (
             ModelMetadata {
@@ -325,6 +356,10 @@ impl ModelMetadataRegistry {
                 // 内置推断路径不产出思考等级：由覆盖项 / 前端声明提供
                 reasoning_levels: Vec::new(),
                 tool_calling_mode: None,
+                // 内置推断路径同样不产出可见性判据：只有管理员覆盖（各 provider
+                // 目录适配器接入后才会由上游给出）——「没依据就不藏」，见 A2A
+                // `seed_hidden_visibility_defaults` 的同一条纪律
+                visibility: None,
             },
             sources,
         )
@@ -381,6 +416,24 @@ mod tests {
         assert_eq!(builtin_context_length("unknown-model"), None);
     }
 
+    /// 可见性取值域归一（判据同 A2A：只认 hidden / shown，其余 = 无判据）。
+    ///
+    /// 这条测的是**契约**：上游适配器或管理员请求体传进来的值，必须只有两种落库
+    /// 形态或 None —— 管理页的三态筛选（可见 / 不展示 / 未声明）依赖它，混进
+    /// 第三种拼写时前端会静默归到「未声明」，看起来像「这家没判据」。
+    #[test]
+    fn visibility_value_domain_is_a2a_verbatim() {
+        assert_eq!(normalize_visibility(Some("hidden")).as_deref(), Some("hidden"));
+        assert_eq!(
+            normalize_visibility(Some("  Shown ")).as_deref(),
+            Some("shown")
+        );
+        // 大小写/空白以外的变体一律不算判据（含 A2A 前端归一用的 "visible"）
+        assert_eq!(normalize_visibility(Some("visible")), None);
+        assert_eq!(normalize_visibility(Some("")), None);
+        assert_eq!(normalize_visibility(None), None);
+    }
+
     #[test]
     fn capabilities_default_chat_and_hints() {
         assert!(infer_capabilities("gpt-4o").contains(&"chat".to_string()));
@@ -421,6 +474,7 @@ mod tests {
                 capabilities: vec!["chat".into()],
                 reasoning_levels: vec!["low".into(), "high".into()],
                 tool_calling_mode: None,
+                visibility: Some(crate::model::metadata::VISIBILITY_HIDDEN.to_string()),
             },
         )
         .unwrap();
@@ -457,6 +511,7 @@ mod tests {
                 capabilities: vec!["chat".into(), "vision".into()],
                 reasoning_levels: vec![],
                 tool_calling_mode: None,
+                visibility: None,
             },
         )
         .unwrap();

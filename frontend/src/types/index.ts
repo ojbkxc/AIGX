@@ -561,6 +561,11 @@ export interface ModelMetaOverride {
   capabilities?: string[];
   /** 思考等级候选（可选，新后端提供；旧后端忽略该字段） */
   reasoning_levels?: string[];
+  /**
+   * 可见性判据覆盖（对齐 Agent2API 的 `visibility` 键）：`"hidden"` / `"shown"`，
+   * 缺省 = 这家没有判据（前端归「未声明」）。
+   */
+  visibility?: string | null;
 }
 
 // ==================== 上游模型目录发现 ====================
@@ -745,6 +750,13 @@ export interface ManagedModel {
   price?: ManagedModelPrice | null;
   /** 模型倍率（缺省 1.0） */
   model_ratio: number;
+  /**
+   * 可见性判据（对齐 Agent2API `providers/<kind>/models.rs` 的 `visibility` 键）。
+   * `"hidden"` = 上游能列出、官方客户端不展示；`"shown"` = 会展示；
+   * 缺省（键缺失）= 这家没有判据（前端归「未声明」）。
+   * 来源是管理员元信息覆盖（`model_meta:{model}`），后端透出。
+   */
+  visibility?: string;
   /** 该模型的对外别名 */
   aliases: string[];
   /** 别名明细（含开关）。老后端不返回时前端回退到 aliases 合成 */

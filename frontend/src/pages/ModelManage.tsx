@@ -72,6 +72,12 @@ const LS_FETCH_ACCPICK = 'aigx-mm-fetch-acctpick';
 type MainTab = 'catalog' | 'ratio';
 /** 启停筛选（多一档「有映射」，对齐 Agent2API MODEL_STATE_OPTIONS） */
 type StateFilter = 'all' | 'on' | 'off' | 'mapped';
+/**
+ * 可见性筛选（对齐 Agent2API MODEL_VISIBILITIES：all / visible / hidden / undeclared，
+ * 默认 `visible`）。语义照 A2A 的注释：`undeclared`（这家没有判据）**归入可见桶**
+ * —— 「没依据就不藏」，所以默认档永远不会因为缺判据而把行筛空。
+ */
+type VisibilityFilter = 'all' | 'visible' | 'hidden' | 'undeclared';
 type PriceFilter = 'all' | 'priced' | 'unpriced';
 type SourceFilter = 'all' | 'channel' | 'account';
 /** 排序档位（对齐 Agent2API MODEL_SORT_OPTIONS） */
@@ -84,9 +90,9 @@ type ColKey = 'rate' | 'price' | 'visibility' | 'source' | 'budget' | 'caps' | '
  * models-panel-state.ts 的 COLUMNS**（check / model / rate / pricing / visibility /
  * source / budget / caps / alias / act，顺序即默认渲染顺序）。
  *
- * `visibility` 列照 A2A 建出来（列名、位置、悬停说明一致），但**本仓后端暂无该数据源**
- * （`src/model/manage.rs` 的 ManageModel 没有 visibility 字段，只有四家内置家有这个
- * 概念）——单元格落 `—` 并在悬停里说明，等后端补字段；见交付说明第 ② 段。
+ * `visibility` 列与筛选档位都按 A2A 落地：后端 `ManageModel.visibility`（`"hidden"` /
+ * `"shown"`，缺省 = 无判据）由 `src/model/manage.rs` 从元信息覆盖读出来，前端按
+ * hidden → 不展示、shown/visible → 可见、其余 → 未声明归一，与 A2A 同一口径。
  */
 type AnyCol = 'check' | ColKey | 'model' | 'act';
 const COL_ORDER: AnyCol[] = ['check', 'model', 'rate', 'price', 'visibility', 'source', 'budget', 'caps', 'alias', 'act'];
@@ -184,6 +190,20 @@ const SOURCE_DOTS: Record<string, { label: string; short: string; className: str
   // models.dev 社区目录补齐（A2A models-cells 的独立来源档：能力/上下文由社区目录回填）
   modelsdev: { label: 'models.dev 社区目录', short: '社区', className: 'mm-src-dot modelsdev' },
 };
+
+/**
+ * 归一化一行的可见性（与 Agent2API `models-panel-state.ts::visibilityOf` 同一取值域）。
+ *
+ * `"hidden"` → hidden（不展示）；`"shown"` / `"visible"` → visible（可见）；
+ * 其余（缺字段 / 空串 / 拼错）→ undeclared（没判据）。**绝不把「没有判据」当成可见**
+ * —— 那会让管理页看起来把所有没判断的家都判成了「会展示」，而后端只对四家有判据。
+ */
+function visibilityOf(row: { visibility?: string } | null | undefined): 'visible' | 'hidden' | 'undeclared' {
+  const raw = typeof row?.visibility === 'string' ? row.visibility.trim().toLowerCase() : '';
+  if (raw === 'hidden') return 'hidden';
+  if (raw === 'shown' || raw === 'visible') return 'visible';
+  return 'undeclared';
+}
 
 /** 取一行的清单来源档：后端总会给一档；旧后端空串时按承载方兜底到手动/内置 */
 function modelSourceKey(row: { source?: string; sources: { kind: string; source?: string }[] }): string {
@@ -304,6 +324,11 @@ interface MetaForm {
   extraTags: string;
   /** 思考等级候选（逗号分隔，对齐 Agent2API 能力弹窗的 reasoningLevels 编辑） */
   reasoningLevels: string;
+  /**
+   * 可见性判据覆盖（对齐 Agent2API 的 `visibility` 键：`hidden` / `shown`，缺省 = 无判据）。
+   * `'inherit'` = 不覆盖（落到 None = 没判据，前端显示「未声明」），不伪造「可见」。
+   */
+  visibilityMode: 'inherit' | 'shown' | 'hidden';
 }
 
 const EMPTY_META_FORM: MetaForm = {
@@ -318,7 +343,16 @@ const EMPTY_META_FORM: MetaForm = {
   capReasoning: false,
   extraTags: '',
   reasoningLevels: '',
+  visibilityMode: 'inherit',
 };
+
+/** 可见性覆盖字段 → 弹窗三态（对齐 A2A 取值域：只认 hidden / shown，其余 = 没判据） */
+function metaFormVisibilityMode(raw: string | null | undefined): MetaForm['visibilityMode'] {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'hidden') return 'hidden';
+  if (value === 'shown' || value === 'visible') return 'shown';
+  return 'inherit';
+}
 
 /** 能力标签 → 表单勾选态（与 CAP_DOTS 同一套正则口径） */
 function capsToForm(caps: string[]): Pick<MetaForm, 'capsMode' | 'capTool' | 'capImage' | 'capVideo' | 'capAudio' | 'capReasoning' | 'extraTags'> {
@@ -443,9 +477,20 @@ export default function ModelManage(): JSX.Element {
   }, [view]);
 
   // ── 筛选（落盘记忆，对齐 Agent2API models-filters） ──
-  const mmFilters = getFilter<Record<string, string>>(LS_FILTERS, { state: 'all', price: 'all', source: 'all', sort: 'default', navKey: 'all', query: '' });
+  const mmFilters = getFilter<Record<string, string>>(LS_FILTERS, { state: 'all', visibility: 'visible', price: 'all', source: 'all', sort: 'default', navKey: 'all', query: '' });
   const [navKey, setNavKey] = useState<string>(mmFilters.navKey || 'all');
   const [stateFilter, setStateFilter] = useState<StateFilter>(mmFilters.state as StateFilter);
+  /**
+   * 可见性筛选（默认 `visible`，与 Agent2API `DEFAULT_FILTERS.visibility` 同值）。
+   *
+   * 存坏值按 A2A 的同一口径回落到 `visible`（不是「全部」）：A2A 的注释里解释了为什么
+   * 默认是 visible 而不是 all —— 上游目录是超集，里面混着官方客户端不展示的模型。
+   */
+  const [visibilityFilter, setVisibilityFilter] = useState<VisibilityFilter>(
+    (['all', 'visible', 'hidden', 'undeclared'] as VisibilityFilter[]).includes(mmFilters.visibility as VisibilityFilter)
+      ? (mmFilters.visibility as VisibilityFilter)
+      : 'visible',
+  );
   const [priceFilter, setPriceFilter] = useState<PriceFilter>(mmFilters.price as PriceFilter);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>(mmFilters.source as SourceFilter);
   const [sortMode, setSortMode] = useState<SortMode>(mmFilters.sort as SortMode);
@@ -456,8 +501,8 @@ export default function ModelManage(): JSX.Element {
 
   // 筛选变更即落盘（navKey 分组 / query 搜索同记，对齐 models-filters 的 provider / search）
   useEffect(() => {
-    setFilter(LS_FILTERS, { state: stateFilter, price: priceFilter, source: sourceFilter, sort: sortMode, navKey, query });
-  }, [stateFilter, priceFilter, sourceFilter, sortMode, navKey, query]);
+    setFilter(LS_FILTERS, { state: stateFilter, visibility: visibilityFilter, price: priceFilter, source: sourceFilter, sort: sortMode, navKey, query });
+  }, [stateFilter, visibilityFilter, priceFilter, sourceFilter, sortMode, navKey, query]);
 
   // 分页（每页条数走公共 usePageSize，旧 aigx-mm-pagesize 一次性搬迁）
   const [page, setPage] = useState(1);
@@ -824,6 +869,7 @@ export default function ModelManage(): JSX.Element {
       context_length: o.context_length != null ? String(o.context_length) : '',
       reasoningLevels: (o.reasoning_levels ?? []).join(', '),
       ...capsToForm(o.capabilities ?? []),
+      visibilityMode: metaFormVisibilityMode(o.visibility),
     });
     setMetaError('');
     setMetaModal(true);
@@ -844,6 +890,7 @@ export default function ModelManage(): JSX.Element {
             : '',
       reasoningLevels: (o?.reasoning_levels ?? []).join(', '),
       ...capsToForm(o?.capabilities ?? row.capabilities ?? []),
+      visibilityMode: metaFormVisibilityMode(o?.visibility ?? row.visibility),
     });
     setMetaError('');
     setMetaModal(true);
@@ -894,6 +941,11 @@ export default function ModelManage(): JSX.Element {
         context_length: ctx,
         capabilities: metaFormToCaps(),
         reasoning_levels: metaFormToLevels(),
+        // 可见性覆盖：只有选了可见 / 不展示才提交（inherit = 不覆盖，落 None = 没判据）
+        visibility:
+          metaForm.visibilityMode === 'hidden' ? 'hidden'
+            : metaForm.visibilityMode === 'shown' ? 'shown'
+              : undefined,
       });
       addToast(t('元信息覆盖已保存'));
       setMetaModal(false);
@@ -1310,6 +1362,11 @@ export default function ModelManage(): JSX.Element {
       if (stateFilter === 'on' && !m.enabled) return false;
       if (stateFilter === 'off' && m.enabled) return false;
       if (stateFilter === 'mapped' && (m.alias_entries?.length ?? m.aliases.length) === 0) return false;
+      // 可见性筛选（对齐 Agent2API 的口径）：`visible` 这一档**包含 undeclared**
+      // —— 没判据的家按「不藏」处理，否则默认档会因为「这家没有这个信息」而筛空。
+      if (visibilityFilter === 'hidden' && visibilityOf(m) !== 'hidden') return false;
+      if (visibilityFilter === 'undeclared' && visibilityOf(m) !== 'undeclared') return false;
+      if (visibilityFilter === 'visible' && !(visibilityOf(m) === 'visible' || visibilityOf(m) === 'undeclared')) return false;
       if (priceFilter === 'priced' && !m.price) return false;
       if (priceFilter === 'unpriced' && m.price) return false;
       if (sourceFilter === 'channel' && !m.sources.some((s) => s.kind === 'channel')) return false;
@@ -1330,7 +1387,7 @@ export default function ModelManage(): JSX.Element {
       });
     }
     return out;
-  }, [view, navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query, sortMode]);
+  }, [view, navKey, stateFilter, visibilityFilter, priceFilter, sourceFilter, channelFilter, query, sortMode]);
 
   /** 聚合模式：左栏「全部」且无搜索词 → 按提供商分组 + 组内折叠（Agent2API 同款）。
    *  任何筛选/排序/搜索生效时回落到平铺分页表。 */
@@ -1445,7 +1502,7 @@ export default function ModelManage(): JSX.Element {
   useEffect(() => {
     setPage(1);
     setSelected(new Set());
-  }, [navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query, sortMode]);
+  }, [navKey, stateFilter, visibilityFilter, priceFilter, sourceFilter, channelFilter, query, sortMode]);
 
   // 渠道页「在模型管理中维护」跳转：预选该渠道
   useEffect(() => {
@@ -1603,16 +1660,15 @@ export default function ModelManage(): JSX.Element {
         // 「可见性」列：三档 + 一档「没有判据」（照 A2A visibilityCell 的口径：
         // hidden → 不展示、shown/visible → 可见、其余 → 没有判据）。
         //
-        // 本仓后端暂不下发 `visibility`（ManageModel 里没有这个字段），所以当前所有行
-        // 都落最后一档；字段一旦补上，这里不用改 —— 归一化已按 A2A 的取值域写好了。
-        const raw = (row as unknown as { visibility?: unknown }).visibility;
-        const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
-        if (value === 'hidden') {
+        // 取值域与 A2A 逐字一致（见 visibilityOf）；后端 `ManageModel.visibility`
+        // 由元信息覆盖读出，缺字段/未声明走最后一档。
+        const vis = visibilityOf(row);
+        if (vis === 'hidden') {
           return (
             <td key={col} className={`mm-c-visibility ta-${colAlign.visibility}`}>
               <span
                 className="mm-src-tag model-source"
-                title={t('上游能列出这个模型，但官方客户端不展示它；本仓已默认关闭它的默认绑定（点这一行的开关可以手动打开）')}
+                title={t('上游能列出这个模型，但官方客户端不展示它')}
               >
                 <i className="mm-src-dot manual" />
                 {t('不展示')}
@@ -1620,7 +1676,7 @@ export default function ModelManage(): JSX.Element {
             </td>
           );
         }
-        if (value === 'shown' || value === 'visible') {
+        if (vis === 'visible') {
           return (
             <td key={col} className={`mm-c-visibility ta-${colAlign.visibility}`}>
               <span className="mm-src-tag model-source" title={t('官方客户端会展示这个模型')}>
@@ -1634,7 +1690,7 @@ export default function ModelManage(): JSX.Element {
           <td key={col} className={`mm-c-visibility ta-${colAlign.visibility}`}>
             <span
               className="mm-price-empty"
-              title={t('这条记录没有可见性判据（本仓后端暂未下发该字段；A2A 只有部分内置家有这一维）')}
+              title={t('这条记录没有可见性判据（这家的目录没有给出这一维；A2A 只对部分内置家有）')}
             >
               —
             </span>
@@ -2320,6 +2376,38 @@ export default function ModelManage(): JSX.Element {
                   </button>
                 ))}
               </div>
+              {/* 可见性筛选：档位与默认值照 Agent2API MODEL_VISIBILITY_OPTIONS /
+                  DEFAULT_FILTERS（all / visible / hidden / undeclared，默认 visible）。
+                  「可见」这一档含未声明 —— 「没判据就不藏」，否则默认档会因为「这家没有这个信息」
+                  而把行筛空。档位在「状态」之后、搜索框之前，与 A2A 筛选行的摆放一致。 */}
+              <div className="mm-seg" role="tablist" aria-label={t('可见性筛选')}>
+                {(
+                  [
+                    ['all', '全部'],
+                    ['visible', '可见'],
+                    ['hidden', '不展示'],
+                    ['undeclared', '未声明'],
+                  ] as Array<[VisibilityFilter, string]>
+                ).map(([v, label]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`mm-seg-btn${visibilityFilter === v ? ' active' : ''}`}
+                    title={
+                      v === 'visible'
+                        ? t('官方客户端会展示的模型；没有可见性判据的家也归在这一档（没依据就不藏）')
+                        : v === 'hidden'
+                          ? t('上游能列出这个模型，但官方客户端不展示它')
+                          : v === 'undeclared'
+                            ? t('这家的目录没有给出可见性判据')
+                            : undefined
+                    }
+                    onClick={() => setVisibilityFilter(v)}
+                  >
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
               <div className="mm-seg" role="tablist" aria-label={t('排序')}>
                 {(
                   [
@@ -2713,6 +2801,41 @@ export default function ModelManage(): JSX.Element {
                   placeholder={t('留空继承内置推断')}
                   disabled={savingMeta}
                 />
+              </div>
+              <div className="form-group">
+                <label>{t('可见性')}</label>
+                {/* 对齐 Agent2API 的 `visibility` 键（hidden / shown / 无判据）。
+                    「不覆盖」= 不写该键，落后端 `None` = 没判据，管理页显示「未声明」，
+                    **不**当成「可见」来伪造 —— 与 A2A「没依据就不藏」同一条纪律。 */}
+                <div className="mm-caps-mode" role="tablist" aria-label={t('可见性判据')}>
+                  <button
+                    type="button"
+                    className={`mm-seg-btn${metaForm.visibilityMode === 'inherit' ? ' active' : ''}`}
+                    title={t('不写覆盖项：这家目录没有给出可见性判据，管理页按「未声明」展示')}
+                    onClick={() => setMetaForm({ ...metaForm, visibilityMode: 'inherit' })}
+                    disabled={savingMeta}
+                  >
+                    {t('不覆盖')}
+                  </button>
+                  <button
+                    type="button"
+                    className={`mm-seg-btn${metaForm.visibilityMode === 'shown' ? ' active' : ''}`}
+                    title={t('官方客户端会展示这个模型')}
+                    onClick={() => setMetaForm({ ...metaForm, visibilityMode: 'shown' })}
+                    disabled={savingMeta}
+                  >
+                    {t('可见')}
+                  </button>
+                  <button
+                    type="button"
+                    className={`mm-seg-btn${metaForm.visibilityMode === 'hidden' ? ' active' : ''}`}
+                    title={t('上游能列出这个模型，但官方客户端不展示它')}
+                    onClick={() => setMetaForm({ ...metaForm, visibilityMode: 'hidden' })}
+                    disabled={savingMeta}
+                  >
+                    {t('不展示')}
+                  </button>
+                </div>
               </div>
               <div className="form-group">
                 <label>{t('能力声明')}</label>

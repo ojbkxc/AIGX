@@ -236,6 +236,14 @@ pub struct ManageModel {
     /// 被用户覆盖的能力键（管理页「已改」标记；空数组 = 全部继承）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cap_overrides: Vec<String>,
+    /// 可见性判据（对齐 Agent2API `providers/<kind>/models.rs` 的 `visibility` 键）。
+    ///
+    /// 取值域逐字同 A2A：`"hidden"` / `"shown"`；`None` = 没有判据（管理页归「未声明」）。
+    /// AIGX 的判据来源是管理员的元信息覆盖（`model_meta:{model}` 的 `visibility`），
+    /// 因为本仓还没接带可见性判据的 provider 目录；覆盖没设就是 `None`，
+    /// 前端**不**把它当成「可见」来撒谎（与 A2A 「没依据就不藏」同一纪律）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
     /// 定价条目（未定价为 null，前端据此高亮）
     pub price: Option<ModelPrice>,
     /// 模型倍率（`ratio_config.model_ratio`，缺省 1.0）
@@ -886,6 +894,7 @@ fn new_row(
         capability_flags,
         cap_overrides,
         tool_calling_mode: meta.tool_calling_mode,
+        visibility: meta.visibility,
         price,
         model_ratio,
         aliases,
@@ -1000,6 +1009,7 @@ mod tests {
             capability_flags: Value::Null,
             cap_overrides: Vec::new(),
             tool_calling_mode: None,
+            visibility: None,
             price: None,
             model_ratio: 1.0,
             aliases: Vec::new(),
