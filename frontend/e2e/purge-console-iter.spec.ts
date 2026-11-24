@@ -103,6 +103,7 @@ const PURGE_DATA = {
   ],
   config_warnings: [],
   skills: [],
+  skill_dir_resolved: '/home/e2e/.aigx/skills',
   runtime: { pid: 1, uptime_secs: 60, upstream: 'e2e', inflight: 0 },
 };
 
@@ -242,6 +243,17 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
 
   // 应用后该条打标
   await expect(page.getByText('最近用过')).toBeVisible();
+});
+
+test('12 · 技能卡显示「实际扫描目录」（放错目录时靠它定位）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const hint = page.getByTestId('purge-skill-dir-resolved');
+  await expect(hint).toBeVisible();
+  await expect(hint).toContainText('/home/e2e/.aigx/skills');
+  // 空目录同时给空态文案（不是整块消失）
+  await expect(page.getByText(/扫不到任何 SKILL.md/)).toBeVisible();
 });
 
 test('11 · 页内导航条可跳到各区块', async ({ page }) => {

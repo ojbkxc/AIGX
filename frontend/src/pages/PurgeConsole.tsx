@@ -2040,6 +2040,8 @@ export default function PurgeConsole(): JSX.Element {
   const [csvReplace, setCsvReplace] = useState(false);
   const [configWarningItems, setConfigWarningItems] = useState<PurgeConfigWarning[]>([]);
   const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
+  /** 技能目录展开后的绝对路径（旧后端不返回 → 空串，不渲染那一行） */
+  const [skillDirResolved, setSkillDirResolved] = useState('');
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
   const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
   // 导入配置文件选择
@@ -2129,6 +2131,7 @@ export default function PurgeConsole(): JSX.Element {
       setConfigWarnings(res.data.config_warnings ?? []);
       setConfigWarningItems(res.data.config_warning_items ?? []);
       setSkills(res.data.skills ?? []);
+      setSkillDirResolved(res.data.skill_dir_resolved ?? '');
       setDirty(false);
     } catch {
       addToast(t('加载失败'), 'error');
@@ -2328,7 +2331,10 @@ export default function PurgeConsole(): JSX.Element {
   const refreshSkills = useCallback(async (): Promise<void> => {
     try {
       const res = await api.getPurge();
-      if (res.success && res.data) setSkills(res.data.skills ?? []);
+      if (res.success && res.data) {
+        setSkills(res.data.skills ?? []);
+        setSkillDirResolved(res.data.skill_dir_resolved ?? '');
+      }
     } catch {
       // 刷新失败不影响写入结果，静默即可
     }
@@ -3452,6 +3458,12 @@ export default function PurgeConsole(): JSX.Element {
           </Button>
         }
       >
+        {/* 扫的是哪：`~` 的展开依赖服务进程 HOME，用户放错目录时靠这行定位 */}
+        {skillDirResolved ? (
+          <p className="purge-hint" data-testid="purge-skill-dir-resolved">
+            {t('实际扫描目录：{{dir}}', { dir: skillDirResolved })}
+          </p>
+        ) : null}
         {skills.length === 0 ? (
           <p className="purge-empty" data-purge-fix="skill-snapshot">
             {t('当前技能目录扫不到任何 SKILL.md（技能注入不会生效）。放好文件后点「重新扫描」。')}

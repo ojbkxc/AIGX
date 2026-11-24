@@ -482,6 +482,9 @@ fn payload(state: &AppState) -> Value {
                 .collect::<Vec<_>>(),
             // 技能目录扫描快照（名称+关键词+正文字符数；skill_inject 配置的可验证性）
             "skills": crate::purge::skill_briefs(&settings.skill_dir),
+            // 技能目录的展开后绝对路径：`~` 的展开依赖服务进程的 HOME，
+            // 与用户交互式 shell 可能不同——放错目录时靠这个才能定位
+            "skill_dir_resolved": crate::purge::expanded_skill_dir(&settings.skill_dir),
             "runtime": {
                 "pid": crate::purge::pid(),
                 "uptime_secs": crate::purge::uptime_secs(),

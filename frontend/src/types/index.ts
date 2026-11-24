@@ -2880,6 +2880,8 @@ export interface PurgeData {
   config_warnings?: string[];
   /** 技能目录扫描快照（旧版后端不返回） */
   skills?: PurgeSkillBrief[];
+  /** 技能目录展开后的绝对路径（旧版后端不返回；`~` 展开依赖服务进程 HOME） */
+  skill_dir_resolved?: string;
   /** 时间窗统计（近 1h / 24h；旧版后端不返回时统计卡只有全程口径） */
   stats_1h?: PurgeWindowedStats;
   stats_24h?: PurgeWindowedStats;

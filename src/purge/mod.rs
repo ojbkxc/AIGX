@@ -1441,6 +1441,16 @@ pub struct SkillBrief {
 }
 
 /// 当前技能目录的扫描快照（复用数据面同款 30 秒缓存）。
+/// 技能目录的**展开后绝对路径**（诊断用）。
+///
+/// 为什么需要：`skill_dir` 默认是 `~/.aigx/skills`，而 `~` 的展开依赖 `HOME`
+/// （Windows 回退 `USERPROFILE`）。用户把 SKILL.md 放到「自己以为的」目录、
+/// 界面却扫不到时，唯一能定位的办法就是看到真实展开结果——服务进程的 HOME
+/// 与用户交互式 shell 的 HOME 不一定是同一个值。
+pub fn expanded_skill_dir(dir: &str) -> String {
+    expand_home(dir).to_string_lossy().to_string()
+}
+
 pub fn skill_briefs(dir: &str) -> Vec<SkillBrief> {
     skills_for(dir)
         .iter()
@@ -2625,6 +2635,27 @@ mod tests {
         assert!(config_warning_items(&cfg)
             .iter()
             .all(|w| w.code != "fallback_duplicate"));
+    }
+
+    /// 技能目录展开成绝对路径：`~` 前缀必须被替换掉（否则前端显示 `~/...`
+    /// 无法与真实目录对照）；不含 `~` 的路径原样返回。
+    #[test]
+    fn expanded_skill_dir_resolves_home_prefix() {
+        let with_tilde = expanded_skill_dir("~/skills-test");
+        assert!(
+            !with_tilde.starts_with('~'),
+            "`~` 前缀应被展开，实际：{with_tilde}"
+        );
+        assert!(
+            with_tilde.ends_with("skills-test"),
+            "尾巴要保留：{with_tilde}"
+        );
+
+        // 已是绝对路径 → 原样返回（不做任何规范化，避免意外改写用户配置）
+        let plain = expanded_skill_dir("/tmp/abs-skills");
+        assert_eq!(plain, "/tmp/abs-skills");
+        // 相对路径同样原样返回
+        assert_eq!(expanded_skill_dir("relative/skills"), "relative/skills");
     }
 
     /// 严重级分类：code 集合与 `severity_of` 分支必须一一对应。
