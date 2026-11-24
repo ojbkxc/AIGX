@@ -726,6 +726,15 @@ fn provider_label(kind: &str) -> &'static str {
         .unwrap_or("account")
 }
 
+/// 账号行 `provider_label` 字段（任何 kind 都可读，绝不空串）。
+///
+/// 原生家 → registry label；`custom-*` 自建 → 「自定义供应商」；插件家
+/// 等 registry 未收录的 kind → 原样回 kind。前端「供应商」筛选条/分组带
+/// 优先读这个字段，避免出现空供应商行。
+fn provider_display(kind: &str) -> String {
+    registry::display_label(kind)
+}
+
 /// 关键词匹配（名称/provider/地址/最近错误）。
 fn matches_search(session: &AccountSession, needle: &str) -> bool {
     if session.name.to_lowercase().contains(needle)
@@ -876,6 +885,9 @@ fn session_json(
         // 派生 email（无一等字段；来自 credential.fields["email"]，缺省 null）
         "email": account_email_of(session),
         "provider": session.provider,
+        // 可读展示名（原生 label / 「自定义供应商」/未知回 kind），
+        // 前端优先用它渲染 provider 列，消除空供应商
+        "provider_label": provider_display(&session.provider),
         "base_url": session.base_url,
         "chat_path": session.chat_path,
         "api_key": mask_secret(&session.credential.secret_plain()),
@@ -1480,6 +1492,25 @@ pub async fn handle_create_account_session(
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
     let plugin_provider = provider_is_plugin_provider(&state, &provider_kind);
+    // provider 必须「原生 registry 认识」或「插件声明接管」，否则落成一个
+    // 永远跑不通的账号：原生选号池会拒它（见 store::acquire 的 provider 硬裁），
+    // 插件链路也不会认领它。历史迁移曾因此导入 8 个 codar/teleagent/
+    // doubaowork/qwenwork 脏账号，每次尝试都 1800s 冷却拖垮整条渠道。
+    // 自建 `custom-*` 允许（用户自带地址/凭证），但仍需显式 base_url。
+    if !plugin_provider && registry::find(&provider_kind).is_none() {
+        return Err(error_response(
+            &format!(
+                "未知 provider「{provider_kind}」：既不在内置注册表也不是已安装插件声明的 provider"
+            ),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if provider_kind.starts_with("custom-") && body.base_url.trim().is_empty() {
+        return Err(error_response(
+            "自定义 provider（custom-*）必须提供账号级 base_url",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
     let has_plugin_material = has_auth_file || body.plugin_secret.is_some();
     if !plugin_provider && has_plugin_material {
         return Err(error_response(

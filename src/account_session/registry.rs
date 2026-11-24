@@ -1140,6 +1140,26 @@ pub fn normalize_kind(kind: &str) -> String {
         .unwrap_or_else(|| kind.trim().to_string())
 }
 
+/// 管理面展示名（任何 kind 都有可读名，绝不返回空串）。
+///
+/// - 原生家 → [`ProviderSpec::label`]
+/// - `custom-*` 自建 provider → 「自定义供应商」（无法从 hash 还原用户名，
+///   展示层再叠加账号/渠道自填名；这里只保证不空）
+/// - 其它未知 kind（插件家 / 历史脏数据）→ 原样回 kind，避免出现空供应商
+pub fn display_label(kind: &str) -> String {
+    if let Some(spec) = find(kind) {
+        return spec.label.to_string();
+    }
+    let trimmed = kind.trim();
+    if trimmed.starts_with("custom-") {
+        return "自定义供应商".to_string();
+    }
+    if trimmed.is_empty() {
+        return "未知供应商".to_string();
+    }
+    trimmed.to_string()
+}
+
 // ── Web 端 / Agent 端 / API 三分类（对齐上游 Agent2API 的 provider_category）──
 //
 // 上游把 provider 分两类：`web`（网页端产品 —— 登录态来自网页 Cookie/令牌，

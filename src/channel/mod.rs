@@ -1931,7 +1931,9 @@ impl ChannelStore {
         );
         if should_evict {
             if let (Some(sid), Some(m)) = (session_id, model) {
-                self.affinity_cache.evict(sid, m);
+                // 条件删除：同会话并发里可能已有别的请求把这条绑定改成健康渠道，
+                // 无条件删会把那份新绑定一起抹掉（对齐上游 v3.5.1 forget 语义）。
+                self.affinity_cache.evict_if(sid, m, channel_id);
             }
         }
     }
@@ -2030,9 +2032,14 @@ impl ChannelStore {
                 circuit_breaker::FailureType::ConnectionError
             }
             BridgeError::ModelNotFound(_) => circuit_breaker::FailureType::ModelNotFound,
-            // 解析失败/配置错误视为服务端错误（上游返回了坏数据）
+            // 本地配置错误（provider 未知 / 必需 base_url 缺失 / 凭证未配置）
+            // **不是上游不健康**：重试只会得到同样的本地错误，计入断路器会
+            // 把健康渠道/账号熔断并打进冷却（v1.0.94 修：`unknown account
+            // provider` 的脏账号曾把整条渠道拖进 1800s 冷却）。按
+            // `ClientError` 口径「不计入断路器、不冷却」处理。
+            BridgeError::Config(_) => circuit_breaker::FailureType::ClientError,
+            // 解析失败/上游配置异常视为服务端错误（上游返回了坏数据）
             BridgeError::UpstreamDecode(_)
-            | BridgeError::Config(_)
             | BridgeError::InvalidUpstreamConfig(_)
             | BridgeError::AllAccountsFailed(_) => circuit_breaker::FailureType::ServerError,
         }

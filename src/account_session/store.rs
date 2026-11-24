@@ -811,6 +811,23 @@ impl AccountSessionStore {
                 }
                 continue;
             }
+            // 原生选号池只收「原生 registry 能构造 bridge」的账号。
+            // 插件家（codar/teleagent/doubaowork/qwenwork/custom-* 等）的账号
+            // 若落成原生账号（历史迁移导入保留了 provider 名却没转成插件账号），
+            // 进 `bridge::account::adapter::build_bridge` 必然报
+            // `unknown account provider`，还会被记一次失败打进 1800s 冷却，
+            // 把整条渠道拖成不可用。此处按 provider 是否为原生家硬裁：
+            // 原生家 → 放行；插件家 → 跳过本池，交给 `ChannelType::Plugin`
+            // 渠道的插件链路；都不是 → 同样跳过（脏数据，不再反复踩坑）。
+            if !session.is_plugin_account()
+                && crate::account_session::registry::find(&session.provider).is_none()
+            {
+                reasons.provider_off += 1;
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "provider_not_allowed"));
+                }
+                continue;
+            }
             // 参与名单硬裁（#40 §2）：显式排除的账号不进候选。名单通常是短表，
             // 逐项精确比较、零分配（与「候选循环内零分配」红线一致）。
             if let Some(scope) = scope {
