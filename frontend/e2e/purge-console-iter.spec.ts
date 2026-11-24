@@ -134,9 +134,22 @@ async function mockPurge(page: Page): Promise<void> {
   await page.route(/\/api\/purge\/preview$/, (r) =>
     r.fulfill({ json: { success: true, data: PREVIEW_RESULT } }),
   );
-  await page.route(/\/api\/purge(\?|$)/, (r) =>
-    r.fulfill({ json: { success: true, data: PURGE_DATA } }),
-  );
+  // 写接口**回显请求体**：开关与保存都是「乐观更新 + 以服务端返回为准」。若 PUT 回一份
+  // 固定数据，保存成功后状态会被覆盖回去——看起来就是「点了没反应」，把正确实现
+  // 测成缺陷。一处改好，所有用到 mockPurge 的用例都受益。
+  await page.route(/\/api\/purge(\?|$)/, async (r) => {
+    if (r.request().method() === 'PUT') {
+      const body = JSON.parse(r.request().postData() ?? '{}');
+      await r.fulfill({
+        json: {
+          success: true,
+          data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, ...body } },
+        },
+      });
+      return;
+    }
+    await r.fulfill({ json: { success: true, data: PURGE_DATA } });
+  });
 }
 
 async function gotoPurge(page: Page): Promise<void> {
@@ -248,19 +261,8 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
 });
 
 test('45 · 总开关关着时说明「配了但没生效」，且不禁用其他开关', async ({ page }) => {
-  // **写接口必须回显请求体**：开关走「乐观更新 + 以服务端返回为准」，若 mock 在 PUT
-  // 里回一份固定数据，保存成功后状态会被覆盖回去，看起来就是「点了没反应」——
-  // 那是 mock 不真实，不是实现有问题。
-  await page.route(/\/api\/purge(\?|$)/, async (r) => {
-    if (r.request().method() === 'PUT') {
-      const body = JSON.parse(r.request().postData() ?? '{}');
-      await r.fulfill({
-        json: { success: true, data: { ...PURGE_DATA, settings: { ...PURGE_DATA.settings, ...body } } },
-      });
-      return;
-    }
-    await r.fulfill({ json: { success: true, data: PURGE_DATA } });
-  });
+  // `mockPurge` 的 PUT 已回显请求体（见其注释），这里不必再覆盖
+  await mockPurge(page);
   await gotoPurge(page);
 
   const notice = page.getByTestId('purge-off-notice');
