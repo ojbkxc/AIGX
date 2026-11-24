@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildActiveSummary,
   capError,
+  readPresetFilter,
   sortWarningsBySeverity,
   diffLines,
   diffTokensInLine,
@@ -15,7 +16,49 @@ import {
   skillKeywordSample,
   validateImportedSettings,
   writePreviewHistory,
+  writePresetFilter,
 } from './PurgeConsole';
+
+describe('readPresetFilter / writePresetFilter', () => {
+  const store = new Map<string, string>();
+  const set = (k: string, v: string): void => {
+    store.set(k, v);
+  };
+  const remove = (k: string): void => {
+    store.delete(k);
+  };
+
+  it('读回写入的筛选', () => {
+    store.clear();
+    writePresetFilter({ q: 'glm', vendor: 'zhipu' }, set, remove);
+    expect(readPresetFilter((k) => store.get(k) ?? null)).toEqual({
+      q: 'glm',
+      vendor: 'zhipu',
+    });
+  });
+
+  it('两项都空 → 移除键，不留垃圾', () => {
+    store.clear();
+    writePresetFilter({ q: 'x', vendor: 'y' }, set, remove);
+    writePresetFilter({ q: '', vendor: '' }, set, remove);
+    expect(store.has('aigx.purge.presetFilter')).toBe(false);
+    expect(readPresetFilter((k) => store.get(k) ?? null)).toEqual({ q: '', vendor: '' });
+  });
+
+  it('坏 JSON / 类型不符 → 空筛选（不拿脏值请求后端）', () => {
+    expect(readPresetFilter(() => 'not-json')).toEqual({ q: '', vendor: '' });
+    expect(readPresetFilter(() => '[]')).toEqual({ q: '', vendor: '' });
+    expect(readPresetFilter(() => '{"q":123,"vendor":null}')).toEqual({ q: '', vendor: '' });
+  });
+
+  it('超长搜索词读回时截断（与写入同上限）', () => {
+    const long = 'a'.repeat(500);
+    store.clear();
+    writePresetFilter({ q: long, vendor: '' }, set, remove);
+    const back = readPresetFilter((k) => store.get(k) ?? null);
+    expect(back.q.length).toBe(200);
+  });
+});
 
 describe('sortWarningsBySeverity', () => {
   it('Error 在前，Info 在后；同级保持原序（稳定）', () => {

@@ -721,6 +721,55 @@ export function writePreviewHistory(
   return next;
 }
 
+/** 预设库筛选（搜索词 + 厂商）的持久化键。 */
+const PRESET_FILTER_KEY = 'aigx.purge.presetFilter';
+/** 搜索词上限：超出不入库（防超长串撑爆 localStorage） */
+const PRESET_FILTER_Q_MAX = 200;
+
+/** 预设库筛选条件（空串 = 不筛）。 */
+export interface PresetFilter {
+  q: string;
+  vendor: string;
+}
+
+/**
+ * 读回上次的预设库筛选。
+ *
+ * 为什么值得存：预设库有几十条，运维常按某厂商（或某个词）反复查；
+ * 刷新一次就归零，等于每次都要重打一遍。坏 JSON / 类型不符 → 空筛选
+ * （宁可从头筛，也不要拿脏值去请求后端）。
+ */
+export function readPresetFilter(get: (k: string) => string | null): PresetFilter {
+  try {
+    const raw = JSON.parse(get(PRESET_FILTER_KEY) ?? '{}') as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { q: '', vendor: '' };
+    const record = raw as Record<string, unknown>;
+    const q = typeof record.q === 'string' ? record.q.slice(0, PRESET_FILTER_Q_MAX) : '';
+    const vendor = typeof record.vendor === 'string' ? record.vendor : '';
+    return { q, vendor };
+  } catch {
+    return { q: '', vendor: '' };
+  }
+}
+
+/** 写筛选：两项都空时移除键（不留 `{"q":"","vendor":""}` 垃圾）。 */
+export function writePresetFilter(
+  filter: PresetFilter,
+  set: (k: string, v: string) => void,
+  remove: (k: string) => void,
+): void {
+  try {
+    if (!filter.q && !filter.vendor) remove(PRESET_FILTER_KEY);
+    else
+      set(
+        PRESET_FILTER_KEY,
+        JSON.stringify({ q: filter.q.slice(0, PRESET_FILTER_Q_MAX), vendor: filter.vendor }),
+      );
+  } catch {
+    // localStorage 满/禁用：静默，筛选照常在本会话内工作
+  }
+}
+
 /** 历史条目的展示摘要：首行截 46 字符（角色前缀形态保留前缀可读性）。 */
 export function previewHistoryLabel(sample: string): string {
   const first = sample.split(/\r?\n/, 1)[0] ?? '';
@@ -1085,10 +1134,21 @@ const PresetsSection = memo(function PresetsSection({
   /** 草稿里的现有模板（覆盖同名时先确认） */
   currentTemplates?: Array<{ name: string; text: string }>;
 }): JSX.Element {
-  const [q, setQ] = useState('');
-  const [debouncedQ, setDebouncedQ] = useState('');
-  const [vendor, setVendor] = useState('');
+  // 筛选条件跨刷新保留（运维常按某厂商反复查；刷新归零等于每次重打）
+  const initialFilter = readPresetFilter((k) => window.localStorage.getItem(k));
+  const [q, setQ] = useState(initialFilter.q);
+  const [debouncedQ, setDebouncedQ] = useState(initialFilter.q);
+  const [vendor, setVendor] = useState(initialFilter.vendor);
   const [list, setList] = useState<PurgePresetList | null>(null);
+
+  // 筛选变化即落盘（写失败静默；本会话内筛选照常工作）
+  useEffect(() => {
+    writePresetFilter(
+      { q, vendor },
+      (k, v) => window.localStorage.setItem(k, v),
+      (k) => window.localStorage.removeItem(k),
+    );
+  }, [q, vendor]);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
