@@ -183,6 +183,27 @@ const EMPTY_SETTINGS_SNAPSHOT = {
   fallback_models: [] as string[],
 };
 
+/** 记录一次词表变更前的快照（供「撤销」用）。 */
+export function undoSnapshot(
+  kind: 'dead_zone' | 'synonym',
+  rules: PurgeRewriteRule[],
+  label: string,
+): { kind: 'dead_zone' | 'synonym'; rules: PurgeRewriteRule[]; label: string } {
+  // 浅拷贝数组即可：规则对象本身在编辑时是整对象替换（patchRule 用 map），
+  // 不会就地改字段，所以旧数组里的对象引用是安全的
+  return { kind, rules: [...rules], label };
+}
+
+/** 把快照应用回草稿的对应表（纯函数，便于测）。 */
+export function applyUndo(
+  draft: PurgeSettings,
+  undo: { kind: 'dead_zone' | 'synonym'; rules: PurgeRewriteRule[] },
+): PurgeSettings {
+  return undo.kind === 'dead_zone'
+    ? { ...draft, rewrite_rules: undo.rules }
+    : { ...draft, synonym_pairs: undo.rules };
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -2377,6 +2398,18 @@ export default function PurgeConsole(): JSX.Element {
   const [draftBackup, setDraftBackup] = useState<DraftBackup | null>(null);
   /** 与出厂默认的差异（null=没比过；空数组=完全一致） */
   const [defaultsDiff, setDefaultsDiff] = useState<SettingsDiffItem[] | null>(null);
+  /**
+   * 词表「撤销上一次批量变更」的快照。
+   *
+   * 只记**一次**：整理/导入/批量粘贴都可能一把改动几十行，用户想退回原来是
+   * 逐行删——那种痛感远超「只能退一步」。同一次操作内重复变更会覆盖快照，
+   * 语义仍然是「撤销我刚才那一下」。
+   */
+  const [tableUndo, setTableUndo] = useState<{
+    kind: 'dead_zone' | 'synonym';
+    rules: PurgeRewriteRule[];
+    label: string;
+  } | null>(null);
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
   const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
   // 导入配置文件选择
@@ -2638,6 +2671,22 @@ export default function PurgeConsole(): JSX.Element {
     );
   }, []);
 
+  /** 撤销上一次词表批量变更（整理 / 批量粘贴 / 导入 CSV 共用一条撤销） */
+  const undoTableChange = useCallback((): void => {
+    const snapshot = tableUndo;
+    if (!snapshot) return;
+    setDirty(true);
+    setDraft((d) => (d ? applyUndo(d, snapshot) : d));
+    setTableUndo(null);
+    addToast(
+      t('已撤销「{{label}}」，词表恢复为变更前的 {{n}} 行', {
+        label: snapshot.label,
+        n: snapshot.rules.length,
+      }),
+      'success',
+    );
+  }, [addToast, t, tableUndo]);
+
   /** 批量粘贴：解析后追加到对应词表（去重、跳过坏行并如实回报） */
   const applyBatchPaste = useCallback((): void => {
     const current = draft;
@@ -2660,6 +2709,13 @@ export default function PurgeConsole(): JSX.Element {
       return;
     }
     setDirty(true);
+    setTableUndo(
+      undoSnapshot(
+        batchPaste === 'dead_zone' ? 'dead_zone' : 'synonym',
+        existing,
+        t('批量粘贴'),
+      ),
+    );
     setDraft(
       table === 'rewrite_rules'
         ? { ...current, rewrite_rules: [...existing, ...rules] }
@@ -2980,6 +3036,7 @@ export default function PurgeConsole(): JSX.Element {
         return;
       }
       setDirty(true);
+      setTableUndo(undoSnapshot(kind, rules, t('整理词表')));
       setDraft((d) =>
         d
           ? {
@@ -3196,6 +3253,7 @@ export default function PurgeConsole(): JSX.Element {
             if (!ok) return;
           }
           setDirty(true);
+          setTableUndo(undoSnapshot(kind, currentRules, t('导入 CSV（替换）')));
           setDraft((d) =>
             d
               ? {
@@ -3227,6 +3285,7 @@ export default function PurgeConsole(): JSX.Element {
           return;
         }
         setDirty(true);
+        setTableUndo(undoSnapshot(kind, currentRules, t('导入 CSV（追加）')));
         setDraft((d) =>
           d
             ? {
@@ -3635,6 +3694,17 @@ export default function PurgeConsole(): JSX.Element {
           >
             {t('对比出厂默认')}
           </Button>
+          {/* 撤销上一次词表批量变更：整理/粘贴/导入都可能一把改几十行 */}
+          {tableUndo ? (
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-table-undo"
+              onClick={undoTableChange}
+            >
+              {t('撤销「{{label}}」', { label: tableUndo.label })}
+            </Button>
+          ) : null}
           {/* 重置为默认：只填草稿（用户确认后再点保存），不直接写库 */}
           <Button
             variant="outline"

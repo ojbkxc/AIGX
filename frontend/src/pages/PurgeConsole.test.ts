@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   activeSummaryText,
+  applyUndo,
   buildActiveSummary,
   clampNumInput,
   capError,
@@ -18,6 +19,7 @@ import {
   statsExportNote,
   sortWarningsBySeverity,
   tidyRules,
+  undoSnapshot,
   warningReportText,
   settingsEqual,
   tidySummary,
@@ -242,6 +244,31 @@ describe('parseBatchRules', () => {
     const { rules, skipped } = parseBatchRules('好的, then');
     expect(rules).toHaveLength(0);
     expect(skipped).toBe(1);
+  });
+});
+
+describe('undoSnapshot / applyUndo', () => {
+  const rules = [{ from: 'a', to: 'b' }];
+
+  it('快照拷贝数组（后续追加不会污染快照）', () => {
+    const snap = undoSnapshot('dead_zone', rules, '整理词表');
+    rules.push({ from: 'c', to: 'd' });
+    expect(snap.rules).toHaveLength(1);
+    rules.pop();
+  });
+
+  it('撤销把快照写回对应表，另一张表不动', () => {
+    const draft = {
+      rewrite_rules: [{ from: 'x', to: 'y' }],
+      synonym_pairs: [{ from: 'p', to: 'q' }],
+    } as never;
+    const back = applyUndo(draft, undoSnapshot('dead_zone', rules, '整理词表'));
+    expect(back.rewrite_rules).toEqual(rules);
+    expect(back.synonym_pairs).toEqual([{ from: 'p', to: 'q' }]);
+
+    const back2 = applyUndo(draft, undoSnapshot('synonym', rules, '批量粘贴'));
+    expect(back2.synonym_pairs).toEqual(rules);
+    expect(back2.rewrite_rules).toEqual([{ from: 'x', to: 'y' }]);
   });
 });
 

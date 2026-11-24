@@ -247,6 +247,31 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
   await expect(page.getByText('最近用过')).toBeVisible();
 });
 
+test('27 · 词表批量粘贴后可一键撤销回变更前', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const rows = page.locator('.purge-rules .purge-rule-row');
+  const before = await rows.count();
+  // 撤销按钮在没变更前不存在
+  await expect(page.getByTestId('purge-table-undo')).toHaveCount(0);
+
+  await page.getByTestId('purge-batch-paste-open').click();
+  await page.getByLabel('批量粘贴内容').fill('甲\tA\n乙\tB');
+  await page.getByRole('button', { name: '解析并添加' }).click();
+  await expect(rows).toHaveCount(before + 2);
+
+  // 撤销入口出现（点名是哪一次操作）
+  const undo = page.getByTestId('purge-table-undo');
+  await expect(undo).toBeVisible();
+  await expect(undo).toContainText(/批量粘贴/);
+
+  await undo.click();
+  await expect(rows).toHaveCount(before);
+  // 撤销后入口消失（只保留一步）
+  await expect(page.getByTestId('purge-table-undo')).toHaveCount(0);
+});
+
 test('26 · 词表字段给非数组时不崩（进入点兜成空表）', async ({ page }) => {
   await mockPurge(page);
   // rewrite_rules 给字符串：`.map()`/`.length` 都在父层渲染作用域，guard 接不住
