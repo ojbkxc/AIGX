@@ -3207,6 +3207,29 @@ export default function PurgeConsole(): JSX.Element {
     [addToast, deadZoneIssues, synonymIssues, t],
   );
 
+  /**
+   * Esc 关闭当前打开的面板（批量粘贴 → 预设详情，按「最上层」顺序取第一个）。
+   *
+   * 为什么需要：这些面板打开后，键盘用户只能 Tab 到关闭按钮才能收起；鼠标用户也
+   * 习惯按 Esc。列表里所有弹层都声明在这里，新增面板要同步加进 `closers`，
+   * 否则就会出现「别的都能 Esc、这个不能」的不一致。
+   */
+  useEffect(() => {
+    const closers: Array<{ isOpen: boolean; close: () => void }> = [
+      { isOpen: batchPaste !== null, close: () => setBatchPaste(null) },
+    ];
+    const active = closers.find((item) => item.isOpen);
+    if (!active) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      // 正在文本框里打字时也允许 Esc 收起面板（textarea 的 Esc 没有其他用途）
+      event.stopPropagation();
+      active.close();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [batchPaste]);
+
   /** 撤销上一次词表批量变更（整理 / 批量粘贴 / 导入 CSV 共用一条撤销） */
   const undoTableChange = useCallback((): void => {
     const snapshot = tableUndo;

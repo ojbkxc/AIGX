@@ -284,6 +284,25 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('52 · Esc 能收起批量粘贴面板（键盘用户不必找关闭按钮）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const panel = page.getByTestId('purge-batch-paste-panel');
+  await expect(panel).toHaveCount(0);
+
+  await page.getByTestId('purge-batch-paste-open').click();
+  await expect(panel).toBeVisible();
+
+  // 在文本框里打字后按 Esc 也要能收起（textarea 的 Esc 没有别的用途）
+  await page.getByLabel('批量粘贴内容').fill('甲\tA');
+  await page.keyboard.press('Escape');
+  await expect(panel).toHaveCount(0);
+
+  // 面板关掉后字表内容不受影响（Esc 只收起面板，不执行添加）
+  await expect(page.locator('[data-purge-fix="dead-zone-table"] .purge-rule-row')).toHaveCount(3);
+});
+
 test('51 · 规则行的操作按钮带可读名称（几十行同名「删除」无法分辨）', async ({ page }) => {
   const rules = [
     { from: 'alpha', to: '1' },
