@@ -219,10 +219,29 @@ test.describe('签到时区边界（page.clock 定针）', () => {
     // 两条计划：23:45（北京帧未到 → 今天）与 09:00（已过 → 明天跨日）
     // A2A flat 契约（camelCase）。nextRunAt=null 时 .ck-sched-next 走 nextRunLabel(time, tz)，
     // 正是本用例要锁的日切边界；providerRows 缺失会渲染异常，需显式给数组。
-    const scheduleEntry = (id: string, label: string, time: string) => ({
+    // v3.5.1 的「下一账号」由 providerRows[].nextAccountAt 驱动（旧结构是
+    // 顶层 nextRunAt + `.ck-sched-next`）。两个计划各给一个「下一账号」时刻，
+    // 正好落在日切边界两侧：北京 23:45 未到 → 今天；09:00 已过 → 明天。
+    const nextAt = (hhmm: string, plusDay: number) => {
+      const [h, m] = hhmm.split(':').map(Number);
+      // 北京帧当天 00:00 = pinned 的 UTC 15:30 属于北京当日；用 UTC 换算
+      const base = new Date(pinnedMs);
+      const beijingMidnightUtc =
+        Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate(), -8, 0, 0) +
+        plusDay * 86_400_000;
+      return beijingMidnightUtc + h * 3_600_000 + m * 60_000;
+    };
+    const scheduleEntry = (id: string, label: string, time: string, nextAccountAt: number) => ({
       id, label, displayLabel: label, enabled: true, time,
       providers: ['workbuddy'], providerTimes: {},
-      providerRows: [],
+      providerRows: [
+        {
+          id: 'workbuddy', label: 'WorkBuddy 国内版', time, timeEnd: '',
+          accountCount: 1, attemptedCount: 0, pendingCount: 1,
+          firedToday: false, overdue: false, builtin: false,
+          nextAccountAt,
+        },
+      ],
       retryTime: '', providerRetryTimes: {},
       retryGapMinutes: 0, retryLimit: 0,
       lastFiredDate: null, lastFiredToday: false,
@@ -239,7 +258,12 @@ test.describe('签到时区边界（page.clock 定针）', () => {
           auto: {
             enabled: true, running: false,
             providerOptions: [{ id: 'workbuddy', label: 'WorkBuddy 国内版', builtinTime: null }],
-            schedules: [scheduleEntry('sch-1', '夜班', '23:45'), scheduleEntry('sch-2', '早班', '09:00')],
+            schedules: [
+              // 夜班 23:45 未到 → 下一个账号就是今天 23:45
+              scheduleEntry('sch-1', '夜班', '23:45', nextAt('23:45', 0)),
+              // 早班 09:00 已过 → 下一个账号是明天 09:00（跨日）
+              scheduleEntry('sch-2', '早班', '09:00', nextAt('09:00', 1)),
+            ],
             time: '23:45', providers: ['workbuddy'],
             lastFiredDate: null, lastFiredToday: false, lastResult: null, nextRunAt: null,
           },

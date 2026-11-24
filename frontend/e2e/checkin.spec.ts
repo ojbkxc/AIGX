@@ -71,7 +71,8 @@ test.describe('签到中心', () => {
       if (r.url().includes('/api/checkin-center/run')) calls.push(r.postData() ?? '');
     });
 
-    await page.getByRole('button', { name: /立即全部签到/ }).click();
+    // v3.5.1：按钮由「立即全部签到」改名为「全部签到」（分区标题栏）
+    await page.getByRole('button', { name: '全部签到', exact: true }).first().click();
     await expect.poll(() => calls.length, { timeout: 5000 }).toBeGreaterThan(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -94,7 +95,8 @@ test.describe('签到中心', () => {
   test('定时签到 Tab 有总开关与间隔设置', async ({ page, pageErrors }) => {
     await page.locator('.sub-tab', { hasText: '定时签到' }).click();
     // v3.5.1 起定时页是「总开关卡 + 计划卡 + 执行规则卡」，不再是单张设置行
-    await expect(page.locator('.main-content')).toContainText('启用定时签到');
+    // v3.5.1：总开关卡标题是「自动执行总开关」（旧文案「启用定时签到」已随重构下线）
+    await expect(page.locator('.main-content')).toContainText('自动执行总开关');
     await expect(page.locator('.main-content')).toContainText('账号间隔');
     // 至少一个开关控件
     await expect(page.getByRole('switch').first()).toBeVisible();
