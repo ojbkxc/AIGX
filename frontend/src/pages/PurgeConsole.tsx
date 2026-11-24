@@ -2749,9 +2749,22 @@ export default function PurgeConsole(): JSX.Element {
       </Card>
 
       {/* 技能扫描快照：让 skill_inject 配置可验证（目录里到底扫到了什么）。
-          关键词可点：填进预览样例并滚到预览区——直接验证「这个词会不会命中」。 */}
-      {skills.length > 0 && (
-        <Card title={t('技能扫描快照')}>
+          关键词可点：填进预览样例并滚到预览区——直接验证「这个词会不会命中」。
+          **空目录也渲染**：以前 `skills.length > 0` 才显示，用户把 SKILL.md 放进
+          目录却没看到卡片，会以为「扫描成功但没内容」；现在给空态文案 + 重新扫描。 */}
+      <Card
+        title={t('技能扫描快照')}
+        actions={
+          <Button variant="outline" size="sm" onClick={() => void refreshSkills()}>
+            {t('重新扫描')}
+          </Button>
+        }
+      >
+        {skills.length === 0 ? (
+          <p className="purge-empty" data-purge-fix="skill-snapshot">
+            {t('当前技能目录扫不到任何 SKILL.md（技能注入不会生效）。放好文件后点「重新扫描」。')}
+          </p>
+        ) : (
           <ul className="purge-skill-list" data-purge-fix="skill-snapshot">
             {skills.map((skill) => (
               <li key={skill.name}>
@@ -2786,8 +2799,8 @@ export default function PurgeConsole(): JSX.Element {
               </li>
             ))}
           </ul>
-        </Card>
-      )}
+        )}
+      </Card>
 
       {/* 预设库：内置 prompt 集合浏览 + 一键落盘（放在结构化模板之上，应用后直接在下方看到结果） */}
       <PresetsSection
