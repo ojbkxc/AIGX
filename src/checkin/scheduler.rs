@@ -879,14 +879,22 @@ async fn run_makeup_round(
 }
 
 /// `HH:MM` 格式校验。
+///
+/// 逐字节判 ASCII 数字，**不对 `&str` 取字节下标切片**：`value[0..2]` 在
+/// 2 字节 UTF-8 字符后接 `:` 的输入（`"é:00"` 的字节是 `C3 A9 3A 30 30`）
+/// 上会切在字符中间直接 panic —— 这个函数是请求路径入口
+/// （`POST /api/checkin-center/schedules` 的 `time` 字段），外部输入可达。
 pub fn is_hhmm(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 5 || bytes[2] != b':' {
         return false;
     }
-    let (Ok(h), Ok(m)) = (value[0..2].parse::<u32>(), value[3..5].parse::<u32>()) else {
+    let digits = [bytes[0], bytes[1], bytes[3], bytes[4]];
+    if !digits.iter().all(u8::is_ascii_digit) {
         return false;
-    };
+    }
+    let h = (bytes[0] - b'0') as u32 * 10 + (bytes[1] - b'0') as u32;
+    let m = (bytes[3] - b'0') as u32 * 10 + (bytes[4] - b'0') as u32;
     h < 24 && m < 60
 }
 
@@ -1246,6 +1254,18 @@ mod tests {
         assert!(!is_hhmm("09-00"));
         assert!(!is_hhmm(""));
         assert!(!is_hhmm("aa:bb"));
+    }
+
+    /// 多字节输入不得 panic：`"é:00"` 的字节是 `C3 A9 3A 30 30`，长度 5 且
+    /// `bytes[2] == b':'` 都成立，旧实现 `&value[0..2]` 会切在 `é` 的字符中间。
+    #[test]
+    fn hhmm_validation_rejects_multibyte_without_panic() {
+        assert!(!is_hhmm("é:00"));
+        assert!(!is_hhmm("中:00"));
+        assert!(!is_hhmm("0é:00"));
+        // 合法性判据本身没放宽
+        assert!(is_hhmm("00:00"));
+        assert!(is_hhmm("23:59"));
     }
 
     #[test]
