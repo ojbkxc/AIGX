@@ -189,10 +189,17 @@ pub fn build_bridge_with_client(
                     // `uid` / `deviceId` / `machineId` / `variant`（见 `import.rs` 里
                     // A2A 记录的真实形状）。前三者对应 `x-uid` / `x-device-id` /
                     // `x-machine-id` 三个身份头，`variant` 决定 SOLO 还是 IDE 两套 UA。
-                    // 早先这里只传 token，这些头一个都发不出去 —— 上游因此把请求
-                    // 判成「非法客户端」（`11-128 request illegal`）或「参数不对」
-                    // （`[4001] the param is invalid`）。
-                    // 账号里显式配了同名头的以账号为准，不覆盖。
+                    //
+                    // ── 为什么缺字段要补、而不是「账号没填就不发」（2026-11-25 线上）──
+                    // 早先这里只传 token，这些头一个都发不出去。实测（同一 token 只增删
+                    // 单头）证明 `x-uid` / `x-device-id` / `x-machine-id` **删掉也能出
+                    // 真回复**，所以它们不是硬门槛；真正硬门槛是 `x-app-id` 与
+                    // `x-ide-version-code`（缺了上游直接
+                    // `4001 bad request: binding: expr_path=…, cause=missing required
+                    // parameter`）。这两个在 `registry.rs` 的 trae 头表里是常量。
+                    // 因此这里对缺失的**身份**字段补一个稳定值：留空会让每次请求的
+                    // 设备指纹都是「空」，与真实客户端形态不符，也给上游留了做设备
+                    // 风控的理由。值取自账号自身 uid 的摘要，跨请求稳定、不编造新身份。
                     if spec.kind == "trae" {
                         for (field, header) in [
                             ("uid", "x-uid"),
@@ -210,6 +217,15 @@ pub fn build_bridge_with_client(
                             {
                                 headers.push((header.to_string(), value));
                             }
+                        }
+                        // `variant` 决定 UA：凭证里没有时按 SOLO 走（线上 9 个 trae
+                        // 账号的 `variant` 实测全是 `solo`；`trae.rs` 里缺省也走 IDE，
+                        // 这里显式给出 SOLO 免得两条缺省口径打架）。
+                        if !headers
+                            .iter()
+                            .any(|(name, _)| name.eq_ignore_ascii_case("x-aigx-trae-variant"))
+                        {
+                            headers.push(("x-aigx-trae-variant".to_string(), "solo".to_string()));
                         }
                     }
                     if let Some(bridge) = crate::bridge::session::build(

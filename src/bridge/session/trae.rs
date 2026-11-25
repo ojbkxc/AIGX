@@ -46,6 +46,190 @@ use crate::bridge::{
 
 const CHAT_PATH: &str = "/api/agent/v3/llm_utils_chat";
 const DEFAULT_MODEL: &str = "glm-5.2";
+
+/// Trae 上游认得的 `config_name` 全表（90 个）。
+///
+/// ── 为什么必须有这张表（2026-11-25 线上实测的根因）──────────────
+/// `config_name` 是 Trae **自己的模型清单键**，不是 OpenAI 的 `model` 字段：
+/// 上游拿它去查 `get_detail_param` 那张表，查不到就回流内
+/// `event:error {"code":4001,"message":"We're sorry, the param is invalid…"}`。
+/// 而 AIGX 的全局模型映射（`kv.model_mappings`）会把请求侧名字改写成**内部 ID**
+/// 再发给上游 —— 线上那条是
+/// `deepseek-v4.1-flash` → `sn-deepseek-v4-1-flash-1017`（`provider: null`，
+/// 对所有供应商生效）。于是 failover 里 9 个账号**全**报
+/// `[4001] the param is invalid`，而同一个 token 直接打上游出 token ——
+/// 账号、token、指纹头**都没有问题**，错的是这一格模型名。
+///
+/// 逐条实测（同一 token、同一头集，只改 `config_name`）：
+///   `deepseek-v4.1-flash`            → 200 + 真回复
+///   `deepseek-v4-1-flash`            → 4001
+///   `deepseek-v4-1-flash-1017`       → 4001
+///   `sn-deepseek-v4-1-flash-1017`    → 4001
+///   `DeepSeek-V4.1-Flash`            → 4001（大小写敏感）
+///   `DeepSeek-V4-Pro`                → 200 + 真回复
+///   `deepseek-v4-pro-0813`           → 4001
+/// 另一条全局映射同理：`glm-5.3-flash` 能过，`sn-glm-5-3-flash` 4001。
+///
+/// `model` 字段**不参与**这个判定（填内部 ID、填别名、留空都出 200 + 真回复），
+/// 所以只归一 `config_name`，`model` 保持调用方原样，日志/计费口径不变。
+///
+/// 表内容取自 `POST /api/ide/v1/get_detail_param` 的
+/// `function=solo_work_lite`(54) ∪ `chat_v3`(65) ∪ `solo_agent`(75) 去重，
+/// 即三条 function 的并集（90 个），避免只认一条时把别的 function 的模型挡掉。
+const TRAE_CONFIG_NAMES: &[&str] = &[
+    "DeepSeek-V4-Flash",
+    "DeepSeek-V4-Flash-Official",
+    "DeepSeek-V4-Pro",
+    "DeepSeek-V4-Pro-Official",
+    "Doubao-Seed-2.0-Code",
+    "Doubao-Seed-2.0-Code-auto",
+    "Doubao-Seed-2.1-Pro",
+    "Doubao-Seed-2.1-Turbo",
+    "Doubao-Seed-2.1-Turbo-auto",
+    "Doubao-Seed-Code",
+    "Doubao-Seed-Evolving",
+    "Doubao-Seed-Evolving-auto",
+    "Doubao_1_6",
+    "aquila",
+    "browser_use_subagent",
+    "computer_use_subagent",
+    "custom_model_1M",
+    "custom_model_1M_text",
+    "custom_model_200k",
+    "custom_model_200k_text",
+    "custom_model_claude",
+    "custom_model_deepseek_chat",
+    "custom_model_deepseek_reasoner",
+    "custom_model_deepseek_v4",
+    "custom_model_doubao_1M",
+    "custom_model_doubao_256k",
+    "custom_model_gemini",
+    "custom_model_gpt-5",
+    "custom_model_gpt-6",
+    "custom_model_kimi",
+    "custom_model_no-fc",
+    "custom_model_placeholder",
+    "custom_model_tokenpony_deepseek_v4_1_flash",
+    "custom_model_tokenpony_glm_5_3",
+    "custom_model_tokenpony_qwen3_8_max",
+    "custom_model_vercel",
+    "custom_model_vercel_gemini",
+    "deepseek-v4.1-flash",
+    "doubao-for-auto",
+    "explore_sub_agent_v2",
+    "fast_apply",
+    "fast_apply_new",
+    "file_search_agent",
+    "glm-4.6",
+    "glm-4.6-auto",
+    "glm-4.7",
+    "glm-4.7-auto",
+    "glm-5",
+    "glm-5-turbo",
+    "glm-5.1",
+    "glm-5.1_advisor",
+    "glm-5.2",
+    "glm-5.2_advisor_default",
+    "glm-5.2_advisor_doubao",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.3-flashx",
+    "glm-5.4",
+    "input_optimization",
+    "kimi-k2",
+    "kimi-k2-0905",
+    "kimi-k2.6",
+    "kimi-k2.7-code",
+    "kimi-k2.8-preview",
+    "kimi-k3",
+    "kimi-k3-auto",
+    "kimi-k3.1-pro",
+    "kimi-k3.1-pro-auto",
+    "kimi-k3.1-pro-highspeed",
+    "mimo-v2.6-flash",
+    "mimo-v2.6-pro",
+    "minimax-m2",
+    "minimax-m2-auto",
+    "minimax-m2.1",
+    "minimax-m2.1-auto",
+    "minimax-m3",
+    "minimax-m3.1-flash",
+    "qwen-3.5",
+    "qwen-3.7-plus",
+    "qwen3-coder",
+    "qwen3.8-flash",
+    "qwen3.8-max",
+    "qwen4-max",
+    "sagitta",
+    "search_agent_qwen_fast",
+    "search_agent_qwen_fast-0710",
+    "seed-code-pro-0430",
+    "step-5-preview",
+    "summary",
+    "title_generation",
+];
+
+/// 把请求侧模型名归一成 Trae 认得的 `config_name`。
+///
+/// 三级（顺序有意义，逐条对应线上实测）：
+/// 1. **原样命中**（逐字节相等）→ 用它。`deepseek-v4.1-flash` / `DeepSeek-V4-Pro`
+///    这类正常请求走这一支，行为逐字节不变。
+/// 2. **规范化命中**：全局映射给的是 slug 化的内部 ID（`sn-deepseek-v4-1-flash-1017`），
+///    那里 `-` 既可能代表 `.` 也可能代表原来的 `-`（`sn-glm-5-3-flash` 对应的是
+///    `glm-5.3-flash`，不是 `glm.5.3.flash`），所以**不能**做字符替换再比 ——
+///    改成「只留字母数字、小写」后比对（[`fold_key`]），并允许逐级剥掉尾部的
+///    纯数字版本段（`-1017` / `-0813`）。
+/// 3. 都不中 → **原样发出**并留一行 warn。
+///
+/// 为什么第 3 支不换成默认模型：换掉等于「用户要 A 却拿到 B」，是一次静默的语义
+/// 改写（错模型答得越顺，越没人发现）。原样发出至少让上游如实 4001，告警里也点了名。
+/// 认不出的名字本来也不该走到这里 —— 那是映射表配错，得让人看见。
+fn resolve_config_name(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_MODEL;
+    }
+    // 1) 原样命中（零涟漪：线上能过的真名一个字节都不动）
+    if let Some(hit) = TRAE_CONFIG_NAMES.iter().find(|name| **name == trimmed) {
+        return hit;
+    }
+    // 2) 规范化命中：先剥 `sn-` 前缀，再逐级剥尾部纯数字段
+    let mut candidate = trimmed.strip_prefix("sn-").unwrap_or(trimmed);
+    loop {
+        let key = fold_key(candidate);
+        if !key.is_empty() {
+            if let Some(hit) = TRAE_CONFIG_NAMES.iter().find(|name| fold_key(name) == key) {
+                return hit;
+            }
+        }
+        // 剥掉尾部 `-<纯数字>` 这一段（版本后缀），剥不动就收手
+        match candidate.rsplit_once('-') {
+            Some((head, tail)) if !head.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => {
+                candidate = head;
+            }
+            _ => break,
+        }
+    }
+    // 3) 原样发出 + 告警（不替换成别的模型，见函数注释）
+    tracing::warn!(
+        "trae: 模型 '{}' 不在上游 config_name 清单里（全局模型映射可能把它改写成了内部 ID），\
+         原样发出，上游大概率回 [4001] the param is invalid —— 请核对模型映射",
+        trimmed
+    );
+    trimmed
+}
+
+/// 比对键：只留 ASCII 字母数字并小写。
+///
+/// 用它而不是逐字符替换 `-`↔`.`：slug 化是有损的，`glm-5.3-flash` 与
+/// `glm-5-3-flash` 的 `-` 含义不同（一个是分隔符、一个是小数点），替换法会把
+/// 后者变成 `glm.5.3.flash` 而永远比不上。抹掉分隔符后两种写法落在同一个键上。
+fn fold_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
 const DEFAULT_MAX_TOKENS: i64 = 1_000_000;
 /// 真实 Trae 客户端 UA —— **两套**，由账号凭证里的 `variant` 决定。
 ///
@@ -586,12 +770,17 @@ pub fn build_body(req: &ChatFormat) -> Value {
     } else {
         model
     };
+    // `config_name` 必须是 Trae 上游认得的名字（见 [`resolve_config_name`]：全局模型
+    // 映射会把请求侧名字改写成 `sn-…` 内部 ID，直接发过去必得 4001）。
+    let config_name = resolve_config_name(model);
 
     let mut out = Map::new();
     out.insert("messages".to_string(), Value::Array(messages));
     out.insert("function".to_string(), json!("solo_work_lite"));
     out.insert("stream".to_string(), json!(true));
-    out.insert("config_name".to_string(), json!(model));
+    out.insert("config_name".to_string(), json!(config_name));
+    // `model` 不参与上游的 config 查表（实测填内部 ID / 别名 / 留空都出 200 + 真回复），
+    // 保持调用方原样，免得动到日志与计费的上游口径。
     out.insert("model".to_string(), json!(model));
     if let Some(tools) = &req.tools {
         // SOLO 要求 `function.parameters` 是 JSON 字符串
@@ -825,6 +1014,105 @@ mod tests {
         let mut req = format(vec![user("hi")]);
         req.tool_choice = Some(json!("read_file"));
         assert_eq!(build_body(&req)["tool_choice"], "read_file");
+    }
+
+    /// `config_name` 必须是 Trae 认得的真名 —— 全局模型映射把请求侧名字改写成
+    /// `sn-…` 内部 ID 时（线上那条是 `sn-deepseek-v4-1-flash-1017`），直接发过去
+    /// 必得流内 `[4001] the param is invalid`，而 failover 会把它当「账号坏了」，
+    /// 把好账号一个个打进冷却。
+    ///
+    /// 改前行为（可区分性）：`config_name` 直接取 `req.model`，`sn-…` 原样发出 → 4001。
+    #[test]
+    fn config_name_is_normalized_back_from_internal_ids() {
+        // 线上实际被映射出来的那个内部 ID → 必须还原成上游真名
+        for raw in [
+            "sn-deepseek-v4-1-flash-1017",
+            "deepseek-v4-1-flash-1017",
+            "sn-glm-5-3-flash",
+        ] {
+            let mut req = format(vec![user("hi")]);
+            req.model = raw.to_string();
+            let body = build_body(&req);
+            let sent = body["config_name"].as_str().unwrap_or("");
+            assert!(
+                TRAE_CONFIG_NAMES.contains(&sent),
+                "config_name 必须落在上游清单里，实际 {sent:?}（输入 {raw:?}）"
+            );
+            assert_ne!(sent, raw, "内部 ID 不得原样发给上游：{raw:?}");
+        }
+    }
+
+    /// 正常名字逐字节不变（零涟漪）：`deepseek-v4.1-flash` / `DeepSeek-V4-Pro`
+    /// 这些线上实测能过的一律原样，不做任何改写。
+    #[test]
+    fn a_real_config_name_passes_through_untouched() {
+        for raw in [
+            "deepseek-v4.1-flash",
+            "DeepSeek-V4-Pro",
+            "glm-5.3-flash",
+            "qwen4-max",
+            "step-5-preview",
+        ] {
+            let mut req = format(vec![user("hi")]);
+            req.model = raw.to_string();
+            assert_eq!(
+                build_body(&req)["config_name"],
+                json!(raw),
+                "{raw:?} 是上游真名，不该被改写"
+            );
+        }
+    }
+
+    /// `model` 字段不参与上游 config 查表（实测填内部 ID / 别名 / 留空都出真回复），
+    /// 所以只归一 `config_name`，`model` 保持调用方原样 —— 日志与计费口径不变。
+    #[test]
+    fn model_field_keeps_the_callers_value() {
+        let mut req = format(vec![user("hi")]);
+        req.model = "sn-deepseek-v4-1-flash-1017".to_string();
+        let body = build_body(&req);
+        assert_eq!(body["model"], "sn-deepseek-v4-1-flash-1017");
+        assert_eq!(body["config_name"], "deepseek-v4.1-flash");
+    }
+
+    /// 大小写不敏感兜底：`GLM-5.3` 能落到 `glm-5.3`（上游大小写敏感，实测
+    /// `DeepSeek-V4.1-Flash` 4001 而 `deepseek-v4.1-flash` 200）。
+    #[test]
+    fn case_insensitive_fallback_maps_to_the_listed_spelling() {
+        let mut req = format(vec![user("hi")]);
+        req.model = "GLM-5.3".to_string();
+        assert_eq!(build_body(&req)["config_name"], "glm-5.3");
+
+        // 但**不是**任何大小写都改：`DeepSeek-V4.1-Flash` 上游没有这个拼法，
+        // 表里只有小写 `deepseek-v4.1-flash`，兜底会把它折过去（避免 4001）。
+        let mut req = format(vec![user("hi")]);
+        req.model = "DeepSeek-V4.1-Flash".to_string();
+        assert_eq!(build_body(&req)["config_name"], "deepseek-v4.1-flash");
+    }
+
+    /// 认不出的名字**原样发出**并告警，不静默换成别的模型：
+    /// 换模型等于「用户要 A 却拿到 B」，错模型答得越顺越没人发现。
+    #[test]
+    fn an_unknown_name_is_sent_as_is_rather_than_silently_replaced() {
+        let mut req = format(vec![user("hi")]);
+        req.model = "totally-made-up-model".to_string();
+        assert_eq!(
+            build_body(&req)["config_name"],
+            "totally-made-up-model",
+            "认不出的名字不该被替换成默认模型"
+        );
+    }
+
+    /// 空模型名回落 `DEFAULT_MODEL`（既有契约），且该默认值本身必须在上游清单里。
+    #[test]
+    fn empty_model_falls_back_to_a_name_trae_actually_knows() {
+        let mut req = format(vec![user("hi")]);
+        req.model = "   ".to_string();
+        let body = build_body(&req);
+        assert_eq!(body["config_name"], DEFAULT_MODEL);
+        assert!(
+            TRAE_CONFIG_NAMES.contains(&DEFAULT_MODEL),
+            "DEFAULT_MODEL 必须是上游认得的 config_name，否则空模型请求必 4001"
+        );
     }
 
     #[test]
