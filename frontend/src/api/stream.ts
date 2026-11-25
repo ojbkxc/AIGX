@@ -95,7 +95,7 @@ function handleSseFrame(
     onDelta({ content: '', isEnd: true });
     return true;
   }
-  if (parsed.type === 'error' || parsed.error !== undefined) {
+  if (parsed.type === 'error' || (parsed.error !== undefined && parsed.error !== null)) {
     const msg = errorMessage(parsed.error ?? parsed.message) ?? '上游流式错误';
     return emitError(onDelta, msg);
   }

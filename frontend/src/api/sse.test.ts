@@ -216,6 +216,13 @@ describe('parseSseFrame — 多行 data 与 event 名', () => {
     expect(ended).toBe(true);
   });
 
+  it('error:null 不算错误帧（旧判据 `parsed.error !== undefined` 会把 null 当错误）', () => {
+    const frame = 'data: {"choices":[{"delta":{"content":"正常"}}],"error":null}\n\n';
+    const { deltas, ended } = collect(frame);
+    expect(deltas).toEqual([{ content: '正常', isEnd: false, kind: 'content' }]);
+    expect(ended).toBe(false);
+  });
+
   it('非规范上游（一块内多条独立 data）仍逐条解析 —— 兼容回退', () => {
     const frame =
       'data: {"choices":[{"delta":{"content":"你"}}]}\n'
