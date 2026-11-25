@@ -290,9 +290,9 @@ impl ModelMetadataRegistry {
 
     /// 查询某模型的元信息（覆盖 > 插件目录 > 内置推断 / models.dev 补空位）。
     ///
-    /// 上下文/输出两列遵循**同一账本**规则（见 [`Self::resolve_with_sources_for`]）：
-    /// 插件目录申报了任一列时两列都以它为准（未申报的留空，不跨账本借值），
-    /// 否则两列走「通用知识」账本（内置表 / models.dev）。
+    /// 上下文/输出两列遵循**物理不变量**规则（见 [`Self::resolve_with_sources_for`]）：
+    /// 申报方申报了哪一列就用哪一列，缺的那列可从通用知识（内置表 / models.dev）
+    /// 补；两列拼起来若 `输出 > 上下文`，由终检让低权威的那列退场。
     ///
     /// `channel_owned_by`：渠道维度推导的归属（优先于名字推断）；
     /// 覆盖项存在时整体以覆盖为准。models.dev 只填「内置推断没声明」的
@@ -328,10 +328,12 @@ impl ModelMetadataRegistry {
 
     /// 同 [`Self::resolve_with_sources`]，但带 **provider 维度**。
     ///
-    /// 上下文/输出两列遵循**同一账本**规则：插件目录申报了任一列，两列就
-    /// 一起锁定在这份申报上（未申报的那列留空，不回落内置表 / models.dev）
-    /// —— 逐字段独立回落会把两列拼到两个账本上（Trae 只申报 200k 上下文，
-    /// models.dev 借来官方 Kimi-K3 的 1M 输出 → 物理不可能组合）。
+    /// 上下文/输出两列遵循**物理不变量**规则（不是「同一账本」）：申报方申报了
+    /// 哪一列就用哪一列，缺的那列允许从通用知识补 —— 判据是采信后是否
+    /// `输出 ≤ 上下文`。跨账本会拼出不可能组合时才让低权威的那列退场
+    /// （Trae 只申报 200k 上下文，models.dev 借来官方 Kimi-K3 的 1M 输出
+    /// → 1M > 200k，丢输出；Antigravity 只申报 64k 输出、内置上下文 200k
+    /// → 容得下，两列都留）。
     ///
     /// 为什么要 provider：插件的模型目录本身就是 provider 维度的
     /// （`plugin_host::model_catalog`，由 `wasm::catalog` 的并集回推），
@@ -375,26 +377,20 @@ impl ModelMetadataRegistry {
         let mut context_source: &str;
         let mut max_output_tokens: Option<u32>;
         let mut output_source: &str;
-        // ── 上下文/输出两列的**同一账本**规则（ledger lock）────────────
+        // ── 上下文/输出两列的采信规则（判据是**物理不变量**，不是账本）────
         //
         // 修复点（v1.0.103 线上实测 34 行「输出 > 上下文」的根因）：旧逻辑
         // 逐字段独立回落 —— 插件目录申报了上下文、没申报输出时，输出那列
         // 会去 models.dev 借**另一个供应商的同名模型**的数（Trae 渠道的
         // Kimi-K3 只申报 200k 上下文，models.dev 里 moonshotai/kimi-k3 是
         // 1M/1M 的官方 API 账本），拼出 200k 上下文 + 1M 输出的物理不可能
-        // 组合。两列各拿一家的数，谁也不代表这条链。
+        // 组合。
         //
-        // 规则：插件目录申报了**任一列**（上下文或输出）时，两列一起锁定在
-        // 这份申报上 —— 报了的那列照用，没报的那列留空，**不再回落**内置表
-        // / models.dev 补值。宁可留空（=「这家上游没申报」，前端按未声明
-        // 展示，管理员可覆盖），也不从社区目录借一个可能是另一个同名模型
-        // 的数 —— 借来的值看起来像申报过，比空更误导。数值碰巧「合理」
-        // （out ≤ ctx）也一样不借：合理的是数值，不是账本。
-        //
-        // 插件目录一行都没申报时，走既有回落：上下文按内置表、输出按
-        // models.dev（内置表没有输出维度）—— builtin 与 models.dev 都是
-        // 「按模型名的通用知识」，不含渠道维度，属于同一类账本，允许内部
-        // 补空位（openai_compatible 等无插件目录的渠道依赖它）。
+        // 判据是**不变量**，不是账本：两列可以来自不同账本，只要采信之后
+        // `out ≤ ctx`（或其中一列缺失）。只有**会拼出不可能组合**的跨账本
+        // 才被拒绝 —— 不能因为「不是同一家说的」就丢值（那会把只申报了
+        // 一列的家一起打成空，Antigravity 那批 17 行就是这么被误伤的）。
+        // 冲突时谁退场见函数尾的终检。
         let declared = plugin_budget(model, plugin_provider)
             .filter(|b| b.context_length.is_some() || b.max_output_tokens.is_some());
         // 插件目录**申报了哪一列就用哪一列**，缺的那列允许从通用账本
@@ -429,101 +425,117 @@ impl ModelMetadataRegistry {
             .iter()
             .map(|c| (c.clone(), serde_json::Value::from("builtin")))
             .collect();
-        if crate::config::models_dev_enabled() {
-            if let Some(dev) = super::models_dev::lookup(model) {
-                // 补空位**逐列**开放：块内全是 `is_none()` 判断，插件已申报的
-                // 列不会被覆盖，所以缺哪列就补哪列。
-                //
-                // 曾经这里是整段 `if !plugin_ledger`——只要插件申报了任一列，
-                // models.dev 一个字段都不许进来。那是把「防止跨账本拼出不可能
-                // 组合」做成了「禁止跨账本」，代价是 Antigravity 那种只申报
-                // 输出的家，上下文列被锁成 null（用户白丢一个能显示的值）。
-                //
-                // 现在只补空位，跨账本的矛盾由函数尾部的 `out > ctx` 终检兜住：
-                // Trae 的 out 被补成 384000、ctx 是申报的 200000，终检发现
-                // 384000 > 200000 → 丢输出，与旧行为等价；Antigravity 的
-                // out=64000 < ctx=200000 → 保留。
-                {
-                    let dev_context = dev.context.and_then(|n| u32::try_from(n).ok());
-                    let dev_output = dev.output.and_then(|n| u32::try_from(n).ok());
-                    // ── 内置表过时修正：整组改用 models.dev ──────────────
-                    //
-                    // builtin 与 models.dev 同属「按模型名的通用知识」账本，
-                    // 但内置表是**静态快照**，会滞后：`glm-5` 前缀钉死
-                    // 128000，而社区目录里 GLM-5 早已是 1M 上下文 / 131k
-                    // 输出。按字段各取一半就会拼出 128k/131k 的物理不可能
-                    // 组合（线上 17 行）。
-                    //
-                    // 判据：**models.dev 的输出上限比内置上下文还大** ⇒ 内置
-                    // 那条上下文明显过时，此时整组采用 models.dev 的自洽对
-                    // （ctx / out 两列同源同值，来源都标 modelsdev），而不是
-                    // 丢掉输出（丢值）或留下不可能组合。前提是 models.dev
-                    // 自己的 ctx 容得下它的 out —— 容不下说明目录自身矛盾，
-                    // 交给下面那道物理守卫兜底。
-                    let stale_builtin = match (context_source, context_length, dev_output) {
-                        ("builtin", Some(builtin), Some(output)) if output > builtin => {
-                            matches!(dev_context, Some(context) if context >= output)
-                        }
-                        _ => false,
-                    };
-                    if stale_builtin {
-                        context_length = dev_context;
+        // models.dev 条目在块外先取出来：下面的「内置表过时修正」与终检都要
+        // 用它，而 `lookup` 是进程内查表（零 IO），取一次比查两次清楚。
+        let dev = if crate::config::models_dev_enabled() {
+            super::models_dev::lookup(model)
+        } else {
+            None
+        };
+        let dev_context = dev
+            .as_ref()
+            .and_then(|d| d.context)
+            .and_then(|n| u32::try_from(n).ok());
+        let dev_output = dev
+            .as_ref()
+            .and_then(|d| d.output)
+            .and_then(|n| u32::try_from(n).ok());
+        if let Some(dev) = dev.as_ref() {
+            // 补空位**逐列**开放：块内全是 `is_none()` 判断，插件已申报的
+            // 列不会被覆盖，所以缺哪列就补哪列。
+            //
+            // 曾经这里是整段 `if !plugin_ledger`——只要插件申报了任一列，
+            // models.dev 一个字段都不许进来。那是把「防止跨账本拼出不可能
+            // 组合」做成了「禁止跨账本」，代价是 Antigravity 那种只申报
+            // 输出的家，上下文列被锁成 null（用户白丢一个能显示的值）。
+            //
+            // 现在只补空位，跨账本的矛盾由函数尾部的 `out > ctx` 终检兜住：
+            // Trae 的 out 被补成 384000、ctx 是申报的 200000，终检发现
+            // 384000 > 200000 → 丢输出，与旧行为等价；Antigravity 的
+            // out=64000 < ctx=200000 → 保留。
+            // ── 内置表过时修正：整组改用 models.dev ──────────────
+            // builtin 与 models.dev 同属「按模型名的通用知识」账本，
+            // 但内置表是**静态快照**，会滞后：`glm-5` 前缀钉死
+            // 128000，而社区目录里 GLM-5 早已是 1M 上下文 / 131k
+            // 输出。按字段各取一半就会拼出 128k/131k 的物理不可能
+            // 组合（线上 17 行）。
+            //
+            // 判据：**models.dev 的输出上限比内置上下文还大** ⇒ 内置
+            // 那条上下文明显过时，此时整组采用 models.dev 的自洽对
+            // （ctx / out 两列同源同值，来源都标 modelsdev），而不是
+            // 丢掉输出（丢值）或留下不可能组合。前提是 models.dev
+            // 自己的 ctx 容得下它的 out —— 容不下说明目录自身矛盾，
+            // 交给下面那道物理守卫兜底。
+            let stale_builtin = match (context_source, context_length, dev_output) {
+                ("builtin", Some(builtin), Some(output)) if output > builtin => {
+                    matches!(dev_context, Some(context) if context >= output)
+                }
+                _ => false,
+            };
+            if stale_builtin {
+                context_length = dev_context;
+                context_source = "modelsdev";
+                max_output_tokens = dev_output;
+                output_source = "modelsdev";
+            } else {
+                if context_length.is_none() {
+                    context_length = dev_context;
+                    if context_length.is_some() {
                         context_source = "modelsdev";
-                        max_output_tokens = dev_output;
-                        output_source = "modelsdev";
-                    } else {
-                        if context_length.is_none() {
-                            context_length = dev_context;
-                            if context_length.is_some() {
-                                context_source = "modelsdev";
-                            }
-                        }
-                        // 输出上限：内置表没这个维度，插件目录没申报时由
-                        // models.dev 补
-                        if max_output_tokens.is_none() {
-                            max_output_tokens = dev_output;
-                            if max_output_tokens.is_some() {
-                                output_source = "modelsdev";
-                            }
-                        }
                     }
                 }
-                // 能力标签只有「默认 chat」（名字没命中任何特征）时才补，
-                // embedding / rerank 等显式推断结果原样保留
-                if capabilities.len() == 1 && capabilities[0] == "chat" {
-                    if dev.images {
-                        capabilities.push("vision".to_string());
-                        cap_sources
-                            .insert("vision".to_string(), serde_json::Value::from("modelsdev"));
-                    }
-                    if dev.video {
-                        capabilities.push("video".to_string());
-                        cap_sources
-                            .insert("video".to_string(), serde_json::Value::from("modelsdev"));
-                    }
-                    if dev.tool_call {
-                        capabilities.push("tools".to_string());
-                        cap_sources
-                            .insert("tools".to_string(), serde_json::Value::from("modelsdev"));
-                    }
-                    if dev.reasoning {
-                        capabilities.push("reasoning".to_string());
-                        cap_sources.insert(
-                            "reasoning".to_string(),
-                            serde_json::Value::from("modelsdev"),
-                        );
+                // 输出上限：内置表没这个维度，缺位就由 models.dev 补 —— 补完
+                // 若与上下文矛盾，终检会丢它（Trae 的 1M 输出正是这样被挡掉的）。
+                // 不因为「申报方在别处说过话」就整列拒补：那会把 Trae 里那些
+                // 数值本来就不冲突的行（GLM-5.3 的 131k 装得进 200k）也一起丢空。
+                if max_output_tokens.is_none() {
+                    max_output_tokens = dev_output;
+                    if max_output_tokens.is_some() {
+                        output_source = "modelsdev";
                     }
                 }
             }
+            // 能力标签只有「默认 chat」（名字没命中任何特征）时才补，
+            // embedding / rerank 等显式推断结果原样保留
+            if capabilities.len() == 1 && capabilities[0] == "chat" {
+                if dev.images {
+                    capabilities.push("vision".to_string());
+                    cap_sources.insert("vision".to_string(), serde_json::Value::from("modelsdev"));
+                }
+                if dev.video {
+                    capabilities.push("video".to_string());
+                    cap_sources.insert("video".to_string(), serde_json::Value::from("modelsdev"));
+                }
+                if dev.tool_call {
+                    capabilities.push("tools".to_string());
+                    cap_sources.insert("tools".to_string(), serde_json::Value::from("modelsdev"));
+                }
+                if dev.reasoning {
+                    capabilities.push("reasoning".to_string());
+                    cap_sources.insert(
+                        "reasoning".to_string(),
+                        serde_json::Value::from("modelsdev"),
+                    );
+                }
+            }
         }
-        // ── 物理不变量守卫：采信的输出上限必须落在采信的上下文窗口内 ──
+        // ── 物理不变量终检：采信的输出上限必须落在采信的上下文窗口内 ──
         //
-        // 兜底：上面的「内置表过时修正」已经处理了 builtin 上下文滞后于
-        // 社区目录的常态（整组改用 models.dev），这里只兜住两种残余 ——
-        // ① models.dev 目录自身矛盾（输出 > 它自己的上下文）；② 上游申报
-        // 自相矛盾（输出 > 上下文）。规则统一：**保上下文、丢输出**（留空），
-        // 宁可少一列也不展示物理不可能的数。管理员覆盖路径不受此限 ——
+        // 兜底两种残余：① models.dev 目录自身矛盾（输出 > 它自己的上下文）；
+        // ② 上游申报自相矛盾（输出 > 上下文）。管理员覆盖路径不受此限 ——
         // 显式填写，全权在人（见 `override_may_express_output_over_context`）。
+        //
+        // 谁退场：**一律丢输出、保上下文**。
+        //
+        // 理由两条：
+        //   ① 上下文是模型的固有属性，展示它是无害的（前端拿它做「装得下吗」
+        //      的提示）；而输出上限直接决定上游会不会按它截断，填错了会让
+        //      请求被截。
+        //   ② 更关键：**冲突的两列里，上下文几乎总是一手信息**（申报的、
+        //      或内置表按名字给的稳定值），而输出那列往往是社区目录里另一个
+        //      同名模型的数（Trae 的 1M 输出就是月之暗面官方 API 的账本）。
+        //      用「别家的输出」去反推「本家的上下文」（把它抬到 1M）会让整行
+        //      都变成别家的模型 —— 那正是 v1.0.103 线上最误导的形态。
         if let (Some(context), Some(output)) = (context_length, max_output_tokens) {
             if output > context {
                 max_output_tokens = None;
@@ -957,20 +969,14 @@ mod tests {
         crate::plugin_host::model_catalog::remove(&large);
     }
 
-    // ── 同一账本规则（ledger lock）+ 物理不变量守卫 ───────────────────
+    // ── 物理不变量判据 + 终检（谁退场）─────────────────────────────────
     //
-    // 这一组覆盖修复点的两个面：① 跨账本混拼（一列 plugin、另一列
-    // builtin/modelsdev）在旧实现的逐字段回落下会出现，凡「两列必须同源
-    // 或留空」的断言旧实现都拿不到；② 「输出 > 上下文」的物理不可能组合
-    // 在旧实现上会原样透出。
+    // 这一组覆盖修复点的两个面：① 跨账本混拼在旧实现的逐字段回落下会拼出
+    // 「输出 > 上下文」，凡「矛盾组合不得出现」的断言旧实现都拿不到；
+    // ② 反过来，**不矛盾**的跨账本组合必须被补全（不许因为「不是同一家
+    // 说的」就把能显示的列丢成空）—— antigravity 那 17 行就是被旧规则
+    // 误伤的形态。
 
-    /// 核心场景（Trae/Kimi-K3 线上实况）：插件目录只申报上下文、没申报
-    /// 输出，而 models.dev 里有**另一家同名模型**的完整账本（官方 API 的
-    /// 1M/1M）。输出那列必须留空，不向对方账本借。
-    ///
-    /// 旧实现逐字段回落：out 会取到 models.dev 的 1_048_576 —— 本用例的
-    /// `None` 断言在旧实现上必红。
-    #[test]
     /// 核心场景（Trae/Kimi-K3 线上实况）：插件目录只申报上下文（200k）、
     /// 没申报输出，而 models.dev 里有**另一家同名模型**的完整账本
     /// （moonshotai 官方 API 的 1M/1M）。
@@ -981,6 +987,7 @@ mod tests {
     ///
     /// 旧实现（逐字段无终检）会把 1_048_576 原样透出 —— 本用例的 `None`
     /// 断言在旧实现上必红。
+    #[test]
     fn plugin_context_with_impossible_modelsdev_output_drops_output() {
         let _seed_guard = crate::model::models_dev::seed_for_test([(
             "unit-meta-ledger-kimi".to_string(),
