@@ -39,10 +39,12 @@ import {
 } from '../../pages/chat-icons';
 import { AsstFileChips } from './AsstMessages';
 import { REASONING_LEVELS } from '../../pages/chat-state';
+import { MAX_IMAGE_BYTES, MAX_IMAGES } from './asst-attach';
 
-/** 附件上限：张数与单张字节。超了给明确提示，不做静默丢弃（与 asst-attach 同值）。 */
-export const MAX_IMAGES = 6;
-export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+/** 附件上限从 `asst-attach` 再导出：判据只有一份（那边同时有文本附件上限）。
+ *  此前 composer 自带一份 `6 / 10MB`，与 `planAttachmentAdd` 的两个常量并存 ——
+ *  改一处忘一处就是「界面说 6 张、实际收了 3 张」这类对不上的 bug。 */
+export { MAX_IMAGE_BYTES, MAX_IMAGES };
 
 /** 字节数 → 人性化尺寸（composer 底部的附件合计用；纯展示，自带实现） */
 function formatSize(bytes: number): string {
@@ -87,6 +89,25 @@ export interface AsstComposerProps {
   canSend: boolean;
   onSend: () => void;
   onStop: () => void;
+  /* ── 以下为判据层接线（asst-model.ts / asst-attach.ts）───────────
+   * 全部可选：缺省时行为与接线前逐字一致（少一层提示，不多一次误判）。 */
+  /**
+   * 当前模型是否还在可用列表里（`modelAvailability().available`）。
+   * `false` 时只在胶囊旁给一行警告 —— **不清空已选模型**（列表刷新失败一次
+   * 就丢掉用户的模型，比「可能失效」更糟）。
+   */
+  modelAvailable?: boolean;
+  /**
+   * 当前模型是否支持读图（`modelSupportsImages()`）。
+   * `false` 才提示；`undefined`（未声明）= 不提示。
+   */
+  modelSupportsImages?: boolean;
+  /** 推理等级候选（`resolveEffortOptions().options`；缺省用 A2A 八档表） */
+  effortLevels?: string[];
+  /** 模型声明了、但本网关不认的档位（`resolveEffortOptions().dropped`） */
+  effortDropped?: string[];
+  /** 附件/文件正在读取（读取期间禁用发送，避免半份附件被发出去） */
+  reading?: boolean;
 }
 
 /** 等级展示：内部存小写，界面统一首字母大写（Max / High…） */
@@ -102,6 +123,7 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
     models, model, modelsLoading, onRefreshModels, onPickModel,
     reasoning, onPickReasoning, mode, modeDisabled, onModeChange,
     effort, onPickEffort, busy, awaiting, canSend, onSend, onStop,
+    modelAvailable, modelSupportsImages, effortLevels, effortDropped, reading,
   } = props;
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
@@ -115,6 +137,19 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
 
   const disabled = busy || awaiting;
   const displayModel = model || t('选择模型…');
+  /**
+   * 有图但当前模型明确不支持读图 → **只提示不拦**。
+   *
+   * 与 A2A 同一口径（`assistant-composer.tsx:115` 的原话是「只提示，不拦：
+   * 用户可能就是想想试，网关会回明确错误」）。这里静默丢掉图片会让人以为
+   * 「我贴的图丢了」，那是更坏的结果。`modelSupportsImages === undefined`
+   * （模型未声明能力）不提示 —— 「不知道」不等于「不支持」。
+   */
+  const imageWarning = images.length > 0 && modelSupportsImages === false;
+  /** 模型清单已拉到但当前模型不在其中：提示，但不改选中的值 */
+  const modelWarning = modelAvailable === false && !modelsLoading;
+  /** 候选档位：缺省用 A2A 八档表（调用方传了就用调用方的，超范围档已剔除） */
+  const levelOptions = effortLevels && effortLevels.length ? effortLevels : REASONING_LEVELS;
 
   /* 自增高（上限 168px ≈ 8 行）。+2px 是亚像素差的余量：scrollHeight 取整后
      常比实际内容矮半像素，不留余量浏览器会误判「还差一行」而挂上滚动条。 */
@@ -139,6 +174,21 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
     return key ? models.filter((name) => name.toLowerCase().includes(key)) : models;
   }, [models, keyword]);
 
+  /**
+   * 一批文件按类型分流（A2A 只有一个 `onAddFiles` 入口、由 hook 内部分拣；
+   * AIGX 这里分成两个回调，所以分流的判据落在组件里）。
+   *
+   * 粘贴/拖拽**必须走这里**而不是直接 `onAddImages`：用户从资源管理器拖一个
+   * `.json` 进来时，旧实现会把它当图片送进 canvas 解码 → 解不出 → 静默消失。
+   */
+  const routeFiles = useCallback((picked: FileList | File[]): void => {
+    const list = Array.from(picked);
+    const pictureFiles = list.filter((file) => file.type.startsWith('image/'));
+    const textFiles = list.filter((file) => !file.type.startsWith('image/'));
+    if (pictureFiles.length) onAddImages(pictureFiles);
+    if (textFiles.length) onAddFiles(textFiles);
+  }, [onAddFiles, onAddImages]);
+
   const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>): void => {
     const items = event.clipboardData?.items;
     if (!items) return;
@@ -150,7 +200,7 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
     }
     if (picked.length) {
       event.preventDefault();
-      onAddImages(picked);
+      routeFiles(picked);
     }
   };
 
@@ -172,7 +222,7 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
         onDrop={(event) => {
           event.preventDefault();
           setDragging(false);
-          if (event.dataTransfer?.files?.length) onAddImages(event.dataTransfer.files);
+          if (event.dataTransfer?.files?.length) routeFiles(event.dataTransfer.files);
         }}
       >
         {images.length > 0 && (
@@ -226,6 +276,31 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
           </div>
         )}
 
+        {/* 附件读取中：图片要过 canvas 降采样、文本要读全文，都是异步的。
+            读取期间不禁用输入，但要让用户看见「还有东西在路上」。 */}
+        {reading && (
+          <div className="asst-composer-warn" data-testid="asst-attach-reading">
+            <ChatImageIcon size={13} />
+            {t('正在读取附件…')}
+          </div>
+        )}
+
+        {/* 有图但模型明确不支持读图：只提示，不拦发送（A2A 同口径） */}
+        {imageWarning && (
+          <div className="asst-composer-warn" data-testid="asst-image-warning">
+            <ChatImageIcon size={13} />
+            {t('当前模型未声明支持读图：图片仍会发送，上游可能返回明确错误。')}
+          </div>
+        )}
+
+        {/* 模型清单已拉到但当前模型不在其中：提示且不改选中值 */}
+        {modelWarning && (
+          <div className="asst-composer-warn" data-testid="asst-model-warning">
+            <ChatSlidersIcon size={13} />
+            {t('当前模型不在可用模型列表里，请重新选择，或到「模型管理」检查是否已启用。')}
+          </div>
+        )}
+
         <div className="asst-bar">
           {/* 左：添加图片 / 文本文件 */}
           <input
@@ -235,7 +310,7 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
             multiple
             hidden
             onChange={(event) => {
-              if (event.currentTarget.files?.length) onAddImages(event.currentTarget.files);
+              if (event.currentTarget.files?.length) routeFiles(event.currentTarget.files);
               event.currentTarget.value = '';
             }}
           />
@@ -246,7 +321,7 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
             multiple
             hidden
             onChange={(event) => {
-              if (event.currentTarget.files?.length) onAddFiles(event.currentTarget.files);
+              if (event.currentTarget.files?.length) routeFiles(event.currentTarget.files);
               event.currentTarget.value = '';
             }}
           />
@@ -422,7 +497,7 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
                       <span>{t('跟随模型')}</span>
                       <span className="asst-sub-tail">{!reasoning && <ChatCheckIcon size={12} />}</span>
                     </button>
-                    {REASONING_LEVELS.map((level) => (
+                    {levelOptions.map((level) => (
                       <button
                         type="button"
                         key={level}
@@ -435,6 +510,13 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
                       </button>
                     ))}
                   </div>
+                  {/* 模型声明了、但本网关不认的档位：如实报出来，不静默丢弃
+                      （选了也只会被后端忽略，用户会以为「我设了 max 怎么没变」） */}
+                  {effortDropped && effortDropped.length > 0 && (
+                    <p className="asst-pop-note" data-testid="asst-effort-dropped">
+                      {t('该模型声明了本网关不支持的推理档位：{{levels}}', { levels: effortDropped.join(' / ') })}
+                    </p>
+                  )}
                 </>
               )}
             </AsstPopover>
@@ -467,7 +549,7 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
           })}
         </p>
       )}
-      {images.length > 0 && (
+      {images.length > 0 && !imageWarning && (
         <p className="asst-composer-hint">
           <ChatImageIcon size={12} />
           {t('图片会随本条消息发送；模型不支持图片时会由上游返回明确错误。')}

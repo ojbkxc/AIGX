@@ -18,6 +18,7 @@ import { Copy, Check, Pencil, Trash2, RefreshCw, GitFork } from 'lucide-react';
 import MessageViewer from '../MessageViewer';
 import ToolCallCard from './ToolCallCard';
 import { ChatAvatar, ChatFileIcon } from '../../pages/chat-icons';
+import { messageActions } from './asst-message-ops';
 import type { DebugMessage } from './types';
 
 /** 字节数 → 人性化尺寸。
@@ -86,6 +87,17 @@ export default function AsstMessages({
               : 'done';
 
         if (isUser) {
+          /**
+           * 判据统一走 `asst-message-ops.ts`（对齐 A2A）：忙碌时编辑/删除都不执行、
+           * 空消息不给复制。此前这里是三个裸 `disabled={busy}` + 无条件复制按钮，
+           * 空消息（编辑后未填）也能点复制，复制出来是空串。
+           */
+          const actions = messageActions({
+            role: 'user',
+            content: message.content,
+            isLast,
+            busy,
+          });
           return (
             <div className="asst-msg user" key={index}>
               <div className="asst-msg-usercol">
@@ -103,38 +115,44 @@ export default function AsstMessages({
                       ))}
                     </div>
                   ) : null}
+                  {/* 文本附件（JSON / .info）：与图片同泡，形态同 A2A 的 asst-msg-files */}
+                  {message.files?.length ? <AsstFileChips files={message.files} /> : null}
                   {message.content ? <p>{message.content}</p> : null}
                 </div>
                 <div className="asst-msg-acts">
-                  <button
-                    type="button"
-                    className="asst-msg-act"
-                    title={t('复制')}
-                    aria-label={t('复制')}
-                    onClick={() => onCopy(index)}
-                  >
-                    {copiedIndex === index ? <Check size={12} /> : <Copy size={12} />}
-                  </button>
-                  <button
-                    type="button"
-                    className="asst-msg-act"
-                    title={t('编辑并重发')}
-                    aria-label={t('编辑并重发')}
-                    disabled={busy}
-                    onClick={() => onBeginEdit(index)}
-                  >
-                    <Pencil size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    className="asst-msg-act"
-                    title={t('删除这条')}
-                    aria-label={t('删除这条')}
-                    disabled={busy}
-                    onClick={() => onDelete(index)}
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                  {actions.copy && (
+                    <button
+                      type="button"
+                      className="asst-msg-act"
+                      title={t('复制')}
+                      aria-label={t('复制')}
+                      onClick={() => onCopy(index)}
+                    >
+                      {copiedIndex === index ? <Check size={12} /> : <Copy size={12} />}
+                    </button>
+                  )}
+                  {actions.edit && (
+                    <button
+                      type="button"
+                      className="asst-msg-act"
+                      title={t('编辑并重发')}
+                      aria-label={t('编辑并重发')}
+                      onClick={() => onBeginEdit(index)}
+                    >
+                      <Pencil size={12} />
+                    </button>
+                  )}
+                  {actions.remove && (
+                    <button
+                      type="button"
+                      className="asst-msg-act"
+                      title={t('删除这条')}
+                      aria-label={t('删除这条')}
+                      onClick={() => onDelete(index)}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -167,54 +185,69 @@ export default function AsstMessages({
                 <ToolCallCard calls={[]} state={toolState} usage={message.usage} />
               ) : null}
 
-              {/* 操作条：流式中的最后一条不显示（正在生成，按钮全是无意义的），
-                  其余情况（含停止/失败）都保留 —— 用户要能复制已收到的内容、
-                  重试或者分叉。 */}
-              {!(isLast && message.toolState === 'streaming') ? (
-                <div className="asst-msg-acts">
-                  <button
-                    type="button"
-                    className="asst-msg-act"
-                    title={t('复制')}
-                    aria-label={t('复制')}
-                    onClick={() => onCopy(index)}
-                  >
-                    {copiedIndex === index ? <Check size={12} /> : <Copy size={12} />}
-                  </button>
-                  {isLast && (
-                    <button
-                      type="button"
-                      className="asst-msg-act"
-                      title={t('重新生成')}
-                      aria-label={t('重新生成')}
-                      disabled={busy}
-                      onClick={() => onRegenerate(index)}
-                    >
-                      <RefreshCw size={12} />
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="asst-msg-act"
-                    title={t('从此条分叉')}
-                    aria-label={t('从此条分叉')}
-                    disabled={busy}
-                    onClick={() => onFork(index)}
-                  >
-                    <GitFork size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    className="asst-msg-act"
-                    title={t('删除这条')}
-                    aria-label={t('删除这条')}
-                    disabled={busy}
-                    onClick={() => onDelete(index)}
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              ) : null}
+              {/* 操作条：判据走 `messageActions`（忙碌一律不执行、空消息不给复制、
+                  重生成只对「最后一条有正文的助手消息」）。流式中的最后一条整条隐藏：
+                  正在生成，按钮全是无意义的；停止/失败态保留 —— 用户要能复制已收到
+                  的内容、重试或分叉。 */}
+              {(() => {
+                const actions = messageActions({
+                  role: 'assistant',
+                  content: message.content,
+                  streaming: message.toolState === 'streaming',
+                  isLast,
+                  busy,
+                  hasToolCalls: Boolean(message.toolCalls?.length),
+                });
+                if (isLast && message.toolState === 'streaming') return null;
+                return (
+                  <div className="asst-msg-acts">
+                    {actions.copy && (
+                      <button
+                        type="button"
+                        className="asst-msg-act"
+                        title={t('复制')}
+                        aria-label={t('复制')}
+                        onClick={() => onCopy(index)}
+                      >
+                        {copiedIndex === index ? <Check size={12} /> : <Copy size={12} />}
+                      </button>
+                    )}
+                    {actions.regenerate && (
+                      <button
+                        type="button"
+                        className="asst-msg-act"
+                        title={t('重新生成')}
+                        aria-label={t('重新生成')}
+                        onClick={() => onRegenerate(index)}
+                      >
+                        <RefreshCw size={12} />
+                      </button>
+                    )}
+                    {actions.fork && (
+                      <button
+                        type="button"
+                        className="asst-msg-act"
+                        title={t('从此条分叉')}
+                        aria-label={t('从此条分叉')}
+                        onClick={() => onFork(index)}
+                      >
+                        <GitFork size={12} />
+                      </button>
+                    )}
+                    {actions.remove && (
+                      <button
+                        type="button"
+                        className="asst-msg-act"
+                        title={t('删除这条')}
+                        aria-label={t('删除这条')}
+                        onClick={() => onDelete(index)}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         );

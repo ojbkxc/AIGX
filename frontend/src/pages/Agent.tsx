@@ -1,18 +1,29 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Bot, Send, Square, ShieldAlert, Terminal, Eye, Wrench, Brain,
-  CheckCircle2, XCircle, History, MessageSquarePlus, Trash2, Lock, Settings,
+  Bot, Send, Square, ShieldAlert, Terminal, Eye, Brain,
+  History, MessageSquarePlus, Trash2, Lock, Settings,
 } from 'lucide-react';
 import ModelPicker from '../components/ModelPicker';
 import SessionDrawer from '../components/chat/SessionDrawer';
 import EffortPicker, { type Effort } from '../components/chat/EffortPicker';
 import StreamPhaseIndicator from '../components/chat/StreamPhase';
+import ToolCallCard from '../components/chat/ToolCallCard';
 import AgentSettingsPanel from '../components/AgentSettingsPanel';
 import { MobileDrawer } from '../components/ui';
 import { usePasteGuard } from '../hooks/usePasteGuard';
 import MessageViewer from '../components/MessageViewer';
 import { api } from '../api';
+import {
+  appendStep,
+  finalizeItems,
+  itemsFromSteps,
+  phaseOverrides,
+  stepFromEvent,
+  stepsFromTrace,
+  toToolCallStates,
+  type ToolAgentItem,
+} from '../components/chat/tool-steps';
 import { A2aAgentPanel } from './agent-a2a-panel';
 import './Agent.css';
 import './agent-a2a.css';
@@ -38,21 +49,17 @@ interface PendingApproval {
   arguments: string;
 }
 
-/** 工具轨迹步骤（决策回放用） */
-interface ToolStep {
-  name: string;
-  args?: string;
-  ok?: boolean;
-  text?: string;
-  kind: 'call' | 'approval' | 'result';
-  approved?: boolean;
-}
-
+/** 工具轨迹（决策回放用）。
+ *
+ *  AIGX 的 SSE 只给 `name`（没有 call id），所以「调用 ↔ 结果」的配对在
+ *  `tool-steps.ts` 里按同名先进先出做（见那边的文件头）。这里只存配对后的
+ *  **一次调用一项**，渲染交给共享的 `ToolCallCard` —— 与 /chat 同一张卡、
+ *  同一套三态，两个页面不会各说一套「成功/失败」。 */
 interface ChatMsg {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  toolSteps?: ToolStep[];
+  toolItems?: ToolAgentItem[];
 }
 
 /** 会话列表项（后端 AgentSession） */
@@ -227,23 +234,20 @@ export default function Agent(): JSX.Element {
       const restored: ChatMsg[] = [];
       for (const m of data.messages ?? []) {
         if (m.role !== 'user' && m.role !== 'assistant') continue;
-        const steps: ToolStep[] = [];
         const mid = String(++msgIdRef.current);
-        if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
-          for (const raw of m.tool_calls as Array<Record<string, unknown>>) {
-            const type = raw.type as string;
-            if (type === 'tool_call') {
-              steps.push({ kind: 'call', name: String(raw.name ?? ''), args: String(raw.arguments ?? ''), ok: true });
-            } else if (type === 'approval_request') {
-              steps.push({ kind: 'approval', name: String(raw.name ?? ''), approved: undefined });
-            } else if (type === 'approval_resolved') {
-              steps.push({ kind: 'approval', name: String(raw.name ?? ''), approved: raw.approved === true });
-            } else if (type === 'tool_result') {
-              steps.push({ kind: 'result', name: String(raw.name ?? ''), ok: raw.ok === true, text: typeof raw.text === 'string' ? raw.text : undefined });
-            }
-          }
-        }
-        restored.push({ id: mid, role: m.role as 'user' | 'assistant', content: m.content, toolSteps: steps.length ? steps : undefined });
+        // 历史会话落库的是**轨迹**（tool_call / approval_* / tool_result 三种条目
+        // 各自一条），不是配对后的卡片。这里一次配对成「一次调用一张卡」，
+        // 与流式期间 `appendStep` 走同一段判据（同名 FIFO），不会出现
+        // 「历史里是成功、流式时是失败」这种两套口径。
+        const items = m.role === 'assistant' && Array.isArray(m.tool_calls)
+          ? itemsFromSteps(stepsFromTrace(m.tool_calls))
+          : [];
+        restored.push({
+          id: mid,
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+          toolItems: items.length ? items : undefined,
+        });
       }
       setMessages(restored);
       setError('');
@@ -337,6 +341,8 @@ export default function Agent(): JSX.Element {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    /** 用户中止（不是错误：卡片按「已取消」收尾，不报错也不洗成完成） */
+    let aborted = false;
     try {
       await api.agentChatStream(sid, text, (ev: AgentEvent) => {
         // 每个流式事件都推进停滞计时（StreamPhase 用）
@@ -360,25 +366,17 @@ export default function Agent(): JSX.Element {
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== asstId) return m;
-            const pushStep = (step: ToolStep): ChatMsg => ({
-              ...m,
-              toolSteps: [...(m.toolSteps ?? []), step],
-            });
             if (ev.type === 'final' && typeof ev.content === 'string') {
               return { ...m, content: m.content + ev.content };
             }
             if (ev.type === 'error' && typeof ev.message === 'string') {
               return { ...m, content: m.content + `\n⚠️ ${describeAgentError(ev.message)}` };
             }
-            if (ev.type === 'tool_call' && typeof ev.name === 'string') {
-              return pushStep({ kind: 'call', name: ev.name, args: ev.arguments, ok: true });
-            }
-            if (ev.type === 'approval_resolved' && typeof ev.name === 'string') {
-              return pushStep({ kind: 'approval', name: ev.name, approved: ev.approved !== false });
-            }
-            if (ev.type === 'tool_result' && typeof ev.name === 'string') {
-              return pushStep({ kind: 'result', name: ev.name, ok: ev.ok === true, text: ev.text });
-            }
+            // 工具事件统一进「配对层」：调用/审批/结果三种事件都会更新**同一张卡**
+            // （此前是各 push 一行，读起来像流水账，且「这次成没成」要人眼在相邻
+            // 两行之间拼）。
+            const step = stepFromEvent(ev);
+            if (step) return { ...m, toolItems: appendStep(m.toolItems ?? [], step) };
             return m;
           }),
         );
@@ -386,10 +384,19 @@ export default function Agent(): JSX.Element {
       // 会话可能被自动命名，刷新抽屉列表
       void loadSessions();
     } catch (e) {
-      if ((e as Error).name !== 'AbortError') {
+      aborted = (e as Error).name === 'AbortError';
+      if (!aborted) {
         setError(describeAgentError(e instanceof Error ? e.message : String(e)));
       }
     } finally {
+      // 收尾：还在跑/等审批的调用按「这一轮结束了」定性；用户中止则标已取消。
+      // 不做「看起来成功就算成功」的猜测 —— 没有结果就是没有结果（卡片会标
+      // 「结果未回灌」），这是 A2A 的口径，也是「失败被画成成功」的解药。
+      setMessages((prev) => prev.map((m) => (
+        m.id === asstId && m.toolItems?.length
+          ? { ...m, toolItems: finalizeItems(m.toolItems, { cancelled: aborted }) }
+          : m
+      )));
       setBusy(false);
       abortRef.current = null;
     }
@@ -404,40 +411,21 @@ export default function Agent(): JSX.Element {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, pending]);
 
-  /** 工具轨迹步骤渲染（决策回放：调用 → 审批 → 结果） */
-  const renderStep = (step: ToolStep, i: number): ReactNode => {
-    if (step.kind === 'call') {
-      return (
-        <div className="agent-step agent-step-call" key={i}>
-          <Wrench size={12} />
-          <code>{step.name}</code>
-          {step.args && step.args !== '{}' && (
-            <span className="agent-step-args" title={step.args}>{step.args}</span>
-          )}
-        </div>
-      );
-    }
-    if (step.kind === 'approval') {
-      return (
-        <div className={`agent-step agent-step-approval ${step.approved === false ? 'denied' : ''}`} key={i}>
-          <ShieldAlert size={12} />
-          <span>{t('人工审批')}{step.approved === undefined ? '' : step.approved ? t('通过') : t('拒绝')}</span>
-        </div>
-      );
-    }
-    return (
-      <div className={`agent-step agent-step-result ${step.ok ? 'ok' : 'fail'}`} key={i}>
-        {step.ok ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
-        <span>{step.name}</span>
-        {step.text && (
-          <details className="agent-step-detail">
-            <summary>{t('结果')}</summary>
-            <pre>{step.text.length > 400 ? `${step.text.slice(0, 400)}…` : step.text}</pre>
-          </details>
-        )}
-      </div>
-    );
-  };
+  /** 工具轨迹卡片（决策回放：调用 → 审批 → 结果，一次调用一张卡）。
+   *
+   *  与 /chat 共用 `ToolCallCard`：逐条三态、失败着色、非法 JSON 标签、凭证遮蔽、
+   *  长输出折叠全都在那一张卡里。`labels`/`risks` 来自 `/api/agent/config` 的
+   *  `tools[]`（后端 registry 是中文名与风险位的唯一来源），`phases` 来自配对层
+   *  —— `ok:false` 的结果文本不一定长得像错误，只有后端那个布尔位说得准。 */
+  const renderToolCard = (items: ToolAgentItem[], streaming: boolean): JSX.Element => (
+    <ToolCallCard
+      calls={toToolCallStates(items)}
+      state={streaming ? 'streaming' : 'done'}
+      phases={phaseOverrides(items)}
+      labels={toolLabels}
+      risks={toolRisks}
+    />
+  );
 
   const hasMessages = messages.length > 0;
 
@@ -509,11 +497,7 @@ export default function Agent(): JSX.Element {
                 {m.role === 'user' ? <Terminal size={14} /> : <Bot size={14} />}
               </span>
               <div className="agent-msg-body">
-                {m.toolSteps && m.toolSteps.length > 0 && (
-                  <div className="agent-tool-steps">
-                    {m.toolSteps.map(renderStep)}
-                  </div>
-                )}
+                {m.toolItems && m.toolItems.length > 0 && renderToolCard(m.toolItems, busy && m.id === messages[messages.length - 1]?.id)}
                 {m.role === 'assistant' && m.content
                   ? <MessageViewer content={m.content} />
                   : <div className="agent-msg-content">{m.content}</div>}

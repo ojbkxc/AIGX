@@ -14,6 +14,7 @@ import { Badge, Button, EmptyState, Tooltip } from '../ui';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
 import { imageExtension, imageToolApi } from '../../api/endpoints/tools_image';
 import type { ImageJob, ImageJobStatus, ImageJobsView } from '../../types/tools-image';
+import { pollImageJob } from '../chat/tool-images';
 import './ToolImagePanel.css';
 
 const STATUS_TONE: Record<ImageJobStatus, 'success' | 'warning' | 'danger' | 'neutral' | 'info'> = {
@@ -80,6 +81,74 @@ export default function ToolImageJobsPanel(): JSX.Element {
     }, 10_000);
     return () => clearInterval(timer);
   }, [load]);
+
+  /**
+   * 进行中的任务逐个轮询（判据在 `chat/tool-images.ts::pollImageJob`）。
+   *
+   * ── 为什么要逐任务轮询，而不是只靠上面那个 10 秒整表刷新 ──────────
+   * 整表刷新是**匀速**的：一次生图通常 10–40 秒，用户看到的就是「生成中」
+   * 一格一格跳，最后一次性冒出来。逐任务轮询尊重后端给的 `poll_after_seconds`
+   * （上游限速时它会变长，忽略它就是自杀），并且把「已中止 / 已超时 / 已取消」
+   * 三种收尾分得清 —— 整表刷新只会让任务一直挂着 `running`。
+   *
+   * ── 三条不变量 ─────────────────────────────────────────────
+   * ①`uncertain` 不是失败：后端明说「结果不确定」（上游可能已扣费但回包丢了），
+   *   渲染成失败会诱导用户重试 → 重复扣费，所以它有自己的徽标与提示；
+   * ②轮询**永不自动重新提交生成**：重试是用户显式动作；
+   * ③超时后任务**仍在后台跑**：`pollImageJob` 返回 `timedOut` 而 phase 停在
+   *   running，这里只把控制权交回整表刷新，不谎报失败。
+   */
+  const polledRef = useRef<Set<string>>(new Set());
+  const [pollTick, setPollTick] = useState(0);
+
+  useEffect(() => {
+    if (!data) return;
+    const running = data.jobs.filter((job) => job.status === 'running');
+    for (const job of running) {
+      if (polledRef.current.has(job.job_id)) continue;
+      polledRef.current.add(job.job_id);
+      void pollImageJob({
+        jobId: job.job_id,
+        list: () => imageToolApi.listJobs(),
+        onUpdate: (next) => {
+          if (!next) return;
+          setData((prev) => {
+            if (!prev) return prev;
+            const at = prev.jobs.findIndex((item) => item.job_id === next.job_id);
+            if (at < 0) return prev;
+            const jobs = prev.jobs.slice();
+            jobs[at] = next;
+            return { ...prev, jobs };
+          });
+        },
+      }).then((result) => {
+        if (result.job && (result.phase === 'done' || result.phase === 'failed')) {
+          addToast(result.phase === 'done' ? t('图片已生成') : t('生图失败：{{error}}', { error: result.error ?? result.job.error ?? '—' }), result.phase === 'done' ? 'success' : 'error');
+        }
+        if (result.phase === 'uncertain') {
+          // 不报「失败」：结果不确定时要用户自己去核对，重试可能重复扣费
+          addToast(t('生图结果不确定，请先确认是否已扣费再决定是否重试'), 'warning');
+        }
+        if (result.timedOut || result.error) {
+          // 交回整表刷新：任务在服务端可能还在跑，等下一轮再判定。
+          // 必须先把 job_id 从已轮询集合里摘掉 —— 否则下一次 tick 会被
+          // 「已经轮询过」判据直接跳过，重试永远不生效。
+          polledRef.current.delete(job.job_id);
+          window.setTimeout(() => setPollTick((tick) => tick + 1), 30_000);
+        }
+        void load();
+      });
+    }
+  }, [addToast, data, load, pollTick, t]);
+
+  // 任务离开「生成中」后允许再次轮询（例如后端把它重置回 running）
+  useEffect(() => {
+    if (!data) return;
+    const alive = new Set(data.jobs.filter((job) => job.status === 'running').map((job) => job.job_id));
+    for (const id of [...polledRef.current]) {
+      if (!alive.has(id)) polledRef.current.delete(id);
+    }
+  }, [data]);
 
   // 任务刷新后为尚未拉取的成功结果补缩略图
   useEffect(() => {

@@ -39,12 +39,25 @@ import AsstComposer, { type AsstTextFile } from '../components/chat/AsstComposer
 import type { Effort } from '../components/chat/EffortPicker';
 import AsstSettingsDrawer from '../components/chat/AsstSettingsDrawer';
 import StreamPhaseIndicator from '../components/chat/StreamPhase';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { MobileDrawer } from '../components/ui';
 import { useToast } from '../components/Toast';
 import ChatSettingsPanel from '../components/ChatSettingsPanel';
 import { isAdmin } from '../lib/utils';
 import { mergeToolCallDelta } from '../lib/toolCallAdapter';
 import type { ChatStreamUsage, ToolCallDelta } from '../types';
+import {
+  MAX_IMAGES,
+  MAX_TEXT_FILES,
+  clearAttachments,
+  planAttachmentAdd,
+  prepareImage,
+  textFileOutcome,
+  type AttachmentSkipReason,
+  type FileLike,
+} from '../components/chat/asst-attach';
+import { modelAvailability, modelSupportsImages, resolveEffortOptions } from '../components/chat/asst-model';
+import { deleteMentionsTools } from '../components/chat/asst-message-ops';
 import { streamChat, type AssistantConfig } from './chat-state';
 import {
   DEFAULT_TITLE_PROMPT,
@@ -238,6 +251,8 @@ export default function Chat(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
   const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
+  /** 删除消息的确认弹窗（A2A 删除要二次确认，且提示工具结果一并删除） */
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const persistConfig = useCallback((next: AssistantConfig, note?: string) => {
     setConfig(next);
@@ -256,28 +271,68 @@ export default function Chat(): JSX.Element {
   }, []);
 
   /* ── 模型清单（A2A 走 /api/assistant/models；AIGX 走网关模型列表）── */
+  /** 逐模型能力位（`/api/models/available` 的 `capabilities`）：判断读图支持用 */
+  const [modelCaps, setModelCaps] = useState<Record<string, string[]>>({});
+  /** 逐模型声明的思考档位（`/api/models/meta` 的 `reasoning_levels`；管理员才有） */
+  const [declaredLevels, setDeclaredLevels] = useState<Record<string, string[]>>({});
   const refreshModels = useCallback(async () => {
     setModelsLoading(true);
     try {
       const res = await api.listModels();
       const raw = Array.isArray(res) ? res : res?.data;
-      const list = Array.isArray(raw)
-        ? (raw as Array<string | { id?: string }>)
-          .map((item) => (typeof item === 'string' ? item : item.id))
-          .filter((name): name is string => Boolean(name))
-        : [];
+      const rows = Array.isArray(raw) ? (raw as Array<string | { id?: string; capabilities?: unknown }>) : [];
+      const list = rows
+        .map((item) => (typeof item === 'string' ? item : item.id))
+        .filter((name): name is string => Boolean(name));
+      const caps: Record<string, string[]> = {};
+      for (const item of rows) {
+        if (!item || typeof item === 'string') continue;
+        const kinds = Array.isArray(item.capabilities) ? item.capabilities.filter((k): k is string => typeof k === 'string') : [];
+        if (item.id && kinds.length) caps[item.id] = kinds;
+      }
       setModels(list);
+      setModelCaps(caps);
       if (list.length && !configRef.current.model) {
         persistConfig({ ...configRef.current, model: list[0] });
       }
     } catch {
       setModels([]);
+      setModelCaps({});
     } finally {
       setModelsLoading(false);
     }
   }, [persistConfig]);
 
   useEffect(() => { void refreshModels(); }, [refreshModels]);
+
+  /**
+   * 逐模型声明的思考档位（可选数据源）。
+   *
+   * `/api/models/meta` 是**管理员**接口，普通用户 403、旧后端也可能没有 ——
+   * 因此：方法缺失（测试替身/老前端）直接跳过、请求失败静默降级，都不影响
+   * 模型清单本身。拿不到就退回「本地四档」，`resolveEffortOptions` 会如实标
+   * `source: 'fallback'`。
+   */
+  useEffect(() => {
+    const read = (api as { listModelMeta?: () => Promise<{ data?: Record<string, { reasoning_levels?: unknown }> }> }).listModelMeta;
+    if (typeof read !== 'function') return;
+    let cancelled = false;
+    void read()
+      .then((res) => {
+        if (cancelled) return;
+        const table = res?.data && typeof res.data === 'object' ? res.data : {};
+        const next: Record<string, string[]> = {};
+        for (const [name, meta] of Object.entries(table)) {
+          const levels = meta?.reasoning_levels;
+          if (Array.isArray(levels) && levels.length) {
+            next[name] = levels.filter((level): level is string => typeof level === 'string');
+          }
+        }
+        setDeclaredLevels(next);
+      })
+      .catch(() => { /* 403 / 老后端：没有声明就用兜底四档 */ });
+    return () => { cancelled = true; };
+  }, []);
 
   /* ── 贴底：新消息进来时滚到底（用户往上翻时不打扰）── */
   useEffect(() => {
@@ -413,6 +468,32 @@ export default function Chat(): JSX.Element {
     saveTitledIds([...titledRef.current]);
   }, []);
 
+  /* ── 附件收集（判据全在 `asst-attach.ts`：上限、类型、读取中占额度）── */
+  /** 已添加张数/个数的 ref 镜像：连续拖两次时 state 还没刷新，闭包里读到的是旧值 */
+  const imagesRef = useRef<string[]>([]);
+  imagesRef.current = images;
+  const filesRef = useRef<AsstTextFile[]>([]);
+  filesRef.current = files;
+  /** 读取中的张数（异步读取也要占额度，否则快速连拖能突破上限） */
+  const pendingImagesRef = useRef(0);
+  const pendingFilesRef = useRef(0);
+  const [attachmentsReading, setAttachmentsReading] = useState(false);
+  /** 附件代次：发送/切会话清空后，迟到的读取结果不再落回输入区 */
+  const attachGenRef = useRef(0);
+
+  /** 清空输入区附件（发送成功 / 切会话 / 新建对话三处同一判据）。
+   *  代次 +1 让**迟到的读取结果作废**：用户在图片还在 canvas 降采样时就点了发送，
+   *  那次读取落地时不能把图塞回已经清空的输入区。 */
+  const resetAttachments = useCallback((): void => {
+    attachGenRef.current += 1;
+    pendingImagesRef.current = 0;
+    pendingFilesRef.current = 0;
+    setAttachmentsReading(false);
+    const empty = clearAttachments();
+    setImages(empty.images);
+    setFiles(empty.files);
+  }, []);
+
   /* ── 发送 ── */
   const send = useCallback(async (text: string, extraImages: string[], extraFiles: AsstTextFile[]): Promise<void> => {
     const content = text.trim();
@@ -449,8 +530,9 @@ export default function Chat(): JSX.Element {
     };
     setMessages((prev) => [...prev, userMessage, { role: 'assistant', content: '…', toolState: 'streaming' }]);
     setDraft('');
-    setImages([]);
-    setFiles([]);
+    // 发送成功即清空附件（A2A 同口径：清空发生在「发送 / 切会话 / 新建对话」，
+    // 不是「切模型」——切模型只提示不丢用户刚贴的图）
+    resetAttachments();
     setBusy(true);
     busyRef.current = true;
     setStreamPhase('thinking');
@@ -537,7 +619,7 @@ export default function Chat(): JSX.Element {
       setBusy(false);
       busyRef.current = false;
     }
-  }, [addToast, t]);
+  }, [addToast, t, resetAttachments]);
 
   const stop = useCallback(() => {
     controllerRef.current?.abort();
@@ -583,9 +665,12 @@ export default function Chat(): JSX.Element {
     messagesRef.current = msgs;
     setActiveId(id);
     setMessages(msgs);
+    // 切会话清附件：上一段对话贴的图不该跟着进新会话（A2A 同口径）
+    setDraft('');
+    resetAttachments();
     if (model) persistConfig({ ...configRef.current, model, titleModel: configRef.current.titleModel });
     try { localStorage.setItem('aigx_playground_active', id); } catch { /* noop */ }
-  }, [guardBusy, persistConfig, saveActiveNow]);
+  }, [guardBusy, persistConfig, resetAttachments, saveActiveNow]);
 
   const newChat = useCallback(async (): Promise<void> => {
     setSidebarOpen(false);
@@ -614,9 +699,8 @@ export default function Chat(): JSX.Element {
     setActiveId(freshId);
     setMessages([]);
     setDraft('');
-    setImages([]);
-    setFiles([]);
-  }, [guardBusy, persistSessions, saveActiveNow]);
+    resetAttachments();
+  }, [guardBusy, persistSessions, saveActiveNow, resetAttachments]);
 
   const removeSession = useCallback(async (id: string): Promise<void> => {
     if (guardBusy()) return;
@@ -716,8 +800,23 @@ export default function Chat(): JSX.Element {
   }, []);
 
   const deleteMessage = useCallback((index: number): void => {
-    setMessages((prev) => prev.filter((_, i) => i !== index));
-  }, []);
+    const target = messagesRef.current[index];
+    if (!target) return;
+    // 删除要二次确认，且带工具调用的消息必须写明「关联工具结果一并删除」
+    // （A2A `assistant-message-actions.tsx:42-45` 的同一句话）—— 一条纯文本消息
+    // 说「工具结果会删」会让人以为删错了东西，所以两种文案分开。
+    setConfirmState({
+      title: t('删除消息'),
+      message: deleteMentionsTools({ hasToolCalls: Boolean(target.toolCalls?.length) })
+        ? t('删除这条消息？模型消息关联的工具结果也会一并删除。')
+        : t('删除这条消息？'),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: () => {
+        setMessages((prev) => prev.filter((_, i) => i !== index));
+      },
+    });
+  }, [t]);
 
   const regenerate = useCallback((index: number): void => {
     const list = messagesRef.current;
@@ -757,41 +856,104 @@ export default function Chat(): JSX.Element {
     }
   }, [addToast, guardBusy, persistSessions, saveActiveNow, t]);
 
-  /* ── 附件收集 ── */
+  const syncReading = useCallback((): void => {
+    setAttachmentsReading(pendingImagesRef.current > 0 || pendingFilesRef.current > 0);
+  }, []);
+
+  const skipText = useCallback((reason: AttachmentSkipReason, name: string): string => {
+    switch (reason) {
+      case 'image-too-large':
+        return `${t('图片过大（上限 10MB）')}：${name}`;
+      case 'too-many-images':
+        return t('最多 6 张图片');
+      case 'file-too-large':
+        return `${t('文本附件过大（上限 512KB）')}：${name}`;
+      case 'too-many-files':
+        return t('一次最多 3 个文本附件');
+      default:
+        return t('只支持图片和 JSON / .info 文本文件，已跳过：{{name}}', { name });
+    }
+  }, [t]);
+
   const addImages = useCallback((picked: FileList | File[]): void => {
-    const list = Array.from(picked).filter((file) => file.type.startsWith('image/'));
-    if (!list.length) return;
-    const room = 6 - images.length;
-    if (room <= 0) {
-      addToast(t('最多 6 张图片'), 'warning');
-      return;
+    const incoming = Array.from(picked) as unknown as FileLike[];
+    const plan = planAttachmentAdd({
+      imageCount: imagesRef.current.length,
+      fileCount: filesRef.current.length,
+      pendingImages: pendingImagesRef.current,
+      pendingFiles: pendingFilesRef.current,
+    }, incoming);
+    for (const skipped of plan.skipped) {
+      addToast(skipText(skipped.reason, skipped.name), skipped.reason === 'too-many-images' ? 'warning' : 'error');
     }
-    const accepted = list.slice(0, room);
-    if (list.length > room) addToast(t('只添加了前 {{n}} 张（上限 6 张）', { n: room }), 'warning');
-    for (const file of accepted) {
-      if (file.size > 10 * 1024 * 1024) {
-        addToast(`${t('图片过大（上限 10MB）')}：${file.name}`, 'error');
-        continue;
-      }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const url = String(reader.result || '');
-        if (url) setImages((prev) => [...prev, url].slice(0, 6));
-      };
-      reader.readAsDataURL(file);
+    if (!plan.images.length) return;
+    const accepted = new Set<FileLike>(plan.images);
+    const generation = attachGenRef.current;
+    pendingImagesRef.current += plan.images.length;
+    syncReading();
+    for (const file of Array.from(picked)) {
+      if (!accepted.has(file as unknown as FileLike)) continue;
+      void prepareImage(file)
+        .then((url) => {
+          if (generation !== attachGenRef.current) return;
+          if (!url) return;
+          setImages((prev) => (prev.length >= MAX_IMAGES ? prev : [...prev, url]));
+        })
+        .catch((error: unknown) => {
+          addToast(`${t('读取图片失败')}：${error instanceof Error ? error.message : String(error)}`, 'error');
+        })
+        .finally(() => {
+          pendingImagesRef.current = Math.max(0, pendingImagesRef.current - 1);
+          syncReading();
+        });
     }
-  }, [addToast, images.length, t]);
+  }, [addToast, skipText, syncReading, t]);
 
   const addFiles = useCallback((picked: FileList | File[]): void => {
-    for (const file of Array.from(picked)) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const text = String(reader.result || '');
-        setFiles((prev) => [...prev, { name: file.name, size: file.size, text }].slice(0, 6));
-      };
-      reader.readAsText(file);
+    const incoming = Array.from(picked) as unknown as FileLike[];
+    const plan = planAttachmentAdd({
+      imageCount: imagesRef.current.length,
+      fileCount: filesRef.current.length,
+      pendingImages: pendingImagesRef.current,
+      pendingFiles: pendingFilesRef.current,
+    }, incoming);
+    // 分流：图片走图片链路（拖进来一张 png 到「文本文件」入口时不该被当 JSON 拒掉）
+    const imagePicked = Array.from(picked).filter((file) => file.type.startsWith('image/'));
+    if (imagePicked.length) addImages(imagePicked);
+    for (const skipped of plan.skipped) {
+      if (skipped.reason === 'too-many-images' || skipped.reason === 'image-too-large') continue;
+      addToast(skipText(skipped.reason, skipped.name), 'error');
     }
-  }, []);
+    if (!plan.textFiles.length) return;
+    const accepted = new Set<FileLike>(plan.textFiles);
+    const generation = attachGenRef.current;
+    pendingFilesRef.current += plan.textFiles.length;
+    syncReading();
+    for (const file of Array.from(picked)) {
+      if (!accepted.has(file as unknown as FileLike)) continue;
+      void file.text()
+        .then((raw: string) => {
+          if (generation !== attachGenRef.current) return;
+          const outcome = textFileOutcome(file.name, file.size, raw);
+          if (outcome.kind === 'empty') {
+            addToast(t('「{{name}}」是空文件', { name: file.name }), 'error');
+            return;
+          }
+          if (outcome.kind === 'binary') {
+            addToast(t('「{{name}}」看起来是二进制文件，只接收文本', { name: file.name }), 'error');
+            return;
+          }
+          setFiles((prev) => (prev.length >= MAX_TEXT_FILES ? prev : [...prev, outcome.file]));
+        })
+        .catch((error: unknown) => {
+          addToast(`${t('读取文件失败')}：${error instanceof Error ? error.message : String(error)}`, 'error');
+        })
+        .finally(() => {
+          pendingFilesRef.current = Math.max(0, pendingFilesRef.current - 1);
+          syncReading();
+        });
+    }
+  }, [addImages, addToast, skipText, syncReading, t]);
 
   /* ── 派生 ── */
   const sessionItems: AsstSessionItem[] = useMemo(
@@ -821,6 +983,37 @@ export default function Chat(): JSX.Element {
   }, [t]);
 
   const modelQuestionable = !modelsLoading && models.length === 0;
+
+  /**
+   * 模型可用性 / 读图能力 / 思考档位（三处判据都在 `asst-model.ts`）。
+   *
+   * `modelAvailability` 的「空列表 = 未知」很关键：拉清单失败时 `models` 会是
+   * 空数组，若按「不在列表里」判失效，用户会在网络抖一下之后看到「模型不可用」，
+   * 而他选的模型其实好好的。
+   */
+  const availability = useMemo(() => modelAvailability(models, config.model), [models, config.model]);
+  const supportsImages = useMemo(
+    () => (config.model ? modelSupportsImages({ capabilities: modelCaps[config.model] }) : undefined),
+    [config.model, modelCaps],
+  );
+  const effortResolution = useMemo(
+    () => resolveEffortOptions({ declared: config.model ? declaredLevels[config.model] : undefined }),
+    [config.model, declaredLevels],
+  );
+  /**
+   * 候选里补上「当前值」。
+   *
+   * 老配置可能存着 `xhigh`/`max`（A2A 八档时代写进去的）。候选按本网关值域
+   * 收窄后它不在列表里，若直接渲染，胶囊显示 `Max` 而下拉里一个都没选中 ——
+   * 看起来像界面坏了。补进候选让它**可见可改**，`effortDropped` 那行同时说明
+   * 这些档位本网关不认。不静默把用户的选择改成 `off`。
+   */
+  const effortLevels = useMemo(() => {
+    const base = effortResolution.options as string[];
+    const current = config.reasoning;
+    if (current && !base.includes(current)) return [...base, current];
+    return base;
+  }, [effortResolution.options, config.reasoning]);
 
   return (
     <div className="asst-layout">
@@ -920,9 +1113,14 @@ export default function Chat(): JSX.Element {
               onPickEffort={(value) => persistConfig({ ...configRef.current, reasoning: levelOfEffort(value) })}
               busy={busy}
               awaiting={false}
-              canSend={!busy && Boolean(config.model) && Boolean(draft.trim() || images.length || files.length)}
+              canSend={!busy && !attachmentsReading && Boolean(config.model) && Boolean(draft.trim() || images.length || files.length)}
               onSend={() => void send(draft, images, files)}
               onStop={stop}
+              modelAvailable={availability.available}
+              modelSupportsImages={supportsImages}
+              effortLevels={effortLevels}
+              effortDropped={effortResolution.dropped}
+              reading={attachmentsReading}
             />
           </>
         )}
@@ -968,6 +1166,9 @@ export default function Chat(): JSX.Element {
           />
         </MobileDrawer>
       )}
+
+      {/* 删除消息确认（A2A：删除必须二次确认，带工具调用时提示工具结果一并删除） */}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       {/* 后端「聊天设置」（管理接口，仅管理员）——A2A 没有这一块，属 AIGX 独有 */}
       {admin && chatSettingsOpen && (
