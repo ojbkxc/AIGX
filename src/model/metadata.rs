@@ -371,10 +371,10 @@ impl ModelMetadataRegistry {
             .or_else(|| infer_owned_by(model))
             .unwrap_or("aigx")
             .to_string();
-        let mut context_length: Option<u32> = None;
-        let mut context_source = "";
-        let mut max_output_tokens: Option<u32> = None;
-        let mut output_source = "";
+        let mut context_length: Option<u32>;
+        let mut context_source: &str;
+        let mut max_output_tokens: Option<u32>;
+        let mut output_source: &str;
         // ── 上下文/输出两列的**同一账本**规则（ledger lock）────────────
         //
         // 修复点（v1.0.103 线上实测 34 行「输出 > 上下文」的根因）：旧逻辑
@@ -395,10 +395,11 @@ impl ModelMetadataRegistry {
         // models.dev（内置表没有输出维度）—— builtin 与 models.dev 都是
         // 「按模型名的通用知识」，不含渠道维度，属于同一类账本，允许内部
         // 补空位（openai_compatible 等无插件目录的渠道依赖它）。
-        let mut plugin_ledger = false;
-        if let Some(budget) = plugin_budget(model, plugin_provider) {
-            if budget.context_length.is_some() || budget.max_output_tokens.is_some() {
-                plugin_ledger = true;
+        let declared = plugin_budget(model, plugin_provider)
+            .filter(|b| b.context_length.is_some() || b.max_output_tokens.is_some());
+        let plugin_ledger = declared.is_some();
+        match declared {
+            Some(budget) => {
                 context_length = budget.context_length;
                 context_source = if budget.context_length.is_some() {
                     "plugin"
@@ -412,14 +413,16 @@ impl ModelMetadataRegistry {
                     ""
                 };
             }
-        }
-        if !plugin_ledger {
-            context_length = builtin_context_length(model);
-            context_source = if context_length.is_some() {
-                "builtin"
-            } else {
-                ""
-            };
+            None => {
+                context_length = builtin_context_length(model);
+                context_source = if context_length.is_some() {
+                    "builtin"
+                } else {
+                    ""
+                };
+                max_output_tokens = None;
+                output_source = "";
+            }
         }
         let mut capabilities = infer_capabilities(model);
         let mut cap_sources: serde_json::Map<String, serde_json::Value> = capabilities
