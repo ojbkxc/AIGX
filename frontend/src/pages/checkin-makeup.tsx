@@ -10,7 +10,7 @@
  * 分成两组卡片，各自说清自己的口径，避免用户以为「关掉补签就顺带关了重试」。
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Badge, Card, EmptyState, Switch } from '../components/ui';
 import type { CheckinAutoState, CheckinScheduleEntry } from '../types';
@@ -45,6 +45,16 @@ function MakeupPlan({
   const [editing, setEditing] = useState(false);
   const [time, setTime] = useState(entry.retryTime || defaultRetryTime);
   const [gap, setGap] = useState(String(Math.max(0, entry.retryGapMinutes ?? 0)));
+  /*
+   * 条目快照刷新（保存后 `load()` / 别处改了同一计划）时，未在编辑中的草稿要跟着
+   * 换成新值：`useState` 的初值只在挂载时求值一次，旧实现会把「改前」的时刻与
+   * 间隔一直留在输入框里，保存后看起来没生效。编辑中不覆盖，避免冲掉正在输入的值。
+   */
+  useEffect(() => {
+    if (editing) return;
+    setTime(entry.retryTime || defaultRetryTime);
+    setGap(String(Math.max(0, entry.retryGapMinutes ?? 0)));
+  }, [entry.retryTime, entry.retryGapMinutes, defaultRetryTime, editing]);
   const gapValue = Number(gap);
   const gapValid = gap.trim() !== '' && Number.isInteger(gapValue) && gapValue >= 0 && gapValue <= 120;
 
@@ -200,6 +210,12 @@ function ActivityRetryPlan({
   const [editing, setEditing] = useState(false);
   const [gap, setGap] = useState(String(Math.max(0, entry.retryGapMinutes ?? 0)));
   const [limit, setLimit] = useState(String(entry.retryLimit || 3));
+  /* 与 MakeupPlan 同一口径：条目快照刷新后，未在编辑中的草稿跟随新值 */
+  useEffect(() => {
+    if (editing) return;
+    setGap(String(Math.max(0, entry.retryGapMinutes ?? 0)));
+    setLimit(String(entry.retryLimit || 3));
+  }, [entry.retryGapMinutes, entry.retryLimit, editing]);
   const gapValue = Number(gap);
   const limitValue = Number(limit);
   const valid =

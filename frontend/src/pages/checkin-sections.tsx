@@ -174,18 +174,50 @@ export default function CheckinCenterSections({
   const { daily, extras } = center;
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [providerId, setProviderId] = useState('');
-  const [running, setRunning] = useState<string>('');
+  /**
+   * 在跑的动作集合（**每个按钮一条 key**）。
+   *
+   * 旧实现是单个字符串：任一动作结束就在 `finally` 里 `setRunning('')`，把
+   * 同时在跑的其它动作的加载态一并清掉 —— 两行同时点「查询任务」，先回来的
+   * 那个会把另一行仍在转的按钮重新点亮（再点一次就是重复请求）。改成 Set
+   * 后每个动作只清自己那条，`disabled` / 文案也只认自己那条。
+   */
+  const [running, setRunning] = useState<Set<string>>(() => new Set());
   const [results, setResults] = useState<BenefitResults>({});
   const [error, setError] = useState('');
+
+  /** 某条 key 是否在跑（`disabled` / 文案判据共用一处，避免各写一遍漂移） */
+  const isRunning = (key: string): boolean => running.has(key);
+
+  const beginRunning = (key: string): void => {
+    setRunning((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  };
+  const endRunning = (key: string): void => {
+    setRunning((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  };
 
   const runBenefit = useCallback(
     async (
       accountId: string,
       action: string,
       params?: Record<string, unknown>,
+      /** 逐条动作的忙碌键（默认 `${accountId}:${action}`；批量/逐任务共用同一结果键时传各自的键） */
+      busyKey?: string,
     ): Promise<BenefitResult | undefined> => {
+      // 结果键与忙碌键分开：结果永远落在 `${accountId}:${action}`（各判据都按它读），
+      // 忙碌键只用于「这颗按钮在不在跑」，逐任务领取因此可以各自独立。
       const key = `${accountId}:${action}`;
-      setRunning(key);
+      const busy = busyKey ?? key;
+      beginRunning(busy);
       setError('');
       try {
         const res = await api.runCheckinBenefit(accountId, action, params);
@@ -199,10 +231,25 @@ export default function CheckinCenterSections({
         setError(err instanceof Error ? err.message : String(err));
         return undefined;
       } finally {
-        setRunning('');
+        // 只清自己那条：并发时别人的加载态不受影响
+        endRunning(busy);
       }
     },
     [onReload],
+  );
+
+  /** 批量动作：整批共用一条 busy key，跑完才清（逐行结果仍各自入 `results`） */
+  const runBenefitBulk = useCallback(
+    async (action: string, rows: Array<{ id: string }>): Promise<void> => {
+      const busy = `bulk:${action}`;
+      beginRunning(busy);
+      try {
+        await Promise.all(rows.map((row) => runBenefit(row.id, action)));
+      } finally {
+        endRunning(busy);
+      }
+    },
+    [runBenefit],
   );
 
   /* ── 各分区的「完成」判据 ───────────────────────────── */
@@ -418,18 +465,18 @@ export default function CheckinCenterSections({
       <Button
         variant="outline"
         size="sm"
-        disabled={running !== '' || onboardingSettled(id)}
+        disabled={isRunning(`${id}:onboarding`) || onboardingSettled(id)}
         onClick={() => void runBenefit(id, 'onboarding')}
       >
-        {running === `${id}:onboarding` ? t('查询中…') : t('查询任务')}
+        {isRunning(`${id}:onboarding`) ? t('查询中…') : t('查询任务')}
       </Button>
       <Button
         variant="outline"
         size="sm"
-        disabled={running !== '' || onboardingSettled(id)}
+        disabled={isRunning(`${id}:onboarding_claim`) || onboardingSettled(id)}
         onClick={() => void runBenefit(id, 'onboarding_claim')}
       >
-        {running === `${id}:onboarding_claim` ? t('领取中…') : t('一键领取')}
+        {isRunning(`${id}:onboarding_claim`) ? t('领取中…') : t('一键领取')}
       </Button>
       {resultBadge(`${id}:onboarding_claim`) ?? resultBadge(`${id}:onboarding`)}
     </>
@@ -440,10 +487,10 @@ export default function CheckinCenterSections({
       <Button
         variant="outline"
         size="sm"
-        disabled={running !== ''}
+        disabled={isRunning(`${id}:plan`)}
         onClick={() => void runBenefit(id, 'plan', { mode: 'preview' })}
       >
-        {running === `${id}:plan` ? t('查询中…') : t('查询套餐')}
+        {isRunning(`${id}:plan`) ? t('查询中…') : t('查询套餐')}
       </Button>
       <Button variant="primary" size="sm" onClick={onOpenBenefits}>
         {plansDone(id) ? t('套餐明细') : t('去领取')}
@@ -457,10 +504,10 @@ export default function CheckinCenterSections({
       <Button
         variant="outline"
         size="sm"
-        disabled={running !== ''}
+        disabled={isRunning(`${id}:growth`)}
         onClick={() => void runBenefit(id, 'growth')}
       >
-        {running === `${id}:growth` ? t('查询中…') : t('查询任务')}
+        {isRunning(`${id}:growth`) ? t('查询中…') : t('查询任务')}
       </Button>
       {resultBadge(`${id}:growth`)}
     </>
@@ -483,10 +530,15 @@ export default function CheckinCenterSections({
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={!code || task.done === true || task.locked === true || running !== ''}
-                  onClick={() => void runBenefit(id, 'growth', { code })}
+                  disabled={
+                    !code
+                    || task.done === true
+                    || task.locked === true
+                    || isRunning(`${id}:growth:${code}`)
+                  }
+                  onClick={() => void runBenefit(id, 'growth', { code }, `${id}:growth:${code}`)}
                 >
-                  {running === `${id}:growth` ? t('领取中…') : t('领取')}
+                  {isRunning(`${id}:growth:${code}`) ? t('领取中…') : t('领取')}
                 </Button>
               </span>
             </div>
@@ -547,22 +599,18 @@ export default function CheckinCenterSections({
                   <Button
                     variant="outline"
                     size="sm"
-                    disabled={running !== ''}
-                    onClick={() => {
-                      for (const row of onboardingRows) void runBenefit(row.id, 'onboarding');
-                    }}
+                    disabled={isRunning('bulk:onboarding')}
+                    onClick={() => void runBenefitBulk('onboarding', onboardingRows)}
                   >
-                    {t('全部查询')}
+                    {isRunning('bulk:onboarding') ? t('查询中…') : t('全部查询')}
                   </Button>
                   <Button
                     variant="outline"
                     size="sm"
-                    disabled={running !== ''}
-                    onClick={() => {
-                      for (const row of onboardingRows) void runBenefit(row.id, 'onboarding_claim');
-                    }}
+                    disabled={isRunning('bulk:onboarding_claim')}
+                    onClick={() => void runBenefitBulk('onboarding_claim', onboardingRows)}
                   >
-                    {t('全部领取')}
+                    {isRunning('bulk:onboarding_claim') ? t('领取中…') : t('全部领取')}
                   </Button>
                 </>
               ) : null}
