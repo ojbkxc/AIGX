@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import { BoundedPre, isStaleResponse } from './chat/debug-traffic-view';
 import type {
   DebugTrafficDetail,
   DebugTrafficEntry,
@@ -31,6 +32,12 @@ export default function DebugTrafficPanel(): JSX.Element {
   const [detailError, setDetailError] = useState('');
   const [detailLoading, setDetailLoading] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  /**
+   * 详情请求序号（单调递增）：每次点条目/关闭弹层都 +1，响应回来时比对。
+   * 快速点 A → B 时 A 的响应可能后到，旧实现直接 setDetail 会把 B 的 id 配
+   * 上 A 的报文——调试面板给出错误的原文，比不显示更坏。
+   */
+  const detailSeqRef = useRef(0);
 
   const loadView = useCallback(async (): Promise<void> => {
     try {
@@ -61,6 +68,8 @@ export default function DebugTrafficPanel(): JSX.Element {
     if (!openId) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
+        // 与 closeDetail 同口径：Esc 关闭也要作废在途详情响应
+        detailSeqRef.current += 1;
         setOpenId(null);
         setDetail(null);
         setDetailError('');
@@ -102,22 +111,29 @@ export default function DebugTrafficPanel(): JSX.Element {
       addToast(t('该记录缺少请求 ID，无法打开详情'), 'error');
       return;
     }
+    // 序号在发起前分配：晚到的旧响应据此丢弃（isStaleResponse）
+    const mine = ++detailSeqRef.current;
     setOpenId(id);
     setDetail(null);
     setDetailError('');
     setDetailLoading(true);
     try {
       const res = await api.getDebugTrafficDetail(id);
+      if (isStaleResponse(detailSeqRef.current, mine)) return;
       setDetail(res?.data ?? null);
     } catch (err) {
       // 后端 404 = 调试模式当时未开启/记录已超出保留条数
+      if (isStaleResponse(detailSeqRef.current, mine)) return;
       setDetailError(err instanceof Error ? err.message : String(err));
     } finally {
-      setDetailLoading(false);
+      // 过期响应不得清掉当前选中项的 loading（否则新请求还在跑却已无转圈）
+      if (!isStaleResponse(detailSeqRef.current, mine)) setDetailLoading(false);
     }
   };
 
   function closeDetail(): void {
+    // 关闭即作废在途响应：否则关掉后迟到的响应会把弹层内容重新写回来
+    detailSeqRef.current += 1;
     setOpenId(null);
     setDetail(null);
     setDetailError('');
@@ -293,7 +309,8 @@ export default function DebugTrafficPanel(): JSX.Element {
                       {t('请求体')}
                       {detail.truncated ? ` ${t('（已截断）')}` : ''}
                     </div>
-                    <pre className="log-detail-pre">{detail.requestBody ?? t('（空）')}</pre>
+                    {/* 有界渲染：预算内与原 <pre> 逐字一致，超出折叠 + 显式展开 */}
+                    <BoundedPre className="log-detail-pre" text={detail.requestBody} />
                   </div>
                   {detail.responseHeaders && (
                     <div>
@@ -306,7 +323,7 @@ export default function DebugTrafficPanel(): JSX.Element {
                   {detail.responseBody != null && (
                     <div>
                       <div className="log-detail-label">{t('响应体（已脱敏）')}</div>
-                      <pre className="log-detail-pre">{detail.responseBody}</pre>
+                      <BoundedPre className="log-detail-pre" text={detail.responseBody} />
                     </div>
                   )}
                 </div>

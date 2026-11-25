@@ -7,9 +7,21 @@ import {
 } from 'lucide-react';
 import { api, testChannelChatStream, directChannelChatStream } from '../api';
 import { fmtCompact } from '../lib/utils';
-import { mergeToolCallDelta, type ToolCallWireMode } from '../lib/toolCallAdapter';
-import type { ChatStreamUsage, ToolCallDelta } from '../types';
+import { type ToolCallWireMode } from '../lib/toolCallAdapter';
+import type { ChatStreamDelta } from '../types';
 import type { DebugMessage } from './chat/types';
+import {
+  applyStreamDelta,
+  applyStreamError,
+  finishStream,
+  markInterrupted,
+  nextStreamPhaseOnDelta,
+  STREAM_PLACEHOLDER,
+  tickStreamPhase,
+  type DebugStreamPhase,
+} from './chat/debug-stream-state';
+import { clearMeta, removeMetaAt, truncateMeta } from './chat/debug-message-meta';
+import { normalizeChatChunk } from './chat/debug-chunk';
 import ModelPicker from './ModelPicker';
 import './ChatDebugger.css';
 
@@ -90,12 +102,8 @@ export interface ChatDebuggerProps {
   toolCallMode?: ToolCallWireMode;
 }
 
-interface ChatChunkResult {
-  stream?: Array<{ content?: string }>;
-  data?: { content?: string; error?: string; usage?: unknown };
-  error?: string;
-  success?: boolean;
-}
+// 非流式响应形状归一化在 chat/debug-chunk.normalizeChatChunk（含 204 / 非数组
+// stream / 非字符串 content 三种畸形输入的判据），本组件不再持有该形状。
 
 /**
  * ChatDebugger — 统一对话调试器。
@@ -360,10 +368,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const messageDurations = useRef<Map<number, number>>(new Map());
 
   // B8: 删除消息处理
+  //
+  // 时间戳/耗时是**按下标**存的，删掉一条后其后所有下标都左移一位：只 delete(idx)
+  // 会让剩下的消息整体错位一格（后一条显示前一条的耗时，最后一条丢标记）。
+  // 重排判据收敛在 debug-message-meta.removeMetaAt。
   const deleteMessage = (idx: number): void => {
     setMessages((prev) => prev.filter((_, i) => i !== idx));
-    messageTimestamps.current.delete(idx);
-    messageDurations.current.delete(idx);
+    messageTimestamps.current = removeMetaAt(messageTimestamps.current, idx);
+    messageDurations.current = removeMetaAt(messageDurations.current, idx);
   };
 
   const addAttachment = (): void => {
@@ -432,7 +444,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         try {
           const res = await api.playgroundTranscribe(blob, model || 'whisper');
           if (!mountedRef.current) return;
-          const text = (res.text || '').trim();
+          // res 可能为 null（HTTP 204 时 request() 直接返回 null），裸取 .text 会
+          // TypeError 掉进下面的 catch，把「没有语音内容」显示成内部错误串
+          const text = (res?.text || '').trim();
           if (text) setInput((prev) => (prev ? `${prev} ${text}` : text));
           else setError(t('未识别到语音内容'));
         } catch (err) {
@@ -488,6 +502,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     if (lastUserIdx < 0) return;
     const userMsg = messages[lastUserIdx];
     setMessages(messages.slice(0, lastUserIdx));
+    // 截尾后同步丢弃尾部元数据：否则重新生成的那条会继承上一轮的耗时/时间戳
+    messageTimestamps.current = truncateMeta(messageTimestamps.current, lastUserIdx);
+    messageDurations.current = truncateMeta(messageDurations.current, lastUserIdx);
     void handleSend(userMsg.content, userMsg.attachments?.slice(), messages.slice(0, lastUserIdx));
   };
 
@@ -505,6 +522,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     setEditingIdx(null);
     if (!text) return;
     setMessages(messages.slice(0, editingIdx));
+    // 同 regenerate：编辑重发是截尾，尾部元数据必须一起丢（否则新回复继承旧耗时）
+    messageTimestamps.current = truncateMeta(messageTimestamps.current, editingIdx);
+    messageDurations.current = truncateMeta(messageDurations.current, editingIdx);
     void handleSend(text, attachmentsOf, messages.slice(0, editingIdx));
   };
 
@@ -600,51 +620,24 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         const controller = new AbortController();
         abortRef.current = controller;
         // 流式阶段标记：收到首个增量前显示「思考中」，之后切「正在生成」
-        streamingStartedRef.current = false;
+        lastDeltaAtRef.current = Date.now();
         setStreamPhase('thinking');
         // 真·流式：占位一条 assistant 消息，逐增量拼接渲染
         setMessages((prev) => {
           const assistantIdx = prev.length;
           messageTimestamps.current.set(assistantIdx, requestStartTime);
-          return [...prev, { role: 'assistant', content: '…' }];
+          return [...prev, { role: 'assistant', content: STREAM_PLACEHOLDER }];
         });
-        const onDelta = (delta: { content: string; isEnd?: boolean; kind?: string; toolCall?: ToolCallDelta; usage?: ChatStreamUsage }): void => {
+        const onDelta = (delta: ChatStreamDelta): void => {
+          // 卸载后不再写 state（宿主切走会话时 abort 是异步生效的，仍可能有帧在途）
+          if (!mountedRef.current) return;
           lastDeltaAtRef.current = Date.now();
-          if (!streamingStartedRef.current) {
-            streamingStartedRef.current = true;
-            setStreamPhase('generating');
-          } else if (streamPhase === 'stalled') {
-            // 停滞后恢复增量：回到正常生成态
-            setStreamPhase('generating');
-          }
-          setMessages((prev) => {
-            const next = prev.slice();
-            const last = next[next.length - 1];
-            if (last && last.role === 'assistant') {
-              // reasoning 与正文分流：思考走折叠面板，正文清占位「…」；
-              // 工具调用分片按 index 聚合进卡片，用量单独收尾（#63）
-              const patch: DebugMessage = { ...last };
-              if (delta.kind === 'reasoning') {
-                patch.reasoning = (last.reasoning ?? '') + delta.content;
-              } else if (delta.kind === 'tool_call' && delta.toolCall) {
-                patch.toolCalls = mergeToolCallDelta(last.toolCalls ?? [], delta.toolCall);
-                patch.toolState = 'streaming';
-              } else if (delta.kind === 'usage' && delta.usage) {
-                patch.usage = delta.usage;
-              } else if (delta.kind === 'error' && delta.isEnd) {
-                // 流式错误帧：在已流出正文后追加「⚠️」尾巴（与中断态「保留已收到
-                // 分片」同惯例，不吞信息；F4 #19）。正文为空时才是单警告气泡。
-                const errBase = last.content === '…' ? '' : last.content;
-                patch.content = errBase ? `${errBase}\n\n⚠️ ${delta.content}` : `⚠️ ${delta.content}`;
-                if (patch.toolCalls?.length) patch.toolState = 'error';
-              } else {
-                const base = last.content === '…' ? '' : last.content;
-                patch.content = delta.isEnd ? base : base + delta.content;
-              }
-              next[next.length - 1] = patch;
-            }
-            return next;
-          });
+          // 任何一帧增量都代表「没停滞」：原实现在闭包里读 streamPhase 做恢复判断，
+          // 闭包捕获的是首帧渲染时的值，stalled 之后永远回不来（见 debug-stream-state）。
+          setStreamPhase((cur) => (cur === 'generating' ? cur : nextStreamPhaseOnDelta()));
+          // 「一帧增量 → 新消息数组」的唯一实现在 debug-stream-state.applyStreamDelta
+          // （含 isEnd 帧的正文追加、工具分片聚合走 lib/toolCallAdapter 单点）
+          setMessages((prev) => applyStreamDelta(prev, delta));
         };
         if (directUpstream) {
           // 无密钥渠道：浏览器直连上游，请求不经服务器中转
@@ -654,32 +647,19 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         }
         abortRef.current = null;
         // 流正常收尾：工具卡片从「进行中」切「完成」；结果未回灌时也保留
-        // 参数（回灌层落地后 adapter 补齐 result，UI 零改动）
-        setMessages((prev) => {
-          const next = prev.slice();
-          const last = next[next.length - 1];
-          if (last && last.role === 'assistant') {
-            if (last.toolCalls?.length) {
-              next[next.length - 1] = { ...last, toolState: 'done' };
-            } else if (!last.reasoning && (last.content === '…' || !last.content.trim())) {
-              // 空流兜底提示（避免界面出现永久空白气泡）
-              next[next.length - 1] = { ...last, content: `⚠️ ${t('上游未返回内容')}` };
-            }
-          }
-          return next;
-        });
+        // 参数（回灌层落地后 adapter 补齐 result，UI 零改动）。
+        // 判据在 debug-stream-state.finishStream（占位「…」/空流兜底同处单点）
+        setMessages((prev) => finishStream(prev, t('上游未返回内容')));
       } else {
-        const res = (await api.testChannelChat(body)) as unknown as ChatChunkResult;
-        const data = res.data || {};
-        if (res.stream && res.stream.length) {
-          const acc = res.stream.map((c) => c.content || '').join('');
-          setMessages((prev) => [...prev, { role: 'assistant', content: acc }]);
-        } else if (data.content) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: data.content ?? '' }]);
-        } else if (data.error) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${data.error}` }]);
-        } else if (res.error) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${res.error}` }]);
+        // 非流式：响应形状全部走 normalizeChatChunk 归一化。
+        // 原实现直接 `res.data || {}` + `res.stream.map(...)`：HTTP 204 时
+        // request() 返回 null（res.data 当场 TypeError）、res.stream 非数组时
+        // .map 抛「not a function」，两种都掉进 catch 只显示内部错误串。
+        const chunk = normalizeChatChunk(await api.testChannelChat(body));
+        if (chunk.content) {
+          setMessages((prev) => [...prev, { role: 'assistant', content: chunk.content }]);
+        } else if (chunk.error) {
+          setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${chunk.error}` }]);
         } else {
           setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${t('上游未返回内容')}` }]);
         }
@@ -691,23 +671,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         // F4/工具卡片支的原地标记口径）。标记走 `toolState` 而不是拼进 content：
         // 正文要原样回传历史 / 复制 / 朗读，混进 UI 提示等于把「已停止生成」
         // 当成模型上一轮回复发给上游（见 isTransientAssistantText 的注释）。
-        setMessages((prev) => {
-          const next = prev.slice();
-          const last = next[next.length - 1];
-          if (last && last.role === 'assistant') {
-            // 停在「…」占位阶段：占位没有信息量，清成空串，气泡只剩中止标记
-            const blank = last.content === '…' || !last.content.trim();
-            next[next.length - 1] = {
-              ...last,
-              ...(blank ? { content: '' } : {}),
-              toolState: 'interrupted',
-            };
-            return next;
-          }
-          // 末尾不是 assistant 气泡（占位气泡还没建起来就被停掉）：只能新起一条
-          next.push({ role: 'assistant', content: `⏹ ${t('已停止生成')}` });
-          return next;
-        });
+        setMessages((prev) => markInterrupted(prev, t('已停止生成')));
         abortRef.current = null;
         return;
       }
@@ -715,24 +679,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       // 一次失败只留一条可见错误：若末尾还是流式占位「…」（或上次未清理的
       // 占位/停止气泡），就地替换成错误文案，而不是再追加一条 —— 否则用户
       // 会同时看到「…」空泡 + 「⚠️ …」气泡 + 顶部红字，重试再各叠一份，
-      // 界面被「一堆报错」刷屏。
-      setMessages((prev) => {
-        const next = prev.slice();
-        const last = next[next.length - 1];
-        if (last && last.role === 'assistant' && isTransientAssistantText(last.content)) {
-          next[next.length - 1] = {
-            ...last,
-            content: `⚠️ ${msg}`,
-            // 已收到工具分片：卡片标错误，保留部分参数供排查（#63）
-            ...(last.toolCalls?.length ? { toolState: 'error' as const } : {}),
-          };
-        } else if (last && last.role === 'assistant' && last.toolCalls?.length) {
-          next[next.length - 1] = { ...last, toolState: 'error' };
-        } else {
-          next.push({ role: 'assistant', content: `⚠️ ${msg}` });
-        }
-        return next;
-      });
+      // 界面被「一堆报错」刷屏。判据在 debug-stream-state.applyStreamError。
+      setMessages((prev) => applyStreamError(prev, msg));
     } finally {
       const duration = Date.now() - requestStartTime;
       setMessages((prev) => {
@@ -753,17 +701,21 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   };
 
   /** 流式生成阶段：收到首个增量前=思考中，之后=正在生成（cc-haha 式阶段动词） */
-  const streamingStartedRef = useRef(false);
-  const [streamPhase, setStreamPhase] = useState<'thinking' | 'generating' | 'stalled'>('thinking');
+  const [streamPhase, setStreamPhase] = useState<DebugStreamPhase>('thinking');
   // 流式停滞检测：每次 onDelta 记录时间戳，超 3s 无增量切「响应缓慢…」（cc-haha useStalledAnimation）
   const lastDeltaAtRef = useRef(0);
   const stallTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
-    if (!busy || streamPhase === 'thinking') return;
+    if (!busy || streamPhase === 'thinking') return undefined;
     stallTimerRef.current = setInterval(() => {
-      if (Date.now() - lastDeltaAtRef.current > 3000) setStreamPhase('stalled');
+      // 判据收敛到 tickStreamPhase：原实现无条件 `setStreamPhase('stalled')`，
+      // 只在超时才写，且不看当前阶段（已是 stalled 时重复 set 无害但无意义）。
+      setStreamPhase((cur) => tickStreamPhase(cur, lastDeltaAtRef.current, Date.now()));
     }, 500);
-    return () => { if (stallTimerRef.current) clearInterval(stallTimerRef.current); };
+    return () => {
+      if (stallTimerRef.current) clearInterval(stallTimerRef.current);
+      stallTimerRef.current = null;
+    };
     // streamPhase 变化本身用于守卫重设 interval，依赖它以在 stalled→generating 间重置
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, streamPhase === 'thinking']);
@@ -785,6 +737,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     setError('');
     setPromptPreset('');
     setTempPreset('');
+    // 下标键的元数据必须一起清：留下旧条目会让「清空后第一条消息」继承上一轮的耗时
+    messageTimestamps.current = clearMeta();
+    messageDurations.current = clearMeta();
     onClearMessages?.();
   };
 
