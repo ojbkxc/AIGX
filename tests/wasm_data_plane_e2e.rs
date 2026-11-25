@@ -44,6 +44,13 @@ const PACK_ID: &str = "wasm-e2e-pack";
 const KEY: &str = "sk-wasm-e2e-0001";
 const EMAIL: &str = "admin@gmail.com";
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
+/// 数据面（`/v1/*`）请求的超时。
+///
+/// 不能复用 [`CONTROL_TIMEOUT`]：控制面都是读配置、建密钥这类毫秒级操作，60s
+/// 足够；而数据面第一次打 wasm 渠道会触发 wasmtime 的**首次编译 + init 握手**，
+/// 在共享 CI runner 上实测会超过 60s，于是用例报一个毫不相关的 `TimedOut`，
+/// 看不出是慢还是挂。给它自己的预算。
+const DATA_PLANE_TIMEOUT: Duration = Duration::from_secs(180);
 
 // ─── wasm 插件包（真实二进制，base64 制品由 lib 单测钉住） ───
 
@@ -435,6 +442,7 @@ async fn wasm_pack_serves_v1_chat_completions() {
     // 5) 非流式：两段 chunk 聚合为 "hello"（resolve.rs 的 wasm 分支 → PluginBridge）
     let resp = c
         .post(format!("{base}/v1/chat/completions"))
+        .timeout(DATA_PLANE_TIMEOUT)
         .bearer_auth(KEY)
         .json(&json!({
             "model": MODEL,
@@ -443,7 +451,12 @@ async fn wasm_pack_serves_v1_chat_completions() {
         }))
         .send()
         .await
-        .expect("chat completions");
+        .unwrap_or_else(|e| {
+            panic!(
+                "chat completions: {e}\nserver.log 尾部：\n{}",
+                server_log_tail(&log_path)
+            )
+        });
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     assert_eq!(status, StatusCode::OK, "wasm 渠道必须 200: {text}");
@@ -456,6 +469,7 @@ async fn wasm_pack_serves_v1_chat_completions() {
     // 6) 流式：SSE 正文里两段 delta 都要出现（真流式通路）
     let stream_resp = c
         .post(format!("{base}/v1/chat/completions"))
+        .timeout(DATA_PLANE_TIMEOUT)
         .bearer_auth(KEY)
         .json(&json!({
             "model": MODEL,
@@ -464,7 +478,12 @@ async fn wasm_pack_serves_v1_chat_completions() {
         }))
         .send()
         .await
-        .expect("stream chat");
+        .unwrap_or_else(|e| {
+            panic!(
+                "stream chat: {e}\nserver.log 尾部：\n{}",
+                server_log_tail(&log_path)
+            )
+        });
     assert_eq!(stream_resp.status(), StatusCode::OK);
     let sse = stream_resp.text().await.unwrap_or_default();
     assert!(
@@ -475,6 +494,7 @@ async fn wasm_pack_serves_v1_chat_completions() {
     // 反向对照：未声明的模型不得 200（证明请求真的走了渠道路由）
     let unknown = c
         .post(format!("{base}/v1/chat/completions"))
+        .timeout(DATA_PLANE_TIMEOUT)
         .bearer_auth(KEY)
         .json(&json!({
             "model": "wasm-e2e-model-missing",
@@ -482,7 +502,12 @@ async fn wasm_pack_serves_v1_chat_completions() {
         }))
         .send()
         .await
-        .expect("unknown model");
+        .unwrap_or_else(|e| {
+            panic!(
+                "unknown model: {e}\nserver.log 尾部：\n{}",
+                server_log_tail(&log_path)
+            )
+        });
     assert_ne!(
         unknown.status(),
         StatusCode::OK,
