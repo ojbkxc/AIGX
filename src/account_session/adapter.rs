@@ -48,10 +48,15 @@ pub fn effective_base_url(session: &AccountSession) -> Result<String, BridgeErro
     let raw = session.base_url.trim();
     if !raw.is_empty() {
         // Trae：把网页站归一成 Agent 站（见 [`canonical_trae_agent_base`]）。
-        if session.provider == "trae" {
-            if let Some(base) = canonical_trae_agent_base(raw) {
-                return Ok(base);
-            }
+        // 先算出候选再判断，避免 provider 判断套 `if let` 这种 clippy
+        // `collapsible_if` 形态（CI 以 `-D warnings` 跑 clippy）。
+        let canonical = if session.provider == "trae" {
+            canonical_trae_agent_base(raw)
+        } else {
+            None
+        };
+        if let Some(base) = canonical {
+            return Ok(base);
         }
         return Ok(raw.to_string());
     }
