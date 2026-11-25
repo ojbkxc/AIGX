@@ -11,6 +11,44 @@ import type {
 } from '@/types';
 import { API_BASE, request } from '../client';
 
+/**
+ * `/api/agent/config` 的响应形状 —— 与 `/api/agent/settings` **同一份**
+ * （后端 `admin/settings.rs::agent_settings_json`，**camelCase**）。
+ *
+ * 前端只需要「模型 / 渠道 / 思考强度 / 工具规格」几项；`tools[]` 是工具卡与
+ * 审批卡的**唯一**中文名与风险来源（`agent/tools.rs` 的 `RiskLevel::as_str()`），
+ * 不要在页面里再写一张表。
+ *
+ * ⚠️ 写侧不在这里：`PUT /api/agent/settings` 已由 `endpoints/tickets.ts` 的
+ * `saveAgentSettings` 承担（`AgentSettingsItem`）。两个文件各写一份同名方法会
+ * 在 `api/index.ts` 的展开合并里**后者覆盖前者**，类型与实现分叉 —— 所以本文件
+ * 只加只读视图，不重复声明写接口。
+ */
+export interface AgentToolSpecView {
+  name: string;
+  /** 后端 registry 的中文名（`agent/tools.rs`），工具卡与审批卡共用 */
+  label: string;
+  description?: string;
+  /** `readonly` / `low` / `high`（`RiskLevel::as_str()`） */
+  risk: string;
+}
+
+export interface AgentConfigView {
+  enabled?: boolean;
+  model?: string;
+  channel?: string;
+  /** 空 `model` 时后端自动发现的实际生效模型 */
+  effectiveModel?: string | null;
+  /** 思考强度（`off` / `low` / `medium` / `high`） */
+  reasoningEffort?: string | null;
+  systemPrompt?: string;
+  maxTurns?: number;
+  approvalTimeoutSecs?: number;
+  maxHistory?: number;
+  disabledTools?: string[];
+  tools?: AgentToolSpecView[];
+}
+
 export const endpoints = {
   // ==================== AI 运维 Agent（管理员专属 /admin/agent） ====================
   listAgentSessions: (): Promise<ApiResponse<unknown[]>> =>
@@ -23,15 +61,13 @@ export const endpoints = {
     request<ApiResponse<null>>('DELETE', `${API_BASE}/agent/sessions/${encodeURIComponent(id)}`),
   agentApprove: (requestId: string, action: 'allow' | 'deny' | 'remember'): Promise<ApiResponse<null>> =>
     request<ApiResponse<null>>('POST', `${API_BASE}/agent/approvals/${encodeURIComponent(requestId)}`, { action }),
-  getAgentConfig: (): Promise<ApiResponse<{
-    model?: string;
-    channel?: string;
-    /** 空 model 时后端自动发现的实际生效模型 */
-    effectiveModel?: string | null;
-    /** 工具清单（name/label/risk），审批卡中文名与设置面板共用 */
-    tools?: Array<{ name: string; label: string; risk: string }>;
-  }>> =>
-    request<ApiResponse<{ model?: string; channel?: string; effectiveModel?: string | null; tools?: Array<{ name: string; label: string; risk: string }> }>>('GET', `${API_BASE}/agent/config`),
+  /**
+   * 运行期配置只读视图（与 `/api/agent/settings` 同源同形状，额外附
+   * `effectiveModel`）。`tools[]` 是工具卡/审批卡的中文名与风险等级的**唯一**
+   * 来源（A2A 的 `toolById` + `TOOL_META` 在 AIGX 由这个端点承担）。
+   */
+  getAgentConfig: (): Promise<ApiResponse<AgentConfigView>> =>
+    request<ApiResponse<AgentConfigView>>('GET', `${API_BASE}/agent/config`),
   // ==================== 聊天会话（按用户隔离的对话记录） ====================
   listChatSessions: (): Promise<ApiResponse<Array<ChatSessionSummary>>> =>
     request<ApiResponse<Array<ChatSessionSummary>>>('GET', `${API_BASE}/chat/sessions`),
