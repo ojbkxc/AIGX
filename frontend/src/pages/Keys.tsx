@@ -440,6 +440,13 @@ export default function Keys(): JSX.Element {
       addToast(t('密钥名称为必填项'), 'error');
       return;
     }
+    // 自定义密钥值的长度下限（对齐 A2A KeyModal 的「Key 至少需要 8 个字符」）：
+    // 后端 custom_key 不做长度校验，前端不拦就会存进一把过短的密钥 ——
+    // 之后每次调用都被上游当非法 key 拒掉，而创建时看起来是成功的。
+    if (!editing && form.custom_key.trim() && form.custom_key.trim().length < 8) {
+      addToast(t('密钥值至少需要 8 个字符'), 'error');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -1289,7 +1296,7 @@ export default function Keys(): JSX.Element {
                   />
                   {!editing && (
                     <Input
-                      label={`${t('密钥值')} ${t('(可选，留空则随机生成 sk-...)')}`}
+                      label={`${t('密钥值')} ${t('(可选，留空则随机生成 sk-...)')} ${t('(至少 8 个字符)')}`}
                       placeholder="sk-..."
                       value={form.custom_key}
                       onChange={(e) => setForm({ ...form, custom_key: e.target.value })}
