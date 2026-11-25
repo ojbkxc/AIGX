@@ -549,7 +549,7 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
 
       {files.length > 0 && (
         <p className="asst-composer-hint">
-          {t('已添加 {n} 个文本附件，共 {size}', {
+          {t('已添加 {{n}} 个文本附件，共 {{size}}', {
             n: files.length,
             size: formatSize(files.reduce((sum, file) => sum + file.size, 0)),
           })}
