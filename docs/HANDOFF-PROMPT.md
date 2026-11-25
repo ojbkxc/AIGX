@@ -88,41 +88,50 @@ CI 有这些 job：`CI`（含 lint/rustfmt/clippy、cargo test、build frontend�
 
 #### ② 日志「供应商」列永远是 `—`
 
-**根因已定位**：后端 `src/log/mod.rs` 的 `RequestLog` 结构体**根本没有 `provider` 字段**。线上 100/100 条记录的字段清单里没有它，而前端「供应商」列读 `row.provider`。
+**先说清一处容易搞错的根因**：不是「前端读错字段」。改前 `Logs.tsx` 读的是 `l.channel_name`
+（`grep provider frontend/src/pages/Logs.tsx` 零命中，产物里也是 `channel_name`×7、`provider`×0）。
+所以别去改前端字段名，那条路走不通。
 
-**你要做的**：
-1. 判断「供应商」该记哪一层：渠道的 `provider`（`openai_compatible` 这类）还是账号的 `provider`（`trae` / `xiaohuanxiong`）。去 `D:\GitHub\Agent2API` 看 A2A 的请求记录结构里有没有对应维度，对齐它；A2A 没有就自己定并写清理由
-2. `RequestLog` 加 `provider: Option<String>`（`#[serde(default)]`，存量日志不受影响）
-3. **全仓 grep `RequestLog {` 找齐所有构造点**逐处填值（漏一个就 E0063 编译失败）
-4. 前端 `Logs.tsx` 改读新字段。**空值显示 `—` 是合理的**（历史记录没记过），但要区分「真的没有」和「有数据却显示不出来」
-5. 导出 CSV、日聚合要不要跟 —— 自己判断，别为了「完整」加一个拖慢聚合的维度
+**真实成因有两层**：
+1. `channel_name` 是在**写日志那一刻**按 `channel_id` 点查渠道表得到的，两种情况下必然落空：
+   - **Hub 兜底候选压根没有 `channel_id`**（见 `src/bridge/hub_fallback.rs` 文件头自己记的这个坑）
+   - 渠道事后被删除，查不到
+2. **「哪一家」这一维从来没进过日志** —— `RequestLog` 结构体里没有 provider 字段。
+   而 `AttemptDetail.provider` 只取到协议族、账号池恒为 `"account"`，信息量不够。
 
-#### ③ 破甲控制台还剩 7 行模型套不上
+**「供应商」的语义已经被 A2A 定死，照抄它就行**：是**家**（provider id），不是协议族。
+- 渠道型 → `channel_type.as_str()`
+- 账号池型 → 该渠道下账号的 `provider`（`trae` / `xiaohuanxiong` / `workbuddy`）
+- A2A 依据：`request_stats/record.rs:97` `RequestEntry.provider`「实际承载本次请求的 provider id」、
+  `:294` `AttemptDetail.provider`；且它明确写着**不给旧数据猜值**（空 = 不知道）
 
-**现状**：覆盖率已达 189/196（96%）。剩 7 行全是 `auto` / `Auto` / `default` 这类**虚拟路由名**，**故意不套**（那不是模型，是还没解析的别名）。这不算 bug，除非你认为应该按「解析后的真实模型」套 —— 那要把 `apply_auto_preset` 挪到选路之后，是路由层改动。
+**AIGX 里这个口径已经存在但没用上**：`src/api/admin/routing_workspace.rs` 的 `channel_meta_map`
+早就在这么算。把它抽成单点函数，日志与尝试明细共用即可。
 
-#### ④ `en.json` 有 108 条中文占位
+**只要做这几步**：
+1. `RequestLog` 加 `provider: Option<String>`（`#[serde(default)]`，存量日志不受影响）
+2. 抽单点 `provider_label_for_channel(channel_type, account_provider)`：
+   渠道型取协议族、账号池型取首个非空账号 provider（取不到回落 `"account"`，**不要写空串**，
+   空串会被下游误读成「上游返回空」）
+3. 账号池的 `channel_id → provider` 反查要做成 **O(1)**（`DashMap` 索引，在
+   `load`/`upsert`（跨渠道搬迁时两边都重算）/`remove`/`remove_for_channel` 同步维护）；
+   索引未命中时回落全扫一次，宁慢一次也不给错答案
+4. **全仓 grep `RequestLog {` 找齐所有构造点**逐处填（数据面 19 处 + 计费 3 处 +
+   内部/管理 8 处，漏一个就 E0063）。`AttemptDetail` 本就有该字段，只需统一口径
+5. 前端：主值改读新字段，**但必须保留 `channel_name` 回退** —— 否则老数据会从「有名字」
+   退化成 `—`，比改前更差
+6. **存量日志不回填**：按 `channel_id` 现算等于猜（渠道可能已删/改名/换类型，账号池成员也会变）。
+   老记录仍显示 `—` 是**预期**，不是没修好。A2A 对同一情形同样写明「不给旧数据猜值」
 
-英文界面看到的是中文原文（`[TODO en]` 前缀已清掉，不再是机器标记）。需要**人工翻译**。可以按批次翻，注意保留 `{{count}}` 这类插值占位符原样、不要翻译占位符名字。翻完跑 `node scripts/i18n-fill-missing.mjs --check` 与 `node scripts/i18n-interpolation-check.mjs` 两个门禁。
+**日聚合不要加 provider 维度**：它与 `channel_id` 1:1，读时 join 即可，硬加会拖慢聚合与回填。
 
-#### ⑤ `static/` 同步闸门在多人并行下反复红
-
-**这是结构性问题**：闸门要求「提交里的 static 产物与提交里的前端源码严格一致」。多人共享一个工作树时，A 改了前端没重建产物，B 提交时构建出的产物对应的是工作区状态（含 A 未提交的改动），于是 B 的提交里产物与源码对不上，CI 红。这一轮为此来回折腾了六七次。
-
-**可以做的事**：要么改成「构建产物不进版本库、由 CI 构建后作为 release 资产分发」（要动部署流程），要么接受它、每次改前端都重建。**先别自己大改 CI 配置**，先问清楚。
-
-#### ⑥ A2A 有但 AIGX 后端没有的能力（结构已占位，功能未通）
-
-AI 运维页已经按 A2A 对齐了结构，但下面这些 AIGX 没有对应后端端点，目前只是占位/disabled：
-- `/api/assistant/config`（助手配置持久化）→ 现用 localStorage
-- `/api/model-access/keys`（API Key 选择）→ 无概念
-- 工具执行通道（tool_calls 回灌）→ 无，**不能伪造结果**
-- 审批事件只在 `/agent` 流里有，`/chat` 链路没有
-
-#### ⑦ 4 个模型的账号凭证 401
-
-`glm-5.3-flash` / `minimax-m3` / `kimi-k3` / `glm-5.2` 早前测出 `Auth failed: 401 Unauthorized`。**这是上游账号凭证过期，需要在面板里重新登录，代码层修不了**。
-
+**验收判据（两条同时成立才算修好）**：
+```
+curl -s -H "Authorization: Bearer $TOKEN" 'http://HOST:9527/api/logs/requests?size=20' \
+  | jq '.data[] | {id, channel_id, channel_name, provider}'
+```
+- 新记录 `provider` 非 null（账号池型应见 `trae`/`xiaohuanxiong`，渠道型见协议族）
+- 老记录 `provider` 缺失，且界面仍按 `channel_name` 正常显示
 ### 这个项目容易踩的坑（血泪）
 
 1. **UTF-8 字节切片 panic**：`&s[0..2]` 在中文/非 ASCII 上会 panic（`byte index 2 is not a char boundary`）。要逐字节判 `is_ascii_digit` 或按字符处理。
