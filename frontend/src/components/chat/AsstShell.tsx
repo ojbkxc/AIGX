@@ -89,7 +89,9 @@ export function AsstSidebar({
   return (
     <aside className="asst-side" aria-label={t('历史对话')}>
       <div className="asst-side-head">
-        <button type="button" className="asst-new" onClick={onNew} disabled={disabled}>
+        {/* 生成中**不**置灰：点它要能给出「请先停止」的反馈（旧页面同口径）。
+            静默禁用等于把「为什么点不动」藏起来 —— 行内动作才用 disabled。 */}
+        <button type="button" className="asst-new" onClick={onNew}>
           <ChatPlusIcon size={14} />
           {t('新对话')}
         </button>

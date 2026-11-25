@@ -1,4 +1,4 @@
-import { test, expect, loginAsAdmin } from './fixtures';
+import { test, expect, loginAsAdmin, newChatSession } from './fixtures';
 import type { Page } from '@playwright/test';
 
 /**
@@ -132,21 +132,19 @@ const GATEWAY_USAGE = { prompt: 26, completion: 9, total: 35 };
 async function gotoChat(page: Page): Promise<void> {
   await loginAsAdmin(page);
   await page.goto('/chat');
-  await expect(page.locator('.pg-shell')).toBeVisible();
-  await expect(page.locator('.pg-shell textarea').first()).toBeVisible();
+  await expect(page.locator('.asst-layout')).toBeVisible();
+  await expect(page.locator('.asst-composer textarea').first()).toBeVisible();
 }
 
 /** 新建空会话：桩进程的会话状态跨用例/跨 project 共享，前序用例落盘的消息
- *  会在首屏载入回来。所有用例从干净会话开始，断言才对历史不敏感。 */
+ *  会在首屏载入回来。所有用例从干净会话开始，断言才对历史不敏感。
+ *  实现走 fixtures 的 newChatSession（桌面=左栏「新对话」按钮，窄屏=☰ 后同一按钮）。 */
 async function newSession(page: Page): Promise<void> {
-  await page.getByRole('button', { name: '历史会话' }).first().click();
-  await page.getByRole('button', { name: '新会话' }).first().click();
-  await expect(page.locator('.sd-root.open')).toHaveCount(0);
-  await expect(page.locator('.pg-empty')).toBeVisible();
+  await newChatSession(page);
 }
 
 async function send(page: Page, text: string): Promise<void> {
-  const input = page.locator('.pg-shell textarea').first();
+  const input = page.locator('.asst-composer textarea').first();
   await input.fill(text);
   await input.press('Enter');
 }
@@ -154,7 +152,8 @@ async function send(page: Page, text: string): Promise<void> {
 test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
   test('正常流：正文渐进上屏 + 工具分片聚合 + usage 收尾', async ({ page, pageErrors }) => {
     await installSseStub(page, {
-      gapMs: 120,
+      // 400ms/帧：给「中间态采样」留出真实窗口（见下方 midway 的说明）
+      gapMs: 400,
       frames: [
         contentFrame('正在'),
         contentFrame('检查文件'),
@@ -171,16 +170,22 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await newSession(page);
     await send(page, '帮我读一下 README');
 
-    const assistant = page.locator('.chat-debugger-msg-assistant').last();
+    const assistant = page.locator('.asst-msg.bot').last();
 
-    // 渐进性：首帧后可见「正在」，而最终内容尚未出现（窗口期内轮询）
+    // 渐进性：首帧后可见「正在」，而最终内容尚未出现。
+    // 这里用**一次采样**而不是两条轮询断言：`not.toContainText` 会一直轮询到
+    // 5s 超时才判红，而这条流的帧间隔只有几百毫秒 —— 等到它判定时全文早已到齐，
+    // 断言的其实是「流有没有跑完」而不是「有没有渐进上屏」（改造前就靠帧间隔
+    // 侥幸通过，改造后帧间窗口更短，竞态被放大）。采样一次读文本，两条断言同时
+    // 钉在同一个时刻上；帧间隔放大到 400ms 保证这个时刻确实落在中间态。
     await expect(assistant).toContainText('正在', { timeout: 5000 });
-    await expect(assistant.locator('.chat-debugger-msg-content'))
-      .not.toContainText('正在检查文件');
+    const midway = await assistant.locator('.message-viewer').innerText();
+    expect(midway, `中间态应只到首帧，实际「${midway}」`).toContain('正在');
+    expect(midway, `中间态不该已有完整正文，实际「${midway}」`).not.toContain('正在检查文件');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
 
     // 最终正文聚合
-    await expect(assistant.locator('.chat-debugger-msg-content'))
+    await expect(assistant.locator('.message-viewer'))
       .toContainText('正在检查文件', { timeout: 5000 });
 
     // 工具卡片：名称 + 拼接后的完整参数
@@ -198,7 +203,7 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await expect(card.locator('[data-testid="usage-estimated"]')).toHaveCount(0);
 
     // busy 已复位（发送按钮回到「发送」）
-    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    await expect(page.locator('.asst-send.stop')).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -217,14 +222,14 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await send(page, '搜索一下');
 
     // 先等到正文与工具卡片出现
-    const assistant = page.locator('.chat-debugger-msg-assistant').last();
-    await expect(assistant.locator('.chat-debugger-msg-content')).toContainText('部分回复', { timeout: 5000 });
+    const assistant = page.locator('.asst-msg.bot').last();
+    await expect(assistant.locator('.message-viewer')).toContainText('部分回复', { timeout: 5000 });
     const card = page.locator('[data-testid="tool-call-card"]').last();
     await expect(card).toBeVisible();
     await expect(card.locator('[data-testid="tool-call-args"]')).toContainText('{"q":"aigx');
 
     // 点停止：abort 上游请求
-    await page.locator('.chat-debugger-send-fab').click();
+    await page.locator('.asst-send').click();
 
     // 中断态：已收到的正文原样保留（不被「已停止生成」覆盖）、卡片标「停止」
     await expect(assistant).toContainText('部分回复');
@@ -236,7 +241,7 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await card.getByRole('button', { name: '输入' }).click();
     await expect(card.locator('[data-testid="tool-call-args"]')).toContainText('{"q":"aigx');
     // busy 复位
-    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    await expect(page.locator('.asst-send.stop')).toHaveCount(0);
     // #25（①）：中断收尾**不得凭空出现 usage 数字**。页内桩这条流压根没有 usage 帧，
     // 所以这条钉的是「前端不会自己造一个 usage 出来」；真链路上的同一不变量在
     // 下面「两跳中途停止」用例里验（那边帧确实存在，只是 abort 落在到达之前）。
@@ -257,18 +262,18 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await newSession(page);
     await send(page, '触发错误');
 
-    const bubbles = page.locator('.chat-debugger-msg-assistant');
+    const bubbles = page.locator('.asst-msg.bot');
     await expect(bubbles.last()).toContainText('上游限流', { timeout: 5000 });
     // F4：错误帧是「追加」不是「覆盖」——已流出的正文必须保留在同一气泡里
     await expect(bubbles.last()).toContainText('写了一半');
     // 错误就地收尾：当前错误气泡只有 1 个（不出现「…」+「⚠️」双泡叠加）。
     // 注意桩进程的会话状态跨用例共享，前序用例的消息可能已被持久化回来，
     // 所以只数「带错误文案」的气泡，不数全部助手气泡。
-    await expect(page.locator('.chat-debugger-msg-assistant', { hasText: '上游限流' })).toHaveCount(1);
+    await expect(page.locator('.asst-msg.bot', { hasText: '上游限流' })).toHaveCount(1);
     // 末尾不残留流式占位「…」气泡
-    await expect(bubbles.last().locator('.chat-debugger-msg-content')).not.toHaveText('…');
+    await expect(bubbles.last().locator('.message-viewer')).not.toHaveText('…');
     // busy 复位
-    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    await expect(page.locator('.asst-send.stop')).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -287,8 +292,8 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await send(page, '走两跳链路');
 
     // 上游双的正文分片必须经透传到达（顺带证明两跳真的打通）
-    const assistant = page.locator('.chat-debugger-msg-assistant').last();
-    await expect(assistant.locator('.chat-debugger-msg-content')).toContainText('两跳链路验证', { timeout: 10000 });
+    const assistant = page.locator('.asst-msg.bot').last();
+    await expect(assistant.locator('.message-viewer')).toContainText('两跳链路验证', { timeout: 10000 });
 
     // 关键断言：usage 三个数字只能来自「上游按条件产出的终帧」——
     // 该帧的存在 ⇔ 后端双确实注入了 stream_options.include_usage。
@@ -299,7 +304,7 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await expect(usage).toContainText(`${TWO_HOP_USAGE.total}`);
 
     // busy 复位
-    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    await expect(page.locator('.asst-send.stop')).toHaveCount(0);
     // #24 口径区分（下半边）：该帧由**上游回报**，不带 estimated ⇒ 必须没有角标。
     // 与末尾账号池用例（有角标 + 另一组数字）成对，才叫「两种口径可区分」。
     await expect(assistant.locator('[data-testid="usage-estimated"]')).toHaveCount(0);
@@ -312,15 +317,15 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     // message 带触发标记：上游双对 stream_options 直接 400（模拟老 vLLM/自建网关）
     await send(page, `走不识别的老上游 ${LEGACY_MARK}`);
 
-    const assistant = page.locator('.chat-debugger-msg-assistant').last();
+    const assistant = page.locator('.asst-msg.bot').last();
     // 重试链路完好：正文照常上屏（400 兜底不能把回复弄丢）
-    await expect(assistant.locator('.chat-debugger-msg-content')).toContainText('两跳链路验证', { timeout: 10000 });
+    await expect(assistant.locator('.message-viewer')).toContainText('两跳链路验证', { timeout: 10000 });
 
     // 先确认整条流**已经结束**（busy 复位发生在 [DONE] 处理之后），再断言「没有数字」。
     // 顺序不能颠倒：`toHaveCount(0)` 是反向断言，帧还没解析到就会立刻成立 —— 早于
     // usage 终帧落地则永远「通过」，等于没测（本地变异验证过：把上游改成无条件
     // 吐 usage 时，若先断言缺失，用例仍假绿）。
-    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    await expect(page.locator('.asst-send.stop')).toHaveCount(0);
 
     // 反向断言（去桩自证的下半边）：重试后出站请求已不含 stream_options，
     // 上游不发 usage 终帧 ⇒ 界面**绝不能**出现 usage 数字。此前页内桩无条件
@@ -342,20 +347,20 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await newSession(page);
     await send(page, `走两跳链路但慢一点 ${SLOW_MARK}`);
 
-    const body = page.locator('.chat-debugger-msg-assistant').last().locator('.chat-debugger-msg-content');
+    const body = page.locator('.asst-msg.bot').last().locator('.message-viewer');
     // 第 1 个正文分片（500ms 档下 t≈0.5s）上屏即停手
     await expect(body).toContainText('两跳', { timeout: 10000 });
     // 此刻仍在流中：完整正文未出现 ⇒ 证明停止点确实落在尾帧之前（不是自然收尾）
     await expect(body).not.toContainText('两跳链路验证');
 
-    await page.locator('.chat-debugger-send-fab').click();
+    await page.locator('.asst-send').click();
 
     // 跨过「尾帧本应到达」的窗口（500ms 档：尾帧 2.5s、`[DONE]` 3s，停止在 ~0.6s）。
     // 纪律同 #22：反向断言若早于帧落地就会立刻成立＝假绿，必须先等过那个时间窗。
     await page.waitForTimeout(2600);
 
     // 停止已生效，busy 复位
-    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    await expect(page.locator('.asst-send.stop')).toHaveCount(0);
 
     // #37 钉住「同泡追加」：**已收到 #25 那版兼容定位（两处 `hasText` 各数一只）
     // 会让「正文一泡 + 停止一泡」的旧形态照样绿，故本单撤掉兼容写法**，改成三条
@@ -363,12 +368,12 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     // （改回 push 新泡 → ①②同时红，本地变异验证过）；③正文本身不含标记文案。
     // ③ 钉的是实现选择——标记走 `toolState` 而非拼进 `content`，于是回传历史 /
     // 复制 / 朗读拿到的都只有正文（`isTransientAssistantText` 的排除口径）。
-    const partial = page.locator('.chat-debugger-msg-assistant', { hasText: '两跳' });
+    const partial = page.locator('.asst-msg.bot', { hasText: '两跳' });
     await expect(partial).toHaveCount(1);
     await expect(partial.locator('[data-testid="msg-stopped"]')).toHaveCount(1);
-    await expect(page.locator('.chat-debugger-msg-assistant')).toHaveCount(1);
-    await expect(partial.locator('.chat-debugger-msg-content')).toContainText('两跳');
-    await expect(partial.locator('.chat-debugger-msg-content')).not.toContainText('已停止生成');
+    await expect(page.locator('.asst-msg.bot')).toHaveCount(1);
+    await expect(partial.locator('.message-viewer')).toContainText('两跳');
+    await expect(partial.locator('.message-viewer')).not.toContainText('已停止生成');
     // 关键反向断言：尾帧从未到达 ⇒ 界面不得出现 usage 数字。
     // 不只查那只气泡——整屏一起查，免得「数字被画到别处」漏网。
     await expect(partial.locator('[data-testid="usage-summary"]')).toHaveCount(0);
@@ -389,9 +394,9 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await newSession(page);
     await send(page, `走账号池归一化链路 ${ACCOUNT_MARK}`);
 
-    const assistant = page.locator('.chat-debugger-msg-assistant').last();
+    const assistant = page.locator('.asst-msg.bot').last();
     // 该档正文与真值档不同（「账号池归一」），档位选错不会撞绿
-    await expect(assistant.locator('.chat-debugger-msg-content'))
+    await expect(assistant.locator('.message-viewer'))
       .toContainText('账号池归一', { timeout: 10000 });
 
     // 合成尾帧的数字（26/9/35）只能来自后端双——上游该档压根不回报 usage
@@ -405,7 +410,7 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await expect(badge).toHaveCount(1);
     await expect(badge).toContainText(/估算|Estimated/);
 
-    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    await expect(page.locator('.asst-send.stop')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
@@ -424,15 +429,18 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await newSession(page);
     await send(page, '列一下文件');
 
-    const assistant = page.locator('.chat-debugger-msg-assistant').last();
+    const assistant = page.locator('.asst-msg.bot').last();
     const card = page.locator('[data-testid="tool-call-card"]').last();
     await expect(card.locator('[data-testid="usage-summary"]')).toContainText('7');
     await expect(card.locator('[data-testid="usage-estimated"]')).toHaveCount(1);
-    // 二选一渲染：有卡片时气泡 meta 不再重复出一份 usage（角标也不会出现两处）
-    await expect(assistant.locator('.chat-debugger-msg-usage')).toHaveCount(0);
+    // 二选一渲染：新结构里 usage 只在工具卡内渲染一份（AsstMessages 把 usage
+    // 交给 ToolCallCard），气泡侧不再有第二个 usage 位。所以断言改成「整只气泡
+    // 里 usage 汇总与估算角标各只有一处」—— 旧的「卡片内 vs 气泡 meta」两个
+    // 容器在 A2A 消息流里已合并为一处，但「不重复渲染」这条需求不变。
+    await expect(assistant.locator('[data-testid="usage-summary"]')).toHaveCount(1);
     await expect(assistant.locator('[data-testid="usage-estimated"]')).toHaveCount(1);
 
-    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    await expect(page.locator('.asst-send.stop')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });

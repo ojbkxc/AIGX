@@ -702,7 +702,7 @@ export default function Chat(): JSX.Element {
     resetAttachments();
   }, [guardBusy, persistSessions, saveActiveNow, resetAttachments]);
 
-  const removeSession = useCallback(async (id: string): Promise<void> => {
+  const doRemoveSession = useCallback(async (id: string): Promise<void> => {
     if (guardBusy()) return;
     setHistoryBusy(true);
     try {
@@ -725,7 +725,21 @@ export default function Chat(): JSX.Element {
     setHistoryBusy(false);
   }, [guardBusy, newChat, openSession, persistSessions]);
 
-  const clearHistory = useCallback(async (): Promise<void> => {
+  /** 删除会话：**必须二次确认**。旧 SessionDrawer 内建这个确认，换成左栏后
+   *  不能因为「自己画行」就把这层保护丢掉（裸删是不可恢复操作）。 */
+  const removeSession = useCallback((id: string): void => {
+    if (guardBusy()) return;
+    const title = sessionsRef.current.find((item) => item.id === id)?.title || t('未命名对话');
+    setConfirmState({
+      title: t('删除会话'),
+      message: `${t('删除后不可恢复，确认删除')}「${title}」？`,
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: () => { void doRemoveSession(id); },
+    });
+  }, [doRemoveSession, guardBusy, t]);
+
+  const doClearHistory = useCallback(async (): Promise<void> => {
     if (guardBusy()) return;
     setHistoryBusy(true);
     try {
@@ -742,6 +756,18 @@ export default function Chat(): JSX.Element {
     }
     await newChat();
   }, [guardBusy, newChat, persistSessions]);
+
+  /** 清空全部：整库删会话，破坏面比删一条大，同样要确认。 */
+  const clearHistory = useCallback((): void => {
+    if (guardBusy()) return;
+    setConfirmState({
+      title: t('清空全部会话'),
+      message: t('将删除本机保存的全部历史对话，且无法恢复。确认继续？'),
+      confirmText: t('清空'),
+      danger: true,
+      onConfirm: () => { void doClearHistory(); },
+    });
+  }, [doClearHistory, guardBusy, t]);
 
   const renameSession = useCallback(async (id: string, title: string): Promise<void> => {
     try {
@@ -1023,10 +1049,10 @@ export default function Chat(): JSX.Element {
         disabled={busy || historyBusy}
         onNew={() => void newChat()}
         onOpen={(id) => void openSession(id)}
-        onRemove={(id) => void removeSession(id)}
+        onRemove={removeSession}
         onRename={(id, title) => void renameSession(id, title)}
         onFork={(id) => void forkSession(id)}
-        onClear={() => void clearHistory()}
+        onClear={clearHistory}
         onTitleSettings={() => setSettingsOpen(true)}
         onChatSettings={admin ? () => setChatSettingsOpen(true) : undefined}
       />
@@ -1157,10 +1183,10 @@ export default function Chat(): JSX.Element {
             disabled={busy || historyBusy}
             onNew={() => void newChat()}
             onOpen={(id) => void openSession(id)}
-            onRemove={(id) => void removeSession(id)}
+            onRemove={removeSession}
             onRename={(id, title) => void renameSession(id, title)}
             onFork={(id) => void forkSession(id)}
-            onClear={() => void clearHistory()}
+            onClear={clearHistory}
             onTitleSettings={() => { setSidebarOpen(false); setSettingsOpen(true); }}
             onChatSettings={admin ? () => { setSidebarOpen(false); setChatSettingsOpen(true); } : undefined}
           />

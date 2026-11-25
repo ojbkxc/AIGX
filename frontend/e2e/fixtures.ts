@@ -83,4 +83,34 @@ export const test = base.extend<{ pageErrors: string[] }>({
   },
 });
 
+/* ── /chat 历史会话的定位助手（对齐 A2A assistant-shell 的 asst-* 结构）──
+ * 桌面端历史会话是**常驻左栏**（没有「打开抽屉」这个动作）；窄屏（<900px）
+ * 左栏收起，由顶栏 ☰ 打开 MobileDrawer 里的同一组件。所有涉及「看/点会话
+ * 列表」的用例都走这两个助手，避免各自写一套断点判断。 */
+export function isNarrowViewport(page: Page): boolean {
+  return (page.viewportSize()?.width ?? 1280) < 900;
+}
+
+/** 当前可见左栏的根选择器（桌面=常驻栏，窄屏=覆盖层里的同一组件） */
+export function sideRoot(page: Page): string {
+  return isNarrowViewport(page) ? '.mobile-drawer .asst-side' : '.asst-layout > .asst-side';
+}
+
+/** 让会话列表可见：桌面直接可见；窄屏先点 ☰ 展开覆盖层。 */
+export async function openSideList(page: Page): Promise<void> {
+  if (isNarrowViewport(page)) {
+    await page.locator('.asst-menu').click();
+    await expect(page.locator('.mobile-drawer-overlay')).toBeVisible();
+  } else {
+    await expect(page.locator('.asst-layout > .asst-side')).toBeVisible();
+  }
+}
+
+/** 新建空会话（经左栏真实 UI 流），并等空态出现。 */
+export async function newChatSession(page: Page): Promise<void> {
+  await openSideList(page);
+  await page.locator(`${sideRoot(page)} .asst-new`).click();
+  await expect(page.locator('.asst-empty')).toBeVisible();
+}
+
 export { expect };

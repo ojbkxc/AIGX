@@ -166,8 +166,15 @@ export default function AsstMessages({
               <div className="asst-msg-who">
                 <b>{model || t('助手')}</b>
                 <span>{timeLabel(Date.now())}</span>
-                {message.toolState === 'interrupted' && <em className="asst-msg-flag stop">{t('已停止生成')}</em>}
-                {message.toolState === 'error' && <em className="asst-msg-flag bad">{t('上游报错')}</em>}
+                {/* #37：中止标记只出现**一处**。有工具卡片时由卡片的「停止」徽标
+                    承担（ToolCallCard 的 interrupted 态），气泡里不再叠一份文字；
+                    没有工具卡片的纯文本回复才在 who 行标「已停止生成」。 */}
+                {message.toolState === 'interrupted' && !message.toolCalls?.length && (
+                  <em className="asst-msg-flag stop" data-testid="msg-stopped">{t('已停止生成')}</em>
+                )}
+                {message.toolState === 'error' && (
+                  <em className="asst-msg-flag bad" data-testid="msg-error">{t('上游报错')}</em>
+                )}
               </div>
 
               {message.content

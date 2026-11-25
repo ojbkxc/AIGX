@@ -1593,6 +1593,21 @@
 @media (max-width: 900px) {
   .asst-layout { height: calc(100vh - 32px); }
   .asst-layout > .asst-side { display: none; }
+  /* 抽屉里的同一组件必须撑满抽屉高度：`.asst-side` 是 flex column，列表靠
+     `flex: 1 1 auto` 拿高度；不给确定高度时它按内容撑开，列表就没有可滚动
+     余量（30 条会话把抽屉顶成「看不见底」的长条）。 */
+  .mobile-drawer .asst-side {
+    height: 100%;
+    width: 100%;
+    margin-right: 0;
+    padding: 10px 10px 8px;
+    border-right: 0;
+  }
+  /* 全局「打开菜单」是 fixed 在视口左上角（top:12 left:12, 40×40）的汉堡，
+     z-index 150。顶栏的 ☰ 若落在同一块区域，点击会被它拦走（实测
+     `element ... intercepts pointer events`，按钮点了没反应）。这里把顶栏
+     整体右让，让两枚按钮各占其位、互不覆盖。 */
+  .asst-top { padding-left: 56px; }
   .asst-menu { display: grid; }
   .asst-title { max-width: 40%; }
   .asst-top-model { display: none; }
@@ -1606,4 +1621,12 @@
   .asst-settings-btn span { display: none; }
   .asst-drawer { width: 100%; }
   .asst-mode-cards { grid-template-columns: 1fr; }
+  /* 底部工具栏在 390px 宽度下装不下「两个圆钮 + 权限胶囊 + 思考 pill + 模型胶囊
+     + 发送键」：实测模型胶囊会把发送键**盖住**（`asst-pill-wrap` 的子树拦截
+     pointer events，点停止/发送全失效）。允许换行后发送键独占右侧一行，
+     每行都可点。 */
+  .asst-bar { flex-wrap: wrap; row-gap: 6px; }
+  .asst-bar-spacer { display: none; }
+  .asst-pill-wrap { min-width: 0; }
+  .asst-pill { max-width: 100%; }
 }
