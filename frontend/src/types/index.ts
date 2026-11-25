@@ -2840,6 +2840,9 @@ export interface PurgeSettings {
   auto_preset?: boolean;
   /** 固定套用的预设 id（空 = 按模型自动匹配） */
   auto_preset_id?: string;
+  /** 通用兜底（默认开）：模型名与厂商都命中不了时套用通用破甲词。
+   *  关掉后这类模型一条都不套 —— 通用词约 6KB，会前插到该模型的每次请求上。 */
+  universal_fallback?: boolean;
   upstream_label: string;
 }
 

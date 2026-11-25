@@ -5722,7 +5722,7 @@
   "新建对话时使用": "[TODO en] 新建对话时使用",
   "选择模型…": "[TODO en] 选择模型…",
   "已触发标题总结": "[TODO en] 已触发标题总结",
-  "已添加 {n} 个文本附件，共 {size}": "[TODO en] 已添加 {n} 个文本附件，共 {size}",
+  "已添加 {{n}} 个文本附件，共 {{size}}": "Added {{n}} text attachment(s), {{size}} total",
   "由 AIGX 网关按渠道优先级自动选路（无需 API Key）": "[TODO en] 由 AIGX 网关按渠道优先级自动选路（无需 API Key）",
   "原先在「设置 → 聊天」的配置都搬到这里了": "[TODO en] 原先在「设置 → 聊天」的配置都搬到这里了",
   "这段文本作为 system 消息排在对话最前面。工具定义由网关自动附加，不用写在这里。": "[TODO en] 这段文本作为 system 消息排在对话最前面。工具定义由网关自动附加，不用写在这里。",
@@ -5776,5 +5776,7 @@
   "其中：被过滤": "of which: filtered",
   "其中：其它": "of which: other",
   "自动套用预设命中": "Auto-preset hits",
-  "1 = 该档是下界估计（事件环被覆盖，只会少算）": "1 = this window is a lower bound (event ring overwritten, under-counts only)"
+  "1 = 该档是下界估计（事件环被覆盖，只会少算）": "1 = this window is a lower bound (event ring overwritten, under-counts only)",
+  "模型名和厂商都没命中时，套用这一条（通用兜底）": "[TODO en] 模型名和厂商都没命中时，套用这一条（通用兜底）",
+  "通用兜底": "[TODO en] 通用兜底"
 }

@@ -45,7 +45,8 @@ type BoolKey =
   | 'cross_source_fallback'
   | 'skill_inject'
   | 'structured_prompt'
-  | 'auto_preset';
+  | 'auto_preset'
+  | 'universal_fallback';
 
 const SWITCHES: Array<{ key: BoolKey; label: string; desc: string }> = [
   {
@@ -92,6 +93,11 @@ const SWITCHES: Array<{ key: BoolKey; label: string; desc: string }> = [
     key: 'auto_preset',
     label: '按模型自动套用',
     desc: '请求发出前按模型找内置预设，命中就把正文原样前插到 system 提示词；名字对不上就不套',
+  },
+  {
+    key: 'universal_fallback',
+    label: '通用兜底',
+    desc: '模型名和厂商都命中不了时，套用通用破甲词。关掉后这类模型一条都不套 —— 通用词约 6KB，会前插到该模型的每次请求上',
   },
 ];
 
@@ -2383,7 +2389,10 @@ const PageNav = memo(function PageNav({ t }: { t: TFunction }): JSX.Element {
  * 声明在本页而非 types 里，是因为 wire 侧尚未把该字段并入 PurgePresetBrief。
  */
 type PresetBriefWithMatch = PurgePresetBrief & {
-  model_match?: 'exact' | 'vendor' | 'mismatch' | 'unknown' | null;
+  // `universal` = 通用兜底条目（模型名/厂商都没命中时套它，见后端
+  // `PresetModelMatch::Universal`）。不加这一档，兜底条目在列表里没有徽标、
+  // 看起来和「未匹配」一样。
+  model_match?: 'exact' | 'vendor' | 'universal' | 'mismatch' | 'unknown' | null;
   /** 命中来自正文（后端只在「元数据搜不到、正文搜得到」时给 true） */
   body_match?: boolean | null;
 };
@@ -2741,6 +2750,14 @@ const PresetsSection = memo(function PresetsSection({
                       <strong>{item.title}</strong>
                       {item.model_match === 'exact' ? (
                         <span className="purge-preset-match">{t('默认模型')}</span>
+                      ) : null}
+                      {item.model_match === 'universal' ? (
+                        <span
+                          className="purge-preset-match"
+                          title={t('模型名和厂商都没命中时，套用这一条（通用兜底）')}
+                        >
+                          {t('通用兜底')}
+                        </span>
                       ) : null}
                       {item.body_match ? (
                         <span
