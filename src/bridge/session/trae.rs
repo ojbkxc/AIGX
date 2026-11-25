@@ -46,6 +46,7 @@ use crate::bridge::{
 
 const CHAT_PATH: &str = "/api/agent/v3/llm_utils_chat";
 const DEFAULT_MODEL: &str = "glm-5.2";
+const DEFAULT_MAX_TOKENS: i64 = 1_000_000;
 
 /// Trae 上游认得的 `config_name` 全表（90 个）。
 ///
@@ -73,9 +74,23 @@ const DEFAULT_MODEL: &str = "glm-5.2";
 /// `model` 字段**不参与**这个判定（填内部 ID、填别名、留空都出 200 + 真回复），
 /// 所以只归一 `config_name`，`model` 保持调用方原样，日志/计费口径不变。
 ///
-/// 表内容取自 `POST /api/ide/v1/get_detail_param` 的
-/// `function=solo_work_lite`(54) ∪ `chat_v3`(65) ∪ `solo_agent`(75) 去重，
-/// 即三条 function 的并集（90 个），避免只认一条时把别的 function 的模型挡掉。
+/// ── 这张表怎么来的 / 什么时候要重取 ─────────────────────────────
+/// 来源：`POST https://trae-api-cn.mchost.guru/api/ide/v1/get_detail_param`，
+/// body `{"function": "<fn>"}`，读响应里的 `config_info_list[].config_name`。
+/// 三个 function 各跑一次再取并集：
+///   `solo_work_lite` → 54 条、`chat_v3` → 65 条、`solo_agent` → 75 条，
+///   去重后 **90 条**（本表）。
+/// 取**并集**而不是只取一条 function 的：`solo_coder` 的清单只有 41 条且不含
+/// `deepseek-v4.1-flash`（发它必得 4001），说明各 function 的清单确实不同 ——
+/// 只认一条会把别的 function 能用的模型误挡。
+///
+/// **什么时候必须重取**（否则新模型会被当「认不出」原样发出 → 上游 4001）：
+///   1. 上游上了新模型，而它不在本表里；
+///   2. `resolve_config_name` 打出
+///      `trae: 模型 '…' 不在上游 config_name 清单里` 这条 warn；
+///   3. 改 `function` 取值时（各 function 清单不同）。
+/// 重取的完整脚本与判据见 `docs/TRAE-PROBE-MATRIX.md` §5.3；拿到新清单后
+/// 替换本常量，并同步那份文档 §5.1 的条数。
 const TRAE_CONFIG_NAMES: &[&str] = &[
     "DeepSeek-V4-Flash",
     "DeepSeek-V4-Flash-Official",
@@ -230,13 +245,23 @@ fn fold_key(text: &str) -> String {
         .map(|c| c.to_ascii_lowercase())
         .collect()
 }
-const DEFAULT_MAX_TOKENS: i64 = 1_000_000;
+
 /// 真实 Trae 客户端 UA —— **两套**，由账号凭证里的 `variant` 决定。
 ///
-/// 上游 WAF 会校验客户端身份：AIGX 早先用 `Trae/1.0 antigravity-cockpit-tools`
-/// 一律被拦成 `{"code":"11-128","msg":"request illegal"}` —— 不是 token 失效
-/// （那是 401），是请求被判成非法客户端。取值来自 A2A `agent2api-wasm-trae`
-/// 0.1.1 wasm 的字面量（`trae/src/headers.rs`），那里 SOLO 与 IDE 是两个不同的串。
+/// ── 实测：这套分流不产生正确性收益（2026-11-25 修正）──────────────
+/// 早先的注释写「上游 WAF 会校验客户端身份，用 `Trae/1.0 antigravity-cockpit-tools`
+/// 一律被拦成 `{"code":"11-128","msg":"request illegal"}`」。**这条与实测不符**：
+/// 同一 token 只换 UA，`Trae/1.0 antigravity-cockpit-tools`、`Mozilla/5.0`、
+/// `VSCode 1.107.1 (TRAE SOLO CN)`、`VSCode 1.107.1 (TRAE CN)`、`Trae/0.1.69`
+/// **全部 200 + 真回复**；只有 `curl/8.5.0` 或删掉 UA 会拿到 200 空流。
+/// 而 `11-128` 在 trae.wasm（A2A 与 AIGX 两份 0.1.1）里**一次都不出现**，
+/// 本机 60+ 组探针也复现不出 —— 它不是对话链路的指纹判据。
+///
+/// 两个串本身来自 A2A wasm 的字面量（SOLO / IDE 确实各有一个），保留是因为
+/// 「贴近真实客户端形态」没有坏处；将来简化可直接固定成官方值 `Trae/0.1.69`
+/// （A2A 成功请求实测就是它）。`variant` 真正必需的场合是 OAuth 换码
+/// （`client_id` 与 `PlatformCode`），不在对话链路上。
+/// 证据全表：`docs/TRAE-PROBE-MATRIX.md` §3.3、§6.1。
 const UA_SOLO: &str = "VSCode 1.107.1 (TRAE SOLO CN)";
 const UA_IDE: &str = "VSCode 1.107.1 (TRAE CN)";
 
@@ -244,8 +269,24 @@ const UA_IDE: &str = "VSCode 1.107.1 (TRAE CN)";
 /// **不能发给上游**（见 `new` 里摘除）。
 const VARIANT_HEADER: &str = "x-aigx-trae-variant";
 
-/// 真实客户端固定随请求带的身份/渠道头。同样是 wasm 里的字面量，缺一个都可能被
-/// 判非法客户端。`x-request-id` / `x-trae-request-id` 每次请求现生成（见 `request`）。
+/// 真实客户端随请求带的身份/渠道头。`x-request-id` / `x-trae-request-id` 每次请求
+/// 现生成（见 `request`）。
+///
+/// ── 实测：这里大部分**不是**必需项（2026-11-25）──────────────────
+/// 早先的注释写「缺一个都可能被判非法客户端」，实测不成立。真实成功请求（A2A
+/// `debug_traffic` 里 32 条 `status=200`）只发 20 个头，**其中并不包含**
+/// `accept-language` / `x-user-region` / `package-type` / `x-lgw-req-sdk-type` /
+/// `x-market-client-id` / `sec-fetch-*` / `x-tt-trace-id`。逐项删测：
+///   · 删 `accept-language` / `x-user-region` / `package-type` /
+///     `x-lgw-req-sdk-type` / `x-market-client-id` / `sec-fetch-*` / `x-tt-trace-id`
+///     → 全部仍 200 + 真回复；
+///   · 删 `x-device-type` / `x-plugin-channel` / `request-traffic-type` → 仍 200；
+///   · 删 `x-app-version` / `x-app-version-code` → 仍 200。
+/// 真正的硬门槛只有两个，且都在 `registry.rs` 的头表里：
+///   · `x-app-id`（缺 → `4001 binding: expr_path=app_id, missing required parameter`）
+///   · `x-ide-version-code`（缺 → `4001 … expr_path=app_version_code …`，且要够新）
+/// 那批多余的头**留着无害**（实测不影响成败），删掉要重新验一遍、收益不对等，
+/// 故保留。逐组证据见 `docs/TRAE-PROBE-MATRIX.md` §2 与 §3。
 const DEFAULT_HEADERS: &[(&str, &str)] = &[
     ("accept", "*/*"),
     ("accept-language", "zh-CN"),
@@ -301,8 +342,20 @@ impl TraeBridge {
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
         {
-            // `solo` 走 SOLO 那套 UA，其余（含缺省）走 IDE 那套 —— wasm 里
-            // `trae_managed_variant_invalid` 说明变体必须与客户端形态一致。
+            // `solo` 走 SOLO 那套 UA，其余（含缺省）走 IDE 那套。
+            //
+            // ── 实测：这套分流**不产生正确性收益**（2026-11-25）──────────
+            // 同一 token、只换 UA，打 `/api/agent/v3/llm_utils_chat`：
+            //   `VSCode 1.107.1 (TRAE SOLO CN)` → 200 + 真回复
+            //   `VSCode 1.107.1 (TRAE CN)`      → 200 + 真回复
+            //   `Trae/0.1.69`（官方值）         → 200 + 真回复
+            //   `Trae/1.0 antigravity-cockpit-tools` → 200 + 真回复
+            //   `Mozilla/5.0`                   → 200 + 真回复
+            //   只有 `curl/8.5.0` 或**删掉 UA** 会拿到 200 空流（非报错）。
+            // 也就是说 UA 不是鉴权门槛，这里按 variant 分两套只是「贴近真实客户端
+            // 形态」的写法。将来简化可直接固定成官方值 `Trae/0.1.69`；`variant`
+            // 真正必需的场合是 OAuth 换码（`client_id` 与 `PlatformCode`），
+            // 不在对话链路上。证据全表见 `docs/TRAE-PROBE-MATRIX.md` §3.3 / §6.1。
             let ua = if variant == "solo" { UA_SOLO } else { UA_IDE };
             merged.push(("user-agent".to_string(), ua.to_string()));
         }
@@ -317,8 +370,19 @@ impl TraeBridge {
         }
         // 认证头：真实客户端把 token 同时放在三处（`authorization` +
         // `x-cloudide-token` + `x-ide-token`）。早先这里把 credential 参数写成
-        // `_credential` 整个忽略掉，请求里没有 authorization → 上游一律
-        // `{"code":"11-128","msg":"request illegal"}`（不是 401，是「非法客户端」）。
+        // `_credential` 整个忽略掉，请求里三个头一个都没有。
+        //
+        // ── 实测口径（2026-11-25 修正）──────────────────────────────
+        // 三个头是**或**关系：任一处带真 token 就过。
+        //   · 只删 `authorization`（另两个还在）        → 200 + 真回复
+        //   · 三个全删 / 全填乱码                      → **401** `{"code":1001,
+        //     "message":"…not able to authenticate you…"}`
+        //   · token 截断到前 40 字符                    → 200 + 真回复
+        // 所以「没认证头」表现为 **401 code 1001**，不是 `11-128 request illegal`。
+        // 早先这里写「没 authorization → 上游一律 11-128」与实测不符：`11-128`
+        // 在 trae.wasm（A2A 与 AIGX 两份 0.1.1）里**一次都不出现**，本机 60+ 组
+        // 探针也复现不出。别把两种错误层混在一起判（证据见
+        // `docs/TRAE-PROBE-MATRIX.md` §3.4 与 §4）。
         // 账号里显式配了同名头的以账号为准，不覆盖。
         let credential = credential.into();
         let credential = credential.trim();
