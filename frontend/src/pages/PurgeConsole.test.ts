@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PurgeSettings } from '../types';
 import {
@@ -36,6 +38,7 @@ import {
   warningReportText,
   settingsEqual,
   summaryTextWithOff,
+  STATS_CSV_HELP,
   swapRules,
   tidySummary,
   writeDraftBackup,
@@ -401,6 +404,33 @@ describe('writePreviewHistory · 去重与截断（导入提示的增量靠它�
     const next = writePreviewHistory(base, 'a', set);
     expect(next).toHaveLength(base.length);
     expect(next.filter((x) => !base.includes(x))).toHaveLength(0);
+  });
+});
+
+describe('STATS_CSV_HELP', () => {
+  it('**列名与顺序必须与后端 STATS_CSV_COLUMNS 一致**（缺一列或换序都会被这测抓到）', () => {
+    // 后端定义在 src/purge/mod.rs；这里直接读源码而不是抄一份，避免两处漂移
+    const mod = fs.readFileSync(path.resolve(__dirname, '../../../src/purge/mod.rs'), 'utf8');
+    const block = mod.slice(mod.indexOf('STATS_CSV_COLUMNS'));
+    const cols: string[] = [];
+    for (const m of block.matchAll(/"([a-z_]+)",/g)) {
+      cols.push(m[1]);
+      if (cols.length >= 13) break;
+    }
+    expect(cols).toHaveLength(13);
+    expect(STATS_CSV_HELP.map((h) => h.column)).toEqual(cols);
+  });
+
+  it('每一列都有中文说明（不留空标签）', () => {
+    for (const item of STATS_CSV_HELP) {
+      expect(item.label.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it('lower_bound 的说明要说清「1 表示什么」（否则这列等于没解释）', () => {
+    const lower = STATS_CSV_HELP.find((h) => h.column === 'lower_bound');
+    expect(lower?.label).toContain('1');
+    expect(lower?.label).toContain('少算');
   });
 });
 

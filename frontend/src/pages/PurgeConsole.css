@@ -906,3 +906,24 @@
 .purge-configured-off .purge-hint {
   margin: 0 0 6px;
 }
+/* 统计 CSV 列说明：折叠起来不占地方，展开能逐列对照 */
+.purge-csv-help {
+  margin: 6px 0 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.purge-csv-help summary {
+  cursor: pointer;
+  user-select: none;
+}
+.purge-csv-help ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 2px 16px;
+}
+.purge-csv-help li code {
+  color: var(--text-primary);
+  margin-right: 6px;
+}

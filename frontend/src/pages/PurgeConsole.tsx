@@ -607,6 +607,31 @@ export function summaryTextWithOff(
   return lines.join('\n');
 }
 
+/**
+ * 导出 CSV 的列说明（供界面展示与单测）。
+ *
+ * 为什么需要：导出的文件是**发给别人的**（汇报、贴工单），而列名是 `responses` /
+ * `lower_bound` 这类机器名，拿到文件的人看不出「早期收敛」和「提前收敛」的差别，
+ * 也不知道 `lower_bound` 是干什么的。此前界面上完全没有这份对照。
+ *
+ * 与后端 `STATS_CSV_COLUMNS` 一一对应、顺序一致；缺一列或改顺序会被单测抓到。
+ */
+export const STATS_CSV_HELP: Array<{ column: string; label: string }> = [
+  { column: 'window', label: '时间窗档位（全程 / 1 小时 / 24 小时 / 上次运行）' },
+  { column: 'responses', label: '响应总数' },
+  { column: 'retries', label: '重试次数' },
+  { column: 'early_success', label: '提前收敛（重试前就成功）' },
+  { column: 'skill_hits', label: '技能命中' },
+  { column: 'refusals', label: '拒绝总数' },
+  { column: 'failure_refusal', label: '其中：模型拒绝' },
+  { column: 'failure_empty', label: '其中：空答' },
+  { column: 'failure_filter', label: '其中：被过滤' },
+  { column: 'failure_other', label: '其中：其它' },
+  { column: 'synonym_hits', label: '同义词命中' },
+  { column: 'auto_preset_hits', label: '自动套用预设命中' },
+  { column: 'lower_bound', label: '1 = 该档是下界估计（事件环被覆盖，只会少算）' },
+];
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -4686,6 +4711,18 @@ export default function PurgeConsole(): JSX.Element {
           })}
         </p>
       ) : null}
+      {/* CSV 列说明：文件是发给别人的，列名是机器名，界面不给对照就没人看得懂 */}
+      <details className="purge-csv-help" data-testid="purge-csv-help">
+        <summary>{t('导出 CSV 的列是什么意思？')}</summary>
+        <ul>
+          {STATS_CSV_HELP.map((item) => (
+            <li key={item.column}>
+              <code>{item.column}</code>
+              <span>{t(item.label)}</span>
+            </li>
+          ))}
+        </ul>
+      </details>
       {/* 「上次运行」档：不说清是哪一次，一排数字等于没意义 */}
       {statsWindow === 'last' ? (
         <p className="purge-hint" data-testid="purge-last-run-note">
