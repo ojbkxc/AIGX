@@ -5786,5 +5786,8 @@
   "没有可添加的规则（可能与现有行重复）": "No rules to add (they may all duplicate existing rows)",
   "导入失败：{{reason}}": "Import failed: {{reason}}",
   "将删除本机保存的全部历史对话，且无法恢复。确认继续？": "This deletes all conversation history saved on this machine and cannot be undone. Continue?",
-  "清空全部会话": "Clear all conversations"
+  "清空全部会话": "Clear all conversations",
+  "可用提供商": "[TODO en] 可用提供商",
+  "留空 = 不限制": "[TODO en] 留空 = 不限制",
+  "暂无可用提供商（先添加渠道或账号）": "[TODO en] 暂无可用提供商（先添加渠道或账号）"
 }

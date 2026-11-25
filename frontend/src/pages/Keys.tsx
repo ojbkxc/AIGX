@@ -40,6 +40,9 @@ const KEYS_COL_DEFS: TableColumnDef[] = [
   { key: 'key', label: '密钥', width: 220 },
   { key: 'quota', label: '额度', align: 'right', width: 130 },
   { key: 'group', label: '分组', width: 100 },
+  // 提供商白名单（07 D 章 allowed_providers）：与「模型」列同构的可见性，
+  // 缺它时「这把 Key 能被路由到哪些上游」在列表里看不见，只能逐个点开编辑。
+  { key: 'providers', label: '提供商', width: 140 },
   { key: 'models', label: '模型', width: 160 },
   { key: 'expires', label: '过期', width: 150 },
   { key: 'created', label: '创建时间', width: 150 },
@@ -57,6 +60,8 @@ interface TokenItem {
   user_email?: string;
   group?: string;
   allowed_models?: string[] | string;
+  /** Provider 白名单（None/空 = 不限；07 D 章 allowed_providers） */
+  allowed_providers?: string[] | string | null;
   ip_limit?: string[];
   quota_limit?: number | null;
   used_quota?: number;
@@ -77,6 +82,8 @@ interface KeyFormState {
   name: string;
   group: string;
   allowed_models: string;
+  /** 提供商白名单（多选，值 = provider 键；空 = 不限） */
+  allowed_providers: string[];
   /** 过期时间：表单内为 datetime-local 字符串（空串=永不过期），提交时转 Unix 秒 */
   expires_at: string;
   quota_limit: string;
@@ -101,6 +108,7 @@ const EMPTY_FORM: KeyFormState = {
   name: '',
   group: 'default',
   allowed_models: '',
+  allowed_providers: [],
   expires_at: '',
   quota_limit: '',
   ip_limit: '',
@@ -123,6 +131,15 @@ function localInputToTs(v: string): number | null {
   const ms = new Date(v).getTime();
   if (Number.isNaN(ms)) return null;
   return Math.floor(ms / 1000);
+}
+
+/** 白名单字段归一化：后端可能下发数组或逗号串（None/空 = 不限） */
+function stringListOf(value: string[] | string | null | undefined): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v)).filter(Boolean);
+  if (typeof value === 'string' && value.trim()) {
+    return value.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  return [];
 }
 
 /** 模型名 → 稳定颜色（与渠道页 autoColor 同思路：字符串 hash → HSL 色相） */
@@ -153,6 +170,10 @@ export default function Keys(): JSX.Element {
   const [groups, setGroups] = useState<GroupItem[]>([]);
   /** 模型白名单候选（对话/运维页同源：/api/models/available） */
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+  /** 提供商白名单候选（令牌列表响应附带的 providers 候选表，后端 provider_candidates 聚合） */
+  const [providerOptions, setProviderOptions] = useState<string[]>([]);
+  /** provider → 该家可用模型（modelsByProvider；「可用模型」候选跟着勾选的提供商走） */
+  const [modelsByProvider, setModelsByProvider] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const addToast = useToast();
@@ -293,6 +314,27 @@ export default function Keys(): JSX.Element {
         isAdmin() ? api.listGroups().catch(() => null) : Promise.resolve(null),
       ]);
       setTokens(Array.isArray(tokenRes?.data) ? (tokenRes.data as unknown as TokenItem[]) : []);
+      // 候选表（后端 GET /api/tokens 顶层附 providers / modelsByProvider）：
+      // 让「可用提供商 / 可用模型」白名单选择器不烤死清单。取不到就留空——
+      // MultiSelect 仍允许自由填，与改动前行为一致。
+      const rawRes = tokenRes as unknown as { providers?: unknown; modelsByProvider?: unknown };
+      setProviderOptions(
+        Array.isArray(rawRes?.providers)
+          ? rawRes.providers.map((p) => String(p ?? '')).filter(Boolean).sort()
+          : [],
+      );
+      const byProviderRaw = rawRes?.modelsByProvider;
+      if (byProviderRaw && typeof byProviderRaw === 'object' && !Array.isArray(byProviderRaw)) {
+        const next: Record<string, string[]> = {};
+        for (const [provider, list] of Object.entries(byProviderRaw as Record<string, unknown>)) {
+          if (!Array.isArray(list)) continue;
+          const models = list.map((m) => String(m ?? '')).filter(Boolean).sort();
+          if (models.length) next[provider] = models;
+        }
+        setModelsByProvider(next);
+      } else {
+        setModelsByProvider({});
+      }
       if (groupRes) setGroups(Array.isArray(groupRes?.data) ? groupRes.data : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -371,6 +413,7 @@ export default function Keys(): JSX.Element {
       allowed_models: Array.isArray(tk.allowed_models)
         ? tk.allowed_models.join(', ')
         : (tk.allowed_models || ''),
+      allowed_providers: stringListOf(tk.allowed_providers),
       expires_at: tsToLocalInput(tk.expires_at),
       quota_limit: tk.quota_limit != null ? String(tk.quota_limit) : '',
       // 编辑时预填现有 IP 白名单（None=不限展示为空），避免保存时把
@@ -414,6 +457,17 @@ export default function Keys(): JSX.Element {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
+      // 提供商白名单（allowed_providers）：与模型白名单同一套「改动才发」判据。
+      // 后端 PUT 把空数组归一化为 None（不限），所以显式清空要真的发 []。
+      const allowedProviders = form.allowed_providers.map((s) => s.trim()).filter(Boolean);
+      const origProviders = stringListOf(editing?.allowed_providers);
+      if (
+        !editing
+        || allowedProviders.length > 0
+        || JSON.stringify(origProviders.slice().sort()) !== JSON.stringify(allowedProviders.slice().sort())
+      ) {
+        payload.allowed_providers = allowedProviders;
+      }
       // 可清除字段按「与原值比较」决定是否提交：原来用「非空才发」，
       // 用户把白名单/额度/过期时间清空后保存，后端因字段缺省视为「不修改」，
       // 限制依然生效且界面无任何提示。
@@ -427,8 +481,7 @@ export default function Keys(): JSX.Element {
       ) {
         payload.allowed_models = allowedModels;
       }
-      const origIps = Array.isArray(editing?.ip_limit) ? editing!.ip_limit : [];
-      if (
+      const origIps = Array.isArray(editing?.ip_limit) ? editing!.ip_limit : [];      if (
         !editing
         || ipLimit.length > 0
         || JSON.stringify(origIps.slice().sort()) !== JSON.stringify(ipLimit.slice().sort())
@@ -744,6 +797,18 @@ export default function Keys(): JSX.Element {
     return [];
   };
 
+  /** 表单里「可用模型」的候选：勾了提供商就跟着这几家的并集走（A2A modelsByProvider 联动），
+   *  没勾就退回全量可用模型——空 = 还没约束范围，此时给出全部候选才不误导。 */
+  const formModelOptions = ((): string[] => {
+    if (!form.allowed_providers.length) return modelOptions;
+    const set = new Set<string>();
+    for (const p of form.allowed_providers) {
+      for (const m of modelsByProvider[p] ?? []) set.add(m);
+    }
+    // 候选表里查不到该家（旧后端/聚合渠道无模型明细）时不收窄，避免把用户卡成空列表
+    return set.size ? [...set].sort() : modelOptions;
+  })();
+
   if (loading) return <SkeletonTable columns={11} rows={6} />;
 
   return (
@@ -990,6 +1055,28 @@ export default function Keys(): JSX.Element {
                           <span className="tk-group-badge">{tk.group || 'default'}</span>
                         </td>
                         )}
+{visibleKeySet.has('providers') && (
+                        <td className="col-providers">
+                          {(() => {
+                            const providers = stringListOf(tk.allowed_providers);
+                            return providers.length === 0
+                              ? <span className="tk-models-all">{t('全部')}</span>
+                              : (
+                                // 与模型列同一形态：前 2 个 + "+N"，title 看完整清单
+                                <div className="tk-models" title={providers.join(', ')}>
+                                  {providers.slice(0, 2).map((p) => (
+                                    <span key={p} className="tk-model-badge tk-provider-badge">{p}</span>
+                                  ))}
+                                  {providers.length > 2 && (
+                                    <span className="tk-model-badge tk-models-more">
+                                      +{providers.length - 2}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                          })()}
+                        </td>
+                        )}
 {visibleKeySet.has('models') && (
                         <td className="col-models">
                           {models.length === 0
@@ -1217,8 +1304,25 @@ export default function Keys(): JSX.Element {
                       <option key={g.name} value={g.name}>{g.name}</option>
                     ))}
                   </Select>
+                  {/* 提供商白名单：候选来自令牌列表响应附带的 providers 候选表
+                      （后端 provider_candidates，与数据面 channel_matches_allowed_providers
+                      同口径）。空 = 不限制。它比模型白名单更粗一层：模型名跨家重名时，
+                      只有它能表达「只允许走这几家」。 */}
+                  <div className="form-group">
+                    <label>
+                      {`${t('可用提供商')} ${t('(留空则允许全部)')}`}
+                    </label>
+                    <MultiSelect
+                      value={form.allowed_providers}
+                      onChange={(list) => setForm({ ...form, allowed_providers: list })}
+                      options={providerOptions}
+                      placeholder={t('留空 = 不限制')}
+                      emptyHint={t('暂无可用提供商（先添加渠道或账号）')}
+                    />
+                  </div>
                   {/* 模型白名单：候选来自网关可用模型（与聊天/运维页同源），
-                      也允许自由填。空 = 不限制，与 Agent2API 口径一致。 */}
+                      勾了提供商时收窄到这几家的并集；也允许自由填。
+                      空 = 不限制，与 Agent2API 口径一致。 */}
                   <div className="form-group">
                     <label>
                       {`${t('模型白名单')} ${t('(留空则允许全部)')}`}
@@ -1231,7 +1335,7 @@ export default function Keys(): JSX.Element {
                       onChange={(list) =>
                         setForm({ ...form, allowed_models: list.join(', ') })
                       }
-                      options={modelOptions}
+                      options={formModelOptions}
                       placeholder={
                         editing
                           ? t('留空表示不修改')
