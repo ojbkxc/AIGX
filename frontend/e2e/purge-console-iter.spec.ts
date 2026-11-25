@@ -284,6 +284,43 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('60 · 所有输入控件都有可读名称（输入框无标签=读屏只念「编辑框」）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const unnamed = await page.evaluate(() => {
+    const readable = (el) => {
+      if (el.getAttribute('aria-label')?.trim()) return true;
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy && document.getElementById(labelledBy)?.textContent?.trim()) return true;
+      const id = el.id;
+      if (id) {
+        const label = document.querySelector(`label[for="${id}"]`);
+        if (label?.textContent?.trim()) return true;
+      }
+      // 被 <label> 包裹也算（本页的开关就是这样）
+      if (el.closest('label')?.textContent?.trim()) return true;
+      if (el.getAttribute('title')?.trim()) return true;
+      if (el.getAttribute('placeholder')?.trim()) return true;
+      return false;
+    };
+    // 只看真正渲染出来的控件（隐藏的 file input 靠点击按钮触发，不参与）
+    const controls = Array.from(
+      document.querySelectorAll('input:not([type="file"]):not([type="hidden"]), textarea, select'),
+    ).filter((el) => el.offsetParent !== null || el.getClientRects().length > 0);
+    return controls
+      .filter((el) => !readable(el))
+      .map((el) => ({
+        tag: el.tagName.toLowerCase(),
+        type: el.getAttribute('type') ?? '',
+        cls: el.className.slice(0, 40),
+        html: el.outerHTML.slice(0, 90),
+      }));
+  });
+
+  expect(unnamed, `无名称控件：${JSON.stringify(unnamed, null, 2)}`).toHaveLength(0);
+});
+
 test('59 · 全页每个按钮都有可读名称（无名称=读屏只念「按钮」）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
