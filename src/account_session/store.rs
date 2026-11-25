@@ -2357,6 +2357,7 @@ mod tests {
                     id: (*id).to_string(),
                     upstream: None,
                     context_length: None,
+                    max_output_tokens: None,
                     capabilities: caps.iter().map(|c| c.to_string()).collect(),
                 })
                 .collect(),

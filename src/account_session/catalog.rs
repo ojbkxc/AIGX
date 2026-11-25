@@ -85,6 +85,27 @@ fn pick_context_length(value: &Value) -> Option<u32> {
     None
 }
 
+/// 目录条目里**输出上限**的来源字段。
+///
+/// 与 [`pick_context_length`] 分开取：同一个上游常把上下文与输出放在
+/// `max_input_tokens` / `max_output_tokens` 两个键里，漏掉后者会让模型管理页的
+/// 「输出」列在这批账号上永远是空的（元信息层只有一个来源能补，就是这里）。
+fn pick_output_tokens(value: &Value) -> Option<u32> {
+    for key in [
+        "maxOutputTokens",
+        "max_output_tokens",
+        "max_tokens",
+        "maxTokens",
+    ] {
+        if let Some(n) = value.get(key).and_then(Value::as_u64) {
+            if n > 0 && n <= u32::MAX as u64 {
+                return Some(n as u32);
+            }
+        }
+    }
+    None
+}
+
 /// 目录条目里能力位的来源字段（各家键名不同，统一归一成标签数组）。
 ///
 /// 与 `model::metadata::infer_capabilities` 的标签词表对齐（`vision` /
@@ -166,6 +187,13 @@ pub struct CatalogEntry {
     /// 上下文长度（上游没给则 None）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
+    /// 最大输出 token（上游没给则 None）。
+    ///
+    /// 2026-11-25 补：此前这条目录只承载上下文，输出上限在解析阶段就被丢掉 ——
+    /// 模型管理页的「输出」列因此在账号型供应商上一片空白（元信息层的插件档
+    /// 拿不到值，models.dev 也不认识这些家）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     /// 能力位标签。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
@@ -1727,6 +1755,100 @@ fn save_cache(
         account_id,
         Arc::new(AccountCapabilityIndex::from_snapshot(snapshot)),
     );
+    // 元信息层的「上下文 / 输出」只认 provider 维度的目录
+    // （`plugin_host::model_catalog`）。账号目录是按账号落盘的，此处把这一家
+    // 的**并集**转投过去 —— 否则目录刷新得再成功，管理页那两列也永远是空的。
+    publish_account_catalog(sessions, provider);
+}
+
+/// 把一个 provider 的**账号目录并集**转投给元信息层
+/// （`plugin_host::model_catalog::set_account_remote`）。
+///
+/// 为什么需要这一跳：账号目录按账号粒度落盘（`model_catalog:{provider}:{id}`），
+/// 而模型管理页的「上下文 / 输出」只读 provider 维度的目录。两条链此前各自
+/// 有各自的写入口、**从不交汇** —— 线上 11 个 provider 全刷成功（`ok_count`
+/// 有值）而 `cap_sources` 里 `plugin` 一条都没有，就是断在这里。
+///
+/// 口径：
+/// - 只并 `source == "remote"` 的账号快照。静态兜底表（`fallback`）是内置种子，
+///   转投过去等于把 builtin 数据伪装成「上游申报」；
+/// - 同 id 逐字段取大（上下文 / 输出），能力位取并；
+/// - 字段名翻成 `maxInputTokens` / `maxOutputTokens`（`budget_for` 索引读的键）
+///   —— 账号目录内部叫 `context_length` / `max_output_tokens`，名字不统一时
+///   「转投过去了但读不出来」与「没转投」在页面上完全一样；
+/// - 并集为空时**不发布**：别把上一次的并集盖成空。
+pub(crate) fn publish_account_catalog(sessions: &AccountSessionStore, provider: &str) {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return;
+    }
+    let mut table: std::collections::BTreeMap<String, serde_json::Map<String, Value>> =
+        std::collections::BTreeMap::new();
+    let mut refreshed_ms = 0i64;
+    for session in sessions
+        .all()
+        .into_iter()
+        .filter(|session| session.provider == provider)
+    {
+        let snapshot = match sessions
+            .store()
+            .get::<CatalogSnapshot>(&cache_key(provider, &session.id))
+        {
+            Ok(Some(snapshot)) if snapshot.source == "remote" => snapshot,
+            _ => continue,
+        };
+        refreshed_ms = refreshed_ms.max(snapshot.fetched_at.max(0) * 1000);
+        for entry in snapshot.models {
+            let key = entry.id.trim().to_ascii_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            let slot = table.entry(key).or_default();
+            slot.insert("id".to_string(), Value::from(entry.id));
+            if let Some(upstream) = entry.upstream.filter(|name| !name.trim().is_empty()) {
+                slot.entry("upstream".to_string())
+                    .or_insert(Value::from(upstream));
+            }
+            if let Some(context) = entry.context_length {
+                take_limit(slot, "maxInputTokens", context);
+            }
+            if let Some(output) = entry.max_output_tokens {
+                take_limit(slot, "maxOutputTokens", output);
+            }
+            for capability in &entry.capabilities {
+                if let Some(flag) = account_capability_flag(capability) {
+                    slot.insert(flag.to_string(), Value::Bool(true));
+                }
+            }
+        }
+    }
+    if table.is_empty() {
+        return;
+    }
+    let models: Vec<Value> = table.into_values().map(Value::Object).collect();
+    crate::plugin_host::model_catalog::set_account_remote(provider, models, refreshed_ms);
+}
+
+/// 同 id 多账号申报时逐字段取大，再写进目录条目。
+fn take_limit(slot: &mut serde_json::Map<String, Value>, key: &str, value: u32) {
+    let current = slot.get(key).and_then(Value::as_u64).unwrap_or(0);
+    if u64::from(value) > current {
+        slot.insert(key.to_string(), Value::from(value));
+    }
+}
+
+/// 能力标签 → 目录里的布尔位（与 `wasm::catalog::merge` 同一组键）。
+///
+/// 只映射**目录确实表达得了**的四位：其余标签（embedding / audio）在目录
+/// 形状里没有对应键，凭空造键会让 `/v1/models` 透出上游没说过的东西。
+fn account_capability_flag(label: &str) -> Option<&'static str> {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "vision" => Some("supportsImages"),
+        "video" => Some("supportsVideo"),
+        "reasoning" | "thinking" => Some("supportsReasoning"),
+        "tool" | "tools" | "tool_call" | "toolcall" => Some("supportsToolCall"),
+        _ => None,
+    }
 }
 
 /// 由静态兜底表构造目录快照（[`static_models_for`] 的产物归一）。
@@ -1757,6 +1879,9 @@ fn catalog_from_static(models: &[FallbackModel]) -> CatalogSnapshot {
                     } else {
                         None
                     },
+                    // 兜底表没有输出上限（`FallbackModel` 无该字段，见
+                    // WORKBUDDY_FALLBACK 的字段映射说明）：不伪造。
+                    max_output_tokens: None,
                     capabilities,
                 }
             })
@@ -1817,6 +1942,7 @@ fn parse_response(value: &Value, openai_shape: bool) -> Vec<CatalogEntry> {
             id,
             upstream,
             context_length: pick_context_length(entry_value),
+            max_output_tokens: pick_output_tokens(entry_value),
             capabilities: pick_capabilities(entry_value),
         });
     }
@@ -1894,6 +2020,7 @@ fn parse_cline_catalog(payload: &Value) -> Vec<CatalogEntry> {
             id,
             upstream: None,
             context_length: context,
+            max_output_tokens: pick_output_tokens(entry),
             capabilities,
         });
     }
@@ -2215,6 +2342,7 @@ fn parse_codearts_builtin(payload: &Value) -> Vec<CatalogEntry> {
             id,
             upstream: None,
             context_length: codearts_u32(entry, "context_window"),
+            max_output_tokens: codearts_u32(entry, "max_output_tokens"),
             capabilities: codearts_caps(images),
         });
     }
@@ -2284,6 +2412,7 @@ fn parse_codearts_agent_detail(payload: &Value) -> Vec<CatalogEntry> {
             id,
             upstream: None,
             context_length: codearts_u32(&parameters, "context_window"),
+            max_output_tokens: codearts_u32(&parameters, "max_output_tokens"),
             capabilities: codearts_caps(images),
         });
     }
@@ -2327,6 +2456,7 @@ fn parse_codearts_benefit(payload: &Value) -> Result<Vec<CatalogEntry>, String> 
             id,
             upstream: None,
             context_length: codearts_u32(entry, "context_window"),
+            max_output_tokens: codearts_u32(entry, "max_output_tokens"),
             capabilities: Vec::new(),
         });
     }
@@ -2795,6 +2925,7 @@ fn parse_trae_catalog(payload: &Value) -> Vec<CatalogEntry> {
             id: display_name,
             upstream: Some(config_name),
             context_length: context,
+            max_output_tokens: pick_output_tokens(entry),
             capabilities,
         });
     }
@@ -2830,6 +2961,10 @@ fn parse_antigravity_catalog(payload: &Value) -> Vec<CatalogEntry> {
             id: trimmed.to_string(),
             upstream: None,
             context_length: context,
+            max_output_tokens: meta
+                .get("maxOutputTokens")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok()),
             capabilities,
         });
     }
@@ -2889,6 +3024,7 @@ fn parse_accio_catalog(payload: &Value) -> Vec<CatalogEntry> {
                 id,
                 upstream: Some(code),
                 context_length: None,
+                max_output_tokens: None,
                 capabilities,
             });
         }
@@ -2918,6 +3054,7 @@ fn parse_kuku_catalog(payload: &Value) -> Vec<CatalogEntry> {
             id,
             upstream: None,
             context_length: None,
+            max_output_tokens: None,
             capabilities: vec!["tool".to_string()],
         })
         .collect()
@@ -3011,14 +3148,23 @@ fn parse_raccoon_catalog(payload: &Value) -> Vec<CatalogEntry> {
             }
             None
         };
-        let context = pick(&[
+        let context_only = pick(&[
             "context_window",
             "contextWindow",
             "maxInputTokens",
             "contextLength",
             "context_length",
-        ])
-        .or_else(|| pick(&["max_tokens", "maxTokens"]));
+        ]);
+        // 输出上限：`max_tokens` 是**输出**上限（Raccoon 的 `params` 里就是它）。
+        let output_only = pick(&[
+            "maxOutputTokens",
+            "max_output_tokens",
+            "max_tokens",
+            "maxTokens",
+        ]);
+        // 兼容旧口径：只有 `max_tokens` 时那条数字仍当上下文（历史上就是这么读的）；
+        // 但只要上游另给了上下文键，`max_tokens` 就只当输出，不再重复顶上下文。
+        let context = context_only.or(output_only);
 
         let tags: Vec<String> = model
             .get("tags")
@@ -3057,6 +3203,9 @@ fn parse_raccoon_catalog(payload: &Value) -> Vec<CatalogEntry> {
             id,
             upstream: None,
             context_length: context,
+            // 上游明确给了上下文键时，`max_tokens` 才是可采信的输出上限；
+            // 只给了 `max_tokens` 时它已被上面当上下文用了，不能再冒充输出。
+            max_output_tokens: context_only.and(output_only),
             capabilities,
         });
     }
@@ -3134,6 +3283,9 @@ fn parse_qoder_chat(value: &Value) -> Vec<CatalogEntry> {
             id,
             upstream: Some(key.to_string()),
             context_length: Some(qoder_context_window(item)),
+            // Qoder 目录按 tier 只给上下文分档，没有独立的输出上限字段：
+            // 把 tier 的最大值当成输出会凭空抬高这一列。
+            max_output_tokens: None,
             capabilities,
         });
     }
@@ -3831,6 +3983,7 @@ mod tests {
                 id: "shared".into(),
                 upstream: None,
                 context_length: Some(1),
+                max_output_tokens: None,
                 capabilities: vec![],
             }],
             vec![
@@ -3838,12 +3991,14 @@ mod tests {
                     id: "shared".into(),
                     upstream: None,
                     context_length: Some(2),
+                    max_output_tokens: None,
                     capabilities: vec![],
                 },
                 CatalogEntry {
                     id: "only-builtin".into(),
                     upstream: None,
                     context_length: None,
+                    max_output_tokens: None,
                     capabilities: vec![],
                 },
             ],
@@ -4076,6 +4231,11 @@ mod tests {
             .find(|entry| entry.id == "raccoon-8c4485")
             .expect("应解析出 raccoon-8c4485");
         assert_eq!(flagship.context_length, Some(1_000_000));
+        assert_eq!(
+            flagship.max_output_tokens,
+            Some(100_000),
+            "`params.max_tokens` 是输出上限：上游同时给了上下文时它只当输出，别再顶上下文"
+        );
         assert!(flagship.capabilities.iter().any(|c| c == "vision"));
         // 缺省 supportThinking=true → reasoning
         assert!(flagship.capabilities.iter().any(|c| c == "reasoning"));
@@ -4094,6 +4254,10 @@ mod tests {
             .expect("应解析出 sn-sensenova-6-8-flash-lite");
         // context_window 缺失 → 退化到 params.max_tokens；supportThinking=false → 无 reasoning
         assert_eq!(sensenova.context_length, Some(63_999));
+        assert_eq!(
+            sensenova.max_output_tokens, None,
+            "只给了 `max_tokens` 时那条数字已被当上下文用，不能再冒充输出上限"
+        );
         assert!(!sensenova.capabilities.iter().any(|c| c == "reasoning"));
     }
 
@@ -4323,6 +4487,7 @@ mod tests {
             id: id.to_string(),
             upstream: upstream.map(|s| s.to_string()),
             context_length: None,
+            max_output_tokens: None,
             capabilities: caps.iter().map(|c| c.to_string()).collect(),
         }
     }
@@ -4397,5 +4562,129 @@ mod tests {
         // 「带标签但三位全无」的条目（如只有 chat）仍是**有证据**：它明确说了
         // 自己不支持视觉/工具/视频，粗筛才敢据此裁人。
         assert!(index.has_evidence());
+    }
+
+    // ── 账号目录 → 元信息层（本次修复的回归面）─────────────────────────
+
+    /// 通用解析器要认输出上限：`max_output_tokens` / `max_tokens` 落进
+    /// `CatalogEntry.max_output_tokens`，否则转投到元信息层也是空的。
+    #[test]
+    fn generic_parser_reads_output_limits() {
+        let payload = serde_json::json!({
+            "data": [
+                {"id": "hy3-x", "max_input_tokens": 192_000, "max_output_tokens": 64_000},
+                {"id": "glm-x", "maxInputTokens": 128_000, "maxTokens": 8_192}
+            ]
+        });
+        let entries = parse_response(&payload, true);
+        assert_eq!(entries[0].context_length, Some(192_000));
+        assert_eq!(entries[0].max_output_tokens, Some(64_000));
+        assert_eq!(entries[1].context_length, Some(128_000));
+        assert_eq!(entries[1].max_output_tokens, Some(8_192));
+    }
+
+    /// 目录缓存写完 → 该 provider 的并集必须出现在元信息层：同 id 多账号
+    /// 逐字段取大、能力位取并。修正前 `model_catalog::budget_for` 恒 `None`。
+    #[test]
+    fn account_catalog_publishes_provider_union_to_metadata_layer() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "aigx-account-catalog-union-{}-{seq}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::storage::FileStore::new(dir));
+        let sessions = AccountSessionStore::new(store);
+        let provider = format!("unit-union-{seq}");
+        for id in ["a1", "a2"] {
+            let mut session = AccountSession::new("ch-union", id);
+            session.id = id.to_string();
+            session.provider = provider.clone();
+            sessions.upsert(session).unwrap();
+        }
+        // 两个账号各申报一半：上下文在 a1、输出在 a2 → 并集两个字段都得有
+        save_cache(
+            &sessions,
+            &provider,
+            "a1",
+            &CatalogSnapshot {
+                models: vec![CatalogEntry {
+                    id: "Raccoon-8C4485".to_string(),
+                    upstream: None,
+                    context_length: Some(1_000_000),
+                    max_output_tokens: None,
+                    capabilities: vec!["vision".to_string(), "tool".to_string()],
+                }],
+                fetched_at: 1_700_000_000,
+                source: "remote".to_string(),
+            },
+        );
+        save_cache(
+            &sessions,
+            &provider,
+            "a2",
+            &CatalogSnapshot {
+                models: vec![CatalogEntry {
+                    id: "raccoon-8c4485".to_string(),
+                    upstream: None,
+                    context_length: Some(500_000),
+                    max_output_tokens: Some(100_000),
+                    capabilities: vec!["reasoning".to_string()],
+                }],
+                fetched_at: 1_700_000_100,
+                source: "remote".to_string(),
+            },
+        );
+        let budget = crate::plugin_host::model_catalog::budget_for(&provider, "raccoon-8c4485")
+            .expect("账号目录并集必须出现在元信息层");
+        assert_eq!(budget.context_length, Some(1_000_000), "同 id 取大");
+        assert_eq!(budget.max_output_tokens, Some(100_000));
+        // 落盘形态也核对：插件读面（`models_for`）不掺账号目录，但上限那一格
+        // 必须按 `budget_for` 读的键名（`maxInputTokens` / `maxOutputTokens`）落
+        let stored = crate::plugin_host::model_catalog::account_snapshot_for_test(&provider)
+            .expect("账号目录并集应已落盘");
+        let models = stored["models"].as_array().cloned().unwrap_or_default();
+        assert_eq!(models.len(), 1, "同 id 大小写归一后只有一条：{models:?}");
+        assert_eq!(models[0]["maxInputTokens"], 1_000_000);
+        assert_eq!(models[0]["maxOutputTokens"], 100_000);
+        assert_eq!(models[0]["supportsImages"], true, "能力位取并");
+        assert_eq!(models[0]["supportsReasoning"], true);
+        assert_eq!(models[0]["supportsToolCall"], true);
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 静态兜底（`source = "fallback"`）不转投：内置种子不是上游申报。
+    #[test]
+    fn static_fallback_is_not_published_as_plugin_catalog() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "aigx-account-catalog-fallback-{}-{seq}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::storage::FileStore::new(dir));
+        let sessions = AccountSessionStore::new(store);
+        let provider = format!("unit-fallback-{seq}");
+        let mut session = AccountSession::new("ch-fallback", "f1");
+        session.id = "f1".to_string();
+        session.provider = provider.clone();
+        sessions.upsert(session).unwrap();
+        let static_models = static_models_for("xiaohuanxiong");
+        save_cache(
+            &sessions,
+            &provider,
+            "f1",
+            &catalog_from_static(static_models),
+        );
+        assert_eq!(
+            crate::plugin_host::model_catalog::budget_for(&provider, "raccoon-8c4485"),
+            None,
+            "内置兜底表不得被标成插件/上游申报"
+        );
+        crate::plugin_host::model_catalog::remove(&provider);
     }
 }

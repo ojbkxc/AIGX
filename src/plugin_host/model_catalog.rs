@@ -32,9 +32,24 @@
 //! 本模块里读全局 `data_dir`，也不另开目录：与 `main.rs` 其余 KV 消费者
 //! 共用同一个 `FileStore` 实例。
 //!
-//! **读取面只认进程内表**：KV 里的上一份并集不会被自动复活 —— 否则「目录
-//! 从未在本进程刷新过」会伪装成「目录是旧的但看起来正常」（上游
-//! `restore` 的语义，本期未接；见 docs/a2a-alignment/README.md §六.1）。
+//! ## 两份目录，同一张读取面
+//!
+//! 目录有**两个**独立的写入方，覆盖的账号集合不同，不能混写：
+//!
+//! | 写入方 | 入口 | KV 键 | 覆盖谁 |
+//! |---|---|---|---|
+//! | 插件/脚本宿主 | [`set_remote`]（sink） | `plugin_catalog:{provider}` | 插件自有账号 |
+//! | 网关账号目录 | [`set_account_remote`] | `account_catalog:{provider}` | 网关直连账号 |
+//!
+//! 分开存的理由：宿主对「没有插件账号的 provider」会发布**空**并集（它按
+//! 插件账号算并集，那些 provider 一个插件账号都没有），若与账号目录共用一格，
+//! 一次空发布就把账号目录刷出来的上限整片抹掉。读取面按模型合并两份，
+//! 插件那份逐字段优先（它是上游对插件账号的直接申报）。
+//!
+//! **读取面在 KV 里复活上一份并集**（每个 provider 每进程一次，见
+//! [`hydrate`]）：不复活的话，进程重启后目录为空直到下一次刷新，而
+//! 「目录是旧的但看起来正常」与「从未刷新」在管理页上无法区分 —— 前者是
+//! 真的、后者是空的，静默的区别比不复活更糟。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -46,8 +61,14 @@ use crate::storage::FileStore;
 
 use super::wasm::catalog::CatalogSink;
 
-/// KV 键前缀（provider 粒度）。
+/// KV 键前缀（provider 粒度）：插件/脚本宿主发布的并集。
 const KEY_PREFIX: &str = "plugin_catalog:";
+
+/// KV 键前缀：网关账号目录（`account_session::catalog`）转投的并集。
+///
+/// 与 [`KEY_PREFIX`] **刻意分格**：两者覆盖的账号集合不同，共用一格时宿主
+/// 对「无插件账号」provider 发布的空并集会抹掉账号目录（见模块头）。
+const ACCOUNT_KEY_PREFIX: &str = "account_catalog:";
 
 /// `settings.get` 的保留键（= 上游 `rpc_cache::SETTING_MODEL_CATALOG`）。
 ///
@@ -116,8 +137,20 @@ impl ModelBudget {
     }
 }
 
-/// 目录条目里的上下文上限键（上游 `ModelList` 口径 + 常见别名）。
-const CONTEXT_KEYS: &[&str] = &["maxInputTokens", "max_input_tokens"];
+/// 目录条目里的上下文上限键（上游 `ModelList` 口径 + 账号目录的落盘形态）。
+///
+/// `context_length` / `contextLength` / `context_window` 是网关账号目录
+/// （`account_session::catalog::CatalogEntry.context_length`）与各家上游
+/// 原始目录用的键 —— 账号目录转投过来时字段名若不被认，就会出现
+/// 「值进了目录、预算索引却是空的」（`budget_for` 恒 `None`）。
+const CONTEXT_KEYS: &[&str] = &[
+    "maxInputTokens",
+    "max_input_tokens",
+    "context_length",
+    "contextLength",
+    "context_window",
+    "maxContextLength",
+];
 /// 目录条目里的输出上限键。
 const OUTPUT_KEYS: &[&str] = &["maxOutputTokens", "max_output_tokens"];
 
@@ -154,18 +187,131 @@ fn budget_index(models: &[Value]) -> Arc<HashMap<String, ModelBudget>> {
     Arc::new(table)
 }
 
-fn table() -> &'static Mutex<HashMap<String, Arc<Entry>>> {
+/// provider 键归一：去空白 + 小写。
+///
+/// 写入方与读取方的 provider 串来自不同层（渠道配置 / 账号记录 / 插件清单），
+/// 大小写或尾随空白的任何差异都会让精确匹配落空 —— 而落空的读数与「这家确实
+/// 没申报」长得一模一样。归一只做在这一处，两边用同一把刀。
+fn normalize_provider(provider: &str) -> Option<String> {
+    let trimmed = provider.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// 插件/脚本宿主发布的目录（进程内）。
+fn catalog_table() -> &'static Mutex<HashMap<String, Arc<Entry>>> {
     static TABLE: OnceLock<Mutex<HashMap<String, Arc<Entry>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 进程内缓存（未命中返回 `None`）。
-fn cached(provider: &str) -> Option<Arc<Entry>> {
-    table().lock().ok()?.get(provider).cloned()
+/// 网关账号目录转投的并集（进程内；与 [`catalog_table`] 分格）。
+fn account_table() -> &'static Mutex<HashMap<String, Arc<Entry>>> {
+    static TABLE: OnceLock<Mutex<HashMap<String, Arc<Entry>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 进程内缓存（未命中返回 `None`；调用方负责先 [`hydrate`]）。
+fn cached_in(
+    table: &'static Mutex<HashMap<String, Arc<Entry>>>,
+    provider: &str,
+) -> Option<Arc<Entry>> {
+    let provider = normalize_provider(provider)?;
+    table.lock().ok()?.get(&provider).cloned()
+}
+
+/// 已经尝试过 KV 复活的 provider（负缓存：避免每次读都打一次存储）。
+fn attempted_slot() -> &'static Mutex<HashSet<String>> {
+    static ATTEMPTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    ATTEMPTED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn lock_attempted() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    attempted_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 fn key(provider: &str) -> String {
     format!("{KEY_PREFIX}{provider}")
+}
+
+fn account_key(provider: &str) -> String {
+    format!("{ACCOUNT_KEY_PREFIX}{provider}")
+}
+
+/// 从一个 KV 键复活目录条目（写进对应进程内表；已有条目不动）。
+fn restore_value(
+    store: &FileStore,
+    stored_key: &str,
+    provider: &str,
+    table: &'static Mutex<HashMap<String, Arc<Entry>>>,
+) {
+    let raw = match store.get::<Value>(stored_key) {
+        Ok(Some(raw)) => raw,
+        _ => return,
+    };
+    let refreshed_at = raw["meta"]["refreshed_at"].as_i64().unwrap_or(0);
+    let models = raw["models"].as_array().cloned().unwrap_or_default();
+    let Some(entry) = entry_at(models, refreshed_at, false) else {
+        return;
+    };
+    if let Ok(mut table) = table.lock() {
+        table.entry(provider.to_string()).or_insert(entry);
+    }
+}
+
+/// 读穿一次：内存未命中时从 KV 复活这个 provider 的两份目录。
+///
+/// 每进程每 provider 只尝试一次（`attempted` 负缓存）—— 否则 `/api/models/manage`
+/// 遍历几百个模型时每次 `budget_for` 都会打一次存储读。
+fn hydrate(provider: &str) {
+    let Some(provider) = normalize_provider(provider) else {
+        return;
+    };
+    // 存储尚未装入（启动早期）时不标记 attempted：装入后还要能复活。
+    let Some(store) = store_slot().get() else {
+        return;
+    };
+    if !lock_attempted().insert(provider.clone()) {
+        return;
+    }
+    restore_value(store, &key(&provider), &provider, catalog_table());
+    restore_value(store, &account_key(&provider), &provider, account_table());
+}
+
+/// 全量复活一次（`budget_any` 没有 provider 维度，只能扫全表）。
+fn hydrate_all() {
+    static DONE: OnceLock<Mutex<bool>> = OnceLock::new();
+    let Some(store) = store_slot().get() else {
+        return;
+    };
+    let done = DONE.get_or_init(|| Mutex::new(false));
+    {
+        let mut done = done.lock().unwrap_or_else(|error| error.into_inner());
+        if *done {
+            return;
+        }
+        *done = true;
+    }
+    for (prefix, table) in [
+        (KEY_PREFIX, catalog_table()),
+        (ACCOUNT_KEY_PREFIX, account_table()),
+    ] {
+        let Ok(keys) = store.list(prefix) else {
+            continue;
+        };
+        for stored_key in keys {
+            let raw = stored_key.trim_start_matches(prefix).trim();
+            let Some(provider) = normalize_provider(raw) else {
+                continue;
+            };
+            lock_attempted().insert(provider.clone());
+            restore_value(store, &stored_key, &provider, table);
+        }
+    }
 }
 
 /// 目录出口的落盘实现（`start()` 时经 `WasmOptions.catalog` 注入）。
@@ -207,17 +353,26 @@ pub fn installed() -> bool {
 }
 
 fn entry(models: Vec<Value>, refreshed_at: i64) -> Option<Arc<Entry>> {
+    entry_at(models, refreshed_at, true)
+}
+
+/// `default_now = true` 时把非正时刻归一为 now（「本次真的算了」）；
+/// 复活 KV 里的旧条目用 `false` —— 旧条目没给时刻就是没给，不要编一个。
+fn entry_at(models: Vec<Value>, refreshed_at: i64, default_now: bool) -> Option<Arc<Entry>> {
     if models.len() > 4096 {
         return None;
     }
     let budget = budget_index(&models);
+    let refreshed_at = if refreshed_at > 0 {
+        refreshed_at
+    } else if default_now {
+        super::wasm::now_ms()
+    } else {
+        0
+    };
     Some(Arc::new(Entry {
         models,
-        refreshed_at: if refreshed_at > 0 {
-            refreshed_at
-        } else {
-            super::wasm::now_ms()
-        },
+        refreshed_at,
         budget,
     }))
 }
@@ -228,25 +383,57 @@ fn entry(models: Vec<Value>, refreshed_at: i64) -> Option<Arc<Entry>> {
 /// 与「从未刷新」（缓存未命中 / KV 无值）是两回事 —— 上层据此决定是否回落
 /// 渠道声明。未装入存储时只留进程内缓存，读数语义不变。
 pub fn set_remote(provider: &str, models: Vec<Value>, refreshed_at: i64) {
-    if provider.is_empty() {
+    publish_into(catalog_table(), KEY_PREFIX, provider, models, refreshed_at);
+}
+
+/// 写入网关账号目录（`account_session::catalog`）的 provider 并集。
+///
+/// 与 [`set_remote`] **分开落格**（见模块头）：宿主对「无插件账号」的 provider
+/// 会发布空并集，共用一格时这条空发布会把账号目录刷出来的上限整片抹掉。
+/// 两个入口的写入形态一致（模型对象数组 + 毫秒时刻），读取面按模型合并。
+pub fn set_account_remote(provider: &str, models: Vec<Value>, refreshed_at: i64) {
+    publish_into(
+        account_table(),
+        ACCOUNT_KEY_PREFIX,
+        provider,
+        models,
+        refreshed_at,
+    );
+}
+
+fn publish_into(
+    table: &'static Mutex<HashMap<String, Arc<Entry>>>,
+    prefix: &str,
+    provider: &str,
+    models: Vec<Value>,
+    refreshed_at: i64,
+) {
+    let Some(provider) = normalize_provider(provider) else {
         return;
-    }
+    };
     let Some(entry) = entry(models, refreshed_at) else {
         return;
     };
     if let Some(store) = store_slot().get() {
         // 落盘失败不影响本次读数（目录是可重建的展示数据，与
         // `account_session::catalog::save_cache` 同取向）。
-        let _ = store.put(&key(provider), &entry.snapshot());
+        let _ = store.put(&format!("{prefix}{provider}"), &entry.snapshot());
     }
-    if let Ok(mut table) = table().lock() {
-        table.insert(provider.to_string(), entry);
+    if let Ok(mut table) = table.lock() {
+        table.insert(provider.clone(), entry);
     }
+    // 刚写入的就是最新事实：不需要再从 KV 复活这个 provider。
+    lock_attempted().insert(provider);
 }
 
 /// 目录的模型对象数组（未命中返回 `None`；空目录返回 `Some(vec![])`）。
+///
+/// **只看插件/脚本宿主那份**：这是插件自己的目录（`settings.get("modelCatalog")`
+/// 与插件渠道的模型回落都读它），把网关账号目录并进来会让插件看到自己路由不了
+/// 的模型。网关账号目录只参与 [`budget_for`] 的上限查询（元信息层用）。
 pub fn models_for(provider: &str) -> Option<Vec<Value>> {
-    cached(provider).map(|entry| entry.models.clone())
+    hydrate(provider);
+    cached_in(catalog_table(), provider).map(|entry| entry.models.clone())
 }
 
 /// 目录的模型 id 列表（模型聚合/管理视图用；未命中返回空）。
@@ -268,9 +455,11 @@ pub fn model_ids(provider: &str) -> Vec<String> {
 
 /// 目录元信息 `(remote, refreshed_at)`；未命中回落 `(false, 0)`。
 ///
-/// `remote=true` 只在「本进程算过并集」时为真 —— 与 [`models_for`] 同源。
+/// `remote=true` 只在「本进程算过并集（或从 KV 复活过）」时为真 ——
+/// 与 [`models_for`] 同源（插件/脚本宿主那份）。
 pub fn meta(provider: &str) -> (bool, i64) {
-    match cached(provider) {
+    hydrate(provider);
+    match cached_in(catalog_table(), provider) {
         Some(entry) => (true, entry.refreshed_at),
         None => (false, 0),
     }
@@ -284,16 +473,27 @@ pub fn meta(provider: &str) -> (bool, i64) {
 ///
 /// 有 provider 维度时必须用这个函数：同一模型 id 在不同 provider 下上限
 /// 可以不同（渠道 A 的 `glm-5.3` 是 128k、账号池 B 是 200k）。
+///
+/// 两份目录都命中时逐字段取大：插件那份是上游对插件账号的直接申报，账号
+/// 目录那份是网关直连账号的申报，两者的最大值就是「这家上游给得出来的最大」。
 pub fn budget_for(provider: &str, model: &str) -> Option<ModelBudget> {
-    if provider.trim().is_empty() {
-        return None;
-    }
-    let entry = cached(provider)?;
     let key = model.trim().to_ascii_lowercase();
     if key.is_empty() {
         return None;
     }
-    entry.budget.get(&key).copied()
+    hydrate(provider);
+    let plugin =
+        cached_in(catalog_table(), provider).and_then(|entry| entry.budget.get(&key).copied());
+    let account =
+        cached_in(account_table(), provider).and_then(|entry| entry.budget.get(&key).copied());
+    match (plugin, account) {
+        (Some(mut plugin), Some(account)) => {
+            plugin.absorb(account);
+            Some(plugin)
+        }
+        (Some(plugin), None) => Some(plugin),
+        (None, account) => account,
+    }
 }
 
 /// 跨全部 provider 的申报（逐字段取大；未命中返回 `None`）。
@@ -306,13 +506,18 @@ pub fn budget_any(model: &str) -> Option<ModelBudget> {
     if key.is_empty() {
         return None;
     }
-    let table = table().lock().ok()?;
+    hydrate_all();
     let mut merged: Option<ModelBudget> = None;
-    for entry in table.values() {
-        if let Some(budget) = entry.budget.get(&key) {
-            match &mut merged {
-                Some(slot) => slot.absorb(*budget),
-                None => merged = Some(*budget),
+    for table in [catalog_table(), account_table()] {
+        let Ok(table) = table.lock() else {
+            continue;
+        };
+        for entry in table.values() {
+            if let Some(budget) = entry.budget.get(&key) {
+                match &mut merged {
+                    Some(slot) => slot.absorb(*budget),
+                    None => merged = Some(*budget),
+                }
             }
         }
     }
@@ -321,21 +526,30 @@ pub fn budget_any(model: &str) -> Option<ModelBudget> {
 
 /// 完整快照 `{models, meta}`（未命中返回 `null`；= 上游 `rpc_cache::snapshot`）。
 pub fn snapshot(provider: &str) -> Value {
-    match cached(provider) {
-        Some(entry) => entry.snapshot(),
-        None => Value::Null,
-    }
+    let Some(models) = models_for(provider) else {
+        return Value::Null;
+    };
+    json!({
+        "models": models,
+        "meta": { "remote": true, "refreshed_at": meta(provider).1 },
+    })
 }
 
 /// 摘除一个 provider 的目录（卸载 / 停用；= 上游 `rpc_cache::forget`）。
 pub fn remove(provider: &str) {
-    let had = cached(provider).is_some();
-    if let Ok(mut table) = table().lock() {
-        table.remove(provider);
+    let Some(provider) = normalize_provider(provider) else {
+        return;
+    };
+    for table in [catalog_table(), account_table()] {
+        if let Ok(mut table) = table.lock() {
+            table.remove(&provider);
+        }
     }
-    if let (true, Some(store)) = (had, store_slot().get()) {
-        let _ = store.delete(&key(provider));
+    if let Some(store) = store_slot().get() {
+        let _ = store.delete(&key(&provider));
+        let _ = store.delete(&account_key(&provider));
     }
+    lock_attempted().remove(&provider);
 }
 
 /// 插件渠道的模型来源：`(provider, models, refreshed_at)`。
@@ -456,6 +670,27 @@ pub(crate) fn test_store() -> Arc<FileStore> {
             store
         })
         .clone()
+}
+
+/// 清掉某 provider 的进程内表与负缓存（测试用：模拟进程重启）。
+#[cfg(test)]
+pub(crate) fn forget_memory_for_test(provider: &str) {
+    let Some(provider) = normalize_provider(provider) else {
+        return;
+    };
+    for table in [catalog_table(), account_table()] {
+        if let Ok(mut table) = table.lock() {
+            table.remove(&provider);
+        }
+    }
+    lock_attempted().remove(&provider);
+}
+
+/// 读账号目录那份的落盘形态（测试用：核对转投后的键名与取值）。
+#[cfg(test)]
+pub(crate) fn account_snapshot_for_test(provider: &str) -> Option<Value> {
+    let provider = normalize_provider(provider)?;
+    cached_in(account_table(), &provider).map(|entry| entry.snapshot())
 }
 
 #[cfg(test)]
@@ -687,5 +922,172 @@ mod tests {
         notify_models_changed_after("   ", "acc", Duration::from_millis(10));
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(HITS.load(Ordering::SeqCst), 2, "空 provider 不应触发");
+    }
+
+    // ── 账号目录转投 + KV 复活（本次修复的回归面）─────────────────────
+
+    /// 账号目录（`account_session::catalog`）转投的上限必须能被 `budget_for`
+    /// 读到 —— 宿主对同一 provider 发布的是**空**并集（它只算插件账号），
+    /// 修正前元信息层只有宿主那一份可查，于是账号目录刷得再全也读不出值。
+    #[test]
+    fn account_catalog_feeds_budgets_when_plugin_catalog_is_empty() {
+        let provider = unique("account-empty-plugin");
+        // 宿主发布：刷新成功但没有插件账号的模型（线上 26 个 provider 的真实形态）
+        set_remote(&provider, Vec::new(), 1);
+        assert_eq!(budget_for(&provider, "raccoon-8c4485"), None);
+
+        // 账号目录转投：上下文 + 输出
+        set_account_remote(
+            &provider,
+            vec![json!({ "id": "Raccoon-8C4485", "maxInputTokens": 1_000_000,
+                "maxOutputTokens": 100_000, "supportsImages": true })],
+            2,
+        );
+        assert_eq!(
+            budget_for(&provider, "raccoon-8c4485"),
+            Some(ModelBudget {
+                context_length: Some(1_000_000),
+                max_output_tokens: Some(100_000),
+            })
+        );
+        // `models_for` 仍是插件自己那份：它是插件 `settings.get("modelCatalog")`
+        // 与插件渠道模型回落的读面，混进网关账号的模型会让插件路由不了
+        // 却「看起来声明过」。
+        assert_eq!(models_for(&provider), Some(Vec::new()));
+        assert!(model_ids(&provider).is_empty());
+        remove(&provider);
+    }
+
+    /// 两份目录同一 provider 都有申报时，上限逐字段取大 ——
+    /// 插件账号与网关账号各写一半，任一份被丢掉都会少一截。
+    #[test]
+    fn plugin_and_account_budgets_merge_per_field() {
+        let provider = unique("merge");
+        set_account_remote(
+            &provider,
+            vec![
+                json!({ "id": "shared", "maxInputTokens": 128_000 }),
+                json!({ "id": "account-only", "maxOutputTokens": 4_096 }),
+            ],
+            10,
+        );
+        set_remote(
+            &provider,
+            vec![
+                json!({ "id": "SHARED", "maxOutputTokens": 8_192, "supportsToolCall": true }),
+                json!({ "id": "plugin-only", "maxInputTokens": 64_000 }),
+            ],
+            20,
+        );
+        assert_eq!(
+            budget_for(&provider, "shared"),
+            Some(ModelBudget {
+                context_length: Some(128_000),
+                max_output_tokens: Some(8_192),
+            }),
+            "上下文来自账号目录、输出来自插件目录，两条链各自的那一半都要留"
+        );
+        assert_eq!(
+            budget_for(&provider, "account-only"),
+            Some(ModelBudget {
+                context_length: None,
+                max_output_tokens: Some(4_096),
+            })
+        );
+        assert_eq!(
+            budget_for(&provider, "plugin-only"),
+            Some(ModelBudget {
+                context_length: Some(64_000),
+                max_output_tokens: None,
+            })
+        );
+        // 插件读面不受账号目录影响
+        assert_eq!(model_ids(&provider).len(), 2);
+        assert_eq!(meta(&provider), (true, 20));
+        remove(&provider);
+    }
+
+    /// 账号目录落盘形态的键名（`context_length` / `max_output_tokens`）也要认：
+    /// 字段名对不上时「值进了目录、预算索引却是空的」，与没转投一模一样。
+    #[test]
+    fn budget_index_accepts_account_catalog_field_names() {
+        let provider = unique("aliases");
+        set_account_remote(
+            &provider,
+            vec![json!({ "id": "ctx-alias", "context_length": 262_144,
+                "max_output_tokens": 32_768 })],
+            3,
+        );
+        assert_eq!(
+            budget_for(&provider, "CTX-ALIAS"),
+            Some(ModelBudget {
+                context_length: Some(262_144),
+                max_output_tokens: Some(32_768),
+            })
+        );
+        remove(&provider);
+    }
+
+    /// provider 键归一：写入带大写 / 尾随空白，读取用小写也能命中。
+    #[test]
+    fn provider_keys_are_normalized() {
+        let provider = unique("Case");
+        set_remote(
+            &format!("  {}  ", provider.to_uppercase()),
+            vec![json!({ "id": "m", "maxInputTokens": 1_024 })],
+            5,
+        );
+        assert_eq!(
+            budget_for(&provider, "m"),
+            Some(ModelBudget {
+                context_length: Some(1_024),
+                max_output_tokens: None,
+            })
+        );
+        remove(&provider);
+    }
+
+    /// 进程内表被清空（= 进程重启）后，读取面从 KV 复活上一份并集 ——
+    /// 否则重启后「目录本来就有」会静默变成「目录是空的」。
+    #[test]
+    fn catalog_restores_from_store_after_restart() {
+        let store = super::test_store();
+        let provider = unique("restore");
+        set_account_remote(
+            &provider,
+            vec![json!({ "id": "persisted", "maxInputTokens": 200_000,
+                "maxOutputTokens": 16_384 })],
+            1_700_000_000_000,
+        );
+        // 落盘确实写了账号目录那一格
+        assert!(store
+            .get::<Value>(&account_key(&provider))
+            .unwrap()
+            .is_some());
+        // 模拟重启：两份进程内表都空、负缓存也清掉
+        forget_memory_for_test(&provider);
+        // 下一读穿 KV（并行的 `budget_any` 也可能触发全量复活，两者都从 KV 来）
+        assert_eq!(
+            budget_for(&provider, "persisted"),
+            Some(ModelBudget {
+                context_length: Some(200_000),
+                max_output_tokens: Some(16_384),
+            })
+        );
+        remove(&provider);
+        assert!(store
+            .get::<Value>(&account_key(&provider))
+            .unwrap()
+            .is_none());
+    }
+
+    /// 负向对照：KV 里也没有时，读穿不能编出条目（`None` 仍是 `None`）。
+    #[test]
+    fn hydrate_does_not_invent_missing_catalog() {
+        let provider = unique("hydrate-miss");
+        forget_memory_for_test(&provider);
+        assert_eq!(models_for(&provider), None);
+        assert_eq!(budget_for(&provider, "nope"), None);
+        assert_eq!(meta(&provider), (false, 0));
     }
 }
