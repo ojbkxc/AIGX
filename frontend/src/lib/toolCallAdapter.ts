@@ -137,15 +137,40 @@ export function extractUsage(frame: Record<string, unknown>): ChatStreamUsage | 
  * 把一个分片并入已聚合列表（纯函数，便于单测与流式状态机复用）。
  *
  * 合并规则：
- * - 同 index 视为同一次调用；`id`/`name` 覆盖式取最新非空值（常规分片帧不带，
- *   带非空值的后续帧以后者为准）；
- * - `arguments` 逐片拼接（首帧常为空串）；`result` 覆盖式取最新非空值
- *   （回灌层可能多帧更新结果，取最后一份）；
- * - 新 index 追加到末尾，保证渲染顺序与模型下发顺序一致。
+ * - **id 是调用身份的主键**：同一 `id` 的后续帧一律并进它那张卡，哪怕上游把
+ *   `index` 改写了（有些网关每帧重排 index，或干脆不发 index ——
+ *   `normalizeToolCall` 会用数组位置回退，于是每帧都是 0）。
+ * - 同 index 但 `id` 不同 ⇒ 是**另一次调用**：分到未占用的新 index，
+ *   绝不再把两段 arguments 拼进同一张卡（拼出来是 `{"a":1}{"b":2}`，
+ *   卡片参数直接不可解析，而界面上看不出错）。
+ * - 同 index、`id` 相同或缺失 ⇒ 同一次调用的分片：`arguments` 逐片拼接
+ *   （首帧常为空串），`id`/`name` 取最新非空值，`result` 覆盖式取最新非空值。
+ * - 新调用追加到末尾，保证渲染顺序与模型下发顺序一致（不按 index 重排：
+ *   到达序就是用户看到卡片出现的顺序，且后端按 index 递增下发）。
  */
 export function mergeToolCallDelta(prev: ToolCallState[], delta: ToolCallDelta): ToolCallState[] {
   const next = prev.map((t) => ({ ...t }));
-  const at = next.findIndex((t) => t.index === delta.index);
+  const id = delta.id ? delta.id : undefined;
+  let at = next.findIndex((t) => t.index === delta.index);
+  if (at >= 0 && id && next[at].id && next[at].id !== id) {
+    // 该 index 已被另一次调用占用：这是新调用，另起一槽
+    const taken = new Set(next.map((t) => t.index));
+    let slot = next.length ? Math.max(...next.map((t) => t.index)) + 1 : 0;
+    while (taken.has(slot)) slot += 1;
+    at = -1;
+    next.push({
+      index: slot,
+      id,
+      ...(delta.name ? { name: delta.name } : {}),
+      arguments: delta.arguments ?? '',
+      ...(delta.result !== undefined ? { result: delta.result } : {}),
+    });
+    return next;
+  }
+  if (at < 0 && id) {
+    // 后到的帧 index 更小 / 被上游改写：按 id 归并到已有调用
+    at = next.findIndex((t) => t.id === id);
+  }
   if (at < 0) {
     next.push({
       index: delta.index,

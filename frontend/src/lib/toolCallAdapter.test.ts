@@ -138,6 +138,36 @@ describe('mergeToolCallDelta — 分片聚合', () => {
     expect(prev[0].arguments).toBe('x');
     expect(next[0].arguments).toBe('xy');
   });
+
+  /* ── 边界：同一 id 多次 delta / 上游重写 index ───────────────────
+   * 两条都钉住旧实现的「把两次调用拼成一张卡」：参数被粘成
+   * `{"x":1}{"y":2}` 这种不可解析的串，用户看到一张参数坏掉的卡片。 */
+
+  it('同 index 但 id 不同 = 另一次调用，不能拼进同一张卡', () => {
+    let list = mergeToolCallDelta([], { index: 0, id: 'c1', name: 'read_file', arguments: '{"a":1}' });
+    list = mergeToolCallDelta(list, { index: 0, id: 'c2', name: 'list_dir', arguments: '{"b":2}' });
+    expect(list).toHaveLength(2);
+    expect(list.map((t) => t.id)).toEqual(['c1', 'c2']);
+    expect(list.map((t) => t.arguments)).toEqual(['{"a":1}', '{"b":2}']);
+    // 新调用拿到未被占用的 index，且不覆盖原有那张卡
+    expect(list.map((t) => t.index)).toEqual([0, 1]);
+  });
+
+  it('同一 id 的后到帧 index 更小：按 id 归并，不新起一张卡', () => {
+    let list = mergeToolCallDelta([], { index: 2, id: 'c9', name: 'write', arguments: '{"a' });
+    list = mergeToolCallDelta(list, { index: 0, id: 'c9', arguments: '":1}' });
+    expect(list).toHaveLength(1);
+    expect(list[0].index).toBe(2);
+    expect(list[0].arguments).toBe('{"a":1}');
+  });
+
+  it('省略 index 的多次调用（上游每帧一条、无 index）：按 id 分开', () => {
+    // normalizeToolCall 对缺失 index 用数组位置回退 → 每帧都是 0，旧实现会把
+    // 两个不同 id 的调用合成一张卡。
+    let list = mergeToolCallDelta([], { index: 0, id: 'c1', name: 'a', arguments: '{}' });
+    list = mergeToolCallDelta(list, { index: 0, id: 'c2', name: 'b', arguments: '{}' });
+    expect(list.map((t) => t.name)).toEqual(['a', 'b']);
+  });
 });
 
 describe('parseSseFrame — 工具调用 / 用量帧（#63 契约）', () => {

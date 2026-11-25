@@ -2,16 +2,136 @@
  * SSE / 流式对话解析层（design 1.4：`api/index.ts` 按域拆分的第 2 块）。
  *
  * 纯解析函数（可单测）+ 两条流式入口：经后端中转 / 浏览器直连上游。
+ *
+ * ── 分帧已下沉到 `lib/stream` ────────────────────────────────
+ * 切帧、多行 `data:` 拼接、`event:` 名、注释行、CRLF、超长帧、abort 真断流
+ * 都在 `lib/stream.ts`（唯一实现，纯逻辑可离线驱动）。本文件只做**协议语义**：
+ * 把一帧 OpenAI / Anthropic 增量翻译成 `ChatStreamDelta`，以及两条请求入口。
  */
 
 import { extractToolCalls, extractUsage, type ToolCallWireMode } from '@/lib/toolCallAdapter';
+import { readSseBody, splitSseFrames, type SseFrame } from '@/lib/stream';
 import type { ChatStreamCallback, PlaygroundChatRequest } from '@/types';
 
 import { API_BASE, authHeaders } from './client';
 
+/** 从错误对象/字符串里取出可读文案（三种形态都捋一遍，取不到给 null） */
+function errorMessage(raw: unknown): string | null {
+  if (typeof raw === 'string') return raw.trim() || null;
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    const message = obj.message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+    const nested = obj.error;
+    if (typeof nested === 'string' && nested.trim()) return nested.trim();
+    if (nested && typeof nested === 'object') {
+      const inner = (nested as Record<string, unknown>).message;
+      if (typeof inner === 'string' && inner.trim()) return inner.trim();
+    }
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** 统一错误帧出口：`kind='error'` + `isEnd` 是 ChatDebugger 收尾「⚠️」的判据 */
+function emitError(onDelta: ChatStreamCallback, message: string): boolean {
+  onDelta({ content: message, isEnd: true, kind: 'error' });
+  return true;
+}
+
 /**
- * 解析单个 SSE 帧（OpenAI / Anthropic 协议）为增量回调序列。
+ * 解析一帧已切好的 SSE 事件（`lib/stream` 的产物），返回是否终止。
+ *
+ * 终止判据（与 A2A 同口径）：`[DONE]` / Anthropic `message_stop` / 错误帧。
+ * **缺 `[DONE]` 不算错误** —— Trae 等上游本来就不发（调用方在流结束时补收尾）。
+ */
+function handleSseFrame(
+  frame: SseFrame,
+  onDelta: ChatStreamCallback,
+  toolCallMode: ToolCallWireMode,
+): boolean {
+  const eventName = frame.event.trim().toLowerCase();
+  const data = frame.data.trim();
+  if (!data) {
+    // 空 data 帧：只有显式 event 名时才可能有语义（如 `event: error` 无正文）
+    if (eventName === 'error') return emitError(onDelta, '上游流式错误');
+    return false;
+  }
+  if (data === '[DONE]') {
+    onDelta({ content: '', isEnd: true });
+    return true;
+  }
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    parsed = JSON.parse(data) as Record<string, unknown>;
+  } catch {
+    parsed = null;
+  }
+  if (!parsed) {
+    // 兼容非规范上游：一个事件块里塞了多条独立的 `data:` JSON（规范要求用 \n
+    // 拼成一条负载，拼接后自然不是 JSON）——逐条回退解析，别把整块丢掉。
+    if (data.includes('\n')) {
+      let ended = false;
+      for (const line of data.split('\n')) {
+        if (ended) break;
+        const text = line.trim();
+        if (!text) continue;
+        ended = handleSseFrame({ event: frame.event, data: text }, onDelta, toolCallMode) || ended;
+      }
+      return ended;
+    }
+    // 非 JSON 负载：`event: error` 当错误文案上报；其余（心跳/日志）忽略
+    return eventName === 'error' ? emitError(onDelta, data) : false;
+  }
+  if (eventName === 'error') {
+    return emitError(onDelta, errorMessage(parsed.error ?? parsed.message ?? parsed) ?? '上游流式错误');
+  }
+  // Anthropic message_stop
+  if (parsed.type === 'message_stop') {
+    onDelta({ content: '', isEnd: true });
+    return true;
+  }
+  if (parsed.type === 'error' || parsed.error !== undefined) {
+    const msg = errorMessage(parsed.error ?? parsed.message) ?? '上游流式错误';
+    return emitError(onDelta, msg);
+  }
+  // 工具调用分片 / 用量收尾（#63）：形状全部走适配层归一化，
+  // 回灌层落地后只改 toolCallAdapter，不动解析与 UI。
+  for (const tc of extractToolCalls(parsed, toolCallMode)) {
+    onDelta({ content: '', isEnd: false, kind: 'tool_call', toolCall: tc });
+  }
+  const usage = extractUsage(parsed);
+  if (usage) onDelta({ content: '', isEnd: false, kind: 'usage', usage });
+  // Anthropic delta
+  const anthropicDelta = parsed.delta as { text?: string } | undefined;
+  if (anthropicDelta && typeof anthropicDelta.text === 'string' && anthropicDelta.text) {
+    onDelta({ content: anthropicDelta.text, isEnd: false });
+    return false;
+  }
+  // OpenAI delta（content / reasoning_content / text）
+  const choices = parsed.choices as Array<{ delta?: Record<string, unknown> }> | undefined;
+  const firstDelta = choices?.[0]?.delta;
+  if (firstDelta) {
+    const reasoning = [firstDelta.reasoning_content, firstDelta.reasoning]
+      .find((v) => typeof v === 'string') as string | undefined;
+    if (reasoning) onDelta({ content: reasoning, isEnd: false, kind: 'reasoning' });
+    const content = ([firstDelta.content, firstDelta.text]
+      .find((v) => typeof v === 'string') ?? '') as string;
+    if (content) onDelta({ content, isEnd: false, kind: 'content' });
+  }
+  return false;
+}
+
+/**
+ * 解析一段 SSE 文本（一个或多个完整帧）为增量回调序列。
  * 纯函数，便于单元测试。返回是否有终止帧（[DONE] / message_stop / error）。
+ *
+ * 终止帧之后的内容不再下发：旧实现会继续把它们拼进同一只气泡，
+ * 用户看到「回答后面挂了一段尾巴」，而那尾巴其实是后端收尾噪声。
  */
 export function parseSseFrame(
   frame: string,
@@ -20,61 +140,9 @@ export function parseSseFrame(
 ): boolean {
   const toolCallMode = opts.toolCallMode ?? 'auto';
   let ended = false;
-  const lines = frame
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.startsWith('data:') && l.length > 5)
-    .map((l) => l.slice(5).trim())
-    .filter((l) => l.length > 0);
-  for (const data of lines) {
-    if (data === '[DONE]') {
-      if (!ended) onDelta({ content: '', isEnd: true });
-      ended = true;
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(data) as Record<string, unknown>;
-      // Anthropic message_stop
-      if (parsed.type === 'message_stop') {
-        if (!ended) onDelta({ content: '', isEnd: true });
-        ended = true;
-        continue;
-      }
-      if (parsed.type === 'error' || parsed.error) {
-        const raw = parsed.error as Record<string, unknown> | string | undefined;
-        const msg = typeof raw === 'string' ? raw : (raw?.message as string | undefined) ?? '上游流式错误';
-        // 标记 kind=error：ChatDebugger 据此以「⚠️」收尾而不是当正文拼接
-        onDelta({ content: msg, isEnd: true, kind: 'error' });
-        ended = true;
-        continue;
-      }
-      // 工具调用分片 / 用量收尾（#63）：形状全部走适配层归一化，
-      // 回灌层落地后只改 toolCallAdapter，不动解析与 UI。
-      for (const tc of extractToolCalls(parsed, toolCallMode)) {
-        onDelta({ content: '', isEnd: false, kind: 'tool_call', toolCall: tc });
-      }
-      const usage = extractUsage(parsed);
-      if (usage) onDelta({ content: '', isEnd: false, kind: 'usage', usage });
-      // Anthropic delta
-      const anthropicDelta = parsed.delta as { text?: string } | undefined;
-      if (anthropicDelta && typeof anthropicDelta.text === 'string' && anthropicDelta.text) {
-        onDelta({ content: anthropicDelta.text, isEnd: false });
-        continue;
-      }
-      // OpenAI delta（content / reasoning_content / text）
-      const choices = parsed.choices as Array<{ delta?: Record<string, unknown> }> | undefined;
-      const firstDelta = choices?.[0]?.delta;
-      if (firstDelta) {
-        const reasoning = [firstDelta.reasoning_content, firstDelta.reasoning]
-          .find((v) => typeof v === 'string') as string | undefined;
-        if (reasoning) onDelta({ content: reasoning, isEnd: false, kind: 'reasoning' });
-        const content = ([firstDelta.content, firstDelta.text]
-          .find((v) => typeof v === 'string') ?? '') as string;
-        if (content) onDelta({ content, isEnd: false, kind: 'content' });
-      }
-    } catch {
-      // 非 JSON 帧（心跳/注释）忽略
-    }
+  for (const parsed of splitSseFrames(frame)) {
+    if (ended) break;
+    ended = handleSseFrame(parsed, onDelta, toolCallMode);
   }
   return ended;
 }
@@ -123,8 +191,10 @@ export async function testChannelChatStream(
     if (text) {
       try {
         const parsed = JSON.parse(text) as Record<string, unknown>;
-        const raw = parsed.error ?? parsed.message;
-        if (typeof raw === 'string') msg = raw;
+        // 错误体三种形态：`{error:"…"}` / `{message:"…"}` / `{error:{message}}`。
+        // 旧实现只认前两种的字符串分支，对象形态会把整段 JSON 当文案怼给用户。
+        const extracted = errorMessage(parsed.error ?? parsed.message);
+        if (extracted) msg = extracted;
       } catch {
         // 非 JSON 错误体，直接抛原文
       }
@@ -174,44 +244,35 @@ export async function readSseResponse(
       const choices = p.choices as Array<{ message?: { content?: string } }> | undefined;
       content = choices?.[0]?.message?.content ?? '';
     }
-    const error = typeof data.error === 'string' ? data.error : typeof p.error === 'string' ? p.error : '';
+    const error = errorMessage(data.error) ?? errorMessage(p.error) ?? '';
     if (error) {
-      onDelta({ content: error, isEnd: true });
+      // kind='error' 是「错误气泡」的唯一判据：旧实现漏了它，ChatDebugger
+      // 走正文分支且 isEnd=true ⇒ 错误文案被整段丢弃，界面只剩「上游未返回内容」。
+      onDelta({ content: error, isEnd: true, kind: 'error' });
     } else if (content) {
-      onDelta({ content, isEnd: true });
+      // 正文必须走**非终止**增量：终止增量在 UI 侧只用来收尾、不拼正文
+      // （旧实现把 content 挂在 isEnd 上，正文被丢掉，见上面的同一处判据）。
+      onDelta({ content, isEnd: false, kind: 'content' });
+      onDelta({ content: '', isEnd: true });
+    } else {
+      onDelta({ content: '', isEnd: true });
     }
     return;
   }
 
-  const reader = res.body?.getReader();
-  if (!reader) return;
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
+  const body = res.body;
+  if (!body) return;
+  const toolCallMode = opts.toolCallMode ?? 'auto';
   let ended = false;
-
-  const handleFrame = (frame: string): void => {
-    ended = parseSseFrame(frame, onDelta, opts) || ended;
-  };
-
-  for (;;) {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    // 统一行尾：剥离所有 \r（上游透传可能用 CRLF）。
-    // SSE 数据行内不应有孤立 \r，strip 是安全的。
-    buffer = buffer.replace(/\r/g, '');
-    // 空行 = SSE 帧边界，只处理完整帧，避免半个 JSON 被解析失败
-    let idx = buffer.indexOf('\n\n');
-    while (idx !== -1) {
-      const frame = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      handleFrame(frame);
-      idx = buffer.indexOf('\n\n');
-    }
-  }
-  // 尾部残留帧
-  if (buffer.trim()) handleFrame(buffer);
+  await readSseBody(body, {
+    signal,
+    stopWhen: () => ended,
+    onFrame: (frame) => {
+      if (ended) return;
+      ended = handleSseFrame(frame, onDelta, toolCallMode);
+    },
+  });
+  // 缺 [DONE]（Trae 等上游明确不发）也要恰好收尾一次
   if (!ended) onDelta({ content: '', isEnd: true });
 }
 
