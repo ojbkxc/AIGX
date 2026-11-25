@@ -569,6 +569,31 @@ placeholder/alt`），**刻意不看常量表里的 `label:`/`desc:`** —— �
 「复制为文本」也带上这一段——那份文本是给别人看的，只列生效项会让对方以为
 「没列出来的都没配」。
 
+### 67. 「build 后提交 static」的前置条件：源码必须干净
+CI 的零漂移门禁会跑 `npm run build` 再比 `git status -- static`。它的**隐含前提**是：
+提交的 `static/` 是用**提交的源码**构建的。而 `npm run build` 用的是**工作树**里的源码。
+
+**我踩了这个坑**：某次 `build` 时工作树里有别人 11 个未提交的前端改动，产物把它们
+编进去了；我只提交 `static/`、没提交那些源码 → CI 用纯 HEAD 源码重建，结果必然
+不同 → 门禁报「static/ 与前端源码不一致」，而我本地 `refs-missing=0`、页面也好好的，
+**完全看不出问题**。
+
+**纪律**：`npm run build` 之前先确认
+
+```bash
+git status --porcelain --untracked-files=no -- frontend/src frontend/package.json frontend/index.html
+```
+
+为空。不干净就别 build、更别提交产物——先用干净源码构建，或者等别人提交。
+**此时正确的做法不是「挑自己的 chunk 提交」**（chunk 名带内容 hash，整批换名），
+而是让源码与产物在同一时刻一致。
+
+### 68. 本地绿 ≠ CI 绿，缺的是「模式」
+`tsc --noEmit` 通过、vitest 通过、本地 e2e 通过，CI 仍可能红，因为它跑的是
+**另一套入口**：`npm run build` 的 tsconfig 范围更大（含 `*.test.ts`）、零漂移门禁、
+`cargo test` / `clippy`。第 62–66 批期间我因为 `build` 被并发会话阻塞，连续几轮只
+做了「tsc + 单测」，那几轮的绿**不含 build 这一层**——报告时必须说清是哪一层绿。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
