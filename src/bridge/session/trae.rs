@@ -89,6 +89,7 @@ const DEFAULT_MAX_TOKENS: i64 = 1_000_000;
 ///   2. `resolve_config_name` 打出
 ///      `trae: 模型 '…' 不在上游 config_name 清单里` 这条 warn；
 ///   3. 改 `function` 取值时（各 function 清单不同）。
+///
 /// 重取的完整脚本与判据见 `docs/TRAE-PROBE-MATRIX.md` §5.3；拿到新清单后
 /// 替换本常量，并同步那份文档 §5.1 的条数。
 const TRAE_CONFIG_NAMES: &[&str] = &[
