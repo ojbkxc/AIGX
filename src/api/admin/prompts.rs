@@ -9,7 +9,7 @@
 //! 由 React 转义防 XSS）。不落地持久化，走 5 分钟内存缓存。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -54,7 +54,12 @@ type SourceEntry = (i64, Arc<Value>, bool);
 pub struct PromptSourceCache {
     map: Arc<RwLock<HashMap<String, SourceEntry>>>,
     /// 按 key 的在途抓取闸门：防止同一源被并发触发多次 GitHub 抓取。
-    inflight: Arc<TokioMutex<HashMap<String, ()>>>,
+    ///
+    /// 用**同步** `std::sync::Mutex` 而不是 `tokio::sync::Mutex`：占位只在
+    /// `begin_fetch` 与 [`FetchGuard::drop`] 两处做 O(1) 表操作，临界区里没有
+    /// 任何 `await`；而异步锁在 `Drop` 里只能 `try_lock` —— 竞争失败就**漏删
+    /// 占位**，此后该源永远返回 409（见 `FetchGuard::drop` 的注释）。
+    inflight: Arc<StdMutex<HashMap<String, ()>>>,
     /// 自环翻译每日字符预算：`(当日 YYYYMMDD, 已用字符数)`。
     /// 跨天自动清零；单次锁内完成检查+累加，保证原子不超卖。
     daily_budget: Arc<TokioMutex<(String, u64)>>,
@@ -70,7 +75,7 @@ impl Default for PromptSourceCache {
     fn default() -> Self {
         Self {
             map: Arc::new(RwLock::new(HashMap::new())),
-            inflight: Arc::new(TokioMutex::new(HashMap::new())),
+            inflight: Arc::new(StdMutex::new(HashMap::new())),
             daily_budget: Arc::new(TokioMutex::new((String::new(), 0))),
         }
     }
@@ -113,23 +118,32 @@ async fn store(cache: &PromptSourceCache, key: &str, v: Arc<Value>, truncated: b
 /// 请求自己落缓存），否则占位返回守卫。守卫 Drop 时释放占位，保证后续
 /// 请求（含失败后重试）不被永久卡死。
 struct FetchGuard {
-    inflight: Arc<TokioMutex<HashMap<String, ()>>>,
+    inflight: Arc<StdMutex<HashMap<String, ()>>>,
     key: String,
 }
 
 impl Drop for FetchGuard {
     fn drop(&mut self) {
-        // 同步 Drop 无法 await，用 try_lock 尽力清理。极端竞争下若锁被
-        // 短暂占用，此处可能漏删——但占位仅是"在途"标记，下一次请求会
-        // 走正常抓取路径重新建占位，不会形成永久死锁。
-        if let Ok(mut m) = self.inflight.try_lock() {
-            m.remove(&self.key);
-        }
+        // 同步锁：Drop 里可以真的删掉占位。
+        //
+        // 此前这里用的是 `tokio::sync::Mutex` + `try_lock`，竞争失败就跳过删除。
+        // 而 `begin_fetch` 见到占位存在只会返回 `None`（→ 409），**没有任何
+        // 时间兜底会清它** —— 那个 409 会一直持续到进程重启。原注释写的
+        // 「下一次请求会走正常抓取路径重新建占位」并不成立：占位还在，就永远
+        // 走不到建占位那一步。锁中毒按既有口径 `into_inner` 继续用。
+        let mut map = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        map.remove(&self.key);
     }
 }
 
-async fn begin_fetch(cache: &PromptSourceCache, key: &str) -> Option<FetchGuard> {
-    let mut m = cache.inflight.lock().await;
+fn begin_fetch(cache: &PromptSourceCache, key: &str) -> Option<FetchGuard> {
+    let mut m = cache
+        .inflight
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     if m.contains_key(key) {
         None
     } else {
@@ -188,7 +202,7 @@ pub async fn handle_prompt_fetch(
     // 这比返回空数组更明确——空数组会被前端误判为「该源无可用提示词」。
     // `_guard` 必须绑定存活到本函数末尾，其 Drop 才在 fetch 完成后释放
     // 占位；若写成 `.is_none()` 临时值，guard 会被立即 Drop、闸门失效。
-    let _guard = match begin_fetch(&state.prompt_source_cache, &key).await {
+    let _guard = match begin_fetch(&state.prompt_source_cache, &key) {
         Some(g) => g,
         None => {
             return Err(error_response(

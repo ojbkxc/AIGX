@@ -1685,7 +1685,7 @@ pub async fn handle_messages(
                 // guard 不能立刻 drop，否则列表里会立刻消失。
                 _inflight: Some(inflight_guard),
             };
-            Sse::new(guarded)
+            let mut resp = Sse::new(guarded)
                 // Anthropic 上游自带 `event: ping`，但那是**上游**的心跳，
                 // 不会自动转发（bridge 里 ping 被丢弃，见 parse_stream_event）。
                 // 这里给下游补 SSE 注释行保活，语义与 OpenAI 侧一致：
@@ -1695,7 +1695,21 @@ pub async fn handle_messages(
                         .interval(crate::bridge::SSE_KEEPALIVE_INTERVAL)
                         .text(crate::bridge::SSE_KEEPALIVE_TEXT),
                 )
-                .into_response()
+                .into_response();
+            // 预算不够时**只能靠响应头告知**：流一旦开始，正文碎片已经逐帧
+            // 发出去了，事后收不回来。非流式那条（本函数末尾）发这个头，
+            // 流式这条此前**漏发** —— 于是同一份 `max_tokens < 1024` 的请求，
+            // 非流式能看出「预算被思考吃穿」，流式只能看到空正文而拿不到
+            // 任何线索。判据与 OpenAI 面流式路径（`chat.rs`）逐字同一把刀：
+            // 请求期事实，与流里最终发生什么无关。
+            if !crate::bridge::output_budget_allows_visible_text(chat_req.declared_output_budget())
+            {
+                resp.headers_mut().insert(
+                    "x-aigx-output-budget",
+                    "below-visible-minimum".parse().unwrap(),
+                );
+            }
+            resp
         }
     } else {
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换

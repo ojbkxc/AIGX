@@ -136,6 +136,19 @@ fn record_seen(keys: &[KeyDefinition]) {
     }
 }
 
+/// 取权威门（**阻塞**，不是 `try_lock`）。
+///
+/// 为什么不能 `try_lock`：本门的临界区全是内存比较（无 IO、无 await），持锁
+/// 时间在微秒级；而 `try_lock` 失败在这里被折叠成「这个 Key 不是当前代」，
+/// 与「Key 无效」共用同一个返回值 —— 也就是说，只要有一次 `publish_keys` /
+/// `revoke` 恰好与鉴权撞上，**合法 Key 会收到 401 `API key has been revoked`**。
+/// 并发越高越容易命中，且现象与真的被吊销完全无法区分（现场只能靠复现碰运气）。
+/// 中毒（panic 打断）按既有口径 `into_inner` 继续用，与 `publish_keys` /
+/// `status` 一致。
+fn lock_authority() -> std::sync::MutexGuard<'static, State> {
+    AUTHORITY.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// 由真实鉴权成功路径签发的来源凭据；字段封闭且不可克隆/序列化。
 pub struct Source {
     authority: Arc<Authority>,
@@ -156,9 +169,7 @@ impl Source {
 
     /// 当前是否仍是有效代（短同步核对）。
     pub fn is_current(&self) -> bool {
-        let Ok(state) = AUTHORITY.try_lock() else {
-            return false;
-        };
+        let state = lock_authority();
         matches_current(
             &state,
             &self.authority,
@@ -210,7 +221,7 @@ pub fn authenticate_key(presented: &str) -> Option<Authenticated> {
         return None;
     }
     let (authority, definition, index) = {
-        let state = AUTHORITY.try_lock().ok()?;
+        let state = lock_authority();
         if state.failed || state.replacement {
             return None;
         }
@@ -236,7 +247,7 @@ pub fn authenticate_key(presented: &str) -> Option<Authenticated> {
         .get(index)
         .map(|d| (d.id.clone(), d.name.clone()))
         .unwrap_or_default();
-    let state = AUTHORITY.try_lock().ok()?;
+    let state = lock_authority();
     if !matches_current(
         &state,
         &authority,

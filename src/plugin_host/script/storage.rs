@@ -70,7 +70,12 @@ pub fn register(
     package: ScriptPackage,
 ) -> Result<()> {
     // 1. KV 权威状态：读现有 → 替换同 id 同 version → 写回。
-    let mut packages: Vec<ScriptPackage> = store.get(KV_KEY).ok().flatten().unwrap_or_default();
+    //
+    // 严格读：读失败**必须**中止。旧实现用 `.ok().flatten().unwrap_or_default()`，
+    // 于是「KV 读坏」被当成「一个包都没装」，紧接着把只含新包的整表写回去 ——
+    // 其余已装包在这一刻从注册表里永久消失（磁盘目录还在，但没有任何入口
+    // 再列出它们）。文件不存在（首次安装）仍是正常的空表。
+    let mut packages = try_load_packages(store)?;
     packages.retain(|p| !(p.id == package.id && p.version == package.version));
     packages.push(package);
     store
@@ -104,14 +109,37 @@ pub fn replace_all(
     Ok(())
 }
 
+/// 读全部已装包（KV 为准），**读失败是错误**。
+///
+/// 写路径必须用这一份：`register` / `remove` 都是「读现有 → 改 → 整表写回」。
+/// 若读失败被当成空集，写回就会把**其它所有已装包**一起抹掉 —— 与
+/// `config.rs` 那次「config.toml 读坏 → 整份配置静默丢弃」同族，只是这里
+/// 丢的是脚本包注册表（磁盘目录还在，但宿主再也看不到它们）。
+fn try_load_packages(store: &crate::storage::FileStore) -> Result<Vec<ScriptPackage>> {
+    store
+        .get(KV_KEY)
+        .context("读取 KV plugin:script-packs 失败（拒绝以空表覆盖既有注册）")
+        .map(Option::unwrap_or_default)
+}
+
 /// 读全部已装包（KV 为准）。
 ///
 /// 读取时归一化（A2A v3.5.0 `normalize_single_provider` 对齐）：历史数据里
 /// 「包启用 + 唯一 provider 被子级停用」是一个矛盾态（宿主不会路由这家，
 /// 界面却显示包开着）。折合成包停用：保留用户的停用选择，同时再开包时
 /// 不会被残留的子开关卡住。
+///
+/// 只读路径（列表/路由计算）没有「写回」这一步，读失败按空表处理不会造成
+/// 数据损失，但**必须留痕**：否则「脚本包全没了」与「KV 坏了」在日志里
+/// 长得一模一样。
 pub fn load_packages(store: &crate::storage::FileStore) -> Vec<ScriptPackage> {
-    let mut packages: Vec<ScriptPackage> = store.get(KV_KEY).ok().flatten().unwrap_or_default();
+    let mut packages = match try_load_packages(store) {
+        Ok(packages) => packages,
+        Err(err) => {
+            tracing::warn!("[Script] 读取脚本包注册表失败，本次按空表处理：{err:#}");
+            Vec::new()
+        }
+    };
     for package in &mut packages {
         if package.enabled && package.providers.len() == 1 {
             let only = &package.providers[0].id;
@@ -131,7 +159,9 @@ pub fn remove(
     package_id: &str,
     version: Option<&str>,
 ) -> Result<()> {
-    let mut packages = load_packages(store);
+    // 严格读（同 `register`）：读失败时按空表算出「包不存在」会误导运维，
+    // 而按空表写回则会连带抹掉其余包。
+    let mut packages = try_load_packages(store)?;
     let before = packages.len();
     packages.retain(|p| {
         let same_id = p.id == package_id;
@@ -160,8 +190,17 @@ pub fn remove_package_dir(data_dir: &Path, package: &ScriptPackage) {
 }
 
 /// 读别名表。
+///
+/// 与 [`load_packages`] 同口径：只读路径按空表兜底（宿主拿不到别名最多是
+/// 路由少几家），但读失败要留痕，别把「KV 坏了」伪装成「还没有别名」。
 pub fn load_identities(store: &crate::storage::FileStore) -> Identities {
-    store.get(IDENTITIES_KEY).ok().flatten().unwrap_or_default()
+    match store.get(IDENTITIES_KEY) {
+        Ok(identities) => identities.unwrap_or_default(),
+        Err(err) => {
+            tracing::warn!("[Script] 读取别名表失败，本次按空表处理：{err:#}");
+            Identities::default()
+        }
+    }
 }
 
 /// 写别名表（js-host 握手上报后调）。

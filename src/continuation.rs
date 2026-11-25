@@ -569,7 +569,13 @@ pub fn wrap_stream(
             match bridge.chat_stream(&req, &ctx).await {
                 Ok(s) => stream = s,
                 Err(e) => {
-                    tracing::warn!("auto-continue(流式) 续写轮建流失败: {e}");
+                    // 带上模型与轮次：同一时刻可能有几十条请求在续写，只打一句
+                    // 「建流失败」等于把「哪条请求、第几轮」交给运维去猜。
+                    tracing::warn!(
+                        "auto-continue(流式) 续写轮建流失败（model={}, round={}）: {e}",
+                        req.model,
+                        rounds_done
+                    );
                     // 前半已流出的内容照常收完：补一个错误帧（SSE error 事件）。
                     let _ = tx.send(Err(e)).await;
                     return;
@@ -630,7 +636,12 @@ pub async fn continue_non_streaming(
                 rounds_done += 1;
             }
             Err(e) => {
-                tracing::warn!("auto-continue(非流式) 续写轮失败: {e}，以已得内容返回");
+                // 同流式那条：模型 + 已完成轮次，别让运维去猜是哪条请求。
+                tracing::warn!(
+                    "auto-continue(非流式) 续写轮失败（model={}, round={}）: {e}，以已得内容返回",
+                    req.model,
+                    rounds_done
+                );
                 break;
             }
         }
