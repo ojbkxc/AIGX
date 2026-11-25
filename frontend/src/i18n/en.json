@@ -5784,5 +5784,7 @@
   "没有解析出规则：{{detail}}": "No rules parsed: {{detail}}",
   "已添加 {{n}} 条；{{detail}}": "Added {{n}} rule(s); {{detail}}",
   "没有可添加的规则（可能与现有行重复）": "No rules to add (they may all duplicate existing rows)",
-  "导入失败：{{reason}}": "Import failed: {{reason}}"
+  "导入失败：{{reason}}": "Import failed: {{reason}}",
+  "将删除本机保存的全部历史对话，且无法恢复。确认继续？": "This deletes all conversation history saved on this machine and cannot be undone. Continue?",
+  "清空全部会话": "Clear all conversations"
 }
