@@ -47,6 +47,7 @@ import {
   parseTemplateJson,
   persistPreviewHistory,
   presetApplyNeedsConfirm,
+  previewHistoryClearPrompt,
   previewHistoryLabel,
   readPreviewHistory,
   skillKeywordSample,
@@ -375,6 +376,27 @@ describe('validateImportedSettings · 导出-导入自洽', () => {
   it('字符串数组本身不是数组 → fatal', () => {
     const verdict = validateImportedSettings({ fallback_models: 'glm-5' });
     expect(verdict.fatal.length).toBeGreaterThan(0);
+  });
+});
+
+describe('previewHistoryClearPrompt', () => {
+  const tr = (key: string, params?: Record<string, string | number>): string =>
+    params ? key.replace(/\{\{(\w+)\}\}/g, (_m, k: string) => String(params[k] ?? '')) : key;
+
+  it('**报出条数**（只说「确定清空吗」等于让人盲签）', () => {
+    const prompt = previewHistoryClearPrompt(3, tr);
+    expect(prompt).toContain('3');
+    expect(prompt).toContain('无法恢复');
+    // 明确告诉用户「不影响已保存的配置」，否则会以为配置也一起没了
+    expect(prompt).toContain('不影响已保存的配置');
+  });
+
+  it('空历史 → 不弹确认（没什么可清）', () => {
+    expect(previewHistoryClearPrompt(0, tr)).toBeNull();
+  });
+
+  it('单条也要问（一条也是不可逆的删除）', () => {
+    expect(previewHistoryClearPrompt(1, tr)).toContain('1');
   });
 });
 

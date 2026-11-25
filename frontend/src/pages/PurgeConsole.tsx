@@ -1754,6 +1754,17 @@ export function readPreviewHistory(get: (k: string) => string | null): string[] 
   }
 }
 
+/** 清空样例历史的确认文案（抽成纯函数便于单测；`null` = 无需确认） */
+export function previewHistoryClearPrompt(
+  count: number,
+  tr: (key: string, params?: Record<string, string | number>) => string,
+): string | null {
+  if (count <= 0) return null;
+  return tr('清空后这 {{n}} 条样例历史会从本地删除（不影响已保存的配置），且无法恢复。继续？', {
+    n: count,
+  });
+}
+
 /** 写历史：新样例去重置顶（去掉旧同值），截断到 8 条。 */
 export function writePreviewHistory(
   items: string[],
@@ -2868,11 +2879,22 @@ export default function PurgeConsole(): JSX.Element {
       return next;
     });
   }, []);
-  /** 清空全部历史（localStorage key 一并移除，不留空数组） */
+  /** 清空全部历史（localStorage key 一并移除，不留空数组）
+   *
+   * 为什么要确认：历史里存的是**样例正文**（可能含敏感内容），用户往往正拿它做
+   * 对照；一条条删还能反悔，整表清掉不可逆，而按钮就挨在「导出」旁边很容易误点。
+   * 确认文案要报出**条数**，只说「确定清空吗」等于让人盲签。
+   */
   const clearPreviewHistory = useCallback((): void => {
+    const prompt = previewHistoryClearPrompt(previewHistory.length, (key, params) =>
+      t(key, params),
+    );
+    if (!prompt) return;
+    if (!window.confirm(prompt)) return;
     persistPreviewHistory([], lsSetStable, lsRemoveStable);
     setPreviewHistory([]);
-  }, []);
+    addToast(t('已清空 {{n}} 条样例历史', { n: previewHistory.length }), 'success');
+  }, [addToast, previewHistory.length, t]);
 
   /** 导出历史为 JSON（团队共享同一批测试用例） */
   const exportPreviewHistoryFile = useCallback((): void => {
