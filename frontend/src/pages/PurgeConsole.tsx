@@ -2424,6 +2424,12 @@ const PresetsSection = memo(function PresetsSection({
 
   const handleApplyTemplate = useCallback(
     async (id: string): Promise<void> => {
+      // 与技能写入同一类：`busy` 是 state，异步 set 挡不住同一 tick 内的连点。
+      // 连点两次会各跑一遍 fetchBody 再各调一次 `onApplyTemplate`，
+      // 草稿里就出现**两个同名模板**——而 `active_template` 是按名匹配的，
+      // 重名会让「启用哪个」变得含糊。
+      if (busyRef.current !== null) return;
+      busyRef.current = `template:${id}`;
       setBusy(`template:${id}`);
       try {
         const full = await fetchBody(id);
@@ -2441,6 +2447,7 @@ const PresetsSection = memo(function PresetsSection({
       } catch {
         addToast(t('应用预设失败'), 'error');
       } finally {
+        busyRef.current = null;
         setBusy(null);
       }
     },
