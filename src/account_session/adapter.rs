@@ -142,6 +142,33 @@ pub fn build_bridge_with_client(
                     for (_, value) in headers.iter_mut() {
                         *value = value.replace("{credential}", credential);
                     }
+                    // 私有协议的身份不只在 token 里：Trae 的凭证还带
+                    // `uid` / `deviceId` / `machineId` / `variant`（见 `import.rs` 里
+                    // A2A 记录的真实形状）。前三者对应 `x-uid` / `x-device-id` /
+                    // `x-machine-id` 三个身份头，`variant` 决定 SOLO 还是 IDE 两套 UA。
+                    // 早先这里只传 token，这些头一个都发不出去 —— 上游因此把请求
+                    // 判成「非法客户端」（`11-128 request illegal`）或「参数不对」
+                    // （`[4001] the param is invalid`）。
+                    // 账号里显式配了同名头的以账号为准，不覆盖。
+                    if spec.kind == "trae" {
+                        for (field, header) in [
+                            ("uid", "x-uid"),
+                            ("deviceId", "x-device-id"),
+                            ("machineId", "x-machine-id"),
+                            ("variant", "x-aigx-trae-variant"),
+                        ] {
+                            let value = session.credential.field_plain(field);
+                            if value.trim().is_empty() {
+                                continue;
+                            }
+                            if !headers
+                                .iter()
+                                .any(|(name, _)| name.eq_ignore_ascii_case(header))
+                            {
+                                headers.push((header.to_string(), value));
+                            }
+                        }
+                    }
                     if let Some(bridge) = crate::bridge::session::build(
                         spec.kind,
                         &base,

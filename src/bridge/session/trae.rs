@@ -24,13 +24,18 @@ use crate::bridge::{
 const CHAT_PATH: &str = "/api/agent/v3/llm_utils_chat";
 const DEFAULT_MODEL: &str = "glm-5.2";
 const DEFAULT_MAX_TOKENS: i64 = 1_000_000;
-/// 真实 Trae 客户端 UA。
+/// 真实 Trae 客户端 UA —— **两套**，由账号凭证里的 `variant` 决定。
 ///
 /// 上游 WAF 会校验客户端身份：AIGX 早先用 `Trae/1.0 antigravity-cockpit-tools`
-/// 一律被拦成 `{"code":"11-128","msg":"request illegal","displayMsg":{"zh":"请求
-/// 被拦截，请重新发送"}}` —— 不是 token 失效（那是 401），是请求被判成非法客户端。
-/// 取值来自 A2A `agent2api-wasm-trae` 0.1.1 wasm 里的字面量（`trae/src/headers.rs`）。
-const DEFAULT_USER_AGENT: &str = "VSCode 1.107.1 (TRAE CN)";
+/// 一律被拦成 `{"code":"11-128","msg":"request illegal"}` —— 不是 token 失效
+/// （那是 401），是请求被判成非法客户端。取值来自 A2A `agent2api-wasm-trae`
+/// 0.1.1 wasm 的字面量（`trae/src/headers.rs`），那里 SOLO 与 IDE 是两个不同的串。
+const UA_SOLO: &str = "VSCode 1.107.1 (TRAE SOLO CN)";
+const UA_IDE: &str = "VSCode 1.107.1 (TRAE CN)";
+
+/// 内部约定：adapter 把凭证里的 `variant` 以这个头名传进来，用它选 UA。
+/// **不能发给上游**（见 `new` 里摘除）。
+const VARIANT_HEADER: &str = "x-aigx-trae-variant";
 
 /// 真实客户端固定随请求带的身份/渠道头。同样是 wasm 里的字面量，缺一个都可能被
 /// 判非法客户端。`x-request-id` / `x-trae-request-id` 每次请求现生成（见 `request`）。
@@ -75,11 +80,24 @@ impl TraeBridge {
     ) -> Self {
         let base = base.into().trim_end_matches('/').to_string();
         let mut merged = headers;
+
+        // 取 variant（adapter 从凭证里带过来），用它决定 UA；取完即摘掉内部头，
+        // 别把 AIGX 的内部约定发给上游。
+        let variant = merged
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(VARIANT_HEADER))
+            .map(|(_, value)| value.trim().to_lowercase())
+            .unwrap_or_default();
+        merged.retain(|(name, _)| !name.eq_ignore_ascii_case(VARIANT_HEADER));
+
         if !merged
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
         {
-            merged.push(("user-agent".to_string(), DEFAULT_USER_AGENT.to_string()));
+            // `solo` 走 SOLO 那套 UA，其余（含缺省）走 IDE 那套 —— wasm 里
+            // `trae_managed_variant_invalid` 说明变体必须与客户端形态一致。
+            let ua = if variant == "solo" { UA_SOLO } else { UA_IDE };
+            merged.push(("user-agent".to_string(), ua.to_string()));
         }
         // 客户端身份/渠道头：账号里显式配了同名头的以账号为准（下面 only 判断）
         for (name, value) in DEFAULT_HEADERS {
