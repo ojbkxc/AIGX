@@ -1049,7 +1049,7 @@ fn paths_settings_ops() -> Value {
                 query_param("scope", "string", "window | running（缺省 window）"),
                 query_param("detail", "string", "paths | requests | sessions | models（缺省 paths）"),
                 query_param("model", "string", "模型过滤"),
-                query_param("client", "string", "客户端名过滤（__unknown = 未识别）"),
+                query_param("client", "string", "客户端名过滤（__unknown = 没读到客户端/空名）"),
                 query_param("provider", "string", "provider 过滤"),
                 query_param("account", "string", "账号过滤（AIGX 无数据源，恒空并列入 unsupportedFilters）"),
                 query_param("offset", "integer", "分页偏移"),

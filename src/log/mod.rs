@@ -23,6 +23,42 @@ pub mod daily_agg;
 pub mod inflight;
 pub mod writer;
 
+// ── 客户端名口径：「没读到就是空」 ──────────────────────────────────
+
+/// 历史遗留的「未识别客户端」占位值（旧版本写入过 `unknown`）。
+///
+/// **只读消费**：用于把存量数据归一成空串、以及拒绝自定义规则占用这个名字。
+/// 识别模块不再产生该值 —— 没读到客户端就是**空**，不写任何占位词。
+pub const LEGACY_UNKNOWN_CLIENT: &str = "unknown";
+
+/// 客户端名归一（**唯一判据**）：去掉首尾空白；历史占位词 `unknown` 视为空。
+///
+/// 空串是「未识别 / 没读到」的规范表示。写侧（
+/// `crate::api::client_id::attach`）与读侧（反序列化钩子、日聚合分组键、
+/// 报表投影、导出）都走本函数，保证同一份库不会「有的地方空、有的地方
+/// 还是 unknown」。
+///
+/// 大小写不敏感地认 `unknown`：历史数据里出现过 `Unknown` 这类手改值。
+pub fn normalize_client_name(name: &str) -> &str {
+    let text = name.trim();
+    if text.eq_ignore_ascii_case(LEGACY_UNKNOWN_CLIENT) {
+        ""
+    } else {
+        text
+    }
+}
+
+/// `RequestLog.client_name` 的反序列化钩子：存量行里的占位词在**读入时**
+/// 即折成空串，不需要一次性改写库（KV 后端 = json/sqlite/postgres blob，
+/// 改动点只有这一处）。
+fn deserialize_client_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(normalize_client_name(&raw).to_string())
+}
+
 // ── RequestLog ─────────────────────────────────────────────────────
 
 /// 特殊请求路由的一次改写留痕（compact / title / vision）。
@@ -114,9 +150,13 @@ pub struct RequestLog {
     /// 客户端 IP
     #[serde(default)]
     pub ip: Option<String>,
-    /// 识别出的客户端名（规范化，如 "Claude Code"；未识别 = "unknown"）。
-    /// 老日志无此字段 → 反序列化为空串（零迁移），展示层显示为「未记录」。
-    #[serde(default)]
+    /// 识别出的客户端名（规范化，如 "Claude Code"）。
+    ///
+    /// **未识别 / 没读到 = 空串**（[`normalize_client_name`] 的唯一口径）：不写
+    /// 任何占位词，报表与导出里也不会多出一个「未识别」分组。老日志缺字段 →
+    /// `serde(default)` 空串（零迁移）；存量里旧版本写过的 `unknown` 在反序列化
+    /// 钩子里折成空串，展示层对空名只显示占位符。
+    #[serde(default, deserialize_with = "deserialize_client_name")]
     pub client_name: String,
     /// 客户端版本（显式声明头或 UA 中能提取则填；否则空串）。
     #[serde(default)]

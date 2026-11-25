@@ -2903,9 +2903,11 @@ pub async fn handle_check_username(
     connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Query(params): Query<CheckUsernameQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // 来源 IP：没读到就是空（不写 `unknown` 这个假值）；空串作为限流桶键与旧
+    // `unknown` 桶是同一个键，行为不变。
     let client_ip = extract_client_ip(&headers)
         .or_else(|| connect.map(|c| c.0.ip().to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_default();
     let rate_key = format!("username-check:{client_ip}");
     let attempts = state.login_limiter.get(&rate_key).await.unwrap_or(0);
     if attempts >= 20 {

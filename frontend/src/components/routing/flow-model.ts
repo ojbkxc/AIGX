@@ -25,7 +25,8 @@ type T = (key: string, vars?: Record<string, string | number>) => string;
  */
 export function clientLabel(client: string, t: T): string {
   switch (client) {
-    case '': return t('未识别客户端');
+    // 没读到客户端 = 空名：只给占位符，不造 `unknown` / 「未知客户端」这类假客户端名
+    case '': return '—';
     case 'other': return t('其他客户端');
     case 'assistant': return t('模型对话');
     case 'assistant_images': return t('助手图片工具');

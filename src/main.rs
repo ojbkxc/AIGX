@@ -1490,7 +1490,8 @@ async fn main() -> anyhow::Result<()> {
     //   4) 关闭前 flush 日志异步队列，避免最后一批日志丢失
     // `into_make_service_with_connect_info` 让 handler 能拿到真实对端 IP
     // （ConnectInfo<SocketAddr>）：反向代理未开 trust_proxy_headers 时，
-    // 登录/注册限流按真实来源 IP 计数，而不是全站共用一个 "unknown" 键。
+    // 登录/注册限流按真实来源 IP 计数；两者都读不到就是空（不再共用一个
+    // "unknown" 占位键，客户端名/IP 一律「没读到就是空」）。
     let livez = livez_state.clone();
     // oneshot 只用于「信号已收到」这一事件，让 drain 超时从信号时刻起算，
     // 而不是从进程启动起算（否则正常运行 20s 后也会被误杀）。

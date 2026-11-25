@@ -2,7 +2,8 @@
 //
 // 对照 Agent2API「设置 → 客户端识别」：内置客户端目录 + 自定义规则 CRUD +
 // 样例试识别。规则保存后下一个请求立即生效（后端原子替换进程快照）。
-// 识别只读请求头、不改转发行为；未知客户端统一记 unknown。
+// 识别只读请求头、不改转发行为；未识别 = 空名（不写 `unknown` 之类的占位词，
+// 预览里空名只显示 `—`）。
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
@@ -264,7 +265,7 @@ export default function ClientIdPanel(): JSX.Element {
                 </button>
                 {previewResult && (
                   <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                    {previewResult.clientName ? String(previewResult.clientName) : t('未知客户端')}
+                    {previewResult.clientName ? String(previewResult.clientName) : '—'}
                     {previewResult.clientVersion ? ` ${String(previewResult.clientVersion)}` : ''}
                     {previewResult.source ? ` · ${String(previewResult.source)}` : ''}
                   </span>

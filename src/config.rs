@@ -909,8 +909,8 @@ pub struct AppConfig {
     pub cors_origins: Vec<String>,
     /// 是否信任反向代理的 `X-Forwarded-For` / `X-Real-IP` 头。
     ///
-    /// - `false`（默认）：忽略这两个头，IP 记为 "unknown"（直连部署无代理，
-    ///   客户端可伪造 XFF 头绕过 IP 白名单/黑名单或伪造日志归属）。
+    /// - `false`（默认）：忽略这两个头，来源 IP 读不到就是**空**（不写占位词；
+    ///   直连部署无代理，客户端可伪造 XFF 头绕过 IP 白名单/黑名单或伪造日志归属）。
     /// - `true`：仅在确认部署于可信反代（Nginx/CF 等）之后开启，此时
     ///   由代理负责剥离外部传入的 XFF 并追加真实 IP。
     #[serde(default)]

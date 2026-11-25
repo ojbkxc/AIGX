@@ -1,6 +1,7 @@
 // Top 客户端榜（客户端识别维度；对照 Agent2API report client 视角）。
 // 行内占比条 + 五指标右对齐（请求/消费/token/成功率/均延迟），标题小字
-// 为该维总量。`unknown` 在界面上显示为「未知客户端」。
+// 为该维总量。**没读到客户端 = 空名**：界面只给占位符 `—`，不显示任何
+// `unknown` 之类的假客户端名（后端也不会把空值合并成一个 unknown 分组）。
 import { useTranslation } from 'react-i18next';
 import { fmtCost, fmtInt, fmtPct, fmtTokens } from '../../lib/format';
 import type { TopClient } from '../../hooks/useDashboard';
@@ -27,7 +28,7 @@ export default function TopClients({ data, lang }: { data: TopClient[]; lang?: s
         <tbody>
           {data.map((c, i) => {
             const pct = total > 0 ? ((c.count ?? 0) / total) * 100 : 0;
-            const name = c.name?.trim() ? c.name : t('未知客户端');
+            const name = c.name?.trim() || '—';
             return (
               <tr key={`${i}-${c.name}`}>
                 <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>

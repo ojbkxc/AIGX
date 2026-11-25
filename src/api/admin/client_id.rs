@@ -20,7 +20,10 @@
 //!
 //! 管理员看全站 `by_client` 聚合维；普通用户按自己的用户行 `clients` 维
 //! 收敛。日聚合未回填（或老聚合行缺该维）时回退到明细现算；老聚合行
-//! 缺维度造成的差额并入 `unknown` 余量行，保证「Σ客户端 = 总请求」不破。
+//! 缺维度造成的差额并入**空名**余量行，保证「Σ客户端 = 总请求」不破。
+//!
+//! **没读到客户端 = 空名**：报表里就是一档空名字，不再把空值/旧占位词合成一个
+//! 叫 `unknown` 的客户端（判据单点 [`crate::log::normalize_client_name`]）。
 
 use std::collections::BTreeMap;
 
@@ -273,19 +276,15 @@ pub async fn handle_preview_client_id(
     })))
 }
 
+/// 报表行的客户端键：没读到就是空名（存量占位词折成空），**不并成一个 unknown 组**。
 fn client_name_key(name: &str) -> &str {
-    let name = name.trim();
-    if name.is_empty() {
-        client_id::UNKNOWN_CLIENT
-    } else {
-        name
-    }
+    crate::log::normalize_client_name(name)
 }
 
 /// GET /api/dashboard/report/top_clients — 客户端维度 Top 榜。
 ///
 /// 管理员 = 全站主档 `by_client`；普通用户 = 自己的用户行 `clients`。
-/// 聚合未就绪时回退明细现算；老聚合行缺该维时差额并入 `unknown`。
+/// 聚合未就绪时回退明细现算；老聚合行缺该维时差额并入**空名**余量行。
 pub async fn handle_report_top_clients(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -325,12 +324,12 @@ pub async fn handle_report_top_clients(
                         row.latency_sum = item.latency_sum;
                         merge_row(&mut rows, row);
                     }
-                    // 老聚合行没有 by_client：差额（请求数已知）并入 unknown。
+                    // 老聚合行没有 by_client：差额（请求数已知）并入空名余量行。
                     let covered_requests: u64 = rows.iter().map(|row| row.count).sum();
                     let covered_tokens: u64 = rows.iter().map(|row| row.tokens).sum();
                     let covered_cost: i64 = rows.iter().map(|row| row.cost).sum();
                     let missing = ClientRow {
-                        name: client_id::UNKNOWN_CLIENT.to_string(),
+                        name: String::new(),
                         count: totals.0.saturating_sub(covered_requests),
                         tokens: totals.1.saturating_sub(covered_tokens),
                         cost: totals.2.saturating_sub(covered_cost),
@@ -360,7 +359,7 @@ pub async fn handle_report_top_clients(
                     }
                     let covered_requests: u64 = rows.iter().map(|row| row.count).sum();
                     let missing = ClientRow {
-                        name: client_id::UNKNOWN_CLIENT.to_string(),
+                        name: String::new(),
                         count: totals.0.saturating_sub(covered_requests),
                         tokens: 0,
                         cost: 0,

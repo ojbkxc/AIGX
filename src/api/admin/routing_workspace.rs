@@ -776,8 +776,11 @@ pub(crate) fn filter_flow_logs<'a>(
                 }
             }
             if let Some(client) = filters.client.as_deref() {
+                // `__unknown` = 「没读到客户端」这一档（空名）。判据走
+                // `log::normalize_client_name`：存量里旧版本写过的 `unknown`
+                // 与空名是同一档，不能在这里分裂成两个筛选项。
                 let hit = if client == "__unknown" {
-                    log.client_name.is_empty() || log.client_name.eq_ignore_ascii_case("unknown")
+                    crate::log::normalize_client_name(&log.client_name).is_empty()
                 } else {
                     log.client_name.eq_ignore_ascii_case(client)
                 };
@@ -833,7 +836,8 @@ pub(crate) fn flow_paths(
     let mut groups: BTreeMap<FlowPathKey, (FlowPathAgg, String)> = BTreeMap::new();
     for log in logs {
         let key = FlowPathKey {
-            client: log.client_name.clone(),
+            // 分组键与筛选/展示同一判据（没读到 = 空名），见 `log::normalize_client_name`
+            client: crate::log::normalize_client_name(&log.client_name).to_string(),
             model: request_model(log).to_string(),
             provider: provider_of(meta, log).to_string(),
             channel_id: log.channel_id.clone().unwrap_or_default(),
@@ -957,8 +961,8 @@ fn request_row_json(log: &RequestLog, meta: &HashMap<String, ChannelMeta>) -> Va
         "channelName": if channel_name.is_empty() { Value::Null } else { Value::String(channel_name) },
         "provider": provider,
         "providerLabel": provider_label(&provider),
-        "client": log.client_name,
-        "clientLabel": log.client_name,
+        "client": crate::log::normalize_client_name(&log.client_name),
+        "clientLabel": crate::log::normalize_client_name(&log.client_name),
         "clientVersion": log.client_version,
         // 数字状态码（0 = 未定论/在途，A2A 同口径）；成功/失败判定另见 `ok`
         "status": log.status_code,
@@ -1988,6 +1992,18 @@ mod tests {
             ..FlowFilters::default()
         };
         assert_eq!(filter_flow_logs(&logs, &meta, &unknown).len(), 0);
+
+        // 没读到客户端（空名）与存量占位词都归 `__unknown` 这一档。
+        let mut blank = log_with("r2", "gpt-4o", None, "ch1", 200, 1, 2);
+        blank.client_name = String::new();
+        let mut legacy = log_with("r3", "gpt-4o", None, "ch1", 200, 1, 3);
+        legacy.client_name = "unknown".to_string();
+        let mixed = [blank, legacy];
+        assert_eq!(
+            filter_flow_logs(&mixed, &meta, &unknown).len(),
+            2,
+            "空名与存量 unknown 是同一档（没读到）"
+        );
 
         // account 维度 AIGX 无数据源 → 恒不命中（诚实退化，不造假）
         let by_account = FlowFilters {

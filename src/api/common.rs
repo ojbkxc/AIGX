@@ -768,11 +768,15 @@ pub fn geo_language_for_ip(ip: &str) -> Option<&'static str> {
     }
 }
 
-/// 提取行为回归（#18-④ 取证：生产 security_event 66/181 条 IP=unknown 的
+/// 提取行为回归（#18-④ 取证：生产 security_event 里大量 `IP=unknown` 的
 /// 根因是本函数的**安全默认**，不是缺陷）——`trust_proxy_headers=false`
 /// （默认）时 X-Forwarded-For / X-Real-IP 一律不认，客户端可伪造这两个头
 /// 冒充白名单 IP 绕过 ip_limit/注入日志归属。反代部署须显式开开关。
 /// 本测试钉住这个默认，防止将来被「顺手修掉」。
+///
+/// 配套口径：本函数返回 `Option`，**调用方拿到的 `None` 就记空**（客户端 IP
+/// 字段为 `None`、限流桶键用空串），不再写 `unknown` 占位（见
+/// `crate::api::admin::auth` 的 `source_ip` / `ip_field` / `ip_label`）。
 #[cfg(test)]
 mod client_ip_tests {
     use super::*;

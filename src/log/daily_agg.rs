@@ -146,11 +146,14 @@ pub struct UserAccum {
 
 /// 主档的按客户端累计项（top_clients 报表维度）。
 ///
-/// 分组键 = `RequestLog.client_name`（识别模块输出的规范化名；空串归
-/// `unknown`）。老聚合行没有该维度（serde default 空数组），读侧用
-/// 「总量 − Σby_client」补一条 `unknown` 余量行，保证报表恒等式不破。
+/// 分组键 = `RequestLog.client_name`（识别模块输出的规范化名；**未识别 = 空串**，
+/// 空名字自成一档，不并成任何人造的「未识别」客户端名）。老聚合行没有该维度
+/// （serde default 空数组），读侧用「总量 − Σby_client」补一条**空名**余量行，
+/// 保证报表恒等式不破。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientAccum {
+    /// 规范化客户端名；空串 = 没读到（存量 `unknown` 在读入时折成空）。
+    #[serde(default, deserialize_with = "deserialize_client_dim_name")]
     pub name: String,
     pub count: u64,
     pub successful: u64,
@@ -184,9 +187,23 @@ pub struct DailyAgg {
     pub by_channel: Vec<ChannelAccum>,
     #[serde(default)]
     pub by_user: Vec<UserAccum>,
-    /// 客户端维度（top_clients 报表；识别模块输出，空串归 unknown）。
+    /// 客户端维度（top_clients 报表；识别模块输出，**未识别 = 空串**）。
     #[serde(default)]
     pub by_client: Vec<ClientAccum>,
+}
+
+/// 客户端维度键的反序列化钩子：存量聚合行里的历史占位词（`unknown`）在读入
+/// 时折成空串，与 [`crate::log::normalize_client_name`] 同一判据。
+///
+/// 为什么放在读侧：日聚合是 KV 里的一整行 JSON，读取点（报表 merge、用户行、
+/// 时间线）全都要过这里；一次性改写库既没有必要，也会把「历史行长什么样」这件事
+/// 抹掉。新行由 [`fold_request`] / [`fold_user_row`] 写成空名，不会再产生占位词。
+fn deserialize_client_dim_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(crate::log::normalize_client_name(&raw).to_string())
 }
 
 /// 用户行的按模型累计项：带分模型 token/成本明细，使**个人**报表
@@ -220,6 +237,8 @@ pub struct ChannelLite {
 /// 用户行的轻量客户端维（个人 Top 客户端榜）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientLite {
+    /// 规范化客户端名；空串 = 没读到（存量 `unknown` 在读入时折成空）。
+    #[serde(default, deserialize_with = "deserialize_client_dim_name")]
     pub name: String,
     pub count: u64,
     #[serde(default)]
@@ -245,7 +264,7 @@ pub struct UserDailyRow {
     /// 个人榜不 join 渠道表，按名字够用了。
     #[serde(default)]
     pub channels: Vec<ChannelLite>,
-    /// 客户端维度（个人 Top 客户端榜；空串归 unknown）。
+    /// 客户端维度（个人 Top 客户端榜；**未识别 = 空串**）。
     #[serde(default)]
     pub clients: Vec<ClientLite>,
 }
@@ -532,7 +551,7 @@ pub fn fold_request(agg: &mut DailyAgg, log: &RequestLog) {
         prune_accum(&mut agg.by_user, USER_CAP, |a| a.count);
     }
 
-    // 客户端维度：识别输出为空的老日志/内部调用统一归 unknown（报表可对账）。
+    // 客户端维度：没读到客户端 = 空名一档（不造 unknown 分组，报表可对账）。
     let client = client_key(&log.client_name);
     push_accum(&mut agg.by_client, client, |a| {
         a.count += 1;
@@ -594,17 +613,13 @@ pub fn fold_user_row(row: &mut UserDailyRow, log: &RequestLog) {
     prune_accum(&mut row.clients, USER_CLIENT_CAP, |a| a.count);
 }
 
-/// 客户端归组键：空串（老日志/未识别路径）统一记 unknown。
+/// 客户端归组键：**没读到客户端就是空串**（空串自成一档，不并进任何占位名）。
 ///
-/// 与识别模块的 [`crate::client_id::UNKNOWN_CLIENT`] 同值；这里用字面量是
-/// 为了让聚合模块不依赖识别模块（回填/重建只读日志字段）。
+/// 判据单点在 [`crate::log::normalize_client_name`]（历史 `unknown` 也折成空），
+/// 与写侧 `attach`、读侧反序列化钩子同源 —— 聚合模块不另写一套判据，
+/// 也不再造 `unknown` 分组（报表里"未识别"就是一档空名，不是一个叫 unknown 的客户端）。
 fn client_key(name: &str) -> &str {
-    let name = name.trim();
-    if name.is_empty() {
-        "unknown"
-    } else {
-        name
-    }
+    crate::log::normalize_client_name(name)
 }
 
 /// 在累计数组里找/建 name 项并应用累加闭包。
@@ -1141,21 +1156,26 @@ mod tests {
         assert_eq!(date_key(i64::MIN), "");
     }
 
-    /// 客户端维度：按识别名归组，空串归 unknown，恒等式 Σby_client = 总请求数。
+    /// 客户端维度：按识别名归组，**没读到 = 空名一档**（没有单独的"未识别"分组名），
+    /// 恒等式 Σby_client = 总请求数。
     #[test]
-    fn client_dimension_groups_and_falls_back_to_unknown() {
+    fn client_dimension_groups_and_keeps_empty_bucket() {
         let mut a = log(Some("u1"), "gpt", Some("ch"), 100, 0);
         a.client_name = "Claude Code".to_string();
         a.input_tokens = 10;
         a.output_tokens = 5;
         let mut b = log(Some("u1"), "gpt", Some("ch"), 50, 1);
         b.client_name = "claude code".to_string();
-        let c = log(Some("u2"), "gpt", Some("ch"), 20, 2); // client_name 空 → unknown
+        let c = log(Some("u2"), "gpt", Some("ch"), 20, 2); // client_name 空 = 没读到
         let mut agg = DailyAgg::default();
         for item in [&a, &b, &c] {
             fold_request(&mut agg, item);
         }
-        assert_eq!(agg.by_client.len(), 2, "大小写不同应合并，空串归 unknown");
+        assert_eq!(
+            agg.by_client.len(),
+            2,
+            "大小写不同应合并，空名自成一档（不并成 unknown）"
+        );
         let claude = agg
             .by_client
             .iter()
@@ -1165,12 +1185,18 @@ mod tests {
             (claude.count, claude.tokens_in, claude.tokens_out),
             (2, 20, 10)
         );
-        let unknown = agg
+        let missing = agg
             .by_client
             .iter()
-            .find(|item| item.name == "unknown")
-            .unwrap();
-        assert_eq!(unknown.count, 1);
+            .find(|item| item.name.is_empty())
+            .expect("没读到客户端就是空名一档");
+        assert_eq!(missing.count, 1);
+        assert!(
+            !agg.by_client
+                .iter()
+                .any(|item| item.name.eq_ignore_ascii_case("unknown")),
+            "不得再造 unknown 分组"
+        );
         let sum: u64 = agg.by_client.iter().map(|item| item.count).sum();
         assert_eq!(sum, agg.requests, "Σby_client 必须等于总请求数");
         // 用户行同样带客户端维度。
@@ -1178,7 +1204,58 @@ mod tests {
         fold_user_row(&mut row, &a);
         fold_user_row(&mut row, &c);
         assert_eq!(row.clients.len(), 2);
+        assert!(row.clients.iter().any(|item| item.name.is_empty()));
         assert_eq!(row.clients.iter().map(|item| item.count).sum::<u64>(), 2);
+    }
+
+    /// 存量 `unknown`（旧版本写入）读入时折成空名 —— 读时归一，不改库。
+    #[test]
+    fn legacy_unknown_client_reads_as_empty() {
+        let mut log = log(Some("u1"), "gpt", Some("ch"), 10, 0);
+        log.client_name = "unknown".to_string();
+        let mut agg = DailyAgg::default();
+        fold_request(&mut agg, &log);
+        assert_eq!(agg.by_client.len(), 1);
+        assert!(
+            agg.by_client[0].name.is_empty(),
+            "旧占位词应折成空名，实得 {:?}",
+            agg.by_client[0].name
+        );
+
+        // 反序列化钩子：库里存量聚合行带 unknown 时同样折成空。
+        let stored = r#"{"name":"Unknown","count":3,"successful":3}"#;
+        let item: ClientAccum = serde_json::from_str(stored).expect("旧行应可解析");
+        assert!(item.name.is_empty(), "实得 {:?}", item.name);
+        let dim = r#"{"name":"unknown","count":1,"tokens":2,"cost":3}"#;
+        let lite: ClientLite = serde_json::from_str(dim).expect("旧用户行应可解析");
+        assert!(lite.name.is_empty(), "实得 {:?}", lite.name);
+    }
+
+    /// 读侧合并：空名跨天也是同一档，且不产生 unknown 行。
+    #[test]
+    fn merge_clients_keeps_empty_bucket_across_days() {
+        let rows = vec![
+            DailyAgg {
+                by_client: vec![ClientAccum {
+                    name: String::new(),
+                    count: 2,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            DailyAgg {
+                by_client: vec![ClientAccum {
+                    name: String::new(),
+                    count: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ];
+        let merged = merge_clients(&rows);
+        assert_eq!(merged.len(), 1, "空名跨天合并成一档");
+        assert!(merged[0].name.is_empty());
+        assert_eq!(merged[0].count, 3);
     }
 
     /// 系统本地时区下的日键 —— `offset = 0` 分支的参照。

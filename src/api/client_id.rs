@@ -12,7 +12,9 @@
 //!    的规则在加载时即被跳过，匹配阶段绝不 panic）。
 //! 3. **内置 UA 规则**：常见 AI 客户端的产品令牌（`claude-cli/1.2.3`、
 //!    `codex_cli_rs/0.4`、`OpenAI/Python 1.30` 等），命中后从 UA 提取版本。
-//! 4. 全部未命中 → [`UNKNOWN_CLIENT`]（`unknown`）。
+//! 4. 全部未命中 → **空名**（[`ClientIdentity::name`] 为空串；没读到客户端就是
+//!    空，不写任何占位词）。存量数据里的历史占位词 `unknown` 由
+//!    [`crate::log::normalize_client_name`] 在读侧折成空串。
 //!
 //! ## 持久化与生效
 //!
@@ -36,11 +38,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::FileStore;
 
-/// 未识别客户端的固定名字（报表/日志对账锚点）。
-pub const UNKNOWN_CLIENT: &str = "unknown";
+/// 未识别客户端：**空名**就是未识别。没有占位词，也不会在日志/报表里多出一个
+/// 叫 `unknown` 的客户端。
+///
+/// 历史占位词保留在 [`crate::log::LEGACY_UNKNOWN_CLIENT`]，只用于①读侧把存量折叠成
+/// 空、②拒绝自定义规则占用这个名字（见 `compile_one` 的保留名校验）。
+pub const UNKNOWN_CLIENT: &str = crate::log::LEGACY_UNKNOWN_CLIENT;
 
 /// AIGX 自身发起请求（Agent / Playground / 渠道调试 / 模型测试 / 运维助手）的
-/// 固定客户端名。数据面之外的内部调用统一标注为此值，避免落 `unknown` 导致
+/// 固定客户端名。数据面之外的内部调用统一标注为此值，避免客户端列为空导致
 /// 「日志里查不到客户端」。同时也是外部声明不可占用的系统保留名。
 pub const SELF_CLIENT: &str = "AIGX";
 
@@ -363,20 +369,24 @@ pub const BUILTIN_CLIENTS: &[BuiltinClient] = &[
 /// 一次识别的结果（写入请求日志的两个字段 + 判定来源）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientIdentity {
-    /// 规范化客户端名（未识别 = [`UNKNOWN_CLIENT`]）
+    /// 规范化客户端名（**未识别 = 空串**，不写占位词）
     pub name: String,
     /// 客户端版本（能提取则填，否则空串）
     pub version: String,
-    /// 判定来源：`declared` / `custom_rule` / `builtin_ua` / `unknown`
+    /// 判定来源：`declared` / `custom_rule` / `builtin_ua` / `unrecognized`
     pub source: &'static str,
 }
 
 impl ClientIdentity {
-    fn unknown() -> Self {
+    /// 没读到客户端：空名 + 来源 `unrecognized`。
+    ///
+    /// 为什么名字是空的而 `source` 还留着：`source` 回答"这条结论是怎么来的"，
+    /// 它不是客户端名、不写进日志的客户端列，也不会被前端当成客户端展示。
+    fn unrecognized() -> Self {
         Self {
-            name: UNKNOWN_CLIENT.to_string(),
+            name: String::new(),
             version: String::new(),
-            source: "unknown",
+            source: "unrecognized",
         }
     }
 }
@@ -394,8 +404,11 @@ pub fn self_identity() -> ClientIdentity {
 /// 把识别结果写入请求日志。
 ///
 /// 数据面所有 `RequestLog` 构造点统一走这里，避免各路径口径漂移。
+/// **写侧也过一遍归一**（[`crate::log::normalize_client_name`]）：识别结果本该
+/// 已经是空名/规范名，但历史占位词可能从别处（旧快照、手改规则）漏进来，
+/// 这里保证"落库的客户端列里永远不会出现 unknown"。
 pub fn attach(log: &mut crate::log::RequestLog, identity: &ClientIdentity) {
-    log.client_name = identity.name.clone();
+    log.client_name = crate::log::normalize_client_name(&identity.name).to_string();
     log.client_version = identity.version.clone();
 }
 
@@ -748,8 +761,9 @@ fn declared_identity(raw: &str, headers: &HeaderMap) -> Option<ClientIdentity> {
     let (raw_name, inline_version) = split_declared(raw)?;
     let name = normalize_client_name(&raw_name)?;
     // 外部声明不得冒用系统保留名（AIGX 自身）；命中则该声明视为无效，回落到
-    // 自定义规则 / 内置 UA 识别。
-    if name == SELF_CLIENT {
+    // 自定义规则 / 内置 UA 识别。历史占位词 `unknown` 同样不算一次有效声明 ——
+    // 否则它会以"客户端名"的身份重新流进日志，与"没读到就是空"的口径打架。
+    if name == SELF_CLIENT || name.eq_ignore_ascii_case(UNKNOWN_CLIENT) {
         return None;
     }
     let version = read_header(headers, DECLARATION_VERSION_HEADER)
@@ -820,7 +834,7 @@ fn builtin_identity(user_agent: &str) -> ClientIdentity {
             }
         }
     }
-    ClientIdentity::unknown()
+    ClientIdentity::unrecognized()
 }
 
 /// 声明名对应的版本提取（先找内置产品令牌，再按声明名原文找）。
@@ -1078,9 +1092,9 @@ mod tests {
         assert_eq!(declared.source, "declared");
     }
 
-    /// 普通浏览器 UA → unknown（不把通用平台当客户端）。
+    /// 普通浏览器 UA → 空名（不把通用平台当客户端，也不写占位词）。
     #[test]
-    fn browser_ua_is_unknown() {
+    fn browser_ua_is_unrecognized() {
         let identity = identify_with(
             &headers(&[(
                 "user-agent",
@@ -1088,16 +1102,32 @@ mod tests {
             )]),
             &CompiledRules::default(),
         );
-        assert_eq!(identity.name, UNKNOWN_CLIENT);
+        assert!(
+            identity.name.is_empty(),
+            "没读到客户端就是空名，实得 {:?}",
+            identity.name
+        );
         assert!(identity.version.is_empty());
-        assert_eq!(identity.source, "unknown");
+        assert_eq!(identity.source, "unrecognized");
     }
 
-    /// 无请求头 → unknown。
+    /// 无请求头 → 空名（同一口径：没读到就是空）。
     #[test]
-    fn missing_headers_is_unknown() {
+    fn missing_headers_is_unrecognized() {
         let identity = identify_with(&HeaderMap::new(), &CompiledRules::default());
-        assert_eq!(identity.name, UNKNOWN_CLIENT);
+        assert!(identity.name.is_empty(), "实得 {:?}", identity.name);
+        assert_eq!(identity.source, "unrecognized");
+    }
+
+    /// 显式声明 `unknown` 不算有效声明（否则占位词会以客户端名身份进日志）。
+    #[test]
+    fn declared_unknown_is_not_honored() {
+        let identity = identify_with(
+            &headers(&[("x-client-name", "unknown")]),
+            &CompiledRules::default(),
+        );
+        assert_ne!(identity.source, "declared");
+        assert!(identity.name.is_empty(), "实得 {:?}", identity.name);
     }
 
     /// 自定义规则优先级：数值小者先命中；同优先级保持插入顺序。
@@ -1256,7 +1286,7 @@ mod tests {
             &headers(&[("user-agent", "MyCodexWrapper/1.0.0")]),
             &CompiledRules::default(),
         );
-        assert_eq!(identity.name, UNKNOWN_CLIENT);
+        assert!(identity.name.is_empty(), "实得 {:?}", identity.name);
     }
 
     /// 版本提取的单测：斜杠、空白、非法版本形态。
@@ -1280,6 +1310,37 @@ mod tests {
         assert_eq!(id.source, "internal");
     }
 
+    /// 写入侧兜底：即便识别结果里混进历史占位词，落库的客户端列也是空（不会写 unknown）。
+    #[test]
+    fn attach_normalizes_legacy_unknown_to_empty() {
+        let mut log = crate::log::RequestLog::new();
+        attach(
+            &mut log,
+            &ClientIdentity {
+                name: "unknown".to_string(),
+                version: String::new(),
+                source: "declared",
+            },
+        );
+        assert!(
+            log.client_name.is_empty(),
+            "落库不得出现 unknown，实得 {:?}",
+            log.client_name
+        );
+
+        // 正常名字逐字保留（不误伤真实客户端）。
+        attach(
+            &mut log,
+            &ClientIdentity {
+                name: "Claude Code".to_string(),
+                version: "2.1.0".to_string(),
+                source: "builtin_ua",
+            },
+        );
+        assert_eq!(log.client_name, "Claude Code");
+        assert_eq!(log.client_version, "2.1.0");
+    }
+
     /// 系统保留名 `AIGX` / `unknown` 不得被自定义规则占用（防把普通请求伪装成自身）。
     #[test]
     fn reserved_self_and_unknown_names_rejected_in_rules() {
@@ -1292,7 +1353,27 @@ mod tests {
         }
     }
 
-    /// 外部显式声明不得冒用 `AIGX`：声明被视为无效，回落到 UA 识别（无 UA → unknown）。
+    /// 归一口径单测：空串/空白/历史占位词都折成空名，正常名字逐字保留。
+    #[test]
+    fn normalize_client_name_folds_legacy_unknown_to_empty() {
+        for raw in ["", "   ", "unknown", "UNKNOWN", " Unknown ", "unknown\t"] {
+            assert!(
+                crate::log::normalize_client_name(raw).is_empty(),
+                "`{raw}` 应归一为空名"
+            );
+        }
+        assert_eq!(
+            crate::log::normalize_client_name("  Claude Code "),
+            "Claude Code"
+        );
+        // `unknown` 只是占位词，不能把含它的真实名字一起折叠掉。
+        assert_eq!(
+            crate::log::normalize_client_name("Unknown Agent"),
+            "Unknown Agent"
+        );
+    }
+
+    /// 外部显式声明不得冒用 `AIGX`：声明被视为无效，回落到 UA 识别（无 UA → 空名）。
     #[test]
     fn declared_aigx_is_not_honored() {
         let identity = identify_with(
@@ -1301,7 +1382,7 @@ mod tests {
         );
         assert_ne!(identity.name, SELF_CLIENT, "外部声明不得被当作 AIGX 自身");
         assert_ne!(identity.source, "declared");
-        assert_eq!(identity.name, UNKNOWN_CLIENT);
+        assert!(identity.name.is_empty(), "实得 {:?}", identity.name);
     }
 
     /// 补齐的 9 家目录：UA 令牌 + 声明别名都应归一为规范名（抽查代表条目）。

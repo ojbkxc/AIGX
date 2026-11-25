@@ -20,6 +20,47 @@ use rand::Rng;
 use rand::RngCore;
 use uuid::Uuid;
 
+// ── 来源 IP：没读到就是空 ──────────────────────────────────────────
+//
+// 口径与「客户端名」一致：**没读到就空，不写占位词**。三处用法各有一个入口：
+//   * `source_ip` —— 取来源 IP，读不到返回空串（限流/锁定桶键用它拼接）；
+//   * `ip_field`  —— 安全事件的 `ip` 字段：空 → `None`（不是 `Some("")`）；
+//   * `ip_label`  —— 人读文案里的占位：空 → 「未读到来源」。
+//
+// 为什么桶键留空串而不是保留 `unknown`：空桶与旧 `unknown` 桶是**同一个键**，
+// 行为等价；而这个字符串只进缓存键，不进日志、不进接口、不上界面。
+// 这也保住了「任意人 5 次失败锁死全站」那个坑的既有边界（见登录 handler 注释）。
+
+/// 来源 IP（信任的代理头 → TCP 对端），都读不到 = 空串。
+fn source_ip(
+    headers: &HeaderMap,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+) -> String {
+    extract_client_ip(headers)
+        .or_else(|| connect.map(|c| c.0.ip().to_string()))
+        .unwrap_or_default()
+}
+
+/// 安全事件的 `ip` 字段投影：空 → `None`（空来源不是一条"IP 是空串"的记录）。
+fn ip_field(ip: &str) -> Option<String> {
+    let ip = ip.trim();
+    if ip.is_empty() {
+        None
+    } else {
+        Some(ip.to_string())
+    }
+}
+
+/// 人读文案里的来源 IP：没读到就说没读到，不写 `unknown` 这种假值。
+fn ip_label(ip: &str) -> &str {
+    let ip = ip.trim();
+    if ip.is_empty() {
+        "未读到来源"
+    } else {
+        ip
+    }
+}
+
 /// 登录请求
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -139,11 +180,10 @@ pub async fn handle_login(
     }
 
     // 真实来源 IP：优先信任的代理头（trust_proxy_headers 开启时），
-    // 否则用 TCP 对端地址。原来两者都拿不到时全站共用 "unknown" 键 ——
-    // 任意人 5 次失败就能把**所有用户**锁 5 分钟（登录 DoS）。
-    let client_ip = extract_client_ip(&headers)
-        .or_else(|| connect.map(|c| c.0.ip().to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+    // 否则用 TCP 对端地址。**都拿不到就是空**（不再用 `unknown` 这个假值）；
+    // 桶键拼接空串与旧 `unknown` 桶等价，所以「任意人 5 次失败锁全站」那条
+    // 既有边界不变（见 `source_ip` 注释）。
+    let client_ip = source_ip(&headers, connect);
     // 限流键带用途前缀：登录、发验证码、忘记密码共用同一个 60s 窗口缓存，
     // 裸 IP 做键会导致「发 5 次登录码」把「登录 10 次的额度」提前耗尽
     // （反之亦然），表现为莫名 429。
@@ -154,9 +194,12 @@ pub async fn handle_login(
             crate::log::SecurityEvent::new(
                 crate::log::SecurityEventType::RateLimit,
                 "warning",
-                format!("登录限流触发：IP {client_ip} 每分钟超过 {rate_limit} 次"),
+                format!(
+                    "登录限流触发：IP {} 每分钟超过 {rate_limit} 次",
+                    ip_label(&client_ip)
+                ),
             )
-            .with_ip(Some(client_ip.clone())),
+            .with_ip(ip_field(&client_ip)),
         );
         return Err(error_response(
             "登录尝试过于频繁，请稍后再试",
@@ -175,9 +218,12 @@ pub async fn handle_login(
             crate::log::SecurityEvent::new(
                 crate::log::SecurityEventType::IpBlocked,
                 "critical",
-                format!("IP {client_ip} 连续失败 {fail_count} 次，已锁定"),
+                format!(
+                    "IP {} 连续失败 {fail_count} 次，已锁定",
+                    ip_label(&client_ip)
+                ),
             )
-            .with_ip(Some(client_ip.clone())),
+            .with_ip(ip_field(&client_ip)),
         );
         return Err(error_response(
             "登录失败次数过多，请稍后再试",
@@ -215,7 +261,7 @@ pub async fn handle_login(
                     "info",
                     format!("登录密码通过，等待 TOTP 二次验证（邮箱: {}）", u.email),
                 )
-                .with_ip(Some(client_ip)),
+                .with_ip(ip_field(&client_ip)),
             );
             return Ok(Json(serde_json::json!({
                 "success": true,
@@ -318,11 +364,12 @@ pub async fn handle_login(
             severity,
             format!("登录认证失败（邮箱/用户名: {}）", body.email),
         )
-        .with_ip(Some(client_ip.clone())),
+        .with_ip(ip_field(&client_ip)),
     );
     if lockout_enabled && next_fail >= fail_threshold {
         tracing::warn!(
-            "Login failed {next_fail} times from {client_ip}; lockout threshold reached"
+            "Login failed {next_fail} times from {}; lockout threshold reached",
+            ip_label(&client_ip)
         );
     }
 
@@ -356,9 +403,7 @@ pub async fn handle_register(
 
     // ── 速率限制：同 IP 每分钟最多 5 次 ──
     const REGISTER_RATE_LIMIT_PER_MINUTE: u32 = 5;
-    let client_ip = extract_client_ip(&headers)
-        .or_else(|| connect.map(|c| c.0.ip().to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+    let client_ip = source_ip(&headers, connect);
     let current_count = state.register_limiter.get(&client_ip).await.unwrap_or(0);
     if current_count >= REGISTER_RATE_LIMIT_PER_MINUTE {
         state.log_store.record_security(
@@ -366,10 +411,11 @@ pub async fn handle_register(
                 crate::log::SecurityEventType::RateLimit,
                 "warning",
                 format!(
-                    "注册限流触发：IP {client_ip} 每分钟超过 {REGISTER_RATE_LIMIT_PER_MINUTE} 次"
+                    "注册限流触发：IP {} 每分钟超过 {REGISTER_RATE_LIMIT_PER_MINUTE} 次",
+                    ip_label(&client_ip)
                 ),
             )
-            .with_ip(Some(client_ip.clone())),
+            .with_ip(ip_field(&client_ip)),
         );
         return Err(error_response(
             "注册请求过于频繁，请稍后再试",
@@ -676,9 +722,7 @@ pub async fn handle_forgot_password(
     // 无限制时可被用来对已知邮箱反复轰炸。键里带邮箱：同一 IP 重置不同邮箱
     // 不算滥用，但同一邮箱被同一来源反复请求就是轰炸。
     const FORGOT_RATE_LIMIT: u32 = 3;
-    let client_ip = extract_client_ip(&headers)
-        .or_else(|| connect.map(|c| c.0.ip().to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+    let client_ip = source_ip(&headers, connect);
     let rate_key = format!("forgot:{}:{}", client_ip, body.email.trim().to_lowercase());
     let attempts = state.login_limiter.get(&rate_key).await.unwrap_or(0);
     if attempts >= FORGOT_RATE_LIMIT {
@@ -686,9 +730,12 @@ pub async fn handle_forgot_password(
             crate::log::SecurityEvent::new(
                 crate::log::SecurityEventType::RateLimit,
                 "warning",
-                format!("忘记密码限流触发：IP {client_ip} 对同一邮箱请求过于频繁"),
+                format!(
+                    "忘记密码限流触发：IP {} 对同一邮箱请求过于频繁",
+                    ip_label(&client_ip)
+                ),
             )
-            .with_ip(Some(client_ip)),
+            .with_ip(ip_field(&client_ip)),
         );
         return Err(error_response(
             "请求过于频繁，请稍后再试",
@@ -1714,9 +1761,7 @@ pub async fn handle_login_totp(
     headers: HeaderMap,
     Json(body): Json<LoginTotpRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let client_ip = extract_client_ip(&headers)
-        .or_else(|| connect.map(|c| c.0.ip().to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+    let client_ip = source_ip(&headers, connect);
 
     // 锁定检查（与密码登录共用计数器；阈值走安全策略快照）
     let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
@@ -1775,7 +1820,7 @@ pub async fn handle_login_totp(
                 "warning",
                 format!("TOTP 二次验证失败（邮箱: {email}）"),
             )
-            .with_ip(Some(client_ip.clone())),
+            .with_ip(ip_field(&client_ip)),
         );
         return Err(error_response("验证码错误", StatusCode::UNAUTHORIZED));
     }
@@ -1797,7 +1842,7 @@ pub async fn handle_login_totp(
                     user.email
                 ),
             )
-            .with_ip(Some(client_ip.clone())),
+            .with_ip(ip_field(&client_ip)),
         );
         Some(remaining)
     } else {
@@ -1852,9 +1897,7 @@ pub async fn handle_login_send_code(
         return Err(error_response("邮箱不能为空", StatusCode::BAD_REQUEST));
     }
 
-    let client_ip = extract_client_ip(&headers)
-        .or_else(|| connect.map(|c| c.0.ip().to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
+    let client_ip = source_ip(&headers, connect);
     // 每 IP 每分钟最多 5 次发送（防刷邮件）。键带 send-code 前缀，
     // 与登录/忘记密码的额度相互独立（否则互吃额度导致误报 429）。
     const SEND_CODE_RATE_LIMIT: u32 = 5;
@@ -1961,7 +2004,10 @@ pub async fn handle_login_with_code(
         ));
     }
 
-    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    // 来源 IP：没读到就是空（不再写 `unknown` 这个假值）。handler 没有
+    // `ConnectInfo`，只能看信任的代理头；读不到时空串作为锁定桶键，与旧
+    // `unknown` 桶是同一个键，行为不变。
+    let client_ip = extract_client_ip(&headers).unwrap_or_default();
     let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
     if crate::config::security_lockout_enabled()
         && fail_count >= crate::config::security_fail_threshold()
