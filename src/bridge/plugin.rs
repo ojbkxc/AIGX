@@ -119,6 +119,15 @@ impl ConversationStream {
                     Some(event) => {
                         if matches!(event, StreamEvent::End) {
                             *ended = true;
+                            // 终点帧也可能承载错误：wasm 宿主在失败时先
+                            // `sink.fail(error)` 再写 `End`（见
+                            // `WasmHost::open_stream` 的错误分支）。不在这里查一次，
+                            // 终结错误会被当成「正常结束的空回复」——failover 失效，
+                            // 上层看到的是 200 + 空正文。
+                            if let Some(error) = sink.take_error() {
+                                *failed = true;
+                                return Some(Err(wire_error_to_bridge(error)));
+                            }
                         }
                         Some(Ok(event))
                     }
@@ -366,9 +375,27 @@ fn wire_error_to_bridge(error: crate::plugin_host::wasm::WireError) -> BridgeErr
 /// finish_stream 的同款约定），先收齐再按上游错误形状解析，不让客户端
 /// 拿到一段 SSE 当错误。插件违规先发正文时按 200 继续（少一帧头不把
 /// 整条流作废，正文字节随 `pending` 交回调用方）。
+///
+/// **等头有上界**：[`HEAD_WAIT_MS`] 与原生/脚本后端的 `call_stream`
+/// （`rpc.rs` 的 `HEAD_TIMEOUT`）同口径。wasm 后端没有 RPC 通道，
+/// 这个界此前只存在于另外两个后端 —— 插件侧一旦不产事件，数据面请求
+/// 会一直挂到客户端自己超时（e2e 实测 180s 后由 reqwest 报
+/// `error sending request`，handler 全程不返回）。超时按可重试的
+/// [`BridgeError::Timeout`] 交付，让 failover 与终态响应都能如实说明
+/// 「卡在响应头之前」，而不是一个没有名字的挂起。
 async fn take_head(call: &mut ConversationStream) -> Result<(u16, Option<Vec<u8>>), BridgeError> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(HEAD_WAIT_MS);
     loop {
-        match call.next().await {
+        let next = match tokio::time::timeout_at(deadline, call.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                return Err(BridgeError::Timeout {
+                    elapsed_ms: HEAD_WAIT_MS,
+                    cause: "插件在响应头之前挂住（未产生任何事件）".to_string(),
+                })
+            }
+        };
+        match next {
             Some(Ok(StreamEvent::Head { status, .. })) => {
                 if (200..300).contains(&status) {
                     return Ok((status, None));

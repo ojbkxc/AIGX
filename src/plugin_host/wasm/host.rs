@@ -466,7 +466,24 @@ impl WasmHost {
                 Err(error) => {
                     // 错误必须显式交给 sink —— 消费方（bridge）据 `take_error()`
                     // 做 failover。静默关闭会被读成「插件返回空回复」。
+                    //
+                    // 先留一行 WARN：这条分支此前**完全没有日志**，于是 e2e 里
+                    // 「插件失败」与「插件正常但慢」在 server.log 上长得一模一样
+                    // （都只剩上一行「已启用」），排障只能靠猜。
+                    tracing::warn!(
+                        provider = %host.manifest.provider,
+                        code = error.code.as_deref().unwrap_or("-"),
+                        "[PluginHost] wasm 流式调用失败: {}",
+                        error.message
+                    );
                     task_sink.out.fail(error);
+                    // **必须同时写终点**：消费方（`bridge::plugin::ConversationStream`）
+                    // 自己持着 `ChannelSink` 发送端的克隆，只 `fail` 不写事件时
+                    // `rx.recv()` 永远不会返回 `None`，`take_error()` 那条分支也就
+                    // 永远走不到 —— 请求会一直挂到客户端超时（e2e 实测 180s），
+                    // 期间 server.log 一行都不留。写一个 `End` 让消费方立刻取到
+                    // 终结错误并转成可重试的失败。
+                    task_sink.out.end();
                 }
             }
             task_sink.credit.close();

@@ -138,14 +138,17 @@ fn free_port() -> u16 {
     listener.local_addr().expect("local_addr").port()
 }
 
+/// 失败诊断：把 server.log 尾部按**时间正序**交出来。
+///
+/// 此前是 `rev().take(30)`：倒序贴出来最难读，而且 30 行装不下
+/// 「启动 → 安装/启用 → 数据面」这条链 —— CI 上两次红灯都只看到「已启用」
+/// 那一行，看不出请求是没进来还是进来后挂住。一个用例生命周期内这份日志只有
+/// 几十行，直接给最后 200 行正序。
 fn server_log_tail(log_path: &std::path::Path) -> String {
-    std::fs::read_to_string(log_path)
-        .unwrap_or_default()
-        .lines()
-        .rev()
-        .take(30)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let text = std::fs::read_to_string(log_path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(200);
+    lines[start..].join("\n")
 }
 
 /// 从 server.log 提取首启一次性管理员密码（随机化后仅打印到日志）。
