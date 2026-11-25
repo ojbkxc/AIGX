@@ -467,7 +467,15 @@ async fn wasm_pack_serves_v1_chat_completions() {
         });
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    assert_eq!(status, StatusCode::OK, "wasm 渠道必须 200: {text}");
+    // 非 200 时把 server.log 一起贴出来：201/502 这类「请求真的到了插件、
+    // 插件真的报了错」的形态，答案在宿主那行 `[PluginHost] wasm ...` 里，
+    // 不在 HTTP 正文里（正文只有一个聚合过的错误码）。
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "wasm 渠道必须 200: {text}\nserver.log 尾部：\n{}",
+        server_log_tail(&log_path)
+    );
     let body: Value = serde_json::from_str(&text).expect("chat json");
     assert_eq!(
         body["choices"][0]["message"]["content"], "hello",
