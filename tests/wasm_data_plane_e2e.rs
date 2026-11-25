@@ -440,6 +440,10 @@ async fn wasm_pack_serves_v1_chat_completions() {
     assert_eq!(created_key["success"], true, "{created_key}");
 
     // 5) 非流式：两段 chunk 聚合为 "hello"（resolve.rs 的 wasm 分支 → PluginBridge）
+    // 耗时是分岔点：≈ DATA_PLANE_TIMEOUT（180s）= 请求挂住（handler 不返回）；
+    // 亚秒级失败 = 传输层当场断开（服务进程已死 / 连接被重置）。两者根因不同，
+    // 不报耗时的话 CI 只吐一个 `error sending request`，无法区分。
+    let started = std::time::Instant::now();
     let resp = c
         .post(format!("{base}/v1/chat/completions"))
         .timeout(DATA_PLANE_TIMEOUT)
@@ -453,7 +457,8 @@ async fn wasm_pack_serves_v1_chat_completions() {
         .await
         .unwrap_or_else(|e| {
             panic!(
-                "chat completions: {e}\nserver.log 尾部：\n{}",
+                "chat completions 失败（耗时 {:?}）: {e}\nserver.log 尾部：\n{}",
+                started.elapsed(),
                 server_log_tail(&log_path)
             )
         });
