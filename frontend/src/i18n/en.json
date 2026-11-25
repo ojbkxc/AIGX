@@ -5777,6 +5777,11 @@
   "其中：其它": "of which: other",
   "自动套用预设命中": "Auto-preset hits",
   "1 = 该档是下界估计（事件环被覆盖，只会少算）": "1 = this window is a lower bound (event ring overwritten, under-counts only)",
-  "模型名和厂商都没命中时，套用这一条（通用兜底）": "[TODO en] 模型名和厂商都没命中时，套用这一条（通用兜底）",
-  "通用兜底": "[TODO en] 通用兜底"
+  "模型名和厂商都没命中时，套用这一条（通用兜底）": "Applied when neither model nor vendor matches (generic fallback)",
+  "通用兜底": "Generic fallback",
+  "{{n}} 行缺少分隔符（第 {{lines}} 行）": "{{n}} line(s) missing a separator (lines {{lines}})",
+  "{{n}} 行重复（第 {{lines}} 行）": "{{n}} duplicate line(s) (lines {{lines}})",
+  "没有解析出规则：{{detail}}": "No rules parsed: {{detail}}",
+  "已添加 {{n}} 条；{{detail}}": "Added {{n}} rule(s); {{detail}}",
+  "没有可添加的规则（可能与现有行重复）": "No rules to add (they may all duplicate existing rows)"
 }

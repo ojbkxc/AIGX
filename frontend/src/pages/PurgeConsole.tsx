@@ -638,6 +638,34 @@ export const STATS_CSV_HELP: Array<{ column: string; label: string }> = [
   { column: 'lower_bound', label: '1 = 该档是下界估计（事件环被覆盖，只会少算）' },
 ];
 
+/**
+ * 把「被丢掉的行」说成人话（纯函数，便于单测）。
+ *
+ * 只报行号不报原文：原文可能很长（整行规则），塞进 toast 会挤掉关键信息；行号足够
+ * 让人回到输入框定位。超过 5 行时只列前 5 个行号——**报「共 N 行」比列全更重要**，
+ * 列全反而让 toast 看不出结构。
+ */
+export function batchDropNote(
+  dropped: Array<{ line: number; reason: 'no-separator' | 'duplicate' }>,
+  tr: (key: string, params?: Record<string, string | number>) => string,
+): string | null {
+  if (dropped.length === 0) return null;
+  const noSep = dropped.filter((d) => d.reason === 'no-separator');
+  const dup = dropped.filter((d) => d.reason === 'duplicate');
+  const parts: string[] = [];
+  const lineList = (items: typeof dropped): string => {
+    const shown = items.slice(0, 5).map((d) => d.line).join('、');
+    return items.length > 5 ? `${shown}…` : shown;
+  };
+  if (noSep.length > 0) {
+    parts.push(tr('{{n}} 行缺少分隔符（第 {{lines}} 行）', { n: noSep.length, lines: lineList(noSep) }));
+  }
+  if (dup.length > 0) {
+    parts.push(tr('{{n}} 行重复（第 {{lines}} 行）', { n: dup.length, lines: lineList(dup) }));
+  }
+  return parts.join('；');
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -1019,6 +1047,14 @@ export function snapshotReportText(input: {
 export interface BatchParseResult {
   rules: PurgeRewriteRule[];
   skipped: number;
+  /**
+   * 被丢掉的行明细（`skipped` 的展开）。
+   *
+   * 为什么要有：`skipped` 只报「跳了 5 行」，用户粘 50 行时根本不知道是哪 5 行，
+   * 只能自己一行行找。而**重复行原本连计数都不进**——它走了 `continue`，既不进
+   * `rules` 也不进 `skipped`，属于彻底的静默丢弃（本模块反复踩的坑）。
+   */
+  dropped: Array<{ line: number; text: string; reason: 'no-separator' | 'duplicate' }>;
 }
 
 /**
@@ -1043,8 +1079,9 @@ export function parseBatchRules(
   const seen = new Set(existing.map((rule) => rule.from.trim().toLowerCase()));
   const rules: PurgeRewriteRule[] = [];
   let skipped = 0;
+  const dropped: BatchParseResult['dropped'] = [];
 
-  for (const rawLine of text.split(/\r?\n/)) {
+  for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line) continue;
     // 表头行（「原文 / 改写」这类）没有分隔符，会自然落进 skipped——不特殊处理，
@@ -1059,15 +1096,21 @@ export function parseBatchRules(
     }
     if (!from || !to) {
       skipped += 1;
+      dropped.push({ line: index + 1, text: line, reason: 'no-separator' });
       continue;
     }
     const key = from.toLowerCase();
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      // 重复行**必须报出来**：原先这里直接 continue，既不进 rules 也不进 skipped，
+      // 用户粘完以为全加进去了。
+      dropped.push({ line: index + 1, text: line, reason: 'duplicate' });
+      continue;
+    }
     seen.add(key);
     rules.push({ from, to });
   }
 
-  return { rules, skipped };
+  return { rules, skipped, dropped };
 }
 
 /** 两份配置是否等价（只比数据面关心的字段，忽略纯展示差异）。 */
@@ -3476,12 +3519,13 @@ export default function PurgeConsole(): JSX.Element {
     // 注意：**不要**在 `setDraft(updater)` 里收集计数——React 的 updater 是异步
     // 执行的，toast 会在计数还是 0 的时候弹出去（实测会报「没有可添加」，而规则
     // 其实已经加进去了）。计数必须在这里同步算完。
-    const { rules, skipped } = parseBatchRules(batchText, existing);
+    const { rules, dropped } = parseBatchRules(batchText, existing);
+    const dropNote = batchDropNote(dropped, (key, params) => t(key, params));
     if (rules.length === 0) {
       addToast(
-        skipped > 0
-          ? t('没有解析出规则：{{skipped}} 行格式不对', { skipped })
-          : t('没有可添加的规则（可能都与现有行重复）'),
+        dropNote
+          ? t('没有解析出规则：{{detail}}', { detail: dropNote })
+          : t('没有可添加的规则（可能与现有行重复）'),
         'error',
       );
       return;
@@ -3500,10 +3544,10 @@ export default function PurgeConsole(): JSX.Element {
         : { ...current, synonym_pairs: [...existing, ...rules] },
     );
     addToast(
-      skipped > 0
-        ? t('已添加 {{n}} 条，{{skipped}} 行未能解析', { n: rules.length, skipped })
+      dropNote
+        ? t('已添加 {{n}} 条；{{detail}}', { n: rules.length, detail: dropNote })
         : t('已添加 {{n}} 条规则', { n: rules.length }),
-      'success',
+      dropNote ? 'warning' : 'success',
     );
     setBatchPaste(null);
     setBatchText('');

@@ -5,6 +5,7 @@ import type { PurgeSettings } from '../types';
 import {
   applyUndo,
   buildActiveSummary,
+  batchDropNote,
   buildConfigExport,
   clampNumInput,
   configuredButOff,
@@ -404,6 +405,58 @@ describe('writePreviewHistory · 去重与截断（导入提示的增量靠它�
     const next = writePreviewHistory(base, 'a', set);
     expect(next).toHaveLength(base.length);
     expect(next.filter((x) => !base.includes(x))).toHaveLength(0);
+  });
+});
+
+describe('batchDropNote', () => {
+  const tr = (key: string, params?: Record<string, string | number>): string =>
+    params ? key.replace(/\{\{(\w+)\}\}/g, (_m, k: string) => String(params[k] ?? '')) : key;
+
+  it('没丢行 → null（不弹多余提示）', () => {
+    expect(batchDropNote([], tr)).toBeNull();
+  });
+
+  it('**报出行号**（只说「跳了 2 行」用户找不到是哪两行）', () => {
+    const note = batchDropNote(
+      [
+        { line: 2, reason: 'no-separator' },
+        { line: 5, reason: 'no-separator' },
+      ],
+      tr,
+    );
+    expect(note).toContain('2');
+    expect(note).toContain('5');
+    expect(note).toContain('缺少分隔符');
+  });
+
+  it('**重复行也要报**（原先它连计数都不进，彻底静默）', () => {
+    const note = batchDropNote([{ line: 3, reason: 'duplicate' }], tr);
+    expect(note).toContain('重复');
+    expect(note).toContain('3');
+  });
+
+  it('两类都有时分开说（合并成一句会看不出各几行）', () => {
+    const note = batchDropNote(
+      [
+        { line: 1, reason: 'no-separator' },
+        { line: 4, reason: 'duplicate' },
+      ],
+      tr,
+    );
+    expect(note).toContain('缺少分隔符');
+    expect(note).toContain('重复');
+    expect(note).toContain('；');
+  });
+
+  it('超过 5 行只列前 5 个行号并加省略号（列全反而看不出结构）', () => {
+    const many = Array.from({ length: 8 }, (_, i) => ({
+      line: i + 1,
+      reason: 'no-separator' as const,
+    }));
+    const note = batchDropNote(many, tr);
+    expect(note).toContain('8');
+    expect(note).toContain('…');
+    expect(note).not.toContain('、7');
   });
 });
 
