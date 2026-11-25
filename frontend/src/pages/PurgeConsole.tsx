@@ -1993,6 +1993,7 @@ const RuleRow = memo(function RuleRow({
   moveDownLabel,
   onProbe,
   probeLabel,
+  probeHint,
 }: {
   rule: PurgeRewriteRule;
   index: number;
@@ -2001,6 +2002,8 @@ const RuleRow = memo(function RuleRow({
   removeLabel: string;
   /** 「试」按钮文案（用该条原文做预览样例，验证到底命中没命中） */
   probeLabel: string;
+  /** 「试」按钮的悬停说明（调用方拼好并带入本行原文；本组件是纯展示，没有 `t`） */
+  probeHint?: string;
   /** 单条启停的无障碍标签 */
   enableLabel: string;
   /** 与其他行原文重复时的行内提示（后端会静默截断重复规则，前端显式提示） */
@@ -2078,7 +2081,8 @@ const RuleRow = memo(function RuleRow({
           <Button
             variant="outline"
             size="sm"
-            title={`用「${rule.from}」做预览样例`}
+            // 悬停说明由调用方拼好传入：本组件是纯展示，没有 `t`
+            title={probeHint}
             onClick={() => onProbe(rule)}
           >
             {probeLabel}
@@ -5002,6 +5006,7 @@ export default function PurgeConsole(): JSX.Element {
                 removeLabel={t('删除')}
                 enableLabel={t('启用该条改写规则')}
                 probeLabel={t('试')}
+                probeHint={t('用「{{keyword}}」做预览样例', { keyword: rule.from })}
                 onProbe={probeRule}
                 onMove={moveRule}
                 canMoveUp={index > 0 && !deadZoneQuery.trim()}
@@ -5164,6 +5169,7 @@ export default function PurgeConsole(): JSX.Element {
                 removeLabel={t('删除')}
                 enableLabel={t('启用该条改写规则')}
                 probeLabel={t('试')}
+                probeHint={t('用「{{keyword}}」做预览样例', { keyword: rule.from })}
                 onProbe={probeRule}
                 onMove={moveSynonymRule}
                 canMoveUp={index > 0 && !synonymQuery.trim()}
