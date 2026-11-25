@@ -266,8 +266,16 @@ pub async fn chat_once_as(
                 }
             }
             Err(e @ AgentLlmError::NoChannelAvailable { .. }) => {
-                // 全渠道冷却也属暂时性：等冷却到期再试
-                last_msg = e.to_string();
+                // 全渠道冷却也属暂时性：等冷却到期再试。
+                //
+                // **不把 `last_msg` 覆写成这条占位文案**：上一轮若已拿到具体的
+                // 上游失败原因（如 `Auth failed: 401 Unauthorized`），那才是排障
+                // 要看的；被「暂无可用渠道或账号」顶掉之后，最终错误只剩一句
+                // 无从下手的话。线上 AI 运维就是这样：渠道都在、只是账号 401，
+                // 报出来的却是「该模型暂无可用渠道」。
+                if last_msg.is_empty() {
+                    last_msg = e.to_string();
+                }
                 last_recoverable = true;
             }
             Err(e) => return Err(e),
