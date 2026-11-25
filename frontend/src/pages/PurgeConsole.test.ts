@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { toCsv } from '../lib/format';
 import type { PurgeSettings } from '../types';
 import {
   applyUndo,
@@ -406,6 +407,43 @@ describe('writePreviewHistory · 去重与截断（导入提示的增量靠它�
     const next = writePreviewHistory(base, 'a', set);
     expect(next).toHaveLength(base.length);
     expect(next.filter((x) => !base.includes(x))).toHaveLength(0);
+  });
+});
+
+describe('CSV 导出 → 导入闭环', () => {
+  it('**导出的 CSV 能原样导回来**（导出自己导不进去是本仓踩过的坑）', () => {
+    const rules = [
+      { from: '违禁词', to: '敏感话题' },
+      { from: '删我', to: '' },
+    ];
+    const csv = toCsv(rules.map((r) => ({ from: r.from, to: r.to })));
+    // 导出带表头 `from,to`；parseRulesCsv 的 HEAD_WORDS 认这两个词 → 会跳过表头
+    expect(csv.split('\n')[0]).toBe('from,to');
+    const parsed = parseRulesCsv(csv);
+    expect(parsed).toEqual(rules);
+  });
+
+  it('含逗号/引号/换行的值经 RFC 4180 转义后能完整还原', () => {
+    const rules = [
+      { from: 'a,b', to: 'c"d' },
+      { from: 'x\ny', to: 'z' },
+    ];
+    const csv = toCsv(rules.map((r) => ({ from: r.from, to: r.to })));
+    expect(parseRulesCsv(csv)).toEqual(rules);
+  });
+
+  it('空词表 → 导出空串 → 导入算 ok 且零条（不是「格式不对」）', () => {
+    const csv = toCsv([]);
+    expect(csv).toBe('');
+    const r = parseRulesCsvDetailed(csv);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.rules).toEqual([]);
+  });
+
+  it('**表头只有一列时不被当成表头**（否则会误跳真实规则行）', () => {
+    const r = parseRulesCsvDetailed('from\n甲,A');
+    expect(r.ok).toBe(false); // `from` 单列 → 不是表头 → 报第 1 行列数不对
+    if (!r.ok) expect(r.line).toBe(1);
   });
 });
 
