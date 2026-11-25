@@ -1525,6 +1525,33 @@ test('14 · 「清零统计」只清计数、不动配置', async ({ page }) => 
   await expect(page.getByTestId('purge-stats-since')).toBeVisible();
 });
 
+test('61 · 360px 窄屏也不横向溢出（mobile project 是 390，低端机更窄）', async ({ page }) => {
+  // mobile project 用 Pixel 5 = 390×844；国产低端机常见 360×640。
+  // 宽 390 够放的行，在 360 上可能刚好挤出去——这类问题只在更窄的视口暴露。
+  await page.setViewportSize({ width: 360, height: 640 });
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const overflow = await page.evaluate(() => {
+    const doc = document.documentElement;
+    const clipped: string[] = [];
+    document.querySelectorAll<HTMLElement>('.purge-console *').forEach((el) => {
+      const style = getComputedStyle(el);
+      const spills = el.scrollWidth - el.clientWidth > 1 && el.clientWidth > 0;
+      if (!spills) return;
+      // 与 test 13 同一判据：只拦 `overflow-x: hidden`（内容被裁掉、滚也滚不到）
+      if (style.overflowX !== 'hidden') return;
+      clipped.push(`${el.className || el.tagName}:${el.scrollWidth}>${el.clientWidth}`);
+    });
+    return { page: doc.scrollWidth - doc.clientWidth, clipped: clipped.slice(0, 5) };
+  });
+
+  expect(overflow.clipped, `360px 下被裁的元素：${JSON.stringify(overflow.clipped)}`).toHaveLength(
+    0,
+  );
+  expect(overflow.page, `360px 下整页横向溢出 ${overflow.page}px`).toBeLessThanOrEqual(1);
+});
+
 test('13 · 整页无横向溢出（窄视口下最容易暴露布局问题）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
