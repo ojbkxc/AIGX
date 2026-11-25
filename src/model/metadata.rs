@@ -436,17 +436,49 @@ impl ModelMetadataRegistry {
                 // —— 否则又回到「一列 plugin、一列 modelsdev」的跨账本混拼
                 // （本函数的修复点）。能力标签不受限：布尔能力不是上限
                 // 数值，没有「两个账本拼出物理不可能组合」的问题。
-                if !plugin_ledger && context_length.is_none() {
-                    context_length = dev.context.and_then(|n| u32::try_from(n).ok());
-                    if context_length.is_some() {
+                if !plugin_ledger {
+                    let dev_context = dev.context.and_then(|n| u32::try_from(n).ok());
+                    let dev_output = dev.output.and_then(|n| u32::try_from(n).ok());
+                    // ── 内置表过时修正：整组改用 models.dev ──────────────
+                    //
+                    // builtin 与 models.dev 同属「按模型名的通用知识」账本，
+                    // 但内置表是**静态快照**，会滞后：`glm-5` 前缀钉死
+                    // 128000，而社区目录里 GLM-5 早已是 1M 上下文 / 131k
+                    // 输出。按字段各取一半就会拼出 128k/131k 的物理不可能
+                    // 组合（线上 17 行）。
+                    //
+                    // 判据：**models.dev 的输出上限比内置上下文还大** ⇒ 内置
+                    // 那条上下文明显过时，此时整组采用 models.dev 的自洽对
+                    // （ctx / out 两列同源同值，来源都标 modelsdev），而不是
+                    // 丢掉输出（丢值）或留下不可能组合。前提是 models.dev
+                    // 自己的 ctx 容得下它的 out —— 容不下说明目录自身矛盾，
+                    // 交给下面那道物理守卫兜底。
+                    let stale_builtin = match (context_source, context_length, dev_output) {
+                        ("builtin", Some(builtin), Some(output)) if output > builtin => {
+                            matches!(dev_context, Some(context) if context >= output)
+                        }
+                        _ => false,
+                    };
+                    if stale_builtin {
+                        context_length = dev_context;
                         context_source = "modelsdev";
-                    }
-                }
-                // 输出上限：内置表没这个维度，插件目录没申报时由 models.dev 补
-                if !plugin_ledger && max_output_tokens.is_none() {
-                    max_output_tokens = dev.output.and_then(|n| u32::try_from(n).ok());
-                    if max_output_tokens.is_some() {
+                        max_output_tokens = dev_output;
                         output_source = "modelsdev";
+                    } else {
+                        if context_length.is_none() {
+                            context_length = dev_context;
+                            if context_length.is_some() {
+                                context_source = "modelsdev";
+                            }
+                        }
+                        // 输出上限：内置表没这个维度，插件目录没申报时由
+                        // models.dev 补
+                        if max_output_tokens.is_none() {
+                            max_output_tokens = dev_output;
+                            if max_output_tokens.is_some() {
+                                output_source = "modelsdev";
+                            }
+                        }
                     }
                 }
                 // 能力标签只有「默认 chat」（名字没命中任何特征）时才补，
@@ -479,13 +511,12 @@ impl ModelMetadataRegistry {
         }
         // ── 物理不变量守卫：采信的输出上限必须落在采信的上下文窗口内 ──
         //
-        // 兜住两类残余：① builtin 上下文 + models.dev 输出的账本内拼接 ——
-        // 内置表是静态快照，会滞后于社区目录（glm-5 前缀内置 128k，而
-        // models.dev 的 GLM-5.3 输出已是 131k），拼出 128k/131k 的不可能
-        // 组合；② 上游申报自相矛盾（输出 > 上下文）。规则统一：**保上下文、
-        // 丢输出**（留空），宁可少一列也不展示物理不可能的数。管理员覆盖
-        // 路径不受此限 —— 显式填写，全权在人（见
-        // `override_may_express_output_over_context`）。
+        // 兜底：上面的「内置表过时修正」已经处理了 builtin 上下文滞后于
+        // 社区目录的常态（整组改用 models.dev），这里只兜住两种残余 ——
+        // ① models.dev 目录自身矛盾（输出 > 它自己的上下文）；② 上游申报
+        // 自相矛盾（输出 > 上下文）。规则统一：**保上下文、丢输出**（留空），
+        // 宁可少一列也不展示物理不可能的数。管理员覆盖路径不受此限 ——
+        // 显式填写，全权在人（见 `override_may_express_output_over_context`）。
         if let (Some(context), Some(output)) = (context_length, max_output_tokens) {
             if output > context {
                 max_output_tokens = None;
@@ -1031,23 +1062,24 @@ mod tests {
         crate::plugin_host::model_catalog::remove(&provider);
     }
 
-    /// 物理守卫（C 兜底）：非插件账本（builtin 上下文 + models.dev 输出）
-    /// 允许组合，但输出必须落在上下文窗口内 —— GLM-5.3 线上实况：内置表
-    /// glm-5 前缀 128k，models.dev 输出 131k，拼成 128k/131k 的不可能组合。
-    /// 修法是**保上下文、丢输出**。
+    /// 内置表过时修正（线上 GLM 家族实况）：内置 `glm-5` 前缀钉死 128000，
+    /// 而 models.dev 是 1M 上下文 / 131072 输出。models.dev 的输出比内置
+    /// 上下文还大 ⇒ 内置那条上下文明显过时，**整组改用 models.dev 的自洽
+    /// 对**（不丢值、不留不可能组合、两列同源）。
     ///
-    /// 旧实现原样透出 `Some(131_072)`。
+    /// 旧实现给出 `(128_000 builtin, 131_072 modelsdev)` —— 本用例的两列
+    /// 断言在旧实现上都必红。
     #[test]
-    fn modelsdev_output_dropped_when_exceeding_builtin_context() {
+    fn builtin_context_yields_to_modelsdev_when_output_exceeds_it() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         // glm-5 前缀命中内置表（128000）；同用例内直接断言这个前提
-        let model = format!("glm-5-unitclamp{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        let model = format!("glm-5-unitstale{}", SEQ.fetch_add(1, Ordering::Relaxed));
         assert_eq!(builtin_context_length(&model), Some(128_000));
         let _seed_guard = crate::model::models_dev::seed_for_test([(
             model.clone(),
             crate::model::models_dev::DevEntry {
-                canonical: Some("zhipuai/glm-5-unitclamp".to_string()),
+                canonical: Some("zhipuai/glm-5-unitstale".to_string()),
                 reasoning: false,
                 tool_call: true,
                 images: false,
@@ -1056,13 +1088,87 @@ mod tests {
                 output: Some(131_072),
             },
         )]);
-        let reg = temp_registry("clamp-builtin");
+        let reg = temp_registry("stale-builtin");
         let (meta, sources) = reg.resolve_with_sources(&model, Some("zhipu"));
-        assert_eq!(meta.context_length, Some(128_000), "内置上下文保留");
+        assert_eq!(
+            meta.context_length,
+            Some(1_000_000),
+            "内置 128k 明显过时（连 models.dev 的输出都装不下），整组改用社区目录"
+        );
+        assert_eq!(
+            meta.max_output_tokens,
+            Some(131_072),
+            "输出不丢值 —— 与上下文同源同组"
+        );
+        assert_eq!(sources["context_length"], serde_json::json!("modelsdev"));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("modelsdev"));
+    }
+
+    /// 正向对照：models.dev 的输出**装得下**内置上下文时，两列各守本分
+    /// —— 上下文仍是内置表的（来源 builtin），输出由 models.dev 补
+    /// （来源 modelsdev）。这是 openai_compatible 等无插件目录渠道的既有
+    /// 行为，本次修复不得改动它。
+    #[test]
+    fn builtin_context_kept_when_modelsdev_output_fits_inside_it() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let model = format!("gpt-4o-unitfits{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        assert_eq!(builtin_context_length(&model), Some(128_000));
+        let _seed_guard = crate::model::models_dev::seed_for_test([(
+            model.clone(),
+            crate::model::models_dev::DevEntry {
+                canonical: Some("openai/gpt-4o-unitfits".to_string()),
+                reasoning: false,
+                tool_call: true,
+                images: false,
+                video: false,
+                context: Some(128_000),
+                output: Some(16_384),
+            },
+        )]);
+        let reg = temp_registry("fits-builtin");
+        let (meta, sources) = reg.resolve_with_sources(&model, Some("openai"));
+        assert_eq!(meta.context_length, Some(128_000), "内置上下文不变");
+        assert_eq!(sources["context_length"], serde_json::json!("builtin"));
+        assert_eq!(meta.max_output_tokens, Some(16_384));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("modelsdev"));
+    }
+
+    /// 物理守卫的兜底面：models.dev 目录**自身矛盾**（输出 > 它自己的
+    /// 上下文）时，既不能整组采用它、也不能留下不可能组合 —— 保上下文、
+    /// 丢输出。
+    ///
+    /// 旧实现原样透出 `(128_000 builtin, 131_072 modelsdev)`。
+    #[test]
+    fn self_contradictory_modelsdev_entry_loses_output() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let model = format!("glm-5-unitbad{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        assert_eq!(builtin_context_length(&model), Some(128_000));
+        let _seed_guard = crate::model::models_dev::seed_for_test([(
+            model.clone(),
+            crate::model::models_dev::DevEntry {
+                canonical: Some("zhipuai/glm-5-unitbad".to_string()),
+                reasoning: false,
+                tool_call: true,
+                images: false,
+                video: false,
+                // 目录自身矛盾：上下文 100k，输出 131k
+                context: Some(100_000),
+                output: Some(131_072),
+            },
+        )]);
+        let reg = temp_registry("bad-dev");
+        let (meta, sources) = reg.resolve_with_sources(&model, Some("zhipu"));
+        assert_eq!(
+            meta.context_length,
+            Some(128_000),
+            "目录自身矛盾时不能整组采用，保留内置上下文"
+        );
         assert_eq!(sources["context_length"], serde_json::json!("builtin"));
         assert_eq!(
             meta.max_output_tokens, None,
-            "131072 > 128000 物理不可能 —— 丢输出保上下文"
+            "131072 > 100000 且 > 128000：物理不可能，丢输出"
         );
         assert!(sources["max_output_tokens"].is_null());
     }
