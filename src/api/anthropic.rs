@@ -932,7 +932,7 @@ pub async fn handle_messages(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
-                                            state,
+                                            &state,
                                             ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
@@ -979,7 +979,7 @@ pub async fn handle_messages(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
-                                            state,
+                                            &state,
                                             ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
@@ -1032,7 +1032,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(&state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1073,7 +1073,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(&state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1852,7 +1852,7 @@ pub async fn handle_messages(
                                         .map(|c| c.name.clone())
                                         .unwrap_or_default(),
                                     provider: attempt_provider(
-                                        state,
+                                        &state,
                                         ch_ref.as_ref(),
                                         bridge.as_ref(),
                                     ),
@@ -1910,7 +1910,11 @@ pub async fn handle_messages(
                                     .as_ref()
                                     .map(|c| c.name.clone())
                                     .unwrap_or_default(),
-                                provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                                provider: attempt_provider(
+                                    &state,
+                                    ch_ref.as_ref(),
+                                    bridge.as_ref(),
+                                ),
                                 account: String::new(),
                                 model: upstream.clone(),
                                 sticky_hit,
@@ -1953,7 +1957,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(&state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1994,7 +1998,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(&state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
