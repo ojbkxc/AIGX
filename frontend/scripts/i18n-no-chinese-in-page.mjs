@@ -38,6 +38,51 @@ const keys = new Set();
 for (const m of src.matchAll(/\bt\(\s*'([^'\\]+)'/g)) keys.add(m[1]);
 for (const m of src.matchAll(/\bt\(\s*"([^"\\]+)"/g)) keys.add(m[1]);
 
+/**
+ * 扫「绕过 `t()` 的中文字面量」——JSX 文本节点与硬编码属性值。
+ *
+ * 这类坏法**前三道检查都看不到**：它根本没进 json，所以 key 集合一致、英文值无残留、
+ * 占位符全对；而英文界面直接显示中文。破甲页实测有 1 处
+ * （`title={\`用「${rule.from}」做预览样例\`}`），是这轮才补上的盲区。
+ *
+ * 只认「渲染到界面上」的位置，避免把常量表里的 `label:`/`desc:` 误判成缺陷
+ * （那些值在使用处都包了 `t()`）。
+ */
+function scanHardcodedCjk(src) {
+  const lines = src.split('\n');
+  const found = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!/[\u4e00-\u9fff]/.test(line)) continue;
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue; // 整行注释
+
+    // ① JSX 文本节点：`>…中文…<`（排除 {…} 表达式）
+    for (const m of line.matchAll(/>\s*([^<>{}]*[\u4e00-\u9fff][^<>{}]*?)\s*</g)) {
+      found.push({ line: i + 1, kind: 'jsx-text', text: m[1].trim().slice(0, 60) });
+    }
+    // ② 硬编码属性值
+    for (const m of line.matchAll(
+      /\b(title|aria-label|placeholder|alt)\s*=\s*(["'])([^"']*[\u4e00-\u9fff][^"']*)\2/g,
+    )) {
+      found.push({ line: i + 1, kind: `attr:${m[1]}`, text: m[3].trim().slice(0, 60) });
+    }
+    // ③ 属性里的模板串且不含 t(
+    for (const m of line.matchAll(
+      /\b(title|aria-label|placeholder)\s*=\s*\{\s*`([^`]*[\u4e00-\u9fff][^`]*)`\s*\}/g,
+    )) {
+      if (/t\(/.test(m[2])) continue;
+      found.push({ line: i + 1, kind: `tpl:${m[1]}`, text: m[2].trim().slice(0, 60) });
+    }
+  }
+  const seen = new Set();
+  return found.filter((h) => {
+    const k = `${h.line}|${h.text}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 const CJK = /[\u4e00-\u9fff]/;
 const bad = [];
 const phMismatch = [];
@@ -63,9 +108,11 @@ for (const key of keys) {
   }
 }
 
-if (bad.length === 0 && phMismatch.length === 0) {
+const hardcoded = scanHardcodedCjk(src);
+
+if (bad.length === 0 && phMismatch.length === 0 && hardcoded.length === 0) {
   console.log(
-    `[i18n-en] ✓ ${pageFile} 用到的 ${keys.size} 个键：英文值无中文残留、占位符与中文一致`,
+    `[i18n-en] ✓ ${pageFile} 用到的 ${keys.size} 个键：英文值无中文残留、占位符与中文一致、无硬编码中文`,
   );
   process.exit(0);
 }
@@ -85,5 +132,14 @@ if (phMismatch.length > 0) {
     if (item.onlyZh.length) console.error(`      zh 有而 en 缺: {{${item.onlyZh.join('}}, {{')}}}`);
     if (item.onlyEn.length) console.error(`      en 有而 zh 缺: {{${item.onlyEn.join('}}, {{')}}}`);
   }
+}
+if (hardcoded.length > 0) {
+  console.error(
+    `[i18n-en] 检查失败：${pageFile} 有 ${hardcoded.length} 处中文绕过了 t()（英文界面会显示中文）`,
+  );
+  for (const item of hardcoded.slice(0, 20)) {
+    console.error(`  - L${item.line} [${item.kind}] ${item.text}`);
+  }
+  if (hardcoded.length > 20) console.error(`  …还有 ${hardcoded.length - 20} 处`);
 }
 process.exit(1);
