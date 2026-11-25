@@ -116,7 +116,16 @@ export default function CheckinPluginTasks({
           {rows.map((row) => {
             const runs = Array.isArray(row.runs) ? row.runs : [];
             const running = runs.some((run) => run.running === true);
-            const errors = runs.filter((run) => typeof run.error === 'string' && run.error.length > 0);
+            /*
+             * 「另有 N 个账号失败」的 N 必须是**没被展示出来**的那些失败：
+             * 下面每行只渲染前 3 条 run，第 4 条起的失败要单独计数。
+             * 旧判据是 `errors.length > runs.slice(0,3).length && runs.length > 3`，
+             * 两种形态都错：runs=5 且 5 条全失败时报「另有 5 个」（实际只藏 2 条）；
+             * runs=5 且失败只在第 4/5 条时 2 > 3 不成立，失败被静默吞掉。
+             */
+            const hiddenErrors = runs
+              .slice(3)
+              .filter((run) => typeof run.error === 'string' && run.error.length > 0).length;
             return (
               <tr key={`${row.provider}:${row.task.id ?? ''}`}>
                 <td>{row.provider}</td>
@@ -150,8 +159,8 @@ export default function CheckinPluginTasks({
                             }`,
                         )
                         .join(' · ')}
-                  {errors.length > runs.slice(0, 3).length && errors.length > 0 && runs.length > 3
-                    ? ` · ${t('另有 {{n}} 个账号失败', { n: errors.length })}`
+                  {hiddenErrors > 0
+                    ? ` · ${t('另有 {{n}} 个账号失败', { n: hiddenErrors })}`
                     : ''}
                 </td>
               </tr>

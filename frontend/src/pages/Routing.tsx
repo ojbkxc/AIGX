@@ -1050,11 +1050,18 @@ export default function Routing(): JSX.Element {
     </div>
   );
 
-  /** 回放左栏的行状态点（A2A RoutingRequestState：成功 / 失败 / 运行中 / 已取消） */
-  const replayRowState = (r: ReplayLogRow): 'success' | 'failed' | 'running' => {
+  /**
+   * 回放左栏的行状态点（A2A RoutingRequestState：成功 / 失败 / 运行中 / 已取消）。
+   *
+   * `status_code` 为 0 或缺失是「未记录」而不是失败：后端
+   * `RequestLog.status_code` 是 `u16` + `#[serde(default)]`，被中断/尚未完成
+   * 的老日志会落成 0。旧实现只要 `!= null` 就判 failed，把「不知道」显示成
+   * 「失败」（与 Logs.tsx 的 `statusKind` 口径冲突，同一行在两页结论相反）。
+   */
+  const replayRowState = (r: ReplayLogRow): 'success' | 'failed' | 'running' | 'unknown' => {
     if (r.running) return 'running';
-    if (r.status_code != null) return r.status_code >= 200 && r.status_code < 400 ? 'success' : 'failed';
-    return 'failed';
+    if (r.status_code == null || r.status_code === 0) return 'unknown';
+    return r.status_code >= 200 && r.status_code < 400 ? 'success' : 'failed';
   };
 
   const replayView = (
@@ -1142,7 +1149,13 @@ export default function Routing(): JSX.Element {
                   <span>{r.model || t('（无模型）')}</span>
                   <span className={`rt-replay-state is-${state}`} aria-label={state}>
                     <i aria-hidden="true" />
-                    {state === 'success' ? t('成功') : state === 'running' ? t('在途') : t('失败')}
+                    {state === 'success'
+                      ? t('成功')
+                      : state === 'running'
+                        ? t('在途')
+                        : state === 'unknown'
+                          ? t('未记录')
+                          : t('失败')}
                   </span>
                 </span>
                 <span className="rt-replay-item-id">

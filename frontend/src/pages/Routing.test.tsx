@@ -290,13 +290,24 @@ describe('Routing 页冒烟', () => {
           created_at: 1_700_000_600,
           channel_id: 'ch-2',
         },
+        {
+          // status_code=0 = 后端未记录（u16 + serde(default) 的中断/未完成日志）：
+          // 必须落「未记录」而不是「失败」，与 Logs.tsx 的 statusKind 同一口径
+          id: 'req-ccc',
+          request_id: 'chatcmpl-ccc',
+          model: 'claude-3',
+          status_code: 0,
+          latency_ms: 0,
+          created_at: 1_700_000_900,
+          channel_id: 'ch-3',
+        },
       ],
     });
     const { container } = render(<Routing /> as ReactElement);
     await waitFor(() => expect(screen.getByText('分层档案')).toBeTruthy(), { timeout: 3000 });
 
     fireEvent.click(modeButton(container, '请求回放'));
-    await waitFor(() => expect(container.querySelectorAll('.rt-replay-item').length).toBe(2));
+    await waitFor(() => expect(container.querySelectorAll('.rt-replay-item').length).toBe(3));
 
     /** 最近一次列表请求的参数（target 是 ES2020，不用 Array.prototype.at） */
     const lastParams = (): Record<string, unknown> | undefined => {
@@ -311,6 +322,10 @@ describe('Routing 页冒烟', () => {
     const rows = container.querySelectorAll('.rt-replay-item');
     expect(rows[0].querySelector('.rt-replay-state.is-success')).toBeTruthy();
     expect(rows[1].querySelector('.rt-replay-state.is-failed')).toBeTruthy();
+    // status_code=0 → 未记录（中性），不是失败：旧实现在这里渲染成 is-failed
+    expect(rows[2].querySelector('.rt-replay-state.is-unknown')).toBeTruthy();
+    expect(rows[2].querySelector('.rt-replay-state.is-failed')).toBeNull();
+    expect(rows[2].textContent).toContain('未记录');
     expect(rows[0].textContent).toContain('chatcmpl-aaa');
     expect(rows[0].textContent).toContain('#ch-1');
 

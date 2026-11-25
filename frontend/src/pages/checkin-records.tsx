@@ -200,7 +200,17 @@ export default function CheckinRecordsView({
   const explicitEnd = dateEnd(end);
   const queryStart = explicitStart ?? rangeStart(range);
 
+  /**
+   * 请求序号：快速翻页 / 改筛选时旧响应晚到不得覆盖新数据。
+   *
+   * `load` 由 `page/size/筛选` 重新创建（useCallback 依赖），每个请求拿自己的
+   * 序号；响应回来只认「仍是最后一个」的那次，否则丢弃。旧实现三条 `setState`
+   * 无条件执行 —— 先发的慢请求会把后发的快请求结果覆盖掉，页面停在上一页的数据
+   * 却显示新页码（翻页越快的网络越容易看到）。
+   */
+  const loadSeq = useRef(0);
   const load = useCallback(async (): Promise<void> => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const res = await api.getCheckinRecords({
@@ -213,14 +223,16 @@ export default function CheckinRecordsView({
         offset: (page - 1) * size,
         limit: size,
       });
+      if (seq !== loadSeq.current) return;
       setRecords(res?.records ?? []);
       setTotal(res?.total ?? 0);
     } catch {
+      if (seq !== loadSeq.current) return;
       // 读取失败由空态承担（错误文案不覆盖整张表）
       setRecords([]);
       setTotal(0);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [provider, outcome, kind, queryStart, explicitEnd, keywordApplied, page, size, setTotal]);
 
@@ -265,9 +277,15 @@ export default function CheckinRecordsView({
               }
             : { all: true },
         );
-        // 删除后：回第 1 页并重新拉取（总数以服务端为准，不在本地做减法）
-        setPage(1);
-        void load();
+        // 删除后：回第 1 页并重新拉取（总数以服务端为准，不在本地做减法）。
+        // 只有已经停在第 1 页时才需要显式 `load()`；否则 `setPage(1)` 会让
+        // useEffect 重新创建 load 并拉一次 —— 两者同时做等于旧页码一次 + 新页码
+        // 一次共两次请求，且先发那次的 `offset` 用的是闭包里的旧 page。
+        if (page !== 1) {
+          setPage(1);
+        } else {
+          await load();
+        }
       },
     });
   };
