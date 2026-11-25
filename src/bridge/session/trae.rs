@@ -9,6 +9,29 @@
 //!   多带字段会被上游拒绝；
 //! - 响应 SSE 用 `event:` 区分帧（`output` / `token_usage` / `done` / `error`），
 //!   **上游不发 `[DONE]`**。
+//!
+//! ── 会话路径只有一条（2026-11-25 从 wasm 与实测双向确认）──────
+//! `agent2api-wasm-trae` 0.1.1 的 `trae.wasm` 里，`/api/agent/v3/*` 只有
+//! `llm_utils_chat` 一个串（偏移 705904，紧邻 `https://trae-api-cn.mchost.guru`
+//! 705862）；`/api/ide/v1/get_detail_param`（712824）与
+//! `/api/ide/v1/batch_get_detail_param`（712584）是**模型目录**端点，
+//! `chat_v3`（698644）与 `solo_work_*` / `solo_agent*` 是**同一枚举里的 function
+//! 取值**，不是路径。所以 SOLO / IDE 两个变体的对话路径相同，
+//! **不存在"SOLO 要走另一条 path"这回事**。
+//!
+//! 线上 `404 <html><center>TLB</center>` 的来源因此不是路径，而是**站**：
+//! 7 个 `trae-solo-*` 账号把 `base_url` 写成 `https://api.trae.cn`（网页/控制台站），
+//! 那个站由字节 TLB 直接回 404；同一份 token 换 `trae-api-cn.mchost.guru` 立即
+//! 出 token（实测两种写法各打一次）。归一见 `account_session::adapter`。
+//!
+//! ── function 取值与模型表的对应（实测）──────────────────────
+//! `function` 决定上游给你哪张模型表，选择不当就是流内 4001：
+//! `/api/ide/v1/get_detail_param` 实测 `solo_work_lite`→54 个 config_name、
+//! `solo_work_remote`→53、`solo_agent`→75、`chat_v3`→65，**这四个都含
+//! `deepseek-v4.1-flash`**；`solo_coder`→41 个且**不含**它，于是
+//! `function=solo_coder` + `deepseek-v4.1-flash` 必得
+//! `event:error {"code":4001,"message":"We're sorry, the param is invalid…"}`。
+//! 本通道固定用 `solo_work_lite`（A2A 的口径，也是四条里 catalog 最全的一条）。
 
 use std::collections::VecDeque;
 
@@ -506,12 +529,31 @@ pub fn build_body(req: &ChatFormat) -> Value {
         // `[]*idecopilot.LLMRawMessageContent`，发字符串会被上游
         // `json: cannot unmarshal string into Go struct field ... of type
         // []*idecopilot.LLMRawMessageContent` 直接 400 掉（线上实测）。
-        // 空文本不发空数组 —— 空数组和缺字段在它那边等价，但空数组更容易
-        // 被判定为「消息内容缺失」；省略字段让它按纯 tool_calls 消息处理。
+        //
+        // ── 空文本**不能省略 content**（2026-11-25 实测修正）──────────
+        // 早先这里写成 `if !text.is_empty()`，理由是"空数组更容易被判内容缺失"。
+        // 实测正好相反：上游对**缺 content 或空数组**的消息一律回
+        // `event:error data:{"code":4001,"message":"We're sorry, the param is invalid…"}`，
+        // 而 `content:[{type:text,text:""}]` 能被接受。三种形态都单独打过一遍：
+        //   system 无 content   → 4001      system content=[]  → 4001
+        //   system 空 text 块   → 200       user   content=[]  → 4001
+        //   tool   无 content   → 4001      tool   空 text 块  → 200
+        // 客户端历史里"空 system 提示 / 空 tool 结果"极常见，所以这条是线上
+        // `[4001] param is invalid` 的真因之一（同一条凭据换写法立即出 token）。
+        //
+        // 唯一例外是**只带 tool_calls 的 assistant**：上游按纯调用消息处理，
+        // 省略 content 与给空 text 块都能过，保留省略以贴近真实客户端形态。
+        let tool_calls_only_assistant =
+            message.role == Role::Assistant && message.tool_calls.is_some();
         if !text.is_empty() {
             entry.insert(
                 "content".to_string(),
                 json!([{ "type": "text", "text": text }]),
+            );
+        } else if !tool_calls_only_assistant {
+            entry.insert(
+                "content".to_string(),
+                json!([{ "type": "text", "text": "" }]),
             );
         }
         if message.role == Role::Tool {
@@ -570,6 +612,62 @@ pub fn build_body(req: &ChatFormat) -> Value {
             })
             .collect();
         out.insert("tools".to_string(), Value::Array(tools));
+    }
+    // `tool_choice` 必须是**裸字符串**：上游 Go 类型是 `string`，
+    // 发 OpenAI 的对象形态（`{"type":"auto"}` / `{"type":"function","function":{"name":…}}`）
+    // 会以 `json: cannot unmarshal object into Go struct field
+    // LLMUtilsChatRequest.tool_choice of type string` 收场（实测 HTTP 400 + 4001）。
+    // 折算规则与 A2A `trae/payload.rs::normalize_tool_choice` 一致：
+    //   "none"（不论裸串还是对象）→ 不发 tool_choice，并连带删掉 tools；
+    //   auto / required       → 同名裸串；
+    //   {type:function,name}  → 函数名裸串（缺名回 auto）；
+    //   其它形态               → 不发 tool_choice（不猜）。
+    if let Some(choice) = &req.tool_choice {
+        let mut suppress_tools = false;
+        let mut out_choice: Option<String> = None;
+        match choice {
+            Value::String(name) => {
+                if name.trim().eq_ignore_ascii_case("none") {
+                    suppress_tools = true;
+                } else {
+                    out_choice = Some(name.trim().to_string());
+                }
+            }
+            Value::Object(wrapper) => {
+                let kind = wrapper
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase();
+                match kind.as_str() {
+                    "none" => suppress_tools = true,
+                    "auto" | "required" => out_choice = Some(kind),
+                    "function" => {
+                        let name = wrapper
+                            .get("function")
+                            .and_then(|function| function.get("name"))
+                            .and_then(Value::as_str)
+                            .or_else(|| wrapper.get("name").and_then(Value::as_str))
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        out_choice = Some(if name.is_empty() {
+                            "auto".to_string()
+                        } else {
+                            name
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        if suppress_tools {
+            out.remove("tools");
+        } else if let Some(choice) = out_choice {
+            out.insert("tool_choice".to_string(), json!(choice));
+        }
     }
     if let Some(temperature) = req.temperature {
         out.insert("temperature".to_string(), json!(temperature));
@@ -649,15 +747,84 @@ mod tests {
         assert_eq!(content[0]["text"], "你好");
     }
 
-    /// 空文本不发空 content 数组（省略字段 = 纯 tool_calls 消息）。
+    /// 空文本**必须**发空 text 块，不能省略 content（2026-11-25 实测）。
+    ///
+    /// 上游对「缺 content / 空数组」的消息回流内 4001（system、user、tool 三种角色
+    /// 都实测过），而 `content:[{type:text,text:""}]` 能被接受 —— 客户端历史里的
+    /// 空 system 提示与空 tool 结果因此成了线上 `[4001] param is invalid` 的来源。
     #[test]
-    fn empty_text_omits_content() {
-        let body = build_body(&format(vec![user("")]));
+    fn empty_text_still_sends_an_empty_text_part() {
+        for role in [Role::System, Role::User, Role::Tool] {
+            let mut message = user("");
+            message.role = role;
+            let body = build_body(&format(vec![message]));
+            let content = &body["messages"][0]["content"];
+            assert!(
+                content.is_array(),
+                "空文本也要给数组形态的 content: {content}"
+            );
+            assert_eq!(content[0]["type"], "text");
+            assert_eq!(content[0]["text"], "");
+        }
+    }
+
+    /// 只带 tool_calls 的 assistant 省略 content（上游按纯调用消息处理，两种形态都行）。
+    #[test]
+    fn tool_calls_only_assistant_omits_content() {
+        let mut message = ChatMessage::assistant("");
+        message.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            function_name: "read_file".into(),
+            arguments: "{}".into(),
+        }]);
+        let body = build_body(&format(vec![message]));
         assert!(
             body["messages"][0].get("content").is_none(),
-            "空文本不该写 content: {}",
+            "纯 tool_calls 消息不该被补空 text 块: {}",
             body["messages"][0]
         );
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["function_call"]["name"],
+            "read_file"
+        );
+    }
+
+    /// `tool_choice` 必须折成裸字符串；对象形态会被上游按类型错误拒掉（4001）。
+    #[test]
+    fn tool_choice_is_flattened_to_a_bare_string() {
+        let cases: [(Value, Option<&str>, bool); 5] = [
+            (json!({"type": "auto"}), Some("auto"), true),
+            (json!({"type": "required"}), Some("required"), true),
+            (
+                json!({"type": "function", "function": {"name": "read_file"}}),
+                Some("read_file"),
+                true,
+            ),
+            (json!({"type": "function"}), Some("auto"), true),
+            (json!({"type": "none"}), None, false),
+        ];
+        for (choice, want, tools_kept) in cases {
+            let mut req = format(vec![user("hi")]);
+            req.tools = Some(vec![json!({
+                "type": "function",
+                "function": {"name": "read_file", "parameters": {"type": "object"}}
+            })]);
+            req.tool_choice = Some(choice.clone());
+            let body = build_body(&req);
+            match want {
+                Some(text) => assert_eq!(body["tool_choice"], json!(text), "choice={choice}"),
+                None => assert!(body.get("tool_choice").is_none(), "choice={choice}"),
+            }
+            assert_eq!(body.get("tools").is_some(), tools_kept, "choice={choice}");
+        }
+    }
+
+    /// 裸字符串形态原样透传（含函数名）。
+    #[test]
+    fn bare_tool_choice_string_survives() {
+        let mut req = format(vec![user("hi")]);
+        req.tool_choice = Some(json!("read_file"));
+        assert_eq!(build_body(&req)["tool_choice"], "read_file");
     }
 
     #[test]

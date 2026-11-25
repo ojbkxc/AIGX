@@ -2700,7 +2700,14 @@ fn catpaw_catalog_body() -> Value {
 /// Trae 目录请求体。
 ///
 /// 口径抄自 Agent2API `providers/trae/models.rs` 的 `catalog_body`：
-/// `function` 恒为 `solo_work_lite`（各家变体都映射到它），其余字段是空值占位。
+/// `function` 取 `solo_work_lite`，其余字段是空值占位。
+///
+/// ⚠️ `function` **不是**「各家变体都映射到它」那么随便 —— 它决定上游返回
+/// 哪张模型表（2026-11-25 实测 `/api/ide/v1/get_detail_param`）：
+/// `solo_work_lite`→54 个 config_name、`solo_work_remote`→53、`solo_agent`→75、
+/// `chat_v3`→65，这四个都含 `deepseek-v4.1-flash`；`solo_coder`→41 且**不含**它。
+/// 对话侧固定发 `function=solo_work_lite`（`bridge::session::trae`），
+/// 两边必须同一取值，否则会出现「目录里有、一聊就 4001」。
 fn trae_catalog_body() -> Value {
     serde_json::json!({
         "function": "solo_work_lite",

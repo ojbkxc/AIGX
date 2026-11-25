@@ -11,10 +11,48 @@ use super::registry::{self, Protocol};
 use super::store::AccountSessionStore;
 use crate::bridge::{Bridge, BridgeError};
 
+/// Trae 的「网页/控制台」主机 —— **不是** 对话与目录所在的站。
+///
+/// `api.trae.cn` 只承载 OAuth（`GetLoginGuidance` / `ExchangeToken`）与网页控制台；
+/// `/api/agent/v3/llm_utils_chat`（对话）、`/api/ide/v1/get_detail_param`（目录）、
+/// `/trae/api/v2/ug/checkin_credits/*`（签到）都只在 Agent 站上存在。
+const TRAE_AGENT_HOST: &str = "https://trae-api-cn.mchost.guru";
+
+/// 把 Trae 账号的「网页站」地址归一到 Agent 站。
+///
+/// **生产实测（2026-11-25）**：7 个 `trae-solo-*` 账号的 `base_url` 被填成
+/// `https://api.trae.cn`，于是每一次对话都打到那个站的 `/api/agent/v3/llm_utils_chat`，
+/// 由字节 TLB 直接回 `404 <html><center>TLB</center>`；而同一份凭据把地址换成
+/// Agent 站后立刻正常出 token（两条链路都实测过）。同一账号的目录/签到也因此
+/// 一直在打错的站。
+///
+/// 只认**官方网页站**这几个精确值（大小写不敏感、带不带尾部 `/` 都算），
+/// 自建中转/别的域名一概不动 —— 归一不是"猜一个地址"，而是"把已知打错的那个
+/// 站换回上游真正承载这些接口的站"。
+fn canonical_trae_agent_base(raw: &str) -> Option<String> {
+    let host = raw.trim().trim_end_matches('/');
+    let lowered = host.to_ascii_lowercase();
+    match lowered.as_str() {
+        "https://api.trae.cn"
+        | "http://api.trae.cn"
+        | "https://www.trae.cn"
+        | "http://www.trae.cn"
+        | "https://api.trae.com.cn"
+        | "http://api.trae.com.cn" => Some(TRAE_AGENT_HOST.to_string()),
+        _ => None,
+    }
+}
+
 /// 生效的上游地址：账号级地址优先，空则用 provider 目录默认值。
 pub fn effective_base_url(session: &AccountSession) -> Result<String, BridgeError> {
     let raw = session.base_url.trim();
     if !raw.is_empty() {
+        // Trae：把网页站归一成 Agent 站（见 [`canonical_trae_agent_base`]）。
+        if session.provider == "trae" {
+            if let Some(base) = canonical_trae_agent_base(raw) {
+                return Ok(base);
+            }
+        }
         return Ok(raw.to_string());
     }
     let spec = registry::find(&session.provider).ok_or_else(|| {
@@ -237,6 +275,58 @@ mod tests {
     fn openai_compatible_requires_explicit_base_url() {
         let session = AccountSession::new("ch", "acct");
         assert!(effective_base_url(&session).is_err());
+    }
+
+    /// Trae 账号把网页站写成上游地址时，生效地址必须是 Agent 站。
+    ///
+    /// 生产实测：7 个 `trae-solo-*` 账号 `base_url = https://api.trae.cn`，
+    /// 对话固定回 TLB 404（同一凭据换 Agent 站立刻正常）。
+    #[test]
+    fn trae_web_host_is_normalized_to_the_agent_host() {
+        for raw in [
+            "https://api.trae.cn",
+            "https://api.trae.cn/",
+            "HTTPS://API.TRAE.CN",
+            "https://www.trae.cn",
+            "https://api.trae.com.cn",
+        ] {
+            let mut session = AccountSession::new("ch", "acct");
+            session.provider = "trae".to_string();
+            session.base_url = raw.to_string();
+            assert_eq!(
+                effective_base_url(&session).unwrap(),
+                "https://trae-api-cn.mchost.guru",
+                "raw={raw}"
+            );
+        }
+    }
+
+    /// 归一只认官方网页站的精确值：自建中转 / 别的域名必须原样透传。
+    ///
+    /// 反向对照 —— 若把归一写成"含 trae.cn 就换"，中转网关会被悄悄改地址，
+    /// 那比 404 更难查。
+    #[test]
+    fn trae_self_hosted_and_other_base_urls_are_left_alone() {
+        for raw in [
+            "https://my-trae-proxy.example.com",
+            "https://api.trae.cn:8443",
+            "https://api.trae.cn/v1",
+            "https://trae-api-cn.mchost.guru",
+        ] {
+            let mut session = AccountSession::new("ch", "acct");
+            session.provider = "trae".to_string();
+            session.base_url = raw.to_string();
+            assert_eq!(effective_base_url(&session).unwrap(), raw, "raw={raw}");
+        }
+    }
+
+    /// 非 trae 家即使用同一个网页站地址也不改（归一挂在 provider 上，不是挂在 URL 上）。
+    #[test]
+    fn other_providers_keep_their_own_base_url() {
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "deepseek".to_string();
+        session.base_url = "https://api.trae.cn".to_string();
+        assert_eq!(effective_base_url(&session).unwrap(), "https://api.trae.cn");
     }
 
     #[test]
