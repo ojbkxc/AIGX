@@ -135,7 +135,11 @@ function BenefitRow({
   return (
     <div className="ck-extra-row" key={accountId}>
       <div className="ck-benefit-head">
-        <span className="ck-extra-name">{t(name || accountId)}</span>
+        {/* 账号名是**用户数据**，不能当 i18n key：`t()` 对不存在的 key 原样返回，
+            但一旦用户把账号命名成「保存」「取消」「确定」这类已存在的 key，
+            英文界面就会把它显示成 Save / Cancel / OK —— 同行的 providerName
+            本来就是裸显示，这里 `t()` 只会让两列口径不一致。 */}
+        <span className="ck-extra-name">{name || accountId}</span>
         <span className="ck-extra-provider">{providerName}</span>
         {badge}
         <span className="ck-benefit-actions">{actions}</span>
