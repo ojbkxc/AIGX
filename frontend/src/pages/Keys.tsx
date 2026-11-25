@@ -28,9 +28,11 @@ import KeysDocsPanel from '../components/KeysDocsPanel';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, MultiSelect, Tabs } from '../components/ui';
 import './Keys.css';
 
-/** 客户端分页每页条数（与 Pricing 页一致） */
 const LS_PSZ = 'aigx-tbl-pagesize.keys';
 const LS_TCOLS = 'aigx-tbl-cols.keys';
+/** 客户端分页每页条数默认档（与公共 usePageSize 的 fallback、ModelManage、A2A table-shell 同为 50；
+ *  原值 20 是本页自己写的覆盖，导致同一产品里两个列表的新用户默认页大小不同） */
+const DEFAULT_PAGE_SIZE = 50;
 /** 密钥表列声明（select/actions 锁定） */
 const KEYS_COL_DEFS: TableColumnDef[] = [
   { key: 'select', label: '选择', align: 'center', width: 32, locked: true },
@@ -48,7 +50,6 @@ const KEYS_COL_DEFS: TableColumnDef[] = [
   { key: 'created', label: '创建时间', width: 150 },
   { key: 'actions', label: '操作', width: 130, locked: true },
 ];
-const DEFAULT_PAGE_SIZE = 20;
 
 /** 页面 Tab：密钥管理 / 接入文档（文档 2026-11-07 自独立页并入，07 E.3） */
 type KeysTab = 'keys' | 'docs';
