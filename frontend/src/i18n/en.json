@@ -444,6 +444,8 @@
   "「同义词替换」开关是关的：下面 {{n}} 条都不会生效。": "The synonym switch is OFF: none of the {{n}} row(s) below take effect.",
   "下面这些配置了内容，但对应开关是关的，不会生效：": "The items below are configured but their switches are OFF, so they do not take effect:",
   "{{label}}（{{count}} 项）": "{{label}} ({{count}})",
+  "## 正在生效": "## Active",
+  "## 配了但没启用（开关关着，不会生效）": "## Configured but OFF (switch is off, takes no effect)",
   "批量停用异常行": "Disable problem rows",
   "将停用 {{n}} 条异常行（不删除，之后可再启用）。继续？": "This disables {{n}} problem row(s) without deleting them; you can re-enable them later. Continue?",
   "已停用 {{n}} 条异常行": "Disabled {{n}} problem row(s)",

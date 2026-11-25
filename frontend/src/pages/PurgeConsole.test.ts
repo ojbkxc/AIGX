@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PurgeSettings } from '../types';
 import {
-  activeSummaryText,
   applyUndo,
   buildActiveSummary,
   buildConfigExport,
@@ -36,6 +35,7 @@ import {
   undoSnapshot,
   warningReportText,
   settingsEqual,
+  summaryTextWithOff,
   swapRules,
   tidySummary,
   writeDraftBackup,
@@ -375,6 +375,40 @@ describe('validateImportedSettings · 导出-导入自洽', () => {
   it('字符串数组本身不是数组 → fatal', () => {
     const verdict = validateImportedSettings({ fallback_models: 'glm-5' });
     expect(verdict.fatal.length).toBeGreaterThan(0);
+  });
+});
+
+describe('summaryTextWithOff', () => {
+  const tr = (key: string, params?: Record<string, string | number>): string =>
+    params ? key.replace(/\{\{(\w+)\}\}/g, (_m, k: string) => String(params[k] ?? '')) : key;
+
+  it('只有生效项 → 一个章节（不硬塞空章节）', () => {
+    const text = summaryTextWithOff([{ key: 'system 归一化' }], [], tr);
+    expect(text).toContain('## 正在生效');
+    expect(text).toContain('- system 归一化');
+    expect(text).not.toContain('配了但没启用');
+  });
+
+  it('**带上白配项**（贴给别人看时不能漏）', () => {
+    const text = summaryTextWithOff(
+      [{ key: 'system 归一化' }],
+      [{ code: 'dead_zone_off_with_rules', label: '死区词改写', count: 3, anchor: 'dead-zone-table' }],
+      tr,
+    );
+    expect(text).toContain('## 配了但没启用');
+    expect(text).toContain('死区词改写（3 项）');
+    // 两个章节顺序：先生效、后白配
+    expect(text.indexOf('## 正在生效')).toBeLessThan(text.indexOf('## 配了但没启用'));
+  });
+
+  it('每一项都占一行（便于贴进工单/群聊）', () => {
+    const text = summaryTextWithOff(
+      [{ key: 'a' }, { key: 'b' }],
+      [{ code: 'x', label: 'L', count: 1, anchor: 'a' }],
+      tr,
+    );
+    const lines = text.split('\n');
+    expect(lines.filter((l) => l.startsWith('- '))).toHaveLength(3);
   });
 });
 
@@ -960,23 +994,6 @@ describe('warningReportText', () => {
   it('只有某一级时不输出空分组标题', () => {
     const text = warningReportText([{ message: 'only-warn', severity: 'warn' }], tr);
     expect(text).toBe('## 需确认\n- only-warn');
-  });
-});
-
-describe('activeSummaryText', () => {
-  it('每行一条、带 `- ` 前缀，参数已插值（贴出去可直接读）', () => {
-    const items = [
-      { key: '死区词改写（{{n}} 条启用）', params: { n: 3 } },
-      { key: 'system 归一化' },
-    ];
-    const text = activeSummaryText(items, (key, params) =>
-      params ? key.replace('{{n}}', String(params.n)) : key,
-    );
-    expect(text).toBe('- 死区词改写（3 条启用）\n- system 归一化');
-  });
-
-  it('空清单 → 空串（不产出只有装饰的文本）', () => {
-    expect(activeSummaryText([], (k) => k)).toBe('');
   });
 });
 

@@ -578,6 +578,35 @@ export function configuredButOff(settings: PurgeSettings): ConfiguredButOff[] {
   return items;
 }
 
+/**
+ * 生效项 + 白配项 → 一份可粘贴的纯文本。
+ *
+ * 为什么要把白配项也带上：这份文本是**给别人看的**（贴工单、贴群聊）。只列生效项
+ * 会让读的人以为「没列出来的都没配」；而实际上「配了但开关关着」同样是关键信息
+ * ——否则对方照着这份清单以为某策略在跑。
+ */
+export function summaryTextWithOff(
+  active: ActiveItem[],
+  off: ConfiguredButOff[],
+  translate: (key: string, params?: Record<string, string | number>) => string,
+): string {
+  const lines = [translate('## 正在生效'), ...active.map((item) => `- ${translate(item.key, item.params)}`)];
+  if (off.length > 0) {
+    lines.push(
+      '',
+      translate('## 配了但没启用（开关关着，不会生效）'),
+      ...off.map(
+        (item) =>
+          `- ${translate('{{label}}（{{count}} 项）', {
+            label: translate(item.label),
+            count: item.count,
+          })}`,
+      ),
+    );
+  }
+  return lines.join('\n');
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -1084,13 +1113,10 @@ export function writeDraftBackup(
   }
 }
 
-/** 生效项摘要导出成纯文本（贴给同事/贴进工单时用，不带 UI 装饰）。 */
-export function activeSummaryText(
-  items: ActiveItem[],
-  translate: (key: string, params?: Record<string, string | number>) => string,
-): string {
-  return items.map((item) => `- ${translate(item.key, item.params)}`).join('\n');
-}
+/** 生效项摘要导出成纯文本（贴给同事/贴进工单时用，不带 UI 装饰）。
+ *  **已被 `summaryTextWithOff` 取代**：后者除生效项外还带「配了但没启用」那段，
+ *  而这份文本是给别人看的——只列生效项会让读的人以为「没列出来的都没配」。
+ *  旧函数与它的两条测试一并删掉（留着会让「测试还在跑」掩盖「产品已不用」）。 */
 
 /** 生效项摘要的一条：`key` 是 i18n 文案（含 `{{n}}` 等占位），`params` 是插值，
  *  `anchor` 是 `data-purge-fix` 锚点（点了滚到对应配置区）。 */
@@ -3857,7 +3883,11 @@ export default function PurgeConsole(): JSX.Element {
   const copyActiveSummary = useCallback(async (): Promise<void> => {
     const current = draftRef.current;
     if (!current) return;
-    const text = activeSummaryText(buildActiveSummary(current), (key, params) => t(key, params));
+    const text = summaryTextWithOff(
+      buildActiveSummary(current),
+      configuredButOff(current),
+      (key, params) => t(key, params),
+    );
     const copied = await copyText(text);
     addToast(
       copied ? t('已复制生效项清单') : t('复制失败（浏览器可能禁用了剪贴板权限）'),
