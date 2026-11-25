@@ -465,6 +465,64 @@ commit 因此变成 **78 个文件**，而我的源文件只有 5 个。
 3. **断言要瞄准本条要验的东西**：验证「调序生效」时套用了「未保存明细」元素，
    而那个元素还依赖 `savedForDiff`，条件更严、与本条无关。
 
+### 57. 导入校验的完整性（五道闸，各带测试）
+这条线修了三轮才收敛，每一轮都是「本页导出的配置自己导不进去或导得不对」：
+- **字符串数组被当对象数组**：`fallback_models: ["glm-5"]` 被按「元素必须是对象」
+  校验 → 判 fatal → 导出的文件拒绝导入。拆 `OBJECT_ARRAY_FIELDS` /
+  `STRING_ARRAY_FIELDS`（后者非字符串条目**只警告**：`.join()` 不会白屏）
+- **枚举没查值域**：`reasoning_floor: "extreme"` 导进去后下拉选不中任何一项，
+  而**后端只兜空串、不清洗非空值**（文案别写成「保存时回落默认」，那是假的）
+- **布尔靠隐式转换**：界面用 `Boolean(draft[key])`，而 **`Boolean('false')` 是
+  `true`** → `enabled: "false"` 显示成开启。`normalizeBooleanFields` 只认
+  `true/1/'true'/'yes'/'on'`，其余一律 false（宁关不开）
+- 另有：启用模板悬空会**静默回退**到 `structured_suffix`（体检里的 `preset_missing`
+  管预设 id，这条是同族，之前漏了）
+
+**核心那条测试直接断言「本页导出的配置 → 导入零 fatal 零 warning」**。
+
+### 58. 导出侧：完整性与可追溯
+- 导出的是**已保存**配置（迁移要的是生效值），有未保存修改时 toast 必须**明说**
+  「N 项未保存修改未包含在内」——否则用户以为导出的就是屏幕上这套
+- 文件里带 `exported_at` 与 `runtime {pid, upstream}`：多环境迁移时能判断新旧与
+  来源；**导入不校验也不用它们**（旧文件没有也照常导入）
+
+### 59. 可访问性与键盘操作
+- 几十行同名「删除」→ 名称带行标识（`删除「原文」`，空原文退 `删除第 N 条`）；
+  上移/下移在 `RuleRow` **内部**统一拼（一处改动覆盖两张表）
+- Esc 收起批量粘贴面板：`closers` 列表声明「哪些面板可关闭、怎么关」，新增面板
+  必须同步加进去，否则会出现「别的都能 Esc、这个不能」
+- 面板打开自动聚焦 textarea（键盘用户点开就能直接粘）
+
+**顺带收益**：e2e 从此能按名称精确定位，不再用 `nth()`/`.first()` 这类脆弱写法。
+**测不下去往往不是测试工具的问题，而是产品没给可读名称。**
+
+### 60. 并发判据必须用 ref，而且 e2e 必须能变异验证（这一批最贵）
+三轮都栽在同一处：**用 state 做并发判据**，`setState` 异步 → 同一 tick 内连点
+会穿透。
+
+| 位置 | 后果 | 变异验证 |
+|---|---|---|
+| `runPreview` | 连点发 3 个预览请求，谁后到谁覆盖 | 改回 state → `Received: 3` |
+| `handleApplySkill` | 两次 `fs::write` 同时覆盖同一个 `SKILL.md` | 去掉判据 → `Received: 2` |
+| `handleApplyTemplate` | 只重复 toast/确认（**不损坏数据**） | —— |
+
+**写 e2e 时连续两次假绿，两次都是变异验证抓出来的**：
+1. `probe.click()` 连点三次 —— Playwright 自带 actionability 等待把点击拉开，
+   state 早已更新，改回 state **仍然通过**。改成 `page.evaluate` 里同一 tick
+   `btn.click()` 三次才对。
+2. 连点两次都 `dismiss` —— 全部在 `confirm` 处返回、`busyRef` 从未置位，
+   并发路径根本没走到。改成两次都 `accept` + mock 悬停制造窗口才对。
+
+**固定纪律**：任何声称「防住了并发」的测试，都要能证明**去掉防护它会挂**。
+
+### 61. 一个必须记住的负结果
+`handleApplyTemplate` 我先后猜错两次：① 会插两个同名模板（实际按名替换，
+不会翻倍）；② 连点会重复取详情（`fetchBody` **有缓存**，增量为 0）。
+两条 e2e 都无法区分新旧，**都删掉了**，提交理由改成「只防重复提示」并写明
+这是低价值修复。
+
+**宁可交一个诚实的低价值修复，也不要交一个包装过的假缺陷。**
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
@@ -496,13 +554,13 @@ commit 因此变成 **78 个文件**，而我的源文件只有 5 个。
 | `cargo test --bin aigx` | **2575 passed / 0 failed**（含 purge:: 87） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **389 passed / 0 failed**（PurgeConsole 159） |
-| e2e（`purge-console-iter` 单 spec，desktop / mobile 各一次） | **46 passed / 0 failed**（×2 project） |
+| vitest 全量 | **415 passed / 0 failed**（PurgeConsole 185） |
+| e2e（`purge-console-iter` 单 spec，desktop / mobile 各一次） | **55 passed / 0 failed**（×2 project） |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
-> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 56 批收口值；Rust 侧数字来自 CI，本机按 AGENTS.md 不编译）。
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 61 批收口值；Rust 侧数字来自 CI，本机按 AGENTS.md 不编译）。
 > **已修**：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
 > 曾偶发假红——固定 `sleep(50ms)` 当同步手段，并发负载下不够。已改为轮询等待
 > （每 5ms 查一次、最多 2s，判据不变），单跑 5 次 + 全量连跑 3 次全绿。
