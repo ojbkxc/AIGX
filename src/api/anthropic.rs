@@ -24,8 +24,9 @@ use crate::bridge::{BridgeContext, ChatFormat, ChatMessage, FinishReason, Role};
 // Anthropic 协议优先 x-api-key，故使用 xapi_first 变体。
 use super::common::extract_api_key_xapi_first as extract_api_key;
 use super::common::extract_client_ip;
-// attempt_provider 定义在 openai::resolve（AttemptDetail.provider 的兜底）。
-use super::openai::resolve::attempt_provider;
+// attempt_provider 定义在 openai::resolve（AttemptDetail.provider 的兜底）；
+// provider_of_channel_id 是同模块的「按 channel_id 反查供应商」（请求日志 provider 列）。
+use super::openai::resolve::{attempt_provider, provider_of_channel_id};
 
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
 ///
@@ -931,6 +932,7 @@ pub async fn handle_messages(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
+                                            state,
                                             ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
@@ -977,6 +979,7 @@ pub async fn handle_messages(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
+                                            state,
                                             ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
@@ -1029,7 +1032,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1070,7 +1073,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1141,6 +1144,9 @@ pub async fn handle_messages(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone());
+                log.provider = used_channel_id
+                    .as_deref()
+                    .and_then(|cid| provider_of_channel_id(&state, cid));
                 log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
                 log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                     None
@@ -1845,7 +1851,11 @@ pub async fn handle_messages(
                                         .as_ref()
                                         .map(|c| c.name.clone())
                                         .unwrap_or_default(),
-                                    provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                                    provider: attempt_provider(
+                                        state,
+                                        ch_ref.as_ref(),
+                                        bridge.as_ref(),
+                                    ),
                                     account: String::new(),
                                     model: upstream.clone(),
                                     sticky_hit,
@@ -1900,7 +1910,7 @@ pub async fn handle_messages(
                                     .as_ref()
                                     .map(|c| c.name.clone())
                                     .unwrap_or_default(),
-                                provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                                provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                                 account: String::new(),
                                 model: upstream.clone(),
                                 sticky_hit,
@@ -1943,7 +1953,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1984,7 +1994,7 @@ pub async fn handle_messages(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -2062,6 +2072,9 @@ pub async fn handle_messages(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone());
+                log.provider = used_channel_id
+                    .as_deref()
+                    .and_then(|cid| provider_of_channel_id(&state, cid));
                 log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
                 log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                     None
@@ -2179,6 +2192,9 @@ pub async fn handle_messages(
                 .as_ref()
                 .and_then(|cid| state.channel_store.get(cid))
                 .map(|c| c.name.clone());
+            log.provider = used_channel_id
+                .as_deref()
+                .and_then(|cid| provider_of_channel_id(&state, cid));
             log.model = billing_model.to_string();
             log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                 None

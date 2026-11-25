@@ -172,23 +172,27 @@ pub(crate) struct ChannelMeta {
     pub provider: String,
 }
 
-/// channel_id → (渠道名, provider)。provider 取 `channel_type`；账号型渠道取
-/// 账号池声明的 provider（拿不到时回落 `"account"`）。
+/// channel_id → (渠道名, provider)。provider 口径单点：
+/// [`crate::log::provider_label_for_channel`]（渠道型取 `channel_type`；账号型
+/// 取账号池声明的 provider，拿不到回落 `"account"`）。
+///
+/// 与请求日志的 `provider` 列**必须同源**：工作台与日志页对同一渠道显示两个
+/// 供应商是不可接受的，故这里不再自建换算。
 pub(crate) fn channel_meta_map(state: &AppState) -> HashMap<String, ChannelMeta> {
     state
         .channel_store
         .snapshot()
         .iter()
         .map(|channel| {
-            let provider = if channel.channel_type == ChannelType::Account {
-                state
-                    .account_sessions
-                    .provider_for_channel(&channel.id)
-                    .filter(|provider| !provider.is_empty())
-                    .unwrap_or_else(|| channel.channel_type.as_str().to_string())
+            let account_provider = if channel.channel_type == ChannelType::Account {
+                state.account_sessions.provider_for_channel(&channel.id)
             } else {
-                channel.channel_type.as_str().to_string()
+                None
             };
+            let provider = crate::log::provider_label_for_channel(
+                channel.channel_type,
+                account_provider.as_deref(),
+            );
             (
                 channel.id.clone(),
                 ChannelMeta {

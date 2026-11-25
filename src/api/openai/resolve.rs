@@ -78,20 +78,56 @@ impl RouteCapture {
     }
 }
 
-/// 尝试明细的 `provider` 字段取值：渠道引用优先（`channel_type`），
-/// Hub 兜底候选没有渠道引用时用 bridge 自报身份（如 `hub:cloudflare`）。
+/// 尝试明细的 `provider` 字段取值（与 `RequestLog.provider` **同口径**）。
 ///
-/// 为什么必须有这一层：兜底候选是 `(bridge, None, None)`，`ch_ref` 为
-/// `None` 时直接 `unwrap_or_default()` 会把 provider 写成空串——线上请求
-/// 日志里 provider 列为空，排障时会被误判成「供应商返回空」。见
-/// `bridge::hub_fallback` 模块头。
+/// 口径单点在 [`crate::log::provider_label_for_channel`]：渠道型取协议族、
+/// 账号池型取该渠道下首个非空账号 `provider`。这里只负责补「没有渠道引用」
+/// 的那一档 —— Hub 兜底候选是 `(bridge, None, None)`，`ch_ref` 为 `None`，
+/// 直接 `unwrap_or_default()` 会把 provider 写成空串，排障时会被误判成
+/// 「供应商返回空」（见 `bridge::hub_fallback` 模块头），故用 bridge 自报
+/// 身份（如 `hub:cloudflare`）兜底。
+///
+/// `state`：只为账号型渠道的「家」反查（`AccountSessionStore::provider_for_channel`，
+/// O(1) 索引）；非账号型渠道连哈希查找都不做。
 pub(crate) fn attempt_provider(
+    state: &AppState,
     ch_ref: Option<&crate::channel::Channel>,
     bridge: &dyn crate::bridge::Bridge,
 ) -> String {
-    ch_ref
-        .map(|c| c.channel_type.as_str().to_string())
-        .unwrap_or_else(|| bridge.name().to_string())
+    match ch_ref {
+        Some(channel) => {
+            let account_provider = (channel.channel_type == crate::channel::ChannelType::Account)
+                .then(|| state.account_sessions.provider_for_channel(&channel.id))
+                .flatten();
+            crate::log::provider_label_for_channel(
+                channel.channel_type,
+                account_provider.as_deref(),
+            )
+        }
+        None => bridge.name().to_string(),
+    }
+}
+
+/// 按渠道 ID 反查供应商（写请求日志时用：那一层手上通常只剩 `channel_id`）。
+///
+/// `None` = 没有渠道（Hub 兜底 / 选路前就失败）→ 调用方不要填 provider。
+/// 渠道存在但已不在库里（日志写的这一刻渠道刚被删）同样返回 `None` ——
+/// 这是**如实留白**，不猜一个曾经的值：把一个已删渠道的旧协议族写进日志，
+/// 读侧无法与「当时确实是这一家」区分。
+///
+/// 账号型渠道的「家」走 [`crate::account_session::AccountSessionStore::provider_for_channel`]
+/// 的 O(1) 索引，不逐条扫账号表。
+pub(crate) fn provider_of_channel_id(state: &AppState, channel_id: &str) -> Option<String> {
+    let channel = state.channel_store.get(channel_id)?;
+    let account_provider = if channel.channel_type == crate::channel::ChannelType::Account {
+        state.account_sessions.provider_for_channel(&channel.id)
+    } else {
+        None
+    };
+    Some(crate::log::provider_label_for_channel(
+        channel.channel_type,
+        account_provider.as_deref(),
+    ))
 }
 
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。

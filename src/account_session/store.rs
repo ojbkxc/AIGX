@@ -205,6 +205,50 @@ struct Inner {
     retry_on_status: RwLock<Vec<u16>>,
     /// 落盘节流：account id → 上次持久化 unix 秒。
     persisted_at: DashMap<String, i64>,
+    /// `channel_id` → 供应商索引（`provider_for_channel` 的 O(1) 快路径）。
+    ///
+    /// ── 为什么需要它 ─────────────────────────────────────────────
+    /// 请求日志每写一条都要回答「这个 channel_id 是哪一家」。账号型的「家」
+    /// 只存在账号上（`AccountSession.provider`），而 `sessions` 是**全池**的
+    /// Vec —— 逐条日志从表头扫到表尾在账号上千时就是每请求 O(n) 的热路径。
+    /// 本表只缓存「渠道 → 首个非空 provider」这一个结论，读侧一次哈希查找。
+    ///
+    /// ── 为什么不会漂移 ───────────────────────────────────────────
+    /// `sessions` 的写入口只有三处（[`AccountSessionStore::upsert`] /
+    /// `remove` / `remove_for_channel`）加启动 [`AccountSessionStore::load`]；
+    /// 四处都在改完 `sessions` 后立即调 [`AccountSessionStore::refresh_channel_provider`]
+    /// 重算受影响渠道（或整体重建）。账号的 `channel_id` / `provider` 不在
+    /// 其它写入口里变更（其余 `sessions.write()` 只动凭证/状态/排序）。
+    /// 算法单点在 [`build_channel_provider`] / [`first_provider_of`]。
+    channel_provider: DashMap<String, String>,
+}
+
+/// 从一批账号算出「channel_id → provider」索引（**唯一算法**）。
+///
+/// 口径与慢路径逐字一致：按 `sessions` 的既有顺序（`created_at` 升序 →
+/// `id` 升序）取**首个非空** provider。空 provider 的账号不建条目。
+fn build_channel_provider(sessions: &[AccountSession]) -> DashMap<String, String> {
+    let index: DashMap<String, String> = DashMap::new();
+    for session in sessions {
+        if session.provider.is_empty() {
+            continue;
+        }
+        index
+            .entry(session.channel_id.clone())
+            .or_insert_with(|| session.provider.clone());
+    }
+    index
+}
+
+/// 某渠道的供应商：按 `sessions` 顺序取首个非空 provider（**唯一算法**）。
+///
+/// 慢路径（`load` 重建索引、写入口增量重算）都走这里，保证两条路不会算出
+/// 两个不同的答案。
+fn first_provider_of(sessions: &[AccountSession], channel_id: &str) -> Option<String> {
+    sessions
+        .iter()
+        .find(|s| s.channel_id == channel_id && !s.provider.is_empty())
+        .map(|s| s.provider.clone())
 }
 
 /// 单个账号的运行态（不落盘，重启归零）。
@@ -312,6 +356,7 @@ impl AccountSessionStore {
                 retry_interval_ms: AtomicU64::new(0),
                 retry_on_status: RwLock::new(vec![402]),
                 persisted_at: DashMap::new(),
+                channel_provider: DashMap::new(),
             }),
         };
         if let Err(e) = pool.load() {
@@ -361,8 +406,11 @@ impl AccountSessionStore {
                 );
             }
         }
-        *self.inner.sessions.write() = sessions;
+        *self.inner.sessions.write() = sessions.clone();
         *self.inner.capabilities.write() = capabilities;
+        // 渠道 → 供应商索引与 `sessions` 同一次重载重建（唯一算法见
+        // `build_channel_provider`）；漏掉这一步索引会一直空，读侧退回全扫。
+        self.rebuild_channel_provider(&sessions);
         Ok(())
     }
 
@@ -486,16 +534,50 @@ impl AccountSessionStore {
 
     /// 指定渠道的**供应商名**（取首个非空 `provider`）。
     ///
-    /// 只读锁内取一个字符串就返回，**不 clone 账号表** —— `for_channel` 会连凭证
-    /// 一起 clone，热路径（每请求每尝试一次）不能那么用。用途：脱敏规则的 provider
-    /// 作用域标识（见 `api::openai::sanitize_provider_id`）。
+    /// **热路径**（每请求写一条请求日志时都要问一次「这个渠道是哪一家」）：
+    /// 走 `channel_provider` 索引做 O(1) 哈希查找，不扫账号表、不 clone 账号
+    ///（`for_channel` 会连凭证一起 clone，绝不能这么用）。
+    ///
+    /// 索引未命中时**回落全扫**而不是直接返回 `None`：索引是本次才建的，
+    /// 混合态（索引建好后又从外部直接改了 KV）下宁可慢一次也不能给错答案
+    ///（空供应商会被误读成「上游返回空」）。回落结果不写回索引 —— 写回会
+    /// 让「索引过期」这件事再也查不出来。
     pub fn provider_for_channel(&self, channel_id: &str) -> Option<String> {
-        self.inner
-            .sessions
-            .read()
-            .iter()
-            .find(|s| s.channel_id == channel_id && !s.provider.is_empty())
-            .map(|s| s.provider.clone())
+        if let Some(hit) = self.inner.channel_provider.get(channel_id) {
+            return Some(hit.value().clone());
+        }
+        let sessions = self.inner.sessions.read();
+        first_provider_of(&sessions, channel_id)
+    }
+
+    /// 整体重建渠道 → 供应商索引（`load` 用；调用方持有权威快照）。
+    fn rebuild_channel_provider(&self, sessions: &[AccountSession]) {
+        let next = build_channel_provider(sessions);
+        let index = &self.inner.channel_provider;
+        // 先清空再灌入：删掉的渠道必须从索引里消失，否则「渠道已删除」的
+        // channel_id 会继续被查出一个早已不存在的家。
+        index.clear();
+        for entry in next.into_iter() {
+            index.insert(entry.0, entry.1);
+        }
+    }
+
+    /// 增量重算**一个**渠道的供应商索引（写入口用；只碰受影响的那一格）。
+    ///
+    /// 传 `None` = 该渠道已无账号/全部 provider 为空 → 删掉索引条目。
+    /// 调用方必须已经在 `sessions` 写锁内完成变更（这里再读一次锁）。
+    fn refresh_channel_provider(&self, channel_id: &str) {
+        let sessions = self.inner.sessions.read();
+        match first_provider_of(&sessions, channel_id) {
+            Some(provider) => {
+                self.inner
+                    .channel_provider
+                    .insert(channel_id.to_string(), provider);
+            }
+            None => {
+                self.inner.channel_provider.remove(channel_id);
+            }
+        }
     }
 
     /// 按 id 取账号（id 全局唯一）。
@@ -576,6 +658,15 @@ impl AccountSessionStore {
                     slot.credential.secret_plain() != next.credential.secret_plain()
                 })
         };
+        // 搬迁判定：本账号若从渠道 A 换到渠道 B，A 的供应商可能随之消失
+        //（A 下只剩空 provider 的账号），必须两个渠道都重算。
+        let previous_channel = {
+            let sessions = self.inner.sessions.read();
+            sessions
+                .iter()
+                .find(|s| s.id == next.id)
+                .map(|s| s.channel_id.clone())
+        };
         if credential_replaced {
             next.reset_relogin_signal();
             next.logged_in_at = Some(now);
@@ -598,11 +689,17 @@ impl AccountSessionStore {
             }
             sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         }
+        // 凭证变更 = 重新登录：进行中的余额查询任务带的是旧凭据，作废
+        //（A2A `invalidateAccount` 同语义；见 usage_jobs 模块注释）。
         if credential_replaced {
-            // 凭证变更 = 重新登录：进行中的余额查询任务带的是旧凭据，作废
-            //（A2A `invalidateAccount` 同语义；见 usage_jobs 模块注释）。
             super::usage_jobs::invalidate_account(&next.id);
         }
+        // 渠道 → 供应商索引：本账号的 `provider` / `channel_id` 可能刚被改过
+        //（含「换到另一个渠道」这种搬迁），受影响渠道要重算。
+        if let Some(previous) = previous_channel.filter(|prev| prev != &next.channel_id) {
+            self.refresh_channel_provider(&previous);
+        }
+        self.refresh_channel_provider(&next.channel_id);
         Ok(next)
     }
 
@@ -621,6 +718,9 @@ impl AccountSessionStore {
         self.inner.persisted_at.remove(&removed.id);
         // 账号已删除：在跑的余额查询任务必须停，否则会持续写已不存在账号的读数
         super::usage_jobs::invalidate_account(&removed.id);
+        // 删掉的可能是该渠道唯一的非空 provider 账号 → 索引要跟着消失，
+        // 否则「渠道已无账号」仍会查出一个供应商。
+        self.refresh_channel_provider(&removed.channel_id);
         Ok(Some(removed))
     }
 
@@ -639,6 +739,8 @@ impl AccountSessionStore {
                 .delete(&Self::key_of(&session.channel_id, &session.id))?;
             self.inner.persisted_at.remove(&session.id);
         }
+        // 整渠道清空：索引条目必须一并删除（不重算 —— 该渠道已无账号）。
+        self.inner.channel_provider.remove(channel_id);
         Ok(removed.len())
     }
 
@@ -3212,6 +3314,127 @@ mod tests {
                 names.insert(lease.session().name.clone());
             }
             assert_eq!(names.len(), 2, "同档账号仍参与加权轮转，不被分档裁掉");
+        });
+    }
+
+    // ── channel_id → provider 索引（O(1) 快路径）───────────────────────
+    //
+    // 这一组钉住「索引与全扫永远同答案」：索引是请求日志 provider 列的
+    // 数据源，漂移会让日志写下一个错误的供应商（比空更坏）。每条都带
+    // 正向对照，防「两边都返回 None」这种恒真断言。
+
+    /// 索引与慢路径（全扫）取值一致，且能跟随 upsert 变化。
+    #[test]
+    fn channel_provider_index_matches_full_scan() {
+        with_secret_dir("provider-index", || {
+            let pool = pool();
+            let mut a = session("ch-1", "acct-a", 0);
+            a.provider = "trae".to_string();
+            let mut b = session("ch-2", "acct-b", 0);
+            b.provider = "xiaohuanxiong".to_string();
+            pool.upsert(a).unwrap();
+            pool.upsert(b).unwrap();
+
+            assert_eq!(pool.provider_for_channel("ch-1").as_deref(), Some("trae"));
+            assert_eq!(
+                pool.provider_for_channel("ch-2").as_deref(),
+                Some("xiaohuanxiong")
+            );
+            // 正向对照：不存在的渠道必须是 None（否则上面的断言可能是恒真）
+            assert_eq!(pool.provider_for_channel("ch-nope"), None);
+
+            // 索引内容与全扫结果逐格相等（这是「同一把刀」的机器判据）
+            let snapshot = pool.inner.sessions.read().clone();
+            for channel_id in ["ch-1", "ch-2", "ch-nope"] {
+                assert_eq!(
+                    pool.provider_for_channel(channel_id),
+                    first_provider_of(&snapshot, channel_id),
+                    "渠道 {channel_id} 的索引值必须等于全扫值"
+                );
+            }
+        });
+    }
+
+    /// 改家名后索引立即跟上（不重载、不重启）。
+    #[test]
+    fn channel_provider_index_follows_provider_change() {
+        with_secret_dir("provider-change", || {
+            let pool = pool();
+            let mut a = session("ch-1", "acct-a", 0);
+            a.provider = "trae".to_string();
+            let created = pool.upsert(a).unwrap();
+            assert_eq!(pool.provider_for_channel("ch-1").as_deref(), Some("trae"));
+
+            let mut changed = created.clone();
+            changed.provider = "workbuddy".to_string();
+            pool.upsert(changed).unwrap();
+            assert_eq!(
+                pool.provider_for_channel("ch-1").as_deref(),
+                Some("workbuddy"),
+                "改家名后索引必须跟着变"
+            );
+        });
+    }
+
+    /// 删掉该渠道唯一的非空 provider 账号 → 索引条目消失（不留悬空家名）。
+    #[test]
+    fn channel_provider_index_drops_when_last_provider_account_removed() {
+        with_secret_dir("provider-remove", || {
+            let pool = pool();
+            let mut a = session("ch-1", "acct-a", 0);
+            a.provider = "trae".to_string();
+            let created = pool.upsert(a).unwrap();
+            assert_eq!(pool.provider_for_channel("ch-1").as_deref(), Some("trae"));
+
+            pool.remove(&created.id).unwrap();
+            assert_eq!(
+                pool.provider_for_channel("ch-1"),
+                None,
+                "渠道下已无账号 → 不该再查出一个供应商"
+            );
+
+            // 正向对照：同渠道还有另一个账号时必须仍能查到它
+            let mut b = session("ch-1", "acct-b", 0);
+            b.provider = "qoder".to_string();
+            pool.upsert(b).unwrap();
+            assert_eq!(pool.provider_for_channel("ch-1").as_deref(), Some("qoder"));
+        });
+    }
+
+    /// 整渠道清空（渠道删除级联）→ 索引条目一并消失。
+    #[test]
+    fn channel_provider_index_cleared_with_channel() {
+        with_secret_dir("provider-clear", || {
+            let pool = pool();
+            let mut a = session("ch-1", "acct-a", 0);
+            a.provider = "trae".to_string();
+            pool.upsert(a).unwrap();
+            assert_eq!(pool.provider_for_channel("ch-1").as_deref(), Some("trae"));
+
+            let removed = pool.remove_for_channel("ch-1").unwrap();
+            assert_eq!(removed, 1);
+            assert_eq!(pool.provider_for_channel("ch-1"), None);
+        });
+    }
+
+    /// 重载后索引与落盘数据一致（重启场景：索引是内存态，必须由 load 重建）。
+    #[test]
+    fn channel_provider_index_rebuilt_on_reload() {
+        with_secret_dir("provider-reload", || {
+            let dir = TempDir::new().unwrap();
+            let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+            let pool = AccountSessionStore::new(Arc::clone(&store));
+            let mut a = session("ch-1", "acct-a", 0);
+            a.provider = "codearts".to_string();
+            pool.upsert(a).unwrap();
+
+            // 新实例（模拟重启）：索引为空表起步，只能靠 load 重建
+            let reopened = AccountSessionStore::new(store);
+            assert_eq!(
+                reopened.provider_for_channel("ch-1").as_deref(),
+                Some("codearts"),
+                "重载后索引必须由 load 重建（否则重启即丢供应商）"
+            );
         });
     }
 }

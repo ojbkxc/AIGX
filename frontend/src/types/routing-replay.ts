@@ -99,7 +99,10 @@ export interface RouteReplayAttemptItem {
   index: number;
   channel_id: string;
   channel_name: string;
-  /** 渠道协议域（channel_type；账号型恒 "account"） */
+  /** 供应商（后端 `AttemptDetail.provider`，与请求日志的「供应商」同口径）：
+   *  渠道型 = 上游协议族（channel_type）；账号池型 = 该渠道下账号的 provider
+   *  （`trae` / `xiaohuanxiong` …，取不到才回落 `"account"`）；
+   *  无渠道的兜底候选 = bridge 自报身份（如 `hub:cloudflare`）。 */
   provider: string;
   /** 恒空串（渠道级明细拿不到账号名；UI 隐藏空值） */
   account: string;

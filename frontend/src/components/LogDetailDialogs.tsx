@@ -36,7 +36,19 @@ export function RequestLogDetail({ log, admin, onClose }: {
     { label: admin ? t('模型（映射后）') : t('模型'), value: log.model || '—', mono: true },
     ...(admin ? [{ label: t('原始模型名'), value: log.origin_model || '—', mono: true }] : []),
     { label: t('客户端'), value: log.client_name ? `${log.client_name}${log.client_version ? ` ${log.client_version}` : ''}` : '—' },
-    ...(admin ? [{ label: t('供应商'), value: log.channel_name ? `${log.channel_name}${log.channel_id ? ` (#${log.channel_id})` : ''}` : (log.channel_id ? `#${log.channel_id}` : '—') }] : []),
+    // 「供应商」= 后端 `provider`（渠道型=上游协议族 / 账号池型=账号的家）。
+    // `channel_name` 是渠道/账号池的名字（另一个维度），作括号内的归属信息保留；
+    // 老日志没有 `provider` 键 → 逐字回退到改造前的 `channel_name` 显示。
+    ...(admin ? [{
+      label: t('供应商'),
+      value: (() => {
+        const where = `${log.channel_name ?? ''}${log.channel_id ? ` #${log.channel_id}` : ''}`.trim();
+        const provider = log.provider?.trim();
+        if (provider) return where ? `${provider} (${where})` : provider;
+        if (log.channel_name) return `${log.channel_name}${log.channel_id ? ` (#${log.channel_id})` : ''}`;
+        return log.channel_id ? `#${log.channel_id}` : '—';
+      })(),
+    }] : []),
     { label: t('输入 Tokens'), value: String(log.input_tokens ?? 0) },
     { label: t('输出 Tokens'), value: String(log.output_tokens ?? 0) },
     { label: t('费用'), value: fmtCost(log.cost ?? 0, lang) },

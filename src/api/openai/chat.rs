@@ -1,7 +1,8 @@
 use super::*;
-// attempt_provider（attempt 明细的 provider 回退）定义在 resolve，chat 的
-// failover 16 处调用点里有 8 处在这——不带这条 mod 级 use 就是 E0425。
-use super::resolve::attempt_provider;
+// attempt_provider（attempt 明细的 provider 回退）与 provider_of_channel_id
+// （请求日志 provider 列的反查）都定义在 resolve，chat 的 failover 16 处调用
+// 点里有 8 处在这——不带这条 mod 级 use 就是 E0425。
+use super::resolve::{attempt_provider, provider_of_channel_id};
 use crate::api::common::extract_client_ip;
 use crate::bridge::{tool_repair, Bridge, BridgeContext, ChatFormat};
 use crate::channel::ChannelStore;
@@ -648,6 +649,7 @@ pub(crate) async fn handle_chat_completions(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
+                                            state,
                                             ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
@@ -697,6 +699,7 @@ pub(crate) async fn handle_chat_completions(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
+                                            state,
                                             ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
@@ -740,7 +743,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -797,7 +800,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -875,6 +878,9 @@ pub(crate) async fn handle_chat_completions(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone());
+                log.provider = used_channel_id
+                    .as_deref()
+                    .and_then(|cid| provider_of_channel_id(&state, cid));
                 log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
                 log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                     None
@@ -1530,7 +1536,11 @@ pub(crate) async fn handle_chat_completions(
                                         .as_ref()
                                         .map(|c| c.name.clone())
                                         .unwrap_or_default(),
-                                    provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                                    provider: attempt_provider(
+                                        state,
+                                        ch_ref.as_ref(),
+                                        bridge.as_ref(),
+                                    ),
                                     account: String::new(),
                                     model: upstream.clone(),
                                     sticky_hit,
@@ -1587,7 +1597,7 @@ pub(crate) async fn handle_chat_completions(
                                     .as_ref()
                                     .map(|c| c.name.clone())
                                     .unwrap_or_default(),
-                                provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                                provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                                 account: String::new(),
                                 model: upstream.clone(),
                                 sticky_hit,
@@ -1631,7 +1641,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1673,7 +1683,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1753,6 +1763,9 @@ pub(crate) async fn handle_chat_completions(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone());
+                log.provider = used_channel_id
+                    .as_deref()
+                    .and_then(|cid| provider_of_channel_id(&state, cid));
                 log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
                 log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                     None
@@ -1893,6 +1906,9 @@ pub(crate) async fn handle_chat_completions(
                 .as_ref()
                 .and_then(|cid| state.channel_store.get(cid))
                 .map(|c| c.name.clone());
+            log.provider = used_channel_id
+                .as_deref()
+                .and_then(|cid| provider_of_channel_id(&state, cid));
             log.model = billing_model.to_string();
             log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                 None

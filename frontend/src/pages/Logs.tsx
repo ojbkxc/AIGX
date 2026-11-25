@@ -39,6 +39,16 @@ export interface RequestLogItem {
   key_id?: string;
   channel_id?: string;
   channel_name?: string;
+  /**
+   * 供应商（后端 `RequestLog.provider`）：渠道型 = 上游协议族
+   *（openai_compatible / anthropic / gemini / zai / cloudflare / plugin）；
+   * 账号池型 = 账号的「家」（trae / xiaohuanxiong / workbuddy …）。
+   *
+   * 与 `channel_name`（渠道/账号池的名字，运维可改可删）是**两个维度**。
+   * 老日志没有这个键（历史数据没记过这一维）→ `undefined`，展示层回退
+   * 到 `channel_name`，与改造前的显示逐字一致。
+   */
+  provider?: string;
   model?: string;
   origin_model?: string;
   input_tokens?: number;
@@ -1287,8 +1297,26 @@ export default function Logs(): JSX.Element {
                       </td>
                       )}
                       {admin && visibleKeySet.has('channel') && (
-                        <td style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.channel_name || ''}>
-                          {masked ? mask(l.channel_name) : (l.channel_name || '—')}
+                        <td
+                          style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          title={[l.provider, l.channel_name, l.channel_id ? `#${l.channel_id}` : '']
+                            .filter(Boolean)
+                            .join(' · ')}
+                        >
+                          {/* 「供应商」列 = 后端 `provider`（渠道型=协议族 / 账号池型=账号的家）。
+                              `channel_name` 是另一个维度（渠道/池的名字），作弱化副行保留；
+                              两者都没有时再退到 `channel_id`，最后才是「—」（真的没记录）。
+                              老日志没有 `provider` 键 → 逐字回退到改造前的 `channel_name` 显示。 */}
+                          {masked ? (
+                            mask(l.provider || l.channel_name || l.channel_id)
+                          ) : (
+                            <>
+                              {l.provider || l.channel_name || (l.channel_id ? `#${l.channel_id}` : '—')}
+                              {l.provider && l.channel_name && (
+                                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{l.channel_name}</div>
+                              )}
+                            </>
+                          )}
                         </td>
                       )}
                       {visibleKeySet.has('tokens') && (

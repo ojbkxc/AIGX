@@ -883,6 +883,10 @@ impl StreamBillingState {
         log.key_id = Some(self.api_key.id.clone());
         log.channel_id = self.channel_id.clone();
         log.channel_name = self.channel_name.clone();
+        log.provider = self
+            .channel_id
+            .as_deref()
+            .and_then(|cid| crate::api::openai::resolve::provider_of_channel_id(&self.state, cid));
         log.model = self.model.clone();
         log.origin_model = self.origin_model.clone();
         log.channel_cost = self.compute_channel_cost(prompt_tokens, completion_tokens, cost);
@@ -1055,6 +1059,10 @@ impl ResponsesBillingState {
         log.key_id = Some(self.api_key.id.clone());
         log.channel_id = self.channel_id.clone();
         log.channel_name = self.channel_name.clone();
+        log.provider = self
+            .channel_id
+            .as_deref()
+            .and_then(|cid| crate::api::openai::resolve::provider_of_channel_id(&self.state, cid));
         log.model = self.model.clone();
         log.origin_model = self.origin_model.clone();
         log.channel_cost = compute_channel_cost(
@@ -1200,12 +1208,14 @@ impl Drop for ResponsesStreamGuard {
 /// 归因到渠道会误伤健康度。
 /// #47：499 日志写入的可测核心（单测覆盖；估算结算仍由 write_499 走
 /// settle_usage，行为级验证归 E1/E2）。
+/// `provider`：供应商标识（口径同 `RequestLog::provider`；`None` = 渠道已不在库里）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_attempt_499_log(
     log_store: &crate::log::LogStore,
     key_id: &str,
     channel_id: &str,
     channel_name: Option<String>,
+    provider: Option<String>,
     model: &str,
     estimated_prompt: u64,
     cost: i64,
@@ -1218,6 +1228,7 @@ pub(crate) fn write_attempt_499_log(
     log.key_id = Some(key_id.to_string());
     log.channel_id = Some(channel_id.to_string());
     log.channel_name = channel_name;
+    log.provider = provider;
     log.model = model.to_string();
     log.input_tokens = estimated_prompt;
     log.output_tokens = 0;
@@ -1289,6 +1300,7 @@ impl AttemptStartGuard {
                 .channel_store
                 .get(&self.channel_id)
                 .map(|c| c.name.clone()),
+            crate::api::openai::resolve::provider_of_channel_id(&self.state, &self.channel_id),
             &self.model,
             estimated_prompt,
             cost,
@@ -1447,6 +1459,7 @@ mod price_snapshot_tests {
             "key-1",
             "ch-9",
             Some("测试渠道".to_string()),
+            Some("anthropic".to_string()),
             "gpt-test",
             321,
             45,

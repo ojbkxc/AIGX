@@ -119,6 +119,32 @@ pub struct RequestLog {
     /// 渠道名（admin 排查用，用户不展示）
     #[serde(default)]
     pub channel_name: Option<String>,
+    /// 实际承载本次请求的**供应商**（口径与 Agent2API `RequestEntry.provider` 一致）。
+    ///
+    /// ── 「供应商」在 AIGX 里指什么 ────────────────────────────────
+    /// 两类上游共用一条日志，但「是谁扛的这次请求」这一维度过去**没有落点**：
+    /// - **渠道型**（`openai_compatible` / `anthropic` / `gemini` / `zai` /
+    ///   `cloudflare` / `plugin`）：供应商 = 上游协议族，取 `channel_type.as_str()`；
+    /// - **账号池型**（`ChannelType::Account`）：渠道只是容器，真正的「家」在
+    ///   账号上（`trae` / `xiaohuanxiong` / `workbuddy` …），取该渠道下首个非空
+    ///   账号 `provider`，取不到才回落 `"account"`。
+    ///
+    /// 这与 [`crate::api::admin::routing_workspace::channel_meta_map`] 的既有口径
+    /// **逐字相同** —— 路由工作台早就在算这个值，只是没落进日志。日志与工作台
+    /// 必须同一把刀，否则同一个渠道在两页显示两个供应商。
+    ///
+    /// ── 与 `channel_name` 的分工（两者不是一回事）──────────────
+    /// `channel_name` 是**渠道/账号池的名字**（运维起的名字，可改、可删）；
+    /// `provider` 是**协议族/家**（结构性事实，不随改名变化）。渠道被删之后
+    /// `channel_name` 就查不到了（写入时点查 `channel_store.get` 落空），而
+    /// `provider` 仍能回答「当时是哪一类上游扛的」—— 这正是补这一维度的理由。
+    ///
+    /// ── 为什么是 `Option<String>` 而不是空串 ─────────────────────
+    /// 本结构体存量字段的口径就是「没有 = `None` + 不猜值」；且 `None` 与
+    /// 「上游协议族恰好叫空」不可能混淆。存量日志无此键 → `serde(default)`
+    /// 读成 `None`（零迁移），展示层给占位符。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// 模型名 — 映射后的上游真实名（= 价格表里的名），用户看这个
     #[serde(default)]
     pub model: String,
@@ -246,6 +272,40 @@ fn default_attempts() -> u32 {
     1
 }
 
+// ── 供应商口径（唯一判据）─────────────────────────────────────────
+
+/// 「这家的标识」——渠道型取协议族，账号池型取账号的 `provider`。
+///
+/// 两类上游共用一条日志，「供应商」这一列必须能对两者都给出答案：
+/// - 账号池型（`ChannelType::Account`）：渠道只是容器，真正的家在账号上
+///   （`trae` / `xiaohuanxiong` / `workbuddy`…）。取该渠道下首个非空
+///   `provider`；取不到（渠道下没有账号 / 账号 provider 全空）→ `"account"`
+///   —— 这是**结构性事实**：「走的是账号池，只是这一格没记下是哪一家」，
+///   比空串多一层信息，也不会被误读成「上游返回空」。
+/// - 其余渠道：`channel_type.as_str()`（`openai_compatible` / `anthropic` /
+///   `gemini` / `zai` / `cloudflare` / `plugin`）。
+///
+/// **本函数是唯一入口**：`RequestLog.provider`、`AttemptDetail.provider`
+/// 以及路由工作台的 `channel_meta_map` 三者必须同口径 —— 同一个请求在主记录
+/// 和尝试明细里显示两个供应商，比不显示更坏。
+///
+/// 无渠道（Hub 兜底候选，`ch_ref = None`）不归本函数管：那种情况下调用方
+/// 不知道该传什么 `channel_type`，由各调用点用 bridge 自报身份兜底
+///（见 `api::openai::resolve::attempt_provider`）。
+pub fn provider_label_for_channel(
+    channel_type: crate::channel::ChannelType,
+    account_provider: Option<&str>,
+) -> String {
+    if channel_type == crate::channel::ChannelType::Account {
+        return account_provider
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .map(str::to_string)
+            // 账号池但这一格拿不到家：记结构性事实，不写空串（见上方说明）。
+            .unwrap_or_else(|| channel_type.as_str().to_string());
+    }
+    channel_type.as_str().to_string()
+}
 /// usize 零值序列化跳过判定。
 fn is_zero_usize(v: &usize) -> bool {
     *v == 0
@@ -591,7 +651,14 @@ pub struct AttemptDetail {
     pub index: u32,
     pub channel_id: String,
     pub channel_name: String,
-    /// 渠道协议域（channel_type.as_str()；账号型恒 "account"）
+    /// 供应商标识（与 [`RequestLog::provider`] **同一把刀**：
+    /// [`provider_label_for_channel`]）。渠道型 = `channel_type.as_str()`；
+    /// 账号池型 = 该渠道下首个非空账号 `provider`（拿不到才回落 `"account"`）；
+    /// 无渠道的 Hub 兜底候选 = bridge 自报身份（如 `hub:cloudflare`）。
+    ///
+    /// **口径变更留档**：本字段曾经恒取 `channel_type.as_str()`（账号型因此
+    /// 恒为 `"account"`），于是主记录若记真家名、明细恒记 `account`，同一个
+    /// 请求在两处显示两个供应商。现改为与主记录同源。
     pub provider: String,
     /// 承载账号展示名（AIGX 渠道级明细拿不到，恒空串——见类型注释）
     pub account: String,
@@ -737,6 +804,7 @@ impl RequestLog {
             key_id: None,
             channel_id: None,
             channel_name: None,
+            provider: None,
             model: String::new(),
             origin_model: None,
             input_tokens: 0,
@@ -3804,5 +3872,166 @@ mod attempt_detail_tests {
         let json = serde_json::to_string(&log).unwrap();
         assert!(json.contains("attempt_details"));
         assert!(json.contains("stickyHit"));
+    }
+}
+
+/// 供应商维度（`RequestLog.provider` / `AttemptDetail.provider`）的口径判据。
+///
+/// 这一组只测**判据本身**（纯函数）与**存量兼容**；各写入点的接线由
+/// `provider_label_for_channel` 的唯一性保证 —— 19 处写点都调它，
+/// 没有第二套换算可漂移。
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    use crate::channel::ChannelType;
+
+    /// 渠道型：供应商 = 上游协议族，与渠道名无关。
+    #[test]
+    fn channel_type_provider_is_protocol_family() {
+        for (kind, expected) in [
+            (ChannelType::OpenaiCompatible, "openai_compatible"),
+            (ChannelType::Anthropic, "anthropic"),
+            (ChannelType::Gemini, "gemini"),
+            (ChannelType::Zai, "zai"),
+            (ChannelType::Cloudflare, "cloudflare"),
+            (ChannelType::Plugin, "plugin"),
+        ] {
+            assert_eq!(
+                provider_label_for_channel(kind, None),
+                expected,
+                "{kind:?} 的供应商应为其协议族"
+            );
+            // 账号池的 provider 传进来也不影响非账号型渠道（防串味）
+            assert_eq!(
+                provider_label_for_channel(kind, Some("trae")),
+                expected,
+                "{kind:?} 不该被账号 provider 覆盖"
+            );
+        }
+    }
+
+    /// 账号池型：供应商 = 账号上的「家」（这才是用户说的「供应商」）。
+    #[test]
+    fn account_pool_provider_prefers_account_provider() {
+        assert_eq!(
+            provider_label_for_channel(ChannelType::Account, Some("trae")),
+            "trae"
+        );
+        assert_eq!(
+            provider_label_for_channel(ChannelType::Account, Some("xiaohuanxiong")),
+            "xiaohuanxiong"
+        );
+        // 首尾空白不许带进日志（账号数据的常见脏值）
+        assert_eq!(
+            provider_label_for_channel(ChannelType::Account, Some("  workbuddy  ")),
+            "workbuddy"
+        );
+    }
+
+    /// 账号池型但拿不到家：记结构性事实 `account`，**不写空串**。
+    ///
+    /// 空串会被读侧误判成「上游返回空」（`bridge::hub_fallback` 模块头记的
+    /// 正是这个坑）；`account` 至少说明「走的是账号池，只是这一格没记下是谁」。
+    #[test]
+    fn account_pool_without_provider_falls_back_to_account() {
+        assert_eq!(
+            provider_label_for_channel(ChannelType::Account, None),
+            "account"
+        );
+        assert_eq!(
+            provider_label_for_channel(ChannelType::Account, Some("")),
+            "account"
+        );
+        assert_eq!(
+            provider_label_for_channel(ChannelType::Account, Some("   ")),
+            "account"
+        );
+        // 正向对照：有家名时必须给出家名，否则上面的兜底断言是空转的
+        assert_eq!(
+            provider_label_for_channel(ChannelType::Account, Some("trae")),
+            "trae"
+        );
+    }
+
+    /// 主记录与尝试明细**同一把刀**：账号池请求在两处必须显示同一个供应商。
+    #[test]
+    fn attempt_detail_and_request_log_share_one_definition() {
+        let account_provider = Some("trae");
+        // 主记录（写日志时按 channel_id 反查后调用同一个函数）
+        let mut log = RequestLog::new();
+        log.channel_id = Some("ch-pool".to_string());
+        log.provider = Some(provider_label_for_channel(
+            ChannelType::Account,
+            account_provider,
+        ));
+        // 尝试明细（failover 循环里用同一函数）
+        let detail = AttemptDetail {
+            index: 1,
+            channel_id: "ch-pool".to_string(),
+            channel_name: "池".to_string(),
+            provider: provider_label_for_channel(ChannelType::Account, account_provider),
+            account: String::new(),
+            model: "m".to_string(),
+            sticky_hit: false,
+            started_at: 0,
+            finished_at: None,
+            status: Some(200),
+            error: None,
+            notice: None,
+        };
+        assert_eq!(log.provider.as_deref(), Some(detail.provider.as_str()));
+        assert_eq!(log.provider.as_deref(), Some("trae"));
+    }
+
+    /// 存量日志（无 `provider` 键）反序列化：`provider` 为 `None`，其余字段不变。
+    ///
+    /// 判据要能区分新旧：同一份 JSON **补上** `provider` 后必须读得出值，
+    /// 否则「读成 None」可能只是因为整段解析失败/字段名写错。
+    #[test]
+    fn legacy_json_without_provider_deserializes_to_none() {
+        let legacy = serde_json::json!({
+            "id": "req-old",
+            "created_at": 1_700_000_000i64,
+            "model": "gpt-4o",
+            "channel_id": "ch-1",
+            "channel_name": "老渠道",
+            "input_tokens": 12,
+            "output_tokens": 34,
+            "cost": 56,
+            "status_code": 200
+        });
+        let log: RequestLog = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(log.provider.is_none(), "存量行没有该键 → None");
+        // 其余字段逐项不变（证明不是「整条解析失败回落到默认值」）
+        assert_eq!(log.id, "req-old");
+        assert_eq!(log.created_at, 1_700_000_000);
+        assert_eq!(log.model, "gpt-4o");
+        assert_eq!(log.channel_id.as_deref(), Some("ch-1"));
+        assert_eq!(log.channel_name.as_deref(), Some("老渠道"));
+        assert_eq!(log.input_tokens, 12);
+        assert_eq!(log.output_tokens, 34);
+        assert_eq!(log.cost, 56);
+        assert_eq!(log.status_code, 200);
+        // 正向对照：同一份 JSON 补上 provider 必须读得出（判据不是恒 None）
+        let mut with_provider = legacy;
+        with_provider["provider"] = serde_json::json!("trae");
+        let log: RequestLog = serde_json::from_value(with_provider).unwrap();
+        assert_eq!(log.provider.as_deref(), Some("trae"));
+    }
+
+    /// `None` 不落键（存量读侧不会因为多出一个 `"provider": null` 而分叉）；
+    /// 有值时键名就是 `provider`（前端按这个名字读）。
+    #[test]
+    fn provider_serialization_shape() {
+        let log = RequestLog::new();
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(!json.contains("\"provider\""), "无值时不落键：{json}");
+        let mut log = RequestLog::new();
+        log.provider = Some("anthropic".to_string());
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(
+            json.contains("\"provider\":\"anthropic\""),
+            "有值时键名为 provider：{json}"
+        );
     }
 }

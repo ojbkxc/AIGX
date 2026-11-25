@@ -4373,6 +4373,8 @@ fn record_chat_test_usage(
         key_id: Some("chat_test".to_string()),
         channel_id: Some(channel_id.to_string()),
         channel_name: Some(channel_name.to_string()),
+        // 供应商（与数据面同口径）：按 channel_id 反查；渠道已删 → None。
+        provider: crate::api::openai::resolve::provider_of_channel_id(state, channel_id),
         model: model.to_string(),
         origin_model: Some(model.to_string()),
         input_tokens: p,
@@ -4434,6 +4436,8 @@ fn record_chat_test_failure(
         key_id: Some("chat_test".to_string()),
         channel_id: Some(channel_id.to_string()),
         channel_name: Some(channel_name.to_string()),
+        // 供应商（与数据面同口径）：按 channel_id 反查；渠道已删 → None。
+        provider: crate::api::openai::resolve::provider_of_channel_id(state, channel_id),
         model: model.to_string(),
         origin_model: Some(model.to_string()),
         input_tokens: 0,

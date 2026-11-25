@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 
+use super::resolve::provider_of_channel_id;
 use super::*;
 use crate::api::common::extract_client_ip;
 use crate::bridge::{BridgeContext, EmbeddingRequest};
@@ -190,6 +191,9 @@ pub(crate) async fn handle_embeddings(
                 .as_ref()
                 .and_then(|cid| state.channel_store.get(cid))
                 .map(|c| c.name.clone());
+            log.provider = used_channel_id
+                .as_deref()
+                .and_then(|cid| provider_of_channel_id(&state, cid));
             log.model = used_upstream.clone().unwrap_or_else(|| model_owned.clone());
             log.origin_model = if used_upstream.as_deref() == Some(model_owned.as_str()) {
                 None
@@ -276,6 +280,9 @@ pub(crate) async fn handle_embeddings(
             .as_ref()
             .and_then(|cid| state.channel_store.get(cid))
             .map(|c| c.name.clone());
+        log.provider = used_channel_id
+            .as_deref()
+            .and_then(|cid| provider_of_channel_id(&state, cid));
         log.model = billing_model.to_string();
         log.origin_model = if used_upstream.as_deref() == Some(model_owned.as_str()) {
             None

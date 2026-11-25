@@ -82,6 +82,9 @@ pub(crate) fn record(params: &Value) -> Result<Value, RpcError> {
     log.model = model.to_string();
     log.origin_model = Some(model.to_string());
     log.channel_name = Some(text("provider").to_string()).filter(|s| !s.is_empty());
+    // 插件自报的 provider 同时落到「供应商」列（插件渠道没有 `channel_type`
+    // 可推，真实来源就是插件声明的这一格）。无 channel_id 可反查，故不填。
+    log.provider = Some(text("provider").to_string()).filter(|s| !s.is_empty());
     log.latency_ms = number("ms") as u64;
     log.status_code = number("status").clamp(0, 999) as u16;
     log.input_tokens = (number("input") + number("cacheRead") + number("cacheWrite")) as u64;

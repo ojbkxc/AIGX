@@ -501,6 +501,9 @@ fn record_agent_request_log(
         key_id: Some(key_id.to_string()),
         channel_id: channel_id.map(|s| s.to_string()),
         channel_name: channel_name.map(|s| s.to_string()),
+        // 供应商（与数据面同口径）：按 channel_id 反查；渠道已删/无渠道 → None。
+        provider: channel_id
+            .and_then(|cid| crate::api::openai::resolve::provider_of_channel_id(state, cid)),
         model: model.to_string(),
         origin_model: Some(upstream_model.to_string()),
         input_tokens,

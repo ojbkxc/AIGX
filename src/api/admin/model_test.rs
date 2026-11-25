@@ -777,6 +777,8 @@ fn write_test_log(
         key_id: Some("model_test".to_string()),
         channel_id: Some(picked.channel_id.clone()),
         channel_name: Some(picked.name.clone()),
+        // 供应商（与数据面同口径）：账号池型取账号的 provider，其余取渠道协议族。
+        provider: crate::api::openai::resolve::provider_of_channel_id(state, &picked.channel_id),
         model: model.to_string(),
         origin_model: Some(model.to_string()),
         input_tokens: usage.prompt_tokens,

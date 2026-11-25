@@ -227,6 +227,9 @@ impl AssistantBilling {
         log.user_id = Some(self.user_id.clone());
         log.channel_id = Some(self.channel_id.clone());
         log.channel_name = Some(self.channel_name.clone());
+        // 供应商（与数据面同口径）：按 channel_id 反查；渠道已删 → None。
+        log.provider =
+            crate::api::openai::resolve::provider_of_channel_id(&self.state, &self.channel_id);
         log.model = self.model.clone();
         log.input_tokens = self.prompt;
         log.output_tokens = self.completion;

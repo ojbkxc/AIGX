@@ -85,6 +85,9 @@ pub(crate) fn record_playground_usage(
         key_id: Some(format!("playground:{kind}")),
         channel_id: channel_id.map(|s| s.to_string()),
         channel_name: channel_name.map(|s| s.to_string()),
+        // 供应商（与数据面同口径）：按 channel_id 反查；未知渠道 → None。
+        provider: channel_id
+            .and_then(|cid| crate::api::openai::resolve::provider_of_channel_id(state, cid)),
         model: model.to_string(),
         origin_model: Some(model.to_string()),
         input_tokens: prompt_tokens,
@@ -162,6 +165,9 @@ pub(crate) fn record_playground_failure(
         key_id: Some(format!("playground:{kind}")),
         channel_id: channel_id.map(|s| s.to_string()),
         channel_name: channel_name.map(|s| s.to_string()),
+        // 供应商（与数据面同口径）：按 channel_id 反查；未知渠道 → None。
+        provider: channel_id
+            .and_then(|cid| crate::api::openai::resolve::provider_of_channel_id(state, cid)),
         model: model.to_string(),
         origin_model: Some(model.to_string()),
         input_tokens: 0,
