@@ -4636,7 +4636,7 @@
   "已丢弃未保存的草稿": "Unsaved draft discarded",
   "{{label}} 只接受整数，已取整为 {{value}}": "{{label}} accepts integers only; rounded to {{value}}",
   "{{label}} 超出 {{min}}–{{max}} 范围，已调整为 {{value}}": "{{label}} is outside {{min}}–{{max}}; adjusted to {{value}}",
-  "{{windows}} 是下界估计（事件环被覆盖），lower_bound=1 表示该档只会少算": "{{windows}} 是下界估计（事件环被覆盖），lower_bound=1 表示该档只会少算",
+  "{{windows}} 是下界估计（事件环被覆盖），lower_bound=1 表示该档只会少算": "{{windows}} is a lower-bound estimate (the event ring was overwritten); lower_bound=1 means this window under-counts",
   "对比出厂默认": "Compare with defaults",
   "读取出厂默认失败": "Failed to read factory defaults",
   "当前配置与出厂默认完全一致。": "The current config matches the factory defaults.",
