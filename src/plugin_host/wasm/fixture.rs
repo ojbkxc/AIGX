@@ -21,6 +21,20 @@
 //! 的 method 首字符分派 init / conversation，并在 conversation 分支里
 //! 主动下发 `stream.head` + 每段 `stream.chunk`（零 mock、真跑 wasmtime）。
 
+/// 流式夹具的内存页数（1 页 = 64 KiB，故 8 页 = 512 KiB）。
+///
+/// 不能沿用 2 页：宿主写请求的长度是请求 JSON 的真实长度（无上限），
+/// 输入缓冲区必须离应答区足够远，见 [`INPUT_BUFFER`]。
+const MEMORY_PAGES: u8 = 8;
+
+/// 流式夹具的输入缓冲区起点（`a2a_alloc` 的返回值）。
+///
+/// 应答落点是 0 / 2048 / 8192 + n*2048，全部在 64 KiB 之前，因此宿主把请求
+/// 写进这里不会碰到任何应答字节。此前是 4096：任何超过 4 KiB 的请求（例如
+/// `purge` 通用兜底注入 6320 字节 system 提示词之后的正常对话请求）都会从
+/// 8192 起原地覆盖 head/chunk 应答，宿主读回的不是 JSON。
+const INPUT_BUFFER: i32 = 65_536;
+
 /// 生成一个最小可装载的 Wasm 模块。
 ///
 /// `provider` / `label` 会写进 `init` 应答，必须与包清单的 provider id 一致
@@ -152,9 +166,23 @@ pub(crate) fn module_with_two_len_dispatch(
 /// `stream.head` / `stream.chunk` 由 wasm 主动发起，而不是宿主替它发。
 ///
 /// `chunks` 是**已解码正文**（通常是一段 OpenAI SSE 字节）；编码器负责
-/// base64 后写进 `stream.chunk` 的参数。三段以上应答的落点依次为
-/// 8192 + n*2048，全部避开 `a2a_alloc` 的输入缓冲区（4096）与 init 回包
-/// 区（0/2048）。
+/// base64 后写进 `stream.chunk` 的参数。应答落点依次为 0 / 2048 /
+/// 8192 + n*2048。
+///
+/// ## 输入缓冲区为什么必须远在应答之后（本夹具踩过的坑）
+///
+/// 宿主把请求写进 `a2a_alloc` 返回的地址，长度是**请求 JSON 的真实长度**，
+/// 没有上限。此前输入缓冲区固定 4096、应答从 8192 起，于是任何超过 4 KiB
+/// 的请求都会把 8192 起的 head/chunk 应答**原地覆盖**：宿主读回的不是 JSON，
+/// 报「Wasm 主程序调用不是 JSON」，表现为插件侧失败。
+///
+/// 这不是假设：破甲预设的通用兜底正文 6320 字节，`purge` 默认
+/// `enabled + auto_preset + universal_fallback` 全开，于是每一条对话请求都
+/// 会被注入这段 system 提示词，请求体稳定超过 4 KiB —— e2e 就是这样从
+/// 「3.26s 通过」变成「插件报错」的（挂 180s 只是错误被吞掉时的表象）。
+///
+/// 所以：内存 8 页（512 KiB）、输入缓冲区 64 KiB，应答全部落在 8192..12288，
+/// 两者不再相邻。见 [`INPUT_BUFFER`] / [`MEMORY_PAGES`]。
 pub(crate) fn streaming_wasm_module(provider: &str, label: &str, chunks: &[&[u8]]) -> Vec<u8> {
     use base64::Engine as _;
 
@@ -189,8 +217,8 @@ pub(crate) fn streaming_wasm_module(provider: &str, label: &str, chunks: &[&[u8]
     for (offset, text) in offsets.iter().zip(&texts) {
         assert!(text.len() < 2048, "夹具应答必须落在预分配的 2 KiB 区间内");
         assert!(
-            offset + text.len() <= 131_072,
-            "夹具应答 {offset}+{} 超出 2 页内存",
+            offset + text.len() <= INPUT_BUFFER as usize,
+            "夹具应答 {offset}+{} 撞上输入缓冲区 {INPUT_BUFFER}：宿主写请求会覆盖应答",
             text.len()
         );
     }
@@ -221,9 +249,9 @@ pub(crate) fn streaming_wasm_module(provider: &str, label: &str, chunks: &[&[u8]
     funcs.extend(leb_u32(2));
     out.extend(section(3, funcs));
 
-    // ── Memory 段：1 个内存，2 页 ──
+    // ── Memory 段：1 个内存，MEMORY_PAGES 页 ──
     let mut memory = leb_u32(1);
-    memory.extend_from_slice(&[0x00, 0x02]);
+    memory.extend_from_slice(&[0x00, MEMORY_PAGES]);
     out.extend(section(5, memory));
 
     // ── Export 段（导入函数占索引 0，故本模块函数从 1 起）──
@@ -268,7 +296,10 @@ pub(crate) fn streaming_wasm_module(provider: &str, label: &str, chunks: &[&[u8]
 
     let mut code = leb_u32(3);
     code.extend(body(&[0x41, 0x01, 0x0b])); // ABI = 1
-    code.extend(body(&[0x41, 0x80, 0x20, 0x0b])); // 4096（输入缓冲区）
+    let mut alloc = vec![0x41]; // i32.const INPUT_BUFFER
+    alloc.extend_from_slice(&leb_i64(INPUT_BUFFER as i64));
+    alloc.push(0x0b);
+    code.extend(body(&alloc));
     code.extend(body(&call_body));
     out.extend(section(10, code));
 
@@ -479,6 +510,50 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(bytes),
             expected.trim(),
             "夹具变更必须同步 tests/e2e/fixtures/stream_plugin.wasm.b64"
+        );
+    }
+
+    /// **输入缓冲区不得与应答区相邻**（本夹具踩过的坑，见 [`INPUT_BUFFER`]）。
+    ///
+    /// 宿主持久化请求时按**真实长度**写进 `a2a_alloc` 的返回值，没有上限。
+    /// 之前输入缓冲区是 4096、应答从 8192 起，于是 `purge` 通用兜底注入
+    /// 6320 字节 system 提示词之后，每一条正常对话请求都会从 8192 起把
+    /// head/chunk 应答原地覆盖，宿主读回的不是 JSON（CI 实测
+    /// `Wasm 主程序调用不是 JSON`）。
+    ///
+    /// 判据直接对着常量与模块字节，而不是「跑一遍看看」：常量被调小、或
+    /// `a2a_alloc` 又写回硬编码地址，这条都会立刻红。
+    #[test]
+    fn input_buffer_is_far_beyond_every_payload() {
+        // 应答落点 0 / 2048 / 8192 + n*2048：四个应答（init/done/head/2 chunk
+        // 里的最后一个）最大末端是 8192 + 2*2048 + 2 KiB = 14336。
+        const MAX_PAYLOAD_END: usize = 8192 + 2 * 2048 + 2048;
+        assert!(
+            INPUT_BUFFER as usize > MAX_PAYLOAD_END,
+            "输入缓冲区 {INPUT_BUFFER} 必须整体落在应答区之后（应答最大末端 {MAX_PAYLOAD_END}）"
+        );
+        // 一次正常对话请求（注入 6320 字节预设后约 7 KiB）必须放得下，
+        // 且留出 8 倍余量，别让下一条更大的请求又把边界撞回来。
+        assert!(
+            INPUT_BUFFER as usize >= 8 * 7 * 1024,
+            "输入缓冲区 {INPUT_BUFFER} 至少 56 KiB，否则一条带预设的正常请求就能撞上应答"
+        );
+        // 输入缓冲区 + 一次请求必须仍在内存内（否则宿主写请求就会越界）。
+        assert!(
+            INPUT_BUFFER as usize + INPUT_BUFFER as usize <= MEMORY_PAGES as usize * 65_536,
+            "内存 {MEMORY_PAGES} 页装不下「应答 + 输入缓冲区 + 一条请求」"
+        );
+        // 模块字节里 `a2a_alloc` 的返回值必须真的是 INPUT_BUFFER（防有人
+        // 把常量改了、函数体还留着旧立即数）。
+        let bytes = streaming_wasm_module(E2E_PROVIDER, E2E_LABEL, &[E2E_CHUNK_1, E2E_CHUNK_2]);
+        let mut expected = vec![0x41]; // i32.const
+        expected.extend_from_slice(&leb_i64(INPUT_BUFFER as i64));
+        expected.push(0x0b); // end
+        assert!(
+            bytes
+                .windows(expected.len())
+                .any(|window| window == expected.as_slice()),
+            "a2a_alloc 必须返回 INPUT_BUFFER={INPUT_BUFFER}（模块里找不到对应 i32.const）"
         );
     }
 
