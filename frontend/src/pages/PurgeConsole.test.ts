@@ -379,6 +379,31 @@ describe('validateImportedSettings · 导出-导入自洽', () => {
   });
 });
 
+describe('writePreviewHistory · 去重与截断（导入提示的增量靠它算）', () => {
+  const store: Record<string, string> = {};
+  const set = (k: string, v: string): void => {
+    store[k] = v;
+  };
+
+  it('新样例置顶、去旧同值', () => {
+    expect(writePreviewHistory(['a', 'b'], 'b', set)).toEqual(['b', 'a']);
+  });
+
+  it('**超过上限就截断**（导入报增量时要考虑这点）', () => {
+    let list: string[] = [];
+    for (let i = 0; i < 12; i += 1) list = writePreviewHistory(list, `s${i}`, set);
+    expect(list).toHaveLength(8);
+    expect(list[0]).toBe('s11'); // 最新的在前
+  });
+
+  it('重复样例不增加长度（增量算得出 0）', () => {
+    const base = ['a', 'b'];
+    const next = writePreviewHistory(base, 'a', set);
+    expect(next).toHaveLength(base.length);
+    expect(next.filter((x) => !base.includes(x))).toHaveLength(0);
+  });
+});
+
 describe('previewHistoryClearPrompt', () => {
   const tr = (key: string, params?: Record<string, string | number>): string =>
     params ? key.replace(/\{\{(\w+)\}\}/g, (_m, k: string) => String(params[k] ?? '')) : key;

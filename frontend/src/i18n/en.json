@@ -455,6 +455,8 @@
   "还没有改写结果，先跑一次预览": "No rewrite output yet — run a preview first",
   "清空后这 {{n}} 条样例历史会从本地删除（不影响已保存的配置），且无法恢复。继续？": "Clearing removes these {{n}} sample history item(s) from local storage (saved config is unaffected) and cannot be undone. Continue?",
   "已清空 {{n}} 条样例历史": "Cleared {{n}} sample history item(s)",
+  "文件里的 {{count}} 条样例都已存在，历史未变": "All {{count}} sample(s) in the file already exist; history is unchanged",
+  "已合并 {{added}} 条样例（文件 {{count}} 条，上限 8 条，新的在前）": "Merged {{added}} sample(s) ({{count}} in file, capped at 8, newest first)",
   "死区词改写": "Dead-zone rewrites",
   "异源模型": "Fallback models",
   "system 剥离前缀": "system strip prefixes",
@@ -5732,5 +5734,16 @@
   "最多 6 张图片": "[TODO en] 最多 6 张图片",
   "作为 system 消息注入": "[TODO en] 作为 system 消息注入",
   "A2A 没有的能力，都保留在这里": "[TODO en] A2A 没有的能力，都保留在这里",
-  "AIGX 独有项": "[TODO en] AIGX 独有项"
+  "AIGX 独有项": "[TODO en] AIGX 独有项",
+  "；其中 上下文窗口 由插件目录申报": "[TODO en] ；其中 上下文窗口 由插件目录申报",
+  "；最大输出 Token 由插件目录申报": "[TODO en] ；最大输出 Token 由插件目录申报",
+  "对话链路暂无工具执行通道；工具的真实执行与审批卡在「AI 运维 Agent」页，这里是同一份清单的只读勾选。": "[TODO en] 对话链路暂无工具执行通道；工具的真实执行与审批卡在「AI 运维 Agent」页，这里是同一份清单的只读勾选。",
+  "非合法 JSON": "[TODO en] 非合法 JSON",
+  "共 {{n}} 字符": "[TODO en] 共 {{n}} 字符",
+  "结果未回灌": "[TODO en] 结果未回灌",
+  "审批已失效，请重新发起请求": "[TODO en] 审批已失效，请重新发起请求",
+  "显示全文": "[TODO en] 显示全文",
+  "已隐藏凭证": "[TODO en] 已隐藏凭证",
+  "由 AIGX 网关按渠道优先级自动选路（无需 API Key）；渠道锁定是「AI 运维 Agent」页的配置，不作用于本页对话。": "[TODO en] 由 AIGX 网关按渠道优先级自动选路（无需 API Key）；渠道锁定是「AI 运维 Agent」页的配置，不作用于本页对话。",
+  "字符": "[TODO en] 字符"
 }

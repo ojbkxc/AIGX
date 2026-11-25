@@ -2928,21 +2928,32 @@ export default function PurgeConsole(): JSX.Element {
           addToast(t('导入失败：文件里没有可用样例'), 'error');
           return;
         }
-        setPreviewHistory((prev) => {
-          let next = prev;
-          // 逐条走 writePreviewHistory：它已实现「去重置顶 + 截断到 8 条」
-          for (const sample of parsed) {
-            next = writePreviewHistory(next, sample, lsSetStable);
-          }
-          persistPreviewHistory(next, lsSetStable, lsRemoveStable);
-          return next;
-        });
-        addToast(t('已合并 {{count}} 条样例（上限 8 条，新的在前）', { count: parsed.length }), 'success');
+        let next = previewHistory;
+        // 逐条走 writePreviewHistory：它已实现「去重置顶 + 截断到 8 条」
+        for (const sample of parsed) {
+          next = writePreviewHistory(next, sample, lsSetStable);
+        }
+        // **报真正的增量而不是文件条数**：文件里 20 条但 15 条已存在时，说「已合并
+        // 20 条」是假话；而且截断到 8 条后也可能没进那么多。
+        const added = next.filter((x) => !previewHistory.includes(x)).length;
+        setPreviewHistory(next);
+        persistPreviewHistory(next, lsSetStable, lsRemoveStable);
+        if (added === 0) {
+          addToast(t('文件里的 {{count}} 条样例都已存在，历史未变', { count: parsed.length }), 'warning');
+        } else {
+          addToast(
+            t('已合并 {{added}} 条样例（文件 {{count}} 条，上限 8 条，新的在前）', {
+              added,
+              count: parsed.length,
+            }),
+            'success',
+          );
+        }
       } catch {
         addToast(t('导入失败：无法读取文件'), 'error');
       }
     },
-    [addToast, t],
+    [addToast, previewHistory, t],
   );
   const [previewing, setPreviewing] = useState(false);
   const [previewMeta, setPreviewMeta] = useState<{ changed: boolean; skill_hit: boolean } | null>(null);
