@@ -284,6 +284,43 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('59 · 全页每个按钮都有可读名称（无名称=读屏只念「按钮」）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  // 展开几个面板，把更多按钮也纳入检查范围
+  await page.getByTestId('purge-batch-paste-open').click().catch(() => {});
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Escape');
+
+  const unnamed = await page.evaluate(() => {
+    const readable = (el) => {
+      const aria = el.getAttribute('aria-label')?.trim();
+      if (aria) return true;
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const target = document.getElementById(labelledBy);
+        if (target?.textContent?.trim()) return true;
+      }
+      const text = (el.textContent ?? '').trim();
+      if (text) return true;
+      const title = el.getAttribute('title')?.trim();
+      if (title) return true;
+      // 图标按钮常见形态：内含 <svg>/<img>，靠 alt 或 aria-label 命名
+      const img = el.querySelector('img[alt]');
+      if (img?.getAttribute('alt')?.trim()) return true;
+      return false;
+    };
+    return Array.from(document.querySelectorAll('button')).filter((el) => !readable(el)).map((el) => ({
+      cls: el.className,
+      testid: el.getAttribute('data-testid') ?? '',
+      html: el.outerHTML.slice(0, 90),
+    }));
+  });
+
+  expect(unnamed, `无名按钮：${JSON.stringify(unnamed, null, 2)}`).toHaveLength(0);
+});
+
 test('58 · 「配了但没启用」一次列全并可跳转', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
