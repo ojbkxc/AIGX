@@ -515,6 +515,49 @@ describe('configuredButOff', () => {
     expect(configuredButOff(settings as unknown as PurgeSettings)).toEqual([]);
   });
 
+  it('技能注入关着但目录有值 → 提（目录配了就等于打算用）', () => {
+    const settings = {
+      ...base,
+      skill_inject: false,
+      skill_dir: '~/.aigx/skills',
+    } as unknown as never;
+    const items = configuredButOff(settings as unknown as PurgeSettings);
+    expect(items.map((i) => i.code)).toContain('skill_inject_off');
+    // 只有目录、没有关键词数（`skill_keywords` 在技能快照里，不在 settings）
+    expect(items.find((i) => i.code === 'skill_inject_off')?.anchor).toBe('skill-dir');
+  });
+
+  it('技能注入关着且目录为空 → 不提（没配东西）', () => {
+    const settings = {
+      ...base,
+      skill_inject: false,
+      skill_dir: '   ',
+    } as unknown as never;
+    expect(configuredButOff(settings as unknown as PurgeSettings)).toEqual([]);
+  });
+
+  it('自动套用关着但预设 id 有值 → 提', () => {
+    const settings = {
+      ...base,
+      auto_preset: false,
+      auto_preset_id: 'some-preset',
+    } as unknown as never;
+    expect(configuredButOff(settings as unknown as PurgeSettings).map((i) => i.code)).toContain(
+      'auto_preset_off',
+    );
+  });
+
+  it('自动套用关着且预设 id 为空/空白 → 不提', () => {
+    for (const id of ['', '   ']) {
+      const settings = {
+        ...base,
+        auto_preset: false,
+        auto_preset_id: id,
+      } as unknown as never;
+      expect(configuredButOff(settings as unknown as PurgeSettings)).toEqual([]);
+    }
+  });
+
   it('降思考关着但 target 是 low → 不提（low 是默认值，没有「白配」）', () => {
     const settings = {
       ...base,
