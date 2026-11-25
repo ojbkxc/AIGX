@@ -290,6 +290,10 @@ impl ModelMetadataRegistry {
 
     /// 查询某模型的元信息（覆盖 > 插件目录 > 内置推断 / models.dev 补空位）。
     ///
+    /// 上下文/输出两列遵循**同一账本**规则（见 [`Self::resolve_with_sources_for`]）：
+    /// 插件目录申报了任一列时两列都以它为准（未申报的留空，不跨账本借值），
+    /// 否则两列走「通用知识」账本（内置表 / models.dev）。
+    ///
     /// `channel_owned_by`：渠道维度推导的归属（优先于名字推断）；
     /// 覆盖项存在时整体以覆盖为准。models.dev 只填「内置推断没声明」的
     /// 上下文长度与能力标签（开关关闭时完全不参与）。
@@ -323,6 +327,11 @@ impl ModelMetadataRegistry {
     }
 
     /// 同 [`Self::resolve_with_sources`]，但带 **provider 维度**。
+    ///
+    /// 上下文/输出两列遵循**同一账本**规则：插件目录申报了任一列，两列就
+    /// 一起锁定在这份申报上（未申报的那列留空，不回落内置表 / models.dev）
+    /// —— 逐字段独立回落会把两列拼到两个账本上（Trae 只申报 200k 上下文，
+    /// models.dev 借来官方 Kimi-K3 的 1M 输出 → 物理不可能组合）。
     ///
     /// 为什么要 provider：插件的模型目录本身就是 provider 维度的
     /// （`plugin_host::model_catalog`，由 `wasm::catalog` 的并集回推），
@@ -362,34 +371,55 @@ impl ModelMetadataRegistry {
             .or_else(|| infer_owned_by(model))
             .unwrap_or("aigx")
             .to_string();
-        let mut context_length = builtin_context_length(model);
-        let mut context_source = if context_length.is_some() {
-            "builtin"
-        } else {
-            ""
-        };
-        // 输出上限：内置表不含该维度，由插件目录 / models.dev 补（见下）
+        let mut context_length: Option<u32> = None;
+        let mut context_source = "";
         let mut max_output_tokens: Option<u32> = None;
         let mut output_source = "";
-        // ── 插件/供应商目录层（账号型供应商的唯一真实来源）─────────────
+        // ── 上下文/输出两列的**同一账本**规则（ledger lock）────────────
         //
-        // 这一层是本次修复的断点：`wasm::catalog::aggregate` 早就按 provider
-        // 把各账号申报的 `maxInputTokens` / `maxOutputTokens` 取最大值并成了
-        // 目录（`plugin_host::model_catalog`），但元信息层从没查过它 —— 于是
-        // 「只在插件目录里申报上限」的家（小浣熊一类账号型供应商）在模型管理
-        // 页的「上下文 / 输出」两列永远是空的。
+        // 修复点（v1.0.103 线上实测 34 行「输出 > 上下文」的根因）：旧逻辑
+        // 逐字段独立回落 —— 插件目录申报了上下文、没申报输出时，输出那列
+        // 会去 models.dev 借**另一个供应商的同名模型**的数（Trae 渠道的
+        // Kimi-K3 只申报 200k 上下文，models.dev 里 moonshotai/kimi-k3 是
+        // 1M/1M 的官方 API 账本），拼出 200k 上下文 + 1M 输出的物理不可能
+        // 组合。两列各拿一家的数，谁也不代表这条链。
         //
-        // 它压过内置推断：内置表是按模型名前缀猜的通用值，插件目录是**这家
-        // 上游自己申报**的；它压不过管理员覆盖（已在上面 return）。
+        // 规则：插件目录申报了**任一列**（上下文或输出）时，两列一起锁定在
+        // 这份申报上 —— 报了的那列照用，没报的那列留空，**不再回落**内置表
+        // / models.dev 补值。宁可留空（=「这家上游没申报」，前端按未声明
+        // 展示，管理员可覆盖），也不从社区目录借一个可能是另一个同名模型
+        // 的数 —— 借来的值看起来像申报过，比空更误导。数值碰巧「合理」
+        // （out ≤ ctx）也一样不借：合理的是数值，不是账本。
+        //
+        // 插件目录一行都没申报时，走既有回落：上下文按内置表、输出按
+        // models.dev（内置表没有输出维度）—— builtin 与 models.dev 都是
+        // 「按模型名的通用知识」，不含渠道维度，属于同一类账本，允许内部
+        // 补空位（openai_compatible 等无插件目录的渠道依赖它）。
+        let mut plugin_ledger = false;
         if let Some(budget) = plugin_budget(model, plugin_provider) {
-            if let Some(value) = budget.context_length {
-                context_length = Some(value);
-                context_source = "plugin";
+            if budget.context_length.is_some() || budget.max_output_tokens.is_some() {
+                plugin_ledger = true;
+                context_length = budget.context_length;
+                context_source = if budget.context_length.is_some() {
+                    "plugin"
+                } else {
+                    ""
+                };
+                max_output_tokens = budget.max_output_tokens;
+                output_source = if budget.max_output_tokens.is_some() {
+                    "plugin"
+                } else {
+                    ""
+                };
             }
-            if let Some(value) = budget.max_output_tokens {
-                max_output_tokens = Some(value);
-                output_source = "plugin";
-            }
+        }
+        if !plugin_ledger {
+            context_length = builtin_context_length(model);
+            context_source = if context_length.is_some() {
+                "builtin"
+            } else {
+                ""
+            };
         }
         let mut capabilities = infer_capabilities(model);
         let mut cap_sources: serde_json::Map<String, serde_json::Value> = capabilities
@@ -398,14 +428,19 @@ impl ModelMetadataRegistry {
             .collect();
         if crate::config::models_dev_enabled() {
             if let Some(dev) = super::models_dev::lookup(model) {
-                if context_length.is_none() {
+                // 补空位只对非插件账本开放：插件目录已锁定的行，两列都以
+                // 申报为准（没申报的留空），models.dev 不进来补 ctx / out
+                // —— 否则又回到「一列 plugin、一列 modelsdev」的跨账本混拼
+                // （本函数的修复点）。能力标签不受限：布尔能力不是上限
+                // 数值，没有「两个账本拼出物理不可能组合」的问题。
+                if !plugin_ledger && context_length.is_none() {
                     context_length = dev.context.and_then(|n| u32::try_from(n).ok());
                     if context_length.is_some() {
                         context_source = "modelsdev";
                     }
                 }
                 // 输出上限：内置表没这个维度，插件目录没申报时由 models.dev 补
-                if max_output_tokens.is_none() {
+                if !plugin_ledger && max_output_tokens.is_none() {
                     max_output_tokens = dev.output.and_then(|n| u32::try_from(n).ok());
                     if max_output_tokens.is_some() {
                         output_source = "modelsdev";
@@ -437,6 +472,21 @@ impl ModelMetadataRegistry {
                         );
                     }
                 }
+            }
+        }
+        // ── 物理不变量守卫：采信的输出上限必须落在采信的上下文窗口内 ──
+        //
+        // 兜住两类残余：① builtin 上下文 + models.dev 输出的账本内拼接 ——
+        // 内置表是静态快照，会滞后于社区目录（glm-5 前缀内置 128k，而
+        // models.dev 的 GLM-5.3 输出已是 131k），拼出 128k/131k 的不可能
+        // 组合；② 上游申报自相矛盾（输出 > 上下文）。规则统一：**保上下文、
+        // 丢输出**（留空），宁可少一列也不展示物理不可能的数。管理员覆盖
+        // 路径不受此限 —— 显式填写，全权在人（见
+        // `override_may_express_output_over_context`）。
+        if let (Some(context), Some(output)) = (context_length, max_output_tokens) {
+            if output > context {
+                max_output_tokens = None;
+                output_source = "";
             }
         }
         let sources = serde_json::json!({
@@ -864,5 +914,236 @@ mod tests {
         assert_eq!(large_meta.context_length, Some(200_000));
         crate::plugin_host::model_catalog::remove(&small);
         crate::plugin_host::model_catalog::remove(&large);
+    }
+
+    // ── 同一账本规则（ledger lock）+ 物理不变量守卫 ───────────────────
+    //
+    // 这一组覆盖修复点的两个面：① 跨账本混拼（一列 plugin、另一列
+    // builtin/modelsdev）在旧实现的逐字段回落下会出现，凡「两列必须同源
+    // 或留空」的断言旧实现都拿不到；② 「输出 > 上下文」的物理不可能组合
+    // 在旧实现上会原样透出。
+
+    /// 核心场景（Trae/Kimi-K3 线上实况）：插件目录只申报上下文、没申报
+    /// 输出，而 models.dev 里有**另一家同名模型**的完整账本（官方 API 的
+    /// 1M/1M）。输出那列必须留空，不向对方账本借。
+    ///
+    /// 旧实现逐字段回落：out 会取到 models.dev 的 1_048_576 —— 本用例的
+    /// `None` 断言在旧实现上必红。
+    #[test]
+    fn plugin_context_without_output_never_borrows_modelsdev_output() {
+        let _seed_guard = crate::model::models_dev::seed_for_test([(
+            "unit-meta-ledger-kimi".to_string(),
+            crate::model::models_dev::DevEntry {
+                canonical: Some("moonshotai/unit-meta-ledger-kimi".to_string()),
+                reasoning: true,
+                tool_call: true,
+                images: false,
+                video: false,
+                context: Some(1_048_576),
+                output: Some(1_048_576),
+            },
+        )]);
+        let reg = temp_registry("ledger-kimi");
+        let provider = seed_plugin_budget(
+            "ledger-kimi",
+            serde_json::json!([{ "id": "unit-meta-ledger-kimi",
+                "maxInputTokens": 200_000 }]),
+        );
+        let (meta, sources) =
+            reg.resolve_with_sources_for("unit-meta-ledger-kimi", None, Some(&provider));
+        assert_eq!(meta.context_length, Some(200_000), "申报的上下文照用");
+        assert_eq!(sources["context_length"], serde_json::json!("plugin"));
+        assert_eq!(
+            meta.max_output_tokens, None,
+            "插件没申报输出就留空 —— models.dev 的 1M 是官方同名模型的账本，不是这条链的"
+        );
+        assert!(
+            sources["max_output_tokens"].is_null(),
+            "输出没有来源（不是 modelsdev）"
+        );
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 同源规则不看数值「合不合理」：就算借来的输出 ≤ 申报的上下文
+    /// （131k ≤ 200k，物理允许），只要上下文来自 plugin，输出就不从
+    /// models.dev 拿 —— 合理的是数值，不是账本。
+    ///
+    /// 旧实现这条会给出 `(200_000 plugin, 131_072 modelsdev)` 的混账本。
+    #[test]
+    fn plugin_ledger_rejects_modelsdev_output_even_when_plausible() {
+        let _seed_guard = crate::model::models_dev::seed_for_test([(
+            "unit-meta-ledger-glm".to_string(),
+            crate::model::models_dev::DevEntry {
+                canonical: Some("zhipuai/unit-meta-ledger-glm".to_string()),
+                reasoning: false,
+                tool_call: true,
+                images: false,
+                video: false,
+                context: Some(1_000_000),
+                output: Some(131_072),
+            },
+        )]);
+        let reg = temp_registry("ledger-glm");
+        let provider = seed_plugin_budget(
+            "ledger-glm",
+            serde_json::json!([{ "id": "unit-meta-ledger-glm",
+                "maxInputTokens": 200_000 }]),
+        );
+        let (meta, sources) =
+            reg.resolve_with_sources_for("unit-meta-ledger-glm", None, Some(&provider));
+        assert_eq!(meta.context_length, Some(200_000));
+        assert_eq!(
+            meta.max_output_tokens, None,
+            "131072 虽 ≤ 200000，但它是官方 1M 那条链的输出，不借"
+        );
+        assert!(sources["max_output_tokens"].is_null());
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 对称方向：插件只申报了输出、没申报上下文 —— 上下文也不回落内置表
+    /// （内置 128k 的 gpt-4o 是按名字猜的通用值，与这家渠道的账本无关），
+    /// 行上只有输出一列有值。
+    ///
+    /// 旧实现会给出 `(128_000 builtin, 131_072 plugin)`：混账本 + 物理不可能
+    /// （131k 输出 > 128k 上下文）双重违规。
+    #[test]
+    fn plugin_output_without_context_locks_context_too() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        // 前缀命中内置表（gpt-4o → 128000），唯一后缀防并行用例互撞
+        let model = format!("gpt-4o-unitlock{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        let reg = temp_registry("ledger-out-only");
+        let provider = seed_plugin_budget(
+            "ledger-out",
+            serde_json::json!([{ "id": &model, "maxOutputTokens": 131_072 }]),
+        );
+        let (meta, sources) = reg.resolve_with_sources_for(&model, None, Some(&provider));
+        assert_eq!(
+            meta.context_length, None,
+            "上下文不从内置表猜 —— 账本锁定下没申报就留空"
+        );
+        assert!(sources["context_length"].is_null());
+        assert_eq!(meta.max_output_tokens, Some(131_072));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("plugin"));
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 物理守卫（C 兜底）：非插件账本（builtin 上下文 + models.dev 输出）
+    /// 允许组合，但输出必须落在上下文窗口内 —— GLM-5.3 线上实况：内置表
+    /// glm-5 前缀 128k，models.dev 输出 131k，拼成 128k/131k 的不可能组合。
+    /// 修法是**保上下文、丢输出**。
+    ///
+    /// 旧实现原样透出 `Some(131_072)`。
+    #[test]
+    fn modelsdev_output_dropped_when_exceeding_builtin_context() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        // glm-5 前缀命中内置表（128000）；同用例内直接断言这个前提
+        let model = format!("glm-5-unitclamp{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        assert_eq!(builtin_context_length(&model), Some(128_000));
+        let _seed_guard = crate::model::models_dev::seed_for_test([(
+            model.clone(),
+            crate::model::models_dev::DevEntry {
+                canonical: Some("zhipuai/glm-5-unitclamp".to_string()),
+                reasoning: false,
+                tool_call: true,
+                images: false,
+                video: false,
+                context: Some(1_000_000),
+                output: Some(131_072),
+            },
+        )]);
+        let reg = temp_registry("clamp-builtin");
+        let (meta, sources) = reg.resolve_with_sources(&model, Some("zhipu"));
+        assert_eq!(meta.context_length, Some(128_000), "内置上下文保留");
+        assert_eq!(sources["context_length"], serde_json::json!("builtin"));
+        assert_eq!(
+            meta.max_output_tokens, None,
+            "131072 > 128000 物理不可能 —— 丢输出保上下文"
+        );
+        assert!(sources["max_output_tokens"].is_null());
+    }
+
+    /// 物理守卫对自相矛盾的同源申报同样生效：插件两列都申报但输出 >
+    /// 上下文（申报自身 bug），保上下文、丢输出。
+    ///
+    /// 旧实现原样透出 `(32_000, 131_072)`。
+    #[test]
+    fn impossible_plugin_pair_loses_output_not_context() {
+        let reg = temp_registry("clamp-plugin");
+        let provider = seed_plugin_budget(
+            "clamp-plugin",
+            serde_json::json!([{ "id": "unit-meta-clamp",
+                "maxInputTokens": 32_000, "maxOutputTokens": 131_072 }]),
+        );
+        let (meta, sources) =
+            reg.resolve_with_sources_for("unit-meta-clamp", None, Some(&provider));
+        assert_eq!(meta.context_length, Some(32_000));
+        assert_eq!(sources["context_length"], serde_json::json!("plugin"));
+        assert_eq!(
+            meta.max_output_tokens, None,
+            "输出 > 上下文的申报组合只展示物理可能的那列"
+        );
+        assert!(sources["max_output_tokens"].is_null());
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 正向对照（不破坏既有回落）：非插件账本内、且输出落在上下文窗口内
+    /// 的组合原样保留 —— 上下文/输出都是 models.dev（无插件目录的
+    /// openai_compatible 渠道依赖这条通路）。
+    #[test]
+    fn modelsdev_pair_survives_when_output_within_context() {
+        let _seed_guard = crate::model::models_dev::seed_for_test([(
+            "unit-meta-ledger-consistent".to_string(),
+            crate::model::models_dev::DevEntry {
+                canonical: Some("acme/unit-meta-ledger-consistent".to_string()),
+                reasoning: false,
+                tool_call: true,
+                images: false,
+                video: false,
+                context: Some(64_000),
+                output: Some(8_192),
+            },
+        )]);
+        let reg = temp_registry("ledger-consistent");
+        let (meta, sources) = reg.resolve_with_sources("unit-meta-ledger-consistent", None);
+        assert_eq!(meta.context_length, Some(64_000));
+        assert_eq!(
+            meta.max_output_tokens,
+            Some(8_192),
+            "8192 ≤ 64000，同账本原样保留"
+        );
+        assert_eq!(sources["context_length"], serde_json::json!("modelsdev"));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("modelsdev"));
+    }
+
+    /// 边界（守卫不越界）：管理员覆盖是显式人的决定，即使填写
+    /// 输出 > 上下文也原样保留 —— 物理守卫只作用于推断层的机器拼接
+    /// （builtin / modelsdev / plugin），不替管理员改数。
+    #[test]
+    fn override_may_express_output_over_context() {
+        let reg = temp_registry("user-ledger");
+        reg.set_override(
+            "unit-meta-user-clamp".into(),
+            ModelMetadata {
+                owned_by: "acme".into(),
+                context_length: Some(2_000),
+                max_output_tokens: Some(4_000),
+                capabilities: vec!["chat".into()],
+                reasoning_levels: vec![],
+                tool_calling_mode: None,
+                visibility: None,
+            },
+        )
+        .unwrap();
+        let (meta, sources) = reg.resolve_with_sources_for("unit-meta-user-clamp", None, None);
+        assert_eq!(
+            meta.context_length,
+            Some(2_000),
+            "覆盖原样，守卫不碰 user 层"
+        );
+        assert_eq!(meta.max_output_tokens, Some(4_000));
+        assert_eq!(sources["context_length"], serde_json::json!("user"));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("user"));
     }
 }
