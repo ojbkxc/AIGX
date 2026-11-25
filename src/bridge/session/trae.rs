@@ -36,11 +36,17 @@ const DEFAULT_USER_AGENT: &str = "VSCode 1.107.1 (TRAE CN)";
 /// 判非法客户端。`x-request-id` / `x-trae-request-id` 每次请求现生成（见 `request`）。
 const DEFAULT_HEADERS: &[(&str, &str)] = &[
     ("accept", "*/*"),
+    ("accept-language", "zh-CN"),
     ("x-user-region", "CN"),
     ("package-type", "stable_cn"),
     ("x-lgw-req-sdk-type", "3"),
     ("x-market-client-id", "VSCode 1.107.1"),
-    ("x-device-type", "x-app-version"),
+    // 下面两个是**独立的键**。早先这里写成 ("x-device-type", "x-app-version")
+    // 一对 —— 那是把 wasm 里两个相邻的键名当成了键值，实际 `x-device-type`
+    // 的值是客户端设备类别、`x-app-version` 是 IDE 版本。
+    ("x-device-type", "ide"),
+    ("x-app-version", "1.107.1"),
+    ("x-ide-version", "1.107.1"),
     ("x-ide-version-type", "stable"),
     ("x-ide-version-code", "20260917"),
     ("x-plugin-channel", "icube-ai"),
@@ -48,6 +54,10 @@ const DEFAULT_HEADERS: &[(&str, &str)] = &[
     ("sec-fetch-dest", "empty"),
     ("sec-fetch-mode", "no-cors"),
     ("sec-fetch-site", "same-origin"),
+    // `x-uid` / `x-machine-id` / `x-device-id` / `x-app-version-code` 依赖账号
+    // 凭证里的身份字段（wasm 里 token 那侧带 `uid` / `machineId` / `deviceId`），
+    // AIGX 的 trae 账号目前 `extra_headers` 是空的，没有来源 —— 按契约
+    // 「账号没填的就不发」，这里不编造值。
 ];
 
 pub struct TraeBridge {
@@ -125,9 +135,12 @@ impl TraeBridge {
         // 每请求现生成的两个追踪 id：真实客户端每次都换（wasm `trae/src/headers.rs`
         // 里 `x-request-id` / `x-trae-request-id`）。复用同一个值会被当成重放。
         let request_id = uuid::Uuid::new_v4().to_string();
+        // `x-tt-trace-id` 是同类追踪头（wasm 里与 x-request-id 相邻构造），一样每请求换。
+        let trace_id = uuid::Uuid::new_v4().simple().to_string();
         req = req
             .header("x-request-id", &request_id)
-            .header("x-trae-request-id", request_id.as_str());
+            .header("x-trae-request-id", request_id.as_str())
+            .header("x-tt-trace-id", trace_id.as_str());
         req.json(body)
     }
 }
