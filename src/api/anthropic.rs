@@ -2309,7 +2309,14 @@ pub async fn handle_messages(
                 }
             }
             let text = response.message.content_str();
-            if !text.is_empty() {
+            // 与 OpenAI 面同一把刀（`bridge::is_markup_debris`）：预算被思考
+            // 吃穿后正文只剩 `**` / `****` 这类 markdown 残渣时**不当答案发出**，
+            // 而是省略 text 块 —— `stop_reason=max_tokens` 已经足够让客户端
+            // 判断「预算不够」，残渣只会被当成答案。不伪造内容。
+            let debris_only = response.finish_reason == FinishReason::Length
+                && !text.is_empty()
+                && crate::bridge::is_markup_debris(text);
+            if !text.is_empty() && !debris_only {
                 content_blocks.push(serde_json::json!({
                     "type": "text",
                     "text": text,
@@ -2328,7 +2335,23 @@ pub async fn handle_messages(
                     "output_tokens": response.usage.completion_tokens,
                 }
             });
-            Json(anthropic_resp).into_response()
+            let mut resp = Json(anthropic_resp).into_response();
+            // 与 OpenAI 面同名同值：请求期预算不够 / 响应期预算被思考吃穿。
+            // Anthropic 面没有 auto-continue，因此只有「不够」这一种成因。
+            if !crate::bridge::output_budget_allows_visible_text(chat_req.declared_output_budget())
+            {
+                resp.headers_mut().insert(
+                    "x-aigx-output-budget",
+                    "below-visible-minimum".parse().unwrap(),
+                );
+            }
+            if debris_only {
+                resp.headers_mut().insert(
+                    "x-aigx-finish-detail",
+                    "reasoning-budget-exhausted".parse().unwrap(),
+                );
+            }
+            resp
         }
     }
 }

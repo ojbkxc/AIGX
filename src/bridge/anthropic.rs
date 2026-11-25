@@ -26,6 +26,13 @@ use super::{
 /// Anthropic API 版本头（与官方 SDK 一致）
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// 扩展思考 `thinking.budget_tokens` 的官方下限。
+///
+/// 低于它上游直接 400（`budget_tokens: must be >= 1024`），且预算还必须
+/// **严格小于** `max_tokens`。两条一起意味着 `max_tokens ≤ 1024` 的请求
+/// 根本开不了思考 —— 那种情况下正文优先，不注入 thinking。
+const ANTHROPIC_MIN_THINKING_BUDGET: u64 = 1024;
+
 /// Anthropic 原生上游 Bridge。
 ///
 /// 持有上游 base_url 与 api_key，将归一化 `ChatFormat` 转为 Anthropic
@@ -334,23 +341,47 @@ impl AnthropicBridge {
         // thinking 冲突而 400。
         if body.get("thinking").is_none() {
             if let Some(mut thinking) = Self::translate_reasoning_effort(&req.reasoning_effort) {
-                // Anthropic 要求 thinking.budget_tokens < max_tokens，
-                // 否则 400。按 new-api 做法把 budget 限制在 max_tokens 的 80% 以内。
-                if let (Some(max_tokens), Some(budget)) = (
-                    body.get("max_tokens").and_then(|v| v.as_u64()),
-                    thinking.get("budget_tokens").and_then(|v| v.as_u64()),
-                ) {
-                    let capped = budget.min((max_tokens as f64 * 0.8) as u64).max(1024);
-                    if capped < budget {
-                        thinking["budget_tokens"] = Value::from(capped);
+                // Anthropic 两条硬约束一起看：`budget_tokens` 必须**严格小于**
+                // `max_tokens`（相等也 400），且官方下限是 1024。因此
+                // `max_tokens ≤ 1024` 时**开不了**思考 —— 这时正文优先：整块
+                // 不注入，而不是把 budget 顶到 1024 去撞 400。
+                //
+                // 此前是 `budget.min(max_tokens * 0.8).max(1024)`：`.max(1024)`
+                // 会把 max_tokens=32 的请求顶成 budget=1024 > 32，上游直接
+                // 400 —— 正是「小预算请求整单失败」的形态，与「预算不够时
+                // 至少把正文说清楚」的目标相反。
+                let max_tokens = body
+                    .get("max_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(u64::from(req.anthropic_max_tokens()));
+                // 预算上限（80%）与官方下限（1024）取交集后**再**夹一次上限：
+                // 顺序必须是 min→max→（`capped < max_tokens` 复核），否则
+                // `.max(1024)` 会把小预算请求顶成 budget > max_tokens。
+                let capped = thinking
+                    .get("budget_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map_or(0, |budget| {
+                        budget
+                            .min((max_tokens as f64 * 0.8) as u64)
+                            .max(ANTHROPIC_MIN_THINKING_BUDGET)
+                    });
+                if capped >= ANTHROPIC_MIN_THINKING_BUDGET && capped < max_tokens {
+                    thinking["budget_tokens"] = Value::from(capped);
+                    body["thinking"] = thinking;
+                    if req.temperature.is_none() {
+                        body.as_object_mut().map(|o| o.remove("temperature"));
                     }
-                }
-                body["thinking"] = thinking;
-                if req.temperature.is_none() {
-                    body.as_object_mut().map(|o| o.remove("temperature"));
-                }
-                if req.top_k.is_none() {
-                    body.as_object_mut().map(|o| o.remove("top_k"));
+                    if req.top_k.is_none() {
+                        body.as_object_mut().map(|o| o.remove("top_k"));
+                    }
+                } else {
+                    // 预算开不了思考（`max_tokens ≤ 1024`）：不注入 thinking，
+                    // 也不动采样参数 —— 没开思考时 temperature/top_k 是合法字段，
+                    // 删掉反而改变语义。
+                    tracing::debug!(
+                        max_tokens,
+                        "thinking skipped: max_tokens too small for a legal budget"
+                    );
                 }
             }
         }

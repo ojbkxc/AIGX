@@ -160,6 +160,22 @@ impl ChatFormat {
         self.max_tokens.unwrap_or(4096)
     }
 
+    /// 客户端**声明**的输出预算：`max_tokens` 与 `max_completion_tokens`
+    /// 两处取有值的那个（新客户端只发后者，旧客户端只发前者）。
+    ///
+    /// 只用于「这条请求够不够 reasoning 模型留下正文」这类**判断**，不改写
+    /// 请求体 —— 两者在 `extra` 里分别透传，语义由上游自己决定。`None` 表示
+    /// 客户端没声明上限（交给上游默认值），不等于 0。
+    pub fn declared_output_budget(&self) -> Option<u32> {
+        self.max_tokens.or_else(|| {
+            self.extra
+                .as_ref()
+                .and_then(|extra| extra.get("max_completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+        })
+    }
+
     /// 从共享的 `Arc` 取回 owned 副本：唯一引用时零拷贝，否则退化为
     /// 一次深拷贝。续写（auto-continue）路径需要 owned 请求体，用它把
     /// 数据面的 `Arc<ChatFormat>` 交接出去（R4 性能）。
@@ -230,6 +246,52 @@ pub fn is_length_finish(raw: &str) -> bool {
     LENGTH_FINISH_ALIASES
         .iter()
         .any(|alias| alias.eq_ignore_ascii_case(trimmed))
+}
+
+/// reasoning 模型留下**可见正文**所需的最低 `max_tokens` 预算（token）。
+///
+/// ── 为什么需要这条线 ────────────────────────────────────────
+/// OpenAI 兼容协议里 `max_tokens` 是**整轮输出上限**，思考
+/// （`reasoning_content`）与正文共用同一份预算 —— 各家实现不一致，但
+/// reasoning 模型普遍把思考计入。实测（`glm-5.3` / codearts 上游，
+/// 2026-11-26，同一句 prompt 连打两轮取一致值）：
+///
+/// | `max_tokens` | 可见正文 | 结论 |
+/// |---|---|---|
+/// | 32 / 48 / 96 / 128 | `****` / `**` | 全是 markdown 碎片 |
+/// | 256 / 384 / 512 / 768 | `##TCP####` / `####` / `#****` | **仍然是碎片** |
+/// | 1024 / 1536 / 2048 | 441 / 463 / 正常整段 | 首个可读正文出现在 1024 |
+///
+/// 阈值因此取 1024 而不是「看起来差不多」的 256：256~768 这几档实测一个
+/// 可读字符都没有，只有 markdown 标记在漏出来。
+///
+/// 所以「预算低于这条线」不是「答案被截断」，而是**模型根本没机会说话**：
+/// 自动续写在这种预算下每一轮都只能再拿一个碎片，把 N 轮的 `**` 拼成
+/// `****`（v1.0.105 线上用户看到的四星号就是这个拼接产物，不是脱敏占位符），
+/// 同时把 `completion_tokens` 花成 N × max_tokens（32 → 128、384 → 768、
+/// 768 → 1536 —— 实测 `completion` 恒为请求值的 2~4 倍）。
+pub const MIN_VISIBLE_OUTPUT_TOKENS: u32 = 1024;
+
+/// 客户端给的 `max_tokens` 是否够 reasoning 模型留下可见正文。
+///
+/// 未指定（`None`）= 交给上游默认值，按「够」处理；只有**显式**设了过小值
+/// 才判不够 —— 判据要能区分「用户没设」与「用户设了 32」。
+pub fn output_budget_allows_visible_text(max_tokens: Option<u32>) -> bool {
+    match max_tokens {
+        Some(n) => n >= MIN_VISIBLE_OUTPUT_TOKENS,
+        None => true,
+    }
+}
+
+/// 可见正文是否只剩 markdown / 标点碎片（一个字母、数字、CJK 都没有）。
+///
+/// 判据用 `char::is_alphanumeric`（CJK 属于 Alphabetic，因此中文正文不会被
+/// 误判成碎片）。命中它的正文是**预算被思考吃穿后的残渣**，不是答案：
+/// `****`、`**`、`---`、`| |` 都在这一类。空串不算碎片（那是「本来就没
+/// 内容」，归空答复兜底链，两者语义不同，不能合并）。
+pub fn is_markup_debris(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty() && !trimmed.chars().any(char::is_alphanumeric)
 }
 
 /// 聊天响应
@@ -1079,6 +1141,59 @@ mod tests {
             stream_timeout >= Duration::from_secs(6 * 3600),
             "流式总超时应远大于 300s 的 api_timeout，实际 {stream_timeout:?}"
         );
+    }
+
+    /// 预算判据的取值表：区分「没设」与「显式设了小值」。
+    ///
+    /// 这条线的存在理由是线上 v1.0.105 的 `max_tokens=32` + `glm-5.3`：
+    /// 思考吃穿预算 → 正文只剩 `**` → 续写把 4 轮碎片拼成 `****`。
+    /// 阈值 1024 来自实测（见常量文档的表格）：256/384/512/768 全是碎片，
+    /// 1024 才第一次出现可读正文。
+    #[test]
+    fn output_budget_judgement_table() {
+        // 没设 = 交给上游默认值，不能判「不够」（否则关掉了正常的续写）
+        assert!(output_budget_allows_visible_text(None));
+        // 边界：等于下限算够
+        assert!(output_budget_allows_visible_text(Some(
+            MIN_VISIBLE_OUTPUT_TOKENS
+        )));
+        // 线上实测「一个可读字符都没有」的全部档位（含 256~768 这段
+        // 「看起来够、实测仍是碎片」的区间 —— 少了它们这条线就是摆设）
+        for tiny in [
+            1u32, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768,
+        ] {
+            assert!(
+                !output_budget_allows_visible_text(Some(tiny)),
+                "max_tokens={tiny} 低于可见正文下限，应判「不够」"
+            );
+        }
+        // 正向对照：够的档位不得被误判
+        assert!(output_budget_allows_visible_text(Some(1536)));
+        assert!(output_budget_allows_visible_text(Some(2048)));
+        assert!(output_budget_allows_visible_text(Some(4096)));
+    }
+
+    /// 碎片判据：只认「一个可读字符都没有」的残渣，中文/英文/数字都不是碎片。
+    #[test]
+    fn markup_debris_only_matches_unreadable_residue() {
+        // 线上实测抓到的真实形态：四星号（两轮 `**` 拼接）、单轮 `**`、
+        // 以及 256~768 档位漏出来的 `####` / `#****`
+        for debris in [
+            "****", "**", "** **", "---", "| |", "###", "```", "* *", "####", "#****",
+        ] {
+            assert!(is_markup_debris(debris), "{debris:?} 是残渣，应判碎片");
+        }
+        // 空串不是碎片：那是「本来就没内容」，走空答复兜底链
+        assert!(!is_markup_debris(""));
+        assert!(!is_markup_debris("   "));
+        // 正向对照：任何可读正文都不是碎片（含 CJK —— is_alphanumeric 覆盖
+        // Alphabetic，中文不会被误伤）
+        for text in ["你好", "TCP", "答案是 42。", "**加粗**", "- 第一条"] {
+            assert!(!is_markup_debris(text), "{text:?} 含可读字符，不是碎片");
+        }
+        // 实测 256 档的 `##TCP####`：碎片里夹着真字母 —— 按「含可读字符」处理，
+        // 原样下发（它确实是模型写出来的东西，只是被预算腰斩）。
+        assert!(!is_markup_debris("##TCP####"));
     }
 
     /// 构造仅含 `Retry-After` 头的 HeaderMap。

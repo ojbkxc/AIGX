@@ -952,7 +952,19 @@ pub(crate) async fn handle_chat_completions(
         // auto-continue（流式）：开关打开才包装，在 ChatChunk 层透传全部轮次；
         // 关着时下发字节与接线前逐字一致（零开销）。计费/文本累积在包装的
         // 下游（map 层），天然看到跨轮拼接的整体。
-        let stream = match (crate::continuation::plan(), cont_bridge, cont_req) {
+        //
+        // 预算闸：`max_tokens` 低于可见正文下限时**不续写**（判据与理由见
+        // `bridge::MIN_VISIBLE_OUTPUT_TOKENS`）。这种预算下每一轮都只能再拿一个
+        // 正文碎片（实测 `**`），续写等于把 N 个碎片拼成 `****`，还把
+        // `completion_tokens` 花成 N × max_tokens（32 → 128）。宁可按
+        // 「预算用尽」如实收尾，也不拼碎片冒充答案。
+        let budget_allows_visible =
+            crate::bridge::output_budget_allows_visible_text(chat_req.declared_output_budget());
+        let stream = match (
+            crate::continuation::plan().filter(|_| budget_allows_visible),
+            cont_bridge,
+            cont_req,
+        ) {
             (Some(max_rounds), Some(bridge), Some(req)) => crate::continuation::wrap_stream(
                 stream,
                 bridge,
@@ -1290,7 +1302,7 @@ pub(crate) async fn handle_chat_completions(
                 _inflight: Some(inflight_guard),
             };
 
-            Sse::new(guarded)
+            let mut resp = Sse::new(guarded)
                 // 保活用 SSE 注释行（` : keepalive`），不是 `event: ping`：
                 // OpenAI 标准流里没有 ping 事件，硬塞会让严格解析的 SDK 收到
                 // 未知事件；注释行按规范被忽略，但能刷新 TCP/CDN 空闲计时器。
@@ -1299,7 +1311,17 @@ pub(crate) async fn handle_chat_completions(
                         .interval(crate::bridge::SSE_KEEPALIVE_INTERVAL)
                         .text(crate::bridge::SSE_KEEPALIVE_TEXT),
                 )
-                .into_response()
+                .into_response();
+            // 预算不够时**只能靠响应头告知**：流一旦开始，正文碎片已经逐帧
+            // 发出去了，事后收不回来（与 OpenAI 面非流式那条 `x-aigx-finish-detail`
+            // 同一语义，只是这里在首帧之前就能判定，所以用请求期的事实）。
+            if !budget_allows_visible {
+                resp.headers_mut().insert(
+                    "x-aigx-output-budget",
+                    "below-visible-minimum".parse().unwrap(),
+                );
+            }
+            resp
         }
     } else {
         // 响应缓存：非流式请求尝试缓存命中。
@@ -1394,6 +1416,15 @@ pub(crate) async fn handle_chat_completions(
             let mut resp = Json(cached).into_response();
             resp.headers_mut()
                 .insert("x-aigx-cache", "hit".parse().unwrap());
+            // 缓存体是**写入时**已清洗过的响应（残渣已置空），这里只需补上
+            // 请求期就能判定的那条提示，保证「命中/未命中」两条路的响应头同口径。
+            if !crate::bridge::output_budget_allows_visible_text(chat_req.declared_output_budget())
+            {
+                resp.headers_mut().insert(
+                    "x-aigx-output-budget",
+                    "below-visible-minimum".parse().unwrap(),
+                );
+            }
             return resp;
         }
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
@@ -1849,7 +1880,18 @@ pub(crate) async fn handle_chat_completions(
         };
         // auto-continue（非流式）：逐轮续写拼接正文、usage 求和；没续轮或
         // 开关关着时响应原样返回。续写轮失败保留已得内容（见 continue_non_streaming）。
-        let response = match (crate::continuation::plan(), cont_bridge, cont_req) {
+        //
+        // 预算闸：与流式同一条判据（见 `bridge::MIN_VISIBLE_OUTPUT_TOKENS`）——
+        // `max_tokens` 低于可见正文下限时不做续写，否则每一轮都只能再拿一个
+        // 正文碎片，拼成 `****` 这种残渣，并把 completion_tokens 花成
+        // N × max_tokens。
+        let budget_allows_visible =
+            crate::bridge::output_budget_allows_visible_text(chat_req.declared_output_budget());
+        let response = match (
+            crate::continuation::plan().filter(|_| budget_allows_visible),
+            cont_bridge,
+            cont_req,
+        ) {
             (Some(max_rounds), Some(bridge), Some(req)) => {
                 crate::continuation::continue_non_streaming(
                     bridge,
@@ -1994,9 +2036,18 @@ pub(crate) async fn handle_chat_completions(
                 response.usage.completion_tokens,
             );
 
+            // 预算被思考吃穿的诚实收尾（判据见 `bridge::is_markup_debris`）：
+            // 正文只剩 markdown / 标点残渣时**不把它当答案发出去** —— `****`
+            // 正是这种残渣（v1.0.105 线上用户看到的那四个星号）。改成空正文，
+            // `finish_reason` 原样保留 `length`：客户端据此判断「预算不够」，
+            // 而不是收到一段假装是答案的符号。不伪造正文、不把思考截进来。
+            let (visible_content, debris_only) = response_visible_content(
+                response.finish_reason,
+                response.message.content.as_deref(),
+            );
             let mut message = serde_json::json!({
                 "role": "assistant",
-                "content": response.message.content_str(),
+                "content": visible_content,
             });
             if let Some(reasoning) = &response.message.reasoning {
                 message["reasoning_content"] = Value::String(reasoning.clone());
@@ -2041,8 +2092,67 @@ pub(crate) async fn handle_chat_completions(
             let mut resp = Json(json).into_response();
             resp.headers_mut()
                 .insert("x-aigx-cache", "miss".parse().unwrap());
+            // 两件事都要让客户端**看得出来**，否则「正文空」会被当成模型没答：
+            // ① 请求期就知道预算不够（`max_tokens` < 可见正文下限）→ 建议值；
+            // ② 响应期发现预算被思考吃穿（正文只剩残渣，已置空）→ 明确原因。
+            // 头里不写动态数字：header 值不做格式化，避免非法字符与转义风险；
+            // 客户端要数值就看自己请求体里的 `max_tokens`。
+            if !budget_allows_visible {
+                resp.headers_mut().insert(
+                    "x-aigx-output-budget",
+                    "below-visible-minimum".parse().unwrap(),
+                );
+            }
+            if debris_only {
+                resp.headers_mut().insert(
+                    "x-aigx-finish-detail",
+                    "reasoning-budget-exhausted".parse().unwrap(),
+                );
+            }
+            // 续写把 N 轮的输出累加在**一条**响应里，`completion_tokens` 因此
+            // 可能超过客户端声明的上限（N × max_tokens）。这是 `usage.auto_continue`
+            // 的既有语义（不是这里引入的），但客户端有知情权 —— 超了就明说，
+            // 不静默替它放大预算。
+            if let Some(limit) = chat_req.declared_output_budget() {
+                if response.usage.completion_tokens > u64::from(limit) {
+                    resp.headers_mut().insert(
+                        "x-aigx-continuation",
+                        "overran-declared-budget".parse().unwrap(),
+                    );
+                }
+            }
             resp
         }
+    }
+}
+
+// ── 可见正文的诚实收尾（判据单点）
+//
+// `max_tokens` 在 OpenAI 兼容协议里是**整轮输出上限**：思考
+// （`reasoning_content`）与正文共用同一份预算。reasoning 模型在小预算下会把
+// 整轮预算烧在思考通道里，正文只剩 markdown 碎片（实测 `glm-5.3` +
+// `max_tokens=32` → `**`；开启自动续写后 4 轮碎片拼成 `****`，同时
+// `completion_tokens` 花成 4 × 32 = 128）。
+//
+// 这里做的**只有一件事**：这种残渣不当答案发出去。判据是「`finish_reason`
+// 属于预算用尽一族」∧「正文一个可读字符都没有」（[`crate::bridge::is_markup_debris`]），
+// 两条同时成立才置空 —— 少了第一条会误删正文本来就短的正常回答（比如模型
+// 故意只回 `**`），少了第二条会把被截断的真答案抹掉。`finish_reason` 原样
+// 保留（`length`），客户端据此能判断「预算不够」，而不是收到一段假装是答案
+// 的符号。不伪造内容、不把思考截进正文、不动用户设的 `max_tokens`。
+//
+// 返回 `(可见正文, 是否判为残渣)`；后者用于在响应头里写明原因。
+fn response_visible_content(
+    finish: crate::bridge::FinishReason,
+    content: Option<&str>,
+) -> (&str, bool) {
+    let text = content.unwrap_or("");
+    let debris_only =
+        finish == crate::bridge::FinishReason::Length && crate::bridge::is_markup_debris(text);
+    if debris_only {
+        ("", true)
+    } else {
+        (text, false)
     }
 }
 
@@ -2161,6 +2271,77 @@ fn response_cache_key(key_id: &str, model: &str, body: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 残渣收尾的取值表：**两条判据同时成立**才置空。
+    ///
+    /// 线上 v1.0.105 的形态是 `finish_reason=length` + `content="****"`
+    /// （4 轮续写各吐一个 `**` 拼起来）。这里钉死四格：
+    /// ① length + 残渣 → 置空（本缺陷）；
+    /// ② length + 真正文 → 原样（被截断的真答案不许抹）；
+    /// ③ stop + 残渣 → 原样（模型就是只回了 `**`，那是它的答案）；
+    /// ④ 空/缺 content → 空串且不判残渣（归空答复兜底链，语义不同）。
+    #[test]
+    fn debris_scrub_needs_both_length_and_unreadable_content() {
+        use crate::bridge::FinishReason;
+
+        // ① 缺陷本体：四星号 + 预算用尽 → 空正文，且标记为残渣
+        assert_eq!(
+            response_visible_content(FinishReason::Length, Some("****")),
+            ("", true)
+        );
+        // 单轮碎片同族
+        assert_eq!(
+            response_visible_content(FinishReason::Length, Some("**")),
+            ("", true)
+        );
+        // ② 正向对照：真答案被截断时一个字都不能动
+        assert_eq!(
+            response_visible_content(FinishReason::Length, Some("TCP三次握手是指")),
+            ("TCP三次握手是指", false)
+        );
+        // 线上另一条实测形态：碎片里混着真字（`TCP一句话TCP**`）—— 含可读
+        // 字符就不是残渣，原样下发（客户端至少能看到模型写了什么）
+        assert_eq!(
+            response_visible_content(FinishReason::Length, Some("TCP一句话TCP**")),
+            ("TCP一句话TCP**", false)
+        );
+        // ③ 反向对照：没耗尽预算就不是残渣判据的事
+        assert_eq!(
+            response_visible_content(FinishReason::Stop, Some("****")),
+            ("****", false)
+        );
+        assert_eq!(
+            response_visible_content(FinishReason::ToolCalls, Some("**")),
+            ("**", false)
+        );
+        // ④ 缺 content / 空串：空串但不是残渣（不写 finish-detail 头）
+        assert_eq!(
+            response_visible_content(FinishReason::Length, None),
+            ("", false)
+        );
+        assert_eq!(
+            response_visible_content(FinishReason::Length, Some("")),
+            ("", false)
+        );
+        assert_eq!(
+            response_visible_content(FinishReason::Length, Some("   ")),
+            ("   ", false)
+        );
+    }
+
+    /// 预算闸的两端：小预算不续写、未指定预算不拦。
+    ///
+    /// 这条与 `bridge::output_budget_judgement_table` 互补 —— 那边钉判据本身，
+    /// 这里钉「handler 用的是同一条判据」（防止有人另写一份阈值）。
+    #[test]
+    fn continuation_budget_gate_matches_bridge_judgement() {
+        // 小预算：闸关（不续写）—— 否则每轮再吐一个碎片，拼成 `****`
+        assert!(!crate::bridge::output_budget_allows_visible_text(Some(32)));
+        // 未指定：闸开（沿用既有续写行为，默认零变化）
+        assert!(crate::bridge::output_budget_allows_visible_text(None));
+        // 够用的预算：闸开
+        assert!(crate::bridge::output_budget_allows_visible_text(Some(2048)));
+    }
 
     // 连接稳定性：流式/非流式 failover 循环接入的预算口径自检。
     // 循环内逻辑为「入口 can_attempt() 判定 → 失败记 last_error → 末尾
