@@ -284,6 +284,32 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('57 · 开关关着时词表整表失效要明说（不是静静留着）', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const gated = page.getByTestId('purge-dead-zone-gated');
+  // mock 默认两个开关都开（rewrite 3 条 / synonym 1 条）→ 不应有提示
+  await expect(gated).toHaveCount(0);
+
+  // 关掉「死区词改写」→ 提示出现并报出条数
+  await page.getByRole('switch', { name: '死区词改写' }).click();
+  await expect(gated).toBeVisible();
+  await expect(gated).toContainText('3');
+
+  // 再打开 → 提示消失
+  await page.getByRole('switch', { name: '死区词改写' }).click();
+  await expect(gated).toHaveCount(0);
+
+  // 同义词表同理，但 mock 里 `synonym_enabled` 默认 **true**（我先入为主写成
+  // false，断言直接红）。按真实数据来：关掉它才该出现提示。
+  const synGated = page.getByTestId('purge-synonym-gated');
+  await expect(synGated).toHaveCount(0);
+  await page.getByRole('switch', { name: '同义词替换' }).click();
+  await expect(synGated).toBeVisible();
+  await expect(synGated).toContainText('1');
+});
+
 test('55 · 连点「写入技能目录」只发一次 apply（确认框之前就要挡住）', async ({ page }) => {
   let applyCalls = 0;
   const preset = {

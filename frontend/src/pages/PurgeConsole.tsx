@@ -4802,6 +4802,15 @@ export default function PurgeConsole(): JSX.Element {
             ) : null}
           </div>
         ) : null}
+        {/* 开关关着时这张表整表不生效（后端 `if cfg.dead_zone_rewrite && …`）：
+            不提示的话，用户会以为「配了 50 条就在起作用」。 */}
+        {!draft.dead_zone_rewrite && draft.rewrite_rules.length > 0 ? (
+          <p className="purge-off-notice" role="status" data-testid="purge-dead-zone-gated">
+            {t('「死区词改写」开关是关的：下面 {{n}} 条规则都不会生效。', {
+              n: draft.rewrite_rules.length,
+            })}
+          </p>
+        ) : null}
         {batchPaste === 'dead_zone' ? (
           <div className="purge-warning-box" role="group" data-testid="purge-batch-paste-panel">
             <p className="purge-warning-row">
@@ -4989,6 +4998,13 @@ export default function PurgeConsole(): JSX.Element {
               </>
             ) : null}
           </div>
+        ) : null}
+        {!draft.synonym_enabled && draft.synonym_pairs.length > 0 ? (
+          <p className="purge-off-notice" role="status" data-testid="purge-synonym-gated">
+            {t('「同义词替换」开关是关的：下面 {{n}} 条都不会生效。', {
+              n: draft.synonym_pairs.length,
+            })}
+          </p>
         ) : null}
         {draft.synonym_pairs.length === 0 ? (
           <p className="purge-empty">{t('暂无同义词，点击右上角「添加规则」新建一条')}</p>
