@@ -48,6 +48,7 @@ import {
   diffTokensInLine,
   parsePreviewMessages,
   parseRulesCsv,
+  parseRulesCsvDetailed,
   parseTemplateJson,
   persistPreviewHistory,
   presetApplyNeedsConfirm,
@@ -405,6 +406,46 @@ describe('writePreviewHistory · 去重与截断（导入提示的增量靠它�
     const next = writePreviewHistory(base, 'a', set);
     expect(next).toHaveLength(base.length);
     expect(next.filter((x) => !base.includes(x))).toHaveLength(0);
+  });
+});
+
+describe('parseRulesCsvDetailed · 报出哪一行', () => {
+  it('正常两列 CSV（带表头）→ ok，表头被跳过', () => {
+    const r = parseRulesCsvDetailed('原文,改写为\n甲,A\n乙,B');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.rules).toEqual([
+      { from: '甲', to: 'A' },
+      { from: '乙', to: 'B' },
+    ]);
+  });
+
+  it('**列数不对时报出是第几行**（只说「格式不对」等于让用户自己找）', () => {
+    const r = parseRulesCsvDetailed('甲,A\n乙,B,多余\n丙,C');
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.line).toBe(2);
+      expect(r.reason).toContain('2');
+      expect(r.reason).toContain('列');
+    }
+  });
+
+  it('原文为空时也报行号', () => {
+    const r = parseRulesCsvDetailed('甲,A\n,B\n丙,C');
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.line).toBe(2);
+      expect(r.reason).toContain('原文为空');
+    }
+  });
+
+  it('空文件 → ok 且零条（不是「格式不对」）', () => {
+    const r = parseRulesCsvDetailed('');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.rules).toEqual([]);
+  });
+
+  it('兼容层仍返回 null（既有调用方与测试不受影响）', () => {
+    expect(parseRulesCsv('甲,A\n乙,B,多余')).toBeNull();
   });
 });
 

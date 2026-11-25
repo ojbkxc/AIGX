@@ -1741,7 +1741,9 @@ export function parsePreviewMessages(
  * 任何行不是两列或 `from` 为空 → 整单拒绝（`null`），不做半截导入。
  * 与 `lib/format.ts::toCsv` 对偶：本函数的输出可直接 `toCsv` 回写。
  */
-export function parseRulesCsv(text: string): { from: string; to: string }[] | null {
+export function parseRulesCsvDetailed(text: string):
+  | { ok: true; rules: { from: string; to: string }[] }
+  | { ok: false; line: number; reason: string } {
   const rows: string[][] = [];
   let field = '';
   let row: string[] = [];
@@ -1781,23 +1783,35 @@ export function parseRulesCsv(text: string): { from: string; to: string }[] | nu
     }
   }
   if (field !== '' || row.length > 0) pushRow();
-  const body = rows.filter((r) => r.length > 0 && r.some((cell) => cell.trim() !== ''));
-  if (body.length === 0) return [];
+  // **保留原始行号**：整体拒绝是对的（不允许「导了一半」），但只报「格式不对」
+  // 等于让用户自己在几十行里找错——诊断必须指出是第几行。
+  const body = rows
+    .map((cells, index) => ({ cells, line: index + 1 }))
+    .filter((item) => item.cells.length > 0 && item.cells.some((cell) => cell.trim() !== ''));
+  if (body.length === 0) return { ok: true, rules: [] };
   // 首行是表头（两列且都命中已知表头词）→ 丢弃。
   const HEAD_WORDS = new Set(['from', 'to', '原文', '改写为', '敏感词', '同义词']);
-  const first = body[0].map((cell) => cell.trim().toLowerCase());
+  const first = body[0].cells.map((cell) => cell.trim().toLowerCase());
   if (first.length === 2 && first.every((cell) => HEAD_WORDS.has(cell))) {
     body.shift();
   }
-  const out: { from: string; to: string }[] = [];
-  for (const cells of body) {
-    if (cells.length !== 2) return null;
+  const rules: { from: string; to: string }[] = [];
+  for (const { cells, line } of body) {
+    if (cells.length !== 2) {
+      return { ok: false, line, reason: `第 ${line} 行不是两列（读到 ${cells.length} 列）` };
+    }
     const from = cells[0].trim();
     const to = cells[1].trim();
-    if (!from) return null;
-    out.push({ from, to });
+    if (!from) return { ok: false, line, reason: `第 ${line} 行原文为空` };
+    rules.push({ from, to });
   }
-  return out;
+  return { ok: true, rules };
+}
+
+/** 兼容旧调用方：结构问题一律 `null`（具体哪一行用 `parseRulesCsvDetailed`）。 */
+export function parseRulesCsv(text: string): { from: string; to: string }[] | null {
+  const result = parseRulesCsvDetailed(text);
+  return result.ok ? result.rules : null;
 }
 
 function formatUptime(total: number, units: { sec: string; min: string; hour: string; day: string }): string {
@@ -4089,11 +4103,13 @@ export default function PurgeConsole(): JSX.Element {
     async (kind: 'dead_zone' | 'synonym', file: File | null): Promise<void> => {
       if (!file) return;
       try {
-        const parsed = parseRulesCsv(await file.text());
-        if (parsed === null) {
-          addToast(t('导入失败：必须是两列（原文,改写为）的 CSV'), 'error');
+        const result = parseRulesCsvDetailed(await file.text());
+        if (!result.ok) {
+          // 指出是**哪一行**：只说「格式不对」等于让用户在几十行里自己找
+          addToast(t('导入失败：{{reason}}', { reason: result.reason }), 'error');
           return;
         }
+        const parsed = result.rules;
         if (parsed.length === 0) {
           addToast(t('导入失败：文件里没有规则行'), 'error');
           return;
