@@ -148,9 +148,45 @@ pub async fn handle_list_purge_presets(
     // 统一 API 信封：前端 `request()` 原样返回 JSON，页面按 `{success,data}`
     // 解包（与 /api/purge 一致）。此前直接返回裸对象，`!res.success` 恒真
     // → 破甲控制台「预设列表加载失败」。
+    //
+    // `data.auto_preset`：**写路径**的口径。列表里的 `model_match` 是逐条展示用的
+    // （`preset_match_for_model`），而真正决定「这个模型的请求会不会被前插预设正文」
+    // 的是 `preset_for_model`——两者此前只有展示口径，管理员看着列表上的一排
+    // `vendor` 无法判断实际会套哪一条、会不会一条都不套。这里把写路径的结论
+    // 直接透出来（同一函数，不另写判定），列表本身仍是展示。
+    let write_path = query.model.as_deref().map(|model| {
+        let settings = state.purge.snapshot();
+        let pinned = settings.auto_preset_id.trim();
+        let hit = presets::preset_for_model(model, pinned);
+        let match_kind = hit.as_ref().map(|(_, kind)| match kind {
+            presets::PresetMatch::Exact => "exact",
+            presets::PresetMatch::Family => "family",
+            presets::PresetMatch::Pinned => "pinned",
+        });
+        let preset_id = hit.as_ref().map(|(detail, _)| detail.id.clone());
+        // 与 `purge::apply_auto_preset` 的前置条件逐条对齐：总开关 ∧ 自动套用 ∧
+        // 命中 ∧ 正文非空。这里不改写任何东西，只回答「会不会套」。
+        let body_not_empty = hit
+            .as_ref()
+            .is_some_and(|(detail, _)| !detail.body.trim().is_empty());
+        let applied = settings.enabled && settings.auto_preset && body_not_empty;
+        json!({
+            "model": model,
+            "preset_id": preset_id,
+            "match": match_kind,
+            "applied": applied,
+        })
+    });
+
+    let mut data = json!({ "items": items, "vendors": vendors, "total": total });
+    if let Some(write_path) = write_path {
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("auto_preset".to_string(), write_path);
+        }
+    }
     Ok(Json(json!({
         "success": true,
-        "data": { "items": items, "vendors": vendors, "total": total },
+        "data": data,
     })))
 }
 

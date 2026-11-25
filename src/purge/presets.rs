@@ -97,6 +97,20 @@ pub enum PresetModelMatch {
 ///
 /// 这张表只做「这家厂商的模型」判定（落 `PresetModelMatch::Vendor`），不改变
 /// `Exact`「模型名真命中」的优先级。新增厂商时在这里补一行。
+///
+/// ── 为什么按**模型名**补词，而不是按模型管理里的 `provider` ────────
+/// 2026-11-25 线上实测（196 个模型 / 53 条预设）：模型管理的 `provider` 是**接入渠道**
+/// （`openai_compatible` 57 条、`workbuddy` 23、`workbuddy-intl` 23、`trae` 19、
+/// `antigravity` 18、`kuku` 13、`zcode` 11、`cline-free` 10、`qoder` 10、
+/// `xiaohuanxiong` 10、`loomy` 2），**不是厂商**：同一个 `provider` 下混着 deepseek、
+/// glm、kimi、qwen 各家模型。真正像厂商的是 `owned_by`（`zhipu` 27 / `google` 14 /
+/// `moonshot` 11 / `alibaba` 7 / `deepseek` 7 / `minimax` 5 / `openai` 4 /
+/// `tencent` 4 / `anthropic` 2 / `baidu` 1 / `aigx` 68）。
+/// 按 `owned_by`/`provider` 各算过一遍反事实：**对当时那 48 个套不上的模型，增益为 0**——
+/// 因为缺的那几家（minimax / bytedance / baidu / sensenova / spark / pangu / raccoon /
+/// ling / poolside）在预设库里**一条内容都没有**（`assets/purge-presets` 只有 19 个
+/// 厂商目录）。所以这一层不接：接了也只是把「无预设可套」换个判定路径，仍是无内容，
+/// 却多一处「按渠道当厂商」的错配风险。
 const VENDOR_FAMILIES: &[(&str, &[&str])] = &[
     ("anthropic", &["claude", "opus", "sonnet", "haiku"]),
     ("openai", &["gpt", "o1", "o3", "o4", "chatgpt", "davinci"]),
@@ -110,7 +124,10 @@ const VENDOR_FAMILIES: &[(&str, &[&str])] = &[
     ("meta", &["llama", "muse"]),
     ("xiaomi", &["mimo"]),
     ("meituan", &["longcat"]),
-    ("tencent", &["hunyuan", "hy4"]),
+    // `hy3` / `hyimage`：线上 Tencent 那条腿除了 `hunyuan-2.0-*` 还有 `hy3-preview`、
+    // `hy3-preview-agent`、`hy-image-3.5`（同一个 workbuddy 渠道下发），而预设库里
+    // 只有 `tencent-hy4-agents` —— 少了这两个词干，这三个模型一条预设都套不上。
+    ("tencent", &["hunyuan", "hy4", "hy3", "hyimage"]),
     ("stepfun", &["step"]),
     ("bytedance", &["seed", "doubao", "skylark"]),
     ("baidu", &["ernie", "wenxin"]),
@@ -118,7 +135,32 @@ const VENDOR_FAMILIES: &[(&str, &[&str])] = &[
     ("nvidia", &["nemotron"]),
     ("microsoft", &["phi"]),
     ("ling", &["ling"]),
+    // 作者签名目录：预设库里 `modemnakata` 只有 `nemotron-3-ultra` 一条，就是 NVIDIA
+    // 的 Nemotron 系列；线上同名模型是 `nemotron-3.5-*`。不补这一行时预设侧 vendor
+    // 是作者名、模型名含 `nemotron`，两边都不命中（判定落在 `Mismatch`）。
+    ("modemnakata", &["nemotron"]),
 ];
+
+/// 虚拟路由名：请求里的 `model` 不是「某个模型」，而是「让网关自己挑」。
+///
+/// 线上实测有 `auto` / `Auto` / `default` 三种写法（kuku / qoder / workbuddy /
+/// workbuddy-intl / openai_compatible 各处都有，共 8 行），它们在模型管理里是
+/// **自映射别名**（`mappings` 里 `{"alias":"Auto","target":"Auto","is_default":true}`），
+/// 不指向任何具体模型。
+///
+/// 这类名字**不该套预设**，理由是具体的而不是「没修好」：预设正文是写给某个模型族
+/// 的破甲词，而 `auto` 这一跳最终落到哪一家由网关选路决定 —— 拿当前请求名去猜族，
+/// 等于按猜出来的那家前插别人的破甲词。正确的做法是等选路结果（`resolved model`）
+/// 出来再按它套，这一步属于路由层，不在本函数职责内。
+///
+/// 因此这里**显式**返回「不套」，而不是靠「碰巧没命中原样落空」：没有这张表时，
+/// 任何未来加进去的厂族词干只要恰好是 `au`/`de` 一类子串就会把预设套到 `auto` 上。
+const VIRTUAL_ROUTE_MODELS: &[&str] = &["auto", "default"];
+
+/// 是否虚拟路由名（折叠大小写与分隔符后比较）。
+fn is_virtual_route_model(active: &str) -> bool {
+    !active.is_empty() && VIRTUAL_ROUTE_MODELS.iter().any(|name| *name == active)
+}
 
 /// 厂商名（预设侧，可能带作者前缀如 `0x8D jailbreaks`）→ 该厂商的产品名词干集合。
 ///
@@ -165,6 +207,13 @@ pub fn preset_match_for_model(vendor: &str, model: &str, active_model: &str) -> 
     if active.is_empty() {
         return PresetModelMatch::Unknown;
     }
+    // 虚拟路由名（`auto` / `Auto` / `default`）：不是「这条预设跟它不配」，而是
+    // 「这个名字根本没指向某个模型」，所以展示层给 Unknown 而不是 Mismatch ——
+    // 后者会让列表像在说「53 条预设名都对不上 auto」，那是误导。写路径同样不套，
+    // 两处口径由 PresetMatch 的两个分支保持一致（见 preset_for_model）。
+    if is_virtual_route_model(&normalize_model_id(active_model)) {
+        return PresetModelMatch::Unknown;
+    }
 
     let folded_model = fold_for_match(model);
     if overlaps(&folded_model, &active) {
@@ -185,8 +234,10 @@ pub fn preset_match_for_model(vendor: &str, model: &str, active_model: &str) -> 
     //    没有公共子串 —— 必须靠 VENDOR_FAMILIES 把厂商映射到产品名词干才能命中。
     //    没有这一层时实测 98.4% 的配对落 Mismatch，破甲「按模型自动套预设」对
     //    线上模型基本失效。
+    //    词干判定与写路径共用同一个 `family_term_matches`：两套口径如果各写一遍，
+    //    「列表说能套、实际不套」的偏差就会悄悄回来。
     for term in vendor_family_terms(vendor) {
-        if overlaps(&fold_for_match(term), &active) {
+        if family_term_matches(term, active_model, &active) {
             return PresetModelMatch::Vendor;
         }
     }
@@ -563,6 +614,11 @@ pub fn preset_for_model(model: &str, pinned_id: &str) -> Option<(PresetDetail, P
     if active.is_empty() {
         return None;
     }
+    // 虚拟路由名（`auto` / `default`）显式不套：见 VIRTUAL_ROUTE_MODELS 的理由。
+    // 放在 pinned 之后是刻意的 —— 操作者点名的那一条仍然优先。
+    if is_virtual_route_model(&active) {
+        return None;
+    }
     for preset in BUILTIN_PRESETS {
         let target = normalize_model_id(preset.model);
         if target.is_empty() {
@@ -580,28 +636,78 @@ pub fn preset_for_model(model: &str, pinned_id: &str) -> Option<(PresetDetail, P
     // 族内取**第一条**：目录已按 (vendor, model) 排序，同族多条时取排序最前的
     // 那条，保证同一模型每次都命中同一个预设（不能随机漂）。
     for preset in BUILTIN_PRESETS {
-        if vendor_family_matches(preset.vendor, &active) {
+        if vendor_family_matches(preset.vendor, model, &active) {
             return Some((to_detail(preset), PresetMatch::Family));
         }
     }
     None
 }
 
+/// 短族词干的长度门槛：`o4` 这种两字符词干只按「段」判定，不按子串判定。
+///
+/// 实测代价与收益（线上 196 个模型）：`("openai", &["o1","o3","o4", …])` 里的 `o4`
+/// 在双向包含口径下命中了 `cline-free/solar-pro4`（`solarpro4` 含 `o4`），把 OpenAI 的
+/// `gpt-oss-20b` 破甲词套到了一家无关模型的请求上 —— 这正是「宁可覆盖不全」要防的那类
+/// 错误命中。改成按段判定后它落回「无预设可套」，而 `o1`/`o3`/`o4` 想命中的真实写法
+/// （`o1-mini`、`o4-mini`、`o3deep`）仍然命中，因为它们本来就是独立段或段前缀。
+const SHORT_TERM_CHARS: usize = 3;
+
+/// 把模型名切成「段」：按非字母数字切开、只留 ascii 字母数字、折叠小写。
+///
+/// `cline-free/solar-pro4` → `["cline", "free", "solar", "pro4"]`。短族词干只在
+/// 段上比对，避免 `pro4` 里的 `o4` 被当成 OpenAI 的 o4 系列。
+fn model_segments(model: &str) -> Vec<String> {
+    model
+        .split(|c: char| !(c.is_ascii_alphanumeric()))
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| seg.to_ascii_lowercase())
+        .collect()
+}
+
+/// 短词干在单个段上的判定：整段相等，或「段前缀 + 后接数字」。
+fn short_term_hits_segment(term: &str, segment: &str) -> bool {
+    if segment == term {
+        return true;
+    }
+    let Some(rest) = segment.strip_prefix(term) else {
+        return false;
+    };
+    rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// 族词干是否命中某个模型名。
+///
+/// - `model`：请求里的原始模型名（`normalize_model_id` 之前，段判定要用它）；
+/// - `normalized`：`fold_for_match(model)` 或 `normalize_model_id(model)` 的结果
+///   （两者只差非 ASCII 字符，族词干全是 ASCII，判定等价）；双向包含用它。
+fn family_term_matches(term: &str, model: &str, normalized: &str) -> bool {
+    let folded: String = term
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect();
+    if folded.is_empty() || normalized.is_empty() {
+        return false;
+    }
+    if folded.chars().count() < SHORT_TERM_CHARS {
+        return model_segments(model)
+            .iter()
+            .any(|segment| short_term_hits_segment(&folded, segment));
+    }
+    normalized.contains(&folded) || folded.contains(normalized)
+}
+
 /// 厂商族命中判定：预设的 vendor 换算成产品名词干后，是否出现在模型名里。
 ///
-/// `active` 必须是已经 `normalize_model_id` 过的值（只留字母数字并小写）。
-fn vendor_family_matches(vendor: &str, active: &str) -> bool {
+/// `active` 必须是已经 `normalize_model_id` 过的值（只留字母数字并小写）；
+/// `model` 是原始模型名，短词干要靠它切段。
+fn vendor_family_matches(vendor: &str, model: &str, active: &str) -> bool {
     if active.is_empty() {
         return false;
     }
-    vendor_family_terms(vendor).iter().any(|term| {
-        let folded: String = term
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .flat_map(char::to_lowercase)
-            .collect();
-        !folded.is_empty() && (active.contains(&folded) || folded.contains(active))
-    })
+    vendor_family_terms(vendor)
+        .iter()
+        .any(|term| family_term_matches(term, model, active))
 }
 
 /// id 是否可安全用作单级目录名。
@@ -1310,5 +1416,102 @@ mod tests {
             preset_for_model(BUILTIN_PRESETS[0].model, "   ").map(|(_, kind)| kind),
             Some(PresetMatch::Exact)
         );
+    }
+
+    // ── 线上 2026-11-25 那批模型的族词干缺口 ─────────────────────
+
+    /// `hy3-preview` / `hy-image-3.5` 与 `hunyuan-*` 是同一家的两条命名线。
+    ///
+    /// 实测缺口：族表只有 `hunyuan` / `hy4`，于是 workbuddy 那条腿上的
+    /// `hy3-preview`、`hy3-preview-agent`、`hy-image-3.5` 三个模型一条预设都套不上
+    /// （`preset_for_model` 返回 `None`），而同渠道的 `hunyuan-2.0-instruct` 能套上。
+    #[test]
+    fn tencent_hy_models_reach_the_tencent_preset() {
+        for model in ["hy3-preview", "hy3-preview-agent", "hy-image-3.5"] {
+            let (detail, kind) =
+                preset_for_model(model, "").unwrap_or_else(|| panic!("{model} 应当命中腾讯族预设"));
+            assert_eq!(kind, PresetMatch::Family, "{model} 应落族兜底");
+            assert!(
+                detail.vendor.to_lowercase().contains("tencent"),
+                "{model} 命中的预设厂商是 {}",
+                detail.vendor
+            );
+            assert_eq!(detail.id, "tencent-hy4-agents");
+        }
+
+        // 词干是 `hy3` 而不是 `hy`：`hybrid` 一类无关名字不得被拉进腾讯族。
+        assert!(
+            preset_for_model("hybrid-9-preview", "").is_none(),
+            "hybrid 不该被 hy3/hy4 词干命中"
+        );
+    }
+
+    /// `modemnakata` 是作者签名目录，内容是 NVIDIA Nemotron；不映射时线上
+    /// `nemotron-3.5-*` 全部落空（预设 vendor 与模型名没有公共子串）。
+    #[test]
+    fn nemotron_models_reach_the_modemnakata_preset() {
+        for model in ["nemotron-3.5-lightning-free", "nemotron-3.5-super-vl"] {
+            let (detail, kind) = preset_for_model(model, "")
+                .unwrap_or_else(|| panic!("{model} 应当命中 nemotron 预设"));
+            assert_eq!(kind, PresetMatch::Family);
+            assert_eq!(detail.id, "modemnakata-nemotron-3-ultra");
+        }
+    }
+
+    /// 两字符族词干（`o1`/`o3`/`o4`）只按「段」判定：子串口径会把
+    /// `cline-free/solar-pro4` 判成 OpenAI 的 o4 系列，把 OpenAI 的破甲词套到无关模型上。
+    #[test]
+    fn short_family_terms_match_segments_not_substrings() {
+        // 段口径：真实写法照旧命中
+        assert!(family_term_matches("o1", "o1-mini", "o1mini"));
+        assert!(family_term_matches("o4", "o4-mini", "o4mini"));
+        assert!(family_term_matches("o3", "o3deep", "o3deep"));
+        assert!(family_term_matches("o4", "o4", "o4"));
+        // 子串但不是段：不命中
+        assert!(!family_term_matches(
+            "o4",
+            "cline-free/solar-pro4",
+            "solarpro4"
+        ));
+        assert!(!family_term_matches(
+            "o1",
+            "poolside/laguna-s-2.1:free",
+            "poolside"
+        ));
+        // 长词干仍是双向包含（`claude` ↔ `claude-sonnet-4-6`）
+        assert!(family_term_matches(
+            "claude",
+            "claude-sonnet-4-6",
+            "claudesonnet46"
+        ));
+
+        // 线上那一行本身：不再被 openai 族抢走
+        assert!(
+            preset_for_model("cline-free/solar-pro4", "").is_none(),
+            "solar-pro4 不该套上 OpenAI 的预设"
+        );
+    }
+
+    /// 虚拟路由名（`auto` / `Auto` / `default`）**显式**不套预设，且展示层给
+    /// `Unknown` 而不是 `Mismatch`：后者会让列表像在说「53 条预设都跟 auto 不配」。
+    #[test]
+    fn virtual_route_names_are_excluded_explicitly() {
+        for model in ["auto", "Auto", "AUTO", "default", " Default "] {
+            assert!(
+                preset_for_model(model, "").is_none(),
+                "{model} 是虚拟路由名，不该套预设"
+            );
+            assert_eq!(
+                preset_match_for_model("Anthropic", "opus v1", model),
+                PresetModelMatch::Unknown,
+                "{model} 在展示层应判 Unknown（不是 Mismatch）"
+            );
+        }
+
+        // 操作者点名的预设仍然优先于「虚拟路由名不套」。
+        let pinned = &BUILTIN_PRESETS[1];
+        let hit = preset_for_model("auto", pinned.id).expect("pinned 应当先于虚拟名排除");
+        assert_eq!(hit.1, PresetMatch::Pinned);
+        assert_eq!(hit.0.id, pinned.id);
     }
 }
