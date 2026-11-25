@@ -163,8 +163,20 @@ jobs:
       - name: Verify static/ matches source
         run: |
           if [ -n "$(git status --porcelain static)" ]; then
-            echo "::error::static/ 与前端源码不一致，请在 frontend 目录执行 npm run build 并提交产物"
+            echo "::error::static/ 与前端源码不一致 —— 产物没跟上源码"
+            echo ""
+            echo "本次提交里改动的前端源码（这些改了就必须重建 static/）："
+            git diff --name-only HEAD~1 HEAD -- frontend/src frontend/e2e frontend/scripts 2>/dev/null | head -20 || true
+            echo ""
+            echo "static/ 的实际差异（前 40 条）："
             git status --porcelain static | head -40
+            echo ""
+            echo "修复（在 frontend 目录）："
+            echo "    npm run sync:static      # 一条命令：build + 报告变更 + 给出精确的 git add"
+            echo "    # 然后把 static/ 与源码放在同一个提交里"
+            echo ""
+            echo "注意：如果工作树里有别人未提交的前端改动，本次产物会把它们的当前状态一起编进去；"
+            echo "      要么等他们提交，要么确认后一并提交。"
             exit 1
           fi
           echo "static/ up to date"
