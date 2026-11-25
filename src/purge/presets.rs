@@ -164,7 +164,7 @@ const VIRTUAL_ROUTE_MODELS: &[&str] = &["auto", "default"];
 
 /// 是否虚拟路由名（折叠大小写与分隔符后比较）。
 fn is_virtual_route_model(active: &str) -> bool {
-    !active.is_empty() && VIRTUAL_ROUTE_MODELS.iter().any(|name| *name == active)
+    !active.is_empty() && VIRTUAL_ROUTE_MODELS.contains(&active)
 }
 
 /// 厂商名（预设侧，可能带作者前缀如 `0x8D jailbreaks`）→ 该厂商的产品名词干集合。
@@ -743,15 +743,14 @@ fn model_segments(model: &str) -> Vec<String> {
         .collect()
 }
 
-/// 短词干在单个段上的判定：整段相等，或「段前缀 + 后接数字」。
+/// 短词干在单个段上的判定：整段相等，或段以它开头。
+///
+/// `o1`/`o3`/`o4` 这类两字符词干的真实写法既有「独立段」（`o4-mini` 切出 `o4`），
+/// 也有「段前缀」（`o3deep` 整段就一个词）。两者都算命中——门禁设在「不能跨段
+/// 做子串包含」上，而不是「前缀后必须跟数字」：后者会把 `o3deep` 这种真实写法
+/// 错杀掉，也与本文件 [`SHORT_TERM_CHARS`] 的注释口径相违。
 fn short_term_hits_segment(term: &str, segment: &str) -> bool {
-    if segment == term {
-        return true;
-    }
-    let Some(rest) = segment.strip_prefix(term) else {
-        return false;
-    };
-    rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+    segment.starts_with(term)
 }
 
 /// 族词干是否命中某个模型名。
