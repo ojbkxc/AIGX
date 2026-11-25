@@ -306,6 +306,7 @@ pub fn provider_label_for_channel(
     }
     channel_type.as_str().to_string()
 }
+
 /// usize 零值序列化跳过判定。
 fn is_zero_usize(v: &usize) -> bool {
     *v == 0
