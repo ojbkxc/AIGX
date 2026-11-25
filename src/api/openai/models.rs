@@ -569,14 +569,18 @@ pub(crate) async fn handle_list_models(
     let data: Vec<Value> = retain_priced_models(&state, aggregated)
         .into_iter()
         .map(|(name, channel_owned_by)| {
-            let (meta, cap_sources) = state
-                .model_metadata
-                .resolve_with_sources(&name, channel_owned_by);
+            // provider 先取出来再解析元信息：插件目录的上限申报是按 provider
+            // 存的（同一模型 id 在两家可以不同），顺序反了就只能按模型名瞎猜。
             let (provider, refreshed_at) = owners
                 .get(&name.to_ascii_lowercase())
                 .cloned()
                 .map(|(provider, refreshed_at)| (Some(provider), refreshed_at))
                 .unwrap_or((None, 0));
+            let (meta, cap_sources) = state.model_metadata.resolve_with_sources_for(
+                &name,
+                channel_owned_by,
+                provider.as_deref(),
+            );
             list_item(
                 &name,
                 provider.as_deref(),
@@ -630,9 +634,12 @@ pub(crate) async fn handle_get_model(
         let channel_owned_by = provider
             .as_deref()
             .and_then(crate::model::metadata::owned_by_for_channel_type);
-        let (meta, cap_sources) = state
-            .model_metadata
-            .resolve_with_sources(&model, channel_owned_by);
+        // 带 provider：插件目录里的上下文/输出上限按家匹配（见 handle_list_models）
+        let (meta, cap_sources) = state.model_metadata.resolve_with_sources_for(
+            &model,
+            channel_owned_by,
+            provider.as_deref(),
+        );
         let mut item = list_item(
             &model,
             provider.as_deref(),

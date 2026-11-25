@@ -686,6 +686,11 @@
 .mm-cap-ctx.from-modelsdev {
   color: var(--accent-color, #6366f1);
 }
+/* 上下文/输出由插件（供应商）目录申报时的提示色：比社区目录更可信，
+   用成功色区分，避免和「models.dev 补齐」混成同一档 */
+.mm-cap-ctx.from-plugin {
+  color: var(--success-color, #16a34a);
+}
 /* #51 P1#2：输出 token（在输入上下文右侧，`/out↑` 形态） */
 .mm-cap-out {
   font-size: 9.5px;

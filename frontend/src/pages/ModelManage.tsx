@@ -230,7 +230,8 @@ function capDotState(caps: string[] | undefined, match: RegExp): '' | 'on' | 'of
 /**
  * 能力圆点的**取数来源**（#51 P1#4，消费后端 cap_sources.capabilities）：
  * 命中该 dot 的能力标签（vision/video/tools/reasoning…）在 cap_sources 里的档
- * —— builtin（内置推断）/ modelsdev（社区目录补齐）/ user（用户覆盖）/ ''（无标记）。
+ * —— builtin（内置推断）/ plugin（插件目录申报）/ modelsdev（社区目录补齐）
+ * / user（用户覆盖）/ ''（无标记）。
  */
 function capDotSource(
   caps: string[] | undefined,
@@ -246,6 +247,11 @@ function capDotSource(
 const CAP_SRC_LABEL: Record<string, string> = {
   builtin: '内置推断',
   modelsdev: '社区目录补齐',
+  // 插件/供应商目录申报（`plugin_host::model_catalog`：这家上游自己
+  // `models.refresh` 回报的 maxInputTokens / maxOutputTokens）。
+  // 复用既有 key「插件目录」—— `t()` 的变量形态不被 i18n 扫描器收取，
+  // 新造文案会漏进 zh/en 而英文界面回退中文。
+  plugin: '插件目录',
   user: '用户覆盖',
 };
 
@@ -1816,7 +1822,11 @@ export default function ModelManage(): JSX.Element {
                 ` / ${t('最大输出 Token')} ${outTok == null ? t('未声明') : outTok}` +
                 ` —— ${t('点击修改模型能力')}` +
                 (ctxSrc === 'modelsdev' ? t('；其中 上下文窗口 由 models.dev 补齐') : '') +
-                (outSrc === 'modelsdev' ? t('；最大输出 Token 由 models.dev 补齐') : '');
+                (outSrc === 'modelsdev' ? t('；最大输出 Token 由 models.dev 补齐') : '') +
+                // 插件/供应商目录申报（这家上游自己回报的值）：与社区目录补齐
+                // 分开说 —— 前者是上游事实，后者是社区估计，可信度不同。
+                (ctxSrc === 'plugin' ? t('；其中 上下文窗口 由插件目录申报') : '') +
+                (outSrc === 'plugin' ? t('；最大输出 Token 由插件目录申报') : '');
               return (
                 <button
                   type="button"
@@ -1824,11 +1834,11 @@ export default function ModelManage(): JSX.Element {
                   title={hint}
                   onClick={() => openMetaForRow(row)}
                 >
-                  <span className={`mm-cap-ctx${inTok == null ? '' : ' filled'}${ctxSrc === 'modelsdev' ? ' from-modelsdev' : ''}`}>
+                  <span className={`mm-cap-ctx${inTok == null ? '' : ' filled'}${ctxSrc === 'modelsdev' ? ' from-modelsdev' : ''}${ctxSrc === 'plugin' ? ' from-plugin' : ''}`}>
                     {inTok != null ? fmtCompact(inTok) : '—'}
                   </span>
                   <span className="mm-cap-ctx">/</span>
-                  <span className={`mm-cap-ctx${outTok == null ? '' : ' filled'}`}>
+                  <span className={`mm-cap-ctx${outTok == null ? '' : ' filled'}${outSrc === 'plugin' ? ' from-plugin' : ''}`}>
                     {outTok != null ? fmtCompact(outTok) : '—'}
                   </span>
                 </button>
@@ -2054,7 +2064,7 @@ export default function ModelManage(): JSX.Element {
     source: { label: t('来源') },
     budget: {
       label: t('上下文 / 输出'),
-      tip: t('数字带虚线底 = 由 models.dev 补齐；右上角小点 = 你手动覆盖过；— = 未声明。点任意一格可改。'),
+      tip: t('数字带虚线底 = 由 models.dev 补齐；绿字 = 由插件（供应商）目录申报；右上角小点 = 你手动覆盖过；— = 未声明。点任意一格可改。'),
     },
     caps: {
       label: t('能力'),

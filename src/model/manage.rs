@@ -217,13 +217,17 @@ pub struct ManageModel {
     pub sources: Vec<ModelSource>,
     pub owned_by: String,
     pub context_length: Option<u32>,
-    /// 最大输出 token 数（来源：模型元信息覆盖 → models.dev `limit.output`；
-    /// 都没有则 None，前端「上下文 / 输出」列显示 —）
+    /// 最大输出 token 数（来源：模型元信息覆盖 → 插件目录申报 → models.dev
+    /// `limit.output`；都没有则 None，前端「上下文 / 输出」列显示 —）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     pub capabilities: Vec<String>,
-    /// 能力/上下文来源标记（Phase1-A4 capSources：user > modelsdev >
-    /// builtin；null = 该字段无读数）。前端可信度展示用。
+    /// 能力/上下文来源标记（Phase1-A4 capSources：user > plugin >
+    /// modelsdev / builtin；null = 该字段无读数）。前端可信度展示用。
+    ///
+    /// `plugin` 一档来自插件/供应商自己申报的模型目录
+    /// （`plugin_host::model_catalog`）—— 账号型供应商（小浣熊一类）的
+    /// 上下文/输出上限只可能来自这里，前端 budget 列据此显示绿色来源。
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub cap_sources: serde_json::Value,
     /// 能力三态出口（T5，A2A `capability::effective` 形状）：六键齐全，
@@ -839,7 +843,12 @@ fn new_row(
     mapper: &ModelMapper,
 ) -> ManageModel {
     let channel_owned_by = crate::model::metadata::owned_by_for_channel_type(provider);
-    let (meta, cap_sources) = metadata.resolve_with_sources(model, channel_owned_by);
+    // provider 维度交给元信息层：插件目录是按 provider 存的（账号型供应商
+    // 申报的 maxInputTokens / maxOutputTokens 只在自己那家名下），只按模型名
+    // 查会把别家的上限套上来。非插件 provider 查不到目录 = None，逐字回落
+    // 内置推断 / models.dev，与改动前一致。
+    let (meta, cap_sources) =
+        metadata.resolve_with_sources_for(model, channel_owned_by, Some(provider));
     let price = pricing.get_price(model);
     let model_ratio = pricing.get_ratios().model_ratio(model);
     let entries = mapper.all_mapping_entries();
@@ -1250,6 +1259,69 @@ mod tests {
         );
         assert!(view.models.is_empty());
         assert!(view.providers.is_empty());
+    }
+
+    /// 插件目录申报的上限**真的走到管理页的行上**：供应商（账号型）只在
+    /// 插件目录里申报 `maxInputTokens` / `maxOutputTokens` 时，`build_view`
+    /// 的行必须带出这两个值，且 `cap_sources` 标 `plugin`。
+    ///
+    /// 这条覆盖的是「接线」而不是「查表」：`new_row` 必须把 provider 传给
+    /// `resolve_with_sources_for`，否则精确匹配落空、值退回空。
+    #[test]
+    fn plugin_catalog_limits_reach_manage_rows() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let provider = format!("unit-manage-budget-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        crate::plugin_host::model_catalog::set_remote(
+            &provider,
+            vec![serde_json::json!({
+                "id": "raccoon-pro",
+                "maxInputTokens": 200_000,
+                "maxOutputTokens": 8_192,
+            })],
+            7,
+        );
+        let channel: Channel = serde_json::from_value(serde_json::json!({
+            "id": "ch-plugin-budget",
+            "name": "plugin-budget",
+            "channel_type": "plugin",
+            "plugin_provider": provider,
+            "status": "enabled",
+            "models": [],
+        }))
+        .unwrap();
+        let store = temp_store("plugin-budget");
+        let sessions = AccountSessionStore::new(store.clone());
+        let rules = ModelRules::new(store.clone());
+        rules.load().unwrap();
+        let metadata = ModelMetadataRegistry::new(store.clone());
+        let pricing = PricingStore::new(store.clone());
+        let mapper = ModelMapper::new(store);
+        let view = build_view(
+            std::slice::from_ref(&channel),
+            &sessions,
+            &rules,
+            &metadata,
+            &pricing,
+            &mapper,
+        );
+        let row = view
+            .models
+            .iter()
+            .find(|m| m.id == "raccoon-pro")
+            .expect("插件目录里的模型应出现在视图里");
+        assert_eq!(row.context_length, Some(200_000));
+        assert_eq!(row.max_output_tokens, Some(8_192));
+        assert_eq!(
+            row.cap_sources["context_length"],
+            serde_json::json!("plugin"),
+            "来源必须是 plugin（前端 budget 列据此显示绿字）"
+        );
+        assert_eq!(
+            row.cap_sources["max_output_tokens"],
+            serde_json::json!("plugin")
+        );
+        crate::plugin_host::model_catalog::remove(&provider);
     }
 
     /// 逐模型清单来源 `source` 推导：声明=builtin、发现=remote、自定义登记=manual。

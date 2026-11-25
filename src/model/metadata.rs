@@ -1,11 +1,18 @@
 //! 模型元信息注册表（P1「模型元信息同步」）—— owned_by / 上下文长度 / 能力标签。
 //!
-//! 数据来源分四层（优先级从低到高）：
+//! 数据来源分五层（优先级从低到高）：
 //! 1. 内置推断：模型名前缀 → 归属厂商；常见模型 → 上下文长度；名字特征 → 能力标签
 //! 2. 渠道类型：list_models 聚合时由渠道的 channel_type 推导 owned_by（覆盖名字推断）
 //! 3. models.dev 补齐（对齐 Agent2API，开关 `usage.models_dev_enabled` 默认开）：
 //!    内置表未声明的上下文长度 / 能力标签用社区目录**只填空位**，已声明不改写
-//! 4. 管理员覆盖：FileStore `model_meta:{name}` 持久化（显式覆盖前三层）
+//! 4. **插件/供应商目录**（`plugin_host::model_catalog`）：插件自己
+//!    `models.refresh` 回报的 `maxInputTokens` / `maxOutputTokens`，按 provider
+//!    取各账号最大值。这是账号型供应商（小浣熊一类）申报上限的唯一真实来源，
+//!    压过内置推断与 models.dev 的补空位
+//! 5. 管理员覆盖：FileStore `model_meta:{name}` 持久化（显式覆盖前四层）
+//!
+//! 为什么插件目录压过 models.dev：前者是**这家上游自己申报**的，后者是社区
+//! 对同名模型的通用估计。为什么仍低于管理员覆盖：管理员的显式配置永远最后说话。
 //!
 //! 百年工程红线：不引 crate；上下文长度表为静态内置 + models.dev 联网补齐
 //! （内嵌快照保底，见 `models_dev` 模块）+ 按需覆盖。
@@ -217,6 +224,26 @@ pub fn infer_capabilities(model: &str) -> Vec<String> {
     caps
 }
 
+// ── 插件目录申报的上限 ──────────────────────────────────────────────
+
+/// 取某模型在插件目录里的上下文/输出申报。
+///
+/// `provider` 给定时**精确匹配**这一家（`plugin_host::model_catalog::budget_for`）；
+/// 拿不到 provider 时退回跨 provider 取大（`budget_any`）—— 那是已知限制：
+/// 同一模型被多家申报时取到的是最大值，可能高于当前这条链的真实上限。
+///
+/// 目录只在进程内表里（重启后由 `bootstrap`/`manager` 重新并集，见
+/// `plugin_host::model_catalog` 模块头），所以本函数是纯同步、零 IO 的查表。
+fn plugin_budget(
+    model: &str,
+    provider: Option<&str>,
+) -> Option<crate::plugin_host::model_catalog::ModelBudget> {
+    match provider.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(provider) => crate::plugin_host::model_catalog::budget_for(provider, model),
+        None => crate::plugin_host::model_catalog::budget_any(model),
+    }
+}
+
 // ── ModelMetadataRegistry ───────────────────────────────────────────
 
 /// 元信息注册表：内置推断 + 管理员覆盖（FileStore 持久化）。
@@ -261,26 +288,57 @@ impl ModelMetadataRegistry {
         Ok(())
     }
 
-    /// 查询某模型的元信息（覆盖 > 内置推断 > models.dev 补空位）。
+    /// 查询某模型的元信息（覆盖 > 插件目录 > 内置推断 / models.dev 补空位）。
     ///
     /// `channel_owned_by`：渠道维度推导的归属（优先于名字推断）；
     /// 覆盖项存在时整体以覆盖为准。models.dev 只填「内置推断没声明」的
     /// 上下文长度与能力标签（开关关闭时完全不参与）。
+    ///
+    /// 本方法**没有 provider 维度**（兼容旧调用点）：插件目录的申报按
+    /// [`crate::plugin_host::model_catalog::budget_any`] 跨 provider 取大 ——
+    /// 同一模型被多家申报时看到的是最大值。拿得到 provider 的调用点用
+    /// [`Self::resolve_with_sources_for`]。
     pub fn get(&self, model: &str, channel_owned_by: Option<&str>) -> ModelMetadata {
         self.resolve_with_sources(model, channel_owned_by).0
     }
 
     /// 解析元信息并给出**逐字段来源标记**（Phase1-A4 capSources，对齐上游
     /// model_meta/fill.rs 的三态可信度）：`user`（管理员覆盖）>
-    /// `modelsdev`（models.dev 目录）> `builtin`（内置推断表）。管理面
-    /// 能力弹窗据此显示「这个能力是谁说的」，防误判。
+    /// `plugin`（插件/供应商目录申报）> `builtin`（内置推断表）/ `modelsdev`
+    /// （models.dev 目录补空位）。管理面能力弹窗据此显示「这个能力是谁说的」，
+    /// 防误判。
     ///
     /// 来源判定与 [`Self::get`] 的合并逻辑同源（本方法是 get 的超集），
     /// 两处不要各自演化。
+    ///
+    /// 本函数是 [`Self::resolve_with_sources_for`] 的 `plugin_provider = None`
+    /// 形态（只按模型名解析，插件目录走跨 provider 取大）—— 拿得到 provider
+    /// 的调用点请直接用那个，否则同一模型在两家申报值不同时会被抬高。
     pub fn resolve_with_sources(
         &self,
         model: &str,
         channel_owned_by: Option<&str>,
+    ) -> (ModelMetadata, serde_json::Value) {
+        self.resolve_with_sources_for(model, channel_owned_by, None)
+    }
+
+    /// 同 [`Self::resolve_with_sources`]，但带 **provider 维度**。
+    ///
+    /// 为什么要 provider：插件的模型目录本身就是 provider 维度的
+    /// （`plugin_host::model_catalog`，由 `wasm::catalog` 的并集回推），
+    /// 同一个模型 id 在不同 provider 下申报的上下文/输出可以不同
+    /// （渠道 A 的 `glm-5.3` 128k、账号池 B 的 200k）。只按模型名取会把
+    /// 别家的上限套到这条链上。
+    ///
+    /// `plugin_provider` 语义：
+    /// - `Some(p)`：**只**认这一家的申报（精确匹配；这家没申报就回落下一层，
+    ///   不去借别家的数字）；
+    /// - `None`：跨全部 provider 逐字段取最大（已知限制，见 [`plugin_budget`]）。
+    pub fn resolve_with_sources_for(
+        &self,
+        model: &str,
+        channel_owned_by: Option<&str>,
+        plugin_provider: Option<&str>,
     ) -> (ModelMetadata, serde_json::Value) {
         if let Some(m) = self.overrides.read().get(model) {
             // 管理员覆盖整体获胜：非空字段全标 user
@@ -310,9 +368,29 @@ impl ModelMetadataRegistry {
         } else {
             ""
         };
-        // 输出上限：内置表不含该维度，只由 models.dev 补（下面的 lookup 里取）
+        // 输出上限：内置表不含该维度，由插件目录 / models.dev 补（见下）
         let mut max_output_tokens: Option<u32> = None;
         let mut output_source = "";
+        // ── 插件/供应商目录层（账号型供应商的唯一真实来源）─────────────
+        //
+        // 这一层是本次修复的断点：`wasm::catalog::aggregate` 早就按 provider
+        // 把各账号申报的 `maxInputTokens` / `maxOutputTokens` 取最大值并成了
+        // 目录（`plugin_host::model_catalog`），但元信息层从没查过它 —— 于是
+        // 「只在插件目录里申报上限」的家（小浣熊一类账号型供应商）在模型管理
+        // 页的「上下文 / 输出」两列永远是空的。
+        //
+        // 它压过内置推断：内置表是按模型名前缀猜的通用值，插件目录是**这家
+        // 上游自己申报**的；它压不过管理员覆盖（已在上面 return）。
+        if let Some(budget) = plugin_budget(model, plugin_provider) {
+            if let Some(value) = budget.context_length {
+                context_length = Some(value);
+                context_source = "plugin";
+            }
+            if let Some(value) = budget.max_output_tokens {
+                max_output_tokens = Some(value);
+                output_source = "plugin";
+            }
+        }
         let mut capabilities = infer_capabilities(model);
         let mut cap_sources: serde_json::Map<String, serde_json::Value> = capabilities
             .iter()
@@ -326,7 +404,7 @@ impl ModelMetadataRegistry {
                         context_source = "modelsdev";
                     }
                 }
-                // 输出上限只有 models.dev 有（内置表没这个维度）
+                // 输出上限：内置表没这个维度，插件目录没申报时由 models.dev 补
                 if max_output_tokens.is_none() {
                     max_output_tokens = dev.output.and_then(|n| u32::try_from(n).ok());
                     if max_output_tokens.is_some() {
@@ -553,5 +631,238 @@ mod tests {
             m.capabilities,
             vec!["chat".to_string(), "vision".to_string()]
         );
+    }
+
+    // ── 插件目录层与四层优先级（本次修复的回归面）────────────────────
+    //
+    // 这一组用例能区分新旧：改动前 `resolve_with_sources` 从不查插件目录，
+    // 所以凡是「值只能来自插件目录」的断言在旧实现上都拿不到（None / 空串），
+    // 而不是「恰好也绿」。
+
+    /// 独立临时目录（各用例互不影响覆盖项落盘）。
+    fn temp_registry(tag: &str) -> ModelMetadataRegistry {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aigx-meta-{tag}-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        ModelMetadataRegistry::new(Arc::new(FileStore::new(dir)))
+    }
+
+    /// 造一个只在插件目录里申报上限的 provider（名字唯一，防并行用例互撞）。
+    fn seed_plugin_budget(tag: &str, models: serde_json::Value) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let provider = format!("unit-meta-{tag}-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        let list = models.as_array().cloned().unwrap_or_default();
+        crate::plugin_host::model_catalog::set_remote(&provider, list, 1);
+        provider
+    }
+
+    /// 第一层：管理员覆盖压过插件目录（覆盖里的非空字段全标 user）。
+    #[test]
+    fn override_beats_plugin_catalog() {
+        let reg = temp_registry("override-plugin");
+        let provider = seed_plugin_budget(
+            "override",
+            serde_json::json!([{ "id": "raccoon-x1", "maxInputTokens": 200_000,
+                "maxOutputTokens": 8_192 }]),
+        );
+        let (meta, sources) = reg.resolve_with_sources_for("raccoon-x1", None, Some(&provider));
+        assert_eq!(meta.context_length, Some(200_000), "插件目录应补上上下文");
+        assert_eq!(
+            meta.max_output_tokens,
+            Some(8_192),
+            "插件目录应补上输出上限"
+        );
+        assert_eq!(sources["context_length"], serde_json::json!("plugin"));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("plugin"));
+
+        reg.set_override(
+            "raccoon-x1".into(),
+            ModelMetadata {
+                owned_by: "acme".into(),
+                context_length: Some(1_000_000),
+                max_output_tokens: Some(64_000),
+                capabilities: vec!["chat".into()],
+                reasoning_levels: vec![],
+                tool_calling_mode: None,
+                visibility: None,
+            },
+        )
+        .unwrap();
+        let (meta, sources) = reg.resolve_with_sources_for("raccoon-x1", None, Some(&provider));
+        assert_eq!(meta.context_length, Some(1_000_000), "管理员覆盖必须赢");
+        assert_eq!(meta.max_output_tokens, Some(64_000));
+        assert_eq!(sources["context_length"], serde_json::json!("user"));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("user"));
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 第二层：插件目录压过内置推断（内置表按名字猜的通用值让位给上游申报）。
+    #[test]
+    fn plugin_catalog_beats_builtin_context() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let reg = temp_registry("plugin-builtin");
+        // 名字带唯一后缀：`gpt-4o` 前缀仍命中内置表（128000），而后缀让
+        // models.dev 的归一化键必然落空 —— 这条用例只比较「内置 vs 插件」。
+        let model = format!("gpt-4o-unitmeta{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        assert_eq!(builtin_context_length(&model), Some(128_000));
+        assert!(
+            super::models_dev::lookup(&model).is_none(),
+            "唯一后缀不该命中 models.dev，否则这条用例测不到插件层"
+        );
+        let provider = seed_plugin_budget(
+            "builtin",
+            serde_json::json!([{ "id": model, "maxInputTokens": 96_000,
+                "maxOutputTokens": 4_096 }]),
+        );
+        let (meta, sources) = reg.resolve_with_sources_for(&model, Some("openai"), Some(&provider));
+        assert_eq!(
+            meta.context_length,
+            Some(96_000),
+            "插件目录申报压过内置推断（这家上游自己说的比通用表准）"
+        );
+        assert_eq!(sources["context_length"], serde_json::json!("plugin"));
+        assert_eq!(meta.max_output_tokens, Some(4_096));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("plugin"));
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 第三层：插件目录压过 models.dev（社区目录只填空位，不得改写上游申报）。
+    #[test]
+    fn plugin_catalog_beats_modelsdev() {
+        let _seed_guard = super::models_dev::seed_for_test([(
+            "unit-meta-plugin-vs-dev".to_string(),
+            super::models_dev::DevEntry {
+                canonical: Some("acme/unit-meta-plugin-vs-dev".to_string()),
+                reasoning: false,
+                tool_call: false,
+                images: false,
+                video: false,
+                context: Some(32_000),
+                output: Some(2_048),
+            },
+        )]);
+        let reg = temp_registry("plugin-dev");
+        // 模型名不命中内置表（前缀全不匹配）→ 只有 models.dev 与插件目录两档
+        assert_eq!(builtin_context_length("unit-meta-plugin-vs-dev"), None);
+        let provider = seed_plugin_budget(
+            "dev",
+            serde_json::json!([{ "id": "unit-meta-plugin-vs-dev",
+                "maxInputTokens": 400_000, "maxOutputTokens": 16_384 }]),
+        );
+        let (meta, sources) =
+            reg.resolve_with_sources_for("unit-meta-plugin-vs-dev", None, Some(&provider));
+        assert_eq!(meta.context_length, Some(400_000), "插件目录赢 models.dev");
+        assert_eq!(meta.max_output_tokens, Some(16_384));
+        assert_eq!(sources["context_length"], serde_json::json!("plugin"));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("plugin"));
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 第四层：插件目录**没有**这个模型时，models.dev 仍按老规矩补空位
+    /// （上下文与输出都补），来源标 `modelsdev` —— 这是「插件层不破坏既有
+    /// 回落」的正向对照。
+    #[test]
+    fn modelsdev_still_fills_when_plugin_catalog_misses() {
+        let _seed_guard = super::models_dev::seed_for_test([(
+            "unit-meta-dev-only".to_string(),
+            super::models_dev::DevEntry {
+                canonical: Some("acme/unit-meta-dev-only".to_string()),
+                reasoning: true,
+                tool_call: true,
+                images: false,
+                video: false,
+                context: Some(64_000),
+                output: Some(8_192),
+            },
+        )]);
+        let reg = temp_registry("dev-fallback");
+        // 唯一 provider 名，且目录里只有别的模型 → 精确匹配必然落空
+        let provider = seed_plugin_budget(
+            "dev-miss",
+            serde_json::json!([{ "id": "some-other-model", "maxInputTokens": 1 }]),
+        );
+        let (meta, sources) =
+            reg.resolve_with_sources_for("unit-meta-dev-only", None, Some(&provider));
+        assert_eq!(meta.context_length, Some(64_000));
+        assert_eq!(meta.max_output_tokens, Some(8_192));
+        assert_eq!(sources["context_length"], serde_json::json!("modelsdev"));
+        assert_eq!(sources["max_output_tokens"], serde_json::json!("modelsdev"));
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 正向对照：完全不碰插件目录时，解析结果与改动前同一口径 ——
+    /// 上下文按内置表，来源就是 `builtin`；输出上限沿用「内置表没有该维度」
+    /// 的老规矩（有 models.dev 命中则由它补，否则未声明）。
+    ///
+    /// 不把 models.dev 那半写死成 `None`：`models_dev` 目录是进程级全局的
+    /// （`init` / `seed_for_test` 都会写入），并行用例先种了 `gpt-4o` 也不该
+    /// 让这条断言变红。因此这里用**运行时的 lookup 结果当 oracle**，只钉住
+    /// 「插件层没有插手」这件事：上下文来自 builtin、来源永不为 plugin。
+    #[test]
+    fn without_plugin_catalog_resolution_is_unchanged() {
+        let reg = temp_registry("no-plugin");
+        let (meta, sources) = reg.resolve_with_sources("gpt-4o", Some("openai"));
+        let dev = super::models_dev::lookup("gpt-4o");
+        assert_eq!(meta.owned_by, "openai");
+        assert_eq!(meta.context_length, Some(128_000), "内置表的上下文不受影响");
+        assert_eq!(sources["context_length"], serde_json::json!("builtin"));
+        let expected_output = dev
+            .as_ref()
+            .and_then(|d| d.output)
+            .and_then(|n| u32::try_from(n).ok());
+        assert_eq!(
+            meta.max_output_tokens, expected_output,
+            "输出上限仍是 models.dev 单独负责的那一档"
+        );
+        assert!(
+            sources["context_length"] != serde_json::json!("plugin")
+                && sources["max_output_tokens"] != serde_json::json!("plugin"),
+            "没有插件目录数据时来源绝不可能是 plugin"
+        );
+        assert_eq!(meta.capabilities, vec!["chat".to_string()]);
+        // 「谁知道这个模型的归属」也不受插件层影响
+        assert!(sources["visibility"].is_null());
+        assert!(sources["reasoning_levels"].is_null());
+    }
+
+    /// 无 provider 维度时的已知限制：跨全部 provider 逐字段取最大。
+    ///
+    /// 这条**固化限制本身**（而不是假装它精确）：两家申报 128k / 200k 时，
+    /// 拿不到 provider 的调用点会看到 200k。有 provider 的调用点不受影响
+    /// （见 `plugin_catalog_beats_builtin_context`）。
+    #[test]
+    fn without_provider_dimension_takes_max_across_providers() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let reg = temp_registry("any-provider");
+        // 唯一模型名：`budget_any` 扫的是全局表，别家同名条目会污染取值。
+        let model = format!("shared-unitmeta{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        let small = seed_plugin_budget(
+            "any-small",
+            serde_json::json!([{ "id": model, "maxInputTokens": 128_000 }]),
+        );
+        let large = seed_plugin_budget(
+            "any-large",
+            serde_json::json!([{ "id": model, "maxInputTokens": 200_000 }]),
+        );
+        let (meta, sources) = reg.resolve_with_sources(&model, None);
+        assert_eq!(
+            meta.context_length,
+            Some(200_000),
+            "无 provider 时取最大（已知限制）"
+        );
+        assert_eq!(sources["context_length"], serde_json::json!("plugin"));
+        // 有 provider 时精确匹配自己那家
+        let (small_meta, _) = reg.resolve_with_sources_for(&model, None, Some(&small));
+        assert_eq!(small_meta.context_length, Some(128_000));
+        let (large_meta, _) = reg.resolve_with_sources_for(&model, None, Some(&large));
+        assert_eq!(large_meta.context_length, Some(200_000));
+        crate::plugin_host::model_catalog::remove(&small);
+        crate::plugin_host::model_catalog::remove(&large);
     }
 }

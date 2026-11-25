@@ -63,6 +63,12 @@ struct Entry {
     models: Vec<Value>,
     /// 并集最近刷新时刻（unix 毫秒）。
     refreshed_at: i64,
+    /// 预算索引：模型 id（小写）→ 上下文/输出上限。
+    ///
+    /// 与 `models` 同一次写入构造（见 [`entry`]），**不随读次数重建**：
+    /// `/api/models/manage` 会遍历几百个模型，逐个去 models 数组里线性找
+    /// 字段是 O(模型数 × 目录条数)，且每次都要 `Value` 反序列化取值。
+    budget: Arc<HashMap<String, ModelBudget>>,
 }
 
 impl Entry {
@@ -72,6 +78,80 @@ impl Entry {
             "meta": { "remote": true, "refreshed_at": self.refreshed_at },
         })
     }
+}
+
+/// 插件申报的「上下文窗口 / 最大输出」上限。
+///
+/// 这是模型元信息链路里**唯一**能拿到账号型供应商（小浣熊等只在插件目录里
+/// 申报上限的家）真实值的来源：数据由插件自己 `models.refresh` 回报，经
+/// `wasm::catalog::merge` 按 provider 取各账号最大值后落到这里。
+/// 两个字段各自独立取用 —— 只申报了上下文的家不会把输出上限写成 0。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModelBudget {
+    /// 上下文窗口（token）。
+    pub context_length: Option<u32>,
+    /// 最大输出 token。
+    pub max_output_tokens: Option<u32>,
+}
+
+impl ModelBudget {
+    /// 合并两份申报（逐字段取大；`None` 不覆盖已有值）。
+    fn absorb(&mut self, other: ModelBudget) {
+        if let Some(value) = other.context_length {
+            self.context_length = Some(match self.context_length {
+                Some(current) => current.max(value),
+                None => value,
+            });
+        }
+        if let Some(value) = other.max_output_tokens {
+            self.max_output_tokens = Some(match self.max_output_tokens {
+                Some(current) => current.max(value),
+                None => value,
+            });
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.context_length.is_none() && self.max_output_tokens.is_none()
+    }
+}
+
+/// 目录条目里的上下文上限键（上游 `ModelList` 口径 + 常见别名）。
+const CONTEXT_KEYS: &[&str] = &["maxInputTokens", "max_input_tokens"];
+/// 目录条目里的输出上限键。
+const OUTPUT_KEYS: &[&str] = &["maxOutputTokens", "max_output_tokens"];
+
+/// 从目录条目对象里取一个正整数上限（0 / 超 u32 一律当未申报）。
+fn pick_limit(model: &Value, keys: &[&str]) -> Option<u32> {
+    keys.iter().find_map(|key| {
+        model
+            .get(*key)
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+            .map(|n| n as u32)
+    })
+}
+
+/// 目录数组 → 预算索引（模型 id 小写 → 上限）。
+fn budget_index(models: &[Value]) -> Arc<HashMap<String, ModelBudget>> {
+    let mut table: HashMap<String, ModelBudget> = HashMap::new();
+    for model in models {
+        let Some(id) = model["id"].as_str() else {
+            continue;
+        };
+        let budget = ModelBudget {
+            context_length: pick_limit(model, CONTEXT_KEYS),
+            max_output_tokens: pick_limit(model, OUTPUT_KEYS),
+        };
+        if budget.is_empty() {
+            continue;
+        }
+        table
+            .entry(id.trim().to_ascii_lowercase())
+            .and_modify(|slot| slot.absorb(budget))
+            .or_insert(budget);
+    }
+    Arc::new(table)
 }
 
 fn table() -> &'static Mutex<HashMap<String, Arc<Entry>>> {
@@ -130,6 +210,7 @@ fn entry(models: Vec<Value>, refreshed_at: i64) -> Option<Arc<Entry>> {
     if models.len() > 4096 {
         return None;
     }
+    let budget = budget_index(&models);
     Some(Arc::new(Entry {
         models,
         refreshed_at: if refreshed_at > 0 {
@@ -137,6 +218,7 @@ fn entry(models: Vec<Value>, refreshed_at: i64) -> Option<Arc<Entry>> {
         } else {
             super::wasm::now_ms()
         },
+        budget,
     }))
 }
 
@@ -192,6 +274,49 @@ pub fn meta(provider: &str) -> (bool, i64) {
         Some(entry) => (true, entry.refreshed_at),
         None => (false, 0),
     }
+}
+
+/// 某 provider 对某模型的上下文/输出申报（精确匹配；未命中返回 `None`）。
+///
+/// 模型 id 大小写不敏感（与 `wasm::catalog::aggregate` 的并集键同一归一：
+/// 都是 `to_ascii_lowercase`）。`None` 的含义是「这家没申报过」，**不是**
+/// 「申报了 0」—— 调用方据此决定是否回落下一层（models.dev / 内置表）。
+///
+/// 有 provider 维度时必须用这个函数：同一模型 id 在不同 provider 下上限
+/// 可以不同（渠道 A 的 `glm-5.3` 是 128k、账号池 B 是 200k）。
+pub fn budget_for(provider: &str, model: &str) -> Option<ModelBudget> {
+    if provider.trim().is_empty() {
+        return None;
+    }
+    let entry = cached(provider)?;
+    let key = model.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    entry.budget.get(&key).copied()
+}
+
+/// 跨全部 provider 的申报（逐字段取大；未命中返回 `None`）。
+///
+/// 只在**拿不到 provider 维度**的调用点用（例如只按模型名解析的旧路径）。
+/// 语义是「任意一家申报过就算」—— 多 provider 同时申报时取最大值，可能
+/// 高于当前这条链自己的上限；拿得到 provider 时优先 [`budget_for`]。
+pub fn budget_any(model: &str) -> Option<ModelBudget> {
+    let key = model.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    let table = table().lock().ok()?;
+    let mut merged: Option<ModelBudget> = None;
+    for entry in table.values() {
+        if let Some(budget) = entry.budget.get(&key) {
+            match &mut merged {
+                Some(slot) => slot.absorb(*budget),
+                None => merged = Some(*budget),
+            }
+        }
+    }
+    merged
 }
 
 /// 完整快照 `{models, meta}`（未命中返回 `null`；= 上游 `rpc_cache::snapshot`）。
@@ -452,6 +577,66 @@ mod tests {
         assert!(p.is_empty());
         assert!(models.is_empty());
         remove(&provider);
+    }
+
+    /// 预算索引：按 provider 精确取上限（模型 id 大小写不敏感）、只申报一个
+    /// 字段时另一个保持 `None`、未命中 / 未发布的 provider 一律 `None`。
+    ///
+    /// 这是元信息层（`model::metadata::resolve_with_sources_for`）取「这家
+    /// 上游申报的上下文/输出」的唯一入口，所以形状与三态语义在这里钉死。
+    #[test]
+    fn budget_index_reads_provider_scoped_limits() {
+        let provider = unique("budget");
+        // 模型名带唯一后缀：`budget_any` 扫全局表，别家同名条目会污染取大结果
+        // （大小写归一由大小写变体覆盖，不靠通用名）。
+        let upper = format!("GLM-{}-Budget", unique("model"));
+        let lower = upper.to_lowercase();
+        set_remote(
+            &provider,
+            vec![
+                json!({ "id": upper, "maxInputTokens": 131_072,
+                    "maxOutputTokens": 8_192 }),
+                // 只申报上下文：输出必须保持 None（不是 0）
+                json!({ "id": "ctx-only", "maxInputTokens": 32_000 }),
+                // 两个字段都没申报：不进索引
+                json!({ "id": "no-limits" }),
+                // 大小写不同的同一模型：索引键归一，逐字段取大
+                json!({ "id": lower, "maxInputTokens": 200_000 }),
+            ],
+            1,
+        );
+        assert_eq!(
+            budget_for(&provider, &lower),
+            Some(ModelBudget {
+                context_length: Some(200_000),
+                max_output_tokens: Some(8_192),
+            }),
+            "索引键归一后逐字段取大；输出只申报过一次，仍是 8_192"
+        );
+        assert_eq!(
+            budget_for(&provider, &upper),
+            budget_for(&provider, &lower),
+            "模型 id 大小写不敏感"
+        );
+        assert_eq!(
+            budget_for(&provider, "CTX-ONLY"),
+            Some(ModelBudget {
+                context_length: Some(32_000),
+                max_output_tokens: None,
+            }),
+            "只申报上下文的家不得凭空得到输出上限"
+        );
+        assert_eq!(budget_for(&provider, "no-limits"), None);
+        assert_eq!(budget_for(&provider, "missing-model"), None);
+        // 未发布的 provider / 空 provider / 空模型名 → 都没有申报
+        assert_eq!(budget_for("unit-cat-never-published", &lower), None);
+        assert_eq!(budget_for("   ", &lower), None);
+        assert_eq!(budget_for(&provider, "  "), None);
+        // 跨 provider 查询也能读到（已知限制路径：无 provider 维度时取大）
+        assert!(budget_any(&lower).is_some_and(|b| b.context_length == Some(200_000)));
+        // 摘除目录后立即不可见
+        remove(&provider);
+        assert_eq!(budget_for(&provider, &lower), None);
     }
 
     /// 轮询等待条件成立（最多 2s，每 5ms 查一次）。

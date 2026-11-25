@@ -293,6 +293,33 @@ pub fn status() -> Value {
     })
 }
 
+/// 测试用：把若干条目并入 models.dev 目录（**只插入不替换**），返回串行化锁。
+///
+/// 目录是进程级 `OnceLock`：`metadata` 的优先级用例需要**已知**的 models.dev
+/// 取值，而 `init()` 要一个 FileStore 且会整表替换（会把并行用例的条目冲掉）。
+/// 这里改为按键插入 + 全局锁串行化（与 `account_session::secret::test_lock`
+/// 同手法）：用例用唯一模型名，条目互不覆盖，锁只防「边写边读」的竞态。
+///
+/// 返回值是守卫，**必须活到用例结束**：丢弃即释放全局锁。
+#[cfg(test)]
+#[must_use = "守卫必须活到测试结束；丢弃会立刻释放全局锁，并行用例可能读到半份目录"]
+pub(crate) fn seed_for_test(
+    entries: impl IntoIterator<Item = (String, DevEntry)>,
+) -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    {
+        let mut catalog = catalog().write();
+        for (model, entry) in entries {
+            let key = normalize_key(&model);
+            if !key.is_empty() {
+                catalog.models.insert(key, entry);
+            }
+        }
+    }
+    guard
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

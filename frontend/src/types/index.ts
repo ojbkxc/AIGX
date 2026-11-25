@@ -726,12 +726,16 @@ export interface ManagedModel {
   max_output_tokens?: number | null;
   capabilities: string[];
   /**
-   * 能力/上下文取数来源标记（后端 Phase1-A4 `cap_sources`：builtin < modelsdev < user；
-   * 字段级 null = 无读数）。#51 P1#4：caps 列据此上色/悬停显示可信度。旧后端可能不下发。
+   * 能力/上下文取数来源标记（后端 Phase1-A4 `cap_sources`：builtin < modelsdev
+   * < plugin < user；字段级 null = 无读数）。#51 P1#4：caps 列据此上色/悬停显示可信度。旧后端可能不下发。
+   *
+   * `plugin` = 插件/供应商目录申报（`plugin_host::model_catalog`，由插件
+   * `models.refresh` 回报、按 provider 取各账号最大值）：账号型供应商
+   * （小浣熊一类）的上下文/输出上限只可能来自这一档。
    */
   cap_sources?: {
     context_length?: string | null;
-    /** 最大输出 token 的来源标记（user / modelsdev / null） */
+    /** 最大输出 token 的来源标记（user / plugin / modelsdev / null） */
     max_output_tokens?: string | null;
     capabilities?: Record<string, string>;
     reasoning_levels?: unknown;

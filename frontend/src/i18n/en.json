@@ -5735,8 +5735,8 @@
   "作为 system 消息注入": "[TODO en] 作为 system 消息注入",
   "A2A 没有的能力，都保留在这里": "[TODO en] A2A 没有的能力，都保留在这里",
   "AIGX 独有项": "[TODO en] AIGX 独有项",
-  "；其中 上下文窗口 由插件目录申报": "[TODO en] ；其中 上下文窗口 由插件目录申报",
-  "；最大输出 Token 由插件目录申报": "[TODO en] ；最大输出 Token 由插件目录申报",
+  "；其中 上下文窗口 由插件目录申报": "; the context window is declared by the plugin catalog",
+  "；最大输出 Token 由插件目录申报": "; max output tokens are declared by the plugin catalog",
   "对话链路暂无工具执行通道；工具的真实执行与审批卡在「AI 运维 Agent」页，这里是同一份清单的只读勾选。": "[TODO en] 对话链路暂无工具执行通道；工具的真实执行与审批卡在「AI 运维 Agent」页，这里是同一份清单的只读勾选。",
   "非合法 JSON": "[TODO en] 非合法 JSON",
   "共 {{n}} 字符": "[TODO en] 共 {{n}} 字符",
@@ -5745,5 +5745,8 @@
   "显示全文": "[TODO en] 显示全文",
   "已隐藏凭证": "[TODO en] 已隐藏凭证",
   "由 AIGX 网关按渠道优先级自动选路（无需 API Key）；渠道锁定是「AI 运维 Agent」页的配置，不作用于本页对话。": "[TODO en] 由 AIGX 网关按渠道优先级自动选路（无需 API Key）；渠道锁定是「AI 运维 Agent」页的配置，不作用于本页对话。",
-  "字符": "[TODO en] 字符"
+  "字符": "[TODO en] 字符",
+  "已拒绝": "[TODO en] 已拒绝",
+  "已允许": "[TODO en] 已允许",
+  "数字带虚线底 = 由 models.dev 补齐；绿字 = 由插件（供应商）目录申报；右上角小点 = 你手动覆盖过；— = 未声明。点任意一格可改。": "Dotted underline = filled in from models.dev; green text = declared by the plugin (provider) catalog; small dot at top-right = you overrode it; — = undeclared. Click any cell to edit."
 }
