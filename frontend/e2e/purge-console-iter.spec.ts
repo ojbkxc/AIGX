@@ -979,8 +979,10 @@ test('37 · 「只看异常」先看清整理会删掉哪些行', async ({ page 
   );
   await gotoPurge(page);
   const rows = page.locator('[data-purge-fix="dead-zone-table"] .purge-rule-row');
+  // `count()` 不自动等待：移动端首次渲染比桌面慢，抢跑会读到 0（CI [mobile]
+  // 实测 Received: 0）。先等它到 5，再把快照值给后面「取消勾选 → 全部回来」。
+  await expect(rows).toHaveCount(5);
   const total = await rows.count();
-  expect(total).toBe(5);
 
   const toggle = page.getByTestId('purge-dead-zone-issues-only');
   await expect(toggle).toBeVisible();
@@ -1474,7 +1476,9 @@ test('17 · 批量粘贴：Excel 两列一次加完，坏行如实回报', async
   await page.getByRole('button', { name: '解析并添加' }).click();
 
   await expect(page.locator('.toast').first()).toContainText(/已添加 3 条/);
-  await expect(page.locator('.toast').first()).toContainText(/1 行未能解析/);
+  // 文案口径：坏行要说出**原因与行号**（「{n} 行缺少分隔符（第 {{lines}} 行）」），
+  // 不再是早期的笼统「n 行未能解析」（PurgeConsole.tsx 的 parts.push）。
+  await expect(page.locator('.toast').first()).toContainText(/1 行缺少分隔符/);
   await expect(page.locator('.purge-rules .purge-rule-row')).toHaveCount(before + 3);
   // 面板自动收起（加完不该还占着屏幕）
   await expect(panel).toHaveCount(0);

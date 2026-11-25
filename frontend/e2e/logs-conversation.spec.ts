@@ -137,7 +137,10 @@ test.describe('安全边界（前端侧）', () => {
   test('Playground 页面对受限模型给出 403 提示路径', async ({ page, pageErrors }) => {
     await loginAsAdmin(page);
     await page.goto('/chat');
-    await expect(page.locator('.pg-shell')).toBeVisible();
+    // /chat 已是 A2A 同构的助手壳（`.asst-layout`，见 Chat.tsx）；旧 `.pg-shell`
+    // 只剩 Chat.css 里的死样式与注释，页面上已不存在。`/playground` 也早就
+    // Navigate 到 `/chat`（App.tsx:235），所以断言根容器改成现在的那个。
+    await expect(page.locator('.asst-layout')).toBeVisible();
     // 页面正常渲染即为通过：403 的具体文案由后端保证
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
