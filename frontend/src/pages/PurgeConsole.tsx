@@ -3884,6 +3884,20 @@ export default function PurgeConsole(): JSX.Element {
   }, [addToast, configWarningItems, configWarnings, t]);
 
   /** 复制生效项为纯文本（贴工单/群聊时不用手动抄） */
+  /** 复制改写结果（手动选取一段 `<pre>` 的文本很难，尤其含 `[role]` 分段时） */
+  const copyPreviewOut = useCallback(async (): Promise<void> => {
+    const text = previewOut;
+    if (!text) {
+      addToast(t('还没有改写结果，先跑一次预览'), 'warning');
+      return;
+    }
+    const copied = await copyText(text);
+    addToast(
+      copied ? t('已复制改写结果') : t('复制失败（浏览器可能禁用了剪贴板权限）'),
+      copied ? 'success' : 'error',
+    );
+  }, [addToast, previewOut, t]);
+
   const copyActiveSummary = useCallback(async (): Promise<void> => {
     const current = draftRef.current;
     if (!current) return;
@@ -5505,14 +5519,26 @@ export default function PurgeConsole(): JSX.Element {
         title={t('改写预览')}
         actions={
           // 预览在最底部、摘要在最上面：改完词表想确认「现在到底哪些在生效」要滚十几屏
-          <Button
-            variant="outline"
-            size="sm"
-            data-testid="purge-jump-active-summary"
-            onClick={() => focusFixTarget('active-summary')}
-          >
-            {t('回看当前生效项')}
-          </Button>
+          <>
+            {/* 改写结果是用户最想拿走的文本（贴群、对比、写进报告），此前只能手选 */}
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-preview-copy"
+              disabled={!previewOut}
+              onClick={() => void copyPreviewOut()}
+            >
+              {t('复制改写结果')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-jump-active-summary"
+              onClick={() => focusFixTarget('active-summary')}
+            >
+              {t('回看当前生效项')}
+            </Button>
+          </>
         }
       >
         <span data-purge-fix="preview" />

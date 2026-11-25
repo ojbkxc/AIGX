@@ -284,6 +284,43 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('62 · 「复制改写结果」把预览输出写进剪贴板（没有结果时禁用）', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __copied: string[] }).__copied = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: (t: string) => {
+          (window as unknown as { __copied: string[] }).__copied.push(t);
+          return Promise.resolve();
+        },
+      },
+    });
+  });
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const copyBtn = page.getByTestId('purge-preview-copy');
+  // 没跑过预览 → 按钮禁用（不是点了没反应）
+  await expect(copyBtn).toBeDisabled();
+
+  // 跑一次预览（「预览」按钮在页面里有两处文案相同，限定到预览动作区）
+  await page.getByLabel('样例输入').fill('违禁词测试');
+  await page
+    .locator('.purge-actions')
+    .getByRole('button', { name: '预览' })
+    .first()
+    .click();
+  await expect(page.locator('.purge-preview-out, .pdl-add, .pdl-mod').first()).toBeVisible();
+
+  await expect(copyBtn).toBeEnabled();
+  await copyBtn.click();
+  const copied = await page.evaluate(() => (window as unknown as { __copied: string[] }).__copied);
+  expect(copied).toHaveLength(1);
+  // 复制的是**改写后的文本**，不是原文（mock 把「违禁词」改成「敏感话题」）
+  expect(copied[0]).toContain('敏感话题');
+});
+
 test('60 · 所有输入控件都有可读名称（输入框无标签=读屏只念「编辑框」）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
