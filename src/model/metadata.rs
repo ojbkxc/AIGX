@@ -397,33 +397,33 @@ impl ModelMetadataRegistry {
         // 补空位（openai_compatible 等无插件目录的渠道依赖它）。
         let declared = plugin_budget(model, plugin_provider)
             .filter(|b| b.context_length.is_some() || b.max_output_tokens.is_some());
-        let plugin_ledger = declared.is_some();
-        match declared {
-            Some(budget) => {
-                context_length = budget.context_length;
-                context_source = if budget.context_length.is_some() {
-                    "plugin"
-                } else {
-                    ""
-                };
-                max_output_tokens = budget.max_output_tokens;
-                output_source = if budget.max_output_tokens.is_some() {
-                    "plugin"
-                } else {
-                    ""
-                };
-            }
-            None => {
-                context_length = builtin_context_length(model);
-                context_source = if context_length.is_some() {
-                    "builtin"
-                } else {
-                    ""
-                };
-                max_output_tokens = None;
-                output_source = "";
-            }
-        }
+        // 插件目录**申报了哪一列就用哪一列**，缺的那列允许从通用账本
+        // （内置表 / models.dev）补 —— 判据是「组合是否违反物理不变量」，
+        // 不是「账本是否相同」。
+        //
+        // 曾经的做法是「申报了任一列就两列都锁死、缺的留空」，那是把
+        // Trae 那次的**症状**当成了通则：Trae 的插件目录只申报上下文
+        // （200k），models.dev 给的是 moonshotai 官方 API 的 1M 输出，
+        // 两者拼起来 200k/1M 物理不可能 —— 那是**必须**锁的。但
+        // Antigravity 只申报输出上限（64000），内置表给的上下文 200k
+        // 完全容得下，锁死反而让用户白丢一个能显示的上下文。
+        //
+        // 所以：先各取各的（申报值优先，缺的列回落内置表），最后统一做一次
+        // `out > ctx` 终检（见函数尾），违反才让**权威度较低的那一列**退场。
+        context_length = declared
+            .and_then(|b| b.context_length)
+            .or_else(|| builtin_context_length(model));
+        context_source = match (declared.and_then(|b| b.context_length), context_length) {
+            (Some(_), Some(_)) => "plugin",
+            (None, Some(_)) => "builtin",
+            (_, None) => "",
+        };
+        max_output_tokens = declared.and_then(|b| b.max_output_tokens);
+        output_source = if max_output_tokens.is_some() {
+            "plugin"
+        } else {
+            ""
+        };
         let mut capabilities = infer_capabilities(model);
         let mut cap_sources: serde_json::Map<String, serde_json::Value> = capabilities
             .iter()
@@ -431,12 +431,19 @@ impl ModelMetadataRegistry {
             .collect();
         if crate::config::models_dev_enabled() {
             if let Some(dev) = super::models_dev::lookup(model) {
-                // 补空位只对非插件账本开放：插件目录已锁定的行，两列都以
-                // 申报为准（没申报的留空），models.dev 不进来补 ctx / out
-                // —— 否则又回到「一列 plugin、一列 modelsdev」的跨账本混拼
-                // （本函数的修复点）。能力标签不受限：布尔能力不是上限
-                // 数值，没有「两个账本拼出物理不可能组合」的问题。
-                if !plugin_ledger {
+                // 补空位**逐列**开放：块内全是 `is_none()` 判断，插件已申报的
+                // 列不会被覆盖，所以缺哪列就补哪列。
+                //
+                // 曾经这里是整段 `if !plugin_ledger`——只要插件申报了任一列，
+                // models.dev 一个字段都不许进来。那是把「防止跨账本拼出不可能
+                // 组合」做成了「禁止跨账本」，代价是 Antigravity 那种只申报
+                // 输出的家，上下文列被锁成 null（用户白丢一个能显示的值）。
+                //
+                // 现在只补空位，跨账本的矛盾由函数尾部的 `out > ctx` 终检兜住：
+                // Trae 的 out 被补成 384000、ctx 是申报的 200000，终检发现
+                // 384000 > 200000 → 丢输出，与旧行为等价；Antigravity 的
+                // out=64000 < ctx=200000 → 保留。
+                {
                     let dev_context = dev.context.and_then(|n| u32::try_from(n).ok());
                     let dev_output = dev.output.and_then(|n| u32::try_from(n).ok());
                     // ── 内置表过时修正：整组改用 models.dev ──────────────
@@ -964,7 +971,17 @@ mod tests {
     /// 旧实现逐字段回落：out 会取到 models.dev 的 1_048_576 —— 本用例的
     /// `None` 断言在旧实现上必红。
     #[test]
-    fn plugin_context_without_output_never_borrows_modelsdev_output() {
+    /// 核心场景（Trae/Kimi-K3 线上实况）：插件目录只申报上下文（200k）、
+    /// 没申报输出，而 models.dev 里有**另一家同名模型**的完整账本
+    /// （moonshotai 官方 API 的 1M/1M）。
+    ///
+    /// 新判据下输出**会被补上** 1_048_576，但补完立刻被终检发现
+    /// `1_048_576 > 200_000` 物理不可能 → 丢弃。所以断言仍是「输出为空」，
+    /// 但原因是**不变量**，不是「不许跨账本」。
+    ///
+    /// 旧实现（逐字段无终检）会把 1_048_576 原样透出 —— 本用例的 `None`
+    /// 断言在旧实现上必红。
+    fn plugin_context_with_impossible_modelsdev_output_drops_output() {
         let _seed_guard = crate::model::models_dev::seed_for_test([(
             "unit-meta-ledger-kimi".to_string(),
             crate::model::models_dev::DevEntry {
@@ -998,13 +1015,17 @@ mod tests {
         crate::plugin_host::model_catalog::remove(&provider);
     }
 
-    /// 同源规则不看数值「合不合理」：就算借来的输出 ≤ 申报的上下文
-    /// （131k ≤ 200k，物理允许），只要上下文来自 plugin，输出就不从
-    /// models.dev 拿 —— 合理的是数值，不是账本。
+    /// 判据是**不变量**，不是账本：插件申报了上下文（200k）、models.dev 给
+    /// 输出 131k，`131k <= 200k` 物理允许 ⇒ 补上这一列，来源如实标
+    /// `modelsdev`。
     ///
-    /// 旧实现这条会给出 `(200_000 plugin, 131_072 modelsdev)` 的混账本。
+    /// 更早的实现（v1.0.103）在这里是反过来的：只要上下文来自 plugin，输出
+    /// 就不许从 models.dev 拿，「合理的是数值，不是账本」。那个判据把 Trae
+    /// 那次的症状当成了通则 —— Trae 的 1M 输出确实不能借（见下面
+    /// `plugin_context_with_impossible_modelsdev_output_drops_output`），
+    /// 但 131k 借过来没有任何问题，锁死只是让用户白丢一列。
     #[test]
-    fn plugin_ledger_rejects_modelsdev_output_even_when_plausible() {
+    fn plugin_context_with_plausible_modelsdev_output_is_filled() {
         let _seed_guard = crate::model::models_dev::seed_for_test([(
             "unit-meta-ledger-glm".to_string(),
             crate::model::models_dev::DevEntry {
@@ -1027,25 +1048,30 @@ mod tests {
             reg.resolve_with_sources_for("unit-meta-ledger-glm", None, Some(&provider));
         assert_eq!(meta.context_length, Some(200_000));
         assert_eq!(
-            meta.max_output_tokens, None,
-            "131072 虽 ≤ 200000，但它是官方 1M 那条链的输出，不借"
+            meta.max_output_tokens,
+            Some(131_072),
+            "131072 <= 200000 不违反不变量，应该补上"
         );
-        assert!(sources["max_output_tokens"].is_null());
+        assert_eq!(sources["max_output_tokens"], "modelsdev");
         crate::plugin_host::model_catalog::remove(&provider);
     }
 
-    /// 对称方向：插件只申报了输出、没申报上下文 —— 上下文也不回落内置表
-    /// （内置 128k 的 gpt-4o 是按名字猜的通用值，与这家渠道的账本无关），
-    /// 行上只有输出一列有值。
+    /// 插件只申报输出、上下文缺失：**补**上下文，但如果补完之后
+    /// `out > ctx`，终检必须丢输出。
     ///
-    /// 旧实现会给出 `(128_000 builtin, 131_072 plugin)`：混账本 + 物理不可能
-    /// （131k 输出 > 128k 上下文）双重违规。
+    /// 这里 `gpt-4o` 前缀命中内置表 → ctx=128000，而插件申报 out=131072，
+    /// `131072 > 128000` 物理不可能 ⇒ 最终 `ctx=128000 / out=None`。
+    ///
+    /// 更早的实现（v1.0.103）在这条上是 `ctx=None / out=131072`（账本锁定，
+    /// 上下文留空）—— 虽然也没拼出不可能组合，但白白丢了一个能显示的上下文，
+    /// 而且用户看不出「这家其实有 128k 上下文」。
     #[test]
-    fn plugin_output_without_context_locks_context_too() {
+    fn plugin_output_exceeding_borrowed_context_drops_output() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         // 前缀命中内置表（gpt-4o → 128000），唯一后缀防并行用例互撞
         let model = format!("gpt-4o-unitlock{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        assert_eq!(builtin_context_length(&model), Some(128_000));
         let reg = temp_registry("ledger-out-only");
         let provider = seed_plugin_budget(
             "ledger-out",
@@ -1053,11 +1079,40 @@ mod tests {
         );
         let (meta, sources) = reg.resolve_with_sources_for(&model, None, Some(&provider));
         assert_eq!(
-            meta.context_length, None,
-            "上下文不从内置表猜 —— 账本锁定下没申报就留空"
+            meta.context_length,
+            Some(128_000),
+            "上下文从内置表补（补完不矛盾就留着，不该锁成空）"
         );
-        assert!(sources["context_length"].is_null());
-        assert_eq!(meta.max_output_tokens, Some(131_072));
+        assert_eq!(sources["context_length"], serde_json::json!("builtin"));
+        assert_eq!(
+            meta.max_output_tokens, None,
+            "131072 > 128000 物理不可能 ⇒ 终检丢输出"
+        );
+        assert!(sources["max_output_tokens"].is_null());
+        crate::plugin_host::model_catalog::remove(&provider);
+    }
+
+    /// 对称的正向用例：插件只申报输出、且补来的上下文**容得下**它 ⇒ 两列都保留，
+    /// 来源分别标注。这是 Antigravity 那 17 行的形状（out=64000，ctx 由内置表给 200k）。
+    #[test]
+    fn plugin_output_within_borrowed_context_keeps_both() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let model = format!("gpt-4o-unitsmall{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        assert_eq!(builtin_context_length(&model), Some(128_000));
+        let reg = temp_registry("ledger-out-small");
+        let provider = seed_plugin_budget(
+            "ledger-out-small",
+            serde_json::json!([{ "id": &model, "maxOutputTokens": 64_000 }]),
+        );
+        let (meta, sources) = reg.resolve_with_sources_for(&model, None, Some(&provider));
+        assert_eq!(meta.context_length, Some(128_000));
+        assert_eq!(sources["context_length"], serde_json::json!("builtin"));
+        assert_eq!(
+            meta.max_output_tokens,
+            Some(64_000),
+            "64000 <= 128000 不违反不变量，保留"
+        );
         assert_eq!(sources["max_output_tokens"], serde_json::json!("plugin"));
         crate::plugin_host::model_catalog::remove(&provider);
     }
