@@ -711,7 +711,7 @@ mod tests {
         let model = format!("gpt-4o-unitmeta{}", SEQ.fetch_add(1, Ordering::Relaxed));
         assert_eq!(builtin_context_length(&model), Some(128_000));
         assert!(
-            super::models_dev::lookup(&model).is_none(),
+            crate::model::models_dev::lookup(&model).is_none(),
             "唯一后缀不该命中 models.dev，否则这条用例测不到插件层"
         );
         let provider = seed_plugin_budget(
@@ -734,9 +734,9 @@ mod tests {
     /// 第三层：插件目录压过 models.dev（社区目录只填空位，不得改写上游申报）。
     #[test]
     fn plugin_catalog_beats_modelsdev() {
-        let _seed_guard = super::models_dev::seed_for_test([(
+        let _seed_guard = crate::model::models_dev::seed_for_test([(
             "unit-meta-plugin-vs-dev".to_string(),
-            super::models_dev::DevEntry {
+            crate::model::models_dev::DevEntry {
                 canonical: Some("acme/unit-meta-plugin-vs-dev".to_string()),
                 reasoning: false,
                 tool_call: false,
@@ -768,9 +768,9 @@ mod tests {
     /// 回落」的正向对照。
     #[test]
     fn modelsdev_still_fills_when_plugin_catalog_misses() {
-        let _seed_guard = super::models_dev::seed_for_test([(
+        let _seed_guard = crate::model::models_dev::seed_for_test([(
             "unit-meta-dev-only".to_string(),
-            super::models_dev::DevEntry {
+            crate::model::models_dev::DevEntry {
                 canonical: Some("acme/unit-meta-dev-only".to_string()),
                 reasoning: true,
                 tool_call: true,
@@ -807,7 +807,7 @@ mod tests {
     fn without_plugin_catalog_resolution_is_unchanged() {
         let reg = temp_registry("no-plugin");
         let (meta, sources) = reg.resolve_with_sources("gpt-4o", Some("openai"));
-        let dev = super::models_dev::lookup("gpt-4o");
+        let dev = crate::model::models_dev::lookup("gpt-4o");
         assert_eq!(meta.owned_by, "openai");
         assert_eq!(meta.context_length, Some(128_000), "内置表的上下文不受影响");
         assert_eq!(sources["context_length"], serde_json::json!("builtin"));
