@@ -1,19 +1,69 @@
+/**
+ * /chat —— AIGX 的「AI 运维」对话页。
+ *
+ * ── 页面结构（1:1 对齐 A2A v3.5.1 的 assistant 页）──────────────
+ *   .asst-layout
+ *     AsstSidebar          左栏：新建对话 / 会话列表（标题+时间）/ 底部动作
+ *     .asst-main
+ *       AsstTopbar         顶栏：会话标题 / 模型 / 设置
+ *       .asst-scroll > .asst-flow(840px)
+ *                          消息流：用户右气泡、助手左对齐无气泡、空态
+ *       AsstComposer       输入区：附件行 / 文本域 / 底部工具栏胶囊
+ *   AsstSettingsDrawer     右上设置抽屉：默认行为 / 系统提示词 / 工具
+ *
+ * ── 相对改造前的根因 ────────────────────────────────────────
+ * 改造前本页把整个对话界面**外包**给 ChatDebugger 的 playground 形态：调试器
+ * 既是消息流又是输入区，于是「对话形态」与「调试形态」耦合在一起 —— 调试器
+ * 一改就动界面，界面想要的 A2A 结构（左栏历史、840px 消息列、胶囊工具栏、
+ * 设置抽屉）一个都落不下来。现在页面自己持有布局与状态，ChatDebugger 退回
+ * 它真正的职责：**调试视图**（顶栏「调试」入口，独立视图，SSE 报文与
+ * tool_calls 全量可见），作为 AIGX 独有能力保留，不是被删掉。
+ *
+ * ── 数据面 ─────────────────────────────────────────────────
+ *   · 会话列表/消息：`/api/chat/sessions`（按用户隔离，fork/rename 后端有界）；
+ *   · 本轮回复：`/api/channels/chat_test`（SSE，与调试器同一条链路）；
+ *   · 助手配置：本机 localStorage（AIGX 无 `/api/assistant/config`）。
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  BarChart3, Code2, GraduationCap, ClipboardList, SlidersHorizontal, Settings,
-} from 'lucide-react';
 import { api } from '../api';
 import ChatDebugger, { type DebugMessage } from '../components/ChatDebugger';
-import SessionDrawer from '../components/chat/SessionDrawer';
-import ChatSettingsPanel from '../components/ChatSettingsPanel';
+import {
+  AsstSidebar,
+  AsstTopbar,
+  AsstEmpty,
+  type AsstSessionItem,
+} from '../components/chat/AsstShell';
+import AsstMessages from '../components/chat/AsstMessages';
+import AsstComposer, { type AsstTextFile } from '../components/chat/AsstComposer';
+import type { Effort } from '../components/chat/EffortPicker';
+import AsstSettingsDrawer from '../components/chat/AsstSettingsDrawer';
+import StreamPhaseIndicator from '../components/chat/StreamPhase';
 import { MobileDrawer } from '../components/ui';
-import type { ChatStreamUsage, ToolCallState } from '../types';
 import { useToast } from '../components/Toast';
+import ChatSettingsPanel from '../components/ChatSettingsPanel';
 import { isAdmin } from '../lib/utils';
+import { mergeToolCallDelta } from '../lib/toolCallAdapter';
+import type { ChatStreamUsage, ToolCallDelta } from '../types';
+import { streamChat, type AssistantConfig } from './chat-state';
+import {
+  DEFAULT_TITLE_PROMPT,
+  TITLE_CFG_KEY,
+  cleanTitle,
+  importLegacySessions,
+  fromPersistedMessage,
+  isDebugMessage,
+  loadTitledIds,
+  readLegacySessions,
+  saveTitledIds,
+  toPersistedMessage,
+  toSessionItem,
+  uid,
+  type PlaygroundSession,
+} from './chat-session';
 import './Chat.css';
 
-/** 读取「已启用」提示词并映射为空状态建议卡片（无则用 new-api 同款默认四项） */
+/** 空态建议卡片：优先用「提示词管理」里启用的条目（A2A 没有这条链路） */
 function loadSuggestionPrompts(): Array<{ title: string; sub: string; content: string }> {
   try {
     const raw = localStorage.getItem('aigx_prompts');
@@ -27,8 +77,7 @@ function loadSuggestionPrompts(): Array<{ title: string; sub: string; content: s
       && typeof (p as { content?: unknown }).content === 'string'
       && (p as { content: string }).content.trim() !== ''));
     // 先按更新时间倒序，再按 name 去重（保留最新者），最后裁剪 6 条。
-    // name 去重：导入 JSON 按 id 合并、手动新建都可能产生同名条目，
-    // 空状态卡片不应重复展示同一条提示词。
+    // name 去重：导入 JSON 按 id 合并、手动新建都可能产生同名条目。
     const seen = new Set<string>();
     return valid
       .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
@@ -49,324 +98,296 @@ function loadSuggestionPrompts(): Array<{ title: string; sub: string; content: s
   }
 }
 
-const DEFAULT_PROMPTS: Array<{ icon: typeof BarChart3; content: string }> = [
-  { icon: BarChart3, content: '帮我分析一组数据的趋势并给出结论' },
-  { icon: ClipboardList, content: '帮我总结一段长文本的要点' },
-  { icon: Code2, content: '写一个可运行的代码示例并解释关键点' },
-  { icon: GraduationCap, content: '我想学习一个新领域，给我一条完整的学习路径' },
+/** 没有自定义提示词时的四项默认建议（new-api 同款语义） */
+const DEFAULT_SUGGESTS: Array<{ title: string; content: string }> = [
+  { title: '帮我分析一组数据的趋势并给出结论', content: '帮我分析一组数据的趋势并给出结论' },
+  { title: '帮我总结一段长文本的要点', content: '帮我总结一段长文本的要点' },
+  { title: '写一个可运行的代码示例并解释关键点', content: '写一个可运行的代码示例并解释关键点' },
+  { title: '我想学习一个新领域，给我一条完整的学习路径', content: '我想学习一个新领域，给我一条完整的学习路径' },
 ];
 
-/** 本机会话存储：多会话列表 + 当前活动会话（旧单会话键在首启时迁移） */
-const SESSIONS_KEY = 'aigx_playground_sessions';
-const ACTIVE_KEY = 'aigx_playground_active';
-const LEGACY_KEY = 'aigx_playground_messages';
-/** 旧本机会话（仅迁移期读取；含消息体） */
-interface LegacySession {
-  id: string;
-  title: string;
-  model: string;
-  messages: DebugMessage[];
-  updated_at: number;
-}
+/** 助手配置（本机）——与 chat-state 的 AssistantConfig 同形，默认值集中在此 */
+const CFG_KEY = 'aigx_chat_assistant_cfg';
 
-/** 会话摘要（列表用；消息按需从后端拉）。
- *  parent/title_source 供 Drawer 父子追溯与命名来源徽标（#58；
- *  本地持久化沿用旧形状时缺省，列表加载走后端 ChatSessionSummary 补齐）。 */
-interface PlaygroundSession {
-  id: string;
-  title: string;
-  model: string;
-  updated_at: number;
-  parent_session_id?: string | null;
-  title_source?: string | null;
-}
-
-const uid = (): string => `pg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-
-/* ── LLM 标题总结（对照上游 assistant_history.rs title / assistant-message-operations）──
- * 上游由后端总结（config.title_model/title_prompt + titleGenerated 幂等位）；
- * AIGX 无该后端，用 Playground 同一条 chat_test 链在前端完成（用户/管理员共用）。
- * 可配 titleModel / titlePrompt（localStorage），首轮对话后自动一次，失败静默。 */
-const TITLE_CFG_KEY = 'aigx_chat_title_cfg';
-const TITLED_KEY = 'aigx_chat_titled';
-/** 默认提示词（上游 DEFAULT_TITLE_PROMPT 同语义：短标题、无引号无解释） */
-const DEFAULT_TITLE_PROMPT =
-  '你是会话标题生成器。根据对话摘录生成一个不超过 12 个字的简洁标题，直接输出标题本身，不要引号、标点或任何解释。';
-
-/** 标题总结配置（本机偏好；titleModel 留空 = 渠道默认首选模型） */
-interface ChatTitleCfg {
-  titleModel?: string;
-  titlePrompt?: string;
-}
-
-function loadTitleCfg(): ChatTitleCfg {
-  try {
-    const raw = localStorage.getItem(TITLE_CFG_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return {
-      titleModel: typeof parsed.titleModel === 'string' ? parsed.titleModel : '',
-      titlePrompt: typeof parsed.titlePrompt === 'string' ? parsed.titlePrompt : '',
-    };
-  } catch {
-    return {};
-  }
-}
-
-/** 已自动总结过的会话 id（成败都记一次，防止每条消息都打一次 LLM）；本地封顶 200 条 */
-function loadTitledIds(): string[] {
-  try {
-    const raw = localStorage.getItem(TITLED_KEY);
-    const arr = raw ? (JSON.parse(raw) as unknown) : [];
-    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveTitledIds(ids: string[]): void {
-  try {
-    localStorage.setItem(TITLED_KEY, JSON.stringify(ids.slice(-200)));
-  } catch { /* 隐私模式等：静默（下次会重复尝试，可接受） */ }
-}
-
-/** 从模型回复里清洗出标题：去首尾引号/空白、截断（模型偶尔带引号或解释） */
-function cleanTitle(raw: string): string {
-  return raw.trim().replace(/^["'「『『]+/, '').replace(/["'」』』]+$/, '').split('\n')[0].trim().slice(0, 40);
-}
-
-const isDebugMessage = (m: unknown): m is DebugMessage => Boolean(
-  m && typeof m === 'object' && ((m as DebugMessage).role === 'user' || (m as DebugMessage).role === 'assistant'),
-);
-
-/** 消息 → 后端落库形状（#63）：工具调用/用量等非正文数据放 extra，
- *  正文仍走 content，保证旧后端（忽略 extra）与旧数据（无 extra）双向兼容。 */
-function toPersistedMessage(m: DebugMessage): { role: string; content: string; extra?: unknown } {
-  const extra: Record<string, unknown> = {};
-  if (m.reasoning) extra.reasoning = m.reasoning;
-  if (m.toolCalls?.length) extra.tool_calls = m.toolCalls;
-  if (m.toolState) extra.tool_state = m.toolState;
-  if (m.usage) extra.usage = m.usage;
-  if (m.attachments?.length) extra.attachments = m.attachments;
+function defaultConfig(): AssistantConfig {
   return {
-    role: m.role,
-    content: m.content,
-    ...(Object.keys(extra).length ? { extra } : {}),
+    model: '',
+    reasoning: null,
+    titleModel: '',
+    titlePrompt: '',
+    mode: 'confirm',
+    systemPromptEnabled: true,
+    systemPrompt: '',
+    tools: {},
+    apiKeyId: null,
   };
 }
 
-/** 后端消息 → 本地 DebugMessage（extra 是自由形状：逐字段防御性读取） */
-function fromPersistedMessage(m: { role: string; content: string; extra?: unknown }): DebugMessage {
-  const msg: DebugMessage = { role: m.role === 'user' ? 'user' : 'assistant', content: m.content ?? '' };
-  const extra = m.extra && typeof m.extra === 'object' ? (m.extra as Record<string, unknown>) : null;
-  if (!extra) return msg;
-  if (typeof extra.reasoning === 'string' && extra.reasoning) msg.reasoning = extra.reasoning;
-  if (Array.isArray(extra.tool_calls)) msg.toolCalls = extra.tool_calls.filter(isToolCallState);
-  if (extra.tool_state === 'done' || extra.tool_state === 'interrupted' || extra.tool_state === 'error') {
-    msg.toolState = extra.tool_state;
-  }
-  if (extra.usage && typeof extra.usage === 'object') msg.usage = extra.usage as ChatStreamUsage;
-  if (Array.isArray(extra.attachments)) {
-    msg.attachments = extra.attachments.filter(
-      (a): a is { kind: 'image' | 'video' | 'audio'; url: string } => Boolean(
-        a && typeof a === 'object' && typeof (a as { url?: unknown }).url === 'string',
-      ),
-    );
-  }
-  return msg;
-}
-
-function isToolCallState(v: unknown): v is ToolCallState {
-  return Boolean(v && typeof v === 'object'
-    && typeof (v as ToolCallState).index === 'number'
-    && typeof (v as ToolCallState).arguments === 'string');
-}
-
-function readSessions(): LegacySession[] {
+function readConfig(): AssistantConfig {
   try {
-    const raw = localStorage.getItem(SESSIONS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((s): s is LegacySession => Boolean(s && typeof s === 'object' && typeof (s as LegacySession).id === 'string'))
-      .map((s) => ({
-        id: s.id,
-        title: typeof s.title === 'string' ? s.title : '',
-        model: typeof s.model === 'string' ? s.model : '',
-        messages: Array.isArray(s.messages) ? s.messages.filter(isDebugMessage) : [],
-        updated_at: typeof s.updated_at === 'number' ? s.updated_at : Date.now(),
-      }));
+    const raw = localStorage.getItem(CFG_KEY);
+    if (!raw) return defaultConfig();
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const base = defaultConfig();
+    return {
+      ...base,
+      model: typeof parsed.model === 'string' ? parsed.model : base.model,
+      reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : null,
+      titleModel: typeof parsed.titleModel === 'string' ? parsed.titleModel : base.titleModel,
+      titlePrompt: typeof parsed.titlePrompt === 'string' ? parsed.titlePrompt : base.titlePrompt,
+      mode: parsed.mode === 'full' ? 'full' : 'confirm',
+      systemPromptEnabled: parsed.systemPromptEnabled !== false,
+      systemPrompt: typeof parsed.systemPrompt === 'string' ? parsed.systemPrompt : base.systemPrompt,
+      tools: parsed.tools && typeof parsed.tools === 'object' ? (parsed.tools as Record<string, boolean>) : {},
+      apiKeyId: typeof parsed.apiKeyId === 'string' ? parsed.apiKeyId : null,
+    };
   } catch {
-    return [];
+    return defaultConfig();
   }
 }
 
-/**
- * Chat — new-api 游乐园（Playground）布局。
- *
- * 无侧栏、无模式切换：单一对话流 + 底部输入区；输入区底部工具行对齐 new-api：
- *   [历史 + 参数(带启用数徽标) + 清空] ··· [模型选择器 + 发送/停止]
- * 多会话历史存 localStorage（会话列表 + 当前活动会话，debounce 保存），
- * 旧版单会话键 `aigx_playground_messages` 首启时自动迁移为首个会话。
- */
+/** 4 档快捷 pill ↔ 8 档推理等级：同一份状态，两种粒度 */
+function effortOf(level: string | null): Effort {
+  if (level === 'low' || level === 'minimal') return 'low';
+  if (level === 'medium' || level === 'none') return 'medium';
+  if (level === 'high' || level === 'xhigh' || level === 'max') return 'high';
+  return 'off';
+}
+
+function levelOfEffort(effort: Effort): string | null {
+  if (effort === 'off') return null;
+  if (effort === 'low') return 'low';
+  if (effort === 'medium') return 'medium';
+  return 'high';
+}
+
+/** 附件展开成 OpenAI 的 content blocks（与 ChatDebugger 同一形状） */
+function blocksForAttachments(
+  attachments: Array<{ kind: 'image' | 'video' | 'audio'; url: string }>,
+  text: string,
+  files: AsstTextFile[],
+): Array<Record<string, unknown>> {
+  const blocks: Array<Record<string, unknown>> = [];
+  if (text) blocks.push({ type: 'text', text });
+  for (const file of files) {
+    blocks.push({ type: 'text', text: `\n\n【附件 ${file.name}】\n${file.text}` });
+  }
+  for (const attachment of attachments) {
+    if (attachment.kind === 'image') blocks.push({ type: 'image_url', image_url: { url: attachment.url } });
+    if (attachment.kind === 'video') blocks.push({ type: 'video_url', video_url: { url: attachment.url } });
+    if (attachment.kind === 'audio') blocks.push({ type: 'audio_url', audio_url: { url: attachment.url } });
+  }
+  return blocks;
+}
+
+/** 界面上的临时提示气泡（流式错误、缺模型等）不算真正的 assistant 回复 */
+function isTransient(text: string | undefined): boolean {
+  const s = (text ?? '').trim();
+  return s === '' || s === '…' || s.startsWith('⚠️') || s.startsWith('⏹');
+}
+
 export default function Chat(): JSX.Element {
   const { t } = useTranslation();
-  // 聊天设置面板走管理接口：仅管理员显示入口（普通用户不发请求）
+  const addToast = useToast();
+  /**
+   * toast 的稳定引用。
+   *
+   * `useToast()` 返回的回调**在实现上是稳定的**（ToastProvider 的 useCallback），
+   * 但把它写进 useCallback 的依赖会形成一条「回调 → 依赖 → 回调」的链：
+   * 一旦外层重新提供新的函数实例（测试替身、Provider 重挂载），`refreshModels`
+   * 就会每次渲染都换引用，挂在它上面的 `useEffect` 随之每帧重跑 →
+   * `setModelsLoading(true)` → 再渲染 → 无限循环（实测把页面卡死）。
+   * 这里走 ref，把「发提示」从依赖图里摘出去。
+   */
+  const toastRef = useRef(addToast);
+  toastRef.current = addToast;
   const admin = isAdmin();
 
-  const [messages, setMessages] = useState<DebugMessage[]>([]);
-  const [model, setModel] = useState('');
+  /* ── 会话 ── */
   const [sessions, setSessions] = useState<PlaygroundSession[]>([]);
   const [activeId, setActiveId] = useState('');
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  /** 「聊天设置」抽屉（迁自「系统设置 → 聊天」的 ChatSettingsPanel） */
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  /** 标题总结设置弹层（headerExtra 挂抽屉头部；本机偏好存 localStorage） */
-  const [titleCfgOpen, setTitleCfgOpen] = useState(false);
-  const [cfgDraft, setCfgDraft] = useState<ChatTitleCfg>(() => loadTitleCfg());
+  const [messages, setMessages] = useState<DebugMessage[]>([]);
   const [loading, setLoading] = useState(true);
-  const saveTimer = useRef<number | null>(null);
-  const loadedRef = useRef(false);
+  const [historyBusy, setHistoryBusy] = useState(false);
   const sessionsRef = useRef<PlaygroundSession[]>([]);
   const activeRef = useRef('');
   const messagesRef = useRef<DebugMessage[]>([]);
-  const modelRef = useRef('');
-  /** 流式生成中标记（ChatDebugger 上报）：生成中禁止切换/新建/删除会话，
-   *  否则切换前的落盘会把流式中间态的半截回复写进当前会话 */
-  const busyRef = useRef(false);
-  const addToast = useToast();
+  const loadedRef = useRef(false);
+  const saveTimer = useRef<number | null>(null);
+  const titledRef = useRef<Set<string>>(new Set(loadTitledIds()));
 
-  /** 会话摘要列表（后端返回；消息按需拉取） */
-  const persistSessions = (next: PlaygroundSession[]): void => {
+  /* ── 对话 ── */
+  const [config, setConfig] = useState<AssistantConfig>(readConfig);
+  const configRef = useRef<AssistantConfig>(config);
+  configRef.current = config;
+  const [models, setModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [images, setImages] = useState<string[]>([]);
+  const [files, setFiles] = useState<AsstTextFile[]>([]);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [streamPhase, setStreamPhase] = useState<'thinking' | 'generating'>('thinking');
+  const [lastEventAt, setLastEventAt] = useState(0);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const controllerRef = useRef<AbortController | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  /* ── 界面 ── */
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
+
+  const persistConfig = useCallback((next: AssistantConfig, note?: string) => {
+    setConfig(next);
+    configRef.current = next;
+    try {
+      localStorage.setItem(CFG_KEY, JSON.stringify(next));
+    } catch {
+      /* 隐私模式：内存内生效即可 */
+    }
+    if (note) toastRef.current(note);
+  }, []);
+
+  const persistSessions = useCallback((next: PlaygroundSession[]) => {
     sessionsRef.current = next;
     setSessions(next);
-  };
+  }, []);
 
-  /** 把当前消息整表落盘后端（debounce 调用；编辑/重发会改写历史，所以是替换不是追加） */
+  /* ── 模型清单（A2A 走 /api/assistant/models；AIGX 走网关模型列表）── */
+  const refreshModels = useCallback(async () => {
+    setModelsLoading(true);
+    try {
+      const res = await api.listModels();
+      const raw = Array.isArray(res) ? res : res?.data;
+      const list = Array.isArray(raw)
+        ? (raw as Array<string | { id?: string }>)
+          .map((item) => (typeof item === 'string' ? item : item.id))
+          .filter((name): name is string => Boolean(name))
+        : [];
+      setModels(list);
+      if (list.length && !configRef.current.model) {
+        persistConfig({ ...configRef.current, model: list[0] });
+      }
+    } catch {
+      setModels([]);
+    } finally {
+      setModelsLoading(false);
+    }
+  }, [persistConfig]);
+
+  useEffect(() => { void refreshModels(); }, [refreshModels]);
+
+  /* ── 贴底：新消息进来时滚到底（用户往上翻时不打扰）── */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+    if (near) el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
   const saveActiveNow = useCallback(async (): Promise<void> => {
     const id = activeRef.current;
     if (!id || !loadedRef.current) return;
     try {
-      await api.replaceChatMessages(
-        id,
-        messagesRef.current.map(toPersistedMessage),
-      );
+      await api.replaceChatMessages(id, messagesRef.current.map(toPersistedMessage));
     } catch {
       /* 离线/过期时静默；下次保存会覆盖 */
     }
   }, []);
 
-  /** 会话操作守卫（对齐 Agent 页 `if (busy) return`）：生成中拦截并提示 */
-  const guardBusy = useCallback((): boolean => {
-    if (!busyRef.current) return false;
-    addToast(t('正在生成回复，请先停止再操作会话'), 'error');
-    return true;
-  }, [addToast, t]);
+  /* debounce 持久化（活动会话整表替换到后端） */
+  useEffect(() => {
+    messagesRef.current = messages;
+    if (!loadedRef.current) return;
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      void saveActiveNow();
+    }, 500);
+  }, [messages, saveActiveNow]);
 
-  /* ── 会话 fork（#58：改调 #37 后端有界 fork——200 条 / 128KiB 上限由
-   *   后端保证，dropped 如实回执；原「createChatSession + replace 前端
-   *   拼接」路径删除。message_seq = 消息下标（0-based 含该条，两侧同序）。
-   *   后端不可用 → toast 报错，不再退化为无上界的本地拼接。── */
-  const forkSession = useCallback(async (idx: number): Promise<void> => {
-    if (guardBusy()) {
-      setDrawerOpen(false);
-      return;
-    }
-    const src = messagesRef.current;
-    const target = src[idx];
-    if (!target || target.role !== 'assistant') return;
+  useEffect(() => () => {
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
+      void saveActiveNow();
     }
-    await saveActiveNow();
-    const srcId = activeRef.current;
-    if (!srcId) return;
-    try {
-      const res = await api.forkChatSession(srcId, idx);
-      const session = res.data?.session;
-      const copied = res.data?.copied ?? 0;
-      const dropped = res.data?.dropped ?? 0;
-      if (!session?.id) throw new Error(t('分叉失败'));
-      const newId = session.id;
-      // 消息切片本地直取（与后端 [0, message_seq] 同构，免二次拉取）
-      const sliced = src.slice(0, idx + 1);
-      persistSessions([
-        { id: newId, title: session.title || t('分叉会话'), model: session.model || modelRef.current, updated_at: Math.floor(Date.now() / 1000), parent_session_id: session.parent_session_id ?? srcId, title_source: session.title_source ?? null },
-        ...sessionsRef.current,
-      ]);
-      activeRef.current = newId;
-      messagesRef.current = sliced;
-      setActiveId(newId);
-      setMessages(sliced);
-      setDrawerOpen(false);
-      addToast(
-        dropped > 0
-          ? t('已分叉为新会话：复制 {{copied}} 条，超界截断 {{dropped}} 条', { copied, dropped })
-          : t('已分叉为新会话：复制 {{copied}} 条', { copied }),
-      );
-    } catch (err) {
-      addToast(`${t('分叉失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
-    }
-  }, [addToast, guardBusy, saveActiveNow, t]);
+  }, [saveActiveNow]);
 
-  /* ── Drawer 行级 fork（#58）：活动会话 = 从最新消息分叉（消息在内存直取）；
-   *   非活动会话 = 拉一次消息数后按最后一条分叉（就地复制，不切换当前会话）。
-   *   message_seq 与消息下标同序（后端 0-based 含该条）。 ── */
-  const forkFromDrawer = useCallback(async (id: string): Promise<void> => {
-    if (guardBusy()) return;
-    if (id === activeRef.current) {
-      const last = messagesRef.current.length - 1;
-      if (last < 0) {
-        addToast(t('空会话无可分叉消息'));
+  /* ── 首启：拉会话列表（空则迁移旧 localStorage），定位活动会话 ── */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      let list: PlaygroundSession[] = [];
+      try {
+        const res = await api.listChatSessions();
+        list = (res.data ?? []).map(toSessionItem);
+      } catch {
+        list = [];
+      }
+      if (!list.length) {
+        // 旧版本把会话存在 localStorage：一次性搬进后端，搬完清旧键
+        if (readLegacySessions().length) list = await importLegacySessions();
+      }
+      if (cancelled) return;
+      let active = '';
+      try { active = localStorage.getItem('aigx_playground_active') ?? ''; } catch { /* noop */ }
+      if (!list.some((item) => item.id === active)) active = list[0]?.id ?? '';
+      sessionsRef.current = list;
+      if (!active) {
+        let freshId = uid();
+        try {
+          const created = await api.createChatSession({ model: configRef.current.model ?? '' });
+          freshId = created.data?.id ?? freshId;
+        } catch {
+          /* 后端不可用时退化为本地临时会话（不持久化） */
+        }
+        if (cancelled) return;
+        const fresh: PlaygroundSession = { id: freshId, title: '', model: configRef.current.model ?? '', updated_at: Math.floor(Date.now() / 1000) };
+        persistSessions([fresh]);
+        activeRef.current = freshId;
+        messagesRef.current = [];
+        setActiveId(freshId);
+        setMessages([]);
+        loadedRef.current = true;
+        setLoading(false);
         return;
       }
-      await forkSession(last);
-      return;
-    }
-    try {
-      const detail = await api.getChatSession(id);
-      const n = detail.data?.messages?.length ?? 0;
-      if (n === 0) {
-        addToast(t('空会话无可分叉消息'));
-        return;
+      let msgs: DebugMessage[] = [];
+      let model = '';
+      try {
+        const detail = await api.getChatSession(active);
+        msgs = (detail.data?.messages ?? []).filter(isDebugMessage).map(fromPersistedMessage);
+        model = detail.data?.session.model ?? '';
+      } catch {
+        msgs = [];
       }
-      const res = await api.forkChatSession(id, n - 1);
-      const session = res.data?.session;
-      if (!session?.id) throw new Error(t('分叉失败'));
-      const copied = res.data?.copied ?? 0;
-      const dropped = res.data?.dropped ?? 0;
-      persistSessions([
-        { id: session.id, title: session.title || t('分叉会话'), model: session.model || '', updated_at: Math.floor(Date.now() / 1000), parent_session_id: session.parent_session_id ?? id, title_source: session.title_source ?? null },
-        ...sessionsRef.current,
-      ]);
-      addToast(
-        dropped > 0
-          ? t('已分叉为新会话：复制 {{copied}} 条，超界截断 {{dropped}} 条', { copied, dropped })
-          : t('已分叉为新会话：复制 {{copied}} 条', { copied }),
-      );
-    } catch (err) {
-      addToast(`${t('分叉失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
-    }
-  }, [addToast, guardBusy, forkSession, t]);
+      if (cancelled) return;
+      activeRef.current = active;
+      messagesRef.current = msgs;
+      persistSessions(list);
+      setActiveId(active);
+      setMessages(msgs);
+      if (model && !configRef.current.model) persistConfig({ ...configRef.current, model });
+      loadedRef.current = true;
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [persistConfig, persistSessions]);
 
-  /* ── LLM 标题总结：首轮对话后自动一次；「新会话」或空标题才触发，
-   *   用户手动改过名的会话永不覆盖（对齐上游 titleGenerated 幂等语义）── */
-  const titledRef = useRef<Set<string>>(new Set(loadTitledIds()));
+  /* ── 标题总结（AIGX 独有：A2A 由后端 title 字段负责）── */
   const summarizeTitle = useCallback(async (id: string): Promise<void> => {
-    // 只总结当前活动会话（消息在内存里；其余会话切换时自然满足条件）
     if (id !== activeRef.current) return;
     const msgs = messagesRef.current;
-    if (!msgs.length) return;
     const excerpts = msgs
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .filter((m) => m.content.trim())
       .slice(0, 4)
       .map((m) => ({ role: m.role, text: m.content.slice(0, 2000) }));
-    // 需完成一轮对话（上游同口径：摘录里没有 assistant 回复就不总结）
     if (!excerpts.some((e) => e.role === 'assistant')) return;
-    const cfg = loadTitleCfg();
+    const cfg = configRef.current;
     try {
       const res = await api.testChannelChat({
         channel_id: '',
@@ -381,241 +402,169 @@ export default function Chat(): JSX.Element {
       const title = cleanTitle(raw);
       if (!title) return;
       await api.renameChatSession(id, title);
-      // 自动总结不改 title_source（保持 auto/缺省）；用户手动 rename 才置
-      // "user"（见 renameSession——后端约定 user 档永不被 auto 覆盖）
-      persistSessions(sessionsRef.current.map((s) => (s.id === id ? { ...s, title } : s)));
+      persistSessions(sessionsRef.current.map((item) => (item.id === id ? { ...item, title } : item)));
     } catch {
-      /* 静默：总结失败保持原标题（本地偏好/网络/渠道问题都不该扰动对话） */
+      /* 静默：总结失败保持原标题 */
     }
-  }, []);
-
-  /** #52：用户手动重命名——PATCH 后端并把本地档位即时切 "user"（徽标
-   *  「手工」）。后端约定：user 档永不被自动标题覆盖（title_source 语义）。 */
-  const renameSession = useCallback(async (id: string, next: string): Promise<void> => {
-    try {
-      await api.renameChatSession(id, next);
-      persistSessions(sessionsRef.current.map((s) => (
-        s.id === id ? { ...s, title: next, title_source: 'user' } : s
-      )));
-      if (id === activeRef.current) {
-        // 抽屉外无标题展示位，无需同步消息区；保持 activeRef 一致即可
-      }
-    } catch (err) {
-      addToast(`${t('重命名失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
-    }
-  }, [addToast, t]);
+  }, [persistSessions]);
 
   const markTitled = useCallback((id: string): void => {
     titledRef.current.add(id);
     saveTitledIds([...titledRef.current]);
   }, []);
 
-  /** 保存标题总结本机偏好（titleModel/titlePrompt 可配） */
-  const saveTitleCfg = (): void => {
+  /* ── 发送 ── */
+  const send = useCallback(async (text: string, extraImages: string[], extraFiles: AsstTextFile[]): Promise<void> => {
+    const content = text.trim();
+    if ((!content && !extraImages.length && !extraFiles.length) || busyRef.current) return;
+    const model = configRef.current.model;
+    if (!model) {
+      addToast(t('请先选择模型'), 'error');
+      return;
+    }
+    const attachments = extraImages.map((url) => ({ kind: 'image' as const, url }));
+    /** 上游历史：带图/带附件的消息展开成 content blocks，纯文本仍是字符串 */
+    const wireHistory: Array<{ role: string; content: string | Array<Record<string, unknown>> }> =
+      messagesRef.current
+        .filter((m) => !(m.role === 'assistant' && isTransient(m.content)))
+        .map((m) => {
+          if (m.role === 'user' && m.attachments?.length) {
+            return { role: 'user', content: blocksForAttachments(m.attachments, m.content, []) };
+          }
+          return { role: m.role, content: m.content };
+        });
+    wireHistory.push({
+      role: 'user',
+      content: attachments.length ? blocksForAttachments(attachments, content, extraFiles) : (
+        extraFiles.length
+          ? blocksForAttachments([], content, extraFiles)
+          : content
+      ),
+    });
+
+    const userMessage: DebugMessage = {
+      role: 'user',
+      content,
+      ...(attachments.length ? { attachments } : {}),
+    };
+    setMessages((prev) => [...prev, userMessage, { role: 'assistant', content: '…', toolState: 'streaming' }]);
+    setDraft('');
+    setImages([]);
+    setFiles([]);
+    setBusy(true);
+    busyRef.current = true;
+    setStreamPhase('thinking');
+    setLastEventAt(Date.now());
+
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const body: Record<string, unknown> = {
+      channel_id: '',
+      protocol: 'openai',
+      model,
+      message: attachments.length || extraFiles.length
+        ? blocksForAttachments(attachments, content, extraFiles)
+        : content,
+      history: wireHistory.slice(0, -1),
+      stream: true,
+    };
+    const cfg = configRef.current;
+    if (cfg.systemPromptEnabled && cfg.systemPrompt.trim()) body.system_prompt = cfg.systemPrompt.trim();
+    if (cfg.reasoning) body.reasoning_effort = cfg.reasoning;
+
+    let started = false;
+    const patchLast = (patch: (last: DebugMessage) => DebugMessage): void => {
+      setMessages((prev) => {
+        const next = prev.slice();
+        const last = next[next.length - 1];
+        if (!last || last.role !== 'assistant') return prev;
+        next[next.length - 1] = patch(last);
+        return next;
+      });
+    };
+
     try {
-      localStorage.setItem(TITLE_CFG_KEY, JSON.stringify(cfgDraft));
-    } catch { /* 隐私模式等：静默，本次会话内仍用草稿值 */ }
-    setTitleCfgOpen(false);
-    addToast(t('标题总结设置已保存'));
-  };
+      await streamChat(
+        body,
+        (delta: { content: string; isEnd?: boolean; kind?: string; toolCall?: ToolCallDelta; usage?: ChatStreamUsage }) => {
+          setLastEventAt(Date.now());
+          if (!started) {
+            started = true;
+            setStreamPhase('generating');
+          }
+          patchLast((last) => {
+            const next: DebugMessage = { ...last };
+            if (delta.kind === 'reasoning') {
+              next.reasoning = (last.reasoning ?? '') + delta.content;
+            } else if (delta.kind === 'tool_call' && delta.toolCall) {
+              next.toolCalls = mergeToolCallDelta(last.toolCalls ?? [], delta.toolCall);
+              next.toolState = 'streaming';
+            } else if (delta.kind === 'usage' && delta.usage) {
+              next.usage = delta.usage;
+            } else if (delta.kind === 'error' && delta.isEnd) {
+              const base = last.content === '…' ? '' : last.content;
+              next.content = base ? `${base}\n\n⚠️ ${delta.content}` : `⚠️ ${delta.content}`;
+              if (next.toolCalls?.length) next.toolState = 'error';
+            } else {
+              const base = last.content === '…' ? '' : last.content;
+              next.content = delta.isEnd ? base : base + delta.content;
+            }
+            return next;
+          });
+        },
+        controller.signal,
+      );
+      patchLast((last) => {
+        if (last.toolCalls?.length) return { ...last, toolState: 'done' };
+        if (!last.reasoning && (last.content === '…' || !last.content.trim())) {
+          return { ...last, content: `⏹ ${t('没有收到回复内容')}`, toolState: 'error' };
+        }
+        return { ...last, toolState: 'done' };
+      });
+    } catch (err) {
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      patchLast((last) => ({
+        ...last,
+        content: aborted
+          ? last.content
+          : (last.content && last.content !== '…' ? `${last.content}\n\n⚠️ ` : '⚠️ ')
+            + (err instanceof Error ? err.message : String(err)),
+        toolState: aborted ? 'interrupted' : 'error',
+      }));
+      if (!aborted) addToast(`${t('发送失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
+    } finally {
+      controllerRef.current = null;
+      setBusy(false);
+      busyRef.current = false;
+    }
+  }, [addToast, t]);
 
-  /** 手动重试当前会话标题（自动轮失败后的出口） */
-  const manualTitle = async (): Promise<void> => {
-    if (guardBusy()) return;
-    if (!activeRef.current || !messagesRef.current.length) return;
-    markTitled(activeRef.current);
-    await summarizeTitle(activeRef.current);
-    const cur = sessionsRef.current.find((s) => s.id === activeRef.current);
-    addToast(cur?.title && cur.title !== '新会话'
-      ? t('标题已更新')
-      : t('未能生成标题（检查供应商与模型配置）'));
-  };
+  const stop = useCallback(() => {
+    controllerRef.current?.abort();
+  }, []);
 
+  /* 首轮结束后自动总结一次标题（AIGX 独有） */
   useEffect(() => {
-    if (loading || !loadedRef.current || !activeId) return;
-    if (busyRef.current) return;
+    if (loading || !loadedRef.current || !activeId || busy) return;
     if (messages.length < 2) return;
-    if (!messages.some((m) => m.role === 'assistant' && m.content.trim())) return;
-    const cur = sessionsRef.current.find((s) => s.id === activeId);
-    if (!cur || (cur.title && cur.title !== '新会话')) return;
+    if (!messages.some((m) => m.role === 'assistant' && m.content.trim() && !isTransient(m.content))) return;
+    const current = sessionsRef.current.find((item) => item.id === activeId);
+    if (current && current.title && current.title_source === 'user') return;
     if (titledRef.current.has(activeId)) return;
     markTitled(activeId);
     void summarizeTitle(activeId);
-  }, [messages, activeId, loading, markTitled, summarizeTitle]);
+  }, [messages, activeId, loading, busy, markTitled, summarizeTitle]);
 
-  /** 一次性迁移旧 localStorage 会话到后端（成功后清旧键） */
-  const importLegacySessions = useCallback(async (): Promise<PlaygroundSession[]> => {
-    const legacyList = readSessions();
-    if (!legacyList.length) return [];
-    const imported: PlaygroundSession[] = [];
-    for (const s of legacyList.slice(0, 20)) {
-      try {
-        // 保留原时间（seed 是 ms，后端存秒）→ 排序与旧版一致
-        const updatedSec = Math.floor(s.updated_at / 1000);
-        const created = await api.createChatSession({
-          title: s.title || '新会话',
-          model: s.model,
-          updated_at: updatedSec > 0 ? updatedSec : undefined,
-        });
-        const id = created.data?.id;
-        if (!id) continue;
-        if (s.messages.length) {
-          await api.replaceChatMessages(
-            id,
-            s.messages.map(toPersistedMessage),
-            false,
-          );
-        }
-        // 单位统一：后端会话摘要的 updated_at 是「秒」（渲染时 ×1000），
-        // 旧 localStorage 数据是 ms —— 入库与本地 state 都按秒存
-        imported.push({ id, title: s.title || '新会话', model: s.model, updated_at: updatedSec > 0 ? updatedSec : Math.floor(Date.now() / 1000) });
-      } catch {
-        /* 单条失败跳过，不阻塞其余 */
-      }
-    }
-    try {
-      localStorage.removeItem(SESSIONS_KEY);
-      localStorage.removeItem(ACTIVE_KEY);
-      localStorage.removeItem(LEGACY_KEY);
-    } catch { /* noop */ }
-    return imported;
-  }, []);
+  /* ── 会话操作 ── */
+  const guardBusy = useCallback((): boolean => {
+    if (!busyRef.current) return false;
+    addToast(t('正在生成回复，请先停止再操作会话'), 'error');
+    return true;
+  }, [addToast, t]);
 
-  // 首启：拉后端会话列表（空则一次性导入旧 localStorage 会话），定位活动会话
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      let list: PlaygroundSession[] = [];
-      try {
-        const res = await api.listChatSessions();
-        list = (res.data ?? []).map((s) => ({
-          id: s.id,
-          title: s.title,
-          model: s.model,
-          updated_at: s.updated_at ?? 0,
-          parent_session_id: s.parent_session_id ?? null,
-          title_source: s.title_source ?? null,
-        }));
-      } catch {
-        list = [];
-      }
-      if (!list.length) {
-        list = await importLegacySessions();
-      }
-      if (cancelled) return;
-      let active = '';
-      try { active = localStorage.getItem(ACTIVE_KEY) ?? ''; } catch { /* noop */ }
-      if (!list.some((s) => s.id === active)) active = list[0]?.id ?? '';
-      sessionsRef.current = list;
-      if (!active) {
-        // 一个会话都没有：建一个新的（首条消息落盘时再自动命名）
-        let freshId = uid();
-        try {
-          const created = await api.createChatSession({ model: '' });
-          freshId = created.data?.id ?? freshId;
-        } catch {
-          // 后端不可用时退化为本地临时会话（不持久化）
-        }
-        if (cancelled) return;
-        const fresh = { id: freshId, title: '新会话', model: '', updated_at: Math.floor(Date.now() / 1000) };
-        persistSessions([fresh]);
-        activeRef.current = freshId;
-        messagesRef.current = [];
-        setActiveId(freshId);
-        setMessages([]);
-        loadedRef.current = true;
-        setLoading(false);
-        return;
-      }
-      // 载入活动会话的消息
-      let msgs: DebugMessage[] = [];
-      let model = '';
-      try {
-        const detail = await api.getChatSession(active);
-        msgs = (detail.data?.messages ?? [])
-          .filter((m) => isDebugMessage(m))
-          .map((m) => fromPersistedMessage(m));
-        model = detail.data?.session.model ?? '';
-      } catch {
-        msgs = [];
-      }
-      if (cancelled) return;
-      activeRef.current = active;
-      messagesRef.current = msgs;
-      modelRef.current = model;
-      // 关键：把已加载的会话列表写进 state。`sessionsRef` 只是渲染期读的快照，
-      // 不 setState 的话抽屉永远显示空列表（历史 bug：加载 30 条会话但列表空白）。
-      persistSessions(list);
-      setActiveId(active);
-      setMessages(msgs);
-      setModel(model);
-      loadedRef.current = true;
-      setLoading(false);
-    })();
-    return () => { cancelled = true; };
-  }, [importLegacySessions]);
-
-  // debounce 持久化（活动会话整表替换到后端）
-  useEffect(() => {
-    messagesRef.current = messages;
-    if (!loadedRef.current) return;
-    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      saveTimer.current = null;
-      void saveActiveNow();
-    }, 500);
-  }, [messages, saveActiveNow]);
-
-  // 卸载时立即落盘
-  useEffect(() => () => {
-    if (saveTimer.current !== null) {
-      window.clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-      void saveActiveNow();
-    }
-  }, [saveActiveNow]);
-
-  const suggestions = useMemo(() => {
-    const custom = loadSuggestionPrompts();
-    if (custom.length) {
-      return custom.map((s, i) => ({
-        icon: DEFAULT_PROMPTS[i % DEFAULT_PROMPTS.length].icon,
-        title: s.title,
-        sub: s.sub,
-        content: s.content,
-      }));
-    }
-    return DEFAULT_PROMPTS.map((p) => ({ ...p, title: p.content, sub: t('提示词') }));
-  }, [t]);
-
-  const handleMessagesChange = (next: DebugMessage[]): void => {
-    setMessages(next);
-  };
-
-  const handleModelChange = (next: string): void => {
-    modelRef.current = next;
-    setModel(next);
-  };
-
-  const handleClear = (): void => {
-    messagesRef.current = [];
-    setMessages([]);
-    void saveActiveNow();
-  };
-
-  /** 切换会话：先落盘当前会话，再从后端载入目标会话（ChatDebugger 以 key 重挂载） */
-  const switchSession = async (id: string): Promise<void> => {
-    if (id === activeRef.current) {
-      setDrawerOpen(false);
-      return;
-    }
-    // 生成中切换会把半截回复落盘到当前会话（流式中间态），直接拦截。
-    // 拦截也收起抽屉：sidebar 变体点项不再自动关，窄屏覆盖层形态下抽屉
-    // 不收起会盖住 toast 与「历史会话」按钮，后续操作全被挡。
-    if (guardBusy()) {
-      setDrawerOpen(false);
-      return;
-    }
+  const openSession = useCallback(async (id: string): Promise<void> => {
+    setSidebarOpen(false);
+    if (id === activeRef.current || guardBusy()) return;
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -625,29 +574,22 @@ export default function Chat(): JSX.Element {
     let model = '';
     try {
       const detail = await api.getChatSession(id);
-      msgs = (detail.data?.messages ?? [])
-        .filter((m) => isDebugMessage(m))
-        .map((m) => fromPersistedMessage(m));
+      msgs = (detail.data?.messages ?? []).filter(isDebugMessage).map(fromPersistedMessage);
       model = detail.data?.session.model ?? '';
     } catch {
       msgs = [];
     }
     activeRef.current = id;
     messagesRef.current = msgs;
-    modelRef.current = model;
     setActiveId(id);
     setMessages(msgs);
-    setModel(model);
-    setDrawerOpen(false);
-  };
+    if (model) persistConfig({ ...configRef.current, model, titleModel: configRef.current.titleModel });
+    try { localStorage.setItem('aigx_playground_active', id); } catch { /* noop */ }
+  }, [guardBusy, persistConfig, saveActiveNow]);
 
-  /** 新建会话（后端创建，消息清空） */
-  const createSession = async (): Promise<void> => {
-    // 拦截同样收起抽屉（理由见 switchSession）
-    if (guardBusy()) {
-      setDrawerOpen(false);
-      return;
-    }
+  const newChat = useCallback(async (): Promise<void> => {
+    setSidebarOpen(false);
+    if (guardBusy()) return;
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -655,166 +597,383 @@ export default function Chat(): JSX.Element {
     await saveActiveNow();
     let freshId = uid();
     try {
-      const created = await api.createChatSession({ model: modelRef.current });
+      const created = await api.createChatSession({ model: configRef.current.model ?? '' });
       freshId = created.data?.id ?? freshId;
     } catch {
-      // 后端不可用：本地临时会话兜底
+      /* 后端不可用：本地临时会话兜底 */
     }
-    persistSessions([{ id: freshId, title: '新会话', model: modelRef.current, updated_at: Math.floor(Date.now() / 1000) }, ...sessionsRef.current]);
+    const fresh: PlaygroundSession = {
+      id: freshId,
+      title: '',
+      model: configRef.current.model ?? '',
+      updated_at: Math.floor(Date.now() / 1000),
+    };
+    persistSessions([fresh, ...sessionsRef.current]);
     activeRef.current = freshId;
     messagesRef.current = [];
     setActiveId(freshId);
     setMessages([]);
-    setDrawerOpen(false);
-  };
+    setDraft('');
+    setImages([]);
+    setFiles([]);
+  }, [guardBusy, persistSessions, saveActiveNow]);
 
-  /** 删除会话（二次确认由共享 SessionDrawer 内建） */
-  const deleteSession = async (id: string): Promise<void> => {
+  const removeSession = useCallback(async (id: string): Promise<void> => {
     if (guardBusy()) return;
+    setHistoryBusy(true);
     try {
       await api.deleteChatSession(id);
     } catch {
       /* 已不存在等情况忽略 */
     }
-    if (id !== activeRef.current) {
+    const rest = sessionsRef.current.filter((item) => item.id !== id);
+    persistSessions(rest);
+    if (id === activeRef.current) {
+      activeRef.current = '';
+      messagesRef.current = [];
+      setMessages([]);
+      if (rest.length) {
+        await openSession(rest[0].id);
+      } else {
+        await newChat();
+      }
+    }
+    setHistoryBusy(false);
+  }, [guardBusy, newChat, openSession, persistSessions]);
+
+  const clearHistory = useCallback(async (): Promise<void> => {
+    if (guardBusy()) return;
+    setHistoryBusy(true);
+    try {
+      for (const item of sessionsRef.current) {
+        try {
+          await api.deleteChatSession(item.id);
+        } catch {
+          /* 单条失败跳过 */
+        }
+      }
+    } finally {
+      persistSessions([]);
+      setHistoryBusy(false);
+    }
+    await newChat();
+  }, [guardBusy, newChat, persistSessions]);
+
+  const renameSession = useCallback(async (id: string, title: string): Promise<void> => {
+    try {
+      await api.renameChatSession(id, title);
+      persistSessions(sessionsRef.current.map((item) => (
+        item.id === id ? { ...item, title, title_source: 'user' } : item
+      )));
+    } catch (err) {
+      addToast(`${t('重命名失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
+  }, [addToast, persistSessions, t]);
+
+  const forkSession = useCallback(async (id: string): Promise<void> => {
+    if (guardBusy()) return;
+    try {
+      let seq = -1;
+      if (id === activeRef.current) {
+        seq = messagesRef.current.length - 1;
+      } else {
+        const detail = await api.getChatSession(id);
+        seq = (detail.data?.messages?.length ?? 0) - 1;
+      }
+      if (seq < 0) {
+        addToast(t('空会话无可分叉消息'));
+        return;
+      }
+      const res = await api.forkChatSession(id, seq);
+      const session = res.data?.session;
+      if (!session?.id) throw new Error(t('分叉失败'));
+      const copied = res.data?.copied ?? 0;
+      const dropped = res.data?.dropped ?? 0;
+      persistSessions([toSessionItem(session), ...sessionsRef.current]);
+      addToast(dropped > 0
+        ? t('已分叉为新会话：复制 {{copied}} 条，超界截断 {{dropped}} 条', { copied, dropped })
+        : t('已分叉为新会话：复制 {{copied}} 条', { copied }));
+    } catch (err) {
+      addToast(`${t('分叉失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
+  }, [addToast, guardBusy, persistSessions, t]);
+
+  /* ── 消息级操作 ── */
+  const copyMessage = useCallback((index: number): void => {
+    const target = messagesRef.current[index];
+    if (!target) return;
+    const text = target.reasoning ? `${target.reasoning}\n\n${target.content}` : target.content;
+    void navigator.clipboard?.writeText(text).catch(() => undefined);
+    setCopiedIndex(index);
+    window.setTimeout(() => setCopiedIndex((current) => (current === index ? null : current)), 1500);
+  }, []);
+
+  const beginEdit = useCallback((index: number): void => {
+    const target = messagesRef.current[index];
+    if (!target || target.role !== 'user') return;
+    setDraft(target.content);
+    setMessages((prev) => prev.slice(0, index));
+  }, []);
+
+  const deleteMessage = useCallback((index: number): void => {
+    setMessages((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const regenerate = useCallback((index: number): void => {
+    const list = messagesRef.current;
+    const previousUser = list.slice(0, index).reverse().find((m) => m.role === 'user');
+    if (!previousUser) return;
+    setMessages(list.slice(0, index));
+    void send(previousUser.content, previousUser.attachments?.filter((a) => a.kind === 'image').map((a) => a.url) ?? [], []);
+  }, [send]);
+
+  /** 按消息下标分叉当前会话（对齐后端 message_seq = 0-based 含该条） */
+  const forkAt = useCallback(async (index: number): Promise<void> => {
+    if (guardBusy()) return;
+    const source = activeRef.current;
+    if (!source) return;
+    if (index < 0) {
+      addToast(t('空会话无可分叉消息'));
+      return;
+    }
+    try {
+      // 先把内存里的最新消息落盘，再让后端按 seq 复制（否则后端只看到旧快照）
       if (saveTimer.current !== null) {
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;
       }
       await saveActiveNow();
+      const res = await api.forkChatSession(source, index);
+      const session = res.data?.session;
+      if (!session?.id) throw new Error(t('分叉失败'));
+      const copied = res.data?.copied ?? 0;
+      const dropped = res.data?.dropped ?? 0;
+      persistSessions([toSessionItem(session), ...sessionsRef.current]);
+      addToast(dropped > 0
+        ? t('已分叉为新会话：复制 {{copied}} 条，超界截断 {{dropped}} 条', { copied, dropped })
+        : t('已分叉为新会话：复制 {{copied}} 条', { copied }));
+    } catch (err) {
+      addToast(`${t('分叉失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
     }
-    const rest = sessionsRef.current.filter((s) => s.id !== id);
-    if (id === activeRef.current) {
-      if (!rest.length) {
-        // 删的是最后一个会话：先把 ref 清空再新建，否则 createSession 会
-        // 拿含刚删会话的 sessionsRef 重建列表，被删的会话「复活」。
-        persistSessions([]);
-        activeRef.current = '';
-        messagesRef.current = [];
-        await createSession();
-        return;
+  }, [addToast, guardBusy, persistSessions, saveActiveNow, t]);
+
+  /* ── 附件收集 ── */
+  const addImages = useCallback((picked: FileList | File[]): void => {
+    const list = Array.from(picked).filter((file) => file.type.startsWith('image/'));
+    if (!list.length) return;
+    const room = 6 - images.length;
+    if (room <= 0) {
+      addToast(t('最多 6 张图片'), 'warning');
+      return;
+    }
+    const accepted = list.slice(0, room);
+    if (list.length > room) addToast(t('只添加了前 {{n}} 张（上限 6 张）', { n: room }), 'warning');
+    for (const file of accepted) {
+      if (file.size > 10 * 1024 * 1024) {
+        addToast(`${t('图片过大（上限 10MB）')}：${file.name}`, 'error');
+        continue;
       }
-      const target = rest[0];
-      activeRef.current = target.id;
-      messagesRef.current = [];
-      modelRef.current = target.model;
-      setActiveId(target.id);
-      setMessages([]);
-      setModel(target.model);
-      try {
-        const detail = await api.getChatSession(target.id);
-        const msgs = (detail.data?.messages ?? [])
-          .filter((m) => isDebugMessage(m))
-          .map((m) => fromPersistedMessage(m));
-        messagesRef.current = msgs;
-        setMessages(msgs);
-      } catch { /* 空消息列表兜底 */ }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = String(reader.result || '');
+        if (url) setImages((prev) => [...prev, url].slice(0, 6));
+      };
+      reader.readAsDataURL(file);
     }
-    persistSessions(rest);
-  };
+  }, [addToast, images.length, t]);
+
+  const addFiles = useCallback((picked: FileList | File[]): void => {
+    for (const file of Array.from(picked)) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result || '');
+        setFiles((prev) => [...prev, { name: file.name, size: file.size, text }].slice(0, 6));
+      };
+      reader.readAsText(file);
+    }
+  }, []);
+
+  /* ── 派生 ── */
+  const sessionItems: AsstSessionItem[] = useMemo(
+    () => sessions.map((item) => ({
+      id: item.id,
+      title: item.title,
+      updated_at: item.updated_at,
+      model: item.model,
+      parent_session_id: item.parent_session_id,
+      title_source: item.title_source,
+    })),
+    [sessions],
+  );
+
+  const currentTitle = useMemo(() => {
+    const current = sessions.find((item) => item.id === activeId);
+    if (current?.title) return current.title;
+    const firstUser = messages.find((m) => m.role === 'user' && m.content.trim());
+    const text = (firstUser?.content ?? '').trim().replace(/\s+/g, ' ');
+    return text ? (text.length > 40 ? `${text.slice(0, 40)}…` : text) : t('新对话');
+  }, [activeId, messages, sessions, t]);
+
+  const suggestions = useMemo(() => {
+    const custom = loadSuggestionPrompts();
+    if (custom.length) return custom;
+    return DEFAULT_SUGGESTS.map((item) => ({ ...item, sub: t('提示词') }));
+  }, [t]);
+
+  const modelQuestionable = !modelsLoading && models.length === 0;
 
   return (
-    <div className="pg-shell">
-      {/* 历史会话抽屉（共享 SessionDrawer：sidebar 变体，对齐 AI 运维页）——
-          内嵌在 .pg-shell 左端把消息区往右推，不遮挡全局侧边栏；
-          窄屏（<900px）由组件 CSS 自动降级为 fixed 覆盖层。切换/新建会话后
-          由 switchSession/createSession 里的 setDrawerOpen(false) 收起。 */}
-      <SessionDrawer
-        variant="sidebar"
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        title={t('历史会话')}
-        sessions={sessions.map((s) => ({
-          id: s.id,
-          title: s.title || t('新会话'),
-          meta: new Date(s.updated_at * 1000).toLocaleDateString(),
-          parent_session_id: s.parent_session_id ?? null,
-          title_source: s.title_source ?? null,
-          // #52：fork 可用性——活动会话按内存消息数；非活动会话未知（列表
-          // 接口不回消息数），缺省允许、点了由 forkFromDrawer 二次校验
-          forkable: s.id === activeId ? messages.length > 0 : undefined,
-        }))}
+    <div className="asst-layout">
+      <AsstSidebar
+        sessions={sessionItems}
         activeId={activeId}
-        onSelect={(id) => void switchSession(id)}
-        onCreate={() => void createSession()}
-        onDelete={(id) => void deleteSession(id)}
-        onFork={(id) => void forkFromDrawer(id)}
-        onRename={(id, next) => void renameSession(id, next)}
-        headerExtra={(
-          <>
-            {/* 聊天设置抽屉（迁自「系统设置 → 聊天」）：管理接口，仅管理员可见 */}
-            {admin && (
-              <button
-                type="button"
-                className="sd-title-gear"
-                title={t('聊天设置')}
-                onClick={() => setSettingsOpen(true)}
-              >
-                <Settings size={13} />
+        disabled={busy || historyBusy}
+        onNew={() => void newChat()}
+        onOpen={(id) => void openSession(id)}
+        onRemove={(id) => void removeSession(id)}
+        onRename={(id, title) => void renameSession(id, title)}
+        onFork={(id) => void forkSession(id)}
+        onClear={() => void clearHistory()}
+        onTitleSettings={() => setSettingsOpen(true)}
+        onChatSettings={admin ? () => setChatSettingsOpen(true) : undefined}
+      />
+
+      <div className={`asst-main${sidebarOpen ? ' side-open' : ''}`}>
+        <AsstTopbar
+          title={currentTitle}
+          modelLabel={config.model ?? ''}
+          onHistory={() => setSidebarOpen((open) => !open)}
+          onSettings={() => setSettingsOpen(true)}
+          onDebugger={() => setDebugOpen((open) => !open)}
+          debuggerActive={debugOpen}
+        />
+
+        {debugOpen ? (
+          <div className="asst-debug">
+            <div className="asst-debug-note">
+              {t('调试视图：SSE 报文、tool_calls、协议与参数都在这里；消息不会写回当前会话。')}
+              <button type="button" className="asst-link-btn" onClick={() => setDebugOpen(false)}>
+                {t('返回对话')}
               </button>
-            )}
-            <span className="sd-title-cfg">
-            <button
-              type="button"
-              className="sd-title-gear"
-              title={t('标题总结设置')}
-              onClick={() => setTitleCfgOpen((v) => !v)}
-            >
-              <SlidersHorizontal size={13} />
-            </button>
-            {titleCfgOpen && (
-              <div className="sd-title-pop">
-                <label>{t('标题模型（留空 = 供应商默认首选）')}</label>
-                <input
-                  className="form-input"
-                  placeholder="gpt-4o-mini"
-                  value={cfgDraft.titleModel ?? ''}
-                  onChange={(e) => setCfgDraft({ ...cfgDraft, titleModel: e.target.value })}
+            </div>
+            <div className="asst-debug-body">
+              <ChatDebugger
+                initialMessages={messages}
+                onBusyChange={(next) => { busyRef.current = next; setBusy(next); }}
+                onForkMessage={(index) => void forkAt(index)}
+              />
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="asst-scroll" ref={scrollRef}>
+              {loading ? (
+                <div className="asst-loading">{t('加载中…')}</div>
+              ) : messages.length === 0 ? (
+                <AsstEmpty
+                  suggestions={suggestions}
+                  onSend={(text) => void send(text, [], [])}
+                  warning={modelQuestionable ? t('没有可用的模型：请先在「模型管理」里启用渠道，或到设置里手动指定模型。') : undefined}
                 />
-                <label>{t('标题提示词')}</label>
-                <textarea
-                  className="form-input"
-                  rows={3}
-                  value={cfgDraft.titlePrompt ?? ''}
-                  placeholder={DEFAULT_TITLE_PROMPT}
-                  onChange={(e) => setCfgDraft({ ...cfgDraft, titlePrompt: e.target.value })}
-                />
-                <div className="sd-title-pop-actions">
-                  <button type="button" className="btn btn-secondary btn-sm" onClick={saveTitleCfg}>
-                    {t('保存')}
-                  </button>
-                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => void manualTitle()}>
-                    {t('立即总结当前会话')}
-                  </button>
+              ) : (
+                <div className="asst-flow">
+                  <AsstMessages
+                    messages={messages}
+                    model={config.model ?? ''}
+                    busy={busy}
+                    copiedIndex={copiedIndex}
+                    onCopy={copyMessage}
+                    onBeginEdit={beginEdit}
+                    onDelete={deleteMessage}
+                    onRegenerate={regenerate}
+                    onFork={(index) => void forkAt(index)}
+                  />
+                  <StreamPhaseIndicator
+                    active={busy}
+                    phase={streamPhase}
+                    lastEventAt={lastEventAt}
+                  />
                 </div>
-                <p className="sd-title-pop-hint">
-                  {t('首轮对话结束后自动总结一次标题；失败保持原标题，可在此手动重试。')}
-                </p>
-              </div>
-            )}
-            </span>
+              )}
+            </div>
+
+            <AsstComposer
+              draft={draft}
+              onDraftChange={setDraft}
+              images={images}
+              files={files}
+              onAddImages={addImages}
+              onAddFiles={addFiles}
+              onRemoveImage={(index) => setImages((prev) => prev.filter((_, i) => i !== index))}
+              onRemoveFile={(index) => setFiles((prev) => prev.filter((_, i) => i !== index))}
+              models={models}
+              model={config.model}
+              modelsLoading={modelsLoading}
+              onRefreshModels={() => void refreshModels()}
+              onPickModel={(name) => persistConfig({ ...configRef.current, model: name })}
+              reasoning={config.reasoning}
+              onPickReasoning={(level) => persistConfig({ ...configRef.current, reasoning: level })}
+              mode={config.mode}
+              modeDisabled
+              onModeChange={(mode) => persistConfig({ ...configRef.current, mode })}
+              effort={effortOf(config.reasoning)}
+              onPickEffort={(value) => persistConfig({ ...configRef.current, reasoning: levelOfEffort(value) })}
+              busy={busy}
+              awaiting={false}
+              canSend={!busy && Boolean(config.model) && Boolean(draft.trim() || images.length || files.length)}
+              onSend={() => void send(draft, images, files)}
+              onStop={stop}
+            />
           </>
         )}
+      </div>
+
+      <AsstSettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        config={config}
+        models={models}
+        modelsLoading={modelsLoading}
+        onRefreshModels={() => void refreshModels()}
+        onSave={(next) => persistConfig(next, t('已保存'))}
+        admin={admin}
+        onOpenDebugger={() => { setSettingsOpen(false); setDebugOpen(true); }}
+        titleModel={config.titleModel ?? ''}
+        titlePrompt={config.titlePrompt ?? ''}
+        onSaveTitleCfg={(next) => {
+          persistConfig({ ...configRef.current, titleModel: next.titleModel, titlePrompt: next.titlePrompt });
+          try {
+            localStorage.setItem(TITLE_CFG_KEY, JSON.stringify({ titleModel: next.titleModel, titlePrompt: next.titlePrompt }));
+          } catch { /* 隐私模式 */ }
+          addToast(t('标题总结设置已保存'));
+        }}
+        onSummarizeNow={() => { void summarizeTitle(activeRef.current); addToast(t('已触发标题总结')); }}
       />
-      <ChatDebugger
-        key={loading ? 'loading' : activeId}
-        playground
-        playgroundModel={model}
-        onPlaygroundModelChange={handleModelChange}
-        initialMessages={loading ? [] : messages}
-        onMessagesChange={handleMessagesChange}
-        suggestionPrompts={suggestions}
-        onClearMessages={handleClear}
-        hasMessages={messages.length > 0}
-        onOpenSessions={() => setDrawerOpen((v) => !v)}
-        onBusyChange={(b) => { busyRef.current = b; }}
-        onForkMessage={(idx) => void forkSession(idx)}
-      />
-      {/* 聊天设置抽屉（迁自「系统设置 → 聊天」）：面板自取数自保存，仅管理员 */}
-      {admin && (
+
+      {/* 窄屏左栏：A2A 用 ResponsiveSheet 断点 900，这里沿用 AIGX 的 MobileDrawer */}
+      {sidebarOpen && (
+        <MobileDrawer open={sidebarOpen} onClose={() => setSidebarOpen(false)} width="min(280px, 86vw)" ariaLabel={t('历史对话')}>
+          <AsstSidebar
+            sessions={sessionItems}
+            activeId={activeId}
+            disabled={busy || historyBusy}
+            onNew={() => void newChat()}
+            onOpen={(id) => void openSession(id)}
+            onRemove={(id) => void removeSession(id)}
+            onRename={(id, title) => void renameSession(id, title)}
+            onFork={(id) => void forkSession(id)}
+            onClear={() => void clearHistory()}
+            onTitleSettings={() => { setSidebarOpen(false); setSettingsOpen(true); }}
+            onChatSettings={admin ? () => { setSidebarOpen(false); setChatSettingsOpen(true); } : undefined}
+          />
+        </MobileDrawer>
+      )}
+
+      {/* 后端「聊天设置」（管理接口，仅管理员）——A2A 没有这一块，属 AIGX 独有 */}
+      {admin && chatSettingsOpen && (
         <MobileDrawer
-          open={settingsOpen}
-          onClose={() => setSettingsOpen(false)}
+          open={chatSettingsOpen}
+          onClose={() => setChatSettingsOpen(false)}
           width="min(92vw, 460px)"
           ariaLabel={t('聊天设置')}
         >
