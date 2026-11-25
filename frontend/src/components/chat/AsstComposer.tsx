@@ -146,8 +146,14 @@ export default function AsstComposer(props: AsstComposerProps): JSX.Element {
    * （模型未声明能力）不提示 —— 「不知道」不等于「不支持」。
    */
   const imageWarning = images.length > 0 && modelSupportsImages === false;
-  /** 模型清单已拉到但当前模型不在其中：提示，但不改选中的值 */
-  const modelWarning = modelAvailable === false && !modelsLoading;
+  /**
+   * 模型清单已拉到、当前模型不在其中：提示，但不改选中的值。
+   *
+   * `Boolean(model)` 这一半不能省（A2A 的判据是
+   * `currentModel && !currentOption`）：**没选模型**与**选的模型失效了**是两件
+   * 不同的事，前者该提示「选择一个模型」，后者才该说「不在可用列表里」。
+   */
+  const modelWarning = modelAvailable === false && Boolean(model) && !modelsLoading;
   /** 候选档位：缺省用 A2A 八档表（调用方传了就用调用方的，超范围档已剔除） */
   const levelOptions = effortLevels && effortLevels.length ? effortLevels : REASONING_LEVELS;
 
