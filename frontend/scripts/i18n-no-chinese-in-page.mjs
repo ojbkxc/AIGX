@@ -40,23 +40,50 @@ for (const m of src.matchAll(/\bt\(\s*"([^"\\]+)"/g)) keys.add(m[1]);
 
 const CJK = /[\u4e00-\u9fff]/;
 const bad = [];
+const phMismatch = [];
+const placeholders = (v) =>
+  new Set([...String(v).matchAll(/\{\{\s*(\w+)\s*\}\}/g)].map((m) => m[1]));
+
+const zh = JSON.parse(fs.readFileSync(path.join(root, 'src/i18n/zh.json'), 'utf8'));
+
 for (const key of keys) {
   const value = en[key];
   if (typeof value !== 'string') continue; // 缺失由 i18n --check 负责
-  if (!CJK.test(value)) continue;
-  if (allowed && value.includes(allowed)) continue;
-  bad.push({ key, value });
+  if (CJK.test(value) && !(allowed && value.includes(allowed))) {
+    bad.push({ key, value });
+  }
+  // 占位符必须与 zh 一致：zh 用 `{{n}}`、en 写成 `{{count}}` 时，英文界面会
+  // 原样显示 `{{count}}` 字面量——key 集合一致、检查全绿，界面却是坏的。
+  if (typeof zh[key] === 'string') {
+    const a = placeholders(zh[key]);
+    const b = placeholders(value);
+    const onlyZh = [...a].filter((x) => !b.has(x));
+    const onlyEn = [...b].filter((x) => !a.has(x));
+    if (onlyZh.length || onlyEn.length) phMismatch.push({ key, onlyZh, onlyEn });
+  }
 }
 
-if (bad.length === 0) {
-  console.log(`[i18n-en] ✓ ${pageFile} 用到的 ${keys.size} 个键，英文值均不含中文`);
+if (bad.length === 0 && phMismatch.length === 0) {
+  console.log(
+    `[i18n-en] ✓ ${pageFile} 用到的 ${keys.size} 个键：英文值无中文残留、占位符与中文一致`,
+  );
   process.exit(0);
 }
 
-console.error(`[i18n-en] 检查失败：${pageFile} 有 ${bad.length} 个键的英文值仍是中文`);
-for (const item of bad.slice(0, 30)) {
-  console.error(`  - ${item.key.slice(0, 50)}`);
-  console.error(`      => ${String(item.value).slice(0, 60)}`);
+if (bad.length > 0) {
+  console.error(`[i18n-en] 检查失败：${pageFile} 有 ${bad.length} 个键的英文值仍是中文`);
+  for (const item of bad.slice(0, 30)) {
+    console.error(`  - ${item.key.slice(0, 50)}`);
+    console.error(`      => ${String(item.value).slice(0, 60)}`);
+  }
+  if (bad.length > 30) console.error(`  …还有 ${bad.length - 30} 条`);
 }
-if (bad.length > 30) console.error(`  …还有 ${bad.length - 30} 条`);
+if (phMismatch.length > 0) {
+  console.error(`[i18n-en] 检查失败：${phMismatch.length} 个键的插值占位符与中文不一致`);
+  for (const item of phMismatch.slice(0, 20)) {
+    console.error(`  - ${item.key.slice(0, 50)}`);
+    if (item.onlyZh.length) console.error(`      zh 有而 en 缺: {{${item.onlyZh.join('}}, {{')}}}`);
+    if (item.onlyEn.length) console.error(`      en 有而 zh 缺: {{${item.onlyEn.join('}}, {{')}}}`);
+  }
+}
 process.exit(1);
