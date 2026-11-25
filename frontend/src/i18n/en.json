@@ -442,6 +442,8 @@
   "已导出「已保存」的配置（当前 {{n}} 项未保存修改未包含在内）": "Exported the SAVED config ({{n}} unsaved change(s) are not included)",
   "「死区词改写」开关是关的：下面 {{n}} 条规则都不会生效。": "The dead-zone rewrite switch is OFF: none of the {{n}} rule(s) below take effect.",
   "「同义词替换」开关是关的：下面 {{n}} 条都不会生效。": "The synonym switch is OFF: none of the {{n}} row(s) below take effect.",
+  "下面这些配置了内容，但对应开关是关的，不会生效：": "The items below are configured but their switches are OFF, so they do not take effect:",
+  "{{label}}（{{count}} 项）": "{{label}} ({{count}})",
   "批量停用异常行": "Disable problem rows",
   "将停用 {{n}} 条异常行（不删除，之后可再启用）。继续？": "This disables {{n}} problem row(s) without deleting them; you can re-enable them later. Continue?",
   "已停用 {{n}} 条异常行": "Disabled {{n}} problem row(s)",

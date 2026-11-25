@@ -895,3 +895,14 @@
   color: var(--text-muted);
   font-size: 12px;
 }
+/* 「配了但没启用」区块：与生效项并列，但要显眼一点（点进去就能开） */
+.purge-configured-off {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--warning-color, #f59e0b);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warning-color, #f59e0b) 6%, transparent);
+}
+.purge-configured-off .purge-hint {
+  margin: 0 0 6px;
+}

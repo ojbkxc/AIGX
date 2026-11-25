@@ -284,6 +284,26 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
 });
 
+test('58 · 「配了但没启用」一次列全并可跳转', async ({ page }) => {
+  await mockPurge(page);
+  await gotoPurge(page);
+
+  const box = page.getByTestId('purge-configured-off');
+  // **不假设初始为空**：mock 里「技能注入」关着但 `skill_dir` 有值，本来就会命中
+  // 一条（我第一版写 `toHaveCount(0)` 直接红——按真实数据写断言）。
+  await expect(box).toBeVisible();
+  const entry = page.getByTestId('purge-configured-off-dead_zone_off_with_rules');
+  await expect(entry).toHaveCount(0); // 死区词开关默认开着 → 这一条还没出现
+
+  // 关掉死区词改写（3 条）→ 出现，且带条数；点它跳回词表
+  await page.getByRole('switch', { name: '死区词改写' }).click();
+  await expect(entry).toBeVisible();
+  await expect(entry).toContainText('死区词改写');
+  await expect(entry).toContainText('3');
+  await entry.click();
+  await expect(page.locator('[data-purge-fix="dead-zone-table"].purge-fix-flash')).toHaveCount(1);
+});
+
 test('57 · 开关关着时词表整表失效要明说（不是静静留着）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);

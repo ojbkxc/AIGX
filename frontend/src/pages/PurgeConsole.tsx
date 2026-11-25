@@ -487,6 +487,97 @@ export function buildConfigExport(
   return JSON.stringify({ version: 1, exported_at: meta.exported_at, runtime: { pid: meta.pid, upstream: meta.upstream }, settings }, null, 2) + '\n';
 }
 
+/** 「配了但没启用」的一条（纯数据，供 UI 列出与单测） */
+export interface ConfiguredButOff {
+  /** 稳定机器码（测试与 i18n 都按它对齐） */
+  code: string;
+  /** 该开关的中文名（i18n key 与中文同形） */
+  label: string;
+  /** 被白配的条目数（词表按行数、模型按个数、模板按个数） */
+  count: number;
+  /** 跳转锚点（复用 `focusFixTarget`） */
+  anchor: string;
+}
+
+/**
+ * 列出「配置了内容、但对应开关是关的」的项。
+ *
+ * 为什么要统一做：后端每条治理都是 `if <switch> { … }`，关着就整块不跑；而界面上
+ * 这些配置照常可见可编辑，用户很容易以为在生效。上一轮只给两张词表加了提示，
+ * 同类还有 5 处——逐个加提示会让信息分散，玩家得自己一处处找。
+ *
+ * 顺序固定（词表 → 交叉递进 → 技能 → 模板 → 自动套用 → 降思考），便于比对与快照。
+ */
+export function configuredButOff(settings: PurgeSettings): ConfiguredButOff[] {
+  const items: ConfiguredButOff[] = [];
+  const rules = settings.rewrite_rules ?? [];
+  if (!settings.dead_zone_rewrite && rules.length > 0) {
+    items.push({
+      code: 'dead_zone_off_with_rules',
+      label: '死区词改写',
+      count: rules.length,
+      anchor: 'dead-zone-table',
+    });
+  }
+  const synonyms = settings.synonym_pairs ?? [];
+  if (!settings.synonym_enabled && synonyms.length > 0) {
+    items.push({
+      code: 'synonym_off_with_pairs',
+      label: '同义词替换',
+      count: synonyms.length,
+      anchor: 'synonym-table',
+    });
+  }
+  const models = settings.fallback_models ?? [];
+  if (!settings.cross_source_fallback && models.length > 0) {
+    items.push({
+      code: 'fallback_off_with_models',
+      label: '异源递进',
+      count: models.length,
+      anchor: 'switches',
+    });
+  }
+  // 技能注入：`skill_keywords` 在技能快照里、不在 settings 中，所以这里只看目录
+  // ——目录配了就等于「用户打算用这个功能」。
+  const skillDir = (settings.skill_dir ?? '').trim();
+  if (!settings.skill_inject && skillDir) {
+    items.push({
+      code: 'skill_inject_off',
+      label: '技能注入',
+      count: 1,
+      anchor: 'skill-dir',
+    });
+  }
+  const templates = settings.structured_templates ?? [];
+  const suffix = (settings.structured_suffix ?? '').trim();
+  if (!settings.structured_prompt && (templates.length > 0 || suffix)) {
+    items.push({
+      code: 'structured_off',
+      label: '结构化提示',
+      count: templates.length,
+      anchor: 'templates',
+    });
+  }
+  const presetId = (settings.auto_preset_id ?? '').trim();
+  if (!settings.auto_preset && presetId) {
+    items.push({
+      code: 'auto_preset_off',
+      label: '按模型自动套用',
+      count: 1,
+      anchor: 'presets',
+    });
+  }
+  if (!settings.reduce_reasoning && (settings.reasoning_floor ?? 'low') !== 'low') {
+    items.push({
+      code: 'reduce_reasoning_off',
+      label: '降思考',
+      count: 1,
+      anchor: 'switches',
+    });
+  }
+  return items;
+}
+
 /** 严重级 → 徽标文案（i18n key 与中文同形）。 */
 const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
   error: '不生效',
@@ -4633,6 +4724,27 @@ export default function PurgeConsole(): JSX.Element {
             </li>
           ))}
         </ul>
+        {/* 配了但没启用：一次列全，点一下跳到对应配置区（不必自己一处处找） */}
+        {configuredButOff(draft).length > 0 ? (
+          <div className="purge-configured-off" data-testid="purge-configured-off">
+            <p className="purge-hint">{t('下面这些配置了内容，但对应开关是关的，不会生效：')}</p>
+            <ul className="purge-active-list">
+              {configuredButOff(draft).map((item) => (
+                <li key={item.code}>
+                  <button
+                    type="button"
+                    className="purge-active-jump"
+                    data-testid={`purge-configured-off-${item.code}`}
+                    title={t('跳到这一项对应的配置')}
+                    onClick={() => focusFixTarget(item.anchor)}
+                  >
+                    {t('{{label}}（{{count}} 项）', { label: t(item.label), count: item.count })}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </Card>
 
       <Card

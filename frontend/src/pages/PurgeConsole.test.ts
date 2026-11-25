@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import type { PurgeSettings } from '../types';
 import {
   activeSummaryText,
   applyUndo,
   buildActiveSummary,
   buildConfigExport,
   clampNumInput,
+  configuredButOff,
   confirmSkillOverwrite,
   collectCapOverflows,
   countEmptyFromRules,
@@ -373,6 +375,96 @@ describe('validateImportedSettings · 导出-导入自洽', () => {
   it('字符串数组本身不是数组 → fatal', () => {
     const verdict = validateImportedSettings({ fallback_models: 'glm-5' });
     expect(verdict.fatal.length).toBeGreaterThan(0);
+  });
+});
+
+describe('configuredButOff', () => {
+  const base = {
+    dead_zone_rewrite: true,
+    synonym_enabled: true,
+    cross_source_fallback: true,
+    skill_inject: true,
+    structured_prompt: true,
+    auto_preset: true,
+    reduce_reasoning: true,
+    reasoning_floor: 'low',
+    rewrite_rules: [],
+    synonym_pairs: [],
+    fallback_models: [],
+    skill_dir: '',
+    structured_templates: [],
+    structured_suffix: '',
+    auto_preset_id: '',
+  } as Record<string, unknown>;
+
+  it('全部启用 / 全空 → 空数组（不打扰）', () => {
+    expect(configuredButOff(base as unknown as PurgeSettings)).toEqual([]);
+  });
+
+  it('**关着但配了内容** → 逐项列出并带 count 与锚点', () => {
+    const settings = {
+      ...base,
+      dead_zone_rewrite: false,
+      rewrite_rules: [{ from: 'a', to: 'b' }, { from: 'c', to: 'd' }],
+      synonym_enabled: false,
+      synonym_pairs: [{ from: 'x', to: 'y' }],
+      cross_source_fallback: false,
+      fallback_models: ['m1', 'm2', 'm3'],
+    } as Record<string, unknown>;
+    const items = configuredButOff(settings as unknown as PurgeSettings);
+    expect(items.map((i) => i.code)).toEqual([
+      'dead_zone_off_with_rules',
+      'synonym_off_with_pairs',
+      'fallback_off_with_models',
+    ]);
+    expect(items[0].count).toBe(2);
+    expect(items[1].count).toBe(1);
+    expect(items[2].count).toBe(3);
+    expect(items[0].anchor).toBe('dead-zone-table');
+  });
+
+  it('开着但配置为空 → 不提（没有可「白配」的东西）', () => {
+    const settings = {
+      ...base,
+      dead_zone_rewrite: false,
+      synonym_enabled: false,
+      rewrite_rules: [],
+      synonym_pairs: [],
+    } as Record<string, unknown>;
+    expect(configuredButOff(settings as unknown as PurgeSettings)).toEqual([]);
+  });
+
+  it('降思考关着但 target 是 low → 不提（low 是默认值，没有「白配」）', () => {
+    const settings = {
+      ...base,
+      reduce_reasoning: false,
+      reasoning_floor: 'low',
+    } as Record<string, unknown>;
+    expect(configuredButOff(settings as unknown as PurgeSettings)).toEqual([]);
+  });
+
+  it('降思考关着且 target 非 low → 提（用户配了档位却没开开关）', () => {
+    const settings = {
+      ...base,
+      reduce_reasoning: false,
+      reasoning_floor: 'medium',
+    } as Record<string, unknown>;
+    expect(configuredButOff(settings as unknown as PurgeSettings).map((i) => i.code)).toContain('reduce_reasoning_off');
+  });
+
+  it('结构化提示关着但有固定后缀 / 模板 → 提', () => {
+    const withSuffix = {
+      ...base,
+      structured_prompt: false,
+      structured_suffix: '请给结论',
+    } as Record<string, unknown>;
+    expect(configuredButOff(withSuffix as unknown as PurgeSettings).map((i) => i.code)).toContain('structured_off');
+    const withTpl = {
+      ...base,
+      structured_prompt: false,
+      structured_templates: [{ name: 't', text: 'x' }],
+    } as Record<string, unknown>;
+    expect(configuredButOff(withTpl as unknown as PurgeSettings).map((i) => i.code)).toContain('structured_off');
   });
 });
 
@@ -1616,3 +1708,4 @@ describe('parseRulesCsv', () => {
     expect(parseRulesCsv(' a , b \n')).toEqual([{ from: 'a', to: 'b' }]);
   });
 });
+
