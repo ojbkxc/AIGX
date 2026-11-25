@@ -594,6 +594,40 @@ git status --porcelain --untracked-files=no -- frontend/src frontend/package.jso
 `cargo test` / `clippy`。第 62–66 批期间我因为 `build` 被并发会话阻塞，连续几轮只
 做了「tsc + 单测」，那几轮的绿**不含 build 这一层**——报告时必须说清是哪一层绿。
 
+### 69. 「哪一处坏」比「坏了」重要一百倍 —— 三个数据入口的统一教训
+本页有三条吃外部数据的入口，处置策略**本来就该不同**，但「说清哪一处」是共同底线：
+
+| 入口 | 坏数据时 | 为什么不同 |
+|---|---|---|
+| 批量粘贴 | 跳过坏行 + **报行号** | 粘几十行，部分可用就该部分成功 |
+| CSV 导入 | **整体拒绝** + 报行号 | 「导了一半」比拒绝更危险 |
+| 导入配置 JSON | **整体拒绝** + fatal 逐条点名 | 半份配置可能让页面白屏 |
+
+**这一族修了三次才发现是同一个问题**：
+1. `skipped` 只报「跳了 N 行」，用户不知道是哪几行；
+2. **重复行连计数都不进**（走了 `continue`，既不进 `rules` 也不进 `skipped`）——彻底的静默丢弃；
+3. CSV 一律 `return null` + 「必须是两列」，用户在几十行里自己找。
+
+三个入口、三种策略，**同一个要求**：错在哪、错几处，必须点名到行。
+
+### 70. 闭环必须被测试钉住，而不是「理论上成立」
+`exportRulesCsv` 输出带表头 `from,to`，`parseRulesCsv` 的 `HEAD_WORDS` 认这两个词
+→ 表头会被跳过 → **闭环理论上成立**。但在此之前**没有任何测试**钉住它。
+
+这个假设一破，症状极其隐蔽：**导出成功的文件导不回来**。配置 JSON 那条线早就
+踩过同样的坑（字符串数组被当对象数组），换了个入口又出现一次。
+
+4 条测试 + **变异验证**：把 `'from'`/`'to'` 从 `HEAD_WORDS` 去掉 → 表头被当成规则
+混进结果（`{from:'from', to:'to'}`）、测试精确红。**能证明它坏，才算测过它。**
+
+### 71. 「未被 e2e 引用」≠「未测试」
+按 testid 反向扫，页面 53 个 testid 里 15 个从未出现在 e2e 中——但这**不构成
+覆盖空洞清单**：有些是通过文案定位的（`getByText(/写入技能目录/)`）、有些是
+`data-purge-fix` 锚点（用于跳转断言，不是元素定位）。
+
+**正确用法**：把它当**候选清单**，逐个回代码看是不是真没人测；而不是当结论。
+真结论只能来自「这条行为有没有任何断言在守」——机器能帮我列候选，判断还得我自己做。
+
 ## 关键设计取舍（防回归备忘）
 
 - 事件环单环 vs 11 个独立计数器环形：省 ~700KB 常驻 + 读侧一次锁。
@@ -625,13 +659,13 @@ git status --porcelain --untracked-files=no -- frontend/src frontend/package.jso
 | `cargo test --bin aigx` | **2575 passed / 0 failed**（含 purge:: 87） |
 | `cargo clippy --bin aigx -- -D warnings` | 0 |
 | `rustfmt --check`（触碰文件） | 0 |
-| vitest 全量 | **PurgeConsole 198 passed / 0 failed**（全量因并发在途错误未能跑完，见下注） |
+| vitest 全量 | **PurgeConsole 219 passed / 0 failed**（全量因并发在途错误未能跑完，见下注） |
 | e2e（`purge-console-iter` 单 spec，desktop / mobile 各一次） | **61 passed / 0 failed**（×2 project，最近一次可构建时实测） |
 | tsc / eslint `--max-warnings 0` | 0 / 0 |
 | i18n:check | zh=en 键集一致 |
 | static 零漂移 | 双重构建后 `git status static/` 为空 |
 
-> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 66 批收口值；Rust 侧数字来自 CI，本机按 AGENTS.md 不编译。第 62–66 批期间 `npm run build` 曾被并发会话的在途类型错误连续阻塞，e2e 与 vitest 全量一度无法运行，上表 e2e 数字取自最后一次可构建时的实测）。
+> 数字随批次增长；以最后一次全文门禁的实测为准（上表为第 71 批收口值；Rust 侧数字来自 CI，本机按 AGENTS.md 不编译。第 62–66 批期间 `npm run build` 曾被并发会话的在途类型错误连续阻塞，e2e 与 vitest 全量一度无法运行，上表 e2e 数字取自最后一次可构建时的实测）。
 > **已修**：`channel::balance_refresh::tests::sweep_survives_channel_deleted_mid_round`
 > 曾偶发假红——固定 `sleep(50ms)` 当同步手段，并发负载下不够。已改为轮询等待
 > （每 5ms 查一次、最多 2s，判据不变），单跑 5 次 + 全量连跑 3 次全绿。
