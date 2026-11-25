@@ -9,7 +9,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
-import '../i18n';
+import '../../i18n';
 
 // jsdom 未实现 scrollIntoView（真实浏览器都有）；组件里按 `if (ref.current)` 守卫，
 // 只在实现缺失时才需要这个桩。
@@ -20,12 +20,12 @@ if (!Element.prototype.scrollIntoView) {
 // 气泡是懒加载的重组件（它自己有一整套纯函数模块）。挂载冒烟只关心
 // ChatDebugger 自己的生命周期，故整体替换成占位——顺带避免本测被兄弟模块的
 // 中间态编译错误带红（并行开发时该目录随时可能半成品）。
-vi.mock('./chat/ChatBubble', () => ({
+vi.mock('./ChatBubble', () => ({
   default: () => 'CHAT_BUBBLE_SLOT',
   __esModule: true,
 }));
 
-vi.mock('../api', () => ({
+vi.mock('../../api', () => ({
   api: {
     listModels: vi.fn().mockResolvedValue({ data: ['gpt-4o'] }),
     listChannels: vi.fn().mockResolvedValue({ data: [] }),
@@ -37,7 +37,7 @@ vi.mock('../api', () => ({
   directChannelChatStream: vi.fn(),
 }));
 
-import ChatDebugger from './ChatDebugger';
+import ChatDebugger from '../ChatDebugger';
 
 describe('ChatDebugger 挂载', () => {
   it('空态可挂载（含模型列表请求）', async () => {
