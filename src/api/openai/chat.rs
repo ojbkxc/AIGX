@@ -649,7 +649,7 @@ pub(crate) async fn handle_chat_completions(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
-                                            state,
+                                            &state,
                                             ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
@@ -699,7 +699,7 @@ pub(crate) async fn handle_chat_completions(
                                             .map(|c| c.name.clone())
                                             .unwrap_or_default(),
                                         provider: attempt_provider(
-                                            state,
+                                            &state,
                                             ch_ref.as_ref(),
                                             bridge.as_ref(),
                                         ),
@@ -743,7 +743,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(&state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -800,7 +800,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(&state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1537,7 +1537,7 @@ pub(crate) async fn handle_chat_completions(
                                         .map(|c| c.name.clone())
                                         .unwrap_or_default(),
                                     provider: attempt_provider(
-                                        state,
+                                        &state,
                                         ch_ref.as_ref(),
                                         bridge.as_ref(),
                                     ),
@@ -1597,7 +1597,11 @@ pub(crate) async fn handle_chat_completions(
                                     .as_ref()
                                     .map(|c| c.name.clone())
                                     .unwrap_or_default(),
-                                provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                                provider: attempt_provider(
+                                    &state,
+                                    ch_ref.as_ref(),
+                                    bridge.as_ref(),
+                                ),
                                 account: String::new(),
                                 model: upstream.clone(),
                                 sticky_hit,
@@ -1641,7 +1645,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(&state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
@@ -1683,7 +1687,7 @@ pub(crate) async fn handle_chat_completions(
                                 .as_ref()
                                 .map(|c| c.name.clone())
                                 .unwrap_or_default(),
-                            provider: attempt_provider(state, ch_ref.as_ref(), bridge.as_ref()),
+                            provider: attempt_provider(&state, ch_ref.as_ref(), bridge.as_ref()),
                             account: String::new(),
                             model: upstream.clone(),
                             sticky_hit,
