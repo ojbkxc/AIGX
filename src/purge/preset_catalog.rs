@@ -142,16 +142,6 @@ pub const BUILTIN_PRESETS: &[BuiltinPreset] = &[
         body: include_str!("../../assets/purge-presets/alibaba/alibaba-qwen-4-max.md"),
     },
     BuiltinPreset {
-        id: "alibaba-qwen-preferences",
-        vendor: "Alibaba",
-        model: "qwen-preferences",
-        title: "qwen-preferences",
-        tags: &[],
-        bytes: 1,
-        sha256: "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-        body: include_str!("../../assets/purge-presets/alibaba/alibaba-qwen-preferences.md"),
-    },
-    BuiltinPreset {
         id: "anthropic-opus-v1",
         vendor: "Anthropic",
         model: "opus v1",
@@ -470,6 +460,16 @@ pub const BUILTIN_PRESETS: &[BuiltinPreset] = &[
         bytes: 10697,
         sha256: "6c2ffdbaa6970c354bcb3ced5ce7c575bbfd3513f8e9e3c948677f8e3104f91c",
         body: include_str!("../../assets/purge-presets/tencent/tencent-hy4-agents.md"),
+    },
+    BuiltinPreset {
+        id: "universal-jailbreak",
+        vendor: "Universal",
+        model: "*",
+        title: "Universal fallback",
+        tags: &["universal", "fallback"],
+        bytes: 6320,
+        sha256: "bfdadd6c2df85231f1df7576830c7d79a033cced4b003455674ca7ef9c32c237",
+        body: include_str!("../../assets/purge-presets/0x8d-jailbreaks/0x8d-jailbreaks-gpt-new.md"),
     },
     BuiltinPreset {
         id: "xai-grok-build",

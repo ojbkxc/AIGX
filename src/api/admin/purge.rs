@@ -157,10 +157,13 @@ pub async fn handle_list_purge_presets(
     let write_path = query.model.as_deref().map(|model| {
         let settings = state.purge.snapshot();
         let pinned = settings.auto_preset_id.trim();
-        let hit = presets::preset_for_model(model, pinned);
+        // 通用兜底开关与数据面同参：关掉时这里的 `match`/`applied` 必须一起变成
+        // `None`/`false`，否则列表会承诺一条实际不会前插的正文。
+        let hit = presets::preset_for_model(model, pinned, settings.universal_fallback);
         let match_kind = hit.as_ref().map(|(_, kind)| match kind {
             presets::PresetMatch::Exact => "exact",
             presets::PresetMatch::Family => "family",
+            presets::PresetMatch::Universal => "universal",
             presets::PresetMatch::Pinned => "pinned",
         });
         let preset_id = hit.as_ref().map(|(detail, _)| detail.id.clone());

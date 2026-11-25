@@ -83,6 +83,11 @@ pub enum PresetModelMatch {
     Mismatch,
     /// 无法判定：未传生效模型，或预设侧缺字段
     Unknown,
+    /// 通用兜底条目：不绑定任何型号，对任何具体模型都会被套上。
+    ///
+    /// 与 `Mismatch` 分开是必要的：兜底条目在列表里如果显示「跟你的模型不配」，
+    /// 而它恰恰是这个模型**实际**会被前插的那一份，管理员会以为自己看反了。
+    Universal,
 }
 
 /// 厂商 → 线上模型名里的产品名词干。
@@ -195,11 +200,24 @@ fn overlaps(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && (a.contains(b) || b.contains(a))
 }
 
+/// 通用兜底条目的 id（目录里由 `tools/sync_purge_presets.py` 合成的那一条）。
+pub const UNIVERSAL_PRESET_ID: &str = "universal-jailbreak";
+
+/// 目录里「不绑定型号」的占位 model 值（`universal-jailbreak` 条目用）。
+///
+/// 它**不是**靠「归一化后变成空串」来自我排除的：`normalize_model_id` 只丢空白与
+/// `._-/`，`*` 会原样留下。真正让它不参与「同名/同族」两轮的是 `preset_for_model`
+/// 里按 id 的显式跳过（以及别的预设模型名里本来就没有 `*`，双向包含碰不到它）。
+/// 两处都留着是刻意的：前者防「有人把 `*` 改成 `.` 之类可被归一化掉的写法」，
+/// 后者防「某个真实模型名里带 `*`」。
+const UNIVERSAL_MODEL_WILDCARD: &str = "*";
+
 /// 给定预设的 `(vendor, model)` 与当前生效模型名，算出匹配度。
 ///
 /// - 折叠大小写与分隔符后做**双向包含**（`claude-sonnet-4` 命中 `sonnet`，反之亦然）；
 /// - 模型命中 → [`PresetModelMatch::Exact`]（厂商是否也命中不改变结论）；
 /// - 仅厂商命中 → [`PresetModelMatch::Vendor`]；
+/// - 不绑定型号的通用兜底条目 → [`PresetModelMatch::Universal`]；
 /// - 都不命中 → [`PresetModelMatch::Mismatch`]；
 /// - 生效模型为空、或预设两侧字段都为空 → [`PresetModelMatch::Unknown`]（无法判定）。
 pub fn preset_match_for_model(vendor: &str, model: &str, active_model: &str) -> PresetModelMatch {
@@ -213,6 +231,12 @@ pub fn preset_match_for_model(vendor: &str, model: &str, active_model: &str) -> 
     // 两处口径由 PresetMatch 的两个分支保持一致（见 preset_for_model）。
     if is_virtual_route_model(&normalize_model_id(active_model)) {
         return PresetModelMatch::Unknown;
+    }
+    // 通用兜底条目：它对任何具体模型都会被套（写路径的最后一级），所以展示层不能
+    // 报 Mismatch —— 那会让列表说「这条跟 minimax 不配」，而它恰恰是 minimax 实际
+    // 会拿到的那一份。虚拟路由名已在上一步判成 Unknown，与写路径同口径。
+    if model.trim() == UNIVERSAL_MODEL_WILDCARD {
+        return PresetModelMatch::Universal;
     }
 
     let folded_model = fold_for_match(model);
@@ -581,7 +605,7 @@ pub fn normalize_model_id(value: &str) -> String {
         .collect()
 }
 
-/// 命中强度：预设目标模型就是当前模型（允许分隔符差异）。
+/// 命中强度（写路径口径：决定前插哪一份正文）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresetMatch {
     /// 同名模型（含「一行覆盖多模型」的双向包含写法）。
@@ -594,17 +618,54 @@ pub enum PresetMatch {
     /// 自动套预设」对现有模型基本失效。族命中是它的兜底：同一家的破甲词对同家
     /// 其它型号同样成立。
     Family,
+    /// 通用兜底：既不认同名、也不认同族时套的那一份**与厂商无关**的正文。
+    ///
+    /// ── 它为什么存在 ─────────────────────────────────────────
+    /// 预设库只有 19 个厂商目录、53 条内容，而线上 196 个模型来自 20+ 家。缺内容的
+    /// 那批（minimax / bytedance seed / spark / raccoon / sensenova / ling / pangu /
+    /// poolside / ernie …）无论族表怎么补词干都永远返回 `None`：补词干只能改「判定」，
+    /// 改不了「库里没有它们的内容」。这一层给它们一份模型无关的正文。
+    ///
+    /// ── 套给不相干的模型，是不是比不套好 ─────────────────────────
+    /// 判断是「多数情况更好，但不是无条件更好」，依据是正文的形态与成本，不是直觉：
+    /// 1. **正文是纯 system 提示词注入**：`universal-jailbreak` 复用库内
+    ///    `0x8d-jailbreaks-gpt-new` 那段 REQ 指令 —— 逐词核过，它不含任何模型名/
+    ///    厂商名（gpt/claude/gemini/grok/kimi/qwen/glm/deepseek/mistral 各 0 次）、
+    ///    不依赖特定 tokenizer、不写厂商专有的 prefill/参数、不引用本产品之外的能力。
+    ///    换个模型读同一段文字机制上成立：它不是「某家的破甲词」，而是「让模型按
+    ///    推理而不是按回避作答」的重框。
+    /// 2. **失效方式是「没效果」，不是「答坏」**：模型不认这段指令时只按原样回答，
+    ///    代价是几千字节上下文；不会因为有这段文本而拒答、截断或说胡话。这与
+    ///    `Family` 层套同家别的型号是同一类风险，而那一层已经在跑。
+    /// 3. **有代价，所以给开关**：正文 6320 字节（约 1.6k token）会前插到该模型
+    ///    **每一次**请求的 system 上，小上下文模型（`spark-x2.6-1.7b` 这类）真实
+    ///    吃到预算；且正文带一条「首条回复打 banner」的输出约定，对不要 banner 的
+    ///    场景是可见噪声。开关是 [`super::PurgeSettings::universal_fallback`]，
+    ///    默认开 —— 42/196 行「什么都不套」是确定无效，比「可能无效但成本可量化」差。
+    /// 4. **不猜厂商**：这一层不再从模型名反推它是哪家（族表已经那么干过一次，代价是
+    ///    `solar-pro4` 被 `o4` 抢走）。通用词就是「不认厂商」的那一份。
+    Universal,
     /// 操作者在 `auto_preset_id` 里点名的预设。
     Pinned,
 }
 
-/// 找写给这个模型的预设：**固定 id > 同名模型**，都没有就是 `None`。
+/// 找写给这个模型的预设：**固定 id > 同名模型 > 同厂商族 > 通用兜底**。
 ///
 /// 纯函数：不读盘、不联网、不改配置。目录是编译期常量，线性扫描 53 条足够快
 /// （每个请求一次，归一化只发生在模型串上）。
 ///
-/// 名字对不上时**坚决不猜**：把写给别的模型的 prompt 静默套上去，比不套更糟。
-pub fn preset_for_model(model: &str, pinned_id: &str) -> Option<(PresetDetail, PresetMatch)> {
+/// `allow_universal` 来自 [`super::PurgeSettings::universal_fallback`]：关掉时最后一
+/// 级直接 `None`（回到只有 Exact/Family 两档的行为），前三档不受影响。做成参数而
+/// 不读全局配置，是为了让**管理面报告的「会不会套」与数据面实际行为**共用同一处
+/// 判定 —— 否则又是「列表说能套、实际不套」。
+///
+/// 名字对不上时**坚决不猜**：唯一允许「不配也对」的是显式的通用兜底档，它不冒充
+/// 任何厂商的破甲词。
+pub fn preset_for_model(
+    model: &str,
+    pinned_id: &str,
+    allow_universal: bool,
+) -> Option<(PresetDetail, PresetMatch)> {
     let pinned = pinned_id.trim();
     if !pinned.is_empty() {
         return get(pinned).map(|detail| (detail, PresetMatch::Pinned));
@@ -616,10 +677,18 @@ pub fn preset_for_model(model: &str, pinned_id: &str) -> Option<(PresetDetail, P
     }
     // 虚拟路由名（`auto` / `default`）显式不套：见 VIRTUAL_ROUTE_MODELS 的理由。
     // 放在 pinned 之后是刻意的 —— 操作者点名的那一条仍然优先。
+    // 通用兜底也**不**套它们：`auto` 不是「没覆盖的模型」，是「还不知道是哪个模型」，
+    // 按当前请求名挑任何正文（含通用词）同样是猜。
     if is_virtual_route_model(&active) {
         return None;
     }
     for preset in BUILTIN_PRESETS {
+        // 通用兜底条目：`model` 是 `*`，它不代表任何具体型号，绝不能在「同名」
+        // 这一轮被取到（`*` 会以原样出现在归一化结果里，不是空串）。按 id 显式跳过，
+        // 它只能由最后一级显式取 —— 优先级表是 Pinned > Exact > Family > Universal。
+        if preset.id == UNIVERSAL_PRESET_ID {
+            continue;
+        }
         let target = normalize_model_id(preset.model);
         if target.is_empty() {
             continue;
@@ -636,11 +705,21 @@ pub fn preset_for_model(model: &str, pinned_id: &str) -> Option<(PresetDetail, P
     // 族内取**第一条**：目录已按 (vendor, model) 排序，同族多条时取排序最前的
     // 那条，保证同一模型每次都命中同一个预设（不能随机漂）。
     for preset in BUILTIN_PRESETS {
+        if preset.id == UNIVERSAL_PRESET_ID {
+            continue;
+        }
         if vendor_family_matches(preset.vendor, model, &active) {
             return Some((to_detail(preset), PresetMatch::Family));
         }
     }
-    None
+    if !allow_universal {
+        return None;
+    }
+    // 通用兜底：不认厂商、不认型号，对任何「不是虚拟路由名」的模型都成立。
+    BUILTIN_PRESETS
+        .iter()
+        .find(|preset| preset.id == UNIVERSAL_PRESET_ID)
+        .map(|preset| (to_detail(preset), PresetMatch::Universal))
 }
 
 /// 短族词干的长度门槛：`o4` 这种两字符词干只按「段」判定，不按子串判定。
@@ -1302,21 +1381,34 @@ mod tests {
     #[test]
     fn preset_for_model_hits_the_same_name_and_never_guesses() {
         let target = &BUILTIN_PRESETS[0];
-        let hit = preset_for_model(target.model, "").expect("同名模型应当命中");
+        let hit = preset_for_model(target.model, "", true).expect("同名模型应当命中");
         assert_eq!(hit.0.id, target.id);
         assert_eq!(hit.1, PresetMatch::Exact);
 
         // 大小写/分隔符差异仍算同一个模型。
         let spaced = target.model.replace('-', " ");
         assert_eq!(
-            preset_for_model(&spaced, "").map(|(detail, _)| detail.id),
+            preset_for_model(&spaced, "", true).map(|(detail, _)| detail.id),
             Some(target.id.to_string())
         );
 
-        // 完全对不上的模型：不猜。
-        assert!(preset_for_model("zzz-unknown-model-9", "").is_none());
-        // 空模型：不猜。
-        assert!(preset_for_model("   ", "").is_none());
+        // 完全对不上的模型：不猜厂商。默认档下它落**通用兜底**，而不是某家的破甲词；
+        // 关掉兜底则回到 `None`（旧行为）。
+        for (model, kind) in [
+            ("zzz-unknown-model-9", PresetMatch::Universal),
+            ("MiniMax-M3", PresetMatch::Universal),
+        ] {
+            let (detail, got) = preset_for_model(model, "", true)
+                .unwrap_or_else(|| panic!("{model} 落在通用兜底档才应当有预设"));
+            assert_eq!(got, kind, "{model} 应落通用兜底，不该被某家预设抢走");
+            assert_eq!(detail.id, UNIVERSAL_PRESET_ID);
+            assert!(
+                preset_for_model(model, "", false).is_none(),
+                "{model} 关掉通用兜底后应当没有预设"
+            );
+        }
+        // 空模型：连通用兜底都不套（没有模型名就无从判定「这是哪个请求」）。
+        assert!(preset_for_model("   ", "", true).is_none());
     }
 
     /// 线上真实模型名 → 同厂商族的预设必须能套上。
@@ -1338,7 +1430,7 @@ mod tests {
             ("claude-sonnet-4", "anthropic"),
         ];
         for (model, vendor_keyword) in family_cases {
-            let hit = preset_for_model(model, "")
+            let hit = preset_for_model(model, "", true)
                 .unwrap_or_else(|| panic!("{model} 应当能命中同厂商族的预设"));
             assert_eq!(hit.1, PresetMatch::Family, "{model} 应落 Family 档");
             assert!(
@@ -1356,8 +1448,8 @@ mod tests {
             ("deepseek-v4.1-flash", "deepseek"),
         ];
         for (model, vendor_keyword) in exact_cases {
-            let hit =
-                preset_for_model(model, "").unwrap_or_else(|| panic!("{model} 应当能命中预设"));
+            let hit = preset_for_model(model, "", true)
+                .unwrap_or_else(|| panic!("{model} 应当能命中预设"));
             assert_eq!(hit.1, PresetMatch::Exact, "{model} 应落 Exact 档");
             assert!(
                 hit.0.vendor.to_lowercase().contains(vendor_keyword),
@@ -1370,26 +1462,36 @@ mod tests {
     /// 同一模型每次必须命中同一个预设（不能随机漂）。
     #[test]
     fn family_fallback_is_deterministic() {
-        let first = preset_for_model("claude-sonnet-4-6", "").map(|(d, k)| (d.id, k));
+        let first = preset_for_model("claude-sonnet-4-6", "", true).map(|(d, k)| (d.id, k));
         for _ in 0..5 {
             assert_eq!(
-                preset_for_model("claude-sonnet-4-6", "").map(|(d, k)| (d.id, k)),
+                preset_for_model("claude-sonnet-4-6", "", true).map(|(d, k)| (d.id, k)),
                 first
             );
         }
     }
 
-    /// 族兜底不能把「真的一点关系都没有」的模型硬套上。
+    /// 族兜底不能把「真的一点关系都没有」的模型拉进**某家**的破甲词。
+    ///
+    /// 这条盯的是「套错厂商」而不是「有没有内容」：这些名字里不含任何族词干，
+    /// 所以关掉通用兜底时必须 `None`、开着时必须命中**通用条目**（不是某家）。
+    /// 不写 `is_none() || Family` 那种几乎恒真的松断言 —— 否则兜底一旦放宽成
+    /// 「什么都套」，这条测试照样绿。
     #[test]
     fn family_fallback_still_declines_unrelated_models() {
-        // 这三个名字里不含任何厂商族词干，必须**明确返回 None** —— 不写
-        // `is_none() || Family` 那种几乎恒真的松断言，否则兜底一旦放宽成「什么都套」
-        // 这条测试照样绿。
-        for model in ["zzz-unknown-model-9", "poolside/laguna-s-2.1:free", "auto"] {
+        for model in [
+            "zzz-unknown-model-9",
+            "poolside/laguna-s-2.1:free",
+            "cline-free/solar-pro4",
+        ] {
             assert!(
-                preset_for_model(model, "").is_none(),
-                "{model} 不含任何厂商族词干，不该被套上预设"
+                preset_for_model(model, "", false).is_none(),
+                "{model} 不含任何厂商族词干，关掉通用兜底后不该被套上预设"
             );
+            let (detail, kind) = preset_for_model(model, "", true)
+                .unwrap_or_else(|| panic!("{model} 应当落通用兜底"));
+            assert_eq!(kind, PresetMatch::Universal, "{model} 不该落 Exact/Family");
+            assert_eq!(detail.id, UNIVERSAL_PRESET_ID);
         }
     }
 
@@ -1397,7 +1499,7 @@ mod tests {
     #[test]
     fn exact_still_wins_over_family() {
         let target = &BUILTIN_PRESETS[0];
-        let hit = preset_for_model(target.model, "").expect("同名模型应当命中");
+        let hit = preset_for_model(target.model, "", true).expect("同名模型应当命中");
         assert_eq!(hit.1, PresetMatch::Exact);
         assert_eq!(hit.0.id, target.id);
     }
@@ -1405,15 +1507,17 @@ mod tests {
     #[test]
     fn a_pinned_id_wins_over_model_matching() {
         let pinned = &BUILTIN_PRESETS[1];
-        let hit = preset_for_model("zzz-unknown-model-9", pinned.id).expect("固定 id 应当命中");
+        let hit =
+            preset_for_model("zzz-unknown-model-9", pinned.id, true).expect("固定 id 应当命中");
         assert_eq!(hit.0.id, pinned.id);
         assert_eq!(hit.1, PresetMatch::Pinned);
 
-        // 死 id：什么都不套，也不回落到模型匹配。
-        assert!(preset_for_model(BUILTIN_PRESETS[0].model, "no-such-preset").is_none());
+        // 死 id：什么都不套，也不回落到模型匹配（含通用兜底）—— 操作者点名的是一条
+        // 不存在的预设，静默换成通用词会把 `preset_missing` 体检告警掩盖掉。
+        assert!(preset_for_model(BUILTIN_PRESETS[0].model, "no-such-preset", true).is_none());
         // 空白 id 等于没填：回到同名匹配。
         assert_eq!(
-            preset_for_model(BUILTIN_PRESETS[0].model, "   ").map(|(_, kind)| kind),
+            preset_for_model(BUILTIN_PRESETS[0].model, "   ", true).map(|(_, kind)| kind),
             Some(PresetMatch::Exact)
         );
     }
@@ -1428,8 +1532,8 @@ mod tests {
     #[test]
     fn tencent_hy_models_reach_the_tencent_preset() {
         for model in ["hy3-preview", "hy3-preview-agent", "hy-image-3.5"] {
-            let (detail, kind) =
-                preset_for_model(model, "").unwrap_or_else(|| panic!("{model} 应当命中腾讯族预设"));
+            let (detail, kind) = preset_for_model(model, "", true)
+                .unwrap_or_else(|| panic!("{model} 应当命中腾讯族预设"));
             assert_eq!(kind, PresetMatch::Family, "{model} 应落族兜底");
             assert!(
                 detail.vendor.to_lowercase().contains("tencent"),
@@ -1440,10 +1544,14 @@ mod tests {
         }
 
         // 词干是 `hy3` 而不是 `hy`：`hybrid` 一类无关名字不得被拉进腾讯族。
+        // 关掉通用兜底时它必须彻底无预设；开着时也只能落通用条目（不是腾讯的）。
         assert!(
-            preset_for_model("hybrid-9-preview", "").is_none(),
+            preset_for_model("hybrid-9-preview", "", false).is_none(),
             "hybrid 不该被 hy3/hy4 词干命中"
         );
+        let (detail, kind) = preset_for_model("hybrid-9-preview", "", true).expect("应落通用兜底");
+        assert_eq!(kind, PresetMatch::Universal);
+        assert_eq!(detail.id, UNIVERSAL_PRESET_ID);
     }
 
     /// `modemnakata` 是作者签名目录，内容是 NVIDIA Nemotron；不映射时线上
@@ -1451,7 +1559,7 @@ mod tests {
     #[test]
     fn nemotron_models_reach_the_modemnakata_preset() {
         for model in ["nemotron-3.5-lightning-free", "nemotron-3.5-super-vl"] {
-            let (detail, kind) = preset_for_model(model, "")
+            let (detail, kind) = preset_for_model(model, "", true)
                 .unwrap_or_else(|| panic!("{model} 应当命中 nemotron 预设"));
             assert_eq!(kind, PresetMatch::Family);
             assert_eq!(detail.id, "modemnakata-nemotron-3-ultra");
@@ -1485,33 +1593,344 @@ mod tests {
             "claudesonnet46"
         ));
 
-        // 线上那一行本身：不再被 openai 族抢走
+        // 线上那一行本身：不再被 openai 族抢走（改落通用兜底，不是 OpenAI 的预设）
+        let (detail, kind) = preset_for_model("cline-free/solar-pro4", "", true)
+            .expect("solar-pro4 应当落通用兜底而不是无预设");
+        assert_eq!(kind, PresetMatch::Universal);
+        assert_eq!(detail.id, UNIVERSAL_PRESET_ID);
         assert!(
-            preset_for_model("cline-free/solar-pro4", "").is_none(),
-            "solar-pro4 不该套上 OpenAI 的预设"
+            preset_for_model("cline-free/solar-pro4", "", false).is_none(),
+            "solar-pro4 关掉通用兜底后应当无预设"
         );
     }
 
     /// 虚拟路由名（`auto` / `Auto` / `default`）**显式**不套预设，且展示层给
     /// `Unknown` 而不是 `Mismatch`：后者会让列表像在说「53 条预设都跟 auto 不配」。
+    ///
+    /// 通用兜底**不豁免**这条：`auto` 不是「没覆盖的模型」，是「还不知道是哪个模型」，
+    /// 拿当前请求名套任何正文（含通用词）同样是猜。
     #[test]
     fn virtual_route_names_are_excluded_explicitly() {
         for model in ["auto", "Auto", "AUTO", "default", " Default "] {
-            assert!(
-                preset_for_model(model, "").is_none(),
-                "{model} 是虚拟路由名，不该套预设"
-            );
+            for allow_universal in [true, false] {
+                assert!(
+                    preset_for_model(model, "", allow_universal).is_none(),
+                    "{model} 是虚拟路由名，通用兜底开关={allow_universal} 时都不该套预设"
+                );
+            }
             assert_eq!(
                 preset_match_for_model("Anthropic", "opus v1", model),
                 PresetModelMatch::Unknown,
                 "{model} 在展示层应判 Unknown（不是 Mismatch）"
             );
+            // 通用兜底条目在展示层同样不给它「对 auto 有效」的假象。
+            assert_eq!(
+                preset_match_for_model("Universal", "*", model),
+                PresetModelMatch::Unknown,
+                "{model} 上通用条目也应判 Unknown"
+            );
         }
 
         // 操作者点名的预设仍然优先于「虚拟路由名不套」。
         let pinned = &BUILTIN_PRESETS[1];
-        let hit = preset_for_model("auto", pinned.id).expect("pinned 应当先于虚拟名排除");
+        let hit = preset_for_model("auto", pinned.id, true).expect("pinned 应当先于虚拟名排除");
         assert_eq!(hit.1, PresetMatch::Pinned);
         assert_eq!(hit.0.id, pinned.id);
+    }
+
+    // ── 通用兜底（Universal）──────────────────────────────────
+
+    /// 目录里必须真有那一条通用兜底，且它的正文与来源预设逐字节相同。
+    ///
+    /// 「逐字节相同」是这条的核心：兜底正文**复用**库内既有内容（`asset_path` 指回
+    /// 同一份 md），如果有人为了省事复制了一份、之后只改其中一份，这里会红。
+    #[test]
+    fn universal_preset_reuses_an_existing_body_byte_for_byte() {
+        let universal = BUILTIN_PRESETS
+            .iter()
+            .find(|p| p.id == UNIVERSAL_PRESET_ID)
+            .expect("目录里必须有通用兜底条目");
+        let source = BUILTIN_PRESETS
+            .iter()
+            .find(|p| p.id == "0x8d-jailbreaks-gpt-new")
+            .expect("通用兜底的正文来源预设必须还在");
+        assert_eq!(universal.body, source.body, "兜底正文必须与来源逐字节相同");
+        assert_eq!(universal.sha256, source.sha256);
+        assert_eq!(universal.bytes, source.bytes);
+        assert_eq!(universal.vendor, "Universal");
+        assert_eq!(universal.model, "*", "不绑定型号必须写成 *");
+        // `*` 不是任何真实模型名的子串，所以「同名命中」那一轮结构上碰不到它；
+        // 匹配器另外还按 id 显式跳过（双保险，见 `preset_for_model`）。
+        for preset in BUILTIN_PRESETS
+            .iter()
+            .filter(|p| p.id != UNIVERSAL_PRESET_ID)
+        {
+            assert!(
+                !normalize_model_id(preset.model).contains('*'),
+                "预设 `{}` 的模型名里出现了 `*`，会让通配条目被误当同名命中",
+                preset.id
+            );
+        }
+        // 正文里不得出现任何厂商/型号名 —— 这正是它「模型无关」的判据。
+        let lowered = universal.body.to_lowercase();
+        for word in [
+            "gpt",
+            "chatgpt",
+            "claude",
+            "anthropic",
+            "gemini",
+            "grok",
+            "kimi",
+            "qwen",
+            "glm",
+            "deepseek",
+            "mistral",
+            "llama",
+            "openai",
+            "moonshot",
+            "zhipu",
+            "nemotron",
+        ] {
+            assert!(
+                !lowered.contains(word),
+                "通用兜底正文里不该出现厂商/型号词 `{word}`（那会让它对别家模型变成错配）"
+            );
+        }
+    }
+
+    /// 四档优先级：Pinned > Exact > Family > Universal > None。
+    ///
+    /// 一条用例把整条链钉死：同一个模型在四种配置下分别落在四档，且**每一档命中
+    /// 的是不同的预设**（否则「优先级」这件事没有被证明，只是「都有返回值」）。
+    #[test]
+    fn match_priority_is_pinned_then_exact_then_family_then_universal() {
+        // `claude-sonnet-4-6` 只能靠族命中（预设库写的是 `opus v2` / `sonnet v1`）。
+        let model = "claude-sonnet-4-6";
+        let (family, family_kind) =
+            preset_for_model(model, "", true).expect("族兜底应当命中 Anthropic 的预设");
+        assert_eq!(family_kind, PresetMatch::Family);
+        assert_eq!(family.vendor, "Anthropic");
+
+        // ① Pinned 压过一切（点名一条完全无关厂商的预设）。
+        let pinned = BUILTIN_PRESETS
+            .iter()
+            .find(|p| p.vendor == "Tencent")
+            .expect("目录里应有腾讯预设");
+        let (pinned_hit, pinned_kind) =
+            preset_for_model(model, pinned.id, true).expect("pinned 应当命中");
+        assert_eq!(pinned_kind, PresetMatch::Pinned);
+        assert_eq!(pinned_hit.id, pinned.id);
+        assert_ne!(pinned_hit.id, family.id, "Pinned 必须换成点名的那一条");
+
+        // ② Exact 压过 Family：拿 Anthropic 里 model 与它同名的写法。
+        let exact_model = "opus v2";
+        let (exact_hit, exact_kind) =
+            preset_for_model(exact_model, "", true).expect("同名应当命中");
+        assert_eq!(exact_kind, PresetMatch::Exact);
+        assert_eq!(exact_hit.id, "anthropic-opus-v2");
+
+        // ③ Family 压过 Universal：同一模型关掉兜底仍能命中，且**不是**通用条目。
+        let (no_fallback, no_fallback_kind) =
+            preset_for_model(model, "", false).expect("族档不受通用兜底开关影响");
+        assert_eq!(no_fallback_kind, PresetMatch::Family);
+        assert_ne!(no_fallback.id, UNIVERSAL_PRESET_ID);
+
+        // ④ Universal：库里没有这家内容时兜底，且兜底不冒充任何厂商。
+        let (universal_hit, universal_kind) =
+            preset_for_model("MiniMax-M3", "", true).expect("无内容厂商应落通用兜底");
+        assert_eq!(universal_kind, PresetMatch::Universal);
+        assert_eq!(universal_hit.id, UNIVERSAL_PRESET_ID);
+        assert_eq!(universal_hit.vendor, "Universal");
+
+        // ⑤ None：关掉兜底 + 库里没内容。
+        assert!(preset_for_model("MiniMax-M3", "", false).is_none());
+    }
+
+    /// 通用条目不能抢 Exact/Family 的位置：它在匹配器里按 id 被显式跳过，
+    /// 即便有人把 `*` 改成某个真实模型名，也必须由最后一级取到。
+    #[test]
+    fn universal_entry_never_wins_the_exact_or_family_rounds() {
+        // 目录里每个真实预设模型名走一遍：命中它的必须不是通用条目。
+        for preset in BUILTIN_PRESETS
+            .iter()
+            .filter(|p| p.id != UNIVERSAL_PRESET_ID)
+        {
+            if normalize_model_id(preset.model).is_empty() {
+                continue;
+            }
+            if let Some((detail, kind)) = preset_for_model(preset.model, "", true) {
+                assert_ne!(
+                    detail.id, UNIVERSAL_PRESET_ID,
+                    "{} 的模型名 `{}` 不该命中通用条目",
+                    preset.id, preset.model
+                );
+                assert_ne!(kind, PresetMatch::Universal);
+            }
+        }
+        // 通用条目自己的 model 值当请求名时，也只能由**兜底**那一级给出，
+        // 不能被当成「同名命中」；关掉兜底则彻底无预设。
+        let hit = preset_for_model("*", "", true).expect("`*` 只可能落通用兜底");
+        assert_eq!(hit.1, PresetMatch::Universal);
+        assert_eq!(hit.0.id, UNIVERSAL_PRESET_ID);
+        assert!(preset_for_model("*", "", false).is_none());
+    }
+
+    /// 展示层：通用条目对任何具体模型都给 `Universal`（不是 Mismatch），
+    /// 对虚拟路由名给 `Unknown`。
+    #[test]
+    fn preset_match_reports_universal_only_for_the_fallback_entry() {
+        let universal = BUILTIN_PRESETS
+            .iter()
+            .find(|p| p.id == UNIVERSAL_PRESET_ID)
+            .expect("目录里必须有通用兜底条目");
+        for model in ["MiniMax-M3", "Seed-2.1-Pro-0915", "spark-x", "ernie-5.1"] {
+            assert_eq!(
+                preset_match_for_model(universal.vendor, universal.model, model),
+                PresetModelMatch::Universal,
+                "{model} 上通用条目应判 Universal"
+            );
+        }
+        // 具体厂商的预设仍然按老口径：不命中就是 Mismatch，不能跟着变成 Universal。
+        assert_eq!(
+            preset_match_for_model("Anthropic", "opus v1", "MiniMax-M3"),
+            PresetModelMatch::Mismatch
+        );
+        // 序列化口径：前端按 snake_case 收（`universal`）。
+        assert_eq!(
+            serde_json::to_string(&PresetModelMatch::Universal).unwrap(),
+            "\"universal\""
+        );
+    }
+
+    /// 通用条目是一个**正常条目**：能列出来、能取详情、能落成模板/技能文件。
+    ///
+    /// 这条挡的是「只给 `preset_for_model` 用、目录里却取不到」的半截实现 ——
+    /// 那样 `pinned` 点不了它、管理员也看不到它到底往 system 里塞了什么。
+    #[test]
+    fn universal_entry_is_listed_readable_and_appliable() {
+        // ① 列表里能按厂商过滤出来（chip 计数也是 1）。
+        let (items, vendors, total) = list(None, Some("Universal"), None, MAX_LIMIT);
+        assert_eq!(total, 1, "通用条目应能被 vendor=Universal 过滤到");
+        assert_eq!(items[0].id, UNIVERSAL_PRESET_ID);
+        assert_eq!(vendors.len(), 1);
+        assert_eq!(vendors[0].vendor, "Universal");
+
+        // ② 详情（含正文）取得到，且过内容门。
+        let detail = get(UNIVERSAL_PRESET_ID).expect("通用条目必须有详情");
+        assert!(detail.body.trim().len() > 1000, "正文不能是空壳");
+        assert!(assert_body_allowed(&detail.body, UNIVERSAL_PRESET_ID).is_ok());
+
+        // ③ 能落成结构化模板（pinned 之外的第二条使用路径）。
+        let mut cfg = PurgeSettings::default();
+        let applied = apply(
+            &mut cfg,
+            UNIVERSAL_PRESET_ID,
+            ApplyTarget::StructuredTemplate,
+            false,
+        )
+        .expect("通用条目应当能落成模板");
+        assert_eq!(applied.name, detail.title, "模板名取预设标题");
+        assert!(cfg
+            .structured_templates
+            .iter()
+            .any(|t| t.name == detail.title && t.text == detail.body));
+
+        // ④ 列表里它能被检索到（标题/标签），并且带模型查询时判 Universal。
+        let (items, _, _) = list(Some("universal"), None, Some("MiniMax-M3"), MAX_LIMIT);
+        let hit = items
+            .iter()
+            .find(|p| p.id == UNIVERSAL_PRESET_ID)
+            .expect("检索 universal 应命中通用条目");
+        assert_eq!(hit.model_match, Some(PresetModelMatch::Universal));
+    }
+
+    /// 目录里不许再有「正文为空」的空壳条目。
+    ///
+    /// 这条钉的是被移除的 `alibaba-qwen-preferences`（上游占位文件只有一个换行，
+    /// 生成出来是 1 字节预设：列表显示成可用条目、套用时什么都不前插，还会**挡住**
+    /// 通用兜底，因为 `preset_for_model` 先返回了它）。同步脚本现在跳过空正文，
+    /// 这里再兜一道 —— 数据怎么回来都必须红。
+    #[test]
+    fn catalog_has_no_blank_bodies() {
+        for preset in BUILTIN_PRESETS {
+            assert!(
+                !preset.body.trim().is_empty(),
+                "预设 `{}` 正文为空（占位漏填），不该进目录",
+                preset.id
+            );
+            assert!(
+                preset.bytes > 1,
+                "预设 `{}` 只有 {} 字节",
+                preset.id,
+                preset.bytes
+            );
+        }
+    }
+
+    /// 同正文多 id 只允许「上游本来就是这么给的那几组」。
+    ///
+    /// 现状（`python tools/sync_purge_presets.py --check` 可复算）：
+    /// - 四份 `0x8D jailbreaks` 正文完全相同（同一段 Jack/register 投稿换了四个文件
+    ///   名）—— 上游如此，不是本仓导入 bug；
+    /// - 三份 11401 字节正文相同（`DeepSeek` 与 `Stealth Models` 各一条 + 那条
+    ///   「v4.1 and v4.1-1017」）—— 同样来自源目录；
+    /// - 一份是我们合成的通用兜底，**故意**与 `0x8d-jailbreaks-gpt-new` 逐字节相同
+    ///   （复用而非复制）。
+    ///
+    /// 处置是「保留现状、不合并」：每条 id 绑定不同的 `model` 名，`preset_for_model`
+    /// 的同名命中靠的就是这些名字（`gemini-chat` / `kimi-standard` / `grok-fast` …）；
+    /// 合并成「一条正文 + 若干别名」要新增别名概念、改生成器与匹配器，换来的只是
+    /// 二进制里几十 KB —— 而且会让「按名字命中」变成「按别名表命中」，风险更大。
+    /// 这条测试的意义是：**新增**的重复必须是有意的（像通用兜底那样写进这里），
+    /// 否则就是又一次「导入时把同一份正文塞进多个 id」。
+    #[test]
+    fn duplicate_bodies_are_limited_to_the_known_groups() {
+        use std::collections::BTreeMap;
+        let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for preset in BUILTIN_PRESETS {
+            groups.entry(preset.sha256).or_default().push(preset.id);
+        }
+        let mut dup: Vec<Vec<&str>> = groups
+            .into_values()
+            .filter(|ids| ids.len() > 1)
+            .map(|mut ids| {
+                ids.sort_unstable();
+                ids
+            })
+            .collect();
+        dup.sort();
+
+        // 组内按 id 字典序、组间按「首个 id」字典序（`0x8d…chatgpt` < `0x8d…gpt` <
+        // `deepseek…`），因此这份期望值与 sha256 值无关，只看目录内容。
+        let expected: Vec<Vec<&str>> = vec![
+            vec![
+                "0x8d-jailbreaks-chatgpt-free-tier",
+                "0x8d-jailbreaks-gemini-chat",
+                "0x8d-jailbreaks-grok-fast",
+                "0x8d-jailbreaks-kimi-standard",
+            ],
+            vec!["0x8d-jailbreaks-gpt-new", "universal-jailbreak"],
+            vec![
+                "deepseek-deepseekv4-1-and-v4-1-1017",
+                "stealth-models-beam",
+                "stealth-models-unified",
+            ],
+        ];
+        assert_eq!(
+            dup, expected,
+            "同正文分组变了：新增重复要么是有意的（写进本测试并说明理由），要么是导入 bug"
+        );
+
+        // 各组内每条 id 仍然各自可被同名命中（合并会破坏这一点）。
+        for (id, model) in [
+            ("0x8d-jailbreaks-gemini-chat", "gemini-chat"),
+            ("0x8d-jailbreaks-kimi-standard", "kimi-standard"),
+            ("0x8d-jailbreaks-grok-fast", "grok-fast"),
+            ("0x8d-jailbreaks-chatgpt-free-tier", "chatgpt-free-tier"),
+        ] {
+            let hit = preset_for_model(model, "", false).expect("同名命中应当有效");
+            assert_eq!(hit.0.id, id, "`{model}` 应精确命中 `{id}`");
+            assert_eq!(hit.1, PresetMatch::Exact);
+        }
     }
 }

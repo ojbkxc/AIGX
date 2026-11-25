@@ -357,6 +357,18 @@ pub struct PurgeSettings {
     /// 按模型自动套用预设：请求发出前按模型找同名预设，命中就把正文原样前插到
     /// system 提示词。默认打开；总开关关闭时零改动。预设正文不参与改写。
     pub auto_preset: bool,
+    /// 通用兜底：既不认同名、也不认同族时，是否套那份**与厂商无关**的正文
+    /// （`universal-jailbreak`）。默认打开。
+    ///
+    /// 为什么默认开：预设库只有 19 家厂商的内容，线上 196 个模型里有 42 个来自
+    /// 库里根本没有的厂商（minimax / bytedance seed / spark / raccoon / sensenova /
+    /// ling / pangu / poolside / ernie…）。不兜底时这 42 行**确定**一分破甲效果都
+    /// 没有；兜底后最坏情况是「多几千字节 system、模型照原样回答」。判断与风险
+    /// 逐条写在 `presets::PresetMatch::Universal` 的注释里。
+    ///
+    /// 关掉它的场景是具体的：跑小上下文模型（正文约 1.6k token）、或不要正文里那条
+    /// 「首条回复打 banner」的输出约定。关掉即回到「只有 Exact/Family 两档」的旧行为。
+    pub universal_fallback: bool,
     /// 固定套用的预设 id（空 = 按模型自动匹配）
     pub auto_preset_id: String,
     /// 拒绝话术词表（空 = 关闭字面拒绝检测）
@@ -398,6 +410,7 @@ impl Default for PurgeSettings {
             active_template: String::new(),
             auto_preset: true,
             auto_preset_id: String::new(),
+            universal_fallback: true,
             refusal_patterns: default_refusal_patterns(),
             failure_filter_keywords: default_filter_keywords(),
             failure_empty_keywords: default_empty_keywords(),
@@ -1032,7 +1045,9 @@ pub fn apply_auto_preset(
     if !cfg.enabled || !cfg.auto_preset {
         return false;
     }
-    let Some((preset, _)) = presets::preset_for_model(model, cfg.auto_preset_id.as_str()) else {
+    let Some((preset, _)) =
+        presets::preset_for_model(model, cfg.auto_preset_id.as_str(), cfg.universal_fallback)
+    else {
         return false;
     };
     let body = preset.body.as_str();
@@ -3304,12 +3319,16 @@ mod tests {
         assert!(cfg.enabled, "总开关默认打开");
         assert!(cfg.auto_preset, "自动套用默认打开");
         assert!(cfg.auto_preset_id.is_empty());
+        assert!(
+            cfg.universal_fallback,
+            "通用兜底默认打开（42/196 行模型库里没内容，不兜底就是确定无效）"
+        );
     }
 
     #[test]
     fn auto_preset_prepends_the_preset_body_to_system() {
         let model = first_preset_model();
-        let (preset, _) = super::presets::preset_for_model(&model, "").expect("应当命中");
+        let (preset, _) = super::presets::preset_for_model(&model, "", true).expect("应当命中");
         let cfg = PurgeSettings::default();
         let mut messages = vec![sys("HOST"), user("hi")];
 
@@ -3331,9 +3350,13 @@ mod tests {
         assert_eq!(messages.len(), 2);
     }
 
+    /// 关掉通用兜底时，库里没内容的模型仍然「什么都不套」——这是旧行为。
     #[test]
     fn auto_preset_never_guesses_on_an_unknown_model() {
-        let cfg = PurgeSettings::default();
+        let cfg = PurgeSettings {
+            universal_fallback: false,
+            ..PurgeSettings::default()
+        };
         let mut messages = vec![user("hi")];
         assert!(!apply_auto_preset(
             &mut messages,
@@ -3341,6 +3364,65 @@ mod tests {
             "zzz-unknown-model-9"
         ));
         assert_eq!(messages[0].content.as_deref(), Some("hi"));
+    }
+
+    /// 默认档（通用兜底开）下，库里没内容的厂商也会被前插**通用**正文。
+    ///
+    /// 这条是「对任何模型都生效」的直接判据：模型名来自线上真实那 42 行里的一家，
+    /// 预设库没有任何 minimax 内容，因此命中只可能来自通用兜底。
+    #[test]
+    fn auto_preset_falls_back_to_the_universal_body_for_uncovered_vendors() {
+        let cfg = PurgeSettings::default();
+        let universal = super::presets::get(super::presets::UNIVERSAL_PRESET_ID)
+            .expect("目录里必须有通用兜底条目");
+
+        for model in [
+            "MiniMax-M3",
+            "Seed-2.1-Pro-0915",
+            "spark-x",
+            "raccoon-image",
+            "ernie-5.1",
+            "Ling-3.1-Flash",
+        ] {
+            let mut messages = vec![sys("HOST"), user("hi")];
+            assert!(
+                apply_auto_preset(&mut messages, &cfg, model),
+                "{model} 应当被前插通用正文"
+            );
+            let system = messages[0].content_str();
+            assert!(
+                system.starts_with(universal.body.as_str()),
+                "{model} 前插的必须是通用兜底正文"
+            );
+            assert!(system.ends_with("HOST"), "{model} 宿主提示词必须保留");
+
+            // 关掉开关 → 同一模型不再被前插（证明是开关在起作用，不是别处命中）。
+            let off = PurgeSettings {
+                universal_fallback: false,
+                ..PurgeSettings::default()
+            };
+            let mut plain = vec![sys("HOST"), user("hi")];
+            assert!(
+                !apply_auto_preset(&mut plain, &off, model),
+                "{model} 关掉通用兜底后不该被前插"
+            );
+            assert_eq!(plain[0].content.as_deref(), Some("HOST"));
+        }
+    }
+
+    /// 虚拟路由名连通用兜底都不套：`auto` 不是「没覆盖的模型」。
+    #[test]
+    fn auto_preset_leaves_virtual_route_names_alone() {
+        let cfg = PurgeSettings::default();
+        for model in ["auto", "Auto", "default"] {
+            let mut messages = vec![sys("HOST"), user("hi")];
+            assert!(
+                !apply_auto_preset(&mut messages, &cfg, model),
+                "{model} 是虚拟路由名，不该套任何预设（含通用兜底）"
+            );
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0].content.as_deref(), Some("HOST"));
+        }
     }
 
     #[test]

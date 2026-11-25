@@ -53,6 +53,20 @@ TAG_KEYWORDS: list[tuple[str, str]] = [
 
 MAX_TAGS = 6
 
+# ── 通用兜底条目（本仓合成，不来自上游收集）────────────────────────
+#
+# 「按模型自动套预设」原先只在命中某个厂商/型号时才前插正文，于是 196 个线上模型里
+# 有 42 个一条都套不上（minimax / bytedance seed / spark / raccoon / sensenova /
+# ling / pangu / poolside / ernie …）——那些厂商在上游收集里根本没有内容。
+#
+# 这一条是**与厂商无关**的正文：正文原样复用仓库里已有的一份（`UNIVERSAL_BODY_FROM`），
+# 不新编任何内容，也不复制字节（资产路径指回同一份 md）。它作为最后兜底，
+# 优先级排在「同名 → 同厂商族」之后、`None` 之前。
+UNIVERSAL_ID = "universal-jailbreak"
+UNIVERSAL_BODY_FROM = "0x8d-jailbreaks-gpt-new"
+UNIVERSAL_TITLE = "Universal fallback"
+UNIVERSAL_TAGS = ("universal", "fallback")
+
 
 @dataclass(frozen=True)
 class Preset:
@@ -64,6 +78,8 @@ class Preset:
     title: str
     tags: tuple[str, ...]
     body: str
+    # 资产路径覆盖：通用兜底条目复用别条预设的正文，不能再写一份同样的 md。
+    asset_path: str = ""
 
     @property
     def vendor_slug(self) -> str:
@@ -71,7 +87,7 @@ class Preset:
 
     @property
     def asset_rel(self) -> str:
-        return f"{self.vendor_slug}/{self.id}.md"
+        return self.asset_path or f"{self.vendor_slug}/{self.id}.md"
 
     @property
     def bytes(self) -> int:
@@ -140,6 +156,13 @@ def collect(source: Path) -> list[Preset]:
         preset_id = base if count == 1 else f"{base}-{count}"
 
         body = read_body(path)
+        # 正文 trim 后为空的源文件不是「空预设」，是上游的占位文件（`Alibaba/
+        # qwen-preferences.md` 只有一个换行）。收进来只会变成一条 1 字节预设：
+        # 列表里显示成可用条目、套用时什么都不前插，而且「命中」会**挡住**通用兜底
+        # （`preset_for_model` 返回它，`apply_auto_preset` 又因正文为空放弃）。
+        # 不伪造内容补填，直接不收。
+        if not body.strip():
+            continue
         presets.append(
             Preset(
                 id=preset_id,
@@ -151,8 +174,33 @@ def collect(source: Path) -> list[Preset]:
             )
         )
 
+    presets = with_universal(presets)
     presets.sort(key=lambda p: (p.vendor.lower(), p.model.lower(), p.id))
     return presets
+
+
+def with_universal(presets: list[Preset]) -> list[Preset]:
+    """追加「通用兜底」条目（正文复用既有预设，不复制字节）。
+
+    为什么不复制正文字节：它必须与 `UNIVERSAL_BODY_FROM` 那条逐字节相同，复制一份
+    等于让仓库里出现两份同文 md，之后任何一侧漂移都无人对账。`asset_path` 指回
+    原文件，`include_str!` 因此仍只有一个来源。
+    """
+    source = next((p for p in presets if p.id == UNIVERSAL_BODY_FROM), None)
+    if source is None:
+        raise SystemExit(f"通用兜底的正文来源预设不存在：{UNIVERSAL_BODY_FROM}")
+    return [
+        *presets,
+        Preset(
+            id=UNIVERSAL_ID,
+            vendor="Universal",
+            model="*",
+            title=UNIVERSAL_TITLE,
+            tags=UNIVERSAL_TAGS,
+            body=source.body,
+            asset_path=source.asset_rel,
+        ),
+    ]
 
 
 def rust_str(value: str) -> str:
