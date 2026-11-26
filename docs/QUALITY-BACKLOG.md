@@ -8,7 +8,7 @@
 
 | 项 | 影响 | 处理 | 状态 |
 |---|---|---|---|
-| `react-router-dom` 6.30.2–6.30.5 开放重定向→XSS（GHSA-wrjc-x8rr-h8h6 系列） | 中 | 升到 6.30.6（同 semver 小版本） | ⏳ 待前端批次随 `package-lock` 一起升 |
+| `react-router-dom` 6.30.2–6.30.5 开放重定向→XSS（GHSA-wrjc-x8rr-h8h6 系列） | 中 | 升到 6.30.6（同 semver 小版本） | ✅ 已升 6.30.6（2026-11-27，`npm audit --omit=dev --audit-level=high` 已通过） |
 | `react-router` < 7.18.0：`<Link>`/`useNavigate` 反斜杠开放重定向 + `deserializeErrors()` SSR 水合注入 | 中 | 需升到 7.18+（**破坏性大版本**）。AIGX 是纯 CSR（无 SSR、不调 `deserializeErrors`），现实不可达 | 🚫 暂不升级，升 v7 单独立项 |
 | `i18next` < 26.3.4：`deepExtend` 递归进内建对象（DoS） | 中 | 需升到 27.x（**破坏性大版本**）。资源包是仓库内 JSON，非用户可控输入 | 🚫 暂不升级 |
 
@@ -18,11 +18,11 @@ CI 已加闸：`npm audit --omit=dev --audit-level=high`（只拦 high/critical�
 
 | 模块 | 现状 | 状态 |
 |---|---|---|
-| `src/graphql` | 零测试 | ⏳ |
-| `src/oauth/{github,google,linuxdo}` | 零测试 | ⏳ |
-| `src/web`（静态服务 / SPA fallback） | 零测试 | ⏳ |
-| `src/payment` 的 stripe / order_store | 无测试 | ⏳ |
-| `src/db` 迁移层 | 无测试 | ⏳ |
+| `src/graphql` | 零测试 | ✅ 4 条（camelCase 反序列化 / errors / 取首个账号 / 缺 data 报错） |
+| `src/oauth/{github,google,linuxdo}` | 零测试 | ✅ 已补（ready 判空 + 响应解析） |
+| `src/web`（静态服务 / SPA fallback） | 零测试 | ✅ 已补（SPA 回退 / `/api` 404 / 缓存头 / 缺 index.html） |
+| `src/payment` 的 stripe / order_store | 无测试 | ✅ stripe 5 条（签名/防重放）+ order_store 7 条（CAS 幂等/持久化/分页） |
+| `src/db` 迁移层 | 无测试 | ⏳ `db/mod.rs` 已覆盖 URL 解析/脱敏 5 条；`migration.rs` 需真实 DB 驱动，暂缓 |
 
 补测优先级：先 `web`（几行就能覆盖 `/api/*` 404 与 SPA fallback）与 `oauth`（回调参数校验）。
 
