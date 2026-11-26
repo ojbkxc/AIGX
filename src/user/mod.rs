@@ -56,6 +56,13 @@ pub struct ReservationEntry {
 pub struct User {
     pub id: String,
     /// 邮箱（唯一标识，用于登录）
+    ///
+    /// **必须 `serde(default)`**：这个字段是后来才加的（首版 `User` 只有
+    /// `username`，email 由 `2eae0f0f2` 引入），升级前写入的 `user:*` 记录里
+    /// 没有这个键 —— 缺默认值时 serde 报 `missing field 'email'`，整条用户
+    /// 记录读不出来（用户列表少人、登录查无此用户）。同结构体里其余 String
+    /// 字段早都有 default，只有它漏了。
+    #[serde(default)]
     pub email: String,
     /// 用户名（展示昵称，可空）
     #[serde(default)]
@@ -972,6 +979,27 @@ pub fn new_trade_no(prefix: &str, user_id: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// 升级前写入的 `user:*` 记录没有 `email` 键（首版 User 只有 username，
+    /// email 是 `2eae0f0f2` 才加的）。这条钉住「旧记录必须仍能读出来」——
+    /// 把 `#[serde(default)]` 从 `email` 上拿掉，它会因 missing field 直接红。
+    #[test]
+    fn legacy_user_record_without_email_still_deserializes() {
+        let legacy = serde_json::json!({
+            "id": "u-legacy",
+            "username": "老用户",
+            "password": "argon2-hash",
+            "quota": 100,
+            "used_quota": 40
+        });
+        let u: User = serde_json::from_value(legacy).expect("旧记录（无 email）必须能读");
+        assert_eq!(u.id, "u-legacy");
+        assert_eq!(u.username, "老用户");
+        // 缺 email 时落到空串（不是报错），调用侧按 DEFAULT_ADMIN_EMAIL / username 兜
+        assert_eq!(u.email, "");
+        assert_eq!(u.quota, 100);
+        assert_eq!(u.used_quota, 40);
+    }
 
     fn store() -> UserStore {
         UserStore::new(Arc::new(FileStore::new(
