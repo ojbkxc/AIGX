@@ -119,10 +119,14 @@ describe('A2A 面板结构', () => {
     });
   });
 
-  it('搜索无命中时左栏出现「没有匹配的客户端」与「清除筛选」', () => {
+  // 面板改为挂载后异步拉 `/api/agents`，首帧是骨架（`initialLoading`），
+  // 空态要等检测结束才渲染 —— 同步断言会撞在骨架上。
+  it('搜索无命中时左栏出现「没有匹配的客户端」与「清除筛选」', async () => {
     render(<A2aAgentPanel />);
     fireEvent.change(screen.getByPlaceholderText('搜索客户端 / 配置文件…'), { target: { value: 'zzz' } });
-    expect(screen.getByText('没有匹配的客户端')).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText('没有匹配的客户端')).toBeTruthy();
+    });
     expect(screen.getByRole('button', { name: '清除筛选' })).toBeTruthy();
   });
 });
