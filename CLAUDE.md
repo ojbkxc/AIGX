@@ -6,41 +6,36 @@
 
 ### 核心特性
 - 🚀 Rust后端 - 高性能、安全
-- 🎨 现代化前端（计划） - React 19 + TypeScript
+- 🎨 现代化前端 - React 18.2 + TypeScript 5.3 + Vite 5
 - 🔐 完整的权限管理系统
 - 📊 实时监控和仪表盘
 - 🌐 多协议支持（OpenAI、Anthropic等）
 
 ## 技术栈
 
-### 当前技术栈
+### 当前技术栈（以 `frontend/package.json` 与 `Cargo.toml` 为准）
 ```yaml
 前端：
-  - React（JS实现）
-  - Vite（构建工具）
-  - Tailwind CSS
+  - React 18.2 + TypeScript 5.3（源码全部 .tsx/.ts，无 JS 文件）
+  - Vite 5（构建）+ esbuild（压缩）
+  - Tailwind CSS 3.4 + 项目自有组件层（不是 shadcn/ui）
+  - TanStack Query 5（数据层）+ react-router-dom 6（路由）
+  - vitest + @testing-library（单测）、Playwright（E2E）
 
 后端：
-  - Rust（Rust 2021）
-  - Axum（Web框架）
-  - 标准库 + Cargo生态系统
+  - Rust（edition 2021）
+  - Axum 0.7 + Tokio
+  - 存储：FileStore / SQLite KV（默认），可选 SeaORM（PostgreSQL/MySQL）
+  - 插件宿主：wasmtime 36（cranelift + async）
 ```
 
-### 目标技术栈
+### 历史规划（2026-11 复核：以下目标均**未执行**，不要按它行事）
 ```yaml
-前端：
-  - React 19
-  - TypeScript 6.0+
-  - Tailwind CSS 4
-  - shadcn/ui（组件库）
-  - TanStack Query（数据层）
-  - TanStack Router（路由）
-
-后端：
-  - Rust（最新稳定版）
-  - Axum 0.7+
-  - 异步运行时（Tokio）
+前端（未执行）：
+  - React 19 / TypeScript 6 / Tailwind CSS 4
+  - shadcn/ui、TanStack Router
 ```
+TanStack Query 已在用；路由是 react-router-dom 6，不是 TanStack Router。
 
 ## 项目结构
 
@@ -95,32 +90,19 @@ cargo build --release
 ./target/release/aigx
 ```
 
-### 项目迁移
-
-#### 第1步：TypeScript迁移
-- [ ] 将JS文件转换为TypeScript
-- [ ] 添加类型定义
-- [ ] 集成TypeScript检查
-
-#### 第2步：React 19升级
-- [ ] 升级React到19.x
-- [ ] 适配新API
-- [ ] 测试兼容性
-
-#### 第3步：shadcn/ui集成
-- [ ] 初始化shadcn/ui
-- [ ] 替换现有UI组件
-- [ ] 自定义配置
-
-#### 第4步：TanStack Query集成
-- [ ] 重构API层
-- [ ] 添加查询缓存
-- [ ] 优化数据获取
+### 迁移清单（2026-11 复核：均为未执行的旧计划，现状已不适用）
+TypeScript 早已迁移完成（全部 `.tsx/.ts`，`tsc --noEmit` 在 CI 里跑）；TanStack Query
+已在用。剩余项（React 19 / shadcn/ui）仍是**未执行**状态，不代表当前方向。
 
 ### CI/CD
-所有构建和测试都在GitHub Actions中运行：
-- 本地编译不会成功验证
-- 所有提交必须通过CI
+所有构建与测试都在 GitHub Actions 中运行（`.github/workflows/ci.yml`）：
+- 6 组 `cargo check` 特性组合（default / no-default / sea-orm+mysql / sea-orm+postgres / all features / release+sqlite-kv+postgres）
+- `lint`（`cargo fmt --check` + `clippy -D warnings`）、`cargo test`、`cargo audit`
+- `build frontend`（eslint + tsc + vitest + i18n 双检 + 构建 + static 漂移校验）
+- `e2e (playwright)` 与 `e2e (browser, real backend + mock upstream)`
+- `route inventory gate`、`upstream drift`、`alerts-lint`
+
+本地不编译 Rust 是**环境限制 + 项目约定**（见下方 FAQ），改动靠 CI 验证。
 
 ## 贡献指南
 
@@ -140,10 +122,18 @@ cargo build --release
 ## 常见问题
 
 ### Q: 为什么本地编译会失败？
-A: 因为项目依赖GitHub Actions的编译验证。所有构建必须在云环境中完成。
+A: 本机没有 MSVC 工具链（无 `cl.exe`），`cargo check` 会在链接 proc-macro 的 build
+script 时以 exit 101 失败。这是环境限制，不是项目设计。**项目约定：不在本地编译
+Rust**，`cargo check` / `clippy` / `cargo test` 一律交给 CI；本地只跑
+`cargo fmt --all -- --check`、前端 `tsc --noEmit` / `eslint` / `vitest`。
 
 ### Q: 如何进行功能性测试？
-A: 必须使用E2E测试框架（未来）或手动测试套件。不支持单元测试。
+A: 单测与 E2E 都有，不是「不支持单元测试」：
+- Rust：`src/` 内有大量 `#[cfg(test)]` 内联测试，CI 跑 `cargo test`。
+- 前端：`vitest` + `@testing-library`（`*.test.ts(x)`），CI 的 `build frontend` 里跑。
+- E2E：`frontend/e2e/*.spec.ts`（Playwright，desktop + mobile 两套），以及带真实后端
+  + mock 上游的 `e2e (browser)`。
+新增逻辑应补对应层的测试；纯 UI 交互优先 E2E。
 
 ### Q: 100年是怎么来的？
 A: 基于费米估算，一代人约28年，100年≈4代技术周期。这个时间框架用于架构设计。

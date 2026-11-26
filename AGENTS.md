@@ -16,18 +16,24 @@ Rust(axum 0.7 + Tokio)后端 + React 18 + TypeScript + Vite 前端,默认 SQLite
   (`Aigx-` 前缀一次性口令,仅在启动日志打印一次,不落库),首登强制改密;测试用
   初始口令从启动日志取,或由测试脚本自身改密(参照 tests/e2e/499_disconnect_billing.rs
   的 initial_password_from_log)。历史默认口令 `123456` 已移除(673a9a67),勿再引用。
-- **工作区**:Cargo workspace = 主 crate `aigx` + `aigx-net`(网络层)
+- **工作区**:Cargo workspace 只有一个成员——主 crate `aigx`(`Cargo.toml` 的 `members = ["."]`);不存在 `aigx-net` 子 crate
 - **后端主要模块**(`src/`):`api`(openai/anthropic/admin)、`channel`(调度/熔断/AIMD/健康)、
   `auth`(JWT/TOTP)、`user`、`payment`、`pricing`、`usage`、`quota_monitor`、`db`(SeaORM
   entity/migration)、`graphql`、`sse`、`oauth`、`guardrail`、`semantic` 等
 - **前端**:`frontend/`(React+TS);构建产物落在 `static/` 并提交入库
-- **E2E**:`tests/e2e/run-e2e.mjs`(Playwright 直连生产,12 项断言含真实上游对话)
+- **E2E**:两套。① `frontend/e2e/*.spec.ts`(Playwright,desktop + mobile 两个 project)跑在
+  **入库的 `static/` 构建产物**上,用内置静态服务器 + API 桩,不碰真后端;②
+  `tests/e2e/run-browser-e2e.mjs` 起「真后端 + loopback mock 上游」再驱动
+  `tests/e2e/run-e2e.mjs`(目标与凭据一律 env 注入,脚本不再内嵌生产 IP/口令)。
 - **同步工具**:`tools/newapi_sync.py`(new-api MySQL → AIGX 渠道/分组/定价)
 
 ### 硬约束(违反会导致返工,全部踩过的坑)
 
-1. **本地不编译 Rust**——本机无完整验证工具链,所有 Rust 编译验证走 GitHub CI(push 后查
-   Actions API)。本地只做前端验证:`cd frontend && node_modules/.bin/tsc --noEmit && npm run build`。
+1. **本地不编译 Rust**——本机没有 MSVC 工具链,`cargo check/build/test/clippy` 会在链接
+   proc-macro build script 时 exit 101;所有 Rust 编译验证走 GitHub CI(push 后查 Actions
+   API)。本地只做:`cargo fmt --all -- --check`、`cd frontend && node_modules/.bin/tsc
+   --noEmit`、`eslint`、`npx vitest run`。**不要跑 `npm run build`**——它写 `../static`,
+   需要和前端源码放进同一个提交,统一用 `npm run sync:static` 并在该批提交里带 `static/`。
 2. **axum 0.7 路由参数是 `:id` 不是 `{id}`**——`{id}` 是 0.8 语法,在 0.7 下被当字面量,
    导致所有带参路由 405。
 3. **`--locked` 编译**——改 `Cargo.toml` 依赖必须同步 `Cargo.lock`(本地可用
@@ -68,9 +74,10 @@ Rust(axum 0.7 + Tokio)后端 + React 18 + TypeScript + Vite 前端,默认 SQLite
   转换时,给客户端的与给上游的(UsageEvent 原样)分开。
 - **RBAC**:角色 admin > manager > user > auditor;权限矩阵见 CLAUDE.md;令牌接口一律
   `verify_user` + 本人资源过滤;普通用户可见自己 key 明文,管理员看脱敏。
-- **feature 矩阵**:default(sqlite-kv)/ no-default(JSON FileStore)/ sea-orm+postgres /
-  sea-orm+mysql 是四个独立产品面,CI 逐个 check 且互不取消;动存储层/feature gate 时
-  四个面都要在脑内过一遍编译影响。
+- **feature 矩阵**:CI 有 **6 组** `cargo check`——default(sqlite-kv)/ no-default(JSON
+  FileStore)/ sea-orm+postgres / sea-orm+mysql / `--features sqlite-kv,postgres`(发布产物
+  组合)/ `--all-features`(漏写 cfg 门控时最先暴露)。动存储层/feature gate 时六面都要在
+  脑内过一遍编译影响。
 
 ## 3. 开发方法( Think Before Coding / 简化优先 / 手术式修改)
 
@@ -95,9 +102,11 @@ Rust(axum 0.7 + Tokio)后端 + React 18 + TypeScript + Vite 前端,默认 SQLite
   ```
   curl -s "https://api.github.com/repos/ojbkxc/AIGX/actions/runs?head_sha=<SHA>&per_page=5"
   ```
-- **CI 三关**:lint(fmt+clippy)→ frontend(tsc+vite build)→ rust-matrix(4 feature 组合
-  `cargo check --locked`)+ `cargo test --locked` + `cargo build --release --locked`。
-  推送前把改动会触碰的关卡在脑内预演一遍,减少反复红绿。
+- **CI 关卡**(`.github/workflows/ci.yml`,15 个 check-run):6 组 `cargo check --locked`、
+  `lint`(fmt + clippy `-D warnings`)、`cargo test`、`cargo audit`、`build frontend`
+  (eslint + tsc + vitest + i18n key/插值双检 + 构建 + **static 漂移校验**)、
+  `e2e (playwright)`、`e2e (browser, 真后端 + mock 上游)`、`route inventory gate`、
+  `upstream drift`、`alerts-lint`。推送前把改动会触碰的关卡在脑内预演一遍。
 - **不许宣称被阻塞**:限制是"从真实失败挣来的结论",不是从配置/文档读来的字段。没实际
   尝试就说 "not attempted",不许说 "we can't";被挡下要引用真实报错。
 
