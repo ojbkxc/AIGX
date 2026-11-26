@@ -2,6 +2,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Webhook 签名时间戳的容忍窗口（秒）。与 Stripe 官方库默认值一致：300s。
+/// 超出（无论过去还是未来）一律视为重放/伪造。
+const WEBHOOK_TOLERANCE_SECS: u64 = 300;
+
 /// Stripe 配置
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StripeConfig {
@@ -20,8 +24,9 @@ pub struct StripeConfig {
 }
 
 impl StripeConfig {
+    /// `trim()` 判空：手写配置里只有空格的占位值不应被当作已配置。
     pub fn ready(&self) -> bool {
-        !self.secret_key.is_empty()
+        !self.secret_key.trim().is_empty()
     }
 
     /// Webhook 回调是否可安全入账。
@@ -31,7 +36,7 @@ impl StripeConfig {
     /// `checkout.session.completed` 回调免费入账配额。
     /// 入账路径必须同时要求 whsec 非空。
     pub fn webhook_ready(&self) -> bool {
-        !self.secret_key.is_empty() && !self.webhook_secret.is_empty()
+        !self.secret_key.trim().is_empty() && !self.webhook_secret.trim().is_empty()
     }
 }
 
@@ -142,6 +147,18 @@ impl StripeClient {
         }
 
         let ts = timestamp.ok_or_else(|| anyhow::anyhow!("missing t= in stripe signature"))?;
+        // 防重放：签名头里的 `t=` 是签名时间。没有这道闸，任何被抓到的合法回调
+        // 都能无限重放（幂等键只挡重复入账，挡不住反复打进无效请求）。
+        // 容忍窗口与 Stripe 官方库一致：300s，过去/未来两个方向都算。
+        let ts_secs: i64 = ts
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid t= in stripe signature"))?;
+        let skew = chrono::Utc::now().timestamp().saturating_sub(ts_secs);
+        if skew.unsigned_abs() > WEBHOOK_TOLERANCE_SECS as u64 {
+            return Err(anyhow::anyhow!(
+                "stripe webhook timestamp outside tolerance ({ts_secs})"
+            ));
+        }
         let expected_input = format!("{}.{}", ts, String::from_utf8_lossy(payload));
         let expected = hmac_sha256_hex(
             self.config.webhook_secret.as_bytes(),
@@ -238,4 +255,100 @@ fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
     mac.update(msg);
     let bytes = mac.finalize().into_bytes();
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECRET: &str = "whsec_test";
+    const EVENT: &str = r#"{"type":"checkout.session.completed","data":{"object":{"client_reference_id":"u1","payment_status":"paid","metadata":{}}}}"#;
+
+    fn client() -> StripeClient {
+        StripeClient {
+            config: StripeConfig {
+                secret_key: "sk_test".to_string(),
+                webhook_secret: SECRET.to_string(),
+                ..Default::default()
+            },
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn signed_header(payload: &str, ts: i64) -> String {
+        let sig = hmac_sha256_hex(SECRET.as_bytes(), format!("{ts}.{payload}").as_bytes());
+        format!("t={ts},v1={sig}")
+    }
+
+    /// 配置就绪判定：漏配 webhook_secret 时不能入账（否则空 key 可被自签）。
+    #[test]
+    fn webhook_ready_requires_signing_secret() {
+        let mut c = StripeConfig::default();
+        assert!(!c.webhook_ready());
+        c.secret_key = "sk".into();
+        assert!(!c.webhook_ready());
+        c.webhook_secret = "whsec".into();
+        assert!(c.webhook_ready());
+        // 只有空格的占位值不算配置
+        c.webhook_secret = "   ".into();
+        assert!(!c.webhook_ready());
+    }
+
+    #[test]
+    fn accepts_freshly_signed_event() {
+        let now = chrono::Utc::now().timestamp();
+        let ev = client()
+            .verify_webhook(EVENT.as_bytes(), &signed_header(EVENT, now))
+            .expect("fresh signature must pass");
+        assert_eq!(ev.event_type, "checkout.session.completed");
+    }
+
+    /// 防重放：过期或超前的时间戳一律拒绝（300s 窗口）。
+    #[test]
+    fn rejects_timestamp_outside_tolerance() {
+        let now = chrono::Utc::now().timestamp();
+        let old = now - WEBHOOK_TOLERANCE_SECS as i64 - 60;
+        assert!(client()
+            .verify_webhook(EVENT.as_bytes(), &signed_header(EVENT, old))
+            .is_err());
+        let future = now + WEBHOOK_TOLERANCE_SECS as i64 + 60;
+        assert!(client()
+            .verify_webhook(EVENT.as_bytes(), &signed_header(EVENT, future))
+            .is_err());
+        // 窗口内仍然接受（取 60s，留足执行抖动余量，避免边界秒导致偶发失败）
+        let recent = now - 60;
+        assert!(client()
+            .verify_webhook(EVENT.as_bytes(), &signed_header(EVENT, recent))
+            .is_ok());
+    }
+
+    #[test]
+    fn rejects_tampered_payload_and_bad_signature() {
+        let now = chrono::Utc::now().timestamp();
+        let header = signed_header(EVENT, now);
+        let c = client();
+        // 改了 body，签名不再匹配
+        let tampered = EVENT.replace("paid", "unpaid");
+        assert!(c.verify_webhook(tampered.as_bytes(), &header).is_err());
+        // 签名本身不对
+        assert!(c
+            .verify_webhook(EVENT.as_bytes(), &format!("t={now},v1=deadbeef"))
+            .is_err());
+        // 缺 t=（无法校验时效，直接拒绝）
+        assert!(c.verify_webhook(EVENT.as_bytes(), "v1=deadbeef").is_err());
+        // t= 不是数字
+        assert!(c
+            .verify_webhook(EVENT.as_bytes(), "t=abc,v1=deadbeef")
+            .is_err());
+    }
+
+    #[test]
+    fn accepts_multiple_v1_signatures() {
+        let now = chrono::Utc::now().timestamp();
+        // Stripe 在轮换密钥时会同时给多个 v1=，命中任一即通过
+        let good = signed_header(EVENT, now);
+        let sig = good.split(',').nth(1).unwrap();
+        let header = format!("t={now},v1=deadbeef,{sig}");
+        assert!(client().verify_webhook(EVENT.as_bytes(), &header).is_ok());
+    }
 }
