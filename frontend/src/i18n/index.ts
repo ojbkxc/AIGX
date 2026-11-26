@@ -1,13 +1,14 @@
 import i18n, { type InitOptions } from 'i18next';
 import { initReactI18next } from 'react-i18next';
 
-export type AppLanguage = 'zh' | 'en' | 'zh-Hant' | 'ja' | 'ko' | 'pt-BR';
+export type AppLanguage = 'zh' | 'en' | 'zh-Hant';
 
 /** 支持的语言清单（侧边栏/设置页切换器用）
  *
- * 只列「有完整翻译」的语言。ja / ko / pt-BR 的语言包是空 `{}`，
- * 选了会静默 fallbackLng 回中文（用户以为切了但界面没变），故不上架。
- * zh-Hant 已补齐（5876 键），但先留在切换器外等质量确认后再上架。 */
+ * 业主 2026-11-27 裁定：**只做中文与英文**。ja / ko / pt-BR 不提供（不再保留
+ * 空占位包——选了会静默 fallback 回中文，属「看起来能切但没生效」的缺陷；
+ * 也不收未复核的机翻）。zh-Hant 是中文繁体，已补齐 5876 键，但暂留在切换器
+ * 外等质量确认后再上架。 */
 export const SUPPORTED_LANGS: Array<{ code: AppLanguage; label: string }> = [
   { code: 'zh', label: '简体中文' },
   { code: 'en', label: 'English' },
@@ -22,17 +23,14 @@ function detectLanguage(): AppLanguage {
   const nav = (navigator.language || '').toLowerCase();
   if (nav.startsWith('en')) return 'en';
   if (nav.startsWith('zh-hant') || nav.startsWith('zh-tw') || nav.startsWith('zh-hk')) return 'zh-Hant';
-  if (nav.startsWith('zh')) return 'zh';
-  if (nav.startsWith('ja')) return 'ja';
-  if (nav.startsWith('ko')) return 'ko';
-  if (nav.startsWith('pt')) return 'pt-BR';
+  // 其余语言（ja/ko/pt-BR 等）业主裁定不提供 → 回落中文
   return 'zh';
 }
 
 // ── 语言包全部按需加载 ─────────────────────────────
 // 所有语言包（含 zh）都走动态 import，被 Vite 拆成独立 chunk，不进主包。
 // 英文用户首屏只加载 en.json（≈461KB），不再被 zh.json（≈439KB）拖累；
-// 中文用户启动时按需加载 zh，其它语言同理。
+// 中文用户启动时按需加载 zh，繁体中文同理。
 const loadedLangs = new Set<AppLanguage>();
 
 /** 各语言包的动态 import 映射（含 zh，与 en 同款加载模式） */
@@ -40,9 +38,6 @@ const bundleImports: Record<AppLanguage, () => Promise<unknown>> = {
   zh: () => import('./zh.json'),
   en: () => import('./en.json'),
   'zh-Hant': () => import('./zh-Hant.json'),
-  ja: () => import('./ja.json'),
-  ko: () => import('./ko.json'),
-  'pt-BR': () => import('./pt-BR.json'),
 };
 
 /** 按需加载某语言资源包（已加载则直接返回） */

@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const i18nDir = path.join(root, 'src', 'i18n');
-const PACKS = ['zh.json', 'en.json', 'zh-Hant.json', 'ja.json', 'ko.json', 'pt-BR.json'];
+const PACKS = ['zh.json', 'en.json', 'zh-Hant.json'];
 
 /** 白名单：键侧本身写单花括号的动态拼接/文档占位键。
  *  - CUSTOM_BASE_HINT 长版×3（AddAccountDialog:61-63，t(值) 无 options，
