@@ -230,8 +230,9 @@ pub async fn set_enabled(
             let index = select_package_index(packages, package_id, version, enabled)
                 .ok_or_else(|| anyhow::anyhow!("包未安装：{package_id}"))?;
             let mut package = packages[index].clone();
-            if package.enabled == enabled {
-                return Ok((package, package.enabled, false));
+            let was_enabled = package.enabled;
+            if was_enabled == enabled {
+                return Ok((package, was_enabled, false));
             }
             if enabled {
                 if !package.trusted {
@@ -415,7 +416,8 @@ pub async fn update_settings(
             .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
             .ok_or_else(|| anyhow::anyhow!("包未安装：{package_id}"))?;
         if let Some(values) = &options {
-            settings::validate_values(values)?;
+            settings::validate_values(values)
+                .map_err(|e| anyhow::anyhow!("设置值校验失败：{e}"))?;
             packages[index].options.values = values.clone();
         }
         if let Some(map) = &provider_options {
