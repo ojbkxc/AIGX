@@ -426,6 +426,10 @@ const REQUEST_LOGS = [
     channel_cost: 3,
     latency_ms: 850,
     status_code: 200,
+    // 重试列（后端 `RequestLog.attempts`，缺省 1；>1 才上 warning 色）。
+    // 三条给 3 / 2 / 1：>1 的徽标与「一次就通」的次要色两条臂都能被断言到，
+    // 而全 1 的桩会让「>1 上色」这条判据永远渲染不出来（假绿）。
+    attempts: 3,
     ip: '203.0.113.10',
     // 关键：只有 conversation、没有 debug —— 证明对话不依赖 log_body 开关
     conversation: {
@@ -453,6 +457,7 @@ const REQUEST_LOGS = [
     cost: 12,
     latency_ms: 2300,
     status_code: 200,
+    attempts: 2,
     conversation: {
       messages: [{ role: 'user', text: '最近一条' }],
       system_prompt_chars: 0,
@@ -474,6 +479,8 @@ const REQUEST_LOGS = [
     cost: 1,
     latency_ms: 400,
     status_code: 500,
+    // 一次就通的那条：与上面两条 >1 的对照，锁「1 次不上警告色」的另一臂
+    attempts: 1,
     error_msg: 'upstream 429',
     debug: {
       upstream_url: 'https://upstream.example.com/v1/chat/completions',
@@ -650,6 +657,57 @@ const REPORT_OVERVIEW = {
   active_days: 21,
   top_models: [{ model: 'glm-4.7-flash', count: 90 }],
 };
+
+// ── 报表榜单桩的形状纪律（本轮补）────────────────────────────
+// 榜单行数必须能**区分** `rank-controls` 的三档（前 5 / 前 10 / 全部），否则
+// 「前 N 名」选择器在 E2E 里点了也没变化 —— 那是装饰而不是覆盖：
+//   · top_sources 给 10 行（前 5 = 5 行、全部 = 10 行，两档可区分）；
+//   · report/models 给 12 行（前 5 / 前 10 / 全部 = 5 / 10 / 12 三档互不相同）。
+// 榜尾占比的分母必须是 overview.total_requests（120），不能是榜内合计：
+//   top_sources 前 5 行请求数合计 74 → 74/120 = 61.7%（正确）vs 74/83 = 89.2%
+//   （拿榜内合计当分母的错误实现）。桩**故意**让两者不同，断言才能锁住口径。
+const REPORT_TOP_SOURCES = [
+  { name: 'glm-4.7-flash', count: 30, cost: 800, tokens: 5000, success_rate: 98.3, avg_latency_ms: 820 },
+  { name: 'wb-coder', count: 18, cost: 434, tokens: 3000, success_rate: 97.1, avg_latency_ms: 1100 },
+  { name: 'claude-sonnet-4', count: 12, cost: 260, tokens: 1000, success_rate: 99.2, avg_latency_ms: 1600 },
+  { name: 'gpt-4o-mini', count: 8, cost: 120, tokens: 500, success_rate: 96.4, avg_latency_ms: 640 },
+  { name: 'deepseek-v3', count: 6, cost: 90, tokens: 300, success_rate: 99.9, avg_latency_ms: 520 },
+  { name: 'kimi-k2', count: 4, cost: 60, tokens: 200, success_rate: 95.0, avg_latency_ms: 1400 },
+  { name: 'qwen-max', count: 2, cost: 30, tokens: 100, success_rate: 99.0, avg_latency_ms: 900 },
+  { name: 'gemini-flash', count: 1, cost: 15, tokens: 50, success_rate: 92.0, avg_latency_ms: 700 },
+  { name: 'mistral-large', count: 1, cost: 10, tokens: 30, success_rate: 90.0, avg_latency_ms: 1500 },
+  { name: 'local-ollama', count: 1, cost: 0, tokens: 20, success_rate: 100, avg_latency_ms: 4000 },
+];
+
+// 客户端榜：请求数与 Token 的**排序不同**（A 请求最多但 Token 最少），
+// 「按请求数 / 按 Token」切换才真的能验出排序行为 —— 两者同序的桩会让
+// 切换按钮点了也没变化。
+const REPORT_TOP_CLIENTS = [
+  { name: 'cursor', count: 50, cost: 300, tokens: 500, success_rate: 99.1, avg_latency_ms: 700 },
+  { name: 'cline', count: 20, cost: 210, tokens: 9000, success_rate: 98.0, avg_latency_ms: 900 },
+  { name: 'aider', count: 10, cost: 90, tokens: 3000, success_rate: 97.0, avg_latency_ms: 1200 },
+  { name: 'codex-cli', count: 5, cost: 20, tokens: 100, success_rate: 95.5, avg_latency_ms: 1500 },
+];
+
+// 模型榜：12 行、token 合计 10000（占比 % 即 token/100），三档数量 + 饼图阈值
+// 折叠都能从这一份数据里读出来：
+//   · 前 5 / 前 10 / 全部 = 5 / 10 / 12 行；
+//   · 饼图默认阈值 1% → 7 项（<100 token）并入「其他」→ 6 个扇区；
+//   · 阈值 5% → 8 项并入「其他」→ 5 个扇区；关掉阈值 → 只剩 maxSlices(9) 兜底 → 9 个扇区。
+const REPORT_MODELS = [
+  { model: 'glm-4.7-flash', count: 60, input_tokens: 3500, output_tokens: 1500, cost: 500 },
+  { model: 'wb-coder', count: 40, input_tokens: 2000, output_tokens: 1000, cost: 300 },
+  { model: 'claude-sonnet-4', count: 20, input_tokens: 600, output_tokens: 300, cost: 120 },
+  { model: 'gpt-4o-mini', count: 12, input_tokens: 400, output_tokens: 200, cost: 80 },
+  { model: 'deepseek-v3', count: 8, input_tokens: 250, output_tokens: 100, cost: 40 },
+  { model: 'kimi-k2', count: 5, input_tokens: 40, output_tokens: 20, cost: 12 },
+  { model: 'qwen-max', count: 4, input_tokens: 30, output_tokens: 10, cost: 9 },
+  { model: 'gemini-flash', count: 3, input_tokens: 15, output_tokens: 5, cost: 6 },
+  { model: 'mistral-large', count: 2, input_tokens: 10, output_tokens: 5, cost: 4 },
+  { model: 'local-ollama', count: 2, input_tokens: 5, output_tokens: 3, cost: 2 },
+  { model: 'tinyllama', count: 1, input_tokens: 3, output_tokens: 2, cost: 1 },
+  { model: 'phi-3', count: 1, input_tokens: 1, output_tokens: 1, cost: 1 },
+];
 
 
 function sendJson(res, body, status = 200) {
@@ -892,6 +950,64 @@ const PROXY_POOL_SEED = () => [
   { id: 'px_e2e_2', name: '日本节点', enabled: false, protocol: 'http', host: '127.0.0.1', port: 8080, username: 'user1', has_password: true, usedBy: [{ id: 'acc-1', name: 'workbuddy-1', enabled: true }] },
 ];
 const proxyPool = PROXY_POOL_SEED();
+
+/** API 令牌（GET /api/tokens）内存态。
+ *
+ *  形状按后端 `TokenListResp` 口径：**顶层**附 `providers`（provider 候选表）
+ *  与 `modelsByProvider`（每家可用模型）；行内 `allowed_providers` 是白名单
+ *  （空/null = 不限，与数据面 `channel_matches_allowed_providers` 同口径）。
+ *
+ *  三条种子各自承担一条判据：
+ *   · tk-seed-1 白名单两家 → 表内「提供商」列两个 chip；
+ *   · tk-seed-2 白名单 null → 该列显示「全部」（不是空白）；
+ *   · tk-seed-3 白名单三家 → 触发「前 2 个 + +1」的折叠臂。
+ *  provider 候选与 modelsByProvider 的模型**故意**包含 /api/models/available
+ *  里没有的名字：否则「勾了提供商→模型候选收窄」与「全量候选」长得一样，
+ *  断言分不出联动到底有没有生效。 */
+const TOKENS_SEED = () => [
+  {
+    id: 'tk-seed-1', name: 'CrewAI 生产', user_email: 'admin@aigx.local', group: 'default',
+    status: 'active', key: 'sk-e2e-****-aaaa', allowed_providers: ['openai', 'anthropic'],
+    allowed_models: '', ip_limit: [], quota_limit: 500000, used_quota: 12000,
+    expires_at: null, created_at: 1761900000,
+  },
+  {
+    id: 'tk-seed-2', name: 'LiteLLM 网关', user_email: 'ops@aigx.local', group: 'default',
+    status: 'active', key: 'sk-e2e-****-bbbb', allowed_providers: null,
+    allowed_models: '', ip_limit: [], quota_limit: null, used_quota: 0,
+    expires_at: null, created_at: 1761890000,
+  },
+  {
+    id: 'tk-seed-3', name: '三方混跑', user_email: 'dev@aigx.local', group: 'default',
+    status: 'disabled', key: 'sk-e2e-****-cccc',
+    allowed_providers: ['openai', 'anthropic', 'google'],
+    allowed_models: '', ip_limit: [], quota_limit: null, used_quota: 400,
+    expires_at: null, created_at: 1761880000,
+  },
+];
+const TOKEN_PROVIDERS = ['anthropic', 'google', 'openai'];
+const TOKEN_MODELS_BY_PROVIDER = {
+  openai: ['gpt-4o', 'gpt-4o-mini'],
+  anthropic: ['claude-sonnet-4'],
+  google: ['gemini-2.0-flash'],
+};
+const tokensSeed = TOKENS_SEED();
+/** 写侧留痕：POST / PUT 的最近一次请求体（spec 用它断「清空空数组真的发出去了」） */
+let lastTokenWrite = null;
+
+/** AI 运维会话（GET /api/agent/sessions）：进程内 Map，跨用例共享（与 chatSessions 同口径）。
+ *  预置一条：抽屉里「有会话」这条臂需要它（全空时抽屉只显示空态）。 */
+const agentSessions = new Map();
+let agentSeq = 0;
+{
+  const base = Math.floor(Date.now() / 1000);
+  agentSessions.set('ag-seed-1', {
+    id: 'ag-seed-1', title: '检查渠道健康', role: 'operator', created_at: base - 120, messages: [],
+  });
+  agentSeq = 1;
+}
+
+
 let chatSeq = 0;
 {
   const base = Math.floor(Date.now() / 1000);
@@ -1495,6 +1611,135 @@ function handle(req, res, p, bodyText) {
       });
     }
 
+    // ── AI 运维 Agent（/agent）──
+    // 此前**没有任何 /api/agent/* 桩**：页面靠 EMPTY_LIST 兜底，`POST /agent/sessions`
+    // 拿到的是数组（没有 id）→ 前端报「创建会话失败」，整条对话链在 E2E 里跑不起来。
+    // 形状对齐 `src/agent/api.rs` 与 `api/endpoints/agent_chat.ts` 的 AgentConfigView。
+    if (p === '/api/agent/config') {
+      return sendJson(res, {
+        success: true,
+        data: {
+          enabled: true,
+          model: 'glm-4.7-flash',
+          channel: '',
+          effectiveModel: null,
+          reasoningEffort: 'medium',
+          systemPrompt: '',
+          maxTurns: 8,
+          approvalTimeoutSecs: 120,
+          maxHistory: 40,
+          disabledTools: [],
+          // 工具中文名/风险的唯一来源（后端 registry）；缺它审批卡就只能显示裸名
+          tools: [
+            { name: 'list_channels', label: '查看供应商', risk: 'readonly' },
+            { name: 'update_channel', label: '修改供应商', risk: 'high' },
+          ],
+        },
+      });
+    }
+    if (p === '/api/agent/sessions' && req.method === 'GET') {
+      return sendJson(res, {
+        success: true,
+        data: [...agentSessions.values()].map(({ messages: _m, ...s }) => s),
+      });
+    }
+    if (p === '/api/agent/sessions' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
+      const id = `ag-${++agentSeq}`;
+      const session = {
+        id,
+        title: body.title || '新会话',
+        role: body.role === 'observer' ? 'observer' : 'operator',
+        created_at: Math.floor(Date.now() / 1000),
+        messages: [],
+      };
+      agentSessions.set(id, session);
+      return sendJson(res, { success: true, data: { id, title: session.title, role: session.role } });
+    }
+    {
+      const m = p.match(/^\/api\/agent\/sessions\/([^/]+)$/);
+      if (m) {
+        const sid = decodeURIComponent(m[1]);
+        const s = agentSessions.get(sid);
+        if (req.method === 'DELETE') {
+          agentSessions.delete(sid);
+          return sendJson(res, { success: true, data: null });
+        }
+        if (req.method === 'GET') {
+          if (!s) return sendJson(res, { success: false, error: 'not found' }, 404);
+          return sendJson(res, { success: true, data: { session: { id: s.id, title: s.title, role: s.role }, messages: s.messages } });
+        }
+      }
+    }
+    // 审批回复（POST /agent/approvals/:id）：只回成功，审批状态机由页面维护
+    if (/^\/api\/agent\/approvals\/[^/]+$/.test(p) && req.method === 'POST') {
+      return sendJson(res, { success: true, data: null });
+    }
+
+    // ── API 令牌（GET /api/tokens）──
+    // 此前**没有桩**：/keys 落到 EMPTY_LIST，令牌表恒空 —— 「提供商」列、
+    // 白名单多选、密钥值长度下限三处一条都没被 E2E 碰过（smoke 只证明页面能渲染）。
+    if (p === '/api/tokens' && req.method === 'GET') {
+      return sendJson(res, {
+        success: true,
+        // 顶层候选表与 data 同级（前端读 tokenRes.providers / modelsByProvider）
+        providers: TOKEN_PROVIDERS,
+        modelsByProvider: TOKEN_MODELS_BY_PROVIDER,
+        data: tokensSeed,
+        total: tokensSeed.length,
+        page: 1,
+        size: 20,
+      });
+    }
+    if (p === '/api/tokens' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
+      lastTokenWrite = { method: 'POST', body };
+      const created = {
+        id: `tk-new-${tokensSeed.length + 1}`,
+        name: body.name ?? '', user_email: 'admin@aigx.local', group: body.group ?? 'default',
+        status: body.status ?? 'active', key: 'sk-e2e-new-****',
+        allowed_providers: body.allowed_providers ?? null,
+        allowed_models: body.allowed_models ?? '', ip_limit: body.ip_limit ?? [],
+        quota_limit: body.quota_limit ?? null, used_quota: 0,
+        expires_at: body.expires_at ?? null, created_at: Math.floor(Date.now() / 1000),
+      };
+      tokensSeed.unshift(created);
+      return sendJson(res, { success: true, data: created });
+    }
+    // 写侧留痕回读（R1「直打桩」配套）：spec 用它确认 PUT 里到底发了什么，
+    // 而不是只能从界面上猜「清空有没有真发出去」。
+    if (p === '/api/__e2e/token-last-write' && req.method === 'GET') {
+      return sendJson(res, { success: true, data: lastTokenWrite });
+    }
+    if (p === '/api/__e2e/token-last-write' && req.method === 'DELETE') {
+      lastTokenWrite = null;
+      return sendJson(res, { success: true, data: null });
+    }
+    // 令牌种子复位：desktop / mobile 两个 project 串行共用本进程，写入会跨 project
+    // 残留（desktop 的「编辑删空白名单」把 tk-seed-1 的 allowed_providers 清成 null，
+    // mobile 再断言「两个 provider chip」就红）。与 `__e2e/reset-proxy-pool` 同口径。
+    if (p === '/api/__e2e/reset-tokens' && req.method === 'POST') {
+      tokensSeed.length = 0;
+      tokensSeed.push(...TOKENS_SEED());
+      lastTokenWrite = null;
+      return sendJson(res, { success: true, data: null });
+    }
+    {
+      const m = p.match(/^\/api\/tokens\/([^/]+)$/);
+      if (m && req.method === 'PUT') {
+        const body = JSON.parse(bodyText || '{}');
+        lastTokenWrite = { method: 'PUT', id: decodeURIComponent(m[1]), body };
+        const tk = tokensSeed.find((it) => String(it.id) === decodeURIComponent(m[1]));
+        if (tk) Object.assign(tk, body, { allowed_providers: body.allowed_providers ?? tk.allowed_providers });
+        return sendJson(res, { success: true, data: tk ?? null });
+      }
+      if (m && req.method === 'DELETE') {
+        const idx = tokensSeed.findIndex((it) => String(it.id) === decodeURIComponent(m[1]));
+        if (idx >= 0) tokensSeed.splice(idx, 1);
+        return sendJson(res, { success: true, data: null });
+      }
+    }
+
     // ── 聊天会话（Chat 页已从 localStorage 迁到后端持久化）──
     // 用进程内 Map 维护状态，让「切换会话 / 重命名 / 删除」这类交互可被
     // E2E 真实驱动，而不是每次返回空数组。
@@ -1505,9 +1750,13 @@ function handle(req, res, p, bodyText) {
       });
     }
     if (p === '/api/chat/sessions' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
       const id = `cs-${++chatSeq}`;
       const now = Math.floor(Date.now() / 1000);
-      const session = { id, title: '新会话', model: '', created_at: now, updated_at: now, messages: [] };
+      // title 缺省给「新会话」（与前端默认一致），显式给值就原样存：
+      // 删除类用例需要「按标题点名一个一次性会话」——服务端忽略 title 的话，
+      // 列表里全是「新会话」，没法只删自己造的那条（会误删种子会话）。
+      const session = { id, title: (typeof body.title === 'string' && body.title) || '新会话', model: body.model ?? '', created_at: now, updated_at: now, messages: [] };
       chatSessions.set(id, session);
       return sendJson(res, { success: true, data: { id, title: session.title, model: session.model } });
     }
@@ -1587,19 +1836,37 @@ function handle(req, res, p, bodyText) {
     if (p === '/api/dashboard/report/heatmap') return sendJson(res, { success: true, data: REPORT_HEATMAP });
     if (p === '/api/dashboard/report/overview') return sendJson(res, { success: true, data: REPORT_OVERVIEW });
     if (p === '/api/dashboard/report/top_sources') {
-      return sendJson(res, { success: true, data: [{ name: 'glm-4.7-flash', count: 90, cost: 800 }, { name: 'wb-coder', count: 30, cost: 434 }] });
+      return sendJson(res, { success: true, data: REPORT_TOP_SOURCES });
+    }
+    // 客户端榜此前**没有桩**（落到 EMPTY_LIST）→ TopClients 恒为空表，
+    // 排序切换 / 行下钻 / 榜尾占比三处一条都没被覆盖过。
+    if (p === '/api/dashboard/report/top_clients') {
+      return sendJson(res, { success: true, data: REPORT_TOP_CLIENTS });
     }
     if (p === '/api/dashboard/report/token_trend') {
       return sendJson(res, { success: true, data: [{ date: '2025-10-30', input_tokens: 1000, output_tokens: 500 }, { date: '2025-10-31', input_tokens: 2000, output_tokens: 900 }] });
     }
+    // 模型榜此前只给 `{model, count}`：缺 input_tokens/output_tokens ⇒
+    // 模型分布饼图的 donutData 全为 0 ⇒ DonutChart 的 `rows.length === 0` 早退
+    // ⇒ 饼图在 E2E 里从未渲染过（「双饼图 + 阈值」零覆盖，看着绿而已）。
     if (p === '/api/dashboard/report/models') {
-      return sendJson(res, { success: true, data: [{ model: 'glm-4.7-flash', count: 90 }] });
+      return sendJson(res, { success: true, data: REPORT_MODELS });
     }
     if (p === '/api/dashboard/report/cache_rates') {
       return sendJson(res, { success: true, data: [{ window: 'last24h', hit_tokens: 100, input_tokens: 500, rate: 20 }] });
     }
+    // 用量趋势：此前只有**一行**（单点既画不出柱也画不出折线，「指标 × 形态」
+    // 两个 SegmentedControl 在 E2E 里点了看不出差别）。三行让两种形态、三种指标
+    // 都有可区分的读数：请求数合计 60 / Token 合计 7000 / 消费合计 176。
     if (p === '/api/dashboard/report/daily_trend') {
-      return sendJson(res, { success: true, data: [{ date: '2025-10-31', count: 20, cost: 123 }] });
+      return sendJson(res, {
+        success: true,
+        data: [
+          { date: '2025-10-29', count: 20, cost: 123, input_tokens: 1000, output_tokens: 500 },
+          { date: '2025-10-30', count: 30, cost: 45, input_tokens: 3000, output_tokens: 1000 },
+          { date: '2025-10-31', count: 10, cost: 8, input_tokens: 1200, output_tokens: 300 },
+        ],
+      });
     }
 
     return sendJson(res, EMPTY_LIST);

@@ -359,43 +359,77 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await page.goto('/chat');
     await expect(page.locator('.asst-layout')).toBeVisible();
 
-    // 会话已迁到后端持久化（mock 维护 /api/chat/sessions 状态）：
-    // 删除**非活动**会话时，活动会话的消息（含 debounce 窗口内未 PUT 的）
-    // 必须完好。这里从活动会话视角取删除前后的消息条数对比。
-    const readActiveCount = async (): Promise<number> =>
-      page.evaluate(async () => {
-        const list = (await (await fetch('/api/chat/sessions')).json()) as {
-          data?: Array<{ id: string }>;
-        };
-        const first = list.data?.[0]?.id;
-        if (!first) return -1;
-        const detail = (await (await fetch(`/api/chat/sessions/${first}`)).json()) as {
-          data?: { messages?: unknown[] };
-        };
-        return detail.data?.messages?.length ?? -1;
+    // 会话已迁到后端持久化（桩维护 /api/chat/sessions 状态）。
+    // 旧版这条断言取的是 `list.data[0].messages.length` —— 而「活动会话」未必是
+    // 列表第 0 条，且所有桩会话都恰好 2 条消息；删掉哪条数字都不变，于是断言恒成立
+    // = 没验。现在改成**活动会话身份 + 独有正文**双判据，并刻意把活动会话选在
+    // 列表**第 5 条**（不是第 0 条）：删除后若实现把活动会话退回列表首条，
+    // 标记消息就会消失 —— 这正是「删除非活动会话丢掉当前会话」的真实形态。
+    const ACTIVE_ID = 'cs-seed-5';
+    const MARKER = 'E2E-ACTIVE-MARKER';
+    await page.evaluate(async ({ id, marker }) => {
+      localStorage.setItem('aigx_playground_active', id);
+      await fetch(`/api/chat/sessions/${id}/messages`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            { role: 'user', content: marker },
+            { role: 'assistant', content: '已收到' },
+          ],
+        }),
       });
-    const beforeLen = await readActiveCount();
-    expect(beforeLen).toBeGreaterThan(0);
+    }, { id: ACTIVE_ID, marker: MARKER });
+    await page.reload();
+    await expect(page.locator('.asst-flow')).toContainText(MARKER);
+
+    // 删一条**非活动**会话：行内「删除这条对话」→ 二次确认。
+    // 被删的必须是**本用例自己造的**一次性会话：桩进程状态跨用例/跨 project 共享，
+    // 删掉 seed 里的「会话 N」会让同一文件后面的用例（以及 mobile project 的同一
+    // 文件）找不到那些种子消息（实测就是这样：desktop 删了「会话 1」，mobile 的
+    // 首屏断言随之红）。一次性会话不影响任何种子断言。
+    const THROW_AWAY = 'E2E-THROW-AWAY';
+    await page.evaluate(async (title) => {
+      await fetch('/api/chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, model: '' }),
+      });
+    }, THROW_AWAY);
+    // 造完就删：桩进程状态跨 project 共享，这条线只有「列表里此刻有它」才需要它。
+    // 双保险：先 reload 让列表带上一次性会话，删完后直接从后端再拉一遍列表确认消失。
+    await page.reload();
+    await expect(page.locator('.asst-flow')).toContainText(MARKER);
 
     await openSideList(page);
     const rows = page.locator(`${sideRoot(page)} .asst-side-item`);
     const beforeCount = await rows.count();
     expect(beforeCount).toBeGreaterThan(1);
-    // 删除一条**非活动**会话（行内「删除这条对话」→ 二次确认）。
-    // 不能裸 nth(1)：每行有三个行内动作（重命名 / 分叉 / 删除），且活动会话
-    // 可能在任意位置；先定位 active 行，再取第一个非 active 行。
     const activeIdx = await rows.evaluateAll(
       (els) => els.findIndex((el) => el.className.includes('active')),
     );
-    const targetIdx = Array.from({ length: beforeCount }, (_, i) => i).find((i) => i !== activeIdx);
-    expect(targetIdx, '左栏里找不到非活动会话').not.toBeUndefined();
-    await rows.nth(targetIdx!).locator('.asst-side-act.del').click();
+    expect(activeIdx, '左栏里找不到活动会话').toBeGreaterThanOrEqual(0);
+    // 一次性会话的 id 从后端列表里按标题取（POST 响应里拿 id 需要再评 evaluate 往返；
+    // 按标题定位同一份 UI 行，行为断言不受影响）
+    const target = rows.filter({ has: page.locator('.asst-side-title', { hasText: THROW_AWAY }) }).first();
+    await expect(target, `左栏里没有一次性会话「${THROW_AWAY}」（列表共 ${beforeCount} 行）`).toHaveCount(1);
+    await target.locator('.asst-side-act.del').click();
     await page.getByRole('button', { name: '删除' }).last().click();
-
-    // 只少一条（seed 有 30 条，不是删到只剩 1 条）
     await expect(rows).toHaveCount(beforeCount - 1);
-    // 删除是异步的（API 往返 + 状态收敛），poll 等待活动会话消息数收敛回原值
-    await expect.poll(readActiveCount, { timeout: 5000 }).toBe(beforeLen);
+    await expect(rows.filter({ has: page.locator('.asst-side-title', { hasText: THROW_AWAY }) })).toHaveCount(0);
+
+    // 活动会话没被切走、消息没丢（退回列表首条的实现会让标记消失）
+    const stillActive = await page.evaluate(() => localStorage.getItem('aigx_playground_active'));
+    expect(stillActive).toBe(ACTIVE_ID);
+    await expect(page.locator('.asst-flow')).toContainText(MARKER);
+    // 后端那侧的同一份数据也还在（不是只有界面残留）
+    const serverCount = await page.evaluate(async (id) => {
+      const res = await fetch(`/api/chat/sessions/${id}`);
+      const body = (await res.json()) as { data?: { messages?: unknown[] } };
+      return body.data?.messages?.length ?? -1;
+    }, ACTIVE_ID);
+    expect(serverCount).toBe(2);
+
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });

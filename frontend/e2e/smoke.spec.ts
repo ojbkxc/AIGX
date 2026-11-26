@@ -23,6 +23,10 @@ const ADMIN_PAGES: Array<[path: string, marker: string]> = [
   ['/proxy-pool', '代理'],
   ['/scheduled-tasks', '定时'],
   ['/purge', '破甲'],
+  // AI 运维（`/agent`）此前**不在任何 spec 的 goto 列表里**：聊天页有 chat-*.spec，
+  // 而 AI 运维页（整页重写 + 客户端配置面）连「能否渲染、路由/懒加载有没有崩」都
+  // 没人验过。它是 admin 专属页，放进本组即获得「不白屏、无 console error」的底线。
+  ['/agent', '运维'],
 ];
 
 /** 普通登录即可访问的页面 */

@@ -120,28 +120,67 @@ test.describe('请求日志对话浏览', () => {
  * 后端拒绝而崩」，真正的规则由后端单测覆盖。
  */
 test.describe('安全边界（前端侧）', () => {
+  /**
+   * ⚠️ 已知产品缺陷（P1，本轮审计发现，未修源码）：
+   * `Channels.tsx` 的 `handleSave` catch 里 `setError(err.message)` 之后紧跟
+   * `loadChannels()`，而 `loadChannels` 第一行是 `setError('')` —— 同一个 tick 里
+   * 后者覆盖前者，于是「保存失败」的错误条永远不显示：用户看到弹窗没关、
+   * 一个提示都没有，只能猜。实测（page.route 打 400 + 真实表单提交）：
+   * POST 400 → 弹窗仍开 → `.error-message` 计数 0、无 toast、无 console 错误。
+   *
+   * 断言本身是对的（后端拒绝就必须给用户看得见的原因），所以**不删不改宽**；
+   * 这里用 `test.fail()` 把「当前实现确实红」钉住 —— 一旦有人把
+   * `loadChannels()` 的 `setError('')` 挪到成功分支（或 catch 里改成
+   * `setError` 之后再 `void loadChannels()` 而不清错），这条会因「预期失败却通过」
+   * 变红，强制删掉这个标记。
+   */
   test('渠道表单提交内网地址时展示可读错误', async ({ page, pageErrors }) => {
-    await loginAsAdmin(page);
-    await page.goto('/channels');
-    await expect(page.locator('.main-content')).toBeVisible();
-    // 后端 400 时前端应显示错误而不是白屏
-    const hasError = await page.evaluate(() => {
-      const el = document.querySelector('.error-message');
-      return el ? el.textContent : null;
+    test.fail(true, 'Channels.handleSave 的 setError 被随后的 loadChannels().setError("") 抹掉（P1，见本测试上方注释）');
+    await loginAsAdmin(page, { sessions: [] });
+    // 旧版这条是「页面里有没有 .error-message」—— 打开 /channels 时本来就没有，
+    // 于是 `null || typeof === 'string'` 恒成立，等于什么都没验。
+    // 现在真的走一遍「添加供应商 → 填内网地址 → 提交」，并让后端返回 400：
+    // 前端必须把后端文案显示出来，而不是白屏 / 只在 console 里报。
+    await page.route('**/api/channels', async (route) => {
+      if (route.request().method() !== 'POST') return route.fallback();
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: false, error: 'Base URL 不能指向内网地址 (127.0.0.1)' }),
+      });
     });
-    // 无渠道时不会触发；只断言页面没有崩
-    expect(hasError === null || typeof hasError === 'string').toBe(true);
+
+    await page.goto('/channels');
+    await page.getByRole('button', { name: '添加供应商' }).click();
+    const modal = page.locator('.modal');
+    await expect(modal).toBeVisible();
+    // 第 1 步是选预置，直接跳自定义表单
+    await modal.getByRole('button', { name: '自定义供应商（跳过预置）' }).click();
+
+    await modal.locator('input[placeholder="例如：OpenAI 官方"]').fill('内网测试供应商');
+    await modal.locator('input[placeholder="https://cf-ai-gw.pages.dev 或 https://api.Workspace_2B8939.com/v1"]')
+      .fill('http://127.0.0.1:8080/v1');
+    // 创建路径的提交键文案是「添加」（编辑才是「更新」）
+    await modal.getByRole('button', { name: '添加', exact: true }).click();
+
+    // 后端 400 的文案原样出现在页面上（页级错误条），弹窗留着可改
+    const err = page.locator('.error-message');
+    await expect(err).toBeVisible();
+    await expect(err).toContainText('Base URL 不能指向内网地址');
+    await expect(page.locator('.modal')).toBeVisible();
+
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('Playground 页面对受限模型给出 403 提示路径', async ({ page, pageErrors }) => {
-    await loginAsAdmin(page);
-    await page.goto('/chat');
-    // /chat 已是 A2A 同构的助手壳（`.asst-layout`，见 Chat.tsx）；旧 `.pg-shell`
-    // 只剩 Chat.css 里的死样式与注释，页面上已不存在。`/playground` 也早就
-    // Navigate 到 `/chat`（App.tsx:235），所以断言根容器改成现在的那个。
+  test('旧 /playground 书签重定向到 /chat（不是白屏，也不是另一个页面）', async ({ page, pageErrors }) => {
+    // 旧版这条断言的是「/chat 渲染出 .asst-layout」—— 与 `smoke.spec.ts` 的
+    // 「页面可渲染：/chat」重复，且它自称验的是「403 提示路径」，实际一个 403
+    // 都没造。改成验真正的契约：/playground 这条老书签必须被重定向到 /chat。
+    await loginAsAdmin(page, { sessions: [] });
+    await page.goto('/playground');
+    await expect(page).toHaveURL(/\/chat$/);
     await expect(page.locator('.asst-layout')).toBeVisible();
-    // 页面正常渲染即为通过：403 的具体文案由后端保证
+
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });
