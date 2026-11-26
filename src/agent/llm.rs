@@ -1068,7 +1068,7 @@ mod tests {
             if self.hang_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.hang_ms)).await;
             }
-            if self.fail.iter().any(|m| *m == model) {
+            if self.fail.contains(&model) {
                 Err(AgentLlmError::AllChannelsFailed(format!("{model} boom")))
             } else {
                 Ok("ok")
