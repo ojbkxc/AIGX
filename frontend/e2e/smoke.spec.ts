@@ -100,11 +100,32 @@ test.describe('全站冒烟', () => {
       await loginAsAdmin(page, { sessions: makeSessions(1) });
       await page.goto(path);
       await expectRendered(page);
-      // 非管理员不应看到 PermissionDenied（我们是 admin，应看到真实页面）
-      await expect(page.locator('.permission-denied')).toHaveCount(0);
+      // 非管理员不应看到拒绝页（我们是 admin，应看到真实页面）。
+      // 旧断言用的是 `.permission-denied` —— 这个类名在 `PermissionDenied.tsx` 里
+      // 根本不存在（组件渲染的是 `.route-error-page` / `.route-error-card`），
+      // 于是 `toHaveCount(0)` 恒成立，等于没验。这里改成真实类名。
+      await expect(page.locator('.route-error-page')).toHaveCount(0);
       expect(pageErrors, `${path} 控制台报错：\n${pageErrors.join('\n')}`).toEqual([]);
     });
   }
+
+  test('普通用户访问管理页看到拒绝页（不是白屏、也不是静默放行）', async ({ page, pageErrors }) => {
+    // 只注入 role=user 的登录态：AdminRoute 直接渲染 PermissionDenied（不触发管理接口）
+    await page.addInitScript(() => {
+      localStorage.setItem('token', 'e2e-token');
+      localStorage.setItem('expires_at', String(Date.now() + 24 * 3600 * 1000));
+      localStorage.setItem('email', 'user@aigx.local');
+      localStorage.setItem('username', 'user');
+      localStorage.setItem('role', 'user');
+      localStorage.setItem('i18n_lang', 'zh');
+    });
+    await page.goto('/channels');
+    // 拒绝页是真实渲染的那一份（`.route-error-card` 在 PermissionDenied.tsx 里）
+    await expect(page.locator('.route-error-card')).toBeVisible();
+    // 管理接口一发没发：页面还是拒绝页，没有任何渠道列表 DOM
+    await expect(page.locator('.channels-toolbar')).toHaveCount(0);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
 
   test('未登录访问受保护页面被重定向到登录页', async ({ page }) => {
     await page.goto('/channels');
