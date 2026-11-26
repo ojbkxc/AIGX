@@ -159,7 +159,7 @@ async fn query_graphql(
         .await
         .map_err(|e| anyhow!("Failed to parse GraphQL response: {e}"))?;
 
-    if let Some(errors) = result.errors {
+    if let Some(errors) = &result.errors {
         if !errors.is_empty() {
             return Err(anyhow!("GraphQL error: {}", errors[0].message));
         }

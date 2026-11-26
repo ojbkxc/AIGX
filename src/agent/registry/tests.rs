@@ -661,6 +661,12 @@ const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
             ],
         ),
         (
+            "不给 AI 面·插件更新（安装/更新会拉取并执行外部二进制，风险高；只读工具 aigx_plugin_status 仅看状态）",
+            &[
+                "/api/plugins/update",
+            ],
+        ),
+        (
             "不给 AI 面·Agent 自身边界（lead 裁定①：只读给 aigx_agent_self_status，PUT /api/agent/settings 永不让 AI 改自己）",
             &[
                 "/api/agent/settings",
