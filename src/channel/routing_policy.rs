@@ -32,7 +32,15 @@ use crate::storage::FileStore;
 pub const ROUTING_POLICY_KEY: &str = "routing_policy";
 
 /// 选路策略。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 与上游 Agent2API `core/routing.rs` 的 `RouteStrategy` 对齐：
+/// - `order`（上游 Order）：**顺序优先 / 队首独占**——始终按优先级取队首
+///   候选接走所有请求，不做轮换；队首不可用时才顺延下一位；
+/// - `provider`（上游 Provider）：**家内轮询**——先按 provider（家）分段，
+///   家之间按「家内最优候选的优先级」保持先后，同一家内部按游标轮流使用；
+/// - `round_robin` 对应上游 Rotate：整条候选线逐请求轮换；
+/// - `weighted` / `ranked` 是 AIGX 既有策略，保留默认值不变。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteStrategy {
     /// 加权随机 + 同优先级分组（`select_for_model` 现状，默认）
@@ -42,6 +50,10 @@ pub enum RouteStrategy {
     RoundRobin,
     /// 多因子调度（health × cost × rpm 几何加权，`select_for_model_ranked`）
     Ranked,
+    /// 顺序优先 / 队首独占（对齐上游 `order`）
+    Order,
+    /// 家内轮询（对齐上游 `provider`：家间按优先级、家内轮流）
+    Provider,
 }
 
 impl RouteStrategy {
@@ -50,6 +62,8 @@ impl RouteStrategy {
             Self::Weighted => "weighted",
             Self::RoundRobin => "round_robin",
             Self::Ranked => "ranked",
+            Self::Order => "order",
+            Self::Provider => "provider",
         }
     }
 
@@ -58,8 +72,24 @@ impl RouteStrategy {
             "weighted" => Some(Self::Weighted),
             "round_robin" => Some(Self::RoundRobin),
             "ranked" => Some(Self::Ranked),
+            "order" => Some(Self::Order),
+            "provider" => Some(Self::Provider),
             _ => None,
         }
+    }
+}
+
+/// 反序列化兜底：未知档位回落到默认策略（`Weighted`），不让配置里多一个
+/// 本版本不认识的档位导致整份配置解析失败（与上游 `from_id` 的「未知值
+/// 一律回落」同口径）。旧配置里的 `weighted` / `round_robin` / `ranked`
+/// 与新增的 `order` / `provider` 均按 `from_str_opt` 精确匹配。
+impl<'de> serde::Deserialize<'de> for RouteStrategy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::from_str_opt(&raw).unwrap_or_default())
     }
 }
 
@@ -756,6 +786,9 @@ pub fn resolve_profile(
 #[derive(Debug, Clone, Copy)]
 pub struct CandidateRef<'a> {
     pub channel: &'a crate::channel::Channel,
+    /// 在**调用方候选切片**中的原始下标（数据面按 `Arc<Channel>` 快照取回
+    /// 渠道本体时用，避免再 clone 一份）。
+    pub index: usize,
 }
 
 impl<'a> CandidateRef<'a> {
@@ -774,16 +807,19 @@ impl<'a> CandidateRef<'a> {
 }
 
 /// 参与候选集合：要么原切片直通（零分配），要么裁剪后的下标视图。
+///
+/// 泛型 `T`（默认 `Channel`）允许调用方传 `&[Channel]`（管理面/预演）或
+/// `&[Arc<Channel>]`（数据面），两者都按 `Borrow<Channel>` 只读访问。
 #[derive(Debug)]
-pub enum PlanCandidates<'a> {
+pub enum PlanCandidates<'a, T = crate::channel::Channel> {
     /// 档案未启用 / 无需裁剪：原切片直通（零分配、零拷贝）
-    All(&'a [crate::channel::Channel]),
+    All(&'a [T]),
     /// 按档案 scope 裁剪后的参与候选（仅此时分配一次小 Vec）
     Kept(Vec<CandidateRef<'a>>),
 }
 
-impl<'a> PlanCandidates<'a> {
-    pub fn iter(&self) -> PlanIter<'a, '_> {
+impl<'a, T: std::borrow::Borrow<crate::channel::Channel>> PlanCandidates<'a, T> {
+    pub fn iter(&self) -> PlanIter<'a, '_, T> {
         match self {
             Self::All(s) => PlanIter::All(s.iter()),
             Self::Kept(v) => PlanIter::Kept(v.iter()),
@@ -804,17 +840,17 @@ impl<'a> PlanCandidates<'a> {
 
 /// 统一两臂的迭代器（两臂 item 都是 `&Channel`，故可共用一个类型）。
 #[derive(Debug)]
-pub enum PlanIter<'a, 's> {
-    All(std::slice::Iter<'a, crate::channel::Channel>),
+pub enum PlanIter<'a, 's, T = crate::channel::Channel> {
+    All(std::slice::Iter<'a, T>),
     Kept(std::slice::Iter<'s, CandidateRef<'a>>),
 }
 
-impl<'a, 's> Iterator for PlanIter<'a, 's> {
+impl<'a, 's, T: std::borrow::Borrow<crate::channel::Channel>> Iterator for PlanIter<'a, 's, T> {
     type Item = &'a crate::channel::Channel;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::All(it) => it.next(),
+            Self::All(it) => it.next().map(std::borrow::Borrow::borrow),
             Self::Kept(it) => it.next().map(|c| c.channel),
         }
     }
@@ -840,16 +876,29 @@ pub struct SkipSummary {
 
 /// 一次选路判定结果（转发与预演共用同一份）。
 #[derive(Debug)]
-pub struct RoutePlan<'a> {
+pub struct RoutePlan<'a, T = crate::channel::Channel> {
     /// 参与候选（已按档案 scope 裁剪，保持调用方给的顺序）
-    pub candidates: PlanCandidates<'a>,
+    pub candidates: PlanCandidates<'a, T>,
     /// 裁掉的原因计数
     pub skipped: SkipSummary,
 }
 
-impl<'a> RoutePlan<'a> {
+impl<'a, T> RoutePlan<'a, T> {
+    /// 参与候选在**调用方切片**中的原始下标（保持顺序）。
+    ///
+    /// 数据面候选是 `Vec<Arc<Channel>>`：用下标直接从快照取回 `Arc`，
+    /// 即可把「渠道本体」一路共享到 `BridgeCandidate`，不必再 clone。
+    pub fn indices(&self) -> Vec<usize> {
+        match &self.candidates {
+            PlanCandidates::All(s) => (0..s.len()).collect(),
+            PlanCandidates::Kept(v) => v.iter().map(|c| c.index).collect(),
+        }
+    }
+}
+
+impl<'a, T: std::borrow::Borrow<crate::channel::Channel>> RoutePlan<'a, T> {
     /// 按序产出参与候选的渠道本体（直通时零分配）。
-    pub fn iter(&self) -> PlanIter<'a, '_> {
+    pub fn iter(&self) -> PlanIter<'a, '_, T> {
         self.candidates.iter()
     }
 
@@ -883,11 +932,14 @@ impl<'a> RoutePlan<'a> {
 /// 账号级规则（`account_order` / `excluded_accounts` / `sort_rules`）不在本
 /// 函数处理：候选是渠道级，账号身份在 `AccountSessionStore::acquire` 才确定
 /// （契约 §2.4 的两级「粗筛/精筛」分离），那一级在账号侧统一实现。
-pub fn plan_route<'a>(
+pub fn plan_route<'a, T>(
     policy: &RoutingPolicy,
     profile: &ResolvedProfile,
-    candidates: &'a [crate::channel::Channel],
-) -> RoutePlan<'a> {
+    candidates: &'a [T],
+) -> RoutePlan<'a, T>
+where
+    T: std::borrow::Borrow<crate::channel::Channel>,
+{
     // 总开关关闭：短路（与历史逐字节等价，零分配）
     if !policy.enabled {
         return RoutePlan {
@@ -906,7 +958,8 @@ pub fn plan_route<'a>(
     }
     let mut kept: Vec<CandidateRef<'a>> = Vec::with_capacity(candidates.len());
     let mut skipped = SkipSummary::default();
-    for ch in candidates {
+    for (index, candidate) in candidates.iter().enumerate() {
+        let ch: &'a crate::channel::Channel = std::borrow::Borrow::borrow(candidate);
         // provider 口径按渠道形态取（与 `api/openai/resolve.rs::channel_matches_
         // allowed_providers` 同一命名空间，P0 修复）：
         // - **插件渠道**的真实 provider 是 `plugin_provider`，`channel_type` 只是
@@ -934,7 +987,7 @@ pub fn plan_route<'a>(
                 continue;
             }
         }
-        kept.push(CandidateRef { channel: ch });
+        kept.push(CandidateRef { channel: ch, index });
     }
     RoutePlan {
         candidates: PlanCandidates::Kept(kept),

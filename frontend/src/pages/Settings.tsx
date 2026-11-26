@@ -36,6 +36,8 @@ import ModelMetadataPanel from '../components/ModelMetadataPanel';
 import SystemInfoPanel from '../components/SystemInfoPanel';
 import DataManagement from '../components/DataManagement';
 import CloudSyncPanel from '../components/CloudSyncPanel';
+import SidebarLayoutPanel from '../components/SidebarLayoutPanel';
+import ImageCompressPanel from '../components/ImageCompressPanel';
 import './Settings.css';
 
 interface LimitsForm {
@@ -731,6 +733,9 @@ export default function Settings() {
               </div>
             </div>
           </div>
+
+          {/* 侧边栏菜单：逐项显隐 / 拖拽排序 / 分组重命名 / 自定义分组（落库 + 跨端同步） */}
+          <SidebarLayoutPanel />
         </>
       )}
 
@@ -838,6 +843,10 @@ export default function Settings() {
           </div>
           <div style={{ marginTop: 16 }}>
             <QueuePanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            {/* 转发前压缩对话内嵌大图（开关 + 长边/质量/阈值；真正的压缩在后端） */}
+            <ImageCompressPanel />
           </div>
           <div style={{ marginTop: 16 }}>
             <ModelMetadataPanel />

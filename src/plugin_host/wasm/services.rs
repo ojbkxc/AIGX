@@ -40,20 +40,8 @@ fn deepseek_pow_difficulty_allowed(difficulty: i64) -> bool {
 /// 尤其难查。这里改成显式 `unsupported` + 指名能力，语义与 `contract()` 一致，
 /// 不改变任何「已服务」判定。
 const UNSERVED_METHODS: &[(&str, &str)] = &[
-    ("login.context", "login.managed.v1"),
-    ("login.input.take", "login.managed.v1"),
-    ("login.step.publish", "login.managed.v1"),
-    ("login.loopback.open", "login.managed.v1"),
-    ("login.loopback.close", "login.managed.v1"),
     ("login.desktop.credentials.take", "login.desktop.chatglm.v1"),
-    ("protocol.request", "protocol.convert.v1"),
-    ("protocol.open", "protocol.convert.v1"),
-    ("protocol.push", "protocol.convert.v1"),
-    ("protocol.close", "protocol.convert.v1"),
     ("checkin.claim", "checkin.rolling.v1"),
-    ("captcha.push", "verification.account.v1"),
-    ("claim.verification.poll", "verification.account.v1"),
-    ("claim.verification.complete", "verification.account.v1"),
     ("resource.cookie-file.take", "resources.cookie-file.v1"),
     (
         "runtime.client_fingerprint",
@@ -553,6 +541,18 @@ impl Context {
             "verification.lease.open" | "verification.lease.check" | "verification.lease.close" => {
                 self.verification_lease(method, &params).await
             }
+            // 协议转换（`protocol.convert.v1`）：只做转换、不发网络请求；
+            // 句柄与输入缓冲归当前调用所有（对齐上游 `wasm/protocol.rs`）。
+            "protocol.request" | "protocol.open" | "protocol.push" | "protocol.close" => {
+                self.protocol(method, &params).await
+            }
+            // 托管登录（`login.managed.v1`）：只在宿主签发的同一 flow 会话内可
+            // 用；会话不存在即 forbidden（对齐上游 `wasm/managed.rs`）。
+            "login.context"
+            | "login.input.take"
+            | "login.step.publish"
+            | "login.loopback.open"
+            | "login.loopback.close" => self.managed_login(method, &params).await,
             "managed_task.create"
             | "managed_task.observe"
             | "managed_task.read"
@@ -770,10 +770,12 @@ mod tests {
 
     #[test]
     fn unserved_methods_name_their_capability() {
-        let error = unsupported_method("login.context");
+        // 用一个仍在 UNSERVED_METHODS 里的方法（登录/协议/验证动作已实现，
+        // 不能再用它们做「未服务」样例）。
+        let error = unsupported_method("checkin.claim");
         assert_eq!(error.code.as_deref(), Some("unsupported"));
         assert!(
-            error.message.contains("login.managed.v1"),
+            error.message.contains("checkin.rolling.v1"),
             "必须指名是哪项能力未服务，实际: {}",
             error.message
         );

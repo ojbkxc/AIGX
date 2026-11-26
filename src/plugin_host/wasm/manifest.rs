@@ -149,10 +149,21 @@ pub const SERVED_CAPABILITIES: &[&str] = &[
     // 但不在这里虚报已服务——否则插件会以为签到走宿主，实际拿到 NO_METHOD。
     "errors.v1",
     // `verification.claim.v1` 闸两样东西：租约（`verification.lease.*`，AIGX 已实现）
-    // 与三个验证执行动作（`captcha.push` / `claim.verification.poll|complete`，AIGX
-    // 没有验证执行器）。租约是真服务的，所以这项留在已服务表；三个动作在
-    // `contract()` 里由 `servedActions`（= `verification.account.v1`）单独标 false。
+    // 与三个验证执行动作（`captcha.push` / `claim.verification.poll|complete`）。
+    // v3.5.1 起 AIGX 在 Wasm 宿主补上了「宿主→插件」的验证执行入口
+    // （`WasmHost::call_verification`，对齐上游 `verification/native.rs`），
+    // 因此 `verification.account.v1` 也列入已服务。
     "verification.claim.v1",
+    "verification.account.v1",
+    // 协议转换：宿主复用 `script::protocol` 的增量状态机（chat 直通），
+    // 句柄归当前调用所有。
+    "protocol.convert.v1",
+    // 托管登录：宿主签发会话后，五个动作在会话内可用；回调监听
+    // （`login.loopback.v1`）本机构建未接线，故不列。
+    "login.managed.v1",
+    // 短信登录：宿主→插件的 `admin.action`（`login.sms.send|verify`）入口，
+    // 对齐上游 `wasm/host.rs`。
+    "login.sms.v1",
     "http.managed-task.v1",
     "http.account-origin.v1",
     "crypto.deepseek-pow.v1",

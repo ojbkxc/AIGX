@@ -65,6 +65,8 @@ mod host;
 mod http;
 mod limits;
 mod login;
+/// 托管登录（`login.managed.v1`）：宿主签发会话 + 五个受控动作。
+pub(crate) mod managed_login;
 /// 受控任务审批闸门 + 任务生命周期（`managed_task.*`）。
 pub(crate) mod managed_task;
 pub(crate) mod manifest;
@@ -73,6 +75,8 @@ pub(crate) mod methods;
 pub(crate) mod native;
 #[cfg(test)]
 mod probe;
+/// 协议转换（`protocol.convert.v1`）：只转换、不发网络请求，句柄归当前调用。
+pub(crate) mod protocol;
 mod public_view;
 /// 插件侧公网图片下载（`resource.fetch_public`）：只产本次调用资源，不借账号身份。
 pub(crate) mod resource_fetch;
@@ -514,6 +518,7 @@ pub(crate) fn forget(provider: &str) {
     tasks::forget(provider);
     state::forget_provider(provider);
     verification::forget_provider(provider);
+    managed_login::forget_provider(provider);
     managed_task::forget_provider(provider);
     // 停用/卸载即撤销受控任务批准（fail-closed：旧批准不能续期）。
     managed_task::revoke(provider);

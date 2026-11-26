@@ -400,6 +400,30 @@ impl AccountBridge {
         }
     }
 
+    /// 构造账号的上游 Bridge：内置订阅三家走 `account_session::subscriptions`
+    /// （Responses 协议 / CLI 占位），其余走既有 `adapter::build_bridge`。
+    ///
+    /// 拦截放在这一层而不是 `adapter::build_bridge` 内部：订阅型的协议族与
+    /// 鉴权形态不符合 `registry::SessionMeta` 那套「头部模板 + OpenAI 兼容」
+    /// 模型，混进通用适配层会让每个 `Protocol::Openai` 分支都要加特判。
+    fn build_session_bridge(
+        &self,
+        session: &crate::account_session::model::AccountSession,
+    ) -> Result<Arc<dyn Bridge>, BridgeError> {
+        if let Some(result) =
+            crate::account_session::subscriptions::build_bridge(session, &self.sessions)
+        {
+            return result;
+        }
+        // 运行期自定义家（`custom-*`）：协议与基址来自提供商记录，账号只带 key。
+        if let Some(result) =
+            crate::account_session::custom_providers::build_bridge(session, &self.sessions)
+        {
+            return result;
+        }
+        adapter::build_bridge(session, &self.sessions)
+    }
+
     /// 构造失败（地址/代理/凭证配置问题）也要冷却该账号，避免反复踩坑。
     fn note_build_failure(&self, lease: &AccountLease, model: &str, error: &BridgeError) {
         let failure = ChannelStore::classify_bridge_error(error);
@@ -589,7 +613,7 @@ impl AccountBridge {
             let Some(lease) = lease else {
                 break;
             };
-            let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
+            let bridge = match self.build_session_bridge(lease.session()) {
                 Ok(bridge) => bridge,
                 Err(e) => {
                     self.note_build_failure(&lease, model, &e);
@@ -645,7 +669,7 @@ impl Bridge for AccountBridge {
             let Some(lease) = lease else {
                 break;
             };
-            let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
+            let bridge = match self.build_session_bridge(lease.session()) {
                 Ok(bridge) => bridge,
                 Err(e) => {
                     self.note_build_failure(&lease, &req.model, &e);
@@ -713,7 +737,7 @@ impl Bridge for AccountBridge {
             let Some(lease) = lease else {
                 break;
             };
-            let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
+            let bridge = match self.build_session_bridge(lease.session()) {
                 Ok(bridge) => bridge,
                 Err(e) => {
                     self.note_build_failure(&lease, &req.model, &e);

@@ -89,6 +89,87 @@ pub const AGENT2API_PROVIDERS: &[&str] = &[
     "lobsterai",
 ];
 
+// ── 内置订阅 provider（对齐 Agent2API `providers/subscriptions.rs`）────────
+//
+// 订阅型 provider 与「登录态型」不同：它们不是「用网页 Cookie 直连某家的
+// OpenAI 兼容端点」，而是把账号的**订阅令牌**换成上游的 **Responses 协议**
+// 请求，或（Claude）交给官方 CLI —— 不能简单塞进 `SESSION_PROVIDERS`
+// 那套「头部模板 + openai_compatible」模型。
+//
+// 因此这里单独一张 `SUBSCRIPTION_PROVIDERS` 表，数据面由
+// `account_session::subscriptions` 承接（`bridge/account.rs` 在构造账号
+// Bridge 前拦截这三家），管理面据此识别分类与凭证字段。
+//
+// 与 `SESSION_PROVIDERS` 的关系：
+// - 两者都要求 `PROVIDERS` 里有同名条目（管理面下拉 / `find` 归一）；
+// - `session_meta` 对订阅型返回 `None`（它们不发那套模板头），
+//   `category` / `credential_fields_for` 用本表的判定先行短路。
+
+/// 一家内置订阅 provider 的静态描述。
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // 部分字段只服务管理面/测试（与 SessionMeta 同）
+pub struct SubscriptionSpec {
+    /// 稳定 kind（落库值，与 Agent2API 的 provider id 逐字一致）。
+    pub kind: &'static str,
+    /// 管理面展示名（对齐上游 `label()`）。
+    pub label: &'static str,
+    /// 默认上游基址（空 = 由账号自填）。
+    pub base_url: &'static str,
+    /// Responses 端点相对 `base_url` 的路径（Claude 为空 —— 走官方 CLI，不发 HTTP）。
+    pub responses_path: &'static str,
+    /// 凭证粘贴/登录提示（管理面展示）。
+    pub credential_hint: &'static str,
+    /// 支持的登录方式（`oauth` = 浏览器授权 / `device` = 设备码 / `cli-link` = 关联本机官方 CLI）。
+    pub login_methods: &'static [&'static str],
+}
+
+/// 内置订阅 provider 全集（同一顺序对齐上游 `subscriptions::KINDS`）。
+pub const SUBSCRIPTION_PROVIDERS: &[SubscriptionSpec] = &[
+    SubscriptionSpec {
+        kind: "claude-subscription",
+        label: "Claude 订阅",
+        // 不发 HTTP：数据面必须经官方 Claude Code CLI 转发（见
+        // `subscriptions/claude.rs`）。这里只是给归一/展示一个稳定基址。
+        base_url: "https://api.anthropic.com",
+        responses_path: "",
+        credential_hint:
+            "关联本机已登录的官方 Claude Code（不接收订阅令牌，不复制 .credentials.json）",
+        login_methods: &["cli-link"],
+    },
+    SubscriptionSpec {
+        kind: "chatgpt-subscription",
+        label: "ChatGPT 订阅",
+        // Sign in with ChatGPT → api.openai.com/v1/responses（不是 Codex 后端，
+        // 也不是普通 OpenAI Key）。
+        base_url: "https://api.openai.com/v1",
+        responses_path: "/responses",
+        credential_hint:
+            "使用「Sign in with ChatGPT」授权；粘贴普通 API Key 或 Codex 登录态均不被接受",
+        login_methods: &["oauth"],
+    },
+    SubscriptionSpec {
+        kind: "codex-subscription",
+        label: "Codex 订阅",
+        // Codex 官方公开 OAuth → chatgpt.com/backend-api/codex/responses。
+        base_url: "https://chatgpt.com/backend-api/codex",
+        responses_path: "/responses",
+        credential_hint:
+            "Codex 设备授权，或粘贴你主动提供的 Codex auth.json（不是 OpenAI API Key）",
+        login_methods: &["device", "import"],
+    },
+];
+
+/// 查内置订阅 provider 描述（非订阅型返回 None）。
+pub fn subscription_spec(kind: &str) -> Option<&'static SubscriptionSpec> {
+    let lower = kind.trim().to_ascii_lowercase();
+    SUBSCRIPTION_PROVIDERS.iter().find(|s| s.kind == lower)
+}
+
+/// 该 kind 是否内置订阅 provider。
+pub fn is_subscription(kind: &str) -> bool {
+    subscription_spec(kind).is_some()
+}
+
 /// 上游协议族，决定复用哪个原生 Bridge。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -521,6 +602,29 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         label: "LobsterAI",
         protocol: Protocol::Openai,
         default_base_url: "https://lobsterai.youdao.com",
+    },
+    // ── 内置订阅三家（对齐 Agent2API `providers/subscriptions.rs`）────────
+    // 数据面由 `account_session::subscriptions` 承接（不是 OpenAI 兼容直连），
+    // 这里 `protocol` 只是占位：`bridge/account.rs` 在调 `adapter::build_bridge`
+    // 之前会先拦截这三家。保留 `PROVIDERS` 条目是为了 `find` / 归一 / 展示
+    // 与管理面下拉的一致性。
+    ProviderSpec {
+        kind: "claude-subscription",
+        label: "Claude 订阅",
+        protocol: Protocol::Anthropic,
+        default_base_url: "https://api.anthropic.com",
+    },
+    ProviderSpec {
+        kind: "chatgpt-subscription",
+        label: "ChatGPT 订阅",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.openai.com/v1",
+    },
+    ProviderSpec {
+        kind: "codex-subscription",
+        label: "Codex 订阅",
+        protocol: Protocol::Openai,
+        default_base_url: "https://chatgpt.com/backend-api/codex",
     },
 ];
 
@@ -1152,7 +1256,9 @@ pub fn display_label(kind: &str) -> String {
     }
     let trimmed = kind.trim();
     if trimmed.starts_with("custom-") {
-        return "自定义供应商".to_string();
+        // 运行期自定义家：用户起的名字就是展示名；未安装存储 / 查不到时回退。
+        return crate::account_session::custom_providers::label_of(trimmed)
+            .unwrap_or_else(|| "自定义供应商".to_string());
     }
     if trimmed.is_empty() {
         return "未知供应商".to_string();
@@ -1179,6 +1285,11 @@ pub const WEB_PROVIDER_KINDS: &[&str] = &["chatglm", "deepseek-web"];
 /// provider 分类标识：`web`（网页端产品）/ `agent`（编码工具形态的登录态家）/
 /// `api`（API Key 直连，含预置模板的落点）。
 pub fn category(kind: &str) -> &'static str {
+    // 内置订阅三家：都是「编码/对话 Agent 形态的订阅通道」，归 agent 段。
+    // 放在最前面短路（`session_meta` 对它们返回 None，不能靠后者兜底）。
+    if is_subscription(kind) {
+        return "agent";
+    }
     if WEB_PROVIDER_KINDS.contains(&kind) {
         "web"
     } else if session_meta(kind).is_some() {
@@ -1471,11 +1582,161 @@ const DEEPSEEK_WEB_CREDENTIAL_FIELDS: &[CredentialField] = &[CredentialField {
     hint: "整段 Cookie（可选；userToken 为主凭证，Cookie 用于风控场景）",
 }];
 
+/// 内置订阅三家的具名凭证字段（对齐 Agent2API 各自的账号记录形状）。
+///
+/// 与 `CREDENTIAL_FIELDS` 分开存放：后者是 Agent2API 同步工具的**生成区**，
+/// 手工追加会被下次 `sync_agent2api_credential_fields.py --write` 冲掉。
+///
+/// 口径：
+/// - 主令牌 `accessToken` → AIGX 的 `Credential.secret`（单密钥）；
+/// - `refreshToken` → `AccountSession.refresh_secret`；
+/// - `expiresAt` → `AccountSession.expires_at`（秒）；
+/// - 其余具名字段落 `Credential.fields`，键名与上游逐字一致。
+const CLAUDE_SUBSCRIPTION_CREDENTIAL_FIELDS: &[CredentialField] = &[
+    CredentialField {
+        name: "kind",
+        required: true,
+        hint: "固定 `claude-code-link-v1`（本机引用类型）",
+    },
+    CredentialField {
+        name: "executable",
+        required: true,
+        hint: "官方 Claude Code 可执行文件绝对路径",
+    },
+    CredentialField {
+        name: "configDir",
+        required: false,
+        hint: "CLAUDE_CONFIG_DIR 绝对路径（空 = 当前系统用户默认）",
+    },
+    CredentialField {
+        name: "profilePath",
+        required: true,
+        hint: "官方 `.claude.json` 绝对路径",
+    },
+    CredentialField {
+        name: "accountKey",
+        required: true,
+        hint: "oauthAccount 的身份摘要（accountUuid 或 email + organizationUuid）",
+    },
+    CredentialField {
+        name: "email",
+        required: false,
+        hint: "oauthAccount.emailAddress",
+    },
+    CredentialField {
+        name: "organization",
+        required: false,
+        hint: "oauthAccount.organizationName",
+    },
+    CredentialField {
+        name: "plan",
+        required: false,
+        hint: "auth status 报告的 subscriptionType",
+    },
+    CredentialField {
+        name: "cliVersion",
+        required: false,
+        hint: "官方 CLI 版本",
+    },
+];
+
+const CHATGPT_SUBSCRIPTION_CREDENTIAL_FIELDS: &[CredentialField] = &[
+    CredentialField {
+        name: "issuer",
+        required: true,
+        hint: "固定 `https://auth.openai.com`",
+    },
+    CredentialField {
+        name: "clientId",
+        required: true,
+        hint: "本应用动态注册得到的 client_id",
+    },
+    CredentialField {
+        name: "hostId",
+        required: true,
+        hint: "本网关宿主标识（ext_agent_host_id）",
+    },
+    CredentialField {
+        name: "sub",
+        required: true,
+        hint: "ID token 的 subject（身份判据，不按邮箱合并）",
+    },
+    CredentialField {
+        name: "email",
+        required: false,
+        hint: "ID token 的 email（展示用）",
+    },
+    CredentialField {
+        name: "idToken",
+        required: false,
+        hint: "已验签的 ID token（身份与套餐来源）",
+    },
+    CredentialField {
+        name: "scopes",
+        required: true,
+        hint: "授权 scope（须含 chatgpt.tokens.use.direct）",
+    },
+    CredentialField {
+        name: "plan",
+        required: false,
+        hint: "chatgpt_plan_type（套餐类型，展示用）",
+    },
+    CredentialField {
+        name: "needsRelogin",
+        required: false,
+        hint: "授权已失效标记（true = 需重新授权）",
+    },
+];
+
+const CODEX_SUBSCRIPTION_CREDENTIAL_FIELDS: &[CredentialField] = &[
+    CredentialField {
+        name: "authMode",
+        required: true,
+        hint: "固定 `chatgpt`（API Key 型 Codex 凭据被拒绝）",
+    },
+    CredentialField {
+        name: "idToken",
+        required: false,
+        hint: "ID token（展示信息与到期时间来源）",
+    },
+    CredentialField {
+        name: "accountId",
+        required: true,
+        hint: "chatgpt_account_id（ChatGPT-Account-Id 头）",
+    },
+    CredentialField {
+        name: "userId",
+        required: false,
+        hint: "chatgpt_user_id / sub（身份归并）",
+    },
+    CredentialField {
+        name: "uid",
+        required: false,
+        hint: "本网关派生的稳定身份串（codex-<sha256>）",
+    },
+    CredentialField {
+        name: "email",
+        required: false,
+        hint: "账号邮箱（展示用）",
+    },
+    CredentialField {
+        name: "planType",
+        required: false,
+        hint: "chatgpt_plan_type（套餐类型，展示用）",
+    },
+];
+
 /// 查某 provider 的凭证字段模板（kind 先归一；空表 = 单 secret 直连型）。
 pub fn credential_fields_for(kind: &str) -> &'static [CredentialField] {
     let canonical = normalize_kind(kind);
     if canonical == "deepseek-web" {
         return DEEPSEEK_WEB_CREDENTIAL_FIELDS;
+    }
+    match canonical.as_str() {
+        "claude-subscription" => return CLAUDE_SUBSCRIPTION_CREDENTIAL_FIELDS,
+        "chatgpt-subscription" => return CHATGPT_SUBSCRIPTION_CREDENTIAL_FIELDS,
+        "codex-subscription" => return CODEX_SUBSCRIPTION_CREDENTIAL_FIELDS,
+        _ => {}
     }
     CREDENTIAL_FIELDS
         .iter()
@@ -1729,5 +1990,89 @@ mod tests {
             missing_meta.is_empty(),
             "这些 kind 缺 SessionMeta：{missing_meta:?}"
         );
+    }
+
+    // ── 内置订阅三家（claude / chatgpt / codex-subscription）─────────────
+
+    #[test]
+    fn subscription_providers_are_known_and_distinct() {
+        for spec in SUBSCRIPTION_PROVIDERS {
+            // 每家都要有 `PROVIDERS` 条目（`find` 归一 / 展示 / 下拉都靠它）
+            assert!(
+                PROVIDERS.iter().any(|p| p.kind == spec.kind),
+                "订阅 provider {} 缺 PROVIDERS 条目",
+                spec.kind
+            );
+            assert!(find(spec.kind).is_some(), "find 应能归一 {}", spec.kind);
+            assert_eq!(display_label(spec.kind), spec.label);
+            // 订阅型不是登录态型：不应误入 SESSION_PROVIDERS 那套模板头模型
+            assert!(
+                session_meta(spec.kind).is_none(),
+                "订阅 provider {} 不应有 SessionMeta",
+                spec.kind
+            );
+            assert!(is_subscription(spec.kind));
+            assert_eq!(category(spec.kind), "agent");
+        }
+        // 三家打成集合，且不缺
+        let kinds: Vec<&str> = SUBSCRIPTION_PROVIDERS.iter().map(|s| s.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "claude-subscription",
+                "chatgpt-subscription",
+                "codex-subscription"
+            ]
+        );
+    }
+
+    #[test]
+    fn subscription_credential_fields_align_with_upstream() {
+        // 关键身份/续期字段必须在模板里（与上游各家账号记录逐字段对齐）
+        let expectations: &[(&str, &[&str])] = &[
+            (
+                "claude-subscription",
+                &["kind", "executable", "profilePath", "accountKey"],
+            ),
+            (
+                "chatgpt-subscription",
+                &["issuer", "clientId", "sub", "scopes"],
+            ),
+            ("codex-subscription", &["authMode", "accountId", "userId"]),
+        ];
+        for (kind, names) in expectations {
+            let fields = credential_fields_for(kind);
+            assert!(!fields.is_empty(), "{kind} 缺凭证字段模板");
+            for name in *names {
+                assert!(
+                    fields.iter().any(|f| f.name == *name),
+                    "{kind} 凭证字段缺少 {name}"
+                );
+            }
+        }
+        // 归一后的别名同样命中（大小写不敏感）
+        assert_eq!(
+            credential_fields_for("CLAUDE-SUBSCRIPTION"),
+            credential_fields_for("claude-subscription")
+        );
+    }
+
+    #[test]
+    fn subscription_specs_carry_responses_endpoint_or_cli() {
+        for spec in SUBSCRIPTION_PROVIDERS {
+            if spec.kind == "claude-subscription" {
+                // Claude 订阅走官方 CLI，没有可直连的 Responses 端点
+                assert!(spec.responses_path.is_empty());
+            } else {
+                assert!(
+                    spec.responses_path.starts_with('/'),
+                    "{} 的 Responses 路径应为绝对路径",
+                    spec.kind
+                );
+                assert!(!spec.base_url.is_empty());
+            }
+            assert!(!spec.credential_hint.is_empty());
+            assert!(!spec.login_methods.is_empty());
+        }
     }
 }

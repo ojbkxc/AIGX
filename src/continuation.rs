@@ -457,6 +457,21 @@ pub fn plan() -> Option<usize> {
     Some(total_rounds_of(crate::config::auto_continue_max_rounds()))
 }
 
+/// 续写轮要用的请求体：failover 成功轮共享的 `ChatFormat.model` 是**入口**模型名，
+/// 续写必须按**上游真名**再发。模型一致时直接复用同一个 `Arc`（零拷贝），
+/// 不一致时才按需克隆一份覆盖 `model`（一次，不是逐候选）。
+pub fn with_upstream_model(
+    req: std::sync::Arc<ChatFormat>,
+    upstream_model: &str,
+) -> std::sync::Arc<ChatFormat> {
+    if req.model == upstream_model {
+        return req;
+    }
+    let mut owned = ChatFormat::from_arc(req);
+    owned.model = upstream_model.to_string();
+    std::sync::Arc::new(owned)
+}
+
 /// 终止帧及其后帧的暂存上限（1 MiB）。超过即放行全部并放弃续写 ——
 /// 宁可不续，也不无界占内存。
 const MAX_HELD_BYTES: usize = 1024 * 1024;

@@ -728,9 +728,22 @@ pub async fn handle_messages(
     }
 
     // R4 性能：请求体从这里起用 `Arc` 共享（与 chat.rs 同口径）——估算、
-    // failover 守卫、流计费快照只 clone 指针；每轮 attempt_req 是唯一必要
-    // 深拷贝。guardrail/image 的原地改写在上方，之后不再有 `&mut chat_req`。
+    // failover 守卫、流计费快照只 clone 指针；各轮默认共享同一请求体，仅当
+    // 模型映射/提供商覆盖层要改字段时才按需克隆。guardrail/image 的原地改写
+    // 在上方，之后不再有 `&mut chat_req`。
     let chat_req = std::sync::Arc::new(chat_req);
+
+    // 出站脱敏的作用域是 provider。作用域为空时脱敏结果与 provider 无关，
+    // 预先在共享基座上做一次，failover 各轮复用，避免逐候选深拷贝（与 chat.rs 同口径）。
+    let sanitize_enabled = crate::config::sanitize_fingerprints_enabled();
+    let sanitize_globally = sanitize_enabled && crate::sanitize::providers().is_empty();
+    let base_req: std::sync::Arc<ChatFormat> = if sanitize_globally {
+        let mut sanitized = (*chat_req).clone();
+        crate::sanitize::sanitize_messages_for_provider("", &mut sanitized.messages);
+        std::sync::Arc::new(sanitized)
+    } else {
+        std::sync::Arc::clone(&chat_req)
+    };
 
     // P1 两段式计费：请求前预留配额，流式/非流式结算时多退少补。
     // 此前 Anthropic 分支未接两段式（reservation: None），余额耗尽用户可在
@@ -849,31 +862,49 @@ pub async fn handle_messages(
                 )));
                 continue;
             }
-            // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
-            let mut attempt_req = (*chat_req).clone();
-            attempt_req.model = upstream.clone();
+            // 本次尝试的请求体：默认共享 `base_req`，上游模型名通过
+            // `chat_stream_with_model` 覆盖（不为改 model 深拷贝整包对话）。
+            // 仅当提供商覆盖层要重建消息、或脱敏按 provider 分作用域时才拥有副本。
             // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
             // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
             // None → 保持入口层结果（默认路径零开销）。重建后必须重跑 purge
             // ——重建的消息来自 purge 前快照，本尝试的治理产物要在此补齐。
-            if let Some(pre_purge) = pre_purge_messages.as_ref() {
+            let rebuilt = pre_purge_messages.as_ref().and_then(|pre_purge| {
                 let provider = super::openai::sanitize_provider_id(&state, ch_ref.as_ref());
-                if let Some(mut rebuilt) = crate::prompt::provider_prompt_rebuild(
+                crate::prompt::provider_prompt_rebuild(
                     &model,
                     &provider,
                     pre_purge,
                     &gateway_prompt,
-                ) {
+                )
+                .map(|mut rebuilt| {
                     crate::purge::apply_request(&mut rebuilt, &purge_cfg, &model);
-                    attempt_req.messages = rebuilt;
+                    rebuilt
+                })
+            });
+            let needs_owned = rebuilt.is_some() || (sanitize_enabled && !sanitize_globally);
+            let attempt_req: std::sync::Arc<ChatFormat> = if needs_owned {
+                let mut owned = (*base_req).clone();
+                owned.model = upstream.clone();
+                if let Some(rebuilt) = rebuilt {
+                    owned.messages = rebuilt;
+                    // 重建消息来自 purge 前快照、绕过了预脱敏，这里补齐
+                    if sanitize_globally {
+                        crate::sanitize::sanitize_messages_for_provider("", &mut owned.messages);
+                    }
                 }
-            }
-            // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
-            crate::api::openai::sanitize_attempt_messages(
-                &state,
-                ch_ref.as_ref(),
-                &mut attempt_req.messages,
-            );
+                // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
+                if !sanitize_globally {
+                    crate::api::openai::sanitize_attempt_messages(
+                        &state,
+                        ch_ref.as_ref(),
+                        &mut owned.messages,
+                    );
+                }
+                std::sync::Arc::new(owned)
+            } else {
+                std::sync::Arc::clone(&base_req)
+            };
             attempt_counter += 1;
             // 连接稳定性：与 attempt_counter 同步记账一次候选尝试（上限/总时长收敛）
             failover_budget.record_attempt();
@@ -884,7 +915,6 @@ pub async fn handle_messages(
                 ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
             attempt_guard.model = upstream.clone();
             // R4：本轮请求体 Arc 共享给守卫（499 兜底估算只读）
-            let attempt_req = std::sync::Arc::new(attempt_req);
             attempt_guard.chat_req = std::sync::Arc::clone(&attempt_req);
             let attempt_index = attempt_counter;
             if attempt_index > 1 {
@@ -895,7 +925,10 @@ pub async fn handle_messages(
             let attempt_start = std::time::Instant::now();
             // T2：SSE 首事件守卫——建流成功后等第一个事件（30s 上限），
             // 上游挂起/建流后立刻断流 → 按失败处理（熔断记账 + failover）
-            let attempt = match bridge.chat_stream(&attempt_req, &ctx).await {
+            let attempt = match bridge
+                .chat_stream_with_model(&attempt_req, &upstream, &ctx)
+                .await
+            {
                 Ok(s) => crate::bridge::first_event_or_timeout(s).await,
                 Err(e) => Err(e),
             };
@@ -1049,7 +1082,16 @@ pub async fn handle_messages(
                     }
                     stream_opt = Some(s);
                     cont_bridge = Some(bridge.clone());
-                    cont_req = Some(std::sync::Arc::clone(&attempt_req));
+                    // 续写轮按上游真名再发：共享基座的 model 可能仍是入口名，
+                    // 仅在续写开启时按需生成覆盖副本（一次，非逐候选）。
+                    cont_req = if crate::continuation::plan().is_some() {
+                        Some(crate::continuation::with_upstream_model(
+                            std::sync::Arc::clone(&attempt_req),
+                            &upstream,
+                        ))
+                    } else {
+                        None
+                    };
                     used_channel_id = cid;
                     used_upstream = Some(upstream);
                     break;
@@ -1275,13 +1317,9 @@ pub async fn handle_messages(
             // 参照 aisix AnthropicSseEncoder：文本块在首个文本增量到达时才开块，
             // 避免 thinking/文本/tool 块 index 冲突）
             let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
-            // P1 性能：估算移到阻塞线程池（纯 CPU；message_start 前缀
-            // 需要回显 input_tokens，此处必须 await 后才能建流）
-            let input_tokens_est = crate::token_estimate::count_chat_prompt_blocking_arc(
-                model.clone(),
-                std::sync::Arc::clone(&chat_req),
-            )
-            .await as u64;
+            // TTFB：首帧不再等待整段 prompt 的 BPE 计数（大 prompt 时会把
+            // message_start 拖到 tokenize 完成之后才发出）。input_tokens 先回显 0，
+            // 真实值在终帧 message_delta 的 usage 里回填（见 suffix）。
             // message_start 对客户端回显**请求的对外模型名**（A2A
             // `rewrite_response_model` 同口径）：上游映射后的实际模型名
             // 只在内部计费/日志使用，不泄漏给下游。
@@ -1299,7 +1337,7 @@ pub async fn handle_messages(
                                 "model": model_for_prefix,
                                 "stop_reason": null,
                                 "stop_sequence": null,
-                                "usage": {"input_tokens": input_tokens_est, "output_tokens": 0}
+                                "usage": {"input_tokens": 0, "output_tokens": 0}
                             }
                         })
                         .to_string(),
@@ -1708,7 +1746,8 @@ pub async fn handle_messages(
                     serde_json::json!({
                         "type": "message_delta",
                         "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                        "usage": {"output_tokens": completion_tokens}
+                        // input_tokens 在此回填（首帧 message_start 为 0，见前缀注释）
+                        "usage": {"input_tokens": prompt_tokens, "output_tokens": completion_tokens}
                     })
                     .to_string(),
                 )));
@@ -1838,31 +1877,45 @@ pub async fn handle_messages(
                 )));
                 continue;
             }
-            // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
-            let mut attempt_req = (*chat_req).clone();
-            attempt_req.model = upstream.clone();
-            // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
-            // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
-            // None → 保持入口层结果（默认路径零开销）。重建后必须重跑 purge
-            // ——重建的消息来自 purge 前快照，本尝试的治理产物要在此补齐。
-            if let Some(pre_purge) = pre_purge_messages.as_ref() {
+            // 本次尝试的请求体：默认共享 `base_req`，上游模型名通过
+            // `chat_with_model` 覆盖（不为改 model 深拷贝整包对话）。仅当提供商
+            // 覆盖层要重建消息、或脱敏按 provider 分作用域时才拥有副本。
+            let rebuilt = pre_purge_messages.as_ref().and_then(|pre_purge| {
                 let provider = super::openai::sanitize_provider_id(&state, ch_ref.as_ref());
-                if let Some(mut rebuilt) = crate::prompt::provider_prompt_rebuild(
+                crate::prompt::provider_prompt_rebuild(
                     &model,
                     &provider,
                     pre_purge,
                     &gateway_prompt,
-                ) {
+                )
+                .map(|mut rebuilt| {
                     crate::purge::apply_request(&mut rebuilt, &purge_cfg, &model);
-                    attempt_req.messages = rebuilt;
+                    rebuilt
+                })
+            });
+            let needs_owned = rebuilt.is_some() || (sanitize_enabled && !sanitize_globally);
+            let attempt_req: std::sync::Arc<ChatFormat> = if needs_owned {
+                let mut owned = (*base_req).clone();
+                owned.model = upstream.clone();
+                if let Some(rebuilt) = rebuilt {
+                    owned.messages = rebuilt;
+                    // 重建消息来自 purge 前快照、绕过了预脱敏，这里补齐
+                    if sanitize_globally {
+                        crate::sanitize::sanitize_messages_for_provider("", &mut owned.messages);
+                    }
                 }
-            }
-            // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
-            crate::api::openai::sanitize_attempt_messages(
-                &state,
-                ch_ref.as_ref(),
-                &mut attempt_req.messages,
-            );
+                // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
+                if !sanitize_globally {
+                    crate::api::openai::sanitize_attempt_messages(
+                        &state,
+                        ch_ref.as_ref(),
+                        &mut owned.messages,
+                    );
+                }
+                std::sync::Arc::new(owned)
+            } else {
+                std::sync::Arc::clone(&base_req)
+            };
             attempt_counter += 1;
             // 连接稳定性：与 attempt_counter 同步记账一次候选尝试（上限/总时长收敛）
             failover_budget.record_attempt();
@@ -1873,7 +1926,6 @@ pub async fn handle_messages(
                 ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
             attempt_guard.model = upstream.clone();
             // R4：本轮请求体 Arc 共享给守卫（499 兜底估算只读）
-            let attempt_req = std::sync::Arc::new(attempt_req);
             attempt_guard.chat_req = std::sync::Arc::clone(&attempt_req);
             let attempt_index = attempt_counter;
             if attempt_index > 1 {
@@ -1882,7 +1934,7 @@ pub async fn handle_messages(
             let attempt_started_at = chrono::Utc::now().timestamp();
             let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
-            match bridge.chat(&attempt_req, &ctx).await {
+            match bridge.chat_with_model(&attempt_req, &upstream, &ctx).await {
                 Ok(resp) => {
                     // #47：计费接管点/记账点（见各分支语义）
                     attempt_guard.handoff();
@@ -2035,7 +2087,16 @@ pub async fn handle_messages(
                     }
                     response_opt = Some(resp);
                     cont_bridge = Some(bridge.clone());
-                    cont_req = Some(std::sync::Arc::clone(&attempt_req));
+                    // 续写轮按上游真名再发：共享基座的 model 可能仍是入口名，
+                    // 仅在续写开启时按需生成覆盖副本（一次，非逐候选）。
+                    cont_req = if crate::continuation::plan().is_some() {
+                        Some(crate::continuation::with_upstream_model(
+                            std::sync::Arc::clone(&attempt_req),
+                            &upstream,
+                        ))
+                    } else {
+                        None
+                    };
                     used_channel_id = cid;
                     used_upstream = Some(upstream);
                     break;

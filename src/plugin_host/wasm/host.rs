@@ -415,6 +415,107 @@ impl WasmHost {
         Ok(result)
     }
 
+    /// 宿主 → 插件的**账号验证**入口（对齐上游 `wasm/verification/native.rs:44-71`）。
+    ///
+    /// 通过 `admin.action` 把 `captcha.push` / `claim.verification.poll` /
+    /// `claim.verification.complete` 转发给插件。`poll`（非 complete）且显式带账号
+    /// 时，校验插件回报的任务确实属于该账号 × 该 provider —— 防止插件把别的
+    /// 账号的任务塞进本次结果。
+    ///
+    /// **待接线**：AIGX 目前没有驱动这条链的账号验证管理面/定时任务；入口先
+    /// 按上游契约就位（与 `native::grant` 同一「壳先就位」口径），由主控在
+    /// 验证执行器接线时调用。
+    #[allow(dead_code)] // 待接线：账号验证执行器尚未接线
+    pub async fn call_verification(
+        &self,
+        account: &str,
+        action: &str,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<Value, WireError> {
+        let complete = match action {
+            "captcha.push" => false,
+            "claim.verification.poll" => false,
+            "claim.verification.complete" => true,
+            _ => {
+                return Err(WireError::with_code(
+                    "该操作不能使用验证码交互通道",
+                    "forbidden",
+                ))
+            }
+        };
+        let claim = action != "captcha.push";
+        if !self.shared.manifest.allows("verification.account.v1")
+            || (claim && !self.shared.manifest.allows("verification.claim.v1"))
+        {
+            return Err(WireError::with_code(
+                "插件未声明所需账号验证码交互能力",
+                "forbidden",
+            ));
+        }
+        let provider = self.shared.manifest.provider.clone();
+        let params = json!({
+            "provider": provider,
+            "account": account,
+            "action": action,
+            "payload": payload,
+        });
+        let result = self.call("admin.action", params, timeout).await?;
+        // `complete` 由插件回传最终结果；只有轮询需要核对任务归属。
+        if !complete && !account.is_empty() && !result["task"].is_null() {
+            let task = &result["task"];
+            if task["accountId"].as_str() != Some(account)
+                || task["provider"].as_str() != Some(provider.as_str())
+            {
+                return Err(WireError::with_code(
+                    "原生领取验证任务未遵守账号范围，结果未公开",
+                    "plugin_protocol_error",
+                ));
+            }
+        }
+        Ok(result)
+    }
+
+    /// 宿主 → 插件的**短信登录**入口（对齐上游 `wasm/host.rs:242-250,277`）。
+    ///
+    /// 通过 `admin.action` 把 `login.sms.send` / `login.sms.verify` 转发给插件；
+    /// 宿主覆盖 `provider` / `account` / `flow` / `proxy`，并剥掉 payload 里插件
+    /// 不能自报的 `flow` / `device`。
+    ///
+    /// **待接线**：短信登录管理面目前只走原生 loomy；本入口供后续接管 Wasm
+    /// 短信插件时使用。
+    #[allow(dead_code)] // 待接线：Wasm 短信登录接管尚未接线
+    pub async fn call_sms(
+        &self,
+        action: &str,
+        payload: Value,
+        flow: &str,
+        proxy: Value,
+        timeout: Duration,
+    ) -> Result<Value, WireError> {
+        if !matches!(action, "login.sms.send" | "login.sms.verify") {
+            return Err(WireError::with_code("短信动作无效", "bad_params"));
+        }
+        if !self.shared.manifest.allows("login.sms.v1") {
+            return Err(WireError::with_code("插件未声明短信登录能力", "forbidden"));
+        }
+        let provider = self.shared.manifest.provider.clone();
+        let mut params = json!({
+            "provider": provider,
+            "account": "",
+            "action": action,
+            "payload": payload,
+            "flow": flow,
+            "proxy": proxy,
+            "proxy_override": !proxy.is_null(),
+        });
+        if let Some(payload) = params["payload"].as_object_mut() {
+            payload.remove("flow");
+            payload.remove("device");
+        }
+        self.call("admin.action", params, timeout).await
+    }
+
     /// 打开流式对话（见上游 `open_wasm_stream`）。
     pub async fn open_stream(
         self: &Arc<Self>,

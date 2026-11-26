@@ -233,19 +233,16 @@ fn translate_tools(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-#[async_trait]
-impl Bridge for GeminiBridge {
-    fn name(&self) -> &'static str {
-        "gemini"
-    }
-
-    async fn chat(
+impl GeminiBridge {
+    /// chat 的实际实现；`model` 为上游模型名（failover 可覆盖），消息体按引用共享。
+    async fn chat_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
         let body = self.build_body(req, false);
-        let url = self.generate_url(&req.model);
+        let url = self.generate_url(model);
         let resp = crate::debug_traffic::traced(
             self.post(&url, &body)
                 .timeout(crate::bridge::nonstream_request_timeout()),
@@ -272,16 +269,18 @@ impl Bridge for GeminiBridge {
             .await
             .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))?;
 
-        Ok(parse_response(&json, &req.model))
+        Ok(parse_response(&json, model))
     }
 
-    async fn chat_stream(
+    /// chat_stream 的实际实现；语义同 [`GeminiBridge::chat_impl`]。
+    async fn chat_stream_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
         let body = self.build_body(req, true);
-        let url = self.stream_url(&req.model);
+        let url = self.stream_url(model);
         let resp = crate::debug_traffic::traced(self.post(&url, &body), ctx)
             // 流式请求放宽总超时（共享 client 的 300s 是累计上限，会掐断长流）
             .timeout(crate::bridge::stream_request_timeout())
@@ -302,7 +301,7 @@ impl Bridge for GeminiBridge {
         }
 
         let id = format!("gemini_{}", uuid::Uuid::new_v4());
-        let model = req.model.clone();
+        let model = model.to_string();
         let byte_stream = resp.bytes_stream();
 
         // 参照 anthropic.rs 的 unfold 模式：把 SSE 解码器与流状态作为种子
@@ -386,6 +385,46 @@ impl Bridge for GeminiBridge {
         );
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl Bridge for GeminiBridge {
+    fn name(&self) -> &'static str {
+        "gemini"
+    }
+
+    async fn chat(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, model, ctx).await
+    }
+    async fn chat_stream(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_stream_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, model, ctx).await
     }
 }
 

@@ -18,8 +18,11 @@ pub(crate) mod antigravity;
 pub(crate) mod autoclaw;
 mod catpaw;
 pub(crate) mod chatglm;
+pub(crate) mod chatgpt_subscription;
+pub(crate) mod claude_subscription;
 mod cline;
 pub(crate) mod codearts;
+pub(crate) mod codex_subscription;
 pub(crate) mod deepseek_web;
 pub(crate) mod lobsterai;
 pub mod loomy;
@@ -219,7 +222,7 @@ pub fn wait_response(task: &LoginTask) -> Value {
 /// 发起网页登录：返回 `{state, authUrl, provider}`，后台任务异步等待完成。
 pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result<Value, String> {
     let provider = registry::normalize_kind(provider);
-    if registry::session_meta(&provider).is_none() {
+    if registry::session_meta(&provider).is_none() && !registry::is_subscription(&provider) {
         return Err(format!("「{provider}」不是登录态型供应商，不需要网页登录"));
     }
     let client = reqwest::Client::new();
@@ -242,6 +245,10 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "trae" => trae::start(&client).await?,
         "codearts" => codearts::start(&client).await?,
         "officeace" => officeace::start(&client).await?,
+        // 内置订阅三家：Codex 设备授权 / ChatGPT PKCE 粘贴回调 / Claude 关联本机 CLI。
+        "codex-subscription" => codex_subscription::start(&client).await?,
+        "chatgpt-subscription" => chatgpt_subscription::start(&client).await?,
+        "claude-subscription" => claude_subscription::start(&client).await?,
         "autoclaw" => {
             // AutoClaw OAuth 需要验证码参数和回调基址——由单独的
             // `start_oauth` 入口处理（见下方），这里不接管。
@@ -653,11 +660,7 @@ fn ensure_channel(
 }
 
 fn label_of(provider: &str) -> String {
-    registry::session_meta(provider)
-        .map(|_| {
-            registry::find(provider)
-                .map(|spec| spec.label.to_string())
-                .unwrap_or_else(|| provider.to_string())
-        })
-        .unwrap_or_else(|| provider.to_string())
+    // 订阅型没有 `SessionMeta`，但 `display_label` 经 `find` 仍能给出正确展示名
+    // （登录落库时渠道名 / 账号名前缀都用它，绝不能退化成裸 kind）。
+    registry::display_label(provider)
 }

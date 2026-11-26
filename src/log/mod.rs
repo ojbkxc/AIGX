@@ -922,6 +922,9 @@ pub struct RequestLogStore {
     store: Arc<FileStore>,
     /// 写入计数：摊薄容量检查频率（每 PURGE_CHECK_EVERY 次写入触发一次）
     writes: std::sync::atomic::AtomicU64,
+    /// `reqlog_id:*` 回填互斥：首次未命中的并发查询只允许一个线程做全表
+    /// 扫描回填，其余等它完成后直接走索引（否则 N 个首查 = N 次全表扫）。
+    id_index_lock: std::sync::Mutex<()>,
 }
 
 #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
@@ -932,6 +935,11 @@ impl RequestLogStore {
     /// 成功后写入。没有这道闸门，混合态（新日志有索引、历史没有）下按
     /// 区间读会静默漏数据。
     const USER_INDEX_MARKER: &'static str = "reqlogu:backfill_done";
+    /// `reqlog_id:*` 二级索引完备性标记：存在 = 历史日志已全部补建 id/request_id
+    /// 索引。缺它时 `get_by_request_id` / `delete_by_id` 的索引未命中不能直接
+    /// 判定「不存在」——库里可能有未建索引的历史行。独立前缀，避免与
+    /// `reqlog_id:{id}={主键}` 的索引键空间混用（后者必带 `=`）。
+    const ID_INDEX_MARKER: &'static str = "reqlogid:backfill_done";
     /// B13：请求日志容量上限
     const MAX_LOGS: usize = 100_000;
     /// B13：超限时每批清理的最旧日志条数
@@ -946,6 +954,7 @@ impl RequestLogStore {
         Self {
             store,
             writes: std::sync::atomic::AtomicU64::new(0),
+            id_index_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -1324,33 +1333,157 @@ impl RequestLogStore {
         Ok(written)
     }
 
-    /// Phase1-B 路由回放：按 request_id（或日志 id）取单条请求日志。
+    /// `reqlog_id:*` 二级索引是否已覆盖全部历史日志（回填 marker 存在）。
+    fn id_index_ready(&self) -> bool {
+        matches!(
+            self.store.get::<bool>(Self::ID_INDEX_MARKER),
+            Ok(Some(true))
+        )
+    }
+
+    /// 一次性回填 `reqlog_id:*` 索引：扫描全部 reqlog 明细，按
+    /// [`Self::index_entries`] 补写缺失的索引键，成功后落 marker。
     ///
-    /// 按 `request_id`（或日志自带 `id`）查单条请求日志。
+    /// 与 [`Self::backfill_user_index`] 同构：幂等、分批 `write_batch`、成功
+    /// 才落 marker。**失败不落 marker** —— 下次调用（或下次首查）会重试，
+    /// 不会出现「marker 说齐全、实际有缺口」的静默漏数据。
     ///
-    /// **走二级索引**：写入时 `write_indexes` 记了 `reqlog_id:{id}={主键}`，
-    /// 这里先索引点查，命中直接按主键取整条 —— O(1)，不再全键扫描 + 逐条
-    /// 反序列化比对。索引缺失（历史数据、索引被手工清过）时回退旧的全扫，
-    /// 行为不变、只是慢。
-    pub fn get_by_request_id(&self, request_id: &str) -> Option<RequestLog> {
-        let index_key = Self::index_key(&Self::escape_index_component(request_id), "");
-        // 索引键前缀是 `reqlog_id:{id}=`，主键跟在 `=` 之后；用前缀列键取最新一条
-        // （同一 request_id 理论上唯一，重复时取最新与旧全扫 `find` 的语义一致）。
-        if let Ok(keys) = self
-            .store
-            .list_latest_keys(&index_key, 1)
-            .or_else(|_| self.store.list(&index_key))
-        {
-            if let Some(key) = keys.first() {
-                let primary = key.split_once('=').map(|(_, rest)| rest).unwrap_or("");
-                if !primary.is_empty() {
-                    if let Ok(Some(log)) = self.store.get::<RequestLog>(primary) {
-                        return Some(log);
-                    }
+    /// 主要调用方是启动预热（`main` 启动流程），请求路径只做兜底。
+    pub fn backfill_id_index(&self) -> anyhow::Result<usize> {
+        if self.id_index_ready() {
+            return Ok(0);
+        }
+        let keys = self.store.list("reqlog:")?;
+        let mut written = 0usize;
+        let mut batch: Vec<(String, Value)> = Vec::with_capacity(512);
+        for k in keys {
+            let Ok(Some(log)) = self.store.get::<RequestLog>(&k) else {
+                continue;
+            };
+            let mut entries = Self::index_entries(&log, &k);
+            // 历史行可能 `id` 字段为空（值里没写 id），但主键尾段一定带 id：
+            // 与 `delete_indexes_by_primary` 的兜底同口径补一条，避免这类行
+            // 永远点查不到。
+            if log.id.is_empty() {
+                if let Some(id) = k.rsplit(':').next().filter(|id| !id.is_empty()) {
+                    entries.push((
+                        Self::index_key(&Self::escape_index_component(id), &k),
+                        Value::Bool(true),
+                    ));
+                }
+            }
+            for (key, value) in entries {
+                if matches!(self.store.get::<bool>(&key), Ok(Some(true))) {
+                    continue;
+                }
+                batch.push((key, value));
+                written += 1;
+                if batch.len() >= 512 {
+                    Self::flush_index_batch(&self.store, &mut batch)?;
                 }
             }
         }
-        // 回退：索引没命中（历史数据未建索引 / request_id 只存在于旧记录）
+        Self::flush_index_batch(&self.store, &mut batch)?;
+        self.store.put(Self::ID_INDEX_MARKER, &true)?;
+        Ok(written)
+    }
+
+    /// 批量写索引并清空缓冲（`write_batch` 在 sqlite 后端是单事务）。
+    fn flush_index_batch(
+        store: &FileStore,
+        batch: &mut Vec<(String, Value)>,
+    ) -> anyhow::Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        {
+            let refs: Vec<(&str, Value)> =
+                batch.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+            store.write_batch(&refs)?;
+        }
+        batch.clear();
+        Ok(())
+    }
+
+    /// 确保 id 索引就绪（首次未命中的惰性回填入口）。返回 `true` = 索引已
+    /// 覆盖全库，可以放心把「索引未命中」当成「确实不存在」。
+    ///
+    /// 回填失败（IO 错误）返回 `false`，调用方必须保留旧的慢路径兜底。
+    ///
+    /// 注意：这里是**同步**全表扫描。正常部署由启动预热完成回填，本路径
+    /// 只在「预热未跑 / 预热失败」的首次查询时付一次全表键扫描（≈旧版一次
+    /// 查询的成本），之后全部 O(1)；`id_index_lock` 保证并发首查只扫一次。
+    fn ensure_id_index_ready(&self) -> bool {
+        if self.id_index_ready() {
+            return true;
+        }
+        let _guard = self
+            .id_index_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 双检：等锁期间别的线程可能已完成回填。
+        if self.id_index_ready() {
+            return true;
+        }
+        match self.backfill_id_index() {
+            Ok(written) => {
+                if written > 0 {
+                    tracing::info!("request log id index backfilled: {written} entries");
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!("request log id index backfill failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// 按二级索引点查主键（`reqlog_id:{转义 id}={主键}`）。
+    ///
+    /// 只拿键、不反序列化整条；索引悬空（主键已删）时由调用方决定怎么处理。
+    fn primary_by_index(&self, id: &str) -> Option<String> {
+        let index_key = Self::index_key(&Self::escape_index_component(id), "");
+        // 同一 id 理论上唯一；重复时取最新一条（与旧全扫 `find` 语义一致）。
+        let keys = self
+            .store
+            .list_latest_keys(&index_key, 1)
+            .or_else(|_| self.store.list(&index_key))
+            .ok()?;
+        let primary = keys
+            .first()?
+            .split_once('=')
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        (!primary.is_empty()).then(|| primary.to_string())
+    }
+
+    /// Phase1-B 路由回放 / 管理面详情：按 request_id（或日志自带 `id`）取单条。
+    ///
+    /// 快路径走二级索引（`reqlog_id:{id}={主键}`）O(1) 点查。索引未命中时
+    /// **不再无条件 `list_all()` 全表物化**：
+    /// - marker 已就绪 → 索引覆盖全库，未命中即确实不存在，直接 `None`；
+    /// - marker 缺失 → 库里可能有未建索引的历史行，先做一次性回填（通常
+    ///   启动预热已覆盖）后重试索引；
+    /// - 回填失败（IO 错误）→ 保留旧全扫慢路径并告警，**绝不静默返回空**。
+    pub fn get_by_request_id(&self, request_id: &str) -> Option<RequestLog> {
+        if let Some(primary) = self.primary_by_index(request_id) {
+            if let Ok(Some(log)) = self.store.get::<RequestLog>(&primary) {
+                return Some(log);
+            }
+        }
+        if self.id_index_ready() {
+            return None;
+        }
+        if self.ensure_id_index_ready() {
+            if let Some(primary) = self.primary_by_index(request_id) {
+                if let Ok(Some(log)) = self.store.get::<RequestLog>(&primary) {
+                    return Some(log);
+                }
+            }
+            return None;
+        }
+        // 回填失败：保持旧行为（全键 + 逐条反序列化比对），宁可慢也不漏。
         self.list_all()
             .into_iter()
             .find(|l| l.id == request_id || l.request_id.as_deref() == Some(request_id))
@@ -1474,7 +1607,28 @@ impl RequestLogStore {
     }
 
     /// 按 ID 删除单条请求日志（best-effort，不存在视为成功）
+    ///
+    /// 优先走 `reqlog_id:*` 二级索引拿主键，避免 `list("reqlog:")` 全前缀扫。
+    /// 降级链：索引命中 → 删除；索引未命中且未就绪 → 一次性回填后重试；
+    /// 回填失败才退回旧 `ends_with` 全键扫 —— **删除绝不能因索引缺失而漏删**。
     pub fn delete_by_id(&self, id: &str) -> anyhow::Result<()> {
+        if let Some(primary) = self.primary_by_index(id) {
+            self.delete_indexes_by_primary(&primary);
+            self.store.delete(&primary)?;
+            return Ok(());
+        }
+        if self.id_index_ready() {
+            // marker 已就绪 = 索引覆盖全库：未命中即确实不存在。
+            return Ok(());
+        }
+        if self.ensure_id_index_ready() {
+            if let Some(primary) = self.primary_by_index(id) {
+                self.delete_indexes_by_primary(&primary);
+                self.store.delete(&primary)?;
+            }
+            return Ok(());
+        }
+        // 回填失败：保留旧全键扫兜底，保证历史行仍删得掉。
         let keys = self.store.list("reqlog:")?;
         let target = keys.into_iter().find(|k| k.ends_with(&format!(":{id}")));
         if let Some(k) = target {
@@ -2878,6 +3032,84 @@ mod tests {
         s.requests.delete_by_id("log-abc").unwrap();
         assert!(s.requests.get_by_request_id("log-abc").is_none());
         assert!(s.requests.get_by_request_id("req/with=special").is_none());
+    }
+
+    /// 历史无索引行：首次 `get_by_request_id` 未命中时自动一次性回填，
+    /// 回填后必须能按日志 id 与 request_id 查到（**不许静默返回空**）。
+    #[test]
+    fn get_by_request_id_backfills_legacy_rows() {
+        let s = store();
+        let mut legacy = RequestLog::new();
+        legacy.id = "legacy-id".to_string();
+        legacy.request_id = Some("req-legacy".to_string());
+        legacy.created_at = 1_700_000_000;
+        legacy.model = "old".to_string();
+        // 绕过 add()，模拟改造前写入的「只有主键、没有索引」的历史行。
+        s.requests
+            .store
+            .put(
+                &format!("reqlog:{}:{}", legacy.created_at, legacy.id),
+                &legacy,
+            )
+            .unwrap();
+        assert!(
+            s.requests
+                .store
+                .get::<bool>("reqlogid:backfill_done")
+                .unwrap()
+                .is_none(),
+            "前置：marker 必须缺失"
+        );
+
+        let by_id = s
+            .requests
+            .get_by_request_id("legacy-id")
+            .expect("历史无索引行首次查询应自动回填后命中");
+        assert_eq!(by_id.model, "old");
+        // 回填落 marker 后，request_id 也能走索引命中
+        assert!(
+            matches!(
+                s.requests.store.get::<bool>("reqlogid:backfill_done"),
+                Ok(Some(true))
+            ),
+            "回填成功后 marker 必须落位"
+        );
+        assert!(s.requests.get_by_request_id("req-legacy").is_some());
+        // 幂等：已回填再调返回 0
+        assert_eq!(s.requests.backfill_id_index().unwrap(), 0);
+    }
+
+    /// marker 就绪（索引覆盖全库）后，查不存在的 id 直接 None，不再全表扫。
+    #[test]
+    fn get_by_request_id_absent_after_marker_returns_none() {
+        let s = store();
+        // 空库先落 marker（等价于启动预热完成）
+        assert_eq!(s.requests.backfill_id_index().unwrap(), 0);
+        assert!(s.requests.get_by_request_id("nope").is_none());
+    }
+
+    /// 删除也必须享受索引：历史无索引行先回填再删，删完索引与主键都干净。
+    #[test]
+    fn delete_by_id_backfills_legacy_and_removes_index() {
+        let s = store();
+        let mut legacy = RequestLog::new();
+        legacy.id = "old-1".to_string();
+        legacy.request_id = Some("req-old-1".to_string());
+        legacy.created_at = 1_700_000_000;
+        let primary = format!("reqlog:{}:{}", legacy.created_at, legacy.id);
+        s.requests.store.put(&primary, &legacy).unwrap();
+
+        s.requests.delete_by_id("old-1").unwrap();
+        assert!(
+            s.requests
+                .store
+                .get::<RequestLog>(&primary)
+                .unwrap()
+                .is_none(),
+            "历史行必须被删掉（索引缺失不能导致漏删）"
+        );
+        assert!(s.requests.get_by_request_id("old-1").is_none());
+        assert!(s.requests.get_by_request_id("req-old-1").is_none());
     }
 
     /// R2 第二档：`list_by_user` 走用户索引（`reqlogu:{uid}:{ts}:{id}`）。

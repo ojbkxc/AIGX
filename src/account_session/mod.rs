@@ -17,11 +17,14 @@
 //! - [`auth_file`]：账号文件导入（authFileContent / b64 / Cookies SQLite）
 //! - [`sorting`]：服务端账号排序规则（credit / balance / added）
 //! - [`usage_jobs`]：余额查询异步任务（start / cancel / 状态）
+//! - [`subscriptions`]：内置订阅三家（claude / chatgpt / codex-subscription）的数据面适配
+//! - [`custom_providers`]：自定义提供商（运行期 CRUD / 模型目录拉取 / `custom-*` 账号）
 
 pub mod adapter;
 pub mod auth_file;
 pub mod balance;
 pub mod catalog;
+pub mod custom_providers;
 pub mod flight;
 pub mod import;
 pub mod limiter;
@@ -34,6 +37,7 @@ pub mod rotate;
 pub mod secret;
 pub mod sorting;
 pub mod store;
+pub mod subscriptions;
 pub mod usage_jobs;
 pub mod usage_query;
 

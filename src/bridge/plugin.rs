@@ -108,15 +108,27 @@ impl ConversationStream {
             Self::Wasm {
                 rx,
                 sink,
+                host,
+                id,
                 failed,
                 ended,
-                ..
             } => {
                 if *ended || *failed {
                     return None;
                 }
                 match rx.recv().await {
                     Some(event) => {
+                        // 归还本帧 credit：宿主写 chunk 前会 `acquire_many`，
+                        // 窗口（STREAM_WINDOW）耗尽即阻塞等待。消费端每读走一帧
+                        // 就归还对应额度，从而把「未消费帧」限制在窗口内 ——
+                        // 这是无界 channel 的背压/内存上界（慢客户端不会让它
+                        // 无界增长）。漏还额度会让插件在输出约 512KB 后永久挂起。
+                        if let StreamEvent::Chunk(bytes) = &event {
+                            host.credit_stream(
+                                *id,
+                                bytes.len() + crate::plugin_host::wasm::FRAME_OVERHEAD,
+                            );
+                        }
                         if matches!(event, StreamEvent::End) {
                             *ended = true;
                             // 终点帧也可能承载错误：wasm 宿主在失败时先
@@ -240,7 +252,7 @@ impl PluginBridge {
         req: &ChatFormat,
     ) -> Result<ConversationStream, BridgeError> {
         let ctx = BridgeContext::new("plugin-test", &req.model);
-        self.open_conversation(req, &ctx).await
+        self.open_conversation(req, &req.model, &ctx).await
     }
 
     /// 发起一次 conversation 流式调用。
@@ -255,12 +267,13 @@ impl PluginBridge {
     async fn open_conversation(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ConversationStream, BridgeError> {
         let params = json!({
             "provider": self.provider,
             "account": "",
-            "body": build_openai_body(req),
+            "body": build_openai_body(req, model),
             // 上游 `forward_conversation` 的必填字段（无 serde 默认）：
             // 缺失会让社区插件反序列化失败。客户端关键头由数据面填进
             // `BridgeContext.client_headers` 后在此原样转发；未填时发空
@@ -268,7 +281,7 @@ impl PluginBridge {
             "headers": forwarded_headers(ctx),
             "stream": true,
             "session": forwarded_session(ctx),
-            "wire_model": req.model,
+            "wire_model": model,
             // `request.context` 的取值来源：客户端**是否要流式**。与 `stream`
             // 不同——`stream` 是「本轮走流式通道」，`client_stream` 是「客户端
             // 原本要什么」，插件据此区分「客户端要流」和「宿主为统一处理而流」。
@@ -506,7 +519,7 @@ fn error_code(envelope: &Value, error: &Value) -> Option<String> {
 /// 字段口径与 openai bridge 的 `build_body` 一致（messages 的
 /// content_blocks / tool_calls / tool_call_id / reasoning 都保留）；
 /// `stream` 恒为 true（见模块头说明）。
-fn build_openai_body(req: &ChatFormat) -> Value {
+fn build_openai_body(req: &ChatFormat, model: &str) -> Value {
     let messages: Vec<Value> = req
         .messages
         .iter()
@@ -555,7 +568,7 @@ fn build_openai_body(req: &ChatFormat) -> Value {
         .collect();
 
     let mut body = json!({
-        "model": req.model,
+        "model": model,
         "messages": messages,
         "stream": true,
     });
@@ -876,24 +889,19 @@ fn aggregate_chunks(chunks: &[ChatChunk], fallback_id: &str, fallback_model: &st
     }
 }
 
-#[async_trait]
-impl Bridge for PluginBridge {
-    fn name(&self) -> &'static str {
-        "plugin"
-    }
-
-    /// 非流式聊天：插件恒按流式推，本桥把帧聚合成完整响应
-    /// （与上游 aggregate_frame_stream 同设计）。
-    async fn chat(
+impl PluginBridge {
+    /// chat 的实际实现；`model` 为上游模型名（failover 可覆盖），消息体按引用共享。
+    async fn chat_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
-        let mut call = self.open_conversation(req, ctx).await?;
+        let mut call = self.open_conversation(req, model, ctx).await?;
         let (_status, pending) = take_head(&mut call).await?;
 
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-        let model = req.model.clone();
+        let model = model.to_string();
         let mut parser = SseLineParser::default();
         if let Some(bytes) = pending {
             parser.feed(&bytes, &id, &model);
@@ -921,21 +929,18 @@ impl Bridge for PluginBridge {
         Ok(aggregate_chunks(&chunks, &id, &model))
     }
 
-    /// 流式聊天：conversation RPC 的字节流逐行解析为 ChatChunk。
-    ///
-    /// head 已在 call_stream 里等好（30s 超时）；非 2xx 的 head 由
-    /// take_head 收齐错误体后报错，2xx 则把 chunk 帧的 OpenAI SSE
-    /// 原始字节解析成 ChatChunk 下发。
-    async fn chat_stream(
+    /// chat_stream 的实际实现；语义同 [`PluginBridge::chat_impl`]。
+    async fn chat_stream_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
-        let mut call = self.open_conversation(req, ctx).await?;
+        let mut call = self.open_conversation(req, model, ctx).await?;
         let (_status, pending) = take_head(&mut call).await?;
 
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-        let model = req.model.clone();
+        let model = model.to_string();
         let mut parser = SseLineParser::default();
         if let Some(bytes) = pending {
             parser.feed(&bytes, &id, &model);
@@ -970,6 +975,48 @@ impl Bridge for PluginBridge {
             },
         );
         Ok(Box::pin(chunk_stream))
+    }
+}
+
+#[async_trait]
+impl Bridge for PluginBridge {
+    fn name(&self) -> &'static str {
+        "plugin"
+    }
+
+    /// 非流式聊天：插件恒按流式推，本桥把帧聚合成完整响应
+    /// （与上游 aggregate_frame_stream 同设计）。
+    async fn chat(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, model, ctx).await
+    }
+    async fn chat_stream(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_stream_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, model, ctx).await
     }
 }
 

@@ -75,6 +75,12 @@ pub const QUALITY_MAX: u8 = 100;
 pub const THRESHOLD_KB_MIN: u32 = 0;
 pub const THRESHOLD_KB_MAX: u32 = 10240;
 
+/// 单次请求内参与压缩的内联图**累计原始字节**上限（base64 文本长度口径）。
+///
+/// 压缩逐图进行，每张解码/缩边/编码都会占一份峰值内存；多图请求若不做总闸，
+/// 峰值随图数线性增长。超过上限后剩余图片原样放行（压缩是尽力而为，不阻断请求）。
+pub const MAX_TOTAL_COMPRESS_BYTES: usize = 32 * 1024 * 1024;
+
 /// `mode` 合法值：辅助识图。
 pub const MODE_DESCRIBE: &str = "describe";
 /// `mode` 合法值：切换视觉模型。
@@ -271,11 +277,12 @@ pub fn compress_messages(
     cfg: &ImageCompatConfig,
 ) -> ImageCompressStats {
     let mut stats = ImageCompressStats::default();
+    let mut budget = MAX_TOTAL_COMPRESS_BYTES;
     for message in messages.iter_mut() {
         let Some(blocks) = message.content_blocks.as_mut() else {
             continue;
         };
-        stats.merge(compress_blocks(blocks, cfg));
+        stats.merge(compress_blocks(blocks, cfg, &mut budget));
     }
     stats
 }
@@ -286,6 +293,7 @@ pub fn compress_messages(
 /// [`compress_messages`] 在 ChatFormat 层处理。
 pub fn compress_responses_body(body: &mut Value, cfg: &ImageCompatConfig) -> ImageCompressStats {
     let mut stats = ImageCompressStats::default();
+    let mut budget = MAX_TOTAL_COMPRESS_BYTES;
     let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
         return stats;
     };
@@ -293,7 +301,7 @@ pub fn compress_responses_body(body: &mut Value, cfg: &ImageCompatConfig) -> Ima
         let Some(blocks) = item.get_mut("content").and_then(Value::as_array_mut) else {
             continue;
         };
-        stats.merge(compress_blocks(blocks, cfg));
+        stats.merge(compress_blocks(blocks, cfg, &mut budget));
     }
     stats
 }
@@ -307,12 +315,24 @@ impl ImageCompressStats {
 }
 
 /// content blocks 数组就地压缩（内部共用实现）。
-fn compress_blocks(blocks: &mut [Value], cfg: &ImageCompatConfig) -> ImageCompressStats {
+///
+/// `budget` 是整请求累计原始字节额度：每处理一张图扣减其 URI 文本长度，
+/// 额度不足时该图（及其后所有图）原样放行，避免多图请求峰值内存无界增长。
+fn compress_blocks(
+    blocks: &mut [Value],
+    cfg: &ImageCompatConfig,
+    budget: &mut usize,
+) -> ImageCompressStats {
     let mut stats = ImageCompressStats::default();
     for block in blocks.iter_mut() {
         let Some(uri) = image_uri_of(block).map(str::to_string) else {
             continue;
         };
+        // 累计额度不足：不再解码/压缩这张图，保持原样（压缩是尽力而为）
+        if uri.len() > *budget {
+            continue;
+        }
+        *budget -= uri.len();
         let Some(next) = compress_with_cache(&uri, cfg) else {
             continue;
         };

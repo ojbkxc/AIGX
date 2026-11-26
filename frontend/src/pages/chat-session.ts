@@ -11,8 +11,11 @@
  * 旧版把消息整表存 localStorage，首启时一次性迁移进后端（迁移后清旧键）。
  */
 import { api } from '../api';
+import { extractAssistantConfig } from '../api/endpoints/assistant';
+import type { AssistantConfigWire } from '../api/endpoints/assistant';
 import type { DebugMessage } from '../components/chat/types';
 import type { ChatStreamUsage, ToolCallState } from '../types';
+import type { AssistantConfig } from './chat-state';
 
 /** 本机会话存储（仅迁移期读取旧键，写路径已全在后端） */
 export const SESSIONS_KEY = 'aigx_playground_sessions';
@@ -237,4 +240,71 @@ export function toSessionItem(summary: {
     parent_session_id: summary.parent_session_id ?? null,
     title_source: summary.title_source ?? null,
   };
+}
+
+/* ── 助手配置：服务端权威 + localStorage 首帧缓存 ─────────────
+ *
+ * 与侧栏布局同一套取向：库里那份是权威副本（`GET/PUT /api/assistant/config`），
+ * localStorage 只当首帧缓存 —— 这样桌面壳/网页端/多设备读到同一份。端点未就绪
+ * （404 / 测试替身缺方法）时静默降级为纯本机，行为与改造前一致。
+ *
+ * AIGX 的 `AssistantConfig` 与上游 `AssistantConfigWire` 字段一一对应，只做
+ * 空串↔null 的归一（上游用 null 表达「未设置」，AIGX 界面用空串）。
+ */
+export function assistantConfigToWire(config: AssistantConfig): AssistantConfigWire {
+  return {
+    model: config.model && config.model.trim() ? config.model : null,
+    apiKeyId: config.apiKeyId,
+    reasoning: config.reasoning,
+    titleModel: config.titleModel && config.titleModel.trim() ? config.titleModel : null,
+    titlePrompt: config.titlePrompt,
+    mode: config.mode,
+    systemPromptEnabled: config.systemPromptEnabled,
+    systemPrompt: config.systemPrompt,
+    tools: config.tools,
+  };
+}
+
+export function assistantConfigFromWire(wire: AssistantConfigWire, base: AssistantConfig): AssistantConfig {
+  return {
+    ...base,
+    model: typeof wire.model === 'string' ? wire.model : '',
+    reasoning: typeof wire.reasoning === 'string' ? wire.reasoning : null,
+    titleModel: typeof wire.titleModel === 'string' ? wire.titleModel : '',
+    titlePrompt: typeof wire.titlePrompt === 'string' ? wire.titlePrompt : base.titlePrompt,
+    mode: wire.mode === 'full' ? 'full' : 'confirm',
+    systemPromptEnabled: wire.systemPromptEnabled !== false,
+    systemPrompt: typeof wire.systemPrompt === 'string' ? wire.systemPrompt : base.systemPrompt,
+    tools: wire.tools && typeof wire.tools === 'object' ? wire.tools : {},
+    apiKeyId: typeof wire.apiKeyId === 'string' ? wire.apiKeyId : null,
+  };
+}
+
+/**
+ * 读服务端助手配置。
+ * `available=false` = 端点不存在/请求失败（调用方继续用 localStorage）；
+ * `available=true, config=null` = 端点可用但库里没存过（调用方上行迁移一次）。
+ */
+export async function loadAssistantConfigFromServer(): Promise<{
+  available: boolean;
+  config: AssistantConfigWire | null;
+}> {
+  const fn = (api as { getAssistantConfig?: () => Promise<unknown> }).getAssistantConfig;
+  if (typeof fn !== 'function') return { available: false, config: null };
+  try {
+    return { available: true, config: extractAssistantConfig(await fn()) };
+  } catch {
+    return { available: false, config: null };
+  }
+}
+
+/** 把助手配置推给服务端（fire-and-forget；端点未就绪时静默）。 */
+export async function pushAssistantConfigToServer(config: AssistantConfig): Promise<void> {
+  const fn = (api as { saveAssistantConfig?: (wire: AssistantConfigWire) => Promise<unknown> }).saveAssistantConfig;
+  if (typeof fn !== 'function') return;
+  try {
+    await fn(assistantConfigToWire(config));
+  } catch {
+    /* 端点未就绪 / 离线：本机缓存仍生效，界面不回滚（与侧栏布局同一取向） */
+  }
 }

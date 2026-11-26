@@ -62,11 +62,14 @@ import { streamChat, type AssistantConfig } from './chat-state';
 import {
   DEFAULT_TITLE_PROMPT,
   TITLE_CFG_KEY,
+  assistantConfigFromWire,
   cleanTitle,
   importLegacySessions,
   fromPersistedMessage,
   isDebugMessage,
+  loadAssistantConfigFromServer,
   loadTitledIds,
+  pushAssistantConfigToServer,
   readLegacySessions,
   saveTitledIds,
   toPersistedMessage,
@@ -233,6 +236,9 @@ export default function Chat(): JSX.Element {
   const [config, setConfig] = useState<AssistantConfig>(readConfig);
   const configRef = useRef<AssistantConfig>(config);
   configRef.current = config;
+  /** 服务端配置是否已同步过一次：同步前不把本机默认值推上去（否则会用本机
+   *  默认覆盖用户在另一端选好的模型）。同步完成（成功或端点不可用）后置 true。 */
+  const configSyncedRef = useRef(false);
   const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [draft, setDraft] = useState('');
@@ -262,7 +268,36 @@ export default function Chat(): JSX.Element {
     } catch {
       /* 隐私模式：内存内生效即可 */
     }
+    // 服务端为权威副本（跨端同步）；同步过一次之后再推，避免首帧默认值覆盖远端。
+    if (configSyncedRef.current) {
+      void pushAssistantConfigToServer(next);
+    }
     if (note) toastRef.current(note);
+  }, []);
+
+  /* ── 首启：从服务端对齐助手配置（端点未就绪则纯本机）──
+   * 库里那份是权威：有就覆盖本机缓存；库里为空（首次落库）就把本机那份上行一次，
+   * 老用户无感迁移。端点不存在/请求失败时保持本机配置不动（与改造前一致）。 */
+  useEffect(() => {
+    let cancelled = false;
+    void loadAssistantConfigFromServer().then(({ available, config: wire }) => {
+      if (cancelled) return;
+      if (available && wire) {
+        const next = assistantConfigFromWire(wire, configRef.current);
+        setConfig(next);
+        configRef.current = next;
+        try {
+          localStorage.setItem(CFG_KEY, JSON.stringify(next));
+        } catch {
+          /* 写不进缓存也仍按服务端那份渲染 */
+        }
+      } else if (available) {
+        // 端点可用但库里没存过：本机这份上行迁移
+        void pushAssistantConfigToServer(configRef.current);
+      }
+      configSyncedRef.current = true;
+    });
+    return () => { cancelled = true; };
   }, []);
 
   const persistSessions = useCallback((next: PlaygroundSession[]) => {

@@ -164,7 +164,7 @@ impl AnthropicBridge {
     /// - 非头部 system 消息降级为 user 轮次（保留语义不丢弃）
     /// - assistant 轮的 `tool_calls` 翻译为 `tool_use` 块（多轮工具回放）
     /// - tool 角色消息翻译为 `tool_result` 块
-    fn build_body(&self, req: &ChatFormat, stream: bool) -> Value {
+    fn build_body(&self, req: &ChatFormat, stream: bool, model: &str) -> Value {
         // 参照 new-api：合并连续同角色纯文本消息。Anthropic Messages API 要求
         // user/assistant 交替，连续同角色会 400；此处先合并，避免拒绝。
         let mut merged: Vec<ChatMessage> = Vec::new();
@@ -284,7 +284,7 @@ impl AnthropicBridge {
         }
 
         let mut body = serde_json::json!({
-            "model": req.model,
+            "model": model,
             "messages": messages,
             // Anthropic 要求 max_tokens 必填；缺失兜底 4096
             "max_tokens": req.anthropic_max_tokens(),
@@ -1052,18 +1052,15 @@ impl StreamState {
     }
 }
 
-#[async_trait]
-impl Bridge for AnthropicBridge {
-    fn name(&self) -> &'static str {
-        "anthropic"
-    }
-
-    async fn chat(
+impl AnthropicBridge {
+    /// chat 的实际实现；`model` 为上游模型名（failover 可覆盖），消息体按引用共享。
+    async fn chat_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
-        let body = self.build_body(req, false);
+        let body = self.build_body(req, false, model);
         let resp = crate::debug_traffic::traced(
             self.post(&self.messages_url(), &body)
                 .timeout(crate::bridge::nonstream_request_timeout()),
@@ -1090,15 +1087,17 @@ impl Bridge for AnthropicBridge {
             .await
             .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))?;
 
-        Ok(parse_response(&json, &req.model))
+        Ok(parse_response(&json, model))
     }
 
-    async fn chat_stream(
+    /// chat_stream 的实际实现；语义同 [`AnthropicBridge::chat_impl`]。
+    async fn chat_stream_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
-        let body = self.build_body(req, true);
+        let body = self.build_body(req, true, model);
         let resp = crate::debug_traffic::traced(self.post(&self.messages_url(), &body), ctx)
             // 流式请求放宽总超时（共享 client 的 300s 是累计上限，会掐断长流）；
             // 空闲兜底交给 read_timeout 与首事件守卫。
@@ -1120,7 +1119,7 @@ impl Bridge for AnthropicBridge {
         }
 
         let id = format!("msg_{}", uuid::Uuid::new_v4());
-        let model = req.model.clone();
+        let model = model.to_string();
         let byte_stream = resp.bytes_stream();
 
         // 参照 openai.rs 的 unfold 模式：把可变解码器与流状态作为种子放入
@@ -1194,6 +1193,47 @@ impl Bridge for AnthropicBridge {
         );
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl Bridge for AnthropicBridge {
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+
+    async fn chat(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, model, ctx).await
+    }
+
+    async fn chat_stream(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_stream_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, model, ctx).await
     }
 }
 
