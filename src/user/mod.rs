@@ -1288,11 +1288,11 @@ mod tests {
         assert!(s.get_by_email("nonexist@example.com").is_none());
     }
 
-    /// 加载失败**不得**把内存里的用户表清空。
+    /// 坏记录被跳过（不拖垮整表），且**原有用户不丢**。
     ///
     /// 旧实现先 `by_id.clear()` / `by_email.clear()` 再逐条读，中途 `?` 冒泡
-    /// 就留下半张（甚至空）表；而 `load()` 也会被热重载接口直接调用。
-    /// 判据：坏掉一条键之后 `load()` 返回 Err，且**原有用户仍在**。
+    /// 就留下半张（甚至空）表；现在坏记录（合法 JSON 但字段不是 User）只告警
+    /// 跳过，整趟 load 成功换入新表——原用户仍在，坏 key 不进索引。
     #[test]
     fn load_failure_keeps_existing_memory_table() {
         let s = store();
@@ -1301,19 +1301,19 @@ mod tests {
         s.store
             .put("user:broken-entry", &serde_json::json!({ "not_a_user": 1 }))
             .unwrap();
-        let err = s.load().expect_err("坏条目必须让 load 报错而不是静默");
-        assert!(
-            format!("{err:#}").contains("user:broken-entry") || !format!("{err:#}").is_empty(),
-            "错误里应带上下文：{err:#}"
-        );
+        s.load().expect("单条坏记录应被跳过，而不是让整表失败");
         assert!(
             s.get_by_id(&u.id).is_some(),
-            "load 失败后内存表被清空了：用户从内存里消失（登录会报「用户不存在」）"
+            "坏记录不该让原有用户从内存里消失"
         );
         assert_eq!(
             s.get_by_email("keep@test.com").map(|x| x.id),
             Some(u.id.clone()),
-            "load 失败后 email 索引被清空了"
+            "坏记录不该清空 email 索引"
+        );
+        assert!(
+            s.get_by_id("broken-entry").is_none(),
+            "坏记录不得进入索引"
         );
     }
 
