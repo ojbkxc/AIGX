@@ -247,7 +247,11 @@ impl Cancel {
             Some(parent) => {
                 tokio::select! {
                     biased;
-                    _ = parent.cancelled() => {}
+                    // 递归 async fn 必须 boxing（E0733）：父链判定要走同一套
+                    // 「先建 notified 再复查 flag」的逻辑，所以直接复用父的
+                    // cancelled()，而不是在这里展开父的 flag 快照（那会丢掉
+                    // 「父在两次检查之间被取消」的窗口）。
+                    _ = Box::pin(parent.cancelled()) => {}
                     _ = notified => {}
                 }
             }
