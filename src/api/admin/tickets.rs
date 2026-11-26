@@ -281,24 +281,31 @@ pub async fn handle_admin_list_tickets(
 }
 
 /// POST /api/admin/tickets/reply - 管理员回复（可重开已关闭工单）
+///
+/// 权限走 `verify_admin`（不是 `verify_user` + `is_admin()`）：后者虽然也挡住
+/// 非管理员，但**绕过首登强制改密门禁**——`must_change_password` 的管理员
+/// 能在这里提交任意回复，而同一管理面的其他接口一律 403
+/// `PASSWORD_CHANGE_REQUIRED`。判定口径与本文件其余管理端点保持一致。
 pub async fn handle_admin_reply_ticket(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<ReplyTicketRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let admin = verify_user(&state, &headers).await?;
-    if !admin.is_admin() {
-        return Err(error_response(
-            "Admin access required",
-            StatusCode::FORBIDDEN,
-        ));
-    }
+    let _config = verify_admin(&state, &headers).await?;
+    // 消息行里的 `user_id` 是用户 UUID（`append_message` 直接落库），不能拿
+    // 会话邮箱充数——否则前端按 id 关联用户时认不出这条管理员回复。
+    let email = crate::api::admin::common::admin_id_from_session(&state, &headers).await;
+    let admin_id = state
+        .user_store
+        .get_by_email(&email)
+        .map(|u| u.id)
+        .ok_or_else(|| error_response("Admin not found", StatusCode::UNAUTHORIZED))?;
     if body.message.trim().is_empty() {
         return Err(error_response("回复内容不能为空", StatusCode::BAD_REQUEST));
     }
     state
         .ticket_store
-        .reply_by_admin(&body.id, &admin.id, body.message.trim())
+        .reply_by_admin(&body.id, &admin_id, body.message.trim())
         .map(|t| Json(json!({ "success": true, "data": ticket_json(&t) })))
         .map_err(|e| error_response(&e.to_string(), StatusCode::BAD_REQUEST))
 }

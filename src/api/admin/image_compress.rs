@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_user};
+use super::common::{error_response, verify_admin, verify_user};
 
 const KEY_ENABLED: &str = "imageCompressEnabled";
 const KEY_MAX_EDGE: &str = "imageCompressMaxEdge";
@@ -90,12 +90,17 @@ pub async fn handle_get_image_compress(
 }
 
 /// PUT /api/image-compress — 部分字段更新；全部校验通过才落盘。
+///
+/// 权限：**管理员**。这几个键是全局单份（`imageCompressEnabled` 等，所有用户
+/// 与所有请求共用），此前写成 `verify_user`，于是任何登录用户都能把全站压缩
+/// 参数改掉（关掉压缩→请求体变大，或把质量调到上限→带宽放大）。读侧仍
+/// 允许登录用户（`GET`），只收紧写侧。
 pub async fn handle_put_image_compress(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<ImageCompressRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    verify_user(&state, &headers).await?;
+    verify_admin(&state, &headers).await?;
 
     // 先校验全部字段，任何一个越界都整体拒绝（不写半份）。
     if let Some(v) = body.max_edge {

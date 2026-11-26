@@ -380,4 +380,100 @@ mod tests {
         headers.insert("user-agent", "Mozilla/5.0".parse().unwrap());
         assert!(!is_metrics_scrape(&headers));
     }
+
+    /// 从源码里截出某个 `pub async fn <name>` 的函数体（括号配对，忽略花括号外的结束）。
+    fn fn_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let needle = format!("pub async fn {name}(");
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("源码里找不到函数 {name}"));
+        let open = src[start..]
+            .find('{')
+            .map(|i| start + i)
+            .unwrap_or_else(|| panic!("函数 {name} 没有函数体"));
+        let mut depth = 0usize;
+        for (idx, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &src[open..open + idx + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("函数 {name} 的括号不配对");
+    }
+
+    /// 全局单键配置的**写侧**必须走 `verify_admin`，读侧保持 `verify_user`。
+    ///
+    /// 缺陷形态：这几个键全站单份（所有用户共用），写成 `verify_user` 时
+    /// 任何登录用户都能覆盖全站设置。本判据同时钉住两件事——
+    /// ① 写侧提权（`verify_admin`）；② 读侧**不**被误提权（正向前提，
+    /// 否则「全都改成 admin」也能骗过只查写侧的守卫）。
+    #[test]
+    fn global_config_writes_require_admin() {
+        let image = include_str!("image_compress.rs");
+        let put_image = fn_body(image, "handle_put_image_compress");
+        assert!(
+            put_image.contains("verify_admin"),
+            "PUT /api/image-compress 必须 admin 鉴权：{}",
+            put_image
+        );
+        assert!(
+            !put_image.contains("verify_user"),
+            "PUT /api/image-compress 不得用 verify_user：{}",
+            put_image
+        );
+        // 正向对照：读侧仍是登录即可
+        let get_image = fn_body(image, "handle_get_image_compress");
+        assert!(
+            get_image.contains("verify_user"),
+            "GET /api/image-compress 应保持 verify_user：{}",
+            get_image
+        );
+
+        let assistant = include_str!("assistant_config.rs");
+        let put_assistant = fn_body(assistant, "handle_put_assistant_config");
+        assert!(
+            put_assistant.contains("verify_admin"),
+            "PUT /api/assistant/config 必须 admin 鉴权：{}",
+            put_assistant
+        );
+        assert!(
+            !put_assistant.contains("verify_user"),
+            "PUT /api/assistant/config 不得用 verify_user：{}",
+            put_assistant
+        );
+        let get_assistant = fn_body(assistant, "handle_get_assistant_config");
+        assert!(
+            get_assistant.contains("verify_user"),
+            "GET /api/assistant/config 应保持 verify_user：{}",
+            get_assistant
+        );
+    }
+
+    /// 管理面 handler 不得用「`verify_user` + 手写 `is_admin()`」绕开
+    /// 首登强制改密门禁——`verify_admin` 内才有 `must_change_password`
+    /// 那一层，手写组合会让未改密的管理员继续操作管理面。
+    #[test]
+    fn admin_endpoints_use_verify_admin_not_manual_is_admin() {
+        let tickets = include_str!("tickets.rs");
+        let reply = fn_body(tickets, "handle_admin_reply_ticket");
+        assert!(
+            reply.contains("verify_admin"),
+            "POST /api/admin/tickets/reply 必须走 verify_admin：{reply}"
+        );
+        assert!(
+            !reply.contains("verify_user"),
+            "不得用 verify_user + is_admin() 组合（绕过改密门禁）：{reply}"
+        );
+        // 消息行的 user_id 必须是用户 UUID，不是会话邮箱
+        assert!(
+            reply.contains("get_by_email"),
+            "管理员回复要把会话邮箱换成用户 id 再落库：{reply}"
+        );
+    }
 }

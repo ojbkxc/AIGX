@@ -17,7 +17,7 @@ use axum::{
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_user};
+use super::common::{error_response, verify_admin, verify_user};
 
 const CONFIG_KEY: &str = "assistantConfig";
 
@@ -46,12 +46,17 @@ pub async fn handle_get_assistant_config(
 }
 
 /// PUT /api/assistant/config — 整块替换。
+///
+/// 权限：**管理员**。`assistantConfig` 是全局单份（设置页的助手默认配置，
+/// 所有用户共用），此前写成 `verify_user`，于是任何登录用户都能整块覆盖
+/// 全站助手配置（含系统提示词等影响所有人会话的字段）。读侧仍允许登录
+/// 用户（`GET`，前端渲染要用），只收紧写侧。
 pub async fn handle_put_assistant_config(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    verify_user(&state, &headers).await?;
+    verify_admin(&state, &headers).await?;
     let Some(config) = body.get("config") else {
         return Err(error_response("缺少 config 字段", StatusCode::BAD_REQUEST));
     };
