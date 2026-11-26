@@ -76,7 +76,10 @@ export default function DonutChart({
   if (small.length) buckets.push({ datum: otherDatum(small), members: small });
   // 上限收尾：保留既有「其他」，把被挤出的项并进去（不新造第二个「其他」）
   if (buckets.length > maxSlices) {
-    const keep = small.length ? Math.max(1, maxSlices - 1) : maxSlices;
+    // **留一位给「其他」**：曾经无小项时 `keep = maxSlices`，`splice` 后剩
+    // maxSlices 个，收尾再 push 一个「其他」就成了 maxSlices + 1 —— 声明上限 9
+    // 却画出 10 片。有/无小项统一成 `maxSlices - 1`，两个分支都不越过上限。
+    const keep = Math.max(1, maxSlices - 1);
     const tail = buckets.splice(keep);
     const members = tail.flatMap((b) => b.members);
     const last = buckets[buckets.length - 1];

@@ -128,14 +128,14 @@ test.describe('安全边界（前端侧）', () => {
    * 一个提示都没有，只能猜。实测（page.route 打 400 + 真实表单提交）：
    * POST 400 → 弹窗仍开 → `.error-message` 计数 0、无 toast、无 console 错误。
    *
-   * 断言本身是对的（后端拒绝就必须给用户看得见的原因），所以**不删不改宽**；
-   * 这里用 `test.fail()` 把「当前实现确实红」钉住 —— 一旦有人把
-   * `loadChannels()` 的 `setError('')` 挪到成功分支（或 catch 里改成
-   * `setError` 之后再 `void loadChannels()` 而不清错），这条会因「预期失败却通过」
-   * 变红，强制删掉这个标记。
+   * 断言本身是对的（后端拒绝就必须给用户看得见的原因），所以**不删不改宽**。
+   *
+   * 这条曾经用 `test.fail()` 钉住「当前实现确实红」，现在已修：`catch` 里改成
+   * 「先 `await loadChannels()`（它会 `setError('')`）→ 再 `setError(真实原因)`」，
+   * 顺序反转后错误不再被同一个 tick 抹掉。这条从「钉住缺陷」转为**回归守卫** ——
+   * 谁把顺序改回去（或把 `setError` 挪到 `loadChannels` 之前），这条就会红。
    */
   test('渠道表单提交内网地址时展示可读错误', async ({ page, pageErrors }) => {
-    test.fail(true, 'Channels.handleSave 的 setError 被随后的 loadChannels().setError("") 抹掉（P1，见本测试上方注释）');
     await loginAsAdmin(page, { sessions: [] });
     // 旧版这条是「页面里有没有 .error-message」—— 打开 /channels 时本来就没有，
     // 于是 `null || typeof === 'string'` 恒成立，等于什么都没验。
@@ -161,15 +161,26 @@ test.describe('安全边界（前端侧）', () => {
     await modal.locator('input[placeholder="https://cf-ai-gw.pages.dev 或 https://api.Workspace_2B8939.com/v1"]')
       .fill('http://127.0.0.1:8080/v1');
     // 创建路径的提交键文案是「添加」（编辑才是「更新」）
+    const posted: string[] = [];
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().includes('/api/channels')) posted.push(r.url());
+    });
     await modal.getByRole('button', { name: '添加', exact: true }).click();
 
-    // 后端 400 的文案原样出现在页面上（页级错误条），弹窗留着可改
-    const err = page.locator('.error-message');
+    // 后端 400 的文案必须出现在**弹窗 body 内**的错误条上（页级那条会被遮罩
+    // 盖住，Channels.tsx 的注释写明保存类错误就放弹窗里），弹窗留着可改。
+    const err = modal.locator('.error-message');
     await expect(err).toBeVisible();
     await expect(err).toContainText('Base URL 不能指向内网地址');
-    await expect(page.locator('.modal')).toBeVisible();
+    await expect(modal).toBeVisible();
+    expect(posted.length, '提交必须真的发出 POST（否则上面的断言是空转）').toBe(1);
 
-    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+    // 这条用例**故意**让后端返回 400，浏览器必然往 console 打一条
+    // `Failed to load resource: ... 400 (Bad Request)` —— 那是预期内的资源
+    // 加载失败，不是页面错误。只放行这一类，其余（真异常 / 其它 console.error）
+    // 仍然要红。
+    const unexpected = pageErrors.filter((e) => !e.includes('Failed to load resource'));
+    expect(unexpected, unexpected.join('\n')).toEqual([]);
   });
 
   test('旧 /playground 书签重定向到 /chat（不是白屏，也不是另一个页面）', async ({ page, pageErrors }) => {

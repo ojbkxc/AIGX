@@ -1641,9 +1641,15 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       loadChannels();
     } catch (err) {
       // PUT 已成功而 PATCH 失败也会走到这里：文案点明是间隔没写进去，
-      // 别让人以为整个渠道都没保存（下面的 loadChannels 会把真实状态刷回来）
-      setError(err instanceof Error ? err.message : String(err));
-      loadChannels();
+      // 别让人以为整个渠道都没保存（下面的 loadChannels 会把真实状态刷回来）。
+      //
+      // **顺序不能反**：`loadChannels()` 首行是 `setError('')`，先设错误再刷新
+      // 会让错误在同一个 tick 内被抹掉 —— 保存失败时用户看不到任何原因
+      // （弹窗不关、无提示，实测 POST 400 时页面一片安静）。所以先 `await`
+      // 刷新（它会清错），再设真实原因。
+      const message = err instanceof Error ? err.message : String(err);
+      await loadChannels();
+      setError(message);
     } finally {
       setSaving(false);
     }

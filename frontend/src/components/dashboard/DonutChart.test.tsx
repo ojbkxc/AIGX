@@ -50,11 +50,13 @@ describe('DonutChart — 跟随式 tooltip + 图例联动（#8/#9）', () => {
     const many = Array.from({ length: 12 }, (_, i) => ({ name: `m${i}`, value: 10 + i }));
     const { container } = render(<DonutChart data={many} colors={new Map()} totalText="t" totalSub="s" maxSlices={4} />);
     const paths = Array.from(container.querySelectorAll('path')) as SVGPathElement[];
-    expect(paths).toHaveLength(5); // 4 头部 + 其他
+    // `maxSlices` 是**含「其他」的总片数上限**：4 → 3 头部 + 1 个「其他」。
+    // 旧断言这里是 5（4 头部 + 其他），把 off-by-one 当成了正确行为。
+    expect(paths).toHaveLength(4);
     const rows = Array.from(container.querySelectorAll('.donut-legend-row'));
     expect(rows).toHaveLength(12); // 图例列全量
     fireEvent.mouseEnter(rows[11]); // 第 12 行 → 其他（最后扇区）
-    expect(paths[4].getAttribute('opacity')).toBe('1');
+    expect(paths[3].getAttribute('opacity')).toBe('1');
     expect(paths[0].getAttribute('opacity')).toBe('0.35');
   });
 
@@ -111,7 +113,8 @@ describe('DonutChart — 合并小项阈值（A2A donutView threshold）', () =>
     const { container } = render(
       <DonutChart data={many} colors={new Map()} totalText="t" totalSub="s" maxSlices={4} minPercent={0} />,
     );
-    expect(container.querySelectorAll('path')).toHaveLength(5);
+    // 上限含「其他」：maxSlices=4 → 4 片（旧断言写 5，把 off-by-one 当成了正确行为）。
+    expect(container.querySelectorAll('path')).toHaveLength(4);
   });
 });
 
