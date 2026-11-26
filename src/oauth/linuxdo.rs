@@ -23,8 +23,9 @@ pub struct LinuxDoOauthConfig {
 }
 
 impl LinuxDoOauthConfig {
+    /// 配置是否就绪。`trim()` 判空：只有空格的占位值不应被当作已配置。
     pub fn ready(&self) -> bool {
-        !self.client_id.is_empty() && !self.client_secret.is_empty()
+        !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty()
     }
 }
 
@@ -112,4 +113,47 @@ pub async fn get_user_info(
     }
 
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(id: &str, secret: &str) -> LinuxDoOauthConfig {
+        LinuxDoOauthConfig {
+            client_id: id.to_string(),
+            client_secret: secret.to_string(),
+            redirect_uri: String::new(),
+        }
+    }
+
+    #[test]
+    fn ready_requires_both_credentials() {
+        assert!(!LinuxDoOauthConfig::default().ready());
+        assert!(!cfg("id", "").ready());
+        assert!(cfg("id", "secret").ready());
+    }
+
+    #[test]
+    fn ready_rejects_whitespace_only_placeholders() {
+        assert!(!cfg("  ", "secret").ready());
+        assert!(!cfg("id", "\t").ready());
+    }
+
+    #[test]
+    fn token_response_tolerates_missing_token_type() {
+        let r: LinuxDoTokenResponse = serde_json::from_str(r#"{"access_token":"t"}"#).unwrap();
+        assert_eq!(r.access_token, "t");
+        assert!(
+            serde_json::from_str::<LinuxDoTokenResponse>(r#"{"token_type":"bearer"}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn user_info_requires_id_and_username() {
+        let ok: LinuxDoUserInfo = serde_json::from_str(r#"{"id":7,"username":"neo"}"#).unwrap();
+        assert_eq!(ok.id, 7);
+        assert_eq!(ok.username, "neo");
+        assert!(serde_json::from_str::<LinuxDoUserInfo>(r#"{"id":7}"#).is_err());
+    }
 }

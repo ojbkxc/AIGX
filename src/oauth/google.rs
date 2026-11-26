@@ -30,11 +30,12 @@ fn default_scope() -> String {
 }
 
 impl GoogleOauthConfig {
-    /// 配置是否就绪（client_id / client_secret / redirect_uri 均非空）
+    /// 配置是否就绪（client_id / client_secret / redirect_uri 均非空）。
+    /// 用 `trim()` 判空：只有空格的占位值不应被当作已配置。
     pub fn ready(&self) -> bool {
-        !self.client_id.is_empty()
-            && !self.client_secret.is_empty()
-            && !self.redirect_uri.is_empty()
+        !self.client_id.trim().is_empty()
+            && !self.client_secret.trim().is_empty()
+            && !self.redirect_uri.trim().is_empty()
     }
 }
 
@@ -152,4 +153,50 @@ pub async fn get_user_info(
         .map_err(|e| anyhow::anyhow!("Failed to parse Google user info: {e}"))?;
 
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(id: &str, secret: &str, redirect: &str) -> GoogleOauthConfig {
+        GoogleOauthConfig {
+            client_id: id.to_string(),
+            client_secret: secret.to_string(),
+            redirect_uri: redirect.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ready_requires_all_three_fields() {
+        assert!(!GoogleOauthConfig::default().ready());
+        assert!(!cfg("id", "secret", "").ready());
+        assert!(!cfg("id", "", "https://x/cb").ready());
+        assert!(cfg("id", "secret", "https://x/cb").ready());
+    }
+
+    #[test]
+    fn ready_rejects_whitespace_only_placeholders() {
+        assert!(!cfg(" ", "secret", "https://x/cb").ready());
+        assert!(!cfg("id", "secret", "  \t").ready());
+    }
+
+    #[test]
+    fn token_response_tolerates_missing_optional_fields() {
+        let r: GoogleTokenResponse = serde_json::from_str(r#"{"access_token":"t"}"#).unwrap();
+        assert_eq!(r.access_token, "t");
+        assert_eq!(r.expires_in, 0);
+        assert!(r.refresh_token.is_none());
+        assert!(serde_json::from_str::<GoogleTokenResponse>(r#"{"token_type":"bearer"}"#).is_err());
+    }
+
+    #[test]
+    fn user_info_requires_sub() {
+        // Google 的稳定用户标识是 sub；缺了它就无法区分用户
+        assert!(serde_json::from_str::<GoogleUserInfo>(r#"{"email":"a@b.c"}"#).is_err());
+        let ok: GoogleUserInfo = serde_json::from_str(r#"{"sub":"123"}"#).unwrap();
+        assert_eq!(ok.sub, "123");
+        assert!(ok.email.is_none());
+    }
 }
