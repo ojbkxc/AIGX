@@ -34,6 +34,7 @@ import { endpoints as pluginsEndpoints } from './endpoints/plugins';
 import { endpoints as agent_chatEndpoints } from './endpoints/agent_chat';
 import { endpoints as prompts_publicEndpoints } from './endpoints/prompts_public';
 import { endpoints as miscEndpoints } from './endpoints/misc';
+import { endpoints as notifyBarkEndpoints } from './endpoints/notify';
 
 export const api = {
   ...storage_reportsEndpoints,
@@ -45,6 +46,7 @@ export const api = {
   ...agent_chatEndpoints,
   ...prompts_publicEndpoints,
   ...miscEndpoints,
+  ...notifyBarkEndpoints,
 };
 
 export default api;

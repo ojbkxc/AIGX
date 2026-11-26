@@ -17,7 +17,7 @@
 //! - 只允许一个提供商、一个跨平台入口、不带可执行网页（`ui`）
 //! - `wasm.json` ≤ 32 KiB、ABI 必须为 [`ABI`]
 //! - 能力必须在 [`CAPABILITIES`] 白名单内，且带依赖声明
-//! - 内存 8–128 MiB、并发 1–16
+//! - 内存 8–256 MiB、并发 1–4096（`concurrency_hard_limit` 若声明也必须落在 1–4096）
 //! - 原生辅助：≤8 项、标识字符集受限、必须声明 `native.helpers.v1`
 //! - 网络来源：≤64 条（原 32，放宽以容纳 kiro 等多区域 OIDC 提供商）、必须是精确 HTTPS origin（无路径/查询/凭据/通配符）
 //! - 入口必须是包内普通文件（canonicalize 后仍在包目录内）
@@ -33,6 +33,15 @@ pub const TARGET: &str = "wasm32-unknown-unknown";
 
 /// 沙箱 ABI 版本。插件导出 `a2a_abi_version()` 必须返回它。
 pub const ABI: u32 = 1;
+
+/// 单次实例内存下限（MiB）。
+pub const MIN_MEMORY_MIB: usize = 8;
+
+/// 内存默认值（MiB）。旧包未写 `memory_mib` 时按此值，且宿主兜底不会低于它。
+pub const DEFAULT_MEMORY_MIB: usize = 128;
+
+/// 单次实例内存上限（MiB）。声明与宿主兜底都不得越过它。
+pub const MAX_MEMORY_MIB: usize = 256;
 
 /// 能力白名单（对齐 Agent2API v3.5.0-beta.6 `CAPABILITIES`，逐字一致）。
 ///
@@ -200,7 +209,7 @@ pub struct Manifest {
 }
 
 fn memory_default() -> usize {
-    64
+    DEFAULT_MEMORY_MIB
 }
 
 fn concurrency_default() -> usize {
@@ -230,6 +239,22 @@ pub struct WasmManifest {
 }
 
 impl WasmManifest {
+    /// 宿主兜底抬高单次运行内存上限，避免旧包因签名锁定无法修改而卡在低值。
+    ///
+    /// 对齐上游 `Options::effective_memory_mib`（manifest.rs:273-275）：对话调用
+    /// 至少 [`MAX_MEMORY_MIB`]，其余调用至少 [`DEFAULT_MEMORY_MIB`]，最终都封顶
+    /// `MAX_MEMORY_MIB`。
+    ///
+    /// 消费点：`wasm/runtime.rs` 构造 `StoreLimits` 与内存超限文案时调用。
+    pub fn effective_memory_mib(&self, is_conversation: bool) -> usize {
+        let floor = if is_conversation {
+            MAX_MEMORY_MIB
+        } else {
+            DEFAULT_MEMORY_MIB
+        };
+        self.memory_mib.max(floor).min(MAX_MEMORY_MIB)
+    }
+
     /// 插件是否声明了某项能力。
     pub fn allows(&self, capability: &str) -> bool {
         self.requires.iter().any(|item| item == capability)
@@ -357,8 +382,15 @@ pub fn read_manifest(dir: &Path, pack: &serde_json::Value) -> Result<Option<Wasm
     if requires("login.sms.alicom4.v1") && providers[0] != "codar" {
         return Err("短信 Alicom4 人机验证能力不能跨提供商使用".into());
     }
-    if !(8..=128).contains(&spec.memory_mib) || !(1..=16).contains(&spec.concurrency) {
-        return Err("Wasm 资源声明超出允许范围（内存 8–128 MiB，并发 1–16）".into());
+    if !(MIN_MEMORY_MIB..=MAX_MEMORY_MIB).contains(&spec.memory_mib)
+        || !(1..=4096).contains(&spec.concurrency)
+        || spec
+            .concurrency_hard_limit
+            .is_some_and(|limit| !(1..=4096).contains(&limit))
+    {
+        return Err(format!(
+            "Wasm 资源声明超出允许范围（内存 {MIN_MEMORY_MIB}–{MAX_MEMORY_MIB} MiB，并发 1–4096）"
+        ));
     }
     if spec.helpers.len() > 8
         || spec.helpers.iter().any(|helper| {
@@ -458,7 +490,7 @@ mod tests {
             .unwrap()
             .expect("is wasm");
         assert_eq!(m.provider, "demo");
-        assert_eq!(m.memory_mib, 64);
+        assert_eq!(m.memory_mib, 128);
         assert_eq!(m.concurrency, 8);
         assert!(m.allows("clock.v1"));
         assert!(!m.allows("http.v1"));
@@ -556,10 +588,11 @@ mod tests {
         for (mib, conc, ok) in [
             (8usize, 1usize, true),
             (128, 16, true),
+            (256, 4096, true),
             (7, 8, false),
-            (129, 8, false),
+            (257, 8, false),
             (64, 0, false),
-            (64, 17, false),
+            (64, 4097, false),
         ] {
             let spec = json!({ "abi": ABI, "requires": [], "origins": [],
                 "memory_mib": mib, "concurrency": conc });
@@ -567,6 +600,58 @@ mod tests {
             let got = read_manifest(tmp.path(), &pack("demo"));
             assert_eq!(got.is_ok(), ok, "memory={mib} concurrency={conc}: {got:?}");
         }
+    }
+
+    #[test]
+    fn concurrency_hard_limit_bounds() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (limit, ok) in [
+            (Some(1usize), true),
+            (Some(4096), true),
+            (None, true),
+            (Some(0), false),
+            (Some(4097), false),
+        ] {
+            let mut spec = minimal(&[]);
+            if let Some(limit) = limit {
+                spec["concurrency_hard_limit"] = json!(limit);
+            }
+            write_plugin(tmp.path(), "x", spec);
+            let got = read_manifest(tmp.path(), &pack("demo"));
+            assert_eq!(got.is_ok(), ok, "concurrency_hard_limit={limit:?}: {got:?}");
+            if let Ok(Some(manifest)) = got {
+                assert_eq!(manifest.concurrency_hard_limit, limit);
+            }
+        }
+    }
+
+    #[test]
+    fn effective_memory_floors_and_caps() {
+        let mut manifest = WasmManifest {
+            provider: "demo".into(),
+            abi: ABI,
+            requires: vec![],
+            origins: vec![],
+            helpers: vec![],
+            memory_mib: MIN_MEMORY_MIB,
+            concurrency: 8,
+            verified: false,
+            account_origin: None,
+            desktop_launch: None,
+            managed_login: None,
+            managed_task: None,
+            concurrency_hard_limit: None,
+        };
+        // 低于默认值：非对话抬到 128，对话抬到 256。
+        assert_eq!(manifest.effective_memory_mib(false), DEFAULT_MEMORY_MIB);
+        assert_eq!(manifest.effective_memory_mib(true), MAX_MEMORY_MIB);
+        // 介于两者之间：非对话保留声明值，对话抬到 256。
+        manifest.memory_mib = 200;
+        assert_eq!(manifest.effective_memory_mib(false), 200);
+        assert_eq!(manifest.effective_memory_mib(true), MAX_MEMORY_MIB);
+        // 已在上限：封顶不越界。
+        manifest.memory_mib = MAX_MEMORY_MIB;
+        assert_eq!(manifest.effective_memory_mib(true), MAX_MEMORY_MIB);
     }
 
     #[test]

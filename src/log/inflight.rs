@@ -231,6 +231,89 @@ impl Drop for InflightGuard {
     }
 }
 
+/// 响应产生前客户端断开的终态码。
+///
+/// AIGX 统一口径 = **499**（client closed before first event），与
+/// `AttemptStartGuard`（`src/api/openai/billing.rs`）落的那条一致。**不要**
+/// 用 408：在 AIGX 里 408 的语义是「上游超时」，同一个「客户端响应前断开」
+/// 事件若落 408 会让统计口径分裂并误导排障。
+pub const CLIENT_CLOSED_STATUS: u16 = 499;
+
+/// 客户端在**响应尚未产出**时断开的错误摘要。
+///
+/// 与 `AttemptStartGuard` 的 499 分支逐字相同（`write_attempt_499_log`
+/// 写的就是这句），两条兜底在报表里能一眼归为一类。
+pub const CLIENT_CLOSED: &str = "client closed before first event";
+
+/// 响应前断线的**日志兜底守卫**（499）。
+///
+/// ── 它解决什么 ──────────────────────────────────────────────
+/// `InflightGuard` 只管在途列表的注销，**不写日志**；chat / anthropic 的
+/// 「响应前断线」由 `AttemptStartGuard` 的 499 兜底覆盖。但原生 Responses
+/// 透传端点两样都没有：handler 在写出任何终态日志之前被取消（客户端断连）
+/// 时，这条请求在统计里彻底消失。
+///
+/// 本守卫把「handler 被丢弃」变成第三条收尾路径（与 Agent2API 同义）：
+/// Drop 时若未显式 [`disarm`](Self::disarm)，补一条 status=499 的请求日志。
+///
+/// ── 与 AttemptStartGuard 的关系（不可并存）────────────────────
+/// `AttemptStartGuard` 需要一条已建的 `Reservation` 才能在 Drop 里
+/// `settle_usage`；本守卫只写日志、不结算，专供**没有两段式预留**的端点
+/// （当前仅 responses.rs 的透传/降级链路）。两端点各用各的，**同一条请求
+/// 只会武装其中一个**，不会出现 499 双写。
+///
+/// ── 三条出口 ────────────────────────────────────────────────
+///   - 正常记账（非流式 / 转发失败）：写完终态日志后 [`disarm`](Self::disarm)；
+///   - 流式：**在返回 Response 之前** `disarm` —— 从这一刻起收尾归流的
+///     计费守卫（`ResponsesStreamGuard` / `StreamUsageGuard`），它们随流
+///     Drop 落日志；
+///   - 什么都不做（Drop）：handler 被取消 → 补 499 终态。
+///
+/// ── 幂等 ────────────────────────────────────────────────────
+/// `pending: Option<_>` + `disarm()` 把「补写」与「正常收尾」互斥：一条
+/// 请求至多写一次（`take()` 后 `pending` 为 None，Drop 不再写）。
+pub struct DisconnectLogGuard {
+    log_store: Arc<super::LogStore>,
+    started_at: std::time::Instant,
+    /// 待补的日志模板；`None` = 已正常收尾，不再兜底。
+    pending: Option<super::RequestLog>,
+}
+
+impl DisconnectLogGuard {
+    /// 在「转发开始前」创建（此刻已知 request_id / 模型 / 用户 / 客户端）。
+    pub fn new(
+        log_store: Arc<super::LogStore>,
+        log: super::RequestLog,
+        started_at: std::time::Instant,
+    ) -> Self {
+        Self {
+            log_store,
+            started_at,
+            pending: Some(log),
+        }
+    }
+
+    /// 正常收尾：解除兜底，绝不重复写（幂等）。
+    pub fn disarm(&mut self) {
+        self.pending = None;
+    }
+}
+
+impl Drop for DisconnectLogGuard {
+    fn drop(&mut self) {
+        if let Some(mut log) = self.pending.take() {
+            log.status_code = CLIENT_CLOSED_STATUS;
+            if log.error_msg.is_none() {
+                log.error_msg = Some(CLIENT_CLOSED.to_string());
+            }
+            log.latency_ms = self.started_at.elapsed().as_millis() as u64;
+            // 走日志旁路：有 runtime 时 try_send（Drop 里绝不阻塞请求线程），
+            // 无 runtime（单测）时同步降级落库。
+            self.log_store.record_request(log);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +395,45 @@ mod tests {
         // 条目仍在（由请求自己的 guard drop 注销，避免与 terminate 竞争）
         assert_eq!(reg.len(), 1);
         assert!(guard.cancel_signal().is_cancelled());
+    }
+
+    /// 499 补数：未 disarm 的守卫在 Drop 时补一条 499；已 disarm 的一条不写。
+    /// 无 tokio runtime（`#[test]`）时 `LogWriter` 同步降级，drop 后即可读库。
+    #[test]
+    fn disconnect_guard_writes_499_only_when_armed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(crate::storage::FileStore::new(dir.path().to_path_buf()));
+        let log_store = Arc::new(crate::log::LogStore::new(store.clone()));
+
+        // 1) 断线（未 disarm）→ 补一条 499
+        {
+            let mut log = crate::log::RequestLog::new();
+            log.model = "m".to_string();
+            log.request_id = Some("req-drop".to_string());
+            let _guard = DisconnectLogGuard::new(log_store.clone(), log, std::time::Instant::now());
+            // 离开作用域 = handler 被取消
+        }
+
+        // 2) 正常收尾（disarm 后 drop）→ 不补
+        {
+            let mut log = crate::log::RequestLog::new();
+            log.model = "m".to_string();
+            log.request_id = Some("req-ok".to_string());
+            let mut guard =
+                DisconnectLogGuard::new(log_store.clone(), log, std::time::Instant::now());
+            guard.disarm();
+        }
+
+        let keys = store.list("reqlog:").unwrap();
+        assert_eq!(keys.len(), 1, "只有未 disarm 的那条会落库（幂等）");
+        let log: crate::log::RequestLog = store.get(&keys[0]).unwrap().expect("日志应可反序列化");
+        assert_eq!(log.status_code, CLIENT_CLOSED_STATUS);
+        assert_eq!(log.status_code, 499, "统一回 AIGX 既有口径 499，不用 408");
+        assert_eq!(log.request_id.as_deref(), Some("req-drop"));
+        assert_eq!(log.error_msg.as_deref(), Some(CLIENT_CLOSED));
+        assert_eq!(
+            log.error_msg.as_deref(),
+            Some("client closed before first event")
+        );
     }
 }

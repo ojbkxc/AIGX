@@ -5820,5 +5820,15 @@
   "柱状": "Bar",
   "已依次尝试以下模型，均失败：": "Tried the following models in order, all failed:",
   "（锁定期间不会自动切换模型）": " (no automatic model switching while locked)",
-  "已自动切换模型，前面模型失败原因：": "Switched models automatically; earlier model failures:"
+  "已自动切换模型，前面模型失败原因：": "Switched models automatically; earlier model failures:",
+  "Bark 通知": "Bark Notifications",
+  "Bark 服务地址": "Bark Server URL",
+  "设备密钥（Device Key）": "Device Key",
+  "分组": "Group",
+  "通知分组名，留空默认 AIGX": "Notification group name; defaults to AIGX when empty",
+  "提示音": "Sound",
+  "留空使用 Bark 默认铃声": "Leave empty to use the Bark default sound",
+  "测试 Bark": "Test Bark",
+  "Bark 测试消息已发送": "Bark test message sent",
+  "iOS 推送（Bark）。服务地址填自建/官方 Bark 服务器基址，如 https://api.day.app；Device Key 在 Bark App 内查看。": "iOS push via Bark. For the server URL, use a self-hosted or official Bark server base such as https://api.day.app; find your Device Key in the Bark app."
 }

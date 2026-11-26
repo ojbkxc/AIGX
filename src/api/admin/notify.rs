@@ -70,6 +70,22 @@ pub struct UpdateNotifyConfigRequest {
     pub slack_webhook_url: Option<String>,
     pub webhook_url: Option<String>,
     pub webhook_secret: Option<String>,
+    // Bark（iOS 推送）
+    pub bark_server_url: Option<String>,
+    pub bark_device_key: Option<String>,
+    pub bark_group: Option<String>,
+    pub bark_sound: Option<String>,
+}
+
+/// 敏感字符串写入决策：空串或脱敏占位符（`...` / `***` / `****`）视为
+/// “不修改”，返回 None（保留库内原值）；否则返回去空白后的新值。
+fn merge_secret(incoming: &str) -> Option<String> {
+    let t = incoming.trim();
+    if t.is_empty() || is_masked_value(t) {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 /// 获取通知配置
@@ -95,10 +111,15 @@ pub async fn handle_get_notify_config(
             "slack_webhook_url": "...", // 脱敏
             "webhook_url": cfg.webhook_url,
             "webhook_secret": "...", // 脱敏
+            "bark_server_url": cfg.bark_server_url,
+            "bark_device_key": "...", // 脱敏
+            "bark_group": cfg.bark_group,
+            "bark_sound": cfg.bark_sound,
             "telegram_ready": cfg.telegram_ready(),
             "smtp_ready": cfg.smtp_ready(),
             "slack_ready": cfg.slack_ready(),
             "webhook_ready": cfg.webhook_ready(),
+            "bark_ready": cfg.bark_ready(),
         }
     })))
 }
@@ -128,6 +149,13 @@ pub async fn handle_update_notify_config(
     if let Some(v) = &body.webhook_url {
         if let Err(rej) = webhook_url_allowed(v, allow_internal) {
             audit_ssrf_reject(&state, &headers, "webhook_url", v, &rej).await;
+            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+        }
+    }
+    // Bark 服务基址同为网关主动外发目标 ⇒ 同口径 SSRF 校验（非 http(s)/内网拒绝）。
+    if let Some(v) = &body.bark_server_url {
+        if let Err(rej) = webhook_url_allowed(v, allow_internal) {
+            audit_ssrf_reject(&state, &headers, "bark_server_url", v, &rej).await;
             return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
         }
     }
@@ -184,6 +212,21 @@ pub async fn handle_update_notify_config(
         if !t.is_empty() && !is_masked_value(&t) {
             cfg.webhook_secret = t;
         }
+    }
+    // Bark（iOS 推送）：device_key 走与 bot_token 同款脱敏不回写守卫。
+    if let Some(v) = body.bark_server_url {
+        cfg.bark_server_url = v.trim().to_string();
+    }
+    if let Some(v) = body.bark_device_key {
+        if let Some(n) = merge_secret(&v) {
+            cfg.bark_device_key = n;
+        }
+    }
+    if let Some(v) = body.bark_group {
+        cfg.bark_group = v;
+    }
+    if let Some(v) = body.bark_sound {
+        cfg.bark_sound = v;
     }
     state.notify_service.update_config(cfg).await;
     // 持久化：重启保留（原先只改内存，重启即丢）
@@ -250,5 +293,46 @@ mod tests {
         assert!(is_masked_value("****"));
         assert!(is_masked_value("token***"));
         assert!(!is_masked_value("https://example.com/hook"));
+    }
+
+    /// 请求体可反序列化 Bark 四字段。
+    #[test]
+    fn update_request_deserializes_bark_fields() {
+        let raw = r#"{"bark_server_url":"https://api.day.app","bark_device_key":"dev","bark_group":"ops","bark_sound":"bell"}"#;
+        let req: UpdateNotifyConfigRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(req.bark_server_url.as_deref(), Some("https://api.day.app"));
+        assert_eq!(req.bark_device_key.as_deref(), Some("dev"));
+        assert_eq!(req.bark_group.as_deref(), Some("ops"));
+        assert_eq!(req.bark_sound.as_deref(), Some("bell"));
+    }
+
+    /// device_key 脱敏回写守卫：空/脱敏占位 → None（不覆盖），真实值去空白保留。
+    #[test]
+    fn merge_secret_skips_empty_and_masked() {
+        assert_eq!(merge_secret("devkey"), Some("devkey".to_string()));
+        assert_eq!(merge_secret("  devkey  "), Some("devkey".to_string()));
+        assert_eq!(merge_secret(""), None);
+        assert_eq!(merge_secret("   "), None);
+        assert_eq!(merge_secret("..."), None);
+        assert_eq!(merge_secret("****"), None);
+        assert_eq!(merge_secret("k***x"), None);
+    }
+
+    /// Bark 服务基址走同一 SSRF 校验：内网/环回/非 http(s) 拒绝，公网放行。
+    #[test]
+    fn bark_server_url_ssrf_rejection() {
+        for raw in [
+            "http://127.0.0.1/push",
+            "http://10.0.0.5/",
+            "http://169.254.169.254/latest/",
+            "ftp://8.8.8.8/",
+        ] {
+            assert!(
+                webhook_url_allowed(raw, false).is_err(),
+                "{raw} 应被 SSRF 校验拒绝"
+            );
+        }
+        // 公网字面量 https 放行（字面量 IP 不做 DNS，避免离线测试环境抖动）
+        assert!(webhook_url_allowed("https://8.8.8.8/push", false).is_ok());
     }
 }

@@ -83,6 +83,10 @@ pub enum CooldownMode {
     Upstream,
     Fixed,
     Protection,
+    /// 不进入硬冷却，只把该账号/提供商/模型「降权」排到候选队尾
+    /// （对齐 v3.5.1 `CooldownMode::Deprioritize`）。窗口到点自动恢复，
+    /// 成功转发一次也提前恢复。
+    Deprioritize,
     None,
 }
 
@@ -182,8 +186,133 @@ impl Default for ErrorPolicyConfig {
     }
 }
 
-/// 9 条全局默认规则（与参考树 `default_rules` 逐条一致）。
+/// 9 条全局默认规则（与 v3.5.1 `default_rules`(v2) 逐条一致）。
 pub fn default_rules() -> Vec<ErrorRule> {
+    use CooldownMode::*;
+    use ErrorAction::*;
+    use ErrorKind::*;
+    let rule = |kind: ErrorKind,
+                name: &str,
+                statuses: &[u16],
+                action,
+                cooldown,
+                fallback_seconds,
+                exponential,
+                scope| ErrorRule {
+        id: kind.id().into(),
+        name: name.into(),
+        kind,
+        statuses: statuses.to_vec(),
+        code: String::new(),
+        provider: "*".into(),
+        model: String::new(),
+        enabled: true,
+        action,
+        cooldown,
+        fallback_seconds,
+        exponential,
+        fallback_cap_seconds: 1800,
+        scope,
+    };
+    vec![
+        rule(
+            RateLimit,
+            "请求限流",
+            &[429],
+            SwitchAccount,
+            Upstream,
+            60,
+            false,
+            CooldownScope::Auto,
+        ),
+        rule(
+            Quota,
+            "额度耗尽",
+            &[429],
+            SwitchAccount,
+            Upstream,
+            600,
+            true,
+            CooldownScope::Auto,
+        ),
+        rule(
+            Auth,
+            "登录失效",
+            &[401],
+            RefreshThenSwitch,
+            Fixed,
+            300,
+            true,
+            CooldownScope::Account,
+        ),
+        rule(
+            Balance,
+            "余额不足",
+            &[402],
+            SwitchAccount,
+            Upstream,
+            600,
+            false,
+            CooldownScope::Account,
+        ),
+        rule(
+            Transient,
+            "连接或服务异常",
+            &[408, 500, 502, 503, 504],
+            RetryThenSwitch,
+            Protection,
+            60,
+            false,
+            CooldownScope::Auto,
+        ),
+        rule(
+            Unsupported,
+            "能力不支持",
+            &[501],
+            SwitchProvider,
+            Deprioritize,
+            1800,
+            false,
+            CooldownScope::Auto,
+        ),
+        rule(
+            BadRequest,
+            "请求有误",
+            &[400, 413, 422],
+            SwitchProvider,
+            Deprioritize,
+            1800,
+            false,
+            CooldownScope::Auto,
+        ),
+        rule(
+            Content,
+            "内容被拒绝",
+            &[],
+            SwitchProvider,
+            Deprioritize,
+            1800,
+            false,
+            CooldownScope::Provider,
+        ),
+        rule(
+            Unknown,
+            "其他错误",
+            &[],
+            SwitchAccount,
+            Deprioritize,
+            1800,
+            false,
+            CooldownScope::Auto,
+        ),
+    ]
+}
+
+/// v1 时代的 9 条默认规则（对齐 v3.5.1 `v1_default_rules`，仅供 v1→v2 迁移判据）。
+///
+/// 判据：某条全局规则若与这里逐字段相等，说明用户没改过它，可以安全升级到
+/// [`default_rules`]（v2）；改过的规则保持原样，避免覆盖用户配置。
+pub fn v1_default_rules() -> Vec<ErrorRule> {
     use CooldownMode::*;
     use ErrorAction::*;
     use ErrorKind::*;
@@ -302,6 +431,25 @@ pub fn default_rules() -> Vec<ErrorRule> {
             CooldownScope::Auto,
         ),
     ]
+}
+
+/// v1→v2 内存迁移（对齐 v3.5.1 `config/error_policy.rs::migrate_untouched_v1_defaults`）。
+///
+/// 只升级「逐字段仍等于 v1 默认值」的全局规则；用户改过的不动。幂等：
+/// 升级后规则已等于 v2，不再满足「等于 v1」的判据。
+pub fn migrate_untouched_v1_defaults(settings: &mut ErrorPolicyConfig) {
+    let v1 = v1_default_rules();
+    let v2 = default_rules();
+    for rule in &mut settings.rules {
+        if let (Some(old), Some(next)) = (
+            v1.iter().find(|item| item.kind == rule.kind),
+            v2.iter().find(|item| item.kind == rule.kind),
+        ) {
+            if *rule == *old {
+                *rule = next.clone();
+            }
+        }
+    }
 }
 
 // ── 插件申报的错误规则（对齐参考树 `PluginErrorRule` / `DeclaredErrorPolicy`）──
@@ -433,12 +581,10 @@ impl ErrorPolicyConfig {
             if rule.kind != ErrorKind::Auth && rule.action == ErrorAction::RefreshThenSwitch {
                 return Err("仅登录失效规则可以使用凭证续期".into());
             }
-            if matches!(rule.kind, ErrorKind::BadRequest | ErrorKind::Content)
-                && (rule.action != ErrorAction::ReturnError || rule.cooldown != CooldownMode::None)
-            {
-                return Err("已识别的请求错误和内容拒绝不能设置为重复发送、换号或账号冷却".into());
-            }
-            if rule.kind == ErrorKind::Unknown && !rule.enabled {
+            // v3.5.1 取消了「BadRequest/Content 必须 ReturnError」的约束：
+            // v2 默认规则把它们改成换提供商 + 降权（不直接拒回），约束若还在，
+            // 默认配置自己就校验不过。
+            if rule.kind == ErrorKind::Unknown && global && !rule.enabled {
                 return Err("其他错误的兜底规则不能关闭".into());
             }
         }
@@ -604,6 +750,12 @@ pub fn snapshot() -> Arc<ErrorPolicySnapshot> {
         .unwrap_or_else(|| Arc::new(ErrorPolicySnapshot::default()))
 }
 
+/// 是否挂了显式 `[error_policy]` 段。数据面据此决定用统一策略还是既有
+/// 轮换冷却（未配置时保持旧行为，不凭空改变线上冷却）。
+pub fn configured() -> bool {
+    snapshot().configured
+}
+
 /// 快照内容摘要（保存冲突检测 / 变更判据）。
 pub fn revision(snapshot: &ErrorPolicySnapshot) -> String {
     format!(
@@ -626,8 +778,10 @@ pub fn revision(snapshot: &ErrorPolicySnapshot) -> String {
 ///   对应类型的一条 `SwitchAccount` 例外规则）；
 /// - 都不满足 → 默认快照（`configured = false, legacy = false`）。
 pub fn build_snapshot(config: &AppConfig) -> ErrorPolicySnapshot {
-    if let Some(raw) = config.error_policy.clone() {
+    if let Some(mut raw) = config.error_policy.clone() {
         if raw.validate().is_ok() {
+            // 已持久化的 v1 默认值在加载时升级到 v2（只迁移用户没改过的规则）。
+            migrate_untouched_v1_defaults(&mut raw);
             return ErrorPolicySnapshot {
                 settings: raw,
                 configured: true,
@@ -807,8 +961,17 @@ impl ErrorDecision {
     pub fn skips_provider(&self) -> bool {
         self.scope == CooldownScope::Provider || self.action == ErrorAction::SwitchProvider
     }
+    /// 该决策走「降权沉底」而非硬冷却（对齐 v3.5.1 `ErrorDecision::deprioritizes`）。
+    pub fn deprioritizes(&self) -> bool {
+        !self.hard_stop && self.rule.cooldown == CooldownMode::Deprioritize
+    }
     pub fn cooldown(&self) -> bool {
-        self.rule.cooldown != CooldownMode::None && !self.hard_stop
+        // Deprioritize 不阻塞选路，只降权，因此不算「冷却」。
+        !self.hard_stop
+            && !matches!(
+                self.rule.cooldown,
+                CooldownMode::None | CooldownMode::Deprioritize
+            )
     }
     /// 若该决策要冷却，返回最终生效规则（Protection 模式改写为 backoff 参数）。
     pub fn cooldown_rule(&self, settings: &ErrorPolicyConfig) -> Option<ErrorRule> {
@@ -890,9 +1053,10 @@ pub fn decide_with_declared(
     let (resolved, rule_source) =
         settings.resolve_with(&declared.rules, kind, status, code, provider, model);
     let rule = resolved.clone();
+    // v3.5.1 起不再按 kind 一刀切拒回：BadRequest/Content 走 v2 默认规则
+    // （换提供商 + 降权）。硬停只由状态码/业务码与插件硬停建议决定。
     let stopped = hard_stop(status, code)
-        || matches!(kind, ErrorKind::BadRequest | ErrorKind::Content)
-        // 4. 插件识别映射的 hard_stop 建议仅对非例外来源生效（用户改过的不被覆盖）。
+        // 插件识别映射的 hard_stop 建议仅对非例外来源生效（用户改过的不被覆盖）。
         || (rule_source != RuleSource::Override && classified.as_ref().is_some_and(|entry| entry.hard_stop));
     let action = if stopped {
         ErrorAction::ReturnError
@@ -980,6 +1144,37 @@ pub fn cooldown_floor_seconds(status: u16, code: &str) -> Option<u64> {
         .cooldown_rule(&snapshot.settings)
         .map(|rule| rule.fallback_seconds)
         .filter(|secs| *secs > 0)
+}
+
+/// 统一策略下的硬冷却时长（秒），对齐 v3.5.1 `account_store::policy_cooldowns::cooldown_entry`：
+/// - `exponential`：`fallback_seconds × 2^(strikes-1)`，封顶 `fallback_cap_seconds`
+/// - 否则：`fallback_seconds`
+/// - 不短于 `floor_seconds`（限流/额度类的最短冷却，见 [`cooldown_floor_seconds`]）
+/// - 上游给了 `Retry-After` 时：`Fixed` 取 `max(上游, fallback)`，其余取 `max(上游, floor)`
+///
+/// `strikes` 用账号的连续失败次数（AIGX 侧即 `consecutive_errors`），与上游
+/// 「同一冷却键 1800s 内连续失败则 strike+1」等效。
+pub fn policy_cooldown_seconds(
+    rule: &ErrorRule,
+    floor_seconds: u64,
+    strikes: u64,
+    upstream_retry_after: Option<u64>,
+) -> u64 {
+    let strikes = strikes.max(1);
+    let delay = if rule.exponential {
+        rule.fallback_seconds
+            .saturating_mul(1u64 << (strikes - 1).min(30))
+            .min(rule.fallback_cap_seconds)
+    } else {
+        rule.fallback_seconds
+    };
+    let fallback = delay.max(floor_seconds);
+    let secs = match (upstream_retry_after, rule.cooldown) {
+        (Some(at), CooldownMode::Fixed) => at.max(fallback),
+        (Some(at), _) => at.max(floor_seconds),
+        (None, _) => fallback,
+    };
+    secs.max(1)
 }
 
 #[cfg(test)]
@@ -1078,13 +1273,190 @@ mod tests {
         assert_eq!(kind_from_status(200, "content_filter"), ErrorKind::Content);
     }
 
+    /// v3.5.1 v2：请求有误不再直接拒回，改为换提供商 + 降权（不硬冷却）。
     #[test]
-    fn decide_marks_bad_request_as_hard_stop_return_error() {
+    fn decide_bad_request_switches_provider_and_deprioritizes() {
         let snap = ErrorPolicySnapshot::default();
         let d = decide_with(&snap, "p", "m", 400, "");
-        assert!(d.hard_stop);
-        assert_eq!(d.action, ErrorAction::ReturnError);
-        assert!(!d.switches());
+        assert!(!d.hard_stop, "v2 起 400 不再无条件硬停");
+        assert_eq!(d.action, ErrorAction::SwitchProvider);
+        assert!(d.switches());
+        assert!(d.deprioritizes());
+        assert!(!d.cooldown(), "降权不是硬冷却");
+    }
+
+    /// 九条默认规则逐条对照 v3.5.1 `default_rules`(v2)。
+    #[test]
+    fn default_rules_match_v351_v2() {
+        let find = |kind: ErrorKind| {
+            default_rules()
+                .into_iter()
+                .find(|r| r.kind == kind)
+                .expect("九条规则齐全")
+        };
+        for (kind, action, cooldown, secs, exp, scope) in [
+            (
+                ErrorKind::RateLimit,
+                ErrorAction::SwitchAccount,
+                CooldownMode::Upstream,
+                60,
+                false,
+                CooldownScope::Auto,
+            ),
+            (
+                ErrorKind::Quota,
+                ErrorAction::SwitchAccount,
+                CooldownMode::Upstream,
+                600,
+                true,
+                CooldownScope::Auto,
+            ),
+            (
+                ErrorKind::Auth,
+                ErrorAction::RefreshThenSwitch,
+                CooldownMode::Fixed,
+                300,
+                true,
+                CooldownScope::Account,
+            ),
+            (
+                ErrorKind::Balance,
+                ErrorAction::SwitchAccount,
+                CooldownMode::Upstream,
+                600,
+                false,
+                CooldownScope::Account,
+            ),
+            (
+                ErrorKind::Transient,
+                ErrorAction::RetryThenSwitch,
+                CooldownMode::Protection,
+                60,
+                false,
+                CooldownScope::Auto,
+            ),
+            (
+                ErrorKind::Unsupported,
+                ErrorAction::SwitchProvider,
+                CooldownMode::Deprioritize,
+                1800,
+                false,
+                CooldownScope::Auto,
+            ),
+            (
+                ErrorKind::BadRequest,
+                ErrorAction::SwitchProvider,
+                CooldownMode::Deprioritize,
+                1800,
+                false,
+                CooldownScope::Auto,
+            ),
+            (
+                ErrorKind::Content,
+                ErrorAction::SwitchProvider,
+                CooldownMode::Deprioritize,
+                1800,
+                false,
+                CooldownScope::Provider,
+            ),
+            (
+                ErrorKind::Unknown,
+                ErrorAction::SwitchAccount,
+                CooldownMode::Deprioritize,
+                1800,
+                false,
+                CooldownScope::Auto,
+            ),
+        ] {
+            let r = find(kind);
+            assert_eq!(r.action, action, "{} 动作", kind.id());
+            assert_eq!(r.cooldown, cooldown, "{} 冷却模式", kind.id());
+            assert_eq!(r.fallback_seconds, secs, "{} 冷却时长", kind.id());
+            assert_eq!(r.exponential, exp, "{} 指数", kind.id());
+            assert_eq!(r.scope, scope, "{} 作用域", kind.id());
+        }
+    }
+
+    /// v1 默认规则在显式配置加载时升级到 v2；迁移幂等。
+    #[test]
+    fn v1_defaults_migrate_to_v2_idempotently() {
+        let mut config = AppConfig::default();
+        let mut settings = ErrorPolicyConfig::default();
+        settings.rules = v1_default_rules();
+        // 用户手改过一条（限流）——迁移不得覆盖。
+        settings.rules[0].fallback_seconds = 45;
+        config.error_policy = Some(settings);
+
+        let snap = build_snapshot(&config);
+        assert!(snap.configured);
+        let auth = snap
+            .settings
+            .rules
+            .iter()
+            .find(|r| r.kind == ErrorKind::Auth)
+            .unwrap();
+        assert_eq!(auth.cooldown, CooldownMode::Fixed, "未改过的 v1 规则升级");
+        assert_eq!(auth.fallback_seconds, 300);
+        let rate = snap
+            .settings
+            .rules
+            .iter()
+            .find(|r| r.kind == ErrorKind::RateLimit)
+            .unwrap();
+        assert_eq!(rate.fallback_seconds, 45, "用户改过的不被覆盖");
+
+        // 幂等：再迁一次结果不变。
+        let mut again = snap.settings.clone();
+        migrate_untouched_v1_defaults(&mut again);
+        assert_eq!(again.rules, snap.settings.rules);
+    }
+
+    /// 冷却时长：floor 抬底、指数翻倍、封顶、Fixed 优先取较大值。
+    #[test]
+    fn policy_cooldown_seconds_honors_floor_cap_and_exponential() {
+        let mut rule = ErrorRule {
+            id: "x".into(),
+            name: "x".into(),
+            kind: ErrorKind::Quota,
+            statuses: vec![],
+            code: String::new(),
+            provider: "*".into(),
+            model: String::new(),
+            enabled: true,
+            action: ErrorAction::SwitchAccount,
+            cooldown: CooldownMode::Upstream,
+            fallback_seconds: 60,
+            exponential: true,
+            fallback_cap_seconds: 600,
+            scope: CooldownScope::Auto,
+        };
+        // 第 1 次：60；第 3 次：60×4=240；第 99 次：封顶 600
+        assert_eq!(policy_cooldown_seconds(&rule, 0, 1, None), 60);
+        assert_eq!(policy_cooldown_seconds(&rule, 0, 3, None), 240);
+        assert_eq!(policy_cooldown_seconds(&rule, 0, 99, None), 600);
+        // floor 抬底
+        assert_eq!(policy_cooldown_seconds(&rule, 300, 1, None), 300);
+        // 非指数：固定 fallback，floor 仍抬底
+        rule.exponential = false;
+        assert_eq!(policy_cooldown_seconds(&rule, 0, 9, None), 60);
+        assert_eq!(policy_cooldown_seconds(&rule, 120, 9, None), 120);
+        // 上游 Retry-After：Fixed 取 max(上游, fallback)，其余取 max(上游, floor)
+        rule.cooldown = CooldownMode::Fixed;
+        assert_eq!(policy_cooldown_seconds(&rule, 0, 1, Some(900)), 900);
+        assert_eq!(policy_cooldown_seconds(&rule, 0, 1, Some(10)), 60);
+        rule.cooldown = CooldownMode::Upstream;
+        assert_eq!(policy_cooldown_seconds(&rule, 30, 1, Some(10)), 30);
+    }
+
+    /// 能力不支持 501：v2 走换提供商 + 降权，作用域升到 Provider。
+    #[test]
+    fn decide_unsupported_deprioritizes_provider() {
+        let snap = ErrorPolicySnapshot::default();
+        let d = decide_with(&snap, "p", "m", 501, "");
+        assert!(d.deprioritizes());
+        assert!(!d.cooldown());
+        assert_eq!(d.scope, CooldownScope::Provider);
+        assert_eq!(d.action, ErrorAction::SwitchProvider);
     }
 
     #[test]

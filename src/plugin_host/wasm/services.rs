@@ -553,7 +553,11 @@ impl Context {
             "verification.lease.open" | "verification.lease.check" | "verification.lease.close" => {
                 self.verification_lease(method, &params).await
             }
-            "managed_task.status"
+            "managed_task.create"
+            | "managed_task.observe"
+            | "managed_task.read"
+            | "managed_task.status"
+            | "managed_task.close"
             | "managed_task.begin"
             | "managed_task.end"
             | "managed_task.abort" => self.managed_task(method, &params).await,

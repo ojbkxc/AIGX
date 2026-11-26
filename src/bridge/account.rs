@@ -421,9 +421,61 @@ impl AccountBridge {
             BridgeError::UpstreamStatus { status, .. } => Some(*status),
             _ => None,
         };
-        let secs =
-            self.sessions
-                .record_failure(lease.id(), model, &failure, &error.to_string(), status);
+        let provider = lease.session().provider.clone();
+        // 显式配置了统一错误策略 → 由决策的冷却规则接管；未配置 → 既有轮换冷却。
+        let policy = crate::error_policy::snapshot();
+        let decision = status
+            .filter(|_| policy.configured)
+            .map(|code| crate::error_policy::decide(&provider, model, code, ""));
+        let secs = match decision.as_ref() {
+            // 降权（沉底）：不写硬冷却，只把账号/提供商/模型排到队尾。
+            Some(d) if d.deprioritizes() => {
+                let until =
+                    self.sessions
+                        .deprioritize(lease.id(), &provider, model, d.scope, &d.rule);
+                until.saturating_sub(chrono::Utc::now().timestamp()).max(0) as u64
+            }
+            Some(d) => match d.cooldown_rule(&policy.settings) {
+                Some(rule) => {
+                    let secs = self.sessions.record_policy_failure(
+                        lease.id(),
+                        model,
+                        &failure,
+                        &error.to_string(),
+                        status,
+                        d.scope,
+                        &rule,
+                        // 只有限流/额度类带最短冷却下限（upstream `floor_ms`）。
+                        d.floor_ms / 1000,
+                    );
+                    // 限流/额度：硬冷却之外再垫底（v3.5.1 finish 同口径），
+                    // 让 `sink`/`sink_seconds` 真正落到数据面。
+                    if matches!(
+                        d.kind,
+                        crate::error_policy::ErrorKind::RateLimit
+                            | crate::error_policy::ErrorKind::Quota
+                    ) && policy.settings.sink
+                    {
+                        self.sessions
+                            .sink_account(lease.id(), policy.settings.sink_seconds);
+                    }
+                    secs
+                }
+                // 冷却模式 None / 关闭 backoff 的 Protection：只记计数不冷却。
+                None => {
+                    self.sessions
+                        .record_failure_no_cooldown(lease.id(), &error.to_string());
+                    0
+                }
+            },
+            None => self.sessions.record_failure(
+                lease.id(),
+                model,
+                &failure,
+                &error.to_string(),
+                status,
+            ),
+        };
         tracing::warn!(
             "account {} failed on {} (cooldown {}s): {error}",
             lease.id(),
@@ -462,6 +514,9 @@ impl AccountBridge {
             }
         }
         // 统一错误策略已显式配置时，按决策覆盖是否继续换号/重试。
+        if let Some(decision) = decision.as_ref() {
+            return decision.switches();
+        }
         if let Some(status) = status {
             if let Some(switch) = crate::error_policy::should_switch(status, "") {
                 return switch;

@@ -9,7 +9,7 @@ use super::resolve::provider_of_channel_id;
 use super::responses_convert;
 use super::*;
 use crate::api::common::extract_client_ip;
-use crate::bridge::{BridgeContext, BridgeError, ResponsesPassthrough};
+use crate::bridge::{BridgeContext, BridgeError, ChatFormat, ResponsesPassthrough};
 use crate::channel::ChannelStore;
 use futures::StreamExt;
 use serde_json::Value;
@@ -223,6 +223,31 @@ pub(crate) async fn handle_responses(
     let mut last_error: Option<crate::bridge::BridgeError> = None;
     // 连接稳定性：failover 预算（候选数 + 总时间上限），与 chat 面同口径
     let mut failover_budget = crate::api::failover::FailoverBudget::new();
+    // auto-continue：留住**降级转换成功**那轮的桥与（映射后）请求，续写轮
+    // 复用同一渠道（与 chat.rs 的 cont_bridge/cont_req 同口径）。
+    //
+    // 仅「Responses → Chat 降级转换」链路可续写：原生 Responses 透传是字节流
+    // （无 ChatFormat / ChatChunk），判据无从下手 —— 与上游 `forward_chat`
+    // 的「同协议原生转发不自动拼接续写」同口径。
+    let mut cont_bridge: Option<Arc<dyn crate::bridge::Bridge>> = None;
+    let mut cont_req: Option<Arc<ChatFormat>> = None;
+    // 响应前断线的日志兜底（499，AIGX 统一口径；与 AttemptStartGuard 同码同文案）。
+    // 原生 Responses 透传端点此前既无 AttemptStartGuard 也无日志兜底 —— handler
+    // 在写出任何终态日志前被取消（客户端断连）时，这条请求在统计里彻底消失。
+    // 本端点没有两段式预留（无 Reservation），故不构造 AttemptStartGuard，
+    // 改用只落日志的 DisconnectLogGuard；两者不在同一条请求上并存。
+    // 正常结束的每个出口都必须 disarm（幂等，绝不重复写）。
+    let mut disconnect_log = {
+        let mut log = crate::log::RequestLog::new();
+        log.special_route = special_route.clone();
+        log.user_id = api_key.user_id.clone();
+        log.key_id = Some(api_key.id.clone());
+        log.model = model.clone();
+        log.ip = client_ip.clone();
+        log.request_id = Some(request_id.clone());
+        crate::api::client_id::attach(&mut log, &client);
+        crate::log::inflight::DisconnectLogGuard::new(state.log_store.clone(), log, request_start)
+    };
     for (bridge, cid, ch_ref) in candidates {
         if !failover_budget.can_attempt() {
             // 连接稳定性：预算耗尽（候选数或总时间达上限）停止 failover
@@ -278,18 +303,30 @@ pub(crate) async fn handle_responses(
                     Ok(converted) => {
                         let mut chat_req = converted.chat;
                         chat_req.model = upstream.clone();
+                        // Arc 化：续写轮要复用同一份请求（与 chat.rs 的
+                        // `cont_req` 同口径）；成功后再登记到 cont_*。
+                        let chat_req = Arc::new(chat_req);
                         if is_stream {
                             match bridge.chat_stream(&chat_req, &ctx).await {
-                                Ok(s) => crate::bridge::first_event_or_timeout(s)
-                                    .await
-                                    .map(ResponsesAttempt::ConvertedStream),
+                                Ok(s) => match crate::bridge::first_event_or_timeout(s).await {
+                                    Ok(s) => {
+                                        cont_bridge = Some(bridge.clone());
+                                        cont_req = Some(Arc::clone(&chat_req));
+                                        Ok(ResponsesAttempt::ConvertedStream(s))
+                                    }
+                                    Err(e) => Err(e),
+                                },
                                 Err(e) => Err(e),
                             }
                         } else {
-                            bridge
-                                .chat(&chat_req, &ctx)
-                                .await
-                                .map(ResponsesAttempt::ConvertedJson)
+                            match bridge.chat(&chat_req, &ctx).await {
+                                Ok(r) => {
+                                    cont_bridge = Some(bridge.clone());
+                                    cont_req = Some(Arc::clone(&chat_req));
+                                    Ok(ResponsesAttempt::ConvertedJson(r))
+                                }
+                                Err(e) => Err(e),
+                            }
                         }
                     }
                     Err(msg) => Err(BridgeError::Config(format!(
@@ -392,6 +429,8 @@ pub(crate) async fn handle_responses(
             }
             log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
             state.log_store.record_request(log);
+            // 终态日志已写：解除断线兜底（幂等）
+            disconnect_log.disarm();
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(
                 &model,
@@ -513,6 +552,8 @@ pub(crate) async fn handle_responses(
             }
             log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
             state.log_store.record_request(log);
+            // 终态日志已写：解除断线兜底（幂等）
+            disconnect_log.disarm();
 
             // Prometheus 指标
             crate::metrics::global().record_request(
@@ -586,6 +627,9 @@ pub(crate) async fn handle_responses(
                 cancel: None,
                 _inflight: None,
             };
+            // 响应体交给 axum：收尾归 ResponsesStreamGuard（随流 Drop 落日志），
+            // 本守卫解除（幂等）。
+            disconnect_log.disarm();
 
             let mut response = Response::new(axum::body::Body::from_stream(guarded));
             response.headers_mut().insert(
@@ -596,7 +640,31 @@ pub(crate) async fn handle_responses(
         }
         // 降级路径（Responses → Chat）：非流式。计费口径与 chat 非流式一致：
         // usage 归一口径复用 UsageStats::billing_tokens（缓存分量进 prompt）。
-        ResponsesAttempt::ConvertedJson(response) => {
+        ResponsesAttempt::ConvertedJson(mut response) => {
+            // auto-continue（非流式）：与 chat 非流式完全同一条判据与预算闸
+            // （`max_tokens` 低于可见正文下限时不续写，见
+            // `bridge::MIN_VISIBLE_OUTPUT_TOKENS`）。续写轮的成功/失败都保留
+            // 已得内容（见 `continue_non_streaming`）。
+            let budget_allows_visible = cont_req
+                .as_ref()
+                .map(|r| {
+                    crate::bridge::output_budget_allows_visible_text(r.declared_output_budget())
+                })
+                .unwrap_or(false);
+            if let (Some(max_rounds), Some(bridge), Some(req)) = (
+                crate::continuation::plan().filter(|_| budget_allows_visible),
+                cont_bridge.take(),
+                cont_req.take(),
+            ) {
+                response = crate::continuation::continue_non_streaming(
+                    bridge,
+                    ChatFormat::from_arc(req),
+                    &ctx,
+                    response,
+                    max_rounds,
+                )
+                .await;
+            }
             let latency_ms = request_start.elapsed().as_millis() as u64;
             let json = responses_convert::chat_to_response(&response, &model, reasoning_collapse);
 
@@ -671,6 +739,8 @@ pub(crate) async fn handle_responses(
             }
             log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
             state.log_store.record_request(log);
+            // 终态日志已写：解除断线兜底（幂等）
+            disconnect_log.disarm();
 
             crate::metrics::global().record_request(
                 billing_model,
@@ -695,6 +765,29 @@ pub(crate) async fn handle_responses(
         // SSE 事件，计费仍走 ResponsesStreamGuard（usage 从 chunk 的权威
         // UsageStats 取，缺失时回退 token 估算）。
         ResponsesAttempt::ConvertedStream(chat_stream) => {
+            // auto-continue（流式）：与 chat 流式完全同一条判据与预算闸；在
+            // ChatChunk 层透传全部续写轮，再交给 Responses SSE 转换。关着时
+            // 不包装（零开销），下发字节与接线前逐字一致。
+            let budget_allows_visible = cont_req
+                .as_ref()
+                .map(|r| {
+                    crate::bridge::output_budget_allows_visible_text(r.declared_output_budget())
+                })
+                .unwrap_or(false);
+            let chat_stream = match (
+                crate::continuation::plan().filter(|_| budget_allows_visible),
+                cont_bridge.take(),
+                cont_req.take(),
+            ) {
+                (Some(max_rounds), Some(bridge), Some(req)) => crate::continuation::wrap_stream(
+                    chat_stream,
+                    bridge,
+                    ChatFormat::from_arc(req),
+                    ctx.clone(),
+                    max_rounds,
+                ),
+                _ => chat_stream,
+            };
             let billing = Arc::new(ResponsesBillingState {
                 state: state.clone(),
                 api_key: api_key.clone(),
@@ -849,6 +942,9 @@ pub(crate) async fn handle_responses(
                 cancel: None,
                 _inflight: None,
             };
+            // 响应体交给 axum：收尾归 ResponsesStreamGuard（随流 Drop 落日志），
+            // 本守卫解除（幂等）。
+            disconnect_log.disarm();
 
             let mut response = Response::new(axum::body::Body::from_stream(guarded));
             response.headers_mut().insert(
@@ -976,5 +1072,31 @@ pub(crate) fn observe_responses_sse_event(json: &Value, billing: &ResponsesBilli
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 续写闸（/v1/responses 降级转换链路）：预算够才允许续写，判据与
+    /// chat.rs 逐字同一把刀（`bridge::output_budget_allows_visible_text`）。
+    /// 这里的断言钉住「本入口用的是哪条闸」—— 换掉判据会让 `Some(32)`
+    /// 从 false 变 true，测试立刻红。
+    #[test]
+    fn continuation_budget_gate_matches_chat() {
+        // 声明预算低于可见正文下限：不续写（否则只拼出 markdown 残渣）
+        assert!(!crate::bridge::output_budget_allows_visible_text(Some(32)));
+        assert!(!crate::bridge::output_budget_allows_visible_text(Some(512)));
+        // 未声明 / 足够：允许
+        assert!(crate::bridge::output_budget_allows_visible_text(None));
+        assert!(crate::bridge::output_budget_allows_visible_text(Some(2048)));
+    }
+
+    /// 入口的总轮数换算与 chat.rs 同源（设 1 = 续一轮 = 共 2 轮）。
+    #[test]
+    fn continuation_rounds_follow_shared_conversion() {
+        assert_eq!(crate::continuation::total_rounds_of(1), 2);
+        assert_eq!(crate::continuation::total_rounds_of(3), 4);
     }
 }

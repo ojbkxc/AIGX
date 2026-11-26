@@ -5218,6 +5218,34 @@ pub async fn handle_test_slack(
     }
 }
 
+/// POST /api/notify/test-bark - 测试 Bark 推送
+pub async fn handle_test_bark(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let cfg = state.notify_service.get_config().await;
+    if !cfg.bark_ready() {
+        return Err(error_response(
+            "Bark 服务地址或 Device Key 未配置",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    match state
+        .notify_service
+        .send_bark("AIGX 测试通知", "🔔 Bark 通知配置成功！")
+        .await
+    {
+        Ok(_) => Ok(Json(
+            serde_json::json!({ "success": true, "data": "Bark 测试消息已发送" }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("发送失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TestWebhookRequest {
     /// 可选：自定义测试载荷内容（默认 "AIGX 测试告警"）

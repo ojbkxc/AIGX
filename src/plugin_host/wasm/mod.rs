@@ -359,7 +359,7 @@ pub(crate) fn contract() -> serde_json::Value {
         },
         "managedTask": {
             "capability": "http.managed-task.v1",
-            "methods": ["managed_task.status", "managed_task.begin", "managed_task.end", "managed_task.abort"],
+            "methods": ["managed_task.create", "managed_task.observe", "managed_task.read", "managed_task.status", "managed_task.close"],
             "approval": "host_admin_then_fence",
             "executor": "plugin_performs_own_egress",
             "served": manifest::served("http.managed-task.v1")
@@ -664,5 +664,21 @@ mod tests {
         }
         // verification 租约是已服务能力
         assert_eq!(value["verification"]["servedLease"], true);
+        // managedTask 广告上游方法集（旧别名 begin/end/abort 仍可分派，但不全列）。
+        let methods = value["managedTask"]["methods"]
+            .as_array()
+            .expect("managedTask.methods 必须是数组");
+        for method in [
+            "managed_task.create",
+            "managed_task.observe",
+            "managed_task.read",
+            "managed_task.status",
+            "managed_task.close",
+        ] {
+            assert!(
+                methods.iter().any(|item| item.as_str() == Some(method)),
+                "contract 缺少 managed_task 方法: {method}"
+            );
+        }
     }
 }

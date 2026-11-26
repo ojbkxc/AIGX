@@ -22,6 +22,11 @@ interface NotifyConfig {
   webhook_ready?: boolean;
   webhook_url?: string;
   webhook_secret?: string;
+  bark_ready?: boolean;
+  bark_server_url?: string;
+  bark_device_key?: string;
+  bark_group?: string;
+  bark_sound?: string;
 }
 
 interface AlertRule {
@@ -86,6 +91,7 @@ export default function Notify() {
   const [testingEmail, setTestingEmail] = useState(false);
   const [testingSlack, setTestingSlack] = useState(false);
   const [testingWebhook, setTestingWebhook] = useState(false);
+  const [testingBark, setTestingBark] = useState(false);
 
   // 告警规则（批次5）
   const [rules, setRules] = useState<AlertRule[]>([]);
@@ -138,11 +144,18 @@ export default function Notify() {
         smtp_starttls: notify.smtp_starttls ?? false,
         smtp_ssl: notify.smtp_ssl ?? false,
         webhook_url: notify.webhook_url ?? '',
+        bark_server_url: notify.bark_server_url ?? '',
+        bark_group: notify.bark_group ?? '',
+        bark_sound: notify.bark_sound ?? '',
       };
       // 敏感凭据字段：仅当输入了新的非脱敏值才提交；空串/未修改的脱敏占位
       // （后端 GET 返回 "..."）不带该字段，避免把真实密钥覆盖为占位符
       // （后端契约：缺省字段保持原值；双端都拦 "..." / *** / ****）
       const isMasked = (v: string): boolean => v.includes('***') || v === '...' || v === '****';
+      const barkKey = (notify.bark_device_key || '').trim();
+      if (barkKey && !isMasked(barkKey)) {
+        payload.bark_device_key = barkKey;
+      }
       const botToken = (notify.telegram_bot_token || '').trim();
       if (botToken && !isMasked(botToken)) {
         payload.telegram_bot_token = botToken;
@@ -222,6 +235,19 @@ export default function Notify() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTestingWebhook(false);
+    }
+  };
+
+  const handleTestBark = async () => {
+    setTestingBark(true);
+    setError('');
+    try {
+      const res = await api.testBark();
+      addToast(String((res as ListResponse<string>).data || t('Bark 测试消息已发送')));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTestingBark(false);
     }
   };
 
@@ -544,6 +570,76 @@ export default function Notify() {
                 disabled={testingWebhook || !notify.webhook_ready}
               >
                 {testingWebhook ? t('发送中...') : t('测试 Webhook')}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Bark 通知（iOS 推送） */}
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('Bark 通知')}</h2>
+            {notify.bark_ready && (
+              <span className="badge badge-success">{t('已就绪')}</span>
+            )}
+          </div>
+          <div className="card-body">
+            <p className="notify-note">
+              {t('iOS 推送（Bark）。服务地址填自建/官方 Bark 服务器基址，如 https://api.day.app；Device Key 在 Bark App 内查看。')}
+            </p>
+            <div className="notify-form-grid">
+              <div className="form-group">
+                <label>{t('Bark 服务地址')}</label>
+                <input
+                  className="form-input"
+                  type="text"
+                  placeholder="https://api.day.app"
+                  value={notify.bark_server_url ?? ''}
+                  onChange={(e) => handleChange('bark_server_url', e.target.value)}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('设备密钥（Device Key）')}</label>
+                <input
+                  className="form-input"
+                  type="password"
+                  placeholder={t('留空表示不修改')}
+                  value={notify.bark_device_key ?? ''}
+                  onChange={(e) => handleChange('bark_device_key', e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="notify-form-grid">
+              <div className="form-group">
+                <label>{t('分组')}</label>
+                <input
+                  className="form-input"
+                  type="text"
+                  placeholder="AIGX"
+                  value={notify.bark_group ?? ''}
+                  onChange={(e) => handleChange('bark_group', e.target.value)}
+                />
+                <span className="form-hint">{t('通知分组名，留空默认 AIGX')}</span>
+              </div>
+              <div className="form-group">
+                <label>{t('提示音')}</label>
+                <input
+                  className="form-input"
+                  type="text"
+                  placeholder="bell"
+                  value={notify.bark_sound ?? ''}
+                  onChange={(e) => handleChange('bark_sound', e.target.value)}
+                />
+                <span className="form-hint">{t('留空使用 Bark 默认铃声')}</span>
+              </div>
+            </div>
+            <div className="notify-actions">
+              <button
+                className="btn btn-outline"
+                onClick={handleTestBark}
+                disabled={testingBark || !notify.bark_ready}
+              >
+                {testingBark ? t('发送中...') : t('测试 Bark')}
               </button>
             </div>
           </div>

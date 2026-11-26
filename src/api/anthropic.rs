@@ -773,6 +773,10 @@ pub async fn handle_messages(
     if is_stream {
         // B06：failover 循环——依次尝试候选渠道建立流，仅对上游可重试错误切换
         let mut stream_opt = None;
+        // auto-continue：留住成功轮的桥与请求，续写轮复用同一渠道
+        // （与 chat.rs 流式路径的 cont_bridge/cont_req 同口径）。
+        let mut cont_bridge: Option<std::sync::Arc<dyn crate::bridge::Bridge>> = None;
+        let mut cont_req: Option<std::sync::Arc<ChatFormat>> = None;
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
@@ -1044,6 +1048,8 @@ pub async fn handle_messages(
                         });
                     }
                     stream_opt = Some(s);
+                    cont_bridge = Some(bridge.clone());
+                    cont_req = Some(std::sync::Arc::clone(&attempt_req));
                     used_channel_id = cid;
                     used_upstream = Some(upstream);
                     break;
@@ -1215,6 +1221,28 @@ pub async fn handle_messages(
                 )
                 .into_response();
             }
+        };
+        // auto-continue（流式）：与 chat 流式完全同一条判据与预算闸；在
+        // ChatChunk 层透传全部续写轮，再交给 Anthropic SSE 编码。关着时不
+        // 包装（零开销），下发字节与接线前逐字一致。终止帧由 wrap_stream
+        // 压住，Anthropic 编码器不会提前收尾。
+        let budget_allows_visible = cont_req
+            .as_ref()
+            .map(|r| crate::bridge::output_budget_allows_visible_text(r.declared_output_budget()))
+            .unwrap_or(false);
+        let stream = match (
+            crate::continuation::plan().filter(|_| budget_allows_visible),
+            cont_bridge.take(),
+            cont_req.take(),
+        ) {
+            (Some(max_rounds), Some(bridge), Some(req)) => crate::continuation::wrap_stream(
+                stream,
+                bridge,
+                ChatFormat::from_arc(req),
+                ctx.clone(),
+                max_rounds,
+            ),
+            _ => stream,
         };
         // 护栏（输出侧，默认关闭）：命中输出词表时把标准错误帧作为流的最后
         // 一项吐出（middle 的 Err 分支按既有错误帧收尾；suffix 照常收尾，
@@ -1714,6 +1742,10 @@ pub async fn handle_messages(
     } else {
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
         let mut response_opt = None;
+        // auto-continue：留住成功轮的桥与请求，续写轮复用同一渠道
+        // （与 chat.rs 非流式路径的 cont_bridge/cont_req 同口径）。
+        let mut cont_bridge: Option<std::sync::Arc<dyn crate::bridge::Bridge>> = None;
+        let mut cont_req: Option<std::sync::Arc<ChatFormat>> = None;
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
@@ -1983,6 +2015,8 @@ pub async fn handle_messages(
                         });
                     }
                     response_opt = Some(resp);
+                    cont_bridge = Some(bridge.clone());
+                    cont_req = Some(std::sync::Arc::clone(&attempt_req));
                     used_channel_id = cid;
                     used_upstream = Some(upstream);
                     break;
@@ -2162,6 +2196,30 @@ pub async fn handle_messages(
                 )
                 .into_response();
             }
+        };
+        // auto-continue（非流式）：与 chat 非流式完全同一条判据与预算闸
+        // （`max_tokens` 低于可见正文下限时不续写，见
+        // `bridge::MIN_VISIBLE_OUTPUT_TOKENS`）。续写轮失败保留已得内容。
+        let budget_allows_visible = cont_req
+            .as_ref()
+            .map(|r| crate::bridge::output_budget_allows_visible_text(r.declared_output_budget()))
+            .unwrap_or(false);
+        let response = match (
+            crate::continuation::plan().filter(|_| budget_allows_visible),
+            cont_bridge.take(),
+            cont_req.take(),
+        ) {
+            (Some(max_rounds), Some(bridge), Some(req)) => {
+                crate::continuation::continue_non_streaming(
+                    bridge,
+                    ChatFormat::from_arc(req),
+                    &ctx,
+                    response,
+                    max_rounds,
+                )
+                .await
+            }
+            _ => response,
         };
         {
             let latency_ms = request_start.elapsed().as_millis() as u64;
@@ -2351,7 +2409,8 @@ pub async fn handle_messages(
             });
             let mut resp = Json(anthropic_resp).into_response();
             // 与 OpenAI 面同名同值：请求期预算不够 / 响应期预算被思考吃穿。
-            // Anthropic 面没有 auto-continue，因此只有「不够」这一种成因。
+            // auto-continue 已接入本端点，但预算闸与 OpenAI 面同一把刀：
+            // 预算不够时**不续写**，只发这个头告知「不够」。
             if !crate::bridge::output_budget_allows_visible_text(chat_req.declared_output_budget())
             {
                 resp.headers_mut().insert(
@@ -2627,5 +2686,18 @@ mod tests {
             None,
             "cancel 置位后 GuardedStream 必须立刻收尾"
         );
+    }
+
+    /// 续写闸（/v1/messages）：预算够才允许续写，判据与 chat.rs 同一把刀。
+    /// 这条钉住本入口用的是哪条闸，改判据会立刻红。
+    #[test]
+    fn continuation_budget_gate_matches_chat() {
+        assert!(!crate::bridge::output_budget_allows_visible_text(Some(32)));
+        assert!(!crate::bridge::output_budget_allows_visible_text(Some(512)));
+        assert!(crate::bridge::output_budget_allows_visible_text(None));
+        assert!(crate::bridge::output_budget_allows_visible_text(Some(2048)));
+        // 总轮数换算与 chat 面同源（设 1 = 续一轮 = 共 2 轮）
+        assert_eq!(crate::continuation::total_rounds_of(1), 2);
+        assert_eq!(crate::continuation::total_rounds_of(3), 4);
     }
 }

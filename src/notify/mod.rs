@@ -1,4 +1,4 @@
-//! 通知系统：Telegram Bot + SMTP 邮件 + Slack + 通用 Webhook
+//! 通知系统：Telegram Bot + SMTP 邮件 + Slack + 通用 Webhook + Bark
 //!
 //! 参照 VFaka 的 aff-notify crate（Telegram + SMTP）与 burncloud 的
 //! alert 通道（slack.rs/webhook.rs）实现统一通知服务。
@@ -7,6 +7,8 @@
 //!   明文回退（25 端口本地中继）。不引入 lettre。
 //! - Slack：Incoming Webhook（attachments 格式，颜色按级别）
 //! - Webhook：通用 JSON POST（结构化告警载荷）
+//! - Bark：iOS 推送（`{server_url}/push`，POST JSON 含 device_key/title/body/group/sound）
+//!   参照 Agent2API `notifications/channels.rs::send_bark`。
 //!
 //! 事件类型：充值成功 / 额度不足 / 渠道故障 / 提现请求 / 告警触发。
 //!
@@ -75,6 +77,19 @@ pub struct NotifyConfig {
     /// 通用 Webhook 附带的验证密钥（X-AIGX-Signature: sha256=hmac(body)）
     #[serde(default)]
     pub webhook_secret: String,
+    // Bark（iOS 推送，参照 Agent2API BarkChannelConfig）
+    /// Bark 服务基址（如 https://api.day.app；自建服务器亦可）
+    #[serde(default)]
+    pub bark_server_url: String,
+    /// Bark 设备密钥（device_key）
+    #[serde(default)]
+    pub bark_device_key: String,
+    /// 通知分组（留空时默认 "AIGX"）
+    #[serde(default)]
+    pub bark_group: String,
+    /// 提示音（留空则不指定，由 Bark 用默认铃声）
+    #[serde(default)]
+    pub bark_sound: String,
 }
 
 impl NotifyConfig {
@@ -96,6 +111,11 @@ impl NotifyConfig {
     /// 通用 Webhook 是否已配置
     pub fn webhook_ready(&self) -> bool {
         !self.webhook_url.is_empty()
+    }
+
+    /// Bark 是否已配置（服务地址 + 设备密钥）
+    pub fn bark_ready(&self) -> bool {
+        !self.bark_server_url.trim().is_empty() && !self.bark_device_key.trim().is_empty()
     }
 }
 
@@ -303,6 +323,57 @@ impl NotifyService {
         Ok(())
     }
 
+    // ── Bark（iOS 推送，参照 Agent2API send_bark） ────────────────────
+
+    /// 发送 Bark 推送（默认标题 "AIGX 通知"）。
+    pub async fn send_bark(&self, title: &str, body: &str) -> Result<(), String> {
+        let cfg = self.config.read().await.clone();
+        self.send_bark_with(&cfg, title, body).await
+    }
+
+    async fn send_bark_with(
+        &self,
+        cfg: &NotifyConfig,
+        title: &str,
+        body: &str,
+    ) -> Result<(), String> {
+        bark_check_ready(cfg)?;
+        let endpoint = bark_endpoint(&cfg.bark_server_url);
+        let payload = bark_payload(cfg, title, body);
+        let resp = self
+            .client
+            .post(&endpoint)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Bark request failed: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let parsed: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+        // Bark 约定：HTTP 200 但业务 code != 200 也算失败（如无效 device_key）
+        let code_err = matches!(
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("code"))
+                .and_then(|c| c.as_i64()),
+            Some(code) if code != 200
+        );
+        if !status.is_success() || code_err {
+            let msg = parsed
+                .as_ref()
+                .and_then(|v| v.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| text.trim().chars().take(160).collect());
+            return Err(if msg.is_empty() {
+                format!("Bark returned HTTP {status}")
+            } else {
+                format!("Bark error: {msg}")
+            });
+        }
+        Ok(())
+    }
+
     // ── 统一事件分发 ─────────────────────────────────────────────────
 
     /// 根据事件类型发送通知（同步等待）。通常用 `notify_spawn` 异步触发。
@@ -313,6 +384,9 @@ impl NotifyService {
         }
 
         let (tg_text, email_to, email_subject, email_body) = render_event(event);
+
+        // Bark 用纯文本（Telegram 文本是 HTML，Bark 不解析标签）
+        let bark_text = tg_text.as_deref().map(strip_html_tags);
 
         // Telegram
         if let Some(text) = tg_text {
@@ -332,6 +406,17 @@ impl NotifyService {
                     warn!("Notify email failed: {}", e);
                 } else {
                     info!("Notify email sent to {}", to);
+                }
+            }
+        }
+
+        // Bark（iOS 推送，纯文本）
+        if let Some(text) = bark_text {
+            if cfg.bark_ready() {
+                if let Err(e) = self.send_bark_with(&cfg, "AIGX 通知", &text).await {
+                    warn!("Notify bark failed: {}", e);
+                } else {
+                    info!("Notify bark sent for event");
                 }
             }
         }
@@ -409,6 +494,61 @@ fn render_event(event: &NotifyEvent) -> (Option<String>, Option<String>, String,
             (Some(tg), None, String::new(), String::new())
         }
     }
+}
+
+// ── Bark 载荷构造（纯函数，便于测试） ────────────────────────────────
+
+/// Bark 推送端点：`{server_url}/push`（去除基址尾部斜杠）。
+fn bark_endpoint(server_url: &str) -> String {
+    format!("{}/push", server_url.trim().trim_end_matches('/'))
+}
+
+/// 构造 Bark POST 载荷。group 留空时用默认分组 "AIGX"；
+/// sound 留空时不带该字段（Bark 用默认铃声）。
+fn bark_payload(cfg: &NotifyConfig, title: &str, body: &str) -> serde_json::Value {
+    let group = {
+        let g = cfg.bark_group.trim();
+        if g.is_empty() {
+            "AIGX"
+        } else {
+            g
+        }
+    };
+    let mut payload = serde_json::json!({
+        "device_key": cfg.bark_device_key.trim(),
+        "title": title,
+        "body": body,
+        "group": group,
+    });
+    let sound = cfg.bark_sound.trim();
+    if !sound.is_empty() {
+        payload["sound"] = serde_json::Value::String(sound.to_string());
+    }
+    payload
+}
+
+/// Bark 配置就绪校验（发送前置检查，未配置直接报错不发起请求）。
+fn bark_check_ready(cfg: &NotifyConfig) -> Result<(), String> {
+    if !cfg.bark_ready() {
+        return Err("Bark server_url or device_key not configured".into());
+    }
+    Ok(())
+}
+
+/// 去除简单 HTML 标签（Telegram 文本用 `<b>`/`<i>` 标记，Bark 不解析）。
+/// 事件文本仅含自产的成对标签，线性扫描即可，不做完整 HTML 解析。
+fn strip_html_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
 }
 
 // ── 原生 SMTP 实现 ───────────────────────────────────────────────────
@@ -753,5 +893,73 @@ mod tests {
         assert!(!c.smtp_ready());
         assert!(!c.smtp_starttls);
         assert!(!c.smtp_ssl);
+        assert!(!c.bark_ready());
+    }
+
+    #[test]
+    fn bark_ready_judgment() {
+        let mut c = NotifyConfig::default();
+        assert!(!c.bark_ready(), "默认未配置");
+        c.bark_server_url = "https://api.day.app".into();
+        assert!(!c.bark_ready(), "仅服务地址不足以就绪");
+        c.bark_device_key = "devkey".into();
+        assert!(c.bark_ready(), "地址 + 密钥即就绪");
+        // 纯空白不算配置
+        c.bark_device_key = "   ".into();
+        assert!(!c.bark_ready());
+    }
+
+    #[test]
+    fn bark_endpoint_joins_push() {
+        assert_eq!(
+            bark_endpoint("https://api.day.app"),
+            "https://api.day.app/push"
+        );
+        assert_eq!(
+            bark_endpoint("https://api.day.app/"),
+            "https://api.day.app/push"
+        );
+        assert_eq!(
+            bark_endpoint("  https://bark.example.com/  "),
+            "https://bark.example.com/push"
+        );
+    }
+
+    #[test]
+    fn bark_payload_fields_and_optional_sound() {
+        let mut c = NotifyConfig::default();
+        c.bark_server_url = "https://api.day.app".into();
+        c.bark_device_key = "devkey".into();
+        // 空 group → 默认 "AIGX"；空 sound → 不带该字段
+        let p = bark_payload(&c, "标题", "正文");
+        assert_eq!(p["device_key"], "devkey");
+        assert_eq!(p["title"], "标题");
+        assert_eq!(p["body"], "正文");
+        assert_eq!(p["group"], "AIGX");
+        assert!(p.get("sound").is_none(), "sound 留空不应带字段");
+
+        // 指定 group / sound
+        c.bark_group = " ops ".into();
+        c.bark_sound = "bell".into();
+        let p2 = bark_payload(&c, "t", "b");
+        assert_eq!(p2["group"], "ops");
+        assert_eq!(p2["sound"], "bell");
+    }
+
+    #[test]
+    fn bark_check_ready_reports_unconfigured() {
+        let mut c = NotifyConfig::default();
+        assert!(bark_check_ready(&c).is_err(), "未配置应报错");
+        c.bark_server_url = "https://api.day.app".into();
+        assert!(bark_check_ready(&c).is_err(), "缺 device_key 应报错");
+        c.bark_device_key = "k".into();
+        assert!(bark_check_ready(&c).is_ok());
+    }
+
+    #[test]
+    fn strip_html_tags_plain_text() {
+        let plain = strip_html_tags("<b>✅ 充值成功</b>\n\n用户: u@x.com");
+        assert_eq!(plain, "✅ 充值成功\n\n用户: u@x.com");
+        assert_eq!(strip_html_tags("无标签"), "无标签");
     }
 }

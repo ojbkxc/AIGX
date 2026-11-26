@@ -21,11 +21,27 @@ pub struct Shared {
     pub(crate) cancel: super::Cancel,
     pub slots: Arc<Semaphore>,
     pub control_slots: Arc<Semaphore>,
+    /// `concurrency_hard_limit` 声明的**对话/图片调用**额外执行硬上限
+    /// （对齐上游 `Shared::execution_slots`，context.rs:32）。与 [`Self::slots`]
+    /// 同时获取，因此对话/图片调用的实际并发上限 = min(声明并发, 本信号量容量)。
+    /// `None` = 未声明，不加额外限制。
+    pub hard_limit_slots: Option<Arc<Semaphore>>,
     pub locks: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     pub sessions: Mutex<HashMap<String, (i64, Value)>>,
     pub(crate) login_state: Mutex<super::state::Transient>,
     pub(crate) interactions: super::login::Interactions,
     pub login_proxies: Mutex<HashMap<String, (i64, Value)>>,
+}
+
+/// 由 `wasm.json` 的 `concurrency_hard_limit` 生成对话/图片调用的执行硬上限。
+///
+/// 对齐上游 `Shared::new` 的 `execution_slots`（context.rs:32）：
+/// `manifest.concurrency_hard_limit.map(|limit| Arc::new(Semaphore::new(limit)))`。
+/// `None` 表示不额外限流，此时并发只由 [`Shared::slots`]（声明并发）决定。
+pub(crate) fn execution_hard_limit(manifest: &WasmManifest) -> Option<Arc<Semaphore>> {
+    manifest
+        .concurrency_hard_limit
+        .map(|limit| Arc::new(Semaphore::new(limit)))
 }
 
 impl Shared {
@@ -37,6 +53,7 @@ impl Shared {
         Arc::new(Self {
             slots: Arc::new(Semaphore::new(manifest.concurrency)),
             control_slots: Arc::new(Semaphore::new(2)),
+            hard_limit_slots: execution_hard_limit(&manifest),
             manifest,
             accounts,
             egress,
@@ -155,5 +172,47 @@ impl Drop for Context {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(hard: Option<usize>) -> WasmManifest {
+        WasmManifest {
+            provider: "demo".into(),
+            abi: super::super::manifest::ABI,
+            requires: vec![],
+            origins: vec![],
+            helpers: vec![],
+            memory_mib: super::super::manifest::DEFAULT_MEMORY_MIB,
+            concurrency: 16,
+            verified: false,
+            account_origin: None,
+            desktop_launch: None,
+            managed_login: None,
+            managed_task: None,
+            concurrency_hard_limit: hard,
+        }
+    }
+
+    #[test]
+    fn absent_hard_limit_adds_no_semaphore() {
+        assert!(execution_hard_limit(&manifest(None)).is_none());
+    }
+
+    #[test]
+    fn hard_limit_semaphore_clamps_conversation_concurrency() {
+        // 声明并发 16，硬上限 2：额外信号量只有 2 个许可，第三个必须等，
+        // 因此对话/图片调用实际并发被钳到 min(16, 2) = 2。
+        assert_eq!(manifest(Some(2)).concurrency, 16);
+        let slots = execution_hard_limit(&manifest(Some(2))).unwrap();
+        assert_eq!(slots.available_permits(), 2);
+        let first = slots.clone().try_acquire_owned().unwrap();
+        let _second = slots.clone().try_acquire_owned().unwrap();
+        assert!(slots.clone().try_acquire_owned().is_err());
+        drop(first);
+        assert!(slots.clone().try_acquire_owned().is_ok());
     }
 }

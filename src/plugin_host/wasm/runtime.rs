@@ -187,6 +187,18 @@ impl Runtime {
         let streaming =
             sink.is_some() || matches!(method, "images.generate" | "images.edit" | "tasks.run");
         let work = async {
+            // `concurrency_hard_limit`（若声明）是对话/图片调用的额外执行硬上限，
+            // 与上游 `execution_slots`（runtime.rs:257）同语义：先取硬上限，再取普通槽位，
+            // 实际并发因此是 min(声明并发, hard_limit)。未声明时行为不变。
+            let conversational =
+                sink.is_some() || matches!(method, "images.generate" | "images.edit");
+            let _hard =
+                match self.shared.hard_limit_slots.as_ref() {
+                    Some(hard) if conversational => Some(hard.acquire().await.map_err(|_| {
+                        WireError::with_code("Wasm 插件已关闭", "plugin_unavailable")
+                    })?),
+                    _ => None,
+                };
             let slots = if streaming {
                 &self.shared.slots
             } else {
@@ -259,8 +271,15 @@ impl Runtime {
                     });
                 }
             }
+            // 内存上限按调用类型取宿主兜底值：对话调用至少 MAX（256 MiB），
+            // 其余至少 DEFAULT（128 MiB），且都不越过 MAX（对齐上游
+            // `effective_memory_mib`）。
+            let memory_mib = self
+                .shared
+                .manifest
+                .effective_memory_mib(method == super::methods::gateway::CONVERSATION);
             let limits = StoreLimitsBuilder::new()
-                .memory_size(self.shared.manifest.memory_mib * 1024 * 1024)
+                .memory_size(memory_mib * 1024 * 1024)
                 .instances(1)
                 .memories(1)
                 .tables(2)
@@ -318,7 +337,7 @@ impl Runtime {
                     // AIGX 的 Limits（beta.1 形状）不记录 table/host_memory 细分；
                     // 对话方法撞上内存上限时，真正原因是正文/图片太大。给出尺寸与
                     // 下一步，既便于用户处理，也避免被通用策略当成服务故障去换号重试。
-                    let limit_mib = self.shared.manifest.memory_mib;
+                    let limit_mib = memory_mib;
                     let input = store.data().input_bytes;
                     let (message, code) = if method == super::methods::gateway::CONVERSATION {
                         (

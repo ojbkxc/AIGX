@@ -20,6 +20,7 @@ use super::rotate::{self, RotationPolicy};
 use crate::bridge::BridgeError;
 use crate::channel::circuit_breaker::FailureType;
 use crate::egress::EgressCache;
+use crate::error_policy::{CooldownScope, ErrorRule};
 use crate::model::capability::CapabilityMask;
 use crate::storage::FileStore;
 
@@ -205,6 +206,17 @@ struct Inner {
     retry_on_status: RwLock<Vec<u16>>,
     /// 落盘节流：account id → 上次持久化 unix 秒。
     persisted_at: DashMap<String, i64>,
+    /// 降权（沉底）标记：key → 到期 unix 秒。**内存态**，重启归零。
+    ///
+    /// 统一错误策略里 `CooldownMode::Deprioritize` 的落地：不把账号逐出调度，
+    /// 只在该窗口内把它排到候选队尾（还有别的可用账号时不选它）。key 三种：
+    /// - `a:{account_id}`：账号级（scope=Account）
+    /// - `m:{account_id}:{model}`：模型级（scope=Model）
+    /// - `p:{provider}`：提供商级（scope=Provider）
+    ///
+    /// 到期比较即自动恢复；账号成功转发一次会提前清（对齐 v3.5.1
+    /// `route_state::sink_clear_scoped`）。
+    deprioritized: DashMap<String, i64>,
     /// `channel_id` → 供应商索引（`provider_for_channel` 的 O(1) 快路径）。
     ///
     /// ── 为什么需要它 ─────────────────────────────────────────────
@@ -356,6 +368,7 @@ impl AccountSessionStore {
                 retry_interval_ms: AtomicU64::new(0),
                 retry_on_status: RwLock::new(vec![402]),
                 persisted_at: DashMap::new(),
+                deprioritized: DashMap::new(),
                 channel_provider: DashMap::new(),
             }),
         };
@@ -1065,20 +1078,49 @@ impl AccountSessionStore {
         // 规则推翻（与 `ChannelStore::select_for_model_ranked` 同口径）。
         // 规则全都判不出结论（读数缺失）时 `pick_by_rules` 返回 None → 回落
         // 加权随机，规则空转而不是把负载均衡悄悄关掉。
-        let max_priority = candidates
-            .iter()
-            .map(|index| sessions[*index].priority)
-            .max()
-            .unwrap_or(0);
-        let group: Vec<usize> = candidates
-            .into_iter()
-            .filter(|index| sessions[*index].priority == max_priority)
-            .collect();
-        // SPEC 1.0.49 §9：同 priority 组内再按 `sort_order` 升序先试
-        //（0 = 存量中位，负数置顶）。只保留**最小档**进入下一级——规则排序
-        // 与加权轮转仍在同档内生效。存量全 0 → 整组同档，行为与改造前一致；
-        // priority 组已在上面切好，sort_order 不会跨组串动。
-        let group = narrow_to_top_sort_order(&sessions, group);
+        // 统一错误策略的「降权沉底」：已标记的候选排到最后——只要还有未被
+        // 降权的候选可选，就不选它们；全都降权时仍可用（不阻塞选路）。标记
+        // 表为空时不构造任何字符串（热路径零开销）。
+        let (fresh, sunk): (Vec<usize>, Vec<usize>) = if self.inner.deprioritized.is_empty() {
+            (candidates, Vec::new())
+        } else {
+            let marked = |session: &AccountSession| {
+                let hit = |key: String| {
+                    self.inner
+                        .deprioritized
+                        .get(&key)
+                        .is_some_and(|until| *until > now)
+                };
+                hit(format!("a:{}", session.id))
+                    || hit(format!("p:{}", session.provider))
+                    || (!model.is_empty() && hit(format!("m:{}:{}", session.id, model)))
+                    || alias.is_some_and(|alias| {
+                        !alias.is_empty()
+                            && alias != model
+                            && hit(format!("m:{}:{}", session.id, alias))
+                    })
+            };
+            candidates
+                .into_iter()
+                .partition(|index| !marked(&sessions[*index]))
+        };
+        // 组内先比 priority，再按 sort_order 收窄；fresh 优先，全部选不出
+        // 才轮到 sunk（两者各自按自己的最高优先级组处理）。
+        let group_of = |pool: &[usize]| -> Vec<usize> {
+            let max_priority = pool
+                .iter()
+                .map(|index| sessions[*index].priority)
+                .max()
+                .unwrap_or(0);
+            let group: Vec<usize> = pool
+                .iter()
+                .copied()
+                .filter(|index| sessions[*index].priority == max_priority)
+                .collect();
+            narrow_to_top_sort_order(&sessions, group)
+        };
+        let fresh_group = group_of(&fresh);
+        let sunk_group = group_of(&sunk);
         let order = scope.map(|s| s.account_order.as_slice()).unwrap_or(&[]);
         // 抢占式占用：上面的并发快速过滤读的是运行态快照，两个并发请求可能
         // 同时看到一个空位（原实现靠写锁串行免掉这个窗口）。这里对选中的
@@ -1110,7 +1152,11 @@ impl AccountSessionStore {
                     }
                 }
             };
-            let mut claimed = try_claim(&group);
+            let mut claimed = try_claim(&fresh_group);
+            // 没有「未降权」候选可占时，才轮到降权队列（仍然不阻塞选路）。
+            if claimed.is_none() && !sunk_group.is_empty() {
+                claimed = try_claim(&sunk_group);
+            }
             // 第二轮：满员但其余全过的账号兜底。快照过滤与原子占位之间存在
             // 窗口 —— 那期间可能刚要结束的请求把槽位放回去了，而
             // `try_acquire_runtime` 自己会再判一次，兜底**不会**越过硬上限。
@@ -1206,6 +1252,9 @@ impl AccountSessionStore {
         } else {
             self.persist_throttled(&snapshot);
         }
+        // 成功转发一次 → 解除降权（对齐 v3.5.1 `sink_clear_scoped`：它证明
+        // 自己能干活，不必再垫底到窗口结束）。
+        self.clear_deprioritized(id, &snapshot.provider, model);
     }
 
     /// 记入一次失败（按失败类型冷却），返回冷却秒数。
@@ -1225,20 +1274,69 @@ impl AccountSessionStore {
         message: &str,
         status: Option<u16>,
     ) -> u64 {
+        self.record_failure_inner(id, model, failure, message, status, None)
+    }
+
+    /// 统一错误策略驱动的失败记录：按 `decision` 的冷却规则（fallback / 指数 /
+    /// cap / floor）计算，返回冷却秒数。
+    ///
+    /// 这是「统一策略已配置」时唯一使用的冷却入口（[`Self::record_failure`]
+    /// 在未配置时走既有轮换冷却）。`scope` 决定冷整号还是冷该模型；
+    /// `floor_seconds` 是限流/额度类的最短冷却（`cooldown_floor_seconds`）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_policy_failure(
+        &self,
+        id: &str,
+        model: &str,
+        failure: &FailureType,
+        message: &str,
+        status: Option<u16>,
+        scope: CooldownScope,
+        rule: &ErrorRule,
+        floor_seconds: u64,
+    ) -> u64 {
+        self.record_failure_inner(
+            id,
+            model,
+            failure,
+            message,
+            status,
+            Some((scope, rule.clone(), floor_seconds)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_failure_inner(
+        &self,
+        id: &str,
+        model: &str,
+        failure: &FailureType,
+        message: &str,
+        status: Option<u16>,
+        policy: Option<(CooldownScope, ErrorRule, u64)>,
+    ) -> u64 {
         let now = chrono::Utc::now().timestamp();
         let retry_after = match failure {
             FailureType::RateLimited { retry_after, .. } => *retry_after,
             _ => None,
         };
-        // 这次失败该冷「整号」还是「这一个模型」
-        let account_wide = match failure {
-            FailureType::RateLimited { scope, .. } => scope.cools_whole_account(),
-            FailureType::AuthFailed | FailureType::PaymentRequired => true,
-            _ => false,
+        // 这次失败该冷「整号」还是「这一个模型」。统一策略配置了作用域时以
+        // 规则为准；否则沿用既有的失败类型口径。
+        let account_wide = match &policy {
+            Some((scope, _, _)) => {
+                // AIGX 的冷却表只有「整号 / 单模型」两档；Provider 作用域
+                // 落到账号上（该账号属这家）更保守，不会漏掉后续同家账号。
+                matches!(*scope, CooldownScope::Account | CooldownScope::Provider)
+            }
+            None => match failure {
+                FailureType::RateLimited { scope, .. } => scope.cools_whole_account(),
+                FailureType::AuthFailed | FailureType::PaymentRequired => true,
+                _ => false,
+            },
         };
-        let policy = self.policy();
-        let direct_switch =
-            status.is_some_and(|code| self.inner.retry_on_status.read().contains(&code));
+        let rotation = self.policy();
+        let direct_switch = policy.is_none()
+            && status.is_some_and(|code| self.inner.retry_on_status.read().contains(&code));
         let (snapshot, secs) = {
             let mut sessions = self.inner.sessions.write();
             let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
@@ -1246,11 +1344,23 @@ impl AccountSessionStore {
             };
             session.error_count = session.error_count.saturating_add(1);
             session.consecutive_errors = session.consecutive_errors.saturating_add(1);
-            let secs = if direct_switch {
-                // 命中「直接换号」名单：只给基础冷却，不走指数退避
-                policy.base_cooldown_secs.max(1)
-            } else {
-                rotate::cooldown_secs(&policy, failure, session.consecutive_errors, retry_after)
+            let secs = match &policy {
+                Some((_, rule, floor_seconds)) => crate::error_policy::policy_cooldown_seconds(
+                    rule,
+                    *floor_seconds,
+                    session.consecutive_errors,
+                    retry_after,
+                ),
+                None if direct_switch => {
+                    // 命中「直接换号」名单：只给基础冷却，不走指数退避
+                    rotation.base_cooldown_secs.max(1)
+                }
+                None => rotate::cooldown_secs(
+                    &rotation,
+                    failure,
+                    session.consecutive_errors,
+                    retry_after,
+                ),
             };
             if secs > 0 {
                 let key = if account_wide {
@@ -1268,6 +1378,93 @@ impl AccountSessionStore {
             tracing::warn!("persist account session {} after failure: {e}", snapshot.id);
         }
         secs
+    }
+
+    /// 只记失败计数与最近错误，**不写冷却**（策略的 `None` 冷却或
+    /// 关闭 backoff 的 `Protection` 时使用）。
+    pub fn record_failure_no_cooldown(&self, id: &str, message: &str) {
+        let now = chrono::Utc::now().timestamp();
+        let snapshot = {
+            let mut sessions = self.inner.sessions.write();
+            let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+                return;
+            };
+            session.error_count = session.error_count.saturating_add(1);
+            session.consecutive_errors = session.consecutive_errors.saturating_add(1);
+            session.last_error = Some(message.to_string());
+            session.updated_at = now;
+            session.clone()
+        };
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::warn!("persist account session {} after failure: {e}", snapshot.id);
+        }
+    }
+
+    /// 按统一策略给账号/提供商/模型打「降权沉底」标记，返回到期 unix 秒。
+    ///
+    /// 不写入硬冷却（账号仍可用），选路时只是排到候选队尾；窗口到点自动
+    /// 恢复。计时用规则的 `fallback_seconds`（v2 的降权规则默认 1800s），
+    /// 指数模式下按连续失败次数翻倍并由 `fallback_cap_seconds` 封顶——与
+    /// v3.5.1 `route_state::deprioritize_mark_scoped` 同口径。
+    pub fn deprioritize(
+        &self,
+        id: &str,
+        provider: &str,
+        model: &str,
+        scope: CooldownScope,
+        rule: &ErrorRule,
+    ) -> i64 {
+        let now = chrono::Utc::now().timestamp();
+        let strikes = {
+            let mut sessions = self.inner.sessions.write();
+            match sessions.iter_mut().find(|s| s.id == id) {
+                Some(session) => {
+                    session.error_count = session.error_count.saturating_add(1);
+                    session.consecutive_errors = session.consecutive_errors.saturating_add(1);
+                    session.consecutive_errors
+                }
+                None => 1,
+            }
+        };
+        let secs = crate::error_policy::policy_cooldown_seconds(rule, 0, strikes, None);
+        let until = now + secs as i64;
+        match scope {
+            CooldownScope::Provider if !provider.is_empty() => {
+                self.inner
+                    .deprioritized
+                    .insert(format!("p:{provider}"), until);
+            }
+            CooldownScope::Model if !model.is_empty() => {
+                self.inner
+                    .deprioritized
+                    .insert(format!("m:{id}:{model}"), until);
+            }
+            _ if !id.is_empty() => {
+                self.inner.deprioritized.insert(format!("a:{id}"), until);
+            }
+            _ => {}
+        }
+        until
+    }
+
+    /// 「垫底」标记：限流/额度类在硬冷却之外再压一档，窗口内排到队尾。
+    /// 对齐 v3.5.1 `route_state::sink_mark_for`（由 `sink` 开关与
+    /// `sink_seconds` 驱动）。返回到期 unix 秒。
+    pub fn sink_account(&self, id: &str, seconds: u64) -> i64 {
+        let until = chrono::Utc::now().timestamp() + seconds as i64;
+        self.inner.deprioritized.insert(format!("a:{id}"), until);
+        until
+    }
+
+    /// 账号成功转发一次 → 清它的降权标记（含该模型与所属提供商）。
+    fn clear_deprioritized(&self, id: &str, provider: &str, model: &str) {
+        self.inner.deprioritized.remove(&format!("a:{id}"));
+        if !model.is_empty() {
+            self.inner.deprioritized.remove(&format!("m:{id}:{model}"));
+        }
+        if !provider.is_empty() {
+            self.inner.deprioritized.remove(&format!("p:{provider}"));
+        }
     }
 
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
@@ -1669,6 +1866,8 @@ impl AccountSessionStore {
 
     /// 周期维护：清理过期冷却、同步凭证过期状态。返回本轮变更条数。
     pub fn sweep(&self, now: i64) -> u64 {
+        // 过期的降权标记直接删（选路按时间判定已让其自动恢复，这里只防表增长）。
+        self.inner.deprioritized.retain(|_, until| *until > now);
         let mut touched: Vec<AccountSession> = Vec::new();
         {
             let mut sessions = self.inner.sessions.write();
@@ -3105,6 +3304,106 @@ mod tests {
             pool.set_retry_on_status(vec![402]);
             let capped = pool.record_failure(&account.id, "m2", &failure, "x", Some(402));
             assert_eq!(capped, 30);
+        });
+    }
+
+    /// 降权（沉底）排在最后：高优先级账号被降权后，选路先选未降权的低优先级账号；
+    /// 成功一次即恢复。
+    #[test]
+    fn deprioritized_account_ranks_last() {
+        with_secret_dir("deprioritize-rank", || {
+            use crate::error_policy::{CooldownScope, ErrorKind};
+            let pool = pool();
+            let a = pool.upsert(session("ch", "a", 10)).unwrap();
+            let b = pool.upsert(session("ch", "b", 0)).unwrap();
+            let rule = crate::error_policy::default_rules()
+                .into_iter()
+                .find(|r| r.kind == ErrorKind::Unsupported)
+                .unwrap();
+            pool.deprioritize(&a.id, &a.provider, "m", CooldownScope::Account, &rule);
+            for _ in 0..5 {
+                let lease = pool.acquire("ch", "m", None).expect("仍有可用账号");
+                assert_eq!(lease.id(), b.id, "降权账号必须排在最后");
+            }
+            // 成功转发一次 → 清降权，优先级重新生效。
+            pool.record_success(&a.id, "m", 1);
+            assert_eq!(pool.acquire("ch", "m", None).expect("账号都在").id(), a.id);
+        });
+    }
+
+    /// 统一策略冷却：floor 抬底 / 指数翻倍 / cap 封顶。
+    #[test]
+    fn policy_failure_uses_floor_and_exponential_with_cap() {
+        with_secret_dir("policy-cooldown", || {
+            use crate::error_policy::CooldownScope;
+            let pool = pool();
+            let acct = pool.upsert(session("ch", "acct", 0)).unwrap();
+            let mut rule = crate::error_policy::default_rules()
+                .into_iter()
+                .find(|r| r.kind == crate::error_policy::ErrorKind::RateLimit)
+                .unwrap();
+            rule.exponential = true;
+            rule.fallback_seconds = 60;
+            rule.fallback_cap_seconds = 600;
+            let failure = FailureType::ServerError;
+            // 第 1 次：60；第 2 次：120（consecutive_errors=2 → ×2）
+            assert_eq!(
+                pool.record_policy_failure(
+                    &acct.id,
+                    "m1",
+                    &failure,
+                    "x",
+                    Some(500),
+                    CooldownScope::Account,
+                    &rule,
+                    0
+                ),
+                60
+            );
+            assert_eq!(
+                pool.record_policy_failure(
+                    &acct.id,
+                    "m2",
+                    &failure,
+                    "x",
+                    Some(500),
+                    CooldownScope::Account,
+                    &rule,
+                    0
+                ),
+                120
+            );
+            // 连续多次后封顶 600
+            let mut last = 0;
+            for i in 0..10 {
+                last = pool.record_policy_failure(
+                    &acct.id,
+                    &format!("m{i}"),
+                    &failure,
+                    "x",
+                    Some(500),
+                    CooldownScope::Account,
+                    &rule,
+                    0,
+                );
+            }
+            assert_eq!(last, 600, "fallback_cap_seconds 必须封顶");
+
+            // floor 抬底（限流/额度类最短冷却）
+            let acct2 = pool.upsert(session("ch", "acct2", 0)).unwrap();
+            assert_eq!(
+                pool.record_policy_failure(
+                    &acct2.id,
+                    "m",
+                    &failure,
+                    "x",
+                    Some(500),
+                    CooldownScope::Account,
+                    &rule,
+                    300
+                ),
+                300
+            );
         });
     }
 
