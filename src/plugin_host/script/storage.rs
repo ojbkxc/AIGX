@@ -127,6 +127,11 @@ pub fn register(
 /// 注意：调用方若在拿到快照后 await 过（如等宿主 RPC），快照可能已过期，
 /// 整表写回会覆盖期间的其它写。这类路径必须改用 [`mutate_packages`]
 /// 在锁内重读后再改（见 `runtime::configure_settings_with`）。
+/// **只给测试用**：生产路径一律走 [mutate_packages]。
+///
+/// 整表覆盖是丢更新的载体（读快照 → await → 整表写回，期间别人的写被抹掉），
+/// 审计把生产调用点全部换成了 mutate_packages，这个函数只剩测试在造初始状态时用。
+#[cfg(test)]
 pub fn replace_all(
     store: &crate::storage::FileStore,
     data_dir: &Path,
