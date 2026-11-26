@@ -5818,5 +5818,7 @@
   "占比低于该阈值的扇区归入「其他」；右侧列表仍完整显示每一项": "Slices below this share are grouped into Other; the list on the right still shows every item",
   "折线": "Line",
   "柱状": "Bar",
-  "已依次尝试以下模型，均失败：": "Tried the following models in order, all failed:"
+  "已依次尝试以下模型，均失败：": "Tried the following models in order, all failed:",
+  "（锁定期间不会自动切换模型）": " (no automatic model switching while locked)",
+  "已自动切换模型，前面模型失败原因：": "Switched models automatically; earlier model failures:"
 }

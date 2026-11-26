@@ -49,6 +49,12 @@ pub enum AgentEvent {
     },
     /// 审批结果（允许/拒绝/超时）。
     ApprovalResolved { name: String, approved: bool },
+    /// 非致命提示（如「已自动切换模型」）。
+    ///
+    /// 与 `Error` 区分：不终止执行、不影响本轮结果，前端只作轻提示。
+    /// 存在意义是「把每个模型的失败原因如实报出」在**成功路径**上也成立 ——
+    /// 切到 B 成功了，A 为什么挂的同样要让人看见。
+    Notice { message: String },
     /// 最终答复。
     Final { content: String },
     /// 错误终止。
@@ -113,8 +119,18 @@ pub async fn run(
             });
         }
         let (resp, _upstream, _cid) =
-            match llm::chat_once(state, config, convo.clone(), Some(tools)).await {
-                Ok(r) => r,
+            match llm::chat_once_traced(state, config, convo.clone(), Some(tools)).await {
+                Ok((resp, upstream, cid, trace)) => {
+                    // 跨模型切换成功后，把「前面那些模型为什么失败」告诉前端。
+                    // 否则成功路径上这半个事实完全不可见（只有全部失败才报原因）。
+                    if !trace.is_empty() {
+                        on_event(AgentEvent::Notice {
+                            message: trace.join(" | "),
+                        })
+                        .await;
+                    }
+                    (resp, upstream, cid)
+                }
                 Err(e) => {
                     on_event(AgentEvent::Error {
                         message: e.to_string(),

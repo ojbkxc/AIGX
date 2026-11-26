@@ -326,6 +326,25 @@ pub async fn chat_once_as(
     tools: Option<Vec<serde_json::Value>>,
     key_id: &str,
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
+    let (resp, upstream, cid, _trace) =
+        chat_once_traced(state, config, messages, tools, key_id).await?;
+    Ok((resp, upstream, cid))
+}
+
+/// 与 [`chat_once_as`] 相同，但**额外返回「切换前失败的模型及原因」**。
+///
+/// 为什么需要：跨模型切换成功后用户只看到答复，不知道前面有模型挂了、为什么挂。
+/// 「把每个模型的失败原因如实报出」若只在全部失败时成立，成功路径上那半个事实
+/// 就丢了。runner 用这个 trace 发一条 `AgentEvent::Notice` 告诉前端。
+///
+/// 返回的第 4 项为空 = 首选模型一次成功，没有发生切换。
+pub async fn chat_once_traced(
+    state: &AppState,
+    config: &AgentConfig,
+    messages: Vec<ChatMessage>,
+    tools: Option<Vec<serde_json::Value>>,
+    key_id: &str,
+) -> Result<(ChatResponse, String, Option<String>, Vec<String>), AgentLlmError> {
     let models = candidate_models(state, config)?;
     let mut attempt = RealAttempt {
         state,
@@ -334,12 +353,13 @@ pub async fn chat_once_as(
         tools: &tools,
         key_id,
     };
-    run_model_failover(
+    let ((resp, upstream, cid), trace) = run_model_failover(
         &models,
         std::time::Duration::from_secs(MODEL_FAILOVER_BUDGET_SECS),
         &mut attempt,
     )
-    .await
+    .await?;
+    Ok((resp, upstream, cid, trace))
 }
 
 /// 「尝试一个模型」的注入点：生产传 [`RealAttempt`]（真打上游），测试传假实现。
@@ -391,7 +411,7 @@ async fn run_model_failover<A: ModelAttempt>(
     models: &[String],
     budget: std::time::Duration,
     attempt: &mut A,
-) -> Result<A::Output, AgentLlmError> {
+) -> Result<(A::Output, Vec<String>), AgentLlmError> {
     let deadline = std::time::Instant::now() + budget;
     // 逐模型试。每个模型内部仍保留原有的「渠道级 failover + 时间维度重试」，
     // 本层只负责「这个模型没指望了，换下一个」。
@@ -415,7 +435,8 @@ async fn run_model_failover<A: ModelAttempt>(
                         tried
                     );
                 }
-                return Ok(v);
+                // 带上「切换前失败的那些」：调用方据此告诉用户为什么换了模型。
+                return Ok((v, tried));
             }
             Ok(Err(e)) => {
                 tracing::warn!("agent llm model {model} failed: {e}");
@@ -1088,11 +1109,18 @@ mod tests {
         };
         let got =
             super::run_model_failover(&models, std::time::Duration::from_secs(60), &mut fake).await;
-        assert_eq!(got.expect("b 应当成功"), "ok");
+        let (out, trace) = got.expect("b 应当成功");
+        assert_eq!(out, "ok");
         assert_eq!(
             fake.order,
             vec!["a".to_string(), "b".to_string()],
             "应先试 a 再试 b"
+        );
+        // 成功路径也必须带出「a 为什么失败」，否则这半个事实就丢了
+        assert_eq!(trace.len(), 1, "应记录 a 的失败: {trace:?}");
+        assert!(
+            trace[0].contains('a') && trace[0].contains("boom"),
+            "{trace:?}"
         );
     }
 

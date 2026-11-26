@@ -159,7 +159,7 @@ export function ChannelLockBadge({ lock }: { lock: ChannelLockState }): JSX.Elem
     ? t('已锁定该供应商（渠道列表加载失败，模型列表未知）')
     : lock.degraded === 'no-models'
       ? t('已锁定该供应商（该渠道未配置模型列表，选择器不锁定）')
-      : t('Agent 已锁定供应商，只走该供应商的请求');
+      : `${t('Agent 已锁定供应商，只走该供应商的请求')}${t('（锁定期间不会自动切换模型）')}`;
   return (
     <span
       className={`agent-channel-lock${lock.degraded ? ' degraded' : ''}`}

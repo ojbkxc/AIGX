@@ -388,6 +388,15 @@ export default function Agent(): JSX.Element {
             if (ev.type === 'error' && typeof ev.message === 'string') {
               return { ...m, content: m.content + `\n⚠️ ${describeAgentError(ev.message)}` };
             }
+            // 跨模型切换成功：后端把「前面那些模型为何失败」一并送来。
+            // 不是错误（本轮有答复），但属于「每个模型的失败原因如实报出」
+            // 在成功路径上的那一半，不能丢。
+            if (ev.type === 'notice' && typeof ev.message === 'string') {
+              return {
+                ...m,
+                content: `${m.content}\n🔀 ${t('已自动切换模型，前面模型失败原因：')} ${ev.message}`,
+              };
+            }
             // 工具事件统一进「配对层」：调用/审批/结果三种事件都会更新**同一张卡**
             // （此前是各 push 一行，读起来像流水账，且「这次成没成」要人眼在相邻
             // 两行之间拼）。
