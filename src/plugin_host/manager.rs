@@ -519,6 +519,23 @@ impl PluginHostManager {
     pub async fn disable(&self, pack_id: &str) -> Result<(), String> {
         // Wasm 包：关宿主 + 摘清单 + 清任务/目录状态，然后落 enabled=false。
         if let Some(provider) = self.provider_of_wasm_pack(pack_id) {
+            // `WasmHost` 按 **provider** 组织，不是按 pack：两个包声明同一 provider
+            // 时（合法配置：一个只实现 chat、另一个只实现 catalog），停掉其中一个
+            // 不能把共享宿主一起关掉 —— 那会让另一个包的数据面静默失效，而且日志里
+            // 一个字都不会提它。只有「没有别的启用包分享这个 provider」时才真停宿主。
+            let shared_with = self
+                .registry
+                .other_enabled_pack_for_provider(&provider, pack_id);
+            if let Some(other) = shared_with {
+                self.registry.set_enabled(pack_id, false)?;
+                if let Some(slot) = self.runtime.write().get_mut(pack_id) {
+                    slot.running = false;
+                }
+                tracing::info!(
+                    "[PluginHost] 已停用 Wasm 插件包 {pack_id}（provider {provider} 仍由包                      {other} 声明，宿主保持运行）"
+                );
+                return Ok(());
+            }
             crate::plugin_host::wasm::stop(&provider).await;
             crate::plugin_host::wasm::forget(&provider);
             self.registry.set_enabled(pack_id, false)?;

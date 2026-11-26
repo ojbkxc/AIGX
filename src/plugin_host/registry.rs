@@ -316,6 +316,28 @@ impl PackRegistry {
             .map(|p| p.id.clone())
     }
 
+    /// 除 `exclude_pack` 之外，还有没有**启用中**的包声明了 `provider`。
+    ///
+    /// 停用/卸载一个包时用：`WasmHost` 按 provider 组织，不是按 pack。两个包声明
+    /// 同一 provider 时（合法配置：一个只实现 chat、另一个只实现 catalog），
+    /// 停掉其中一个不该把共享宿主一起关掉 —— 否则另一个包的数据面静默失效。
+    pub fn other_enabled_pack_for_provider(
+        &self,
+        provider: &str,
+        exclude_pack: &str,
+    ) -> Option<String> {
+        self.inner
+            .packs
+            .read()
+            .iter()
+            .find(|p| {
+                p.id != exclude_pack
+                    && p.provider_enabled(provider)
+                    && p.providers.iter().any(|pp| pp.id == provider)
+            })
+            .map(|p| p.id.clone())
+    }
+
     /// 是否由插件接管该 provider（**插件优先**）。
     ///
     /// 已装且启用的包声明了 `provider` 即接管；**逐家停用**（`disabled_providers`
@@ -431,6 +453,42 @@ mod tests {
             enabled,
             ..Default::default()
         }
+    }
+
+    /// 两个包声明同一 provider 时，「还有谁在用它」必须能问出来 ——
+    /// `manager.disable` 靠它决定要不要关共享宿主（关了会让另一个包静默失效）。
+    #[test]
+    fn other_enabled_pack_for_provider_reports_the_sharer() {
+        let reg = temp_registry();
+        reg.load().unwrap();
+        // 一个包声明 chat 侧、另一个声明 catalog 侧，同一个 provider
+        reg.upsert(meta("pack-a", &["trae"], true)).unwrap();
+        reg.upsert(meta("pack-b", &["trae"], true)).unwrap();
+
+        // 从 pack-a 的视角：pack-b 仍在用
+        assert_eq!(
+            reg.other_enabled_pack_for_provider("trae", "pack-a")
+                .as_deref(),
+            Some("pack-b"),
+            "另一个启用包仍声明该 provider 时必须报出来（否则 disable 会连带停掉它）"
+        );
+        // 从 pack-b 的视角：pack-a 仍在用
+        assert_eq!(
+            reg.other_enabled_pack_for_provider("trae", "pack-b")
+                .as_deref(),
+            Some("pack-a")
+        );
+
+        // pack-b 停用后，pack-a 就是唯一持有者 → 可以安全关宿主
+        reg.set_enabled("pack-b", false).unwrap();
+        assert_eq!(
+            reg.other_enabled_pack_for_provider("trae", "pack-a"),
+            None,
+            "唯一的另一个包已停用时必须返回 None（此时关宿主是安全的）"
+        );
+
+        // 没人用的 provider 自然也是 None（正向对照，防「恒返回 Some」蒙对）
+        assert_eq!(reg.other_enabled_pack_for_provider("kimi", "pack-a"), None);
     }
 
     #[test]
