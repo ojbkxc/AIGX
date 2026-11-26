@@ -1,0 +1,105 @@
+/* 侧栏分组自定义（components/Sidebar.tsx）：组头（标签 + 组内计数 + 隐藏按钮）
+   与底部「已隐藏 N 组 · 恢复」提示条。
+
+   为什么单独一份而不是并进 App.css：App.css 里的 .sidebar-* 是常驻全局样式，
+   而这一组样式只服务本文件的交互件；单开一份，改动面看得见、回滚也只动这一处。
+
+   折叠态（.sidebar-aside-collapsed）下组标签本就退化成一条分隔细线（见 App.css
+   「.sidebar-aside-collapsed .sidebar-group-label」），计数与隐藏按钮必须一起藏掉，
+   否则 44px 宽的图标栏里会挤出两个点不动的小方块。 */
+
+.sidebar-group-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  /* 右侧留一点内距：隐藏按钮不该贴到侧栏边缘 */
+  padding-right: 4px;
+}
+
+.sidebar-group-head .sidebar-group-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 组内计数：与标签同一行，右对齐，平时低对比度（不抢菜单文字） */
+.sidebar-group-count {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--btn-secondary-bg, rgba(148, 163, 184, 0.14));
+  font-variant-numeric: tabular-nums;
+}
+
+/* 隐藏组按钮：默认透明，鼠标移到分组上才显形（避免每条分组都挂一个常亮图标） */
+.sidebar-group-hide {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-group:hover .sidebar-group-hide,
+.sidebar-group-hide:focus-visible {
+  opacity: 1;
+}
+
+.sidebar-group-hide:hover {
+  color: var(--text-main);
+  background: var(--sidebar-menu-hover);
+}
+
+/* 恢复条：常驻在导航底部，虚线分隔，整行可点 */
+.sidebar-restore-groups {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.sidebar-restore-groups:hover {
+  color: var(--text-main);
+  border-color: var(--accent-color);
+}
+
+/* 折叠态：计数、隐藏按钮、恢复条一律不显示（图标栏没有它们的落点） */
+.sidebar-aside-collapsed .sidebar-group-count,
+.sidebar-aside-collapsed .sidebar-group-hide,
+.sidebar-aside-collapsed .sidebar-restore-groups {
+  display: none;
+}
+
+/* 折叠态下组头只剩那条分隔细线：让 label 独占整行，head 不再做 flex 分配 */
+.sidebar-aside-collapsed .sidebar-group-head {
+  display: block;
+}
+
+/* 移动端抽屉里没有 hover：隐藏按钮常显，否则触屏用户根本发现不了这个功能 */
+.sidebar-aside-drawer .sidebar-group-hide {
+  opacity: 1;
+}

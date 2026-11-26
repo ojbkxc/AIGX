@@ -12,11 +12,13 @@ import {
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, Globe,
   Puzzle, Route as RouteIcon, Flame, Wrench, CalendarClock, Bell, Gauge,
+  EyeOff, RotateCcw,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
 import GlobalSearch from './GlobalSearch';
 import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
+import './Sidebar.css';
 
 interface NavItem {
   path: string;
@@ -141,15 +143,54 @@ function roleFilter(items: NavItem[]): NavItem[] {
   return items.filter((it) => !it.adminOnly);
 }
 
+// ── 分组自定义（对齐 A2A sidebar-pane 的分组面板，只做其中两件）──────────
+// A2A 的侧栏分组有拖动排序 / 重命名 / 隐藏组 / 组内计数四件；AIGX 这一波只落
+// 「组内计数 + 隐藏组」：拖动排序与重命名需要一套完整的布局编辑态（拖动把手、
+// 跨组落点、重命名输入、恢复默认），不是本波体量能做完的，宁可不做也不做浅。
+//
+// 持久化：隐藏的是**组 key**（'general' / 'admin' / 'personal'），不是下标 ——
+// 下标会随菜单增删漂移，隐藏状态就会静默落到别的组上（与 navGroups 用
+// navItemOf(path) 而非下标取条目同一个理由）。
+//
+// 恢复入口必须存在：隐藏整组之后若不提示，用户会以为菜单没了（A2A 的
+// 「已隐藏 N 组」提示条同理）。这里在导航底部常驻一行「已隐藏 N 组 · 恢复」。
+const HIDDEN_GROUPS_KEY = 'aigx-sidebar-hidden-groups';
+
+function readHiddenGroups(): string[] {
+  try {
+    const raw = localStorage.getItem(HIDDEN_GROUPS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // 只收仍在 navGroups 里的 key：菜单下线后残留的 key 不该继续占位
+    const known = new Set(navGroups.map((g) => g.key));
+    return parsed.filter((k): k is string => typeof k === 'string' && known.has(k));
+  } catch {
+    return [];
+  }
+}
+
+function writeHiddenGroups(keys: string[]): void {
+  try {
+    localStorage.setItem(HIDDEN_GROUPS_KEY, JSON.stringify(keys));
+  } catch {
+    /* 存储不可用只影响下次打开，本次会话照常生效 */
+  }
+}
+
 interface SidebarContentProps {
   collapsed: boolean;
   onToggleCollapsed: () => void;
   /** 移动端抽屉形态：隐藏收缩按钮（抽屉本身即开合） */
   isDrawer: boolean;
+  /** 被隐藏的分组 key（桌面栏与移动抽屉共用同一份状态） */
+  hiddenGroups: string[];
+  onToggleGroup: (key: string) => void;
+  onRestoreGroups: () => void;
 }
 
 /** 侧栏内容（桌面常驻 / 移动抽屉共用） */
-function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarContentProps): JSX.Element {
+function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, hiddenGroups, onToggleGroup, onRestoreGroups }: SidebarContentProps): JSX.Element {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const [userMenuOpen, setUserMenuOpen] = React.useState<boolean>(false);
@@ -192,6 +233,14 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
   const email = localStorage.getItem('email') || 'Admin';
   const username = localStorage.getItem('username') || '';
 
+  // 「已隐藏 N 组」只数当前角色真能看见的组：普通用户看不到管理组，
+  // 管理员隐藏了「管理」后切到普通账号，提示条不该冒出个点不动的计数。
+  const visibleHiddenCount = navGroups.filter((g) => {
+    if (g.adminOnly && !isAdmin()) return false;
+    if (roleFilter(g.items).length === 0) return false;
+    return hiddenGroups.includes(g.key);
+  }).length;
+
   return (
     <aside
       className={`sidebar-aside ${collapsed ? 'sidebar-aside-collapsed' : ''} ${isDrawer ? 'sidebar-aside-drawer' : ''}`}
@@ -213,10 +262,29 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
           if (group.adminOnly && !isAdmin()) return null;
           const visibleItems = roleFilter(group.items);
           if (visibleItems.length === 0) return null;
+          // 隐藏组：整组不渲染（恢复入口在 nav 底部，见下）
+          if (hiddenGroups.includes(group.key)) return null;
+          const label = t(group.labelKey || '');
           return (
             <div key={group.key} className="sidebar-group">
-              <div className="sidebar-group-label" title={t(group.labelKey || '')}>
-                {t(group.labelKey || '')}
+              <div className="sidebar-group-head">
+                <div className="sidebar-group-label" title={label}>
+                  {label}
+                </div>
+                {/* 组内计数：A2A 分组面板的「{n} 项 · {shown} 显示」，这里只剩「项」——
+                    可见性由「隐藏整组」承载，没有逐项隐藏，两个数会永远相等 */}
+                <span className="sidebar-group-count" title={t('{{n}} 项', { n: visibleItems.length })}>
+                  {visibleItems.length}
+                </span>
+                <button
+                  type="button"
+                  className="sidebar-group-hide"
+                  title={t('隐藏「{{name}}」分组', { name: label })}
+                  aria-label={t('隐藏「{{name}}」分组', { name: label })}
+                  onClick={(e) => { e.stopPropagation(); onToggleGroup(group.key); }}
+                >
+                  <EyeOff size={12} strokeWidth={1.8} />
+                </button>
               </div>
               {visibleItems.map((item) => (
                 <NavLink
@@ -233,6 +301,13 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
             </div>
           );
         })}
+        {/* 恢复入口：隐藏整组后必须给一条回来的路（A2A 的「已隐藏 N 组」提示条同位） */}
+        {visibleHiddenCount > 0 && (
+          <button type="button" className="sidebar-restore-groups" onClick={onRestoreGroups}>
+            <RotateCcw size={12} strokeWidth={1.8} />
+            <span>{t('已隐藏 {{n}} 组 · 恢复', { n: visibleHiddenCount })}</span>
+          </button>
+        )}
       </nav>
 
       {/* 唯一收缩开关：nav 与 footer 之间的固定行，整行（含提示文字）可点击 */}
@@ -324,6 +399,23 @@ export default function Sidebar(): JSX.Element {
       return false;
     }
   });
+  // 分组隐藏状态提到这里（而不是各 SidebarContent 自己 useState）：
+  // 桌面栏与移动抽屉是同一个组件的两个实例，状态留在实例里就会出现
+  // 「抽屉里隐藏了、桌面栏还显示」。
+  const [hiddenGroups, setHiddenGroups] = React.useState<string[]>(readHiddenGroups);
+
+  const toggleGroup = (key: string): void => {
+    setHiddenGroups((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      writeHiddenGroups(next);
+      return next;
+    });
+  };
+
+  const restoreGroups = (): void => {
+    setHiddenGroups([]);
+    writeHiddenGroups([]);
+  };
 
   // 切换展开/收缩并持久化（全局布局联动 .main-content 边距）
   const toggleCollapsed = (): void => {
@@ -369,11 +461,13 @@ export default function Sidebar(): JSX.Element {
       </button>
       {/* 桌面端常驻侧栏（≤768px 由 CSS 隐藏） */}
       <div className="sidebar-desktop">
-        <SidebarContent collapsed={collapsed} onToggleCollapsed={toggleCollapsed} isDrawer={false} />
+        <SidebarContent collapsed={collapsed} onToggleCollapsed={toggleCollapsed} isDrawer={false}
+          hiddenGroups={hiddenGroups} onToggleGroup={toggleGroup} onRestoreGroups={restoreGroups} />
       </div>
       {/* 移动端抽屉（恒为展开形态） */}
       <MobileDrawer open={mobileOpen} onClose={() => setMobileOpen(false)} ariaLabel={t('导航菜单')}>
-        <SidebarContent collapsed={false} onToggleCollapsed={toggleCollapsed} isDrawer />
+        <SidebarContent collapsed={false} onToggleCollapsed={toggleCollapsed} isDrawer
+          hiddenGroups={hiddenGroups} onToggleGroup={toggleGroup} onRestoreGroups={restoreGroups} />
       </MobileDrawer>
       <GlobalSearch
         open={searchOpen}

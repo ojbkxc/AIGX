@@ -1,0 +1,147 @@
+/* 报表面板共用件样式（components/report/*）：Top 榜显示数量选择器、榜尾占比行、
+   饼图合并阈值控件、趋势指标/形态切换。
+
+   为什么单开一份而不并进 pages/Dashboard.css：这些控件由 components/report 下的
+   共用件渲染，Dashboard.css 只有报表页 import；共用件若被别的页复用，样式会跟着
+   一起缺。放在组件同目录，谁 import 谁生效。 */
+
+/* 分段控件（紧凑版）：与报表页 .range-switcher 同一套视觉，字号/内距更小，
+   以便塞进面板标题行而不撑高标题 */
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.seg-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 5px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.seg-btn:hover:not(.is-active) {
+  color: var(--text-main);
+  background: rgba(47, 111, 237, 0.06);
+}
+
+.seg-btn.is-active {
+  background: var(--accent-color);
+  color: var(--accent-contrast);
+  font-weight: 600;
+}
+
+.seg-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 榜单工具行：选择器右对齐，不挤占表头 */
+.rank-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+/* 榜尾合计行：左侧「前 N 名占全部用量 X%」，右侧该榜读数 */
+.rank-footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.rank-footer-total {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+}
+
+/* 饼图合并阈值控件（开关 + 阈值下拉），挂在面板标题行 */
+.donut-settings {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.donut-settings-select {
+  appearance: none;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-main);
+  font-size: 11.5px;
+  padding: 3px 6px;
+  min-width: 64px;
+}
+
+.donut-settings-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 趋势面板读数行（合计 / 日均） */
+.trend-reading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.trend-reading strong {
+  font-size: 15px;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 可点行（客户端统计 → 请求日志）：整行可点，但键盘走行内的链接按钮 */
+.clickable-row {
+  cursor: pointer;
+}
+
+.clickable-row:hover {
+  background: rgba(47, 111, 237, 0.06);
+}
+
+.row-link {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent-color);
+  cursor: pointer;
+  text-align: left;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-link:hover {
+  text-decoration: underline;
+}

@@ -13,7 +13,7 @@ import { isAdmin } from '../lib/utils';
 import type { ReportWindow } from '../api';
 import { SkeletonCards, Tabs } from '../components/ui';
 import ReportSettingsPanel from '../components/ReportSettingsPanel';
-import { fmtInt, fmtTokens, nameColorMap, toCsv, downloadText } from '../lib/format';
+import { fmtTokens, nameColorMap, toCsv, downloadText } from '../lib/format';
 import PanelWrap from '../components/dashboard/PanelWrap';
 import RangeSwitcher, { initialRange, rangeLabel as rangeLabelOf, windowOf, readCustomRange, type RangeKey } from '../components/dashboard/RangeSwitcher';
 import StatCards from '../components/dashboard/StatCards';
@@ -31,6 +31,7 @@ import {
   useDailyTrend, useHeatmap, useLimits, useOverview, usePersonalMe, useRealtime,
   useReportModels, useTodayTokens, useTokenTrend, useTopClients, useTopSources, useUsageSummary, useUserRanking,
 } from '../hooks/useDashboard';
+import { drillRangeOf } from '../components/report/logs-drilldown';
 import './Dashboard.css';
 
 function RefreshIcon({ spinning }: { spinning: boolean }): JSX.Element {
@@ -141,12 +142,10 @@ export default function Dashboard(): JSX.Element {
   const lm = limitsQ.data;
   const me = meQ.data;
 
-  const trendRows = useMemo(() => daily.map((d) => ({
-    date: d.date ?? '',
-    value: d.cost ?? 0,
-    sub: t('{{n}} 次请求', { n: fmtInt(d.count, lang) }),
-    models: (d.models ?? []).map((m) => ({ model: m.model ?? '?', tokens: m.tokens ?? 0 })),
-  })), [daily, t, lang]);
+  // 趋势面板的逐日行改由 ConsumptionPanel 自己按指标（消费/Token/请求数）派生
+  // —— 指标切换要换整列读数，放在页面层会让这页每加一个指标就多一个 memo。
+  // 这里只留「下钻窗口」：点客户端榜的行要跳 /logs 并带上同一段时间。
+  const drillRange = useMemo(() => drillRangeOf(win), [win]);
 
   // 环形图按 token 分片（A2A donutView 口径）：扇区角表达相对占比、中心给
   // 共同分母（总 token）、图例每行是绝对量 + 占比 —— 只看角度读不出量级，
@@ -160,6 +159,20 @@ export default function Dashboard(): JSX.Element {
   }));
   const donutColors = useMemo(() => nameColorMap(models, (m) => m.model ?? '', tokenOf), [models]);
   const modelTotalTokens = models.reduce((s, m) => s + tokenOf(m), 0);
+
+  // 供应商饼图（A2A 双饼图的第二张）：数据源就是 Top 供应商榜的 tokens。
+  // 个人口径 tokens 恒为 null（后端不给个人 token 读数），此时这张图不该出现。
+  const providerRows = useMemo(() => sourcesQ.data ?? [], [sourcesQ.data]);
+  const providerDonut = useMemo(() => providerRows.map((s) => ({
+    name: s.name?.trim() || '—',
+    value: s.tokens ?? 0,
+    labelValue: fmtTokens(s.tokens ?? 0, lang),
+  })), [providerRows, lang]);
+  const providerColors = useMemo(
+    () => nameColorMap(providerRows, (s) => s.name ?? '', (s) => s.tokens ?? 0),
+    [providerRows],
+  );
+  const providerTotalTokens = providerRows.reduce((s, r) => s + (r.tokens ?? 0), 0);
 
   const monthlyUsed = me?.used_quota ?? lm?.monthly_used ?? 0;
   const monthlyLimit = me && !admin ? me.quota ?? null : lm?.monthly_limit ?? null;
@@ -318,12 +331,12 @@ export default function Dashboard(): JSX.Element {
         <div style={{ marginTop: 16 }} />
         {statCardsBlock}
 
-        <ConsumptionPanel query={dailyQ} rows={trendRows} lang={lang} rLabel={rLabel} />
+        <ConsumptionPanel query={dailyQ} daily={daily} lang={lang} rLabel={rLabel} />
         <TokenTrendPanel query={tokenTrendQ} lang={lang} rLabel={rLabel} />
         <ModelPanels query={modelsQ} donutData={donutData} colors={donutColors}
           totalTokens={modelTotalTokens} lang={lang} rLabel={rLabel} personal />
         <PanelWrap title={t('Top 客户端（{{range}}）', { range: t(rLabel) })} query={clientsQ} emptyText={t('暂无客户端数据')}>
-          {(data) => <TopClients data={data} lang={lang} />}
+          {(data) => <TopClients data={data} lang={lang} drill={drillRange} totalRequests={ov?.total_requests} />}
         </PanelWrap>
         <CachePanels ratesQuery={ratesQ} trendQuery={trend24Q} savings={savings} lang={lang} />
         <HeatmapPanel query={heatmapQ} lang={lang} />
@@ -362,22 +375,24 @@ export default function Dashboard(): JSX.Element {
         {(data) => <ChannelHealth data={data} lang={lang} updatedAt={healthQ.dataUpdatedAt} />}
       </PanelWrap>
 
-      {/* 7) 消费趋势 + Token 趋势 */}
-      <ConsumptionPanel query={dailyQ} rows={trendRows} lang={lang} rLabel={rLabel} />
+      {/* 7) 用量趋势（指标 × 形态切换）+ Token 趋势 */}
+      <ConsumptionPanel query={dailyQ} daily={daily} lang={lang} rLabel={rLabel} />
       <TokenTrendPanel query={tokenTrendQ} lang={lang} rLabel={rLabel} />
       {/* 8) 缓存效率：四窗口卡 + 近 24h 双轴折线 */}
       <CachePanels ratesQuery={ratesQ} trendQuery={trend24Q} savings={savings} lang={lang} />
-      {/* 9) 模型分布环形图 + Top 模型榜 */}
+      {/* 9) 模型分布 + 供应商分布双环形图 + Top 模型榜 */}
       <ModelPanels query={modelsQ} donutData={donutData} colors={donutColors}
-        totalTokens={modelTotalTokens} lang={lang} rLabel={rLabel} personal={false} />
+        totalTokens={modelTotalTokens} lang={lang} rLabel={rLabel} personal={false}
+        providers={providerDonut} providersTotal={providerTotalTokens}
+        providersColors={providerColors} providersQuery={sourcesQ} />
 
       {/* 10) Top 供应商榜 + Top 客户端榜 + 用户消费榜 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
         <PanelWrap title={t('Top 供应商（{{range}}）', { range: t(rLabel) })} query={sourcesQ} emptyText={t('暂无供应商数据')}>
-          {(data) => <TopSources data={data} lang={lang} />}
+          {(data) => <TopSources data={data} lang={lang} totalRequests={ov?.total_requests} />}
         </PanelWrap>
         <PanelWrap title={t('Top 客户端（{{range}}）', { range: t(rLabel) })} query={clientsQ} emptyText={t('暂无客户端数据')}>
-          {(data) => <TopClients data={data} lang={lang} />}
+          {(data) => <TopClients data={data} lang={lang} drill={drillRange} totalRequests={ov?.total_requests} />}
         </PanelWrap>
         <PanelWrap title={t('用户消费排行（Top 20）')} query={userRankQ} emptyText={t('暂无用户排行数据')}>
           {(data) => <UserRanking data={data} lang={lang} />}

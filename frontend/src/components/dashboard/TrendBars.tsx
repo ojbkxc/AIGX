@@ -32,6 +32,9 @@ export interface BarRow {
   sub?: string;
 }
 
+/** 形态（A2A daily-trend-panel 的 TYPES：柱状 / 折线） */
+export type TrendShape = 'bar' | 'line';
+
 interface Props {
   rows: BarRow[];
   /** 读数格式化（token/请求/金额各传各的） */
@@ -41,6 +44,8 @@ interface Props {
   colors?: Map<string, string>;
   lang?: string;
   height?: number;
+  /** 柱状（默认）或折线：轴/刻度/柱顶读数/hover 全部共用，只有图形本体不同 */
+  shape?: TrendShape;
 }
 
 const VERTICAL_LABEL_MIN_STEP = 13;
@@ -51,6 +56,7 @@ export default function TrendBars({
   formatAxis,
   lang,
   height = 240,
+  shape = 'bar',
 }: Props): JSX.Element | null {
   const [ref, measured] = useMeasuredWidth<HTMLDivElement>();
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -166,6 +172,27 @@ export default function TrendBars({
           <text x={width / 2} y={height / 2} textAnchor="middle" fill="var(--text-muted)" fontSize="12">
             —
           </text>
+        ) : shape === 'line' ? (
+          <>
+            <polyline
+              points={rows.map((r, i) => `${Math.round((pad.left + step * i + step / 2) * 10) / 10},${Math.round(yAt(r.value) * 10) / 10}`).join(' ')}
+              fill="none"
+              stroke="var(--accent-color)"
+              strokeWidth="2"
+              strokeLinejoin="round"
+            />
+            {rows.map((r, i) =>
+              r.value <= 0 ? null : (
+                <circle
+                  key={`p${i}`}
+                  cx={pad.left + step * i + step / 2}
+                  cy={yAt(r.value)}
+                  r={hoverIdx === i ? 4.5 : 2.6}
+                  fill="var(--accent-color)"
+                />
+              ),
+            )}
+          </>
         ) : (
           rows.map((r, i) =>
             r.value <= 0 ? null : (

@@ -1,16 +1,38 @@
 // Top 渠道榜（A2A Top providers/accounts 的 AIGX 合并对应物）：行内占比条
 // （CSS 宽度百分比 = count 占该榜总量）+ 五指标右对齐（请求/消费/token/
 // 成功率/均延迟），标题小字 = 该维总量（各行相加与标题可对账）。
+//
+// 「前 N 名 / 全部」选择器 + 榜尾占比合计：对齐 A2A report/rank-panel.tsx
+// 的 COUNTS 选择器与「前 {n} 名占全部用量 {pct}」合计行，口径差异见
+// components/report/rank-controls.tsx 头部注释（后端 truncate(10)、分母取概览总量）。
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { fmtCost, fmtInt, fmtPct, fmtTokens } from '../../lib/format';
 import type { TopSource } from '../../hooks/useDashboard';
+import { RankCountControl, RankShareFooter, rankShare, rankSlice, type RankCount } from '../report/rank-controls';
 
-export default function TopSources({ data, lang }: { data: TopSource[]; lang?: string }): JSX.Element {
+export default function TopSources({ data, lang, totalRequests }: {
+  data: TopSource[];
+  lang?: string;
+  /** 窗口内全站总请求（概览 total_requests）：榜尾占比的分母；缺省退回榜内合计 */
+  totalRequests?: number | null;
+}): JSX.Element {
   const { t } = useTranslation();
-  const total = data.reduce((s, d) => s + (d.count ?? 0), 0);
-  const maxCount = Math.max(...data.map((d) => d.count ?? 0), 1);
+  // 默认 5：与 A2A 的 useState('5') 一致（榜单一眼可读完，需要更多可切「全部」）
+  const [count, setCount] = useState<RankCount>(5);
+  const rows = useMemo(() => rankSlice(data, count), [data, count]);
+  const rowsTotal = useMemo(() => data.reduce((s, d) => s + (d.count ?? 0), 0), [data]);
+  const shownSum = useMemo(() => rows.reduce((s, d) => s + (d.count ?? 0), 0), [rows]);
+  // 行内占比的分母用全量行（切 5 名后各行占比不跳变，只是少列几行）
+  const total = rowsTotal;
+  const maxCount = Math.max(...rows.map((d) => d.count ?? 0), 1);
+  const share = rankShare(shownSum, totalRequests ?? 0, rowsTotal);
+
   return (
     <div>
+      <div className="rank-toolbar">
+        <RankCountControl count={count} onChange={setCount} label={t('供应商显示数量')} />
+      </div>
       <table className="top-rank-table" style={{ width: '100%' }}>
         <thead>
           <tr>
@@ -25,7 +47,7 @@ export default function TopSources({ data, lang }: { data: TopSource[]; lang?: s
           </tr>
         </thead>
         <tbody>
-          {data.map((s, i) => {
+          {rows.map((s, i) => {
             const pct = total > 0 ? ((s.count ?? 0) / total) * 100 : 0;
             return (
               <tr key={`${i}-${s.name}`}>
@@ -49,6 +71,12 @@ export default function TopSources({ data, lang }: { data: TopSource[]; lang?: s
           })}
         </tbody>
       </table>
+      <RankShareFooter
+        count={rows.length}
+        share={share}
+        metric={t('请求')}
+        totalText={`${t('合计')} ${fmtInt(rowsTotal, lang)}`}
+      />
     </div>
   );
 }
