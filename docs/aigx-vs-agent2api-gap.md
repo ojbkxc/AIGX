@@ -1,5 +1,9 @@
 # AIGX ↔ Agent2API 差距清单（手工分析，2026-11-02）
 
+> ⚠️ **已过时（2026-11-26 复核）**：基准还停在 v3.0.8；§2「路由策略语义等价」不成立
+> （缺 `order` / `provider` 语义），§1「内容拦截降级期未见」已过期（`guardrail/degrade.rs`
+> 已存在）。以 [`V351-GAP-AUDIT-2026-11-26.md`](./V351-GAP-AUDIT-2026-11-26.md) 为唯一依据。
+
 > 基准：AIGX `D:\GitHub\AIGX` @ `dcb14bd`（VERSION 1.0.28）↔ 上游 Agent2API @ `68d0a4e`（v3.0.8，`D:\GitHub\Agent2API`）。
 > 用途：逐项对照上游功能，标出 AIGX 落点或缺口，供多人/多 AI 并行改动时对照，避免撞车。
 > 生成方式：人工核对源码（非 `tools/sync_agent2api_*.py` 生成的自动报告，那三份看 `upstream-*-diff.md`）。

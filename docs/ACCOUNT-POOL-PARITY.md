@@ -1,5 +1,9 @@
 # 账号池功能差距审计：AIGX × Agent2API v3.5.0-beta.7
 
+> ⚠️ **已过时（2026-11-26 复核）**：本文列为「待补」的 4 项（relogin UI、rich filters、
+> 服务端分页、导出 v2）**实际均已实现**，不要再据此排期。重新核实后的差距清单见
+> [`V351-GAP-AUDIT-2026-11-26.md`](./V351-GAP-AUDIT-2026-11-26.md)。
+
 > 审计日期：2026-11-22
 > A2A 真相源：`D:\GitHub\Agent2API` tag `v3.5.0-beta.7`（只读；AGPL，仅审计行为，未拷贝源码）
 > AIGX：`D:\GitHub\AIGX`（工作区）

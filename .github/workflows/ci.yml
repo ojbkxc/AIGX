@@ -8,6 +8,13 @@ on:
       - main
   workflow_dispatch:
 
+# 同一 ref 的并发运行只保留最新一次。此前没有 concurrency：连续 push 会叠加
+# 每次 6 组 feature check + `cargo test`(约 30 分钟) + 两套 e2e，队列积压后
+# 最新提交要排在旧运行后面才出结果，且旧运行的结果已无参考价值。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 

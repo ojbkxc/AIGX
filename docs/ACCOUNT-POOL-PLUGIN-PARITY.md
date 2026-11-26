@@ -1,5 +1,8 @@
 ﻿# 账号池插件能力对齐：AIGX × Agent2API v3.5.0-beta.7（WASM 宿主面）
 
+> ⚠️ **数字失实（2026-11-26 复核）**：本文写 wasm 宿主文件 39 个，实测 41 个；
+> 能力面核对以 [`V351-GAP-AUDIT-2026-11-26.md`](./V351-GAP-AUDIT-2026-11-26.md) 为准。
+
 > 审计日期：2026-11-23
 > 上游：`D:\GitHub\Agent2API` tag `v3.5.0-beta.7`（`HEAD` 与 tag 同一提交 `d20e8501`）
 > AIGX：`D:\GitHub\AIGX`（本次改动前 `HEAD`=847911ba / v1.0.91 工作区）

@@ -1,5 +1,9 @@
 # AIGX × Agent2API v3.5.0-beta.7 对齐审计与实施分工
 
+> ⚠️ **结论已被推翻（2026-11-26 复核）**：本文把订阅 provider 判为「不适用（未移植）」，
+> 按用户「AIGX 只能比 Agent2API 多、不能少」的口径该判定不成立，已列入待补缺口
+> （见 [`V351-GAP-AUDIT-2026-11-26.md`](./V351-GAP-AUDIT-2026-11-26.md) 的 B-A1）。
+
 > 审计日期：2026-11-22
 > 上游：`D:\GitHub\Agent2API` tag `v3.5.0-beta.7`（`v3.5.0-beta.6..v3.5.0-beta.7`，120 文件）
 > AIGX：`D:\GitHub\AIGX`（当前 HEAD 含 1.0.80）
