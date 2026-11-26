@@ -210,8 +210,10 @@ pub struct RequestLog {
     pub purge_applied: bool,
     /// 特殊请求路由留痕（compact / title / vision）。仅命中时出现。
     ///
-    /// 回放页把它投影成 `route.compactRoute/titleRoute/visionCompatibility`；
-    /// 信息非敏感（只有模型名与模式），普通用户导出不剔除。
+    /// 回放页把它投影成 `route.compactRoute/titleRoute/visionCompatibility`。
+    /// **仅管理员可见**：`from`/`to` 都是模型名，`to` 是站方改写后实际用的那个
+    /// （compact 换便宜模型 / vision 换识图模型），与 `model` 同属「上游是谁」这一维，
+    /// 故非管理员响应整条剥离（见 [`strip_non_admin_fields`]）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub special_route: Option<SpecialRouteTrace>,
     /// 请求/响应快照（仅 log_body 开关开启时记录；关闭时 None 且不序列化）
@@ -798,6 +800,20 @@ impl Default for RequestLog {
 }
 
 impl RequestLog {
+    /// 这条日志在**普通用户视角**下的模型名（唯一判据）。
+    ///
+    /// `model` 存的是映射后的上游真名，`origin_model` 才是用户请求的名字
+    /// （无映射时为 `None`，此时 `model` 本身就是请求名）。三处必须同口径：
+    /// 响应遮罩（[`mask_upstream_identity`]）、筛选（`Self::matches` /
+    /// `list_with_filter_ext` 的 keyword）、CSV 导出列。
+    ///
+    /// 为什么不是三处各写一遍：`?model=` 与 `?keyword=` 都接受任意字符串，
+    /// 若筛选仍比上游真名，「命中几条」就是一条逐字问出上游真名的预言机 ——
+    /// 响应体遮了、筛选器又漏回来。收成一个函数让它们无法漂移。
+    pub fn visible_model(&self) -> &str {
+        self.origin_model.as_deref().unwrap_or(self.model.as_str())
+    }
+
     pub fn new() -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1496,10 +1512,12 @@ impl RequestLogStore {
     ///
     /// 参数：
     /// - user_id：按用户 ID 过滤
-    /// - model：按模型过滤
-    /// - channel_id：按渠道过滤
+    /// - model：按模型过滤（`admin=false` 时比对**用户可见的**模型名，见
+    ///   [`RequestLog::visible_model`]）
+    /// - channel_id：按渠道过滤（`admin=false` 时调用方必须传 `None`）
     /// - start/end：时间范围（unix timestamp，闭区间）
     /// - page/size：分页（1-based）
+    /// - admin：视角（决定 `model` 比上游真名还是请求侧名字）
     #[allow(clippy::too_many_arguments)]
     pub fn list_with_filter(
         &self,
@@ -1510,6 +1528,7 @@ impl RequestLogStore {
         end: Option<i64>,
         page: usize,
         size: usize,
+        admin: bool,
     ) -> (Vec<RequestLog>, usize) {
         // P0 性能：无筛选时用 list_latest_keys 只取最新一页所需的键（索引范围
         // 扫描 + LIMIT），避免全表列键+全量反序列化。10 万条日志时从 O(全表)
@@ -1554,7 +1573,7 @@ impl RequestLogStore {
         let all = self.list_all();
         let filtered: Vec<RequestLog> = all
             .into_iter()
-            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
+            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end, admin))
             .collect();
         let total = filtered.len();
         let start_idx = (page - 1) * size;
@@ -1570,8 +1589,12 @@ impl RequestLogStore {
     /// 带状态/关键词的扩展筛选（在基础筛选之上再收窄）。
     ///
     /// - `status`：`ok` = 2xx 成功；`error` = 非 2xx 或带 `error_msg`
-    /// - `keyword`：大小写不敏感，匹配 model / channel_name / error_msg / user_id / client
+    /// - `keyword`：大小写不敏感。`admin=true` 匹配 model / channel_name / error_msg /
+    ///   user_id / client；**`admin=false` 不匹配 `channel_name`、model 比可见名** ——
+    ///   否则「按渠道名搜到了几条」就是一条布尔预言机，逐字把渠道名问出来，
+    ///   响应体里刚遮掉的上游拓扑从筛选器又漏回去（`total` 就是答案）。
     /// - `client`：大小写不敏感，匹配 client_name / client_version（专用客户端维度过滤）
+    /// - `admin`：视角（与响应剥离同一判据，见 [`strip_non_admin_fields`]）
     ///
     /// 不要扩展 `list_with_filter` 的签名：那是热路径（无筛选时走索引快路径），
     /// 多出的条件会让所有调用点都被迫传 None。扩展筛选只在真正用到时退化全扫。
@@ -1588,6 +1611,7 @@ impl RequestLogStore {
         client: Option<&str>,
         page: usize,
         size: usize,
+        admin: bool,
     ) -> (Vec<RequestLog>, usize) {
         let kw = keyword
             .map(|k| k.trim().to_lowercase())
@@ -1597,14 +1621,15 @@ impl RequestLogStore {
             .filter(|c| !c.is_empty());
         // 无扩展条件时直接走基础路径（保留索引快路径）
         if status.is_none() && kw.is_none() && client_kw.is_none() {
-            return self.list_with_filter(user_id, model, channel_id, start, end, page, size);
+            return self
+                .list_with_filter(user_id, model, channel_id, start, end, page, size, admin);
         }
         let page = page.clamp(1, 10_000);
         let size = size.clamp(1, Self::PAGE_SIZE_MAX);
         let filtered: Vec<RequestLog> = self
             .list_all()
             .into_iter()
-            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
+            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end, admin))
             .filter(|l| match status {
                 Some("ok") => (200..300).contains(&l.status_code),
                 Some("error") => !(200..300).contains(&l.status_code) || l.error_msg.is_some(),
@@ -1620,11 +1645,20 @@ impl RequestLogStore {
             .filter(|l| match &kw {
                 None => true,
                 Some(k) => {
-                    l.model.to_lowercase().contains(k)
-                        || l.channel_name
+                    // 模型名：admin 比上游真名，非管理员比**他看到的那个名字**。
+                    let model_hit = if admin {
+                        l.model.to_lowercase().contains(k)
+                    } else {
+                        l.visible_model().to_lowercase().contains(k)
+                    };
+                    // 渠道名：仅 admin（非管理员响应里根本没有这个字段）。
+                    let channel_hit = admin
+                        && l.channel_name
                             .as_deref()
                             .map(|c| c.to_lowercase().contains(k))
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                    model_hit
+                        || channel_hit
                         || l.error_msg
                             .as_deref()
                             .map(|e| e.to_lowercase().contains(k))
@@ -1663,11 +1697,14 @@ impl RequestLogStore {
 
     /// 导出按完整筛选条件过滤后的 JSON（与列表页筛选语义一致）。
     ///
-    /// `admin` = false 时按非管理员视角剥离 `debug` / `conversation` /
-    /// `candidate_channels` / `filtered_channels` / `selected_channel`，
-    /// 并把上游实际模型名遮掉（`redact_model_for_non_admin`：`model` 重写为
-    /// 请求侧原名、移除 `origin_model`），与 `logs.rs::logs_with_user_email`
-    /// 的剥离口径一致 —— 导出与列表页不应给出不同权限边界。
+    /// `admin` = false 时走 [`strip_non_admin_fields`]（**与列表页同一个函数**）：
+    /// 剥离管理员排障 / 审计专属字段（`debug` / `conversation` / 路由回放 /
+    /// `account_skips` / `special_route` / `purge_applied`），并把上游身份遮掉
+    /// （`model` 重写为请求侧原名、移除 `origin_model` / 渠道 / 供应商，
+    /// `attempt_details[]` 逐行同一把刀）—— 导出与列表页不应给出不同权限边界。
+    ///
+    /// 历史教训：本函数此前内联抄了一份字段清单，于是列表页补 `purge_applied`
+    /// 时这里没补、`attempt_details` 两处都漏。现在只剩一个实现。
     #[allow(clippy::too_many_arguments)]
     pub fn export_json_filtered(
         &self,
@@ -1681,22 +1718,12 @@ impl RequestLogStore {
         let all = self.list_all();
         let filtered: Vec<Value> = all
             .iter()
-            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
+            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end, admin))
             .map(|l| {
                 let mut v = serde_json::to_value(l).unwrap_or(Value::Null);
                 if !admin {
                     if let Some(obj) = v.as_object_mut() {
-                        obj.remove("debug");
-                        obj.remove("conversation");
-                        obj.remove("candidate_channels");
-                        obj.remove("filtered_channels");
-                        obj.remove("selected_channel");
-                        // 破甲控制台使用标记仅管理员可见（普通用户不下发），
-                        // 口径与列表页 `logs_with_user_email` 一致。
-                        obj.remove("purge_applied");
-                        // 上游实际模型名遮罩（`model` → 请求名 + 移除
-                        // `origin_model`），口径与列表页共用同一函数。
-                        redact_model_for_non_admin(obj);
+                        strip_non_admin_fields(obj);
                     }
                 }
                 v
@@ -1705,7 +1732,11 @@ impl RequestLogStore {
         serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// 单条日志是否匹配筛选条件（列表与导出共用，保证语义一致）
+    /// 单条日志是否匹配筛选条件（列表与导出共用，保证语义一致）。
+    ///
+    /// `admin` 决定 `model` 比的是上游真名还是用户可见名 —— 与响应剥离同一判据。
+    /// 非管理员传 `channel_id` 无意义（响应里没有该字段），调用方已强制 `None`；
+    /// 这里仍按值比，避免「筛选语义」与「可见字段」两套口径。
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     fn matches(
@@ -1715,6 +1746,7 @@ impl RequestLogStore {
         channel_id: Option<&str>,
         start: Option<i64>,
         end: Option<i64>,
+        admin: bool,
     ) -> bool {
         if let Some(u) = user_id {
             if l.user_id.as_deref() != Some(u) {
@@ -1722,7 +1754,14 @@ impl RequestLogStore {
             }
         }
         if let Some(m) = model {
-            if l.model != m {
+            // 非管理员按「他看到的名字」比：直接比 `l.model`（上游真名）会把
+            // `?model=` 变成一条枚举上游真名的接口（命中条数即答案）。
+            let matched = if admin {
+                l.model == m
+            } else {
+                l.visible_model() == m
+            };
+            if !matched {
                 return false;
             }
         }
@@ -1776,12 +1815,12 @@ impl RequestLogStore {
         );
         for l in all
             .iter()
-            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
+            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end, admin))
         {
-            // 非 admin：`model` 列 = 请求侧原名（未映射时就是 `model`），
-            // `origin_model` 列置空（避免请求名在 CSV 里出现两次）；
-            // 渠道归属同属上游拓扑（结构体注释「admin 排查用，用户不展示」），
-            // 非 admin 两列一并置空，与列表/JSON 导出同一权限边界。
+            // 非 admin：`model` 列 = 请求侧原名（[`RequestLog::visible_model`]，
+            // 与响应遮罩 / 筛选同一判据），`origin_model` 列置空（避免请求名在
+            // CSV 里出现两次）；渠道归属同属上游拓扑（结构体注释「admin 排查用，
+            // 用户不展示」），非 admin 两列一并置空，与列表/JSON 导出同一权限边界。
             let (model_col, origin_col, channel_id_col, channel_name_col): (
                 &str,
                 &str,
@@ -1795,7 +1834,7 @@ impl RequestLogStore {
                     l.channel_name.as_deref().unwrap_or(""),
                 )
             } else {
-                (l.origin_model.as_deref().unwrap_or(&l.model), "", "", "")
+                (l.visible_model(), "", "", "")
             };
             buf.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
@@ -1834,24 +1873,79 @@ impl RequestLogStore {
     }
 }
 
-/// 非管理员视角：把序列化后的请求日志里的「上游实际模型名」遮掉。
+/// 「上游身份」遮罩的**唯一实现**：把一份（可能嵌套的）日志投影里的
+/// 上游真名 / 渠道归属 / 供应商 / 账号名全部遮掉。
+///
+/// `visible_model` = 这条请求在用户侧应显示的名字（请求侧原名）。`None` 表示
+/// 连这个名字都取不到 —— 此时**删除** `model` 键，不留空串（空串会被读侧误读成
+/// 「上游返回空」，与本仓 `provider_label_for_channel` 注释里记的坑同源）。
+///
+/// 为什么做成一个可递归的函数而不是「主记录一份 + 明细一份」：本仓反复踩过
+/// 「同一个判据两处实现然后漂移」（`candidate_channels` 那批就是只删了列表、
+/// 漏了导出）。`attempt_details[]` 是**另一套序列化形状**（`AttemptDetail` 带
+/// `rename_all = "camelCase"` → `channelId`/`channelName`），主记录的 snake_case
+/// 删除清单对它一个都不命中 —— 所以这里把两种拼写收在同一张键表里，逐行递归
+/// 复用同一函数，新增字段只要往这张表加一次。
+fn mask_upstream_identity(obj: &mut serde_json::Map<String, Value>, visible_model: Option<&str>) {
+    // 1) 模型名：上游真名 → 请求侧名字（字段形状不变，前端不出现 undefined）。
+    match visible_model {
+        Some(model) => {
+            obj.insert("model".into(), Value::String(model.to_string()));
+        }
+        None => {
+            obj.remove("model");
+        }
+    }
+    // 2) 渠道 / 供应商 / 账号归属：两种序列化形状一并收
+    //    （顶层 `RequestLog` = snake_case；`attempt_details[]` = camelCase）。
+    //    `provider` 是「上游家」（trae / xiaohuanxiong …），`account` 是账号展示名，
+    //    与 `channel_name` 同属「谁在服务这条请求」。
+    for key in [
+        "origin_model",
+        "channel_id",
+        "channelId",
+        "channel_name",
+        "channelName",
+        "provider",
+        "account",
+    ] {
+        obj.remove(key);
+    }
+    // 3) 逐次尝试明细：同一把刀逐行应用 —— 保留轮次（index）/状态（status）/
+    //    耗时（startedAt/finishedAt/stickyHit）/错误文案（error/notice），
+    //    只把「哪家上游、哪个渠道、哪个模型」遮掉。
+    if let Some(rows) = obj
+        .get_mut("attempt_details")
+        .and_then(|v| v.as_array_mut())
+    {
+        for row in rows.iter_mut() {
+            if let Some(row) = row.as_object_mut() {
+                mask_upstream_identity(row, visible_model);
+            }
+        }
+    }
+}
+
+/// 非管理员视角：把序列化后的请求日志里的「上游实际模型名 / 渠道 / 供应商」遮掉。
 ///
 /// 字段语义（见 `RequestLog` 注释与 `api/openai/chat.rs`）：`model` 存的是
 /// **映射后的上游真实模型名**（`log.model = used_upstream`），`origin_model`
 /// 才是用户**请求侧的原始模型名**（仅发生映射改名时才有值，否则为 `null`）。
 /// 普通用户不应看穿自己实际被哪家/哪个上游模型服务，故：
 ///
-/// - 把 `model` **重写**成 `origin_model`（有值即映射改名场景）；
-/// - **删除** `origin_model`，避免同一个请求名在响应里出现两次。
+/// - 把 `model` **重写**成请求侧原名（`origin_model` 有值即映射改名场景；
+///   无值时 `model` 本就是请求名，原样写回）；
+/// - **删除** `origin_model`，避免同一个请求名在响应里出现两次；
+/// - **删除** `channel_id` / `channel_name` / `provider`（渠道与上游家）；
+/// - 对 `attempt_details[]` 逐行套用同一条规则（含 camelCase 拼写）。
 ///
 /// 为什么是「重写」而不是「删除」`model`：`model` 是前端列表 / 详情的必展示
 /// 字段，直接删会让前端显示 `undefined`；重写后字段形状不变、值换成用户自己
-/// 请求的名字。未发生映射（`origin_model` 为 `null`）时 `model` 本就是请求名，
-/// 无需重写，但 `origin_model` 仍移除（值为 `null`，移除以免留下痕迹）。
+/// 请求的名字。
 ///
-/// 列表（`api/admin/logs.rs::logs_with_user_email`）与 JSON 导出
-/// （`export_json_filtered`）共用本函数，保证两处权限边界一致；CSV 导出
-/// （`export_csv_filtered`）是另一套列式输出，口径对齐但就地处理。
+/// 唯一调用方是 [`strip_non_admin_fields`]（列表与 JSON 导出共用）；CSV 导出
+/// （`export_csv_filtered`）是另一套列式输出，口径对齐但就地处理（它没有
+/// `provider` / `attempt_details` 列，故结构上不可能漏这两项）。
 pub(crate) fn redact_model_for_non_admin(obj: &mut serde_json::Map<String, Value>) {
     // 先取 owned 副本，避免 if-let 试探式里对 obj 的不可变借用与下面 insert 的
     // 可变借用冲突（if-let 临时量存活期坑）。
@@ -1859,16 +1953,50 @@ pub(crate) fn redact_model_for_non_admin(obj: &mut serde_json::Map<String, Value
         .get("origin_model")
         .and_then(|v| v.as_str())
         .map(String::from);
-    if let Some(origin) = origin {
-        obj.insert("model".into(), Value::String(origin));
+    let visible = origin.or_else(|| obj.get("model").and_then(|v| v.as_str()).map(String::from));
+    mask_upstream_identity(obj, visible.as_deref());
+}
+
+/// 非管理员视角剥离：去掉管理员排障 / 审计专属字段，再把上游身份遮掉。
+///
+/// **唯一实现**：列表（`api::admin::logs::logs_with_user_email`）与 JSON 导出
+/// （[`RequestLogStore::export_json_filtered`]）都调这里 —— 此前两处各抄一份
+/// 字段清单，`purge_applied` / `attempt_details` 就是这么漏的（一处补了、另一处
+/// 没补）。新增管理员专属字段时**只改这一张表**。
+///
+/// 口径（判据：**用户解释自己的请求需要什么**）：
+/// - `debug` / `conversation`：原始报文与他人系统提示词拼接，属审计视图；
+/// - `candidate_channels` / `filtered_channels` / `selected_channel` /
+///   `route_config` / `account_skips`：站方调度内部视图（候选集、过滤原因、
+///   策略快照、逐账号跳过明细），对用户没有可用信息；
+/// - `special_route`：`from`/`to` 是模型名，`to` 是站方改写后实际用的上游模型；
+/// - `purge_applied`：破甲控制台使用标记，仅管理员可见；
+/// - 上游身份遮罩见 [`redact_model_for_non_admin`]。
+///
+/// **截断计数的规则**：只有它所描述的列表还在，计数才有意义 ——
+/// `filtered_channels` 被剥 ⇒ `route_truncated` 一并剥（留着是一个没有指代的数字）；
+/// `attempt_details` 保留 ⇒ `attempt_details_truncated` 保留（「还有 n 次尝试未记录」
+/// 是用户能看懂的信息）。
+///
+/// **刻意保留**（用户有权知道的自己的请求细节）：`attempts` / `phase` /
+/// `attempt_details`（遮罩后）/ `attempt_details_truncated` / 状态码 / 耗时 /
+/// 错误文案 / token 与费用。
+pub(crate) fn strip_non_admin_fields(obj: &mut serde_json::Map<String, Value>) {
+    for key in [
+        "debug",
+        "conversation",
+        "candidate_channels",
+        "filtered_channels",
+        "selected_channel",
+        "route_config",
+        "route_truncated",
+        "account_skips",
+        "special_route",
+        "purge_applied",
+    ] {
+        obj.remove(key);
     }
-    obj.remove("origin_model");
-    // 渠道归属同样属于上游拓扑：`channel_id`/`channel_name` 的结构体注释写明
-    // 「admin 排查用，用户不展示」，但此前三个读出口都只删了路由回放字段、
-    // 漏了这两个，普通用户仍能看穿请求被路由到哪个上游渠道。
-    // 收进本函数，保证 列表 / JSON 导出 / CSV 导出 三处口径一致。
-    obj.remove("channel_id");
-    obj.remove("channel_name");
+    redact_model_for_non_admin(obj);
 }
 
 /// 标准 CSV 字段转义（RFC 4180）。
@@ -3340,9 +3468,99 @@ mod tests {
         }
         let (gpt4, total) =
             s.requests
-                .list_with_filter(None, Some("gpt-4"), None, None, None, 1, 10);
+                .list_with_filter(None, Some("gpt-4"), None, None, None, 1, 10, true);
         assert_eq!(total, 2);
         assert_eq!(gpt4.len(), 2);
+    }
+
+    /// ★筛选口径与响应口径同一把刀：非管理员按 `?model=` 查**上游真名**必须一条都查不到
+    /// （否则「命中几条」就是枚举上游模型名的预言机），按**他看到的名字**查才命中。
+    ///
+    /// 变异判据：把 `matches` 里 `admin` 分支去掉、恒比 `l.model` ⇒ 本用例前两条断言红。
+    #[test]
+    fn non_admin_model_filter_matches_visible_name_not_upstream() {
+        let s = store();
+        let mut mapped = RequestLog::new();
+        mapped.user_id = Some("u1".to_string());
+        mapped.model = "glm-4-plus".to_string(); // 上游真名
+        mapped.origin_model = Some("gpt-4o".to_string()); // 请求名
+        s.requests.add(mapped).unwrap();
+
+        // 非管理员：上游真名查不到
+        let (hits, total) = s.requests.list_with_filter(
+            Some("u1"),
+            Some("glm-4-plus"),
+            None,
+            None,
+            None,
+            1,
+            10,
+            false,
+        );
+        assert_eq!(total, 0, "非管理员不得用上游真名筛出自己的日志");
+        assert!(hits.is_empty());
+        // 非管理员：请求名查得到
+        let (hits, total) =
+            s.requests
+                .list_with_filter(Some("u1"), Some("gpt-4o"), None, None, None, 1, 10, false);
+        assert_eq!(total, 1, "非管理员按自己请求的名字筛应命中");
+        assert_eq!(hits.len(), 1);
+        // 管理员：上游真名照常可查（排障）
+        let (_, total) = s.requests.list_with_filter(
+            Some("u1"),
+            Some("glm-4-plus"),
+            None,
+            None,
+            None,
+            1,
+            10,
+            true,
+        );
+        assert_eq!(total, 1, "管理员仍应能按上游真名筛");
+    }
+
+    /// ★同一条预言机在 `keyword` 上：非管理员不得用渠道名子串把渠道问出来
+    /// （`total` 命中数即答案），也不得用上游模型名子串命中；管理员照旧。
+    ///
+    /// 变异判据：把 `list_with_filter_ext` 里 `channel_hit` 的 `admin &&` 去掉 ⇒
+    /// 本用例的「渠道名查不到」断言红。
+    #[test]
+    fn non_admin_keyword_filter_cannot_probe_channel_or_upstream_model() {
+        let s = store();
+        let mut log = RequestLog::new();
+        log.user_id = Some("u1".to_string());
+        log.model = "glm-4-plus".to_string();
+        log.origin_model = Some("gpt-4o".to_string());
+        log.channel_name = Some("讯飞星辰".to_string());
+        log.client_name = "Claude Code".to_string();
+        s.requests.add(log).unwrap();
+
+        let probe = |kw: &str, admin: bool| {
+            s.requests
+                .list_with_filter_ext(
+                    Some("u1"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(kw),
+                    None,
+                    1,
+                    10,
+                    admin,
+                )
+                .1
+        };
+        // 非管理员：渠道名 / 上游模型名子串都探不出来
+        assert_eq!(probe("讯飞", false), 0, "渠道名不得成为筛选预言机");
+        assert_eq!(probe("glm-4", false), 0, "上游模型名不得成为筛选预言机");
+        // 正向前提：可见字段照样能筛（否则上面的 0 是空转）
+        assert_eq!(probe("gpt-4o", false), 1, "请求侧模型名应能筛");
+        assert_eq!(probe("claude", false), 1, "客户端名应能筛");
+        // 管理员：渠道名与上游模型名都能筛（排障依赖）
+        assert_eq!(probe("讯飞", true), 1, "管理员应能按渠道名筛");
+        assert_eq!(probe("glm-4", true), 1, "管理员应能按上游模型名筛");
     }
 
     #[test]
@@ -3501,17 +3719,17 @@ mod tests {
         }
         let (page1, total) = s
             .requests
-            .list_with_filter(None, None, None, None, None, 1, 10);
+            .list_with_filter(None, None, None, None, None, 1, 10, true);
         assert_eq!(total, 15);
         assert_eq!(page1.len(), 10);
         // P0 快路径：键倒序 LIMIT 取前 page*size 条后内存切片，语义与原全量切片一致
         let (page2, _) = s
             .requests
-            .list_with_filter(None, None, None, None, None, 2, 10);
+            .list_with_filter(None, None, None, None, None, 2, 10, true);
         assert_eq!(page2.len(), 5);
         let (page3, _) = s
             .requests
-            .list_with_filter(None, None, None, None, None, 3, 10);
+            .list_with_filter(None, None, None, None, None, 3, 10, true);
         assert_eq!(page3.len(), 0);
     }
 
@@ -3729,6 +3947,10 @@ mod tests {
     /// 与导出共用的遮罩核心。断言：映射改名时重写 `model` + 移除 `origin_model`；
     /// 未映射（`origin_model` 为 null）时 `model` 原样保留，`origin_model` 一并移除。
     ///
+    /// 另钉死本单补的两项（同属「上游是谁」）：顶层 `provider`（上游家）与
+    /// `attempt_details[]` 逐行（camelCase 形状）——明细的键名与顶层**不同拼写**，
+    /// 只删 snake_case 会静默漏掉，故两条形状各断言一次。
+    ///
     /// 注：列表用的 `logs_with_user_email` 依赖 `AppState`（40+ Arc 字段，无测试
     /// 构造器），故其遮罩逻辑由本纯函数单测覆盖，导出路径另在下面端到端断言。
     #[test]
@@ -3739,7 +3961,22 @@ mod tests {
             "model": "glm-4",
             "origin_model": "gpt-4o",
             "channel_id": "ch-abc",
-            "channel_name": "天翼云"
+            "channel_name": "天翼云",
+            "provider": "trae",
+            "attempt_details": [{
+                "index": 1,
+                "channelId": "ch-abc",
+                "channelName": "天翼云",
+                "provider": "trae",
+                "account": "",
+                "model": "glm-4",
+                "stickyHit": false,
+                "startedAt": 1,
+                "finishedAt": 2,
+                "status": 502,
+                "error": "boom",
+                "notice": null
+            }]
         });
         redact_model_for_non_admin(mapped.as_object_mut().unwrap());
         let got = mapped.as_object().unwrap();
@@ -3747,13 +3984,37 @@ mod tests {
         assert!(!got.contains_key("origin_model"));
         assert!(!got.contains_key("channel_id"), "非 admin 不得看渠道 ID");
         assert!(!got.contains_key("channel_name"), "非 admin 不得看渠道名");
+        assert!(!got.contains_key("provider"), "非 admin 不得看上游家");
+        let row = got["attempt_details"][0].as_object().unwrap();
+        for k in ["channelId", "channelName", "provider", "account"] {
+            assert!(
+                !row.contains_key(k),
+                "明细行不得下发 `{k}`（camelCase 形状）"
+            );
+        }
+        assert_eq!(
+            row.get("model").and_then(|v| v.as_str()),
+            Some("gpt-4o"),
+            "明细行 model 与顶层同口径（请求侧原名），不是删键"
+        );
+        // 时间线结构不误伤
+        for (k, expected) in [
+            ("index", serde_json::json!(1)),
+            ("status", serde_json::json!(502)),
+            ("startedAt", serde_json::json!(1)),
+            ("finishedAt", serde_json::json!(2)),
+            ("error", serde_json::json!("boom")),
+        ] {
+            assert_eq!(row.get(k), Some(&expected), "明细行 `{k}` 应保留");
+        }
 
         // 未映射：origin_model=null ⇒ model 原样（本就是请求名），origin_model 移除
         let mut unmapped = serde_json::json!({
             "model": "gpt-4o",
             "origin_model": null,
             "channel_id": "ch-abc",
-            "channel_name": "天翼云"
+            "channel_name": "天翼云",
+            "provider": "anthropic"
         });
         redact_model_for_non_admin(unmapped.as_object_mut().unwrap());
         let got2 = unmapped.as_object().unwrap();
@@ -3761,6 +4022,85 @@ mod tests {
         assert!(!got2.contains_key("origin_model"));
         assert!(!got2.contains_key("channel_id"));
         assert!(!got2.contains_key("channel_name"));
+        assert!(!got2.contains_key("provider"));
+    }
+
+    /// ★本单主修（导出侧）：非 admin JSON 导出里 `attempt_details` 的渠道 / 供应商 /
+    /// 上游模型名必须被遮，而轮次 / 状态 / 耗时 / 错误文案保留；admin 导出原样。
+    ///
+    /// 与 `logs.rs` 里那条（列表 handler 路径）成对：两条路径都调
+    /// `strip_non_admin_fields`，任一处回退成「只删顶层」都会各自变红。
+    #[test]
+    fn export_json_masks_attempt_details_for_non_admin_only() {
+        let s = store();
+        let mut log = RequestLog::new();
+        log.user_id = Some("u1".to_string());
+        log.model = "glm-4-plus".to_string();
+        log.origin_model = Some("gpt-4o".to_string());
+        log.channel_id = Some("ch-9".to_string());
+        log.channel_name = Some("讯飞星辰".to_string());
+        log.provider = Some("trae".to_string());
+        log.attempts = 1;
+        log.attempt_details = vec![AttemptDetail {
+            index: 1,
+            channel_id: "ch-9".to_string(),
+            channel_name: "讯飞星辰".to_string(),
+            provider: "trae".to_string(),
+            account: String::new(),
+            model: "glm-4-plus".to_string(),
+            sticky_hit: false,
+            started_at: 1_700_000_000,
+            finished_at: Some(1_700_000_005),
+            status: Some(429),
+            error: Some("upstream returned HTTP 429".to_string()),
+            notice: None,
+        }];
+        s.requests.add(log).unwrap();
+
+        let non_admin = s
+            .requests
+            .export_json_filtered(Some("u1"), None, None, None, None, false);
+        for needle in ["讯飞星辰", "ch-9", "\"provider\"", "glm-4-plus", "trae"] {
+            assert!(
+                !non_admin.contains(needle),
+                "非 admin 导出不得含上游拓扑 `{needle}`：{non_admin}"
+            );
+        }
+        // 结构 + 自己的请求细节保留
+        for needle in [
+            "\"attempt_details\"",
+            "\"index\": 1",
+            "\"status\": 429",
+            "\"startedAt\": 1700000000",
+            "\"finishedAt\": 1700000005",
+            "upstream returned HTTP 429",
+            "\"attempts\": 1",
+        ] {
+            assert!(
+                non_admin.contains(needle),
+                "非 admin 导出应保留请求细节 `{needle}`：{non_admin}"
+            );
+        }
+        assert!(
+            non_admin.contains("\"model\": \"gpt-4o\""),
+            "非 admin 导出应显示请求侧模型名：{non_admin}"
+        );
+
+        let admin = s
+            .requests
+            .export_json_filtered(Some("u1"), None, None, None, None, true);
+        for needle in [
+            "讯飞星辰",
+            "ch-9",
+            "\"provider\": \"trae\"",
+            "glm-4-plus",
+            "\"channelName\": \"讯飞星辰\"",
+        ] {
+            assert!(
+                admin.contains(needle),
+                "管理员导出必须原样含 `{needle}`：{admin}"
+            );
+        }
     }
 
     /// 需求6：CSV 导出同口径 —— 非 admin 的 `model` 列 = 请求名、`origin_model`

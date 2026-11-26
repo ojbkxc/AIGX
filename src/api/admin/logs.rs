@@ -23,15 +23,15 @@ use super::common::{default_page, default_size, error_response, verify_admin, ve
 /// 把请求日志条目序列化为 JSON，并附加 user_email（user_id → 邮箱解析）。
 ///
 /// 前端用户列展示邮箱而非 UUID；解析失败（用户已删）回退原 user_id。
-/// 普通用户响应剥离 `debug`（请求/响应快照仅 admin 可见，对齐 new-api admin_info 剥离语义），
-/// 并遮掉上游实际模型名（`redact_model_for_non_admin`：`model` 重写为请求侧原名、
-/// 移除 `origin_model`）——普通用户不得看穿自己实际被哪个上游模型服务。
+/// 普通用户响应走 [`crate::log::strip_non_admin_fields`]：剥离 `debug` 等管理员
+/// 专属字段，并把上游身份（模型名 / 渠道 / 供应商 / 逐次尝试明细）遮掉 ——
+/// 普通用户不得看穿自己实际被哪个上游模型、哪家渠道服务。
 fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: bool) -> Vec<Value> {
     logs.into_iter()
         .map(|mut l| {
             if let Some(obj) = l.as_object_mut() {
                 if !admin {
-                    strip_non_admin_fields(obj);
+                    crate::log::strip_non_admin_fields(obj);
                 }
                 if let Some(uid) = obj.get("user_id").and_then(|v| v.as_str()) {
                     if let Some(u) = state.user_store.get_by_id(uid) {
@@ -42,24 +42,6 @@ fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: b
             l
         })
         .collect()
-}
-
-/// 普通用户视角剥离：只保留统计字段，去掉管理员排障/审计专属字段。
-///
-/// 抽成纯函数（不依赖 `AppState`）以便单测直接覆盖权限边界；剥离口径在
-/// 列表（本文件）与 JSON 导出（`log::export_json_filtered`）保持对称：
-/// - `debug` / `conversation`：含原始报文与他人系统提示词拼接，属审计视图；
-/// - `candidate_channels` / `filtered_channels` / `selected_channel`：站方渠道拓扑；
-/// - `purge_applied`：破甲控制台使用标记，仅管理员可见；
-/// - 上游实际模型名遮罩（`redact_model_for_non_admin`）。
-fn strip_non_admin_fields(obj: &mut serde_json::Map<String, Value>) {
-    obj.remove("debug");
-    obj.remove("conversation");
-    obj.remove("candidate_channels");
-    obj.remove("filtered_channels");
-    obj.remove("selected_channel");
-    obj.remove("purge_applied");
-    crate::log::redact_model_for_non_admin(obj);
 }
 
 /// 审计日志附加 admin_email（admin_id → 邮箱解析，"admin" 等旧值原样保留）。
@@ -156,6 +138,10 @@ pub struct ExportQuery {
 ///
 /// 普通用户自动按 `user_id` 过滤，忽略 URL 中的 `user` 参数（安全）。
 /// 管理员保持原行为，可按任意 user/model/channel 筛选。
+///
+/// `admin` 同时决定**筛选口径**：非管理员的 `model` / `keyword` 比的是用户可见的
+/// 名字（请求侧模型名、客户端名等），不比上游真名与渠道名 —— 否则「命中几条」
+/// 就是一条把上游拓扑逐字问出来的预言机，响应体刚遮掉的东西从筛选器漏回去。
 pub async fn handle_list_request_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -193,6 +179,7 @@ pub async fn handle_list_request_logs(
         q.client.as_deref(),
         q.page,
         q.effective_size(),
+        admin,
     );
     // user_id → user_email 解析（前端用户列展示邮箱）；非 admin 剥离 debug 快照
     let data = logs_with_user_email(
@@ -270,7 +257,9 @@ pub async fn handle_export_request_logs(
     let fmt = q.format.as_deref().unwrap_or("json").to_lowercase();
     let u = filter_user_id.as_deref();
     let m = q.model.as_deref();
-    let c = q.channel.as_deref();
+    // 渠道过滤仅管理员：非管理员响应里 `channel_id` 已被剥离，允许按它筛等于
+    // 又开一条「命中几条 = 这个渠道 id 对不对」的探测通道（与列表页同一处理）。
+    let c = if admin { q.channel.as_deref() } else { None };
 
     let result = match fmt.as_str() {
         "csv" => {
@@ -1133,6 +1122,9 @@ mod tests {
 
     /// 普通用户视角必须剥离破甲使用标记（`purge_applied`）及其他 admin 专属字段，
     /// 且不误伤统计字段 —— 这是列表页「破甲仅管理员可见」的权限边界单测。
+    ///
+    /// 剥离实现已收口到 `crate::log::strip_non_admin_fields`（列表与 JSON 导出共用），
+    /// 本测断的是**这个 handler 用的那把刀**的输出形状，不是某个本地副本。
     #[test]
     fn strip_non_admin_fields_drops_purge_applied_keeps_stats() {
         let mut obj = serde_json::json!({
@@ -1150,7 +1142,7 @@ mod tests {
         .as_object()
         .cloned()
         .expect("object");
-        strip_non_admin_fields(&mut obj);
+        crate::log::strip_non_admin_fields(&mut obj);
         // admin 专属字段全部剥离（含破甲标记）
         for k in [
             "purge_applied",
@@ -1166,6 +1158,208 @@ mod tests {
         assert_eq!(obj.get("id").and_then(|v| v.as_str()), Some("log-1"));
         assert_eq!(obj.get("cost").and_then(|v| v.as_f64()), Some(0.12));
         assert_eq!(obj.get("status_code").and_then(|v| v.as_u64()), Some(200));
+    }
+
+    /// ★本单主修：普通用户拿到的 `attempt_details` 里不能再有「哪家上游 / 哪个渠道 /
+    /// 哪个上游模型」，但**轮次 / 状态 / 耗时 / 错误文案必须还在**（否则「为什么失败」
+    /// 变成不可解释）。
+    ///
+    /// 变异判据：把 `mask_upstream_identity` 里对 `attempt_details` 的递归段删掉 ⇒
+    /// 本用例的 `channelName` / `provider` / 上游模型名三条断言全红（旧实现就是这个
+    /// 形态：顶层遮了、明细原样下发）。
+    #[test]
+    fn non_admin_attempt_details_lose_upstream_topology_but_keep_timeline() {
+        let mut log = crate::log::RequestLog::new();
+        log.id = "log-1".into();
+        log.user_id = Some("u1".into());
+        log.model = "glm-4-plus".into(); // 映射后的上游真名
+        log.origin_model = Some("gpt-4o".into()); // 用户请求名
+        log.channel_id = Some("ch-9".into());
+        log.channel_name = Some("讯飞星辰".into());
+        log.provider = Some("trae".into());
+        log.attempts = 2;
+        log.attempt_details = vec![
+            crate::log::AttemptDetail {
+                index: 1,
+                channel_id: "ch-9".into(),
+                channel_name: "讯飞星辰".into(),
+                provider: "trae".into(),
+                account: "acct-1".into(),
+                model: "glm-4-plus".into(),
+                sticky_hit: true,
+                started_at: 1_700_000_000,
+                finished_at: Some(1_700_000_001),
+                status: Some(502),
+                error: Some("upstream returned HTTP 502".into()),
+                notice: None,
+            },
+            crate::log::AttemptDetail {
+                index: 2,
+                channel_id: "ch-10".into(),
+                channel_name: "天翼云服务器_Agent2API".into(),
+                provider: "xiaohuanxiong".into(),
+                account: String::new(),
+                model: "glm-4-plus".into(),
+                sticky_hit: false,
+                started_at: 1_700_000_002,
+                finished_at: Some(1_700_000_003),
+                status: Some(200),
+                error: None,
+                notice: None,
+            },
+        ];
+        let mut value = serde_json::to_value(&log).expect("序列化");
+        // 正向前提：未剥离时上游身份确实在（否则下面的断言是空转）
+        let raw = serde_json::to_string(&value).expect("raw");
+        assert!(raw.contains("讯飞星辰"), "构造前提：原始载荷应含渠道名");
+        assert!(
+            raw.contains("\"provider\":\"trae\""),
+            "构造前提：原始载荷应含供应商"
+        );
+
+        if let Some(obj) = value.as_object_mut() {
+            crate::log::strip_non_admin_fields(obj);
+        }
+
+        // 1) 上游拓扑：渠道名 / 渠道 id / 供应商 / 上游模型名，一个都不许剩
+        let stripped = serde_json::to_string(&value).expect("stripped");
+        for needle in [
+            "讯飞星辰",
+            "天翼云服务器",
+            "ch-9",
+            "ch-10",
+            "trae",
+            "xiaohuanxiong",
+            "glm-4-plus",
+            "acct-1",
+        ] {
+            assert!(
+                !stripped.contains(needle),
+                "非管理员不得看穿上游拓扑，`{needle}` 仍在载荷里：{stripped}"
+            );
+        }
+        let obj = value.as_object().expect("object");
+        // 顶层同样遮掉（provider 是「上游家」，与明细同一维度）
+        assert!(!obj.contains_key("provider"), "顶层 provider 必须剥离");
+        assert!(!obj.contains_key("channel_id"));
+        assert!(!obj.contains_key("channel_name"));
+        assert_eq!(
+            obj.get("model").and_then(|v| v.as_str()),
+            Some("gpt-4o"),
+            "model 应重写为请求侧原名"
+        );
+
+        // 2) 用户有权知道自己的请求细节：轮次 / 状态码 / 耗时 / 错误文案 / 重试计数
+        let rows = obj
+            .get("attempt_details")
+            .and_then(|v| v.as_array())
+            .expect("attempt_details 结构必须保留（B 方案：不整块砍）");
+        assert_eq!(rows.len(), 2, "两条尝试都要在");
+        let first = rows[0].as_object().expect("row object");
+        assert_eq!(first.get("index").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(first.get("status").and_then(|v| v.as_u64()), Some(502));
+        assert_eq!(
+            first.get("startedAt").and_then(|v| v.as_i64()),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            first.get("finishedAt").and_then(|v| v.as_i64()),
+            Some(1_700_000_001)
+        );
+        assert_eq!(
+            first.get("error").and_then(|v| v.as_str()),
+            Some("upstream returned HTTP 502"),
+            "失败文案是用户排查自己请求的依据，必须保留"
+        );
+        assert_eq!(first.get("stickyHit").and_then(|v| v.as_bool()), Some(true));
+        // 明细行内不再有身份键（camelCase 拼写，AttemptDetail 带 rename_all）
+        for k in [
+            "channelId",
+            "channelName",
+            "provider",
+            "account",
+            "channel_id",
+            "channel_name",
+        ] {
+            assert!(!first.contains_key(k), "明细行不应下发 `{k}`");
+        }
+        // 明细行 model 走同一把刀：换成请求侧原名（不是删除，形状不变）
+        assert_eq!(
+            first.get("model").and_then(|v| v.as_str()),
+            Some("gpt-4o"),
+            "明细行 model 必须与顶层同口径（请求侧原名）"
+        );
+        assert_eq!(
+            obj.get("attempts").and_then(|v| v.as_u64()),
+            Some(2),
+            "重试计数是用户可见列，不得连带剥离"
+        );
+    }
+
+    /// 管理员视角**原样**：同一个 handler 在 `admin = true` 时不走剥离，
+    /// `attempt_details` 的渠道 / 供应商 / 上游模型名全部保留（排障需要）。
+    ///
+    /// 与上面那条成对存在 —— 只测「非管理员被遮」不测「管理员没被误伤」，
+    /// 一个把所有字段都删掉的实现也能过。
+    #[test]
+    fn admin_view_keeps_attempt_details_topology() {
+        let mut log = crate::log::RequestLog::new();
+        log.model = "glm-4-plus".into();
+        log.channel_id = Some("ch-9".into());
+        log.channel_name = Some("讯飞星辰".into());
+        log.provider = Some("trae".into());
+        log.attempt_details = vec![crate::log::AttemptDetail {
+            index: 1,
+            channel_id: "ch-9".into(),
+            channel_name: "讯飞星辰".into(),
+            provider: "trae".into(),
+            account: String::new(),
+            model: "glm-4-plus".into(),
+            sticky_hit: false,
+            started_at: 0,
+            finished_at: None,
+            status: Some(200),
+            error: None,
+            notice: None,
+        }];
+        // admin = true ⇒ handler 不调 strip_non_admin_fields，载荷就是序列化原样
+        let value = serde_json::to_value(&log).expect("序列化");
+        let json = serde_json::to_string(&value).expect("json");
+        for needle in ["讯飞星辰", "ch-9", "\"provider\":\"trae\"", "glm-4-plus"] {
+            assert!(
+                json.contains(needle),
+                "管理员必须能看到 `{needle}`（排障依赖）：{json}"
+            );
+        }
+        assert_eq!(
+            value
+                .get("attempt_details")
+                .and_then(|v| v.as_array())
+                .map(|r| r.len()),
+            Some(1)
+        );
+    }
+
+    /// 「同一个判据不许两处实现」的守卫：`logs.rs` 自己**不得**再抄一份字段清单。
+    ///
+    /// 历史形态就是这里有一份逐字段 remove 的清单、`log/mod.rs` 的导出路径又抄
+    /// 一份 —— `purge_applied` 与 `attempt_details` 都是「一处补了、另一处没补」。
+    /// 变异判据：把清单搬回本文件（哪怕只是加回一行 remove）⇒ 红。
+    ///
+    /// needle 运行时拼接：本测试源码就在被扫描文件里，写整串会自匹配。
+    #[test]
+    fn strip_list_is_not_duplicated_in_this_file() {
+        let src = include_str!("logs.rs");
+        let needle = ["obj.re", "move(\"candidate_channels\")"].concat();
+        assert!(
+            !src.contains(&needle),
+            "本文件不得再抄剥离清单（唯一实现在 log::strip_non_admin_fields）"
+        );
+        let wired = ["crate::log::", "strip_non_admin_fields(obj)"].concat();
+        assert!(
+            src.contains(&wired),
+            "列表 handler 必须调 crate::log::strip_non_admin_fields"
+        );
     }
 
     /// 迁移响应必须把四条坑原文吐给调用方（本单约定：**不许只写在文档里**）。
