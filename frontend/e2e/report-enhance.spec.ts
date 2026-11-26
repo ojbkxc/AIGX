@@ -154,15 +154,14 @@ test.describe('报表增强 · 双饼图合并小项阈值', () => {
     await expect(providerSlices).toHaveCount(4);
 
     // 关掉开关 → 回到纯 maxSlices 行为。
-    // ⚠️ 实测是 **10 片**，而 `DonutChart` 的 prop 文档写的是「扇区条数上限（默认 9）」：
-    //    `keep = maxSlices` 先切到 9 片、再把被挤出的尾部**追加**成第 10 个「其他」，
-    //    所以上限实际是 maxSlices + 1。这是组件的 off-by-one（已登记在交付说明的
-    //    缺陷清单里，本轮不改 `frontend/src` 业务逻辑）。这里钉住**当前可观测行为**：
-    //    一旦有人把上限修成真正的 9，这条会红 —— 修的人必须顺手改这里并确认图例/扇区
-    //    的对应关系（图例 12 行 → 9 片时的下标题映射也要一起看）。
+    // `DonutChart` 的 `maxSlices`（默认 9）是**扇区条数上限**，含「其他」：
+    // 装配时 `keep = maxSlices - 1` 先切出 8 片，再把被挤出的尾部并成第 9 个
+    // 「其他」。早前这里是 `keep = maxSlices` 再 push「其他」，实际画出 10 片
+    // （声明上限 9 却越界 1）；组件已修正为真正的 9，本断言随之改成 9。
+    // 图例（12 行）不受 maxSlices 影响，仍列全量。
     await modelCard.locator('[role="switch"][aria-label="合并小项"]').click();
     await expect(modelCard.locator('[role="switch"][aria-label="合并小项"]')).toHaveAttribute('aria-checked', 'false');
-    await expect(modelSlices).toHaveCount(10);
+    await expect(modelSlices).toHaveCount(9);
     // 阈值下拉在关掉时禁用（此时调阈值没有意义）
     await expect(select).toBeDisabled();
 
@@ -171,7 +170,7 @@ test.describe('报表增强 · 双饼图合并小项阈值', () => {
     expect(stored, '合并小项设置没落盘').not.toBeNull();
     expect(JSON.parse(stored as string)).toMatchObject({ enabled: false, threshold: 5 });
     await page.reload();
-    await expect(panel(page, '模型分布（').locator('svg path')).toHaveCount(10);
+    await expect(panel(page, '模型分布（').locator('svg path')).toHaveCount(9);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
