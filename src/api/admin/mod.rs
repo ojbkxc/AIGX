@@ -41,6 +41,7 @@ pub mod playground;
 pub mod plugin_helpers;
 pub mod plugin_icons;
 pub mod plugin_login;
+pub mod plugin_permissions; // 插件权限矩阵（GET/PATCH /api/plugins/permissions，对齐 A2A）
 pub mod plugin_provider_settings;
 pub mod plugin_tasks;
 pub mod plugin_theme;

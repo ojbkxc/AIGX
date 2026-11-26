@@ -1318,6 +1318,34 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // 请求日志 id 索引一次性回填：`get_by_request_id` / `delete_by_id` 原先
+        // 在索引缺失时退回全表扫（十万级日志会卡住管理页）。这里在启动期把历史
+        // 行补齐，并落 `reqlogid:backfill_done` 闸门；幂等，24h 周期只为兜住
+        // 「首次失败」的补跑。请求路径仍保留惰性兜底，失败时不静默漏数据。
+        {
+            let log_store = state.log_store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "reqlog-id-index-backfill",
+                interval: Duration::from_secs(86400),
+                first_run_delay: Duration::from_secs(120),
+                run: Box::new(move || {
+                    let ls = log_store.clone();
+                    Box::pin(async move {
+                        match ls.requests.backfill_id_index() {
+                            Ok(0) => 0,
+                            Ok(n) => {
+                                tracing::info!("请求日志 id 索引回填完成: 补写 {n} 条");
+                                n as u64
+                            }
+                            Err(e) => {
+                                tracing::warn!("请求日志 id 索引回填失败（下一周期重试）: {e}");
+                                0
+                            }
+                        }
+                    })
+                }),
+            });
+        }
         // 读侧（find_active/try_charge）已做动态过期判断，此处落库保证
         // 用户订阅列表与分组权益最终一致。
         {
@@ -3566,12 +3594,17 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .merge(crate::api::admin::agents::router())
         // A2A 兼容别名（/api/timeouts、/api/retry、/api/cors → 同一份配置）
         .merge(crate::api::admin::aliases::router())
+        // 前端布局 / 图片压缩 / 助手配置（服务端权威存储）
+        .merge(crate::api::admin::sidebar_layout::router())
+        .merge(crate::api::admin::image_compress::router())
+        .merge(crate::api::admin::assistant_config::router())
         // 插件管理面子页（provider 设置 / 图标 / 主题 / UI / 登录 / 任务 / helpers）
         .merge(crate::api::admin::plugin_provider_settings::router())
         .merge(crate::api::admin::plugin_icons::router())
         .merge(crate::api::admin::plugin_theme::router())
         .merge(crate::api::admin::plugin_ui::router())
         .merge(crate::api::admin::plugin_login::router())
+        .merge(crate::api::admin::plugin_permissions::router())
         .merge(crate::api::admin::plugin_tasks::router())
         .merge(crate::api::admin::plugin_helpers::router())
         // 插件管理面新增子路由（startup / settings / reload；T2 交付）
