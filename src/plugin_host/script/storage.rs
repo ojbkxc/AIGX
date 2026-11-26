@@ -255,6 +255,7 @@ fn try_load_identities(store: &crate::storage::FileStore) -> Result<Identities> 
 ///
 /// 与 [`load_packages`] 同口径：只读路径按空表兜底（宿主拿不到别名最多是
 /// 路由少几家），但读失败要留痕，别把「KV 坏了」伪装成「还没有别名」。
+#[allow(dead_code)] // 宽松读（读坏当空表）保留给投影/诊断路径；当前写路径用严格版
 pub fn load_identities(store: &crate::storage::FileStore) -> Identities {
     match store.get(IDENTITIES_KEY) {
         Ok(identities) => identities.unwrap_or_default(),

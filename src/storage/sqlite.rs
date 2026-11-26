@@ -433,6 +433,7 @@ impl SqliteStore {
     /// 迁移必须走原始文本：`get::<serde_json::Value>()` 对**形状漂移**的存量
     /// 值（如某条历史记录少字段/多字段）会静默反序列化成功但语义已变，对
     /// 读不出来的则整条跳过 —— 迁移静默丢数据。这里只搬运字节。
+    #[allow(dead_code)] // 仅 sqlite→postgres 迁移（feature-gated）与测试调用；默认构建无调用方
     pub fn raw_pairs(&self) -> anyhow::Result<Vec<(String, String)>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare_cached("SELECT key, value FROM kv ORDER BY key")?;
