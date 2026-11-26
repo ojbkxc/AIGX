@@ -164,8 +164,9 @@ fn background_gate() -> Arc<tokio::sync::Semaphore> {
 
 /// 单家后台并发闸：上限 = `min(background_per_provider, 申报 concurrency)`。
 fn provider_gate(provider: &str) -> Arc<tokio::sync::Semaphore> {
-    static STATE: OnceLock<Mutex<HashMap<String, (usize, Arc<tokio::sync::Semaphore>)>>> =
-        OnceLock::new();
+    /// provider → (上次生效的 limit, 闸)。limit 变化时就地换闸，不必重建 STATE。
+    type ProviderSemaphores = HashMap<String, (usize, Arc<tokio::sync::Semaphore>)>;
+    static STATE: OnceLock<Mutex<ProviderSemaphores>> = OnceLock::new();
     let limit = crate::runtime_capacity::limits()
         .background_per_provider
         .min(super::usage_query::provider_cap(provider))

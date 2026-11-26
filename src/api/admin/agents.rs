@@ -1785,7 +1785,7 @@ mod tests {
             ..WireRequest::default()
         };
         let config = crate::config::AppConfig::default();
-        let error = build_plan(&request, &config).unwrap_err();
+        let error = build_plan(&request, &config).err().expect("应拒绝");
         assert!(error.contains("Cursor"), "{error}");
     }
 
@@ -1883,7 +1883,9 @@ mod tests {
             service: "web-search".into(),
             ..ResourceRequest::default()
         };
-        let error = build_resource_plan(Target::CursorCli, &request, &config).unwrap_err();
+        let error = build_resource_plan(Target::CursorCli, &request, &config)
+            .err()
+            .expect("应拒绝");
         assert_eq!(error, block_reason(Target::CursorCli));
         assert!(!error.is_empty());
     }

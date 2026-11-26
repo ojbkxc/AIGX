@@ -122,9 +122,12 @@ mod tests {
     fn default_budget_covers_every_candidate_attempt() {
         let per_attempt = crate::bridge::sse_first_event_deadline();
         let needed = per_attempt.saturating_mul(FAILOVER_MAX_ATTEMPTS as u32);
+        // 注意：format 字符串的参数捕获只支持标识符/路径，函数调用必须先在
+        // 语句里求值（`{default_total_budget():?}` 是编译错误）。
+        let budget = default_total_budget();
         assert!(
-            default_total_budget() >= needed,
-            "预算 {default_total_budget():?} 必须 ≥ {FAILOVER_MAX_ATTEMPTS} × {per_attempt:?}",
+            budget >= needed,
+            "预算 {budget:?} 必须 ≥ {FAILOVER_MAX_ATTEMPTS} × {per_attempt:?}",
         );
         assert!(
             default_total_budget() >= FAILOVER_TOTAL_BUDGET,

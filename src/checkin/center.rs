@@ -742,7 +742,7 @@ mod tests {
             time: "09:00".into(),
             time_end: "09:30".into(),
             randomize: true,
-            daily_kind: super::store::DAILY_KIND_FIXED.to_string(),
+            daily_kind: crate::checkin::store::DAILY_KIND_FIXED.to_string(),
             rolling_minutes: 0,
             retry_limit: 3,
             retry_gap_minutes: 5,

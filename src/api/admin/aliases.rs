@@ -648,9 +648,11 @@ fn span_days(start: &str, end: &str) -> u32 {
 ///
 /// 非法 `range` 一律 400 并列出合法值 —— 与 A2A 同口径：报表区间是用户显式选的
 /// 值，静默换成别的区间会让页面显示的与选项对不上。
-fn resolve_stats_range(
-    params: &Params,
-) -> Result<(String, u32, String, String), (StatusCode, Json<Value>)> {
+/// 报表区间解析的返回：`(生效 range 原文, 跨度天数, start, end)`。
+/// 用别名压住 clippy::type_complexity（-D warnings 下嵌套元组返回会直接报错）。
+type StatsRangeResult = Result<(String, u32, String, String), (StatusCode, Json<Value>)>;
+
+fn resolve_stats_range(params: &Params) -> StatsRangeResult {
     let requested = text_of(params, "range").unwrap_or_else(|| STATS_DEFAULT_RANGE.to_string());
     if !STATS_RANGES.contains(&requested.as_str()) {
         return Err(error_response(
