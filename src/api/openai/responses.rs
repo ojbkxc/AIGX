@@ -857,8 +857,14 @@ pub(crate) async fn handle_responses(
                         }
                         // 上游权威 usage（流式终帧携带）
                         if let Some(usage) = chunk.usage {
-                            let (prompt, _cached) = usage.billing_tokens();
-                            *billing_for_map.usage.lock() = Some((prompt, usage.completion_tokens));
+                            // 缓存量必须一起存：`billing_tokens()` 已经归一了
+                            // OpenAI（cached 是 prompt 子集）与 Anthropic
+                            // （cache_creation+read 在 prompt 之外）两种形状。
+                            // 曾经这里写 `let (prompt, _cached) = ...`，把缓存量
+                            // 丢掉 → 流式按正价收（多扣）。
+                            let (prompt, cached) = usage.billing_tokens();
+                            *billing_for_map.usage.lock() =
+                                Some((prompt, usage.completion_tokens, cached));
                         }
                         if reasoning_collapse {
                             if let Some(text) = &chunk.delta.content {
@@ -1062,7 +1068,15 @@ pub(crate) fn observe_responses_sse_event(json: &Value, billing: &ResponsesBilli
                     .get("output_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                *billing.usage.lock() = Some((input_tokens, output_tokens));
+                // 同一份 `.response.usage` 里也有缓存量（OpenAI 形状
+                // `input_tokens_details.cached_tokens`）；取不到就是 0。
+                let cached_tokens = usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .or_else(|| usage.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                *billing.usage.lock() = Some((input_tokens, output_tokens, cached_tokens));
             }
         }
         Some("response.output_text.delta") => {

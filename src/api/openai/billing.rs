@@ -1132,9 +1132,14 @@ pub(crate) struct ResponsesBillingState {
     pub(crate) group: String,
     /// 请求侧 input 文本快照（上游未上报 usage 时估算 prompt tokens 用）
     pub(crate) input_text: String,
-    /// 上游 usage（input_tokens, output_tokens）——旁路解析
-    /// `response.completed` 等终止事件的 `.response.usage` 填充
-    pub(crate) usage: Arc<parking_lot::Mutex<Option<(u64, u64)>>>,
+    /// 上游 usage（input_tokens, output_tokens, **cached**）——旁路解析
+    /// `response.completed` 等终止事件的 `.response.usage` 填充。
+    ///
+    /// 第三项是缓存命中量（OpenAI `cached_tokens` / Anthropic `cache_read`）：
+    /// 曾经只有两元组、`finalize` 写死 `cached=0`，于是 Responses 面**流式**
+    /// 请求按正价收缓存 token（多扣），而非流式走 `billing_tokens()` 带 cached，
+    /// 同一条链路两套价。
+    pub(crate) usage: Arc<parking_lot::Mutex<Option<(u64, u64, u64)>>>,
     /// 输出文本累积器（估算 completion tokens 兜底）
     pub(crate) acc: Arc<parking_lot::Mutex<String>>,
     /// 事后限流记账句柄
@@ -1157,7 +1162,8 @@ impl ResponsesBillingState {
     /// （能估就估，拿不到就 0）。返回 (prompt_tokens, completion_tokens)
     /// 供限流记账。`errored` = 流中途出错时日志 status_code 记 500。
     pub(crate) fn finalize(&self, errored: bool) -> (u64, u64) {
-        let (mut prompt_tokens, mut completion_tokens) = self.usage.lock().unwrap_or((0, 0));
+        let (mut prompt_tokens, mut completion_tokens, cached_tokens) =
+            self.usage.lock().unwrap_or((0, 0, 0));
         let output_text = self.acc.lock().clone();
         // 上游未上报 usage 的侧逐项估算
         if prompt_tokens == 0 {
@@ -1181,8 +1187,7 @@ impl ResponsesBillingState {
             &self.group,
             prompt_tokens,
             completion_tokens,
-            // usage 元组只带 (prompt, completion)，无缓存量
-            0,
+            cached_tokens,
         );
 
         // 记录请求日志（真实耗时）

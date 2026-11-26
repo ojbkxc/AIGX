@@ -1262,6 +1262,15 @@ pub async fn handle_messages(
             let stream_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let stream_errored_for_map = stream_errored.clone();
 
+            // 上游上报的 usage（Anthropic 的 `message_start` 带 input+缓存、
+            // `message_delta` 带 output，各带一半）。逐帧合并后交给
+            // `finalize_with_usage` —— 否则 `cache_read_input_tokens` /
+            // `cache_creation_input_tokens` 完全不计费（它们在 prompt_tokens
+            // **之外**，本地 BPE 估算看不见），实测少扣 10 额度起。
+            let stream_usage =
+                std::sync::Arc::new(parking_lot::Mutex::new(None::<crate::bridge::UsageStats>));
+            let stream_usage_for_map = stream_usage.clone();
+
             // 前缀事件：仅 message_start（内容块统一由 middle 动态开启，
             // 参照 aisix AnthropicSseEncoder：文本块在首个文本增量到达时才开块，
             // 避免 thinking/文本/tool 块 index 冲突）
@@ -1322,6 +1331,15 @@ pub async fn handle_messages(
                     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
                     match chunk_result {
                         Ok(chunk) => {
+                            // 上游 usage 逐帧合并（后到的非零字段覆盖先到的）：
+                            // Anthropic 的 input+缓存与 output 分两帧到，谁后到
+                            // 都不能抹掉对方（与 `chat.rs` 同口径）。
+                            if let Some(usage) = chunk.usage {
+                                let mut slot = stream_usage_for_map.lock();
+                                *slot = Some(crate::api::openai::billing::merge_stream_usage(
+                                    *slot, *usage,
+                                ));
+                            }
                             // 推理内容增量 → Anthropic thinking 块（首个增量开块）
                             if let Some(reasoning) = &chunk.delta.reasoning {
                                 has_reasoning_middle.store(true, Ordering::Relaxed);
@@ -1608,8 +1626,9 @@ pub async fn handle_messages(
                     .charged
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
-                    let (pt, ct) = billing_fin.finalize_with_token_estimates(
+                    let (pt, ct) = billing_fin.finalize_with_usage(
                         errored,
+                        stream_usage.lock().take(),
                         est_prompt,
                         est_completion,
                     );
