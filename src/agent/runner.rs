@@ -119,7 +119,7 @@ pub async fn run(
             });
         }
         let (resp, _upstream, _cid) =
-            match llm::chat_once_traced(state, config, convo.clone(), Some(tools)).await {
+            match llm::chat_once_traced(state, config, convo.clone(), Some(tools), "agent").await {
                 Ok((resp, upstream, cid, trace)) => {
                     // 跨模型切换成功后，把「前面那些模型为什么失败」告诉前端。
                     // 否则成功路径上这半个事实完全不可见（只有全部失败才报原因）。
