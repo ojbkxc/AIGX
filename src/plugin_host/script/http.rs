@@ -339,7 +339,15 @@ pub(crate) async fn open(
             code: Some("internal".into()),
         })?
         .to_string();
-    sessions.insert(id.clone(), transport, session);
+    let stale = sessions.insert(id.clone(), transport, session);
+    // 客户端复用同一个 id 重开（宿主侧 `http.open` 重试/复用 id）：旧映射被
+    // HashMap::insert 覆盖后，旧 Transport 会话**再也没人持有键**——它不会
+    // 进 read/close，只能等 reaper 30min 空闲回收，期间一直占着一条上游连接
+    // 与最多 120MB 累计流（脚本重试 1024 次就顶满 MAX_SESSIONS）。换绑时
+    // 显式关掉旧会话（`close` 幂等，未知也返回 {}）。
+    if let Some((old_transport, old_session)) = stale {
+        let _ = old_transport.close(&old_session).await;
+    }
     // A2A 形状：url 取响应最终地址（重定向后）；headers 原样透传
     let url = created
         .get("url")
@@ -414,10 +422,19 @@ impl SessionMap {
         }
     }
 
-    fn insert(&self, id: String, transport: Arc<Transport>, session: String) {
+    /// 插入映射；返回被同一个 id 顶掉的旧条目（调用方负责关闭，见 `open`）。
+    fn insert(
+        &self,
+        id: String,
+        transport: Arc<Transport>,
+        session: String,
+    ) -> Option<(Arc<Transport>, String)> {
         if let Ok(mut map) = self.inner.lock() {
-            map.insert(id, HttpSession { transport, session });
+            return map
+                .insert(id, HttpSession { transport, session })
+                .map(|old| (old.transport, old.session));
         }
+        None
     }
 
     fn get(&self, id: &str) -> Option<(Arc<Transport>, String)> {
@@ -528,6 +545,35 @@ mod tests {
         assert_eq!(session, "s1");
         assert!(map.get("a").is_none());
         assert_eq!(map.len(), 0);
+    }
+
+    /// 复用同一个客户端 id 重开：旧绑定必须被**交回**给调用方关闭。
+    ///
+    /// 旧实现 `insert` 返回 `()`，被 `HashMap::insert` 顶掉的旧 Transport
+    /// 会话立刻失去唯一引用（映射已被覆盖），既不会进 `read`/`close`，也不
+    /// 会被人关闭——只能等 reaper 30min 空闲回收，期间一直占着一条上游连接
+    /// 与最多 120MB 累计流。脚本对同一个 id 重试 1024 次就能把会话表顶满
+    /// （`MAX_SESSIONS`），后续流式请求全部被拒。
+    #[test]
+    fn reopening_same_id_hands_back_previous_session_for_close() {
+        let map = SessionMap::new();
+        let first = Transport::new(crate::test_http_client());
+        let second = Transport::new(crate::test_http_client());
+        assert!(
+            map.insert("req-1".into(), first.clone(), "old".into())
+                .is_none(),
+            "首次插入没有旧绑定"
+        );
+        let stale = map
+            .insert("req-1".into(), second.clone(), "new".into())
+            .expect("同 id 重开必须交回旧绑定（否则旧会话泄漏到 reaper）");
+        assert!(Arc::ptr_eq(&stale.0, &first), "交回的必须是旧 Transport");
+        assert_eq!(stale.1, "old");
+        // 映射已换成新绑定
+        let (bound, session) = map.get("req-1").expect("应命中新绑定");
+        assert!(Arc::ptr_eq(&bound, &second));
+        assert_eq!(session, "new");
+        assert_eq!(map.len(), 1, "同 id 不应留下两条");
     }
 
     #[tokio::test]

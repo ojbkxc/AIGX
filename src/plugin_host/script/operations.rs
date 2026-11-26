@@ -220,54 +220,70 @@ pub async fn set_enabled(
     version: Option<&str>,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut packages = storage::load_packages(manager.store());
-    let index = select_package_index(&packages, package_id, version, enabled)
-        .ok_or_else(|| format!("包未安装：{package_id}"))?;
-    let mut package = packages[index].clone();
-    if package.enabled == enabled {
+    // 读改写必须在 storage 写锁内完成：这里「读 → 选择 → 改 → 整表写回」
+    // 中间没有 await，但多个 tokio worker 可以同时进入各自的同步段。旧实现
+    // 在锁外读快照再整表写回，与并发的 install / 另一个包的 settings 保存
+    // 交错时后写者赢，前者刚落的 enabled 被静默顶回旧值 —— 落盘状态与数据面
+    // 实际行为不一致（宿主按旧状态路由）。
+    let (package, previous, changed) =
+        storage::mutate_packages(manager.store(), manager.data_dir(), |packages| {
+            let index = select_package_index(packages, package_id, version, enabled)
+                .ok_or_else(|| anyhow::anyhow!("包未安装：{package_id}"))?;
+            let mut package = packages[index].clone();
+            if package.enabled == enabled {
+                return Ok((package, package.enabled, false));
+            }
+            if enabled {
+                if !package.trusted {
+                    return Err(anyhow::anyhow!(
+                        "包 {package_id} 未信任，不能启用（安装时需显式 trusted=true）"
+                    ));
+                }
+                // 同一 id 的另一个版本已启用 → 拒绝：两个版本同时进 init 载荷会
+                // 造成 provider id 冲突加缀、路由漂移。安装闸门只挡「装新版本」，
+                // 挡不住「再启用另一个已装版本」，这里补上。
+                if let Some(other) = other_enabled_version(packages, package_id, &package.version) {
+                    return Err(anyhow::anyhow!(
+                        "包 {package_id} 的版本 {other} 已启用：请先停用再启用其它版本\
+                         （避免同 id 双版本同时进 init 载荷）"
+                    ));
+                }
+            }
+            let previous = package.enabled;
+            package.enabled = enabled;
+            // v3.5.0 对齐：重新启用时把单提供商包残留的子级停用清掉，否则包开了
+            // 但那家 provider 仍在 disabled_providers 里，界面显示包已启用、数据面
+            // 却不路由——被隐藏的子开关卡住。
+            if enabled && package.providers.len() == 1 {
+                package.disabled_providers.clear();
+            }
+            packages[index] = package.clone();
+            Ok((package, previous, true))
+        })
+        .map_err(|e| e.to_string())?;
+
+    if !changed {
         return Ok(());
     }
-    if enabled {
-        if !package.trusted {
-            return Err(format!(
-                "包 {package_id} 未信任，不能启用（安装时需显式 trusted=true）"
-            ));
-        }
-        // 同一 id 的另一个版本已启用 → 拒绝：两个版本同时进 init 载荷会
-        // 造成 provider id 冲突加缀、路由漂移。安装闸门只挡「装新版本」，
-        // 挡不住「再启用另一个已装版本」，这里补上。
-        if let Some(other) = other_enabled_version(&packages, package_id, &package.version) {
-            return Err(format!(
-                "包 {package_id} 的版本 {other} 已启用：请先停用再启用其它版本\
-                 （避免同 id 双版本同时进 init 载荷）"
-            ));
-        }
-    }
-    let previous = package.enabled;
-    package.enabled = enabled;
-    // v3.5.0 对齐：重新启用时把单提供商包残留的子级停用清掉，否则包开了
-    // 但那家 provider 仍在 disabled_providers 里，界面显示包已启用、数据面
-    // 却不路由——被隐藏的子开关卡住。
-    if enabled && package.providers.len() == 1 {
-        package.disabled_providers.clear();
-        packages[index].disabled_providers.clear();
-    }
-    packages[index] = package.clone();
-    persist_packages(manager, &packages)?;
 
     match manager.rebuild("enable/disable").await {
         Ok(_) => Ok(()),
         Err(e) => {
-            // 回滚 enabled：落盘状态必须与数据面实际行为一致
-            let mut rollback = storage::load_packages(manager.store());
-            if let Some(slot) = rollback
-                .iter_mut()
-                .rposition(|p| p.id == package_id && p.version == package.version)
-                .map(|i| &mut rollback[i])
+            // 回滚 enabled：落盘状态必须与数据面实际行为一致。
+            // 同样走锁内事务（不拿旧快照整表写回，避免把并发写一起回滚掉）。
+            if let Err(rollback) =
+                storage::mutate_packages(manager.store(), manager.data_dir(), |packages| {
+                    if let Some(slot) = packages
+                        .iter()
+                        .rposition(|p| p.id == package_id && p.version == package.version)
+                    {
+                        packages[slot].enabled = previous;
+                    }
+                    Ok(())
+                })
             {
-                slot.enabled = previous;
+                tracing::warn!("[Script] 启停回滚落盘失败（宿主重建已失败）：{rollback:#}");
             }
-            let _ = persist_packages(manager, &rollback);
             Err(format!("宿主重建失败，已回滚启停状态：{e}"))
         }
     }
@@ -353,14 +369,16 @@ pub async fn update_options(
     values: serde_json::Map<String, serde_json::Value>,
 ) -> Result<ScriptPackage, String> {
     settings::validate_values(&values)?;
-    let mut packages = storage::load_packages(manager.store());
-    let index = packages
-        .iter()
-        .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
-        .ok_or_else(|| format!("包未安装：{package_id}"))?;
-    packages[index].options.values = values;
-    let package = packages[index].clone();
-    persist_packages(manager, &packages)?;
+    // 锁内事务：与并发的启停/另一个包的配置保存互不覆盖。
+    let package = storage::mutate_packages(manager.store(), manager.data_dir(), |packages| {
+        let index = packages
+            .iter()
+            .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
+            .ok_or_else(|| anyhow::anyhow!("包未安装：{package_id}"))?;
+        packages[index].options.values = values.clone();
+        Ok(packages[index].clone())
+    })
+    .map_err(|e| e.to_string())?;
     if package.enabled {
         if let Err(e) = manager.rebuild("options").await {
             return Err(format!("配置已保存，但宿主重建失败（下次重启生效）：{e}"));
@@ -389,36 +407,39 @@ pub async fn update_settings(
     options: Option<serde_json::Map<String, serde_json::Value>>,
     provider_options: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<ScriptPackage, String> {
-    let mut packages = storage::load_packages(manager.store());
-    let index = packages
-        .iter()
-        .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
-        .ok_or_else(|| format!("包未安装：{package_id}"))?;
-    if let Some(values) = options {
-        settings::validate_values(&values)?;
-        packages[index].options.values = values;
-    }
-    if let Some(map) = provider_options {
-        let declared: Vec<String> = packages[index]
-            .providers
+    // 锁内事务：校验与「读 → 改 → 整表写回」原子化。旧实现先读快照、
+    // 校验、再整表写回——并发写落在两者之间就被旧快照覆盖。
+    let package = storage::mutate_packages(manager.store(), manager.data_dir(), |packages| {
+        let index = packages
             .iter()
-            .map(|p| p.id.clone())
-            .collect();
-        for (provider, values) in &map {
-            if !declared.iter().any(|id| id == provider) {
-                return Err(format!("开关不属于当前插件：{provider}"));
-            }
-            let values = values
-                .as_object()
-                .ok_or_else(|| "提供商开关必须是对象".to_string())?;
-            if values.values().any(|v| !v.is_boolean()) {
-                return Err("提供商开关必须是布尔值".into());
-            }
+            .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
+            .ok_or_else(|| anyhow::anyhow!("包未安装：{package_id}"))?;
+        if let Some(values) = &options {
+            settings::validate_values(values)?;
+            packages[index].options.values = values.clone();
         }
-        packages[index].provider_options = map;
-    }
-    let package = packages[index].clone();
-    persist_packages(manager, &packages)?;
+        if let Some(map) = &provider_options {
+            let declared: Vec<String> = packages[index]
+                .providers
+                .iter()
+                .map(|p| p.id.clone())
+                .collect();
+            for (provider, values) in map {
+                if !declared.iter().any(|id| id == provider) {
+                    return Err(anyhow::anyhow!("开关不属于当前插件：{provider}"));
+                }
+                let values = values
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("提供商开关必须是对象"))?;
+                if values.values().any(|v| !v.is_boolean()) {
+                    return Err(anyhow::anyhow!("提供商开关必须是布尔值"));
+                }
+            }
+            packages[index].provider_options = map.clone();
+        }
+        Ok(packages[index].clone())
+    })
+    .map_err(|e| e.to_string())?;
     if package.enabled {
         if let Err(e) = manager.rebuild("settings").await {
             return Err(format!("配置已保存，但宿主重建失败（下次重启生效）：{e}"));
@@ -437,35 +458,37 @@ pub async fn set_provider_enabled(
     provider: &str,
     enabled: bool,
 ) -> Result<ScriptPackage, String> {
-    let mut packages = storage::load_packages(manager.store());
-    let index = packages
-        .iter()
-        .position(|p| p.id == package_id)
-        .ok_or_else(|| format!("包未安装：{package_id}"))?;
-    if !packages[index].providers.iter().any(|p| p.id == provider) {
-        return Err(format!("提供商不属于该脚本插件：{provider}"));
-    }
-    // v3.5.0 对齐（单提供商包折叠）：只声明一家 provider 的包，包级
-    // `enabled` 是唯一真相——停这家 = 停整包（包关掉、`disabled_providers`
-    // 清空），再开包不会被隐藏的子开关卡住。多提供商包维持子开关语义。
-    if packages[index].providers.len() == 1 {
-        packages[index].enabled = enabled;
-        packages[index].disabled_providers.clear();
-    } else if enabled {
-        packages[index]
+    // 锁内事务（同 set_enabled）：子开关改动不许被并发写的旧快照覆盖。
+    let package = storage::mutate_packages(manager.store(), manager.data_dir(), |packages| {
+        let index = packages
+            .iter()
+            .position(|p| p.id == package_id)
+            .ok_or_else(|| anyhow::anyhow!("包未安装：{package_id}"))?;
+        if !packages[index].providers.iter().any(|p| p.id == provider) {
+            return Err(anyhow::anyhow!("提供商不属于该脚本插件：{provider}"));
+        }
+        // v3.5.0 对齐（单提供商包折叠）：只声明一家 provider 的包，包级
+        // `enabled` 是唯一真相——停这家 = 停整包（包关掉、`disabled_providers`
+        // 清空），再开包不会被隐藏的子开关卡住。多提供商包维持子开关语义。
+        if packages[index].providers.len() == 1 {
+            packages[index].enabled = enabled;
+            packages[index].disabled_providers.clear();
+        } else if enabled {
+            packages[index]
+                .disabled_providers
+                .retain(|id| id != provider);
+        } else if !packages[index]
             .disabled_providers
-            .retain(|id| id != provider);
-    } else if !packages[index]
-        .disabled_providers
-        .iter()
-        .any(|id| id == provider)
-    {
-        packages[index]
-            .disabled_providers
-            .push(provider.to_string());
-    }
-    let package = packages[index].clone();
-    persist_packages(manager, &packages)?;
+            .iter()
+            .any(|id| id == provider)
+        {
+            packages[index]
+                .disabled_providers
+                .push(provider.to_string());
+        }
+        Ok(packages[index].clone())
+    })
+    .map_err(|e| e.to_string())?;
     if package.enabled {
         if let Err(e) = manager.rebuild("provider-toggle").await {
             return Err(format!("已保存，但宿主重建失败（下次重启生效）：{e}"));
@@ -595,12 +618,9 @@ fn commit_update(installed_reference: &str, latest_sha: &str) -> Option<(String,
     Some((current[..12].to_string(), latest_sha[..12].to_string()))
 }
 
-fn persist_packages(manager: &ScriptHostManager, packages: &[ScriptPackage]) -> Result<(), String> {
-    // 走 storage 的 KV + 投影语义：禁止直接 store.put，否则 registry.json
-    // 投影不会刷新，脚本侧读到的 options/enabled 会滞后。
-    storage::replace_all(manager.store(), manager.data_dir(), packages)
-        .map_err(|e| format!("保存脚本包状态失败：{e:#}"))
-}
+// `persist_packages`（读快照 → 整表 replace_all）已删除：它是丢更新的载体。
+// 本模块的所有写路径都必须走 `storage::mutate_packages` 的锁内事务，
+// 在锁内重读后再改，避免「旧快照覆盖并发写」。
 
 /// 安装失败清理：删刚落盘的包版本目录。
 ///

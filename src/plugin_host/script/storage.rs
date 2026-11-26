@@ -56,6 +56,42 @@ fn default_version() -> u32 {
     1
 }
 
+/// 脚本包注册表的写锁（进程级）。
+///
+/// 所有「读 KV → 改内存 → 整表写回」的路径都必须在同一把锁内完成，
+/// 否则并发写会互相覆盖：`set_enabled` 刚把包打开，同时另一个请求拿着
+/// 更早读到的快照写回，启停状态就被旧值顶回去了（数据面按旧状态路由，
+/// 界面显示新状态）。典型受害者是 `configure_settings`——它在宿主 RPC
+/// 上等最多 10s 才写回，期间任何写都会丢。
+///
+/// `parking_lot::Mutex` 是同步锁：所有持锁段都不 await（KV 与投影都是
+/// 本地文件 IO），不构成跨 await 持锁。
+static WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// 在写锁内执行一次「读现有 → 改 → 写回」事务。
+///
+/// 读失败**必须**中止（`try_load_packages` 的严格语义）：把损坏的 KV
+/// 当空表改完写回，等于静默抹掉整个注册表。
+///
+/// 投影写失败仍然只 warn（KV 才是事实源，下次写会重试），但**不能**因此
+/// 让调用方以为整笔事务失败——KV 已经落了。
+pub fn mutate_packages<T>(
+    store: &crate::storage::FileStore,
+    data_dir: &Path,
+    mutate: impl FnOnce(&mut Vec<ScriptPackage>) -> Result<T>,
+) -> Result<T> {
+    let _guard = WRITE_LOCK.lock();
+    let mut packages = try_load_packages(store)?;
+    let out = mutate(&mut packages)?;
+    store
+        .put(KV_KEY, &packages)
+        .context("写入 KV plugin:script-packs 失败")?;
+    if let Err(err) = write_projection(data_dir, &packages, &load_identities(store)) {
+        tracing::warn!("[Script] 写 registry.json 投影失败（KV 已落盘，不影响运行）：{err:#}");
+    }
+    Ok(out)
+}
+
 /// 脚本根目录。
 pub fn root(data_dir: &Path) -> PathBuf {
     script_plugins_root(data_dir)
@@ -69,24 +105,17 @@ pub fn register(
     data_dir: &Path,
     package: ScriptPackage,
 ) -> Result<()> {
-    // 1. KV 权威状态：读现有 → 替换同 id 同 version → 写回。
+    // KV 权威状态：读现有 → 替换同 id 同 version → 写回，全程持写锁。
     //
     // 严格读：读失败**必须**中止。旧实现用 `.ok().flatten().unwrap_or_default()`，
     // 于是「KV 读坏」被当成「一个包都没装」，紧接着把只含新包的整表写回去 ——
     // 其余已装包在这一刻从注册表里永久消失（磁盘目录还在，但没有任何入口
     // 再列出它们）。文件不存在（首次安装）仍是正常的空表。
-    let mut packages = try_load_packages(store)?;
-    packages.retain(|p| !(p.id == package.id && p.version == package.version));
-    packages.push(package);
-    store
-        .put(KV_KEY, &packages)
-        .context("写入 KV plugin:script-packs 失败")?;
-
-    // 2. 磁盘投影（失败只记 warn：KV 已是事实源，下次写会重试）。
-    if let Err(err) = write_projection(data_dir, &packages, &load_identities(store)) {
-        tracing::warn!("[Script] 写 registry.json 投影失败（KV 已落盘，不影响运行）：{err:#}");
-    }
-    Ok(())
+    mutate_packages(store, data_dir, |packages| {
+        packages.retain(|p| !(p.id == package.id && p.version == package.version));
+        packages.push(package);
+        Ok(())
+    })
 }
 
 /// 批量替换全部包状态（启停/配置整表落盘用）。
@@ -94,19 +123,20 @@ pub fn register(
 /// 与 [`register`] 的区别：这里把调用方给的**整表**原样写回（KV + 投影），
 /// 不再逐条合并——调用方已持有完整列表（如 `operations::set_enabled`
 /// 改完一个包后的全量快照）。
+///
+/// 注意：调用方若在拿到快照后 await 过（如等宿主 RPC），快照可能已过期，
+/// 整表写回会覆盖期间的其它写。这类路径必须改用 [`mutate_packages`]
+/// 在锁内重读后再改（见 `runtime::configure_settings_with`）。
 pub fn replace_all(
     store: &crate::storage::FileStore,
     data_dir: &Path,
     packages: &[ScriptPackage],
 ) -> Result<()> {
-    // put 的泛型参数默认 Sized，切片 &[ScriptPackage] 过不去——转 Vec。
-    store
-        .put(KV_KEY, &packages.to_vec())
-        .context("写入 KV plugin:script-packs 失败")?;
-    if let Err(err) = write_projection(data_dir, packages, &load_identities(store)) {
-        tracing::warn!("[Script] 写 registry.json 投影失败（KV 已落盘，不影响运行）：{err:#}");
-    }
-    Ok(())
+    mutate_packages(store, data_dir, |current| {
+        current.clear();
+        current.extend_from_slice(packages);
+        Ok(())
+    })
 }
 
 /// 读全部已装包（KV 为准），**读失败是错误**。
@@ -160,20 +190,19 @@ pub fn remove(
     version: Option<&str>,
 ) -> Result<()> {
     // 严格读（同 `register`）：读失败时按空表算出「包不存在」会误导运维，
-    // 而按空表写回则会连带抹掉其余包。
-    let mut packages = try_load_packages(store)?;
-    let before = packages.len();
-    packages.retain(|p| {
-        let same_id = p.id == package_id;
-        let same_ver = version.is_none_or(|v| p.version == v);
-        !(same_id && same_ver)
-    });
-    if packages.len() == before {
-        anyhow::bail!("包不存在：{package_id}");
-    }
-    store.put(KV_KEY, &packages).context("更新 KV 失败")?;
-    let _ = write_projection(data_dir, &packages, &load_identities(store));
-    Ok(())
+    // 而按空表写回则会连带抹掉其余包。写锁覆盖「读 → 改 → 写」整段。
+    mutate_packages(store, data_dir, |packages| {
+        let before = packages.len();
+        packages.retain(|p| {
+            let same_id = p.id == package_id;
+            let same_ver = version.is_none_or(|v| p.version == v);
+            !(same_id && same_ver)
+        });
+        if packages.len() == before {
+            anyhow::bail!("包不存在：{package_id}");
+        }
+        Ok(())
+    })
 }
 
 /// 删除包的磁盘目录（卸载时用）。
@@ -204,15 +233,28 @@ pub fn load_identities(store: &crate::storage::FileStore) -> Identities {
 }
 
 /// 写别名表（js-host 握手上报后调）。
+///
+/// **投影写回不许用宽松读**：旧实现写别名后调 `load_packages`（读坏当空表）
+/// 再写投影，于是「KV 包表读坏」这一瞬间会把 `registry.json` 覆写成
+/// `packages: []` —— KV 里包还在，但宿主文件视图空了，所有脚本包静默停止
+/// 加载，直到下一次 `register`/`replace_all` 才被顺手修好。别名表与包表一起
+/// 在同一把写锁内落盘，避免与其它写并发时两者互相覆盖。
 pub fn save_identities(
     store: &crate::storage::FileStore,
     data_dir: &Path,
     identities: Identities,
 ) -> Result<()> {
+    let _guard = WRITE_LOCK.lock();
+    // 先严格读包表（读坏立刻中止，**一个字都不写**）：否则「别名表写成功、
+    // 投影写失败」会留下半个事务，调用方却看到 Err。
+    let packages = try_load_packages(store)
+        .context("读取 KV plugin:script-packs 失败（拒绝以空包表覆盖 registry 投影）")?;
     store
         .put(IDENTITIES_KEY, &identities)
         .context("写入 KV 别名表失败")?;
-    let _ = write_projection(data_dir, &load_packages(store), &identities);
+    if let Err(err) = write_projection(data_dir, &packages, &identities) {
+        tracing::warn!("[Script] 写 registry.json 投影失败（KV 已落盘，不影响运行）：{err:#}");
+    }
     Ok(())
 }
 
@@ -403,5 +445,99 @@ mod tests {
         )
         .unwrap();
         assert!(read_projection(dir.path()).is_err());
+    }
+
+    /// 制造「KV 里这个键读不出来」：形状对不上强类型（幂等、与后端无关）。
+    fn corrupt_packages_kv(store: &crate::storage::FileStore) {
+        store
+            .put(KV_KEY, &serde_json::json!({"not": "a package list"}))
+            .unwrap();
+        assert!(
+            store.get::<Vec<ScriptPackage>>(KV_KEY).is_err(),
+            "前置条件：KV 必须是读不出来的状态"
+        );
+    }
+
+    /// 写别名表时 KV 包表读坏：**不许**用空包表覆写 registry 投影。
+    ///
+    /// 旧实现写别名后调 `load_packages`（读失败当空表）再写投影，于是这一
+    /// 瞬间 `registry.json` 变成 `packages: []` —— KV 里包还在，宿主文件
+    /// 视图空了，所有脚本包静默停止加载，直到下次 `register` 顺手修好。
+    #[test]
+    fn save_identities_never_overwrites_projection_with_empty_table() {
+        let (dir, store) = temp_store();
+        let data_dir = dir.path();
+        register(&store, data_dir, pkg("pkg-a", "1.0.0")).unwrap();
+        let before = read_projection(data_dir).unwrap();
+        assert_eq!(before.packages.len(), 1);
+
+        corrupt_packages_kv(&store);
+        let mut ids = Identities::new();
+        ids.entry("pkg-a".into())
+            .or_default()
+            .insert("kiro".into(), "kiro-magpie".into());
+        let err = save_identities(&store, data_dir, ids).expect_err("读坏时不许装作成功");
+        assert!(
+            format!("{err:#}").contains("plugin:script-packs"),
+            "错误要点名是包表读失败：{err:#}"
+        );
+
+        let after = read_projection(data_dir).unwrap();
+        assert_eq!(
+            after.packages.len(),
+            1,
+            "投影必须保留原有包（旧实现会在这里变成 0 条）"
+        );
+        assert_eq!(after.packages[0].id, "pkg-a");
+    }
+
+    /// 写路径的事务性：闭包执行期间写锁必须已被持有。
+    ///
+    /// 这是「读 → 改 → 写回」能否串行化的唯一判据。旧实现各写路径在锁外
+    /// 读快照再整表写回，并发写互相覆盖（`set_enabled` 刚打开包，另一个
+    /// 请求拿更早的快照写回，启停状态被静默顶回旧值）。
+    #[test]
+    fn mutate_packages_holds_write_lock_for_whole_transaction() {
+        let (dir, store) = temp_store();
+        let data_dir = dir.path();
+        let observed = mutate_packages(&store, data_dir, |packages| {
+            let free = super::WRITE_LOCK.try_lock().is_some();
+            packages.push(pkg("pkg-a", "1.0.0"));
+            Ok(free)
+        })
+        .unwrap();
+        assert!(
+            !observed,
+            "闭包执行期间写锁必须被持有（读改写不可被并发插入）"
+        );
+        assert_eq!(load_packages(&store).len(), 1);
+    }
+
+    /// 并发写不丢更新：N 个线程各登记一个不同的包，最终必须全部在册。
+    ///
+    /// 旧实现（读快照 → 改 → 整表写回，无锁）在这条上会丢——是否必现取决于
+    /// 调度，所以判据不依赖它：真正的确定性判据是上一条「闭包内写锁必须被
+    /// 持有」，本条是它的行为面覆盖。
+    #[test]
+    fn concurrent_registers_do_not_lose_updates() {
+        let (dir, store) = temp_store();
+        let data_dir = dir.path().to_path_buf();
+        let store = std::sync::Arc::new(store);
+        std::thread::scope(|scope| {
+            for i in 0..16 {
+                let store = store.clone();
+                let data_dir = data_dir.clone();
+                scope.spawn(move || {
+                    register(&store, &data_dir, pkg(&format!("pkg-{i}"), "1.0.0")).unwrap();
+                });
+            }
+        });
+        let ids: Vec<String> = load_packages(&store).into_iter().map(|p| p.id).collect();
+        for i in 0..16 {
+            assert!(
+                ids.contains(&format!("pkg-{i}")),
+                "并发登记丢了 pkg-{i}：{ids:?}"
+            );
+        }
     }
 }

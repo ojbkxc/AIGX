@@ -514,9 +514,14 @@ impl ScriptHostManager {
         match fetch_package_list(&new_host).await {
             Some(list) => {
                 apply_package_list(&mut packages, &list, new_host.providers());
-                let mut stored = storage::load_packages(&self.store);
-                apply_package_list(&mut stored, &list, new_host.providers());
-                if let Err(e) = storage::replace_all(&self.store, &self.data_dir, &stored) {
+                // 落盘必须在锁内**重读**现有全表再回填：`packages` 是本次
+                // rebuild 的入参快照，而上面等宿主应答已经 await 过——期间
+                // 新装的包会落进 KV。拿旧快照整表写回等于把那些包从注册表
+                // 里抹掉（磁盘目录还在，但没有任何入口再列出它们）。
+                if let Err(e) = storage::mutate_packages(&self.store, &self.data_dir, |stored| {
+                    apply_package_list(&mut stored[..], &list, new_host.providers());
+                    Ok(())
+                }) {
                     tracing::warn!("[Script] 回填宿主包清单失败（路由不受影响）：{e:#}");
                 }
             }
@@ -1027,7 +1032,9 @@ async fn configure_settings_with(
     options: Option<serde_json::Map<String, Value>>,
     provider_options: Option<serde_json::Map<String, Value>>,
 ) -> Result<ScriptPackage, String> {
-    let mut packages = storage::load_packages(manager.store());
+    // 这里的读只用于「定位 + 校验 + 判断 options 是否变化」（校验必须基于
+    // 当前声明）。落盘不走这份快照——见下方 mutate_packages 注释。
+    let packages = storage::load_packages(manager.store());
     let index = packages
         .iter()
         .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
@@ -1092,24 +1099,38 @@ async fn configure_settings_with(
         .map_err(|e| format!("宿主拒绝设置更新：{e}"))?;
         next.settings_schema = schema;
     }
-    packages[index] = next.clone();
-    if let Err(e) = storage::replace_all(manager.store(), manager.data_dir(), &packages) {
-        // 保存失败：把宿主内存态回滚到旧 providerOptions（尽力而为）
-        if let Some(channel) = host {
-            let _ = call_channel(
-                channel,
-                host_admin::SETTINGS,
-                serde_json::json!({
-                    "package": package_id,
-                    "providerOptions": before.provider_options,
-                }),
-                Duration::from_secs(10),
-            )
-            .await;
+    // 落盘必须在锁内**重读**后再改：上面等宿主 RPC 最多 10s，期间任何
+    // 写（另一个包的安装/启停/配置）都已落进 KV。用旧快照整表写回会把
+    // 这些写全部抹掉（宿主内存在改设置，安装的新包却从注册表消失）。
+    let saved = storage::mutate_packages(manager.store(), manager.data_dir(), |packages| {
+        let index = packages
+            .iter()
+            .rposition(|p| p.id == package_id && version.is_none_or(|v| p.version == v))
+            .ok_or_else(|| anyhow::anyhow!("包未安装：{package_id}"))?;
+        // 只写本包被这次请求改动的两格；其余字段保留锁内读到的现值。
+        packages[index].provider_options = next.provider_options.clone();
+        packages[index].settings_schema = next.settings_schema.clone();
+        Ok(packages[index].clone())
+    });
+    match saved {
+        Ok(package) => Ok(package),
+        Err(e) => {
+            // 保存失败：把宿主内存态回滚到旧 providerOptions（尽力而为）
+            if let Some(channel) = host {
+                let _ = call_channel(
+                    channel,
+                    host_admin::SETTINGS,
+                    serde_json::json!({
+                        "package": package_id,
+                        "providerOptions": before.provider_options,
+                    }),
+                    Duration::from_secs(10),
+                )
+                .await;
+            }
+            Err(format!("保存脚本包状态失败：{e:#}"))
         }
-        return Err(format!("保存脚本包状态失败：{e:#}"));
     }
-    Ok(next)
 }
 
 /// 拉宿主包清单（`script.packages`，10s——与上游 `call_coded` 同预算）。
@@ -1771,6 +1792,78 @@ mod tests {
         stub_host_with(expected_calls, false)
     }
 
+    /// 桩宿主：收到 `script.settings` 后**先**执行 `during`，再回帧。
+    ///
+    /// 这样能确定性地制造「网关读快照 → await 宿主 RPC → 写回」中间那段
+    /// 窗口里有别的写落盘（不靠 sleep 撞时序）：网关的快照一定在 `during`
+    /// 之前读到（`call_channel` 已把帧写出去了），写回一定在它之后。
+    fn stub_host_with_hook(
+        expected_calls: usize,
+        during: impl FnOnce() + Send + 'static,
+    ) -> (Arc<RpcChannel>, tokio::task::JoinHandle<()>) {
+        use crate::plugin_host::rpc::CallbackHandler;
+        struct NoCallbacks;
+        impl CallbackHandler for NoCallbacks {
+            fn handle(
+                &self,
+                method: &str,
+                _params: Value,
+            ) -> Result<Value, crate::plugin_host::rpc::RpcError> {
+                Err(crate::plugin_host::rpc::RpcError {
+                    message: format!("stub unsupported: {method}"),
+                    code: Some("unsupported".into()),
+                })
+            }
+        }
+        let (client_out, host_in) = tokio::io::duplex(64 * 1024);
+        let (host_out, client_in) = tokio::io::duplex(64 * 1024);
+        let channel = Arc::new(RpcChannel::new(
+            Box::new(client_in),
+            Box::new(client_out),
+            Arc::new(NoCallbacks),
+        ));
+        let mut during = Some(during);
+        let handle = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(host_in);
+            let mut writer = host_out;
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            for _ in 0..expected_calls {
+                let mut buf = Vec::new();
+                let Ok(read) = reader.read_until(b'\n', &mut buf).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                let Ok(frame) =
+                    crate::plugin_host::rpc::decode_frame(String::from_utf8_lossy(&buf).trim())
+                else {
+                    return;
+                };
+                if let Some(hook) = during.take() {
+                    hook();
+                }
+                let reply = json!({
+                    "id": frame.id,
+                    "result": {
+                        "id": "stub",
+                        "optionsExample": {},
+                        "providerOptions": frame.params.as_ref()
+                            .and_then(|p| p.get("providerOptions"))
+                            .cloned()
+                            .unwrap_or_else(|| json!({})),
+                    },
+                });
+                let mut line = reply.to_string();
+                line.push('\n');
+                if writer.write_all(line.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        (channel, handle)
+    }
+
     /// 同上；`reply_error=true` 时宿主对每次调用回错误帧（拒绝路径）。
     fn stub_host_with(
         expected_calls: usize,
@@ -1958,6 +2051,68 @@ mod tests {
             );
         }
         assert!(seen.lock().unwrap().is_empty(), "校验失败不得打宿主");
+    }
+
+    /// 设置保存必须在锁内**重读**后写：等宿主 RPC（最长 10s）期间别的写
+    /// 落盘，旧快照整表回写会把它们抹掉。
+    ///
+    /// 确定性构造：桩宿主在回帧**之前**登记一个新包（此时网关早已读完
+    /// 快照，因为帧已经发出来了），所以新包一定落在「快照之后、写回之前」
+    /// 的窗口里。旧实现用 `replace_all(旧快照)` 直接把它抹掉；新实现在
+    /// 写锁内重读，新包安然在册。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configure_settings_does_not_drop_concurrent_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::storage::FileStore::new(dir.path().to_path_buf()));
+        let manager = manager_with_store(store.clone(), dir.path());
+        let mut package = pkg("@a/kiro", &["kiro"]);
+        package.enabled = true;
+        storage::replace_all(&store, dir.path(), &[package]).unwrap();
+
+        let hook_store = store.clone();
+        let hook_dir = dir.path().to_path_buf();
+        let (channel, task) = stub_host_with_hook(1, move || {
+            // 窗口内落盘：模拟并发的 install / 另一个包的配置保存
+            let mut new_pkg = ScriptPackage {
+                id: "@a/concurrent".into(),
+                version: "1.0.0".into(),
+                ..Default::default()
+            };
+            new_pkg.trusted = true;
+            storage::register(&hook_store, &hook_dir, new_pkg).unwrap();
+        });
+
+        configure_settings_with(
+            &manager,
+            Some(channel.as_ref()),
+            "@a/kiro",
+            None,
+            None,
+            Some(
+                [("kiro".to_string(), json!({"fast": true}))]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .await
+        .unwrap();
+        task.await.unwrap();
+
+        let stored = storage::load_packages(&store);
+        let ids: Vec<&str> = stored.iter().map(|p| p.id.as_str()).collect();
+        assert!(
+            ids.contains(&"@a/concurrent"),
+            "窗口内登记的包被旧快照抹掉了：{ids:?}"
+        );
+        let kiro = stored
+            .iter()
+            .find(|p| p.id == "@a/kiro")
+            .expect("原包仍在册");
+        assert_eq!(
+            kiro.provider_options["kiro"]["fast"], true,
+            "本包的设置也要落盘"
+        );
+        assert_eq!(stored.len(), 2, "不应多出或少掉包：{ids:?}");
     }
 
     /// 宿主拒绝设置更新：错误如实上报且不落盘。

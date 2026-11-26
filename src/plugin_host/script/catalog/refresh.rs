@@ -224,9 +224,9 @@ async fn refresh_cycle(r: &Refresher, force: bool) {
                 Ok(catalog) => catalog,
                 Err(_) => unreachable!("cdn_usable 已保证 Ok"),
             };
-            let catalog = fill_distribution(client, catalog).await;
+            let (catalog, distribution_error) = fill_distribution(client, catalog).await;
             let mut c = r.cache.lock().await;
-            apply_cdn(&mut c, catalog, network::now_unix());
+            apply_cdn(&mut c, catalog, distribution_error, network::now_unix());
             let _ = c.save(&r.path);
             tracing::info!(
                 market = c.market.len(),
@@ -260,29 +260,48 @@ fn cdn_usable(result: &Result<cdn::Catalog, network::Failure>) -> bool {
 ///
 /// 分发索引整段失败也不阻断：Magpie 条目会被标成「暂不可安装」，其余
 /// 来源（npm / github）照常可用。
-async fn fill_distribution(client: &reqwest::Client, mut catalog: cdn::Catalog) -> cdn::Catalog {
+///
+/// **但必须把失败原因带出来**：旧实现只 warn 日志，`apply_cdn` 照样盖
+/// `market_at` 且 `market_error` 留空 —— 管理面看到的是「刚刷新、无错误」，
+/// 而所有 Magpie 条目在整整一个 market TTL（30min）内都装不了。这就是
+/// 「失败后留下看着成功的状态」：日志里有一行 warn，状态面板上没有。
+async fn fill_distribution(
+    client: &reqwest::Client,
+    mut catalog: cdn::Catalog,
+) -> (cdn::Catalog, Option<String>) {
     match super::distribution::fetch(client).await {
         Ok(dist) => {
             let hits = super::distribution::attach_archives(&mut catalog.market, &dist);
             tracing::info!(hits, "CDN 条目补充分发数据完成");
+            (catalog, None)
         }
         Err(f) => {
             tracing::warn!("分发索引不可用，Magpie 条目暂标不可安装：{}", f.message);
             super::distribution::mark_missing_archives(&mut catalog.market);
+            let note = format!("分发索引不可用（Magpie 条目不显示为可安装）：{}", f.message);
+            (catalog, Some(note))
         }
     }
-    catalog
 }
 
 /// 把一次成功的 CDN 结果落进缓存：接管 market + github 两个阶段，清错误
 /// 与闸门、盖时间戳；上游 warning 写进 `market_error` 供管理面展示。
-fn apply_cdn(cache: &mut Cache, catalog: cdn::Catalog, now: i64) {
+///
+/// `distribution_error` 是「目录本体成功、分发索引失败」的半成功态：上游
+/// warning 优先展示，没有 warning 时才用它填 `market_error`（两个都要能看见，
+/// 不能因为目录成功就把分发失败藏起来）。
+fn apply_cdn(
+    cache: &mut Cache,
+    catalog: cdn::Catalog,
+    distribution_error: Option<String>,
+    now: i64,
+) {
     cache.market = catalog.market;
     cache.github = catalog.github;
     cache.record_success(Stage::Market, now);
     cache.record_success(Stage::Github, now);
     // record_success 会清 market_error；上游告警要覆盖回去（None 时保持已清）。
-    cache.market_error = catalog.warning;
+    cache.market_error = catalog.warning.or(distribution_error);
 }
 
 /// 旧链阶段 1 + 2：market（registry + dist + npm）→ github（topic 发现）。
@@ -517,7 +536,7 @@ mod tests {
                 .as_bytes(),
         )
         .expect("合法目录");
-        apply_cdn(&mut cache, catalog, 1_700_000_000);
+        apply_cdn(&mut cache, catalog, None, 1_700_000_000);
         assert_eq!(cache.market.len(), 1);
         assert_eq!(cache.market_at, 1_700_000_000);
         assert_eq!(cache.github_at, 1_700_000_000);
@@ -525,5 +544,57 @@ mod tests {
         assert_eq!(cache.github_retry, 0);
         assert_eq!(cache.market_error.as_deref(), Some("目录告警"));
         assert!(cache.github.is_empty() && cache.github_missing);
+    }
+
+    /// 半成功态：目录本体成功但分发索引失败 → 阶段仍算成功（条目可用），
+    /// 但 `market_error` 必须留痕，不能留下「刚刷新且无错误」的假象。
+    /// 上游 warning 存在时优先给 warning（它更接近目录语义）。
+    #[test]
+    fn apply_cdn_reports_distribution_failure_instead_of_silent_success() {
+        let mut cache = Cache::empty();
+        apply_cdn(
+            &mut cache,
+            parse_official_catalog(None),
+            Some("分发索引不可用（Magpie 条目不显示为可安装）：HTTP 503".into()),
+            1_700_000_000,
+        );
+        assert_eq!(cache.market.len(), 1, "条目仍可用（npm/github 不受影响）");
+        assert_eq!(cache.market_at, 1_700_000_000);
+        assert!(
+            cache
+                .market_error
+                .as_deref()
+                .is_some_and(|e| e.contains("分发索引不可用")),
+            "分发失败必须出现在状态面板：{:?}",
+            cache.market_error
+        );
+
+        // 上游 warning 与分发失败同时存在：warning 优先（不被覆盖成 None）
+        let mut cache2 = Cache::empty();
+        apply_cdn(
+            &mut cache2,
+            parse_official_catalog(Some("目录告警")),
+            Some("分发失败".into()),
+            1,
+        );
+        assert_eq!(cache2.market_error.as_deref(), Some("目录告警"));
+
+        // 两者都没有：错误字段保持清空（成功路径不被这条改动污染）
+        let mut cache3 = Cache::empty();
+        apply_cdn(&mut cache3, parse_official_catalog(None), None, 2);
+        assert_eq!(cache3.market_error, None);
+    }
+
+    /// 测试辅助：造一份只含一个 official 条目的 CDN 目录（可选 warning）。
+    fn parse_official_catalog(warning: Option<&str>) -> super::super::cdn::Catalog {
+        let warning_field = warning
+            .map(|w| format!(r#""warning":"{w}","#))
+            .unwrap_or_default();
+        let raw = format!(
+            r#"{{"schemaVersion":1,{warning_field}"entries":[
+                {{"name":"@magpie-community/a","providers":["a"],"source":"magpie:a",
+                 "publisher":"official","kind":"provider","providerVerified":true}}]}}"#
+        );
+        super::super::cdn::parse_catalog(raw.as_bytes()).expect("合法目录")
     }
 }
