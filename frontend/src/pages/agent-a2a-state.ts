@@ -1,13 +1,15 @@
 /**
  * A2A（Agent2API v3.5.1）Agent 页状态层。
  *
- * 对齐 `agent-state.ts` 的职责划分：store 形状、筛选/搜索、计数、选中与重载。
+ * 数据来自 AIGX 后端 `/api/agents`（本机客户端检测）与 `/api/agents/models`
+ * （网关模型目录）—— 与 A2A `core/agents` 的 `snapshot` 同职责。检测/预览/
+ * 应用/回滚的写入链路在 `agent-a2a-actions.ts`（后端 `/api/agents/{preview,apply,restore}`）。
  *
- * AIGX 后端**暂无**「本机客户端检测」接口（后端只有 /api/agent/* 的运维会话接口），
- * 这里按 A2A 的响应形状留一个数据入口 `loadAgentPayload`：后端就绪时替换该实现即可，
- * 页面结构与字段顺序无需改动。接口缺位期间保持空列表 + 空态，不伪造数据。
+ * 只读客户端（`writable=false`）仍然出现在列表里，`supportNote` 给出「缺什么」，
+ * 不做静默隐藏 —— 用户要知道为什么某家接不上。
  */
 
+import { request } from '../api/client';
 import { A2A_TEXT } from './agent-a2a-types';
 import type { A2aCatalogModel } from './agent-a2a-models';
 import type { A2aClient, A2aFilterKey } from './agent-a2a-types';
@@ -35,22 +37,134 @@ export type A2aStore = {
 
 const AUTO_REFRESH_COOLDOWN_MS = 15_000;
 
+/** 后端 `/api/agents` 的单客户端载荷（与 Rust `api::admin::agents::list_agents` 同形） */
+type AgentClientPayload = {
+  id: string;
+  name: string;
+  vendor: string;
+  hue: number;
+  letter: string;
+  icon: string;
+  iconFull: boolean;
+  format: string;
+  configMode: A2aClient['configMode'];
+  protocols: string[];
+  installed: boolean;
+  detected: boolean;
+  detectionState: A2aClient['detectionState'];
+  configPath: string;
+  resolvedPath: string;
+  pathOverride: string;
+  exists: boolean;
+  size: number;
+  modifiedAt: number | null;
+  parsed: boolean;
+  parseError: string | null;
+  writable: boolean;
+  writeShape: string | null;
+  blockReason: string | null;
+  wired: { connected: boolean; baseUrl: string | null };
+  backups: string[];
+};
+
+/** 后端载荷 → 页面契约（缺的字段给「无」而不是编造）。 */
+function toClient(payload: AgentClientPayload): A2aClient {
+  const protocols = Array.isArray(payload.protocols) ? payload.protocols : [];
+  return {
+    id: payload.id,
+    name: payload.name,
+    vendor: payload.vendor,
+    hue: payload.hue,
+    letter: payload.letter,
+    icon: payload.icon,
+    iconFull: payload.iconFull,
+    configPath: payload.configPath,
+    resolvedPath: payload.resolvedPath,
+    pathOverride: payload.pathOverride || '',
+    format: payload.format,
+    configMode: payload.configMode,
+    protocol: protocols[0] || '',
+    protocols,
+    installed: Boolean(payload.installed),
+    detected: Boolean(payload.detected),
+    detectionState: payload.detectionState,
+    // 检测证据：界面用它解释「为什么判定为已安装 / 未安装」。
+    evidence: [
+      payload.exists ? `配置文件：${payload.configPath}` : '',
+      payload.installed ? '二进制在 PATH 上' : '',
+    ].filter(Boolean),
+    version: '',
+    writable: Boolean(payload.writable),
+    supportsModels: payload.configMode === 'models' || payload.configMode === 'providers',
+    supportsEffort: false,
+    supportsDefault: payload.configMode === 'single',
+    supportsToggle: false,
+    supportsGateway: Boolean(payload.writable),
+    supportsEnvKey: payload.id === 'codex',
+    supportNote: payload.blockReason || payload.writeShape || '',
+    docsUrl: '',
+    needsRestart: true,
+    configurations: [],
+    profiles: [],
+    live: [],
+    readError: payload.parsed ? null : payload.parseError,
+    storeError: null,
+    viaGateway: Boolean(payload.wired?.connected),
+    activeId: null,
+    revision: payload.modifiedAt ? String(payload.modifiedAt) : '',
+    applied: {
+      canUndo: payload.backups.length > 0,
+      canDisconnect: Boolean(payload.wired?.connected),
+      appliedAt: payload.modifiedAt ?? undefined,
+      backupId: payload.backups[0],
+    },
+  };
+}
+
 /**
- * A2A 客户端清单数据入口。
+ * 客户端清单数据入口：`GET /api/agents` + `GET /api/agents/models`。
  *
- * AIGX 后端缺「本机客户端检测」接口：当前返回空负载，页面按 A2A 空态渲染。
- * 后端补 `/api/agent/clients` 后在此处接入即可。
+ * 模型目录失败不影响客户端列表（页面主干仍可用），故目录请求单独兜底。
  */
 export async function loadAgentPayload(): Promise<{
   clients: A2aClient[];
-  gateway: { baseUrl: string; requiresKey: boolean; keys: Array<{ id: string; name: string }>; defaultModel?: string };
+  catalog?: A2aCatalogModel[];
+  gateway: {
+    baseUrl: string;
+    requiresKey: boolean;
+    keys: Array<{ id: string; name: string }>;
+    defaultModel?: string;
+  };
   detectedAt: number;
   host: { name: string };
 }> {
+  const [agents, catalog] = await Promise.all([
+    request<{
+      success: boolean;
+      data: { gateway: { baseUrl: string }; clients: AgentClientPayload[] };
+    }>('GET', '/api/agents'),
+    request<{ success: boolean; data: { models: string[] } }>(
+      'GET',
+      '/api/agents/models',
+    ).catch(() => ({ success: false, data: { models: [] as string[] } })),
+  ]);
+  const clients = (agents.data?.clients ?? []).map(toClient);
+  const models = (catalog.data?.models ?? []).map<A2aCatalogModel>((id) => ({
+    id,
+    name: id,
+    label: id,
+    reasoningLevels: [],
+    effort: '',
+  }));
   return {
-    clients: [],
-    gateway: { baseUrl: '', requiresKey: false, keys: [] },
-    detectedAt: 0,
+    clients,
+    catalog: models,
+    gateway: {
+      baseUrl: agents.data?.gateway?.baseUrl ?? '',
+      requiresKey: false,
+      keys: [],
+    },
+    detectedAt: Date.now(),
     host: { name: '' },
   };
 }
@@ -163,6 +277,7 @@ export async function loadPanel(options: LoadOptions = {}): Promise<void> {
     const next: A2aStore = {
       ...state,
       clients: Array.isArray(payload.clients) ? payload.clients : [],
+      catalog: payload.catalog ?? state.catalog,
       gateway: payload.gateway.baseUrl || '',
       defaultModel: payload.gateway.defaultModel || '',
       requiresKey: payload.gateway.requiresKey,

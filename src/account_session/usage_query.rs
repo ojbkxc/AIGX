@@ -35,7 +35,11 @@ const CONCURRENCY: usize = 3;
 /// 只锁「取号」这一段（几微秒），请求本身在锁外并发执行 —— 它限制的是启动
 /// 间隔与在飞数量，不是串行化整轮查询。`min_interval = 0` 时直接放行（未申报
 /// 策略的家零额外开销）。
-struct ProviderGate {
+///
+/// `pub(super)`：`usage_jobs` 经 [`gate_for`] 拿到 `Arc<ProviderGate>` 再调
+/// `wait_turn`。类型若保持私有，`gate_for` 的返回类型就是 `private type`
+///（E0603，且 `private_interfaces` 告警在 `-D warnings` 下同样致命）。
+pub(super) struct ProviderGate {
     /// 申报的最小启动间隔（毫秒）。用原子量而非构造期常量：运行中插件重新
     /// 申报策略时，[`gate_for`] 会就地更新，不必重建闸（重建会把排队者丢掉）。
     min_interval_ms: std::sync::atomic::AtomicU64,
