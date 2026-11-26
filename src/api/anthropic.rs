@@ -1336,8 +1336,8 @@ pub async fn handle_messages(
                             // 都不能抹掉对方（与 `chat.rs` 同口径）。
                             if let Some(usage) = chunk.usage {
                                 let mut slot = stream_usage_for_map.lock();
-                                *slot = Some(crate::api::openai::billing::merge_stream_usage(
-                                    *slot, *usage,
+                                *slot = Some(crate::api::openai::merge_stream_usage(
+                                    *slot, usage,
                                 ));
                             }
                             // 推理内容增量 → Anthropic thinking 块（首个增量开块）
