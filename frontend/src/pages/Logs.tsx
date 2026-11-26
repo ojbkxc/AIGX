@@ -56,6 +56,9 @@ export interface RequestLogItem {
   cost?: number;
   channel_cost?: number;
   latency_ms?: number;
+  /** 本次请求的上游尝试次数（含重试；后端 `RequestLog.attempts`，缺省 1）。
+   *  A2A requests 列表有「重试」列，本页原先只能点开详情/路由回放才知道重试了几次。 */
+  attempts?: number;
   status_code?: number;
   error_msg?: string;
   ip?: string;
@@ -192,6 +195,9 @@ function logsReqColDefs(admin: boolean): TableColumnDef[] {
     { key: 'tokens', label: 'Tokens', align: 'right' as const, width: 110 },
     { key: 'cost', label: '费用', align: 'right' as const, width: 100 },
     { key: 'latency', label: '延迟', align: 'right' as const, width: 90 },
+    // 重试次数（A2A requests 的「重试」列）：>1 才上色，1 次照常显示，
+    // 让「一次就通」与「试了三家才通」在同一列上可比。
+    { key: 'retry', label: '重试', align: 'center' as const, width: 70 },
     { key: 'status', label: '状态', align: 'center' as const, width: 90 },
     ...(admin ? [{ key: 'purge', label: '破甲', align: 'center' as const, width: 70 }] : []),
   ];
@@ -1331,6 +1337,17 @@ export default function Logs(): JSX.Element {
                       )}
                       {visibleKeySet.has('latency') && (
                       <td style={{ whiteSpace: 'nowrap' }}>{l.latency_ms != null ? `${l.latency_ms}ms` : '—'}</td>
+                      )}
+                      {visibleKeySet.has('retry') && (
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        {l.attempts != null && l.attempts > 1 ? (
+                          <span className="badge badge-warning" title={t('共尝试 {{n}} 次（含重试）', { n: l.attempts })}>
+                            {l.attempts}
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>{l.attempts ?? 1}</span>
+                        )}
+                      </td>
                       )}
                       {visibleKeySet.has('status') && (
                       <td>

@@ -57,6 +57,10 @@ export function RequestLogDetail({ log, admin, onClose }: {
       { label: t('利润'), value: log.channel_cost != null ? fmtCost((log.cost ?? 0) - log.channel_cost, lang) : '—' },
     ] : []),
     { label: t('延迟'), value: `${log.latency_ms ?? 0}ms` },
+    // 尝试次数（后端 RequestLog.attempts，缺省 1）：与列表的「重试」列同源。
+    // 逐次明细（attempt_details）含上游渠道名与真实模型名，对普通用户未脱敏，
+    // 这里只给计数，明细留在管理员的「路由回放」Tab 里看。
+    { label: t('尝试次数'), value: t('{{n}} 次', { n: log.attempts ?? 1 }) },
     { label: t('状态码'), value: String(log.status_code ?? '—') },
     // 破甲控制台使用标记（后端仅对管理员下发，普通用户已剥离）
     ...(admin ? [{ label: t('破甲控制台'), value: log.purge_applied ? t('是') : t('否') }] : []),

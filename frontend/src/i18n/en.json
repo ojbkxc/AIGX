@@ -5791,5 +5791,6 @@
   "留空 = 不限制": "Leave empty = no restriction",
   "暂无可用提供商（先添加渠道或账号）": "No providers available yet (add a channel or an account first)",
   "(至少 8 个字符)": "(at least 8 characters)",
-  "密钥值至少需要 8 个字符": "The key value must be at least 8 characters"
+  "密钥值至少需要 8 个字符": "The key value must be at least 8 characters",
+  "共尝试 {{n}} 次（含重试）": "{{n}} attempts in total (including retries)"
 }
