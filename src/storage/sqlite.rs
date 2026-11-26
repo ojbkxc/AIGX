@@ -195,13 +195,13 @@ impl SqliteStore {
         })
     }
 
-    /// 前缀匹配的上界：`prefix + U+10FFFF`。
+    /// 前缀匹配的上界：`prefix + U+10FFFF`（单点实现见 `storage::prefix_upper`）。
     ///
     /// 拿它代替 `LIKE 'prefix%'`：SQLite 的 LIKE 是否被改写索引范围取决于
     /// 大小写折叠配置，而 `key >= prefix AND key < prefix+\u{10FFFF}` 是**纯主键
     /// 范围扫**，行为确定（任何以 prefix 开头的键都落在区间内，且不含其它键）。
     fn prefix_upper(prefix: &str) -> String {
-        format!("{prefix}\u{10FFFF}")
+        super::prefix_upper(prefix)
     }
 
     /// 列出所有键（支持前缀匹配；空前缀 = 全部键）
@@ -235,7 +235,7 @@ impl SqliteStore {
         let upper = Self::prefix_upper(prefix);
         // limit 钳到 i64 正区间：usize::MAX as i64 = -1，SQLite 负 LIMIT
         // 语义为"无限制"，会把快路径优化反转成全表扫描。
-        let limit = (limit as i64).clamp(1, 10_000_000);
+        let limit = super::clamp_limit(limit);
         let mut stmt = conn.prepare_cached(
             "SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT ?3",
         )?;
@@ -274,7 +274,7 @@ impl SqliteStore {
     ) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
         // 与 list_latest_keys 同口径：负 LIMIT 在 SQLite 里是「无限制」。
-        let limit = (limit as i64).clamp(1, 10_000_000);
+        let limit = super::clamp_limit(limit);
         let mut stmt = conn.prepare_cached(
             "SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT ?3",
         )?;
@@ -298,7 +298,7 @@ impl SqliteStore {
     ) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
         // 与 list_range_desc 同口径：负 LIMIT 在 SQLite 里是「无限制」。
-        let limit = (limit as i64).clamp(1, 10_000_000);
+        let limit = super::clamp_limit(limit);
         let mut stmt = conn.prepare_cached(
             "SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key ASC LIMIT ?3",
         )?;
@@ -350,32 +350,98 @@ impl SqliteStore {
 
     /// 原子更新（读取-修改-写入）
     /// 返回旧值（如果存在）
+    ///
+    /// **读与写必须持同一把连接锁**：旧实现先 `get`（取锁→放锁）再 `put`
+    /// （再取锁），两段之间别的线程可以插入自己的读-改-写，于是两个并发的
+    /// `update` 读到同一个旧值、各自 +1 后写回，最终只加了一次（丢更新）。
+    /// 本方法的签名就是「原子更新」，调用方（如 `channel_store.update`、
+    /// `user_store.update` 的底层形态）按原子语义依赖它。
     pub fn update<T, F>(&self, key: &str, f: F) -> anyhow::Result<Option<T>>
     where
         T: DeserializeOwned + Serialize + Clone + Default,
         F: FnOnce(Option<T>) -> T,
     {
-        let existing: Option<T> = self.get(key)?;
-        let old = existing.clone();
-        let new_value = f(existing);
-        self.put(key, &new_value)?;
-        Ok(old)
+        // 与 `mutate` 共用同一条路径：取得连接锁后完成读、闭包、写三步。
+        self.mutate(key, |existing| Ok(f(existing)))
     }
 
-    /// 在事务中执行多个操作
+    /// 真正的原子读-改-写：**全程持连接锁**（读与写在同一个临界区内）。
+    ///
+    /// `update` 只能表达「拿旧值算新值」；需要中途报错（校验失败不落盘）或
+    /// 需要按前缀读多键的路径用这个。返回写入的新值。
+    ///
+    /// 跨进程仍由 SQLite 自身的事务/锁保证（单条 `INSERT OR REPLACE` 是原子
+    /// 语句），但「读-判定-写」这整段只在本进程内互斥——多实例部署时两个
+    /// 进程各自持自己的 `Mutex<Connection>`，仍会互相覆盖。真正跨进程的
+    /// 读-改-写要走 `transaction()`。
+    pub fn mutate<T, F>(&self, key: &str, f: F) -> anyhow::Result<T>
+    where
+        T: DeserializeOwned + Serialize + Clone,
+        F: FnOnce(Option<T>) -> anyhow::Result<T>,
+    {
+        let conn = self.conn.lock();
+        let existing: Option<T> = {
+            let mut stmt = conn.prepare_cached("SELECT value FROM kv WHERE key = ?1")?;
+            let mut rows = stmt.query_map([key], |row| row.get::<_, String>(0))?;
+            match rows.next() {
+                Some(Ok(value)) => Some(serde_json::from_str(&value)?),
+                Some(Err(e)) => return Err(e.into()),
+                None => None,
+            }
+        };
+        let new_value = f(existing)?;
+        let content = serde_json::to_string(&new_value)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
+            rusqlite::params![key, content],
+        )?;
+        Ok(new_value)
+    }
+
+    /// 在事务中执行多个操作。
+    ///
+    /// 事务是**连接级状态**：`BEGIN IMMEDIATE` 之后若闭包 panic（内部 `unwrap`
+    /// / 断言失败），连接上会留下一个没人结束的写事务。parking_lot 的 Mutex
+    /// 不做 poisoning，下一次拿锁的调用会在**这个还开着的事务里**继续执行：它的
+    /// 写会跟着那个事务一起悬着（别人读不到、进程退出才回滚），而它自己若再
+    /// `BEGIN` 就直接报 "cannot start a transaction within a transaction"，此后
+    /// 所有写路径（含 `write_batch` 的日志聚合落盘）永久失败。用 Drop 守卫保证
+    /// ——不是正常 COMMIT 结束，就一定 ROLLBACK。
     pub fn transaction<F, R>(&self, f: F) -> anyhow::Result<R>
     where
         F: FnOnce(&Connection) -> anyhow::Result<R>,
     {
+        struct RollbackOnDrop<'a> {
+            conn: &'a Connection,
+            finished: bool,
+        }
+        impl Drop for RollbackOnDrop<'_> {
+            fn drop(&mut self) {
+                if !self.finished {
+                    // 收尾失败也不能再抛：本守卫在 panic 展开期间运行，
+                    // 抛第二个 panic 会直接 abort 进程。
+                    let _ = self.conn.execute("ROLLBACK", []);
+                }
+            }
+        }
+
         let conn = self.conn.lock();
         conn.execute("BEGIN IMMEDIATE", [])?;
+        let mut guard = RollbackOnDrop {
+            conn: &conn,
+            finished: false,
+        };
         match f(&conn) {
             Ok(result) => {
+                // COMMIT 失败（例如写锁被外部进程抢走）时事务仍然是开着的：
+                // finished 不置位，交给 Drop 的 ROLLBACK 收拾。
                 conn.execute("COMMIT", [])?;
+                guard.finished = true;
                 Ok(result)
             }
             Err(e) => {
                 let _ = conn.execute("ROLLBACK", []);
+                guard.finished = true;
                 Err(e)
             }
         }
@@ -522,5 +588,91 @@ mod tests {
         // key2 不应该存在
         let val: Option<String> = store.get("key2").unwrap();
         assert_eq!(val, None);
+    }
+
+    /// 闭包 panic 后事务必须已回滚，连接仍可继续写。
+    ///
+    /// 旧实现在 `f(&conn)` panic 时**什么都不做**：`BEGIN IMMEDIATE` 留下一个
+    /// 没人结束的写事务。parking_lot 的 Mutex 不 poison，下一个调用方会在这个
+    /// 还开着的事务里干活（它的写跟着悬着），而它若再 `BEGIN` 就报
+    /// "cannot start a transaction within a transaction" —— 此后**所有**批量写
+    /// （含日志聚合 `write_batch`）永久失败，只能重启进程。
+    #[test]
+    fn transaction_panic_rolls_back_and_leaves_connection_usable() {
+        let (_dir, store) = new_test_store();
+        store.put("key1", &"val1").unwrap();
+
+        let store = std::sync::Arc::new(store);
+        let s2 = store.clone();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            s2.transaction(|conn| -> anyhow::Result<()> {
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
+                    rusqlite::params!["panic_key", "v"],
+                )?;
+                panic!("boom");
+            })
+            .ok();
+        }));
+        assert!(panicked.is_err());
+
+        // 未提交的那条必须回滚
+        let leaked: Option<String> = store.get("panic_key").unwrap();
+        assert_eq!(leaked, None, "panic 后未提交的写必须回滚");
+        // 连接必须仍可用：能再开事务（旧实现这里报 "cannot start a transaction"）
+        store
+            .transaction(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
+                    rusqlite::params!["after_panic", "ok"],
+                )?;
+                Ok(())
+            })
+            .expect("panic 之后事务必须仍能开启（连接不能留在未结束事务里）");
+        let v: Option<String> = store.get("after_panic").unwrap();
+        assert_eq!(v.as_deref(), Some("ok"));
+    }
+
+    /// 并发 `update` 不丢更新（读与写必须在同一段连接锁内）。
+    #[test]
+    fn concurrent_update_does_not_lose_increments() {
+        let (_dir, store) = new_test_store();
+        store.put("counter", &0u64).unwrap();
+        let store = std::sync::Arc::new(store);
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let store = store.clone();
+                scope.spawn(move || {
+                    store
+                        .update("counter", |v| {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            v.unwrap_or(0) + 1
+                        })
+                        .unwrap();
+                });
+            }
+        });
+        let final_v: Option<u64> = store.get("counter").unwrap();
+        assert_eq!(final_v, Some(16), "并发自增丢了更新：{final_v:?}");
+    }
+
+    /// `limit = 0` 返回空集（与 JSON 后端一致；旧实现 clamp 到 1，会返回 1 条）。
+    #[test]
+    fn limit_zero_returns_empty() {
+        let (_dir, store) = new_test_store();
+        for i in 0..3 {
+            store.put(&format!("k:{i}"), &i).unwrap();
+        }
+        assert!(store.list_latest_keys("k:", 0).unwrap().is_empty());
+        assert!(store
+            .list_range_asc("k:", "k:\u{10FFFF}", 0)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_range_desc("k:", "k:\u{10FFFF}", 0)
+            .unwrap()
+            .is_empty());
+        // 对照：非零 limit 仍正常返回（证明上面不是「恒空」）
+        assert_eq!(store.list_latest_keys("k:", 1).unwrap().len(), 1);
     }
 }

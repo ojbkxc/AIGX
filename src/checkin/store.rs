@@ -377,6 +377,19 @@ const DAILY_PREFIX: &str = "checkin:daily:";
 pub struct CheckinStore {
     store: Arc<FileStore>,
     schedules: RwLock<ScheduleFile>,
+    /// 计划落盘互斥（`schedules` 的**持久化**这一半）。
+    ///
+    /// 内存态由 `schedules` 的写锁串行化，但「落盘」是第二段动作：
+    /// 旧实现的 [`Self::persist_schedules`](CheckinStore::persist_schedules)
+    /// 先在读锁内克隆快照、再在锁外 `put`。两个并发修改者（调度器 tick 的
+    /// `mark_fired_providers` + 管理端 `upsert_schedule`）的时序可以是
+    /// 「A 克隆(v1) → B 克隆(v2) → B 写(v2) → A 写(v1)」——内存里 latest 是 v2，
+    /// 盘上是 v1，重启后 `load()` 把 v1 装回内存：**最后一条触发记录、
+    /// 启用状态、逐账号排程全部回退**。
+    ///
+    /// 修法：落盘的「克隆 + 写」在**同一段锁**内完成。这样每次落盘写的都是
+    /// 拿到锁那一刻的最新内存态，最后落盘的那次必然包含此前所有修改。
+    persist: parking_lot::Mutex<()>,
 }
 
 impl CheckinStore {
@@ -384,6 +397,7 @@ impl CheckinStore {
         Self {
             store,
             schedules: RwLock::new(ScheduleFile::default()),
+            persist: parking_lot::Mutex::new(()),
         }
     }
 
@@ -403,7 +417,10 @@ impl CheckinStore {
     }
 
     fn persist_schedules(&self) -> Result<()> {
-        // 先 clone 再释放读锁，避免读守卫存活于整个 put（锁内同步 IO）
+        // 落盘互斥内**重新克隆**：拿到锁的那一刻的内存态才是要写的值。
+        // 锁序：persist → schedules 读锁（只在克隆期间持有，且克隆后立即释放，
+        // 不会与任何持有 schedules 写锁的路径形成环）。
+        let _guard = self.persist.lock();
         let snapshot = self.schedules.read().clone();
         self.store.put(SCHEDULE_KEY, &snapshot)
     }
@@ -599,11 +616,22 @@ impl CheckinStore {
     }
 
     /// 追加一条记录（按日分桶）。
+    ///
+    /// **必须走 `FileStore::mutate`（原子读-改-写）**：旧实现是
+    /// `get(bucket)` → `push` → `put(bucket)`，三步之间没有任何互斥。写这条
+    /// 台账的调用方分布在四个并发源上（调度器 tick 的 `record_with_reason`、
+    /// 手动单账号签到 `checkin_center`、zcode 验证码后回写、启动补签），
+    /// 同一天桶被两个源同时追加时，后者读到的是「不含前者那条」的快照，
+    /// 写回后**前一条记录永久消失**（台账是唯一的历史，没有别处能补）。
     pub fn append_record(&self, record: CheckinRecord) -> Result<()> {
         let key = Self::record_key(&record.date);
-        let mut bucket: Vec<CheckinRecord> = self.store.get(&key)?.unwrap_or_default();
-        bucket.push(record);
-        self.store.put(&key, &bucket)
+        self.store
+            .mutate::<Vec<CheckinRecord>, _>(&key, move |bucket| {
+                let mut bucket = bucket.unwrap_or_default();
+                bucket.push(record);
+                Ok(bucket)
+            })?;
+        Ok(())
     }
 
     /// 读最近 `days` 天的记录，按时间倒序。
@@ -671,15 +699,33 @@ impl CheckinStore {
     /// 只改这一个布尔字段。找不到记录时静默成功（保活回写不该让主流程失败）。
     pub fn mark_kept_active(&self, account_id: &str, provider: &str, date: &str) -> Result<()> {
         let key = Self::record_key(date);
-        let mut bucket: Vec<CheckinRecord> = self.store.get(&key)?.unwrap_or_default();
-        if let Some(last) = bucket
-            .iter_mut()
-            .rev()
-            .find(|r| r.account_id == account_id && r.provider == provider)
-        {
-            last.kept_active = true;
-            self.store.put(&key, &bucket)?;
+        let account_id = account_id.to_string();
+        let provider = provider.to_string();
+        // 廉价预判：没有匹配记录时**不写盘**（保持原语义「找不到就静默成功」，
+        // 不给没有记录的日期凭空造一个空桶键）。
+        let hit = self
+            .store
+            .get::<Vec<CheckinRecord>>(&key)?
+            .unwrap_or_default()
+            .iter()
+            .any(|r| r.account_id == account_id && r.provider == provider);
+        if !hit {
+            return Ok(());
         }
+        // 真正的修改走原子读改写：同 `append_record`，否则「回写保活标记」这一步
+        // 会把期间新追加的记录一起抹掉（标记是个布尔修正，不该有删除权限）。
+        self.store
+            .mutate::<Vec<CheckinRecord>, _>(&key, move |bucket| {
+                let mut bucket = bucket.unwrap_or_default();
+                if let Some(last) = bucket
+                    .iter_mut()
+                    .rev()
+                    .find(|r| r.account_id == account_id && r.provider == provider)
+                {
+                    last.kept_active = true;
+                }
+                Ok(bucket)
+            })?;
         Ok(())
     }
 
@@ -751,32 +797,82 @@ impl CheckinStore {
         let keyword = keyword
             .map(|k| k.trim().to_lowercase())
             .filter(|k| !k.is_empty());
+        // 闭包要跨线程（`FileStore::mutate` 的 `Send + 'static`），参数先转 owned。
+        let provider = provider.map(str::to_string);
+        let account_id = account_id.map(str::to_string);
         let mut removed = 0usize;
         for key in self.store.list(RECORD_PREFIX)? {
-            let Some(bucket) = self.store.get::<Vec<CheckinRecord>>(&key)? else {
-                continue;
+            // 逐桶原子读改写：旧实现「get 整桶 → 过滤 → put 整桶」，删除期间
+            // 调度器追加的新记录会随整桶写回一起消失（删记录把别人的记录也删了）。
+            //
+            // 语义变化（有意）：删空后写回**空数组**而不是删键。删键会在「判定为空」
+            // 与「删键」之间留一个窗口，期间 `append_record` 刚写进去的记录被整个
+            // 键删掉；写回空数组则是同一次原子写，谁也不丢。空桶对读侧等价于
+            // 「没有记录」（`records_of_date` / `recent_records` / `total_records`
+            // 都按空处理），代价是键仍在（会随 `prune_records` 按日期过期）。
+            //
+            // 先做一次廉价预判：没有命中就**不写盘**。否则「按筛选删 0 条」会对
+            // 每个日桶各写一次（台账 3650 个日桶 = 3650 次事务），而结果一个字节
+            // 都不变。预判与真正的改写在两段临界区里，但预判只用来决定「要不要
+            // 白写一次」—— 命中判定在 mutate 里重做，不影响正确性。
+            let pre = match self.store.get::<Vec<CheckinRecord>>(&key)? {
+                Some(bucket) => bucket,
+                None => continue,
             };
-            let bucket_len = bucket.len();
-            let kept: Vec<CheckinRecord> = bucket
-                .into_iter()
-                .filter(|r| {
-                    !(provider.map(|p| r.provider == p).unwrap_or(false)
-                        && account_id.map(|a| r.account_id == a).unwrap_or(false)
-                        && outcome.map(|o| r.outcome == o).unwrap_or(false)
-                        && keyword.as_ref().is_none_or(|k| {
-                            r.account_name.to_lowercase().contains(k)
-                                || r.account_id.to_lowercase().contains(k)
-                                || r.provider.to_lowercase().contains(k)
-                                || r.message.to_lowercase().contains(k)
-                        }))
-                })
-                .collect();
-            removed += bucket_len.saturating_sub(kept.len());
-            if kept.is_empty() {
-                self.store.delete(&key)?;
-            } else {
-                self.store.put(&key, &kept)?;
+            let would_hit = pre.iter().any(|r| {
+                !(provider
+                    .as_deref()
+                    .map(|p| r.provider == p)
+                    .unwrap_or(false)
+                    && account_id
+                        .as_deref()
+                        .map(|a| r.account_id == a)
+                        .unwrap_or(false)
+                    && outcome.map(|o| r.outcome == o).unwrap_or(false)
+                    && keyword.as_ref().is_none_or(|k| {
+                        r.account_name.to_lowercase().contains(k)
+                            || r.account_id.to_lowercase().contains(k)
+                            || r.provider.to_lowercase().contains(k)
+                            || r.message.to_lowercase().contains(k)
+                    }))
+            });
+            if !would_hit {
+                continue;
             }
+            let stats = std::sync::Arc::new(parking_lot::Mutex::new((0usize, 0usize)));
+            let stats_c = stats.clone();
+            let provider_c = provider.clone();
+            let account_id_c = account_id.clone();
+            let keyword_c = keyword.clone();
+            self.store
+                .mutate::<Vec<CheckinRecord>, _>(&key, move |bucket| {
+                    let bucket = bucket.unwrap_or_default();
+                    let bucket_len = bucket.len();
+                    let kept: Vec<CheckinRecord> = bucket
+                        .into_iter()
+                        .filter(|r| {
+                            !(provider_c
+                                .as_deref()
+                                .map(|p| r.provider == p)
+                                .unwrap_or(false)
+                                && account_id_c
+                                    .as_deref()
+                                    .map(|a| r.account_id == a)
+                                    .unwrap_or(false)
+                                && outcome.map(|o| r.outcome == o).unwrap_or(false)
+                                && keyword_c.as_ref().is_none_or(|k| {
+                                    r.account_name.to_lowercase().contains(k)
+                                        || r.account_id.to_lowercase().contains(k)
+                                        || r.provider.to_lowercase().contains(k)
+                                        || r.message.to_lowercase().contains(k)
+                                }))
+                        })
+                        .collect();
+                    *stats_c.lock() = (bucket_len, kept.len());
+                    Ok(kept)
+                })?;
+            let (before, after) = *stats.lock();
+            removed += before.saturating_sub(after);
         }
         Ok(removed)
     }
@@ -1276,5 +1372,144 @@ mod tests {
             error: "需要验证码".into(),
         };
         assert_eq!(rec.kind, rec.source);
+    }
+
+    fn rec(ts: i64, account_id: &str) -> CheckinRecord {
+        CheckinRecord {
+            ts,
+            date: "2026-01-01".into(),
+            account_id: account_id.into(),
+            account_name: account_id.into(),
+            provider: "loomy".into(),
+            source: "schedule".into(),
+            kind: "schedule".into(),
+            reason: String::new(),
+            outcome: CheckinOutcome::Success,
+            ok: true,
+            kept_active: false,
+            streak_days: 0,
+            message: "ok".into(),
+            error: String::new(),
+        }
+    }
+
+    /// 并发追加不丢记录（读改写必须原子）。
+    ///
+    /// 旧实现 `get(bucket)` → `push` → `put(bucket)` 三步无互斥：同一天桶被
+    /// 多个源（调度器 tick / 手动签到 / zcode 回写 / 启动补签）同时追加时，
+    /// 后写者用「不含前者那条」的快照写回，前者**永久消失**。判据是确定性的：
+    /// 最终条数必须恰好等于写入次数。
+    #[test]
+    fn concurrent_append_record_loses_nothing() {
+        let store = Arc::new(CheckinStore::new(temp_store()));
+        const N: usize = 8;
+        std::thread::scope(|scope| {
+            for i in 0..N {
+                let store = store.clone();
+                scope.spawn(move || {
+                    store
+                        .append_record(rec(i as i64, &format!("a{i}")))
+                        .unwrap();
+                });
+            }
+        });
+        let bucket = store.records_of_date("2026-01-01").unwrap();
+        assert_eq!(
+            bucket.len(),
+            N,
+            "并发追加丢了记录：期望 {N} 条，实际 {} 条",
+            bucket.len()
+        );
+        let mut ids: Vec<String> = bucket.into_iter().map(|r| r.account_id).collect();
+        ids.sort();
+        for i in 0..N {
+            assert!(ids.contains(&format!("a{i}")), "丢了 a{i}：{ids:?}");
+        }
+    }
+
+    /// 追加与「回写保活标记」并发时，追加的那条不能被抹掉。
+    ///
+    /// 旧实现 `mark_kept_active` 也是 get→改→put 整桶写回：它会用「不含并发
+    /// 追加那条」的快照覆盖回去，等于删记录。
+    #[test]
+    fn mark_kept_active_does_not_erase_concurrent_append() {
+        let store = Arc::new(CheckinStore::new(temp_store()));
+        store.append_record(rec(1, "a0")).unwrap();
+        std::thread::scope(|scope| {
+            {
+                let store = store.clone();
+                scope.spawn(move || {
+                    for i in 1..6 {
+                        store.append_record(rec(i, &format!("a{i}"))).unwrap();
+                    }
+                });
+            }
+            {
+                let store = store.clone();
+                scope.spawn(move || {
+                    for _ in 0..6 {
+                        store.mark_kept_active("a0", "loomy", "2026-01-01").unwrap();
+                    }
+                });
+            }
+        });
+        let bucket = store.records_of_date("2026-01-01").unwrap();
+        assert_eq!(bucket.len(), 6, "回写保活标记抹掉了并发追加的记录");
+        assert!(
+            bucket.iter().any(|r| r.account_id == "a0" && r.kept_active),
+            "保活标记未生效"
+        );
+    }
+
+    /// 计划落盘取的是**调用时刻的最新内存态**，不是「克隆时的旧快照」。
+    ///
+    /// 旧实现先克隆、放锁、再写：并发两个修改者的落盘顺序可以反过来，盘上
+    /// 留下的是更旧的那份（重启后 `load()` 把旧值装回内存，触发记录/启用
+    /// 状态回退）。判据：并发 upsert 不同 id 之后，盘上必须包含全部 id。
+    #[test]
+    fn concurrent_schedule_writes_persist_all_entries() {
+        let store = Arc::new(CheckinStore::new(temp_store()));
+        const N: usize = 8;
+        std::thread::scope(|scope| {
+            for i in 0..N {
+                let store = store.clone();
+                scope.spawn(move || {
+                    store
+                        .upsert_schedule(CheckinSchedule {
+                            id: format!("s{i}"),
+                            label: format!("计划{i}"),
+                            enabled: true,
+                            time: "09:00".into(),
+                            time_end: String::new(),
+                            randomize: false,
+                            daily_kind: default_daily_kind(),
+                            rolling_minutes: 0,
+                            retry_limit: default_retry_limit(),
+                            retry_gap_minutes: default_retry_gap_minutes(),
+                            makeup_time: String::new(),
+                            providers: vec!["loomy".into()],
+                            provider_times: HashMap::new(),
+                            last_fired_date: String::new(),
+                            last_fired_providers: HashMap::new(),
+                            last_retried_providers: HashMap::new(),
+                            account_plan: AccountPlan::default(),
+                            last_result: String::new(),
+                            last_summary: Value::Null,
+                            last_ok: 0,
+                            last_keepalive: 0,
+                            last_failed: 0,
+                        })
+                        .unwrap();
+                });
+            }
+        });
+        // 从盘上重新加载（模拟重启），必须看到全部 N 条
+        let reloaded = CheckinStore::new(store.file_store().clone());
+        reloaded.load().unwrap();
+        let ids: Vec<String> = reloaded.schedules().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids.len(), N, "盘上丢了计划：{ids:?}");
+        for i in 0..N {
+            assert!(ids.contains(&format!("s{i}")), "盘上丢了 s{i}：{ids:?}");
+        }
     }
 }

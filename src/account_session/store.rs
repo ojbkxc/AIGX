@@ -206,6 +206,16 @@ struct Inner {
     retry_on_status: RwLock<Vec<u16>>,
     /// 落盘节流：account id → 上次持久化 unix 秒。
     persisted_at: DashMap<String, i64>,
+    /// 落盘互斥：保证「取当前内存态 → 写盘」这一对动作整体串行。
+    ///
+    /// 没有它时，两个并发请求的落盘顺序可与内存修改顺序相反（各自拿快照
+    /// 再写），盘上留下旧值。有了它，**后拿到锁的那次读到的内存态一定不比
+    /// 先拿到锁的旧**，因此最后一次落盘必然包含此前所有修改。
+    ///
+    /// 不用 `sessions` 写锁来做这件事：写盘是同步 IO，持写锁会挡住所有选路
+    /// 读，代价不成比例。锁序恒为 `persist → sessions.read`（只读快照），
+    /// 与任何持有 `sessions` 写锁的路径都不构成环。
+    persist_lock: parking_lot::Mutex<()>,
     /// 降权（沉底）标记：key → 到期 unix 秒。**内存态**，重启归零。
     ///
     /// 统一错误策略里 `CooldownMode::Deprioritize` 的落地：不把账号逐出调度，
@@ -368,6 +378,7 @@ impl AccountSessionStore {
                 retry_interval_ms: AtomicU64::new(0),
                 retry_on_status: RwLock::new(vec![402]),
                 persisted_at: DashMap::new(),
+                persist_lock: parking_lot::Mutex::new(()),
                 deprioritized: DashMap::new(),
                 channel_provider: DashMap::new(),
             }),
@@ -397,6 +408,39 @@ impl AccountSessionStore {
         for key in &keys {
             if let Some(session) = self.inner.store.get::<AccountSession>(key)? {
                 sessions.push(session);
+            }
+        }
+        // **同 id 去重**：键是 `acctses:{channel_id}:{id}`，历史数据里可能存在
+        // 「同一账号两个渠道键」（搬迁路径曾经不删旧键，见 `upsert` 的说明）。
+        // 不去重就把同一账号装成两条 —— 选路各发一份请求、并发上限/冷却各算
+        // 一遍、管理面出现重复行且删一条另一条会「复活」。保留 `updated_at`
+        // 最新那条（同一 id 的最新状态），并 warning 点名被丢弃的键。
+        {
+            let mut newest: HashMap<String, usize> = HashMap::with_capacity(sessions.len());
+            let mut stale: Vec<usize> = Vec::new();
+            for (pos, session) in sessions.iter().enumerate() {
+                match newest.get(&session.id) {
+                    Some(&prev) if sessions[prev].updated_at >= session.updated_at => {
+                        stale.push(pos);
+                    }
+                    Some(&prev) => {
+                        stale.push(prev);
+                        newest.insert(session.id.clone(), pos);
+                    }
+                    None => {
+                        newest.insert(session.id.clone(), pos);
+                    }
+                }
+            }
+            if !stale.is_empty() {
+                tracing::warn!(
+                    "账号库里同一账号存在 {} 条重复键（历史搬迁残留），已按 updated_at 取最新一条",
+                    stale.len()
+                );
+                stale.sort_unstable_by(|a, b| b.cmp(a));
+                for pos in stale {
+                    sessions.remove(pos);
+                }
             }
         }
         sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
@@ -477,14 +521,72 @@ impl AccountSessionStore {
         format!("{KEY_PREFIX}{channel_id}:{id}")
     }
 
-    /// 立即落盘。
-    fn persist(&self, session: &AccountSession) -> anyhow::Result<()> {
+    /// 立即落盘（**在 `sessions` 写锁内取「当前内存态」再写**，落盘顺序 = 修改顺序）。
+    ///
+    /// 旧实现是裸 `store.put(&key, session)`，调用方一律「在 `sessions` 写锁内
+    /// 克隆快照 → **放锁** → 落盘」。两个并发请求（同账号并发转发）的落盘
+    /// 顺序因此可与内存修改顺序相反：后写的那次带的是更旧的快照，磁盘上留下
+    /// 旧的 `cooldowns` / `status` / `needs_relogin`。重启后 `load()` 把旧值装回
+    /// 内存 —— **已定的冷却与禁用状态被抹掉**，账号重新参与调度，对着还在
+    /// 限流/已失效的上游继续打（冷却失效 → 401/429 风暴）。
+    ///
+    /// 修法：不再写「调用方手里的旧快照」，改在**持锁状态下**取当前内存态写盘
+    /// —— 每次落盘写的都是它拿到锁那一刻的最新值，因此「最后一次落盘」必然
+    /// 包含此前所有修改（与 `plugin_host/script/storage.rs` 的 `mutate_packages`
+    /// 同一手法）。`fallback` 只用于「内存里还没有这条」。
+    ///
+    /// 锁序安全：`store` 的连接锁只在 `SqliteStore` 内部持有、没有回调回到本
+    /// 结构，不存在「store → sessions」的反向嵌套；且所有调用点都在锁外。
+    /// 只有 `upsert` 例外——它是**整条替换**语义（管理面提交的是完整记录），
+    /// 走 [`Self::put_session`] 直接写目标值。
+    fn persist(&self, fallback: &AccountSession) -> anyhow::Result<()> {
+        // 串行化「取内存态 → 写盘」：否则两次落盘可以乱序，盘上留下旧值。
+        // 持锁期间只做 `sessions.read()` 快照克隆 + 一次存储写（不持
+        // `sessions` 写锁，不挡选路）。
+        let _guard = self.inner.persist_lock.lock();
+        let snapshot = {
+            let sessions = self.inner.sessions.read();
+            sessions
+                .iter()
+                .find(|s| s.id == fallback.id)
+                .cloned()
+                .unwrap_or_else(|| fallback.clone())
+        };
+        let key = Self::key_of(&snapshot.channel_id, &snapshot.id);
+        self.inner.store.put(&key, &snapshot)?;
+        self.inner
+            .persisted_at
+            .insert(fallback.id.clone(), chrono::Utc::now().timestamp());
+        Ok(())
+    }
+
+    /// 把给定快照原样落盘（不读内存态）。
+    ///
+    /// 只给 [`Self::upsert`] 用：那是「管理面提交了完整记录」的整条替换语义，
+    /// 目标值就是参数本身，不能拿内存里的旧值顶替。
+    ///
+    /// **调用方必须持有 `persist_lock`**（`parking_lot::Mutex` 不可重入，所以
+    /// 这里不能再自己拿一次）。持有期间 upsert 还会顺手替换内存表，从而让
+    /// 「边界内内存态 = 盘上态」；之后任何 `persist` 拿锁读到的都是新值。
+    fn put_session(&self, session: &AccountSession) -> anyhow::Result<()> {
         let key = Self::key_of(&session.channel_id, &session.id);
         self.inner.store.put(&key, session)?;
         self.inner
             .persisted_at
             .insert(session.id.clone(), chrono::Utc::now().timestamp());
         Ok(())
+    }
+
+    /// 删除某渠道下的账号键（搬迁时清掉旧渠道那条）。
+    ///
+    /// 失败只 warn：新键已经写成功，留着旧键是「多一条重复」而不是「丢数据」，
+    /// 但下一次 `load()` 会把它当独立账号装回来 —— 所以必须留痕，否则
+    /// 运维只会看到「账号莫名其妙多了一条」而查不到原因。
+    fn delete_stored_key(&self, channel_id: &str, id: &str) {
+        let key = Self::key_of(channel_id, id);
+        if let Err(e) = self.inner.store.delete(&key) {
+            tracing::warn!("删除账号搬迁前的旧键失败（{key}，重载后会出现重复账号）：{e:#}");
+        }
     }
 
     /// 节流落盘（运行态统计高频变化，避免每请求写存储）。
@@ -685,8 +787,14 @@ impl AccountSessionStore {
             next.logged_in_at = Some(now);
             next.relogin_notified_at = None;
         }
-        self.persist(&next)?;
+        // upsert 是「整条替换」语义：在落盘互斥内写目标值 + 换内存表，
+        // 使边界结束时「内存态 == 盘上态」。否则期间并发的 `persist` 会读旧
+        // 内存态把刚写的新值覆盖回去（管理面改了名字/状态，几毫秒后又被
+        // 运行态落盘改回旧值）。`persist_lock` 不可重入，故 put_session 内
+        // 不再自行加锁。
         {
+            let _guard = self.inner.persist_lock.lock();
+            self.put_session(&next)?;
             // 运行态在 `runtime` 表里，快照上的 `in_flight` / `last_used_at`
             // 只是投影；写回快照时按运行态表重算，避免管理面覆盖掉计数。
             let runtime = self.inner.runtime.get(&next.id).map(|e| *e);
@@ -710,6 +818,13 @@ impl AccountSessionStore {
         // 渠道 → 供应商索引：本账号的 `provider` / `channel_id` 可能刚被改过
         //（含「换到另一个渠道」这种搬迁），受影响渠道要重算。
         if let Some(previous) = previous_channel.filter(|prev| prev != &next.channel_id) {
+            // **旧渠道的 KV 键必须删掉**：键是 `acctses:{channel_id}:{id}`，
+            // 搬迁只写了新键。旧实现漏了这一步，于是同一账号在库里留下两条
+            // 记录（旧渠道键 + 新渠道键），`load()` 把两条都读进内存 ——
+            // **同一个账号被登记两次**：选路时当成两个账号各发一份请求
+            //（并发上限、冷却、配额都各自算一遍），管理面列表出现重复行，
+            // 删除时只删一条、另一条在下一次重载后「复活」。
+            self.delete_stored_key(&previous, &next.id);
             self.refresh_channel_provider(&previous);
         }
         self.refresh_channel_provider(&next.channel_id);
@@ -3735,6 +3850,90 @@ mod tests {
                 Some("codearts"),
                 "重载后索引必须由 load 重建（否则重启即丢供应商）"
             );
+        });
+    }
+
+    /// 换渠道（搬迁）后旧渠道的 KV 键必须消失，否则重载会出现**同一 id 两条**。
+    ///
+    /// 旧实现只写新键、不删旧键，于是同一账号在库里留下两条（旧渠道键 +
+    /// 新渠道键）。`load()` 现在会按 id 去重（只取 `updated_at` 最新一条），
+    /// 但**盘上的孤儿键仍在**：它会在下一次搬回旧渠道、或别人手工改 KV 时
+    /// 变成一条「凭空多出来的账号」。所以两边都要修：写路径删旧键（本条），
+    /// 读路径去重（`load` 里那条 warning）。
+    ///
+    /// 判据：搬迁后**盘上只剩一个键**，且重载后该 id 只出现一次。
+    #[test]
+    fn moving_account_to_another_channel_drops_old_key() {
+        with_secret_dir("move-channel", || {
+            let dir = TempDir::new().unwrap();
+            let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+            let pool = AccountSessionStore::new(Arc::clone(&store));
+            let created = pool.upsert(session("ch-a", "acct", 0)).unwrap();
+            assert_eq!(store.list("acctses:").unwrap().len(), 1, "初始应只有一个键");
+
+            let mut moved = created.clone();
+            moved.channel_id = "ch-b".to_string();
+            pool.upsert(moved).unwrap();
+
+            let keys = store.list("acctses:").unwrap();
+            assert_eq!(
+                keys.len(),
+                1,
+                "搬迁后旧渠道的键必须被删掉（否则同一账号在库里两条）：{keys:?}"
+            );
+
+            // 重载后内存里也只能有一条
+            let reopened = AccountSessionStore::new(store);
+            let occurrences = reopened
+                .all()
+                .into_iter()
+                .filter(|s| s.id == created.id)
+                .count();
+            assert_eq!(
+                occurrences, 1,
+                "重载后同一账号被登记了 {occurrences} 次（重复账号）"
+            );
+            assert_eq!(reopened.all().len(), 1);
+        });
+    }
+
+    /// 并发落盘必须写「当时的最新内存态」，不能把旧快照写回去。
+    ///
+    /// 旧实现 `persist(&snapshot)` 写的是**锁外**那份快照：两个并发请求的落盘
+    /// 顺序可以反过来，盘上因此留下旧的 `cooldowns` / `status` / `needs_relogin`。
+    /// 重启后 `load()` 把旧值装回内存 —— 已定的冷却与禁用状态被抹掉，账号重新
+    /// 参与调度，对着还在限流/已失效的上游继续打。
+    ///
+    /// 判据：并发把同一账号置为 disabled 与 enabled，结束时**内存**的 status 是
+    /// 什么，盘上就必须是什么（旧实现会留成二者之一，与内存不符的概率很高）。
+    #[test]
+    fn concurrent_persist_writes_latest_state() {
+        with_secret_dir("persist-order", || {
+            let dir = TempDir::new().unwrap();
+            let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+            let pool = AccountSessionStore::new(Arc::clone(&store));
+            let acct = pool.upsert(session("ch", "acct", 0)).unwrap();
+            std::thread::scope(|scope| {
+                for i in 0..16 {
+                    let pool = &pool;
+                    let id = acct.id.clone();
+                    scope.spawn(move || {
+                        let status = if i % 2 == 0 { "disabled" } else { "enabled" };
+                        pool.set_status(&id, status);
+                    });
+                }
+            });
+            // 内存态与盘上必须一致（旧实现可能留成中间某个快照）
+            let mem = pool.get(&acct.id).unwrap();
+            let disk: crate::account_session::model::AccountSession = store
+                .get(&AccountSessionStore::key_of(&mem.channel_id, &mem.id))
+                .unwrap()
+                .expect("盘上必须有这条账号");
+            assert_eq!(
+                disk.status, mem.status,
+                "盘上 status 与内存不一致（最后一次落盘写的是旧快照）"
+            );
+            assert_eq!(disk.updated_at, mem.updated_at);
         });
     }
 }

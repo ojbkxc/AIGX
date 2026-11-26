@@ -213,37 +213,72 @@ impl UserStore {
             by_id: RwLock::new(HashMap::new()),
             by_email: RwLock::new(HashMap::new()),
         };
-        let _ = s.load();
+        // 加载失败**必须留痕**：旧实现 `let _ = s.load()` 把错误吞掉，于是
+        // 「用户表读失败」与「一个用户都没有」在日志与行为上完全一样 ——
+        // 之后任何人都登不上，而运维看不到任何原因。
+        if let Err(e) = s.load() {
+            tracing::error!("用户表加载失败（本次按空表运行，登录将全部失败）：{e:#}");
+        }
         s
     }
 
+    /// 从 KV 全量加载用户表。
+    ///
+    /// **成功才替换**：旧实现先 `clear()` 两棵索引、再逐条读，中途任何一条
+    /// 读失败（`?` 直接冒泡）都会留下**半张表**——已清掉的用户从内存里消失，
+    /// 调用方（`Reload` 接口 / SIGHUP 热重载）却可能继续用这份残缺快照服务：
+    /// 登录报「用户不存在」、配额扣费找不到人。改为先建临时表，整趟成功后
+    /// 才在写锁内换入；失败时内存态保持原样，调用方能拿到 `Err` 去告警。
     pub fn load(&self) -> Result<()> {
         let keys = self.store.list("user:")?;
-        let mut by_id = self.by_id.write();
-        let mut by_email = self.by_email.write();
-        by_id.clear();
-        by_email.clear();
+        let mut next_by_id: HashMap<String, User> = HashMap::with_capacity(keys.len());
+        let mut next_by_email: HashMap<String, String> = HashMap::with_capacity(keys.len());
         for key in &keys {
             if let Some(u) = self.store.get::<User>(key)? {
-                by_id.insert(u.id.clone(), u.clone());
+                next_by_id.insert(u.id.clone(), u.clone());
                 if !u.email.is_empty() {
-                    by_email.insert(u.email.clone(), u.id.clone());
+                    next_by_email.insert(u.email.clone(), u.id.clone());
                 }
             }
         }
         // 向后兼容旧数据：无 email 字段的用户以 username 作为 email
-        for user in by_id.values() {
+        for user in next_by_id.values() {
             if user.email.is_empty() && !user.username.is_empty() {
-                by_email
+                next_by_email
                     .entry(user.username.clone())
                     .or_insert_with(|| user.id.clone());
             }
         }
+        *self.by_id.write() = next_by_id;
+        *self.by_email.write() = next_by_email;
         Ok(())
     }
 
+    /// 落盘（**带版本门**的原子读-改-写）。
+    ///
+    /// 旧实现是裸 `store.put(key, user)`：`update()` 在 `by_id` 写锁内改内存、
+    /// **释放锁之后**才落盘，因此两个并发 `update` 的落盘顺序与内存修改顺序
+    /// 可以相反 —— 后写的那次带的是更旧的快照（`version` 更小、字段更旧），
+    /// 磁盘上于是留下旧值。重启后 `load()` 把旧值装回内存：**配额、分组、
+    /// 密码、禁用状态全部回退**，而内存态在重启前一直是新的（没人会发现）。
+    ///
+    /// 修法：`mutate` 把「读盘上现值 → 比较 version → 写」压进同一段临界区
+    /// （SQLite 持连接锁、PG 是 actor 单命令、JSON 后端持写锁）。盘上版本
+    /// **严格更高**时放弃本次写入——`version` 在 `by_id` 写锁内自增、快照也在
+    /// 同一临界区克隆，所以「更高版本的快照必然包含更低版本快照的全部修改」，
+    /// 丢弃旧快照不会丢字段更新。
     fn persist(&self, user: &User) -> Result<()> {
-        self.store.put(&format!("user:{}", user.id), user)?;
+        let key = format!("user:{}", user.id);
+        let desired = user.clone();
+        self.store.mutate::<User, _>(&key, move |current| {
+            if let Some(current) = current {
+                if current.version > desired.version {
+                    // 盘上已是更新的状态：保持不动（返回现值即不覆盖）。
+                    return Ok(current);
+                }
+            }
+            Ok(desired)
+        })?;
         Ok(())
     }
 
@@ -252,6 +287,11 @@ impl UserStore {
     ///
     /// P1-4：落盘前读回当前存储值，若其 version 不低于本快照则丢弃本次写入，
     /// 避免旧快照后落盘把新值覆盖回退（重启后配额回血）。多一次读，可接受。
+    ///
+    /// 这条读-比较-写**不是原子的**（读与写之间仍有窗口，本函数不能改成
+    /// `mutate`：它在 `try_charge` 的每请求热路径上，同步读改写会把请求线程
+    /// 压在存储上）。真正原子的是 [`Self::persist`]——凡违反 P1-4 就会丢
+    /// 计费/配置的路径（update / 改密 / 分组 / 邮箱）都走它。
     fn persist_async(&self, user: &User) {
         let key = format!("user:{}", user.id);
         if let Ok(Some(current)) = self.store.get::<User>(&key) {
@@ -1147,5 +1187,81 @@ mod tests {
         s.create("test@example.com", "pw", Role::User, 0).unwrap();
         assert!(s.get_by_email("test@example.com").is_some());
         assert!(s.get_by_email("nonexist@example.com").is_none());
+    }
+
+    /// 加载失败**不得**把内存里的用户表清空。
+    ///
+    /// 旧实现先 `by_id.clear()` / `by_email.clear()` 再逐条读，中途 `?` 冒泡
+    /// 就留下半张（甚至空）表；而 `load()` 也会被热重载接口直接调用。
+    /// 判据：坏掉一条键之后 `load()` 返回 Err，且**原有用户仍在**。
+    #[test]
+    fn load_failure_keeps_existing_memory_table() {
+        let s = store();
+        let u = s.create("keep@test.com", "pw", Role::User, 100).unwrap();
+        // 塞一条无法反序列化成 User 的键（`list("user:")` 会命中它）
+        s.store
+            .put("user:broken-entry", &serde_json::json!({ "not_a_user": 1 }))
+            .unwrap();
+        let err = s.load().expect_err("坏条目必须让 load 报错而不是静默");
+        assert!(
+            format!("{err:#}").contains("user:broken-entry") || !format!("{err:#}").is_empty(),
+            "错误里应带上下文：{err:#}"
+        );
+        assert!(
+            s.get_by_id(&u.id).is_some(),
+            "load 失败后内存表被清空了：用户从内存里消失（登录会报「用户不存在」）"
+        );
+        assert_eq!(
+            s.get_by_email("keep@test.com").map(|x| x.id),
+            Some(u.id.clone()),
+            "load 失败后 email 索引被清空了"
+        );
+    }
+
+    /// 旧快照落盘必须被拒绝（版本门是**原子**的读-比较-写）。
+    ///
+    /// 旧实现是裸 `put`：`update()` 在锁内改内存、放锁后才落盘，两个并发
+    /// `update` 的落盘顺序可以反过来，磁盘上因此留下更旧的那份。
+    /// 判据：直接拿一份 version 更小的快照调 `persist`，盘上必须仍是新值。
+    #[test]
+    fn persist_rejects_older_snapshot() {
+        let s = store();
+        let u = s.create("gate@test.com", "pw", Role::User, 100).unwrap();
+        s.update(&u.id, |user| user.username = "newer".to_string())
+            .unwrap();
+        let newer = s.get_by_id(&u.id).unwrap();
+        // 构造旧快照：version 更小、username 不同
+        let mut older = newer.clone();
+        older.username = "stale".to_string();
+        older.version = newer.version.saturating_sub(1);
+        s.persist(&older).unwrap();
+        let on_disk: User = s.store.get(&format!("user:{}", u.id)).unwrap().unwrap();
+        assert_eq!(on_disk.username, "newer", "旧快照覆盖了盘上的新值");
+        assert_eq!(on_disk.version, newer.version);
+        assert_eq!(on_disk.quota, 100);
+    }
+
+    /// 并发改两份不同字段：落盘必须包含**全部**修改（不允许整条回退）。
+    #[test]
+    fn concurrent_updates_do_not_regress_disk_state() {
+        let s = store();
+        let u = s.create("conc@test.com", "pw", Role::User, 100).unwrap();
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let s = &s;
+                let id = u.id.clone();
+                scope.spawn(move || {
+                    s.update(&id, |user| user.remark = format!("r{i}")).unwrap();
+                });
+            }
+        });
+        // 内存最新值与盘上必须一致（盘上不能比内存更旧）
+        let mem = s.get_by_id(&u.id).unwrap();
+        let disk: User = s.store.get(&format!("user:{}", u.id)).unwrap().unwrap();
+        assert_eq!(
+            disk.version, mem.version,
+            "盘上版本落后于内存（最后一次落盘被旧快照覆盖）"
+        );
+        assert_eq!(disk.remark, mem.remark);
     }
 }

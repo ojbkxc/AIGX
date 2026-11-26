@@ -51,6 +51,38 @@ fn decode_key(enc: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// 前缀匹配的上界：`prefix + U+10FFFF`。
+///
+/// **三后端共用的唯一前缀判定口径**。历史上 SQLite 用 `key >= p AND key < p+MAX`、
+/// JSON 后端用 `starts_with`、PostgreSQL 用 `LIKE 'p%'`（前缀未转义）——前两者
+/// 是「字面前缀」，后者是「LIKE 模式」，前缀里只要含 `%` 或 `_` 就**过匹配**：
+/// 例如 `list("plugin_")` 在 PG 上会连 `pluginX` 一起返回，同一份数据换后端
+/// 结果不同。本函数把口径收敛为字面区间比较（PG 的 TEXT 比较是 bytewise，
+/// 与 SQLite BINARY 排序一致）。
+#[allow(dead_code)] // `--no-default-features`（纯 JSON 后端）构建下没有 SQL 调用方
+pub(crate) fn prefix_upper(prefix: &str) -> String {
+    format!("{prefix}\u{10FFFF}")
+}
+
+/// 键区间 `[from, to)` 的数量上限钳制（三后端共用）。
+///
+/// 各后端对 `limit` 的默认容忍度不同，同一调用在不同后端结果不同：
+/// - SQLite 负 LIMIT 语义是「无限制」，故必须钳成正区间；
+/// - PostgreSQL 传负值同理（`LIMIT -1` = 无限制）；
+/// - JSON 后端 `truncate(0)` 返回空。
+///
+/// 统一为 `[0, 10_000_000]`：**`limit = 0` 返回空集**（三后端一致；SQLite 原先
+/// clamp 到 1，会让「请求 0 条」返回 1 条）。生产调用点均传 ≥1，故此归一不改
+/// 现有任何查询的结果。
+#[allow(dead_code)] // `--no-default-features`（纯 JSON 后端）构建下没有 SQL 调用方
+pub(crate) fn clamp_limit(limit: usize) -> i64 {
+    if limit > 10_000_000 {
+        10_000_000
+    } else {
+        limit as i64
+    }
+}
+
 /// 基于 JSON 文件的 KV 存储（无 rusqlite 时的回退后端）。
 /// 每个键存储为 `{dir}/{encoded_key}.json`。
 ///
@@ -59,6 +91,13 @@ fn decode_key(enc: &str) -> String {
 pub struct JsonFileStore {
     dir: PathBuf,
     cache: RwLock<HashMap<String, String>>,
+    /// 读-改-写事务锁（`put_if_absent` / `mutate` 的检查与落盘必须同处一段）。
+    ///
+    /// JSON 后端没有数据库事务，唯一的原子性来源就是这把锁：`put_if_absent`
+    /// 若先 `get` 再 `put`，两个线程可以同时看到「不存在」并各写一次，
+    /// 返回两个 `true`——靠它做幂等的调用方（`user/checkin.rs` 的签到 CAS）
+    /// 就会双发奖励。锁是进程级的：跨进程只靠文件系统，「尽力而为」。
+    write: parking_lot::Mutex<()>,
 }
 
 /// 敏感数据落盘：0600 权限写文件（Unix）。
@@ -85,6 +124,39 @@ fn write_secret_file(path: &Path, content: &str) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn write_secret_file(path: &Path, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content)
+}
+
+/// 原子落盘：先写同目录临时文件再 `rename` 覆盖目标。
+///
+/// 直接 `truncate + write` 有一个**崩溃即丢值**的窗口：文件已经变成长度 0，
+/// 新内容还没落完，进程被杀/掉电 → 磁盘上留下一个空文件。读取侧
+/// `serde_json::from_str("")` 报解析错，`UserStore::load` 这类「读失败即
+/// 中止」的路径会让**整个用户表加载失败**，而丢的那一条恰好是最新的
+/// 用户/渠道快照。`rename` 在同目录内是原子的（POSIX 与 NTFS 均保证），
+/// 所以要么读到旧值，要么读到新值，不会读到半个。
+fn write_secret_file_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    let tmp = match path.file_name().and_then(|s| s.to_str()) {
+        Some(name) => path.with_file_name(format!(".{name}.tmp")),
+        None => return write_secret_file(path, content),
+    };
+    write_secret_file(&tmp, content)?;
+    // Windows 上「rename 覆盖一个正被别的句柄打开的文件」会短暂返回
+    // ERROR_ACCESS_DENIED（读取侧刚 open 还没 close）。这属于瞬时竞争，
+    // 不是失败：退让 1ms 重试几次即可。最终失败才把 tmp 清掉并报错。
+    let mut last_err = None;
+    for attempt in 0..5 {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("atomic rename failed")))
 }
 
 /// SQLite 数据库文件收紧到 0600（Unix）。
@@ -117,6 +189,7 @@ impl JsonFileStore {
         Self {
             dir,
             cache: RwLock::new(HashMap::new()),
+            write: parking_lot::Mutex::new(()),
         }
     }
 
@@ -156,12 +229,18 @@ impl JsonFileStore {
     /// 写入 JSON 值
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
+        let _guard = self.write.lock();
+        self.put_locked(key, value)
+    }
+
+    /// 写入（调用方已持 `write` 锁）。
+    fn put_locked<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
         let path = self.path_of(key);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(value)?;
-        write_secret_file(&path, &content)?;
+        write_secret_file_atomic(&path, &content)?;
         self.cache.write().insert(key.to_string(), content);
         Ok(())
     }
@@ -169,6 +248,7 @@ impl JsonFileStore {
     /// 删除键
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
     pub fn delete(&self, key: &str) -> anyhow::Result<()> {
+        let _guard = self.write.lock();
         let path = self.path_of(key);
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -207,11 +287,14 @@ impl JsonFileStore {
         Ok(keys)
     }
 
-    /// 前缀内字典序 `[from, to)` 区间的键（与 SqliteStore::list_range 同语义，
-    /// JSON 后端 list + filter 降级）。
-    pub fn list_range(&self, prefix: &str, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+    /// 按键区间 `[from, to)` 取键（**纯区间**，与 `SqliteStore::list_range` 同语义）。
+    ///
+    /// `prefix` 只为兼容签名保留：SQLite 后端一直忽略它，PostgreSQL 后端旧实现
+    /// 把它拼进 `LIKE`，于是同一组参数在三后端给出三套结果。统一以 SQLite 的
+    /// 「纯键区间」为准（生产调用方本来就把前缀算进 `from`/`to`）。
+    pub fn list_range(&self, _prefix: &str, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
         // list 已按字典序升序，filter 保序，无需再排。
-        self.list(prefix).map(|keys| {
+        self.list("").map(|keys| {
             keys.into_iter()
                 .filter(|k| k.as_str() >= from && k.as_str() < to)
                 .collect()
@@ -267,42 +350,72 @@ impl JsonFileStore {
         Ok(self.list(prefix)?.len())
     }
 
-    /// 原子插入（key 已存在返回 false）。JSON 后端用写锁近似 CAS：
-    /// 非默认 feature，仅保证单进程内的互斥（跨进程靠文件系统，尽力而为）。
+    /// 原子插入（key 已存在返回 false）。
+    ///
+    /// **检查与落盘必须在同一段 `write` 锁内**：旧实现先 `get`（无锁）再在
+    /// 另一段窗口里判断 `cache.contains_key` / `path.exists()`，两个线程可以
+    /// 同时通过全部检查、各写一次、各返回 `true`。靠它做幂等的唯一生产调用点
+    /// 是 `user/checkin.rs` 的签到 CAS（`put_if_absent` 返回 true 才保留奖励），
+    /// 因此这个窗口在 JSON 后端（`--no-default-features` 构建）意味着**同一用户
+    /// 同一天可双领奖励**，而 SQLite/PG 后端的 `INSERT ... ON CONFLICT DO NOTHING`
+    /// 不会。跨进程仍只靠文件系统（尽力而为），锁是进程级的。
     pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
-        if self.get::<serde_json::Value>(key)?.is_some() {
-            return Ok(false);
-        }
-        let mut cache = self.cache.write();
-        if cache.contains_key(key) {
+        let _guard = self.write.lock();
+        if self.cache.read().contains_key(key) {
             return Ok(false);
         }
         let path = self.path_of(key);
+        if path.exists() {
+            // 缓存未命中但文件在：把内容补进缓存再拒绝（与 get 的缓存写入
+            // 同口径，避免下一次 get 又走一次磁盘）。
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                self.cache.write().insert(key.to_string(), content);
+            }
+            return Ok(false);
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if path.exists() {
-            return Ok(false);
-        }
         let content = serde_json::to_string_pretty(value)?;
-        write_secret_file(&path, &content)?;
-        cache.insert(key.to_string(), content);
+        write_secret_file_atomic(&path, &content)?;
+        self.cache.write().insert(key.to_string(), content);
         Ok(true)
     }
 
-    /// 原子更新（读取-修改-写入）。
+    /// 原子更新（读取-修改-写入）：读、闭包、写全程持 `write` 锁。
     /// 返回旧值（如果存在）。
+    ///
+    /// 旧实现是 `get` → 闭包 → `put` 三步、三步之间不持锁，两个并发的自增
+    /// 会读同一个旧值、各自 +1，最终只 +1（丢一次更新）。与 SQLite/PG 的同名
+    /// 方法一致地只在「同一个进程内」原子（跨进程无隔离），但至少不再自身
+    /// 制造丢更新。
     #[allow(dead_code)]
     pub fn update<T, F>(&self, key: &str, f: F) -> anyhow::Result<Option<T>>
     where
         T: DeserializeOwned + Serialize + Clone + Default,
         F: FnOnce(Option<T>) -> T,
     {
+        let _guard = self.write.lock();
         let existing: Option<T> = self.get(key)?;
         let old = existing.clone();
         let new_value = f(existing);
-        self.put(key, &new_value)?;
+        self.put_locked(key, &new_value)?;
         Ok(old)
+    }
+
+    /// 原子读-改-写（同 `SqliteStore::mutate` / `PgStore::mutate_raw` 的语义）。
+    ///
+    /// 闭包返回 `Err` 时**一个字节都不落盘**（校验失败不该留下半截修改）。
+    pub fn mutate<T, F>(&self, key: &str, f: F) -> anyhow::Result<T>
+    where
+        T: DeserializeOwned + Serialize + Clone,
+        F: FnOnce(Option<T>) -> anyhow::Result<T>,
+    {
+        let _guard = self.write.lock();
+        let existing: Option<T> = self.get(key)?;
+        let new_value = f(existing)?;
+        self.put_locked(key, &new_value)?;
+        Ok(new_value)
     }
 
     /// 异步写入（JSON 后端降级实现）。
@@ -322,6 +435,13 @@ impl JsonFileStore {
     }
 
     /// 多键写入（JSON 后端逐条写，无事务）。
+    /// 多键写入。
+    ///
+    /// 与 SQLite/PG 后端的 `write_batch` 不同：JSON 后端没有事务，**逐条写、
+    /// 失败即停，已写的不回滚**。这是能力边界，不是可以忽略的差异——调用方
+    /// （`log::writer::apply_ops`）拿到 `Err` 会整批回队重试，故这里的
+    /// 半批落库会在重试时被同一批再写一遍（聚合行因此翻倍）。默认构建
+    /// （sqlite-kv）不会走到这里；只有 `--no-default-features` 构建受影响。
     pub fn write_batch(&self, entries: &[(&str, serde_json::Value)]) -> anyhow::Result<()> {
         for (key, val) in entries {
             self.put(key, val)?;
@@ -517,11 +637,17 @@ impl FileStore {
     }
 
     /// 原子更新（读取-修改-写入）。
+    ///
+    /// 三后端语义一致：整段读-改-写在同一个临界区内（SQLite 持连接锁、PG 是
+    /// actor 单命令、JSON 后端持写锁）。`status` 是「老 API 形」，新代码用
+    /// [`Self::mutate`]（能中途报错，且不要求 `Default`）。
+    ///
+    /// `Send + 'static`：PG 分支把闭包搬进 actor 线程执行。
     #[allow(dead_code)]
     pub fn update<T, F>(&self, key: &str, f: F) -> anyhow::Result<Option<T>>
     where
-        T: DeserializeOwned + Serialize + Clone + Default,
-        F: FnOnce(Option<T>) -> T,
+        T: DeserializeOwned + Serialize + Clone + Default + 'static,
+        F: FnOnce(Option<T>) -> T + Send + 'static,
     {
         match &self.inner {
             FileStoreInner::Sqlite(s) => s.update(key, f),
@@ -582,35 +708,63 @@ impl FileStore {
     }
 
     /// 多键原子写入（单事务）：中途失败全部回滚，消除「写到一半进程挂了」的中间态。
-    /// 仅 SQLite 后端支持真事务；PG 后端逐条写（actor 串行，等效原子）；JSON 后端逐条写。
+    ///
+    /// 三个后端现在**都是** all-or-nothing：
+    /// - SQLite：`BEGIN IMMEDIATE ... COMMIT`；
+    /// - PostgreSQL：actor 内一个 `BEGIN ... COMMIT`（旧实现是逐条 `self.put()`，
+    ///   属于 N 次独立提交——第 k 条失败时前 k-1 条已落库，调用方却按「整批
+    ///   没落」重试，聚合行因此被折叠两次，见 `PgStore::put_many_raw` 的注释）；
+    /// - JSON（`--no-default-features`）：逐条写，失败即返回错误，**已写的
+    ///   不回滚**——本后端没有事务，这是能力边界而不是可忽略的差异。
     pub fn write_batch(&self, entries: &[(&str, serde_json::Value)]) -> anyhow::Result<()> {
-        // 无 postgres feature 时 FileStoreInner 只有 Sqlite 一个变体，
-        // 模式必然匹配 —— 此时 `if let` 会被 clippy 判为 irrefutable。
-        #[cfg(all(feature = "sqlite-kv", feature = "postgres"))]
-        if let FileStoreInner::Sqlite(sqlite) = &self.inner {
-            return sqlite.transaction(|conn| {
+        match &self.inner {
+            FileStoreInner::Sqlite(sqlite) => sqlite.transaction(|conn| {
                 for (key, val) in entries {
                     sqlite::SqliteStore::put_conn(conn, key, val)?;
                 }
                 Ok(())
-            });
-        }
-        #[cfg(all(feature = "sqlite-kv", not(feature = "postgres")))]
-        {
-            let FileStoreInner::Sqlite(sqlite) = &self.inner;
-            return sqlite.transaction(|conn| {
+            }),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => {
+                let mut raw: Vec<(String, String)> = Vec::with_capacity(entries.len());
                 for (key, val) in entries {
-                    sqlite::SqliteStore::put_conn(conn, key, val)?;
+                    raw.push(((*key).to_string(), serde_json::to_string(val)?));
                 }
-                Ok(())
-            });
-        }
-        #[allow(unreachable_code)]
-        {
-            for (key, val) in entries {
-                self.put(key, val)?;
+                p.put_many_raw(&raw)
             }
-            Ok(())
+        }
+    }
+
+    /// 原子读-改-写：`f` 拿到当前值（不存在给 `None`），返回要写入的新值。
+    ///
+    /// 这是「先 `get` 改完再 `put`」的**正确替代**，三后端的临界区各自成立：
+    /// - SQLite：整段持 `Mutex<Connection>`（`SqliteStore::mutate`）；
+    /// - PostgreSQL：整段是 actor 里的**一条命令**（`PgStore::mutate_raw`），
+    ///   别的命令插不进来；
+    /// - JSON：整段持 `JsonFileStore` 的写锁。
+    ///
+    /// 反例（本仓真实踩过两次）：`get` → 改 → `put` 之间没有任何互斥，两个
+    /// 并发调用各拿旧值、各写回，后写的把先写的抹掉。改不了调用方时至少别
+    /// 把这种序列写在新代码里。
+    pub fn mutate<T, F>(&self, key: &str, f: F) -> anyhow::Result<T>
+    where
+        T: DeserializeOwned + Serialize + Clone + 'static,
+        F: FnOnce(Option<T>) -> anyhow::Result<T> + Send + 'static,
+    {
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.mutate(key, f),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => {
+                let (_old_raw, new_raw) = p.mutate_raw(key, move |existing| {
+                    let parsed: Option<T> = match existing {
+                        Some(raw) => Some(serde_json::from_str(&raw)?),
+                        None => None,
+                    };
+                    let value = f(parsed)?;
+                    Ok(serde_json::to_string(&value)?)
+                })?;
+                Ok(serde_json::from_str(&new_raw)?)
+            }
         }
     }
 
@@ -851,5 +1005,161 @@ mod tests {
                 assert_eq!(mode, 0o600, "{name} 必须是 0600");
             }
         }
+    }
+
+    /// 同一 key 的并发 `put_if_absent` 只能有一个赢家。
+    ///
+    /// 判据是**确定性**的：闭包/判据看的是「赢家数量必须恰好 1」。旧实现先
+    /// 无锁 `get` 再另开一段窗口判断 `cache.contains_key` / `path.exists()`，
+    /// 两个线程可以同时通过全部检查并各返回 `true`。这条在 16 线程下旧实现
+    /// 会间歇性出现 `wins > 1`（`user/checkin.rs` 依赖它做「同日只能领一次」
+    /// 的幂等，多出的赢家就是多发一份奖励）。
+    #[test]
+    fn json_put_if_absent_has_single_winner() {
+        let dir = TempDir::new().unwrap();
+        let store = std::sync::Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        for round in 0..8 {
+            let key = format!("checkin:u{round}:2026-01-01");
+            let wins = std::sync::atomic::AtomicU32::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..16 {
+                    let store = store.clone();
+                    let key = key.clone();
+                    let wins = &wins;
+                    scope.spawn(move || {
+                        if store.put_if_absent(&key, &1u64).unwrap() {
+                            wins.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                }
+            });
+            assert_eq!(
+                wins.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "round {round}: put_if_absent 必须恰好一个赢家"
+            );
+            let v: Option<u64> = store.get(&key).unwrap();
+            assert_eq!(v, Some(1));
+        }
+    }
+
+    /// 并发 `update` 不丢更新：N 个线程各自增一次，最终必须等于 N。
+    ///
+    /// 旧实现「get → 闭包 → put」三步不持锁，闭包里睡 2ms 把窗口撑开，16 线程
+    /// 各 +1 后典型结果是远小于 16 的中间值（每次并发都能撞上）。
+    #[test]
+    fn json_update_does_not_lose_increments() {
+        let dir = TempDir::new().unwrap();
+        let store = std::sync::Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        store.put("counter", &0u64).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let store = store.clone();
+                scope.spawn(move || {
+                    store
+                        .update("counter", |v| {
+                            // 撑开读-改-写窗口（旧实现在这里被并发打断）
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                            v.unwrap_or(0) + 1
+                        })
+                        .unwrap();
+                });
+            }
+        });
+        let final_v: Option<u64> = store.get("counter").unwrap();
+        assert_eq!(final_v, Some(16), "并发自增丢了更新：{final_v:?}");
+    }
+
+    /// 落盘是「写临时文件 + rename」：文件在磁盘上**永远不出现半截内容**。
+    ///
+    /// 旧实现 `truncate + write_all`：截断之后、写完之前磁盘上是**空文件**，
+    /// 此刻崩溃/被杀就留下一个 0 字节的 JSON —— 读取侧解析失败，而
+    /// `UserStore::load` 这类「读失败即中止」的路径会让整张表加载失败。
+    /// 注意判据必须**直接读文件**（绕开 `get` 的内存缓存），否则缓存会掩盖
+    /// 整个窗口、让这条测试恒真。
+    #[test]
+    fn json_put_is_atomic_on_disk() {
+        let dir = TempDir::new().unwrap();
+        let store = std::sync::Arc::new(JsonFileStore::new(dir.path().to_path_buf()));
+        // 值足够大，让旧实现的「截断→写完」之间有可观察的空窗
+        let big: Vec<String> = (0..20_000).map(|i| format!("payload-{i}")).collect();
+        store.put("blob", &big).unwrap();
+        let path = store.path_of("blob");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let bad = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let path = path.clone();
+                let stop = &stop;
+                let bad = &bad;
+                scope.spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        // 直接读文件：空文件 / 半截 JSON 都会在解析处暴露
+                        match std::fs::read_to_string(&path) {
+                            Ok(text) => {
+                                if serde_json::from_str::<Vec<String>>(&text).is_err() {
+                                    bad.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                            // 目标文件在 rename 期间应该一直存在
+                            Err(_) => {
+                                bad.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
+                });
+            }
+            {
+                let store = store.clone();
+                let big = big.clone();
+                let stop = &stop;
+                scope.spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        store.put("blob", &big).unwrap();
+                    }
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert_eq!(
+            bad.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "并发写期间读到了空文件/半截 JSON（落盘不是原子的）"
+        );
+    }
+
+    /// `list = 0` 在三后端都必须是「空集」（SQLite 原先 clamp 到 1）。
+    #[test]
+    fn limit_zero_means_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = JsonFileStore::new(dir.path().to_path_buf());
+        for i in 0..3 {
+            store.put(&format!("k:{i}"), &i).unwrap();
+        }
+        assert!(store.list_latest_keys("k:", 0).unwrap().is_empty());
+        assert!(store
+            .list_range_asc("k:", "k:", "k:\u{10FFFF}", 0)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_range_desc("k:", "k:\u{10FFFF}", 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// `list_range` 是**纯键区间**，与 `prefix` 参数无关（与 SQLite 同语义）。
+    ///
+    /// 旧实现先按 `prefix` 过滤：同一组 `(prefix, from, to)` 在 SQLite 上返回
+    /// 区间全部键、在 JSON/PG 上只返回前缀内的键 —— 同一份数据换后端结果不同。
+    #[test]
+    fn list_range_is_prefix_agnostic() {
+        let dir = TempDir::new().unwrap();
+        let store = JsonFileStore::new(dir.path().to_path_buf());
+        store.put("a:1", &1).unwrap();
+        store.put("b:1", &1).unwrap();
+        let keys = store.list_range("a:", "a:", "c").unwrap();
+        assert_eq!(keys, vec!["a:1".to_string(), "b:1".to_string()]);
+        assert_eq!(store.count_range("a:", "c").unwrap(), 2);
     }
 }

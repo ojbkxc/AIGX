@@ -86,8 +86,25 @@ pub fn mutate_packages<T>(
     store
         .put(KV_KEY, &packages)
         .context("写入 KV plugin:script-packs 失败")?;
-    if let Err(err) = write_projection(data_dir, &packages, &load_identities(store)) {
-        tracing::warn!("[Script] 写 registry.json 投影失败（KV 已落盘，不影响运行）：{err:#}");
+    // 别名表也必须**严格读**：`load_identities` 是「读坏当空表」的宽松版，
+    // 用它写投影会把 registry.json 里的 `identities: {}` 覆写掉 —— 宿主随后
+    // 按空别名表加载，所有「包声明的 id ≠ 运行时 id」的脚本包静默路由到默认
+    // provider（`save_identities` 早就为此改成严格读，这条路径当时漏了）。
+    match try_load_identities(store) {
+        Ok(identities) => {
+            if let Err(err) = write_projection(data_dir, &packages, &identities) {
+                tracing::warn!(
+                    "[Script] 写 registry.json 投影失败（KV 已落盘，不影响运行）：{err:#}"
+                );
+            }
+        }
+        Err(err) => {
+            // KV 的包表已落盘（这是权威状态），投影这半笔失败只能留痕：
+            // 回滚包表会让「安装成功」变成「安装失败」而磁盘目录已经写好了。
+            tracing::warn!(
+                "[Script] 读 KV 别名表失败，本次不写 registry.json 投影（保留旧投影，避免覆写成空表）：{err:#}"
+            );
+        }
     }
     Ok(out)
 }
@@ -221,6 +238,17 @@ pub fn remove_package_dir(data_dir: &Path, package: &ScriptPackage) {
             tracing::warn!("[Script] 删除包目录失败 {}：{err}", dir.display());
         }
     }
+}
+
+/// 读别名表（KV 为准），**读失败是错误**。
+///
+/// 写路径（投影写回）必须用这一份：宽松的 [`load_identities`] 把读失败当空表，
+/// 用它写投影会把 registry.json 的 `identities` 覆写成 `{}`。
+fn try_load_identities(store: &crate::storage::FileStore) -> Result<Identities> {
+    store
+        .get(IDENTITIES_KEY)
+        .context("读取 KV plugin:script-identities 失败（拒绝以空别名表覆盖投影）")
+        .map(Option::unwrap_or_default)
 }
 
 /// 读别名表。
@@ -460,6 +488,57 @@ mod tests {
         assert!(
             store.get::<Vec<ScriptPackage>>(KV_KEY).is_err(),
             "前置条件：KV 必须是读不出来的状态"
+        );
+    }
+
+    /// 制造「别名表读不出来」：形状对不上 `Identities`（BTreeMap 套 BTreeMap）。
+    fn corrupt_identities_kv(store: &crate::storage::FileStore) {
+        store
+            .put(IDENTITIES_KEY, &serde_json::json!("not-an-identity-table"))
+            .unwrap();
+        assert!(
+            store.get::<Identities>(IDENTITIES_KEY).is_err(),
+            "前置条件：别名表 KV 必须是读不出来的状态"
+        );
+    }
+
+    /// 别名表读坏时**不许**用空别名表覆写 registry 投影。
+    ///
+    /// `mutate_packages` 写投影时调的是宽松的 `load_identities`（读失败当空表），
+    /// 于是「KV 包表正常、别名表读坏」这一瞬间会把 `registry.json` 的
+    /// `identities` 覆写成 `{}` —— 宿主按空别名表加载，所有「包声明的 id ≠
+    /// 运行时 id」的脚本包静默路由到默认 provider。`save_identities` 早就为此
+    /// 改成严格读，这条路径当时漏了。
+    #[test]
+    fn mutate_packages_never_overwrites_projection_with_empty_identities() {
+        let (dir, store) = temp_store();
+        let data_dir = dir.path();
+        register(&store, data_dir, pkg("pkg-a", "1.0.0")).unwrap();
+        let mut ids = Identities::new();
+        ids.entry("pkg-a".into())
+            .or_default()
+            .insert("kiro".into(), "kiro-magpie".into());
+        save_identities(&store, data_dir, ids.clone()).unwrap();
+        assert_eq!(read_projection(data_dir).unwrap().identities, ids);
+
+        corrupt_identities_kv(&store);
+        register(&store, data_dir, pkg("pkg-b", "1.0.0")).unwrap();
+
+        // KV（权威状态）必须已经落盘：pkg-b 在册
+        let kv_ids: Vec<String> = try_load_packages(&store)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(
+            kv_ids.contains(&"pkg-b".to_string()),
+            "KV 权威状态必须包含新包：{kv_ids:?}"
+        );
+        // 投影这一笔**整体跳过**（宁可停在旧版本也不写空别名表）
+        let after = read_projection(data_dir).unwrap();
+        assert_eq!(
+            after.identities, ids,
+            "别名表读坏时投影必须保留原别名（旧实现会在这里被覆写成空表）"
         );
     }
 

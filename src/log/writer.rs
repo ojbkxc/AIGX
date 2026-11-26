@@ -353,36 +353,62 @@ fn apply_ops(store: &FileStore, lock: &Mutex<()>, ops: &[LogOp]) -> Result<u64, 
 
     for (day, logs) in by_day {
         let key = master_key(&day);
-        let mut agg: DailyAgg = store.get(&key).ok().flatten().unwrap_or_else(|| DailyAgg {
-            date: day.clone(),
-            ..Default::default()
-        });
-        for l in logs {
-            fold_request(&mut agg, l);
-        }
-        match serde_json::to_value(&agg) {
-            Ok(v) => entries.push((key, v)),
-            Err(e) => tracing::warn!("聚合主档序列化失败（{day}）：{e}"),
+        // **读失败必须跳过这一行聚合，绝不当空的当日主档。**
+        //
+        // 旧实现是 `.ok().flatten().unwrap_or_else(|| DailyAgg::default())`：
+        // KV 这一瞬间读不出来（存储损坏 / 后端超时）时，本批日志会折叠进一个
+        // 「从零开始」的主档，随后 `write_batch` 把这一天**此前的全部统计整行
+        // 覆盖成只剩本批**——报表数字断崖式归零，且没有任何痕迹（与
+        // `plugin:script-packs` 两次事故同一族：读失败被当成空表，再整表写回）。
+        //
+        // 处置取模块头的原则「丢统计不丢计费」：详情 `reqlog` 照写、这一天的
+        // 聚合行**本轮不写**（保持盘上的既有值），并 error 留痕。不选「整批
+        // 失败回队重试」是因为坏主档不会自愈：回队会变成无限重试，把整条日志
+        // 写入链（含计费详情）永久堵死。
+        match store.get::<DailyAgg>(&key) {
+            Ok(existing) => {
+                let mut agg = existing.unwrap_or_else(|| DailyAgg {
+                    date: day.clone(),
+                    ..Default::default()
+                });
+                for l in logs {
+                    fold_request(&mut agg, l);
+                }
+                match serde_json::to_value(&agg) {
+                    Ok(v) => entries.push((key, v)),
+                    Err(e) => tracing::warn!("聚合主档序列化失败（{day}）：{e}"),
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "读取日聚合主档失败，本轮跳过 {day} 的聚合（详情照写，避免用空主档覆盖历史统计）：{e:#}"
+                );
+            }
         }
     }
 
     for ((uid, day), logs) in by_uid_day {
         let key = user_key(&uid, &day);
-        let mut row: UserDailyRow =
-            store
-                .get(&key)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| UserDailyRow {
+        // 同主档：读失败时跳过该用户当天的聚合行，不用空行覆盖。
+        match store.get::<UserDailyRow>(&key) {
+            Ok(existing) => {
+                let mut row = existing.unwrap_or_else(|| UserDailyRow {
                     date: day.clone(),
                     ..Default::default()
                 });
-        for l in logs {
-            fold_user_row(&mut row, l);
-        }
-        match serde_json::to_value(&row) {
-            Ok(v) => entries.push((key, v)),
-            Err(e) => tracing::warn!("用户日行序列化失败（{uid} {day}）：{e}"),
+                for l in logs {
+                    fold_user_row(&mut row, l);
+                }
+                match serde_json::to_value(&row) {
+                    Ok(v) => entries.push((key, v)),
+                    Err(e) => tracing::warn!("用户日行序列化失败（{uid} {day}）：{e}"),
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "读取用户日行失败，本轮跳过 {uid} {day} 的用户聚合（详情照写，避免用空行覆盖历史统计）：{e:#}"
+                );
+            }
         }
     }
 
@@ -668,5 +694,91 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 读聚合主档失败时**不会用空主档覆盖**既有统计（而是跳过本轮聚合）。
+    ///
+    /// 旧实现 `.ok().flatten().unwrap_or_else(DailyAgg::default())`：这一瞬间
+    /// 读不出来（损坏/后端超时）就把本批日志折进一个从零开始的主档，随后
+    /// `write_batch` 把这一天的**全部历史统计整行覆盖成只剩本批**，报表数字
+    /// 断崖归零且无痕迹。
+    ///
+    /// 判据：先写入一条好数据，再往主档键塞一段**无法反序列化**的 JSON，然后
+    /// 跑一批新日志 —— 该键的原始内容必须**一字未改**，而详情 `reqlog` 照写
+    /// （「丢统计不丢计费」）。
+    #[test]
+    fn corrupt_master_read_does_not_overwrite_history() {
+        let store = make_store();
+        let lock = Mutex::new(());
+        // 先写一条正常记录，建立主档
+        apply_ops(
+            &store,
+            &lock,
+            &[LogOp::Request(log(Some("u1"), "gpt", 10, DAY0))],
+        )
+        .unwrap();
+        let key = master_key(DAY0_STR);
+        assert!(store.get::<DailyAgg>(&key).unwrap().is_some());
+
+        // 把主档改成对不上 DailyAgg 结构的 JSON
+        store
+            .put(&key, &serde_json::json!({ "unexpected": "shape" }))
+            .unwrap();
+
+        // 再灌一批：读聚合必须失败 → 该键保持原样
+        let res = apply_ops(
+            &store,
+            &lock,
+            &[LogOp::Request(log(Some("u1"), "gpt", 99, DAY0 + 1))],
+        );
+        assert!(res.is_ok(), "详情应照写（丢统计不丢计费）");
+        let raw = store
+            .get::<serde_json::Value>(&key)
+            .unwrap()
+            .expect("键仍在");
+        assert_eq!(
+            raw,
+            serde_json::json!({ "unexpected": "shape" }),
+            "坏主档被空主档覆盖了（历史统计已被抹掉）"
+        );
+        // 明细照写：本批 reqlog 必须存在
+        assert_eq!(
+            store.list("reqlog:").unwrap().len(),
+            2,
+            "明细应照写（聚合坏掉不该连累计费详情）"
+        );
+    }
+
+    /// 读用户日行失败同样不覆盖（同族：读失败当空行再整行覆盖）。
+    #[test]
+    fn corrupt_user_row_read_does_not_overwrite_history() {
+        let store = make_store();
+        let lock = Mutex::new(());
+        apply_ops(
+            &store,
+            &lock,
+            &[LogOp::Request(log(Some("u1"), "gpt", 10, DAY0))],
+        )
+        .unwrap();
+        let ukey = user_key("u1", DAY0_STR);
+        store
+            .put(&ukey, &serde_json::json!({ "unexpected": "shape" }))
+            .unwrap();
+        // 主档保持健康，只让用户行读坏（区分两条路径）
+        let res = apply_ops(
+            &store,
+            &lock,
+            &[LogOp::Request(log(Some("u1"), "gpt", 5, DAY0 + 2))],
+        );
+        assert!(res.is_ok());
+        let raw = store.get::<serde_json::Value>(&ukey).unwrap().unwrap();
+        assert_eq!(
+            raw,
+            serde_json::json!({ "unexpected": "shape" }),
+            "坏用户行被空行覆盖了"
+        );
+        // 同一批里主档仍应被正常折叠（证明只有坏的那行被跳过）
+        let master = store.get::<DailyAgg>(&master_key(DAY0_STR)).unwrap();
+        assert!(master.is_some(), "主档不该因为用户行坏掉而被一起跳过");
     }
 }
