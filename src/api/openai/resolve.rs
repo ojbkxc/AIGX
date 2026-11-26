@@ -631,7 +631,7 @@ pub(crate) fn order_chat_test_candidates(
     Vec<(crate::channel::Channel, String)>,
 ) {
     // `sort_by` 是稳定排序：同 priority 的元素保持原相对顺序。
-    picked.sort_by(|a, b| b.priority.cmp(&a.priority));
+    picked.sort_by_key(|c| std::cmp::Reverse(c.priority));
     let mut ready = Vec::new();
     let mut blocked = Vec::new();
     for ch in picked {
