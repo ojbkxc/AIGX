@@ -1261,6 +1261,23 @@ fn paths_settings_ops() -> Value {
         },
         "/api/model-key-source/refresh": {
             "post": op("模型", "刷新模型 Key 权威代（运营改 Key 后重建撤销闸）")
+        },
+        // ── 第三轮合并新增管理面（对照 real_admin_routes 同步登记）──────────
+        "/api/sidebar-layout": {
+            "get": op("界面", "查询服务端权威侧边栏布局（未存/空对象回 null）"),
+            "put": op_body("界面", "整份替换侧边栏布局（null = 恢复默认，写后触发云同步）", "layout: object | null")
+        },
+        "/api/image-compress": {
+            "get": op("界面", "查询发送前图片压缩设置"),
+            "put": op_body("界面", "更新图片压缩设置（热生效）", "启用开关/阈值/尺寸/质量字段")
+        },
+        "/api/assistant/config": {
+            "get": op("助手", "查询服务端助手配置"),
+            "put": op_body("助手", "更新服务端助手配置（热生效）", "config: object")
+        },
+        "/api/plugins/permissions": {
+            "get": op("插件", "查询插件账户源与受控任务授权快照（按 pack）"),
+            "patch": op_body("插件", "更新插件授权声明（账户源 / 受控任务，≤16KiB）", "pack + 授权字段")
         }
     })
 }
@@ -2051,6 +2068,11 @@ mod tests {
         add("/api/model-key-source", &["get"]);
         add("/api/model-key-source/refresh", &["post"]);
         add("/api/plugin-task-grants", &["get", "put"]);
+        // ── 第三轮合并新增管理面（侧栏布局 / 图片压缩 / 助手配置 / 插件权限）──
+        add("/api/sidebar-layout", &["get", "put"]);
+        add("/api/image-compress", &["get", "put"]);
+        add("/api/assistant/config", &["get", "put"]);
+        add("/api/plugins/permissions", &["get", "patch"]);
         // ── 签到台账 / 计划 / 活动福利（T6）─────────────────────────
         // 前三者是 `any(handler)` 单入口按 method+path 分发，对外承诺的方法
         // 见 handler 内部分支；文档列具体方法，闸门对 `any` 跳过方法比对。

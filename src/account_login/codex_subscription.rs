@@ -21,7 +21,6 @@ use sha2::{Digest, Sha256};
 
 use super::{Credentials, LoginFlow, Started};
 
-const ISSUER: &str = "https://auth.openai.com";
 const USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";

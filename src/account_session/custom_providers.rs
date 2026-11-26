@@ -1013,7 +1013,7 @@ fn validate_protocol(value: Option<&Value>) -> Result<String, String> {
 }
 
 fn valid_protocol(protocol: &str) -> bool {
-    PROTOCOLS.iter().any(|known| *known == protocol)
+    PROTOCOLS.contains(&protocol)
 }
 
 /// baseUrl 校验与规范化（http/https；去尾斜杠）。

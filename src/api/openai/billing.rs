@@ -1294,7 +1294,7 @@ fn spawn_rate_bundle_commit(
 ) {
     if let Some(bundle) = rate_bundle {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let _ = handle.spawn(async move {
+            let _task = handle.spawn(async move {
                 bundle
                     .commit_tokens(prompt_tokens + completion_tokens)
                     .await;
@@ -1342,9 +1342,9 @@ impl Drop for StreamUsageGuard {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let ret = handle.clone();
-                let _ = handle.spawn_blocking(move || {
+                let _task = handle.spawn_blocking(move || {
                     let (prompt_tokens, completion_tokens) = billing.estimate_tokens();
-                    let _ = ret.spawn(async move {
+                    let _task = ret.spawn(async move {
                         finalize_stream_billing(&billing, prompt_tokens, completion_tokens);
                     });
                 });
@@ -1421,10 +1421,10 @@ impl Drop for ResponsesStreamGuard {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let ret = handle.clone();
-                let _ = handle.spawn_blocking(move || {
+                let _task = handle.spawn_blocking(move || {
                     let (prompt_tokens, completion_tokens, cached_tokens) =
                         billing.compute_tokens();
-                    let _ = ret.spawn(async move {
+                    let _task = ret.spawn(async move {
                         finalize_responses_billing(
                             &billing,
                             prompt_tokens,
@@ -1608,10 +1608,10 @@ impl AttemptStartGuard {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let ret = handle.clone();
-                let _ = handle.spawn_blocking(move || {
+                let _task = handle.spawn_blocking(move || {
                     let estimated_prompt =
                         crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
-                    let _ = ret.spawn(async move {
+                    let _task = ret.spawn(async move {
                         write_499_settle_and_log(
                             &state,
                             &api_key,

@@ -83,6 +83,12 @@ ROUTE_FILES = [
     #   至于「要不要写进自描述文档」，由 EXEMPT 逐条表态（见 openapi.rs）。
     "src/api/admin/agents.rs",
     "src/api/admin/aliases.rs",
+    # 第三轮合并新增的管理面 router：侧栏布局 / 图片压缩 / 助手配置 / 插件权限。
+    # 都是非空 Router，必须登记进白名单，否则闸门完全看不到它们。
+    "src/api/admin/sidebar_layout.rs",
+    "src/api/admin/image_compress.rs",
+    "src/api/admin/assistant_config.rs",
+    "src/api/admin/plugin_permissions.rs",
 ]
 
 # 未登记白名单的说明（由 check_router_coverage() 兜底校验）：

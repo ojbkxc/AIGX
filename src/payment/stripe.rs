@@ -154,7 +154,7 @@ impl StripeClient {
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid t= in stripe signature"))?;
         let skew = chrono::Utc::now().timestamp().saturating_sub(ts_secs);
-        if skew.unsigned_abs() > WEBHOOK_TOLERANCE_SECS as u64 {
+        if skew.unsigned_abs() > WEBHOOK_TOLERANCE_SECS {
             return Err(anyhow::anyhow!(
                 "stripe webhook timestamp outside tolerance ({ts_secs})"
             ));

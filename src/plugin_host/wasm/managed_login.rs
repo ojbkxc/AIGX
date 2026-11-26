@@ -376,7 +376,7 @@ pub(crate) fn submit_input(flow: &str, value: Value) -> Result<(), WireError> {
         .lock()
         .map_err(|_| WireError::with_code("托管登录会话表不可用", "internal"))?;
     prune(&mut map);
-    let session = map.get_mut(flow).ok_or_else(|| unavailable())?;
+    let session = map.get_mut(flow).ok_or_else(unavailable)?;
     if session.taken {
         return Err(conflict("当前登录输入已被读取，不能重复使用"));
     }
