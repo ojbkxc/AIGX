@@ -16,8 +16,8 @@
 // 本模块的公开 API 覆盖 beta.2 的完整契约面，部分符号为后续接线/线表预留。
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -121,8 +121,13 @@ impl CapacitySettings {
 static SETTINGS: parking_lot::RwLock<Option<CapacitySettings>> = parking_lot::RwLock::new(None);
 
 /// 安装/刷新进程级容量设置（启动与保存后调用）。
+///
+/// 管理面改配置后 **必须** 让 [`limits`] 尽快看到新阈值：这里同时 bump
+/// [`SETTINGS_GEN`]，使 TTL 内的旧快照立即失效，下一次 `limits()` 立刻重算，
+/// 不被 1.5s 采样窗口挡住。
 pub fn install_settings(settings: CapacitySettings) {
     *SETTINGS.write() = Some(settings);
+    SETTINGS_GEN.fetch_add(1, Ordering::AcqRel);
 }
 
 /// 读取当前容量设置（未安装时返回默认）。
@@ -312,9 +317,106 @@ fn effective(settings: &CapacitySettings, resources: Resources) -> Limits {
     }
 }
 
+// ── 生效上限的 TTL 原子快照 ──────────────────────────────────────────
+//
+// 准入热路径（`try_acquire` / `acquire` 的每次翻查）不能每请求都读 `/proc`
+// 与 `available_parallelism()`。这里把 `effective(settings, sample())` 的结果
+// 缓存 1.5s：TTL 内只做一次内存读 + 克隆，锁内**零 IO**；过期后**单飞**刷新
+// （拿不到刷新权的线程直接用旧快照，绝不为刷新排队，最多滞后一个 TTL）。
+//
+// 管理面改配置走 [`install_settings`] 递增 [`SETTINGS_GEN`]，旧快照立即作废。
+
+/// 资源采样的有效期。过期后下一次准入触发单飞刷新；期间阈值最多滞后这么久。
+const SAMPLE_TTL: Duration = Duration::from_millis(1500);
+
+struct LimitSnapshot {
+    sampled_at: Instant,
+    /// 采样时对应的设置代次；与当前 [`SETTINGS_GEN`] 不等即作废。
+    settings_gen: u64,
+    limits: Limits,
+    /// 逐提供商上限（`allowed()` 用）；与 `limits` 同批算出，避免每次再
+    /// `current_settings()` 克隆整张 BTreeMap。
+    provider_limits: Arc<BTreeMap<String, usize>>,
+}
+
+/// 设置代次：`install_settings` 每次递增，使 TTL 内的旧快照失效。
+static SETTINGS_GEN: AtomicU64 = AtomicU64::new(0);
+/// 生效上限快照（`None` = 尚未采样）。
+static LIMIT_CACHE: parking_lot::RwLock<Option<LimitSnapshot>> = parking_lot::RwLock::new(None);
+/// 单飞刷新闸：`true` = 已有线程在刷新，其余线程用旧值不阻塞。
+static REFRESHING: AtomicBool = AtomicBool::new(false);
+
+/// 刷新权 RAII：离开作用域（含 panic）即释放单飞闸。
+struct RefreshGuard;
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        REFRESHING.store(false, Ordering::Release);
+    }
+}
+
+/// 命中返回快照副本，未命中/过期返回 `None`（只读锁，克隆 `Limits` + 引用计数）。
+fn cached_snapshot() -> Option<(Limits, Arc<BTreeMap<String, usize>>)> {
+    let gen = SETTINGS_GEN.load(Ordering::Acquire);
+    let now = Instant::now();
+    let guard = LIMIT_CACHE.read();
+    if let Some(s) = guard.as_ref() {
+        if s.settings_gen == gen && now.duration_since(s.sampled_at) < SAMPLE_TTL {
+            return Some((s.limits.clone(), s.provider_limits.clone()));
+        }
+    }
+    None
+}
+
+/// 取得生效上限与逐提供商上限：TTL 内走缓存；过期则单飞刷新，刷新期间其它
+/// 线程用旧快照（冷启动无旧值时才各采一次，属极窄的一次性窗口，不排队）。
+fn runtime_limits() -> (Limits, Arc<BTreeMap<String, usize>>) {
+    if let Some(hit) = cached_snapshot() {
+        return hit;
+    }
+    // 单飞：拿不到刷新权就用旧值，**任何情况下都不为刷新排队**。
+    if REFRESHING.swap(true, Ordering::AcqRel) {
+        if let Some(s) = LIMIT_CACHE.read().as_ref() {
+            return (s.limits.clone(), s.provider_limits.clone());
+        }
+        // 冷启动且恰好有线程在刷新：无旧值可借，直接采样返回（不写缓存，
+        // 由持闸线程负责填充），避免在这里等待。
+        let settings = current_settings();
+        let resources = sample();
+        return (
+            effective(&settings, resources),
+            Arc::new(settings.provider_limits),
+        );
+    }
+    let _guard = RefreshGuard;
+    // 采样与设置在锁外完成；写缓存时只做一次内存移动。
+    // 代次必须在读 `current_settings()` **之前**取：若采样期间管理面
+    // `install_settings()` 写了新阈值并 bump 代次，本快照存的仍是旧 `gen`，
+    // 与当前 gen 不等 → 下一次 `limits()` 立即重算（最坏多采一次样），
+    // 绝不会把「旧阈值」标成「新代次」而卡住新配置到 TTL 过期。
+    let gen = SETTINGS_GEN.load(Ordering::Acquire);
+    let settings = current_settings();
+    let resources = sample();
+    let limits = effective(&settings, resources);
+    let provider_limits = Arc::new(settings.provider_limits);
+    *LIMIT_CACHE.write() = Some(LimitSnapshot {
+        sampled_at: Instant::now(),
+        settings_gen: gen,
+        limits: limits.clone(),
+        provider_limits: provider_limits.clone(),
+    });
+    (limits, provider_limits)
+}
+
 /// 当前生效上限。
 pub fn limits() -> Limits {
-    effective(&current_settings(), sample())
+    runtime_limits().0
+}
+
+/// 测试隔离：作废快照并清空缓存，使各用例不共享上一轮的采样/设置。
+#[cfg(test)]
+pub(crate) fn reset_caches() {
+    SETTINGS_GEN.fetch_add(1, Ordering::AcqRel);
+    *LIMIT_CACHE.write() = None;
 }
 
 // ── 准入计数 ─────────────────────────────────────────────────────────
@@ -440,7 +542,13 @@ impl Drop for Waiting {
     }
 }
 
-fn allowed(state: &State, class: Class, provider: &str, limits: &Limits) -> bool {
+fn allowed(
+    state: &State,
+    class: Class,
+    provider: &str,
+    limits: &Limits,
+    provider_limits: &BTreeMap<String, usize>,
+) -> bool {
     if state.active[class.index()] >= limits.for_class(class) {
         return false;
     }
@@ -464,27 +572,30 @@ fn allowed(state: &State, class: Class, provider: &str, limits: &Limits) -> bool
     if class == Class::Background && count >= limits.background_per_provider {
         return false;
     }
-    if matches!(class, Class::Conversation | Class::Image | Class::Request) {
-        let settings = current_settings();
-        if settings
-            .provider_limits
+    if matches!(class, Class::Conversation | Class::Image | Class::Request)
+        && provider_limits
             .get(provider)
             .is_some_and(|limit| count >= *limit)
-        {
-            return false;
-        }
+    {
+        return false;
     }
     true
 }
 
-fn selected(state: &State, class: Class, limits: &Limits, now: Instant) -> Option<u64> {
+fn selected(
+    state: &State,
+    class: Class,
+    limits: &Limits,
+    provider_limits: &BTreeMap<String, usize>,
+    now: Instant,
+) -> Option<u64> {
     state
         .waiters
         .iter()
         .filter(|waiter| {
             waiter.class == class
                 && waiter.deadline > now
-                && allowed(state, class, &waiter.provider, limits)
+                && allowed(state, class, &waiter.provider, limits, provider_limits)
         })
         .min_by_key(|waiter| {
             (
@@ -524,13 +635,13 @@ fn enter(
 /// 非阻塞准入：容量足够立即返回票据，否则返回 `Err(())`。
 pub fn try_acquire(class: Class, provider: &str) -> Result<Ticket, ()> {
     let manager = manager().clone();
-    let limits = limits();
+    let (limits, provider_limits) = runtime_limits();
     let caller = caller_label();
     let mut state = manager
         .state
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if !allowed(&state, class, provider, &limits) {
+    if !allowed(&state, class, provider, &limits, &provider_limits) {
         state.rejected = state.rejected.saturating_add(1);
         return Err(());
     }
@@ -556,14 +667,26 @@ pub async fn acquire(
     if now >= deadline {
         return Err(());
     }
-    let initial_limits = limits();
+    let (initial_limits, initial_provider_limits) = runtime_limits();
     let id = {
         let mut state = manager
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if allowed(&state, class, provider, &initial_limits)
-            && selected(&state, class, &initial_limits, Instant::now()).is_none()
+        if allowed(
+            &state,
+            class,
+            provider,
+            &initial_limits,
+            &initial_provider_limits,
+        ) && selected(
+            &state,
+            class,
+            &initial_limits,
+            &initial_provider_limits,
+            Instant::now(),
+        )
+        .is_none()
         {
             return Ok(enter(
                 &mut state,
@@ -604,7 +727,7 @@ pub async fn acquire(
         let wake = manager.changed.notified();
         tokio::pin!(wake);
         wake.as_mut().enable();
-        let limits = limits();
+        let (limits, provider_limits) = runtime_limits();
         {
             let mut state = manager
                 .state
@@ -614,7 +737,7 @@ pub async fn acquire(
                 state.rejected = state.rejected.saturating_add(1);
                 return Err(());
             }
-            if selected(&state, class, &limits, Instant::now()) == Some(id) {
+            if selected(&state, class, &limits, &provider_limits, Instant::now()) == Some(id) {
                 let index = state
                     .waiters
                     .iter()
@@ -714,6 +837,13 @@ fn _reserved_atomic() -> &'static AtomicUsize {
 mod tests {
     use super::*;
 
+    /// 串行化会改动全局 `SETTINGS` / `LIMIT_CACHE` 的用例，避免并行互踩。
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn default_capacity_validates() {
         assert!(CapacitySettings::default().validate().is_ok());
@@ -758,6 +888,8 @@ mod tests {
 
     #[test]
     fn try_acquire_counts_and_releases() {
+        let _serial = serial();
+        reset_caches();
         let settings = CapacitySettings {
             mode: CapacityMode::Manual,
             max_conversations: 1,
@@ -773,5 +905,33 @@ mod tests {
         );
         // 恢复默认，避免影响其它用例
         install_settings(CapacitySettings::default());
+    }
+
+    /// 管理面改配置必须立即生效——不能被 1.5s TTL 缓存挡住（`install_settings`
+    /// 递增代次作废旧快照）。同时验证 TTL 内重复读取走缓存、语义不变。
+    #[test]
+    fn install_settings_invalidates_cached_limits() {
+        let _serial = serial();
+        reset_caches();
+        install_settings(CapacitySettings {
+            mode: CapacityMode::Manual,
+            max_conversations: 11,
+            ..CapacitySettings::default()
+        });
+        assert_eq!(limits().conversations, 11, "首次采样取当前配置");
+        assert_eq!(limits().conversations, 11, "TTL 内命中缓存，值不变");
+        // 改配置：代次 bump → 下一次读取立即看到新阈值（不等 TTL 过期）
+        install_settings(CapacitySettings {
+            mode: CapacityMode::Manual,
+            max_conversations: 13,
+            ..CapacitySettings::default()
+        });
+        assert_eq!(
+            limits().conversations,
+            13,
+            "install_settings 必须 bump 代次使缓存立即失效"
+        );
+        install_settings(CapacitySettings::default());
+        reset_caches();
     }
 }

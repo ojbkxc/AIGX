@@ -1,13 +1,17 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Tabs } from '../components/ui';
+import { Tabs, SkeletonList } from '../components/ui';
 import Channels from './Channels';
-import AccountSessions from './AccountSessions';
-import Diagnostics from './Diagnostics';
-import CheckinCenter from './CheckinCenter';
 import GatewayRuntimePanel from '../components/GatewayRuntimePanel';
 import './Gateways.css';
+
+// 二级懒加载：非默认 Tab 的重子页各自拆成独立 chunk，不再打进 Gateways 主
+// chunk（AccountSessions 5600+ 行是最大头）。默认 Tab 对应的 Channels（供应商）
+// 保持静态引用——它是打开本页即要显示的，避免首次进入多一次 chunk 往返。
+const AccountSessions = lazy(() => import('./AccountSessions'));
+const Diagnostics = lazy(() => import('./Diagnostics'));
+const CheckinCenter = lazy(() => import('./CheckinCenter'));
 
 /**
  * 供应商 —— 单页四 Tab。
@@ -124,14 +128,24 @@ export default function Gateways(): JSX.Element {
             让 initialChannelFilter 生效（组件只把初值读进 useState，不改其内部逻辑）。
             无 provider 参数时 key 恒为 ''，普通切 Tab 不重挂、不丢筛选状态。 */}
         {mounted.has('accounts') && (
-          <AccountSessions key={providerFilter} embedded initialChannelFilter={providerFilter} />
+          <Suspense fallback={<SkeletonList rows={6} />}>
+            <AccountSessions key={providerFilter} embedded initialChannelFilter={providerFilter} />
+          </Suspense>
         )}
       </div>
       <div hidden={tab !== 'health'}>
-        {mounted.has('health') && <Diagnostics embedded />}
+        {mounted.has('health') && (
+          <Suspense fallback={<SkeletonList rows={6} />}>
+            <Diagnostics embedded />
+          </Suspense>
+        )}
       </div>
       <div hidden={tab !== 'checkin'}>
-        {mounted.has('checkin') && <CheckinCenter embedded />}
+        {mounted.has('checkin') && (
+          <Suspense fallback={<SkeletonList rows={6} />}>
+            <CheckinCenter embedded />
+          </Suspense>
+        )}
       </div>
     </div>
   );

@@ -325,7 +325,8 @@ fn apply_ops(store: &FileStore, lock: &Mutex<()>, ops: &[LogOp]) -> Result<u64, 
     // 锁序：聚合锁 → 连接锁（与 DailyAggStore/回填一致，无反向持锁）。
     let _guard = lock.lock();
 
-    let mut entries: Vec<(String, Value)> = Vec::with_capacity(ops.len());
+    // 每条 Request 除主档外还会扩出 2-3 条索引 / 聚合行，按 3 倍预留减少 realloc。
+    let mut entries: Vec<(String, Value)> = Vec::with_capacity(ops.len().saturating_mul(3));
     let mut by_day: BTreeMap<String, Vec<&RequestLog>> = BTreeMap::new();
     let mut by_uid_day: BTreeMap<(String, String), Vec<&RequestLog>> = BTreeMap::new();
     let mut reqlog_count = 0u64;
@@ -386,10 +387,14 @@ fn apply_ops(store: &FileStore, lock: &Mutex<()>, ops: &[LogOp]) -> Result<u64, 
     }
 
     if !entries.is_empty() {
-        let refs: Vec<(&str, Value)> = entries
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.clone()))
-            .collect();
+        // 拆成 key/value 两个 Vec 后把 value **按值移动**进借用切片：`write_batch`
+        // 的元素类型是 `(&str, Value)`（Value 按值持有），原先用 `v.clone()` 组装
+        // 会对整批（≤512 条 + 索引 + 聚合行）的完整 JSON 树各做一次深拷贝。
+        // 这里 unzip + move 消除这次拷贝；序列化次数不变（`to_value` 一次，
+        // `put_conn` 内 `to_string` 一次 —— 要再降一次需给 FileStore 增
+        // `write_batch_raw`，超出本任务允许改动的文件范围）。
+        let (keys, values): (Vec<String>, Vec<Value>) = entries.into_iter().unzip();
+        let refs: Vec<(&str, Value)> = keys.iter().map(String::as_str).zip(values).collect();
         // 单事务全回滚：Err 时本批一条都没落库，调用方整批回队重试即可。
         // 失败日志由调用方（消费者 error! / 同步模式 error!）输出，此处不重复记。
         store.write_batch(&refs)?;

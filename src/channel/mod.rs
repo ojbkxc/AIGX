@@ -635,6 +635,14 @@ pub struct ChannelStore {
     /// 值为占位时刻（用于 TTL 惰性清除防泄漏）。
     /// 试探成功由 clear_cooldown 清除；试探失败由 mark_cooldown 清除并重新冷却。
     half_open_inflight: dashmap::DashMap<String, Instant>,
+    /// `mark_used` 的**锁外**节流表：channel_id → 最近一次「刷新 `last_used_at`
+    /// 并落盘」的 unix 时间戳（秒）。
+    ///
+    /// 仅作热路径快判据，权威值仍是 `Channel.last_used_at`；二者只在写锁内变更、
+    /// 出锁后同步，故管理面读到的 `last_used_at` 语义不变（仍是最近一次使用时间）。
+    /// 60s 窗口内的重复使用直接命中本表返回 —— 不再每请求抢 `channels` 写锁
+    /// （旧实现每请求独占写锁 → 把并发选路的 `channels.read()` 全挡住）。
+    last_used_throttle: dashmap::DashMap<String, i64>,
     /// per-channel 断路器（阶段2）
     circuit_breaker: circuit_breaker::CircuitBreaker,
     /// session+model 亲和性缓存（阶段2）
@@ -876,6 +884,7 @@ impl ChannelStore {
             cooldowns: dashmap::DashMap::new(),
             cooldown_failures: dashmap::DashMap::new(),
             half_open_inflight: dashmap::DashMap::new(),
+            last_used_throttle: dashmap::DashMap::new(),
             circuit_breaker: circuit_breaker::CircuitBreaker::with_defaults(),
             affinity_cache: affinity::AffinityCache::default(),
             health_tracker: health_manager::ChannelStateTracker::new(),
@@ -1003,27 +1012,35 @@ impl ChannelStore {
             );
         }
         self.persist(&ch)?;
-        let mut channels = self.channels.write();
-        if let Some(pos) = channels.iter().position(|c| c.id == id) {
-            channels[pos] = ch.clone();
-        } else {
-            channels.push(ch.clone());
+        {
+            let mut channels = self.channels.write();
+            if let Some(pos) = channels.iter().position(|c| c.id == id) {
+                channels[pos] = ch.clone();
+            } else {
+                channels.push(ch.clone());
+            }
+            channels.sort_by(|a, b| {
+                b.priority
+                    .cmp(&a.priority)
+                    .then(a.created_at.cmp(&b.created_at))
+            });
+            self.publish_snapshot(&channels);
         }
-        channels.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then(a.created_at.cmp(&b.created_at))
-        });
-        self.publish_snapshot(&channels);
+        // 整条渠道被替换：清掉节流缓存（锁外），避免残留时间戳让后续 mark_used 误判。
+        self.last_used_throttle.remove(id);
         Ok(ch)
     }
 
     /// 删除渠道
     pub fn remove(&self, id: &str) -> anyhow::Result<()> {
         self.store.delete(&format!("channel:{id}"))?;
-        let mut channels = self.channels.write();
-        channels.retain(|c| c.id != id);
-        self.publish_snapshot(&channels);
+        {
+            let mut channels = self.channels.write();
+            channels.retain(|c| c.id != id);
+            self.publish_snapshot(&channels);
+        }
+        // 锁外清理节流缓存，防止 id 复用或条目泄漏。
+        self.last_used_throttle.remove(id);
         Ok(())
     }
 
@@ -1305,23 +1322,43 @@ impl ChannelStore {
     }
 
     /// 标记渠道已使用
+    ///
+    /// 热路径（每请求调用）：先用**无锁**的 `last_used_throttle` 做 60s 节流判定，
+    /// 命中即直接返回——不再每请求抢 `channels` 写锁（旧实现先独占写锁 + 线性
+    /// 扫描再节流，把并发的 `select_for_model_filtered` 的 `channels.read()` 全挡住）。
+    /// 只有真的需要刷新时间戳并落盘时才拿写锁，且锁内二次校验避免并发重复落盘。
     pub fn mark_used(&self, id: &str) {
-        let mut channels = self.channels.write();
-        let Some(pos) = channels.iter().position(|c| c.id == id) else {
-            return;
-        };
         let now = chrono::Utc::now().timestamp();
-        // 节流：60 秒内重复使用不重复落盘，避免热路径每次请求都同步写存储
-        if channels[pos]
-            .last_used_at
-            .is_some_and(|last| now - last < 60)
-        {
+        // 快路径：只做一次 DashMap 分片读（无全局锁）。60s 内已记录过则直接返回。
+        let throttled = self
+            .last_used_throttle
+            .get(id)
+            .is_some_and(|ts| now.saturating_sub(*ts) < 60);
+        if throttled {
             return;
         }
-        channels[pos].last_used_at = Some(now);
-        self.persist_async(&channels[pos]);
-        // 仅在确有变更时重建快照（mark_used 每请求调用，节流命中时不应付出重建成本）
-        self.publish_snapshot(&channels);
+        // 慢路径：确实需要刷新 `last_used_at`。写锁内更新 + 落盘 + 重建快照；
+        // 节流缓存**出锁后**再回填——全仓口径是 `channels` 锁与 dashmap 不嵌套
+        // （见 mark_cooldown），避免锁顺序反转。
+        let throttle_ts: i64 = {
+            let mut channels = self.channels.write();
+            let Some(pos) = channels.iter().position(|c| c.id == id) else {
+                return;
+            };
+            match channels[pos].last_used_at {
+                // 并发下已被别的线程刷新过（上次落盘仍在 60s 内）：不重复落盘，
+                // 仅把权威值回填到节流缓存。
+                Some(last) if now.saturating_sub(last) < 60 => last,
+                _ => {
+                    channels[pos].last_used_at = Some(now);
+                    self.persist_async(&channels[pos]);
+                    // 仅在确有变更时重建快照（节流命中时不应付出重建成本）。
+                    self.publish_snapshot(&channels);
+                    now
+                }
+            }
+        };
+        self.last_used_throttle.insert(id.to_string(), throttle_ts);
     }
 
     /// 保存渠道的上游模型发现快照（模型自动发现）。

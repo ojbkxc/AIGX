@@ -32,6 +32,8 @@ pub struct SseDecoder {
     byte_buf: Vec<u8>,
     /// 已解码的文本，等待 `\n\n` 事件终结符
     buffer: String,
+    /// 上次扫描到的最远字节位置；无完整事件时保存，避免跨块从头重扫。
+    scan_pos: usize,
 }
 
 impl SseDecoder {
@@ -42,19 +44,47 @@ impl SseDecoder {
     /// 推送一个字节块。返回此 feed 解锁的所有完整事件。
     /// 部分消息保留在缓冲区中，直到后续调用提供剩余部分。
     pub fn feed<'a>(&mut self, bytes: impl Into<Cow<'a, [u8]>>) -> Vec<SseEvent> {
-        let bytes: Cow<'a, [u8]> = bytes.into();
-        self.byte_buf.extend_from_slice(&bytes);
-        self.decode_buffered_bytes();
-
         let mut events = Vec::new();
+        self.feed_into(bytes, &mut events);
+        events
+    }
+
+    /// 与 [`feed`] 相同，但把事件追加进调用方复用的 `events`（免每次新建 Vec）。
+    /// 内部只对每个事件分配一次 payload，不再产生中间 message String，
+    /// 也不再「每事件 drain 一次 + 从 0 重扫」（一包多事件 → 单次正向扫描 + 单次 drain）。
+    pub fn feed_into<'a>(&mut self, bytes: impl Into<Cow<'a, [u8]>>, events: &mut Vec<SseEvent>) {
+        let bytes: Cow<'a, [u8]> = bytes.into();
+        if !bytes.is_empty() {
+            self.byte_buf.extend_from_slice(&bytes);
+            self.decode_buffered_bytes();
+        }
+
         // SSE 规范允许事件以 \n\n、\r\n\r\n 或 \r\r 分隔。
         // 部分上游/代理会输出 CRLF 行尾，只匹配 \n\n 会把两条事件
         // 粘成一条导致 JSON 解析失败，此处归一化处理。
-        while let Some(idx) = find_event_end(&self.buffer) {
-            let message: String = self.buffer.drain(..idx).collect();
-            decode_message(&message, &mut events);
+        //
+        // 首轮从上次扫描位置回退 3 字节续扫（覆盖跨块终结符边界——最长终结符
+        // \r\n\r\n 为 4 字节，最多只有 3 个字节落在上一块）；找到第一个终结符后，
+        // 后续从该边界精确续扫（不回退，避免把已消费的空事件重扫成死循环）。
+        let mut consumed = 0usize;
+        let mut search_from = if self.scan_pos == 0 {
+            0
+        } else {
+            self.scan_pos.saturating_sub(3)
+        };
+        while let Some(end) = find_event_end_bytes_from(self.buffer.as_bytes(), search_from) {
+            // 借用切片解码（与旧 `drain(..idx).collect()` 逐字等价，都含终结符），
+            // 单次事件只分配一次 payload。
+            decode_message(&self.buffer[consumed..end], events);
+            consumed = end;
+            search_from = end;
         }
-        events
+        if consumed > 0 {
+            // 单次前缀移除（摊还 O(剩余)），避免逐事件 drain 搬移。
+            self.buffer.drain(..consumed);
+        }
+        // 记下「已扫描到缓冲区末尾」的位置，供下一块回退续扫。
+        self.scan_pos = self.buffer.len();
     }
 
     /// 刷新所有缓冲的尾部字节作为最终事件。
@@ -64,6 +94,7 @@ impl SseDecoder {
             self.decode_buffered_bytes();
         }
         let remaining = std::mem::take(&mut self.buffer);
+        self.scan_pos = 0;
         if remaining.is_empty() {
             return None;
         }
@@ -105,16 +136,12 @@ impl SseDecoder {
     }
 }
 
-/// 在缓冲区中查找 SSE 事件终结符（`\n\n` / `\r\n\r\n` / `\r\r`）。
+/// 从 `from` 起**精确**查找事件终结符（`\n\n` / `\r\n\r\n` / `\r\r`）。
 ///
-/// 返回从缓冲区开头到终结符（含）的字节数。未找到返回 `None`。
-fn find_event_end(buffer: &str) -> Option<usize> {
-    find_event_end_bytes(buffer.as_bytes())
-}
-
-/// 字节版事件终结符查找（供字节缓冲的流式 bridge 复用）。
-pub(crate) fn find_event_end_bytes(bytes: &[u8]) -> Option<usize> {
-    let mut i = 0;
+/// 返回自缓冲区开头的绝对字节数（含终结符），未找到返回 `None`。
+/// 需覆盖跨块边界时，调用方自行把 `from` 回退 3 字节传入。
+pub(crate) fn find_event_end_bytes_from(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
     while i + 1 < bytes.len() {
         match (bytes[i], bytes[i + 1]) {
             (b'\r', b'\r') => return Some(i + 2),
@@ -134,7 +161,8 @@ pub(crate) fn find_event_end_bytes(bytes: &[u8]) -> Option<usize> {
 /// 解析一条 SSE 消息，提取 `data:` 行。
 /// 一条消息可能包含多个 `data:` 行，按 SSE 规范以 `\n` 连接为单个事件负载。
 fn decode_message(message: &str, events: &mut Vec<SseEvent>) {
-    let mut data_parts: Vec<String> = Vec::new();
+    // 借用切片收集，免去逐行 `to_string()`；单行时只分配一次 payload。
+    let mut data_parts: Vec<&str> = Vec::new();
     let mut saw_done = false;
     for line in message.lines() {
         if let Some(payload) = line.strip_prefix("data:") {
@@ -142,20 +170,19 @@ fn decode_message(message: &str, events: &mut Vec<SseEvent>) {
             if payload == "[DONE]" {
                 saw_done = true;
             } else {
-                data_parts.push(payload.to_string());
+                data_parts.push(payload);
             }
         }
         // 忽略其他 SSE 字段（event:, id:, retry:）
     }
-    if !data_parts.is_empty() {
-        // 绝大多数事件只有一行 data：直接转移所有权，免去 join 的二次拼接分配；
+    if let Some(first) = data_parts.first().copied() {
+        // 绝大多数事件只有一行 data：直接 to_string 一次即可（旧路径 join 的二次拼接）；
         // 多行（罕见）才按规范 \n 连接。
-        let payload = if data_parts.len() == 1 {
-            data_parts.pop().unwrap_or_default()
+        if data_parts.len() == 1 {
+            events.push(SseEvent::Data(first.to_string()));
         } else {
-            data_parts.join("\n")
-        };
-        events.push(SseEvent::Data(payload));
+            events.push(SseEvent::Data(data_parts.join("\n")));
+        }
     }
     if saw_done {
         events.push(SseEvent::Done);
@@ -396,6 +423,32 @@ mod tests {
         // 注释行不产生任何事件：解码器应当忽略它
         let mut decoder = SseDecoder::new();
         assert!(decoder.feed(frame).is_empty(), "注释行不应被解析成数据事件");
+    }
+
+    #[test]
+    fn byte_at_a_time_uses_scan_continuation() {
+        // 逐字节喂入：既验证跨块终结符（\n\n 的第二个 \n 落在新块），
+        // 也验证 scan_pos 回退续扫既不漏事件、也不重复产出。
+        let mut decoder = SseDecoder::new();
+        let mut events = Vec::new();
+        for b in b"data: one\n\ndata: two\n\n" {
+            decoder.feed_into(std::slice::from_ref(b), &mut events);
+        }
+        assert_eq!(
+            events,
+            vec![SseEvent::Data("one".into()), SseEvent::Data("two".into())]
+        );
+    }
+
+    #[test]
+    fn feed_into_appends_to_caller_vec() {
+        let mut decoder = SseDecoder::new();
+        let mut events = vec![SseEvent::Data("pre".into())];
+        decoder.feed_into(b"data: hello\n\n", &mut events);
+        assert_eq!(
+            events,
+            vec![SseEvent::Data("pre".into()), SseEvent::Data("hello".into())]
+        );
     }
 
     #[test]

@@ -532,8 +532,32 @@ pub(crate) fn chat_chunk_to_response_events(
     phase_input: Option<StreamPhaseInput<'_>>,
 ) -> Vec<Value> {
     let mut events: Vec<Value> = Vec::new();
-    let response_id = format!("resp-{}", chunk.id);
-    let message_id = format!("msg-{}", chunk.id);
+    // `chunk.id` 整条流恒定（见函数文档：上游响应 id，全流稳定）。中段 chunk
+    // 常常只产出 delta、甚至不产出任何事件，无条件 `format!` 两次是逐帧浪费。
+    // 按需构造：只有真正会把这些 id 写进事件的分支才分配，未命中的分支拿空串
+    // 占位（空串永不进入输出，字节形态与改造前逐字一致）。`json!` 对值走
+    // `to_value(&expr)` 借用，故同一 String 可在多处复用。
+    //
+    // 说明：真正「每条流只算一次」需要跨 chunk 缓存，而缓存状态在调用方
+    // （responses.rs 的 `seq` 旁），不在本文件职责内；此处先把「不需要的帧
+    // 不分配」做掉，文本流的 `msg-` 仍每帧一次（它确实每帧都要用）。
+    let response_id = if *seq == 0 || chunk.finish_reason.is_some() {
+        format!("resp-{}", chunk.id)
+    } else {
+        String::new()
+    };
+    let message_id = if *seq == 0
+        || chunk.finish_reason.is_some()
+        || chunk
+            .delta
+            .content
+            .as_deref()
+            .is_some_and(|t| !t.is_empty())
+    {
+        format!("msg-{}", chunk.id)
+    } else {
+        String::new()
+    };
 
     if *seq == 0 {
         events.push(next_event(

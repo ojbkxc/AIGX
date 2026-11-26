@@ -635,21 +635,26 @@ impl Bridge for OpenaiCompatibleBridge {
         let byte_stream = resp.bytes_stream();
 
         let chunk_stream = futures::stream::unfold(
-            (byte_stream, Vec::<u8>::new(), id, model),
-            |(mut byte_stream, mut buf, id, model)| async move {
+            (byte_stream, Vec::<u8>::new(), 0usize, 0usize, id, model),
+            |(mut byte_stream, mut buf, mut start, mut scan, id, model)| async move {
                 use futures::StreamExt;
                 loop {
+                    // start=已消费起点；scan=已扫描上限。不变量：start>0 时 scan==start。
                     // 以字节方式缓冲，多字节 UTF-8 字符跨 chunk 边界不会被截断损坏。
-                    // 事件分隔符兼容 \n\n / \r\n\r\n / \r\r（部分上游输出 CRLF 行尾）
-                    if let Some(end) = crate::sse::find_event_end_bytes(&buf) {
-                        // 零拷贝事件切片：缓冲字节来自逐事件产出的合法 UTF-8 流，
-                        // 直接借用切片解析，省去每事件一次 String 分配；仅在遇到
-                        // 非法字节（损坏流）时回退 lossy 重建。
+                    // 事件分隔符兼容 \n\n / \r\n\r\n / \r\r（部分上游输出 CRLF 行尾）。
+                    let search_at = if scan > start {
+                        scan.saturating_sub(3)
+                    } else {
+                        start
+                    };
+                    if let Some(end) = crate::sse::find_event_end_bytes_from(&buf, search_at) {
+                        // 零拷贝事件切片：直接借用 [start..end] 解析，省去每事件一次
+                        // String 分配；仅在遇到非法字节（损坏流）时回退 lossy 重建。
                         let lossy;
-                        let event: &str = match std::str::from_utf8(&buf[..end]) {
+                        let event: &str = match std::str::from_utf8(&buf[start..end]) {
                             Ok(s) => s,
                             Err(_) => {
-                                lossy = String::from_utf8_lossy(&buf[..end]).into_owned();
+                                lossy = String::from_utf8_lossy(&buf[start..end]).into_owned();
                                 &lossy
                             }
                         };
@@ -661,12 +666,25 @@ impl Bridge for OpenaiCompatibleBridge {
                         } else {
                             parse_sse_event(event, &id, &model)
                         };
-                        buf.drain(..end);
+                        start = end;
+                        scan = end;
+                        // 已消费前缀按阈值批量移除，避免逐事件 drain 搬移
+                        if start == buf.len() {
+                            buf.clear();
+                            start = 0;
+                            scan = 0;
+                        } else if start >= 16 * 1024 {
+                            buf.drain(..start);
+                            start = 0;
+                            scan = 0;
+                        }
                         if let Some(chunk) = chunk {
-                            return Some((Ok(chunk), (byte_stream, buf, id, model)));
+                            return Some((Ok(chunk), (byte_stream, buf, start, scan, id, model)));
                         }
                         continue;
                     }
+                    // 无终结符：记住扫描进度，下次续扫而非从 0 重来
+                    scan = buf.len();
                     // 拉取更多数据
                     match byte_stream.next().await {
                         Some(Ok(bytes)) => {
@@ -675,19 +693,19 @@ impl Bridge for OpenaiCompatibleBridge {
                         Some(Err(e)) => {
                             return Some((
                                 Err(BridgeError::Transport(e.to_string())),
-                                (byte_stream, buf, id, model),
+                                (byte_stream, buf, start, scan, id, model),
                             ));
                         }
                         None => {
                             // 流结束：缓冲区里可能还有**最后一帧没有尾随空行**
                             // （部分上游省略最后的 `\n\n`）。直接丢弃会丢掉终帧
                             // 的 usage / finish_reason，因此这里补解析一次。
-                            if !buf.is_empty() {
+                            if start < buf.len() {
                                 let lossy;
-                                let tail: &str = match std::str::from_utf8(&buf) {
+                                let tail: &str = match std::str::from_utf8(&buf[start..]) {
                                     Ok(s) => s,
                                     Err(_) => {
-                                        lossy = String::from_utf8_lossy(&buf).into_owned();
+                                        lossy = String::from_utf8_lossy(&buf[start..]).into_owned();
                                         &lossy
                                     }
                                 };
@@ -699,8 +717,13 @@ impl Bridge for OpenaiCompatibleBridge {
                                     parse_sse_event(tail, &id, &model)
                                 };
                                 buf.clear();
+                                start = 0;
+                                scan = 0;
                                 if let Some(chunk) = chunk {
-                                    return Some((Ok(chunk), (byte_stream, buf, id, model)));
+                                    return Some((
+                                        Ok(chunk),
+                                        (byte_stream, buf, start, scan, id, model),
+                                    ));
                                 }
                             }
                             return None;
@@ -1142,6 +1165,22 @@ fn parse_openai_error(body: &[u8]) -> Option<super::UpstreamErrorView> {
 /// 与 [`parse_sse_event`] 同款 `data:` 前缀解析（兼容 `data:` 后无空格）；
 /// `[DONE]` 与非 JSON 负载一律不算——它们不是保活节拍，丢掉会伤到收尾。
 fn is_newline_keepalive_event(event: &str) -> bool {
+    // 必要预筛：保活帧必含 choices/delta/content 三键，且 content 只由换行组成，
+    // 其 JSON 必含 \n、\r 或 \u000a/\u000d（大小写十六进制）。缺任一即非保活帧，
+    // 直接 false —— 省掉对绝大多数正文帧的整帧 Value 解析。
+    let has_nl_escape = event.contains("\\n")
+        || event.contains("\\r")
+        || event.contains("\\u000a")
+        || event.contains("\\u000A")
+        || event.contains("\\u000d")
+        || event.contains("\\u000D");
+    if !(event.contains("\"choices\"")
+        && event.contains("\"delta\"")
+        && event.contains("\"content\"")
+        && has_nl_escape)
+    {
+        return false;
+    }
     for line in event.lines() {
         if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
             if data.trim() == "[DONE]" {
@@ -2126,5 +2165,39 @@ data: [DONE]\n\n";
             .await
             .expect_err("未开开关时必须被上游 400 拒掉");
         assert!(format!("{err}").contains("11101") || format!("{err}").contains("400"));
+    }
+
+    /// `is_newline_keepalive_event` 的廉价字符串预筛必须与「整帧 Value 解析」逐例等价：
+    /// 只有「choices[0].delta.content 非空且仅由换行组成、无终止信号」的帧为 true。
+    #[test]
+    fn newline_keepalive_event_prefilter_matches_value_path() {
+        // true：content 仅换行（\n 转义）
+        assert!(super::is_newline_keepalive_event(
+            r#"data: {"choices":[{"delta":{"content":"\n\n"}}]}"#
+        ));
+        // true：content 仅换行（\r 转义）
+        assert!(super::is_newline_keepalive_event(
+            r#"data: {"choices":[{"delta":{"content":"\r"}}]}"#
+        ));
+        // true：content 仅换行（\u000a 小写十六进制）
+        assert!(super::is_newline_keepalive_event(
+            r#"data: {"choices":[{"delta":{"content":"\u000a"}}]}"#
+        ));
+        // false：有正文（无换行转义）
+        assert!(!super::is_newline_keepalive_event(
+            r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#
+        ));
+        // false：换行 + 思维链载荷
+        assert!(!super::is_newline_keepalive_event(
+            r#"data: {"choices":[{"delta":{"content":"\n","reasoning_content":"x"}}]}"#
+        ));
+        // false：带 finish_reason 的收尾帧
+        assert!(!super::is_newline_keepalive_event(
+            r#"data: {"choices":[{"delta":{"content":"\n"},"finish_reason":"stop"}]}"#
+        ));
+        // false：[DONE] 与非 JSON、注释行一律不算
+        assert!(!super::is_newline_keepalive_event("data: [DONE]"));
+        assert!(!super::is_newline_keepalive_event("data: not-json"));
+        assert!(!super::is_newline_keepalive_event(": keepalive"));
     }
 }

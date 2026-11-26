@@ -20,6 +20,9 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// 满容量插入时抽样清理过期项的条数上限（O(1) 有界，替代旧的全表 retain）。
+const EXPIRED_SWEEP_SAMPLE: usize = 16;
+
 // ── AsyncCacheBuilder ───────────────────────────────────────────────
 
 /// 异步缓存 builder（模拟 `moka::future::Cache::builder`）。
@@ -124,14 +127,18 @@ where
         }
     }
 
-    /// 插入缓存值。超 `max_capacity` 时先清过期项，仍超则移除任意一项。
-    pub async fn insert(&self, key: K, value: V) {
+    /// 插入缓存值。超 `max_capacity` 时先做**有界抽样**清过期项，仍超则
+    /// O(1) 移除任意一项（近似驱逐，非严格 LRU）。
+    pub async fn insert(&self, key: K, value: V)
+    where
+        K: Clone,
+    {
         // 仅当 key 不存在且已达容量上限时才驱逐，避免覆盖已有 key 时误删
         if self.max_capacity > 0
             && !self.inner.contains_key(&key)
             && self.inner.len() >= self.max_capacity as usize
         {
-            self.evict_expired();
+            self.sweep_expired_sample();
             if self.inner.len() >= self.max_capacity as usize {
                 self.evict_one_arbitrary();
             }
@@ -139,28 +146,42 @@ where
         self.inner.insert(key, (value, Instant::now()));
     }
 
-    /// 清理所有过期项。
-    fn evict_expired(&self) {
+    /// 有界抽样清理过期项（最多扫 `EXPIRED_SWEEP_SAMPLE` 条，O(1) 有界）。
+    ///
+    /// 旧实现 `retain` 全表清（O(n) 且逐个分片加写锁），满容量时每次 insert
+    /// 全扫会成为热点。这里只抽样一小批；未扫到的过期项仍由 `get` 的懒惰
+    /// 检查兜底 —— TTL 语义不变（到期值绝不返回）。
+    fn sweep_expired_sample(&self)
+    where
+        K: Clone,
+    {
         if self.ttl == Duration::MAX {
             return;
         }
         let now = Instant::now();
         let ttl = self.ttl;
-        // retain 闭包返回 false 则移除；v.1 是 Instant（插入时间）
-        self.inner.retain(|_, v| now.duration_since(v.1) < ttl);
+        let mut victims: Vec<K> = Vec::new();
+        for entry in self.inner.iter().take(EXPIRED_SWEEP_SAMPLE) {
+            if now.duration_since(entry.value().1) >= ttl {
+                victims.push(entry.key().clone());
+            }
+        }
+        // 先放开迭代器（Ref 持分片读锁）再 remove，避免同分片重入死锁。
+        for key in &victims {
+            self.inner.remove(key);
+        }
     }
 
-    /// 移除任意一项（dashmap 无序）。用 `retain` + `Cell` 标记只移除一个，无需 K: Clone。
-    fn evict_one_arbitrary(&self) {
-        let removed = std::cell::Cell::new(false);
-        self.inner.retain(|_, _| {
-            if removed.get() {
-                true
-            } else {
-                removed.set(true);
-                false
-            }
-        });
+    /// 移除任意一项：取迭代器首条，O(1) 有界（受分片数上界）。
+    /// 拿 key 后立刻松开 `Ref` 再 remove，避免同分片重入死锁。
+    fn evict_one_arbitrary(&self)
+    where
+        K: Clone,
+    {
+        let victim = self.inner.iter().next().map(|e| e.key().clone());
+        if let Some(key) = victim {
+            self.inner.remove(&key);
+        }
     }
 
     /// 获取或插入。若 key 不存在或已过期，执行 `init` future 生成值并缓存。
@@ -168,7 +189,10 @@ where
     /// 注意：与 moka 不同，并发重复调用时 `init` 可能被多个 future 同时执行
     ///（moka 会去重只执行一次）。缓存场景下此差异无害。
     #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
-    pub async fn get_with(&self, key: K, init: impl std::future::Future<Output = V>) -> V {
+    pub async fn get_with(&self, key: K, init: impl std::future::Future<Output = V>) -> V
+    where
+        K: Clone,
+    {
         // 先查未过期
         if let Some(entry) = self.inner.get(&key) {
             let (value, inserted_at) = entry.value();
@@ -280,7 +304,10 @@ where
 
     /// 获取或插入。如果 key 不存在，调用 init 函数生成值并缓存。
     #[allow(dead_code)] // 预留/未接线（见 main.rs 债务清单）
-    pub async fn get_or_insert(&self, key: K, init: impl std::future::Future<Output = V>) -> V {
+    pub async fn get_or_insert(&self, key: K, init: impl std::future::Future<Output = V>) -> V
+    where
+        K: Clone,
+    {
         self.inner.get_with(key, init).await
     }
 
@@ -290,7 +317,10 @@ where
     }
 
     /// 插入缓存值
-    pub async fn insert(&self, key: K, value: V) {
+    pub async fn insert(&self, key: K, value: V)
+    where
+        K: Clone,
+    {
         self.inner.insert(key, value).await;
     }
 

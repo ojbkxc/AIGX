@@ -18,6 +18,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::{
@@ -316,14 +317,15 @@ impl Bridge for GeminiBridge {
                 },
                 id,
                 model,
-                Vec::<std::result::Result<ChatChunk, BridgeError>>::new(),
+                VecDeque::<std::result::Result<ChatChunk, BridgeError>>::new(),
             ),
             |(mut byte_stream, mut decoder, mut state, id, model, mut pending)| async move {
                 use futures::StreamExt;
                 loop {
-                    // 优先吐出上一批积压的 chunk
-                    if !pending.is_empty() {
-                        let first = pending.remove(0);
+                    // 优先吐出上一批积压的 chunk。用 VecDeque 从头部弹出：
+                    // 单批解析出 N 帧时 `Vec::remove(0)` 每次都 O(N) 搬移，整批
+                    // 吐出是 O(N²)；pop_front 是 O(1)。吐出顺序与积压顺序一致。
+                    if let Some(first) = pending.pop_front() {
                         return Some((first, (byte_stream, decoder, state, id, model, pending)));
                     }
                     match byte_stream.next().await {
@@ -336,8 +338,8 @@ impl Bridge for GeminiBridge {
                                             parse_stream_event(&payload, &id, &model, &mut state)
                                         {
                                             match chunk {
-                                                Ok(c) => pending.push(Ok(c)),
-                                                Err(e) => pending.push(Err(e)),
+                                                Ok(c) => pending.push_back(Ok(c)),
+                                                Err(e) => pending.push_back(Err(e)),
                                             }
                                         }
                                     }
@@ -345,7 +347,7 @@ impl Bridge for GeminiBridge {
                                         // 流结束：产出带 finish_reason=Stop 的终帧
                                         // （若尚未发过 finish_reason）
                                         if !state.sent_finish {
-                                            pending.push(Ok(ChatChunk {
+                                            pending.push_back(Ok(ChatChunk {
                                                 id: state.id.clone(),
                                                 model: state.model.clone(),
                                                 delta: ChatDelta::default(),
