@@ -55,11 +55,16 @@ pub enum AgentLlmError {
 /// 早就断了。5 个已经能覆盖「首选挂了换备选」的绝大多数情况。
 const MAX_MODEL_CANDIDATES: usize = 5;
 
-/// 跨模型切换的总耗时上限（秒）。
+/// 跨模型切换的总耗时上限（秒）。**硬上限**。
 ///
 /// 与 `MAX_MODEL_CANDIDATES` 是两道独立的闸：模型少但每个都很慢时，只靠数量
 /// 封顶拦不住；反过来只靠时间封顶，模型多时又可能把时间浪费在注定失败的
 /// 候选上。两道都要。
+///
+/// 注意：这是**真的硬**——每个模型的整次尝试都包在
+/// `tokio::time::timeout(剩余预算, …)` 里。只在「两次尝试之间看表」是不够的：
+/// 单次非流式请求默认超时 300s（`body_timeout_secs`）、流式更长，一次就能把
+/// 预算撑爆，那样 60s 只是句空话。
 const MODEL_FAILOVER_BUDGET_SECS: u64 = 60;
 
 /// 本次调用要依次尝试的模型列表（首选在前）。
@@ -110,10 +115,33 @@ fn compose_model_candidates(primary: &str, listed: Vec<String>, limit: usize) ->
 /// 「稍后重试」，包一层 AllModelsFailed 会把这两个语义磨平。试过多个才汇总，
 /// 并把每个模型的原因带出去（否则运营只看到一句「暂无可用渠道」）。
 fn final_error(tried: &[String], last: Option<AgentLlmError>) -> AgentLlmError {
-    if tried.len() <= 1 {
-        return last.unwrap_or(AgentLlmError::ModelNotConfigured);
+    match last {
+        // 一次都没真正跑过（预算一开始就耗尽）→ 汇总，而不是谎称「模型未配置」
+        None if !tried.is_empty() => AgentLlmError::AllModelsFailed(tried.join(" | ")),
+        None => AgentLlmError::ModelNotConfigured,
+        // 只试过一个模型且真的失败了：保留原错误类型（前端据此区分
+        // 「配置问题」与「稍后重试」，包平会把这个语义磨掉）
+        Some(e) if tried.len() <= 1 => e,
+        Some(_) => AgentLlmError::AllModelsFailed(tried.join(" | ")),
     }
-    AgentLlmError::AllModelsFailed(tried.join(" | "))
+}
+
+/// 距离总预算还剩多少；已耗尽返回 `None`。
+fn remaining_budget(deadline: std::time::Instant) -> Option<std::time::Duration> {
+    let now = std::time::Instant::now();
+    (now < deadline).then(|| deadline - now)
+}
+
+/// 把「没来得及试」的模型如实记进 `tried`。
+///
+/// 不记的话，预算耗尽时最终错误只提试过的那几个，读的人会以为候选清单里
+/// 本来就没有别的模型 —— 与「把每个模型的失败原因如实报出」相反。
+fn mark_untried(tried: &mut Vec<String>, rest: &[String]) {
+    for model in rest {
+        tried.push(format!(
+            "{model}: 未尝试（总耗时预算 {MODEL_FAILOVER_BUDGET_SECS}s 已用尽）"
+        ));
+    }
 }
 
 /// 把渠道快照 + bridge 绑定成一个候选，供自环 failover 循环使用。
@@ -300,17 +328,23 @@ pub async fn chat_once_as(
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
     let models = candidate_models(state, config)?;
     let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_secs(MODEL_FAILOVER_BUDGET_SECS);
+        std::time::Instant::now() + std::time::Duration::from_secs(MODEL_FAILOVER_BUDGET_SECS);
     // 逐模型试。每个模型内部仍保留原有的「渠道级 failover + 时间维度重试」，
     // 本层只负责「这个模型没指望了，换下一个」。
     let mut tried: Vec<String> = Vec::new();
     let mut last_err: Option<AgentLlmError> = None;
-    for model in &models {
-        if tokio::time::Instant::now() >= deadline {
+    for (index, model) in models.iter().enumerate() {
+        let Some(budget) = remaining_budget(deadline) else {
+            // 预算耗尽：把还没轮到的模型如实列出来，而不是让错误看起来像
+            // 「候选清单里本来就没有别的模型」。
+            mark_untried(&mut tried, &models[index..]);
             break;
-        }
-        match chat_once_model(state, config, model, &messages, &tools, key_id, deadline).await {
-            Ok(v) => {
+        };
+        // **硬闸**：这个模型的整次尝试（含 `try_candidates` 扫全部渠道、以及
+        // 退避睡眠）都必须在剩余预算内完成。
+        let attempt = chat_once_model(state, config, model, &messages, &tools, key_id, deadline);
+        match tokio::time::timeout(budget, attempt).await {
+            Ok(Ok(v)) => {
                 if !tried.is_empty() {
                     tracing::info!(
                         "agent llm switched model after {:?}, succeeded on {model}",
@@ -319,17 +353,27 @@ pub async fn chat_once_as(
                 }
                 return Ok(v);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("agent llm model {model} failed: {e}");
                 tried.push(format!("{model}: {e}"));
                 last_err = Some(e);
             }
+            Err(_elapsed) => {
+                let e = AgentLlmError::AllChannelsFailed(format!(
+                    "尝试超过总耗时预算（{MODEL_FAILOVER_BUDGET_SECS}s）被中止"
+                ));
+                tracing::warn!("agent llm model {model} aborted: {e}");
+                tried.push(format!("{model}: {e}"));
+                last_err = Some(e);
+                mark_untried(&mut tried, &models[index + 1..]);
+                break;
+            }
         }
     }
 
-    // 只试过一个模型（渠道锁定，或候选清单只有它）时保留原有错误类型：
-    // 调用方/前端靠 `NoChannelAvailable` / `TransientExhausted` 区分「配置问题」
-    // 与「稍后重试」；包一层 AllModelsFailed 会把这两个语义磨平。
+    // 收口规则见 `final_error`：只试过一个模型时保留原错误类型（前端靠
+    // `NoChannelAvailable` / `TransientExhausted` 区分「配置问题」与「稍后重试」），
+    // 试过多个（或一个都没跑起来）才汇总成 `AllModelsFailed`，逐条带原因。
     Err(final_error(&tried, last_err))
 }
 
@@ -344,7 +388,7 @@ async fn chat_once_model(
     messages: &[ChatMessage],
     tools: &Option<Vec<serde_json::Value>>,
     key_id: &str,
-    deadline: tokio::time::Instant,
+    deadline: std::time::Instant,
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
     let rounds = config
         .transient_retry_rounds
@@ -353,7 +397,7 @@ async fn chat_once_model(
     let mut last_recoverable = false;
 
     for round in 1..=rounds {
-        if tokio::time::Instant::now() >= deadline {
+        if remaining_budget(deadline).is_none() {
             break;
         }
         // 每轮重新解析候选：冷却中的渠道会随冷却到期重新可用，
@@ -402,7 +446,9 @@ async fn chat_once_model(
         if round < rounds {
             let wait = retry_backoff(config, round);
             // 等完就超过总预算了就别等了 —— 外层也没时间再试下一个模型。
-            if tokio::time::Instant::now() + std::time::Duration::from_millis(wait) >= deadline {
+            if remaining_budget(deadline)
+                .is_none_or(|left| left <= std::time::Duration::from_millis(wait))
+            {
                 break;
             }
             tracing::warn!(
@@ -908,5 +954,55 @@ mod tests {
         assert!(msg.contains("401"), "应带出 A 的原因: {msg}");
         assert!(msg.contains("glm-5.3-flash"), "应点名模型 B: {msg}");
         assert!(msg.contains("404"), "应带出 B 的原因: {msg}");
+    }
+    /// 预算已过 → `remaining_budget` 返回 `None`，外层据此不再发起新尝试。
+    #[test]
+    fn remaining_budget_none_once_deadline_passed() {
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        assert!(super::remaining_budget(past).is_none(), "过期应返回 None");
+        let future = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let left = super::remaining_budget(future).expect("未来应有剩余");
+        assert!(!left.is_zero() && left <= std::time::Duration::from_secs(60));
+    }
+
+    /// **硬闸**：在飞的尝试必须被预算切断，而不是只在两次尝试之间看表。
+    ///
+    /// 钉的是 `tokio::time::timeout(剩余预算, 尝试)` 这一层。模拟「上游挂了不
+    /// 返回」的尝试（睡 5s），50ms 预算必须中止它。若有人把它改回「尝试前检查
+    /// 一下时间」，这个用例会等满 5s 且断言 `is_err` 失败。
+    #[tokio::test]
+    async fn in_flight_attempt_is_cut_by_budget() {
+        let attempt = async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            Ok::<(), AgentLlmError>(())
+        };
+        let started = std::time::Instant::now();
+        let got = tokio::time::timeout(std::time::Duration::from_millis(50), attempt).await;
+        assert!(got.is_err(), "超预算的在飞尝试必须被中止");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "应远早于 5s 返回，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 预算耗尽时，未尝试的模型要如实列出并标明「未尝试」，
+    /// 不得让错误看起来像「候选清单里本来没有别的模型」，也不得编造失败原因。
+    #[test]
+    fn untried_models_are_reported_when_budget_exhausted() {
+        let mut tried = vec!["a: upstream timeout".to_string()];
+        super::mark_untried(&mut tried, &["b".to_string(), "c".to_string()]);
+        let msg = super::final_error(
+            &tried,
+            Some(AgentLlmError::AllChannelsFailed("x".to_string())),
+        )
+        .to_string();
+        assert!(msg.contains("a:"), "应保留已试模型: {msg}");
+        assert!(msg.contains("b: 未尝试"), "应标明 b 未尝试: {msg}");
+        assert!(msg.contains("c: 未尝试"), "应标明 c 未尝试: {msg}");
+        assert!(
+            !msg.contains("b: upstream"),
+            "不得给未试模型编造原因: {msg}"
+        );
     }
 }
