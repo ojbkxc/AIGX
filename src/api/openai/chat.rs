@@ -982,6 +982,13 @@ pub(crate) async fn handle_chat_completions(
             // 累积输出文本用于流结束时估算 token（问题 3）
             let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
             let acc_for_map = acc.clone();
+            // 上游 usage 槽：流里收到的**权威 usage**（`stream_options.include_usage`
+            // 终帧 / Anthropic `message_start`+`message_delta`）。计费侧优先用它，
+            // 缺失时才回退本地估算——与非流式三条路径同口径（此前流式只喂本地
+            // 估算、cached 恒 0，缓存部分被按正价收）。
+            let stream_usage =
+                std::sync::Arc::new(parking_lot::Mutex::new(None::<crate::bridge::UsageStats>));
+            let stream_usage_for_map = stream_usage.clone();
             // 工具按次调用计数表（流式过程统计 tool_use 起始块，计费时折算附加费）
             let tool_calls = std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::pricing::ToolCallCounts::new(),
@@ -1088,6 +1095,15 @@ pub(crate) async fn handle_chat_completions(
                     // 回传 usage 帧（choices 空数组，OpenAI 官方契约）。此前
                     // chat.rs 忽略 chunk.usage，客户端收不到 usage 帧。
                     if let Some(usage) = &chunk.usage {
+                        // 计费侧存档（权威值）：流结束时 finalize 优先用它，
+                        // 见 `StreamBillingState::finalize_with_usage`。
+                        // 逐帧合并（后到的非零字段覆盖先到的）：OpenAI 的
+                        // `include_usage` 终帧是整份，Anthropic 的
+                        // `message_start`（input+缓存）与 `message_delta`
+                        // （output）各带一半，谁后到都不能抹掉对方。
+                        let mut slot = stream_usage_for_map.lock();
+                        *slot = Some(super::billing::merge_stream_usage(*slot, *usage));
+                        drop(slot);
                         let usage_data = serde_json::json!({
                             "id": chunk.id,
                             "object": "chat.completion.chunk",
@@ -1227,8 +1243,11 @@ pub(crate) async fn handle_chat_completions(
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
                     let errored = stream_errored.load(std::sync::atomic::Ordering::SeqCst);
-                    let (pt, ct) = billing_fin.finalize_with_token_estimates(
+                    // 上游 usage 优先（含缓存量），缺失侧回退上面的本地估算
+                    let upstream_usage = stream_usage.lock().take();
+                    let (pt, ct) = billing_fin.finalize_with_usage(
                         errored,
+                        upstream_usage,
                         est_prompt,
                         est_completion,
                     );

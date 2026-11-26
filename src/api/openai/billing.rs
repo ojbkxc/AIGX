@@ -445,6 +445,75 @@ fn compute_cost_from_snapshot(
     c
 }
 
+/// 逐帧合并流式 usage（纯函数，单测覆盖）。
+///
+/// 两种线路形状都要能拼：OpenAI 的 `stream_options.include_usage` 终帧带
+/// 整份 usage；Anthropic 的 `message_start` 只带 `input_tokens` + 缓存两项、
+/// `message_delta` 只带 `output_tokens`。任何一方后到都不许抹掉另一方，
+/// 所以按**字段**合并：后到的非零值覆盖先到的非零值，零视为「这一帧没说」。
+pub(crate) fn merge_stream_usage(
+    prev: Option<crate::bridge::UsageStats>,
+    next: crate::bridge::UsageStats,
+) -> crate::bridge::UsageStats {
+    let Some(prev) = prev else {
+        return next;
+    };
+    let pick = |old: u64, new: u64| if new > 0 { new } else { old };
+    let mut merged = crate::bridge::UsageStats {
+        prompt_tokens: pick(prev.prompt_tokens, next.prompt_tokens),
+        completion_tokens: pick(prev.completion_tokens, next.completion_tokens),
+        total_tokens: 0,
+        cached_prompt_tokens: pick(prev.cached_prompt_tokens, next.cached_prompt_tokens),
+        cache_creation_tokens: pick(prev.cache_creation_tokens, next.cache_creation_tokens),
+        cache_read_tokens: pick(prev.cache_read_tokens, next.cache_read_tokens),
+    };
+    merged.total_tokens = merged.prompt_tokens + merged.completion_tokens;
+    merged
+}
+
+/// 流式计费的 token / 缓存量口径（纯函数，单测覆盖）。
+///
+/// 非流式三条路径（chat 非流式、anthropic 非流式、responses 非流式）都从
+/// 上游 usage 经 [`crate::bridge::UsageStats::billing_tokens`] 取
+/// `(prompt, cached)` 再计费；流式路径此前把 `cached` 写死为 0，于是
+/// 「同一请求流式还是非流式」决定了要不要吃缓存折扣：
+///
+/// - `cache_price` 已配置时，缓存部分被按**正价**收 → 多扣；
+/// - Anthropic 线路的 `cache_read` / `cache_creation` 属于
+///   `prompt_tokens` **之外**的追加量，本地估算（只编码 messages）根本看不见
+///   它们 → 那部分 prompt 完全不计费 → 少扣。
+///
+/// 这里统一成一条口径：上游 usage 优先（权威值），缺失的侧逐项回退本地估算；
+/// `cached` 只在 prompt 确实来自上游时采信（上游给的缓存量配本地估算的
+/// prompt 是两套口径，混着算会得出自相矛盾的账单）。
+pub(crate) fn stream_billing_tokens(
+    usage: Option<&crate::bridge::UsageStats>,
+    est_prompt_tokens: u64,
+    est_completion_tokens: u64,
+) -> (u64, u64, u64) {
+    let Some(usage) = usage else {
+        return (est_prompt_tokens, est_completion_tokens, 0);
+    };
+    // 输出侧：上游报了就用上游的（缺的一侧才回退估算）
+    let completion_tokens = if usage.completion_tokens > 0 {
+        usage.completion_tokens
+    } else {
+        est_completion_tokens
+    };
+    let (upstream_prompt, upstream_cached) = usage.billing_tokens();
+    if upstream_prompt > 0 {
+        (
+            upstream_prompt,
+            completion_tokens,
+            upstream_cached.min(upstream_prompt),
+        )
+    } else {
+        // 上游只报了输出侧（例如只收到 message_delta）：prompt 用本地估算，
+        // 缓存量不可信 → 0（宁可不多扣，也不拿两套口径拼账单）。
+        (est_prompt_tokens, completion_tokens, 0)
+    }
+}
+
 /// 预留记录（P1：两段式计费；P0-2：用户/key 侧改为逐笔 token）
 #[derive(Clone)]
 pub(crate) struct Reservation {
@@ -589,6 +658,29 @@ pub(crate) fn reserve_usage(
         price_snapshot,
     })
 }
+/// 结算分配计划（纯函数，单测覆盖）：返回
+/// 「每个订阅实际承接额（与 `sub_allocs` 逐位对应）」与「钱包侧溢出额」。
+///
+/// 口径：
+/// - 按预留顺序承接，每笔承接额 = `min(预留额, 剩余实际消费)`；
+/// - 归属全部订阅预留之后仍有剩余 → 那是**钱包侧溢出**，由调用方去扣余额；
+/// - 剩余归零之后，后面那些订阅的承接额是 **0**，不是「跳过」——
+///   [`crate::plan::subscription::SubscriptionStore::settle`] 的
+///   `actual = 0` 等价于「全额归还预留」。少算这一笔，它们的预留会永久留在
+///   `amount_used` 里：订阅库**没有**超时回收（`main.rs` 的
+///   `release_stale_reservations` 只扫用户库与 key 库），那部分池额度
+///   从此不可用。
+fn plan_sub_settlement(sub_allocs: &[(String, i64)], actual_cost: i64) -> (Vec<i64>, i64) {
+    let mut remaining = actual_cost.max(0);
+    let mut takes = Vec::with_capacity(sub_allocs.len());
+    for (_, reserved) in sub_allocs {
+        let take = (*reserved).max(0).min(remaining);
+        remaining -= take;
+        takes.push(take);
+    }
+    (takes, remaining)
+}
+
 /// 把一笔实际消费按「订阅池 → 用户钱包 → API key」分配结算，并摘除预留。
 ///
 /// `settle_usage` 与 `settle_cache_hit` 共用此分配逻辑，保证两条路径对
@@ -601,23 +693,17 @@ fn distribute_settlement(
     reservation: &Reservation,
     actual_cost: i64,
 ) {
-    // P2 订阅化：结算订阅池预留（多订阅逐个结算）。
-    // 实际消费按各订阅预留占比顺序承接：每个订阅先扣自身预留内的
-    // 部分（sub_take），不足部分溢出到钱包侧。用户钱包侧传 wallet_cost
-    // 作为实际消费，保证总账不重不漏。
-    let mut wallet_cost = actual_cost;
-    for (sid, reserved) in &reservation.sub_allocs {
-        let sub_take = (*reserved).min(wallet_cost);
-        state.subscription_store.settle(sid, *reserved, sub_take);
-        wallet_cost -= sub_take;
-        if wallet_cost <= 0 {
-            break;
-        }
+    // P2 订阅化：结算订阅池预留（多订阅逐个结算，含「承接额为 0 = 全额归还」
+    // 的那几笔——不能因为剩余实际消费已经归零就 break，理由见
+    // [`plan_sub_settlement`]）。
+    let (sub_takes, wallet_cost) = plan_sub_settlement(&reservation.sub_allocs, actual_cost);
+    for ((sid, reserved), take) in reservation.sub_allocs.iter().zip(sub_takes) {
+        state.subscription_store.settle(sid, *reserved, take);
     }
 
     // 结算用户配额（按 token 精确摘除预留；超额记 overdraft，P0-3）
-    if reservation.user_token != 0 {
-        if let Some(uid) = &api_key.user_id {
+    if let Some(uid) = &api_key.user_id {
+        if reservation.user_token != 0 {
             state
                 .user_store
                 .settle_quota(uid, reservation.user_token, wallet_cost);
@@ -633,6 +719,24 @@ fn distribute_settlement(
                             remaining,
                         });
                 }
+            }
+        } else if wallet_cost > 0 {
+            // 下单时订阅池承接了**全部**估算额（user_token == 0），但实际消费
+            // 超出预留总额：这段钱只能从钱包扣。旧实现把它和「已结算完」混为
+            // 一谈直接丢弃，结果是「日志记满 actual_cost、用户余额一分不动」
+            // ——少扣全部溢出部分。
+            //
+            // 没有预留 token 可摘，只能直接扣减；余额不足时扣不到，记 WARN
+            // 不静默（真正的欠账口径需要 user_store 提供一个无预留结算入口，
+            // 属跨模块契约改动，见交付说明的「已确认未修」）。
+            if !state.user_store.try_charge(uid, wallet_cost) {
+                tracing::warn!(
+                    user = %uid,
+                    overflow = wallet_cost,
+                    actual_cost,
+                    "subscription reservation covered the whole estimate but actual cost overflowed; \
+                     wallet charge failed (insufficient balance) — undercharge recorded"
+                );
             }
         }
     }
@@ -835,6 +939,35 @@ impl StreamBillingState {
         prompt_tokens: u64,
         completion_tokens: u64,
     ) -> (u64, u64) {
+        // 本地估算口径：没有上游 usage，也就没有缓存量可言 → cached = 0
+        self.finalize_billable(errored, prompt_tokens, completion_tokens, 0)
+    }
+
+    /// 上游 usage 感知版 finalize（流式计费口径对齐非流式）。
+    ///
+    /// `usage` = 流里收到的**上游权威 usage**（`stream_options.include_usage`
+    /// 终帧 / Anthropic `message_start`+`message_delta`）；缺失的侧逐项回退
+    /// 调用方预估算的 `est_*`。token 与缓存量的归一化在
+    /// [`stream_billing_tokens`] 单点完成。
+    pub(crate) fn finalize_with_usage(
+        &self,
+        errored: bool,
+        usage: Option<crate::bridge::UsageStats>,
+        est_prompt_tokens: u64,
+        est_completion_tokens: u64,
+    ) -> (u64, u64) {
+        let (prompt_tokens, completion_tokens, cached_tokens) =
+            stream_billing_tokens(usage.as_ref(), est_prompt_tokens, est_completion_tokens);
+        self.finalize_billable(errored, prompt_tokens, completion_tokens, cached_tokens)
+    }
+
+    fn finalize_billable(
+        &self,
+        errored: bool,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cached_tokens: u64,
+    ) -> (u64, u64) {
         // 累计用量
         self.state
             .usage_tracker
@@ -859,8 +992,7 @@ impl StreamBillingState {
                 reservation,
                 prompt_tokens,
                 completion_tokens,
-                // 本地估算路径没有上游 usage，无缓存量可言
-                0,
+                cached_tokens,
                 tool_calls_opt,
             )
         } else {
@@ -872,7 +1004,7 @@ impl StreamBillingState {
                 &self.group,
                 prompt_tokens,
                 completion_tokens,
-                0,
+                cached_tokens,
                 tool_calls_opt,
             )
         };
@@ -1483,5 +1615,150 @@ mod price_snapshot_tests {
         assert_eq!(hit.ip.as_deref(), Some("9.9.9.9"));
         assert_eq!(hit.channel_id.as_deref(), Some("ch-9"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 流式计费口径：上游 usage 优先 + 缓存折扣 ─────────────────────
+
+    /// 回归「流式 cached 恒 0 → 缓存部分按正价收」。
+    ///
+    /// 价格：input $0.003/1k、cache $0.0003/1k、output $0.015/1k，
+    /// 倍率全 1、fx 1、1 元 = 200 额度。
+    ///
+    /// 同一请求（prompt 2000，其中 1600 命中上游缓存；completion 500）：
+    /// - 非流式口径（cached=1600）：
+    ///   (400×0.003 + 1600×0.0003 + 500×0.015)/1000 = 0.00918 USD → ×200 = 1.836 → **2 额度**
+    /// - 流式旧口径（cached=0）：(2000×0.003 + 500×0.015)/1000 = 0.0135 → ×200 = 2.7 → **3 额度**
+    ///
+    /// 即每个这样的请求 **多扣 1 额度**（3 → 2）；缓存占比越高、prompt 越大，差额越大
+    /// （prompt 200k / cached 160k / completion 50k 时 270 → 184 额度，多扣 86）。
+    #[test]
+    fn stream_usage_applies_upstream_cache_discount() {
+        let snap = token_snapshot(0.003, 0.015, Some(0.0003), 1.0, 1.0);
+        let mut usage = crate::bridge::UsageStats::new(2_000, 500);
+        usage.cached_prompt_tokens = 1_600;
+
+        // 旧口径：cached 被写死为 0
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 2_000, 500, 0), 3);
+        // 新口径：流式也吃缓存折扣
+        let (prompt, completion, cached) = stream_billing_tokens(Some(&usage), 2_000, 500);
+        assert_eq!((prompt, completion, cached), (2_000, 500, 1_600));
+        assert_eq!(
+            compute_cost_from_snapshot_pure(&snap, prompt, completion, cached),
+            2
+        );
+    }
+
+    /// Anthropic 线路：`cache_read` / `cache_creation` 在 `input_tokens` **之外**，
+    /// 本地估算（只编码 messages）看不见它们 → 少扣。
+    ///
+    /// 上游：input 2000 + cache_read 160000（162k prompt，其中 160k 命中缓存），
+    /// completion 100。价格同上。
+    /// - 旧口径（本地估算 ≈ 2000 prompt、cached 恒 0）：
+    ///   (2000×0.003 + 100×0.015)/1000 = 0.0075 USD → ×200 = 1.5 → **2 额度**
+    /// - 新口径（fresh = 162000−160000 = 2000）：
+    ///   (2000×0.003 + 160000×0.0003 + 100×0.015)/1000 = 0.0555 USD → ×200 = 11.1
+    ///   → **12 额度**
+    ///
+    /// 即这种请求此前 **少扣 10 额度**（2 → 12），大 prompt 高频命中缓存时按比例放大。
+    #[test]
+    fn stream_usage_counts_anthropic_cache_tokens() {
+        let snap = token_snapshot(0.003, 0.015, Some(0.0003), 1.0, 1.0);
+        let mut usage = crate::bridge::UsageStats::new(2_000, 100);
+        usage.cache_read_tokens = 160_000;
+        // billing_tokens：prompt = 2000 + 160000（缓存读在 prompt 之外），缓存部分 160000
+        let (prompt, completion, cached) = stream_billing_tokens(Some(&usage), 2_000, 100);
+        assert_eq!((prompt, completion, cached), (162_000, 100, 160_000));
+        // 旧口径（本地估算 2k prompt / 100 completion）= 2 额度
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 2_000, 100, 0), 2);
+        // 新口径 = 12 额度（少扣的 10 额度修回来了）
+        assert_eq!(
+            compute_cost_from_snapshot_pure(&snap, prompt, completion, cached),
+            12
+        );
+    }
+
+    /// 没有上游 usage（上游不吐 usage 帧 / 断连兜底）：口径不变，仍用本地估算且 cached=0。
+    #[test]
+    fn stream_tokens_fall_back_to_estimates_without_usage() {
+        assert_eq!(stream_billing_tokens(None, 1234, 56), (1234, 56, 0));
+    }
+
+    /// 上游只报输出侧（例如只收到 Anthropic `message_delta`，只带 output_tokens）：
+    /// prompt 回退估算、缓存量不可信记 0，不许拿两套口径拼账单。
+    #[test]
+    fn stream_tokens_ignore_cache_when_prompt_is_estimated() {
+        let usage = crate::bridge::UsageStats::new(0, 700);
+        let got = stream_billing_tokens(Some(&usage), 900, 700);
+        assert_eq!(got.0, 900, "上游没给 prompt → 回退本地估算");
+        assert_eq!(got.1, 700, "上游报了输出侧就用上游的");
+        assert_eq!(got.2, 0, "prompt 不是上游给的 → 缓存量不得采信");
+
+        // 反向对照：prompt 完全来自缓存（input 0 + cache_read 500）时，
+        // 「上游 prompt」= 500 是权威值，不得被本地估算顶掉（否则整段缓存白送）
+        let mut cache_only = crate::bridge::UsageStats::new(0, 40);
+        cache_only.cache_read_tokens = 500;
+        let got = stream_billing_tokens(Some(&cache_only), 900, 40);
+        assert_eq!(got, (500, 40, 500), "缓存整段命中的 prompt 以上游为准");
+    }
+
+    /// 逐帧合并：Anthropic `message_start`（input+缓存）与 `message_delta`（output）
+    /// 各带一半，谁后到都不能抹掉对方。
+    #[test]
+    fn stream_usage_merge_keeps_both_halves() {
+        let mut start = crate::bridge::UsageStats::new(1_000, 0);
+        start.cache_read_tokens = 800;
+        start.cache_creation_tokens = 100;
+        let delta = crate::bridge::UsageStats::new(0, 250);
+        let merged = merge_stream_usage(Some(start), delta);
+        assert_eq!(merged.prompt_tokens, 1_000);
+        assert_eq!(merged.completion_tokens, 250);
+        assert_eq!(merged.cache_read_tokens, 800);
+        assert_eq!(merged.cache_creation_tokens, 100);
+        assert_eq!(merged.total_tokens, 1_250);
+        // 终帧带整份（OpenAI include_usage）：后到的非零值覆盖
+        let full = crate::bridge::UsageStats::new(1_000, 300);
+        let merged = merge_stream_usage(Some(merged), full);
+        assert_eq!(merged.completion_tokens, 300);
+        assert_eq!(merged.cache_read_tokens, 800, "终帧没提缓存 → 保留先到的");
+    }
+
+    // ── 结算分配：订阅预留不许漏结算、钱包溢出不许丢 ─────────────────
+
+    /// 分配计划（纯函数）：`actual < 预留总额` 时，**后面那几笔订阅必须拿到
+    /// 承接额 0**（= 全额归还预留），不能因为剩余消费归零就跳过。
+    ///
+    /// 触发：两个订阅各预留 100（估算 200），实际只花 60。
+    /// 旧实现 `break` 之后 s2 的 100 永久留在 `amount_used` 里
+    /// （订阅库无超时回收，`main.rs` 只扫用户库/key 库）→ 用户已付费的
+    /// **100 额度**从此不可用。
+    #[test]
+    fn settlement_plan_releases_trailing_subscriptions() {
+        let subs = vec![("s1".to_string(), 100_i64), ("s2".to_string(), 100_i64)];
+        let (takes, wallet) = plan_sub_settlement(&subs, 60);
+        assert_eq!(takes, vec![60, 0], "s2 必须结算 actual=0 以归还预留");
+        assert_eq!(wallet, 0, "订阅池全额承接，钱包不动");
+    }
+
+    /// 分配计划：实际超过全部订阅预留 → 溢出部分归钱包（必须真的扣，
+    /// 旧实现在 `user_token == 0` 时把它整段丢掉：少扣）。
+    #[test]
+    fn settlement_plan_charges_wallet_overflow() {
+        let subs = vec![("s1".to_string(), 100_i64), ("s2".to_string(), 100_i64)];
+        let (takes, wallet) = plan_sub_settlement(&subs, 250);
+        assert_eq!(takes, vec![100, 100]);
+        assert_eq!(wallet, 50, "溢出 50 额度必须落到钱包侧");
+        // 单订阅承接全部估算额（user_token == 0 的形态）：溢出 50
+        let (takes, wallet) = plan_sub_settlement(&[("s1".to_string(), 100)], 150);
+        assert_eq!(takes, vec![100]);
+        assert_eq!(wallet, 50);
+    }
+
+    /// 无实际消费（缓存命中免费 / 失败释放）：所有预留都拿到 0，全额归还。
+    #[test]
+    fn settlement_plan_zero_cost_releases_everything() {
+        let subs = vec![("s1".to_string(), 120_i64), ("s2".to_string(), 80_i64)];
+        assert_eq!(plan_sub_settlement(&subs, 0), (vec![0, 0], 0));
+        // 负值（不该出现）也钳成 0，不得反向计费
+        assert_eq!(plan_sub_settlement(&subs, -5), (vec![0, 0], 0));
     }
 }

@@ -84,11 +84,27 @@ pub(crate) fn record(params: &Value) -> Result<Value, RpcError> {
     log.channel_name = Some(text("provider").to_string()).filter(|s| !s.is_empty());
     // 插件自报的 provider 同时落到「供应商」列（插件渠道没有 `channel_type`
     // 可推，真实来源就是插件声明的这一格）。无 channel_id 可反查，故不填。
+    //
+    // ⚠️ 这一格是**第三方自报**，宿主持有不了「本次请求实际走的哪家」：
+    // `script.usage` 是宿主级回调，参数里没有 request_id / channel / 请求体，
+    // 无从交叉校验。要校验必须在 RPC 形状里带 request_id（契约改动，见
+    // 交付说明「已确认未修」）。在报表上它只能当「插件声明」，不能当
+    // 与网关日志同源的「供应商」事实。
     log.provider = Some(text("provider").to_string()).filter(|s| !s.is_empty());
     log.latency_ms = number("ms") as u64;
     log.status_code = number("status").clamp(0, 999) as u16;
-    log.input_tokens = (number("input") + number("cacheRead") + number("cacheWrite")) as u64;
+    // 三个计数各自已被钳到 [0, 1e12]，这里用 saturating 求和是**上限合并**：
+    // 相加后最大 3e12，仍在 u64 内；写成饱和加法是为了让「钳制后再相加」
+    // 这件事在代码里显式（钳的是每格、总和是另一件事）。
+    log.input_tokens = number("input")
+        .saturating_add(number("cacheRead"))
+        .saturating_add(number("cacheWrite")) as u64;
     log.output_tokens = number("output") as u64;
+    // 本路**不计费**：插件的销售侧费用由网关自己的计费链（`api::openai::billing`
+    // 的 reserve/settle 或 charge）结算，这条日志只做用量投影。cost 显式写 0，
+    // 避免有人以为「没填 = 沿用默认」而在报表里把它当收入。
+    log.cost = 0;
+    log.channel_cost = 0;
     log.error_msg = params
         .get("error")
         .and_then(Value::as_str)
@@ -144,6 +160,43 @@ mod tests {
             }))
             .unwrap();
             assert_eq!(out, Value::Bool(true));
+        });
+    }
+
+    /// 自报用量**不许变成钱**：即使插件报一个天文数字，这一行也必须 cost=0、
+    /// channel_cost=0（`fold_request` 只把这行折进 token/请求计数）。
+    ///
+    /// 改前：`input/cacheRead/cacheWrite` 各钳到 1e12 后仍相加；
+    /// 断言值 = 1e12 × 3（三格各自顶格），证明「钳的是每格、总和可达 3e12」。
+    #[test]
+    fn self_reported_usage_never_carries_money() {
+        with_store(|| {
+            let huge = json!({
+                "provider": "impostor",
+                "account": "acc-2",
+                "kind": "chat",
+                "model": "claude-x",
+                "input": 9_999_999_999_999_i64,
+                "output": 9_999_999_999_999_i64,
+                "cacheRead": 9_999_999_999_999_i64,
+                "cacheWrite": 9_999_999_999_999_i64,
+                "status": 200,
+                "ms": 1,
+            });
+            record(&huge).unwrap();
+            let logs = LOG_STORE.get().unwrap().requests.list_all();
+            let row = logs
+                .iter()
+                .find(|l| l.provider.as_deref() == Some("impostor"))
+                .expect("自报用量应留痕");
+            assert_eq!(row.cost, 0, "自报用量不得带费用");
+            assert_eq!(row.channel_cost, 0, "自报用量不得带渠道成本");
+            assert_eq!(
+                row.input_tokens, 3_000_000_000_000,
+                "三格各自钳到 1e12；总和是另一件事，必须可见地饱和相加"
+            );
+            assert_eq!(row.output_tokens, 1_000_000_000_000);
+            assert!(row.user_id.is_none() && row.key_id.is_none());
         });
     }
 
