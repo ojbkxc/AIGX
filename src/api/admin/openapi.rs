@@ -1563,7 +1563,8 @@ fn paths_accounts_network() -> Value {
             "post": op_body("插件", "卸载外置插件包（停进程 + 删包；内置包不支持）", "{ id }")
         },
         "/api/plugins/update": {
-            "get": op("插件", "插件更新检查（内置目录随网关版本发布）")
+            "get": op("插件", "插件更新检查（内置目录随网关版本发布）"),
+            "post": op_body("插件", "执行一次插件更新（空体取首个已装包）", "id? / target? / sha256?")
         },
         "/api/plugins/release": {
             "get": op("插件", "发布目录（从 [plugins] source_url 实时拉取）")
@@ -2161,7 +2162,7 @@ mod tests {
         add("/api/plugins/enable", &["post"]);
         add("/api/plugins/provider", &["post"]);
         add("/api/plugins/uninstall", &["post"]);
-        add("/api/plugins/update", &["get"]);
+        add("/api/plugins/update", &["get", "post"]);
         add("/api/plugins/release", &["get"]);
         add("/api/plugins/progress", &["get"]);
         add("/api/plugins/scripts", &["get"]);

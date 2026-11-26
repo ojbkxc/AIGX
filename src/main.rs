@@ -3362,7 +3362,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         .route(
             "/api/plugins/update",
-            get(api::admin::plugins::handle_check_plugin_updates),
+            get(api::admin::plugins::handle_check_plugin_updates)
+                .post(api::admin::plugins::handle_run_update),
         )
         .route(
             "/api/plugins/release",
