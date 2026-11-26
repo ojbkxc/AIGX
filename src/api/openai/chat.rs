@@ -431,10 +431,24 @@ pub(crate) async fn handle_chat_completions(
     }
 
     // R4 性能：请求体从这里起用 `Arc` 共享 —— 估算、failover 守卫、流计费
-    // 快照都只 clone 指针；failover 每轮的 `attempt_req` 是唯一必要的深拷贝
-    // （model 映射 + provider 覆盖/脱敏要改字段）。guardrail/image 的原地
+    // 快照都只 clone 指针；failover 各轮默认共享同一个请求体，仅当模型映射/提供商
+    // 覆盖层要改字段时才按需克隆（见循环内 `needs_owned`）。guardrail/image 的原地
     // 改写在上面，之后不再有 `&mut chat_req`。
     let chat_req = Arc::new(chat_req);
+
+    // 出站脱敏的作用域是 provider。作用域为空时，脱敏结果只依赖消息内容与角色，
+    // 对所有候选完全一致 —— 预先在共享基座上做一次，failover 各轮直接复用，
+    // 不再逐候选克隆整包对话（这是重试路径上最大的深拷贝来源）。作用域非空时
+    // 各 provider 结果可能不同，退回下面的「按候选拥有副本」路径。
+    let sanitize_enabled = crate::config::sanitize_fingerprints_enabled();
+    let sanitize_globally = sanitize_enabled && crate::sanitize::providers().is_empty();
+    let base_req: Arc<ChatFormat> = if sanitize_globally {
+        let mut sanitized = (*chat_req).clone();
+        crate::sanitize::sanitize_messages_for_provider("", &mut sanitized.messages);
+        Arc::new(sanitized)
+    } else {
+        Arc::clone(&chat_req)
+    };
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone()).with_client_headers(
         headers
@@ -565,27 +579,45 @@ pub(crate) async fn handle_chat_completions(
                 )));
                 continue;
             }
-            // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
-            let mut attempt_req = (*chat_req).clone();
-            attempt_req.model = upstream.clone();
+            // 本次尝试的请求体：默认共享 `base_req`，上游模型名通过
+            // `chat_stream_with_model` 覆盖（不再为改 model 深拷贝整包对话）。
+            // 仅当提供商覆盖层要重建消息、或脱敏按 provider 分作用域时才拥有副本。
             // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
             // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
             // None → 保持入口层结果（默认路径零开销）。重建后必须重跑 purge
             // ——重建的消息来自 purge 前快照，本尝试的治理产物要在此补齐。
-            if let Some(pre_purge) = pre_purge_messages.as_ref() {
+            let rebuilt = pre_purge_messages.as_ref().and_then(|pre_purge| {
                 let provider = sanitize_provider_id(&state, ch_ref.as_ref());
-                if let Some(mut rebuilt) = crate::prompt::provider_prompt_rebuild(
+                crate::prompt::provider_prompt_rebuild(
                     &model,
                     &provider,
                     pre_purge,
                     &gateway_prompt,
-                ) {
+                )
+                .map(|mut rebuilt| {
                     crate::purge::apply_request(&mut rebuilt, &purge_cfg, &model);
-                    attempt_req.messages = rebuilt;
+                    rebuilt
+                })
+            });
+            let needs_owned = rebuilt.is_some() || (sanitize_enabled && !sanitize_globally);
+            let attempt_req: Arc<ChatFormat> = if needs_owned {
+                let mut owned = (*base_req).clone();
+                owned.model = upstream.clone();
+                if let Some(rebuilt) = rebuilt {
+                    owned.messages = rebuilt;
+                    // 重建消息来自 purge 前快照、绕过了预脱敏，这里补齐
+                    if sanitize_globally {
+                        crate::sanitize::sanitize_messages_for_provider("", &mut owned.messages);
+                    }
                 }
-            }
-            // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
-            sanitize_attempt_messages(&state, ch_ref.as_ref(), &mut attempt_req.messages);
+                // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
+                if !sanitize_globally {
+                    sanitize_attempt_messages(&state, ch_ref.as_ref(), &mut owned.messages);
+                }
+                Arc::new(owned)
+            } else {
+                Arc::clone(&base_req)
+            };
             attempt_counter += 1;
             let attempt_index = attempt_counter;
             if attempt_index > 1 {
@@ -602,11 +634,13 @@ pub(crate) async fn handle_chat_completions(
             attempt_guard.model = upstream.clone();
             // R4：本轮请求体 Arc 共享给守卫（499 兜底估算只读），
             // 不再为守卫整包深拷贝
-            let attempt_req = Arc::new(attempt_req);
             attempt_guard.chat_req = Arc::clone(&attempt_req);
             // T2：SSE 首事件守卫——建流成功后等第一个事件（30s 上限），
             // 上游挂起/建流后立刻断流 → 按失败处理（熔断记账 + failover）
-            let attempt = match bridge.chat_stream(&attempt_req, &ctx).await {
+            let attempt = match bridge
+                .chat_stream_with_model(&attempt_req, &upstream, &ctx)
+                .await
+            {
                 Ok(s) => crate::bridge::first_event_or_timeout(s).await,
                 Err(e) => Err(e),
             };
@@ -771,9 +805,18 @@ pub(crate) async fn handle_chat_completions(
                     stream_opt = Some(s);
                     used_channel_id = cid;
                     // 记录映射结果：流计费守卫用上游名计价/记账
-                    used_upstream = Some(upstream);
+                    used_upstream = Some(upstream.clone());
                     cont_bridge = Some(bridge);
-                    cont_req = Some(attempt_req);
+                    // 续写轮按上游真名再发：共享基座的 model 可能仍是入口名，
+                    // 仅在续写开启时按需生成覆盖副本（一次，非逐候选）。
+                    cont_req = if crate::continuation::plan().is_some() {
+                        Some(crate::continuation::with_upstream_model(
+                            Arc::clone(&attempt_req),
+                            &upstream,
+                        ))
+                    } else {
+                        None
+                    };
                     break;
                 }
                 Err(e) => {
@@ -1513,27 +1556,41 @@ pub(crate) async fn handle_chat_completions(
                 )));
                 continue;
             }
-            // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
-            let mut attempt_req = (*chat_req).clone();
-            attempt_req.model = upstream.clone();
-            // 提供商覆盖层重套（模型覆盖 > 提供商覆盖 > 全局）：failover 到
-            // 不同 provider 的渠道时按那一家的覆盖重建消息。判据 False 时
-            // None → 保持入口层结果（默认路径零开销）。重建后必须重跑 purge
-            // ——重建的消息来自 purge 前快照，本尝试的治理产物要在此补齐。
-            if let Some(pre_purge) = pre_purge_messages.as_ref() {
+            // 本次尝试的请求体：默认共享 `base_req`，上游模型名通过
+            // `chat_with_model` 覆盖（不再为改 model 深拷贝整包对话）。仅当提供商
+            // 覆盖层要重建消息、或脱敏按 provider 分作用域时才拥有副本。
+            let rebuilt = pre_purge_messages.as_ref().and_then(|pre_purge| {
                 let provider = sanitize_provider_id(&state, ch_ref.as_ref());
-                if let Some(mut rebuilt) = crate::prompt::provider_prompt_rebuild(
+                crate::prompt::provider_prompt_rebuild(
                     &model,
                     &provider,
                     pre_purge,
                     &gateway_prompt,
-                ) {
+                )
+                .map(|mut rebuilt| {
                     crate::purge::apply_request(&mut rebuilt, &purge_cfg, &model);
-                    attempt_req.messages = rebuilt;
+                    rebuilt
+                })
+            });
+            let needs_owned = rebuilt.is_some() || (sanitize_enabled && !sanitize_globally);
+            let attempt_req: Arc<ChatFormat> = if needs_owned {
+                let mut owned = (*base_req).clone();
+                owned.model = upstream.clone();
+                if let Some(rebuilt) = rebuilt {
+                    owned.messages = rebuilt;
+                    // 重建消息来自 purge 前快照、绕过了预脱敏，这里补齐
+                    if sanitize_globally {
+                        crate::sanitize::sanitize_messages_for_provider("", &mut owned.messages);
+                    }
                 }
-            }
-            // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
-            sanitize_attempt_messages(&state, ch_ref.as_ref(), &mut attempt_req.messages);
+                // 出站脱敏：在这一家即将发送之前判定（provider 作用域，A2A 同口径）
+                if !sanitize_globally {
+                    sanitize_attempt_messages(&state, ch_ref.as_ref(), &mut owned.messages);
+                }
+                Arc::new(owned)
+            } else {
+                Arc::clone(&base_req)
+            };
             attempt_counter += 1;
             let attempt_index = attempt_counter;
             if attempt_index > 1 {
@@ -1549,9 +1606,8 @@ pub(crate) async fn handle_chat_completions(
                 ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
             attempt_guard.model = upstream.clone();
             // R4：Arc 共享给守卫（同流式路径），避免每轮第二次整包深拷贝
-            let attempt_req = Arc::new(attempt_req);
             attempt_guard.chat_req = Arc::clone(&attempt_req);
-            match bridge.chat(&attempt_req, &ctx).await {
+            match bridge.chat_with_model(&attempt_req, &upstream, &ctx).await {
                 Ok(resp) => {
                     // #47：响应已收 → 计费接管点（下方 settle_usage 记账）
                     attempt_guard.handoff();
@@ -1708,9 +1764,18 @@ pub(crate) async fn handle_chat_completions(
                     }
                     response_opt = Some(resp);
                     used_channel_id = cid;
-                    used_upstream = Some(upstream);
+                    used_upstream = Some(upstream.clone());
                     cont_bridge = Some(bridge);
-                    cont_req = Some(attempt_req);
+                    // 续写轮按上游真名再发：共享基座的 model 可能仍是入口名，
+                    // 仅在续写开启时按需生成覆盖副本（一次，非逐候选）。
+                    cont_req = if crate::continuation::plan().is_some() {
+                        Some(crate::continuation::with_upstream_model(
+                            Arc::clone(&attempt_req),
+                            &upstream,
+                        ))
+                    } else {
+                        None
+                    };
                     break;
                 }
                 Err(e) => {

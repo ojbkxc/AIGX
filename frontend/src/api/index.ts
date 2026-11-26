@@ -35,6 +35,9 @@ import { endpoints as agent_chatEndpoints } from './endpoints/agent_chat';
 import { endpoints as prompts_publicEndpoints } from './endpoints/prompts_public';
 import { endpoints as miscEndpoints } from './endpoints/misc';
 import { endpoints as notifyBarkEndpoints } from './endpoints/notify';
+import { endpoints as sidebarLayoutEndpoints } from './endpoints/sidebarLayout';
+import { endpoints as imageCompressEndpoints } from './endpoints/imageCompress';
+import { endpoints as assistantEndpoints } from './endpoints/assistant';
 
 export const api = {
   ...storage_reportsEndpoints,
@@ -47,7 +50,20 @@ export const api = {
   ...prompts_publicEndpoints,
   ...miscEndpoints,
   ...notifyBarkEndpoints,
+  ...sidebarLayoutEndpoints,
+  ...imageCompressEndpoints,
+  ...assistantEndpoints,
 };
+
+// 助手流式通道与图片地址不是 `api` 对象方法（一个要逐帧回调、一个直接做 src），单独 re-export。
+export { assistantChatStream, assistantImageFileUrl } from './endpoints/assistant';
+export type {
+  AssistantChatRequest,
+  AssistantConfigWire,
+  AssistantImageRequest,
+  AssistantSessionDetail,
+  AssistantSessionSummary,
+} from './endpoints/assistant';
 
 export default api;
 

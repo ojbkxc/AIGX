@@ -1053,6 +1053,43 @@ pub trait Bridge: Send + Sync + 'static {
         ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError>;
 
+    /// 非流式聊天补全，上游模型名由调用方覆盖。
+    ///
+    /// failover 每个候选只需改 `model`（渠道映射后的上游名），消息体在各候选间
+    /// 完全一致。默认实现按「是否需要覆盖」决定是否克隆：模型未变化直接借用；
+    /// 变化时克隆一次后改写（与旧 failover 的 `(*req).clone()` 等价）。能直接从
+    /// 覆盖模型构造上游体的 bridge 覆写本方法，从而在多候选重试间共享消息体。
+    async fn chat_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        if model == req.model {
+            self.chat(req, ctx).await
+        } else {
+            let mut owned = req.clone();
+            owned.model = model.to_string();
+            self.chat(&owned, ctx).await
+        }
+    }
+
+    /// 流式聊天补全的上游模型覆盖版。语义同 [`Bridge::chat_with_model`]。
+    async fn chat_stream_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        if model == req.model {
+            self.chat_stream(req, ctx).await
+        } else {
+            let mut owned = req.clone();
+            owned.model = model.to_string();
+            self.chat_stream(&owned, ctx).await
+        }
+    }
+
     /// 嵌入调用
     async fn embed(
         &self,

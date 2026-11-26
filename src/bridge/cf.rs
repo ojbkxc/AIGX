@@ -287,18 +287,15 @@ impl CloudflareBridge {
     }
 }
 
-#[async_trait]
-impl Bridge for CloudflareBridge {
-    fn name(&self) -> &'static str {
-        "cloudflare"
-    }
-
-    async fn chat(
+impl CloudflareBridge {
+    /// chat 的实际实现；`model` 为上游模型名（failover 可覆盖），消息体按引用共享。
+    async fn chat_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         _ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
-        let cf_model = self.model_mapper.resolve(&req.model);
+        let cf_model = self.model_mapper.resolve(model);
         let cf_body = self.build_cf_body(req);
 
         let result = self
@@ -371,19 +368,21 @@ impl Bridge for CloudflareBridge {
 
         Ok(ChatResponse {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-            model: req.model.clone(),
+            model: model.to_string(),
             message: msg,
             finish_reason,
             usage: UsageStats::new(prompt_tokens, completion_tokens),
         })
     }
 
-    async fn chat_stream(
+    /// chat_stream 的实际实现；语义同 [`CloudflareBridge::chat_impl`]。
+    async fn chat_stream_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         _ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
-        let cf_model = self.model_mapper.resolve(&req.model);
+        let cf_model = self.model_mapper.resolve(model);
         let mut cf_body = self.build_cf_body(req);
         // CF Workers AI: 流式输出需显式带 stream:true，返回 OpenAI 风格 SSE
         cf_body["stream"] = Value::Bool(true);
@@ -395,7 +394,7 @@ impl Bridge for CloudflareBridge {
             .map_err(|e| Self::map_cf_error(&e))?;
 
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-        let model = req.model.clone();
+        let model = model.to_string();
 
         let mut decoder = crate::sse::SseDecoder::new();
         let id_clone = id.clone();
@@ -432,7 +431,46 @@ impl Bridge for CloudflareBridge {
 
         Ok(Box::pin(stream))
     }
+}
 
+#[async_trait]
+impl Bridge for CloudflareBridge {
+    fn name(&self) -> &'static str {
+        "cloudflare"
+    }
+
+    async fn chat(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, model, ctx).await
+    }
+    async fn chat_stream(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_stream_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, model, ctx).await
+    }
     async fn embed(
         &self,
         req: &EmbeddingRequest,

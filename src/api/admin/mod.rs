@@ -4,6 +4,7 @@ pub mod accounts_query; // 账号列表查询/分页 + 凭证替换（对齐 A2A
 pub mod agents; // 本机 Agent 客户端接入（对齐 A2A core/agents + /api/agents*）
 pub mod aliases; // A2A 兼容别名（/api/{timeouts,retry,cors} → 同一份配置）
 pub mod assistant;
+pub mod assistant_config; // 助手服务端配置（GET/PUT /api/assistant/config，服务端权威整块替换）
 pub mod auth;
 pub mod backup;
 pub mod backup_crypto;
@@ -22,6 +23,7 @@ pub mod desktop_import;
 pub mod diagnostics;
 pub mod guardrail;
 pub mod image_compat_api; // 图片压缩与视觉兼容设置面（对照 Agent2API /api/image-compat/settings）
+pub mod image_compress; // 会话图片压缩设置（GET/PUT /api/image-compress）
 pub mod logs;
 pub mod maintenance; // 维护任务管理面（对齐 A2A api/maintenance.rs；T7 填充）
 pub mod mcp;
@@ -57,6 +59,7 @@ pub mod scheduled_tasks;
 pub mod script_plugins; // 脚本插件管理面（Magpie 脚本包：目录/安装/启停/卸载/配置/宿主）
 pub mod security;
 pub mod settings;
+pub mod sidebar_layout; // 侧边栏布局权威副本（GET/PUT /api/sidebar-layout）
 pub mod subscriptions;
 pub mod sync;
 pub mod system_info; // 系统信息（对照 Agent2API GET /api/system-info；版本/环境/路径/开关/计数）

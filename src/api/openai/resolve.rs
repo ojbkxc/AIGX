@@ -390,12 +390,14 @@ pub(crate) fn resolve_bridges_needs(
         } else {
             Some(&capability_gate)
         };
-        state.channel_store.select_for_model_by_strategy_filtered(
-            model,
-            profile.strategy,
-            &state.pricing_store,
-            coarse,
-        )
+        state
+            .channel_store
+            .select_for_model_by_strategy_filtered_arc(
+                model,
+                profile.strategy,
+                &state.pricing_store,
+                coarse,
+            )
     };
     let plan = crate::channel::routing_policy::plan_route(&policy, &profile, &candidates);
     // #40 §2 账号级规则（参与名单 / 排序规则）：档案里真配了内容才构造
@@ -405,7 +407,9 @@ pub(crate) fn resolve_bridges_needs(
         || !profile.scope.excluded_accounts.is_empty())
     .then(|| std::sync::Arc::new(profile.scope.clone()));
     let account_sort_rules = profile.sort_rules.clone();
-    for ch in plan.iter() {
+    for idx in plan.indices() {
+        // 候选是 `Arc<Channel>`：按原始下标取回 Arc 指针（不 clone 渠道本体）。
+        let ch = &candidates[idx];
         // 统一模型管理里按 (provider, model) 关掉的模型不再进候选。
         // 账号型渠道的 provider 由账号决定，渠道级无从判断 —— 那一层由
         // `AccountSessionStore::acquire` 按账号白名单过滤，这里跳过即可。
@@ -441,7 +445,7 @@ pub(crate) fn resolve_bridges_needs(
             | crate::channel::ChannelType::Gemini
             | crate::channel::ChannelType::Zai => {
                 if let Some(bridge) = build_channel_bridge_at(state, ch, &ch.base_url) {
-                    result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
+                    result.push((bridge, Some(ch.id.clone()), Some((**ch).clone())));
                 }
             }
             crate::channel::ChannelType::Account => {
@@ -462,12 +466,12 @@ pub(crate) fn resolve_bridges_needs(
                     .with_account_rules(account_scope.clone(), account_sort_rules.clone())
                     .with_capabilities(needs_mask),
                 );
-                result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
+                result.push((bridge, Some(ch.id.clone()), Some((**ch).clone())));
             }
             crate::channel::ChannelType::Cloudflare => {
                 // CF 渠道走 Hub 专用桥接
                 if let Some(b) = state.hub.get_specialized("cloudflare") {
-                    result.push((b, Some(ch.id.clone()), Some(ch.clone())));
+                    result.push((b, Some(ch.id.clone()), Some((**ch).clone())));
                 }
             }
             crate::channel::ChannelType::Plugin => {
@@ -487,7 +491,7 @@ pub(crate) fn resolve_bridges_needs(
                     result.push((
                         Arc::new(crate::bridge::plugin::PluginBridge::new(process, provider)),
                         Some(ch.id.clone()),
-                        Some(ch.clone()),
+                        Some((**ch).clone()),
                     ));
                 } else if let Some(route) = state.script_host.route_for_provider(&provider) {
                     result.push((
@@ -496,7 +500,7 @@ pub(crate) fn resolve_bridges_needs(
                             route.provider,
                         )),
                         Some(ch.id.clone()),
-                        Some(ch.clone()),
+                        Some((**ch).clone()),
                     ));
                 } else if let Some(host) = crate::plugin_host::wasm::host_for_provider(&provider)
                     .filter(|_| state.plugin_host.registry().is_plugin_owned(&provider))
@@ -515,7 +519,7 @@ pub(crate) fn resolve_bridges_needs(
                             host, provider,
                         )),
                         Some(ch.id.clone()),
-                        Some(ch.clone()),
+                        Some((**ch).clone()),
                     ));
                 }
             }
@@ -1043,6 +1047,10 @@ pub(crate) async fn chat_stream_with_backup_entries(
 }
 
 /// 渠道候选元组：bridge + 渠道 id + 渠道快照（映射/成本价解析用）。
+///
+/// 数据面选路阶段用 `Arc<Channel>` 共享（见 `channel_store` 的 `_arc` 选择器）；
+/// 到这里才 clone 出 owned `Channel`——每个候选仅深拷贝**一次**，而不是
+/// 选路/裁剪/failover 各拷一遍。
 pub(crate) type BridgeCandidate = (
     Arc<dyn Bridge>,
     Option<String>,

@@ -676,6 +676,20 @@ pub struct ChannelStore {
 /// `AccountSessionStore::channel_may_serve` 只读两把锁 + 掩码比较）。
 pub type ChannelGate<'a> = &'a dyn Fn(&Channel) -> bool;
 
+/// 渠道的「家」键（`RouteStrategy::Provider` 分组用）。
+///
+/// 与 `plan_route` 的 provider 口径同源：插件渠道取真实 `plugin_provider`；
+/// 账号型渠道没有单一 provider（真正干活的是账号，`AccountBridge` 内已按
+/// 账号轮询），渠道级把它自身视作独立一家；其余渠道取协议族
+/// （`channel_type.as_str()`）。
+fn channel_family_key(ch: &Channel) -> &str {
+    match ch.channel_type {
+        ChannelType::Plugin => ch.plugin_provider.as_str(),
+        ChannelType::Account => ch.id.as_str(),
+        other => other.as_str(),
+    }
+}
+
 /// 单渠道目录漂移对账（P2-6②，**只读**）：声明 vs 发现差异 + 悬空映射统计。
 ///
 /// `discovered` = 本轮拉回的上游模型清单。有效清单（`alive`）＝`models` 非空用
@@ -1072,8 +1086,86 @@ impl ChannelStore {
         model: &str,
         coarse: Option<ChannelGate<'_>>,
     ) -> Vec<Channel> {
-        let mut candidates: Vec<Channel> = self
-            .channels
+        // 兼容包装：管理面/测试仍要 owned 渠道；数据面走 `_arc` 版本避免深拷贝。
+        self.select_for_model_filtered_arc(model, coarse)
+            .into_iter()
+            .map(|c| (*c).clone())
+            .collect()
+    }
+
+    /// [`Self::select_for_model_filtered`] 的 `Arc` 版本（数据面热路径）。
+    ///
+    /// 每请求都会调用；返回的 `Arc<Channel>` 让下游（`plan_route` 裁剪、
+    /// `BridgeCandidate`、failover 循环）只做指针 clone，不再重复深拷贝
+    /// `Channel`（含 4 个 Vec + 2 个 HashMap）。从存储快照克隆**一次**进
+    /// `Arc`，之后一路共享；算法（priority 分组 + 组内加权随机）与 owned
+    /// 版本逐字节等价（同一 RNG 抽样序列）。
+    pub fn select_for_model_filtered_arc(
+        &self,
+        model: &str,
+        coarse: Option<ChannelGate<'_>>,
+    ) -> Vec<Arc<Channel>> {
+        let mut candidates = self.collect_candidates(model, coarse);
+
+        // 按 priority 降序分组，组内按 weight 加权随机
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.priority));
+        // 用 Option 池把 Channel **移动**进 Arc，避免 `candidates[pick].clone()`
+        // 那一次额外深拷贝（这正是本项改造要消掉的成本）。
+        let mut pool: Vec<Option<Channel>> = candidates.into_iter().map(Some).collect();
+        let mut result: Vec<Arc<Channel>> = Vec::with_capacity(pool.len());
+        let mut i = 0;
+        let mut rng = rand::thread_rng();
+        while i < pool.len() {
+            // i 始终落在「尚未取走」的候选区间，as_ref 必为 Some。
+            let prio = pool[i].as_ref().expect("候选槽位在分组前不会取走").priority;
+            let mut group = Vec::new();
+            let mut total_weight = 0u32;
+            while i < pool.len()
+                && pool[i].as_ref().expect("候选槽位在分组前不会取走").priority == prio
+            {
+                let ch = pool[i].as_ref().unwrap();
+                total_weight += ch.weight.max(1);
+                group.push(i);
+                i += 1;
+            }
+            // 加权随机抽取
+            while !group.is_empty() {
+                let pick = if total_weight == 0 {
+                    // L2 安全性说明：此处 group 非空（外层 while 条件保证），
+                    // 故 slice::choose 必返回 Some，unwrap 不会 panic。
+                    // 实际上 total_weight 由各 weight.max(1) 累加，每项 ≥1，
+                    // group 非空时 total_weight ≥1，此分支理论上不可达，属防御性回退。
+                    group.choose(&mut rng).copied().unwrap()
+                } else {
+                    let mut r = rng.gen_range(0..total_weight);
+                    let mut chosen = group[0];
+                    for &idx in &group {
+                        let w = pool[idx].as_ref().unwrap().weight.max(1);
+                        if r < w {
+                            chosen = idx;
+                            break;
+                        }
+                        r -= w;
+                    }
+                    chosen
+                };
+                let ch = pool[pick].take().expect("候选槽位不会重复取走");
+                total_weight = total_weight.saturating_sub(ch.weight.max(1));
+                result.push(Arc::new(ch));
+                group.retain(|&x| x != pick);
+            }
+        }
+        result
+    }
+
+    /// 候选构造阶段（过滤 + 从存储克隆一次，保持存储顺序）。
+    ///
+    /// 过滤条件与 [`Self::select_for_model_filtered_arc`] 完全一致（启用 /
+    /// 模型声明 / 冷却 / 断路器 / AIMD / 能力粗筛）。顺序优先与家内轮询需要
+    /// **确定性**候选线，因此把「过滤」与「策略排序」拆开，避免顺序语义被
+    /// 加权随机的摇序污染。
+    fn collect_candidates(&self, model: &str, coarse: Option<ChannelGate<'_>>) -> Vec<Channel> {
+        self.channels
             .read()
             .iter()
             .filter(|c| {
@@ -1090,49 +1182,61 @@ impl ChannelStore {
                     && coarse.is_none_or(|gate| gate(c))
             })
             .cloned()
-            .collect();
+            .collect()
+    }
 
-        // 按 priority 降序分组，组内按 weight 加权随机
+    /// 顺序优先 / 队首独占（对齐上游 `order`）：priority 降序、同优先级按
+    /// 存储顺序（稳定排序）——队首即首挑，后续只作 failover 顺延。
+    pub fn select_for_model_order_arc(
+        &self,
+        model: &str,
+        coarse: Option<ChannelGate<'_>>,
+    ) -> Vec<Arc<Channel>> {
+        let mut candidates = self.collect_candidates(model, coarse);
         candidates.sort_by_key(|b| std::cmp::Reverse(b.priority));
-        let mut result = Vec::with_capacity(candidates.len());
-        let mut i = 0;
-        let mut rng = rand::thread_rng();
-        while i < candidates.len() {
-            let prio = candidates[i].priority;
-            let mut group = Vec::new();
-            let mut total_weight = 0u32;
-            while i < candidates.len() && candidates[i].priority == prio {
-                total_weight += candidates[i].weight.max(1);
-                group.push(i);
-                i += 1;
-            }
-            // 加权随机抽取
-            while !group.is_empty() {
-                let pick = if total_weight == 0 {
-                    // L2 安全性说明：此处 group 非空（外层 while 条件保证），
-                    // 故 slice::choose 必返回 Some，unwrap 不会 panic。
-                    // 实际上 total_weight 由各 weight.max(1) 累加，每项 ≥1，
-                    // group 非空时 total_weight ≥1，此分支理论上不可达，属防御性回退。
-                    group.choose(&mut rng).copied().unwrap()
-                } else {
-                    let mut r = rng.gen_range(0..total_weight);
-                    let mut chosen = group[0];
-                    for &idx in &group {
-                        let w = candidates[idx].weight.max(1);
-                        if r < w {
-                            chosen = idx;
-                            break;
-                        }
-                        r -= w;
-                    }
-                    chosen
-                };
-                result.push(candidates[pick].clone());
-                total_weight = total_weight.saturating_sub(candidates[pick].weight.max(1));
-                group.retain(|&x| x != pick);
+        candidates.into_iter().map(Arc::new).collect()
+    }
+
+    /// 家内轮询（对齐上游 `provider`）：家之间按「家内最优候选的优先级」
+    /// 保持先后（= 各家首次出现的位置），同一家内部按游标轮流使用。
+    ///
+    /// 「家」的判定与 `plan_route` 的 provider 口径同源：
+    /// - 插件渠道 → `plugin_provider`（真实 provider）；
+    /// - 账号型渠道 → 渠道自身（账号级轮询已在 `AccountBridge` 内完成，
+    ///   渠道级把它视作独立一家，避免把不同账号池错误合并）；
+    /// - 其余 → `channel_type`。
+    pub fn select_for_model_provider_arc(
+        &self,
+        model: &str,
+        coarse: Option<ChannelGate<'_>>,
+    ) -> Vec<Arc<Channel>> {
+        let ordered = self.select_for_model_order_arc(model, coarse);
+        // 按首次出现切段：有序线上某家第一次出现的位置 = 该家最优优先级，
+        // 段序即为「各家最优候选之间」的优先级顺序（与上游 `provider_order` 一致）。
+        let mut groups: Vec<(String, Vec<Arc<Channel>>)> = Vec::new();
+        for ch in ordered {
+            let key = channel_family_key(&ch).to_string();
+            match groups.iter_mut().find(|(name, _)| *name == key) {
+                Some((_, members)) => members.push(ch),
+                None => groups.push((key, vec![ch])),
             }
         }
-        result
+        let mut arranged: Vec<Arc<Channel>> = Vec::new();
+        for (key, members) in groups {
+            let len = members.len();
+            if len <= 1 {
+                arranged.extend(members);
+                continue;
+            }
+            // 家内游标：与 round_robin 共用同一把 per-group 计数器
+            // （按 model + 家区分；取模只对**这一家过滤后的成员数**做）。
+            let group_id = format!("provider:{model}:{key}");
+            let start = self.balancer.next_index(&group_id, len);
+            for offset in 0..len {
+                arranged.push(Arc::clone(&members[(start + offset) % len]));
+            }
+        }
+        arranged
     }
 
     /// 渠道是否处于冷却期（**纯查询，无副作用**）。
@@ -1799,7 +1903,24 @@ impl ChannelStore {
         pricing_store: &crate::pricing::PricingStore,
         coarse: Option<ChannelGate<'_>>,
     ) -> Vec<Channel> {
-        let candidates = self.select_for_model_filtered(model, coarse);
+        self.select_for_model_ranked_filtered_arc(model, pricing_store, coarse)
+            .into_iter()
+            .map(|c| (*c).clone())
+            .collect()
+    }
+
+    /// [`Self::select_for_model_ranked_filtered`] 的 `Arc` 版本（数据面热路径）。
+    ///
+    /// 组内重排仍需 owned `(Channel, u32)` 喂给调度器（评分只依赖字段），
+    /// 故该路径比 weighted 多一次深拷贝；评分结果再 **move** 进 `Arc`，
+    /// 不再产生第三份拷贝。
+    pub fn select_for_model_ranked_filtered_arc(
+        &self,
+        model: &str,
+        pricing_store: &crate::pricing::PricingStore,
+        coarse: Option<ChannelGate<'_>>,
+    ) -> Vec<Arc<Channel>> {
+        let candidates = self.select_for_model_filtered_arc(model, coarse);
         if candidates.len() <= 1 {
             return candidates;
         }
@@ -1807,7 +1928,7 @@ impl ChannelStore {
         // 设定的硬约束（「这组渠道优先用」），不能被自动评分推翻 —— 否则
         // 把低优先级渠道的分数抬上去会让管理员的配置失效。同组内才比较
         // health / cost / rpm。
-        let mut result: Vec<Channel> = Vec::with_capacity(candidates.len());
+        let mut result: Vec<Arc<Channel>> = Vec::with_capacity(candidates.len());
         let mut group_start = 0;
         while group_start < candidates.len() {
             let priority = candidates[group_start].priority;
@@ -1815,12 +1936,16 @@ impl ChannelStore {
             while group_end < candidates.len() && candidates[group_end].priority == priority {
                 group_end += 1;
             }
-            let group: Vec<Channel> = candidates[group_start..group_end].to_vec();
+            let group: Vec<Arc<Channel>> = candidates[group_start..group_end].to_vec();
             if group.len() <= 1 {
                 result.extend(group);
             } else {
-                let pairs: Vec<(Channel, u32)> =
-                    group.iter().map(|c| (c.clone(), c.weight.max(1))).collect();
+                // 调度器接口仍是 owned `(Channel, u32)`：从 Arc 深拷贝一份
+                // （ranked 路径本身要做评分，这份代价可接受）。
+                let pairs: Vec<(Channel, u32)> = group
+                    .iter()
+                    .map(|c| ((**c).clone(), c.weight.max(1)))
+                    .collect();
                 let mut rpm_overrides: HashMap<String, f64> = HashMap::new();
                 for (ch, _) in &pairs {
                     if let Some(snapshot) = self.aimd_snapshot(&ch.id) {
@@ -1844,7 +1969,7 @@ impl ChannelStore {
                 );
                 let scheduler = self.scheduler.read();
                 let ranked = scheduler::rank_candidates(pairs, &ctx, &*scheduler);
-                result.extend(ranked.into_iter().map(|(ch, _)| ch));
+                result.extend(ranked.into_iter().map(|(ch, _)| Arc::new(ch)));
             }
             group_start = group_end;
         }
@@ -1883,7 +2008,13 @@ impl ChannelStore {
     /// 与 `select_for_model` 的加权随机不同，本方法提供确定性轮询，适合需要
     /// 均匀分布的场景。组 ID 用 model（同模型的候选组内轮询）。
     pub fn select_for_model_round_robin(&self, model: &str) -> Option<Channel> {
-        let candidates = self.select_for_model(model);
+        self.select_for_model_round_robin_arc(model)
+            .map(|c| (*c).clone())
+    }
+
+    /// [`Self::select_for_model_round_robin`] 的 `Arc` 版本。
+    pub fn select_for_model_round_robin_arc(&self, model: &str) -> Option<Arc<Channel>> {
+        let candidates = self.select_for_model_filtered_arc(model, None);
         let group_id = format!("model:{model}");
         self.balancer.next(&group_id, &candidates).cloned()
     }
@@ -2220,17 +2351,37 @@ impl ChannelStore {
         pricing_store: &crate::pricing::PricingStore,
         coarse: Option<ChannelGate<'_>>,
     ) -> Vec<Channel> {
+        self.select_for_model_by_strategy_filtered_arc(model, strategy, pricing_store, coarse)
+            .into_iter()
+            .map(|c| (*c).clone())
+            .collect()
+    }
+
+    /// [`Self::select_for_model_by_strategy_filtered`] 的 `Arc` 版本
+    /// （数据面热路径）：三个策略分支都只产出 `Arc<Channel>`，下游 failover
+    /// 循环与 `BridgeCandidate` 共享指针，不再逐候选深拷贝渠道本体。
+    pub fn select_for_model_by_strategy_filtered_arc(
+        &self,
+        model: &str,
+        strategy: routing_policy::RouteStrategy,
+        pricing_store: &crate::pricing::PricingStore,
+        coarse: Option<ChannelGate<'_>>,
+    ) -> Vec<Arc<Channel>> {
         match strategy {
             routing_policy::RouteStrategy::Ranked => {
-                self.select_for_model_ranked_filtered(model, pricing_store, coarse)
+                self.select_for_model_ranked_filtered_arc(model, pricing_store, coarse)
+            }
+            routing_policy::RouteStrategy::Order => self.select_for_model_order_arc(model, coarse),
+            routing_policy::RouteStrategy::Provider => {
+                self.select_for_model_provider_arc(model, coarse)
             }
             routing_policy::RouteStrategy::RoundRobin => {
-                let mut candidates = self.select_for_model_filtered(model, coarse);
+                let mut candidates = self.select_for_model_filtered_arc(model, coarse);
                 if candidates.len() <= 1 {
                     return candidates;
                 }
                 let top_prio = candidates[0].priority;
-                let mut group: Vec<Channel> = candidates
+                let mut group: Vec<Arc<Channel>> = candidates
                     .iter()
                     .filter(|c| c.priority == top_prio)
                     .cloned()
@@ -2253,7 +2404,7 @@ impl ChannelStore {
                 candidates
             }
             routing_policy::RouteStrategy::Weighted => {
-                self.select_for_model_filtered(model, coarse)
+                self.select_for_model_filtered_arc(model, coarse)
             }
         }
     }

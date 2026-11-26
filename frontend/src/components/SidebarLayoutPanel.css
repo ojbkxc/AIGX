@@ -1,0 +1,165 @@
+/* 侧边栏菜单编辑面板（components/SidebarLayoutPanel.tsx）专用样式。
+   与 Sidebar.css 分开：那一组只服务侧栏本体，这一组只服务设置页编辑面板。 */
+
+.sl-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.sl-group {
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg, transparent);
+  overflow: hidden;
+}
+
+.sl-group.is-hidden {
+  opacity: 0.62;
+}
+
+.sl-group.is-dragging {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.sl-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--btn-secondary-bg, rgba(148, 163, 184, 0.1));
+  min-width: 0;
+}
+
+.sl-grip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 20px;
+  color: var(--text-muted);
+  cursor: grab;
+  border-radius: 4px;
+}
+.sl-grip:hover { color: var(--text-main); }
+.sl-grip:active { cursor: grabbing; }
+
+.sl-group-title {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 4px;
+  border-radius: 5px;
+  cursor: text;
+}
+.sl-group-title:hover { background: var(--sidebar-menu-hover, rgba(148, 163, 184, 0.14)); }
+
+.sl-rename {
+  width: 140px;
+  padding: 3px 6px !important;
+}
+
+.sl-group-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sl-group-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sl-move-select {
+  width: auto;
+  min-width: 96px;
+  padding: 3px 6px !important;
+  font-size: 12px;
+}
+
+.sl-items {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+
+.sl-item {
+  display: grid;
+  grid-template-columns: 18px 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+}
+
+.sl-item:hover { background: var(--sidebar-menu-hover, rgba(148, 163, 184, 0.1)); }
+
+.sl-item.is-hidden { opacity: 0.55; }
+
+.sl-item.is-dragging {
+  pointer-events: none;
+  opacity: 0.4;
+}
+
+.sl-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.sl-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.sl-fixed {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+}
+
+.sl-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sl-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.sl-add-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+}
+
+.sl-add-form .form-input {
+  max-width: 220px;
+}
+
+/* 拖动期间禁止选中文字（否则快速拖会选中整行） */
+body.sl-dragging {
+  user-select: none;
+  cursor: grabbing;
+}

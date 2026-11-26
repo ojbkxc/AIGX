@@ -914,8 +914,10 @@ impl StreamBillingState {
     /// `errored` = 流中途出错：请求日志 status_code 记 500 而非 200，
     /// 失败率统计不失真（此前流式出错仍按 200 记录）。
     /// 返回 (prompt_tokens, completion_tokens) 供调用方提交限流记账。
-    /// 同步估算 token（Drop 兜底路径用；async 路径走
-    /// [`Self::finalize_with_token_estimates`] 的 spawn_blocking 预估算）
+    /// 同步估算 token（纯 CPU BPE）。
+    ///
+    /// 仅供 [`StreamUsageGuard`] 的 Drop 兜底路径使用：Drop 不能 await，
+    /// 调用方会先把它丢到阻塞线程池执行，避免 BPE 编码堵住 tokio worker。
     fn estimate_tokens(&self) -> (u64, u64) {
         let output_text = self.acc.lock().clone();
         let completion_tokens = crate::token_estimate::count_text(&self.model, &output_text) as u64;
@@ -1156,23 +1158,44 @@ pub(crate) struct ResponsesBillingState {
     pub(crate) debug_request_body: Option<String>,
 }
 impl ResponsesBillingState {
+    /// 上游 usage 缺失侧的本地估算（纯 CPU BPE）。
+    ///
+    /// 拆成独立方法，让 [`ResponsesStreamGuard`] 的 Drop 先把估算丢到阻塞
+    /// 线程池执行（BPE 每 64KB 切片一次正则编码，大 prompt / 长输出在 tokio
+    /// worker 上同步跑会堵住数毫秒到数十毫秒），再回运行时做计费/日志。
+    fn compute_tokens(&self) -> (u64, u64, u64) {
+        let (mut prompt_tokens, mut completion_tokens, cached_tokens) =
+            self.usage.lock().unwrap_or((0, 0, 0));
+        // 上游未上报 usage 的侧逐项估算
+        if prompt_tokens == 0 {
+            prompt_tokens = crate::token_estimate::count_text(&self.model, &self.input_text) as u64;
+        }
+        if completion_tokens == 0 {
+            let output_text = self.acc.lock().clone();
+            completion_tokens = crate::token_estimate::count_text(&self.model, &output_text) as u64;
+        }
+        (prompt_tokens, completion_tokens, cached_tokens)
+    }
+
     /// 计费三件套：usage 累计 + charge_usage + 请求日志。
     ///
     /// 上游 usage（权威值）优先；缺失的侧逐项回退 token 估算
     /// （能估就估，拿不到就 0）。返回 (prompt_tokens, completion_tokens)
     /// 供限流记账。`errored` = 流中途出错时日志 status_code 记 500。
     pub(crate) fn finalize(&self, errored: bool) -> (u64, u64) {
-        let (mut prompt_tokens, mut completion_tokens, cached_tokens) =
-            self.usage.lock().unwrap_or((0, 0, 0));
-        let output_text = self.acc.lock().clone();
-        // 上游未上报 usage 的侧逐项估算
-        if prompt_tokens == 0 {
-            prompt_tokens = crate::token_estimate::count_text(&self.model, &self.input_text) as u64;
-        }
-        if completion_tokens == 0 {
-            completion_tokens = crate::token_estimate::count_text(&self.model, &output_text) as u64;
-        }
+        let (prompt_tokens, completion_tokens, cached_tokens) = self.compute_tokens();
+        self.finalize_with_tokens(errored, prompt_tokens, completion_tokens, cached_tokens)
+    }
 
+    /// 计数注入版 finalize：token 估算已在外层（阻塞线程池）算好，
+    /// 此处只做同步计费/日志，不再跑 BPE。
+    fn finalize_with_tokens(
+        &self,
+        errored: bool,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cached_tokens: u64,
+    ) -> (u64, u64) {
         // 累计用量
         self.state
             .usage_tracker
@@ -1243,6 +1266,65 @@ pub(crate) struct ResponsesStreamGuard {
     pub(crate) billing: Arc<ResponsesBillingState>,
 }
 
+/// 计费收尾的 Prometheus 指标（断连兜底路径上报；正常路径由后缀事件上报）。
+///
+/// chat / responses 两条流式兜底共用：模型 + 渠道 + 真实耗时 + token 计。
+fn record_billing_completion_metrics(
+    model: &str,
+    channel_id: Option<&str>,
+    started: std::time::Instant,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) {
+    crate::metrics::global().record_request(
+        model,
+        channel_id.unwrap_or("unknown"),
+        "ok",
+        started.elapsed().as_millis() as u64,
+    );
+    crate::metrics::global().record_tokens(model, "prompt", prompt_tokens);
+    crate::metrics::global().record_tokens(model, "completion", completion_tokens);
+}
+
+/// 事后限流记账（TPM）：Drop 中不能 await，交后台任务补交。
+fn spawn_rate_bundle_commit(
+    rate_bundle: Option<crate::ratelimit::ReservationBundle>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) {
+    if let Some(bundle) = rate_bundle {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let _ = handle.spawn(async move {
+                bundle
+                    .commit_tokens(prompt_tokens + completion_tokens)
+                    .await;
+            });
+        }
+    }
+}
+
+/// 断连兜底收尾（在运行时任务内执行）：token 估算已由阻塞线程池完成，
+/// 此处只做同步计费/日志/指标（`notify_spawn` 等依赖运行时上下文）。
+fn finalize_stream_billing(
+    billing: &Arc<StreamBillingState>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) {
+    billing.finalize_with_token_estimates(false, prompt_tokens, completion_tokens);
+    record_billing_completion_metrics(
+        &billing.model,
+        billing.channel_id.as_deref(),
+        billing.request_start,
+        prompt_tokens,
+        completion_tokens,
+    );
+    spawn_rate_bundle_commit(
+        billing.rate_bundle.clone(),
+        prompt_tokens,
+        completion_tokens,
+    );
+}
+
 impl Drop for StreamUsageGuard {
     fn drop(&mut self) {
         // 原子抢占计费权：仅当后缀事件未执行计费时（swap 返回 false）才兜底
@@ -1253,29 +1335,35 @@ impl Drop for StreamUsageGuard {
         {
             return; // 正常路径已计费，无需重复
         }
-        // Drop 中不能 await：计费本身（token 估算/扣费/日志）全为同步操作，
-        // 直接执行；异步的事后限流记账交由后台任务补交。
-        let (prompt_tokens, completion_tokens) = self.billing.finalize(false);
-        // Prometheus 指标（断连兜底路径上报；正常路径由后缀事件上报）
-        crate::metrics::global().record_request(
-            &self.billing.model,
-            self.billing.channel_id.as_deref().unwrap_or("unknown"),
-            "ok",
-            self.billing.request_start.elapsed().as_millis() as u64,
-        );
-        crate::metrics::global().record_tokens(&self.billing.model, "prompt", prompt_tokens);
-        crate::metrics::global().record_tokens(
-            &self.billing.model,
-            "completion",
-            completion_tokens,
-        );
-        if let Some(bundle) = self.billing.rate_bundle.clone() {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    bundle
-                        .commit_tokens(prompt_tokens + completion_tokens)
-                        .await;
+        let billing = Arc::clone(&self.billing);
+        // P1 性能：Drop 不能 await，但 BPE 估算（纯 CPU，数毫秒到数十毫秒）
+        // 若在 tokio worker 上同步执行会堵住该 worker。先把估算丢到阻塞
+        // 线程池，再回到运行时执行计费/日志（notify_spawn 依赖运行时上下文）。
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let ret = handle.clone();
+                let _ = handle.spawn_blocking(move || {
+                    let (prompt_tokens, completion_tokens) = billing.estimate_tokens();
+                    let _ = ret.spawn(async move {
+                        finalize_stream_billing(&billing, prompt_tokens, completion_tokens);
+                    });
                 });
+            }
+            Err(_) => {
+                // 边缘：无运行时上下文 → 同步兜底（与旧实现逐字一致）
+                let (prompt_tokens, completion_tokens) = billing.finalize(false);
+                record_billing_completion_metrics(
+                    &billing.model,
+                    billing.channel_id.as_deref(),
+                    billing.request_start,
+                    prompt_tokens,
+                    completion_tokens,
+                );
+                spawn_rate_bundle_commit(
+                    billing.rate_bundle.clone(),
+                    prompt_tokens,
+                    completion_tokens,
+                );
             }
         }
     }
@@ -1300,29 +1388,67 @@ impl<S: futures::Stream, G: std::marker::Unpin> futures::Stream for GuardedStrea
     }
 }
 
+/// Responses 透传流的断连/结束兜底收尾（在运行时任务内执行）。
+///
+/// token 估算已由阻塞线程池完成；此处做同步计费/日志/指标。
+fn finalize_responses_billing(
+    billing: &Arc<ResponsesBillingState>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cached_tokens: u64,
+) {
+    billing.finalize_with_tokens(false, prompt_tokens, completion_tokens, cached_tokens);
+    record_billing_completion_metrics(
+        &billing.model,
+        billing.channel_id.as_deref(),
+        billing.request_start,
+        prompt_tokens,
+        completion_tokens,
+    );
+    spawn_rate_bundle_commit(
+        billing.rate_bundle.clone(),
+        prompt_tokens,
+        completion_tokens,
+    );
+}
+
 impl Drop for ResponsesStreamGuard {
     fn drop(&mut self) {
-        let (prompt_tokens, completion_tokens) = self.billing.finalize(false);
-        // Prometheus 指标（透传流没有后缀事件，Drop 即唯一上报点）
-        crate::metrics::global().record_request(
-            &self.billing.model,
-            self.billing.channel_id.as_deref().unwrap_or("unknown"),
-            "ok",
-            self.billing.request_start.elapsed().as_millis() as u64,
-        );
-        crate::metrics::global().record_tokens(&self.billing.model, "prompt", prompt_tokens);
-        crate::metrics::global().record_tokens(
-            &self.billing.model,
-            "completion",
-            completion_tokens,
-        );
-        if let Some(bundle) = self.billing.rate_bundle.clone() {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    bundle
-                        .commit_tokens(prompt_tokens + completion_tokens)
-                        .await;
+        let billing = Arc::clone(&self.billing);
+        // P1 性能：透传流无后缀事件，Drop 即唯一计费点。BPE 估算（大 prompt /
+        // 长输出可达数十毫秒纯 CPU）不在 tokio worker 上同步跑：先丢阻塞
+        // 线程池估算，再回运行时做计费/日志（notify_spawn 依赖运行时上下文）。
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let ret = handle.clone();
+                let _ = handle.spawn_blocking(move || {
+                    let (prompt_tokens, completion_tokens, cached_tokens) =
+                        billing.compute_tokens();
+                    let _ = ret.spawn(async move {
+                        finalize_responses_billing(
+                            &billing,
+                            prompt_tokens,
+                            completion_tokens,
+                            cached_tokens,
+                        );
+                    });
                 });
+            }
+            Err(_) => {
+                // 边缘：无运行时上下文 → 同步兜底（与旧实现逐字一致）
+                let (prompt_tokens, completion_tokens) = billing.finalize(false);
+                record_billing_completion_metrics(
+                    &billing.model,
+                    billing.channel_id.as_deref(),
+                    billing.request_start,
+                    prompt_tokens,
+                    completion_tokens,
+                );
+                spawn_rate_bundle_commit(
+                    billing.rate_bundle.clone(),
+                    prompt_tokens,
+                    completion_tokens,
+                );
             }
         }
     }
@@ -1407,6 +1533,52 @@ pub(crate) struct AttemptStartGuard {
     pub handled: bool,
 }
 
+/// 499 兜底的结算 + 日志（在运行时任务内执行；token 估算已在别处完成）。
+///
+/// 与旧 `write_499` 逐字同口径：settle_usage 按估算 prompt 结算、
+/// completion 记 0，再落一条 status=499 日志。独立成函数是为了让 Drop
+/// 能把 BPE 估算移出 tokio worker（见 [`AttemptStartGuard::write_499`]）。
+#[allow(clippy::too_many_arguments)]
+fn write_499_settle_and_log(
+    state: &AppState,
+    api_key: &crate::api::auth::ApiKey,
+    requested_model: &str,
+    model: &str,
+    group: &str,
+    reservation: &Reservation,
+    channel_id: &str,
+    estimated_prompt: u64,
+    ip: Option<String>,
+    request_id: &str,
+    client: &crate::api::client_id::ClientIdentity,
+) {
+    let cost = settle_usage(
+        state,
+        api_key,
+        requested_model,
+        model,
+        group,
+        reservation,
+        estimated_prompt,
+        0,
+        0,
+        None,
+    );
+    write_attempt_499_log(
+        &state.log_store,
+        &api_key.id,
+        channel_id,
+        state.channel_store.get(channel_id).map(|c| c.name.clone()),
+        crate::api::openai::resolve::provider_of_channel_id(state, channel_id),
+        model,
+        estimated_prompt,
+        cost,
+        ip,
+        request_id,
+        client,
+    );
+}
+
 impl AttemptStartGuard {
     /// 计费接管点（流式=StreamUsageGuard 构造处；非流式=settle_usage 处）。
     pub fn handoff(&mut self) {
@@ -1414,37 +1586,67 @@ impl AttemptStartGuard {
     }
 
     /// Drop 兜底写账：status=499 + 按估算结算（prompt 估算、completion 0）。
+    ///
+    /// P1 性能：prompt 的 BPE 估算是纯 CPU（数毫秒到数十毫秒），Drop 不能
+    /// await，所以先 `spawn_blocking` 完成估算，再回运行时执行同步结算/日志
+    /// （`notify_spawn` 等依赖运行时上下文）。无运行时上下文（极边缘）时
+    /// 退回同步执行，与旧实现逐字一致。
     fn write_499(&mut self) {
-        let estimated_prompt =
-            crate::token_estimate::count_chat_prompt(&self.model, &self.chat_req) as u64;
-        let cost = settle_usage(
-            &self.state,
-            &self.api_key,
-            &self.requested_model,
-            &self.model,
-            &self.group,
-            &self.reservation,
-            estimated_prompt,
-            0,
-            0,
-            None,
-        );
-        write_attempt_499_log(
-            &self.state.log_store,
-            &self.api_key.id,
-            &self.channel_id,
-            self.state
-                .channel_store
-                .get(&self.channel_id)
-                .map(|c| c.name.clone()),
-            crate::api::openai::resolve::provider_of_channel_id(&self.state, &self.channel_id),
-            &self.model,
-            estimated_prompt,
-            cost,
-            self.ip.clone(),
-            &self.request_id,
-            &self.client,
-        );
+        // Drop 只有 `&mut self`，无法 move 字段出去：按需 Clone 一份 owned 快照。
+        let state = self.state.clone();
+        let api_key = self.api_key.clone();
+        let requested_model = self.requested_model.clone();
+        let group = self.group.clone();
+        let reservation = self.reservation.clone();
+        let channel_id = self.channel_id.clone();
+        let request_id = self.request_id.clone();
+        let ip = self.ip.clone();
+        let client = self.client.clone();
+        let model = self.model.clone();
+        let chat_req = Arc::clone(&self.chat_req);
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let ret = handle.clone();
+                let _ = handle.spawn_blocking(move || {
+                    let estimated_prompt =
+                        crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+                    let _ = ret.spawn(async move {
+                        write_499_settle_and_log(
+                            &state,
+                            &api_key,
+                            &requested_model,
+                            &model,
+                            &group,
+                            &reservation,
+                            &channel_id,
+                            estimated_prompt,
+                            ip,
+                            &request_id,
+                            &client,
+                        );
+                    });
+                });
+            }
+            Err(_) => {
+                // 边缘：无运行时上下文 → 同步兜底（旧行为）
+                let estimated_prompt =
+                    crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+                write_499_settle_and_log(
+                    &state,
+                    &api_key,
+                    &requested_model,
+                    &model,
+                    &group,
+                    &reservation,
+                    &channel_id,
+                    estimated_prompt,
+                    ip,
+                    &request_id,
+                    &client,
+                );
+            }
+        }
     }
 }
 

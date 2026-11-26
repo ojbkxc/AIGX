@@ -246,9 +246,14 @@ impl OpenaiCompatibleBridge {
     async fn chat_via_stream_aggregation(
         &self,
         req: &ChatFormat,
+        upstream_model: &str,
     ) -> Result<ChatResponse, BridgeError> {
         let mut stream = self
-            .chat_stream(req, &BridgeContext::new("aggregate", &req.model))
+            .chat_stream_impl(
+                req,
+                upstream_model,
+                &BridgeContext::new("aggregate", upstream_model),
+            )
             .await?;
         let mut content = String::new();
         let mut reasoning = String::new();
@@ -257,7 +262,7 @@ impl OpenaiCompatibleBridge {
         let mut usage = super::UsageStats::default();
         let mut finish = super::FinishReason::Stop;
         let mut id = String::new();
-        let mut model = req.model.clone();
+        let mut model = upstream_model.to_string();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             if !chunk.id.is_empty() {
@@ -339,8 +344,8 @@ impl OpenaiCompatibleBridge {
         })
     }
 
-    /// 将 ChatFormat 转为 OpenAI 请求体
-    fn build_body(&self, req: &ChatFormat) -> Value {
+    /// 将 ChatFormat 转为 OpenAI 请求体。`model` 为上游真实模型名（可被调用方覆盖）。
+    fn build_body(&self, req: &ChatFormat, model: &str) -> Value {
         let messages: Vec<Value> = req
             .messages
             .iter()
@@ -404,7 +409,7 @@ impl OpenaiCompatibleBridge {
         // （每请求 ~12 次），此处按已知字段数一次分配；字段形状与 json!
         // 逐字段一致（含透传 extra 覆盖写）。
         let mut body = serde_json::Map::with_capacity(16);
-        body.insert("model".to_string(), Value::String(req.model.clone()));
+        body.insert("model".to_string(), Value::String(model.to_string()));
         body.insert("messages".to_string(), Value::Array(messages));
         body.insert("stream".to_string(), Value::Bool(req.stream));
         if let Some(tools) = &req.tools {
@@ -448,18 +453,15 @@ impl OpenaiCompatibleBridge {
     }
 }
 
-#[async_trait]
-impl Bridge for OpenaiCompatibleBridge {
-    fn name(&self) -> &'static str {
-        "openai_compatible"
-    }
-
-    async fn chat(
+impl OpenaiCompatibleBridge {
+    /// chat 的实际实现；`model` 为上游模型名（failover 可覆盖），消息体按引用共享。
+    async fn chat_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
-        let mut body = self.build_body(req);
+        let mut body = self.build_body(req, model);
         body["stream"] = serde_json::json!(false);
 
         // OpenCode 免费档只接受流式请求（见 channel::emulation）；会话供应商
@@ -469,7 +471,7 @@ impl Bridge for OpenaiCompatibleBridge {
             || (self.quirks.emulates_opencode()
                 && !crate::channel::emulation::is_opencode_go_endpoint(&self.base_url))
         {
-            return self.chat_via_stream_aggregation(req).await;
+            return self.chat_via_stream_aggregation(req, model).await;
         }
 
         let (request, body) = self.apply_emulation(body);
@@ -508,7 +510,7 @@ impl Bridge for OpenaiCompatibleBridge {
         let model = json
             .get("model")
             .and_then(|v| v.as_str())
-            .unwrap_or(&req.model)
+            .unwrap_or(model)
             .to_string();
 
         let message = {
@@ -597,12 +599,14 @@ impl Bridge for OpenaiCompatibleBridge {
         })
     }
 
-    async fn chat_stream(
+    /// chat_stream 的实际实现；语义同 [`OpenaiCompatibleBridge::chat_impl`]。
+    async fn chat_stream_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
-        let mut body = self.build_body(req);
+        let mut body = self.build_body(req, model);
         body["stream"] = serde_json::json!(true);
 
         let (request, body) = self.apply_emulation(body);
@@ -631,7 +635,7 @@ impl Bridge for OpenaiCompatibleBridge {
         }
 
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-        let model = req.model.clone();
+        let model = model.to_string();
         let byte_stream = resp.bytes_stream();
 
         let chunk_stream = futures::stream::unfold(
@@ -734,6 +738,47 @@ impl Bridge for OpenaiCompatibleBridge {
         );
 
         Ok(Box::pin(chunk_stream))
+    }
+}
+
+#[async_trait]
+impl Bridge for OpenaiCompatibleBridge {
+    fn name(&self) -> &'static str {
+        "openai_compatible"
+    }
+
+    async fn chat(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, model, ctx).await
+    }
+
+    async fn chat_stream(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_stream_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, model, ctx).await
     }
 
     async fn embed(
@@ -1626,7 +1671,7 @@ mod tests {
         };
         let bridge =
             super::OpenaiCompatibleBridge::with_client("https://x", "k", crate::test_http_client());
-        let body = bridge.build_body(&req);
+        let body = bridge.build_body(&req, &req.model);
 
         // 期望形状 = 旧 json! 建树口径手工构造
         let expected = serde_json::json!({

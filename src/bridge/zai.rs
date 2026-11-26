@@ -93,7 +93,7 @@ impl ZaiBridge {
     /// - `max_tokens` 必填，缺失兜底 4096
     /// - `temperature` 可选
     /// - `stream` 标志透传
-    fn build_body(&self, req: &ChatFormat, stream: bool) -> Value {
+    fn build_body(&self, req: &ChatFormat, stream: bool, model: &str) -> Value {
         let mut system_parts: Vec<String> = Vec::new();
         let mut messages: Vec<Value> = Vec::new();
 
@@ -148,7 +148,7 @@ impl ZaiBridge {
         }
 
         let mut body = serde_json::json!({
-            "model": req.model,
+            "model": model,
             "messages": messages,
             // 智谱 AI 要求 max_tokens 必填；缺失兜底 4096
             "max_tokens": req.max_tokens.unwrap_or(4096),
@@ -186,18 +186,15 @@ impl ZaiBridge {
     }
 }
 
-#[async_trait]
-impl Bridge for ZaiBridge {
-    fn name(&self) -> &'static str {
-        "zai"
-    }
-
-    async fn chat(
+impl ZaiBridge {
+    /// chat 的实际实现；`model` 为上游模型名（failover 可覆盖），消息体按引用共享。
+    async fn chat_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
-        let body = self.build_body(req, false);
+        let body = self.build_body(req, false, model);
         let resp = crate::debug_traffic::traced(self.post(&self.messages_url(), &body), ctx)
             .send()
             .await
@@ -220,15 +217,17 @@ impl Bridge for ZaiBridge {
             .await
             .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))?;
 
-        Ok(parse_response(&json, &req.model))
+        Ok(parse_response(&json, model))
     }
 
-    async fn chat_stream(
+    /// chat_stream 的实际实现；语义同 [`ZaiBridge::chat_impl`]。
+    async fn chat_stream_impl(
         &self,
         req: &ChatFormat,
+        model: &str,
         ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
-        let body = self.build_body(req, true);
+        let body = self.build_body(req, true, model);
         let resp = crate::debug_traffic::traced(self.post(&self.messages_url(), &body), ctx)
             .send()
             .await
@@ -247,7 +246,7 @@ impl Bridge for ZaiBridge {
         }
 
         let id = format!("zai_{}", uuid::Uuid::new_v4());
-        let model = req.model.clone();
+        let model = model.to_string();
         let byte_stream = resp.bytes_stream();
 
         // 参照 anthropic.rs 的 unfold 模式
@@ -318,6 +317,46 @@ impl Bridge for ZaiBridge {
         );
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl Bridge for ZaiBridge {
+    fn name(&self) -> &'static str {
+        "zai"
+    }
+
+    async fn chat(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
+        self.chat_impl(req, model, ctx).await
+    }
+    async fn chat_stream(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, &req.model, ctx).await
+    }
+
+    async fn chat_stream_with_model(
+        &self,
+        req: &ChatFormat,
+        model: &str,
+        ctx: &BridgeContext,
+    ) -> Result<ChatChunkStream, BridgeError> {
+        self.chat_stream_impl(req, model, ctx).await
     }
 }
 
@@ -738,7 +777,7 @@ mod tests {
         };
 
         let bridge = ZaiBridge::with_client("", "test-key", crate::test_http_client());
-        let body = bridge.build_body(&req, false);
+        let body = bridge.build_body(&req, false, &req.model);
 
         assert_eq!(body["model"], "glm-5");
         assert_eq!(body["system"], "Be helpful");
@@ -779,7 +818,7 @@ mod tests {
         };
 
         let bridge = ZaiBridge::with_client("", "key", crate::test_http_client());
-        let body = bridge.build_body(&req, false);
+        let body = bridge.build_body(&req, false, &req.model);
         assert_eq!(body["max_tokens"], 4096);
     }
 
@@ -810,7 +849,7 @@ mod tests {
         };
 
         let bridge = ZaiBridge::with_client("", "key", crate::test_http_client());
-        let body = bridge.build_body(&req, true);
+        let body = bridge.build_body(&req, true, &req.model);
         assert_eq!(body["stream"], true);
     }
 

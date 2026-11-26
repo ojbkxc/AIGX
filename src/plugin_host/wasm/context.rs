@@ -114,6 +114,9 @@ pub struct Context {
     pub blobs: super::resources::Resources,
     pub guards: HashMap<String, OwnedMutexGuard<()>>,
     pub calls: u32,
+    /// 本次调用打开的协议转换器（`protocol.open` 登记、`push` 归还、
+    /// `close`/Drop 摘除）。句柄**只属于当前调用**，与上游一致。
+    pub(super) converters: HashMap<String, super::protocol::Conversion>,
 }
 
 impl Context {
@@ -141,6 +144,7 @@ impl Context {
             blobs: Default::default(),
             guards: HashMap::new(),
             calls: 0,
+            converters: HashMap::new(),
         }
     }
 }
