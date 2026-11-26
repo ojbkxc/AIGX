@@ -120,3 +120,31 @@ AIGX 已有同一套 `runtime_capacity`（`max_background=32` / `background_per_
 - beta.7/beta.8 的宿主面审计在 [`BETA8-ACCOUNT-POOL-ERROR-RULES.md`](BETA8-ACCOUNT-POOL-ERROR-RULES.md)
   与 `ACCOUNT-POOL-PLUGIN-PARITY.md`。
 - 本文只覆盖 **v3.5.0 → v3.5.1** 这一跳；更早的判定不重复。
+
+## 5. 复核记录（2026-11-27）
+
+用 `tools/account-pool-plugin-parity.mjs` 对上游 v3.5.1 宿主面重新跑了一遍
+（上游实际路径 `C:\GitHub\Agent2API\desktop-tauri\src-tauri\server\src\server\core\plugin_host`，
+工具默认写死的 `D:\` 需用 `--a2a` 覆盖）：
+
+| 指标 | 上游 | AIGX |
+|---|---:|---:|
+| 可声明能力 | 55 | 55 |
+| 已服务能力 | 0（桌面壳由插件实现） | 36 |
+| 能力差集（双向） | 0 | 0 |
+
+- **方法臂**：上游 110 / AIGX 80。AIGX 独有的 8 个方法
+  （`login.sms.send|verify`、`managed_task.begin|end|abort`、`account.normalize|view`、
+  `native.helpers`）是 v3.5.1 之后 AIGX 自加的，属于「多」，不是缺口；基线已刷新，
+  `--check` 现为绿。
+- **上游有、AIGX 未实现的 38 个方法**：逐项落在
+  `docs/V351-GAP-AUDIT-2026-11-26.md` 的 B-P* / B-A* 条目，分三类：
+  ① 桌面宿主专属（`desktop.launch.*`、`login.desktop.credentials.take`、
+     `codearts.*`、`catpaw.turn.*`、`doubao.*`、`login.trae.*`、`login.kiro.*`）——AIGX 无桌面壳；
+  ② 闭源插件实现（`checkin.claim`、`claim.doubao.tasks`、`usage.query`、`resource.cookie-file.take`、
+     `runtime.client_fingerprint`）——实现在上游闭源插件仓；
+  ③ 通用数据面（`models.list|refresh`、`token.refresh|expiring|ensure`、`admin.action`）——
+     与 AIGX 既有 `/v1/models` / Key 生命周期 / 插件 `admin.action` 通道的对应关系见 B-P4/B-P10，
+     属「实现形态不同」而非缺失。
+- 本表不改变 §2「不移植」结论；后续若上游发新版本，按 §3 流程重跑并刷新基线。
+

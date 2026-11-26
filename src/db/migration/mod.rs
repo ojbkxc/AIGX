@@ -26,3 +26,29 @@ impl MigratorTrait for Migrator {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm_migration::prelude::*;
+
+    /// 迁移清单自检：名称取源码文件名（`get_file_stem(file!())`），必须唯一且
+    /// 按时间戳升序——SeaORM 按返回顺序执行 `up()`，乱序会让「先加列后建表」
+    /// 这类有依赖的迁移在真实库上失败；重名则 `seaql_migrations` 台账互相覆盖。
+    #[test]
+    fn migrations_are_unique_and_chronological() {
+        let names: Vec<String> = Migrator::migrations()
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect();
+
+        assert_eq!(names.len(), 3, "迁移条数与预期不符: {names:?}");
+        assert!(names.iter().all(|n| !n.is_empty()), "迁移名不能为空");
+
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "迁移名重复: {names:?}");
+        assert_eq!(sorted, names, "迁移必须按文件名时间戳升序: {names:?}");
+    }
+}

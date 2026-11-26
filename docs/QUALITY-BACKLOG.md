@@ -22,7 +22,7 @@ CI 已加闸：`npm audit --omit=dev --audit-level=high`（只拦 high/critical�
 | `src/oauth/{github,google,linuxdo}` | 零测试 | ✅ 已补（ready 判空 + 响应解析） |
 | `src/web`（静态服务 / SPA fallback） | 零测试 | ✅ 已补（SPA 回退 / `/api` 404 / 缓存头 / 缺 index.html） |
 | `src/payment` 的 stripe / order_store | 无测试 | ✅ stripe 5 条（签名/防重放）+ order_store 7 条（CAS 幂等/持久化/分页） |
-| `src/db` 迁移层 | 无测试 | ⏳ `db/mod.rs` 已覆盖 URL 解析/脱敏 5 条；`migration.rs` 需真实 DB 驱动，暂缓 |
+| `src/db` 迁移层 | 无测试 | ✅ `db/mod.rs` URL 解析/脱敏 5 条；`migration/mod.rs` 新增迁移清单自检（名称唯一+时间戳升序），随 `sea-orm` feature 编译（`cargo test --features sea-orm`） |
 
 补测优先级：先 `web`（几行就能覆盖 `/api/*` 404 与 SPA fallback）与 `oauth`（回调参数校验）。
 
@@ -41,7 +41,7 @@ CI 已加闸：`npm audit --omit=dev --audit-level=high`（只拦 high/critical�
 | `CLAUDE.md` | 技术栈写成 React 19 / TS 6 / shadcn（实际 18.2 / 5.3 / 自研组件）；"不支持单元测试" 不成立 | ✅ 已重写 |
 | `AGENTS.md` | 工作区含不存在的 `aigx-net`；feature 矩阵 4 组（实际 6）；E2E 描述为"直连生产"（已改真后端+mock） | ✅ 已重写 |
 | 5 份对齐台账 | 结论与源码不符（详见各自横幅） | ✅ 加过时横幅并指向 `V351-GAP-AUDIT-2026-11-26.md` |
-| `docs/V351-ALIGN.md` | 部分结论待重新核实 | ⏳ 有并行会话在改，避免冲突，收尾后复核 |
+| `docs/V351-ALIGN.md` | 部分结论待重新核实 | ✅ 2026-11-27 复核：用 parity 工具重跑宿主面（能力 55:55、双向差集 0），刷新基线使 `--check` 转绿，并追加 §5 复核记录；「上游有、AIGX 无」的 38 个方法逐项归入既有 B-P*/B-A* 台账 |
 
 ## 5. 性能
 
@@ -54,4 +54,23 @@ CI 已加闸：`npm audit --omit=dev --audit-level=high`（只拦 high/critical�
 |---|---|---|
 | CI 并发 | 连续 push 会叠加全套运行；已加 `concurrency`（同 ref 只保留最新一次） | ✅ |
 | 生产配置被重置 | 新二进制首启可能把 `~/.aigx/config.toml` 重置回 `127.0.0.1:8080` | ⏳ 已记录在 AGENTS.md 硬约束 8，根因未修 |
-| `origin` remote 内嵌 PAT | 明文 token 存在本地 `.git/config`（不入库），建议轮换并改用凭据管理器 | ⏳ 需业主操作 |
+| `origin` remote 内嵌 PAT | 明文 token 存在本地 `.git/config`（不入库），建议轮换并改用凭据管理器 | ⏳ 需业主操作（agent 无法代为轮换/改凭据） |
+
+## 7. parity「待核实」项复核（2026-11-27）
+
+结论与依据见 [`V351-GAP-AUDIT-2026-11-26.md` §8](./V351-GAP-AUDIT-2026-11-26.md)。要点：
+
+| 项 | 结论 | 一句话理由 |
+|---|---|---|
+| B-F6 `/api/model-access/{models,keys}` | 🚫 | 上游无鉴权、仅供 localhost 桌面壳；AIGX 公网暴露＝泄露 Key。等价能力是 `/v1/models` + `/api/tokens` |
+| B-F7 `/api/advertisements` | 🚫 | 桌面运营广告位 + CDN feed，AIGX 无广告面 |
+| B-F8 `/api/zcode/version` | 🚫 | 桌面面板兼容端点，上游 PUT 已废弃；AIGX 无版本同步宿主 |
+| B-A5 逐账号 growth | 🚫 | 执行体在上游闭源插件（`workbuddy::admin`），网关只转发 |
+| B-O1 峰谷分时/`same_as`/通配 | 🚫 | 上游独立计价体系，V351-ALIGN §2 已判定不移植；需产品决策另立项 |
+
+## 8. 国际化
+
+| 项 | 说明 | 状态 |
+|---|---|---|
+| zh-Hant | 5876 键全量，已修繁简转换用字错误；未上架 `SUPPORTED_LANGS`（等质量确认） | ✅ 语言包完成 |
+| ja / ko / pt-BR | 上游有完整翻译，AIGX 这三个包是空占位、**未上架**（用户不可选）。机器翻译直接上架会新增缺陷，需人工/native review | ⏳ 待人工翻译（非上架面缺陷） |
