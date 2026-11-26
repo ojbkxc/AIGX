@@ -265,12 +265,20 @@ pub fn spawn(
 /// 自适应 tick 间隔（对齐 A2A scheduler 的 `delay = min(next_at - now, TICK)`）：
 /// 有当日排程时睡到最近一个未执行账号的时刻（夹在 `[250ms, TICK]`），否则睡满
 /// 一个 TICK。既保证「到点即跑」的精度，又不会在空转时每 10 秒醒来查一遍。
+///
+/// **只认当日排程**（`account_plan.date == today`，与 [`next_run_at`] 同一判据）：
+/// `AccountPlan::next_at()` 不校验日期，跨天后昨日计划里没尝试的账号仍留着
+/// 昨夜时刻；那些时刻全都 `< now`，`clamp` 下界会把等待钳成 250ms —— 于是
+/// 进程从零点起每 250ms 醒一轮（每轮 `schedules()` 全量克隆 + `prune_records`），
+/// 一路空转到当天主轮重写计划为止。过期计划直接忽略，下一拍睡满 TICK。
 fn next_sleep(store: &CheckinStore) -> Duration {
     let now_ms = Utc::now().timestamp_millis();
+    let today = today();
     let earliest = store
         .schedules()
         .into_iter()
         .filter(|schedule| schedule.enabled)
+        .filter(|schedule| schedule.account_plan.date == today)
         .filter_map(|schedule| schedule.account_plan.next_at())
         .min();
     match earliest {
@@ -1243,6 +1251,71 @@ mod tests {
             last_keepalive: 0,
             last_failed: 0,
         }
+    }
+
+    /// 跨天残留的排程不得把 tick 间隔压成 250ms。
+    ///
+    /// `AccountPlan::next_at()` 不校验日期，只挑「未尝试且时刻最早」的账号。
+    /// 昨天没跑完的计划会留下昨夜的时刻（全部 `< now`），旧实现把它喂给
+    /// `clamp(250, TICK)` → 每 250ms 醒一轮（每轮 `schedules()` 全量克隆 +
+    /// `prune_records`），从零点一直空转到当天主轮重写计划。过期计划必须被
+    /// 忽略，退回满 TICK；当日排程仍要能缩短等待（正向对照）。
+    #[test]
+    fn next_sleep_ignores_stale_plan_but_honors_today() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aigx-next-sleep-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = CheckinStore::new(std::sync::Arc::new(crate::storage::FileStore::new(dir)));
+        store.load().unwrap();
+
+        let s = schedule("09:00", &["loomy"]);
+        store.upsert_schedule(s.clone()).unwrap();
+
+        let planned = |provider: &str, at: i64| super::super::store::PlannedAccount {
+            provider: provider.to_string(),
+            at,
+            attempted_at: None,
+        };
+
+        // ① 过期计划（昨天的时刻，且没尝试）→ 必须睡满 TICK
+        store
+            .patch_account_plan(&s.id, |plan| {
+                plan.date = "2000-01-01".to_string();
+                plan.accounts.insert("a1".to_string(), planned("loomy", 1));
+            })
+            .unwrap();
+        assert_eq!(
+            next_sleep(&store),
+            TICK,
+            "过期计划（非当日）不得参与 tick 收缩，否则会 250ms 空转"
+        );
+
+        // ② 正向对照：当日排程且时刻在 → 仍在 [250ms, TICK] 内（不放假值）
+        let now_ms = Utc::now().timestamp_millis();
+        store
+            .patch_account_plan(&s.id, |plan| {
+                plan.date = today();
+                plan.accounts
+                    .insert("a1".to_string(), planned("loomy", now_ms + 3_600_000));
+            })
+            .unwrap();
+        let wait = next_sleep(&store);
+        assert_eq!(wait, TICK, "远未来的当日排程封顶到 TICK");
+        store
+            .patch_account_plan(&s.id, |plan| {
+                plan.date = today();
+                plan.accounts
+                    .insert("a1".to_string(), planned("loomy", now_ms + 1_000));
+            })
+            .unwrap();
+        let wait = next_sleep(&store);
+        assert!(
+            wait >= Duration::from_millis(250) && wait < TICK,
+            "当日到点排程应缩短等待，实际 {wait:?}"
+        );
     }
 
     #[test]

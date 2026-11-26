@@ -178,13 +178,36 @@ impl Default for Embedded {
 }
 
 /// 可克隆的取消令牌（tokio-util 不是本仓直接依赖，这里最小实现同语义）。
-#[derive(Clone, Default)]
+///
+/// ## 父子传播为什么**不**用后台任务
+///
+/// 旧实现给每个子令牌 `tokio::spawn` 一个「等父取消 → 置位」的常驻任务。
+/// 父令牌是 `Shared::cancel`，只在宿主整个生命周期结束（`shutdown`）时才
+/// 取消，而每次 `Runtime::invoke`（无 sink 的常规控制面调用）与每条
+/// `open_stream` 都会 `child()` 一次 —— 于是每收一次调用就**永久多一个
+/// 任务**并各自持着父令牌的 `Arc` 克隆：任务表与父令牌强引用计数随调用量
+/// 无上限增长，直到停用/重载该包才一次性清零。这与「wasm store 泄漏」同一
+/// 形态，只是漏的是任务与引用而不是 Store。
+///
+/// 现在子令牌直接持有父令牌，`cancelled()` 两级同时等、`is_cancelled()`
+/// 逐级向上查：零任务、零常驻内存，语义（父取消 ⇒ 子取消）不变。
+#[derive(Clone)]
 pub(crate) struct Cancel(Arc<CancelInner>);
+
+/// 手写 `Default`（不派生）：`CancelInner` 里嵌了 `Option<Cancel>` 的父指针，
+/// 让令牌的默认构造保持显式（父 = `None`），不依赖派生链上的隐式取值。
+impl Default for Cancel {
+    fn default() -> Self {
+        Self(Arc::new(CancelInner::default()))
+    }
+}
 
 #[derive(Default)]
 struct CancelInner {
     flag: AtomicBool,
     notify: tokio::sync::Notify,
+    /// 父令牌：父取消即子取消（直接持有，不起传播任务）。
+    parent: Option<Cancel>,
 }
 
 impl Cancel {
@@ -197,39 +220,54 @@ impl Cancel {
         self.0.notify.notify_waiters();
     }
 
+    /// 本令牌或任一祖先是否已取消。
     pub fn is_cancelled(&self) -> bool {
         self.0.flag.load(Ordering::Acquire)
+            || self
+                .0
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_cancelled())
     }
 
     /// 等待取消（已取消时立即返回）。
+    ///
+    /// 先建 `notified()` 再复查标志，避免「cancel 先到」丢信号；有父令牌时
+    /// 把自己与父的等待一起 `select`——父取消时本令牌的 `flag` 不必被改写，
+    /// 判定一律经 [`Self::is_cancelled`] 向上查。
     pub async fn cancelled(&self) {
         if self.is_cancelled() {
             return;
         }
-        // notified() 先建再查，避免「cancel 先到」丢信号
         let notified = self.0.notify.notified();
         if self.is_cancelled() {
             return;
         }
-        notified.await;
+        match &self.0.parent {
+            Some(parent) => {
+                tokio::select! {
+                    biased;
+                    _ = parent.cancelled() => {}
+                    _ = notified => {}
+                }
+            }
+            None => notified.await,
+        }
     }
 
     /// 子令牌：父取消会连带取消子（每次调用一个，避免跨调用误伤）。
+    ///
+    /// **不 spawn 传播任务**：子令牌持父令牌，判定与等待都走两级（见类型注释
+    /// 里记的那次泄漏）。
     pub fn child(&self) -> Self {
-        let child = Self::new();
+        let child = Self(Arc::new(CancelInner {
+            flag: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+            parent: Some(self.clone()),
+        }));
         if self.is_cancelled() {
             child.cancel();
-            return child;
         }
-        let parent = self.clone();
-        let weak = Arc::downgrade(&child.0);
-        tokio::spawn(async move {
-            parent.cancelled().await;
-            if let Some(inner) = weak.upgrade() {
-                inner.flag.store(true, Ordering::Release);
-                inner.notify.notify_waiters();
-            }
-        });
         child
     }
 }
@@ -517,6 +555,46 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(100), cancel.cancelled())
             .await
             .expect("already-cancelled token must resolve immediately");
+    }
+
+    /// 计数型证明：`child()` 不得留下常驻任务，也不得残留对父令牌的引用。
+    ///
+    /// 旧实现每次 `child()` 都 `tokio::spawn` 一个「等父取消」的任务并持父
+    /// 令牌的 `Arc` 克隆 —— 父令牌（`Shared::cancel`）只在宿主关停时取消，
+    /// 于是每收一次 `Runtime::invoke` / 每开一条流就永久多一个任务与一份引用。
+    /// 这里循环 100 次「建了就用完 drop」，父令牌强引用计数必须回到基线。
+    #[tokio::test]
+    async fn child_token_does_not_leak_parent_reference() {
+        let parent = Cancel::new();
+        let baseline = Arc::strong_count(&parent.0);
+        for _ in 0..100 {
+            let child = parent.child();
+            assert!(!child.is_cancelled());
+            drop(child);
+        }
+        assert_eq!(
+            Arc::strong_count(&parent.0),
+            baseline,
+            "子令牌全部 drop 后父令牌强引用计数应回到基线（残留 = 传播任务泄漏）"
+        );
+    }
+
+    /// 语义不变：父 → 子 → 孙 逐级取消，且孙令牌在不 spawn 传播任务的前提下
+    /// 也能被祖先取消（旧实现靠常驻任务传播，新实现靠逐级查询）。
+    #[tokio::test]
+    async fn cancel_cascades_to_grandchild() {
+        let parent = Cancel::new();
+        let child = parent.child();
+        let grandchild = child.child();
+        assert!(!grandchild.is_cancelled());
+        parent.cancel();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            grandchild.cancelled(),
+        )
+        .await
+        .expect("祖先取消必须传播到孙令牌");
+        assert!(grandchild.is_cancelled());
     }
 
     /// 只登记清单、没有活宿主时：能力查询必须一律为假。

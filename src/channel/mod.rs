@@ -1166,20 +1166,37 @@ impl ChannelStore {
     /// 并放行首个试探请求，其余并发请求被拦截。看板/诊断/模型列表等查询型调用点
     /// **不得**调用本方法（会误占名额），应使用纯查询的 `is_in_cooldown`。
     ///
-    /// 半开探测：冷却到期 → `half_open_inflight.insert` 原子占位，`is_none()` 表示
-    /// 我抢到名额 → 放行；`is_some()` 表示别人已占 → 拦截。试探成功由
-    /// `clear_cooldown`/`record_channel_success` 清除占位恢复，试探失败由
-    /// `mark_cooldown` 清除占位并重新冷却。
+    /// 半开探测：冷却到期 → 占位 `half_open_inflight`，名额空或占位已过
+    /// [`HALF_OPEN_TTL`] 才放行；名额在有效期内被占 → 拦截，**且不刷新占位
+    /// 时刻**（旧实现每次调用都 `insert` 一遍，等于把 TTL 一直往后续期：
+    /// 占位者一旦没走到成功/失败路径，只要还有请求进来，名额就永不超时，
+    /// 渠道被永久卡在半开拦截态）。试探成功由 `clear_cooldown` /
+    /// `record_channel_success` 清除占位恢复，试探失败由 `mark_cooldown`
+    /// 清除占位并重新冷却。
     pub fn is_dispatch_allowed(&self, id: &str) -> bool {
         match self.cooldowns.get(id) {
             Some(entry) => {
                 if *entry > Instant::now() {
                     return false;
                 }
-                // 冷却到期 → 半开：原子占位，仅首个试探放行。
-                self.half_open_inflight
-                    .insert(id.to_string(), Instant::now())
-                    .is_none()
+                // 冷却到期 → 半开：占位放行，仅首个试探拿到名额。
+                match self.half_open_inflight.entry(id.to_string()) {
+                    dashmap::mapref::entry::Entry::Vacant(slot) => {
+                        slot.insert(Instant::now());
+                        true
+                    }
+                    dashmap::mapref::entry::Entry::Occupied(mut slot) => {
+                        // 占位仍在有效期内 = 别人正在试探 → 拦截，**不动时刻**。
+                        if Instant::now().duration_since(*slot.get()) <= HALF_OPEN_TTL {
+                            return false;
+                        }
+                        // 占位已超 TTL（占位者没走到成功/失败路径）→ 接手，
+                        // 时刻重置为本次，语义与 `half_open_occupied` 的惰性
+                        // 清除一致，但不需要先删后插（避免中间态）。
+                        *slot.get_mut() = Instant::now();
+                        true
+                    }
+                }
             }
             None => true,
         }
@@ -3009,6 +3026,42 @@ mod tests {
 
             // 占位 TTL 过期分支：无法在测试中快进 120s（避免 sleep 120s 拖慢），
             // 过期清除由 half_open_occupied 惰性触发，逻辑与未过期分支对称。
+        });
+    }
+
+    /// 半开占位**过期后必须能被接手**，且在被拦截时不得刷新占位时刻。
+    ///
+    /// 旧实现 `is_dispatch_allowed` 每次都 `insert` 一遍（用 `is_none()` 判首飞），
+    /// 副作用是把占位时刻整体往后推：占位者没走到成功/失败路径（请求被取消、
+    /// 候选被 failover 跳过）时，只要还有请求进来，`half_open_occupied` 里的
+    /// `elapsed` 就永远 < [`HALF_OPEN_TTL`]，名额永不超时 → 渠道被永久卡在
+    /// 「半开、只拦截不放行」的拦截态，只能人工 `clear_cooldown` 才能捞出。
+    #[test]
+    fn half_open_slot_expires_and_blocked_calls_do_not_refresh_it() {
+        with_secret_dir("half-open-expiry", || {
+            let s = store();
+            s.add(sample("a", 1, vec!["m"])).unwrap();
+            // 冷却时长 0 → 立即进入半开（冷却到期）
+            s.mark_cooldown("a", "err".to_string(), 0);
+
+            // ① 过期占位（占位者早就没影了）→ 必须放行一个试探
+            let stale = Instant::now() - HALF_OPEN_TTL - Duration::from_secs(1);
+            s.half_open_inflight.insert("a".to_string(), stale);
+            assert!(
+                s.is_dispatch_allowed("a"),
+                "占位已过 HALF_OPEN_TTL，应接手放行新试探"
+            );
+
+            // ② 有效期内被拦截的调用不得把占位时刻往后推
+            let occupied_at = Instant::now() - Duration::from_secs(5);
+            s.half_open_inflight.insert("a".to_string(), occupied_at);
+            assert!(!s.is_dispatch_allowed("a"), "有效占位期间应拦截");
+            assert!(!s.is_dispatch_allowed("a"), "有效占位期间应持续拦截");
+            let after = *s.half_open_inflight.get("a").unwrap();
+            assert_eq!(
+                after, occupied_at,
+                "被拦截的调用不得刷新占位时刻（否则 TTL 永不超时）"
+            );
         });
     }
 

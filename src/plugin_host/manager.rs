@@ -687,10 +687,24 @@ impl PluginHostManager {
                     ..Default::default()
                 })
                 .collect();
-            let mut rt = self.runtime.write();
-            let slot = rt.entry(meta.id.clone()).or_default();
-            slot.running = true;
-            slot.providers = providers.clone();
+            // 已装载分支也要落 enabled=true：这条分支只在宿主已在跑时命中
+            // （重启恢复、或两个包声明同一 provider 时第二个包的 enable）。
+            // 旧实现只改 runtime 槽不落注册表——`restore_enabled` 的筛选
+            // 条件是 `p.enabled`，恢复失败重启后这个包不再被恢复；而
+            // 「插件的 provider 接管判据」`is_plugin_owned` 也读 enabled，
+            // 会把已接管的 provider 判成未接管、数据面回落原生。
+            //
+            // 这里**不动已跑的宿主**（它可能属于另一个包），失败只记 last_error。
+            if let Err(error) = self.registry.set_enabled(&meta.id, true) {
+                return Err(self.note_wasm_error(meta, format!("保存启用状态失败: {error}")));
+            }
+            {
+                let mut rt = self.runtime.write();
+                let slot = rt.entry(meta.id.clone()).or_default();
+                slot.running = true;
+                slot.providers = providers.clone();
+                slot.last_error = None;
+            }
             return Ok(Some(providers));
         }
         // 构造注入面：账号访问 + 出站（复用脚本宿主的 Transport 实例）。
@@ -741,7 +755,14 @@ impl PluginHostManager {
                 ..Default::default()
             })
             .collect();
-        self.registry.set_enabled(&meta.id, true)?;
+        // 启用既成事实先落注册表（restore_enabled / is_plugin_owned 都读它）。
+        // 落库失败必须回滚已起宿主再报错——否则留下「宿主在跑、清单已登记、
+        // enabled=false」的半启用态：数据面 is_plugin_owned=false 回落原生，
+        // 而 wasm::owns()=true 又放行管理面调用，两边口径漂移且重启不自愈。
+        if let Err(error) = self.registry.set_enabled(&meta.id, true) {
+            crate::plugin_host::wasm::stop(&provider).await;
+            return Err(self.note_wasm_error(meta, format!("保存启用状态失败: {error}")));
+        }
         {
             let mut rt = self.runtime.write();
             let slot = rt.entry(meta.id.clone()).or_default();
@@ -756,9 +777,23 @@ impl PluginHostManager {
         // 不再申报 tasks.v1 时 load 会报「未声明任务能力」，若留着旧声明，
         // 管理面会继续列出这些任务 —— 而调度侧已按能力门禁跳过它们，形成
         // 「有任务、跑不动」的幽灵条目。先 forget 再报警，两边状态一致。
+        //
+        // 日志级别按「清单是否声明 tasks.v1」分流：未声明是**正常形态**（聊天/
+        // 登录类包本来不申报任务），`load` 返回的是「不适用」而不是「失败」，
+        // 打 WARN 会让每次启动为每个包刷一条假警报，把「声明了 tasks.v1 却
+        // 装载失败」这条真故障淹掉。声明了才 warn。
+        let declares_tasks = crate::plugin_host::wasm::has_capability(&provider, "tasks.v1");
         if let Err(error) = crate::plugin_host::wasm::tasks::load(&provider).await {
             crate::plugin_host::wasm::tasks::forget(&provider);
-            tracing::warn!("[PluginHost] Wasm 包 {} 任务声明加载失败: {error}", meta.id);
+            if declares_tasks {
+                tracing::warn!("[PluginHost] Wasm 包 {} 任务声明加载失败: {error}", meta.id);
+            } else {
+                tracing::debug!(
+                    "[PluginHost] Wasm 包 {} 未声明 tasks.v1，跳过任务声明（{}）",
+                    meta.id,
+                    error
+                );
+            }
         }
         // 目录并集回推：账号状态里已落盘的 `host.catalog.v1`（上一次成功
         // 刷新）在进程重启 / 重新启用后不会自动出现在目录出口 —— 与上游

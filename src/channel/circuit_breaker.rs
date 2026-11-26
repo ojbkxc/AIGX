@@ -459,9 +459,15 @@ impl CircuitBreaker {
         // **不动失败计数、不开断路器、不设冷却、不清试探租约** —— 渠道本身是健康的。
         // 必须提前 return：否则 Open 期间的 400 会重置 last_failure_time 延长冷却起点、
         // HalfOpen 期间的 400 会清掉在飞试探租约（与 channel/mod.rs 的契约一致）。
+        //
+        // **也不能写 `last_failure_time`**：旧实现这里赋了一次 `now`，恰好就是
+        // 上面这句注释要挡的事——`is_half_open` / `state_of` 都用
+        // `last_failure_time.elapsed()` 判冷却是否走完，被 400 刷一下就把半开
+        // 探测窗口整体后推一整轮 cooldown（Open 期同理延长冷却起点）。「最近
+        // 失败类型」与「最近失败时刻」在这里没有消费者：健康/排障信息由
+        // `health_manager` 的 `last_client_error` / `last_client_error_time` 承载。
         if matches!(failure_type, FailureType::ClientError) {
             entry.failure_type = Some(failure_type);
-            entry.last_failure_time = Some(Instant::now());
             return;
         }
 
@@ -820,6 +826,55 @@ mod tests {
         let snap = cb.snapshot_all().into_iter().next().unwrap();
         assert_eq!(snap.state, "open");
         assert_eq!(snap.half_open_successes, 0, "失败应清零半开成功计数");
+    }
+
+    // ── 客户端错误不得扰动断路器时间轴 ────────────────────────────────
+
+    /// 400/413/422 这类客户端错误**不得**刷新 `last_failure_time`。
+    ///
+    /// 冷却是否走完全靠 `last_failure_time.elapsed()` 判定（`is_half_open` /
+    /// `state_of`）。旧实现给 ClientError 赋了 `now`——与同分支注释「不动失败
+    /// 计数、不设冷却」直接矛盾：半开期间的 400 会把探测窗口整体后推一整轮
+    /// cooldown，Open 期间则延长冷却起点。断言用「时刻不变 + 租约仍在 + 计数
+    /// 不变」三条，三条在旧实现下同时失败。
+    #[test]
+    fn client_error_does_not_restart_cooldown_timeline() {
+        let cb = CircuitBreaker::new(1, 30);
+        cb.record_failure("ch1", FailureType::ServerError);
+        let past = Instant::now() - Duration::from_secs(31); // 冷却已过 → 半开
+        if let Some(mut e) = cb.states.get_mut("ch1") {
+            e.last_failure_time = Some(past);
+        }
+        assert_eq!(cb.get_state("ch1"), "halfopen");
+        assert!(cb.allow_request("ch1"), "半开期首个请求应抢到试探租约");
+        let lease = cb
+            .states
+            .get("ch1")
+            .and_then(|e| e.probe_lease_until)
+            .expect("试探租约应在飞");
+
+        cb.record_failure("ch1", FailureType::ClientError);
+
+        let after = cb.states.get("ch1").unwrap();
+        assert_eq!(
+            after.last_failure_time,
+            Some(past),
+            "客户端错误不得刷新 last_failure_time（否则半开窗口被后推/冷却被延长）"
+        );
+        assert_eq!(
+            after.probe_lease_until,
+            Some(lease),
+            "客户端错误不得清掉在飞试探租约"
+        );
+        assert_eq!(
+            after.failure_count.load(Ordering::Relaxed),
+            1,
+            "客户端错误不得增失败计数"
+        );
+        assert_eq!(
+            after.failure_type.as_ref().map(FailureType::as_str),
+            Some("client_error")
+        );
     }
 
     // ── 总开关（breaker.enabled）──────────────────────────────────────
