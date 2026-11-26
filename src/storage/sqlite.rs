@@ -170,6 +170,7 @@ impl SqliteStore {
     /// 与 [`Self::put_if_absent`] 的差别只有「不做序列化往返」—— 迁移必须搬原始
     /// 字节，形状与存量值不完全一致的历史记录经 `serde_json::Value` 往返会被改写
     /// 成另一份语义（或直接跳过，静默丢数据）。
+    #[allow(dead_code)] // 仅经 FileStore::put_if_absent_raw 的 sqlite→postgres 迁移调用（feature-gated）
     pub fn put_if_absent_raw(&self, key: &str, raw_json: &str) -> anyhow::Result<bool> {
         run_blocking(|| -> anyhow::Result<bool> {
             let conn = self.conn.lock();
@@ -671,7 +672,7 @@ mod tests {
             .transaction(|conn| {
                 conn.execute(
                     "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
-                    rusqlite::params!["after_panic", "ok"],
+                    rusqlite::params!["after_panic", "\"ok\""],
                 )?;
                 Ok(())
             })

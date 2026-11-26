@@ -791,6 +791,7 @@ impl FileStore {
     /// 不完全一致的历史记录会被 `serde_json::Value` 往返改写成另一份语义
     /// （或直接跳过，静默丢数据）。与 `put_raw` 同形态按 backend 分派。
     #[cfg(feature = "sqlite-kv")]
+    #[allow(dead_code)] // 仅 sqlite→postgres 迁移（feature-gated）调用；默认构建看不到调用方
     pub fn put_if_absent_raw(&self, key: &str, raw: &str) -> anyhow::Result<bool> {
         match &self.inner {
             FileStoreInner::Sqlite(s) => s.put_if_absent_raw(key, raw),
