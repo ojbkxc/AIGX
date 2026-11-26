@@ -205,3 +205,157 @@ impl OrderStore {
         (items, total)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn store(dir: &TempDir) -> OrderStore {
+        OrderStore::new(Arc::new(FileStore::new(dir.path().to_path_buf())))
+    }
+
+    fn order(no: &str, user: &str, status: &str, created: i64) -> TopUpOrder {
+        TopUpOrder {
+            trade_no: no.into(),
+            user_id: user.into(),
+            amount: 10,
+            money: 1.0,
+            quota: 100,
+            payment_method: "epay".into(),
+            status: status.into(),
+            create_time: created,
+            paid_time: None,
+        }
+    }
+
+    #[test]
+    fn insert_get_and_reload_from_disk() {
+        let dir = TempDir::new().unwrap();
+        {
+            let s = store(&dir);
+            s.insert(&order("t1", "u1", "pending", 100)).unwrap();
+            assert_eq!(s.get("t1").unwrap().status, "pending");
+            assert!(s.get("missing").is_none());
+        }
+        // 新实例从磁盘重建索引，订单不丢
+        let s2 = store(&dir);
+        let got = s2.get("t1").expect("persisted order must reload");
+        assert_eq!(got.user_id, "u1");
+        assert_eq!(got.quota, 100);
+    }
+
+    /// CAS 完成：第一次 pending→paid 返回订单，第二次一律 None（防止回调并发双倍入账）。
+    #[test]
+    fn complete_if_pending_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let s = store(&dir);
+        s.insert(&order("t1", "u1", "pending", 100)).unwrap();
+
+        let first = s.complete_if_pending("t1").expect("first must complete");
+        assert_eq!(first.status, "paid");
+        assert!(first.paid_time.is_some());
+
+        assert!(
+            s.complete_if_pending("t1").is_none(),
+            "second must be rejected"
+        );
+        assert!(s.complete_if_pending("nope").is_none(), "missing order");
+
+        // paid 状态已落盘
+        let s2 = store(&dir);
+        assert_eq!(s2.get("t1").unwrap().status, "paid");
+    }
+
+    #[test]
+    fn complete_if_pending_rejects_non_pending() {
+        let dir = TempDir::new().unwrap();
+        let s = store(&dir);
+        s.insert(&order("t1", "u1", "expired", 100)).unwrap();
+        assert!(s.complete_if_pending("t1").is_none());
+        assert_eq!(s.get("t1").unwrap().status, "expired");
+    }
+
+    /// 补单失败回滚：reopen 把 paid 拉回 pending，可再次 CAS 成功。
+    #[test]
+    fn reopen_resets_to_pending_for_retry() {
+        let dir = TempDir::new().unwrap();
+        let s = store(&dir);
+        s.insert(&order("t1", "u1", "pending", 100)).unwrap();
+        assert!(s.complete_if_pending("t1").is_some());
+
+        s.reopen("t1").unwrap();
+        let after = s.get("t1").unwrap();
+        assert_eq!(after.status, "pending");
+        assert!(after.paid_time.is_none());
+        assert!(s.complete_if_pending("t1").is_some());
+
+        assert!(s.reopen("missing").is_err());
+    }
+
+    #[test]
+    fn delete_removes_memory_and_disk() {
+        let dir = TempDir::new().unwrap();
+        let s = store(&dir);
+        s.insert(&order("t1", "u1", "pending", 100)).unwrap();
+        assert!(s.delete("t1"));
+        assert!(s.get("t1").is_none());
+        assert!(!s.delete("t1"));
+        // 重启后仍不存在
+        assert!(store(&dir).get("t1").is_none());
+    }
+
+    #[test]
+    fn list_paged_filters_and_sorts_desc() {
+        let dir = TempDir::new().unwrap();
+        let s = store(&dir);
+        for (i, (no, user, method)) in [
+            ("t1", "u1", "epay"),
+            ("t2", "u1", "stripe"),
+            ("t3", "u2", "epay"),
+            ("t4", "u2", "stripe"),
+            ("t5", "u1", "epay"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut o = order(no, user, "pending", (i as i64 + 1) * 10);
+            o.payment_method = method.into();
+            s.insert(&o).unwrap();
+        }
+
+        // 无关键字：按 create_time 倒序
+        let (items, total) = s.list_paged(None, 1, 10);
+        assert_eq!(total, 5);
+        let nos: Vec<_> = items.iter().map(|o| o.trade_no.as_str()).collect();
+        assert_eq!(nos, ["t5", "t4", "t3", "t2", "t1"]);
+
+        // 关键字按 user_id 过滤（大小写不敏感）
+        let (items, total) = s.list_paged(Some("U1"), 1, 10);
+        assert_eq!(total, 3);
+        assert!(items.iter().all(|o| o.user_id == "u1"));
+
+        // 分页：size=2
+        let (p1, total) = s.list_paged(None, 1, 2);
+        assert_eq!((p1.len(), total), (2, 5));
+        assert_eq!(p1[0].trade_no, "t5");
+        let (p3, _) = s.list_paged(None, 3, 2);
+        assert_eq!(p3.len(), 1);
+        assert_eq!(p3[0].trade_no, "t1");
+        let (p4, _) = s.list_paged(None, 4, 2);
+        assert!(p4.is_empty());
+    }
+
+    #[test]
+    fn list_by_user_returns_only_that_user_desc() {
+        let dir = TempDir::new().unwrap();
+        let s = store(&dir);
+        s.insert(&order("a", "u1", "pending", 10)).unwrap();
+        s.insert(&order("b", "u2", "paid", 30)).unwrap();
+        s.insert(&order("c", "u1", "paid", 20)).unwrap();
+
+        let list = s.list_by_user("u1");
+        let nos: Vec<_> = list.iter().map(|o| o.trade_no.as_str()).collect();
+        assert_eq!(nos, ["c", "a"]);
+    }
+}

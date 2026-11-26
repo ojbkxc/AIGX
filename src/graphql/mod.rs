@@ -165,16 +165,22 @@ async fn query_graphql(
         }
     }
 
-    let groups = result
+    let groups = first_account_groups(result);
+
+    Ok(groups)
+}
+
+/// 取首个账号的用量分组（CF GraphQL 按 accountTag 过滤，命中至多一个账号）。
+/// 抽成独立函数以便单测覆盖「空账号 → 空分组」「多账号只取第一个」。
+fn first_account_groups(result: GraphQLResponse) -> Vec<GraphQLGroup> {
+    result
         .data
         .viewer
         .accounts
         .into_iter()
         .next()
         .map(|a| a.ai_inference_adaptive_groups)
-        .unwrap_or_default();
-
-    Ok(groups)
+        .unwrap_or_default()
 }
 
 // ── GraphQL 响应类型 ──────────────────────────────────────────────────
@@ -245,4 +251,74 @@ pub struct DailyUsage {
     pub date: String,
     pub neurons: u64,
     pub requests: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GROUP: &str = r#"{
+        "viewer": {
+            "accounts": [{
+                "aiInferenceAdaptiveGroups": [{
+                    "count": 7,
+                    "sum": { "totalNeurons": 1234 },
+                    "dimensions": { "date": "2026-11-26", "modelId": "@cf/meta/llama" }
+                }]
+            }]
+        }
+    }"#;
+
+    fn parse(data: &str) -> GraphQLResponse {
+        serde_json::from_str(data).expect("valid GraphQL payload")
+    }
+
+    /// camelCase 嵌套结构与 CF 真实返回一致；未知字段（modelId）应被忽略。
+    #[test]
+    fn deserializes_camel_case_groups() {
+        let resp = parse(&format!(r#"{{"data": {GROUP}}}"#));
+        assert!(resp.errors.is_none());
+        let groups = first_account_groups(resp);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].count, 7);
+        assert_eq!(groups[0].sum.total_neurons, 1234);
+        assert_eq!(groups[0].dimensions.date, "2026-11-26");
+    }
+
+    #[test]
+    fn parses_graphql_errors() {
+        let resp =
+            parse(r#"{"data":{"viewer":{"accounts":[]}},"errors":[{"message":"acct not found"}]}"#);
+        let errs = resp.errors.expect("errors present");
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].message, "acct not found");
+    }
+
+    #[test]
+    fn first_account_groups_handles_empty_and_multi() {
+        // 无账号 → 空分组
+        let empty = parse(r#"{"data":{"viewer":{"accounts":[]}}}"#);
+        assert!(first_account_groups(empty).is_empty());
+
+        // 多账号只取第一个
+        let multi = parse(
+            r#"{"data":{"viewer":{"accounts":[
+            {"aiInferenceAdaptiveGroups":[
+                {"count":1,"sum":{"totalNeurons":10},"dimensions":{"date":"2026-11-01"}}
+            ]},
+            {"aiInferenceAdaptiveGroups":[
+                {"count":2,"sum":{"totalNeurons":20},"dimensions":{"date":"2026-11-02"}}
+            ]}
+        ]}}}"#,
+        );
+        let groups = first_account_groups(multi);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].sum.total_neurons, 10);
+    }
+
+    /// data 缺失/结构不符必须报错（而不是静默返回空用量）。
+    #[test]
+    fn missing_data_is_error() {
+        assert!(serde_json::from_str::<GraphQLResponse>(r#"{"errors":[]}"#).is_err());
+    }
 }
