@@ -37,7 +37,11 @@ pub fn serve_static_files() -> Router {
         path.push("static");
         path
     });
+    serve_static_files_from(static_dir)
+}
 
+/// 以指定目录构建静态服务（`serve_static_files` 的实现体，单独抽出便于测试注入目录）。
+fn serve_static_files_from(static_dir: PathBuf) -> Router {
     tracing::info!("Serving static files from: {:?}", static_dir);
 
     let index_path = static_dir.join("index.html");
@@ -115,4 +119,100 @@ pub fn find_static_dir() -> Option<PathBuf> {
         .into_iter()
         .flatten()
         .find(|candidate| candidate.exists() && candidate.is_dir())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use tower::ServiceExt; // oneshot
+
+    /// 造一个最小 static 目录：index.html + assets/app.js。
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<html>spa</html>").unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        std::fs::write(dir.path().join("assets/app.js"), "console.log(1)").unwrap();
+        dir
+    }
+
+    async fn get(app: Router, uri: &str) -> Response {
+        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// 未匹配的 `/api/*` 必须回 404 JSON —— 不能落进 SPA 回退返回 200 HTML，
+    /// 否则管理面的路径探测会把「HTML 200」误读成端点存在。
+    #[tokio::test]
+    async fn unmatched_api_path_returns_json_404() {
+        let dir = fixture();
+        let resp = get(
+            serve_static_files_from(dir.path().to_path_buf()),
+            "/api/nope",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        // 404 不套缓存头（中间件只在 2xx 上加）
+        assert!(resp.headers().get(header::CACHE_CONTROL).is_none());
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains("\"success\":false"), "{text}");
+    }
+
+    /// 页面路由（非 /api、非静态文件）回退到 index.html，且是 no-cache。
+    #[tokio::test]
+    async fn spa_route_falls_back_to_index_with_no_cache() {
+        let dir = fixture();
+        let resp = get(serve_static_files_from(dir.path().to_path_buf()), "/logs").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache")
+        );
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "<html>spa</html>");
+    }
+
+    /// 哈希资源走长缓存 immutable（更新后无需重新下载）。
+    #[tokio::test]
+    async fn hashed_asset_gets_immutable_cache() {
+        let dir = fixture();
+        let resp = get(
+            serve_static_files_from(dir.path().to_path_buf()),
+            "/assets/app.js",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("public, max-age=31536000, immutable")
+        );
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "console.log(1)");
+    }
+
+    /// 静态目录里缺 index.html 时，SPA 回退给 404 而不是 500。
+    #[tokio::test]
+    async fn missing_index_html_falls_back_to_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let resp = get(serve_static_files_from(dir.path().to_path_buf()), "/logs").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }
