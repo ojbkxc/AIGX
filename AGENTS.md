@@ -46,8 +46,9 @@ Rust(axum 0.7 + Tokio)后端 + React 18 + TypeScript + Vite 前端,默认 SQLite
 6. **Rust 测试用独立临时目录**——`temp_dir + pid + AtomicU64 序号`;并行测试共用一个
    SQLite 文件会 `database is locked`。
 7. **React `onClick={() => fn(args)}`**——`onClick={fn(args)}` 在渲染期立即执行,TS2322。
-8. **部署新二进制后检查 config**——新二进制首启可能把 `~/.aigx/config.toml` 重置回
-   `127.0.0.1:8080`,需 sed 回 `0.0.0.0:9527` 再重启。
+8. **部署新二进制后检查 config**——若启动日志出现 `config file is not valid TOML`，说明旧
+   配置无法被新版本解析：程序会把原文件备份到 `config.toml.broken-<ts>`、**拒绝后续保存**
+   （不会再被默认值静默覆盖），此时请按备份修好配置再重启。正常可解析的配置不会被重置。
 9. **`scripts/` 目录被 gitignore**(部署助手,含服务器凭据)——可入库的工具脚本放 `tools/`。
 10. **前端管理后台永远不调 `/v1/*`**——数据面要 sk-xxx 密钥,管理 token 会 401 并触发
     全局误踢登录;管理面一律走 `/api/*`。

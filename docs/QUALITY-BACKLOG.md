@@ -53,7 +53,7 @@ CI 已加闸：`npm audit --omit=dev --audit-level=high`（只拦 high/critical�
 | 项 | 说明 | 状态 |
 |---|---|---|
 | CI 并发 | 连续 push 会叠加全套运行；已加 `concurrency`（同 ref 只保留最新一次） | ✅ |
-| 生产配置被重置 | 新二进制首启可能把 `~/.aigx/config.toml` 重置回 `127.0.0.1:8080` | ⏳ 已记录在 AGENTS.md 硬约束 8，根因未修 |
+| 生产配置被重置 | 新二进制首启可能把 `~/.aigx/config.toml` 重置回 `127.0.0.1:8080` | ✅ 根因修复：配置存在但读不出/解析失败时，先备份原文件到 `config.toml.broken-<ts>`，并置 `protect_from_overwrite` 拒绝后续 `save/save_with` 覆盖（`src/config.rs`，含 2 条回归测试）；AGENTS 硬约束 8 同步更新 |
 | `origin` remote 内嵌 PAT | 明文 token 存在本地 `.git/config`（不入库），建议轮换并改用凭据管理器 | ⏳ 需业主操作（agent 无法代为轮换/改凭据） |
 
 ## 7. parity「待核实」项复核（2026-11-27）

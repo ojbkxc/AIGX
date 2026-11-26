@@ -1850,6 +1850,16 @@ pub struct ConfigManager {
     /// （`/api/gateway/settings` 与 `/api/vision-compatibility`）时，后写者
     /// 用自己那份旧快照把前者的改动盖掉，**没有日志、无法自诊断**。
     write_lock: tokio::sync::Mutex<()>,
+    /// 启动时配置文件**已存在但读不出/解析失败** → 置位。
+    ///
+    /// P1 根因修复：旧行为是回落默认配置后照常运行，随后任一保存
+    /// （`ensure_session_secret` 首次生成 secret、管理面改设置）会把内存里的
+    /// 默认值整份写回磁盘，**原文件不可恢复**——表现就是「部署新二进制后
+    /// `config.toml` 被重置回 `127.0.0.1:8080`」。置位后 `save/save_with`
+    /// 拒绝覆盖原文件，并在加载时先把原文件备份到 `config.toml.broken-<ts>`。
+    protect_from_overwrite: std::sync::atomic::AtomicBool,
+    /// 损坏配置的备份路径（诊断 / 报错信息用）。
+    corrupt_backup: RwLock<Option<PathBuf>>,
 }
 
 impl ConfigManager {
@@ -1882,6 +1892,8 @@ impl ConfigManager {
             config,
             path,
             write_lock: tokio::sync::Mutex::new(()),
+            protect_from_overwrite: std::sync::atomic::AtomicBool::new(false),
+            corrupt_backup: RwLock::new(None),
         };
 
         // 如果配置文件已存在则加载，否则创建默认配置
@@ -1930,16 +1942,22 @@ impl ConfigManager {
         // 三条路都回落默认配置，但**不能都静默**：后两条是「用户写的配置被
         // 整份丢弃」—— 渠道、密钥、管理员账号全在文件里，而进程照常起来、
         // 页面看起来只是「配置没了」。更糟的是下一次 `save()` 会把内存里的
-        // 默认值写回磁盘，原文件不可恢复。默认行为仍是回落（不 fail，存量
-        // 部署照常可用），但每条非首启路径都要留一行可诊断的日志。
+        // 默认值写回磁盘，原文件不可恢复。现在的处理：读不出/解析不了时置
+        // `protect_from_overwrite`（解析失败还会先备份原文件），此后所有
+        // `save/save_with` 一律拒绝覆盖，运营修复或还原后重启即可。
         let content = match tokio::fs::read_to_string(&self.path).await {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => {
+                // 读不出（权限/编码）：无法备份，但**也不能让后续 save 覆盖**
+                // 一个我们没读懂的文件。
+                self.protect_from_overwrite
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 tracing::error!(
                     path = %self.path.display(),
                     %error,
-                    "config file unreadable; falling back to default configuration"
+                    "config file unreadable; falling back to default configuration in memory \
+                     and refusing to overwrite it (fix permissions/encoding and restart)"
                 );
                 String::new()
             }
@@ -1948,12 +1966,21 @@ impl ConfigManager {
             Ok(config) => config,
             Err(error) => {
                 // 空内容（首启）解析不会失败（每个字段都有 `#[serde(default)]`），
-                // 走到这里说明文件真的坏了。
+                // 走到这里说明文件真的坏了/旧格式不兼容。
+                // 关键：先把原文件备份，再回落默认，并禁止后续 save 覆盖它——
+                // 否则 `ensure_session_secret`（首次生成 secret）或任意管理面保存
+                // 会把默认值写回磁盘，原配置不可恢复（「部署新二进制后配置被重置」）。
+                let backup = self.backup_corrupt_config().await;
+                *self.corrupt_backup.write().await = backup.clone();
+                self.protect_from_overwrite
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 tracing::error!(
                     path = %self.path.display(),
                     %error,
+                    backup = ?backup,
                     "config file is not valid TOML for AppConfig; falling back to default \
-                     configuration (the next save will overwrite the file — fix or restore it first)"
+                     configuration in memory. The original has been backed up (if possible) and \
+                     will NOT be overwritten. Fix or restore it, then restart."
                 );
                 AppConfig::default()
             }
@@ -1985,12 +2012,57 @@ impl ConfigManager {
         Ok(())
     }
 
+    /// 把损坏/不兼容的配置文件原样复制一份到 `config.toml.broken-<ts>`。
+    ///
+    /// 失败只记日志（不阻断启动），返回值仅供诊断/报错信息使用。
+    async fn backup_corrupt_config(&self) -> Option<PathBuf> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "config.toml".to_string());
+        let backup = self.path.with_file_name(format!("{name}.broken-{ts}"));
+        match tokio::fs::copy(&self.path, &backup).await {
+            Ok(_) => Some(backup),
+            Err(e) => {
+                tracing::error!(
+                    path = %self.path.display(),
+                    backup = %backup.display(),
+                    %e,
+                    "failed to back up unparseable config file"
+                );
+                None
+            }
+        }
+    }
+
     /// 把已序列化的 TOML 内容原子落盘（tmp + rename，0600）。
     async fn write_tmp_and_rename(
         &self,
         tmp: &std::path::Path,
         content: &str,
     ) -> anyhow::Result<()> {
+        // P1 根因闸：启动时原文件已存在却读不出/解析失败 → 一律拒绝覆盖。
+        // 否则默认值会被写回磁盘，把用户原来的渠道/密钥/监听地址整份抹掉
+        // （「部署新二进制后 config.toml 被重置成 127.0.0.1:8080」）。
+        if self
+            .protect_from_overwrite
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let backup = self.corrupt_backup.read().await.clone();
+            anyhow::bail!(
+                "refusing to overwrite config file {}: it existed at startup but could not be \
+                 read/parsed, so the original is left untouched{}; fix or restore it and restart",
+                self.path.display(),
+                backup
+                    .map(|p| format!(" (backup: {})", p.display()))
+                    .unwrap_or_default()
+            );
+        }
         #[cfg(unix)]
         {
             use tokio::io::AsyncWriteExt as _;
@@ -2583,5 +2655,70 @@ mod tests {
         // 缺省时主端口/主机保持原默认（零迁移）
         assert_eq!(parsed.port, 8080);
         assert_eq!(parsed.host, "127.0.0.1");
+    }
+
+    /// P1 根因回归：启动时配置文件存在但解析失败，**绝不能**被后续 save
+    /// 覆盖成默认值（否则就是「部署新二进制后 config.toml 被重置」）。
+    /// 同时原文件要先备份，保证可恢复。
+    #[tokio::test]
+    async fn corrupt_config_is_backed_up_and_never_overwritten() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[server]\nhost = \"0.0.0.0\"\nport = \"not-a-number\"\n";
+        std::fs::write(&path, original).unwrap();
+
+        let manager = super::ConfigManager::new_with(Some(path.clone()), |_| None).await;
+        // 内存回落默认（无法得知原意）
+        assert_eq!(manager.get().await.server.port, super::default_port());
+
+        // 原文件仍在、内容未变
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "损坏配置的原始文件不得被改写"
+        );
+
+        // 存在且仅存在一个备份，内容与原文一致
+        let backups: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".broken-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "应生成一个备份文件: {backups:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&backups[0])).unwrap(),
+            original
+        );
+
+        // 两条保存路径都必须拒绝覆盖
+        assert!(manager.save().await.is_err(), "损坏配置不得被 save 覆盖");
+        assert!(
+            manager.update(super::AppConfig::default()).await.is_err(),
+            "损坏配置不得被 update 覆盖"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "save/update 失败后原文件仍应保持不变"
+        );
+    }
+
+    /// 正常（可解析）配置不受保护闸影响：照常可写盘。
+    #[tokio::test]
+    async fn valid_config_is_still_writable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nport = 9527\n").unwrap();
+
+        let manager = super::ConfigManager::new_with(Some(path.clone()), |_| None).await;
+        assert_eq!(manager.get().await.server.port, 9527);
+
+        manager.update(super::AppConfig::default()).await.unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains(&format!("port = {}", super::default_port())),
+            "正常配置应可写盘: {content}"
+        );
     }
 }
