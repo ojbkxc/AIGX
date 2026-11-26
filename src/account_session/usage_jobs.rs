@@ -33,8 +33,13 @@ pub const RETAIN_SECONDS: i64 = 300;
 struct Job {
     account_id: String,
     request_id: String,
-    started_at_ms: i64,
+    /// 登记时刻（任务排队起点）。
+    queued_at_ms: i64,
+    /// 真正开跑时刻（拿到后台并发令牌之后才写；排队期间 = 登记时刻）。
+    started_at_ms: std::sync::atomic::AtomicI64,
     timeout_seconds: u64,
+    /// `false` = 还在排队（等全局后台并发令牌），`true` = 已发出上游请求。
+    running: std::sync::atomic::AtomicBool,
     cancel: watch::Sender<bool>,
     result: watch::Sender<Option<Value>>,
 }
@@ -46,18 +51,30 @@ impl Job {
 
     fn state(&self) -> Value {
         let result = self.result.borrow();
+        // `queued` 是 AIGX 新增的对外取值（上游用 execution 时间戳区分
+        // queued/running）。前端已按 `status` 分支渲染，未知取值落到默认文案。
         let status = result
             .as_ref()
             .and_then(|row| row.get("queryStatus"))
             .and_then(Value::as_str)
-            .unwrap_or("running");
+            .unwrap_or_else(|| {
+                if self.running.load(std::sync::atomic::Ordering::Relaxed) {
+                    "running"
+                } else {
+                    "queued"
+                }
+            });
+        let started_at = self
+            .started_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
         json!({
             "id": self.account_id,
             "requestId": self.request_id,
             "status": status,
             "error": result.as_ref().and_then(|row| row.get("error")),
-            "startedAt": self.started_at_ms,
-            "deadlineAt": self.started_at_ms + self.timeout_seconds as i64 * 1000,
+            "queuedAt": self.queued_at_ms,
+            "startedAt": started_at,
+            "deadlineAt": started_at + self.timeout_seconds as i64 * 1000,
         })
     }
 
@@ -127,11 +144,51 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// 全局后台并发闸：上限 = `runtime_capacity::limits().background`（默认 32）。
+///
+/// 「查询全部余额」是 200 个账号一次登记 200 个任务；此前每个任务直接
+/// `tokio::spawn` 发上游，等于绕过容量页上的「后台并发」。这里与
+/// `usage_query` 的按家闸叠加：先过全局令牌，再过按家启动间隔。
+/// 容量页改了值就地换一个新的信号量（旧令牌自然归还给旧实例）。
+fn background_gate() -> Arc<tokio::sync::Semaphore> {
+    static STATE: OnceLock<Mutex<(usize, Arc<tokio::sync::Semaphore>)>> = OnceLock::new();
+    let limit = crate::runtime_capacity::limits().background.max(1);
+    let cell =
+        STATE.get_or_init(|| Mutex::new((limit, Arc::new(tokio::sync::Semaphore::new(limit)))));
+    let mut guard = cell.lock().unwrap_or_else(|error| error.into_inner());
+    if guard.0 != limit {
+        *guard = (limit, Arc::new(tokio::sync::Semaphore::new(limit)));
+    }
+    guard.1.clone()
+}
+
+/// 单家后台并发闸：上限 = `min(background_per_provider, 申报 concurrency)`。
+fn provider_gate(provider: &str) -> Arc<tokio::sync::Semaphore> {
+    static STATE: OnceLock<Mutex<HashMap<String, (usize, Arc<tokio::sync::Semaphore>)>>> =
+        OnceLock::new();
+    let limit = crate::runtime_capacity::limits()
+        .background_per_provider
+        .min(super::usage_query::provider_cap(provider))
+        .max(1);
+    let cell = STATE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cell.lock().unwrap_or_else(|error| error.into_inner());
+    let entry = guard
+        .entry(provider.to_string())
+        .or_insert_with(|| (limit, Arc::new(tokio::sync::Semaphore::new(limit))));
+    if entry.0 != limit {
+        *entry = (limit, Arc::new(tokio::sync::Semaphore::new(limit)));
+    }
+    entry.1.clone()
+}
+
 fn prune(registry: &mut Registry) {
     let now = now_ms();
-    registry
-        .jobs
-        .retain(|_, job| job.pending() || now - job.started_at_ms < RETAIN_SECONDS * 1000);
+    registry.jobs.retain(|_, job| {
+        // 排队中的任务不算超期（还没发过上游），终态才按开跑时刻判保留窗。
+        job.pending()
+            || now - job.started_at_ms.load(std::sync::atomic::Ordering::Relaxed)
+                < RETAIN_SECONDS * 1000
+    });
 }
 
 /// 单次查询（带超时 + 重试）；任一次成功即收口。
@@ -171,6 +228,28 @@ async fn wait_cancelled(rx: &mut watch::Receiver<bool>) {
     }
 }
 
+/// 依次拿「全局后台并发」与「单家并发」两个令牌（顺序固定，避免死锁）。
+async fn acquire_permits(
+    background: Arc<tokio::sync::Semaphore>,
+    provider: Arc<tokio::sync::Semaphore>,
+) -> Result<
+    (
+        tokio::sync::OwnedSemaphorePermit,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    String,
+> {
+    let global = background
+        .acquire_owned()
+        .await
+        .map_err(|_| "后台并发闸已关闭".to_string())?;
+    let local = provider
+        .acquire_owned()
+        .await
+        .map_err(|_| "单家并发闸已关闭".to_string())?;
+    Ok((global, local))
+}
+
 /// 起一个后台查询任务；返回 `(是否新建, 状态快照)`。
 fn spawn_job(
     pool: &AccountSessionStore,
@@ -194,8 +273,10 @@ fn spawn_job(
     let job = Arc::new(Job {
         account_id: session.id.clone(),
         request_id: request_id.clone(),
-        started_at_ms: now_ms(),
+        queued_at_ms: now_ms(),
+        started_at_ms: std::sync::atomic::AtomicI64::new(now_ms()),
         timeout_seconds: config.timeout_seconds,
+        running: std::sync::atomic::AtomicBool::new(false),
         cancel,
         result,
     });
@@ -207,6 +288,37 @@ fn spawn_job(
     let client = client.clone();
     let mut cancel_rx = cancel_rx;
     tokio::spawn(async move {
+        // ① 全局后台并发令牌 → ② 单家并发令牌 → ③ 单家启动间隔。
+        // 三级都拿齐才发上游；排队期间任务状态是 `queued`（界面可分辨「在等」
+        // 与「在飞」），排队与在飞期间取消都有效。
+        let background = background_gate();
+        let provider_slot = provider_gate(&session.provider);
+        let gate = super::usage_query::gate_for(&session.provider);
+        let permits = tokio::select! {
+            _ = wait_cancelled(&mut cancel_rx) => None,
+            acquired = acquire_permits(background, provider_slot) => Some(acquired),
+        };
+        let Some(permits) = permits else {
+            job.stop("cancelled", None);
+            return;
+        };
+        let _permits = match permits {
+            Ok(permits) => permits,
+            Err(message) => {
+                job.stop("failed", Some(&message));
+                return;
+            }
+        };
+        // 按家启动间隔（进程级闸，与巡检/手动查询共用）。
+        gate.wait_turn().await;
+        if *cancel_rx.borrow() {
+            job.stop("cancelled", None);
+            return;
+        }
+        job.running
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        job.started_at_ms
+            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
         let outcome = tokio::select! {
             _ = wait_cancelled(&mut cancel_rx) => None,
             queried = query_with_retries(&client, &session, config.retries, config.timeout_seconds) => Some(queried),
@@ -360,6 +472,61 @@ mod tests {
         assert!(states(&pool)["jobs"].as_array().unwrap().is_empty());
     }
 
+    /// 后台并发闸：令牌数与容量一致，超出的排队者拿不到令牌。
+    #[tokio::test]
+    async fn acquire_permits_respects_semaphore_sizes() {
+        let background = Arc::new(tokio::sync::Semaphore::new(2));
+        let provider = Arc::new(tokio::sync::Semaphore::new(8));
+        let first = acquire_permits(background.clone(), provider.clone())
+            .await
+            .expect("first");
+        let _second = acquire_permits(background.clone(), provider.clone())
+            .await
+            .expect("second");
+        // 第三个必须排队：后台闸只有 2 个令牌。
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                acquire_permits(background.clone(), provider.clone())
+            )
+            .await
+            .is_err(),
+            "超过后台并发上限时必须排队"
+        );
+        drop(first);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                acquire_permits(background, provider)
+            )
+            .await
+            .is_ok(),
+            "归还令牌后必须能拿到"
+        );
+    }
+
+    #[test]
+    fn queued_job_reports_queued_until_it_runs() {
+        let (cancel, _rx) = watch::channel(false);
+        let (result, _) = watch::channel(None);
+        let job = Job {
+            account_id: "a".into(),
+            request_id: "r".into(),
+            queued_at_ms: 1,
+            started_at_ms: std::sync::atomic::AtomicI64::new(1),
+            timeout_seconds: 5,
+            running: std::sync::atomic::AtomicBool::new(false),
+            cancel,
+            result,
+        };
+        assert_eq!(job.state()["status"], "queued");
+        job.running
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(job.state()["status"], "running");
+        job.stop("cancelled", None);
+        assert_eq!(job.state()["status"], "cancelled");
+    }
+
     #[test]
     fn states_are_pruned_by_retention() {
         let mut registry = Registry::default();
@@ -368,8 +535,12 @@ mod tests {
         let job = Arc::new(Job {
             account_id: "a".into(),
             request_id: "r".into(),
-            started_at_ms: now_ms() - (RETAIN_SECONDS + 1) * 1000,
+            queued_at_ms: now_ms() - (RETAIN_SECONDS + 1) * 1000,
+            started_at_ms: std::sync::atomic::AtomicI64::new(
+                now_ms() - (RETAIN_SECONDS + 1) * 1000,
+            ),
             timeout_seconds: 1,
+            running: std::sync::atomic::AtomicBool::new(true),
             cancel,
             result,
         });

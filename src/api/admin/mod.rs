@@ -1,6 +1,8 @@
 pub mod account_login;
 pub mod account_sessions;
 pub mod accounts_query; // 账号列表查询/分页 + 凭证替换（对齐 A2A accounts_list / accounts_credentials）
+pub mod agents; // 本机 Agent 客户端接入（对齐 A2A core/agents + /api/agents*）
+pub mod aliases; // A2A 兼容别名（/api/{timeouts,retry,cors} → 同一份配置）
 pub mod assistant;
 pub mod auth;
 pub mod backup;
@@ -258,11 +260,11 @@ pub use legacy::{
     handle_list_groups, handle_list_prices, handle_openapi_json, handle_patch_channel,
     handle_realtime, handle_refresh_usage, handle_remove_ip_blacklist, handle_remove_ip_whitelist,
     handle_reset_channel_circuit, handle_rotate_token, handle_stripe_topup, handle_stripe_webhook,
-    handle_swagger_ui, handle_test_account, handle_test_channel, handle_test_email,
-    handle_test_slack, handle_test_telegram, handle_test_webhook, handle_tokens_today,
-    handle_update_ip_filter, handle_update_price_sync_config, handle_update_ratelimit_config,
-    handle_upsert_group, handle_upsert_price_by_model, handle_usage_models, handle_usage_summary,
-    handle_usage_trend, handle_user_ranking,
+    handle_swagger_ui, handle_test_account, handle_test_bark, handle_test_channel,
+    handle_test_email, handle_test_slack, handle_test_telegram, handle_test_webhook,
+    handle_tokens_today, handle_update_ip_filter, handle_update_price_sync_config,
+    handle_update_ratelimit_config, handle_upsert_group, handle_upsert_price_by_model,
+    handle_usage_models, handle_usage_summary, handle_usage_trend, handle_user_ranking,
 };
 
 // 用户侧端点与未迁移端点（main.rs 恢复路由时需要）

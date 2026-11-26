@@ -10,6 +10,30 @@
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
+
+/// 把一段同步落盘放进 tokio 的 blocking 池执行。
+///
+/// 存储层是**同步** API（`rusqlite` + 一把 `Mutex<Connection>`），但绝大多数
+/// 调用点都在 async handler 里（账号 persist / 渠道 persist / 设置保存）。直接
+/// 在工作线程上拿锁写 WAL 会阻塞该 worker：并发请求下 tokio 的可用 worker
+/// 被 IO 吃掉，吞吐随并发量线性掉档，且「一个慢写」会连带同一 worker 上的
+/// 其它请求一起排队。
+///
+/// - 多线程运行时：`block_in_place` 让 tokio 立刻补一个 worker 顶上，当前任务
+///   转入 blocking 池（语义仍是同步返回，写失败照常冒泡）；
+/// - 单线程运行时 / 无运行时的启动早期与同步测试：原样执行（`block_in_place`
+///   在 current_thread 运行时会 panic，必须绕开）。
+///
+/// 与 Agent2API `core::blocking::in_place` 同一口径。
+fn run_blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -47,6 +71,18 @@ impl SqliteStore {
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA foreign_keys=ON;
+             -- 写锁被别人持着时最多等 5 秒，而不是立刻 SQLITE_BUSY 失败。
+             -- 与 Agent2API `db::apply_pragmas` 同值：网关的写路径是同步调用
+             -- （账号/渠道/设置各自 put），进程内虽有 Mutex 串行化，但
+             -- 「备份导出」「外部 sqlite3 巡检」「第二个实例」都会短暂持写锁，
+             -- 默认 0ms 超时会把这类正常竞争直接变成一次失败的落盘。
+             PRAGMA busy_timeout=5000;
+             -- 临时表/排序走内存：`list(prefix)` 与分页查询会用到临时 B-tree，
+             -- 默认落盘会让每次列表查询多一次文件 I/O。
+             PRAGMA temp_store=MEMORY;
+             -- 页缓存 20MB（负值 = KiB）：KV 表以十万行量级计，默认 2MB 缓存
+             -- 在账号池 + 日志桶并发读时会反复回读同一批页。
+             PRAGMA cache_size=-20000;
              CREATE TABLE IF NOT EXISTS kv (
                  key   TEXT PRIMARY KEY NOT NULL,
                  value TEXT NOT NULL,
@@ -82,12 +118,19 @@ impl SqliteStore {
     /// 写入 JSON 值（INSERT OR REPLACE）
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
         let content = serde_json::to_string(value)?;
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
-            rusqlite::params![key, content],
-        )?;
-        Ok(())
+        // 落盘走 blocking 语义：调用方（账号/渠道/设置的 persist）是同步函数，
+        // 直接在工作线程上拿锁 + 写 WAL，会把 tokio worker 卡住（并发请求下
+        // 直接表现为整体吞吐掉档）。`run_blocking` 在多线程运行时切到
+        // blocking 池（tokio 会补一个 worker），单线程运行时/无运行时原样执行。
+        // 与 Agent2API `core::blocking::in_place` 同一口径。
+        run_blocking(|| -> anyhow::Result<()> {
+            let conn = self.conn.lock();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
+                rusqlite::params![key, content],
+            )?;
+            Ok(())
+        })
     }
 
     /// 在给定连接上写入（供事务内多键写；`transaction` 回调持有连接锁）。
@@ -107,12 +150,14 @@ impl SqliteStore {
     /// 写入已序列化的原始 JSON 字符串（迁移旧 FileStore 数据时使用，
     /// 避免对已是 JSON 的内容二次序列化产生转义）
     pub fn put_raw(&self, key: &str, raw_json: &str) -> anyhow::Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
-            rusqlite::params![key, raw_json],
-        )?;
-        Ok(())
+        run_blocking(|| -> anyhow::Result<()> {
+            let conn = self.conn.lock();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
+                rusqlite::params![key, raw_json],
+            )?;
+            Ok(())
+        })
     }
 
     /// 原子插入：key 已存在时不写入，返回 false。
@@ -143,9 +188,11 @@ impl SqliteStore {
 
     /// 删除键
     pub fn delete(&self, key: &str) -> anyhow::Result<()> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM kv WHERE key = ?1", [key])?;
-        Ok(())
+        run_blocking(|| -> anyhow::Result<()> {
+            let conn = self.conn.lock();
+            conn.execute("DELETE FROM kv WHERE key = ?1", [key])?;
+            Ok(())
+        })
     }
 
     /// 前缀匹配的上界：`prefix + U+10FFFF`。

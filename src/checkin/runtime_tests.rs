@@ -376,8 +376,34 @@ async fn raccoon_claims_successfully() {
 
     let result = claim_for(&crate::test_http_client(), &account("xiaohuanxiong", &base)).await;
 
+    // S5：读接口带发放通知 = 今天确实已发过 → `Already`（幂等，不再二次 grant）。
+    // 旧实现只读不判，把「已发放」也报成 Success，掩盖了「本来就没发」的情况。
+    assert_eq!(result.outcome, CheckinOutcome::Already);
+    assert_hit(&state, "/api/web/office/v3/setting_info");
+}
+
+#[tokio::test]
+async fn raccoon_grants_when_not_granted_today() {
+    let (base, state) = start_mock(vec![
+        (
+            "/api/web/office/v3/setting_info",
+            200,
+            json!({"code": 0, "data": {}}),
+        ),
+        (
+            "/api/web/desktop/v1/login/points/grant",
+            200,
+            json!({"code": 0, "data": {"granted": 1}}),
+        ),
+    ])
+    .await;
+
+    let result = claim_for(&crate::test_http_client(), &account("xiaohuanxiong", &base)).await;
+
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/api/web/office/v3/setting_info");
+    assert_hit(&state, "/api/web/desktop/v1/login/points/grant");
+    assert_method(&state, "/api/web/desktop/v1/login/points/grant", "POST");
 }
 
 // ── AutoClaw ────────────────────────────────────────────────────────
@@ -1060,6 +1086,8 @@ fn makeup_targets_only_picks_unsucceeded_accounts() {
         time: "09:00".into(),
         time_end: String::new(),
         randomize: false,
+        daily_kind: crate::checkin::store::DAILY_KIND_FIXED.to_string(),
+        rolling_minutes: 0,
         retry_limit: 3,
         retry_gap_minutes: 5,
         makeup_time: "23:00".into(),

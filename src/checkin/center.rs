@@ -45,10 +45,14 @@ use crate::account_session::AccountSessionStore;
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// 抢闸守卫：Drop 时复位（正常返回 / 中途 panic 都不会把闸永久卡死）。
-struct Guard;
+///
+/// `pub(crate)`：调度主轮、重试/补签轮与两条手动入口都必须抢同一把闸。
+/// 此前只有 `run_now` / `run_schedule_now` 抢，定时轮与手动点击可叠跑同一
+/// 账号 —— 上游看到两次并发签到，`auto_state.running` 也常年 false。
+pub(crate) struct Guard;
 
 impl Guard {
-    fn acquire() -> Option<Self> {
+    pub(crate) fn acquire() -> Option<Self> {
         if RUNNING.swap(true, Ordering::SeqCst) {
             None
         } else {
@@ -128,6 +132,9 @@ fn schedule_view(
         "time": schedule.time,
         "timeEnd": schedule.time_end,
         "randomize": schedule.randomize,
+        // 窗口形态（S2）：`fixed` 固定时刻 / `rolling` 从账号当天首次尝试起算
+        "dailyKind": schedule.daily_kind,
+        "rollingMinutes": schedule.rolling_minutes,
         "providers": schedule.providers,
         "providerTimes": schedule.provider_times,
         "providerRows": rows,
@@ -205,6 +212,8 @@ pub fn auto_state(store: &CheckinStore, sessions: &AccountSessionStore) -> Value
         time: "00:01".to_string(),
         time_end: String::new(),
         randomize: false,
+        daily_kind: super::store::DAILY_KIND_FIXED.to_string(),
+        rolling_minutes: 0,
         retry_limit: 3,
         retry_gap_minutes: 5,
         makeup_time: DEFAULT_RETRY_TIME.to_string(),
@@ -387,7 +396,13 @@ pub fn onboarding_rows(store: &CheckinStore, sessions: &AccountSessionStore) -> 
         .filter(|session| {
             session.provider != "officeace"
                 && crate::checkin::benefits::actions_for(&session.provider)
-                    .contains(&"onboarding")
+                    .iter()
+                    // 契约表里 codearts 的新手礼动作名是 `newbie`（见
+                    // `benefits::BENEFIT_CONTRACTS`），而 `checkin_features`
+                    // 已把 `onboarding`/`newbie` 合并成 `onboarding:true`。
+                    // 这里只认 `onboarding` 会让 codearts 账号「features 说有、
+                    // 新手分组一条都没有」——两边必须同一判据。
+                    .any(|action| *action == "onboarding" || *action == "newbie")
         })
         .map(|session| {
             let memory = crate::checkin::benefits::load_memory(
@@ -507,54 +522,109 @@ pub fn campaign_rows() -> Vec<Value> {
 
 /// 各家申报的签到链路信息（A2A `checkinFeatures` 的 AIGX 等价物）。
 ///
-/// A2A 由插件申报（`CheckinInfo`）；AIGX 的执行体在主仓，能力从
-/// `claim::supports_checkin` 与 `benefits::actions_for` 推导。字段名按 A2A
-/// 的序列化形状（camelCase），没申报的家不出现（旧读端走自己的兜底）。
+/// A2A 由插件申报（`CheckinInfo.daily`，见 `auto_checkin::plugin_supports_daily_checkin`：
+/// 显式声明 `daily: false` 的家如活动福利/按需任务不进每日签到）；AIGX **没有**
+/// 插件签到申报通道 —— 上游能力面里那些「有福利没每日签到」的家在主仓只有福利
+/// 动作表（[`crate::checkin::benefits::BENEFIT_CONTRACTS`]）。所以这里的 `daily`
+/// 是**派生**的三态，而不是读取某处申报：
+///
+/// | 形态 | 判据 | 对界面 |
+/// |---|---|---|
+/// | [`DailyState::Daily`] | 在签到白名单且不在插件仓清单 | `daily: true`，进签到范围 |
+/// | [`DailyState::BenefitsOnly`] | 不在签到白名单，但福利动作表里有它 | `daily: false` + `outOfScope` 原因「本家没有每日签到，福利在对应标签」 |
+/// | [`DailyState::Absent`] | 既无签到也无福利动作 | 不进表（界面空态） |
+///
+/// 这个偏离是有意为之：白名单是**落盘契约**、福利动作表是**能力事实**，两者
+/// 合起来才等价于 A2A 的「插件申报」。将来若接入插件签到申报，只需把
+/// [`daily_state`] 的第一个判据换成申报值，下发给前端的形状不变。
 pub fn checkin_features() -> Map<String, Value> {
     let mut map = Map::new();
-    for provider in claim::CHECKIN_PROVIDERS {
-        let provider = *provider;
+    // 清单 = 签到白名单（顺序即展示顺序）+ 只有福利通道的家（追加在末尾）
+    let mut providers: Vec<&str> = claim::CHECKIN_PROVIDERS.to_vec();
+    for contract in crate::checkin::benefits::BENEFIT_CONTRACTS {
+        if !providers.contains(&contract.provider) {
+            providers.push(contract.provider);
+        }
+    }
+    for provider in providers {
         let actions = crate::checkin::benefits::actions_for(provider);
-        let daily =
-            claim::supports_checkin(provider) && !claim::UNSUPPORTED_PROVIDERS.contains(&provider);
-        let onboarding = actions.contains(&"onboarding");
-        let plans = actions.contains(&"plan");
-        let growth = actions.contains(&"growth");
-        let newbie = actions.contains(&"newbie");
-        // 完全没有签到链路且没有福利通道的家不进表（界面显示空态）
-        if !daily && !onboarding && !plans && !growth && !newbie {
-            continue;
+        if let Some(entry) = feature_entry(provider, &actions) {
+            map.insert(provider.to_string(), entry);
         }
-        let mut modes: Vec<&str> = Vec::new();
-        if daily {
-            modes.push("checkin");
-        }
-        if provider == "workbuddy-intl" {
-            modes.extend(["keepalive", "claim", "full"]);
-        }
-        let ui_hooks: Vec<&str> = if provider == "qoder-intl" {
-            vec!["umid_component"]
-        } else {
-            Vec::new()
-        };
-        map.insert(
-            provider.to_string(),
-            json!({
-                "daily": daily,
-                "onboarding": onboarding || newbie,
-                "plans": plans,
-                "growth": growth,
-                "manualPlans": daily && plans,
-                "excludeGuest": provider == "chatglm",
-                "description": Value::Null,
-                "modes": modes,
-                "uiHooks": ui_hooks,
-                // AIGX 扩展：该家的全部福利动作（福利通道页用）
-                "benefitActions": actions,
-            }),
-        );
     }
     map
+}
+
+/// `daily` 的三态（见 [`checkin_features`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DailyState {
+    /// 有每日签到（白名单内且有实现）
+    Daily,
+    /// 没有每日签到，但这家仍有福利动作（福利在对应标签里领）
+    BenefitsOnly,
+    /// 既无签到也无福利动作 —— 不进能力表
+    Absent,
+}
+
+/// 福利档的 `outOfScope` 文案（与 `out_of_scope_reason` 的账号级文案分开：
+/// 那条讲「这个账号为什么不在范围」，这条讲「这家为什么没有每日签到」）。
+pub const BENEFITS_ONLY_REASON: &str = "本家没有每日签到，福利在对应标签";
+
+/// 一家的三态判定（见 [`checkin_features`] 的表）。
+pub fn daily_state(provider: &str, actions: &[&str]) -> DailyState {
+    let daily =
+        claim::supports_checkin(provider) && !claim::UNSUPPORTED_PROVIDERS.contains(&provider);
+    if daily {
+        return DailyState::Daily;
+    }
+    if actions.is_empty() {
+        return DailyState::Absent;
+    }
+    DailyState::BenefitsOnly
+}
+
+/// 一条能力表的条目；`None` = 这家不该出现在表里（[`DailyState::Absent`]）。
+fn feature_entry(provider: &str, actions: &[&str]) -> Option<Value> {
+    let state = daily_state(provider, actions);
+    if state == DailyState::Absent {
+        return None;
+    }
+    let daily = state == DailyState::Daily;
+    let onboarding = actions.contains(&"onboarding");
+    let plans = actions.contains(&"plan");
+    let growth = actions.contains(&"growth");
+    let newbie = actions.contains(&"newbie");
+    let mut modes: Vec<&str> = Vec::new();
+    if daily {
+        modes.push("checkin");
+    }
+    if provider == "workbuddy-intl" {
+        modes.extend(["keepalive", "claim", "full"]);
+    }
+    let ui_hooks: Vec<&str> = if provider == "qoder-intl" {
+        vec!["umid_component"]
+    } else {
+        Vec::new()
+    };
+    Some(json!({
+        "daily": daily,
+        "onboarding": onboarding || newbie,
+        "plans": plans,
+        "growth": growth,
+        "manualPlans": daily && plans,
+        "excludeGuest": provider == "chatglm",
+        "description": Value::Null,
+        "modes": modes,
+        "uiHooks": ui_hooks,
+        // 没有每日签到时给一句原因（`daily: true` 时为 null，前端不必判字段缺失）
+        "outOfScope": if state == DailyState::BenefitsOnly {
+            Value::from(BENEFITS_ONLY_REASON)
+        } else {
+            Value::Null
+        },
+        // AIGX 扩展：该家的全部福利动作（福利通道页用）
+        "benefitActions": actions,
+    }))
 }
 
 /// 界面要显示的管理面板（对齐 A2A `adminPanels`：`daily_keepalive` /
@@ -672,6 +742,8 @@ mod tests {
             time: "09:00".into(),
             time_end: "09:30".into(),
             randomize: true,
+            daily_kind: super::store::DAILY_KIND_FIXED.to_string(),
+            rolling_minutes: 0,
             retry_limit: 3,
             retry_gap_minutes: 5,
             makeup_time: "10:00".into(),
@@ -709,6 +781,59 @@ mod tests {
         }
         // lastResult 带上 retryAttempts（A2A retry::merge 同形）
         assert!(view["lastResult"].get("retryAttempts").is_some());
+    }
+
+    /// S1：`daily` 是三态派生的，不是布尔开关。
+    #[test]
+    fn daily_state_is_three_valued() {
+        // ① 有每日签到
+        assert_eq!(
+            daily_state("loomy", &crate::checkin::benefits::actions_for("loomy")),
+            DailyState::Daily
+        );
+        // ② 有福利没每日签到（白名单外 + 福利动作表里有它）→ 福利档
+        assert_eq!(
+            daily_state("eventshelf", &["growth"]),
+            DailyState::BenefitsOnly
+        );
+        // ③ 既无签到也无福利 → 不出现
+        assert_eq!(daily_state("openai", &[]), DailyState::Absent);
+        // 插件仓三家：白名单内但无实现，也没有福利动作 → 不出现（与改造前一致）
+        assert_eq!(
+            daily_state("chatglm", &crate::checkin::benefits::actions_for("chatglm")),
+            DailyState::Absent
+        );
+    }
+
+    /// S1：能力表里三态各自的序列化形状（`daily` / `outOfScope`）。
+    #[test]
+    fn feature_entry_marks_benefits_only_reason() {
+        let daily = feature_entry("loomy", &crate::checkin::benefits::actions_for("loomy"))
+            .expect("有签到的家必须在表里");
+        assert_eq!(daily["daily"], json!(true));
+        assert!(daily["outOfScope"].is_null(), "有签到时不给原因");
+
+        let benefits = feature_entry("eventshelf", &["growth"]).expect("有福利的家必须出现");
+        assert_eq!(benefits["daily"], json!(false));
+        assert_eq!(benefits["outOfScope"], json!(BENEFITS_ONLY_REASON));
+        assert_eq!(benefits["growth"], json!(true));
+        assert_eq!(
+            benefits["manualPlans"],
+            json!(false),
+            "没有签到就没有手动入签"
+        );
+
+        assert!(feature_entry("openai", &[]).is_none(), "空家不进表");
+        // 表里现存的每一家都必须是「有签到」或「有福利」，不能出现 daily:false 又没原因
+        for (provider, entry) in checkin_features() {
+            if entry["daily"] == json!(false) {
+                assert_eq!(
+                    entry["outOfScope"],
+                    json!(BENEFITS_ONLY_REASON),
+                    "{provider} 没有每日签到就必须说明福利在哪"
+                );
+            }
+        }
     }
 
     #[test]

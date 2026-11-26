@@ -2686,6 +2686,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/notify/test-webhook",
             post(api::admin::handle_test_webhook),
         )
+        .route("/api/notify/test-bark", post(api::admin::handle_test_bark))
         // 告警规则
         .route(
             "/api/alerts/rules",
@@ -3561,6 +3562,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 签到台账 / 计划（见 api::admin::{checkin_records,checkin_schedules}）
         .merge(crate::api::admin::checkin_records::router())
         .merge(crate::api::admin::checkin_schedules::router())
+        // 本机 Agent 客户端接入（检测 / 预览 / 应用 / 回滚；对齐 A2A /api/agents*）
+        .merge(crate::api::admin::agents::router())
+        // A2A 兼容别名（/api/timeouts、/api/retry、/api/cors → 同一份配置）
+        .merge(crate::api::admin::aliases::router())
         // 插件管理面子页（provider 设置 / 图标 / 主题 / UI / 登录 / 任务 / helpers）
         .merge(crate::api::admin::plugin_provider_settings::router())
         .merge(crate::api::admin::plugin_icons::router())

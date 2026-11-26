@@ -40,6 +40,10 @@ pub mod history;
 pub mod scheduler;
 pub mod schedules;
 pub mod store;
+// 连登管家「补签 → 兑换 → 抽奖」的调度骨架（对齐 A2A
+// `billing/checkin.rs::spawn_streak_bonus`）：上游端点未接入，能力表为空，
+// 批量签到成功后由 scheduler 调 `spawn_after_batch`（表空则零开销不 spawn）。
+pub mod streak;
 // 猫猫旅行巡检（对齐上游 core/growth_scheduler + api/growth_schedule）：
 // 配置 {enabled,times} 落 `checkin:travel`，执行走插件 `admin.action
 // "growth.travel"`。随签到调度一起启动，接线在 main.rs（报告见交付说明）。

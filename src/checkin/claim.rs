@@ -162,8 +162,10 @@ pub const CHECKIN_CONTRACTS: &[CheckinContract] = &[
     },
     CheckinContract {
         provider: "xiaohuanxiong",
+        // 先读（今天发没发过）……
         status_path: "/api/web/office/v3/setting_info",
-        claim_path: "/api/web/office/v3/setting_info",
+        // ……没发过就显式补领（S5：与 onboarding 的 desktop 通道同一端点）
+        claim_path: "/api/web/desktop/v1/login/points/grant",
         done_field: "/benefit/amount",
         note: "",
     },
@@ -759,10 +761,59 @@ async fn qoder(client: &Client, session: &AccountSession, secret: &str) -> Claim
 
 // ── 小浣熊 ──────────────────────────────────────────────────────────
 
-/// 小浣熊：`GET /api/web/office/v3/setting_info` 触发每日积分发放（按天幂等）。
+/// 小浣熊主站根下的状态读取端点（账号 `base_url` 是 `/api/web/llm/v2`，
+/// 这两个端点都在主站根下）。
+const XIAOHUANXIONG_SETTING_PATH: &str = "/api/web/office/v3/setting_info";
+/// 每日积分发放端点。**与 `benefits/onboarding.rs::xiaohuanxiong` 的 desktop
+/// 通道**同一个 URL / 方法 / body（那边是「新手礼」语义、这边是「每日签到」
+/// 语义，上游只看当天发没发过）；两处共用同一套请求构造，不再各自猜。
+const XIAOHUANXIONG_GRANT_PATH: &str = "/api/web/desktop/v1/login/points/grant";
+
+/// 读取结果里是否带了「今天有入账」的发放通知。
 ///
-/// 成功判据是「HTTP 通且返回了发放通知」—— 上游没有单独的签到接口，
-/// 这个读接口本身就是触发器。重复调用不会重复入账。
+/// **在 `data` 下面** —— 与 Agent2API `providers/raccoon/balance.rs` 的
+/// `data.get("point_grant_popups")` 同口径。此前这里读的是顶层，上游把通知
+/// 放在 `data` 里 → 永远读不到 → 永远判「已领过」。
+fn xiaohuanxiong_granted(payload: &Value) -> bool {
+    payload
+        .get("point_grant_popups")
+        .is_some_and(|value| !value.is_null())
+        || payload
+            .get("point_grant_toast")
+            .is_some_and(|value| !value.is_null())
+}
+
+/// 发放响应 → 结果分类（S5 的成功判据只此一处）。
+///
+/// 成功 = HTTP 2xx **且**业务 `code == 0`（上游把业务失败放在 200 里）。
+/// 失败**不升格成成功**：401/403 是账号失效（Failed），其余上游拒绝也是
+/// Failed；只有「请求没送出去」（超时/连接错误）才是 Pending，留给重试轮。
+fn xiaohuanxiong_grant_outcome(status: u16, body: &Value) -> ClaimResult {
+    if status == 401 || status == 403 {
+        return failed("小浣熊登录态已失效，请重新登录该账号");
+    }
+    let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+    if status >= 400 || code != 0 {
+        let message = upstream_message(body);
+        return failed(&format!(
+            "小浣熊每日积分发放失败（HTTP {status}，code {code}）：{message}"
+        ));
+    }
+    ok("每日积分已领取".to_string())
+}
+
+/// 小浣熊每日积分：**先读、再发**。
+///
+/// 上游没有独立的「签到」口，历史实现只 `GET setting_info` 看有没有发放通知：
+/// 读接口**不保证**每天触发发放（通知只在真的入账那一次出现，之后无论今天领没
+/// 领都读不到），于是当天首读晚于发放、或读接口没触发时，AIGX 会把「今天没
+/// 领」判成「今天已领过」—— 看着成功，实际没到账。
+///
+/// 所以改成两段：
+/// 1. 读 `setting_info`：带发放通知 = 今天确实发放过 → `Already`（幂等，不再多发）；
+/// 2. 没有通知 = 当天未发放 → `POST points/grant` 显式补领，**grant 成功才算
+///    Success**；grant 失败保留 Pending/Failed 分类（见
+///    [`xiaohuanxiong_grant_outcome`]）。
 async fn xiaohuanxiong(client: &Client, session: &AccountSession, secret: &str) -> ClaimResult {
     let base = crate::account_session::adapter::effective_base_url(session)
         .unwrap_or_else(|_| "https://xiaohuanxiong.com".to_string());
@@ -773,7 +824,7 @@ async fn xiaohuanxiong(client: &Client, session: &AccountSession, secret: &str) 
         .filter(|s| !s.is_empty())
         .unwrap_or("https://xiaohuanxiong.com")
         .trim_end_matches('/');
-    let url = format!("{origin}/api/web/office/v3/setting_info");
+    let url = format!("{origin}{XIAOHUANXIONG_SETTING_PATH}");
     let headers = vec![
         ("Authorization".to_string(), format!("Bearer {secret}")),
         ("X-Raccoon-Language".to_string(), "zh".to_string()),
@@ -791,23 +842,31 @@ async fn xiaohuanxiong(client: &Client, session: &AccountSession, secret: &str) 
         let message = upstream_message(&value);
         return failed(&format!("小浣熊签到失败（HTTP {status}）：{message}"));
     }
-    // 发放通知：有 popup/toast 说明今天有入账；没有则是已经领过。
-    //
-    // **在 `data` 下面** —— 与 Agent2API `providers/raccoon/balance.rs` 的
-    // `data.get("point_grant_popups")` 同口径。此前这里读的是顶层，
-    // 上游把通知放在 `data` 里 → 永远读不到 → 永远判「已领过」，
-    // 签到看着成功但实际没领到。
     let payload = value.get("data").unwrap_or(&value);
-    let has_grant = payload
-        .get("point_grant_popups")
-        .is_some_and(|v| !v.is_null())
-        || payload
-            .get("point_grant_toast")
-            .is_some_and(|v| !v.is_null());
-    if has_grant {
-        ok("每日积分已发放".to_string())
-    } else {
-        already("今日积分已发放过（无新增）")
+    if xiaohuanxiong_granted(payload) {
+        // 今天已经发放过了（本次读就是触发点）：不再多发一次 grant
+        return already("今日积分已发放（读接口已触发入账）");
+    }
+    // 当天未发放：显式补领（与 onboarding 的 desktop 通道同一请求构造）
+    let grant_url = format!("{origin}{XIAOHUANXIONG_GRANT_PATH}");
+    let grant_headers = vec![
+        ("Authorization".to_string(), format!("Bearer {secret}")),
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("X-Raccoon-Language".to_string(), "zh".to_string()),
+    ];
+    match send_json(
+        client,
+        reqwest::Method::POST,
+        &grant_url,
+        &grant_headers,
+        Some(json!({})),
+        None,
+    )
+    .await
+    {
+        Ok((status, body)) => xiaohuanxiong_grant_outcome(status, &body),
+        // 请求没送出去：中性未领取，交给重试轮（不是账号失效）
+        Err(e) => pending(&format!("小浣熊每日积分发放未完成，稍后重试：{e}")),
     }
 }
 
@@ -2055,6 +2114,12 @@ async fn zcode(client: &Client, session: &AccountSession, secret: &str) -> Claim
 #[cfg(test)]
 mod tests {
     use super::*;
+    // S5 的上游替身用（模块级 import：嵌套 fn 不继承函数体内的 `use`）
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::any;
+    use axum::Router;
 
     #[test]
     fn whitelist_matches_branches() {
@@ -2404,5 +2469,196 @@ mod tests {
         assert!(ids
             .iter()
             .all(|id| !UNSUPPORTED_PROVIDERS.contains(&id.as_str())));
+    }
+
+    // ── S5：小浣熊「先读后发」────────────────────────────────────────
+
+    /// 上游替身：按路径回放固定响应，并记录命中的 `(path, method)`。
+    ///
+    /// 与 `runtime_tests` 的替身同思路（那套是私有的，且以模块内路由表为主），
+    /// 这里只需要「哪条路径被打过、用了什么方法」，所以保持最小。
+    struct Stub {
+        routes: std::collections::HashMap<String, (u16, Value)>,
+        hits: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    fn xiaohuanxiong_account(base: &str) -> AccountSession {
+        let mut session = AccountSession::new("test-channel", "小浣熊测试");
+        session.id = "raccoon-1".to_string();
+        session.provider = "xiaohuanxiong".to_string();
+        // 账号的 base_url 与线上一致（`/api/web/llm/v2`），origin 由它切出来
+        session.base_url = format!("{base}/api/web/llm/v2");
+        session.credential = crate::account_session::model::Credential {
+            kind: CREDENTIAL_KIND_SESSION.to_string(),
+            secret: "test-token".to_string(),
+            fields: std::collections::HashMap::new(),
+        };
+        session
+    }
+
+    async fn mock_upstream(routes: Vec<(&str, u16, Value)>) -> (String, std::sync::Arc<Stub>) {
+        async fn handle(
+            State(stub): State<std::sync::Arc<Stub>>,
+            method: axum::http::Method,
+            uri: axum::http::Uri,
+        ) -> axum::response::Response {
+            let path = uri.path().to_string();
+            stub.hits
+                .lock()
+                .expect("记录命中")
+                .push((path.clone(), method.to_string()));
+            let (status, body) = stub
+                .routes
+                .get(&path)
+                .cloned()
+                .unwrap_or((404, json!({ "message": "not found" })));
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (status, axum::Json(body)).into_response()
+        }
+
+        let stub = std::sync::Arc::new(Stub {
+            routes: routes
+                .into_iter()
+                .map(|(path, status, body)| (path.to_string(), (status, body)))
+                .collect(),
+            hits: std::sync::Mutex::new(Vec::new()),
+        });
+        let router = Router::new().fallback(any(handle)).with_state(stub.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑定 mock 端口");
+        let addr = listener.local_addr().expect("读 mock 地址");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (format!("http://{addr}"), stub)
+    }
+
+    fn hit(stub: &Stub, path: &str) -> Option<String> {
+        stub.hits
+            .lock()
+            .expect("读命中")
+            .iter()
+            .find(|(seen, _)| seen == path)
+            .map(|(_, method)| method.clone())
+    }
+
+    /// 已发放（读接口带了发放通知）→ **Already**，且不再多发一次 grant。
+    #[tokio::test]
+    async fn xiaohuanxiong_already_when_granted() {
+        let (base, stub) = mock_upstream(vec![(
+            XIAOHUANXIONG_SETTING_PATH,
+            200,
+            json!({"code": 0, "data": {"point_grant_popups": [{"amount": 30}]}}),
+        )])
+        .await;
+        let session = xiaohuanxiong_account(&base);
+        let result = claim_for(&crate::test_http_client(), &session).await;
+        assert_eq!(result.outcome, CheckinOutcome::Already);
+        assert_eq!(
+            hit(&stub, XIAOHUANXIONG_SETTING_PATH).as_deref(),
+            Some("GET"),
+            "先读 setting_info"
+        );
+        assert!(
+            hit(&stub, XIAOHUANXIONG_GRANT_PATH).is_none(),
+            "今天已经发过就不再调 grant（幂等，省一次上游写）"
+        );
+    }
+
+    /// 未发放（读接口没有发放通知）→ **调 grant**，成功才算 Success。
+    #[tokio::test]
+    async fn xiaohuanxiong_calls_grant_when_not_granted() {
+        let (base, stub) = mock_upstream(vec![
+            (
+                XIAOHUANXIONG_SETTING_PATH,
+                200,
+                json!({"code": 0, "data": {"balance": 10}}),
+            ),
+            (XIAOHUANXIONG_GRANT_PATH, 200, json!({"code": 0})),
+        ])
+        .await;
+        let session = xiaohuanxiong_account(&base);
+        let result = claim_for(&crate::test_http_client(), &session).await;
+        assert_eq!(result.outcome, CheckinOutcome::Success);
+        assert_eq!(
+            hit(&stub, XIAOHUANXIONG_GRANT_PATH).as_deref(),
+            Some("POST"),
+            "未发放时必须补一次 grant（只查不发是这次要修的洞）"
+        );
+    }
+
+    /// grant 失败**不升格**成成功：业务码非 0 → Failed，登录态失效 → Failed，
+    /// 连接层失败 → Pending（留给重试轮）。
+    #[tokio::test]
+    async fn xiaohuanxiong_grant_failure_keeps_classification() {
+        let (base, _stub) = mock_upstream(vec![
+            (
+                XIAOHUANXIONG_SETTING_PATH,
+                200,
+                json!({"code": 0, "data": {}}),
+            ),
+            (
+                XIAOHUANXIONG_GRANT_PATH,
+                200,
+                json!({"code": 40001, "message": "今天已领完"}),
+            ),
+        ])
+        .await;
+        let result = claim_for(&crate::test_http_client(), &xiaohuanxiong_account(&base)).await;
+        assert_eq!(result.outcome, CheckinOutcome::Failed);
+        assert!(!result.success);
+
+        let (base, _stub) = mock_upstream(vec![
+            (
+                XIAOHUANXIONG_SETTING_PATH,
+                200,
+                json!({"code": 0, "data": {}}),
+            ),
+            (
+                XIAOHUANXIONG_GRANT_PATH,
+                401,
+                json!({"message": "unauthorized"}),
+            ),
+        ])
+        .await;
+        let result = claim_for(&crate::test_http_client(), &xiaohuanxiong_account(&base)).await;
+        assert_eq!(result.outcome, CheckinOutcome::Failed);
+    }
+
+    /// grant 响应的分类映射（纯函数，覆盖「成功必须 code==0」这条判据）。
+    #[test]
+    fn grant_outcome_maps_upstream_signals() {
+        assert_eq!(
+            xiaohuanxiong_grant_outcome(200, &json!({"code": 0})).outcome,
+            CheckinOutcome::Success
+        );
+        // 200 里的业务失败不能算成功
+        assert_eq!(
+            xiaohuanxiong_grant_outcome(200, &json!({"code": 40001})).outcome,
+            CheckinOutcome::Failed
+        );
+        assert_eq!(
+            xiaohuanxiong_grant_outcome(403, &json!({})).outcome,
+            CheckinOutcome::Failed
+        );
+        assert_eq!(
+            xiaohuanxiong_grant_outcome(500, &json!({"message": "boom"})).outcome,
+            CheckinOutcome::Failed
+        );
+        // 缺 code 字段按 0 处理（上游成功时不回业务码）
+        assert_eq!(
+            xiaohuanxiong_grant_outcome(200, &json!({"data": {}})).outcome,
+            CheckinOutcome::Success
+        );
+        // 「已发放」判据：popup / toast 任一存在即已发放
+        assert!(xiaohuanxiong_granted(
+            &json!({"point_grant_popups": [{"amount": 1}]})
+        ));
+        assert!(xiaohuanxiong_granted(
+            &json!({"point_grant_toast": {"x": 1}})
+        ));
+        assert!(!xiaohuanxiong_granted(&json!({"balance": 3})));
+        assert!(!xiaohuanxiong_granted(&json!({"point_grant_popups": null})));
     }
 }

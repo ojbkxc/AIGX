@@ -30,7 +30,7 @@
 
 mod account_search;
 mod bridge;
-mod config_files;
+pub(crate) mod config_files;
 pub(crate) mod image_bridge;
 pub(crate) mod image_config;
 pub(crate) mod image_jobs;

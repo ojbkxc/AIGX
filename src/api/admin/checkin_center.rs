@@ -240,6 +240,18 @@ pub async fn handle_checkin_run(
     verify_admin(&state, &headers).await?;
     let request = body.map(|Json(b)| b).unwrap_or_default();
     let settings = state.upstream_checkin.settings();
+    // 抢进程级执行闸：定时轮与「立即签到」不能同时对同一账号发起。此前只有
+    // `run_now` / `run_schedule_now` 抢闸，本入口与定时轮可叠跑，上游看到
+    // 重复签到，界面上的 `running` 也一直是 false。
+    let _guard = match center::Guard::acquire() {
+        Some(guard) => guard,
+        None => {
+            return Ok(Json(json!({
+                "success": false,
+                "error": "签到正在执行中，请稍后再试"
+            })))
+        }
+    };
 
     let mut targets = scheduler::collect_targets(&state.account_sessions, &request.providers);
     if !request.account_ids.is_empty() {
@@ -281,31 +293,31 @@ pub async fn handle_checkin_run(
                 continue;
             }
         };
-        let result = claim::claim_for(&client, session).await;
-        if result.outcome.is_ok() {
+        // 与调度主轮/重试轮共用同一执行单元：workbuddy-intl 手动触发也必须走
+        // Full 保活链（此前直接 `claim_for`，手动签到永远点不亮网页通道）。
+        let (outcome, message, kept_active) =
+            scheduler::claim_one(&state.upstream_checkin, &client, session).await;
+        if outcome.is_ok() {
             ok += 1;
         }
-        if matches!(
-            result.outcome,
-            CheckinOutcome::Failed | CheckinOutcome::Captcha
-        ) {
-            failures.push(format!("{}（{}）", session.name, result.msg));
+        if matches!(outcome, CheckinOutcome::Failed | CheckinOutcome::Captcha) {
+            failures.push(format!("{}（{message}）", session.name));
         }
         scheduler::record(
             &state.upstream_checkin,
             session,
             "manual",
-            result.outcome,
-            &result.msg,
-            false,
+            outcome,
+            &message,
+            kept_active,
         );
         results.push(json!({
             "account_id": session.id,
             "account_name": session.name,
             "provider": session.provider,
-            "success": result.success,
-            "outcome": result.outcome.as_str(),
-            "message": result.msg,
+            "success": outcome.is_ok(),
+            "outcome": outcome.as_str(),
+            "message": message,
         }));
         if settings.gap_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(settings.gap_ms)).await;
@@ -583,6 +595,16 @@ pub struct ScheduleBody {
     /// true = 每个账号在 `[time, time_end]` 内取确定性随机时刻。未传时继承存量。
     #[serde(default)]
     pub randomize: Option<bool>,
+    /// 窗口形态：`fixed`（默认，每天固定 `time` 开窗）/ `rolling`（每个账号
+    /// 从当天首次尝试起算 `rolling_minutes` 分钟）。未传时继承存量。
+    ///
+    /// 非法值（含空串 = 撤销）一律归一 `fixed` —— 与 `schedules::upsert`
+    /// 同一口径，两处读同一个 body 形状不能给出不同判定。
+    #[serde(default)]
+    pub daily_kind: Option<String>,
+    /// rolling 窗口分钟数（0 = 关闭）。未传时继承存量。
+    #[serde(default)]
+    pub rolling_minutes: Option<u32>,
     /// 每账号每天重试次数上限（0 = 关闭重试）。未传时继承存量（缺省 3）。
     #[serde(default)]
     pub retry_limit: Option<u32>,
@@ -655,16 +677,52 @@ pub async fn handle_upsert_checkin_schedule(
             .map_err(|m| error_response(&m, StatusCode::BAD_REQUEST))?,
     };
     let makeup_time = match body.makeup_time.as_deref() {
+        // 未传 = 用默认补签时刻（`schedules::DEFAULT_RETRY_TIME`，00:10）。
+        // 此前 `unwrap_or_default()` 给空串，而空 = 「不跑补签」——同一功能
+        // 走新入口 `/api/checkin-schedules` 缺省 00:10、走本入口却永不补签，
+        // 两个入口行为相反。
         None => existing
             .as_ref()
             .map(|s| s.makeup_time.clone())
-            .unwrap_or_default(),
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| crate::checkin::schedules::DEFAULT_RETRY_TIME.to_string()),
         Some(raw) => normalize_hhmm(raw, "补签时刻")
             .map_err(|m| error_response(&m, StatusCode::BAD_REQUEST))?,
     };
     let randomize = body
         .randomize
         .unwrap_or_else(|| existing.as_ref().map(|s| s.randomize).unwrap_or(false));
+    // 窗口形态（S2）：未传继承存量；`rolling` 的窗口分钟数夹到
+    // [MIN_ROLLING_MINUTES, MAX_ROLLING_MINUTES]（0 仍表示关闭），与
+    // `schedules::upsert` 完全同口径 —— 同一个 body 不能在两处得到不同结果。
+    let daily_kind = match body
+        .daily_kind
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+    {
+        Some(text) if text == crate::checkin::store::DAILY_KIND_ROLLING => {
+            crate::checkin::store::DAILY_KIND_ROLLING.to_string()
+        }
+        Some(_) => crate::checkin::store::DAILY_KIND_FIXED.to_string(),
+        None => existing
+            .as_ref()
+            .map(|s| s.daily_kind.clone())
+            .filter(|kind| !kind.trim().is_empty())
+            .unwrap_or_else(|| crate::checkin::store::DAILY_KIND_FIXED.to_string()),
+    };
+    let rolling_minutes = body
+        .rolling_minutes
+        .unwrap_or_else(|| existing.as_ref().map(|s| s.rolling_minutes).unwrap_or(0));
+    let rolling_minutes =
+        if daily_kind == crate::checkin::store::DAILY_KIND_ROLLING && rolling_minutes > 0 {
+            rolling_minutes.clamp(
+                crate::checkin::schedules::MIN_ROLLING_MINUTES,
+                crate::checkin::schedules::MAX_ROLLING_MINUTES as u32,
+            )
+        } else {
+            rolling_minutes
+        };
     if randomize && !time_end.is_empty() && time_end.as_str() <= body.time.as_str() {
         return Err(error_response(
             "开启区间随机时，窗口结束时刻必须晚于开始时刻",
@@ -745,6 +803,8 @@ pub async fn handle_upsert_checkin_schedule(
             time: body.time,
             time_end,
             randomize,
+            daily_kind,
+            rolling_minutes,
             retry_limit,
             retry_gap_minutes,
             makeup_time,
@@ -807,6 +867,16 @@ pub async fn handle_run_checkin_schedule(
         .find(|s| s.id == body.id)
         .ok_or_else(|| error_response("签到计划不存在", StatusCode::NOT_FOUND))?;
     let settings = state.upstream_checkin.settings();
+    // 与 handle_checkin_run / run_now 抢同一把闸：三条手动入口和定时轮互斥。
+    let _guard = match center::Guard::acquire() {
+        Some(guard) => guard,
+        None => {
+            return Ok(Json(json!({
+                "success": false,
+                "error": "签到正在执行中，请稍后再试"
+            })))
+        }
+    };
     let outcome = scheduler::run_schedule(
         &state.upstream_checkin,
         &state.account_sessions,
@@ -829,6 +899,27 @@ pub async fn handle_run_checkin_schedule(
     let _ = state
         .upstream_checkin
         .mark_last_summary(&schedule.id, &outcome.last_summary);
+    // 签到失败通知（S6）：scheduler 只产出只读快照（它没有 `NotifyService`），
+    // 由这里这层有 state 的入口发一次站内/推送通知。只在「本轮确有失败」时发，
+    // 成功轮与空轮不打扰。快照是进程级单槽，多次并发运行取到的是最近一轮。
+    if let Some(snapshot) = crate::checkin::scheduler::last_failures() {
+        if snapshot.failed > 0 {
+            let detail = if snapshot.failures.is_empty() {
+                String::new()
+            } else {
+                format!("：{}", snapshot.failures.join("；"))
+            };
+            state
+                .notify_service
+                .notify_spawn(crate::notify::NotifyEvent::AlertTriggered {
+                    level: "warning".to_string(),
+                    message: format!(
+                        "签到失败 {}/{}（{}{}）",
+                        snapshot.failed, snapshot.total, snapshot.reason, detail
+                    ),
+                });
+        }
+    }
     Ok(Json(json!({
         "success": true,
         "data": {

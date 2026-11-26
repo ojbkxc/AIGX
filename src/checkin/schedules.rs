@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::claim;
-use super::store::{CheckinSchedule, CheckinStore};
+use super::store::{CheckinSchedule, CheckinStore, DAILY_KIND_FIXED, DAILY_KIND_ROLLING};
 
 /// 条目上限：再多列表难以扫读，定点签到的语义也不需要更多（对齐 A2A）。
 pub const MAX_SCHEDULES: usize = 10;
@@ -43,6 +43,12 @@ pub const MAX_SCHEDULES: usize = 10;
 pub const MAX_RETRY_GAP_MINUTES: i64 = 120;
 /// 每账号每天的重试次数上限（对齐 A2A）。
 pub const MAX_RETRY_LIMIT: i64 = 20;
+/// rolling 窗口长度上限（分钟，= 24 小时）：超过一天的窗口等于「今天开一次、
+/// 明天才满窗」，比 fixed 还离谱，直接夹掉。
+pub const MAX_ROLLING_MINUTES: i64 = 1440;
+/// rolling 窗口长度下限（分钟）：1 分钟窗口 = 每满一分钟打一次上游，
+/// 那是压力测试不是签到，1..5 一律抬到 5。
+pub const MIN_ROLLING_MINUTES: u32 = 5;
 /// 补签不早于的缺省时刻（对齐 A2A `DEFAULT_RETRY_TIME`）。
 pub const DEFAULT_RETRY_TIME: &str = "00:10";
 
@@ -209,6 +215,38 @@ pub fn upsert(store: &CheckinStore, payload: &Value) -> Result<Vec<CheckinSchedu
         old.map(|s| s.retry_limit as i64).unwrap_or(3),
         MAX_RETRY_LIMIT,
     ) as u32;
+    // 窗口形态（S2）：只认 `fixed` / `rolling`，其它值（含空串 = 撤销）一律
+    // 归一回 `fixed`；未传则继承存量。`rolling_minutes` 同理继承 + 夹到
+    // [0, MAX_ROLLING_MINUTES]（0 = 关闭，见 `CheckinSchedule::is_rolling`）。
+    let daily_kind = match payload
+        .get("daily_kind")
+        .or_else(|| payload.get("dailyKind"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+    {
+        Some(text) if text == DAILY_KIND_ROLLING => DAILY_KIND_ROLLING.to_string(),
+        Some(_) => DAILY_KIND_FIXED.to_string(),
+        None => old
+            .map(|s| s.daily_kind.clone())
+            .filter(|kind| !kind.trim().is_empty())
+            .unwrap_or_else(|| DAILY_KIND_FIXED.to_string()),
+    };
+    let rolling_minutes = number_or(
+        payload
+            .get("rolling_minutes")
+            .or_else(|| payload.get("rollingMinutes"))
+            .and_then(Value::as_i64),
+        old.map(|s| s.rolling_minutes as i64).unwrap_or(0),
+        MAX_ROLLING_MINUTES,
+    ) as u32;
+    // 窗口下限：1 分钟的滚动窗口等于把签到轮变成压力测试（每满一分钟打一次上游），
+    // 所以 1..MIN 一律抬到 MIN；0 仍表示关闭。
+    let rolling_minutes = if daily_kind == DAILY_KIND_ROLLING && rolling_minutes > 0 {
+        rolling_minutes.clamp(MIN_ROLLING_MINUTES, MAX_ROLLING_MINUTES as u32)
+    } else {
+        rolling_minutes
+    };
 
     // 运行状态一律从存量继承（编辑配置不该重置去重状态 / 上次结果）
     let schedule = CheckinSchedule {
@@ -218,6 +256,8 @@ pub fn upsert(store: &CheckinStore, payload: &Value) -> Result<Vec<CheckinSchedu
         time: time.to_string(),
         time_end,
         randomize,
+        daily_kind,
+        rolling_minutes,
         retry_limit,
         retry_gap_minutes,
         // makeup_time 是 AIGX 既有字段名（前端沿用）；值来自 retry_time
@@ -480,6 +520,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(list[0].retry_limit, 0);
+    }
+
+    /// S2：rolling 形态的归一 / 继承 / 夹值。
+    #[test]
+    fn rolling_window_is_normalized_and_inherited() {
+        let s = store();
+        // 缺省 = fixed / 0（旧前端不传这两个字段）
+        let list = upsert(
+            &s,
+            &serde_json::json!({"time": "09:00", "providers": ["loomy"]}),
+        )
+        .unwrap();
+        assert_eq!(list[0].daily_kind, DAILY_KIND_FIXED);
+        assert_eq!(list[0].rolling_minutes, 0);
+        assert!(!list[0].is_rolling());
+        let id = list[0].id.clone();
+        // 开启 rolling（camelCase 也认）+ 超上限夹到 1440
+        let list = upsert(
+            &s,
+            &serde_json::json!({"id": id, "time": "09:00", "providers": ["loomy"],
+                "dailyKind": "ROLLING", "rollingMinutes": 99999}),
+        )
+        .unwrap();
+        assert_eq!(list[0].daily_kind, DAILY_KIND_ROLLING);
+        assert_eq!(list[0].rolling_minutes, MAX_ROLLING_MINUTES as u32);
+        assert!(list[0].is_rolling());
+        // 下限：1..5 分钟抬到 5（再短等于把签到轮变成压力测试）
+        let list = upsert(
+            &s,
+            &serde_json::json!({"id": list[0].id, "time": "09:00", "providers": ["loomy"],
+                "daily_kind": "rolling", "rolling_minutes": 2}),
+        )
+        .unwrap();
+        assert_eq!(list[0].rolling_minutes, MIN_ROLLING_MINUTES);
+        let list = upsert(
+            &s,
+            &serde_json::json!({"id": list[0].id, "time": "09:00", "providers": ["loomy"],
+                "rolling_minutes": 30}),
+        )
+        .unwrap();
+        // 只改时刻：形态与窗口必须继承（编辑别家字段不该把 rolling 清掉）
+        let list = upsert(
+            &s,
+            &serde_json::json!({"id": list[0].id, "time": "10:30", "providers": ["loomy"]}),
+        )
+        .unwrap();
+        assert_eq!(list[0].time, "10:30");
+        assert_eq!(list[0].daily_kind, DAILY_KIND_ROLLING);
+        assert_eq!(list[0].rolling_minutes, 30);
+        // 非法形态 / 空串 = 撤销 → 回落 fixed
+        for value in [serde_json::json!("whenever"), serde_json::json!("")] {
+            let list = upsert(
+                &s,
+                &serde_json::json!({"id": list[0].id, "time": "10:30",
+                    "providers": ["loomy"], "daily_kind": value}),
+            )
+            .unwrap();
+            assert_eq!(list[0].daily_kind, DAILY_KIND_FIXED);
+        }
     }
 
     #[test]

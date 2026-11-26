@@ -1189,6 +1189,11 @@ fn paths_settings_ops() -> Value {
         "/api/notify/test-webhook": {
             "post": op("通知", "发送 Webhook 测试请求")
         },
+        // Bark 与上面四个 test-* 同类：一个按钮触发一条站外推送，故同样文档化，
+        // 而不是塞进 EXEMPT（EXEMPT 只留给「不该被面板/AI 发现」的面）。
+        "/api/notify/test-bark": {
+            "post": op("通知", "发送 Bark 测试推送（站外即时推送，无持久化副作用）")
+        },
         "/api/alerts/rules": {
             "get": op("告警", "列出告警规则"),
             "put": op_body("告警", "更新告警规则（写操作）", "规则数组")
@@ -2437,6 +2442,7 @@ mod tests {
         add("/api/notify/test-slack", &["post"]);
         add("/api/notify/test-telegram", &["post"]);
         add("/api/notify/test-webhook", &["post"]);
+        add("/api/notify/test-bark", &["post"]);
         add("/api/oauth/config", &["get", "put"]);
         add("/api/openapi.json", &["get"]);
         add("/api/orders", &["get"]);
@@ -2550,6 +2556,162 @@ mod tests {
         (
             "/api/purge/preview",
             "破甲控制台改写试跑（dry-run：不落库、不计统计、不改数据面），属 /api/purge 配置页的保存前预演动作，不自描述",
+        ),
+        // ── 本机 Agent 接入（src/api/admin/agents.rs，v1.0.63）──────────
+        // 为什么整组豁免而不是文档化：这 10 条**以服务器本机的客户端配置文件为
+        // 操作对象**（读 Claude Code / Codex / OpenCode 的 settings.json、
+        // config.toml，并在用户确认后写回），字段形状跟着各家客户端演进；
+        // 更关键的是 apply 的响应里会带上**新签发的网关令牌**，写进公开自描述
+        // 等于把「运维 AI 该去点哪个按钮就能把令牌读出来」摆在明面上。
+        // 与 /api/debug/traffic、/api/purge/preview 同一取舍：真实存在、按钮可点、
+        // 但不给自描述面。它们也不进 AI 工具面（见 registry/tests.rs 的 ROUTE_SOURCES 注释）。
+        (
+            "/api/agents",
+            "本机 Agent 接入向导：探测**服务器本机**已装 CLI/桌面客户端并回读其配置，输出接线建议，随客户端形态演进，不自描述",
+        ),
+        (
+            "/api/agents/models",
+            "向导下拉用的模型清单投影（与上游模型表同步变动），不是独立配置面，不自描述",
+        ),
+        (
+            "/api/agents/preview",
+            "向导差异预览（dry-run：只读磁盘、不写盘），属「预览 → 令牌 → 应用」三段的第一段，不自描述",
+        ),
+        (
+            "/api/agents/apply",
+            "向导落盘：改写本机客户端真实配置文件并回传新签发令牌，凭据会进响应体，不自描述",
+        ),
+        (
+            "/api/agents/restore",
+            "向导回滚：把 apply 前的备份写回本机配置文件，与 /api/agents/apply 成对，不自描述",
+        ),
+        (
+            "/api/agents/profiles",
+            "向导方案库写入口（落 KV agent:profiles:*，200 套上限），属本机向导的本地状态，不自描述",
+        ),
+        (
+            "/api/agents/import",
+            "从本机已有客户端配置反向导入识别（只读扫描），属向导探测动作，不自描述",
+        ),
+        (
+            "/api/agents/{id}/resources",
+            "读本机客户端的 MCP / Skills 资源清单（扫真实文件路径），只读探测，不自描述",
+        ),
+        (
+            "/api/agents/{id}/resources/preview",
+            "资源写入的差异预览（dry-run），与 resources/apply 成对，不自描述",
+        ),
+        (
+            "/api/agents/{id}/resources/apply",
+            "资源写入落盘：目标路径只取自本机路径表，会改写客户端 MCP 配置，不上自描述面",
+        ),
+        // ── A2A 兼容别名（src/api/admin/aliases.rs，v1.0.63）────────────
+        // 为什么整组豁免：这 24 条是 **A2A 上游路径名 → AIGX 现有 handler 的翻译
+        // 层**（同一个 handler、同一个数据源、第二条 path，见该文件 router() 的注释）。
+        // canonical 入口全部已文档化：
+        //   /api/{timeouts,retry,cors}     → /api/settings 的 failover / retry / cors 字段
+        //   /api/stats/*                   → /api/dashboard/report/*
+        //   /api/logs/{stats,download}     → /api/logs/runtime{,/export}
+        //   /api/cloud-sync/*              → /api/admin/sync/{test,now,pull,status}
+        //   /api/backup/{upload,progress}  → /api/backup/{import,download}
+        //   /api/session/login/*           → /api/account-sessions/login/*
+        // 若也写进自描述，面板与 AI 会看到两个同义端点、且 A2A 的字段口径与
+        // 本网关不同（前者为兼容旧客户端保留），只会引出「该调哪个」的误判。
+        (
+            "/api/timeouts",
+            "A2A 兼容别名 → /api/settings 的 connect/read/write 超时字段（canonical 已文档化），本表只做路径翻译，下同不赘述",
+        ),
+        (
+            "/api/retry",
+            "A2A 兼容别名 → /api/settings 的重试次数/间隔/换号状态码字段（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/cors",
+            "A2A 兼容别名 → /api/settings 的 CORS 允许来源字段（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/stats/summary",
+            "A2A 报表别名 → /api/dashboard/report/overview（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/stats/requests",
+            "A2A 报表别名 → /api/logs/requests 的分页列表（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/stats/requests/detail",
+            "A2A 报表别名 → /api/logs/requests 的单条明细（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/stats/requests/filters",
+            "A2A 报表别名 → 报表筛选候选值投影（canonical 见 /api/dashboard/report/*），只做路径翻译",
+        ),
+        (
+            "/api/stats/requests/raw",
+            "A2A 报表别名 → 上游原始报文（含 Authorization / API key 残留），与 /api/debug/traffic 同理不上自描述面",
+        ),
+        (
+            "/api/stats/requests/terminate",
+            "A2A 中断别名 → /api/logs/inflight/{id}/terminate（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/logs/stats",
+            "A2A 日志别名 → /api/logs/runtime 的环形缓冲统计（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/logs/download",
+            "A2A 日志别名 → /api/logs/runtime/export（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/cloud-sync/test",
+            "A2A 云同步别名 → /api/admin/sync/test（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/cloud-sync/upload",
+            "A2A 云同步别名 → /api/admin/sync/now 的上行推送（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/cloud-sync/download",
+            "A2A 云同步别名 → /api/admin/sync/pull 的下行拉取（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/cloud-sync/remote",
+            "A2A 云同步别名 → /api/admin/sync/status 的远端状态（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/backup/upload",
+            "A2A 备份别名 → /api/backup/import（同一 handler handle_backup_import，canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/backup/progress",
+            "A2A 备份别名 → /api/backup/* 的进度轮询投影（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/session/login/start",
+            "A2A 登录别名 → /api/account-sessions/login/start（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/session/login/wait",
+            "A2A 登录别名 → /api/account-sessions/login/wait（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/session/login/cancel",
+            "A2A 登录别名 → /api/account-sessions/login/cancel（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/session/login/callback",
+            "A2A 登录别名 → /api/account-sessions/login/callback（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/session/login/sms/send",
+            "A2A 登录别名 → /api/account-sessions/login/sms/send（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/session/login/sms/verify",
+            "A2A 登录别名 → /api/account-sessions/login/sms/verify（canonical 已文档化），只做路径翻译",
+        ),
+        (
+            "/api/session/login/oauth/start",
+            "A2A 登录别名 → /api/account-sessions/login/oauth/start（canonical 已文档化），只做路径翻译",
         ),
     ];
 

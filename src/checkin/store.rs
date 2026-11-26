@@ -113,6 +113,19 @@ pub struct CheckinSchedule {
     /// （`hash(account_id) % 窗口分钟数`，同账号同日同刻、重启不漂）。
     #[serde(default)]
     pub randomize: bool,
+    /// 每日签到的窗口形态（对齐 A2A `dailyCheckin.kind` 的 AIGX 配置侧）：
+    /// `"fixed"`（**默认**）= 固定时刻触发；`"rolling"` = 窗口从**账号当天首次
+    /// 尝试**起算 `rolling_minutes` 分钟，此后每满一个窗口再判一次到期。
+    ///
+    /// 存量配置没有这个键 → 反序列化回落 `"fixed"`（[`default_daily_kind`]，
+    /// 零迁移，见本模块「兼容旧数据」）。
+    #[serde(default = "default_daily_kind")]
+    pub daily_kind: String,
+    /// rolling 窗口长度（分钟）；`0`（**默认**）= 关闭 —— 即使 `daily_kind`
+    /// 写了 `"rolling"` 也按 fixed 跑，否则「开了 rolling 却没给窗口」会退化成
+    /// 每个 tick 都判到期（等于每 10 秒重签一次上游）。
+    #[serde(default)]
+    pub rolling_minutes: u32,
     /// 每账号每天重试次数上限（0 = 关闭重试；缺省 3，与旧 `RETRY_LIMIT` 一致）。
     #[serde(default = "default_retry_limit")]
     pub retry_limit: u32,
@@ -172,6 +185,24 @@ pub struct ScheduleCounts {
     pub failed: usize,
 }
 
+/// `daily_kind` 的缺省值（存量配置没有这个键 = 固定时刻）。
+fn default_daily_kind() -> String {
+    DAILY_KIND_FIXED.to_string()
+}
+
+/// 固定时刻形态（缺省）。
+pub const DAILY_KIND_FIXED: &str = "fixed";
+/// rolling 形态：窗口从账号当天首次尝试起算。
+pub const DAILY_KIND_ROLLING: &str = "rolling";
+
+impl CheckinSchedule {
+    /// 本条目的 rolling 窗口是否**生效**：`daily_kind="rolling"` 且
+    /// `rolling_minutes > 0`（窗口为 0 时按 fixed 跑，见字段注释）。
+    pub fn is_rolling(&self) -> bool {
+        self.rolling_minutes > 0 && self.daily_kind.eq_ignore_ascii_case(DAILY_KIND_ROLLING)
+    }
+}
+
 /// 某账号在某条目里的当日排程（对齐 A2A `checkin_schedules::account_plan::PlannedAccount`）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -224,6 +255,38 @@ impl AccountPlan {
             .filter(|account| account.attempted_at.is_none())
             .map(|account| account.at)
             .min()
+    }
+
+    /// rolling 窗口的到期账号（按到期时刻升序）。
+    ///
+    /// 判据（对齐 A2A `checkin_schedules/account_plan.rs` 对 `rolling_until`
+    /// 的处理，AIGX 侧改成「从首次尝试起算」）：
+    ///
+    /// - **还没尝试过** → 按排定起点 `at`（当天首轮）到期，与 [`Self::due`] 同口径；
+    /// - **已尝试过** → 窗口从那次尝试时刻起算 `minutes` 分钟，满窗才再次到期；
+    /// - 没有尝试时刻**不造**任何时间点（只有 `attempted_at` 这一处事实来源）；
+    /// - `minutes == 0` / 跨天 → 一律不到期（rolling 关闭或昨天作废）。
+    ///
+    /// 每次执行前 `mark_attempted` 会把 `attempted_at` 刷成本轮时刻，所以
+    /// 「每满一个窗口最多跑一次」是自限的，不会随 tick 频率打上游。
+    pub fn rolling_due(&self, now_ms: i64, today: &str, minutes: u32) -> Vec<String> {
+        if minutes == 0 || self.date != today {
+            return Vec::new();
+        }
+        let span = i64::from(minutes).saturating_mul(60_000);
+        let mut due: Vec<(i64, String)> = self
+            .accounts
+            .iter()
+            .filter_map(|(id, account)| match account.attempted_at {
+                None => (account.at <= now_ms).then_some((account.at, id.clone())),
+                Some(at) => {
+                    let next = at.saturating_add(span);
+                    (next <= now_ms).then_some((next, id.clone()))
+                }
+            })
+            .collect();
+        due.sort();
+        due.into_iter().map(|(_, id)| id).collect()
     }
 }
 
@@ -294,6 +357,12 @@ struct ScheduleFile {
 const SCHEDULE_KEY: &str = "checkin:schedules";
 /// 台账按日分桶的键前缀
 const RECORD_PREFIX: &str = "checkin:rec:";
+/// 重试记账 / 补签记账的键前缀（`checkin:retry:{schedule_id}:{date}`、
+/// `checkin:makeup:{schedule_id}:{date}`）。两者都按「条目 + 当天日期」生成，
+/// 跨天换键即作废，但**旧键此前没有任何清理入口** —— 每个条目每天 +2 个
+/// KV 键，长期运行线性膨胀。由 [`CheckinStore::prune_ledger_keys`] 统一回收。
+const RETRY_PREFIX: &str = "checkin:retry:";
+const MAKEUP_PREFIX: &str = "checkin:makeup:";
 /// 台账「扫多少天」的**查询**上限（不是保留期）：一次查询最多回溯这么多天。
 /// 台账本身**全量保留**（对齐 A2A：不按天数裁、也没有条数上限），要清历史
 /// 走记录页的「清空 / 按筛选删除」。
@@ -449,7 +518,9 @@ impl CheckinStore {
     }
 
     /// 记下某计划的几家 provider 今天补签轮已跑（对齐 A2A `mark_retried_providers`）。
-    #[allow(dead_code)] // 预留/线表符号（见 main.rs 债务清单）
+    ///
+    /// 由 `scheduler::run_makeup_round` 逐家调用（S3：每家每天一轮），
+    /// `last_retried_providers` 按日期比较，跨天自然作废。
     pub fn mark_retried_providers(&self, id: &str, providers: &[String], date: &str) -> Result<()> {
         if providers.is_empty() {
             return Ok(());
@@ -740,6 +811,29 @@ impl CheckinStore {
         Ok(removed)
     }
 
+    /// 清掉「今天就作废」的重试/补签记账键。
+    ///
+    /// 这两类键的语义是按天作废（键里带日期，跨天自然换新键），但换键后旧键
+    /// 没人删：每个计划条目每天各留 1 个 `checkin:retry:*` 与
+    /// `checkin:makeup:*`，长跑一年就是几百到几千个无主 KV 行，且每次
+    /// `list_` 扫描都要过一遍。调度每轮顺手调一次（与 [`Self::prune_records`]
+    /// 同处），只删日期**早于今天**的键 —— 今天正在用的记账一条不动。
+    pub fn prune_ledger_keys(&self, today: &str) -> Result<usize> {
+        let mut removed = 0usize;
+        for prefix in [RETRY_PREFIX, MAKEUP_PREFIX] {
+            for key in self.store.list(prefix)? {
+                // 键形如 `checkin:retry:{schedule_id}:{YYYY-MM-DD}`：日期是最后
+                // 10 个字符，长度不足或格式不对的一律跳过（脏数据不删）。
+                let date = key.rsplit(':').next().unwrap_or("");
+                if date.len() == 10 && date < today {
+                    self.store.delete(&key)?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     /// 今天某账号某 provider 的最后一条记录（用于「今日是否已签」）。
     pub fn last_today(&self, account_id: &str, provider: &str) -> Result<Option<CheckinRecord>> {
         let records = self.recent_records(1, Some(provider), Some(account_id), None, None)?;
@@ -840,6 +934,8 @@ mod tests {
                 time: "09:00".into(),
                 time_end: String::new(),
                 randomize: false,
+                daily_kind: default_daily_kind(),
+                rolling_minutes: 0,
                 retry_limit: default_retry_limit(),
                 retry_gap_minutes: default_retry_gap_minutes(),
                 makeup_time: String::new(),
@@ -1002,6 +1098,71 @@ mod tests {
         assert_eq!(plan.next_at(), Some(1000));
     }
 
+    /// S2：rolling 窗口的到期判据 —— 窗口从**账号当天首次尝试**起算。
+    #[test]
+    fn rolling_due_counts_from_first_attempt() {
+        let date = "2026-11-17";
+        let mut plan = AccountPlan {
+            date: date.into(),
+            ..Default::default()
+        };
+        // a1 还没尝试：按排定起点（当天首轮）到期
+        plan.accounts.insert(
+            "a1".into(),
+            PlannedAccount {
+                provider: "loomy".into(),
+                at: 1_000,
+                attempted_at: None,
+            },
+        );
+        assert!(plan.rolling_due(999, date, 30).is_empty(), "未到排定起点");
+        assert_eq!(
+            plan.rolling_due(1_000, date, 30),
+            vec!["a1".to_string()],
+            "首次尝试按排定起点到期"
+        );
+        // 已尝试：从那次尝试起算 30 分钟（不是从 at / 不是从零点）
+        plan.accounts.get_mut("a1").unwrap().attempted_at = Some(10_000);
+        assert!(
+            plan.rolling_due(10_000 + 30 * 60_000 - 1, date, 30)
+                .is_empty(),
+            "窗口未满不得再签"
+        );
+        assert_eq!(
+            plan.rolling_due(10_000 + 30 * 60_000, date, 30),
+            vec!["a1".to_string()],
+            "满窗到期"
+        );
+        // 跨天作废 / 窗口 0 = 关闭
+        assert!(plan.rolling_due(999_999_999, "2026-11-18", 30).is_empty());
+        assert!(plan.rolling_due(999_999_999, date, 0).is_empty());
+    }
+
+    /// S2 兼容性：旧配置没有 `daily_kind` / `rolling_minutes` 两个键 →
+    /// 反序列化不失败且回落 fixed / 0（`is_rolling()` 为假）。
+    #[test]
+    fn legacy_schedule_json_defaults_to_fixed_window() {
+        let legacy = r#"{"id":"s1","label":"每日","enabled":true,"time":"09:00",
+            "providers":["loomy"]}"#;
+        let schedule: CheckinSchedule =
+            serde_json::from_str(legacy).expect("旧配置必须能读（新增字段全有 serde default）");
+        assert_eq!(schedule.daily_kind, DAILY_KIND_FIXED);
+        assert_eq!(schedule.rolling_minutes, 0);
+        assert!(!schedule.is_rolling(), "旧配置 = 固定时刻形态");
+        // rolling 只有在「形态 + 窗口」都给了才生效
+        let rolling = serde_json::from_str::<CheckinSchedule>(
+            r#"{"id":"s1","label":"","enabled":true,"time":"09:00","daily_kind":"rolling","rolling_minutes":30}"#,
+        )
+        .expect("rolling 配置可读");
+        assert!(rolling.is_rolling());
+        // 只给形态不给窗口 = 按 fixed 跑（否则每 tick 都判到期）
+        let no_window = serde_json::from_str::<CheckinSchedule>(
+            r#"{"id":"s1","label":"","enabled":true,"time":"09:00","daily_kind":"rolling"}"#,
+        )
+        .expect("缺窗口也可读");
+        assert!(!no_window.is_rolling());
+    }
+
     #[test]
     fn mark_attempted_and_mark_retried_providers() {
         let store = CheckinStore::new(temp_store());
@@ -1014,6 +1175,8 @@ mod tests {
                 time: "09:00".into(),
                 time_end: String::new(),
                 randomize: false,
+                daily_kind: default_daily_kind(),
+                rolling_minutes: 0,
                 retry_limit: 3,
                 retry_gap_minutes: 5,
                 makeup_time: String::new(),

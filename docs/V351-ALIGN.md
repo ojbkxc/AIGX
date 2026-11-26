@@ -46,7 +46,13 @@ node -e "…比对两侧 CAPABILITIES 全集…"               # 见该提交的
 **教训（已入库）**：`--check` 以基线文件为参照做增量判定，**上游新增能力时不会自动变红**——
 `login.sms.alicom4.v1` 就是靠人工全集比对才发现的（修复见 `9171a2dc`：四项差集进 baselineShape）。
 
-## 3.1 立项（已登记，未实施）：U-1 / U-2 余额查询的按家限流只盖住了自动巡检
+## 3.1 立项（**已实施 2026-11-26**）：U-1 / U-2 余额查询的按家限流只盖住了自动巡检
+
+> 实施结果（`A2A-V351-FULL-AUDIT-2026-11-26.md` §7）：`ProviderGate` 提为进程级
+> `gate_for(provider)`（`usage_query.rs`），`sweep` / `query_manual` / `usage_jobs`
+> 三条路径共用；`wait_turn` 改为锁内预占 + 锁外 sleep；`usage_jobs::spawn_job`
+> 先过全局 `background` 与单家 `background_per_provider` 令牌，排队期间
+> `status="queued"`。非目标（`queue.rs` 常驻 worker + `Notify`）维持 §2 判定不引入。
 
 上游 v3.5.1 把手动查询和自动巡检**收进了同一道闸**：`usage_query::query_all`（同步手动）与
 `run::start`（异步任务）都走 `queue::submit`，所以按家并发上限与 `minIntervalMs` 对

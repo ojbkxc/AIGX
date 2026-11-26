@@ -181,6 +181,11 @@ fn main_fired(schedule: &CheckinSchedule, provider: &str, today: &str) -> bool {
 
 /// 今天的主轮该跑哪些家：时刻已到、今天还没跑过、范围在条目内（空 = 全部）。
 fn due_providers(schedule: &CheckinSchedule, now_hhmm: &str, today: &str) -> Vec<String> {
+    if schedule.is_rolling() {
+        // rolling 形态没有「这家今天跑完了」这一说：到不到期在账号级
+        // `attempted_at` 上判（见 [`window_due_targets`]），走 [`rolling_providers`]。
+        return Vec::new();
+    }
     schedule
         .providers
         .iter()
@@ -189,6 +194,27 @@ fn due_providers(schedule: &CheckinSchedule, now_hhmm: &str, today: &str) -> Vec
         .filter(|p| {
             let time = effective_time(schedule, p);
             // 时刻格式非法时跳过（保存时已校验，这里只防脏数据）
+            is_hhmm(&time) && time.as_str() <= now_hhmm
+        })
+        .cloned()
+        .collect()
+}
+
+/// rolling 窗该跑的家：生效时刻已到，且条目是 rolling 形态（S2）。
+///
+/// 与 [`due_providers`] 的差别只有一条：**不看逐家 fired 标记** —— rolling 的
+/// 到期判据在账号上（`attempted_at + rolling_minutes`），一家今天可以跑多轮；
+/// 逐家标记只用来向界面表示「今天首轮已过」，不参与调度。
+fn rolling_providers(schedule: &CheckinSchedule, now_hhmm: &str) -> Vec<String> {
+    if !schedule.is_rolling() {
+        return Vec::new();
+    }
+    schedule
+        .providers
+        .iter()
+        .filter(|p| is_implemented(p))
+        .filter(|p| {
+            let time = effective_time(schedule, p);
             is_hhmm(&time) && time.as_str() <= now_hhmm
         })
         .cloned()
@@ -301,14 +327,24 @@ async fn run_due(
     egress: &crate::egress::EgressCache,
 ) {
     let settings = store.settings();
+    let date = today();
+    // 台账裁剪**必须在总开关之前**：开关关闭时台账仍在写（手动签到不看不签
+    // 开关），此前放在 `if !enabled { return }` 之后，关掉自动签到等于把
+    // `keep_days` 一起关掉，台账随天数无限增长。
+    let _ = store.prune_records();
+    // 重试/补签记账键按「计划 id + 当天日期」生成，跨天换键即作废；旧键此前
+    // 永不删除，每个条目每天 +2 个 KV 键，长期运行会线性膨胀。与台账同处清理。
+    let _ = store.prune_ledger_keys(&date);
     if !settings.enabled {
         return;
     }
-    let date = today();
+    // 与手动入口共抢一把闸：此前只有 run_now / run_schedule_now 抢闸，定时轮
+    // 与「立即签到」可以同时对同一账号发起，上游看到两次并发签到，且
+    // `auto_state.running` 在定时轮期间恒为 false（界面会重复点）。
+    let Some(_guard) = super::center::Guard::acquire() else {
+        return;
+    };
     let now = now_hhmm();
-    // 刷新时间超出 90 天的桶先清掉：这个 store 没有别的清理入口，
-    // 不清的话台账会随天数无限增长
-    let _ = store.prune_records();
     for schedule in store.schedules() {
         if !schedule.enabled {
             continue;
@@ -318,7 +354,17 @@ async fn run_due(
             continue;
         }
         // ① 主轮：逐家到点即跑（执行前先落逐家标记 —— 中途被杀不会重跑）
-        for provider in due_providers(&schedule, &now, &date) {
+        //
+        // rolling 形态（`daily_kind="rolling"`，S2）走同一循环，但到期判据在账号
+        // 上而不是「这家今天跑过没有」：`due_providers` 对它返回空，
+        // `rolling_providers` 每 tick 都把它交回来，逐账号判 `attempted_at + 窗口`。
+        let mut queue = due_providers(&schedule, &now, &date);
+        queue.extend(rolling_providers(&schedule, &now));
+        for provider in queue {
+            if schedule.is_rolling() {
+                run_rolling_provider(store, sessions, &schedule, &provider, &date, &settings).await;
+                continue;
+            }
             // 区间窗：整个窗口内逐 tick 只跑「自己那刻已到」的账号；窗口进行中
             // 不落 provider 标记（否则剩下的账号再也不会被 this 轮捡起）。
             match effective_window(&schedule, &provider).1 {
@@ -361,6 +407,10 @@ async fn run_due(
                             end
                         );
                         let ran: Vec<String> = targets.iter().map(|s| s.id.clone()).collect();
+                        // 先落「已尝试」再执行：与 A2A `take_due` 同序（执行前落
+                        // attempted_at）。此前在执行后才落，进程在批次中途被杀 →
+                        // 重启后这批账号全部重跑主轮，上游看到重复签到。
+                        let _ = store.mark_attempted(&schedule.id, &ran, &date);
                         let outcome = run_targets_with_reason(
                             store,
                             sessions,
@@ -379,8 +429,6 @@ async fn run_due(
                         // 只落条目级结果摘要，供界面「上次执行」。
                         let _ = store.mark_fired(&schedule.id, &date, &outcome.summary, &counts);
                         let _ = store.mark_last_summary(&schedule.id, &outcome.last_summary);
-                        // 本轮跑过的账号标为已尝试（排程层去重）
-                        let _ = store.mark_attempted(&schedule.id, &ran, &date);
                     }
                     if now.as_str() >= end.as_str() {
                         // 窗口结束：本家今天到此为止（未签上的账号交给重试/补签轮）
@@ -394,8 +442,8 @@ async fn run_due(
         for provider in retry_due_providers(&schedule, &now, &date, store) {
             run_retry_round(store, sessions, egress, &schedule, &provider, &settings).await;
         }
-        // ③ 补签轮：`makeup_time` 到达时，挑当天该条目下仍未签上的账号再跑一次
-        // （`kind="makeup"`），每天至多一轮。
+        // ③ 补签轮：逐家补签时刻到达时，只补**这一家**当天仍未签上的账号
+        // （`kind="makeup"`），每家每天至多一轮（S3）。
         run_makeup_round(store, sessions, egress, &schedule, &settings).await;
     }
 }
@@ -511,19 +559,166 @@ fn prepare_account_plan(
 
 /// 窗口进行中该跑的账号：**当日排程**里到点且未尝试的账号（区间随机）。
 /// 与 A2A 同一口径 —— 排程持久化，重启沿用，不会在窗口内反复签到同一账号。
+///
+/// rolling（S2）：排程只放今天还没签上的账号，到期判据换成
+/// [`crate::checkin::store::AccountPlan::rolling_due`]（账号当天首次尝试时刻 +
+/// `rolling_minutes`；没有尝试时刻不造时间点）。
 fn window_due_targets(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
     schedule: &CheckinSchedule,
     provider: &str,
 ) -> Vec<crate::account_session::model::AccountSession> {
-    prepare_account_plan(store, sessions, schedule, provider);
-    let plan = store.account_plan_of(&schedule.id);
-    let due = plan.due(Utc::now().timestamp_millis(), &today());
+    let now_ms = Utc::now().timestamp_millis();
+    let date = today();
+    let due = if schedule.is_rolling() {
+        prepare_rolling_plan(store, sessions, schedule, provider);
+        let plan = store.account_plan_of(&schedule.id);
+        plan.rolling_due(now_ms, &date, schedule.rolling_minutes)
+    } else {
+        prepare_account_plan(store, sessions, schedule, provider);
+        let plan = store.account_plan_of(&schedule.id);
+        plan.due(now_ms, &date)
+    };
     collect_targets(sessions, std::slice::from_ref(&provider.to_string()))
         .into_iter()
         .filter(|s| due.iter().any(|id| id == &s.id))
         .collect()
+}
+
+/// rolling 窗的当日排程：只收**今天还没签上**的账号，窗口起点用该家生效时刻。
+///
+/// 与 [`prepare_account_plan`] 的差别是刻意的：
+/// - 不分配随机时刻（rolling 的「时刻」由 `attempted_at + rolling_minutes` 算，
+///   排程里的 `at` 只用来表示首轮的生效点）；
+/// - 今天已签上（`ok`，含 Already）的账号**从排程里移除** —— 这是 rolling 的
+///   「停」信号（A2A 靠上游给的 `until` 前进来自停，AIGX 没有那个上游信号，
+///   改用自己台账里的当日事实）；否则成功账号会每满一个窗口被重签一次。
+fn prepare_rolling_plan(
+    store: &CheckinStore,
+    sessions: &AccountSessionStore,
+    schedule: &CheckinSchedule,
+    provider: &str,
+) {
+    let start = effective_time(schedule, provider);
+    let Some((start_ms, _)) = window_ms(&start, &start) else {
+        return;
+    };
+    let date = today();
+    // 今天这家已签上的账号（success / already）：rolling 不再碰
+    let signed: std::collections::HashSet<String> = store
+        .recent_records(1, Some(provider), None, None, None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|record| record.ok)
+        .map(|record| record.account_id)
+        .collect();
+    let targets = collect_targets(sessions, std::slice::from_ref(&provider.to_string()));
+    let _ = store.patch_account_plan(&schedule.id, |plan| {
+        if plan.date != date {
+            *plan = crate::checkin::store::AccountPlan {
+                date: date.clone(),
+                ..Default::default()
+            };
+        }
+        for session in &targets {
+            if signed.contains(&session.id) {
+                plan.accounts.remove(&session.id);
+                continue;
+            }
+            // 已排过的沿用 `attempted_at`（窗口起点就是这个值，不能抹掉）
+            if plan
+                .accounts
+                .get(&session.id)
+                .is_some_and(|existing| existing.provider == provider)
+            {
+                continue;
+            }
+            plan.accounts.insert(
+                session.id.clone(),
+                crate::checkin::store::PlannedAccount {
+                    provider: provider.to_string(),
+                    at: start_ms,
+                    attempted_at: None,
+                },
+            );
+        }
+        let ids: std::collections::HashSet<&str> = targets.iter().map(|s| s.id.as_str()).collect();
+        // 只留本条目本轮范围内、且仍属于这家（或别的家的）账号
+        plan.accounts
+            .retain(|id, account| account.provider != provider || ids.contains(id.as_str()));
+    });
+}
+
+/// rolling 的逐家「今天跑过」标记：排程里这家已无「未尝试」的账号
+/// （含「今天都签上了、已移出排程」与「没有可签账号」）→ 落标记。
+///
+/// 只影响界面（`lastFiredToday` / `pendingProviders` / `nextRunAt`），
+/// **不停止** rolling 轮询 —— 轮询按账号到期判据走，与这个标记无关。
+/// 已经标过就直接返回（`mark_fired_provider` 每调一次都要落盘，别每个 tick 写一遍）。
+fn mark_rolling_fired_if_done(
+    store: &CheckinStore,
+    schedule: &CheckinSchedule,
+    provider: &str,
+    date: &str,
+) {
+    if main_fired(schedule, provider, date) {
+        return;
+    }
+    let plan = store.account_plan_of(&schedule.id);
+    let pending = plan
+        .accounts
+        .values()
+        .filter(|account| account.provider == provider && account.attempted_at.is_none())
+        .count();
+    if pending == 0 {
+        let _ = store.mark_fired_provider(&schedule.id, provider, date);
+    }
+}
+
+/// rolling 窗的一家一轮：跑到期账号 → 刷新窗口起点 → 汇总落账。
+///
+/// 「跑完才刷新起点」与区间窗同序（执行前 `mark_attempted`）：进程在批次中途
+/// 被杀时，这批账号已经记过尝试，不会被下一个 tick 立刻重签一遍。
+async fn run_rolling_provider(
+    store: &CheckinStore,
+    sessions: &AccountSessionStore,
+    schedule: &CheckinSchedule,
+    provider: &str,
+    date: &str,
+    settings: &super::store::CheckinSettings,
+) {
+    let targets = window_due_targets(store, sessions, schedule, provider);
+    if targets.is_empty() {
+        // 没有到期账号 ≠ 今天没跑过：全都签上了也要把逐家标记补上
+        mark_rolling_fired_if_done(store, schedule, provider, date);
+        return;
+    }
+    let ran: Vec<String> = targets.iter().map(|s| s.id.clone()).collect();
+    let _ = store.mark_attempted(&schedule.id, &ran, date);
+    let reason = format!(
+        "滚动签到（{} · {} · 窗口 {} 分钟）",
+        schedule.label.trim(),
+        effective_time(schedule, provider),
+        schedule.rolling_minutes
+    );
+    let outcome = run_targets_with_reason(
+        store,
+        sessions,
+        targets,
+        "schedule",
+        settings.gap_ms,
+        &reason,
+    )
+    .await;
+    let counts = ScheduleCounts {
+        ok: outcome.ok,
+        keepalive: outcome.keepalive,
+        failed: outcome.failed,
+    };
+    let _ = store.mark_fired(&schedule.id, date, &outcome.summary, &counts);
+    let _ = store.mark_last_summary(&schedule.id, &outcome.last_summary);
+    mark_rolling_fired_if_done(store, schedule, provider, date);
 }
 
 /// 今天该重试的家：主轮已跑、时刻已过、且这家还有没签上的账号。
@@ -536,6 +731,11 @@ fn retry_due_providers(
     today: &str,
     store: &CheckinStore,
 ) -> Vec<String> {
+    if schedule.is_rolling() {
+        // rolling 自己的节奏就是「每满一个窗口再判一次到期」，再叠一层
+        // 中性未领取重试会让同一账号在一个窗口里被打两次。
+        return Vec::new();
+    }
     schedule
         .providers
         .iter()
@@ -629,10 +829,16 @@ async fn run_retry_round(
             .entry(r.account_id.clone())
             .or_insert_with(|| r);
     }
-    // 到点且次数未用尽的未签账号
+    // 到点且次数未用尽的未签账号。
+    //
+    // 只重试 **Pending**（窗口未开/待领取）——对齐 A2A `retry::due` 的
+    // `claim_pending` 判据（`error` 非空直接不进名单）。此前用 `!r.ok` 全收，
+    // Failed（登录态失效、凭证错误）与 Captcha 也会被打满 `retry_limit` 次：
+    // 这类失败等再久都不会好，重试只是给上游送无效请求。
     let due: Vec<String> = last_by_account
         .iter()
-        .filter(|(_, r)| !r.ok && matches!(r.source.as_str(), "schedule" | "retry" | "makeup"))
+        .filter(|(_, r)| r.outcome == CheckinOutcome::Pending && !r.ok)
+        .filter(|(_, r)| matches!(r.source.as_str(), "schedule" | "retry" | "makeup"))
         .filter(|(id, _)| ledger.attempts.get(id.as_str()).copied().unwrap_or(0) < limit)
         .filter(|(id, _)| ledger.accounts.get(id.as_str()).copied().unwrap_or(0) <= now)
         .map(|(id, _)| id.clone())
@@ -649,6 +855,7 @@ async fn run_retry_round(
     let mut ok = 0usize;
     let mut failed = 0usize;
     let mut total = 0usize;
+    let mut keepalive = 0usize;
     let mut failures: Vec<String> = Vec::new();
     for session in targets {
         total += 1;
@@ -660,21 +867,24 @@ async fn run_retry_round(
                 continue;
             }
         };
-        let result = claim::claim_for(&client, &session).await;
-        if result.outcome.is_ok() {
+        // 与主轮共用同一条执行单元：workbuddy-intl 在这里也必须走 Full 保活链。
+        // 此前重试轮直接 `claim_for`，intl 账号在重试路径上永远点不亮网页通道，
+        // `kept_active` 恒 false、保活计数恒 0（与主轮结果自相矛盾）。
+        let (outcome, message, kept_active) = claim_one(store, &client, &session).await;
+        if kept_active {
+            keepalive += 1;
+        }
+        if outcome.is_ok() {
             ok += 1;
-        } else if result.outcome == CheckinOutcome::Failed {
+        } else if outcome == CheckinOutcome::Failed {
             failed += 1;
         }
-        if matches!(
-            result.outcome,
-            CheckinOutcome::Failed | CheckinOutcome::Captcha
-        ) {
-            failures.push(format!("{}（{}）", session.name, result.msg));
+        if matches!(outcome, CheckinOutcome::Failed | CheckinOutcome::Captcha) {
+            failures.push(format!("{}（{message}）", session.name));
         }
-        record(store, &session, "retry", result.outcome, &result.msg, false);
+        record(store, &session, "retry", outcome, &message, kept_active);
         // 记账：签上了就摘掉；没签上 → 次数 +1、下次到点 = now + gap
-        if result.outcome.is_ok() {
+        if outcome.is_ok() {
             ledger.accounts.remove(&session.id);
             ledger.attempts.remove(&session.id);
         } else {
@@ -701,7 +911,7 @@ async fn run_retry_round(
             &format!("重试 {ok}/{total}（{provider}）"),
             &ScheduleCounts {
                 ok,
-                keepalive: 0,
+                keepalive,
                 failed,
             },
         );
@@ -711,7 +921,7 @@ async fn run_retry_round(
             "date": date,
             "reason": reason,
             "succeeded": ok,
-            "active": 0,
+            "active": keepalive,
             "total": total,
             "skipped": 0,
             "failed": failures.iter().take(5).cloned().collect::<Vec<_>>(),
@@ -738,6 +948,7 @@ fn makeup_already_ran(store: &CheckinStore, schedule_id: &str, date: &str) -> bo
 }
 
 /// 条目覆盖的 provider 范围（空 = 全部支持的）。
+#[allow(dead_code)] // 聚合形态（`makeup_targets`）的配套读侧，见该函数注释
 fn schedule_provider_scope(schedule: &CheckinSchedule) -> Vec<String> {
     if schedule.providers.is_empty() {
         claim::supported_providers()
@@ -815,6 +1026,11 @@ pub fn next_run_at(schedule: &CheckinSchedule, today: &str) -> Option<i64> {
 
 /// 补签轮的账号：该条目 provider 范围内，今天**还没签上**（末次记录非 ok，
 /// 或今天压根没跑过）的账号。今天已 ok 的账号不再补签。
+///
+/// **聚合形态**（一次问「这条条目还有谁没签上」）：S3 之后执行侧按家走
+/// [`makeup_targets_of`]（逐家判到点），这里保留给读侧与 `runtime_tests`
+/// 的判据用例 —— 两处共用同一套「末次记录非 ok」口径，不各写一遍。
+#[allow(dead_code)] // 见 doc：聚合形态，执行侧已改逐家
 pub(super) fn makeup_targets(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
@@ -822,28 +1038,70 @@ pub(super) fn makeup_targets(
 ) -> Vec<crate::account_session::model::AccountSession> {
     let mut out = Vec::new();
     for provider in schedule_provider_scope(schedule) {
-        let records = store
-            .recent_records(1, Some(&provider), None, None, None)
-            .unwrap_or_default();
-        // 账号 id → 末次记录（倒序读、只在缺失时插入 = 最新一条）
-        let mut last_by_account: HashMap<String, &CheckinRecord> = HashMap::new();
-        for r in &records {
-            last_by_account
-                .entry(r.account_id.clone())
-                .or_insert_with(|| r);
-        }
-        for session in collect_targets(sessions, std::slice::from_ref(&provider)) {
-            let signed = last_by_account.get(&session.id).is_some_and(|r| r.ok);
-            if !signed {
-                out.push(session);
-            }
-        }
+        out.extend(makeup_targets_of(store, sessions, &provider));
     }
     out
 }
 
-/// 补签轮：`makeup_time` 到达时，挑当天该条目下仍未签上的账号再跑一次
-/// （`kind="makeup"`），每天至多一轮。
+/// 单家的补签账号（[`makeup_targets`] 的逐家形态）。
+fn makeup_targets_of(
+    store: &CheckinStore,
+    sessions: &AccountSessionStore,
+    provider: &str,
+) -> Vec<crate::account_session::model::AccountSession> {
+    let records = store
+        .recent_records(1, Some(provider), None, None, None)
+        .unwrap_or_default();
+    // 账号 id → 末次记录（倒序读、只在缺失时插入 = 最新一条）
+    let mut last_by_account: HashMap<String, &CheckinRecord> = HashMap::new();
+    for r in &records {
+        last_by_account
+            .entry(r.account_id.clone())
+            .or_insert_with(|| r);
+    }
+    collect_targets(sessions, std::slice::from_ref(&provider.to_string()))
+        .into_iter()
+        .filter(|session| !last_by_account.get(&session.id).is_some_and(|r| r.ok))
+        .collect()
+}
+
+/// 今天该补哪几家（逐家到点）：S3。
+///
+/// 判据与 A2A `auto_checkin::times::retry_due_providers` 同构 —— 逐家时刻由
+/// [`super::schedules::provider_retry_times`] 算（`max(条目补签时刻, 该家生效
+/// 时刻 + 重试间隔)`，已经含「窗口没开就别补」这层），再加上：
+/// 主轮已跑过（`main_fired`）、今天还没补过（`last_retried_providers`）。
+/// 补签时刻**逐家不同**：qoder 10:01 开窗的家不会在 00:10 被补一轮空跑。
+fn makeup_due_providers(schedule: &CheckinSchedule, now_hhmm: &str, today: &str) -> Vec<String> {
+    let times = super::schedules::provider_retry_times(schedule);
+    schedule
+        .providers
+        .iter()
+        .filter(|p| is_implemented(p))
+        // 逐家补签点一定晚于该家主轮时刻，主轮没跑过就没有「补」可言
+        .filter(|p| main_fired(schedule, p, today))
+        .filter(|p| {
+            schedule
+                .last_retried_providers
+                .get(*p)
+                .is_none_or(|date| date.as_str() != today)
+        })
+        .filter(|p| {
+            times
+                .get(*p)
+                .and_then(|value| value.as_str())
+                .is_some_and(|time| is_hhmm(time) && time <= now_hhmm)
+        })
+        .cloned()
+        .collect()
+}
+
+/// 补签轮：逐家到点后只跑**这一家**当天仍未签上的账号（`kind="makeup"`）。
+///
+/// 每家每天至多一轮：跑完落 `mark_retried_providers`，`last_retried_providers`
+/// 跨天自然作废（按日期比较）。此前是「整条条目一轮」：00:10 一到就把所有家
+/// 一起补掉，qoder / zcode 这类窗口晚上才开的家在补签时刻根本没有可签的机会
+/// （届时只会拿到「窗口未开」），而 `mark_retried_providers` 从没人调用。
 async fn run_makeup_round(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
@@ -851,39 +1109,51 @@ async fn run_makeup_round(
     schedule: &CheckinSchedule,
     settings: &super::store::CheckinSettings,
 ) {
-    let makeup_time = schedule.makeup_time.trim();
-    if makeup_time.is_empty() || !is_hhmm(makeup_time) {
-        return;
-    }
-    if makeup_time > now_hhmm().as_str() {
-        return; // 未到补签时刻
-    }
     let date = today();
+    // 存量兼容：升级前版本今天已经跑过整条补签轮（全局标记）→ 今天不再补；
+    // 这份标记从本版本起不再写入（逐家标记接管），旧键由 `prune_ledger_keys` 清掉。
     if makeup_already_ran(store, &schedule.id, &date) {
         return;
     }
-    // 先落「已跑」标记：中途被杀也不会反复补签
-    let _ = store
-        .file_store()
-        .put(&makeup_key(&schedule.id, &date), &true);
-    let targets = makeup_targets(store, sessions, schedule);
-    if targets.is_empty() {
-        return;
+    let now = now_hhmm();
+    for provider in makeup_due_providers(schedule, &now, &date) {
+        let targets = makeup_targets_of(store, sessions, &provider);
+        if !targets.is_empty() {
+            let reason = format!(
+                "补签（{} · {} @ {}）",
+                schedule.label.trim(),
+                provider,
+                super::schedules::provider_retry_times(schedule)
+                    .get(&provider)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+            );
+            let outcome = run_targets_with_reason(
+                store,
+                sessions,
+                targets,
+                "makeup",
+                settings.gap_ms,
+                &reason,
+            )
+            .await;
+            let _ = store.mark_fired(
+                &schedule.id,
+                &date,
+                &format!("补签 {}（{provider}）", outcome.summary),
+                &ScheduleCounts {
+                    ok: outcome.ok,
+                    keepalive: outcome.keepalive,
+                    failed: outcome.failed,
+                },
+            );
+            let _ = store.mark_last_summary(&schedule.id, &outcome.last_summary);
+        }
+        // 跑完落逐家标记（每家每天一轮）。放在执行之后：进程在批次中途被杀时
+        // 这一家下一次 tick 还会再补一轮 —— 签到/补签在上游都是幂等的，重复
+        // 一次比「从此不再补」安全。
+        let _ = store.mark_retried_providers(&schedule.id, std::slice::from_ref(&provider), &date);
     }
-    let reason = format!("补签（{}）", schedule.label.trim());
-    let outcome =
-        run_targets_with_reason(store, sessions, targets, "makeup", settings.gap_ms, &reason).await;
-    let _ = store.mark_fired(
-        &schedule.id,
-        &date,
-        &format!("补签 {}", outcome.summary),
-        &ScheduleCounts {
-            ok: outcome.ok,
-            keepalive: outcome.keepalive,
-            failed: outcome.failed,
-        },
-    );
-    let _ = store.mark_last_summary(&schedule.id, &outcome.last_summary);
 }
 
 /// `HH:MM` 格式校验。
@@ -933,6 +1203,60 @@ pub fn retry_snapshot(
         .filter(|id| ledger.attempts.get(*id).copied().unwrap_or(0) < limit)
         .count();
     (waiting, exhausted, ledger.attempts)
+}
+
+/// 最近一轮执行的失败快照（S6：签到失败通知的**只读事实**）。
+///
+/// ## 为什么不是「直接发通知」
+///
+/// 发送要 [`crate::notify::NotifyService`]（它挂在 `AppState` 上），而
+/// [`run_targets_with_reason`] 只拿得到 `&CheckinStore`；有 `state` 的两个入口
+/// （`handle_checkin_run` / `handle_run_checkin_schedule`）在 `src/api/admin/**`，
+/// 不在签到子系统的改动范围。所以这里只把「这一轮有几个失败、都是谁」落成
+/// 进程级快照，由那两条入口读完再发一次 —— 判据只此一份（`failed > 0`），
+/// 不会出现在调度里发一遍、入口里再发一遍的重复通知。
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // 字段由接线点（api/admin 的签到失败通知）读取，见交付报告的接线说明
+pub struct FailureSnapshot {
+    /// unix 秒
+    pub at: i64,
+    /// 日期（YYYY-MM-DD，按签到配置时区）
+    pub date: String,
+    /// 触发原因（如「定时签到（每日 · 09:00）」）
+    pub reason: String,
+    /// 本轮账号总数
+    pub total: usize,
+    /// 失败数
+    pub failed: usize,
+    /// 失败明细（`名字（原因）`，最多 5 条 —— 与台账 `failed` 列同口径）
+    pub failures: Vec<String>,
+}
+
+/// 最近一轮的失败快照：`None` = 最近一轮没有失败（或还没跑过）。
+///
+/// 进程级单槽：签到本身是串行打上游的长动作（`center::Guard` 全局互斥），
+/// 同一时刻不会有两轮同时收尾，后写的覆盖先写的即正确。
+static LAST_FAILURES: std::sync::Mutex<Option<FailureSnapshot>> = std::sync::Mutex::new(None);
+
+/// 写快照。锁中毒时取回内部值继续写 —— 快照是诊断用的旁路事实，
+/// 不该因为一次中毒把后面所有轮次的失败都丢掉（`panic=abort` 下中毒本身
+/// 也不会发生，这条只是防御）。
+fn publish_failures(snapshot: Option<FailureSnapshot>) {
+    let mut slot = match LAST_FAILURES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *slot = snapshot;
+}
+
+/// 读取最近一轮的失败快照（只读；S6 的接线点，见 [`FailureSnapshot`]）。
+#[allow(dead_code)] // 接线点在 api/admin（不在签到子系统改动范围），见交付报告
+pub fn last_failures() -> Option<FailureSnapshot> {
+    let slot = match LAST_FAILURES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    slot.clone()
 }
 
 /// 一次计划执行的结果汇总（`summary` 进台账，计数供界面展示）。
@@ -996,6 +1320,8 @@ pub(crate) async fn run_targets_with_reason(
     if targets.is_empty() {
         // 空轮次也给一份结构化摘要（界面「上次执行」/ 条目 lastResult 需要）；
         // 但不进时间线 —— 没有发生任何签到动作。
+        // 失败快照同步清空：这一轮什么都没跑，旧失败不该被接线点当成「刚发生」。
+        publish_failures(None);
         return ScheduleOutcome {
             summary: "没有可签到的账号".to_string(),
             last_summary: serde_json::json!({
@@ -1017,6 +1343,8 @@ pub(crate) async fn run_targets_with_reason(
     let mut keepalive = 0usize;
     let mut total = 0usize;
     let mut failures: Vec<String> = Vec::new();
+    // 连登管家（S4）的候选：本轮签到成功的账号，批量跑完后异步接手
+    let mut streak_targets: Vec<super::streak::StreakTarget> = Vec::new();
     for session in targets {
         total += 1;
         // 出口统一走 `client_for`（解析 `pool:` / `rotate` 编码）——绕开
@@ -1058,6 +1386,12 @@ pub(crate) async fn run_targets_with_reason(
         };
         if outcome.is_ok() {
             ok += 1;
+            // 连登管家只在「今天确实签上了」的账号上跑（连登天数当天 +1 之后
+            // 才可能解锁新档位，与 A2A `billing/checkin.rs` 挂在签到末尾同因）。
+            streak_targets.push(super::streak::StreakTarget {
+                account_id: session.id.clone(),
+                provider: session.provider.clone(),
+            });
         } else if outcome == CheckinOutcome::Failed {
             failed += 1;
         }
@@ -1109,6 +1443,28 @@ pub(crate) async fn run_targets_with_reason(
         "failedCount": failures.len(),
     });
     history::record(store, reason, ok, keepalive, total, 0, &failures);
+    // 连登管家（S4）：批量签到成功后按 provider 能力表起一个后台任务。
+    // 能力表里没有任何家支持时 [`super::streak::spawn_after_batch`] **立刻返回、
+    // 不 spawn**（零开销）—— 上游端点未接入期间这条调用等于一次空判断。
+    let _ = super::streak::spawn_after_batch(store, &streak_targets);
+    // 签到失败通知（S6）：只落一份**只读快照**，不在这里发通知 —— 发送需要
+    // `NotifyService`（挂在 AppState 上），而本函数只拿得到 `&CheckinStore`。
+    // 接线点：`handle_checkin_run` / `handle_run_checkin_schedule` 跑完之后
+    // 读 `scheduler::last_failures()`，有值就
+    // `state.notify.notify_spawn(NotifyEvent::AlertTriggered { level, message })`。
+    // 成功轮落 `None`：旧失败不该被下一轮当成「刚发生」再发一遍。
+    publish_failures(if failed > 0 {
+        Some(FailureSnapshot {
+            at: chrono::Utc::now().timestamp(),
+            date: today(),
+            reason: reason.to_string(),
+            total,
+            failed,
+            failures: failures.iter().take(5).cloned().collect(),
+        })
+    } else {
+        None
+    });
     ScheduleOutcome {
         summary: summary_text,
         ok,
@@ -1117,6 +1473,27 @@ pub(crate) async fn run_targets_with_reason(
         total,
         failures,
         last_summary,
+    }
+}
+
+/// 一个账号的一次签到执行单元：`workbuddy-intl` 走 Full 保活链，其余走普通 claim。
+///
+/// 返回 `(outcome, message, kept_active)`。主轮、重试轮与两条手动入口**必须**
+/// 共用这一处 —— 此前只有主轮对 intl 走 Full 链，重试轮与
+/// `handle_checkin_run` 直接 `claim_for`，intl 账号在这些路径上永远点不亮
+/// 网页通道保活（`kept_active` 恒 false，保活计数恒 0）。
+pub(crate) async fn claim_one(
+    store: &CheckinStore,
+    client: &reqwest::Client,
+    session: &crate::account_session::model::AccountSession,
+) -> (CheckinOutcome, String, bool) {
+    if session.provider == "workbuddy-intl" {
+        let benefit = keepalive::run(store.file_store(), client, session, "full").await;
+        let hit = keepalive_hits(&benefit) > 0;
+        (benefit_outcome(&benefit), benefit.message, hit)
+    } else {
+        let result = claim::claim_for(client, session).await;
+        (result.outcome, result.msg, false)
     }
 }
 
@@ -1228,6 +1605,10 @@ pub fn record_with_reason(
 mod tests {
     use super::*;
 
+    /// 串行锁：`LAST_FAILURES` 是进程级 static，读它的用例必须排队，
+    /// 否则并行跑测试时会互相覆盖（与 `center` 的 `GLOBAL_STATE` 同款）。
+    static GLOBAL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn schedule(time: &str, providers: &[&str]) -> CheckinSchedule {
         CheckinSchedule {
             id: "s1".to_string(),
@@ -1236,6 +1617,8 @@ mod tests {
             time: time.to_string(),
             time_end: String::new(),
             randomize: false,
+            daily_kind: super::super::store::DAILY_KIND_FIXED.to_string(),
+            rolling_minutes: 0,
             retry_limit: 3,
             retry_gap_minutes: 5,
             makeup_time: String::new(),
@@ -1550,5 +1933,103 @@ mod tests {
         assert_eq!(waiting, 0);
         assert!(exhausted.is_empty());
         assert!(attempts.is_empty());
+    }
+
+    /// S3：补签轮**逐家**判到点 —— 补签点逐家不同（窗口结束 + 等待间隔），
+    /// 主轮跑过、今天没补过的家才进来，补过的家当天不再出现。
+    #[test]
+    fn makeup_round_picks_provider_by_provider_when_due() {
+        let today = "2026-11-17";
+        // 条目 09:00，补签不早于 00:10，重试间隔 5 分钟：
+        // 两家的补签点都是 max(00:10, 09:00 + 5) = 09:05
+        let mut s = schedule("09:00", &["loomy", "kuku"]);
+        s.makeup_time = "00:10".to_string();
+        s.retry_gap_minutes = 5;
+        for provider in ["loomy", "kuku"] {
+            s.last_fired_providers
+                .insert(provider.to_string(), today.to_string());
+        }
+        // 未到点：一家都不补
+        assert!(makeup_due_providers(&s, "09:04", today).is_empty());
+        // 到点：两家各自在名单里（逐家判，而不是整条条目一刀切）
+        assert_eq!(
+            makeup_due_providers(&s, "09:05", today),
+            vec!["loomy".to_string(), "kuku".to_string()]
+        );
+        assert_eq!(
+            super::super::schedules::provider_retry_times(&s)
+                .get("loomy")
+                .and_then(|value| value.as_str()),
+            Some("09:05"),
+            "逐家补签点 = max(条目补签时刻, 该家生效时刻 + 重试间隔)"
+        );
+        // 今天已补过的家不再出现（每家每天一轮）
+        s.last_retried_providers
+            .insert("loomy".to_string(), today.to_string());
+        assert_eq!(
+            makeup_due_providers(&s, "23:00", today),
+            vec!["kuku".to_string()]
+        );
+        // 昨天补过的不算「今天补过」
+        s.last_retried_providers
+            .insert("loomy".to_string(), "2026-11-16".to_string());
+        assert_eq!(makeup_due_providers(&s, "23:00", today).len(), 2);
+        // 主轮没跑过的家不补（对齐 A2A retry_due_providers 的 main_fired 判据）
+        s.last_fired_providers.clear();
+        s.last_fired_date = String::new();
+        assert!(makeup_due_providers(&s, "23:00", today).is_empty());
+        // 补签时刻清空 = 关掉补签轮
+        s.last_fired_date = today.to_string();
+        s.makeup_time = String::new();
+        assert!(makeup_due_providers(&s, "23:00", today).is_empty());
+    }
+
+    /// S2：rolling 形态的主轮不再看「这家今天跑过没有」，改由账号级到期判据。
+    #[test]
+    fn rolling_form_uses_account_level_due_not_provider_markers() {
+        let today = "2026-11-17";
+        let mut s = schedule("09:00", &["loomy"]);
+        s.last_fired_providers
+            .insert("loomy".to_string(), today.to_string());
+        // fixed：今天已跑过 → 主轮名单空
+        assert!(due_providers(&s, "23:00", today).is_empty());
+        // rolling（窗口 30 分钟）：时刻到点就交给账号级判据，不看逐家标记
+        s.daily_kind = super::super::store::DAILY_KIND_ROLLING.to_string();
+        s.rolling_minutes = 30;
+        assert!(
+            due_providers(&s, "23:00", today).is_empty(),
+            "rolling 不走这条"
+        );
+        assert_eq!(
+            rolling_providers(&s, "23:00"),
+            vec!["loomy".to_string()],
+            "rolling 每 tick 都把它交回来，到期在账号上判"
+        );
+        assert!(rolling_providers(&s, "08:59").is_empty(), "时刻没到");
+        // 只给形态不给窗口 = 按 fixed 跑（否则每 tick 都判到期）
+        s.rolling_minutes = 0;
+        assert!(!s.is_rolling());
+        assert!(rolling_providers(&s, "23:00").is_empty());
+    }
+
+    /// S6：失败快照能被读到、成功轮会把它清掉（旧失败不该被反复当「刚发生」）。
+    #[test]
+    fn last_failures_snapshot_roundtrip() {
+        let _serial = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        publish_failures(None);
+        assert!(last_failures().is_none(), "还没跑过 / 上一轮没失败");
+        let snapshot = FailureSnapshot {
+            at: 1_700_000_000,
+            date: "2026-11-17".to_string(),
+            reason: "定时签到（每日 · 09:00）".to_string(),
+            total: 3,
+            failed: 2,
+            failures: vec!["账号A（登录态失效）".to_string()],
+        };
+        publish_failures(Some(snapshot.clone()));
+        assert_eq!(last_failures(), Some(snapshot));
+        // 成功轮清空
+        publish_failures(None);
+        assert!(last_failures().is_none());
     }
 }

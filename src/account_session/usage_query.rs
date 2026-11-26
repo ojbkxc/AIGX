@@ -27,37 +27,89 @@ const CONCURRENCY: usize = 3;
 
 /// 单家限流闸：保证同一 provider 相邻两次查询的**启动**间隔不小于申报值。
 ///
-/// 只锁「取号」这一段（几十微秒），请求本身在锁外并发执行——所以它限制的是
-/// 启动间隔与在飞数量，不是串行化整轮查询。`min_interval = 0` 时直接放行
-/// （未申报策略的家零额外开销，行为与从前一致）。
+/// 进程级、按 provider 一实例（见 [`gate_for`]）——**所有**发起余额查询的路径
+/// （自动巡检 [`sweep`]、手动 [`query_manual`]、异步任务 `usage_jobs`）共用同一
+/// 把闸。此前每轮 `sweep` 内 new 一个：既让手动路径完全绕开限流，也让
+/// `min_interval` 只约束「本轮内相邻启动」，跨轮不生效。
+///
+/// 只锁「取号」这一段（几微秒），请求本身在锁外并发执行 —— 它限制的是启动
+/// 间隔与在飞数量，不是串行化整轮查询。`min_interval = 0` 时直接放行（未申报
+/// 策略的家零额外开销）。
 struct ProviderGate {
-    min_interval: Duration,
-    /// 上一次放行时刻；`None` = 本轮第一次。
-    last: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+    /// 申报的最小启动间隔（毫秒）。用原子量而非构造期常量：运行中插件重新
+    /// 申报策略时，[`gate_for`] 会就地更新，不必重建闸（重建会把排队者丢掉）。
+    min_interval_ms: std::sync::atomic::AtomicU64,
+    /// 下一次可启动时刻（预占推进）。只存 Instant，不跨 await 持锁。
+    next_ready: tokio::sync::Mutex<Option<tokio::time::Instant>>,
 }
 
 impl ProviderGate {
-    fn new(min_interval: Duration) -> Self {
+    fn new(min_interval_ms: u64) -> Self {
         Self {
-            min_interval,
-            last: tokio::sync::Mutex::new(None),
+            min_interval_ms: std::sync::atomic::AtomicU64::new(min_interval_ms),
+            next_ready: tokio::sync::Mutex::new(None),
         }
     }
 
+    fn set_min_interval(&self, min_interval_ms: u64) {
+        self.min_interval_ms
+            .store(min_interval_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 取一个启动号：锁内只推进 `next_ready`，锁外 sleep。
+    ///
+    /// 之前的实现把 `sleep` 放在持锁段里，等待方全部串行堵在锁上 —— 语义上
+    /// 仍是 0/120/240… 的错峰，但每个等待者都要排队拿锁，抖动更大。现在每个
+    /// 调用者先把自己要等的时长算出来（并预占下一个窗口），再各自 sleep。
     async fn wait_turn(&self) {
-        if self.min_interval.is_zero() {
+        let interval = self
+            .min_interval_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if interval == 0 {
             return;
         }
-        let mut guard = self.last.lock().await;
-        if let Some(previous) = *guard {
-            let ready_at = previous + self.min_interval;
+        let wait = {
+            let mut guard = self.next_ready.lock().await;
             let now = tokio::time::Instant::now();
-            if ready_at > now {
-                tokio::time::sleep(ready_at - now).await;
-            }
+            let ready = match *guard {
+                Some(previous) => (previous + Duration::from_millis(interval)).max(now),
+                None => now,
+            };
+            *guard = Some(ready);
+            ready.saturating_duration_since(now)
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
         }
-        *guard = Some(tokio::time::Instant::now());
     }
+}
+
+/// 取该 provider 的进程级闸（首次创建，之后复用；顺带刷新申报值）。
+///
+/// `min_interval_ms` 每次从 `usage_policy` 重读：插件在运行中新装/卸载或改申报
+/// 时，闸的行为立刻跟着变，不需要重启进程。
+pub(super) fn gate_for(provider: &str) -> Arc<ProviderGate> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<ProviderGate>>>,
+    > = std::sync::OnceLock::new();
+    let declared = crate::plugin_host::usage_policy::for_provider(provider).min_interval_ms;
+    let gates = GATES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = gates.lock().unwrap_or_else(|error| error.into_inner());
+    let gate = guard
+        .entry(provider.to_string())
+        .or_insert_with(|| Arc::new(ProviderGate::new(declared)))
+        .clone();
+    drop(guard);
+    gate.set_min_interval(declared);
+    gate
+}
+
+/// 该 provider 的并发上限：`min(宿主 CONCURRENCY, 插件申报 concurrency)`。
+pub(super) fn provider_cap(provider: &str) -> usize {
+    let declared = crate::plugin_host::usage_policy::for_provider(provider).concurrency;
+    declared
+        .map_or(CONCURRENCY, |value| value.min(CONCURRENCY))
+        .max(1)
 }
 
 /// 单账号查询（带「每账号」的超时 + 重试；口径与 `usage_jobs` 的
@@ -118,8 +170,9 @@ fn snapshot(balance: &AccountBalance) -> serde_json::Value {
 ///
 /// **按家限流**（对齐上游 v3.5.1 `usage_policy`）：到期账号先按 provider 分组，
 /// 同一家的并发上限 = `min(宿主 CONCURRENCY, 插件申报 concurrency)`，相邻两次
-/// 查询启动间隔 ≥ 插件申报的 `minIntervalMs`。组间顺序执行（总并发因此仍受
-/// `CONCURRENCY` 约束），未申报策略的家行为与从前逐字节一致。
+/// 查询启动间隔 ≥ 插件申报的 `minIntervalMs`。组间顺序执行，未申报策略的家行为
+/// 与从前逐字节一致。闸是**进程级**的（[`gate_for`]），与手动查询、`usage_jobs`
+/// 共用 —— 三条路径对同一家上游的启动节奏因此一致。
 pub async fn sweep(pool: &AccountSessionStore, client: &Client) -> u64 {
     let now = chrono::Utc::now().timestamp();
     let targets: Vec<AccountSession> = pool
@@ -142,14 +195,9 @@ pub async fn sweep(pool: &AccountSessionStore, client: &Client) -> u64 {
 
     let mut results = Vec::new();
     for (provider, group) in by_provider {
-        let policy = crate::plugin_host::usage_policy::for_provider(&provider);
-        let cap = policy
-            .concurrency
-            .map_or(CONCURRENCY, |declared| declared.min(CONCURRENCY))
-            .max(1);
-        let gate = Arc::new(ProviderGate::new(Duration::from_millis(
-            policy.min_interval_ms,
-        )));
+        // 进程级闸 + 按家并发上限：与手动查询、异步任务共用同一套口径。
+        let cap = provider_cap(&provider);
+        let gate = gate_for(&provider);
         let batch = futures::stream::iter(group)
             .map(|session| {
                 let client = client.clone();
@@ -248,9 +296,10 @@ fn persist_outcome(
 ///   与余额查询无关，照抄上游说明）；
 /// - `id` 给定 = 只查这一个（单行「余额」按钮），未知 id 记 not_found 行。
 ///
-/// 有界并发复用 [`CONCURRENCY`]（余额接口普遍 20s 超时，别把上游打疼）；
-/// 逐账号写回快照（同 [`sweep`] 口径）。返回 (results, skipped)——skipped
-/// 是「凭证不完整等被跳过」的数量，与上游同义。
+/// 有界并发**按家**限流（与 [`sweep`] 同口径）：组内
+/// `min(CONCURRENCY, 申报 concurrency)`，相邻启动间隔 ≥ 申报值，组间顺序执行。
+/// 逐账号写回快照。返回 (results, skipped)——skipped 是「凭证不完整等被跳过」
+/// 的数量，与上游同义。
 pub async fn query_manual(
     pool: &AccountSessionStore,
     client: &Client,
@@ -281,20 +330,45 @@ pub async fn query_manual(
             0,
         );
     }
-    let results = futures::stream::iter(targets)
-        .map(|session| {
-            let client = client.clone();
-            async move {
-                let config = session.usage_query.normalized();
-                let outcome =
-                    query_with_settings(&client, &session, config.retries, config.timeout_seconds)
-                        .await;
-                (session.id, session.name, session.provider, outcome)
-            }
-        })
-        .buffer_unordered(CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+    // 按家分组后组内限流的**并发**执行：手动路径此前是全局 `CONCURRENCY`
+    // 一把梭 —— 200 个账号点「查询全部余额」= 200 路打向十几家上游，而定时
+    // 巡检却是按家限流的（同产品里两条口径互相矛盾）。这里与 [`sweep`] 同源：
+    // 组内 `min(CONCURRENCY, 申报 concurrency)` + 相邻启动间隔 ≥ 申报值。
+    let mut by_provider: std::collections::BTreeMap<String, Vec<AccountSession>> =
+        std::collections::BTreeMap::new();
+    for session in targets {
+        by_provider
+            .entry(session.provider.clone())
+            .or_default()
+            .push(session);
+    }
+    let mut collected = Vec::new();
+    for (provider, group) in by_provider {
+        let cap = provider_cap(&provider);
+        let gate = gate_for(&provider);
+        let batch = futures::stream::iter(group)
+            .map(|session| {
+                let client = client.clone();
+                let gate = gate.clone();
+                async move {
+                    gate.wait_turn().await;
+                    let config = session.usage_query.normalized();
+                    let outcome = query_with_settings(
+                        &client,
+                        &session,
+                        config.retries,
+                        config.timeout_seconds,
+                    )
+                    .await;
+                    (session.id, session.name, session.provider, outcome)
+                }
+            })
+            .buffer_unordered(cap)
+            .collect::<Vec<_>>()
+            .await;
+        collected.extend(batch);
+    }
+    let results = collected;
     let mut rows = Vec::with_capacity(results.len());
     for (id, name, provider, outcome) in results {
         let (usage, error) = match &outcome {
@@ -388,7 +462,7 @@ mod tests {
     /// 单家限流闸：第二次放行必须等满 min_interval。
     #[tokio::test]
     async fn provider_gate_enforces_min_interval() {
-        let gate = Arc::new(ProviderGate::new(Duration::from_millis(120)));
+        let gate = Arc::new(ProviderGate::new(120));
         let started = tokio::time::Instant::now();
         gate.wait_turn().await;
         let first = started.elapsed();
@@ -405,10 +479,41 @@ mod tests {
         );
     }
 
+    /// 并发等待者按号次错峰，且都不在持锁段里睡（三个一起抢）。
+    #[tokio::test]
+    async fn provider_gate_spaces_concurrent_waiters() {
+        let gate = Arc::new(ProviderGate::new(60));
+        let start = tokio::time::Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let gate = gate.clone();
+            handles.push(tokio::spawn(async move {
+                gate.wait_turn().await;
+                start.elapsed()
+            }));
+        }
+        let mut elapsed = Vec::new();
+        for handle in handles {
+            if let Ok(value) = handle.await {
+                elapsed.push(value);
+            }
+        }
+        elapsed.sort();
+        assert_eq!(elapsed.len(), 3, "三个等待者都必须放行");
+        assert!(
+            elapsed[1] >= Duration::from_millis(50),
+            "第二个必须错峰: {elapsed:?}"
+        );
+        assert!(
+            elapsed[2] >= Duration::from_millis(110),
+            "第三个必须再错一格: {elapsed:?}"
+        );
+    }
+
     /// 间隔为 0（未申报策略）→ 直接放行，零等待。
     #[tokio::test]
     async fn provider_gate_zero_interval_never_waits() {
-        let gate = Arc::new(ProviderGate::new(Duration::ZERO));
+        let gate = Arc::new(ProviderGate::new(0));
         let started = tokio::time::Instant::now();
         for _ in 0..50 {
             gate.wait_turn().await;

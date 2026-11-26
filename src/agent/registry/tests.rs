@@ -49,7 +49,24 @@ use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// 路由提取源，与 `tools/extract_routes.py::ROUTE_FILES` 一一对应。
+/// 路由提取源，默认与 `tools/extract_routes.py::ROUTE_FILES` 对齐（例外见下）。
+///
+/// **有意不含** `src/api/admin/agents.rs` 与 `src/api/admin/aliases.rs`（v1.0.63 新增
+/// 的两个 `pub fn router()`，分别 10 / 24 条），二者在 CI 闸门侧已登记进
+/// `ROUTE_FILES`（闸门照扫、照对账），但**不进本测试的路由源**：
+///
+/// - `aliases.rs` 是 A2A 兼容别名层：同一个 handler、同一个数据源、第二条 path
+///   （`/api/timeouts` → `/api/settings` 超时字段、`/api/stats/*` →
+///   `/api/dashboard/report/*`、`/api/session/login/*` → `/api/account-sessions/login/*` …）。
+///   工具 covers 指的是**能力**（canonical 路径），别名只是路径翻译；把它也扫进来
+///   会让同一能力在台账里出现两行，A 断言会把 24 条别名判成「未登记」而红，
+///   修法只能是往 covers / 豁免里塞同义重复项——那才是台账真正腐烂的开始。
+/// - `agents.rs` 写的是**服务器本机**的客户端配置文件（apply 的响应还带新签发令牌），
+///   本身就不给 AI 工具面；扫进来只会得到 10 条必然的红，然后再去豁免表里抄一遍。
+///
+/// 口径：本测试管「AI 工具面 vs 真实管理面路由」，闸门管「真实路由 vs 文档∪豁免」。
+/// 两个面不重合的文件只登记在闸门一侧。**若将来给它们加了工具/covers，或把某条别名
+/// 变成唯一入口**，就要把它们加进这里并重跑 `every_real_route_is_registered`。
 const ROUTE_SOURCES: [&str; 2] = [include_str!("../../main.rs"), include_str!("../api.rs")];
 
 /// 写方法：路径有它们、owns 它的工具却全是 ReadOnly ⇒ 方法级欠债。
@@ -500,6 +517,8 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/notify/test-slack",
                 "/api/notify/test-webhook",
                 "/api/notify/test-telegram",
+                // Bark 与上述四家同族：会把测试推送到配置里的 Device Key
+                "/api/notify/test-bark",
                 "/api/alerts/test",
             ],
         ),

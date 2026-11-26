@@ -25,6 +25,9 @@ axum 0.7 没有运行时枚举全部路由的 API，静态提取是唯一能拿�
 提取范围：
   - src/main.rs      （含 admin_routes / epay / stripe / openai / anthropic 等 merge 进来的 router）
   - src/agent/api.rs （agent 域独立 router，main.rs 里 .merge(crate::agent::api::router())）
+  - ROUTE_FILES 里其余「子模块 router」（plugin_* / tools / maintenance / checkin_* /
+    admin/agents.rs 本机 Agent 接入 / admin/aliases.rs A2A 兼容别名）；这些模块的
+    `pub fn router()` 都由 main.rs `.merge(...)` 接入 —— 静态提取不逐文件扫就看不见。
   - src/agent/registry/*.rs （工具声明；仅 `mod.rs` / `tests.rs` 除外。见 extract_covers）
 
 用法：
@@ -71,6 +74,15 @@ ROUTE_FILES = [
     # 同上：10 条 /api 路由（含 campaigns 双路径）此前对闸门失明。
     "src/api/admin/checkin_records.rs",
     "src/api/admin/checkin_schedules.rs",
+    # ── 本机 Agent 接入 / A2A 兼容别名（v1.0.63）──────────────────
+    # agents.rs：本机 Agent 资源编排（预览 → 应用 → 回滚）的管理面入口，
+    #   10 条 /api 路由；不登记就完全在闸门之外。
+    # aliases.rs：A2A 独立端点 → AIGX 配置字段的**路径翻译层**（24 条），
+    #   同一个 handler、同一个数据源、只是第二个 path。它们必须被扫进
+    #   「真实」侧，否则闸门连「别名指向的 handler 还在不在」都无从判断；
+    #   至于「要不要写进自描述文档」，由 EXEMPT 逐条表态（见 openapi.rs）。
+    "src/api/admin/agents.rs",
+    "src/api/admin/aliases.rs",
 ]
 
 # 未登记白名单的说明（由 check_router_coverage() 兜底校验）：

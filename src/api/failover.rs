@@ -16,12 +16,28 @@ use std::time::{Duration, Instant};
 /// 取 5：覆盖多渠道路由的常见冗余度，同时把最坏等待收敛到 5 个首事件窗口内。
 pub const FAILOVER_MAX_ATTEMPTS: usize = 5;
 
-/// failover 循环的总时间预算（从循环开始计）。
+/// failover 循环的总时间预算（从循环开始计）的**地板值**。
 ///
-/// 取 90s：覆盖「前几个候选各撞一次首事件超时」的最坏情况，又不至于让
-/// 单个请求无限期挂住。注意预算只约束「尝试新候选」；已经建立的流不受影响
+/// 取 90s：覆盖「前几个候选各撞一次首事件超时」的常见情况，又不至于让单个
+/// 请求无限期挂住。注意预算只约束「尝试新候选」；已经建立的流不受影响
 /// （流式请求的读空闲与 24h 上限由 bridge 层负责）。
+///
+/// **它不是实际预算**：实际预算见 [`default_total_budget`]——首个候选的等待
+/// 窗口是可配的（`sse_first_event_deadline`，默认 30s），固定 90s 会在
+/// 「5 个候选 × 30s = 150s」的情况下于第 3 个候选后提前截断，让
+/// [`FAILOVER_MAX_ATTEMPTS`] 这个「5」名不副实。
 pub const FAILOVER_TOTAL_BUDGET: Duration = Duration::from_secs(90);
+
+/// 实际总预算：`max(地板 90s, 候选上限 × 当前首事件窗口)`。
+///
+/// 两个上限（候选数 / 总时长）必须**同源**，否则会互相掩盖：配置把首事件
+/// 窗口调到 60s 时，固定 90s 预算只够试 1 个候选就耗尽，用户在面板上改的
+/// 「最多尝试 5 个」不可能生效，而且现场只看到「预算耗尽」，看不出是被谁截断。
+pub fn default_total_budget() -> Duration {
+    let per_attempt = crate::bridge::sse_first_event_deadline();
+    let needed = per_attempt.saturating_mul(FAILOVER_MAX_ATTEMPTS as u32);
+    FAILOVER_TOTAL_BUDGET.max(needed)
+}
 
 /// failover 预算状态：记录循环起点与已尝试次数。
 #[derive(Debug, Clone)]
@@ -33,9 +49,9 @@ pub struct FailoverBudget {
 }
 
 impl FailoverBudget {
-    /// 用默认口径（[`FAILOVER_MAX_ATTEMPTS`] / [`FAILOVER_TOTAL_BUDGET`]）新建。
+    /// 用默认口径（[`FAILOVER_MAX_ATTEMPTS`] / [`default_total_budget`]）新建。
     pub fn new() -> Self {
-        Self::with_limits(FAILOVER_MAX_ATTEMPTS, FAILOVER_TOTAL_BUDGET)
+        Self::with_limits(FAILOVER_MAX_ATTEMPTS, default_total_budget())
     }
 
     /// 显式指定上限（单测 / 未来可配置化用）。
@@ -99,6 +115,21 @@ mod tests {
         let budget = FailoverBudget::new();
         assert!(budget.can_attempt());
         assert_eq!(budget.attempts(), 0);
+    }
+
+    /// 两个上限必须同源：默认预算至少够把「候选上限」次尝试走完。
+    #[test]
+    fn default_budget_covers_every_candidate_attempt() {
+        let per_attempt = crate::bridge::sse_first_event_deadline();
+        let needed = per_attempt.saturating_mul(FAILOVER_MAX_ATTEMPTS as u32);
+        assert!(
+            default_total_budget() >= needed,
+            "预算 {default_total_budget():?} 必须 ≥ {FAILOVER_MAX_ATTEMPTS} × {per_attempt:?}",
+        );
+        assert!(
+            default_total_budget() >= FAILOVER_TOTAL_BUDGET,
+            "预算不得低于 90s 地板",
+        );
     }
 
     #[test]
