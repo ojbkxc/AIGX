@@ -379,7 +379,19 @@ impl SqliteStore {
         F: FnOnce(Option<T>) -> T,
     {
         // 与 `mutate` 共用同一条路径：取得连接锁后完成读、闭包、写三步。
-        self.mutate(key, |existing| Ok(f(existing)))
+        //
+        // 返回**旧值**（本方法契约），而 `mutate` 返回写入的新值 —— 所以在闭包
+        // 里把旧值 clone 出来带出去。不能改成「先 get 再 put」：那会把原子性
+        // 拆成两段，两段之间别的线程可插入自己的读-改-写（正是上面注释说的丢更新）。
+        let previous: std::sync::Arc<parking_lot::Mutex<Option<T>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let prev_slot = previous.clone();
+        self.mutate(key, move |existing| {
+            *prev_slot.lock() = existing.clone();
+            Ok(f(existing))
+        })?;
+        let out = previous.lock().clone();
+        Ok(out)
     }
 
     /// 真正的原子读-改-写：**全程持连接锁**（读与写在同一个临界区内）。
