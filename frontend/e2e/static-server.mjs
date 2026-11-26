@@ -963,28 +963,49 @@ const proxyPool = PROXY_POOL_SEED();
  *   · tk-seed-3 白名单三家 → 触发「前 2 个 + +1」的折叠臂。
  *  provider 候选与 modelsByProvider 的模型**故意**包含 /api/models/available
  *  里没有的名字：否则「勾了提供商→模型候选收窄」与「全量候选」长得一样，
- *  断言分不出联动到底有没有生效。 */
+ *  断言分不出联动到底有没有生效。
+ *
+ *  ── 轮换 / 重置已用 / 每页条数（keys-ops.spec.ts）需要的三条扩展 ──
+ *   · 每条令牌额外带 `_plain`（**只在桩内部**，列表响应里会被剥掉）：后端列表是
+ *     脱敏的，明文只经 `GET /api/tokens/:id/key` 单条取回，`POST .../rotate` 一次性
+ *     返回新明文。桩照此建模，而不是把明文塞进列表；
+ *   · `TOKEN_FILLERS`（57 条）凑到 60 条 —— 只有超过「每页 50」才分得出默认档
+ *     50 与 20（3 条时两种实现都只有 1 页，断言恒真）；
+ *   · filler 全部 `status:'active'`、无 `quota_limit`：不参与白名单列的 +N 折叠，
+ *     也不会把「重置已用」菜单项错误地渲染出来（该菜单项只在有 quota_limit 时出现）。 */
+const TOKEN_FILLERS = Array.from({ length: 57 }, (_, i) => {
+  const n = i + 1;
+  return {
+    id: `tk-fill-${n}`, name: `填充令牌 ${n}`, user_email: 'admin@aigx.local', group: 'default',
+    status: 'active', key: `sk-e2e-****-f${String(n).padStart(3, '0')}`, allowed_providers: null,
+    allowed_models: '', ip_limit: [], quota_limit: null, used_quota: n * 10,
+    expires_at: null, created_at: 1761800000 - n * 60,
+  };
+});
 const TOKENS_SEED = () => [
   {
     id: 'tk-seed-1', name: 'CrewAI 生产', user_email: 'admin@aigx.local', group: 'default',
     status: 'active', key: 'sk-e2e-****-aaaa', allowed_providers: ['openai', 'anthropic'],
     allowed_models: '', ip_limit: [], quota_limit: 500000, used_quota: 12000,
-    expires_at: null, created_at: 1761900000,
+    expires_at: null, created_at: 1761900000, _plain: 'sk-e2e-plain-aaaa-0001',
   },
   {
     id: 'tk-seed-2', name: 'LiteLLM 网关', user_email: 'ops@aigx.local', group: 'default',
     status: 'active', key: 'sk-e2e-****-bbbb', allowed_providers: null,
     allowed_models: '', ip_limit: [], quota_limit: null, used_quota: 0,
-    expires_at: null, created_at: 1761890000,
+    expires_at: null, created_at: 1761890000, _plain: 'sk-e2e-plain-bbbb-0002',
   },
   {
     id: 'tk-seed-3', name: '三方混跑', user_email: 'dev@aigx.local', group: 'default',
     status: 'disabled', key: 'sk-e2e-****-cccc',
     allowed_providers: ['openai', 'anthropic', 'google'],
     allowed_models: '', ip_limit: [], quota_limit: null, used_quota: 400,
-    expires_at: null, created_at: 1761880000,
+    expires_at: null, created_at: 1761880000, _plain: 'sk-e2e-plain-cccc-0003',
   },
+  ...TOKEN_FILLERS.map((tk) => ({ ...tk, _plain: `sk-e2e-plain-${tk.id}` })),
 ];
+/** 列表响应里必须剥掉的内部字段（明文只走单条端点） */
+const maskTokenRow = ({ _plain, ...row }) => row;
 const TOKEN_PROVIDERS = ['anthropic', 'google', 'openai'];
 const TOKEN_MODELS_BY_PROVIDER = {
   openai: ['gpt-4o', 'gpt-4o-mini'],
@@ -1685,7 +1706,8 @@ function handle(req, res, p, bodyText) {
         // 顶层候选表与 data 同级（前端读 tokenRes.providers / modelsByProvider）
         providers: TOKEN_PROVIDERS,
         modelsByProvider: TOKEN_MODELS_BY_PROVIDER,
-        data: tokensSeed,
+        // 后端口径：列表**脱敏**（明文只经单条 /key 与 rotate 一次性给出）
+        data: tokensSeed.map(maskTokenRow),
         total: tokensSeed.length,
         page: 1,
         size: 20,
@@ -1702,9 +1724,16 @@ function handle(req, res, p, bodyText) {
         allowed_models: body.allowed_models ?? '', ip_limit: body.ip_limit ?? [],
         quota_limit: body.quota_limit ?? null, used_quota: 0,
         expires_at: body.expires_at ?? null, created_at: Math.floor(Date.now() / 1000),
+        // 内部明文（不进响应，列表也会被 maskTokenRow 剥掉）；留一条 path 让
+        // 「新建后查看/轮换」在桩里也有明文可取，否则 GET /key 会给出 undefined。
+        _plain: body.custom_key ?? `sk-e2e-new-plain-${tokensSeed.length + 1}`,
       };
       tokensSeed.unshift(created);
-      return sendJson(res, { success: true, data: created });
+      // 响应形状保持原样（不带 plain_key）：keys-providers.spec 的「创建响应不带
+      // plain_key 时不该弹一次性密钥框」这条断言建在这个形状上。真后端创建响应
+      // 会带 plain_key（tokens.rs:318-320），那是另一条待补的判据，改这里会顺手
+      // 把那条件断言弄红 —— 不在本轮改动面内。
+      return sendJson(res, { success: true, data: maskTokenRow(created) });
     }
     // 写侧留痕回读（R1「直打桩」配套）：spec 用它确认 PUT 里到底发了什么，
     // 而不是只能从界面上猜「清空有没有真发出去」。
@@ -1731,12 +1760,48 @@ function handle(req, res, p, bodyText) {
         lastTokenWrite = { method: 'PUT', id: decodeURIComponent(m[1]), body };
         const tk = tokensSeed.find((it) => String(it.id) === decodeURIComponent(m[1]));
         if (tk) Object.assign(tk, body, { allowed_providers: body.allowed_providers ?? tk.allowed_providers });
-        return sendJson(res, { success: true, data: tk ?? null });
+        return sendJson(res, { success: true, data: tk ? maskTokenRow(tk) : null });
       }
       if (m && req.method === 'DELETE') {
         const idx = tokensSeed.findIndex((it) => String(it.id) === decodeURIComponent(m[1]));
         if (idx >= 0) tokensSeed.splice(idx, 1);
         return sendJson(res, { success: true, data: null });
+      }
+    }
+    // ── 令牌单条明文 / 重置已用 / 轮换（keys-ops.spec.ts）──
+    // 形状逐字段对齐真实 handler（不是自创）：
+    //  · GET  /api/tokens/:id/key        → `{success,data:{id, plain_key}}`
+    //    （src/api/admin/tokens.rs:279-281 handle_get_token_key）；
+    //  · POST /api/tokens/:id/reset_used → `{success,data:null}`，used_quota 归零
+    //    （tokens.rs:472-476 handle_reset_token_used → reset_used_quota）；
+    //  · POST /api/tokens/:id/rotate     → `{success,data:{id,key,rotated_at,message}}`，
+    //    新 key 只在此响应出现一次、旧 key 立即失效
+    //    （src/api/admin/legacy.rs:2870-2877 handle_rotate_token）。
+    {
+      const m = p.match(/^\/api\/tokens\/([^/]+)\/(key|reset_used|rotate)$/);
+      if (m) {
+        const id = decodeURIComponent(m[1]);
+        const action = m[2];
+        const tk = tokensSeed.find((it) => String(it.id) === id);
+        if (!tk) return sendJson(res, { success: false, error: 'Token not found' }, 404);
+        if (action === 'key' && req.method === 'GET') {
+          return sendJson(res, { success: true, data: { id: tk.id, plain_key: tk._plain } });
+        }
+        if (action === 'reset_used' && req.method === 'POST') {
+          tk.used_quota = 0;
+          return sendJson(res, { success: true, data: null });
+        }
+        if (action === 'rotate' && req.method === 'POST') {
+          // 新明文每次不同（形如后端 `sk-<uuid 去横线>`）：spec 用它断「拿到的确实是新的」
+          const fresh = `sk-e2e-rot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+          tk._plain = fresh;
+          tk.key = `sk-e2e-****-${fresh.slice(-4)}`;
+          return sendJson(res, {
+            success: true,
+            data: { id: tk.id, key: fresh, rotated_at: Math.floor(Date.now() / 1000), message: 'Token rotated; old key invalidated' },
+          });
+        }
+        return sendJson(res, { success: false, error: 'method not allowed' }, 405);
       }
     }
 
