@@ -1,0 +1,1 @@
+import{j as d,ad as r}from"./index-BTX4rMeL.js";const a={success:"badge badge-success",warning:"badge badge-warning",danger:"badge badge-danger",neutral:"badge badge-neutral",info:"badge badge-info"};function b({children:e,tone:n="neutral",className:s,...g}){return d.jsx("span",{className:r(a[n]||a.neutral,s),...g,children:e})}export{b as B};
