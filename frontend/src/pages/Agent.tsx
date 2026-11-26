@@ -280,6 +280,22 @@ export default function Agent(): JSX.Element {
    */
   const describeAgentError = useCallback((raw: string): string => {
     const s = raw.toLowerCase();
+    // 跨模型 failover 已穷尽：后端已按「模型: 原因」逐条给出（`AllModelsFailed`），
+    // 这里**必须原样分行展示**。落到下面任何一个单因分支都会把 A/B 各自的原因
+    // 压成一句「鉴权失败」——运维就看不到试了哪几个模型、各自为什么不行，
+    // 这与「把每个模型的失败原因如实报出」相反。
+    if (s.includes('all candidate models failed')) {
+      const detail = raw.slice(raw.toLowerCase().indexOf('all candidate models failed') +
+        'all candidate models failed'.length);
+      const lines = detail
+        .replace(/^[:：]\s*/, '')
+        .split(' | ')
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (lines.length > 0) {
+        return `${t('已依次尝试以下模型，均失败：')}\n${lines.map((line) => `· ${line}`).join('\n')}`;
+      }
+    }
     // 暂时性失败已自动重试过若干轮才报到前端：优先给出「稍后再试」，
     // 别让用户以为配置坏了（后端 TransientExhausted 变体）。
     if (s.includes('failed after') && s.includes('rounds')) {

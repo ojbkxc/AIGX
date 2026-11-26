@@ -5817,5 +5817,6 @@
   "暂无供应商分布数据": "No provider distribution data",
   "占比低于该阈值的扇区归入「其他」；右侧列表仍完整显示每一项": "Slices below this share are grouped into Other; the list on the right still shows every item",
   "折线": "Line",
-  "柱状": "Bar"
+  "柱状": "Bar",
+  "已依次尝试以下模型，均失败：": "Tried the following models in order, all failed:"
 }

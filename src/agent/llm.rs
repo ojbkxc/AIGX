@@ -327,23 +327,87 @@ pub async fn chat_once_as(
     key_id: &str,
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
     let models = candidate_models(state, config)?;
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(MODEL_FAILOVER_BUDGET_SECS);
+    let mut attempt = RealAttempt {
+        state,
+        config,
+        messages: &messages,
+        tools: &tools,
+        key_id,
+    };
+    run_model_failover(
+        &models,
+        std::time::Duration::from_secs(MODEL_FAILOVER_BUDGET_SECS),
+        &mut attempt,
+    )
+    .await
+}
+
+/// 「尝试一个模型」的注入点：生产传 [`RealAttempt`]（真打上游），测试传假实现。
+///
+/// 抽这一层的目的是让**切换、预算硬闸、未尝试上报**三条契约都由生产同一段
+/// 循环代码保证 —— 谁把 `tokio::time::timeout` 拆掉、或把循环改回「只试一个
+/// 模型」，对应用例立刻变红（而不是只测到 tokio 原语）。
+trait ModelAttempt {
+    type Output;
+    async fn attempt(
+        &mut self,
+        model: &str,
+        deadline: std::time::Instant,
+    ) -> Result<Self::Output, AgentLlmError>;
+}
+
+/// 生产实现：真打上游。渠道级 failover 与时间维度重试都在 `chat_once_model` 里。
+struct RealAttempt<'a> {
+    state: &'a AppState,
+    config: &'a AgentConfig,
+    messages: &'a [ChatMessage],
+    tools: &'a Option<Vec<serde_json::Value>>,
+    key_id: &'a str,
+}
+
+impl ModelAttempt for RealAttempt<'_> {
+    type Output = (ChatResponse, String, Option<String>);
+
+    async fn attempt(
+        &mut self,
+        model: &str,
+        deadline: std::time::Instant,
+    ) -> Result<Self::Output, AgentLlmError> {
+        chat_once_model(
+            self.state,
+            self.config,
+            model,
+            self.messages,
+            self.tools,
+            self.key_id,
+            deadline,
+        )
+        .await
+    }
+}
+
+/// 跨模型 failover 的主循环（生产与测试共用同一段代码）。
+async fn run_model_failover<A: ModelAttempt>(
+    models: &[String],
+    budget: std::time::Duration,
+    attempt: &mut A,
+) -> Result<A::Output, AgentLlmError> {
+    let deadline = std::time::Instant::now() + budget;
     // 逐模型试。每个模型内部仍保留原有的「渠道级 failover + 时间维度重试」，
     // 本层只负责「这个模型没指望了，换下一个」。
     let mut tried: Vec<String> = Vec::new();
     let mut last_err: Option<AgentLlmError> = None;
     for (index, model) in models.iter().enumerate() {
-        let Some(budget) = remaining_budget(deadline) else {
+        let Some(left) = remaining_budget(deadline) else {
             // 预算耗尽：把还没轮到的模型如实列出来，而不是让错误看起来像
             // 「候选清单里本来就没有别的模型」。
             mark_untried(&mut tried, &models[index..]);
             break;
         };
         // **硬闸**：这个模型的整次尝试（含 `try_candidates` 扫全部渠道、以及
-        // 退避睡眠）都必须在剩余预算内完成。
-        let attempt = chat_once_model(state, config, model, &messages, &tools, key_id, deadline);
-        match tokio::time::timeout(budget, attempt).await {
+        // 退避睡眠）都必须在剩余预算内完成。只在「两次尝试之间看表」是不够的：
+        // 单次非流式请求默认超时 300s（`body_timeout_secs`）、流式更长。
+        match tokio::time::timeout(left, attempt.attempt(model, deadline)).await {
             Ok(Ok(v)) => {
                 if !tried.is_empty() {
                     tracing::info!(
@@ -360,7 +424,8 @@ pub async fn chat_once_as(
             }
             Err(_elapsed) => {
                 let e = AgentLlmError::AllChannelsFailed(format!(
-                    "尝试超过总耗时预算（{MODEL_FAILOVER_BUDGET_SECS}s）被中止"
+                    "尝试超过总耗时预算（{}s）被中止",
+                    budget.as_secs()
                 ));
                 tracing::warn!("agent llm model {model} aborted: {e}");
                 tried.push(format!("{model}: {e}"));
@@ -370,7 +435,6 @@ pub async fn chat_once_as(
             }
         }
     }
-
     // 收口规则见 `final_error`：只试过一个模型时保留原错误类型（前端靠
     // `NoChannelAvailable` / `TransientExhausted` 区分「配置问题」与「稍后重试」），
     // 试过多个（或一个都没跑起来）才汇总成 `AllModelsFailed`，逐条带原因。
@@ -965,27 +1029,6 @@ mod tests {
         assert!(!left.is_zero() && left <= std::time::Duration::from_secs(60));
     }
 
-    /// **硬闸**：在飞的尝试必须被预算切断，而不是只在两次尝试之间看表。
-    ///
-    /// 钉的是 `tokio::time::timeout(剩余预算, 尝试)` 这一层。模拟「上游挂了不
-    /// 返回」的尝试（睡 5s），50ms 预算必须中止它。若有人把它改回「尝试前检查
-    /// 一下时间」，这个用例会等满 5s 且断言 `is_err` 失败。
-    #[tokio::test]
-    async fn in_flight_attempt_is_cut_by_budget() {
-        let attempt = async {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            Ok::<(), AgentLlmError>(())
-        };
-        let started = std::time::Instant::now();
-        let got = tokio::time::timeout(std::time::Duration::from_millis(50), attempt).await;
-        assert!(got.is_err(), "超预算的在飞尝试必须被中止");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "应远早于 5s 返回，实际 {:?}",
-            started.elapsed()
-        );
-    }
-
     /// 预算耗尽时，未尝试的模型要如实列出并标明「未尝试」，
     /// 不得让错误看起来像「候选清单里本来没有别的模型」，也不得编造失败原因。
     #[test]
@@ -1004,5 +1047,84 @@ mod tests {
             !msg.contains("b: upstream"),
             "不得给未试模型编造原因: {msg}"
         );
+    }
+    /// 假 attempt：记录调用顺序，按脚本决定成功/失败/挂住。
+    /// 走的是生产同一段 `run_model_failover`，因此能真正区分新旧实现。
+    struct FakeAttempt {
+        order: Vec<String>,
+        fail: Vec<&'static str>,
+        hang_ms: u64,
+    }
+
+    impl super::ModelAttempt for FakeAttempt {
+        type Output = &'static str;
+
+        async fn attempt(
+            &mut self,
+            model: &str,
+            _deadline: std::time::Instant,
+        ) -> Result<Self::Output, AgentLlmError> {
+            self.order.push(model.to_string());
+            if self.hang_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.hang_ms)).await;
+            }
+            if self.fail.iter().any(|m| *m == model) {
+                Err(AgentLlmError::AllChannelsFailed(format!("{model} boom")))
+            } else {
+                Ok("ok")
+            }
+        }
+    }
+
+    /// 主需求：某个模型失败后**真的换下一个**并成功。
+    /// 把 `run_model_failover` 改回「只试一个模型」，这条立刻红。
+    #[tokio::test]
+    async fn failover_switches_to_next_model_and_records_order() {
+        let models = vec!["a".to_string(), "b".to_string()];
+        let mut fake = FakeAttempt {
+            order: Vec::new(),
+            fail: vec!["a"],
+            hang_ms: 0,
+        };
+        let got =
+            super::run_model_failover(&models, std::time::Duration::from_secs(60), &mut fake).await;
+        assert_eq!(got.expect("b 应当成功"), "ok");
+        assert_eq!(
+            fake.order,
+            vec!["a".to_string(), "b".to_string()],
+            "应先试 a 再试 b"
+        );
+    }
+
+    /// **硬闸**：挂住的尝试必须被预算切断，且未轮到的模型如实标「未尝试」。
+    ///
+    /// 钉的是生产循环里的 `tokio::time::timeout(剩余预算, attempt)`。
+    /// 若把它拆成「尝试前检查一下时间」，这条会跑满 500ms×3 且拿不到「被中止」
+    /// 文案 —— 断言全部失败。
+    #[tokio::test]
+    async fn failover_hard_stops_on_budget_and_marks_untried() {
+        let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut fake = FakeAttempt {
+            order: Vec::new(),
+            fail: Vec::new(),
+            hang_ms: 500,
+        };
+        let started = std::time::Instant::now();
+        let got =
+            super::run_model_failover(&models, std::time::Duration::from_millis(50), &mut fake)
+                .await;
+        let elapsed = started.elapsed();
+        assert!(got.is_err(), "应报错");
+        assert!(
+            elapsed < std::time::Duration::from_millis(400),
+            "必须被硬闸切断，实际 {elapsed:?}"
+        );
+        let msg = got.unwrap_err().to_string();
+        assert!(msg.contains("被中止"), "应说明超预算被中止: {msg}");
+        assert!(
+            msg.contains("b: 未尝试") && msg.contains("c: 未尝试"),
+            "应标注未尝试的模型: {msg}"
+        );
+        assert_eq!(fake.order, vec!["a".to_string()], "只该真正试过 a");
     }
 }
