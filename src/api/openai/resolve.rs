@@ -563,50 +563,95 @@ pub(crate) fn resolve_bridges_needs(
 ///   weight 加权随机，但调试入口的「第一个失败、第二个成功」必须可复现，
 ///   否则排障时两次同样的操作得到不同链路。
 ///
-/// 返回 `(可尝试候选, 被阻塞候选+原因)`：被阻塞的是冷却中 / 断路器打开 / AIMD
-/// 限速中的渠道 —— 它们**不进**主力候选，但调用方在「一个能用的都没有」时可以
-/// 拿它们当最后手段（调试入口的价值是「试到什么错」）。
+/// 返回 `(可尝试候选, 被阻塞候选+原因, 没进候选的渠道+原因)`：
+/// - 第二项是冷却中 / 断路器打开 / AIMD 限速中的渠道 —— 它们**不进**主力候选，
+///   调用方在「一个能用的都没有」时拿它们当最后手段；
+/// - 第三项是**根本没参与选路**的渠道（未启用、models 白名单明确不含该模型）。
+///   它存在的唯一目的是让聚合错误能如实交代「为什么只试了 1 个」：线上
+///   `glm-4.7-flash` 只有 1 个候选，而 39 个渠道里有 35 个是管理员主动 disable 的，
+///   用户看不到这一层就会以为 failover 没生效。**这一项只用于诊断，不参与选路。**
 ///
 /// 冷却/断路器判定一律走**只读**查询（`is_in_cooldown` / `get_state` /
 /// `aimd_allows`）：候选构造阶段若调 `is_dispatch_allowed` 会原子占用半开名额，
 /// 把真实流量本该拿到的试探租约抢走 —— 那是给数据面用的有副作用接口。
-#[allow(clippy::type_complexity)] // (候选, 被阻塞候选+原因) 两个 Vec 的元组
+/// 选路分类（纯函数）：把渠道分成「进候选」与「没进候选 + 原因」。
+///
+/// 抽出来是因为**原因本身就是要给用户看的产出**：线上 `glm-4.7-flash` 只有 1 个
+/// 候选（另外 35 个是管理员 disable 的），用户看不到这一层就把「候选确实只有 1 个」
+/// 误判成「failover 没生效」。分类口径与改造前的 `max_by_key` 之前的过滤子集逐字
+/// 一致（`auto_pick_supports` + `models` 为空的兜底），这里只是**多记一份原因**。
+#[allow(clippy::type_complexity)] // (候选, 未参与选路的渠道+原因)
+pub(crate) fn classify_chat_test_channels(
+    all: Vec<crate::channel::Channel>,
+    requested_model: &str,
+) -> (
+    Vec<crate::channel::Channel>,
+    Vec<crate::log::FilteredChannel>,
+) {
+    let requested = requested_model.trim();
+    let mut excluded: Vec<crate::log::FilteredChannel> = Vec::new();
+    // **disabled 也进候选池**：AI 运维是人工调试入口，不是生产流量。
+    // 某个渠道 disabled 可能是管理员临时关的，也可能凭证过期 —— 试一次就知道；
+    // 排除它只会让用户看到「没有可用渠道」却不知道为什么。它们会在
+    // `blocked_of` 里被判为「未启用」而排到可调度渠道之后（由调用方兜底试），
+    // 所以不会把正常渠道的正常请求拖慢。
+    let enabled: Vec<crate::channel::Channel> = all;
+    if requested.is_empty() {
+        return (enabled, excluded);
+    }
+    let declared: Vec<crate::channel::Channel> = enabled
+        .iter()
+        .filter(|c| c.auto_pick_supports(requested))
+        .cloned()
+        .collect();
+    if declared.is_empty() {
+        // 无渠道声明该模型：退「models 为空（=全部）」的启用渠道兜底（改造前口径）
+        let fallback: Vec<crate::channel::Channel> = enabled
+            .into_iter()
+            .filter(|c| c.models.is_empty())
+            .collect();
+        return (fallback, excluded);
+    }
+    // 诊断用：启用、但这一版选路没让它进候选的原因
+    for ch in enabled.iter() {
+        if ch.auto_pick_supports(requested) {
+            continue;
+        }
+        let reason = if ch.models.is_empty() {
+            "发现快照未收录该模型（渠道声明全部，快照收窄后未命中）"
+        } else {
+            "渠道 models 白名单不含该模型"
+        };
+        excluded.push(crate::log::FilteredChannel {
+            channel_id: ch.id.clone(),
+            reason: reason.to_string(),
+        });
+    }
+    (declared, excluded)
+}
+
+#[allow(clippy::type_complexity)] // (候选, 阻塞候选+原因, 未参与选路的渠道+原因)
 pub(crate) fn chat_test_candidates(
     state: &AppState,
     requested_model: &str,
 ) -> (
     Vec<crate::channel::Channel>,
     Vec<(crate::channel::Channel, String)>,
+    Vec<crate::log::FilteredChannel>,
 ) {
-    let enabled: Vec<crate::channel::Channel> = state
-        .channel_store
-        .list()
-        .into_iter()
-        .filter(|c| c.is_enabled())
-        .collect();
-    // 模型声明过滤：与改造前 `max_by_key` 前的过滤子集逐字一致 ——
-    // 先找声明了该模型的渠道；models 留空的渠道若已有发现快照，按快照收窄
-    //（`auto_pick_supports`），防止高优先级「全声明」渠道抢走上游实际不提供的
-    // 模型；无渠道声明时退「models 为空（=全部）」的启用渠道兜底。
-    let picked: Vec<crate::channel::Channel> = if requested_model.trim().is_empty() {
-        enabled
-    } else {
-        let declared: Vec<crate::channel::Channel> = enabled
-            .iter()
-            .filter(|c| c.auto_pick_supports(requested_model))
-            .cloned()
-            .collect();
-        if declared.is_empty() {
-            enabled
-                .into_iter()
-                .filter(|c| c.models.is_empty())
-                .collect()
-        } else {
-            declared
-        }
-    };
-    order_chat_test_candidates(picked, |id| {
-        if state.channel_store.is_in_cooldown(id) {
+    let (picked, excluded) =
+        classify_chat_test_channels(state.channel_store.list(), requested_model);
+    let (ready, blocked) = order_chat_test_candidates(picked, |id| {
+        // 未启用的渠道排最后但**仍然会试**（见 classify_chat_test_channels 的注释）。
+        // 放在最前面判断：一条渠道同时 disabled + 冷却时，报「未启用」更接近真相。
+        if state
+            .channel_store
+            .get(id)
+            .map(|c| !c.is_enabled())
+            .unwrap_or(false)
+        {
+            Some("未启用（管理员已关闭）".to_string())
+        } else if state.channel_store.is_in_cooldown(id) {
             Some("冷却中（近期失败）".to_string())
         } else if state.channel_store.circuit_breaker().get_state(id) == "open" {
             Some("断路器打开（连续失败）".to_string())
@@ -615,13 +660,17 @@ pub(crate) fn chat_test_candidates(
         } else {
             None
         }
-    })
+    });
+    (ready, blocked, excluded)
 }
 
-/// [`chat_test_candidates`] 的纯排序/分组部分（无状态，便于单测钉住顺序）。
+/// [`classify_chat_test_channels`] 的纯排序/分组部分（无状态，便于单测钉住顺序）。
 ///
-/// `blocked_of` 返回 `Some(原因)` 表示该渠道当前不可调度。排序：priority 降序，
-/// **同优先级保持入参顺序**（稳定排序，不引入随机）。
+/// `blocked_of` 返回 `Some(原因)` 表示该渠道当前不可调度（冷却/断路器/限速）。
+/// **不可调度的渠道仍然会被返回**（在 `blocked` 里）：调用方在主力候选全败时会把
+/// 它们当最后手段试一遍 —— 这正是「候选池不应因为冷却而缩到 1 个」的落点。
+///
+/// 排序：priority 降序，**同优先级保持入参顺序**（稳定排序，不引入随机）。
 #[allow(clippy::type_complexity)]
 pub(crate) fn order_chat_test_candidates(
     mut picked: Vec<crate::channel::Channel>,
@@ -1021,6 +1070,68 @@ mod tests {
             "候选必须全量、按 priority 降序（改造前只留一个）"
         );
         assert!(blocked.is_empty(), "没有阻塞渠道时 blocked 必须为空");
+    }
+
+    /// ★本单新增：**没进候选的渠道及原因必须能被算出来**。
+    ///
+    /// 线上 `glm-4.7-flash` 只有 1 个候选（39 个渠道里 35 个被管理员 disable），
+    /// 用户看到 `attempts=1` 就以为 failover 没生效。旧实现只返回候选列表、不返回
+    /// 排除原因，`filtered` 恒为空 —— 所以「excluded 里有 disabled 与水名单两条」
+    /// 就是能区分新旧的断言。
+    #[test]
+    fn classify_chat_test_channels_explains_every_exclusion() {
+        let mut disabled_snapshot = sample("disc-snapshot", 99);
+        disabled_snapshot.discovered_models = vec!["other-model".to_string()];
+        let mut whitelist_other = sample("white-other", 10);
+        whitelist_other.models = vec!["other-model".to_string()];
+        let mut off = sample("off", 50);
+        off.status = "disabled".to_string();
+
+        let (kept, excluded) = super::classify_chat_test_channels(
+            vec![disabled_snapshot, whitelist_other, off, sample("kept", 5)],
+            "deepseek-chat",
+        );
+
+        // 只有「声明了该模型的启用渠道」进候选
+        let kept_ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(kept_ids, vec!["kept"], "只有声明该模型的启用渠道进候选");
+
+        // 排除原因必须逐条说清楚 —— 这是「为什么只试了一个」的可解释来源
+        let reasons: Vec<(&str, &str)> = excluded
+            .iter()
+            .map(|f| (f.channel_id.as_str(), f.reason.as_str()))
+            .collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|(id, r)| *id == "off" && r.contains("未启用")),
+            "disabled 渠道必须被记为「未启用（管理员已关闭）」：{reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|(id, r)| *id == "white-other" && r.contains("白名单")),
+            "models 白名单不含该模型必须有独立原因：{reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|(id, r)| *id == "disc-snapshot" && r.contains("快照")),
+            "models 留空但快照未收录必须有独立原因：{reasons:?}"
+        );
+        assert_eq!(excluded.len(), 3, "三条排除都要在（不静默丢）");
+    }
+
+    /// 判据与改造前一致：**没有**启用的候选时，退回 `models` 留空的启用渠道
+    /// （旧实现在 `declared.is_empty()` 时也是这条兜底路径）。
+    #[test]
+    fn classify_chat_test_channels_falls_back_to_all_models_channels() {
+        let mut empty_models = sample("no-models", 3);
+        empty_models.models = Vec::new();
+        let (kept, _excluded) =
+            super::classify_chat_test_channels(vec![empty_models], "some-unlisted-model");
+        assert_eq!(kept.len(), 1, "无渠道声明该模型时退「models 为空」的渠道");
+        assert_eq!(kept[0].id, "no-models");
     }
 
     /// 同优先级**保持渠道表顺序**（稳定排序，不引入随机）：

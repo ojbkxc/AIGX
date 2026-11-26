@@ -4205,9 +4205,10 @@ pub async fn handle_channel_chat_test(
             }
         }
     } else {
-        let (ready, blocked) =
+        let (ready, blocked, mut excluded) =
             crate::api::openai::resolve::chat_test_candidates(&state, &requested_model);
-        // 阻塞原因无论如何都进 filtered_channels：日志里能看到「本来为什么被跳过」。
+        // 被阻塞（冷却/断路器/限速）与「没参与选路」（未启用/白名单不含）的渠道都
+        // 进 filtered_channels：线上「为什么只试了 1 个」必须能从日志与错误里看出来。
         let reasons: Vec<crate::log::FilteredChannel> = blocked
             .iter()
             .map(|(c, reason)| crate::log::FilteredChannel {
@@ -4215,15 +4216,31 @@ pub async fn handle_channel_chat_test(
                 reason: reason.clone(),
             })
             .collect();
-        if ready.is_empty() && !blocked.is_empty() {
-            // 候选全空但存在被阻塞渠道（冷却/断路器/限速）：按优先级作为**最后手段**
-            // 试一遍。调试入口的价值就是「试到什么错」；直接 400 掉只是把「失败就
-            // 报错」换个说法，而用户要的是「自动切换，直到能成功」。
-            notice = Some("最后手段：该渠道处于冷却/断路器打开状态".to_string());
-            let fallback: Vec<Channel> = blocked.into_iter().map(|(c, _)| c).collect();
-            (fallback, reasons)
+        excluded.extend(reasons);
+        if blocked.is_empty() {
+            (ready, excluded)
         } else {
-            (ready, reasons)
+            // **blocked 排在 ready 之后一起进候选链**，不是「ready 全空才用它」。
+            //
+            // 曾经是 `if ready.is_empty()` 才把 blocked 当最后手段 —— 后果是
+            // ready 里有 2 个渠道、都失败了，blocked 里那一批（冷却/断路器/
+            // 限流/未启用）一个都不会被尝试，用户看到「所有候选都失败了」，
+            // 而实际上还有一批没试过。用户要的是「自动切换，直到能成功」。
+            //
+            // 顺序仍是「能用的先试」：试通就停，正常情况走不到 blocked 那批；
+            // 只有主力全败才会轮到它们 —— 这正是兜底该有的语义。
+            if ready.is_empty() {
+                notice = Some("最后手段：该渠道处于冷却/断路器打开状态".to_string());
+            } else {
+                notice = Some(format!(
+                    "主力 {} 个渠道之外另有 {} 个渠道处于冷却/断路器/未启用状态，仍会依次尝试",
+                    ready.len(),
+                    blocked.len()
+                ));
+            }
+            let mut chain = ready;
+            chain.extend(blocked.into_iter().map(|(c, _)| c));
+            (chain, excluded)
         }
     };
 
@@ -4378,9 +4395,27 @@ pub async fn handle_channel_chat_test(
     }
 
     // 全败：一条请求日志 + 聚合错误（逐渠道原因同时进 attempt_details）。
-    let error = failover
+    let mut error = failover
         .error
         .unwrap_or_else(|| "所有候选渠道均失败".to_string());
+    // 「为什么只试了 N 个」必须说清楚：把没进候选的渠道与原因补一句。
+    // 线上 `glm-4.7-flash` 只有 1 个候选，而 39 个渠道里 35 个是管理员主动关闭的 —
+    // 用户看不到这一层，就会把「候选确实只有 1 个」误判成「failover 没生效」。
+    if !failover.trace.filtered_channels.is_empty() {
+        let mut tail = format!(
+            "（候选 {} 个；另有 {} 个渠道未参与选路：",
+            failover.trace.candidate_channels.len(),
+            failover.trace.filtered_channels.len()
+        );
+        for (i, f) in failover.trace.filtered_channels.iter().enumerate() {
+            if i > 0 {
+                tail.push('；');
+            }
+            tail.push_str(&format!("{} — {}", f.channel_id, f.reason));
+        }
+        tail.push('）');
+        error.push_str(&tail);
+    }
     let last = failover.trace.attempt_details.last();
     let (channel_id, channel_name) = last
         .map(|a| (a.channel_id.clone(), a.channel_name.clone()))
@@ -4397,6 +4432,17 @@ pub async fn handle_channel_chat_test(
         &failover.trace,
     );
     // 结构化附带逐渠道明细（前端只读 `error` 字符串；`attempts` 供调试面展示链路）
+    let filtered: Vec<Value> = failover
+        .trace
+        .filtered_channels
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "channelId": f.channel_id,
+                "reason": f.reason,
+            })
+        })
+        .collect();
     let attempts: Vec<Value> = failover
         .trace
         .attempt_details
@@ -4416,6 +4462,8 @@ pub async fn handle_channel_chat_test(
             "success": false,
             "error": error,
             "attempts": attempts,
+            "filtered": filtered,
+            "candidateCount": failover.trace.candidate_channels.len(),
         })),
     )
         .into_response()
