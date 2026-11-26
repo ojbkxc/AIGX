@@ -773,10 +773,10 @@ impl FileStore {
     /// 写入原始 JSON 字符串（`put_async` 内部用；SQLite/PG 走 `put_raw`，JSON 后端直接写文件）。
     ///
     /// 调用点在 `put_async` 里按后端各取所需，这里保留一个统一的便捷实现；
-    /// 当前 `put_async` 已原地分派，本方法暂无调用方，保留以免后端增减时重复。
+    /// 迁移/容错测试也会直接写原始 JSON 文本，因此跨模块可见。
     #[cfg(feature = "sqlite-kv")]
-    #[allow(dead_code)]
-    fn put_raw(&self, key: &str, raw: &str) -> anyhow::Result<()> {
+    #[allow(dead_code)] // 生产 put_async 已原地分派；当前仅测试写原始 JSON 时调用
+    pub fn put_raw(&self, key: &str, raw: &str) -> anyhow::Result<()> {
         match &self.inner {
             FileStoreInner::Sqlite(s) => s.put_raw(key, raw),
             #[cfg(feature = "postgres")]

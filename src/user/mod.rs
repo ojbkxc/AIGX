@@ -249,9 +249,17 @@ impl UserStore {
             // 创建随机密码 admin 覆盖原密码。一条脏数据不该有这个权力。
             //
             // 区分两类错误：存储层故障（连接/IO）仍然冒泡 —— 那是真故障，静默会变成
-            // 「用户莫名消失」；只有「值是坏的」才跳过，并点名 key（不静默）。
+            // 「用户莫名消失」；只有「值是坏的」（serde 解析错）才跳过，并点名 key。
             let raw = match self.store.get::<serde_json::Value>(key) {
                 Ok(v) => v,
+                Err(e) if e.downcast_ref::<serde_json::Error>().is_some() => {
+                    skipped += 1;
+                    tracing::warn!(
+                        "用户记录解析失败已跳过（key={key}，原因：{e}）：该条不是合法 JSON；\
+                         其余用户不受影响"
+                    );
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
             let Some(raw) = raw else { continue };
@@ -1041,14 +1049,14 @@ mod tests {
     #[test]
     fn one_corrupt_user_record_does_not_fail_the_whole_table() {
         let s = store();
-        // 一条好的
-        let good = User {
-            id: "u-good".to_string(),
-            email: "good@aigx.local".to_string(),
-            username: "good".to_string(),
-            password: "hash".to_string(),
-            ..Default::default()
-        };
+        // 一条好的（其余字段走 serde 默认，等价于旧记录形态）
+        let good: User = serde_json::from_value(serde_json::json!({
+            "id": "u-good",
+            "email": "good@aigx.local",
+            "username": "good",
+            "password": "hash",
+        }))
+        .unwrap();
         s.store.put("user:u-good", &good).unwrap();
         // 一条坏的：值不是 JSON（直接写裸文本）
         s.store
