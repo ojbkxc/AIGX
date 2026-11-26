@@ -462,6 +462,10 @@ pub fn plan() -> Option<usize> {
 const MAX_HELD_BYTES: usize = 1024 * 1024;
 
 /// 粗估一个 chunk 的正文体积（判据与续写都不读工具参数，只为闸住暂存内存）。
+///
+/// 必须**算上 tool_calls 的 id / 函数名 / 参数**：工具调用流里 delta.content
+/// 往往为空，参数 JSON 全走 `tool_calls[].arguments`。漏算时 `held_bytes`
+/// 几乎不增长，1 MiB 暂存上限形同虚设（大参数调用会把整段积压全留在内存里）。
 fn estimate_chunk_bytes(chunk: &ChatChunk) -> usize {
     let mut n = 0usize;
     if let Some(text) = &chunk.delta.content {
@@ -469,6 +473,14 @@ fn estimate_chunk_bytes(chunk: &ChatChunk) -> usize {
     }
     if let Some(text) = &chunk.delta.reasoning {
         n += text.len();
+    }
+    if let Some(calls) = &chunk.delta.tool_calls {
+        for call in calls {
+            n += call.id.as_ref().map_or(0, String::len);
+            n += call.function_name.as_ref().map_or(0, String::len);
+            n += call.arguments.as_ref().map_or(0, String::len);
+            n += call.signature.as_ref().map_or(0, String::len);
+        }
     }
     n
 }
