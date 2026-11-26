@@ -240,13 +240,43 @@ impl UserStore {
         let keys = self.store.list("user:")?;
         let mut next_by_id: HashMap<String, User> = HashMap::with_capacity(keys.len());
         let mut next_by_email: HashMap<String, String> = HashMap::with_capacity(keys.len());
+        let mut skipped = 0usize;
         for key in &keys {
-            if let Some(u) = self.store.get::<User>(key)? {
-                next_by_id.insert(u.id.clone(), u.clone());
-                if !u.email.is_empty() {
-                    next_by_email.insert(u.email.clone(), u.id.clone());
+            // **单条解析失败不能否掉整张表**：
+            // `get::<User>` 在值不是合法 JSON 时报错（线上实况：两条 `user:` 记录是
+            // Ruby inspect 输出 `{id: …, email: …}` 而不是 JSON），旧实现用 `?` 让
+            // 整个 load 失败 → 用户表按空表运行 → 登录全挂 → 系统误判「首次启动」
+            // 创建随机密码 admin 覆盖原密码。一条脏数据不该有这个权力。
+            //
+            // 区分两类错误：存储层故障（连接/IO）仍然冒泡 —— 那是真故障，静默会变成
+            // 「用户莫名消失」；只有「值是坏的」才跳过，并点名 key（不静默）。
+            let raw = match self.store.get::<serde_json::Value>(key) {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            };
+            let Some(raw) = raw else { continue };
+            match serde_json::from_value::<User>(raw) {
+                Ok(u) => {
+                    next_by_id.insert(u.id.clone(), u.clone());
+                    if !u.email.is_empty() {
+                        next_by_email.insert(u.email.clone(), u.id.clone());
+                    }
+                }
+                Err(e) => {
+                    skipped += 1;
+                    tracing::warn!(
+                        "用户记录解析失败已跳过（key={key}，原因：{e}）：该条不是合法 JSON 或字段类型不符；\
+                         其余用户不受影响"
+                    );
                 }
             }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                "用户表加载完成：成功 {} 条，**跳过 {} 条损坏记录**（详见上一条 WARN 的 key）",
+                next_by_id.len(),
+                skipped
+            );
         }
         // 向后兼容旧数据：无 email 字段的用户以 username 作为 email
         for user in next_by_id.values() {
@@ -999,6 +1029,39 @@ mod tests {
         assert_eq!(u.email, "");
         assert_eq!(u.quota, 100);
         assert_eq!(u.used_quota, 40);
+    }
+
+    /// 一条值不是合法 JSON 的 `user:` 记录**不能**让整张用户表加载失败。
+    ///
+    /// 线上实况：PG 里两条 `user:` 记录是 Ruby inspect 输出（`{id: …, email: …}`
+    /// 而不是 JSON），旧实现 `get::<User>(key)?` 直接冒泡 → 整表失败 → 按空表运行
+    /// → 登录全挂 → 系统误判首次启动、创建随机密码 admin 覆盖原密码。
+    ///
+    /// 这条钉住：坏记录被跳过（WARN 点名 key），好记录照常加载。
+    #[test]
+    fn one_corrupt_user_record_does_not_fail_the_whole_table() {
+        let s = store();
+        // 一条好的
+        let good = User {
+            id: "u-good".to_string(),
+            email: "good@aigx.local".to_string(),
+            username: "good".to_string(),
+            password: "hash".to_string(),
+            ..Default::default()
+        };
+        s.store.put("user:u-good", &good).unwrap();
+        // 一条坏的：值不是 JSON（直接写裸文本）
+        s.store
+            .put_raw(
+                "user:u-bad",
+                "{id: u-bad, email: bad@aigx.local, password: =19=19456}",
+            )
+            .unwrap();
+
+        s.load().expect("单条坏记录不该让整表失败");
+        assert!(s.get_by_id("u-good").is_some(), "好记录必须加载进来");
+        assert!(s.get_by_email("good@aigx.local").is_some());
+        assert!(s.get_by_id("u-bad").is_none(), "坏记录被跳过");
     }
 
     fn store() -> UserStore {
