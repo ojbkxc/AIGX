@@ -3589,10 +3589,9 @@ where
 /// 90s 总预算在调试入口会把「第一个慢渠道超时」直接判成终态、根本走不到切换，
 /// 与「直到能成功」冲突。
 async fn chat_test_failover<A>(
-    candidates: Vec<Channel>,
+    candidates: Vec<(Channel, Option<String>)>,
     model: &str,
     trace: ChatTestTrace,
-    notice: Option<String>,
     provider_of: impl Fn(&str) -> Option<String>,
     mut attempt: A,
 ) -> ChatTestFailover
@@ -3601,7 +3600,7 @@ where
 {
     let mut chain = trace;
     let mut last_error: Option<String> = None;
-    for (idx, ch) in candidates.into_iter().enumerate() {
+    for (idx, (ch, notice)) in candidates.into_iter().enumerate() {
         let index = (idx + 1) as u32;
         // 渠道级模型映射：每轮按该轮渠道重算（不跨模型——候选都声明了同一个模型，
         // 只有上游真名可能不同）
@@ -3614,7 +3613,7 @@ where
             upstream,
             started_at: chrono::Utc::now().timestamp(),
             provider: provider_of(&ch.id).unwrap_or_default(),
-            notice: notice.clone(),
+            notice,
             trace: chain.clone(),
         };
         // 失败轮明细复用同一上下文（尝试内部只负责状态位）
@@ -4197,6 +4196,9 @@ pub async fn handle_channel_chat_test(
     // 否则「调试这个渠道」的语义就没了）。
     let explicit_channel = !body.channel_id.trim().is_empty();
     let mut notice: Option<String> = None;
+    // 逐渠道 notice（渠道已禁用 / 冷却中 / 断路器打开）：这些要如实写进每轮的
+    // `AttemptDetail.notice`，否则日志里看不出「这条尝试打的是被禁用的渠道」。
+    let mut notices: HashMap<String, String> = HashMap::new();
     let (mut candidates, filtered) = if explicit_channel {
         match state.channel_store.get(&body.channel_id) {
             Some(c) => (vec![c], Vec::new()),
@@ -4205,50 +4207,37 @@ pub async fn handle_channel_chat_test(
             }
         }
     } else {
-        let (ready, blocked, mut excluded) =
+        // 候选链 = 全部渠道（含 disabled）：健康 → 冷却/断路器/限流 → 已禁用。
+        // 调试入口不是生产流量，要的是「这个模型到底能不能用」，所以不继承
+        // 生产选路的健康门槛（disabled 那批只排最后，仍然会试）。
+        let (picks, excluded) =
             crate::api::openai::resolve::chat_test_candidates(&state, &requested_model);
-        // 被阻塞（冷却/断路器/限速）与「没参与选路」（未启用/白名单不含）的渠道都
-        // 进 filtered_channels：线上「为什么只试了 1 个」必须能从日志与错误里看出来。
-        let reasons: Vec<crate::log::FilteredChannel> = blocked
-            .iter()
-            .map(|(c, reason)| crate::log::FilteredChannel {
-                channel_id: c.id.clone(),
-                reason: reason.clone(),
-            })
-            .collect();
-        excluded.extend(reasons);
-        if blocked.is_empty() {
-            (ready, excluded)
-        } else {
-            // **blocked 排在 ready 之后一起进候选链**，不是「ready 全空才用它」。
-            //
-            // 曾经是 `if ready.is_empty()` 才把 blocked 当最后手段 —— 后果是
-            // ready 里有 2 个渠道、都失败了，blocked 里那一批（冷却/断路器/
-            // 限流/未启用）一个都不会被尝试，用户看到「所有候选都失败了」，
-            // 而实际上还有一批没试过。用户要的是「自动切换，直到能成功」。
-            //
-            // 顺序仍是「能用的先试」：试通就停，正常情况走不到 blocked 那批；
-            // 只有主力全败才会轮到它们 —— 这正是兜底该有的语义。
-            if ready.is_empty() {
-                notice = Some("最后手段：该渠道处于冷却/断路器打开状态".to_string());
-            } else {
+        if picks.len() > 1 {
+            let degraded = picks.iter().filter(|p| p.tier > 0).count();
+            if degraded > 0 {
                 notice = Some(format!(
-                    "主力 {} 个渠道之外另有 {} 个渠道处于冷却/断路器/未启用状态，仍会依次尝试",
-                    ready.len(),
-                    blocked.len()
+                    "候选 {} 个渠道：健康 {} 个，另有 {} 个冷却/断开/已禁用，仍会依次尝试",
+                    picks.len(),
+                    picks.len() - degraded,
+                    degraded
                 ));
             }
-            let mut chain = ready;
-            chain.extend(blocked.into_iter().map(|(c, _)| c));
-            (chain, excluded)
         }
+        let mut chain: Vec<Channel> = Vec::with_capacity(picks.len());
+        for pick in picks {
+            if let Some(n) = pick.notice.clone() {
+                notices.insert(pick.channel.id.clone(), n);
+            }
+            chain.push(pick.channel);
+        }
+        (chain, excluded)
     };
 
     if candidates.is_empty() {
         return error_response(
             &format!(
-                "No enabled channel provides model '{requested_model}' \
-                 (available channels do not declare it)"
+                "No channel declares model '{requested_model}' \
+                 (candidate pool covers every channel, disabled included)"
             ),
             StatusCode::BAD_REQUEST,
         )
@@ -4339,11 +4328,18 @@ pub async fn handle_channel_chat_test(
     // 供应商标识反查（与请求日志 provider 列同一把刀）：先克隆一份给只读闭包，
     // 避免与下面 `move` 进尝试闭包的 `state` 冲突。
     let provider_state = state.clone();
+    let global_notice = notice;
+    let candidates: Vec<(Channel, Option<String>)> = candidates
+        .into_iter()
+        .map(|ch| {
+            let per = notices.remove(&ch.id);
+            (ch, per.or_else(|| global_notice.clone()))
+        })
+        .collect();
     let failover = chat_test_failover(
         candidates,
         &model,
         trace,
-        notice,
         |cid: &str| crate::api::openai::resolve::provider_of_channel_id(&provider_state, cid),
         {
             let state = state.clone();
@@ -4398,20 +4394,28 @@ pub async fn handle_channel_chat_test(
     let mut error = failover
         .error
         .unwrap_or_else(|| "所有候选渠道均失败".to_string());
-    // 「为什么只试了 N 个」必须说清楚：把没进候选的渠道与原因补一句。
-    // 线上 `glm-4.7-flash` 只有 1 个候选，而 39 个渠道里 35 个是管理员主动关闭的 —
-    // 用户看不到这一层，就会把「候选确实只有 1 个」误判成「failover 没生效」。
-    if !failover.trace.filtered_channels.is_empty() {
+    // 「试了几个、跳过几个、各是什么状态」必须说清楚。
+    //
+    // 调试入口的候选链只排除「models 白名单明确不含该模型」的渠道，其余（含
+    // disabled、冷却中）都会真的被试一次。用户看到失败时要能回答「还有没有没试的」：
+    // 线上曾经的形态是 39 个渠道只试 1 个却只回一条 502，用户只能猜。
+    {
+        let tried = failover.trace.attempt_details.len();
+        let skipped = failover.trace.filtered_channels.len();
         let mut tail = format!(
-            "（候选 {} 个；另有 {} 个渠道未参与选路：",
-            failover.trace.candidate_channels.len(),
-            failover.trace.filtered_channels.len()
+            "（本次共尝试 {tried} 个渠道，候选链 {} 个",
+            failover.trace.candidate_channels.len()
         );
-        for (i, f) in failover.trace.filtered_channels.iter().enumerate() {
-            if i > 0 {
-                tail.push('；');
+        if skipped == 0 {
+            tail.push_str("；没有任何渠道被排除在候选之外");
+        } else {
+            tail.push_str(&format!("；另有 {skipped} 个渠道未进候选："));
+            for (i, f) in failover.trace.filtered_channels.iter().enumerate() {
+                if i > 0 {
+                    tail.push('；');
+                }
+                tail.push_str(&format!("{} — {}", f.channel_id, f.reason));
             }
-            tail.push_str(&format!("{} — {}", f.channel_id, f.reason));
         }
         tail.push('）');
         error.push_str(&tail);
@@ -4453,6 +4457,9 @@ pub async fn handle_channel_chat_test(
                 "channelName": a.channel_name,
                 "status": a.status,
                 "error": a.error,
+                // 渠道状态标记（已禁用 / 冷却中 / 断路器打开），让「这条尝试打的是
+                // 一个管理员关掉的渠道」在日志与响应里都看得出来
+                "notice": a.notice,
             })
         })
         .collect();
@@ -4464,6 +4471,7 @@ pub async fn handle_channel_chat_test(
             "attempts": attempts,
             "filtered": filtered,
             "candidateCount": failover.trace.candidate_channels.len(),
+            "triedCount": failover.trace.attempt_details.len(),
         })),
     )
         .into_response()
@@ -5290,13 +5298,15 @@ mod tests {
     /// （`success=None`、attempt_details 也只有一条）—— 所以这三条断言都能区分新旧。
     #[tokio::test]
     async fn chat_test_failover_switches_to_next_channel_until_success() {
-        let candidates = vec![failover_channel("ch-a", 30), failover_channel("ch-b", 10)];
+        let candidates = vec![
+            (failover_channel("ch-a", 30), None),
+            (failover_channel("ch-b", 10), None),
+        ];
         let mut tried: Vec<String> = Vec::new();
         let failover = chat_test_failover(
             candidates,
             "deepseek-chat",
             ChatTestTrace::default(),
-            None,
             |_id: &str| None::<String>,
             |ch: Channel, ctx: ChatTestAttemptContext| -> ChatTestAttemptFut {
                 tried.push(ch.id.clone());
@@ -5339,13 +5349,15 @@ mod tests {
     /// 上游回 400 时立即收手，只留一条明细。
     #[tokio::test]
     async fn chat_test_failover_stops_on_client_error() {
-        let candidates = vec![failover_channel("ch-a", 30), failover_channel("ch-b", 10)];
+        let candidates = vec![
+            (failover_channel("ch-a", 30), None),
+            (failover_channel("ch-b", 10), None),
+        ];
         let mut tried = 0usize;
         let failover = chat_test_failover(
             candidates,
             "deepseek-chat",
             ChatTestTrace::default(),
-            None,
             |_id: &str| None::<String>,
             |_ch: Channel, _ctx: ChatTestAttemptContext| -> ChatTestAttemptFut {
                 tried += 1;
@@ -5367,12 +5379,14 @@ mod tests {
     /// 全败时的聚合错误必须**列出试过的每个渠道与各自原因**（单渠道时保持旧文案）。
     #[tokio::test]
     async fn chat_test_failover_aggregates_every_attempt() {
-        let candidates = vec![failover_channel("ch-a", 30), failover_channel("ch-b", 10)];
+        let candidates = vec![
+            (failover_channel("ch-a", 30), None),
+            (failover_channel("ch-b", 10), None),
+        ];
         let failover = chat_test_failover(
             candidates,
             "deepseek-chat",
             ChatTestTrace::default(),
-            None,
             |_id: &str| None::<String>,
             |ch: Channel, _ctx: ChatTestAttemptContext| -> ChatTestAttemptFut {
                 boxed_attempt(async move {
@@ -5391,6 +5405,69 @@ mod tests {
         assert!(error.contains("所有 2 个候选渠道均失败"), "{error}");
         assert!(error.contains("ch-a") && error.contains("ch-b"), "{error}");
         assert!(error.contains("503"), "各自原因必须逐条列出: {error}");
+    }
+
+    /// ★本次口径：**disabled 渠道也要试**（调试入口不继承生产健康门槛）。
+    ///
+    /// 用户在 AI 运维点「发送」，要的是「这个模型到底能不能用」；某渠道 disabled
+    /// 可能只是管理员临时关的。旧实现的 `is_enabled()` 过滤会把 39 个渠道砍到 4 个，
+    /// `glm-4.7-flash` 更是只剩 1 个候选 —— 用户看到 `attempts=1` 就以为
+    /// failover 没生效。这条断言钉住「禁用的渠道真的会被尝试」且 notice 如实标注。
+    #[tokio::test]
+    async fn chat_test_failover_tries_disabled_channel_with_notice() {
+        let mut disabled = failover_channel("ch-off", 99);
+        disabled.status = "disabled".to_string();
+        let candidates = vec![
+            (failover_channel("ch-enabled", 10), None),
+            (
+                disabled,
+                Some(
+                    "渠道已禁用（管理员已关闭）；调试入口仍按最后手段尝试，不改其状态".to_string(),
+                ),
+            ),
+        ];
+        let mut tried: Vec<String> = Vec::new();
+        let failover = chat_test_failover(
+            candidates,
+            "deepseek-chat",
+            ChatTestTrace::default(),
+            |_id: &str| None::<String>,
+            |ch: Channel, ctx: ChatTestAttemptContext| -> ChatTestAttemptFut {
+                tried.push(ch.id.clone());
+                let notice = ctx.notice.clone();
+                boxed_attempt(async move {
+                    if ch.id == "ch-off" {
+                        // disabled 渠道也会被真实上游拒绝 —— 失败必须带 notice 留痕
+                        assert!(
+                            notice.as_deref().is_some_and(|n| n.contains("已禁用")),
+                            "disabled 渠道的尝试必须带「已禁用」notice：{notice:?}"
+                        );
+                        Ok(failover_success(&ctx, &ch.id))
+                    } else {
+                        Err(ChatTestAttemptError::from_http_status(
+                            502,
+                            "Upstream HTTP 502: bad gateway".to_string(),
+                        ))
+                    }
+                })
+            },
+        )
+        .await;
+
+        assert_eq!(
+            tried,
+            vec!["ch-enabled", "ch-off"],
+            "健康渠道先试，disabled 的排后面但**必须真的被试过**"
+        );
+        assert!(failover.success.is_some(), "disabled 渠道也能救活这次请求");
+        assert_eq!(failover.trace.attempt_details.len(), 2);
+        assert!(
+            failover.trace.attempt_details[1]
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("已禁用")),
+            "落库的 AttemptDetail 必须带「已禁用」标注"
+        );
     }
 
     /// 造一个最小可用的 `Channel`（只为 `resolve_fetch_target` 单测）。
