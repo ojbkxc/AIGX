@@ -68,13 +68,22 @@ export function assistantFiles(value: unknown): AssistantTextFile[] {
 }
 
 /**
- * JSON / .info 都按文本读。
+ * 可以按文本读进来的附件：JSON / .info / 纯文本（`.txt` / `.md`）。
  *
- * Windows 上 `.json` 的 MIME 经常是空串（注册表缺失），只看 `file.type`
- * 会把正常凭证文件判成「不支持」。
+ * 判据必须与输入框的 `accept` 一致（`AsstComposer` 写的是
+ * `.json,.txt,.md,.info,application/json,text/plain`）—— 曾经这里只认
+ * `.json`/`.info`，用户按界面提示选 `.txt` 会被静默判成「不支持的类型」跳过。
+ *
+ * 同时按 MIME 兜底：Windows 上 `.json` 的 MIME 经常是空串（注册表缺失），
+ * 只看 `file.type` 会把正常凭证文件判成「不支持」。
  */
 export function isTextCredentialFile(file: FileLike): boolean {
-  return /\.(json|info)$/i.test(file.name) || file.type === 'application/json';
+  return (
+    /\.(json|info|txt|md)$/i.test(file.name) ||
+    file.type === 'application/json' ||
+    file.type === 'text/plain' ||
+    file.type === 'text/markdown'
+  );
 }
 
 /** 跳过原因（渲染层据此选文案：这里是判据，不是文案） */

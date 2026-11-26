@@ -167,15 +167,20 @@ test.describe('聊天 · 附件（粘贴 / 拖入 / 上限 / 移除）', () => {
     await expect(fileChips(page).first()).toContainText('keys.info');
 
     /**
-     * `.txt` 的现状（如实钉住，不美化）：`<input type=file accept>` 里写着
-     * `.txt,.md`，但判据 `isTextCredentialFile`（asst-attach.ts:76-78）只认
-     * `.json` / `.info` / `application/json` ⇒ 从「添加文本文件」入口选一个
-     * `.txt` 会被判「不支持」。这是 UI 承诺与判据不一致（已登记在交付说明），
-     * 这里钉住**当前真实行为**：一旦有人把两处对齐，这条会红并提醒同步改。
+     * `.txt` / `.md` 必须与 `<input accept>` 一致地被收下。
+     *
+     * 这条曾经钉住的是**旧的真实行为**（accept 写着 `.txt,.md`，但
+     * `isTextCredentialFile` 只认 `.json`/`.info` → 用户按界面提示选了 `.txt`
+     * 却被静默判「不支持」）。两处已经对齐（判据补上 `.txt`/`.md`/`text/plain`），
+     * 所以这里改成钉住**正确行为**：收下、且不弹「不支持」的 toast。
+     * 谁把判据改回去，这条会红。
      */
     await dropFiles(page, [{ name: 'notes.txt', type: 'text/plain', text: 'hello' }]);
-    await expect(fileChips(page)).toHaveCount(1);
-    await expect(page.locator('.toast', { hasText: '只支持图片和 JSON / .info 文本文件' })).toBeVisible();
+    await expect(fileChips(page)).toHaveCount(2);
+    await expect(fileChips(page).last()).toContainText('notes.txt');
+    await expect(
+      page.locator('.toast', { hasText: '只支持图片和 JSON / .info 文本文件' }),
+    ).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

@@ -251,12 +251,21 @@ export default function Keys(): JSX.Element {
   // 行内 absolute 弹层（尤其最后一行向下弹出时），fixed 可逃出所有裁剪容器
   const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
   const [rowMenuPos, setRowMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  // 菜单打开的时刻：浏览器为了「让目标行可点」可能先自动滚动一次，那一次
+  // 不该把刚打开的菜单关掉（实测时序 PANEL=1@1017 → scroll@1019 → PANEL=0@1036，
+  // 用户看到的是「点了没反应，得再点一次」）。
+  const rowMenuOpenedAt = useRef(0);
   useEffect(() => {
     if (rowMenuId === null) return;
     const handler = (): void => setRowMenuId(null);
     document.addEventListener('mousedown', handler);
-    // 页面/表格滚动时关闭菜单（fixed 坐标不随滚动联动）
-    const scrollHandler = (): void => setRowMenuId(null);
+    // 页面/表格滚动时关闭菜单（fixed 坐标不随滚动联动）。但**打开瞬间的那一次
+    // 自动滚动**要放行 —— 点可视区外的行时浏览器会先滚动再派发 click，那个
+    // scroll 事件紧跟在 mousedown 之后；照关的话菜单一个 tick 就没了。
+    const scrollHandler = (): void => {
+      if (Date.now() - rowMenuOpenedAt.current < 150) return;
+      setRowMenuId(null);
+    };
     window.addEventListener('scroll', scrollHandler, true);
     return () => {
       document.removeEventListener('mousedown', handler);
@@ -268,6 +277,7 @@ export default function Keys(): JSX.Element {
   const openRowMenu = (e: React.MouseEvent<HTMLButtonElement>, id: string | number): void => {
     e.stopPropagation();
     if (rowMenuId === id) { setRowMenuId(null); return; }
+    rowMenuOpenedAt.current = Date.now();
     const rect = e.currentTarget.getBoundingClientRect();
     const menuH = 200; // 菜单预估高度（4 项 + 分隔线）
     const below = window.innerHeight - rect.bottom;
@@ -1240,9 +1250,15 @@ export default function Keys(): JSX.Element {
       {/* 令牌轮换后新密钥展示模态框：新密钥仅此一次显示 */}
       {rotatedKey && (
         <div className="modal-overlay" onClick={() => setRotatedKey(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="keys-rotated-title"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="modal-header">
-              <h3>{t('令牌已轮换')} — {rotatedKey.name}</h3>
+              <h3 id="keys-rotated-title">{t('令牌已轮换')} — {rotatedKey.name}</h3>
               <button type="button" className="modal-close" onClick={() => setRotatedKey(null)}>&times;</button>
             </div>
             <div className="modal-body">
@@ -1267,9 +1283,15 @@ export default function Keys(): JSX.Element {
 
       {showModal && (
         <div className="modal-overlay">
-          <form className="modal" onSubmit={handleSave}>
+          <form
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="keys-edit-title"
+            onSubmit={handleSave}
+          >
             <div className="modal-header">
-              <h3>{editing ? t('编辑令牌') : t('创建 API 令牌')}</h3>
+              <h3 id="keys-edit-title">{editing ? t('编辑令牌') : t('创建 API 令牌')}</h3>
               <button type="button" className="modal-close" onClick={closeModal}>&times;</button>
             </div>
             <div className="modal-body">

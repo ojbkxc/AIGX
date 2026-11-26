@@ -22,6 +22,10 @@ describe('asst-attach — 类型识别', () => {
     expect(isTextCredentialFile(file('a.info', ''))).toBe(true);
     expect(isTextCredentialFile(file('a.JSON', 'text/plain'))).toBe(true);
     expect(isTextCredentialFile(file('a.png', 'image/png'))).toBe(false);
+  // 与 AsstComposer 的 accept 对齐：界面允许选 .txt/.md，判据就必须收
+  expect(isTextCredentialFile(file('notes.txt', 'text/plain'))).toBe(true);
+  expect(isTextCredentialFile(file('readme.md', 'text/markdown'))).toBe(true);
+  expect(isTextCredentialFile(file('x.md', ''))).toBe(true);
   });
 
   it('宽松读取会话里存的文件（手改过的历史不炸）', () => {
