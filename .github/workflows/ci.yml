@@ -136,6 +136,14 @@ jobs:
       - name: Install deps
         working-directory: frontend
         run: npm ci
+      # 生产依赖漏洞闸（只拦 high / critical）。
+      # 已知 moderate 项记录在 docs/QUALITY-BACKLOG.md：react-router 6.x 的
+      # SSR `deserializeErrors()` 与 `<Link>`/`useNavigate` 反斜杠 open-redirect
+      # 要 react-router 7.18+ 才修（破坏性大版本），本仓是纯 CSR、不走 SSR，
+      # 现实中不可达；react-router-dom 自身那条可由 6.30.6 修，待前端批次随升级。
+      - name: Audit production deps (high+)
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
       # lint / 单测 / 类型检查先于构建：构建能过不代表代码合规，
       # 也不代表 hook 依赖、i18n key、SSE 解析这些纯逻辑没退化。
       - name: Lint (eslint, max-warnings 0)

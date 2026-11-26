@@ -1,3 +1,8 @@
+// @vitest-environment node
+// 本文件全部是纯逻辑断言（无 React 渲染），且要读后端源码 `src/purge/mod.rs`。
+// 默认的 jsdom 环境会把 `node:fs` / `node:path` 解析成空模块，导致 Windows 上
+// `default.readFileSync is not a function`；Linux CI 恰好不触发。用 node 环境
+// 才能稳定读文件。
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
