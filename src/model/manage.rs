@@ -967,6 +967,18 @@ pub fn view_json(view: &ManageView) -> Value {
 /// config.model 为空时的自动发现入口（`agent::llm::effective_model`）。
 /// 全部启用模型都未定价时兜底取启用集（总比 ModelNotConfigured 强）。
 pub fn pick_default_model(view: &ManageView) -> Option<String> {
+    pick_default_models(view, 1).into_iter().next()
+}
+
+/// [`pick_default_model`] 的有序列表版：同样的筛选与排序，返回前 `limit` 个。
+///
+/// 存在意义：Agent 的跨模型 failover 需要「首选之外还该试谁」，而排序规则
+/// 必须与首选**同一套**（否则会出现「首选按 A 规则、备选按 B 规则」的漂移）。
+/// `pick_default_model` 就是本函数取 1 个的特例。
+pub fn pick_default_models(view: &ManageView, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let is_preview = |id: &str| {
         let l = id.to_ascii_lowercase();
         ["preview", "beta", "alpha", "exp", "canary", "nightly", "rc"]
@@ -986,7 +998,11 @@ pub fn pick_default_model(view: &ManageView) -> Option<String> {
             .cmp(&is_preview(&b.id))
             .then_with(|| a.id.cmp(&b.id))
     });
-    cands.first().map(|m| m.id.clone())
+    cands
+        .into_iter()
+        .take(limit)
+        .map(|m| m.id.clone())
+        .collect()
 }
 
 #[cfg(test)]

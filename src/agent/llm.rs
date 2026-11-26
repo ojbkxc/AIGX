@@ -36,10 +36,84 @@ pub enum AgentLlmError {
     /// false 表示确定性失败（模型不存在、参数错误等），重试无意义。
     #[error("all channels failed: {0}")]
     AllChannelsFailed(String),
+    /// 所有候选模型均失败（跨模型 failover 已穷尽）。
+    ///
+    /// 与 [`AllChannelsFailed`] 的区别：后者是「一个模型的所有渠道都挂了」，
+    /// 本变体是「连换几个模型也没成功」。文本里逐行带上每个模型的失败原因，
+    /// 这样运营能直接看出是凭证 401、模型被关 404、还是渠道校验拦截。
+    #[error("all candidate models failed: {0}")]
+    AllModelsFailed(String),
     /// 暂时性失败且已用尽重试轮次。与 [`AllChannelsFailed`] 区分，是为了让
     /// 前端能给出「稍后重试即可」而不是「配置有问题」的建议。
     #[error("all channels failed after {rounds} rounds: {last}")]
     TransientExhausted { rounds: u32, last: String },
+}
+
+/// 跨模型切换的上限：一次调用最多尝试多少个模型。
+///
+/// 为什么封顶：模型清单可能几十个，全试一遍会把一次对话拖成几分钟，用户
+/// 早就断了。5 个已经能覆盖「首选挂了换备选」的绝大多数情况。
+const MAX_MODEL_CANDIDATES: usize = 5;
+
+/// 跨模型切换的总耗时上限（秒）。
+///
+/// 与 `MAX_MODEL_CANDIDATES` 是两道独立的闸：模型少但每个都很慢时，只靠数量
+/// 封顶拦不住；反过来只靠时间封顶，模型多时又可能把时间浪费在注定失败的
+/// 候选上。两道都要。
+const MODEL_FAILOVER_BUDGET_SECS: u64 = 60;
+
+/// 本次调用要依次尝试的模型列表（首选在前）。
+///
+/// - 首选 = [`effective_model`]（显式 `[agent].model` 优先，否则自动发现）。
+/// - 备选 = `pick_default_models` 的同一套排序（启用+已定价 → 非预览 → 字典序），
+///   最多 [`MAX_MODEL_CANDIDATES`] 个。
+/// - **`[agent].channel` 显式锁定时不做跨模型切换**：锁渠道的语义就是「只走这
+///   一条」的排障口径，换模型就不再是「只走这条」，会把排障结论带偏。
+fn candidate_models(state: &AppState, config: &AgentConfig) -> Result<Vec<String>, AgentLlmError> {
+    let primary = effective_model(state, config)?;
+    if !config.channel.trim().is_empty() {
+        return Ok(vec![primary]);
+    }
+    let view = crate::api::admin::model_manage::current_view(state);
+    let listed = crate::model::manage::pick_default_models(&view, MAX_MODEL_CANDIDATES);
+    Ok(compose_model_candidates(
+        &primary,
+        listed,
+        MAX_MODEL_CANDIDATES,
+    ))
+}
+
+/// 纯函数：把「首选」与「候选清单」拼成实际尝试顺序。
+///
+/// 规则：首选永远第一；清单里与首选同名或已出现的跳过（不重复打同一个模型）；
+/// 总数封顶 `limit`（至少保留首选）。抽成纯函数，是为了排序/去重/封顶这三条
+/// 能被单测钉住，而不必构造 `AppState`。
+fn compose_model_candidates(primary: &str, listed: Vec<String>, limit: usize) -> Vec<String> {
+    let cap = limit.max(1);
+    let mut out: Vec<String> = Vec::with_capacity(cap.min(listed.len() + 1));
+    out.push(primary.to_string());
+    for id in listed {
+        if out.len() >= cap {
+            break;
+        }
+        if id != primary && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// 纯函数：把「尝试过的模型 + 各自原因」收口成最终错误。
+///
+/// 只试过一个模型（渠道锁定，或候选清单只有它）时**保留原错误类型** ——
+/// 前端靠 `NoChannelAvailable` / `TransientExhausted` 区分「配置问题」与
+/// 「稍后重试」，包一层 AllModelsFailed 会把这两个语义磨平。试过多个才汇总，
+/// 并把每个模型的原因带出去（否则运营只看到一句「暂无可用渠道」）。
+fn final_error(tried: &[String], last: Option<AgentLlmError>) -> AgentLlmError {
+    if tried.len() <= 1 {
+        return last.unwrap_or(AgentLlmError::ModelNotConfigured);
+    }
+    AgentLlmError::AllModelsFailed(tried.join(" | "))
 }
 
 /// 把渠道快照 + bridge 绑定成一个候选，供自环 failover 循环使用。
@@ -224,7 +298,54 @@ pub async fn chat_once_as(
     tools: Option<Vec<serde_json::Value>>,
     key_id: &str,
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
-    let model = effective_model(state, config)?;
+    let models = candidate_models(state, config)?;
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(MODEL_FAILOVER_BUDGET_SECS);
+    // 逐模型试。每个模型内部仍保留原有的「渠道级 failover + 时间维度重试」，
+    // 本层只负责「这个模型没指望了，换下一个」。
+    let mut tried: Vec<String> = Vec::new();
+    let mut last_err: Option<AgentLlmError> = None;
+    for model in &models {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        match chat_once_model(state, config, model, &messages, &tools, key_id, deadline).await {
+            Ok(v) => {
+                if !tried.is_empty() {
+                    tracing::info!(
+                        "agent llm switched model after {:?}, succeeded on {model}",
+                        tried
+                    );
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                tracing::warn!("agent llm model {model} failed: {e}");
+                tried.push(format!("{model}: {e}"));
+                last_err = Some(e);
+            }
+        }
+    }
+
+    // 只试过一个模型（渠道锁定，或候选清单只有它）时保留原有错误类型：
+    // 调用方/前端靠 `NoChannelAvailable` / `TransientExhausted` 区分「配置问题」
+    // 与「稍后重试」；包一层 AllModelsFailed 会把这两个语义磨平。
+    Err(final_error(&tried, last_err))
+}
+
+/// 单个模型的完整尝试：渠道级 failover + 时间维度重试（轮次来自配置）。
+///
+/// 与 [`chat_once_as`] 的分工：本函数只对一个模型负责，失败（无论暂时还是
+/// 确定性）都只把错误还给调用方，**不再把整次调用打死** —— 换模型是外层的决定。
+async fn chat_once_model(
+    state: &AppState,
+    config: &AgentConfig,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &Option<Vec<serde_json::Value>>,
+    key_id: &str,
+    deadline: tokio::time::Instant,
+) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
     let rounds = config
         .transient_retry_rounds
         .clamp(1, MAX_TRANSIENT_RETRY_ROUNDS);
@@ -232,20 +353,15 @@ pub async fn chat_once_as(
     let mut last_recoverable = false;
 
     for round in 1..=rounds {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
         // 每轮重新解析候选：冷却中的渠道会随冷却到期重新可用，
         // 固定用第一轮的候选列表会白白错过刚恢复的渠道。
-        match resolve_candidates(state, config, &model) {
+        match resolve_candidates(state, config, model) {
             Ok(candidates) => {
-                match try_candidates(
-                    state,
-                    config,
-                    &model,
-                    &candidates,
-                    &messages,
-                    &tools,
-                    key_id,
-                )
-                .await
+                match try_candidates(state, config, model, &candidates, messages, tools, key_id)
+                    .await
                 {
                     Ok(v) => {
                         if round > 1 {
@@ -260,6 +376,8 @@ pub async fn chat_once_as(
                         last_msg = message;
                         last_recoverable = recoverable;
                         if !recoverable {
+                            // 确定性失败（模型已关闭/参数错误/凭证硬性无效）：
+                            // 本模型重试无意义，交回外层换下一个模型。
                             return Err(AgentLlmError::AllChannelsFailed(last_msg));
                         }
                     }
@@ -283,8 +401,12 @@ pub async fn chat_once_as(
 
         if round < rounds {
             let wait = retry_backoff(config, round);
+            // 等完就超过总预算了就别等了 —— 外层也没时间再试下一个模型。
+            if tokio::time::Instant::now() + std::time::Duration::from_millis(wait) >= deadline {
+                break;
+            }
             tracing::warn!(
-                "agent llm transient failure (round {round}/{rounds}): {last_msg}; retrying in {wait}ms"
+                "agent llm transient failure on model {model} (round {round}/{rounds}): {last_msg}; retrying in {wait}ms"
             );
             tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
         }
@@ -709,5 +831,82 @@ mod tests {
         let d = AgentLlmError::AllChannelsFailed("model not found".to_string()).to_string();
         assert_ne!(msg, d, "两类失败文案不得相同");
         assert!(!d.contains("rounds"), "确定性失败不该报重试轮次: {d}");
+    }
+    // ─── 跨模型切换（failover）────────────────────────────────────
+
+    /// 首选永远排第一，且清单里与首选同名的跳过 —— 否则会把同一个模型打两遍。
+    #[test]
+    fn compose_candidates_puts_primary_first_and_skips_duplicate() {
+        let got = super::compose_model_candidates(
+            "deepseek-v4.1-flash",
+            vec![
+                "deepseek-v4.1-flash".to_string(),
+                "glm-5.3-flash".to_string(),
+            ],
+            5,
+        );
+        assert_eq!(
+            got,
+            vec!["deepseek-v4.1-flash", "glm-5.3-flash"],
+            "首选第一且不重复"
+        );
+    }
+
+    /// 封顶：清单再长也只取 limit 个（线上清单几十个，全试会把对话拖成几分钟）。
+    #[test]
+    fn compose_candidates_caps_at_limit() {
+        let listed: Vec<String> = (0..10).map(|i| format!("m{i}")).collect();
+        let got = super::compose_model_candidates("primary", listed, super::MAX_MODEL_CANDIDATES);
+        assert_eq!(got.len(), super::MAX_MODEL_CANDIDATES, "应封顶到 5");
+        assert_eq!(got[0], "primary", "首选仍在第一");
+        assert_eq!(
+            &got[1..],
+            &["m0", "m1", "m2", "m3"],
+            "按清单原序补齐到 5 个"
+        );
+    }
+
+    /// 清单为空（= 渠道被显式锁定，`candidate_models` 直接返回单元素）时只试首选。
+    #[test]
+    fn compose_candidates_single_when_no_alternatives() {
+        let got = super::compose_model_candidates("only-model", vec![], 5);
+        assert_eq!(got, vec!["only-model"]);
+    }
+
+    /// 只试过一个模型时**保留原错误类型**：前端靠它区分「配置问题」与「稍后重试」。
+    #[test]
+    fn final_error_keeps_original_type_for_single_model() {
+        let original = AgentLlmError::TransientExhausted {
+            rounds: 3,
+            last: "upstream timeout".to_string(),
+        };
+        let got = super::final_error(&["a: upstream timeout".to_string()], Some(original));
+        assert!(
+            matches!(got, AgentLlmError::TransientExhausted { .. }),
+            "单模型时不得包成 AllModelsFailed: {got}"
+        );
+    }
+
+    /// 试过多个模型时汇总，且**逐条带出模型名与原因** —— 这是运营能看出
+    /// 「凭证 401 / 模型被关 404 / 渠道校验拦截」的唯一入口。
+    #[test]
+    fn final_error_lists_every_model_and_reason() {
+        let tried = vec![
+            "deepseek-v4.1-flash: Auth failed: 401 Unauthorized".to_string(),
+            "glm-5.3-flash: upstream returned HTTP 404: model disabled".to_string(),
+        ];
+        let got = super::final_error(
+            &tried,
+            Some(AgentLlmError::AllChannelsFailed("x".to_string())),
+        );
+        let msg = got.to_string();
+        assert!(
+            matches!(got, AgentLlmError::AllModelsFailed(_)),
+            "多模型应汇总: {msg}"
+        );
+        assert!(msg.contains("deepseek-v4.1-flash"), "应点名模型 A: {msg}");
+        assert!(msg.contains("401"), "应带出 A 的原因: {msg}");
+        assert!(msg.contains("glm-5.3-flash"), "应点名模型 B: {msg}");
+        assert!(msg.contains("404"), "应带出 B 的原因: {msg}");
     }
 }
