@@ -101,7 +101,10 @@ fn auth_error(error: ApiKeyError) -> Response {
 ///
 /// 错误用 `Box<Response>`：axum 的 `Response` 自身 ~128 字节，直接塞进
 /// `Result::Err` 会让每个调用栈帧都变大（clippy `result_large_err`）。
-fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<ApiKey, Box<Response>> {
+fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<std::sync::Arc<ApiKey>, Box<Response>> {
     let key = extract_api_key_bearer_first(headers).ok_or_else(|| Box::new(unauthorized()))?;
     let ip = extract_client_ip(headers);
     if let Some(ip_str) = ip.as_deref() {

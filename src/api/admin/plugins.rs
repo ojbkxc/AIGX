@@ -1166,7 +1166,73 @@ pub async fn handle_install_from_release(
             StatusCode::BAD_REQUEST,
         ));
     }
-    let catalog = fetch_catalog(&state).await;
+    start_release_operation(&state, action, id, body.target.as_deref(), body.sha256).await
+}
+
+/// POST /api/plugins/update 的请求体（对齐 A2A `run_update`：`{id?, target?, sha256?}`）。
+#[derive(Debug, Deserialize, Default)]
+pub struct RunUpdateBody {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+/// POST /api/plugins/update —— 执行一次更新（与 `install-from-release` 同一实现）。
+///
+/// 对齐上游 `api/plugins.rs::run_update`（`start_operation(body, "update")`）：
+/// 请求体可为空；缺省 `id` 时取目录里第一个已装外部包（按 registry 顺序），
+/// 再据此解析「目标版本 + 当前平台下载地址 + sha256」并起后台 Operation。
+/// 目录里没有该包 / 平台无包 / 已是最新 → 400（不进后台任务）。
+pub async fn handle_run_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let payload: RunUpdateBody = if body.is_empty() {
+        RunUpdateBody::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| error_response("请求体不是合法 JSON", StatusCode::BAD_REQUEST))?
+    };
+    let id = payload
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            state
+                .plugin_host
+                .registry()
+                .list()
+                .first()
+                .map(|pack| pack.id.clone())
+        })
+        .ok_or_else(|| error_response("缺少插件包 id", StatusCode::BAD_REQUEST))?;
+    start_release_operation(
+        &state,
+        "update",
+        &id,
+        payload.target.as_deref(),
+        payload.sha256,
+    )
+    .await
+}
+
+/// `install-from-release` 与 `POST /update` 共用的实现：
+/// 从发布目录解析目标平台下载地址，校验版本后起后台安装/更新 Operation。
+async fn start_release_operation(
+    state: &AppState,
+    action: &str,
+    id: &str,
+    target: Option<&str>,
+    sha256_override: Option<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let catalog = fetch_catalog(state).await;
     let entry = catalog
         .get("plugins")
         .and_then(Value::as_array)
@@ -1191,7 +1257,7 @@ pub async fn handle_install_from_release(
             StatusCode::BAD_REQUEST,
         ));
     }
-    let target = body.target.as_deref().unwrap_or(std::env::consts::OS);
+    let target = target.unwrap_or(std::env::consts::OS);
     let platform = entry
         .get("platforms")
         .and_then(Value::as_array)
@@ -1224,9 +1290,7 @@ pub async fn handle_install_from_release(
             return Err(error_response("已经是最新版本", StatusCode::BAD_REQUEST));
         }
     }
-    let sha256 = body
-        .sha256
-        .clone()
+    let sha256 = sha256_override
         .or_else(|| {
             platform
                 .get("sha256")

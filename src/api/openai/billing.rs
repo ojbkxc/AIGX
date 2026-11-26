@@ -863,7 +863,7 @@ pub(crate) fn release_reservation(
 /// 若客户端在计费完成前断连，守卫的 Drop 实现会负责兜底计费，确保请求最终被正确记账。
 pub(crate) struct StreamBillingState {
     pub(crate) state: AppState,
-    pub(crate) api_key: crate::api::auth::ApiKey,
+    pub(crate) api_key: Arc<crate::api::auth::ApiKey>,
     /// 映射后的上游模型名（= 价格表名），用户可见
     pub(crate) model: String,
     /// 用户原始请求模型名（admin 排查用，无映射时 None）
@@ -1126,7 +1126,7 @@ pub(crate) struct GuardedStream<S, G> {
 /// 天然恰好一次，无需原子标志互斥。
 pub(crate) struct ResponsesBillingState {
     pub(crate) state: AppState,
-    pub(crate) api_key: crate::api::auth::ApiKey,
+    pub(crate) api_key: Arc<crate::api::auth::ApiKey>,
     /// 映射后的上游模型名（= 价格表名），用户可见
     pub(crate) model: String,
     /// 用户原始请求模型名（admin 排查用，无映射时 None）
@@ -1507,7 +1507,7 @@ pub(crate) fn write_attempt_499_log(
 
 pub(crate) struct AttemptStartGuard {
     pub state: AppState,
-    pub api_key: crate::api::auth::ApiKey,
+    pub api_key: Arc<crate::api::auth::ApiKey>,
     pub requested_model: String,
     pub group: String,
     /// 预留句柄（**owned clone**：Reservation::Clone 语义=克隆体与原件恰好

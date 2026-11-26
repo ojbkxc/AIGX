@@ -132,12 +132,13 @@ pub(crate) fn provider_of_channel_id(state: &AppState, channel_id: &str) -> Opti
 
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
 ///
-/// 参照 new-api token.go 的校验逻辑。返回 ApiKey 实例供计费使用。
+/// 参照 new-api token.go 的校验逻辑。返回 `Arc<ApiKey>` 共享引用供计费使用
+/// （鉴权路径不再每请求深拷贝整份 ApiKey）。
 pub(crate) fn verify_api_key_full(
     state: &AppState,
     headers: &HeaderMap,
     model: &str,
-) -> Result<crate::api::auth::ApiKey, (StatusCode, Json<Value>)> {
+) -> Result<Arc<crate::api::auth::ApiKey>, (StatusCode, Json<Value>)> {
     let key = extract_api_key(headers).ok_or_else(|| {
         openai_error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED)
     })?;
@@ -185,7 +186,7 @@ pub(crate) fn verify_api_key_full(
 pub(crate) fn verify_api_key_listing(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<crate::api::auth::ApiKey, (StatusCode, Json<Value>)> {
+) -> Result<Arc<crate::api::auth::ApiKey>, (StatusCode, Json<Value>)> {
     let key = extract_api_key(headers).ok_or_else(|| {
         openai_error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED)
     })?;

@@ -194,7 +194,9 @@ pub struct ApiKeyStore {
     /// enc1: 信封加密的数据目录（`account.key` 密钥文件所在目录，与 FileStore
     /// 同目录；main 启动时在 `set_data_dir` 之后传入）。
     data_dir: PathBuf,
-    keys: Arc<RwLock<HashMap<String, ApiKey>>>,
+    /// 密钥表：值为 `Arc<ApiKey>`，鉴权路径只做引用计数克隆（O(1)），
+    /// 不再每请求深拷贝整份 `ApiKey`（含 reservations / 白名单等 Vec）。
+    keys: Arc<RwLock<HashMap<String, Arc<ApiKey>>>>,
     key_hash_map: Arc<RwLock<HashMap<String, String>>>, // hash -> id
     /// 用户存储（余额预检用；None 时跳过用户级检查）
     user_store: Option<std::sync::Arc<crate::user::UserStore>>,
@@ -270,15 +272,15 @@ impl ApiKeyStore {
         let mut hash_map = self.key_hash_map.write();
         for (id, api_key, hash) in loaded {
             hash_map.insert(hash, id.clone());
-            map.insert(id, api_key);
+            map.insert(id, Arc::new(api_key));
         }
 
         tracing::info!("Loaded {} API keys", map.len());
         Ok(())
     }
 
-    /// 验证 API Key
-    pub fn validate(&self, key: &str) -> Option<ApiKey> {
+    /// 验证 API Key（返回共享引用，调用方 `Arc::clone` 即可，避免深拷贝）。
+    pub fn validate(&self, key: &str) -> Option<Arc<ApiKey>> {
         let actual_key = if let Some(stripped) = key.strip_prefix("sk-") {
             stripped
         } else {
@@ -292,7 +294,7 @@ impl ApiKeyStore {
             let keys = self.keys.read();
             if let Some(api_key) = keys.get(id) {
                 if api_key.is_active {
-                    return Some(api_key.clone());
+                    return Some(Arc::clone(api_key));
                 }
             }
         }
@@ -372,7 +374,9 @@ impl ApiKeyStore {
         // P0：落盘前加密 key 字段（内存保持明文供鉴权哈希比对）
         self.store
             .put(&format!("apikey_{id}"), &self.for_storage(&api_key))?;
-        self.keys.write().insert(id.clone(), api_key.clone());
+        self.keys
+            .write()
+            .insert(id.clone(), Arc::new(api_key.clone()));
         self.key_hash_map.write().insert(hash, id);
 
         Ok(api_key)
@@ -388,7 +392,7 @@ impl ApiKeyStore {
             .keys
             .read()
             .get(id)
-            .cloned()
+            .map(|key| (**key).clone())
             .ok_or_else(|| anyhow::anyhow!("api key not found"))?;
         let old_hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
         mutator(&mut api_key);
@@ -405,7 +409,9 @@ impl ApiKeyStore {
         // P0：落盘前加密 key 字段（内存保持明文供鉴权哈希比对）
         self.store
             .put(&format!("apikey_{id}"), &self.for_storage(&api_key))?;
-        self.keys.write().insert(id.to_string(), api_key.clone());
+        self.keys
+            .write()
+            .insert(id.to_string(), Arc::new(api_key.clone()));
         let mut hm = self.key_hash_map.write();
         if old_hash != new_hash {
             hm.remove(&old_hash);
@@ -420,7 +426,7 @@ impl ApiKeyStore {
             .read()
             .values()
             .filter(|k| k.user_id.as_deref() == Some(user_id))
-            .cloned()
+            .map(|k| (**k).clone())
             .collect()
     }
 
@@ -436,7 +442,7 @@ impl ApiKeyStore {
         key: &str,
         model: &str,
         ip: Option<&str>,
-    ) -> Result<ApiKey, ApiKeyError> {
+    ) -> Result<Arc<ApiKey>, ApiKeyError> {
         let api_key = self.validate(key).ok_or(ApiKeyError::Invalid)?;
         if !api_key.is_enabled() {
             return Err(ApiKeyError::Disabled);
@@ -475,7 +481,11 @@ impl ApiKeyStore {
     /// 列举请求没有具体 model，用空串去比白名单会把「只允许 gpt-4 的 Key」
     /// 误判为无权限。其余检查（禁用/过期/额度/IP/用户余额）照常执行，
     /// 避免过期或超额的 Key 仍能读到模型清单。
-    pub fn validate_listing(&self, key: &str, ip: Option<&str>) -> Result<ApiKey, ApiKeyError> {
+    pub fn validate_listing(
+        &self,
+        key: &str,
+        ip: Option<&str>,
+    ) -> Result<Arc<ApiKey>, ApiKeyError> {
         let api_key = self.validate(key).ok_or(ApiKeyError::Invalid)?;
         if !api_key.is_enabled() {
             return Err(ApiKeyError::Disabled);
@@ -521,7 +531,7 @@ impl ApiKeyStore {
         }
         let mut keys = self.keys.write();
         let api_key = match keys.get_mut(id) {
-            Some(k) => k,
+            Some(k) => Arc::make_mut(k),
             None => return false,
         };
         if let Some(limit) = api_key.quota_limit {
@@ -547,7 +557,7 @@ impl ApiKeyStore {
             return Some(0);
         }
         let mut keys = self.keys.write();
-        let api_key = keys.get_mut(id)?;
+        let api_key = Arc::make_mut(keys.get_mut(id)?);
         if let Some(limit) = api_key.quota_limit {
             if api_key.used_quota + api_key.reserved_total() + amount > limit {
                 return None;
@@ -575,7 +585,7 @@ impl ApiKeyStore {
         let actual = actual.max(0);
         let mut keys = self.keys.write();
         let api_key = match keys.get_mut(id) {
-            Some(k) => k,
+            Some(k) => Arc::make_mut(k),
             None => return,
         };
         if let Some(pos) = api_key.reservations.iter().position(|r| r.token == token) {
@@ -610,7 +620,7 @@ impl ApiKeyStore {
         }
         let mut keys = self.keys.write();
         let api_key = match keys.get_mut(id) {
-            Some(k) => k,
+            Some(k) => Arc::make_mut(k),
             None => return,
         };
         let Some(pos) = api_key.reservations.iter().position(|r| r.token == token) else {
@@ -630,7 +640,8 @@ impl ApiKeyStore {
         let mut dirty: Vec<ApiKey> = Vec::new();
         {
             let mut keys = self.keys.write();
-            for key in keys.values_mut() {
+            for entry in keys.values_mut() {
+                let key = Arc::make_mut(entry);
                 let before = key.reservations.len();
                 key.reservations.retain(|r| r.at >= cutoff);
                 if key.reservations.len() != before {
@@ -649,7 +660,8 @@ impl ApiKeyStore {
     /// 重置已用额度
     pub fn reset_used_quota(&self, id: &str) -> bool {
         let mut keys = self.keys.write();
-        if let Some(api_key) = keys.get_mut(id) {
+        if let Some(entry) = keys.get_mut(id) {
+            let api_key = Arc::make_mut(entry);
             api_key.used_quota = 0;
             api_key.updated_at = chrono::Utc::now().timestamp();
             api_key.bump_version();
@@ -678,7 +690,7 @@ impl ApiKeyStore {
 
     /// 列出所有密钥
     pub fn list(&self) -> Vec<ApiKey> {
-        self.keys.read().values().cloned().collect()
+        self.keys.read().values().map(|k| (**k).clone()).collect()
     }
 
     /// 当前**可用**的启用密钥数量（`is_enabled()` 且未过期）。
@@ -1177,9 +1189,7 @@ mod session_registry_tests {
         let fresh_tok = s.reserve_quota(&k.id, 40).unwrap();
         {
             let mut keys = s.keys.write();
-            let entry = keys
-                .get_mut(&k.id)
-                .unwrap()
+            let entry = Arc::make_mut(keys.get_mut(&k.id).unwrap())
                 .reservations
                 .iter_mut()
                 .find(|r| r.token == stale_tok)

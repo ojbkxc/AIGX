@@ -35,7 +35,7 @@ fn verify_api_key_full(
     state: &AppState,
     headers: &HeaderMap,
     model: &str,
-) -> Result<super::auth::ApiKey, (StatusCode, Json<Value>)> {
+) -> Result<std::sync::Arc<super::auth::ApiKey>, (StatusCode, Json<Value>)> {
     let key = extract_api_key(headers).ok_or_else(|| {
         anthropic_error(
             "authentication_error",
@@ -1317,12 +1317,14 @@ pub async fn handle_messages(
             // 参照 aisix AnthropicSseEncoder：文本块在首个文本增量到达时才开块，
             // 避免 thinking/文本/tool 块 index 冲突）
             let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
-            // TTFB：首帧不再等待整段 prompt 的 BPE 计数（大 prompt 时会把
-            // message_start 拖到 tokenize 完成之后才发出）。input_tokens 先回显 0，
-            // 真实值在终帧 message_delta 的 usage 里回填（见 suffix）。
+            // TTFB：首帧不再为 message_start 单独再做一次整段 prompt 的 BPE 计数。
+            // input_tokens 直接复用请求前已算好的 `estimated_prompt_tokens`
+            // （配额预留用过同一个值，零额外开销）；Anthropic 官方口径里
+            // input_tokens 只在 message_start 出现，message_delta 只报 output。
             // message_start 对客户端回显**请求的对外模型名**（A2A
             // `rewrite_response_model` 同口径）：上游映射后的实际模型名
             // 只在内部计费/日志使用，不泄漏给下游。
+            let input_tokens_for_start = estimated_prompt_tokens;
             let model_for_prefix = model.clone();
             let prefix = futures::stream::once(async move {
                 Ok::<_, Infallible>(
@@ -1337,7 +1339,7 @@ pub async fn handle_messages(
                                 "model": model_for_prefix,
                                 "stop_reason": null,
                                 "stop_sequence": null,
-                                "usage": {"input_tokens": 0, "output_tokens": 0}
+                                "usage": {"input_tokens": input_tokens_for_start, "output_tokens": 0}
                             }
                         })
                         .to_string(),
@@ -1746,8 +1748,9 @@ pub async fn handle_messages(
                     serde_json::json!({
                         "type": "message_delta",
                         "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                        // input_tokens 在此回填（首帧 message_start 为 0，见前缀注释）
-                        "usage": {"input_tokens": prompt_tokens, "output_tokens": completion_tokens}
+                        // 官方口径：message_delta 的 usage 只报 output_tokens（累计值）；
+                        // input_tokens 已在 message_start 给出，不在终帧重复。
+                        "usage": {"output_tokens": completion_tokens}
                     })
                     .to_string(),
                 )));
