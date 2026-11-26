@@ -1311,10 +1311,7 @@ mod tests {
             Some(u.id.clone()),
             "坏记录不该清空 email 索引"
         );
-        assert!(
-            s.get_by_id("broken-entry").is_none(),
-            "坏记录不得进入索引"
-        );
+        assert!(s.get_by_id("broken-entry").is_none(), "坏记录不得进入索引");
     }
 
     /// 旧快照落盘必须被拒绝（版本门是**原子**的读-比较-写）。
