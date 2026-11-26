@@ -3229,10 +3229,10 @@ pub async fn handle_update_exchange_rates(
 // 渠道对话调试 + 通知测试端点（补充：前端仍在调用）
 // ============================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ChannelChatTestRequest {
-    /// 渠道 ID；Playground（不绑定渠道）传空字符串，由后端自动选择
-    /// 优先级最高的启用渠道。
+    /// 渠道 ID；Playground（不绑定渠道）传空字符串，由后端按候选链逐个尝试
+    ///（priority 降序，失败切下一个直到成功）。
     #[serde(default)]
     pub channel_id: String,
     /// 协议：openai（/v1/chat/completions）或 anthropic（/v1/messages）
@@ -3372,179 +3372,363 @@ fn build_openai_chat_test_payload(
     payload
 }
 
-/// 渠道对话调试入口（原 admin.rs 逐字搬运）。
-pub async fn handle_channel_chat_test(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<ChannelChatTestRequest>,
-) -> Response {
-    // 权限对齐 new-api：Playground 是用户/管理员共用的调试沙盒。
-    // 登录用户即可对话，但普通用户不得指定 channel_id（防止探测他人渠道），
-    // 只能走「自动选择启用渠道」路径。
-    let user = match verify_user(&state, &headers).await {
-        Ok(u) => u,
-        Err(e) => return e.into_response(),
-    };
-    let request_start = std::time::Instant::now();
-    if !user.is_admin() && !body.channel_id.trim().is_empty() {
-        return error_response(
-            "Only administrators can target a specific channel",
-            StatusCode::FORBIDDEN,
-        )
-        .into_response();
+// ── chat_test 的候选 failover（与数据面 B06 同一判据）────────────────────
+//
+// 改造前：按 priority 只挑**一个**渠道，失败即把错误原样回给用户 —— 同一个上游
+// 故障，`/v1/chat/completions` 会切到下一个候选成功，AI 运维页直接报错。
+// 现在：候选全量、priority 降序（同优先级保持渠道表顺序，不引入随机）逐个尝试，
+// 失败切下一个直到成功；全败时把「试过哪些渠道、各自什么错」聚合成一条错误给
+// 前端，逐次明细同时落进请求日志（`attempt_details`），调试面能看到完整链路。
+//
+// 复用的数据面判据（不写第二份）：
+// - 换不换渠道：[`crate::api::openai::resolve::is_retryable_bridge_error`]
+//   —— 裸 reqwest 的 HTTP 状态/传输/解码失败先映射成 `BridgeError` 再问它；
+// - 冷却/断路器：只读判定（`is_in_cooldown` / `get_state`），不抢半开租约、
+//   不改渠道健康状态（一次调试探针不该改写生产选路）；
+// - 尝试明细：字段与 `crate::log::AttemptDetail` 同口径。
+
+/// 单次尝试的失败摘要上限（与数据面 `AttemptDetail.error` 的 300 字符口径一致）。
+const CHAT_TEST_ATTEMPT_ERROR_CHARS: usize = 300;
+/// 聚合错误里每条渠道错误的展示上限（一条错误要能在一屏里读完）。
+const CHAT_TEST_AGGREGATE_ERROR_CHARS: usize = 200;
+
+/// 截断到 `max` 个字符（按字符不按字节，避免切碎 UTF-8）。
+fn truncate_chars(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text;
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// 一次 chat_test 尝试的失败。
+///
+/// `retryable` 是**唯一**的「换不换下一个渠道」判据，构造时一律经
+/// [`crate::api::openai::resolve::is_retryable_bridge_error`] 得出 —— 4xx 客户端
+/// 错误（上下文超限、参数错误、模型不存在）不换渠道，5xx/401/403/429/超时/传输
+/// 错误才切下一个。
+struct ChatTestAttemptError {
+    /// 上游 HTTP 状态（`None` = 传输层失败/无状态码）
+    status: Option<u16>,
+    /// 回给前端与日志的错误摘要
+    message: String,
+    /// 是否值得换下一个渠道（判据见上）
+    retryable: bool,
+}
+
+impl ChatTestAttemptError {
+    /// 裸 HTTP 非 2xx：先映射成 `BridgeError::UpstreamStatus` 再问数据面同一判据。
+    fn from_http_status(status: u16, message: String) -> Self {
+        let probe = crate::bridge::BridgeError::upstream_status(status, message.clone());
+        Self {
+            status: Some(status),
+            message: truncate_chars(message, CHAT_TEST_ATTEMPT_ERROR_CHARS),
+            retryable: crate::api::openai::resolve::is_retryable_bridge_error(&probe),
+        }
     }
 
-    // Playground 不绑定渠道：按用户指定的 model 路由到声明了该模型的启用渠道
-    //（优先级降序取第一个）；不再「选优先级最高的渠道后透传任意模型」——
-    // 那会把 A 渠道的模型名发给 B 渠道（B 上游可能静默用别的模型兜底，
-    // 日志渠道/模型错位，且无从追溯真实上游模型）。
-    // model 为空时保留旧行为：选优先级最高的启用渠道，再取其 models[0]。
-    let requested_model = body.model.trim().to_string();
-
-    // 分组模型白名单（与数据面 / Playground 同口径）：普通用户按次扣 2 配额
-    // 打上游，若不校验白名单，受限分组用户能用低价在这里调用高价模型。
-    if !user.is_admin()
-        && !requested_model.is_empty()
-        && !state
-            .user_group_store
-            .allows_model(&user.group, &requested_model)
-    {
-        return error_response(
-            &format!("模型 '{requested_model}' 不在当前分组允许范围内"),
-            StatusCode::FORBIDDEN,
-        )
-        .into_response();
+    /// 传输层失败（连接/超时/发送失败）：对应 `BridgeError::Transport`，可切下一个。
+    fn from_transport(message: String) -> Self {
+        let probe = crate::bridge::BridgeError::Transport(message.clone());
+        Self {
+            status: None,
+            message: truncate_chars(message, CHAT_TEST_ATTEMPT_ERROR_CHARS),
+            retryable: crate::api::openai::resolve::is_retryable_bridge_error(&probe),
+        }
     }
-    let ch = if body.channel_id.trim().is_empty() {
-        let enabled: Vec<crate::channel::Channel> = state
-            .channel_store
-            .list()
-            .into_iter()
-            .filter(|c| c.is_enabled())
-            .collect();
-        let picked = if requested_model.is_empty() {
-            enabled.iter().max_by_key(|c| c.priority).cloned()
-        } else {
-            // 与数据面 /v1/chat/completions 同口径（select_for_model 的过滤子集，
-            // 不含冷却/断路器——调试入口要能看到被冷却的渠道，方便诊断）：
-            // 先找声明了该模型的渠道；models 留空的渠道若已有发现快照，
-            // 按快照收窄（auto_pick_supports），防止高优先级“全声明”渠道抢走
-            // 上游实际不提供的模型（日志因此记到与请求不符的渠道）。
-            enabled
-                .iter()
-                .filter(|c| c.auto_pick_supports(&requested_model))
-                .max_by_key(|c| c.priority)
-                .cloned()
-                .or_else(|| {
-                    // 无渠道声明该模型时，退「models 为空（=全部）」的启用渠道
-                    enabled
-                        .iter()
-                        .filter(|c| c.models.is_empty())
-                        .max_by_key(|c| c.priority)
-                        .cloned()
-                })
+
+    /// 上游 2xx 但正文不可解析：对应 `BridgeError::UpstreamDecode`。
+    fn from_decode(message: String) -> Self {
+        let probe = crate::bridge::BridgeError::UpstreamDecode(message.clone());
+        Self {
+            status: None,
+            message: truncate_chars(message, CHAT_TEST_ATTEMPT_ERROR_CHARS),
+            retryable: crate::api::openai::resolve::is_retryable_bridge_error(&probe),
+        }
+    }
+
+    /// 账号池链路原生 `BridgeError`（401/403/429/5xx/超时分类已是数据面口径）。
+    fn from_bridge(error: &crate::bridge::BridgeError, message: String) -> Self {
+        Self {
+            status: Some(error.http_status()),
+            message: truncate_chars(message, CHAT_TEST_ATTEMPT_ERROR_CHARS),
+            retryable: crate::api::openai::resolve::is_retryable_bridge_error(error),
+        }
+    }
+}
+
+/// chat_test 的调度留痕（与数据面 `RequestLog` 同字段，AI 运维调试面据此看链路）。
+#[derive(Debug, Clone, Default)]
+struct ChatTestTrace {
+    /// 候选渠道 id（按尝试顺序）
+    candidate_channels: Vec<String>,
+    /// 被跳过的渠道及原因（冷却/断路器/限速）
+    filtered_channels: Vec<crate::log::FilteredChannel>,
+    /// 逐次尝试明细（成功轮也占一条）
+    attempt_details: Vec<crate::log::AttemptDetail>,
+    /// 实际服务的那一个渠道
+    selected_channel: Option<String>,
+}
+
+impl ChatTestTrace {
+    /// 真实上游调用次数（含重试；为空时按 1 计——与改造前的固定值同口径）。
+    fn attempts(&self) -> u32 {
+        std::cmp::max(1, self.attempt_details.len() as u32)
+    }
+
+    /// 派生「含本轮成功轮」的快照：给流式守卫/非流式落账用。
+    fn with_success(&self, detail: &crate::log::AttemptDetail, channel_id: &str) -> Self {
+        let mut next = self.clone();
+        next.selected_channel = Some(channel_id.to_string());
+        next.attempt_details.push(detail.clone());
+        next
+    }
+}
+
+/// 一次尝试的上下文（渠道相关的派生量在进入尝试前就定好，明细与落账都用它）。
+#[derive(Clone)]
+struct ChatTestAttemptContext {
+    /// 本次尝试的序号（1 起）
+    index: u32,
+    /// 请求口径的模型名（记账/回显用，跨渠道不变）
+    model: String,
+    /// 本轮渠道映射后的上游真实模型名（每轮按该轮渠道重算）
+    upstream: String,
+    /// 本轮开始时刻（unix 秒）
+    started_at: i64,
+    /// 渠道供应商标识（`AttemptDetail.provider`）
+    provider: String,
+    /// 明细提示（全部渠道都在冷却时的「最后手段」标记）
+    notice: Option<String>,
+    /// 之前各轮明细 + 候选/过滤快照（成功轮落账与流式守卫要用完整链路）
+    trace: ChatTestTrace,
+}
+
+impl ChatTestAttemptContext {
+    /// 构造一条 `AttemptDetail`（成功轮 `error=None`）。
+    fn detail(
+        &self,
+        channel: &Channel,
+        status: Option<u16>,
+        error: Option<String>,
+        finished_at: Option<i64>,
+    ) -> crate::log::AttemptDetail {
+        crate::log::AttemptDetail {
+            index: self.index,
+            channel_id: channel.id.clone(),
+            channel_name: channel.name.clone(),
+            provider: self.provider.clone(),
+            account: String::new(),
+            model: self.upstream.clone(),
+            sticky_hit: false,
+            started_at: self.started_at,
+            finished_at,
+            status,
+            error,
+            notice: self.notice.clone(),
+        }
+    }
+}
+
+/// 非流式成功轮待落的账（链路完整后由调用方写一条请求日志）。
+struct ChatTestSuccessLog {
+    channel_id: String,
+    channel_name: String,
+    model: String,
+    usage_json: Value,
+    accumulated_text: Option<String>,
+    request_body: Value,
+    upstream_url: String,
+}
+
+/// 一次成功的尝试。
+struct ChatTestSuccess {
+    /// 可直接回给前端的响应（流式轮已包好保活与记账守卫）
+    response: Response,
+    /// 本轮成功明细（调用方并入链路）
+    detail: crate::log::AttemptDetail,
+    /// 非流式轮：待写日志；流式轮为 `None`（守卫在流结束时落账）
+    log: Option<ChatTestSuccessLog>,
+}
+
+/// failover 的最终结论。
+struct ChatTestFailover {
+    /// 成功的尝试（`None` = 全败）
+    success: Option<ChatTestSuccess>,
+    /// 完整尝试链（成功时含成功轮）
+    trace: ChatTestTrace,
+    /// 全败时的聚合错误文案
+    error: Option<String>,
+}
+
+/// 注入式尝试的 future（`'static`：调用方把需要的状态克隆进去）。
+#[allow(clippy::type_complexity)] // 别名就是为了把这一长串收成一处
+type ChatTestAttemptFut = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<ChatTestSuccess, ChatTestAttemptError>> + Send>,
+>;
+
+/// 把一次尝试的 future 装箱成 [`ChatTestAttemptFut`]。
+///
+/// 独立成函数而不是在闭包里 `let fut: ChatTestAttemptFut = Box::pin(…); fut`：
+/// 后者正好是 `clippy::let_and_return`（本仓 CI 用 `-D warnings`，那条会直接判红）。
+fn boxed_attempt<F>(fut: F) -> ChatTestAttemptFut
+where
+    F: std::future::Future<Output = Result<ChatTestSuccess, ChatTestAttemptError>> + Send + 'static,
+{
+    Box::pin(fut)
+}
+
+/// 逐候选尝试，直到成功 —— failover 的驱动（尝试本体由 `attempt` 注入，便于单测）。
+///
+/// 语义与数据面 `/v1/chat/completions` 的 failover 循环一致：不论候选有几个，
+/// 每个渠道**最多打一次**；某轮失败且 `retryable` 才切下一个，不可重试立即收手
+/// （换一家大概率同样失败）。
+///
+/// 不额外套时间预算：等待上限由「候选数 × 单次 120s 超时」天然界定。数据面的
+/// 90s 总预算在调试入口会把「第一个慢渠道超时」直接判成终态、根本走不到切换，
+/// 与「直到能成功」冲突。
+async fn chat_test_failover<A>(
+    candidates: Vec<Channel>,
+    model: &str,
+    trace: ChatTestTrace,
+    notice: Option<String>,
+    provider_of: impl Fn(&str) -> Option<String>,
+    mut attempt: A,
+) -> ChatTestFailover
+where
+    A: FnMut(Channel, ChatTestAttemptContext) -> ChatTestAttemptFut,
+{
+    let mut chain = trace;
+    let mut last_error: Option<String> = None;
+    for (idx, ch) in candidates.into_iter().enumerate() {
+        let index = (idx + 1) as u32;
+        // 渠道级模型映射：每轮按该轮渠道重算（不跨模型——候选都声明了同一个模型，
+        // 只有上游真名可能不同）
+        let upstream = ch
+            .resolve_channel_mapping(model)
+            .unwrap_or_else(|| model.to_string());
+        let ctx = ChatTestAttemptContext {
+            index,
+            model: model.to_string(),
+            upstream,
+            started_at: chrono::Utc::now().timestamp(),
+            provider: provider_of(&ch.id).unwrap_or_default(),
+            notice: notice.clone(),
+            trace: chain.clone(),
         };
-        match picked {
-            Some(c) => c,
-            None => {
-                return error_response(
-                    &format!(
-                        "No enabled channel provides model '{requested_model}' \
-                         (available channels do not declare it)"
-                    ),
-                    StatusCode::BAD_REQUEST,
-                )
-                .into_response()
+        // 失败轮明细复用同一上下文（尝试内部只负责状态位）
+        let detail_ctx = ctx.clone();
+        match attempt(ch.clone(), ctx).await {
+            Ok(success) => {
+                chain.selected_channel = Some(ch.id.clone());
+                chain.attempt_details.push(success.detail.clone());
+                return ChatTestFailover {
+                    success: Some(success),
+                    trace: chain,
+                    error: None,
+                };
             }
-        }
-    } else {
-        match state.channel_store.get(&body.channel_id) {
-            Some(c) => c,
-            None => {
-                return error_response("Channel not found", StatusCode::NOT_FOUND).into_response()
+            Err(err) => {
+                let finished_at = chrono::Utc::now().timestamp();
+                let detail = detail_ctx.detail(
+                    &ch,
+                    err.status,
+                    Some(err.message.clone()),
+                    Some(finished_at),
+                );
+                chain.attempt_details.push(detail);
+                let retryable = err.retryable;
+                last_error = Some(err.message);
+                if !retryable {
+                    break;
+                }
             }
-        }
-    };
-
-    // 指定渠道调试：校验模型属于该渠道（models 非空 = 白名单；空 = 全部，
-    // 以发现快照兜底），防止把别的渠道的模型名透传给本渠道上游。
-    if !body.channel_id.trim().is_empty() && !requested_model.is_empty() {
-        let declared = ch.supports_model(&requested_model)
-            || ch
-                .effective_models()
-                .iter()
-                .any(|m| m.eq_ignore_ascii_case(&requested_model));
-        if !declared {
-            return error_response(
-                &format!(
-                    "Model '{requested_model}' is not declared by channel '{}' \
-                     (check channel models or clear the selection)",
-                    ch.name
-                ),
-                StatusCode::BAD_REQUEST,
-            )
-            .into_response();
         }
     }
+    let error = Some(chat_test_aggregate_error(
+        &chain.attempt_details,
+        last_error,
+    ));
+    ChatTestFailover {
+        success: None,
+        trace: chain,
+        error,
+    }
+}
 
-    // 确定目标模型：渠道未配置模型时使用第一个启用渠道声明的模型，
-    // 再无则透传空字符串（不再硬编码 glm-4.7-flash 兜底）。
-    let model = if !body.model.trim().is_empty() {
-        body.model.trim().to_string()
-    } else if let Some(m) = ch.models.first() {
-        m.clone()
-    } else {
-        state
-            .channel_store
-            .list()
-            .into_iter()
-            .filter(|c| c.is_enabled())
-            .find_map(|c| c.models.into_iter().find(|m| !m.is_empty()))
-            .unwrap_or_default()
-    };
+/// 全败时的聚合错误文案：**试过哪些渠道、各自什么错**。
+///
+/// 单渠道（指定 `channel_id`、或模型只被一个渠道声明）时与改造前逐字相同
+/// （直接回那一条上游错误）；多渠道时逐条列出，便于用户判断该找哪一家。
+fn chat_test_aggregate_error(
+    attempts: &[crate::log::AttemptDetail],
+    last_error: Option<String>,
+) -> String {
+    if attempts.is_empty() {
+        return last_error.unwrap_or_else(|| "所有候选渠道均失败".to_string());
+    }
+    if attempts.len() == 1 {
+        return attempts[0]
+            .error
+            .clone()
+            .unwrap_or_else(|| last_error.unwrap_or_else(|| "所有候选渠道均失败".to_string()));
+    }
+    let mut out = format!("所有 {} 个候选渠道均失败：", attempts.len());
+    for (i, a) in attempts.iter().enumerate() {
+        if i > 0 {
+            out.push('；');
+        }
+        out.push_str(&format!(
+            "{}. {}（{}）→ {}",
+            i + 1,
+            a.channel_name,
+            a.channel_id,
+            truncate_chars(
+                a.error.clone().unwrap_or_default(),
+                CHAT_TEST_AGGREGATE_ERROR_CHARS
+            )
+        ));
+    }
+    out
+}
 
-    // 渠道级模型映射（与数据面一致：用户请求名 → 上游真实名）
-    let upstream = ch
-        .resolve_channel_mapping(&model)
-        .unwrap_or_else(|| model.clone());
-
-    // 构建消息列表：history + 当前消息（多模态时 content 为块数组）
-    let mut messages: Vec<Value> = body.history.clone();
-    messages.push(serde_json::json!({ "role": "user", "content": body.message }));
-
-    let api_key = ch.decode_api_key();
+/// 单渠道尝试（原 handler 的协议分支逐字搬入，失败改成返回 `Err`）。
+///
+/// 三种链路各自把失败映射成 [`ChatTestAttemptError`]：
+/// - 账号型渠道：`AccountBridge` 原生 `BridgeError`；
+/// - OpenAI 透传：状态码/传输/解码三类失败；
+/// - Anthropic 透传：同上。
+///
+/// 流式轮在这里就把保活与记账守卫包好（守卫持有截至本轮的完整尝试链），
+/// 因此流式只在「建流」阶段可切渠道 —— 已开始推流后字节已发给前端，无法回滚
+/// （与数据面一致：数据面也只 failover 到建立流为止）。
+#[allow(clippy::too_many_arguments)]
+async fn chat_test_attempt_once(
+    state: AppState,
+    user: crate::user::User,
+    body: ChannelChatTestRequest,
+    messages: Vec<Value>,
+    client: reqwest::Client,
+    ch: Channel,
+    ctx: ChatTestAttemptContext,
+    request_start: std::time::Instant,
+) -> Result<ChatTestSuccess, ChatTestAttemptError> {
+    let model = ctx.model.clone();
+    let stream = body.stream;
     let protocol = body.protocol.to_lowercase();
     let is_anthropic = protocol == "anthropic";
 
+    let api_key = ch.decode_api_key();
+
     // 构造上游 URL
-    let base = {
-        let b = if is_anthropic {
-            // Anthropic：base_url 通常不含 /v1（上游根就是 api.anthropic.com）
-            ch.base_url.trim().trim_end_matches('/').to_string()
-        } else {
-            // OpenAI 兼容：归一化补 /v1（与 bridge::openai::normalize_base_url 一致）
-            crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string())
-        };
-        b
+    let base = if is_anthropic {
+        // Anthropic：base_url 通常不含 /v1（上游根就是 api.anthropic.com）
+        ch.base_url.trim().trim_end_matches('/').to_string()
+    } else {
+        // OpenAI 兼容：归一化补 /v1（与 bridge::openai::normalize_base_url 一致）
+        crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string())
     };
-
-    let client = match reqwest::Client::builder()
-        // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
-        .http1_only()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return error_response(
-                &format!("HTTP client error: {e}"),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
-        }
-    };
-
-    let stream = body.stream;
 
     // 账号型渠道：凭证不进 Channel，改走 AccountBridge（账号池选号 + 复用各家
     // 原生 bridge 协议），与数据面 /v1/chat/completions 同源。
@@ -3566,7 +3750,7 @@ pub async fn handle_channel_chat_test(
         let parsed = crate::api::openai::parse_messages(Some(&Value::Array(account_msgs)))
             .unwrap_or_default();
         let chat_req = crate::bridge::ChatFormat {
-            model: upstream.clone(),
+            model: ctx.upstream.clone(),
             messages: parsed,
             tools: None,
             max_tokens: body.max_tokens,
@@ -3580,7 +3764,7 @@ pub async fn handle_channel_chat_test(
             web_search_options: None,
             extra: None,
         };
-        let ctx =
+        let bridge_ctx =
             crate::bridge::BridgeContext::new(uuid::Uuid::new_v4().to_string(), model.clone());
         let bridge = crate::bridge::account::AccountBridge::new(
             ch.id.clone(),
@@ -3589,26 +3773,20 @@ pub async fn handle_channel_chat_test(
         .with_rules(state.model_rules.clone())
         .with_plugin_disabled(state.provider_gates.clone());
         // 记账用请求体快照（与既有透传路径口径一致：含 model + messages）
-        let payload_for_log = serde_json::json!({ "model": upstream, "messages": messages });
+        let payload_for_log =
+            serde_json::json!({ "model": ctx.upstream.clone(), "messages": messages });
         let account_url = format!("account://{}", ch.id);
         if stream {
-            let s = match bridge.chat_stream(&chat_req, &ctx).await {
+            let s = match bridge.chat_stream(&chat_req, &bridge_ctx).await {
                 Ok(s) => s,
                 Err(e) => {
-                    record_chat_test_failure(
-                        &state,
-                        &user,
-                        &ch.id,
-                        &ch.name,
-                        &model,
-                        502,
-                        &e.to_string(),
-                        request_start.elapsed().as_millis() as u64,
-                    );
-                    return error_response(&format!("账号池不可用：{e}"), StatusCode::BAD_GATEWAY)
-                        .into_response();
+                    return Err(ChatTestAttemptError::from_bridge(
+                        &e,
+                        format!("账号池不可用：{e}"),
+                    ))
                 }
             };
+            let detail = ctx.detail(&ch, Some(200), None, Some(chrono::Utc::now().timestamp()));
             let body_stream = account_chat_test_stream(
                 s,
                 state.clone(),
@@ -3622,6 +3800,8 @@ pub async fn handle_channel_chat_test(
                 // #21/B：提示 token 估算（与数据面 / 499 同款口径），仅在
                 // 上游未回 usage 时用于合成尾帧与记账
                 crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64,
+                // 守卫持有截至本轮（含本轮成功）的完整链路，落账时一并写入
+                ctx.trace.with_success(&detail, &ch.id),
             );
             // 保活：长思考模型调试时上游长时间无输出，空闲期注入 ": keepalive"
             // 注释行（SSE 规范要求解析器忽略注释行，与数据面 /v1/responses 同法），
@@ -3639,9 +3819,13 @@ pub async fn handle_channel_chat_test(
                     response.headers_mut().insert(name, v);
                 }
             }
-            return response;
+            return Ok(ChatTestSuccess {
+                response,
+                detail,
+                log: None,
+            });
         }
-        return match bridge.chat(&chat_req, &ctx).await {
+        return match bridge.chat(&chat_req, &bridge_ctx).await {
             Ok(resp) => {
                 let content = resp.message.content_str().to_string();
                 let usage_json = serde_json::json!({
@@ -3651,38 +3835,30 @@ pub async fn handle_channel_chat_test(
                         "total_tokens": resp.usage.total_tokens,
                     }
                 });
-                record_chat_test_usage(
-                    &state,
-                    &user,
-                    &ch.id,
-                    &ch.name,
-                    &model,
-                    &usage_json,
-                    Some(&content),
-                    &payload_for_log,
-                    &account_url,
-                    request_start.elapsed().as_millis() as u64,
-                );
-                Json(serde_json::json!({
+                let detail = ctx.detail(&ch, Some(200), None, Some(chrono::Utc::now().timestamp()));
+                let response = Json(serde_json::json!({
                     "success": true,
                     "data": { "content": content, "model": model, "usage": usage_json.get("usage") }
                 }))
-                .into_response()
+                .into_response();
+                Ok(ChatTestSuccess {
+                    response,
+                    detail,
+                    log: Some(ChatTestSuccessLog {
+                        channel_id: ch.id.clone(),
+                        channel_name: ch.name.clone(),
+                        model: model.clone(),
+                        usage_json,
+                        accumulated_text: Some(content),
+                        request_body: payload_for_log,
+                        upstream_url: account_url,
+                    }),
+                })
             }
-            Err(e) => {
-                record_chat_test_failure(
-                    &state,
-                    &user,
-                    &ch.id,
-                    &ch.name,
-                    &model,
-                    502,
-                    &e.to_string(),
-                    request_start.elapsed().as_millis() as u64,
-                );
-                error_response(&format!("账号池不可用：{e}"), StatusCode::BAD_GATEWAY)
-                    .into_response()
-            }
+            Err(e) => Err(ChatTestAttemptError::from_bridge(
+                &e,
+                format!("账号池不可用：{e}"),
+            )),
         };
     }
 
@@ -3690,8 +3866,8 @@ pub async fn handle_channel_chat_test(
     if !is_anthropic {
         let url = ch.quirks.append_suffix(&format!("{base}/chat/completions"));
         let mut payload = build_openai_chat_test_payload(
-            &upstream,
-            messages,
+            &ctx.upstream,
+            messages.clone(),
             stream,
             body.temperature,
             body.top_p,
@@ -3737,128 +3913,108 @@ pub async fn handle_channel_chat_test(
             }
             other => other,
         };
-        return match sent {
-            Ok(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    let text = resp.text().await.unwrap_or_default();
-                    record_chat_test_failure(
-                        &state,
-                        &user,
-                        &ch.id,
-                        &ch.name,
-                        &model,
-                        status.as_u16(),
-                        &format!("Upstream HTTP {status}: {text}"),
-                        request_start.elapsed().as_millis() as u64,
-                    );
-                    return error_response(
-                        &format!("Upstream HTTP {status}: {text}"),
-                        StatusCode::BAD_GATEWAY,
-                    )
-                    .into_response();
-                }
-                if stream {
-                    // 流式：上游 SSE 字节流原样透传。
-                    // 不能再包一层 Sse::Event —— 那会产出 data: data: {...}
-                    // 嵌套帧，前端按 OpenAI SSE 解析时全部丢弃，表现为无回复。
-                    let upstream_headers = [
-                        ("Content-Type", "text/event-stream; charset=utf-8"),
-                        ("Cache-Control", "no-cache"),
-                    ];
-                    // 保活：透传流空闲期注入 ": keepalive" 注释行（与 responses 同法）
-                    let logged = chat_test_logged_stream(
-                        resp.bytes_stream(),
-                        state.clone(),
-                        user.clone(),
-                        ch.id.clone(),
-                        ch.name.clone(),
-                        model.clone(),
-                        payload.clone(),
-                        url.clone(),
-                        request_start,
-                    );
-                    let keepalive_stream = crate::sse::KeepaliveStream::new(
-                        logged,
-                        crate::bridge::SSE_KEEPALIVE_INTERVAL,
-                    );
-                    let mut response = Body::from_stream(keepalive_stream).into_response();
-                    for (name, value) in upstream_headers {
-                        if let Ok(value) = axum::http::HeaderValue::from_str(value) {
-                            response.headers_mut().insert(name, value);
-                        }
-                    }
-                    response
-                } else {
-                    match resp.json::<Value>().await {
-                        Ok(json) => {
-                            let content = json
-                                .get("choices")
-                                .and_then(|c| c.get(0))
-                                .and_then(|c| c.get("message"))
-                                .and_then(|m| m.get("content"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            record_chat_test_usage(
-                                &state,
-                                &user,
-                                &ch.id,
-                                &ch.name,
-                                &model,
-                                &json,
-                                None,
-                                &payload,
-                                &url,
-                                request_start.elapsed().as_millis() as u64,
-                            );
-                            Json(serde_json::json!({
-                                "success": true,
-                                "data": { "content": content, "model": model, "usage": json.get("usage") }
-                            }))
-                            .into_response()
-                        }
-                        Err(e) => {
-                            record_chat_test_failure(
-                                &state,
-                                &user,
-                                &ch.id,
-                                &ch.name,
-                                &model,
-                                502,
-                                &format!("Upstream returned non-JSON: {e}"),
-                                request_start.elapsed().as_millis() as u64,
-                            );
-                            error_response(
-                                &format!("Upstream returned non-JSON: {e}"),
-                                StatusCode::BAD_GATEWAY,
-                            )
-                            .into_response()
-                        }
-                    }
-                }
-            }
+        let resp = match sent {
+            Ok(resp) => resp,
             Err(e) => {
-                record_chat_test_failure(
-                    &state,
-                    &user,
-                    &ch.id,
-                    &ch.name,
-                    &model,
-                    502,
-                    &format!("Request failed: {e}"),
-                    request_start.elapsed().as_millis() as u64,
-                );
-                error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
-                    .into_response()
+                return Err(ChatTestAttemptError::from_transport(format!(
+                    "Request failed: {e}"
+                )))
             }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(ChatTestAttemptError::from_http_status(
+                status.as_u16(),
+                format!("Upstream HTTP {status}: {text}"),
+            ));
+        }
+        if stream {
+            // 流式：上游 SSE 字节流原样透传。
+            // 不能再包一层 Sse::Event —— 那会产出 data: data: {...}
+            // 嵌套帧，前端按 OpenAI SSE 解析时全部丢弃，表现为无回复。
+            let detail = ctx.detail(
+                &ch,
+                Some(status.as_u16()),
+                None,
+                Some(chrono::Utc::now().timestamp()),
+            );
+            let upstream_headers = [
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Cache-Control", "no-cache"),
+            ];
+            // 保活：透传流空闲期注入 ": keepalive" 注释行（与 responses 同法）
+            let logged = chat_test_logged_stream(
+                resp.bytes_stream(),
+                state.clone(),
+                user.clone(),
+                ch.id.clone(),
+                ch.name.clone(),
+                model.clone(),
+                payload.clone(),
+                url.clone(),
+                request_start,
+                ctx.trace.with_success(&detail, &ch.id),
+            );
+            let keepalive_stream =
+                crate::sse::KeepaliveStream::new(logged, crate::bridge::SSE_KEEPALIVE_INTERVAL);
+            let mut response = Body::from_stream(keepalive_stream).into_response();
+            for (name, value) in upstream_headers {
+                if let Ok(value) = axum::http::HeaderValue::from_str(value) {
+                    response.headers_mut().insert(name, value);
+                }
+            }
+            return Ok(ChatTestSuccess {
+                response,
+                detail,
+                log: None,
+            });
+        }
+        return match resp.json::<Value>().await {
+            Ok(json) => {
+                let content = json
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let detail = ctx.detail(
+                    &ch,
+                    Some(status.as_u16()),
+                    None,
+                    Some(chrono::Utc::now().timestamp()),
+                );
+                let response = Json(serde_json::json!({
+                    "success": true,
+                    "data": { "content": content, "model": model, "usage": json.get("usage") }
+                }))
+                .into_response();
+                Ok(ChatTestSuccess {
+                    response,
+                    detail,
+                    log: Some(ChatTestSuccessLog {
+                        channel_id: ch.id.clone(),
+                        channel_name: ch.name.clone(),
+                        model: model.clone(),
+                        usage_json: json,
+                        accumulated_text: None,
+                        request_body: payload,
+                        upstream_url: url,
+                    }),
+                })
+            }
+            Err(e) => Err(ChatTestAttemptError::from_decode(format!(
+                "Upstream returned non-JSON: {e}"
+            ))),
         };
     }
 
     // ── Anthropic 协议 ──
     let url = ch.quirks.append_suffix(&format!("{base}/v1/messages"));
     let mut payload = serde_json::json!({
-        "model": upstream,
+        "model": ctx.upstream.clone(),
         "max_tokens": body.max_tokens.unwrap_or(1024),
         "messages": messages,
     });
@@ -3890,124 +4046,379 @@ pub async fn handle_channel_chat_test(
     }
     req = req.header("anthropic-version", "2023-06-01");
     req = ch.quirks.apply_headers(req);
-    match req.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                record_chat_test_failure(
-                    &state,
-                    &user,
-                    &ch.id,
-                    &ch.name,
-                    &model,
-                    status.as_u16(),
-                    &format!("Upstream HTTP {status}: {text}"),
-                    request_start.elapsed().as_millis() as u64,
-                );
-                return error_response(
-                    &format!("Upstream HTTP {status}: {text}"),
-                    StatusCode::BAD_GATEWAY,
-                )
-                .into_response();
-            }
-            if stream {
-                let upstream_headers = [
-                    ("Content-Type", "text/event-stream; charset=utf-8"),
-                    ("Cache-Control", "no-cache"),
-                ];
-                // 保活：透传流空闲期注入 ": keepalive" 注释行（与 responses 同法）
-                let logged = chat_test_logged_stream(
-                    resp.bytes_stream(),
-                    state.clone(),
-                    user.clone(),
-                    ch.id.clone(),
-                    ch.name.clone(),
-                    model.clone(),
-                    payload.clone(),
-                    url.clone(),
-                    request_start,
-                );
-                let keepalive_stream =
-                    crate::sse::KeepaliveStream::new(logged, crate::bridge::SSE_KEEPALIVE_INTERVAL);
-                let mut response = Body::from_stream(keepalive_stream).into_response();
-                for (name, value) in upstream_headers {
-                    if let Ok(value) = axum::http::HeaderValue::from_str(value) {
-                        response.headers_mut().insert(name, value);
-                    }
-                }
-                response
-            } else {
-                match resp.json::<Value>().await {
-                    Ok(json) => {
-                        let text = json
-                            .get("content")
-                            .and_then(|c| c.as_array())
-                            .and_then(|arr| {
-                                arr.iter().find(|p| {
-                                    p.get("type").and_then(|t| t.as_str()) == Some("text")
-                                })
-                            })
-                            .and_then(|p| p.get("text"))
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        record_chat_test_usage(
-                            &state,
-                            &user,
-                            &ch.id,
-                            &ch.name,
-                            &model,
-                            &json,
-                            None,
-                            &payload,
-                            &url,
-                            request_start.elapsed().as_millis() as u64,
-                        );
-                        Json(serde_json::json!({
-                            "success": true,
-                            "data": {
-                                "content": text,
-                                "model": json.get("model"),
-                                "usage": json.get("usage")
-                            }
-                        }))
-                        .into_response()
-                    }
-                    Err(e) => {
-                        record_chat_test_failure(
-                            &state,
-                            &user,
-                            &ch.id,
-                            &ch.name,
-                            &model,
-                            502,
-                            &format!("Upstream returned non-JSON: {e}"),
-                            request_start.elapsed().as_millis() as u64,
-                        );
-                        error_response(
-                            &format!("Upstream returned non-JSON: {e}"),
-                            StatusCode::BAD_GATEWAY,
-                        )
-                        .into_response()
-                    }
-                }
+    let resp = match req.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            return Err(ChatTestAttemptError::from_transport(format!(
+                "Request failed: {e}"
+            )))
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(ChatTestAttemptError::from_http_status(
+            status.as_u16(),
+            format!("Upstream HTTP {status}: {text}"),
+        ));
+    }
+    if stream {
+        let detail = ctx.detail(
+            &ch,
+            Some(status.as_u16()),
+            None,
+            Some(chrono::Utc::now().timestamp()),
+        );
+        let upstream_headers = [
+            ("Content-Type", "text/event-stream; charset=utf-8"),
+            ("Cache-Control", "no-cache"),
+        ];
+        // 保活：透传流空闲期注入 ": keepalive" 注释行（与 responses 同法）
+        let logged = chat_test_logged_stream(
+            resp.bytes_stream(),
+            state.clone(),
+            user.clone(),
+            ch.id.clone(),
+            ch.name.clone(),
+            model.clone(),
+            payload.clone(),
+            url.clone(),
+            request_start,
+            ctx.trace.with_success(&detail, &ch.id),
+        );
+        let keepalive_stream =
+            crate::sse::KeepaliveStream::new(logged, crate::bridge::SSE_KEEPALIVE_INTERVAL);
+        let mut response = Body::from_stream(keepalive_stream).into_response();
+        for (name, value) in upstream_headers {
+            if let Ok(v) = axum::http::HeaderValue::from_str(value) {
+                response.headers_mut().insert(name, v);
             }
         }
-        Err(e) => {
-            record_chat_test_failure(
-                &state,
-                &user,
-                &ch.id,
-                &ch.name,
-                &model,
-                502,
-                &format!("Request failed: {e}"),
-                request_start.elapsed().as_millis() as u64,
+        return Ok(ChatTestSuccess {
+            response,
+            detail,
+            log: None,
+        });
+    }
+    match resp.json::<Value>().await {
+        Ok(json) => {
+            let text = json
+                .get("content")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                })
+                .and_then(|p| p.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            let detail = ctx.detail(
+                &ch,
+                Some(status.as_u16()),
+                None,
+                Some(chrono::Utc::now().timestamp()),
             );
-            error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY).into_response()
+            let response = Json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "content": text,
+                    "model": json.get("model"),
+                    "usage": json.get("usage")
+                }
+            }))
+            .into_response();
+            Ok(ChatTestSuccess {
+                response,
+                detail,
+                log: Some(ChatTestSuccessLog {
+                    channel_id: ch.id.clone(),
+                    channel_name: ch.name.clone(),
+                    model: model.clone(),
+                    usage_json: json,
+                    accumulated_text: None,
+                    request_body: payload,
+                    upstream_url: url,
+                }),
+            })
+        }
+        Err(e) => Err(ChatTestAttemptError::from_decode(format!(
+            "Upstream returned non-JSON: {e}"
+        ))),
+    }
+}
+
+/// 渠道对话调试入口（原 admin.rs 逐字搬运 + 候选 failover）。
+pub async fn handle_channel_chat_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChannelChatTestRequest>,
+) -> Response {
+    // 权限对齐 new-api：Playground 是用户/管理员共用的调试沙盒。
+    // 登录用户即可对话，但普通用户不得指定 channel_id（防止探测他人渠道），
+    // 只能走「自动选择启用渠道」路径。
+    let user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    let request_start = std::time::Instant::now();
+    if !user.is_admin() && !body.channel_id.trim().is_empty() {
+        return error_response(
+            "Only administrators can target a specific channel",
+            StatusCode::FORBIDDEN,
+        )
+        .into_response();
+    }
+
+    // Playground 不绑定渠道：按用户指定的 model 路由到**声明了该模型**的启用渠道
+    //（优先级降序逐个尝试，失败切下一个直到成功）。不再「选优先级最高的渠道后
+    // 透传任意模型」—— 那会把 A 渠道的模型名发给 B 渠道（B 上游可能静默用别的
+    // 模型兜底，日志渠道/模型错位，且无从追溯真实上游模型）。
+    // model 为空时保留旧行为：选优先级最高的启用渠道，再取其 models[0]。
+    let requested_model = body.model.trim().to_string();
+
+    // 分组模型白名单（与数据面 / Playground 同口径）：普通用户按次扣 2 配额
+    // 打上游，若不校验白名单，受限分组用户能用低价在这里调用高价模型。
+    if !user.is_admin()
+        && !requested_model.is_empty()
+        && !state
+            .user_group_store
+            .allows_model(&user.group, &requested_model)
+    {
+        return error_response(
+            &format!("模型 '{requested_model}' 不在当前分组允许范围内"),
+            StatusCode::FORBIDDEN,
+        )
+        .into_response();
+    }
+
+    // ── 候选渠道 ──
+    // 指定 channel_id = 管理员明确点某个渠道调试：**不 failover**（只打这一个，
+    // 否则「调试这个渠道」的语义就没了）。
+    let explicit_channel = !body.channel_id.trim().is_empty();
+    let mut notice: Option<String> = None;
+    let (mut candidates, filtered) = if explicit_channel {
+        match state.channel_store.get(&body.channel_id) {
+            Some(c) => (vec![c], Vec::new()),
+            None => {
+                return error_response("Channel not found", StatusCode::NOT_FOUND).into_response()
+            }
+        }
+    } else {
+        let (ready, blocked) =
+            crate::api::openai::resolve::chat_test_candidates(&state, &requested_model);
+        // 阻塞原因无论如何都进 filtered_channels：日志里能看到「本来为什么被跳过」。
+        let reasons: Vec<crate::log::FilteredChannel> = blocked
+            .iter()
+            .map(|(c, reason)| crate::log::FilteredChannel {
+                channel_id: c.id.clone(),
+                reason: reason.clone(),
+            })
+            .collect();
+        if ready.is_empty() && !blocked.is_empty() {
+            // 候选全空但存在被阻塞渠道（冷却/断路器/限速）：按优先级作为**最后手段**
+            // 试一遍。调试入口的价值就是「试到什么错」；直接 400 掉只是把「失败就
+            // 报错」换个说法，而用户要的是「自动切换，直到能成功」。
+            notice = Some("最后手段：该渠道处于冷却/断路器打开状态".to_string());
+            let fallback: Vec<Channel> = blocked.into_iter().map(|(c, _)| c).collect();
+            (fallback, reasons)
+        } else {
+            (ready, reasons)
+        }
+    };
+
+    if candidates.is_empty() {
+        return error_response(
+            &format!(
+                "No enabled channel provides model '{requested_model}' \
+                 (available channels do not declare it)"
+            ),
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response();
+    }
+
+    // 指定渠道调试：校验模型属于该渠道（models 非空 = 白名单；空 = 全部，
+    // 以发现快照兜底），防止把别的渠道的模型名透传给本渠道上游。
+    if explicit_channel && !requested_model.is_empty() {
+        let ch = &candidates[0];
+        let declared = ch.supports_model(&requested_model)
+            || ch
+                .effective_models()
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(&requested_model));
+        if !declared {
+            return error_response(
+                &format!(
+                    "Model '{requested_model}' is not declared by channel '{}' \
+                     (check channel models or clear the selection)",
+                    ch.name
+                ),
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response();
         }
     }
+
+    // 确定目标模型：渠道未配置模型时使用第一个启用渠道声明的模型，
+    // 再无则透传空字符串（不再硬编码 glm-4.7-flash 兜底）。
+    let model = if !requested_model.is_empty() {
+        requested_model.clone()
+    } else if let Some(m) = candidates[0].models.first() {
+        m.clone()
+    } else {
+        state
+            .channel_store
+            .list()
+            .into_iter()
+            .filter(|c| c.is_enabled())
+            .find_map(|c| c.models.into_iter().find(|m| !m.is_empty()))
+            .unwrap_or_default()
+    };
+
+    // 模型是「推断」出来的（请求没带 model）时，候选必须都声明同一个模型：
+    // 否则跨渠道换模型 = 悄悄用别的模型兜底。推断不出候选就只试首个（旧行为）。
+    if requested_model.is_empty() {
+        let narrowed: Vec<Channel> = candidates
+            .iter()
+            .filter(|c| c.auto_pick_supports(&model))
+            .cloned()
+            .collect();
+        if narrowed.is_empty() {
+            candidates.truncate(1);
+        } else {
+            candidates = narrowed;
+        }
+    }
+
+    // 调度留痕在候选定型（含上面的模型收窄）后再建，`candidate_channels` 才是
+    // 真正会按顺序尝试的那份名单。
+    let trace = ChatTestTrace {
+        candidate_channels: candidates.iter().map(|c| c.id.clone()).collect(),
+        filtered_channels: filtered,
+        ..Default::default()
+    };
+
+    // 构建消息列表：history + 当前消息（多模态时 content 为块数组）
+    let mut messages: Vec<Value> = body.history.clone();
+    messages.push(serde_json::json!({ "role": "user", "content": body.message.clone() }));
+
+    let client = match reqwest::Client::builder()
+        // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+        .http1_only()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return error_response(
+                &format!("HTTP client error: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .into_response()
+        }
+    };
+
+    // 供应商标识反查（与请求日志 provider 列同一把刀）：先克隆一份给只读闭包，
+    // 避免与下面 `move` 进尝试闭包的 `state` 冲突。
+    let provider_state = state.clone();
+    let failover = chat_test_failover(
+        candidates,
+        &model,
+        trace,
+        notice,
+        |cid: &str| crate::api::openai::resolve::provider_of_channel_id(&provider_state, cid),
+        {
+            let state = state.clone();
+            let user = user.clone();
+            let body = body.clone();
+            let messages = messages.clone();
+            let client = client.clone();
+            move |ch: Channel, ctx: ChatTestAttemptContext| -> ChatTestAttemptFut {
+                let state = state.clone();
+                let user = user.clone();
+                let body = body.clone();
+                let messages = messages.clone();
+                let client = client.clone();
+                boxed_attempt(chat_test_attempt_once(
+                    state,
+                    user,
+                    body,
+                    messages,
+                    client,
+                    ch,
+                    ctx,
+                    request_start,
+                ))
+            }
+        },
+    )
+    .await;
+
+    let latency_ms = request_start.elapsed().as_millis() as u64;
+    if let Some(success) = failover.success {
+        // 成功轮：非流式的账在这里落（流式由守卫在流结束时落）；渠道/模型/供应商
+        // 一律记**实际成功的那个**渠道，不是第一个尝试的。
+        if let Some(log) = success.log {
+            record_chat_test_usage(
+                &state,
+                &user,
+                &log.channel_id,
+                &log.channel_name,
+                &log.model,
+                &log.usage_json,
+                log.accumulated_text.as_deref(),
+                &log.request_body,
+                &log.upstream_url,
+                latency_ms,
+                &failover.trace,
+            );
+        }
+        return success.response;
+    }
+
+    // 全败：一条请求日志 + 聚合错误（逐渠道原因同时进 attempt_details）。
+    let error = failover
+        .error
+        .unwrap_or_else(|| "所有候选渠道均失败".to_string());
+    let last = failover.trace.attempt_details.last();
+    let (channel_id, channel_name) = last
+        .map(|a| (a.channel_id.clone(), a.channel_name.clone()))
+        .unwrap_or_default();
+    record_chat_test_failure(
+        &state,
+        &user,
+        &channel_id,
+        &channel_name,
+        &model,
+        last.and_then(|a| a.status).unwrap_or(502),
+        &error,
+        latency_ms,
+        &failover.trace,
+    );
+    // 结构化附带逐渠道明细（前端只读 `error` 字符串；`attempts` 供调试面展示链路）
+    let attempts: Vec<Value> = failover
+        .trace
+        .attempt_details
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "channelId": a.channel_id,
+                "channelName": a.channel_name,
+                "status": a.status,
+                "error": a.error,
+            })
+        })
+        .collect();
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "success": false,
+            "error": error,
+            "attempts": attempts,
+        })),
+    )
+        .into_response()
 }
 
 /// #21/B：账号池归一化流尾部合成的 usage 收尾帧（`[DONE]` 前最后一帧）。
@@ -4135,6 +4546,9 @@ fn account_chat_test_stream(
     // #21/B：调用方用 `count_chat_prompt`（与数据面 / 499 同款口径）算好的
     // 提示 token 估算值，仅在流尾没有上游真 usage 时兜底合成 usage 帧。
     prompt_tokens_est: u64,
+    // 截至本轮（含本轮成功）的完整尝试链：流结束时随记账一并写进请求日志，
+    // AI 运维的调试面因此能看到「试过哪些渠道、各自什么错」。
+    trace: ChatTestTrace,
 ) -> impl Stream<Item = Result<bytes::Bytes, std::convert::Infallible>> {
     // 输出文本累积（估算 completion tokens；含 reasoning）
     let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
@@ -4243,6 +4657,7 @@ fn account_chat_test_stream(
         // 客户端断连时 done 闭包根本不执行、slot 留空，守卫必须还能给出
         // 与数据面同口径的 prompt 数字（原先这里只能传 Null → 记 0）。
         prompt_tokens_est: u64,
+        trace: ChatTestTrace,
         fired: std::sync::atomic::AtomicBool,
     }
     impl std::ops::Drop for AccountStreamGuard {
@@ -4271,6 +4686,7 @@ fn account_chat_test_stream(
                 &self.request_body,
                 &self.upstream_url,
                 self.request_start.elapsed().as_millis() as u64,
+                &self.trace,
             );
         }
     }
@@ -4286,6 +4702,7 @@ fn account_chat_test_stream(
         acc: acc.clone(),
         usage_slot: usage_slot.clone(),
         prompt_tokens_est,
+        trace,
         fired: std::sync::atomic::AtomicBool::new(false),
     };
 
@@ -4336,6 +4753,7 @@ fn record_chat_test_usage(
     request_body: &Value,
     upstream_url: &str,
     latency_ms: u64,
+    trace: &ChatTestTrace,
 ) {
     let (p, c) = super::playground::extract_usage_tokens(usage_json);
     // usage 缺失（部分流式/小模型）：按估算文本兜底
@@ -4389,19 +4807,19 @@ fn record_chat_test_usage(
         client_version: String::new(),
         request_id: None,
         created_at: chrono::Utc::now().timestamp(),
-        candidate_channels: Vec::new(),
+        candidate_channels: trace.candidate_channels.clone(),
         cache_hit: false,
         conversation: None,
-        filtered_channels: Vec::new(),
-        selected_channel: None,
+        filtered_channels: trace.filtered_channels.clone(),
+        selected_channel: trace.selected_channel.clone(),
         debug,
         first_response_ms: None,
-        attempts: 1,
+        attempts: trace.attempts(),
         sensitive_hits: Vec::new(),
         phase: String::new(),
         route_config: None,
         route_truncated: 0,
-        attempt_details: Vec::new(),
+        attempt_details: trace.attempt_details.clone(),
         attempt_details_truncated: 0,
         account_skips: Vec::new(),
     };
@@ -4427,6 +4845,7 @@ fn record_chat_test_failure(
     status_code: u16,
     upstream_error: &str,
     latency_ms: u64,
+    trace: &ChatTestTrace,
 ) {
     let log = crate::log::RequestLog {
         purge_applied: false,
@@ -4452,19 +4871,19 @@ fn record_chat_test_failure(
         client_version: String::new(),
         request_id: None,
         created_at: chrono::Utc::now().timestamp(),
-        candidate_channels: Vec::new(),
+        candidate_channels: trace.candidate_channels.clone(),
         cache_hit: false,
         conversation: None,
-        filtered_channels: Vec::new(),
+        filtered_channels: trace.filtered_channels.clone(),
         selected_channel: None,
         debug: None,
         first_response_ms: None,
-        attempts: 1,
+        attempts: trace.attempts(),
         sensitive_hits: Vec::new(),
         phase: String::new(),
         route_config: None,
         route_truncated: 0,
-        attempt_details: Vec::new(),
+        attempt_details: trace.attempt_details.clone(),
         attempt_details_truncated: 0,
         account_skips: Vec::new(),
     };
@@ -4502,6 +4921,8 @@ fn chat_test_logged_stream<S, E>(
     request_body: Value,
     upstream_url: String,
     request_start: std::time::Instant,
+    // 截至本轮（含本轮成功）的完整尝试链：流结束时随记账一并写进请求日志
+    trace: ChatTestTrace,
 ) -> impl Stream<Item = Result<bytes::Bytes, E>>
 where
     S: Stream<Item = Result<bytes::Bytes, E>> + Unpin,
@@ -4576,6 +4997,7 @@ where
         request_start: std::time::Instant,
         acc: std::sync::Arc<parking_lot::Mutex<String>>,
         usage_slot: std::sync::Arc<parking_lot::Mutex<Option<Value>>>,
+        trace: ChatTestTrace,
         fired: std::sync::atomic::AtomicBool,
     }
     impl std::ops::Drop for ChatTestLogGuard {
@@ -4620,6 +5042,7 @@ where
                 &self.request_body,
                 &self.upstream_url,
                 self.request_start.elapsed().as_millis() as u64,
+                &self.trace,
             );
         }
     }
@@ -4634,6 +5057,7 @@ where
         request_start,
         acc: acc.clone(),
         usage_slot,
+        trace,
         fired: std::sync::atomic::AtomicBool::new(false),
     };
 
@@ -4781,6 +5205,145 @@ pub async fn handle_test_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一个最小 `Channel`（failover 单测用；id/优先级可按需区分）。
+    fn failover_channel(id: &str, priority: i64) -> Channel {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": format!("渠道 {id}"),
+            "channel_type": "openai_compatible",
+            "base_url": "https://upstream.example.com",
+            "api_key": "sk-test",
+            "priority": priority,
+            "status": "enabled",
+            "models": ["deepseek-chat"],
+        }))
+        .expect("测试渠道构造")
+    }
+
+    /// 造一次「上游已受理」的成功尝试（响应体在单测里无需真发）。
+    fn failover_success(ctx: &ChatTestAttemptContext, channel_id: &str) -> ChatTestSuccess {
+        ChatTestSuccess {
+            response: StatusCode::OK.into_response(),
+            detail: ctx.detail(
+                &failover_channel(channel_id, 0),
+                Some(200),
+                None,
+                Some(ctx.started_at),
+            ),
+            log: None,
+        }
+    }
+
+    /// ★本单主修：**第一个渠道失败、第二个成功** —— 断言最终成功，且
+    /// `attempt_details` 恰好两条（失败轮 + 成功轮）。
+    ///
+    /// 改造前 chat_test 只挑一个渠道（`max_by_key`），第一个失败就整条请求失败
+    /// （`success=None`、attempt_details 也只有一条）—— 所以这三条断言都能区分新旧。
+    #[tokio::test]
+    async fn chat_test_failover_switches_to_next_channel_until_success() {
+        let candidates = vec![failover_channel("ch-a", 30), failover_channel("ch-b", 10)];
+        let mut tried: Vec<String> = Vec::new();
+        let failover = chat_test_failover(
+            candidates,
+            "deepseek-chat",
+            ChatTestTrace::default(),
+            None,
+            |_id: &str| None::<String>,
+            |ch: Channel, ctx: ChatTestAttemptContext| -> ChatTestAttemptFut {
+                tried.push(ch.id.clone());
+                boxed_attempt(async move {
+                    if ch.id == "ch-a" {
+                        // 502 = 上游可恢复错误 → 必须切下一个
+                        Err(ChatTestAttemptError::from_http_status(
+                            502,
+                            "Upstream HTTP 502: bad gateway".to_string(),
+                        ))
+                    } else {
+                        Ok(failover_success(&ctx, &ch.id))
+                    }
+                })
+            },
+        )
+        .await;
+
+        assert!(failover.success.is_some(), "第二个渠道成功 → 整体必须成功");
+        assert_eq!(tried, vec!["ch-a", "ch-b"], "必须按 priority 降序逐个尝试");
+        assert_eq!(
+            failover.trace.attempt_details.len(),
+            2,
+            "失败轮 + 成功轮各一条明细"
+        );
+        assert_eq!(failover.trace.attempt_details[0].channel_id, "ch-a");
+        assert_eq!(failover.trace.attempt_details[0].status, Some(502));
+        assert!(failover.trace.attempt_details[0].error.is_some());
+        assert_eq!(failover.trace.attempt_details[1].channel_id, "ch-b");
+        assert!(failover.trace.attempt_details[1].error.is_none());
+        assert_eq!(
+            failover.trace.selected_channel.as_deref(),
+            Some("ch-b"),
+            "日志/回显渠道必须是实际成功的那个，不是第一个尝试的"
+        );
+        assert_eq!(failover.trace.attempts(), 2);
+    }
+
+    /// 4xx 客户端错误**不换渠道**（判据与数据面同一把刀）：
+    /// 上游回 400 时立即收手，只留一条明细。
+    #[tokio::test]
+    async fn chat_test_failover_stops_on_client_error() {
+        let candidates = vec![failover_channel("ch-a", 30), failover_channel("ch-b", 10)];
+        let mut tried = 0usize;
+        let failover = chat_test_failover(
+            candidates,
+            "deepseek-chat",
+            ChatTestTrace::default(),
+            None,
+            |_id: &str| None::<String>,
+            |_ch: Channel, _ctx: ChatTestAttemptContext| -> ChatTestAttemptFut {
+                tried += 1;
+                boxed_attempt(async move {
+                    Err(ChatTestAttemptError::from_http_status(
+                        400,
+                        "Upstream HTTP 400: invalid request".to_string(),
+                    ))
+                })
+            },
+        )
+        .await;
+
+        assert!(failover.success.is_none());
+        assert_eq!(tried, 1, "400 属客户端错误，不得继续换渠道");
+        assert_eq!(failover.trace.attempt_details.len(), 1);
+    }
+
+    /// 全败时的聚合错误必须**列出试过的每个渠道与各自原因**（单渠道时保持旧文案）。
+    #[tokio::test]
+    async fn chat_test_failover_aggregates_every_attempt() {
+        let candidates = vec![failover_channel("ch-a", 30), failover_channel("ch-b", 10)];
+        let failover = chat_test_failover(
+            candidates,
+            "deepseek-chat",
+            ChatTestTrace::default(),
+            None,
+            |_id: &str| None::<String>,
+            |ch: Channel, _ctx: ChatTestAttemptContext| -> ChatTestAttemptFut {
+                boxed_attempt(async move {
+                    Err(ChatTestAttemptError::from_http_status(
+                        503,
+                        format!("Upstream HTTP 503: {}", ch.id),
+                    ))
+                })
+            },
+        )
+        .await;
+
+        assert!(failover.success.is_none());
+        assert_eq!(failover.trace.attempt_details.len(), 2);
+        let error = failover.error.expect("全败必须有错误文案");
+        assert!(error.contains("所有 2 个候选渠道均失败"), "{error}");
+        assert!(error.contains("ch-a") && error.contains("ch-b"), "{error}");
+        assert!(error.contains("503"), "各自原因必须逐条列出: {error}");
+    }
 
     /// 造一个最小可用的 `Channel`（只为 `resolve_fetch_target` 单测）。
     fn test_channel(channel_type: ChannelType, base_url: &str) -> Channel {

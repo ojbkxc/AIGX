@@ -552,6 +552,97 @@ pub(crate) fn resolve_bridges_needs(
     }
     result
 }
+
+/// 调试入口（`/api/channels/chat_test`、Playground、AI 运维）的候选渠道列表。
+///
+/// 与数据面 `select_for_model_filtered` **同一组过滤判据**（启用 / 声明该模型 /
+/// 冷却 / 断路器 / AIMD 限速），差别只有两处，都是调试入口的产品要求：
+/// - **返回全部候选**而不是只挑优先级最高的一个：调用方逐个尝试，失败切下一个
+///   （数据面 failover 循环同理，见 `chat.rs` 的 `build_attempt_plan`）；
+/// - **确定性排序**：priority 降序、同优先级保持渠道表原顺序 —— 数据面在组内做
+///   weight 加权随机，但调试入口的「第一个失败、第二个成功」必须可复现，
+///   否则排障时两次同样的操作得到不同链路。
+///
+/// 返回 `(可尝试候选, 被阻塞候选+原因)`：被阻塞的是冷却中 / 断路器打开 / AIMD
+/// 限速中的渠道 —— 它们**不进**主力候选，但调用方在「一个能用的都没有」时可以
+/// 拿它们当最后手段（调试入口的价值是「试到什么错」）。
+///
+/// 冷却/断路器判定一律走**只读**查询（`is_in_cooldown` / `get_state` /
+/// `aimd_allows`）：候选构造阶段若调 `is_dispatch_allowed` 会原子占用半开名额，
+/// 把真实流量本该拿到的试探租约抢走 —— 那是给数据面用的有副作用接口。
+#[allow(clippy::type_complexity)] // (候选, 被阻塞候选+原因) 两个 Vec 的元组
+pub(crate) fn chat_test_candidates(
+    state: &AppState,
+    requested_model: &str,
+) -> (
+    Vec<crate::channel::Channel>,
+    Vec<(crate::channel::Channel, String)>,
+) {
+    let enabled: Vec<crate::channel::Channel> = state
+        .channel_store
+        .list()
+        .into_iter()
+        .filter(|c| c.is_enabled())
+        .collect();
+    // 模型声明过滤：与改造前 `max_by_key` 前的过滤子集逐字一致 ——
+    // 先找声明了该模型的渠道；models 留空的渠道若已有发现快照，按快照收窄
+    //（`auto_pick_supports`），防止高优先级「全声明」渠道抢走上游实际不提供的
+    // 模型；无渠道声明时退「models 为空（=全部）」的启用渠道兜底。
+    let picked: Vec<crate::channel::Channel> = if requested_model.trim().is_empty() {
+        enabled
+    } else {
+        let declared: Vec<crate::channel::Channel> = enabled
+            .iter()
+            .filter(|c| c.auto_pick_supports(requested_model))
+            .cloned()
+            .collect();
+        if declared.is_empty() {
+            enabled
+                .into_iter()
+                .filter(|c| c.models.is_empty())
+                .collect()
+        } else {
+            declared
+        }
+    };
+    order_chat_test_candidates(picked, |id| {
+        if state.channel_store.is_in_cooldown(id) {
+            Some("冷却中（近期失败）".to_string())
+        } else if state.channel_store.circuit_breaker().get_state(id) == "open" {
+            Some("断路器打开（连续失败）".to_string())
+        } else if !state.channel_store.aimd_allows(id) {
+            Some("限速冷却中（自适应降速）".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// [`chat_test_candidates`] 的纯排序/分组部分（无状态，便于单测钉住顺序）。
+///
+/// `blocked_of` 返回 `Some(原因)` 表示该渠道当前不可调度。排序：priority 降序，
+/// **同优先级保持入参顺序**（稳定排序，不引入随机）。
+#[allow(clippy::type_complexity)]
+pub(crate) fn order_chat_test_candidates(
+    mut picked: Vec<crate::channel::Channel>,
+    blocked_of: impl Fn(&str) -> Option<String>,
+) -> (
+    Vec<crate::channel::Channel>,
+    Vec<(crate::channel::Channel, String)>,
+) {
+    // `sort_by` 是稳定排序：同 priority 的元素保持原相对顺序。
+    picked.sort_by(|a, b| b.priority.cmp(&a.priority));
+    let mut ready = Vec::new();
+    let mut blocked = Vec::new();
+    for ch in picked {
+        match blocked_of(&ch.id) {
+            Some(reason) => blocked.push((ch, reason)),
+            None => ready.push(ch),
+        }
+    }
+    (ready, blocked)
+}
+
 /// 把原始模型名解析为上游真实模型名（= 价格表里的名）。
 ///
 /// 优先级：渠道级映射（链式）> 全局映射 > **渠道清单实际写法** > 原名透传。
@@ -897,6 +988,66 @@ pub(crate) type BridgeCandidate = (
 mod tests {
     use super::channel_matches_allowed_providers;
     use crate::channel::ChannelType;
+
+    /// 造一个最小 `Channel`（只为候选排序/分组单测）。
+    fn sample(id: &str, priority: i64) -> crate::channel::Channel {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": format!("ch-{id}"),
+            "channel_type": "openai_compatible",
+            "base_url": "https://upstream.example.com",
+            "api_key": "sk-test",
+            "priority": priority,
+            "status": "enabled",
+            "models": ["deepseek-chat"],
+        }))
+        .expect("测试渠道构造")
+    }
+
+    /// 调试入口候选：**全部**声明了该模型的渠道按 priority 降序返回。
+    ///
+    /// 旧实现的判据是 `max_by_key(priority)`（只留一个），所以「返回列表长度」
+    /// 就是能区分新旧的断言；顺序另钉一个（最高优先级的排第一）。
+    #[test]
+    fn chat_test_candidates_keep_every_declaring_channel() {
+        let (ready, blocked) = super::order_chat_test_candidates(
+            vec![sample("low", 1), sample("high", 30), sample("mid", 10)],
+            |_id: &str| None::<String>,
+        );
+        let ids: Vec<&str> = ready.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["high", "mid", "low"],
+            "候选必须全量、按 priority 降序（改造前只留一个）"
+        );
+        assert!(blocked.is_empty(), "没有阻塞渠道时 blocked 必须为空");
+    }
+
+    /// 同优先级**保持渠道表顺序**（稳定排序，不引入随机）：
+    /// 数据面在组内做 weight 加权随机，调试入口必须可复现。
+    #[test]
+    fn chat_test_candidates_keep_store_order_within_same_priority() {
+        let (ready, _) =
+            super::order_chat_test_candidates(vec![sample("a", 5), sample("b", 5)], |_id: &str| {
+                None::<String>
+            });
+        let ids: Vec<&str> = ready.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"], "同优先级保持入参（渠道表）顺序");
+    }
+
+    /// 冷却/断路器/限速中的渠道进 `blocked` 并带原因，不混进可尝试候选。
+    #[test]
+    fn chat_test_candidates_separate_blocked_channels_with_reason() {
+        let (ready, blocked) = super::order_chat_test_candidates(
+            vec![sample("ready", 10), sample("cooling", 20)],
+            |id| (id == "cooling").then(|| "冷却中".to_string()),
+        );
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "ready");
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].0.id, "cooling");
+        assert_eq!(blocked[0].1, "冷却中");
+    }
 
     /// 表驱动：Key 级 provider 白名单在各渠道形态下的判定。
     ///
