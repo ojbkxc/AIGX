@@ -598,7 +598,7 @@ pub(crate) fn classify_chat_test_channels(
     if requested.is_empty() {
         return (all, excluded);
     }
-    let declared: Vec<crate::channel::Channel> = all
+    let mut declared: Vec<crate::channel::Channel> = all
         .iter()
         .filter(|c| c.auto_pick_supports(requested))
         .cloned()
@@ -609,23 +609,29 @@ pub(crate) fn classify_chat_test_channels(
             all.into_iter().filter(|c| c.models.is_empty()).collect();
         return (fallback, excluded);
     }
-    // 只有「models 白名单明确写了别的模型」才真的剔除 —— 那不是「不健康」，
-    // 是「这一家客观上没有这个模型」，试了必然 4xx。
+    // 逐个过一遍，只有「models 白名单明确写了别的模型」才真剔除 —— 那不是
+    // 「不健康」，是「这一家客观上没有这个模型」，试了必然 4xx，白拖慢整条链。
+    //
+    // `models` 留空（声明「全部」）但发现快照未收录的属于**弱证据**：快照可能过期
+    // （渠道加过模型没重新拉取），所以**仍然进候选**（追加在强证据之后）。
+    // 之前这里只 `continue`、忘了把它加回去，结果弱证据渠道被静默丢掉 ——
+    // 单测 `classify_chat_test_channels_only_excludes_explicit_whitelist_mismatch`
+    // 就是抓这个的。
+    let mut weak: Vec<crate::channel::Channel> = Vec::new();
     for ch in all.iter() {
         if ch.auto_pick_supports(requested) {
             continue;
         }
-        let reason = if ch.models.is_empty() {
-            // 声明全部但快照未收录：快照可能过期，**仍然试**（弱证据），不剔除
+        if ch.models.is_empty() {
+            weak.push(ch.clone());
             continue;
-        } else {
-            "渠道 models 白名单不含该模型"
-        };
+        }
         excluded.push(crate::log::FilteredChannel {
             channel_id: ch.id.clone(),
-            reason: reason.to_string(),
+            reason: "渠道 models 白名单不含该模型".to_string(),
         });
     }
+    declared.extend(weak);
     (declared, excluded)
 }
 
@@ -1111,6 +1117,15 @@ mod tests {
         assert!(
             kept_ids.contains(&"snapshot-lacks"),
             "快照未收录是弱证据（可能过期），仍要进候选：{kept_ids:?}"
+        );
+        assert!(
+            kept_ids.contains(&"kept"),
+            "明确声明的渠道必须在候选里：{kept_ids:?}"
+        );
+        assert_eq!(
+            kept_ids.len(),
+            2,
+            "弱证据渠道要真的加回候选（只 continue 不加回 = 静默丢掉）：{kept_ids:?}"
         );
         let reasons: Vec<(&str, &str)> = excluded
             .iter()
