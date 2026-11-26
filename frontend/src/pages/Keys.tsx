@@ -817,7 +817,9 @@ export default function Keys(): JSX.Element {
     return set.size ? [...set].sort() : modelOptions;
   })();
 
-  if (loading) return <SkeletonTable columns={11} rows={6} />;
+  // 骨架列数与 KEYS_COL_DEFS 同步（新增「提供商」列后 11 → 12），
+  // 否则加载态的表头宽度与真实表头对不齐、出现一次跳动。
+  if (loading) return <SkeletonTable columns={KEYS_COL_DEFS.length} rows={6} />;
 
   return (
     <div>
