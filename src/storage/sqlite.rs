@@ -165,6 +165,23 @@ impl SqliteStore {
     /// 供"check-then-put"竞态场景（如签到幂等）做真正的 CAS：
     /// INSERT ... ON CONFLICT DO NOTHING 在 SQLite 内判定存在性，
     /// 并发双写只有一个成功。
+    /// 原子插入**原始 JSON 文本**（迁移用）：`ON CONFLICT DO NOTHING`，返回是否写入。
+    ///
+    /// 与 [`Self::put_if_absent`] 的差别只有「不做序列化往返」—— 迁移必须搬原始
+    /// 字节，形状与存量值不完全一致的历史记录经 `serde_json::Value` 往返会被改写
+    /// 成另一份语义（或直接跳过，静默丢数据）。
+    pub fn put_if_absent_raw(&self, key: &str, raw_json: &str) -> anyhow::Result<bool> {
+        run_blocking(|| -> anyhow::Result<bool> {
+            let conn = self.conn.lock();
+            let n = conn.execute(
+                "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())
+                 ON CONFLICT(key) DO NOTHING",
+                rusqlite::params![key, raw_json],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
     pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
         let content = serde_json::to_string(value)?;
         let conn = self.conn.lock();

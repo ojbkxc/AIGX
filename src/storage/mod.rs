@@ -783,6 +783,21 @@ impl FileStore {
             FileStoreInner::Postgres(p) => p.put_raw(key, raw),
         }
     }
+
+    /// 原子插入**原始 JSON 文本**：key 已存在时不写入，返回 `false`。
+    ///
+    /// 迁移专用（`migrate_sqlite_to_pg`）：必须搬原始字节，不能走
+    /// `put_if_absent<T: Serialize>` —— 后者会先反序列化再序列化，形状与存量值
+    /// 不完全一致的历史记录会被 `serde_json::Value` 往返改写成另一份语义
+    /// （或直接跳过，静默丢数据）。与 `put_raw` 同形态按 backend 分派。
+    #[cfg(feature = "sqlite-kv")]
+    pub fn put_if_absent_raw(&self, key: &str, raw: &str) -> anyhow::Result<bool> {
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.put_if_absent_raw(key, raw),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.put_if_absent_raw(key, raw),
+        }
+    }
 }
 
 /// 无 rusqlite 时，`FileStore` 即 JSON 文件后端。
