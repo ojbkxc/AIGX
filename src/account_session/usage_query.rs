@@ -61,7 +61,10 @@ impl ProviderGate {
     /// 之前的实现把 `sleep` 放在持锁段里，等待方全部串行堵在锁上 —— 语义上
     /// 仍是 0/120/240… 的错峰，但每个等待者都要排队拿锁，抖动更大。现在每个
     /// 调用者先把自己要等的时长算出来（并预占下一个窗口），再各自 sleep。
-    async fn wait_turn(&self) {
+    ///
+    /// 可见性 `pub(super)`：`usage_jobs`（同一父模块下的兄弟）也要用同一把闸，
+    /// 三条路径（巡检 / 手动 / 异步任务）对同一家上游的启动节奏必须一致。
+    pub(super) async fn wait_turn(&self) {
         let interval = self
             .min_interval_ms
             .load(std::sync::atomic::Ordering::Relaxed);
