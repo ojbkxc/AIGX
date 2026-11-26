@@ -5830,5 +5830,7 @@
   "留空使用 Bark 默认铃声": "Leave empty to use the Bark default sound",
   "测试 Bark": "Test Bark",
   "Bark 测试消息已发送": "Bark test message sent",
-  "iOS 推送（Bark）。服务地址填自建/官方 Bark 服务器基址，如 https://api.day.app；Device Key 在 Bark App 内查看。": "iOS push via Bark. For the server URL, use a self-hosted or official Bark server base such as https://api.day.app; find your Device Key in the Bark app."
+  "iOS 推送（Bark）。服务地址填自建/官方 Bark 服务器基址，如 https://api.day.app；Device Key 在 Bark App 内查看。": "iOS push via Bark. For the server URL, use a self-hosted or official Bark server base such as https://api.day.app; find your Device Key in the Bark app.",
+  "当前视图超过单次渲染上限，仅渲染前 {{n}} 行；请调整每页条数或折叠分组查看其余账号": "This view exceeds the single-render limit; only the first {{n}} rows are shown. Adjust the page size or collapse groups to see the remaining accounts.",
+  "当前页行数超过渲染上限，仅渲染前 {{n}} 行，请调整每页条数后翻页查看剩余数据": "This page has more rows than the render limit; only the first {{n}} rows are shown. Change the page size and paginate to see the rest."
 }

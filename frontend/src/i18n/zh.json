@@ -5830,5 +5830,7 @@
   "留空使用 Bark 默认铃声": "留空使用 Bark 默认铃声",
   "测试 Bark": "测试 Bark",
   "Bark 测试消息已发送": "Bark 测试消息已发送",
-  "iOS 推送（Bark）。服务地址填自建/官方 Bark 服务器基址，如 https://api.day.app；Device Key 在 Bark App 内查看。": "iOS 推送（Bark）。服务地址填自建/官方 Bark 服务器基址，如 https://api.day.app；Device Key 在 Bark App 内查看。"
+  "iOS 推送（Bark）。服务地址填自建/官方 Bark 服务器基址，如 https://api.day.app；Device Key 在 Bark App 内查看。": "iOS 推送（Bark）。服务地址填自建/官方 Bark 服务器基址，如 https://api.day.app；Device Key 在 Bark App 内查看。",
+  "当前视图超过单次渲染上限，仅渲染前 {{n}} 行；请调整每页条数或折叠分组查看其余账号": "当前视图超过单次渲染上限，仅渲染前 {{n}} 行；请调整每页条数或折叠分组查看其余账号",
+  "当前页行数超过渲染上限，仅渲染前 {{n}} 行，请调整每页条数后翻页查看剩余数据": "当前页行数超过渲染上限，仅渲染前 {{n}} 行，请调整每页条数后翻页查看剩余数据"
 }
