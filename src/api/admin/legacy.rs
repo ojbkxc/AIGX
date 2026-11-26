@@ -5219,6 +5219,11 @@ pub async fn handle_test_slack(
 }
 
 /// POST /api/notify/test-bark - 测试 Bark 推送
+///
+/// workaround：路由（main.rs）与导出（admin/mod.rs）因并行的「Agent 客户端接入」
+/// 改动占用这两个文件而暂缓入库，handler 先标 `dead_code` 让 CI 的
+/// `clippy -D warnings` 通过；该两处补提交后本属性即可删除。
+#[allow(dead_code)]
 pub async fn handle_test_bark(
     State(state): State<AppState>,
     headers: HeaderMap,
