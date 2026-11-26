@@ -398,6 +398,24 @@ impl SqliteStore {
         Ok(new_value)
     }
 
+    /// 遍历全部键值（迁移用）：不反序列化为具体类型，直接给原始 JSON 文本。
+    ///
+    /// 迁移必须走原始文本：`get::<serde_json::Value>()` 对**形状漂移**的存量
+    /// 值（如某条历史记录少字段/多字段）会静默反序列化成功但语义已变，对
+    /// 读不出来的则整条跳过 —— 迁移静默丢数据。这里只搬运字节。
+    pub fn raw_pairs(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached("SELECT key, value FROM kv ORDER BY key")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 在事务中执行多个操作。
     ///
     /// 事务是**连接级状态**：`BEGIN IMMEDIATE` 之后若闭包 panic（内部 `unwrap`

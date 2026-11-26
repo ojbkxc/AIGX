@@ -147,6 +147,21 @@ impl PgStore {
         rx.recv()?
     }
 
+    /// 原子插入**原始 JSON 文本**（迁移用）：key 已存在时不写入，返回 false。
+    ///
+    /// 与 [`Self::put_if_absent`] 的区别只在于「不经过反序列化再序列化」——
+    /// 迁移必须搬运原始字节，否则形状与存量值不完全一致的历史记录会被
+    /// `serde_json::Value` 往返改写成另一份语义（或直接跳过，静默丢数据）。
+    pub fn put_if_absent_raw(&self, key: &str, raw: &str) -> anyhow::Result<bool> {
+        let (reply, rx) = sync_channel(1);
+        self.send(Cmd::PutIfAbsent {
+            key: key.to_string(),
+            value: raw.to_string(),
+            reply,
+        })?;
+        rx.recv()?
+    }
+
     /// 写入 JSON 值（INSERT ... ON CONFLICT 更新）
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
         let content = serde_json::to_string(value)?;

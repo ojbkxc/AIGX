@@ -496,7 +496,9 @@ impl FileStore {
     /// 以 PostgreSQL 为后端打开 KV 存储（保持同样的同步接口）。
     ///
     /// 仅在启用 `postgres` feature 时可用；`database.url` 非空时由 main.rs 调用。
-    /// 打开后执行一次性 SQLite→PG 历史数据迁移（幂等，已存在 key 跳过）。
+    /// 打开后执行一次性文件→PG 历史数据迁移（幂等，已存在 key 跳过）：
+    /// `sqlite_dirs` 里的 `aigx.db` **与**同目录下的旧版 `*.json` 键文件都被
+    /// 搬运（后者是 mysql / `--no-default-features` 构建的全部数据所在）。
     #[cfg(feature = "postgres")]
     pub fn open_postgres(
         url: &str,
@@ -825,48 +827,88 @@ fn migrate_legacy_json(dir: &Path, store: &sqlite::SqliteStore) -> anyhow::Resul
 
 /// SQLite→PG 一次性历史数据迁移（幂等）：
 /// - 按顺序探测 `sqlite_dirs` 中的 `aigx.db`（新旧两种布局都覆盖）；
+/// - **也读同一个 dir 下的旧版 `*.json` 键文件**：`--no-default-features`
+///   构建（sea-orm + mysql 矩阵）里 `FileStore` 就是 JSON 文件后端，数据全
+///   落在 `{data_dir}/data/*.json` 而**没有任何 aigx.db**。只探 `aigx.db`
+///   等于从 MySQL 换到 PG 时把这些数据整块留在原地，新库看起来「用户/渠道
+///   全没了」（同一份数据换后端行为不同的最极端形态）。
 /// - 对 PG 中尚不存在的 key 用 put_if_absent 原子写入（并发/重复启动安全）；
 /// - 已存在的 key 跳过，避免覆盖 PG 中的新数据。
 ///
 /// 背景：`open_postgres` 此前直接返回空 PG 库，历史数据（请求日志/审计/
-/// 会话等）全部留在 SQLite 文件里，切库后页面查不到历史——补上迁移。
+/// 会话等）全部留在文件里，切库后页面查不到历史——补上迁移。
 #[cfg(all(feature = "sqlite-kv", feature = "postgres"))]
 fn migrate_sqlite_to_pg(pg: &FileStore, sqlite_dirs: &[std::path::PathBuf]) {
     for dir in sqlite_dirs {
         let db_path = dir.join("aigx.db");
-        if !db_path.exists() {
-            continue;
-        }
-        let sqlite = match sqlite::SqliteStore::open(db_path.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("SQLite→PG migration: skip {}: {e}", db_path.display());
-                continue;
-            }
-        };
-        let keys = match sqlite.list("") {
-            Ok(k) => k,
-            Err(e) => {
-                tracing::warn!("SQLite→PG migration: list keys failed: {e}");
-                continue;
-            }
-        };
+        let mut sources = 0usize;
         let mut migrated = 0usize;
-        for key in keys {
-            // put_if_absent 保证：PG 已有（更新）的 key 不被旧 SQLite 值覆盖
-            match sqlite.get::<serde_json::Value>(&key) {
-                Ok(Some(v)) => {
-                    if matches!(pg.put_if_absent(&key, &v), Ok(true)) {
-                        migrated += 1;
+
+        if db_path.exists() {
+            sources += 1;
+            match sqlite::SqliteStore::open(db_path.clone()) {
+                Ok(sqlite) => match sqlite.raw_pairs() {
+                    Ok(pairs) => {
+                        for (key, raw) in pairs {
+                            // put_raw 免二次序列化；put_if_absent 保证 PG 已有
+                            // （更新）的 key 不被旧值覆盖。
+                            match pg.put_if_absent_raw(&key, &raw) {
+                                Ok(true) => migrated += 1,
+                                Ok(false) => {}
+                                Err(e) => {
+                                    tracing::warn!("SQLite→PG migration: put {key} failed: {e:#}")
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "SQLite→PG migration: scan {} failed: {e}",
+                            db_path.display()
+                        )
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("SQLite→PG migration: skip {}: {e}", db_path.display());
+                }
+            }
+        }
+
+        // 旧版 JSON 键文件（mysql/JSON 构建下的全部数据都在这里）
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                let mut json_source = 0usize;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                        continue;
+                    }
+                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    let content = match std::fs::read_to_string(&path) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    let key = decode_key(stem);
+                    json_source += 1;
+                    match pg.put_if_absent_raw(&key, &content) {
+                        Ok(true) => migrated += 1,
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!("JSON→PG migration: put {key} failed: {e:#}"),
                     }
                 }
-                _ => continue,
+                if json_source > 0 {
+                    sources += 1;
+                }
             }
+            Err(e) => tracing::warn!("JSON→PG migration: read_dir {} failed: {e}", dir.display()),
         }
-        if migrated > 0 {
+
+        if sources > 0 {
             tracing::info!(
-                "SQLite→PG migration: {migrated} entries imported from {}",
-                db_path.display()
+                "file→PG migration: {migrated} entries imported from {} ({sources} source(s))",
+                dir.display()
             );
         }
     }
@@ -979,6 +1021,31 @@ mod tests {
         store.put_if_absent("channel:token", &"tok").unwrap();
         let meta2 = std::fs::metadata(store.path_of("channel:token")).unwrap();
         assert_eq!(meta2.permissions().mode() & 0o777, 0o600);
+    }
+
+    /// SQLite 里的**原始字节**必须原样搬进目标后端（不经过类型往返）。
+    ///
+    /// 迁移若逐条 `get::<serde_json::Value>()` 再 `put`，形状与目标类型不完全
+    /// 一致的历史值会被往返改写或直接跳过 —— 迁移静默丢数据。这里用一条
+    /// 「看起来不像任何业务类型」的历史值来钉住字节级搬运。
+    #[cfg(feature = "sqlite-kv")]
+    #[test]
+    fn raw_pairs_preserves_exact_bytes() {
+        let dir = TempDir::new().unwrap();
+        let store = sqlite::SqliteStore::open(dir.path().join("test.db")).unwrap();
+        let odd = r#"{"status":"active","legacy_extra":{ "nested" : [1,2,3] },"":"weird"}"#;
+        store.put_raw("user:odd", odd).unwrap();
+        store.put_raw("user:plain", r#"{"id":"u1"}"#).unwrap();
+        let pairs = store.raw_pairs().unwrap();
+        let odd_again = pairs
+            .iter()
+            .find(|(k, _)| k == "user:odd")
+            .map(|(_, v)| v.clone())
+            .expect("必须读到 user:odd");
+        assert_eq!(
+            odd_again, odd,
+            "迁移读出的必须是原始字节，不是往返后的规范化 JSON"
+        );
     }
 
     /// P0：SQLite 主库文件（含 WAL/SHM 副档，含同样的明文页）必须是 0600。
