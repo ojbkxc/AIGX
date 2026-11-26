@@ -1,1 +1,0 @@
-import{j as s,ad as a}from"./index-Hh0dmAIT.js";function j({children:c,title:r,actions:d,className:e,headerClassName:i,bodyClassName:n}){return s.jsxs("div",{className:a("card",e),children:[(r||d)&&s.jsxs("div",{className:a("card-header",i),children:[s.jsx("h2",{children:r}),d]}),s.jsx("div",{className:a("card-body",n),children:c})]})}export{j as C};
