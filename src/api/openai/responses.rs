@@ -1077,8 +1077,6 @@ pub(crate) fn observe_responses_sse_event(json: &Value, billing: &ResponsesBilli
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// 续写闸（/v1/responses 降级转换链路）：预算够才允许续写，判据与
     /// chat.rs 逐字同一把刀（`bridge::output_budget_allows_visible_text`）。
     /// 这里的断言钉住「本入口用的是哪条闸」—— 换掉判据会让 `Some(32)`

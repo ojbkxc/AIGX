@@ -262,13 +262,21 @@ mod tests {
                     if delay_ms > 0 {
                         std::thread::sleep(Duration::from_millis(delay_ms));
                     }
+                    // 「在途」口径 = 服务器正在处理本请求（读完请求头 → 开始回响应前）。
+                    // **必须在写响应之前**递减：客户端一读到响应就会立刻发起下一个
+                    // 请求，若把递减放在 `write_all` 之后，递减线程被调度延迟时，
+                    // 下一个请求的递增会与本请求尚未执行的递减重叠，把并发峰值虚报
+                    // 成「上限 + 1」（CI 曾因此偶发「并发峰值应 ≤ 3，实测 4」）。
+                    // 递减在写响应前完成时，下一请求（客户端收到本响应后才发）的递增
+                    // 必然发生在本次递减之后，计数峰值被确定性地钳在真实上限内；
+                    // 若真的失守（如把 buffer_unordered 改成无界），计数仍会照实冲高。
+                    if_cur.fetch_sub(1, Ordering::Relaxed);
                     let response = format!(
                         "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes());
                     let _ = stream.flush();
-                    if_cur.fetch_sub(1, Ordering::Relaxed);
                 });
             }
         });

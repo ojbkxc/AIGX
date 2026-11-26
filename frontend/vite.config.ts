@@ -76,13 +76,47 @@ export default defineConfig({
   build: {
     outDir: '../static',
     emptyOutDir: true,
+    // 浏览器基线：ES2020 为目标（可选链/空值合并等原生可用，无需降级即可去掉多余 polyfill）
+    target: 'es2020',
+    // 显式声明压缩器与关闭 sourcemap：生产产物不带 .map，避免泄露源码、减小体积
+    minify: 'esbuild',
+    sourcemap: false,
     // 代码分割：vendor 与业务代码分离，利于缓存（产物体积变化由 CI 验证）
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          'vendor-i18n': ['i18next', 'react-i18next'],
-        }
+        // 用函数式分组把同一包的**所有子模块**归并到一个 vendor chunk。
+        // 对象式只能匹配 `lucide-react` 入口，图标子路径（dist/esm/icons/*）
+        // 仍会被 Rollup 拆成几十个 1-2KB 的小 chunk；函数式按路径前缀可整组收拢。
+        // 只对我们关心的包分组，其它模块返回 undefined 交回 Rollup 默认策略。
+        manualChunks(id: string): string | undefined {
+          if (!id.includes('node_modules')) return undefined;
+          // lucide 图标：逐图标子模块按路径前缀整组归入 vendor-icons
+          if (id.includes('/lucide-react/')) return 'vendor-icons';
+          // @tanstack/react-query 及其 @tanstack/query-core 同组
+          if (id.includes('/@tanstack/')) return 'vendor-query';
+          // i18n 运行时连同其转译期依赖一起分组，避免它们落回主 chunk 反向依赖形成循环
+          if (
+            id.includes('/i18next/') ||
+            id.includes('/react-i18next/') ||
+            id.includes('/@babel/runtime/') ||
+            id.includes('/html-parse-stringify/')
+          ) {
+            return 'vendor-i18n';
+          }
+          // react 系连同 scheduler、@remix-run（react-router 的依赖）一起分组；
+          // 这些依赖若落回主 chunk，会让主 chunk ⇄ vendor-react 形成循环依赖告警。
+          if (
+            id.includes('/node_modules/react/') ||
+            id.includes('/node_modules/react-dom/') ||
+            id.includes('/node_modules/react-router/') ||
+            id.includes('/node_modules/react-router-dom/') ||
+            id.includes('/node_modules/scheduler/') ||
+            id.includes('/node_modules/@remix-run/')
+          ) {
+            return 'vendor-react';
+          }
+          return undefined;
+        },
       }
     }
   }

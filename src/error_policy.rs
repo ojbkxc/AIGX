@@ -1381,8 +1381,10 @@ mod tests {
     #[test]
     fn v1_defaults_migrate_to_v2_idempotently() {
         let mut config = AppConfig::default();
-        let mut settings = ErrorPolicyConfig::default();
-        settings.rules = v1_default_rules();
+        let mut settings = ErrorPolicyConfig {
+            rules: v1_default_rules(),
+            ..Default::default()
+        };
         // 用户手改过一条（限流）——迁移不得覆盖。
         settings.rules[0].fallback_seconds = 45;
         config.error_policy = Some(settings);

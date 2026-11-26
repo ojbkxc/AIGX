@@ -41,8 +41,9 @@ if (!rootElement) {
   throw new Error('Root element #root not found');
 }
 
-// i18n 就绪后再挂载：非默认语言（en）的资源包是动态 import 的，必须等它到位，
-// 否则英文界面首帧会回退显示中文。资源加载失败也继续挂载（回退 zh），不让白屏。
+// i18n 就绪后再挂载：所有语言包（含 zh/en）都是动态 import 的，必须等初始
+// 语言资源到位，否则首帧会显示 key（中文原文）。资源加载失败也继续挂载
+// （回退 key/中文），不让白屏。
 async function bootstrap(): Promise<void> {
   try {
     await i18nReady;

@@ -1,6 +1,5 @@
 import i18n, { type InitOptions } from 'i18next';
 import { initReactI18next } from 'react-i18next';
-import zh from './zh.json';
 
 export type AppLanguage = 'zh' | 'en' | 'zh-Hant' | 'ja' | 'ko' | 'pt-BR';
 
@@ -30,13 +29,15 @@ function detectLanguage(): AppLanguage {
   return 'zh';
 }
 
-// ── 语言包按需加载 ─────────────────────────────────
-// 只有「中文」随首屏同步打包（zh.json 静态 import，同时是 fallbackLng）；
-// 其余语言包走动态 import，被 Vite 拆成独立 chunk。
-const loadedLangs = new Set<AppLanguage>(['zh']);
+// ── 语言包全部按需加载 ─────────────────────────────
+// 所有语言包（含 zh）都走动态 import，被 Vite 拆成独立 chunk，不进主包。
+// 英文用户首屏只加载 en.json（≈461KB），不再被 zh.json（≈439KB）拖累；
+// 中文用户启动时按需加载 zh，其它语言同理。
+const loadedLangs = new Set<AppLanguage>();
 
-/** 各语言包的动态 import 映射 */
-const bundleImports: Record<Exclude<AppLanguage, 'zh'>, () => Promise<unknown>> = {
+/** 各语言包的动态 import 映射（含 zh，与 en 同款加载模式） */
+const bundleImports: Record<AppLanguage, () => Promise<unknown>> = {
+  zh: () => import('./zh.json'),
   en: () => import('./en.json'),
   'zh-Hant': () => import('./zh-Hant.json'),
   ja: () => import('./ja.json'),
@@ -47,8 +48,7 @@ const bundleImports: Record<Exclude<AppLanguage, 'zh'>, () => Promise<unknown>> 
 /** 按需加载某语言资源包（已加载则直接返回） */
 async function loadBundle(lang: AppLanguage): Promise<void> {
   if (loadedLangs.has(lang)) return;
-  if (lang === 'zh') return;
-  const loader = bundleImports[lang as Exclude<AppLanguage, 'zh'>];
+  const loader = bundleImports[lang];
   if (!loader) return;
   const mod = await loader();
   const bundle = ((mod as { default?: Record<string, string> }).default ?? (mod as Record<string, string>));
@@ -59,10 +59,10 @@ async function loadBundle(lang: AppLanguage): Promise<void> {
 const initialLang = detectLanguage();
 
 const initOptions: InitOptions = {
-  resources: {
-    // 默认语言（也是 fallback）同步内置；其余语言包见 loadBundle。
-    zh: { translation: zh },
-  },
+  // 不预置任何语言包：全部由 loadBundle 按需 addResourceBundle。
+  // zh / en 的 key 集合完全一致（脚本 i18n:check 校验），故英文用户缺键时
+  // 直接回落到「key 本身」（本项目的 key 就是中文原文），无需再加载 zh。
+  resources: {},
   lng: initialLang,
   fallbackLng: 'zh',
   // 允许 key 中包含点号、括号等特殊字符，按原样查找
@@ -77,8 +77,8 @@ const initOptions: InitOptions = {
 
 /**
  * i18n 就绪 Promise：main.tsx 必须 await 后再挂载 React。
- * - 默认（中文）用户：init 完成即可，无额外请求；
- * - 其他语言用户：先把对应语言包 import 进来再 resolve，避免首帧闪中文。
+ * - 先把初始语言的语言包动态 import 进来再 resolve，避免首帧闪 key/中文；
+ * - 中文用户启动即加载 zh，英文用户只加载 en（不预载 zh）。
  */
 export const i18nReady: Promise<void> = (async () => {
   await i18n.use(initReactI18next).init(initOptions);
@@ -89,14 +89,14 @@ export const i18nReady: Promise<void> = (async () => {
     const match = SUPPORTED_LANGS.find(
       (l) => l.code === lng || l.code.toLowerCase().startsWith(code)
     );
-    if (!match || match.code === 'zh') return;
+    if (!match) return;
     const alreadyLoaded = loadedLangs.has(match.code);
     void loadBundle(match.code).then(() => {
       // 资源包是「切语言之后」才补齐的 → 再切一次触发 react-i18next 重渲染。
       if (!alreadyLoaded) void i18n.changeLanguage(lng);
     });
   });
-  if (initialLang !== 'zh') await loadBundle(initialLang);
+  await loadBundle(initialLang);
   await i18n.changeLanguage(initialLang);
 })();
 

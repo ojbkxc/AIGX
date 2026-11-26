@@ -927,9 +927,11 @@ mod tests {
 
     #[test]
     fn bark_payload_fields_and_optional_sound() {
-        let mut c = NotifyConfig::default();
-        c.bark_server_url = "https://api.day.app".into();
-        c.bark_device_key = "devkey".into();
+        let mut c = NotifyConfig {
+            bark_server_url: "https://api.day.app".into(),
+            bark_device_key: "devkey".into(),
+            ..Default::default()
+        };
         // 空 group → 默认 "AIGX"；空 sound → 不带该字段
         let p = bark_payload(&c, "标题", "正文");
         assert_eq!(p["device_key"], "devkey");

@@ -1,4 +1,4 @@
-import { cloneElement, Fragment, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement, type ReactNode } from 'react';
+import { cloneElement, Fragment, isValidElement, memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowUpDown, ChevronsDownUp, ChevronsUpDown, Columns3, Download, Eye, EyeOff, FlaskConical, Gift, Globe, GripVertical,
@@ -451,6 +451,12 @@ const AS_COLS: Array<{
 const AS_FLEX_MIN = 220;
 /** 拖动的下限：再窄里面的控件就点不准了 */
 const AS_MIN_COLW = 48;
+/**
+ * 单次渲染上限（对齐 Channels 的 MAX_RENDER_ROWS）：账号池「每页=全部」时单页可达数千行，
+ * 一次性挂载会拖慢首帧与父级状态变更（拖拽/勾选）后的整表重渲染。超过阈值只渲染前 N 行，
+ * 表格容器本身已有界滚动；其余行通过「调整每页条数 / 分组折叠」查看，避免无上限 DOM。
+ */
+const MAX_RENDER_ROWS = 200;
 
 const LS_COLCFG = 'aigx-as-colcfg'; // 旧显隐表（公共层 v1 迁移源，读后由公共层接管）
 const LS_COLW = 'aigx-as-colw'; // 旧列宽覆盖（init 时一次性并进 v2 后删键）
@@ -784,6 +790,165 @@ interface AccountSessionsProps {
    */
   initialChannelFilter?: string;
 }
+
+/**
+ * 余额明细弹层里的两行组件（§2.9，对齐 A2A accounts-credit-detail）：
+ * 提成模块级 `memo` 组件 + 稳定 key（wallet 无 id → 用其归一后的序号；window 优先 `w.key`），
+ * 避免父级任一状态变化时把这类（可复用的）行重新创建。
+ */
+interface NormalizedWalletPack {
+  i: number;
+  balance: number;
+  total: number;
+  used: number;
+  expMs: number | null;
+  expired: boolean;
+  usedUp: boolean;
+  name: string;
+}
+
+const WalletPackRow = memo(function WalletPackRow({
+  pack,
+  unit,
+  dim,
+}: {
+  pack: NormalizedWalletPack;
+  unit: string;
+  dim: boolean;
+}): JSX.Element {
+  const { t } = useTranslation();
+  const p = pack;
+  return (
+    <div className={`as-wallet-row${dim ? ' is-spent' : ''}`}>
+      <span className="as-wallet-name" title={p.name}>{p.name}</span>
+      <span className="as-wallet-view">
+        {Number.isFinite(p.balance) ? `${fmtAmount(p.balance)}${unit}` : '—'}
+        {p.total > 0 ? ` / ${fmtAmount(p.total)}${unit}` : ''}
+        {p.used > 0 ? ` · ${t('已用')} ${fmtAmount(p.used)}${unit}` : ''}
+      </span>
+      {p.expMs != null && (
+        <span
+          className={`as-pack-expiry${p.expired ? ' expired' : ''}`}
+          title={`${t('到期时间：')}${new Date(p.expMs).toLocaleString()}`}
+        >
+          {p.expired ? t('已过期') : `${t('到期')} ${new Date(p.expMs).toLocaleDateString()}`}
+        </span>
+      )}
+    </div>
+  );
+});
+
+const WalletWindowRow = memo(function WalletWindowRow({ w }: { w: AccountUsageWindow }): JSX.Element {
+  const { t } = useTranslation();
+  const label = usageWindowTitle(w);
+  const pct = typeof w.remaining_percent === 'number' ? Math.round(w.remaining_percent) : null;
+  const remaining = typeof w.remaining === 'number' ? w.remaining : null;
+  const reset = w.resets_at && w.resets_at > 0 ? new Date(w.resets_at * 1000).toLocaleString() : '';
+  return (
+    <div className="as-wallet-row">
+      <span className="as-wallet-name" title={label}>{label}</span>
+      <span className="as-wallet-view">
+        {pct != null ? t('剩 {{pct}}%', { pct }) : ''}
+        {remaining != null ? ` · ${fmtAmount(remaining)}` : ''}
+        {reset ? ` · ${t('重置于 {{time}}', { time: reset })}` : ''}
+      </span>
+    </div>
+  );
+});
+
+/**
+ * §2.9 余额明细（对齐 A2A accounts-credit-detail 的信息量）：
+ * - wallets[] 逐份积分包：面额 / 已用 / 剩余 + 到期徽标；
+ * - 「已用完 / 已过期」折叠组（A2A 的 spent 折叠）；
+ * - windows[] 逐窗口，按 group 分节（A2A「分组窗口」视图）。
+ * 都空 → 「上游未返回明细」。memo 以 bal 引用比对：弹层只对一个账号打开，轮询刷新 bal
+ * 时才重算到期等随时间变化的口径。
+ */
+const BalanceDetail = memo(function BalanceDetail({
+  bal,
+}: {
+  bal: AccountBalance | null | undefined;
+}): JSX.Element {
+  const { t } = useTranslation();
+  const wallets = Array.isArray(bal?.wallets) ? bal.wallets : [];
+  // 同一基础模型的不同思考等级先合并，避免明细弹层里重复列同一模型。
+  const wins = mergeUsageWindows(bal?.windows ?? []);
+  if (!wallets.length && !wins.length) {
+    return <div className="as-pop-empty">{t('上游未返回明细')}</div>;
+  }
+  const unit = bal?.unit ? ` ${bal.unit}` : '';
+  const nowMs = Date.now();
+
+  // 每份积分包归一：剩余/面额/已用 + 到期时刻 + 是否已用完/已过期
+  const packs: NormalizedWalletPack[] = wallets.map((w, i) => {
+    const balance = Number(w?.balance);
+    const total = Number(w?.total) || 0;
+    const used = Number(w?.used) || 0;
+    const expMs = expiryMillis(w?.expireAt ?? w?.expiresAt ?? w?.expire_at);
+    const expired = expMs != null && expMs <= nowMs;
+    const usedUp = Number.isFinite(balance) && (balance <= 0 || (total > 0 && used >= total));
+    return {
+      i,
+      balance,
+      total,
+      used,
+      expMs,
+      expired,
+      usedUp,
+      name: String(w?.displayName || w?.type || t('额度')),
+    };
+  });
+  const livePacks = packs.filter((p) => !p.expired && !p.usedUp);
+  const spentPacks = packs.filter((p) => p.expired || p.usedUp);
+
+  // 窗口按 group 分节（有 group 时出分组标题；无 group 时维持平铺）
+  const winGroups = new Map<string, AccountUsageWindow[]>();
+  for (const w of wins) {
+    const g = (w.group || '').trim();
+    const arr = winGroups.get(g);
+    if (arr) arr.push(w);
+    else winGroups.set(g, [w]);
+  }
+  const showGroupHeads = [...winGroups.keys()].some((g) => g.length > 0);
+
+  return (
+    <>
+      {packs.length > 0 && (
+        <>
+          <div className="as-pop-section">{t('额度桶')}</div>
+          {livePacks.length > 0
+            ? livePacks.map((p) => (
+                <WalletPackRow key={`w-${p.i}`} pack={p} unit={unit} dim={false} />
+              ))
+            : (
+              <div className="as-pop-empty">{t('可用额度已用完或已过期')}</div>
+            )}
+          {spentPacks.length > 0 && (
+            <details className="as-pack-spent">
+              <summary>{t('已用完 / 已过期 {{n}} 份', { n: spentPacks.length })}</summary>
+              {spentPacks.map((p) => (
+                <WalletPackRow key={`w-${p.i}`} pack={p} unit={unit} dim />
+              ))}
+            </details>
+          )}
+        </>
+      )}
+      {wins.length > 0 && (
+        <>
+          <div className="as-pop-section">{t('用量窗口')}</div>
+          {[...winGroups.entries()].map(([g, list]) => (
+            <Fragment key={`wg-${g || 'default'}`}>
+              {showGroupHeads && g && <div className="as-pop-subsection">{g}</div>}
+              {list.map((w, i) => (
+                <WalletWindowRow key={w.key || `win-${i}`} w={w} />
+              ))}
+            </Fragment>
+          ))}
+        </>
+      )}
+    </>
+  );
+});
 
 export default function AccountSessions({ embedded = false, initialChannelFilter }: AccountSessionsProps = {}): JSX.Element {
   const { t } = useTranslation();
@@ -2680,12 +2845,40 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
     if (rawPage !== 1) setRawPage(1);
   }
   const page = Math.min(Math.max(1, rawPage), totalPages);
-  const pageGroups = grouped ? (groupPages[page - 1] ?? []) : [];
-  const pageRows = grouped
-    ? []
-    : pageSize === 'all'
-      ? visibleSorted
-      : visibleSorted.slice((page - 1) * pageSize, page * pageSize);
+  const pageGroups = useMemo(
+    () => (grouped ? (groupPages[page - 1] ?? []) : []),
+    [grouped, groupPages, page],
+  );
+  const pageRows = useMemo(
+    () => (grouped
+      ? []
+      : pageSize === 'all'
+        ? visibleSorted
+        : visibleSorted.slice((page - 1) * pageSize, page * pageSize)),
+    [grouped, pageSize, visibleSorted, page],
+  );
+
+  // ── 渲染窗口截断（对齐 Channels MAX_RENDER_ROWS）：容器已有界滚动 + 只挂前 N 行 ──
+  // 「每页=全部」或分组某页过大时避免一次性挂载上千行 DOM；折叠组不占渲染预算。
+  const flatRenderRows = useMemo(
+    () => (pageRows.length > MAX_RENDER_ROWS ? pageRows.slice(0, MAX_RENDER_ROWS) : pageRows),
+    [pageRows],
+  );
+  const flatTruncated = pageRows.length > flatRenderRows.length;
+  const groupRenderRows = useMemo<AccountSessionItem[][]>(() => {
+    if (!grouped) return [];
+    let budget = MAX_RENDER_ROWS;
+    return pageGroups.map((g) => {
+      if (collapsedGroups.has(g.provider)) return g.rows; // 折叠不渲染，不占预算
+      if (budget <= 0) return [];
+      const allowed = Math.min(g.rows.length, budget);
+      budget -= allowed;
+      return allowed < g.rows.length ? g.rows.slice(0, allowed) : g.rows;
+    });
+  }, [grouped, pageGroups, collapsedGroups]);
+  const groupedTruncated = grouped && pageGroups.some(
+    (g, i) => !collapsedGroups.has(g.provider) && (groupRenderRows[i]?.length ?? 0) < g.rows.length,
+  );
 
   /** §2.8 账号详情气泡：邮箱 / 昵称 / 标识 / 凭证 / 代理 / 更新于 / 来源 / 桌面登录态 */
   const accountTitleLines = (s: AccountSessionItem): string[] => {
@@ -2786,125 +2979,6 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
       default:
         return null;
     }
-  };
-
-  /**
-   * §2.9 余额明细（对齐 A2A accounts-credit-detail 的信息量）：
-   * - wallets[] 逐份积分包：面额 / 已用 / 剩余 + 到期徽标；
-   * - 「已用完 / 已过期」折叠组（A2A 的 spent 折叠）；
-   * - windows[] 逐窗口，按 group 分节（A2A「分组窗口」视图；逐模型配额卡片需后端
-   *   逐模型额度读数，当前数据无此维度，故仅出分组窗口）。
-   * 都空 → 「上游未返回明细」。
-   */
-  const balanceDetailRows = (bal: AccountBalance | null | undefined): ReactNode => {
-    const wallets = Array.isArray(bal?.wallets) ? bal.wallets : [];
-    // 同一基础模型的不同思考等级先合并，避免明细弹层里重复列同一模型。
-    const wins = mergeUsageWindows(bal?.windows ?? []);
-    if (!wallets.length && !wins.length) {
-      return <div className="as-pop-empty">{t('上游未返回明细')}</div>;
-    }
-    const unit = bal?.unit ? ` ${bal.unit}` : '';
-    const nowMs = Date.now();
-
-    // 每份积分包归一：剩余/面额/已用 + 到期时刻 + 是否已用完/已过期
-    const packs = wallets.map((w, i) => {
-      const balance = Number(w?.balance);
-      const total = Number(w?.total) || 0;
-      const used = Number(w?.used) || 0;
-      const expMs = expiryMillis(w?.expireAt ?? w?.expiresAt ?? w?.expire_at);
-      const expired = expMs != null && expMs <= nowMs;
-      const usedUp = Number.isFinite(balance) && (balance <= 0 || (total > 0 && used >= total));
-      return {
-        i,
-        balance,
-        total,
-        used,
-        expMs,
-        expired,
-        usedUp,
-        name: String(w?.displayName || w?.type || t('额度')),
-      };
-    });
-    const livePacks = packs.filter((p) => !p.expired && !p.usedUp);
-    const spentPacks = packs.filter((p) => p.expired || p.usedUp);
-
-    const packRow = (p: (typeof packs)[number], dim: boolean): ReactNode => (
-      <div key={`w-${p.i}`} className={`as-wallet-row${dim ? ' is-spent' : ''}`}>
-        <span className="as-wallet-name" title={p.name}>{p.name}</span>
-        <span className="as-wallet-view">
-          {Number.isFinite(p.balance) ? `${fmtAmount(p.balance)}${unit}` : '—'}
-          {p.total > 0 ? ` / ${fmtAmount(p.total)}${unit}` : ''}
-          {p.used > 0 ? ` · ${t('已用')} ${fmtAmount(p.used)}${unit}` : ''}
-        </span>
-        {p.expMs != null && (
-          <span
-            className={`as-pack-expiry${p.expired ? ' expired' : ''}`}
-            title={`${t('到期时间：')}${new Date(p.expMs).toLocaleString()}`}
-          >
-            {p.expired ? t('已过期') : `${t('到期')} ${new Date(p.expMs).toLocaleDateString()}`}
-          </span>
-        )}
-      </div>
-    );
-
-    // 窗口按 group 分节（有 group 时出分组标题；无 group 时维持平铺）
-    const winGroups = new Map<string, AccountUsageWindow[]>();
-    for (const w of wins) {
-      const g = (w.group || '').trim();
-      const arr = winGroups.get(g);
-      if (arr) arr.push(w);
-      else winGroups.set(g, [w]);
-    }
-    const showGroupHeads = [...winGroups.keys()].some((g) => g.length > 0);
-
-    const windowRow = (w: AccountUsageWindow, i: number): ReactNode => {
-      const label = usageWindowTitle(w);
-      const pct = typeof w.remaining_percent === 'number' ? Math.round(w.remaining_percent) : null;
-      const remaining = typeof w.remaining === 'number' ? w.remaining : null;
-      const reset = w.resets_at && w.resets_at > 0 ? new Date(w.resets_at * 1000).toLocaleString() : '';
-      return (
-        <div key={w.key || `win-${i}`} className="as-wallet-row">
-          <span className="as-wallet-name" title={label}>{label}</span>
-          <span className="as-wallet-view">
-            {pct != null ? t('剩 {{pct}}%', { pct }) : ''}
-            {remaining != null ? ` · ${fmtAmount(remaining)}` : ''}
-            {reset ? ` · ${t('重置于 {{time}}', { time: reset })}` : ''}
-          </span>
-        </div>
-      );
-    };
-
-    return (
-      <>
-        {packs.length > 0 && (
-          <>
-            <div className="as-pop-section">{t('额度桶')}</div>
-            {livePacks.length > 0
-              ? livePacks.map((p) => packRow(p, false))
-              : (
-                <div className="as-pop-empty">{t('可用额度已用完或已过期')}</div>
-              )}
-            {spentPacks.length > 0 && (
-              <details className="as-pack-spent">
-                <summary>{t('已用完 / 已过期 {{n}} 份', { n: spentPacks.length })}</summary>
-                {spentPacks.map((p) => packRow(p, true))}
-              </details>
-            )}
-          </>
-        )}
-        {wins.length > 0 && (
-          <>
-            <div className="as-pop-section">{t('用量窗口')}</div>
-            {[...winGroups.entries()].map(([g, list]) => (
-              <Fragment key={`wg-${g || 'default'}`}>
-                {showGroupHeads && g && <div className="as-pop-subsection">{g}</div>}
-                {list.map((w, i) => windowRow(w, i))}
-              </Fragment>
-            ))}
-          </>
-        )}
-      </>
-    );
   };
 
   // ── 表格单元格渲染（列配置驱动：列显隐 / 列宽 / 分组模式共用一套）──
@@ -3343,7 +3417,7 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                       ✕
                     </button>
                   </div>
-                  {balanceDetailRows(rawBal)}
+                  <BalanceDetail bal={rawBal} />
                 </div>
               )}
             </div>
@@ -4349,7 +4423,9 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
               </thead>
               <tbody>
                 {grouped && pageGroups.length
-                  ? pageGroups.map((g, pageIdx) => {
+                  ? (
+                    <>
+                      {pageGroups.map((g, pageIdx) => {
                       const collapsed = collapsedGroups.has(g.provider);
                       // 组统计读整组（分页切块时也用完整组的数据，避免数字随页跳）
                       const groupRows = groupedList.find((x) => x.provider === g.provider)?.rows ?? g.rows;
@@ -4519,11 +4595,36 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
                             </div>
                           </td>
                         </tr>
-                        {!collapsed && g.rows.map((row) => renderRow(row))}
+                        {!collapsed && (groupRenderRows[pageIdx] ?? []).map((row) => renderRow(row))}
                       </Fragment>
                       );
-                    })
-                  : pageRows.map((row) => renderRow(row))}
+                    })}
+                    {groupedTruncated && (
+                      <tr>
+                        <td
+                          colSpan={visibleCols.length}
+                          style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: 12, padding: '8px 0' }}
+                        >
+                          {t('当前视图超过单次渲染上限，仅渲染前 {{n}} 行；请调整每页条数或折叠分组查看其余账号', { n: MAX_RENDER_ROWS })}
+                        </td>
+                      </tr>
+                    )}
+                    </>
+                  ) : (
+                    <>
+                      {flatRenderRows.map((row) => renderRow(row))}
+                      {flatTruncated && (
+                        <tr>
+                          <td
+                            colSpan={visibleCols.length}
+                            style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: 12, padding: '8px 0' }}
+                          >
+                            {t('当前页行数超过渲染上限，仅渲染前 {{n}} 行，请调整每页条数后翻页查看剩余数据', { n: MAX_RENDER_ROWS })}
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  )}
               </tbody>
               {/* 限流明细展开行（对齐 Agent2API row-panel：通栏面板 + 标签流）。
                   A2A 列名 + AIGX 内容：冷却明细（429/限额）与限制器跳过模型合并展示。 */}
