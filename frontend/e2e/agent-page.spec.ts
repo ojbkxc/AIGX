@@ -51,7 +51,17 @@ test.describe('AI 运维页 · 结构', () => {
     // A2A v3.5.1 客户端配置分区（`12f0a5b1` 新增；此前页面只有对话工作台）
     // A2A 客户端检测面板已下掉（166d46c2）：AI 运维是「用 AI 运维网关」，
     // 不是「给外部客户端配网关」。腾出来的右栏改成运维概览。
-    await expect(page.locator('.agent-ops')).toBeVisible();
+    // 窄屏（≤1100px）下右栏降级为覆盖层抽屉：先点「运行信息」按钮打开，再断言。
+    // 断言后必须关闭抽屉——抽屉遮罩层会拦截输入区/角色胶囊的后续点击。
+    if ((page.viewportSize()?.width ?? 1440) <= 1100) {
+      await page.getByRole('button', { name: '运行信息' }).click();
+      await expect(page.locator('.mobile-drawer .agent-ops')).toBeVisible();
+      // 关闭抽屉：按 Escape（遮罩层点击在窄屏下坐标可能落在 aside 上，不可靠）
+      await page.locator('.mobile-drawer').press('Escape');
+      await expect(page.locator('.mobile-drawer')).toHaveCount(0);
+    } else {
+      await expect(page.locator('.agent-ops')).toBeVisible();
+    }
 
     // 对话工作台骨架：会话抽屉（sidebar 变体）+ 消息流 + 输入区
     await expect(page.locator('.agent-shell')).toBeVisible();

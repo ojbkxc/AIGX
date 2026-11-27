@@ -166,6 +166,8 @@ test.describe('全站冒烟', () => {
     if ((page.viewportSize()?.width ?? 1440) <= 768) {
       await page.locator('.mobile-menu-btn').click();
     }
+    // 「管理」组默认折叠（sidebar-ia-cleanup），先展开再点「供应商」
+    await page.getByRole('button', { name: /展开「管理」分组/ }).click();
     await page
       .locator('.sidebar-aside')
       .filter({ visible: true })
