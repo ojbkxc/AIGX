@@ -30,6 +30,7 @@ import {
 } from '../api/endpoints/oauth';
 import { copyText } from '../lib/clipboard';
 import { useToast } from './Toast';
+import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
 import type {
   OauthConfig,
   OauthProviderConfig,
@@ -107,6 +108,8 @@ export default function OAuthConfigPanel(): JSX.Element {
   );
   /** 用户显式点了「清除已保存的密钥」的 provider */
   const [clearSecret, setClearSecret] = useState<Set<OauthProviderKey>>(new Set());
+  /** 「清除已保存的密钥」二次确认（不可撤销，误点一次即失效） */
+  const [clearConfirm, setClearConfirm] = useState<{ key: OauthProviderKey; label: string } | null>(null);
   /** 小眼睛：只控制**新输入**的可见性，掩码原值永远不显示 */
   const [revealSecret, setRevealSecret] = useState<Set<OauthProviderKey>>(new Set());
   const [siteOrigin, setSiteOrigin] = useState<string>(() => defaultSiteOrigin());
@@ -293,11 +296,13 @@ export default function OAuthConfigPanel(): JSX.Element {
             reveal={revealSecret.has(meta.key)}
             onToggleReveal={() => toggleSet(setRevealSecret, meta.key)}
             onToggleClear={() => {
-              // 勾上「清除」时把刚输入的新值也丢掉：否则界面上还留着一串被忽略的
-              // 密码（输入框此时是 disabled），用户会以为它会生效。
-              const wasSet = clearSecret.has(meta.key);
-              toggleSet(setClearSecret, meta.key);
-              if (!wasSet) setDraft(meta.key, { client_secret: '' });
+              if (clearSecret.has(meta.key)) {
+                // 取消清除：无害操作，直接执行
+                toggleSet(setClearSecret, meta.key);
+                return;
+              }
+              // 勾上「清除」是不可撤销的高危操作（保存后登录入口立即失效），先二次确认
+              setClearConfirm({ key: meta.key, label: meta.label });
             }}
             onChange={(patch) => setDraft(meta.key, patch)}
             onCopy={copy}
@@ -323,6 +328,31 @@ export default function OAuthConfigPanel(): JSX.Element {
           {saving ? t('保存中...') : t('保存更改')}
         </button>
       </div>
+
+      {/* 清除已保存密钥的二次确认（不可撤销，确认后才标记 + 丢弃刚输入的新值） */}
+      <ConfirmDialog
+        state={
+          clearConfirm
+            ? ({
+                title: t('清除已保存的密钥'),
+                message: t(
+                  '确定清除 {{provider}} 的 client_secret 吗？保存后对应登录入口会立即失效，且不可撤销。',
+                  { provider: clearConfirm.label },
+                ),
+                confirmText: t('清除'),
+                danger: true,
+                onConfirm: () => {
+                  const k = clearConfirm.key;
+                  // 勾上「清除」时把刚输入的新值也丢掉：否则界面上还留着一串被忽略的
+                  // 密码（输入框此时是 disabled），用户会以为它会生效。
+                  toggleSet(setClearSecret, k);
+                  setDraft(k, { client_secret: '' });
+                },
+              } as ConfirmState)
+            : null
+        }
+        onClose={() => setClearConfirm(null)}
+      />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import React, { useId, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
@@ -29,6 +30,7 @@ export default function PasswordInput({
   ...rest
 }: PasswordInputProps): JSX.Element {
   const [visible, setVisible] = useState(false);
+  const { t } = useTranslation();
   const reactId = useId();
   const inputId = id ?? (label ? `pwd-${reactId}` : undefined);
   return (
@@ -45,10 +47,10 @@ export default function PasswordInput({
         <button
           type="button"
           className="password-input-toggle"
-          tabIndex={-1}
           onClick={() => setVisible((v) => !v)}
-          aria-label={visible ? '隐藏密码' : '显示密码'}
-          title={visible ? '隐藏密码' : '显示密码'}
+          aria-label={visible ? t('隐藏密码') : t('显示密码')}
+          aria-pressed={visible}
+          title={visible ? t('隐藏密码') : t('显示密码')}
         >
           {visible ? <EyeOff size={14} /> : <Eye size={14} />}
         </button>

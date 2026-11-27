@@ -8,7 +8,7 @@ import { isAdmin } from '../lib/utils';
 import {
   ChevronDown, Menu,
   PanelLeftClose, PanelLeftOpen, Sun, Languages, LogOut,
-  EyeOff, Pencil, GripVertical, RotateCcw,
+  EyeOff, Pencil, GripVertical, RotateCcw, Search,
 } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
 import GlobalSearch from './GlobalSearch';
@@ -73,10 +73,12 @@ interface SidebarContentProps {
   isDrawer: boolean;
   layout: SidebarLayout;
   onApply: (next: SidebarLayout | null) => boolean;
+  /** 打开全局搜索（Ctrl/⌘+K）：侧栏常驻入口，提升可发现性 */
+  onOpenSearch: () => void;
 }
 
 /** 侧栏内容（桌面常驻 / 移动抽屉共用） */
-function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onApply }: SidebarContentProps): JSX.Element {
+function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onApply, onOpenSearch }: SidebarContentProps): JSX.Element {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const [userMenuOpen, setUserMenuOpen] = React.useState<boolean>(false);
@@ -307,6 +309,22 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onAppl
 
       {/* Nav：展开态分组平铺；收缩态仅图标 + title tooltip */}
       <nav className="sidebar-nav" ref={navRef}>
+        {/* 全局搜索常驻入口：Ctrl/⌘+K 此前只有快捷键、无界面入口，可发现性差 */}
+        <button
+          type="button"
+          className="sidebar-search-btn"
+          onClick={onOpenSearch}
+          aria-label={t('搜索页面与配置项')}
+          title={t('搜索页面与配置项（{{shortcut}}）', { shortcut: navigator.platform?.includes('Mac') ? '⌘K' : 'Ctrl+K' })}
+        >
+          <Search size={15} strokeWidth={1.8} />
+          {!collapsed && (
+            <>
+              <span className="sidebar-search-label">{t('搜索')}</span>
+              <kbd className="sidebar-search-kbd">{navigator.platform?.includes('Mac') ? '⌘K' : 'Ctrl K'}</kbd>
+            </>
+          )}
+        </button>
         {drawnGroups.map(({ group, visibleItems, label, folded }) => {
           const isRenaming = renamingId === group.id;
           return (
@@ -590,12 +608,12 @@ export default function Sidebar(): JSX.Element {
       {/* 桌面端常驻侧栏（≤768px 由 CSS 隐藏） */}
       <div className="sidebar-desktop">
         <SidebarContent collapsed={collapsed} onToggleCollapsed={toggleCollapsed} isDrawer={false}
-          layout={layout} onApply={apply} />
+          layout={layout} onApply={apply} onOpenSearch={() => setSearchOpen(true)} />
       </div>
       {/* 移动端抽屉（恒为展开形态） */}
       <MobileDrawer open={mobileOpen} onClose={() => setMobileOpen(false)} ariaLabel={t('导航菜单')}>
         <SidebarContent collapsed={false} onToggleCollapsed={toggleCollapsed} isDrawer
-          layout={layout} onApply={apply} />
+          layout={layout} onApply={apply} onOpenSearch={() => setSearchOpen(true)} />
       </MobileDrawer>
       <GlobalSearch
         open={searchOpen}
