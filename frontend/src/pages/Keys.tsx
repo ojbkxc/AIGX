@@ -26,6 +26,7 @@ import { useListKeyboard } from '../hooks/useListKeyboard';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import KeysDocsPanel from '../components/KeysDocsPanel';
 import DocsApiBrowser from '../components/docs-api-browser';
+import ModelPricingPage from '../components/ModelPricingPage';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, MultiSelect, Tabs } from '../components/ui';
 import './Keys.css';
 
@@ -56,7 +57,7 @@ const KEYS_COL_DEFS: TableColumnDef[] = [
  *  / 完整接入文档（2026-11-27 自 A2A `docs-page` 移植：7 章正文 + 接口地址表 +
  *  搜索/分页/一键复制。前两个 Tab 的内容与语义不变，第三个只是新增入口，
  *  避免把「4 张快速参考卡」替换掉——快速参考与完整正文是两种阅读场景）。 */
-type KeysTab = 'keys' | 'docs' | 'api';
+type KeysTab = 'keys' | 'docs' | 'api' | 'pricing';
 
 interface TokenItem {
   id: string | number;
@@ -162,7 +163,11 @@ export default function Keys(): JSX.Element {
   // 刷新/书签直达、文档 Tab 的链接可分享（/keys?tab=docs、/keys?tab=api）
   const [params, setParams] = useSearchParams();
   const tabParam = params.get('tab');
-  const tab: KeysTab = tabParam === 'docs' ? 'docs' : tabParam === 'api' ? 'api' : 'keys';
+  const tab: KeysTab =
+    tabParam === 'docs' ? 'docs'
+      : tabParam === 'api' ? 'api'
+        : tabParam === 'pricing' ? 'pricing'
+          : 'keys';
   const changeTab = (next: KeysTab): void => {
     if (next === tab) return;
     const nextParams = new URLSearchParams(params);
@@ -853,6 +858,7 @@ export default function Keys(): JSX.Element {
           { key: 'keys', label: t('密钥管理') },
           { key: 'docs', label: t('接入文档') },
           { key: 'api', label: t('完整接入文档') },
+          { key: 'pricing', label: t('模型价格') },
         ]}
         active={tab}
         onChange={changeTab}
@@ -1218,6 +1224,14 @@ export default function Keys(): JSX.Element {
           components/docs-api-browser.tsx。Base URL 由组件按角色自行解析。 */}
       <div hidden={tab !== 'api'}>
         <DocsApiBrowser />
+      </div>
+
+      {/* 模型价格 Tab（2026-11-27 新增）：用户侧的模型单价一览，单位「元 / 百万 Token」，
+          含官方价对照与折扣（官方价由管理员填，未填显示「未登记」）。
+          前端组件 ModelPricingPage；数据依赖 GET /api/user/models，未上线时回落
+          已上线的 /api/models/available。 */}
+      <div hidden={tab !== 'pricing'}>
+        <ModelPricingPage />
       </div>
 
       {/* 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪） */}

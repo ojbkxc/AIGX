@@ -57,3 +57,10 @@
   color: var(--text-muted);
   font-size: 12px;
 }
+
+.cpe-unit-note {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding-bottom: 4px;
+  line-height: 1.5;
+}

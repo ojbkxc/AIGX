@@ -32,6 +32,7 @@ import ModelTestDialog from '../components/ModelTestDialog';
 import ModelCapabilityDialog from '../components/ModelCapabilityDialog';
 import RatioPanel from '../components/RatioPanel';
 import { fmtCompact } from '../lib/utils';
+import { formatPerMillion, parsePerMillionInput, toPerMillion } from '../lib/pricingUnits';
 import { getFilter, setFilter } from '../lib/filterMemory';
 import {
   applyTableColumns,
@@ -257,12 +258,23 @@ const CAP_SRC_LABEL: Record<string, string> = {
 
 // ── 小工具 ───────────────────────────────────────────────────────────
 
+/**
+ * 界面口径是**元 / 百万 Token**，后端存的是每 1K token。
+ * 换算只在前端：显示 ×1000，写回 ÷1000（`lib/pricingUnits.ts`），后端契约一字不动。
+ */
+
+/** 列宽紧张时的展示格式：去浮点尾巴，且**不裁整数的零**（1000 不会变成 1）。 */
 function fmtPrice(n: number | null | undefined): string {
   if (n == null) return '—';
   // 去尾零：0.0010 → 0.001，列宽紧张时不被截断
   if (n < 0.01) return String(parseFloat(n.toFixed(4)));
   if (n < 1) return String(parseFloat(n.toFixed(3)));
   return n.toFixed(2);
+}
+
+/** 每百万 Token 的展示格式（比列宽宽松，保留足够小数位给缓存读这类小数）。 */
+function fmtPerMillion(storage: number | null | undefined): string {
+  return formatPerMillion(storage);
 }
 
 /** 定价条目是否全 0（免费模型）——与「未定价」（price 为 null）区分开展示 */
@@ -722,14 +734,15 @@ export default function ModelManage(): JSX.Element {
   };
 
   // ── 定价弹窗 ──
+  // 界面口径：元 / 百万 Token；后端存每 1K token。打开时 ×1000 换算，保存时 ÷1000 写回。
   const openPrice = (row: ManagedModel) => {
     setPriceTarget(row);
     setPriceError('');
     const p = row.price;
     setPriceForm({
-      input_price: p ? String(p.input_price ?? '') : '',
-      output_price: p ? String(p.output_price ?? '') : '',
-      cache_price: p && p.cache_price != null ? String(p.cache_price) : '',
+      input_price: p && p.input_price ? String(toPerMillion(p.input_price)) : '',
+      output_price: p && p.output_price ? String(toPerMillion(p.output_price)) : '',
+      cache_price: p && p.cache_price != null ? String(toPerMillion(p.cache_price)) : '',
       price_type: p?.price_type || 'token',
       model_ratio: row.model_ratio !== 1 ? String(row.model_ratio) : '',
     });
@@ -741,9 +754,9 @@ export default function ModelManage(): JSX.Element {
     const free = priceForm.price_type === 'free';
     // 免费：价格与倍率都不参与计费（后端 cost_with_name 对 free 直接返回 0），
     // 统一提交 0/null，避免残留旧价格让列表误显示成「$x/1k tokens」。
-    const input = free ? 0 : Number(priceForm.input_price || 0);
-    const output = free ? 0 : Number(priceForm.output_price || 0);
-    const cache = free || priceForm.cache_price.trim() === '' ? null : Number(priceForm.cache_price);
+    const input = free ? 0 : parsePerMillionInput(priceForm.input_price);
+    const output = free ? 0 : parsePerMillionInput(priceForm.output_price);
+    const cache = free || priceForm.cache_price.trim() === '' ? null : parsePerMillionInput(priceForm.cache_price);
     if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0) {
       setPriceError(t('价格必须是非负数字'));
       return;
@@ -1740,7 +1753,12 @@ export default function ModelManage(): JSX.Element {
             className={`mm-c-price ta-${colAlign.price}`}
             role="button"
             tabIndex={0}
-            title={`${t('点击编辑定价')} · ${t('单位：美元。按量价为每 1k tokens 输入/输出价；按次价为每次调用价。')}`}
+            title={
+              row.price && !isFreePrice(row.price) && row.price.price_type !== 'count'
+                ? `${t('点击编辑定价')} · ${t('列内为后端存储口径：每 1K token 的输入/输出价；编辑弹窗按「元 / 百万 Token」填写，×1000 换算后写回。')}\n`
+                  + `${t('换算成每百万')}：${fmtPerMillion(row.price.input_price)} / ${fmtPerMillion(row.price.output_price)} ${t('元 / 百万 Token')}`
+                : `${t('点击编辑定价')} · ${t('列内为后端存储口径：每 1K token 的输入/输出价；编辑弹窗按「元 / 百万 Token」填写，×1000 换算后写回。')}`
+            }
             onClick={() => openPrice(row)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
@@ -3007,40 +3025,45 @@ export default function ModelManage(): JSX.Element {
                 <>
               <div className="form-group">
                 <label>
-                  {priceForm.price_type === 'count' ? t('每次价格') : t('输入价格（每 1k token）')}
+                  {priceForm.price_type === 'count' ? t('每次价格') : t('输入价格（元 / 百万 Token）')}
                 </label>
                 <input
                   className="form-input"
                   value={priceForm.input_price}
                   onChange={(e) => setPriceForm({ ...priceForm, input_price: e.target.value })}
-                  placeholder="0.0005"
+                  placeholder="0.3"
                   disabled={savingPrice}
                 />
               </div>
               {priceForm.price_type !== 'count' && (
                 <>
                   <div className="form-group">
-                    <label>{t('输出价格（每 1k token）')}</label>
+                    <label>{t('输出价格（元 / 百万 Token）')}</label>
                     <input
                       className="form-input"
                       value={priceForm.output_price}
                       onChange={(e) => setPriceForm({ ...priceForm, output_price: e.target.value })}
-                      placeholder="0.0015"
+                      placeholder="0.6"
                       disabled={savingPrice}
                     />
                   </div>
                   <div className="form-group">
-                    <label>{t('缓存价格（可选）')}</label>
+                    <label>{t('缓存价格（元 / 百万 Token，可选）')}</label>
                     <input
                       className="form-input"
                       value={priceForm.cache_price}
                       onChange={(e) => setPriceForm({ ...priceForm, cache_price: e.target.value })}
-                      placeholder="0.0001"
+                      placeholder="0.0025"
                       disabled={savingPrice}
                     />
                   </div>
                 </>
               )}
+              <div className="form-group">
+                <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 12 }}>
+                  {t('单位是元 / 百万 Token：填 0.3 即「每百万 0.3 元」。后端仍按每 1K token 存储与计费，界面值已自动 ×1000 换算，写回时再 ÷1000，历史价格不变。')}
+                </p>
+              </div>
               <div className="form-group">
                 <label>{t('模型倍率（可选，默认 1.0）')}</label>
                 <input
