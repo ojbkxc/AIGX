@@ -63,11 +63,13 @@ describe('StatCards — 趋势 delta + sparkline（#11）', () => {
     expect(container.textContent).not.toContain('▼ 96.0%');
   });
 
-  it('金额格按视角分名：默认（管理员）「总成本」，personal（普通用户）「总消费」', () => {
-    // 后端只有一个金额量（overview 的 total_cost／额度）：个人视图只改用词，不改读数。
+  it('金额格统一为「消费」口径（≠上游成本），普通用户叫「总消费」', () => {
+    // 后端只有一个金额量（overview 的 total_cost／额度）：它是按定价从配额扣减的
+    // 消费，不是真正的上游成本。旧文案管理员叫「总成本」会误读成「付给上游的钱」，
+    // 故统一为「消费」口径；读数同源，只换标签。
     const admin = render(<StatCards overview={ov} />);
-    expect(admin.container.textContent).toContain('总成本');
-    expect(admin.container.textContent).not.toContain('总消费');
+    expect(admin.container.textContent).toContain('总消费（配额）');
+    expect(admin.container.textContent).not.toContain('总成本');
     const personal = render(<StatCards overview={ov} personal />);
     expect(personal.container.textContent).toContain('总消费');
     expect(personal.container.textContent).not.toContain('总成本');

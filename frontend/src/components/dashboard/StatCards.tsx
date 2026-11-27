@@ -123,10 +123,13 @@ export default function StatCards({ overview, lang, rangeLabel, prev, series, pe
     />,
     <TrendCard
       key="cost"
-      title={t(personal ? '总消费' : '总成本')}
+      // 后端只有一个金额量 total_cost：它=按定价从用户配额扣减的额度（即「消费」），
+      // 不是真正的上游成本（上游成本在 request_log.channel_cost，只在日志详情露出）。
+      // 旧文案管理员视角叫「总成本」，会被误读成「付给上游的钱」，故统一为「消费」口径。
+      title={t(personal ? '总消费' : '总消费（配额）')}
       value={fmtCost(o.total_cost, lang)}
       delta={deltaPct(o.total_cost ?? 0, p.total_cost)}
-      desc={t('配额口径，与日志页可对账')}
+      desc={t('按定价从配额扣减，≠ 上游成本；与日志页可对账')}
     />,
     <TrendCard
       key="activeDays"

@@ -6219,5 +6219,16 @@
   "确定清除 {{provider}} 的 client_secret 吗？保存后对应登录入口会立即失效，且不可撤销。": "Clear the saved client_secret for {{provider}}? The corresponding sign-in entry will stop working immediately after saving, and this cannot be undone.",
   "搜索页面与配置项": "Search pages & settings",
   "搜索页面与配置项（{{shortcut}}）": "Search pages & settings ({{shortcut}})",
-  "解除降级": "Lift downgrade"
+  "解除降级": "Lift downgrade",
+  "放弃": "Discard",
+  "覆盖未保存的修改": "Overwrite unsaved changes",
+  "清空样例历史": "Clear sample history",
+  "清零": "Reset",
+  "确认保存": "Confirm save",
+  "替换词表": "Replace word list",
+  "停用异常行": "Disable abnormal rows",
+  "显示商户密钥": "Show merchant secret",
+  "隐藏商户密钥": "Hide merchant secret",
+  "按定价从配额扣减，≠ 上游成本；与日志页可对账": "Deducted from quota at pricing, ≠ upstream cost; reconciles with the logs page",
+  "总消费（配额）": "Total spend (quota)"
 }
