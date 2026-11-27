@@ -194,7 +194,7 @@ pub fn validate_with_fallback(
         // 词一起丢掉，等于「名字有了、词没了」。description 从原始内容里再取一次
         // （`parse_skill_parts` 的返回元组不带它）。
         name = fallback.to_string();
-        let description = extract_description_line(&content);
+        let description = extract_description_line(content);
         keywords = keywords_from(fallback, &description, &[]);
     }
     let body_chars = body.chars().count();
@@ -331,7 +331,7 @@ mod tests {
     ///
     /// 用后端解析器本身回读，而不是自己再写一遍 frontmatter 正则——
     /// 两份实现漂移时，界面新建出来的技能会「看起来正常、永远不命中」。
-    #[test]
+    ///
     /// 不传关键词时，骨架**仍然**要带 `keywords:` 行。
     ///
     /// 旧实现只在 keywords 非空时才写这行，于是「生成骨架 → 填正文 → 写入」

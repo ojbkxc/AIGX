@@ -1428,13 +1428,13 @@ fn mtime_of(path: &Path) -> Option<(u64, u32)> {
 /// 递归统计目录树下的目录总数（只 stat，不读文件内容）。
 ///
 /// 用于技能缓存指纹：新增技能目录会让总数变化，而它不会改变任何旧条目的 mtime。
-fn count_dirs(root: &Path, reader: std::fs::ReadDir) -> usize {
+fn count_dirs(reader: std::fs::ReadDir) -> usize {
     let mut count = 1usize;
     for entry in reader.flatten() {
         let path = entry.path();
         if path.is_dir() {
             if let Ok(sub) = std::fs::read_dir(&path) {
-                count += count_dirs(&path, sub);
+                count += count_dirs(sub);
             }
         }
     }
@@ -1473,7 +1473,7 @@ impl SkillStamp {
         let dir_count_now = match self.dirs.first() {
             Some((root, _)) => std::fs::read_dir(root)
                 .ok()
-                .map(|r| count_dirs(root, r))
+                .map(|r| count_dirs(r))
                 .unwrap_or(0),
             None => 0,
         };
