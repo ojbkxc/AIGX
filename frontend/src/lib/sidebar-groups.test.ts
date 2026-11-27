@@ -4,9 +4,12 @@ import {
   dropLineBefore,
   groupOrderIsCustomized,
   moveGroupAcrossVisible,
+  moveGroupAdjacent,
   moveGroupTo,
+  moveItemAdjacent,
   resetGroupOrderAndNames,
 } from './sidebar-groups';
+import { moveGroup } from './sidebar-layout';
 import { cloneLayout, defaultLayout, type SidebarLayout } from './sidebar-layout';
 
 /** 默认布局 + 一个自建分组（放在末尾，模拟用户在设置页新建过一组）。 */
@@ -26,6 +29,11 @@ function group(layout: SidebarLayout, gid: string) {
   const found = layout.groups.find((g) => g.id === gid);
   if (!found) throw new Error(`布局里没有分组 ${gid}`);
   return found;
+}
+
+/** 某组内菜单顺序（不存在就炸，避免断言在 undefined 上假绿）。 */
+function itemsOf(layout: SidebarLayout, gid: string): string[] {
+  return group(layout, gid).items;
 }
 
 describe('moveGroupTo（拖动落点提交）', () => {
@@ -160,6 +168,69 @@ describe('moveGroupAcrossVisible（Alt+↑ / ↓ 键盘走一格）', () => {
     const visible = ['g-admin', 'g-personal'];
     const next = moveGroupAcrossVisible(layout, visible, 'g-admin', 1) as SidebarLayout;
     expect(order(next)).toBe('g-general,g-personal,g-admin');
+  });
+});
+
+describe('moveGroupAdjacent（设置页 Alt+↑/↓ 走一格）', () => {
+  it('↑ 把第二组挪到第一组之前（传 index 是死键，传 index-1 才动）', () => {
+    const layout = defaultLayout();
+    const next = moveGroupAdjacent(layout, 'g-admin', -1) as SidebarLayout;
+    expect(order(next)).toBe('g-admin,g-general,g-personal');
+  });
+
+  it('↓ 把首组挪到第二组之后（要 index+2，index+1 属原位）', () => {
+    const layout = defaultLayout();
+    const next = moveGroupAdjacent(layout, 'g-general', 1) as SidebarLayout;
+    expect(order(next)).toBe('g-admin,g-general,g-personal');
+  });
+
+  it('首组 ↑ / 末组 ↓ 返回 null —— 边界挡住，不让 -1 进 splice 从末尾数', () => {
+    const layout = defaultLayout();
+    expect(moveGroupAdjacent(layout, 'g-general', -1)).toBeNull();
+    expect(moveGroupAdjacent(layout, 'g-personal', 1)).toBeNull();
+  });
+
+  it('**正向对照**：把 -1 直接交给 moveGroup 并不是「原地不动」而是另一种错序', () => {
+    // 这条钉住「为什么必须在调用前挡边界」。若 moveGroup 哪天改成夹取，这条会红，
+    // 提醒把相邻函数的边界守卫连同注释一起重审（不是照着旧行为改测试）。
+    const layout = defaultLayout();               // general, admin, personal
+    const naive = moveGroup(layout, 'g-general', -1);
+    expect(naive).not.toBeNull();                 // 没有返回 null（不是安全空操作）
+    expect(order(naive as SidebarLayout)).toBe('g-admin,g-general,g-personal'); // 反而像「下移」
+    expect(order(naive as SidebarLayout)).not.toBe(order(layout)); // 布局确实被改了
+  });
+
+  it('delta=0 / 未知 id 不动', () => {
+    const layout = defaultLayout();
+    expect(moveGroupAdjacent(layout, 'g-admin', 0)).toBeNull();
+    expect(moveGroupAdjacent(layout, 'g-nope', -1)).toBeNull();
+  });
+});
+
+describe('moveItemAdjacent（设置页组内 Alt+↑/↓ 走一格）', () => {
+  /** 通用组默认 items：/ , /chat, /prompts, /keys, /logs */
+  function general(): SidebarLayout { return defaultLayout(); }
+
+  it('↑ 把组内第二项挪到第一项之前（传 index 是死键，传 index-1 才动）', () => {
+    const layout = general();
+    const next = moveItemAdjacent(layout, '/chat', -1) as SidebarLayout;
+    expect(itemsOf(next, 'g-general').slice(0, 2)).toEqual(['/chat', '/']);
+  });
+
+  it('↓ 把组内第一项挪到第二项之后（要 index+2）', () => {
+    const layout = general();
+    const next = moveItemAdjacent(layout, '/', 1) as SidebarLayout;
+    expect(itemsOf(next, 'g-general').slice(0, 2)).toEqual(['/chat', '/']);
+  });
+
+  it('组内首项 ↑ / 组内末项 ↓ 返回 null（跨组由调用方单独处理）', () => {
+    const layout = general();
+    expect(moveItemAdjacent(layout, '/', -1)).toBeNull();
+    expect(moveItemAdjacent(layout, '/logs', 1)).toBeNull();
+  });
+
+  it('跨组落点不在本函数职责内：不在布局里的 key 返回 null', () => {
+    expect(moveItemAdjacent(general(), '/nope', 1)).toBeNull();
   });
 });
 

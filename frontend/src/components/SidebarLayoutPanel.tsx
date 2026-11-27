@@ -29,6 +29,7 @@ import {
   type LayoutGroup,
   type SidebarLayout,
 } from '../lib/sidebar-layout';
+import { moveGroupAdjacent, moveItemAdjacent } from '../lib/sidebar-groups';
 import './SidebarLayoutPanel.css';
 
 const GRIP_ICON = (
@@ -209,24 +210,22 @@ export default function SidebarLayoutPanel(): JSX.Element {
   /** 键盘排序：把手聚焦后 Alt+↑/↓ 移动一格，跨过组边界时落到相邻组。 */
   const moveByKeyboard = (kind: 'group' | 'item', id: string, up: boolean): void => {
     if (kind === 'group') {
-      const index = layout.groups.findIndex((g) => g.id === id);
-      if (index < 0) return;
-      apply(moveGroup(layout, id, up ? index : index + 2));
+      apply(moveGroupAdjacent(layout, id, up ? -1 : 1));
       return;
     }
     const from = locate(layout, id);
     if (!from) return;
-    let toGi = from.gi;
-    let toIndex = from.index + (up ? 0 : 1);
-    const group = layout.groups[from.gi];
+    // 组首上移 / 组尾下移：跨到相邻组的端点（这一跳必须自己算，纯组内交换表达不了）
     if (up && from.index === 0 && from.gi > 0) {
-      toGi = from.gi - 1;
-      toIndex = layout.groups[toGi].items.length;
-    } else if (!up && from.index === group.items.length - 1 && from.gi < layout.groups.length - 1) {
-      toGi = from.gi + 1;
-      toIndex = 0;
+      apply(moveItem(layout, id, from.gi - 1, layout.groups[from.gi - 1].items.length));
+      return;
     }
-    apply(moveItem(layout, id, toGi, toIndex));
+    if (!up && from.index === layout.groups[from.gi].items.length - 1
+      && from.gi < layout.groups.length - 1) {
+      apply(moveItem(layout, id, from.gi + 1, 0));
+      return;
+    }
+    apply(moveItemAdjacent(layout, id, up ? -1 : 1));
   };
 
   const onGripKey = (kind: 'group' | 'item', id: string) => (event: ReactKeyboardEvent): void => {

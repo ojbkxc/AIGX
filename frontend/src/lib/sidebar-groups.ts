@@ -22,7 +22,9 @@
 
 import {
   defaultLayout,
+  locate,
   moveGroup,
+  moveItem,
   renameGroup,
   type LayoutGroup,
   type SidebarLayout,
@@ -63,8 +65,11 @@ export function moveGroupTo(
  * 下移要传「下邻的下一个可见组」的下标（插在它之前 = 落在下邻之后）；没有就落到末尾。
  * 传自身下标在 `moveGroup` 里属原位、返回 null，也就是「按了没反应」。
  *
- * 可见序列的边界必须显式挡住：`moveGroup` 只认插入位，`-1` 会被 `splice(-1)` 当成
- * 「插到最后一项之前」，按一下 ↑ 就绕到末尾去了。
+ * 可见序列的边界必须显式挡住。`-1` 之所以必须挡在门口：`moveGroup` 的越界处理并不是
+ * 「夹到边界」，而是把负数直接交给 `splice(toIndex, 0, x)`，而负下标从**末尾**数——
+ * 于是在长度 3 的布局里按一下 ↑ 得到 `b,a,c`（把自身挪到第二格，看起来像「下移」），
+ * 长度 2 时又恰好不动，长度 4 时又是 `a,c,b,d`。同一组键的含义随布局长度漂移，
+ * 这种「有时对、有时错」比恒错更难查，所以边界一律挡在调用 `moveGroup` 之前。
  */
 export function moveGroupAcrossVisible(
   layout: SidebarLayout,
@@ -169,6 +174,61 @@ export function resetGroupOrderAndNames(layout: SidebarLayout): SidebarLayout | 
   const after = JSON.stringify(ordered);
   if (before === after) return null; // 已经就是默认：不白写一次缓存 + 一次 PUT
   return withGroups(layout, ordered);
+}
+
+/**
+ * 原地走一格（设置页 SidebarLayoutPanel 的 Alt+↑/↓ 用，那页把所有组都画出来了，
+ * 不存在「看不见的邻居」问题，所以按布局下标走）。
+ *
+ * 与 `moveGroupAcrossVisible` 的差别只在可见性口径；坑是同一个：
+ *   · 传自身下标给 `moveGroup` 属原位、返回 null —— 上移传 `index` 就是死键；
+ *   · 上移传 `index - 1` 还不够：首组会算出 -1，而 `moveGroup` **不夹取**边界，
+ *     负下标直接进 `splice(-1, 0, x)`，从末尾数 —— 长度 3 的布局里按 ↑ 会得到
+ *     `b,a,c`（像「下移」），长度 2 时又恰好不动。含义随长度漂移，所以首尾在这里挡。
+ *   · 下移要传 `index + 2`（插到下邻之后），`index + 1` 同样属原位。
+ */
+export function moveGroupAdjacent(
+  layout: SidebarLayout,
+  gid: string,
+  delta: number,
+): SidebarLayout | null {
+  const from = layout.groups.findIndex((g) => g.id === gid);
+  if (from < 0) return null;
+  if (delta < 0) {
+    if (from === 0) return null;
+    return moveGroup(layout, gid, from - 1);
+  }
+  if (delta > 0) {
+    if (from === layout.groups.length - 1) return null;
+    return moveGroup(layout, gid, from + 2);
+  }
+  return null;
+}
+
+/**
+ * 组内菜单原地走一格（设置页 Alt+↑/↓ 的另一条腿）。
+ *
+ * 跨组边界已经由调用方先处理（组首上移 → 落到上一组末尾，组尾下移 → 落到下一组开头），
+ * 进到这里就是同一组内的相邻交换。插入位同样不是自身下标：上移传 `index - 1`，
+ * 下移传 `index + 2` —— 传 `index` / `index + 1` 在 `moveItem` 里都算原位返回 null
+ * （设置页原先两条腿都踩了这个，组内上下键一起失灵）。
+ */
+export function moveItemAdjacent(
+  layout: SidebarLayout,
+  key: string,
+  delta: number,
+): SidebarLayout | null {
+  const from = locate(layout, key);
+  if (!from) return null;
+  if (delta < 0) {
+    if (from.index === 0) return null;
+    return moveItem(layout, key, from.gi, from.index - 1);
+  }
+  if (delta > 0) {
+    if (from.index === layout.groups[from.gi].items.length - 1) return null;
+    return moveItem(layout, key, from.gi, from.index + 2);
+  }
+  return null;
 }
 
 /**
