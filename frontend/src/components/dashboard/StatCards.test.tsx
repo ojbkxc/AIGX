@@ -1,7 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { render } from '@testing-library/react';
+import i18n from 'i18next';
 import StatCards from './StatCards';
 import '../../i18n';
+
+// 全量套件里别的测试文件会把 localStorage 的 i18n_lang 污染成 en（jsdom 共享环境），
+// 而本文件有断言中文文案的用例（金额格按视角分名）。钉回 zh 并真正切换语言，
+// 否则只写 localStorage 不会让已初始化的 i18n 重新生效（单跑绿、全量红）。
+beforeEach(async () => {
+  localStorage.setItem('i18n_lang', 'zh');
+  await i18n.changeLanguage('zh');
+});
 
 const ov = {
   total_requests: 120,
