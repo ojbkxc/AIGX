@@ -510,7 +510,12 @@ pub async fn handle_clear_route_sticky(
             // 非法 / 过期 id：不 500，回 0 条（幂等清除）
             _ => 0usize,
         }
-    } else if let Some(model) = body.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    } else if let Some(model) = body
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         // 按模型清：取快照里 model 匹配的条目逐条 evict。
         // 不走「清空再重建」——期间别的请求可能正写入，逐条删不会误伤新条目。
         let (entries, _) = cache.snapshot(ROUTE_STICKY_MAX_SNAPSHOT);

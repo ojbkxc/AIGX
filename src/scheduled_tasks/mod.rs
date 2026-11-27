@@ -1038,7 +1038,10 @@ mod tests {
 
         // 间隔也走同一口径（claim 用 task_interval_ms，与 settings_of 同源）
         settings.plugin_catalog_follow = true;
-        assert_eq!(task_interval_ms(&settings, TASK_PLUGIN_CATALOG), 20 * 60_000);
+        assert_eq!(
+            task_interval_ms(&settings, TASK_PLUGIN_CATALOG),
+            20 * 60_000
+        );
         settings.plugin_catalog_follow = false;
         assert_eq!(
             task_interval_ms(&settings, TASK_PLUGIN_CATALOG),
