@@ -220,9 +220,13 @@ export default function Epay() {
               <div style={{ display: 'flex', gap: 8 }}>
                 <input className="form-input" type={showKey ? 'text' : 'password'}
                   placeholder={t('留空则不修改')}
+                  autoComplete="new-password"
                   value={cfg.epay_key}
                   onChange={(e) => setCfg({ ...cfg, epay_key: e.target.value })} />
-                <button className="btn btn-outline" onClick={() => setShowKey(!showKey)}>
+                <button className="btn btn-outline" onClick={() => setShowKey(!showKey)}
+                  aria-label={showKey ? t('隐藏商户密钥') : t('显示商户密钥')}
+                  aria-pressed={showKey}
+                  title={showKey ? t('隐藏商户密钥') : t('显示商户密钥')}>
                   {showKey ? t('隐藏') : t('显示')}
                 </button>
               </div>

@@ -429,9 +429,9 @@ export default function Register() {
               <button
                 type="button"
                 className="password-input-toggle"
-                tabIndex={-1}
                 onClick={() => setShowPassword((v) => !v)}
                 aria-label={showPassword ? t('隐藏密码') : t('显示密码')}
+                aria-pressed={showPassword}
                 title={showPassword ? t('隐藏密码') : t('显示密码')}
               >
                 {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}

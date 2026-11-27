@@ -548,6 +548,7 @@ export default function Wallet(): JSX.Element {
                     key={v}
                     type="button"
                     className={`wallet-amount-preset ${active ? 'active' : ''}`}
+                    aria-pressed={active}
                     onClick={() => setAmount(String(v))}
                   >
                     <span className="wallet-amount-num">{fmtYuan(payMoney(v))}</span>
@@ -590,6 +591,7 @@ export default function Wallet(): JSX.Element {
                       key={m}
                       type="button"
                       className={`wallet-method ${method === m ? 'active' : ''}`}
+                      aria-pressed={method === m}
                       onClick={() => setMethod(m)}
                     >
                       <span className="wallet-method-icon">{m === 'alipay' ? '支付宝' : m === 'wxpay' ? '微信' : m}</span>
