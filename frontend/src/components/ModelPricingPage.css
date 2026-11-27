@@ -1,0 +1,157 @@
+/* ModelPricingPage —— 用户侧「模型价格」页（每百万 Token 口径 + 官方价对照） */
+
+.mpp {
+  padding: 0 0 24px;
+}
+
+.mpp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mpp-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg, #fff);
+  color: var(--text-muted);
+}
+
+.mpp-search input {
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12.5px;
+  width: 180px;
+}
+
+.mpp-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--surface-subtle, #f8f9fb);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mpp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.mpp-table thead th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.mpp-table tbody td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-main);
+  vertical-align: middle;
+}
+
+.mpp-table tbody tr:hover {
+  background: var(--row-hover, rgba(0, 0, 0, 0.02));
+}
+
+.mpp-table .ta-right {
+  text-align: right;
+}
+
+.mpp-row-unpriced {
+  opacity: 0.75;
+}
+
+.mpp-model {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+
+.mpp-tag-unpriced,
+.mpp-tag-free {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  background: var(--surface-subtle, #f8f9fb);
+}
+
+.mpp-tag-free {
+  color: var(--success-color, #1a7f37);
+  border-color: var(--success-color, #1a7f37);
+}
+
+.mpp-muted {
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
+.mpp-official {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-style: dashed;
+}
+
+.mpp-discount {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #b42318;
+  background: rgba(180, 35, 24, 0.08);
+  white-space: nowrap;
+}
+
+.mpp-official-actions,
+.mpp-official-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.mpp-official-edit input {
+  width: 84px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg, #fff);
+  color: var(--text-main);
+  font-size: 12px;
+  outline: none;
+}
+
+.mpp-official-edit input:focus {
+  border-color: var(--accent-color, #2f6fed);
+}
+
+.mpp-foot-note {
+  margin: 12px 0 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
