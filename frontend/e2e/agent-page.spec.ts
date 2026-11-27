@@ -49,7 +49,9 @@ test.describe('AI 运维页 · 结构', () => {
     await expect(page.locator('.agent-page')).toBeVisible();
 
     // A2A v3.5.1 客户端配置分区（`12f0a5b1` 新增；此前页面只有对话工作台）
-    await expect(page.locator('.a2a-panel')).toBeVisible();
+    // A2A 客户端检测面板已下掉（166d46c2）：AI 运维是「用 AI 运维网关」，
+    // 不是「给外部客户端配网关」。腾出来的右栏改成运维概览。
+    await expect(page.locator('.agent-ops')).toBeVisible();
 
     // 对话工作台骨架：会话抽屉（sidebar 变体）+ 消息流 + 输入区
     await expect(page.locator('.agent-shell')).toBeVisible();

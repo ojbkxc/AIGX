@@ -2591,6 +2591,18 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/purge/skills/import",
             post(api::admin::handle_import_purge_skills),
         )
+        // 破甲技能：骨架生成（GET）与单文件写入（POST，先校验后落盘）
+        .route(
+            "/api/purge/skills/skeleton",
+            get(api::admin::handle_get_skill_skeleton),
+        )
+        .route("/api/purge/skills", post(api::admin::handle_write_skill))
+        // 破甲异源递进：按主模型推荐「真异源」候选（按 owned_by 判厂商，
+        // 不是 provider —— 同 provider 下可能挂多家上游）
+        .route(
+            "/api/purge/fallback/suggest",
+            get(api::admin::handle_suggest_fallback),
+        )
         // 护栏（输入/输出黑名单 + 200 假答复门控；默认全关）
         .route(
             "/api/guardrail",

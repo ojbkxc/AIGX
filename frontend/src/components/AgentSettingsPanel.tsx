@@ -123,46 +123,6 @@ export default function AgentSettingsPanel(): JSX.Element {
       <div className="card-body">
         {error && <div className="error-message">{error}</div>}
         <div className="settings-form">
-          {/* ── 对齐 A2A v3.5.1「新增配置 / 编辑配置」弹窗的字段与顺序 ──
-              AIGX 后端暂无这些字段的数据源：控件与顺序照 A2A 落位，只读占位，
-              取数待补（详见交付清单「A2A 有但 AIGX 缺数据源」）。 */}
-          <section className="a2a-settings-section" aria-label="A2A 配置字段（结构对齐）">
-            <h3 className="a2a-settings-title">配置</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <div className="form-group">
-                <label>配置名称</label>
-                <input className="form-input" value="AIGX 内置助手" readOnly disabled />
-                <div className="form-hint">A2A 的配置名称；AIGX 仅有单一内置配置，暂无该字段。</div>
-              </div>
-              <div className="form-group">
-                <label>备注</label>
-                <input className="form-input" value="" readOnly disabled placeholder="AIGX 后端暂无备注字段" />
-                <div className="form-hint">A2A 的备注字段；AIGX 暂无数据源。</div>
-              </div>
-            </div>
-            <div className="form-group">
-              <label>接口基址</label>
-              <input className="form-input" value="" readOnly disabled placeholder="AIGX 后端暂无接口基址字段" />
-              <div className="form-hint">A2A 的接口基址；AIGX 的模型地址由供应商渠道决定。</div>
-            </div>
-            <div className="form-group">
-              <label>认证方式</label>
-              <select className="form-input" disabled value="gateway">
-                <option value="gateway">使用网关 Key</option>
-                <option value="key">API Key</option>
-                <option value="env">环境变量</option>
-                <option value="none">无需认证</option>
-                <option value="preserve">保留现有认证</option>
-              </select>
-              <div className="form-hint">A2A 的认证方式；AIGX 助手固定走网关内部调用，暂无该字段。</div>
-            </div>
-            <div className="form-group">
-              <label>高级选项 · 客户端协议</label>
-              <input className="form-input" value="客户端原生配置" readOnly disabled />
-              <div className="form-hint">A2A 的高级选项；AIGX 无本机客户端配置写入面，字段先落位。</div>
-            </div>
-          </section>
-
           {/* ── 模型配置（对齐 A2A 的 ModelsFields / SingleModelFields）── */}
           <section className="a2a-settings-section" aria-label="模型配置（对齐 A2A）">
             <h3 className="a2a-settings-title">模型配置</h3>
