@@ -18,8 +18,10 @@ import {
   SIDEBAR_MENUS,
   cloneLayout,
   groupHasFixed,
+  groupIsCollapsed,
   isBuiltinGroupLabel,
   menuOf,
+  setGroupCollapsed,
   setGroupHidden,
   type LayoutGroup,
   type SidebarLayout,
@@ -142,12 +144,23 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onAppl
   // 要渲染的组（本角色可见 + 未整组隐藏 + 组内有可见项）。
   // 拖动落点、插入线、键盘走一格全部按这份算 —— 布局里还躺着画面上看不见的组，
   // 按布局下标走格会「换了个看不见的顺序」，界面一动不动。
+  //
+  // 折叠（folded）不参与上面那份「可见组」判据：折叠只是把组内项临时收起来，
+  // 组本身还在侧栏上占一行（点一下就能展开），把它算成「看不见的组」会让拖动落点
+  // 与键盘走格跳过它 —— 用户拖过一行却落到更远的地方。
   const drawnGroups = layout.groups.flatMap((group) => {
     if (ownedMenusOf(group).length === 0) return [];   // 本角色看不到这一组
     if (group.hidden) return [];                        // 整组隐藏（恢复入口在 nav 底部）
     const visibleItems = visibleMenusOf(group, layout);
     if (visibleItems.length === 0) return [];           // 组内全被隐藏，画空组会像加载失败
-    return [{ group, visibleItems, label: groupTitle(group) }];
+    return [{
+      group,
+      visibleItems,
+      label: groupTitle(group),
+      // 44px 图标栏里没有「折叠」这回事：那一栏只画图标，折起来等于把整组菜单
+      // 一起藏掉，而图标栏又没有任何展开入口。所以收起侧栏时一律展开。
+      folded: !collapsed && groupIsCollapsed(group),
+    }];
   });
   const drawnIds = drawnGroups.map(({ group }) => group.id);
 
@@ -294,13 +307,13 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onAppl
 
       {/* Nav：展开态分组平铺；收缩态仅图标 + title tooltip */}
       <nav className="sidebar-nav" ref={navRef}>
-        {drawnGroups.map(({ group, visibleItems, label }) => {
+        {drawnGroups.map(({ group, visibleItems, label, folded }) => {
           const isRenaming = renamingId === group.id;
           return (
             <div
               key={group.id}
               data-sidebar-group={group.id}
-              className={`sidebar-group${draggingId === group.id ? ' is-dragging' : ''}`}
+              className={`sidebar-group${draggingId === group.id ? ' is-dragging' : ''}${folded ? ' is-folded' : ''}`}
             >
               {/* 插入线：拖到这一组之前。收起态不画（图标栏里横线会变成分隔线，看不出是落点） */}
               {dragging && !collapsed && dropBeforeId === group.id && (
@@ -321,6 +334,28 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onAppl
                   >
                     <GripVertical size={12} strokeWidth={1.8} />
                   </span>
+                )}
+                {/* 折叠开关：长到一屏放不下的组（管理员那一组 14 项）默认收起。
+                  做成一枚独立按钮而不是「点组名」：组名上已经有双击重命名，
+                  再叠一个单击折叠，会出现「想改名却把组折了」的互相打架。 */}
+                {!collapsed && (
+                  <button
+                    type="button"
+                    className="sidebar-group-fold"
+                    aria-expanded={!folded}
+                    aria-label={folded
+                      ? t('展开「{{name}}」分组', { name: label })
+                      : t('折叠「{{name}}」分组', { name: label })}
+                    title={folded
+                      ? t('展开「{{name}}」分组', { name: label })
+                      : t('折叠「{{name}}」分组', { name: label })}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onApply(setGroupCollapsed(layout, group.id, !folded));
+                    }}
+                  >
+                    <ChevronDown size={11} strokeWidth={2} />
+                  </button>
                 )}
                 {isRenaming ? (
                   <input
@@ -371,18 +406,22 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onAppl
                   </button>
                 )}
               </div>
-              {visibleItems.map((item) => (
-                <NavLink
-                  key={item.key}
-                  to={item.key}
-                  end={item.end}
-                  className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-                  title={t(item.labelKey)}
-                >
-                  <item.icon size={15} strokeWidth={1.8} />
-                  <span>{t(item.labelKey)}</span>
-                </NavLink>
-              ))}
+              {/* 组内项：折叠时用 hidden 属性收起（元素仍在 DOM 里 —— 键盘 Tab 不会
+                  跑到看不见的链接上，样式也只由这一个属性决定，不会两边各写一套显隐） */}
+              <div className="sidebar-group-items" hidden={folded}>
+                {visibleItems.map((item) => (
+                  <NavLink
+                    key={item.key}
+                    to={item.key}
+                    end={item.end}
+                    className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                    title={t(item.labelKey)}
+                  >
+                    <item.icon size={15} strokeWidth={1.8} />
+                    <span>{t(item.labelKey)}</span>
+                  </NavLink>
+                ))}
+              </div>
             </div>
           );
         })}

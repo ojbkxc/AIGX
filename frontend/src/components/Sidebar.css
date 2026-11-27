@@ -22,6 +22,75 @@
   min-width: 0;
 }
 
+/* ── 分组折叠（管理员那一组 14 项一屏放不下的那条路）─────────────
+   组内项包一层容器，折叠靠 `hidden` 属性收起（不是 display:none 的另一个类名：
+   同一个显隐事实只留一处判据，样式与 DOM 状态不会分叉）。
+   容器自己也要排成列，否则组内 2px 的紧凑间距会丢。 */
+
+.sidebar-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* display:flex 会盖掉 hidden 属性的默认 display:none —— 必须显式写回来，
+   否则「折叠」在浏览器里完全无效（元素照样排出来）。 */
+.sidebar-group-items[hidden] {
+  display: none;
+}
+
+/* 折叠开关：一枚 12px 的小箭头，常态淡出、悬停/聚焦/已折叠时可见。
+   与拖动把手同一套「安静到需要时才出现」的处理，避免组头挤满可控件。 */
+.sidebar-group-fold {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-group-fold svg {
+  transition: transform 0.15s ease;
+}
+
+.sidebar-group:hover .sidebar-group-fold,
+.sidebar-group-fold:focus-visible {
+  opacity: 1;
+}
+
+.sidebar-group-fold:hover {
+  color: var(--text-main);
+}
+
+/* 收起态：箭头转成 ▸，且把那一组的计数提亮 —— 折起来以后「里面还有 N 项」
+   必须还看得见，否则用户会以为这一组空了。 */
+.sidebar-group.is-folded .sidebar-group-fold {
+  opacity: 1;
+}
+
+.sidebar-group.is-folded .sidebar-group-fold svg {
+  transform: rotate(-90deg);
+}
+
+.sidebar-group.is-folded .sidebar-group-count {
+  color: var(--text-main);
+}
+
+/* 44px 图标栏：箭头会与图标挤在同一列，且那一栏里折叠本身是被禁用的
+   （见 Sidebar.tsx 的 folded 判据），这里再兜一层样式。 */
+.sidebar-aside-collapsed .sidebar-group-fold {
+  display: none;
+}
+
 /* ── 分组拖动排序 ────────────────────────────────────────────
    只有「展开态 + 至少两个组」才渲染把手（见 Sidebar.tsx）；
    收起态（44px 图标栏）没有拖动落点，CSS 这边再兜一层。 */

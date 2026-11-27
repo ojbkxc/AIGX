@@ -15,6 +15,7 @@ import { useSidebarLayout } from '../hooks/useSidebarLayout';
 import {
   addGroup,
   groupHasFixed,
+  groupIsCollapsed,
   isBuiltinGroupLabel,
   locate,
   menuOf,
@@ -22,10 +23,12 @@ import {
   moveItem,
   removeGroup,
   renameGroup,
+  setGroupCollapsed,
   setGroupHidden,
   setItemHidden,
   defaultLayout,
   visibleCount,
+  AUTO_FOLD_MIN_ITEMS,
   type LayoutGroup,
   type SidebarLayout,
 } from '../lib/sidebar-layout';
@@ -82,6 +85,18 @@ export default function SidebarLayoutPanel(): JSX.Element {
       return;
     }
     apply(setGroupHidden(layout, group.id, !group.hidden));
+  };
+
+  /**
+   * 折叠 / 展开一组。
+   *
+   * 与「隐藏」是两件事，别混：隐藏是「这组我现在不想看」（组离开导航、留一条恢复条），
+   * 折叠是「这组太长，先收成一行」（组还在，点一下就展）。所以这里的按钮叫「折叠/展开」，
+   * 并且**不需要**二次确认 —— 它不是破坏性操作。
+   */
+  const toggleFold = (group: LayoutGroup): void => {
+    const folded = groupIsCollapsed(group);
+    apply(setGroupCollapsed(layout, group.id, !folded));
   };
 
   const commitRename = (gid: string): void => {
@@ -246,6 +261,9 @@ export default function SidebarLayoutPanel(): JSX.Element {
         <div className="settings-state">
           {t('拖动 ⠿ 调整顺序（菜单可跨组拖）；拨开关控制显隐；点分组名可重命名；组头下拉可把别的菜单移进来；眼睛按钮隐藏整组。键盘也能排序：把手聚焦后按 Alt+↑ / ↓。')}
         </div>
+        <div className="settings-state">
+          {t('菜单超过 {{n}} 项的组在侧边栏上默认折叠成一行（点组头箭头展开）；也可以在这里逐组决定折叠或展开。折叠只收起组内菜单，不影响页面访问，也不影响菜单的显示开关。', { n: AUTO_FOLD_MIN_ITEMS })}
+        </div>
 
         <div className="sl-groups">
           {layout.groups.map((group) => {
@@ -317,6 +335,15 @@ export default function SidebarLayoutPanel(): JSX.Element {
                         })}
                       </select>
                     )}
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      title={t('在侧边栏上收起这一组的菜单（组还在，点组头的箭头即可展开；不影响能不能打开页面）')}
+                      aria-pressed={groupIsCollapsed(group)}
+                      onClick={() => toggleFold(group)}
+                    >
+                      {groupIsCollapsed(group) ? t('展开') : t('折叠')}
+                    </button>
                     <button
                       type="button"
                       className="btn btn-outline btn-sm"

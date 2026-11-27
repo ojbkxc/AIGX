@@ -24,7 +24,16 @@
  * 读盘/读库都过 `normalizeLayout`：
  *   · 不认识的菜单键丢掉（降级回旧版本）；
  *   · 新版本新增、存盘里没有的菜单补进默认位置（否则升级后新功能凭空消失）；
- *   · 同一菜单出现在两组时只保留先出现的那份。
+ *   · 同一菜单出现在两组时只保留先出现的那份；
+ *   · 分组显示名缺失时按 **id 语义**补回（内置组补「通用/管理/个人」），
+ *     只有真正来历不明的组才落到 [`FALLBACK_GROUP_LABEL`]。
+ *
+ * ── 显示名为什么不能按序号兜底 ───────────────────────────────
+ * 老实现是 `label || \`分组 ${index + 1}\``。两个后果：
+ *   ① 用户看到的是「分组 1」这种**位置**残留，不是任何有意义的名字；
+ *   ② `writeLayout` 会把这件兜底**落盘**（写缓存 + 推库），于是「数据缺字段」
+ *      这个瞬时异常被固化成界面上的永久组名，之后再也看不出它原来是缺 label。
+ * 所以兜底只保留「有意义的固定名」这一种形态，且缺失的**内置组按 id 认回本名**。
  */
 
 import {
@@ -56,6 +65,13 @@ export interface LayoutGroup {
   custom: boolean;
   hidden: boolean;
   items: string[];
+  /**
+   * 折叠态：`true` 收起、`false` 展开、`undefined` = 未表态（按
+   * [`AUTO_FOLD_MIN_ITEMS`] 自动判）。三态而不是布尔，才能让「老存盘（没有这个
+   * 字段）」与「用户明确点开过」区分开 —— 老存盘要跟随以后的自动口径变化，
+   * 用户点过的那一组不该被自动口径重新折起来。
+   */
+  collapsed?: boolean;
 }
 
 /** 整份布局。 */
@@ -70,6 +86,8 @@ export interface RenderGroup {
   label: string;
   items: SidebarMenu[];
   hidden: boolean;
+  /** 这一组在侧栏上是否收起（`items` 在 DOM 里、但不可见）。 */
+  collapsed: boolean;
 }
 
 /* ─── 菜单表（唯一事实来源）─────────────────────────────── */
@@ -106,6 +124,34 @@ export const MENU_KEYS = SIDEBAR_MENUS.map((m) => m.key);
 
 /** 内置分组的展示名（存盘里保存的是这些中文原键，渲染时查词典）。 */
 export const BUILTIN_GROUP_LABELS = ['通用', '管理', '个人'] as const;
+
+/** 内置分组 id → 本名。缺 label 时按 id 认回它，而不是印一个序号。 */
+const BUILTIN_LABEL_BY_ID: Readonly<Record<string, string>> = {
+  'g-general': '通用',
+  'g-admin': '管理',
+  'g-personal': '个人',
+};
+
+/**
+ * 真正缺名时的兜底显示名（数据异常时才走到这里）。
+ *
+ * 不含序号：序号会把「第几组」这件事当成名字写进用户视野，还会随分组增删漂移
+ * （在同一份坏数据上重排一次，组名就变了）。固定名至少是诚实的 —— 它说明的正是
+ * 「这个名字没存下来」，用户当场就知道该给它改个名。
+ */
+export const FALLBACK_GROUP_LABEL = '未命名分组';
+
+/**
+ * 老兜底（`分组 N`）留下的名字。
+ *
+ * 这条正则唯一的用途是**认出历史残留**：`分组 1` / `分组 2` 这种名字只可能由
+ * 老版本的序号兜底产生，不可能是用户自己起的（真有人起这个名，见
+ * [`normalizeLayout`] 里「只在本库自己造出来的 id 上做更正」那条判据）。
+ */
+const LEGACY_INDEX_LABEL_RE = /^分组\s*\d+$/;
+
+/** 本库自动生成的组 id（`g-<index>`，只出现在外来数据的兜底路径上）。 */
+const SYNTHETIC_GROUP_ID_RE = /^g-\d+$/;
 
 /** 某个内置分组名是否可翻译（自建分组名原样显示）。 */
 export function isBuiltinGroupLabel(label: string): boolean {
@@ -165,15 +211,45 @@ export function defaultLayout(): SidebarLayout {
 /** 深拷贝。 */
 export function cloneLayout(layout: SidebarLayout): SidebarLayout {
   return {
-    groups: layout.groups.map((g) => ({
-      id: g.id,
-      label: g.label,
-      custom: g.custom,
-      hidden: g.hidden,
-      items: g.items.slice(),
-    })),
+    groups: layout.groups.map((g) => {
+      const copy: LayoutGroup = {
+        id: g.id,
+        label: g.label,
+        custom: g.custom,
+        hidden: g.hidden,
+        items: g.items.slice(),
+      };
+      // 三态原样带过去：undefined 不许被写成 false（那会把「未表态」变成「用户展开过」）
+      if (typeof g.collapsed === 'boolean') copy.collapsed = g.collapsed;
+      return copy;
+    }),
     hidden: layout.hidden.slice(),
   };
+}
+
+/**
+ * 一个组的显示名：先认 id，再认用户自己写的字，最后才兜底。
+ *
+ * 判据顺序就是「这条数据是从哪来的」：
+ *   · 内置 id（g-general / g-admin / g-personal）→ 本名。空名或老序号名都算缺失；
+ *     用户把它改成「常用」这种自定义名字时**不动**（那是人写的字，不是缺失）。
+ *   · 本库自己造的 id（`g-<n>`）→ 这组压根没经过 `addGroup`，名却又是空的或老序号
+ *     形态 ⇒ 一定是兜底产物，给固定兜底名。
+ *   · 自建 id（`g-custom-*`，`addGroup` 生成，创建时非空名是硬要求）→ 原样保留；
+ *     用户真写了一模一样的「分组 1」也不会被我改掉。
+ */
+function resolveGroupLabel(id: string, rawLabel: unknown): string {
+  const label = typeof rawLabel === 'string' ? rawLabel.trim() : '';
+  const builtin = BUILTIN_LABEL_BY_ID[id];
+  if (builtin) {
+    if (!label || LEGACY_INDEX_LABEL_RE.test(label)) return builtin;
+    return label;
+  }
+  if (!label) return FALLBACK_GROUP_LABEL;
+  if (SYNTHETIC_GROUP_ID_RE.test(id) && LEGACY_INDEX_LABEL_RE.test(label)) {
+    return FALLBACK_GROUP_LABEL;
+  }
+  return label;
 }
 
 /**
@@ -196,14 +272,17 @@ export function normalizeLayout(raw: unknown): SidebarLayout {
       seen.add(key);
       items.push(key);
     }
-    const label = typeof group.label === 'string' ? group.label.trim() : '';
-    groups.push({
-      id: typeof group.id === 'string' && group.id ? group.id : `g-${index}`,
-      label: label || `分组 ${index + 1}`,
+    const id = typeof group.id === 'string' && group.id ? group.id : `g-${index}`;
+    const normalized: LayoutGroup = {
+      id,
+      label: resolveGroupLabel(id, group.label),
       custom: group.custom === true,
       hidden: group.hidden === true,
       items,
-    });
+    };
+    // 折叠态只收真正的布尔值：老存盘没这个字段 ⇒ 保持 undefined（跟随自动口径）
+    if (typeof group.collapsed === 'boolean') normalized.collapsed = group.collapsed;
+    groups.push(normalized);
   });
 
   if (groups.length === 0) return defaultLayout();
@@ -471,6 +550,54 @@ export function removeGroup(layout: SidebarLayout, gid: string): SidebarLayout |
   return next;
 }
 
+/* ─── 折叠（管理员那一组 14 项一屏放不下）────────────────── */
+
+/**
+ * 默认折叠门槛：组内菜单数达到它就先收起（用户点一次即可展开，状态落盘）。
+ *
+ * 为什么是「按菜单数」而不是「按组名/角色」：门槛要能被一条判据说清、
+ * 且不随角色漂 —— 同一个账号在管理员与普通用户视角下看到的折叠态必须一致，
+ * 否则换角色登录会像「布局自己变了」。普通用户的组都远不到 10 项，不受影响。
+ *
+ * 为什么不是「全部收起」：把 5 项的「通用」也折起来，等于给最常见的入口多加一次
+ * 点击。只折真正长到放不下的那一组，才配得上「省一屏」这件事。
+ */
+export const AUTO_FOLD_MIN_ITEMS = 10;
+
+/** 这一组实际是否收起：用户表态优先，没表态按菜单数自动判。 */
+export function groupIsCollapsed(group: LayoutGroup): boolean {
+  if (typeof group.collapsed === 'boolean') return group.collapsed;
+  return group.items.length >= AUTO_FOLD_MIN_ITEMS;
+}
+
+/**
+ * 设置折叠态。`null` = 交回自动口径（清掉表态，而不是写一个恰好相等的布尔）。
+ *
+ * 传 `null` 而不是「删掉这一项」的唯一入口，是为了让「恢复默认」这类操作
+ * 能把自动口径重新拿回来：老用户升级后不该被一个他当年没做过的决定钉住。
+ *
+ * 判「没变化」用的是**实际显示出来的折叠态**（含自动口径），不是字段本身：
+ * 一组已经因为「太长」自动收起了，再点一次收起不该白写一次缓存 + 一次 PUT。
+ */
+export function setGroupCollapsed(
+  layout: SidebarLayout,
+  gid: string,
+  collapsed: boolean | null,
+): SidebarLayout | null {
+  const index = layout.groups.findIndex((g) => g.id === gid);
+  if (index < 0) return null;
+  const current = layout.groups[index];
+  if (collapsed === null) {
+    if (typeof current.collapsed !== 'boolean') return null;
+  } else if (groupIsCollapsed(current) === collapsed) {
+    return null;
+  }
+  const next = cloneLayout(layout);
+  if (collapsed === null) delete next.groups[index].collapsed;
+  else next.groups[index].collapsed = collapsed;
+  return next;
+}
+
 /* ─── 派生：侧边栏要画什么 ─────────────────────────────── */
 
 /** 把布局压成「侧边栏实际要画的分组」。空组 / 整组隐藏 / 全隐藏的组跳过。 */
@@ -485,7 +612,13 @@ export function renderGroups(layout: SidebarLayout): RenderGroup[] {
       if (menu) items.push(menu);
     }
     if (!items.length) continue;
-    out.push({ id: group.id, label: group.label, items, hidden: group.hidden });
+    out.push({
+      id: group.id,
+      label: group.label,
+      items,
+      hidden: group.hidden,
+      collapsed: groupIsCollapsed(group),
+    });
   }
   return out;
 }
