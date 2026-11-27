@@ -8,7 +8,7 @@ import { isAdmin } from '../lib/utils';
 import {
   ChevronDown, Menu,
   PanelLeftClose, PanelLeftOpen, Sun, Languages, LogOut,
-  EyeOff, RotateCcw,
+  EyeOff, Pencil, GripVertical, RotateCcw,
 } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
 import GlobalSearch from './GlobalSearch';
@@ -25,6 +25,14 @@ import {
   type SidebarLayout,
   type SidebarMenu,
 } from '../lib/sidebar-layout';
+import {
+  commitGroupRename,
+  dropLineBefore,
+  groupOrderIsCustomized,
+  moveGroupAcrossVisible,
+  moveGroupTo,
+  resetGroupOrderAndNames,
+} from '../lib/sidebar-groups';
 import './Sidebar.css';
 
 // 角色过滤：普通用户仅见无 adminOnly 标记的菜单（展示层过滤，权限由后端强制）。
@@ -124,6 +132,151 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onAppl
   const groupTitle = (group: LayoutGroup): string =>
     isBuiltinGroupLabel(group.label) ? t(group.label) : group.label;
 
+  /* ─── 分组拖动排序 / 重命名 ─────────────────────────────────────
+   * 拖动用指针事件而不是 HTML5 拖放：拖放会话绑在源节点上，一旦重绘（我们这个
+   * 组头里还有计数、按钮、编辑框）就断；指针事件的状态只在 ref 里，节点换掉不影响。
+   * 与设置页面板不同的是：这里**不**边拖边写盘（那样每跨过一行就是一次 localStorage
+   * 写 + 一次 PUT /api/sidebar-layout），拖动期间只画插入线，松手才提交一次。
+   * 收起态（44px 图标栏）不渲染把手与 ✎：那里没有落点，塞进去只会挤成一排点不动的方块。 */
+
+  // 要渲染的组（本角色可见 + 未整组隐藏 + 组内有可见项）。
+  // 拖动落点、插入线、键盘走一格全部按这份算 —— 布局里还躺着画面上看不见的组，
+  // 按布局下标走格会「换了个看不见的顺序」，界面一动不动。
+  const drawnGroups = layout.groups.flatMap((group) => {
+    if (ownedMenusOf(group).length === 0) return [];   // 本角色看不到这一组
+    if (group.hidden) return [];                        // 整组隐藏（恢复入口在 nav 底部）
+    const visibleItems = visibleMenusOf(group, layout);
+    if (visibleItems.length === 0) return [];           // 组内全被隐藏，画空组会像加载失败
+    return [{ group, visibleItems, label: groupTitle(group) }];
+  });
+  const drawnIds = drawnGroups.map(({ group }) => group.id);
+
+  const navRef = React.useRef<HTMLElement | null>(null);
+  const [draggingId, setDraggingId] = React.useState<string | null>(null);
+  /** 拖动中的插入位（布局坐标，0..groups.length）；null = 没在拖 */
+  const [dropIndex, setDropIndex] = React.useState<number | null>(null);
+  /** 落点的 ref 镜像：松手那个事件读的是渲染时的闭包，state 在闭包里可能是旧的 */
+  const dropIndexRef = React.useRef<number | null>(null);
+  const [renamingId, setRenamingId] = React.useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = React.useState<string>('');
+  /** Esc / Enter 之后紧跟着的那次 blur 不能再提交一遍（同一次编辑只落一次盘） */
+  const renameClosedRef = React.useRef<boolean>(false);
+  /** 拖动期间保持最新布局（父层随时可能因别处改动重画） */
+  const layoutRef = React.useRef<SidebarLayout>(layout);
+  layoutRef.current = layout;
+  const teardownRef = React.useRef<(() => void) | null>(null);
+  React.useEffect(() => () => { teardownRef.current?.(); }, []);
+
+  const dragging = draggingId !== null;
+
+  const startGroupDrag = (gid: string, event: React.PointerEvent<HTMLElement>): void => {
+    if (event.button !== 0) return;
+    event.preventDefault();   // 别让把手上的按下变成选中文字 / 拖出图片
+    event.stopPropagation();
+    teardownRef.current?.();
+
+    // 画面上真正渲染出来的组（整组隐藏 / 本角色不可见 / 组内全隐藏的都不在 DOM 里）。
+    // 落点只在它们之间算，再折算回布局下标，避免把指针位置映射到看不见的组上。
+    const drawn = Array.from(
+      navRef.current?.querySelectorAll<HTMLElement>('[data-sidebar-group]') ?? [],
+    );
+    const gids = drawn.map((el) => el.dataset.sidebarGroup || '').filter(Boolean);
+    setDraggingId(gid);
+
+    const onMove = (moveEvent: PointerEvent): void => {
+      let insertAt = drawn.length;
+      for (let i = 0; i < drawn.length; i += 1) {
+        const rect = drawn[i].getBoundingClientRect();
+        if (moveEvent.clientY < rect.top + rect.height / 2) { insertAt = i; break; }
+      }
+      const groups = layoutRef.current.groups;
+      const anchor = insertAt < gids.length ? gids[insertAt] : '';
+      const found = anchor ? groups.findIndex((g) => g.id === anchor) : -1;
+      const next = found < 0 ? groups.length : found;
+      // 同时写 state（画插入线）与 ref（松手时读）：pointerup 可能在这次重渲染之前到达，
+      // 只靠 state 会拿到上一帧的落点。
+      dropIndexRef.current = next;
+      setDropIndex(next);
+    };
+
+    const teardown = (): void => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      document.body.classList.remove('sidebar-group-dragging');
+      teardownRef.current = null;
+      dropIndexRef.current = null;
+      setDraggingId(null);
+      setDropIndex(null);
+    };
+    const onUp = (): void => {
+      const current = dropIndexRef.current;
+      teardown();
+      if (current !== null) onApply(moveGroupTo(layoutRef.current, gid, current));
+    };
+    const onCancel = (): void => { teardown(); };
+
+    document.body.classList.add('sidebar-group-dragging');
+    teardownRef.current = teardown;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+  };
+
+  /** 键盘排序：把手聚焦后 Alt+↑/↓ 走一格（走的是画面上可见的邻居，见 moveGroupAcrossVisible）。 */
+  const onGripKeyDown = (gid: string) => (event: React.KeyboardEvent<HTMLElement>): void => {
+    if (!event.altKey) return;
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    onApply(moveGroupAcrossVisible(layout, drawnIds, gid, event.key === 'ArrowUp' ? -1 : 1));
+  };
+
+  const beginRename = (group: LayoutGroup): void => {
+    // 收起态不进入编辑：44px 里面只画得下分隔线，输入框会被 CSS 藏掉，
+    // 结果就是「按了没反应、焦点还丢在看不见的元素上」。
+    if (collapsed) return;
+    renameClosedRef.current = false;
+    setRenamingId(group.id);
+    // 预填**存盘里那个名字**（内置组是中文原键），不是词典译名：
+    // 拿译名当草稿，英文界面里按下 Enter 就会把 "General" 写进 label，把内置键覆盖掉。
+    setRenameDraft(group.label);
+  };
+
+  const commitRename = (gid: string): void => {
+    // 已经关过这一轮（Enter / Esc 之后紧跟着的 blur）：不重复提交
+    if (renameClosedRef.current) return;
+    renameClosedRef.current = true;
+    const next = commitGroupRename(layout, gid, renameDraft);
+    setRenamingId(null);
+    onApply(next);   // null = 空名 / 没改，保留原显示名
+  };
+
+  const cancelRename = (): void => {
+    renameClosedRef.current = true;
+    setRenamingId(null);
+  };
+
+  const onRenameKeyDown = (gid: string) => (event: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key === 'Enter') { event.preventDefault(); commitRename(gid); }
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelRename(); }
+  };
+
+  // 编辑到一半收起侧栏：输入框会被收起态的 CSS 藏掉，焦点留在看不见的元素上。
+  // 直接当作取消（草稿不落盘；重新展开时用户看得见组名还是原来的，不会以为改丢了）。
+  React.useEffect(() => {
+    if (collapsed) {
+      renameClosedRef.current = true;
+      setRenamingId(null);
+    }
+  }, [collapsed]);
+
+  // 插入线挂在哪一组之前（布局坐标 → 画面上真的渲染出来的那一组）；null = 列表末尾
+  const dropBeforeId = dragging && dropIndex !== null
+    ? dropLineBefore(layout, drawnIds, dropIndex)
+    : null;
+  const dropAtEnd = dragging && dropIndex !== null && dropBeforeId === null;
+  const orderCustomized = groupOrderIsCustomized(layout);
+
   return (
     <aside
       className={`sidebar-aside ${collapsed ? 'sidebar-aside-collapsed' : ''} ${isDrawer ? 'sidebar-aside-drawer' : ''}`}
@@ -140,20 +293,67 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onAppl
       </div>
 
       {/* Nav：展开态分组平铺；收缩态仅图标 + title tooltip */}
-      <nav className="sidebar-nav">
-        {layout.groups.map((group) => {
-          const owned = ownedMenusOf(group);
-          if (owned.length === 0) return null;        // 本角色看不到这一组
-          if (group.hidden) return null;              // 整组隐藏（恢复入口在 nav 底部）
-          const visibleItems = visibleMenusOf(group, layout);
-          if (visibleItems.length === 0) return null; // 组内全被隐藏，画空组会像加载失败
-          const label = groupTitle(group);
+      <nav className="sidebar-nav" ref={navRef}>
+        {drawnGroups.map(({ group, visibleItems, label }) => {
+          const isRenaming = renamingId === group.id;
           return (
-            <div key={group.id} className="sidebar-group">
+            <div
+              key={group.id}
+              data-sidebar-group={group.id}
+              className={`sidebar-group${draggingId === group.id ? ' is-dragging' : ''}`}
+            >
+              {/* 插入线：拖到这一组之前。收起态不画（图标栏里横线会变成分隔线，看不出是落点） */}
+              {dragging && !collapsed && dropBeforeId === group.id && (
+                <div className="sidebar-drop-line" aria-hidden="true" />
+              )}
               <div className="sidebar-group-head">
-                <div className="sidebar-group-label" title={label}>
-                  {label}
-                </div>
+                {/* 拖动把手：只在展开态、且画面上真有第二个组可排时出现 —— 整行可拖会和点链接冲突；
+                  只画出一个组时把手是纯噪音（拖它只会把这一组甩到看不见的组后面）。 */}
+                {!collapsed && drawnIds.length > 1 && (
+                  <span
+                    className="sidebar-group-grip"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t('拖动分组 {{name}}', { name: label })}
+                    title={t('拖动调整分组顺序（Alt+↑ / ↓ 也可）')}
+                    onPointerDown={(e) => startGroupDrag(group.id, e)}
+                    onKeyDown={onGripKeyDown(group.id)}
+                  >
+                    <GripVertical size={12} strokeWidth={1.8} />
+                  </span>
+                )}
+                {isRenaming ? (
+                  <input
+                    className="sidebar-group-rename"
+                    value={renameDraft}
+                    maxLength={12}
+                    autoFocus
+                    aria-label={t('分组名')}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onBlur={() => commitRename(group.id)}
+                    onKeyDown={onRenameKeyDown(group.id)}
+                  />
+                ) : (
+                  <div
+                    className="sidebar-group-label"
+                    title={label}
+                    onDoubleClick={() => beginRename(group)}
+                  >
+                    {label}
+                  </div>
+                )}
+                {!isRenaming && (
+                  <button
+                    type="button"
+                    className="sidebar-group-rename-btn"
+                    title={t('重命名「{{name}}」分组', { name: label })}
+                    aria-label={t('重命名「{{name}}」分组', { name: label })}
+                    onClick={(e) => { e.stopPropagation(); beginRename(group); }}
+                  >
+                    <Pencil size={11} strokeWidth={1.8} />
+                  </button>
+                )}
                 {/* 组内计数：只数本角色可见项 */}
                 <span className="sidebar-group-count" title={t('{{n}} 项', { n: visibleItems.length })}>
                   {visibleItems.length}
@@ -186,11 +386,28 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer, layout, onAppl
             </div>
           );
         })}
+        {/* 插入线落在末尾（拖到最后 / 拖到空白处） */}
+        {dragging && !collapsed && dropAtEnd && (
+          <div className="sidebar-drop-line" aria-hidden="true" />
+        )}
         {/* 恢复入口：隐藏整组/单项后必须给一条回来的路 */}
         {hiddenCount > 0 && (
           <button type="button" className="sidebar-restore-groups" onClick={() => onApply(restoreHidden(layout))}>
             <RotateCcw size={12} strokeWidth={1.8} />
             <span>{t('已隐藏 {{n}} 项 · 恢复', { n: hiddenCount })}</span>
+          </button>
+        )}
+        {/* 顺序 / 内置组名被改过才出现：不清隐藏状态（那是上面那条恢复条的事），
+            自建分组也不删 —— 口径见 lib/sidebar-groups.ts 的 resetGroupOrderAndNames。 */}
+        {!collapsed && orderCustomized && (
+          <button
+            type="button"
+            className="sidebar-restore-groups sidebar-reset-order"
+            title={t('把分组顺序与内置分组名恢复默认（隐藏状态与自建分组保留）')}
+            onClick={() => onApply(resetGroupOrderAndNames(layout))}
+          >
+            <RotateCcw size={12} strokeWidth={1.8} />
+            <span>{t('恢复默认分组')}</span>
           </button>
         )}
       </nav>

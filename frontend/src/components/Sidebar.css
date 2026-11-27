@@ -22,6 +22,112 @@
   min-width: 0;
 }
 
+/* ── 分组拖动排序 ────────────────────────────────────────────
+   只有「展开态 + 至少两个组」才渲染把手（见 Sidebar.tsx）；
+   收起态（44px 图标栏）没有拖动落点，CSS 这边再兜一层。 */
+
+.sidebar-group-grip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 把手比隐藏按钮矮一点：它贴在组头最左，别把组名挤走。
+     160px 的侧栏里组头一行要塞 把手 + 组名 + ✎ + 计数 + 隐藏，
+     所以把手/✎ 各留一点负外边距回收宽度（净占 10 / 14），组名还能剩 60px 左右。 */
+  width: 12px;
+  height: 18px;
+  margin-left: -2px;
+  color: var(--text-muted);
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+  /* 拖动时浏览器别把指针手势当成滚动/选中 */
+  touch-action: none;
+  user-select: none;
+}
+
+.sidebar-group:hover .sidebar-group-grip,
+.sidebar-group-grip:focus-visible {
+  opacity: 1;
+}
+
+.sidebar-group-grip:hover {
+  color: var(--text-main);
+}
+
+/* 拖动中：把手锁成抓握、被拖的那组压淡（落点靠插入线表达，不用位移做假象） */
+body.sidebar-group-dragging,
+body.sidebar-group-dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+
+.sidebar-group.is-dragging {
+  opacity: 0.45;
+}
+
+/* 插入线：一条 2px 的强调色横线，画在「要插进去的那一组之前」。
+   它占 2px 高（height:0 + border-top），拖动期间下方各组会整体下沉 2px —— 命中判定
+   用的是每组**中点**并在每次 pointermove 重算矩形，2px 远不足以跨过中点阈值，
+   不会出现「线一出就抖」的来回跳。换成绝对定位能省这 2px，但列表末尾那条线
+   会失去参照（nav 是滚动容器），两处风格就会分叉。 */
+.sidebar-drop-line {
+  height: 0;
+  margin: 0 8px;
+  border-top: 2px solid var(--accent-color);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+/* ── 分组重命名 ────────────────────────────────────────────
+   双击组名或点行内 ✎ 进入编辑；Enter 保存 / Esc 取消（Sidebar.tsx 的 onRenameKeyDown）。
+   输入框占满组名那一格，别让组头在切换编辑态时变宽/变窄。 */
+
+.sidebar-group-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  padding: 1px 4px;
+  border: 1px solid var(--accent-color);
+  border-radius: 5px;
+  background: var(--bg-color, transparent);
+  color: var(--text-main);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  outline: none;
+}
+
+/* 行内 ✎：与隐藏按钮同一套显隐节奏（hover / 键盘聚焦才显形） */
+.sidebar-group-rename-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 18px;
+  padding: 0;
+  margin-right: -2px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-group:hover .sidebar-group-rename-btn,
+.sidebar-group-rename-btn:focus-visible {
+  opacity: 1;
+}
+
+.sidebar-group-rename-btn:hover {
+  color: var(--text-main);
+  background: var(--sidebar-menu-hover);
+}
+
 /* 组内计数：与标签同一行，右对齐，平时低对比度（不抢菜单文字） */
 .sidebar-group-count {
   flex: 0 0 auto;
@@ -90,6 +196,10 @@
 /* 折叠态：计数、隐藏按钮、恢复条一律不显示（图标栏没有它们的落点） */
 .sidebar-aside-collapsed .sidebar-group-count,
 .sidebar-aside-collapsed .sidebar-group-hide,
+.sidebar-aside-collapsed .sidebar-group-rename-btn,
+.sidebar-aside-collapsed .sidebar-group-grip,
+.sidebar-aside-collapsed .sidebar-drop-line,
+.sidebar-aside-collapsed .sidebar-group-rename,
 .sidebar-aside-collapsed .sidebar-restore-groups {
   display: none;
 }
@@ -99,7 +209,24 @@
   display: block;
 }
 
-/* 移动端抽屉里没有 hover：隐藏按钮常显，否则触屏用户根本发现不了这个功能 */
-.sidebar-aside-drawer .sidebar-group-hide {
+/* 移动端抽屉里没有 hover：隐藏 / 改名按钮常显，否则触屏用户根本发现不了这些功能 */
+.sidebar-aside-drawer .sidebar-group-hide,
+.sidebar-aside-drawer .sidebar-group-rename-btn,
+.sidebar-aside-drawer .sidebar-group-grip {
   opacity: 1;
+}
+
+/* 触控没有 hover：电源/粗指针下把手与 ✎ 常显，否则「摸不到、看不见」 */
+@media (hover: none), (pointer: coarse) {
+  .sidebar-group-grip,
+  .sidebar-group-rename-btn {
+    opacity: 1;
+  }
+}
+
+/* 恢复默认分组：与「已隐藏 N 项 · 恢复」同款虚线行，但用等宽文字 + 不加粗，
+   两条同时出现时读起来是「两个并列的撤销动作」，不是一个主按钮带条说明 */
+.sidebar-reset-order {
+  color: var(--text-muted);
+  font-size: 11px;
 }
