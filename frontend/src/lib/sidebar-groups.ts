@@ -53,45 +53,18 @@ export function moveGroupTo(
 }
 
 /**
- * 键盘走一格（把手聚焦后 Alt+↑ / ↓，与 routing-actions.tsx 的 `routingOrderKey` 同一套语义）。
+ * 键盘走一格（Alt+↑/↓），走的是**画面上真的渲染出来的**那一列邻居。
  *
- * 注意「插入位」与「下标」的区别：上移要传 from-1（插到前一组之前），下移要传 from+2
- * （插到后一组之后）。传 from（=自身下标）在 moveGroup 里属原位、直接返回 null，
- * 也就是「按了没反应」—— 设置页 SidebarLayoutPanel 的 Alt+↑ 就是这个形态，见交付说明。
+ * 为什么不能按布局下标走：布局里还躺着看不见的组（本角色看不到的管理组、整组隐藏的、
+ * 组内全隐藏的）。普通用户按一下 ↓ 时相邻那一格可能正是个看不见的管理组 ——
+ * 布局确实换了，界面一动不动，用户只会认为快捷键坏了；再按一下才跨两步，长度也不对。
  *
- * 首尾必须在这里挡住：moveGroup 只认插入位，from-1 = -1 会被 splice(-1) 当成「插到
- * 最后一项之前」，按一下 ↑ 就绕到末尾去了。
- */
-export function moveGroupStep(
-  layout: SidebarLayout,
-  gid: string,
-  delta: number,
-): SidebarLayout | null {
-  const from = layout.groups.findIndex((g) => g.id === gid);
-  if (from < 0) return null;
-  if (delta < 0) {
-    if (from === 0) return null;
-    return moveGroup(layout, gid, from - 1);
-  }
-  if (delta > 0) {
-    if (from === layout.groups.length - 1) return null;
-    return moveGroup(layout, gid, from + 2);
-  }
-  return null;
-}
-
-/**
- * 在**画面上真的渲染出来的**那一列里走一格（Alt+↑/↓ 实际用的是这个）。
+ * 「插入位」与「下标」的区别也要在这里处理：上移要传前一组的下标（插在它之前），
+ * 下移要传「下邻的下一个可见组」的下标（插在它之前 = 落在下邻之后）；没有就落到末尾。
+ * 传自身下标在 `moveGroup` 里属原位、返回 null，也就是「按了没反应」。
  *
- * 为什么不能用 moveGroupStep：它按布局坐标走一格，而布局里还躺着画面上看不见的组
- * （本角色看不到的管理组、整组隐藏的、组内全隐藏的）。普通用户按一下 ↓ 时，
- * 相邻的那一格可能就是个看不见的管理组 —— 布局确实换了，界面一动不动，
- * 用户只会认为快捷键坏了；再按一下才跨两步，长度也不对。
- *
- * 落点按「可见邻居」算，再折算回布局下标：
- *   · 上移 → 插到上邻**之前**；
- *   · 下移 → 插到「下邻的下一个可见组」之前（没有就落到末尾），
- *     这样中间夹着的隐藏组都留在原处，不会在将来重新显示时插到两者之间。
+ * 可见序列的边界必须显式挡住：`moveGroup` 只认插入位，`-1` 会被 `splice(-1)` 当成
+ * 「插到最后一项之前」，按一下 ↑ 就绕到末尾去了。
  */
 export function moveGroupAcrossVisible(
   layout: SidebarLayout,

@@ -4,7 +4,6 @@ import {
   dropLineBefore,
   groupOrderIsCustomized,
   moveGroupAcrossVisible,
-  moveGroupStep,
   moveGroupTo,
   resetGroupOrderAndNames,
 } from './sidebar-groups';
@@ -81,47 +80,44 @@ describe('moveGroupTo（拖动落点提交）', () => {
   });
 });
 
-describe('moveGroupStep（Alt+↑ / ↓ 键盘走一格）', () => {
-  it('↑ 把当前组与前一组交换（插入位是 from-1，不是 from）', () => {
+describe('moveGroupAcrossVisible（Alt+↑ / ↓ 键盘走一格）', () => {
+  const ALL = defaultLayout().groups.map((g) => g.id);
+
+  it('↑ 把当前组与前一组交换（插入位是前一组的下标，不是自身下标）', () => {
     const layout = defaultLayout();
-    const next = moveGroupStep(layout, 'g-admin', -1);
+    const next = moveGroupAcrossVisible(layout, ALL, 'g-admin', -1);
     expect(next).not.toBeNull();
     expect(order(next as SidebarLayout)).toBe('g-admin,g-general,g-personal');
   });
 
   it('↓ 把当前组与后一组交换', () => {
     const layout = defaultLayout();
-    const next = moveGroupStep(layout, 'g-admin', 1);
+    const next = moveGroupAcrossVisible(layout, ALL, 'g-admin', 1);
     expect(order(next as SidebarLayout)).toBe('g-general,g-personal,g-admin');
   });
 
-  it('已在首 / 尾时返回 null（不循环绕到另一边）', () => {
+  it('已在首 / 尾时返回 null（不循环绕到另一边：moveGroup 的 splice(-1) 会把它转到末尾）', () => {
     const layout = defaultLayout();
-    expect(moveGroupStep(layout, 'g-general', -1)).toBeNull();
-    expect(moveGroupStep(layout, 'g-personal', 1)).toBeNull();
+    expect(moveGroupAcrossVisible(layout, ALL, 'g-general', -1)).toBeNull();
+    expect(moveGroupAcrossVisible(layout, ALL, 'g-personal', 1)).toBeNull();
   });
 
   it('delta=0 与未知 id 不动', () => {
     const layout = defaultLayout();
-    expect(moveGroupStep(layout, 'g-admin', 0)).toBeNull();
-    expect(moveGroupStep(layout, 'g-nope', -1)).toBeNull();
+    expect(moveGroupAcrossVisible(layout, ALL, 'g-admin', 0)).toBeNull();
+    expect(moveGroupAcrossVisible(layout, ALL, 'g-nope', -1)).toBeNull();
   });
 
   it('连按两次 ↓ 能穿过一整组（不是只换一次就卡住）', () => {
-    let layout = defaultLayout();
-    layout = moveGroupStep(layout, 'g-general', 1) as SidebarLayout;
-    expect(order(layout)).toBe('g-admin,g-general,g-personal');
-    layout = moveGroupStep(layout, 'g-general', 1) as SidebarLayout;
-    expect(order(layout)).toBe('g-admin,g-personal,g-general');
-  });
-});
+    let layout: SidebarLayout = defaultLayout();
+    // 每一帧的可见序列都是按当前布局重算的（界面上 drawnIds 就是这么来的），
+    // 不能拿第一次那份去喂第二次 —— 那等于让 DOM 顺序停在上一帧。
+    const visibleOf = (l: SidebarLayout): string[] => l.groups.map((g) => g.id);
 
-describe('moveGroupAcrossVisible（Alt+↑ / ↓ 在可见组之间走一格）', () => {
-  it('全部可见时行为与 moveGroupStep 一致（↑ 与本组前的一组换位）', () => {
-    const layout = defaultLayout();
-    const ids = layout.groups.map((g) => g.id);
-    const next = moveGroupAcrossVisible(layout, ids, 'g-admin', -1) as SidebarLayout;
-    expect(order(next)).toBe('g-admin,g-general,g-personal');
+    layout = moveGroupAcrossVisible(layout, visibleOf(layout), 'g-general', 1) as SidebarLayout;
+    expect(order(layout)).toBe('g-admin,g-general,g-personal');
+    layout = moveGroupAcrossVisible(layout, visibleOf(layout), 'g-general', 1) as SidebarLayout;
+    expect(order(layout)).toBe('g-admin,g-personal,g-general');
   });
 
   it('画面上只有两个组（中间那组整组隐藏）时，↓ 直接与下一个**可见**组换位', () => {
@@ -129,7 +125,7 @@ describe('moveGroupAcrossVisible（Alt+↑ / ↓ 在可见组之间走一格）'
     const layout = defaultLayout();
     const visible = ['g-general', 'g-personal'];
     const next = moveGroupAcrossVisible(layout, visible, 'g-general', 1);
-    // 旧实现（按布局下标 +2）会得到 g-admin,g-general,g-personal —— 界面上什么都没变
+    // 按布局下标走一格会得到 g-admin,g-general,g-personal —— 界面上什么都没变
     expect(next).not.toBeNull();
     const after = order(next as SidebarLayout);
     expect(after.split(',').indexOf('g-personal')).toBeLessThan(after.split(',').indexOf('g-general'));
