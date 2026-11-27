@@ -3221,3 +3221,15 @@ export type {
 
 // 维护任务清单是运行期常量（非类型），单独值导出。
 export { MAINTENANCE_TASKS } from './a2a';
+
+// OAuth 登录配置（GitHub / Google / LinuxDO）类型独立成文件：
+// 契约面（掩码 secret / ready 判据 / 两套回调路径）自成一块，与上面的维护任务
+// 无关；barrel 只做转出，改动集中在 ./oauth。
+export type {
+  OauthProviderKey,
+  OauthProviderConfig,
+  OauthConfig,
+  OauthProviderUpdate,
+  OauthConfigUpdate,
+  OauthCallbackShape,
+} from './oauth';

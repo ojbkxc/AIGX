@@ -5,7 +5,7 @@ import { SUPPORTED_LANGS, setLanguage } from '../i18n';
 import {
   Monitor, Sun, Moon,
   SlidersHorizontal, Network, ShieldCheck, Download,
-  MessageSquare, Info, Database, Bell, Layers, Timer, UserRound,
+  MessageSquare, Info, Database, Bell, Layers, Timer, UserRound, KeyRound,
 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
@@ -38,6 +38,8 @@ import DataManagement from '../components/DataManagement';
 import CloudSyncPanel from '../components/CloudSyncPanel';
 import SidebarLayoutPanel from '../components/SidebarLayoutPanel';
 import ImageCompressPanel from '../components/ImageCompressPanel';
+import OAuthConfigPanel from '../components/OAuthConfigPanel';
+import SettingsOverview from '../components/SettingsOverview';
 import './Settings.css';
 
 interface LimitsForm {
@@ -123,6 +125,7 @@ type SettingsTab =
   | 'providers'
   | 'timeout'
   | 'security'
+  | 'oauth'
   | 'data'
   | 'feedback'
   | 'system'
@@ -150,6 +153,9 @@ const SETTINGS_CATEGORIES: Array<{ key: SettingsTab; label: string; icon: typeof
   { key: 'providers', label: '提供商', icon: Layers },
   { key: 'timeout', label: '超时', icon: Timer },
   { key: 'security', label: '安全', icon: ShieldCheck },
+  // OAuth 登录（GitHub / Google / LinuxDO）对接参数：后端 /api/oauth/config 一直存在，
+  // 前端此前没有入口，管理员在线上找不到这三家的配置（v1.0.124 补）。
+  { key: 'oauth', label: 'OAuth 登录', icon: KeyRound },
   { key: 'data', label: '数据', icon: Database },
   { key: 'feedback', label: '反馈与需求', icon: MessageSquare },
   { key: 'system', label: '版本信息', icon: Info },
@@ -518,8 +524,15 @@ export default function Settings() {
 
       {activeTab === 'general' && (
         <>
+          {/* 配置总览：设置页默认落点的第一张卡，回答「有哪些配置、各自在哪一页」。
+              加它的原因见 components/SettingsOverview.tsx 头注释——易支付 / OAuth 都
+              不在本页，旧版这里只有「使用限额」，管理员一进来看到的就是一张没有
+              易支付的页面。不新增左栏分类（导航项数量由 e2e 钉死为当前值，且侧栏
+              正在单独精简），所以挂在默认分类里。 */}
+          <SettingsOverview />
+
           {/* 通用 = 使用限额 + 界面（主题 / 缩放） */}
-          <div className="card">
+          <div className="card" style={{ marginTop: 16 }}>
             <div className="card-header">
               <h2>{t('使用限额')}</h2>
               <p className="card-subtitle">{t('settingsGeneralHint')}</p>
@@ -945,6 +958,8 @@ export default function Settings() {
 
       {/* AI 助手 → 助手页自带设置抽屉（v1.0.93 迁出）；聊天 → /chat 页；报表 → 仪表盘 Tab；
           图片兼容（ImageCompatPanel）→ 路由「特殊请求路由 → 图片兼容」 */}
+
+      {activeTab === 'oauth' && <OAuthConfigPanel />}
 
       {activeTab === 'data' && (
         <>

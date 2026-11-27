@@ -38,6 +38,7 @@ import { endpoints as notifyBarkEndpoints } from './endpoints/notify';
 import { endpoints as sidebarLayoutEndpoints } from './endpoints/sidebarLayout';
 import { endpoints as imageCompressEndpoints } from './endpoints/imageCompress';
 import { endpoints as assistantEndpoints } from './endpoints/assistant';
+import { endpoints as oauthEndpoints } from './endpoints/oauth';
 
 export const api = {
   ...storage_reportsEndpoints,
@@ -53,6 +54,7 @@ export const api = {
   ...sidebarLayoutEndpoints,
   ...imageCompressEndpoints,
   ...assistantEndpoints,
+  ...oauthEndpoints,
 };
 
 // 助手流式通道与图片地址不是 `api` 对象方法（一个要逐帧回调、一个直接做 src），单独 re-export。
