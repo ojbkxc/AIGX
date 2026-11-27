@@ -4212,6 +4212,12 @@ mod tests {
                 .map(|r| count_dirs(r))
                 .unwrap_or(usize::MAX)
         );
+        // 诊断 DIAG4：直接看 still_matches 的返回值
+        eprintln!("DIAG4 still_matches={}", {
+            let cache = SKILL_CACHE.get().unwrap();
+            let g = cache.read();
+            g.stamp.as_ref().map(|s| s.still_matches()).unwrap_or(false)
+        });
 
         // 普通读取（fresh=false）：指纹变了 → 必须立刻看到新文件，不等 30 秒
         let after_add = skill_doc_briefs_with(&root, false);
