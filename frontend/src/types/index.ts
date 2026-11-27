@@ -2358,15 +2358,21 @@ export interface ScheduledTaskList {
 }
 
 /** 改一条任务的请求体（PATCH/POST /api/scheduled-tasks/{id}，只传要改的字段） */
+/**
+ * 改一条任务的请求体（PATCH/POST /api/scheduled-tasks/{id}，只传要改的字段）。
+ *
+ * `checkMode` 仅 `pluginCatalog` 接受，两档都受支持（对齐 A2A
+ * `configure_extended`）：
+ *   · `follow` = 跟随「软件检查更新」计划（开关与间隔都取那一份，本任务的
+ *     interval 不落库）；
+ *   · `custom` = 用本任务自己的开关与间隔（AIGX 默认档，存量行为不变）。
+ */
 export interface ScheduledTaskPatch {
   enabled?: boolean;
   interval?: number;
-  /**
-   * beta.7：仅 `pluginCatalog` 接受。checkMode 只支持 `follow`
-   * （跟随软件更新计划；follow 时后端跳过并忽略 interval）。
-   */
+  /** 仅 `pluginCatalog` 接受；`follow` 时后端跳过并忽略 interval/enabled。 */
   checkMode?: 'follow' | 'custom';
-  /** beta.7：仅 `pluginCatalog` 接受；落点为软件更新的自动应用开关。 */
+  /** 仅 `pluginCatalog` 接受；落点为软件更新的自动应用开关。 */
   autoUpdate?: boolean;
 }
 
@@ -2907,6 +2913,68 @@ export interface PurgeSkillBrief {
   name: string;
   keywords: string[];
   body_chars: number;
+  /** frontmatter 是否带显式 `keywords:` 行（旧后端不返回 → undefined） */
+  has_keywords_key?: boolean;
+  /** 该技能 `SKILL.md` 的绝对路径（旧后端不返回） */
+  path?: string;
+}
+
+/** 后台 `fallback_plan::PriceFacts::label` 的输出（已格式化的价格摘要） */
+export type PurgeFallbackPrice = string;
+
+/** 一条异源候选（`fallback_plan::Candidate`） */
+export interface PurgeFallbackCandidate {
+  model: string;
+  provider: string;
+  /** 厂商归属（`owned_by` 归一；真异源的判据） */
+  vendor: string;
+  /** 价格摘要（`null` = 未定价，不会进推荐） */
+  price: PurgeFallbackPrice | null;
+  channels: number;
+  accounts: number;
+  free: boolean;
+  preview: boolean;
+  context_length?: number | null;
+  /** 人话理由（异源厂商 → 承载方 → 定价） */
+  reason: string;
+}
+
+/** 被排除的模型与原因（`fallback_plan::Excluded`） */
+export interface PurgeFallbackExcluded {
+  model: string;
+  vendor: string;
+  code:
+    | 'same_vendor'
+    | 'same_model'
+    | 'unpriced'
+    | 'no_carrier'
+    | 'not_chat'
+    | 'disabled';
+  reason: string;
+}
+
+/** 候选池统计（`fallback_plan::Pools`） */
+export interface PurgeFallbackPools {
+  models_total: number;
+  enabled: number;
+  enabled_priced: number;
+  eligible: number;
+  cross_vendor: number;
+}
+
+/** 异源候选推荐（`GET /api/purge` 的 `fallback_suggestion` / `/fallback/suggest`） */
+export interface PurgeFallbackSuggestion {
+  main_model: string;
+  /** 主模型厂商（空 = 未知，此时不做同厂商排除） */
+  main_vendor: string | null;
+  /** 主模型是否在启用清单里（false = 推荐按通用池挑，界面要提示） */
+  main_known: boolean;
+  candidates: PurgeFallbackCandidate[];
+  /** 一键填入用的模型名清单（= candidates[].model） */
+  models: string[];
+  excluded: PurgeFallbackExcluded[];
+  pools: PurgeFallbackPools;
+  limit: number;
 }
 
 /** 配置体检告警（结构化形态：code 为稳定机器码，前端据此跳修复入口） */
@@ -2943,6 +3011,14 @@ export interface PurgeData {
   stats_last_run?: PurgeRunSnapshot | null;
   /** 配置体检告警（结构化：带 code；旧后端只有 config_warnings 字符串） */
   config_warning_items?: PurgeConfigWarning[];
+  /** 技能目录展开后是否真实存在（旧后端不返回 → undefined） */
+  skill_dir_exists?: boolean;
+  /** 当前技能注入上限（技能快照里正文是否会被截断；旧后端不返回） */
+  skill_inject_limit?: number;
+  /** 异源候选推荐（旧后端不返回 → undefined，界面隐藏「一键填入」） */
+  fallback_suggestion?: PurgeFallbackSuggestion;
+  /** 当前用于判定的主模型（推荐与「同厂商」体检的基准；旧后端不返回） */
+  main_model?: string;
 }
 
 /** 破甲预设库 · 列表条目（GET /api/purge/presets，不含正文，只带预览） */
@@ -2972,6 +3048,26 @@ export interface PurgePresetList {
   vendors: PurgePresetVendorCount[];
   /** 过滤后总数（items 已被 limit 截断） */
   total: number;
+  /**
+   * 「写路径」结论（`preset_for_model`，与数据面同链）：传了 `model` 才有。
+   *
+   * 为什么单独给：列表里每条 `model_match` 是**展示口径**（逐条徽标），真正决定
+   * 「这个模型的请求会不会被前插预设正文」的是 `preset_for_model`——只看逐条徽标
+   * 无法判断会套哪一条、会不会一条都不套。旧后端不返回该字段（→ undefined）。
+   */
+  auto_preset?: PurgePresetAutoPreset | null;
+}
+
+/** 写路径匹配结论（后端 `presets::preset_for_model` 的展示形态） */
+export interface PurgePresetAutoPreset {
+  /** 用于判定的模型名（后端回显，便于对照） */
+  model: string;
+  /** 命中的预设 id（null = 没命中任何一条） */
+  preset_id: string | null;
+  /** 命中档：exact / family / universal / pinned（null = 没命中） */
+  match: 'exact' | 'family' | 'universal' | 'pinned' | null;
+  /** 总开关 && 自动套用 && 正文非空 三者同时成立才为 true */
+  applied: boolean;
 }
 
 /** 破甲预设库 · 详情（GET /api/purge/presets/{id}，含完整正文） */
@@ -3007,6 +3103,45 @@ export interface PurgeSkillImportResult {
   files: number;
   bytes: number;
   has_skill_md: boolean;
+}
+
+/** GET /api/purge/skills/skeleton 的 data 结构（新建技能的骨架） */
+export interface PurgeSkillSkeleton {
+  /** 完整 `SKILL.md` 文本（frontmatter + 占位正文），可直接填进编辑器 */
+  content: string;
+  /** 建议目录名（由 name 经 slugify 规整；空 = name 不含可用字符） */
+  dir: string;
+  /** 将会写入的 `SKILL.md` 绝对路径 */
+  path: string;
+  /** 技能目录的展开后绝对路径（`~` 由服务进程 HOME 展开） */
+  skill_dir_resolved: string;
+  /** 骨架的解析回读结果（`null` + `validate_error` = 解析器读不出正文） */
+  validate: {
+    name: string;
+    keywords: string[];
+    body_chars: number;
+    has_keywords_key: boolean;
+    warnings: string[];
+  } | null;
+  validate_error: string | null;
+}
+
+/** POST /api/purge/skills 的 data 结构（纯文本技能写入结果） */
+export interface PurgeSkillWriteResult {
+  /** `text` = 粘贴/上传单文件；`template` = 骨架新建 */
+  mode: string;
+  dir: string;
+  files: number;
+  bytes: number;
+  has_skill_md: boolean;
+  name: string;
+  keywords: string[];
+  body_chars: number;
+  has_keywords_key: boolean;
+  /** 写盘前校验的非致命提示（缺 keywords / 正文超上限 等） */
+  warnings: string[];
+  /** 落盘后的 `SKILL.md` 绝对路径 */
+  path: string;
 }
 
 /** GET /api/public/branding 的 data 结构（免鉴权） */

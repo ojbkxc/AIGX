@@ -28,8 +28,11 @@ import type {
   GatewayPromptItem,
   SanitizeHeadersItem,
   PurgeData,
+  PurgeFallbackSuggestion,
   PurgePreviewResult,
   PurgeSettings,
+  PurgeSkillSkeleton,
+  PurgeSkillWriteResult,
   PurgeStats,
   PurgePresetApplyResult,
   PurgePresetApplyTarget,
@@ -139,10 +142,14 @@ export const endpoints = {
   saveSanitize: (data: Record<string, unknown>): Promise<ApiResponse<SanitizeHeadersItem>> =>
     request<ApiResponse<SanitizeHeadersItem>>('PUT', `${API_BASE}/sanitize`, data),
   // 破甲控制台（请求治理总控：归一化/改写/降档/异源/技能注入；热生效）
-  // 破甲控制台读取（`skills: 'fresh'` 跳过技能扫描的 30 秒缓存）
-  getPurge: (params?: { skills?: 'fresh' }): Promise<ApiResponse<PurgeData>> => {
-    const qs = params?.skills ? `?skills=${params.skills}` : '';
-    return request<ApiResponse<PurgeData>>('GET', `${API_BASE}/purge${qs}`);
+  // 破甲控制台读取（`skills: 'fresh'` 跳过技能扫描的 30 秒缓存，
+  // `models: 'fresh'` 跳过模型管理视图缓存——改了渠道/定价后重算推荐用）
+  getPurge: (params?: { skills?: 'fresh'; models?: 'fresh' }): Promise<ApiResponse<PurgeData>> => {
+    const search = new URLSearchParams();
+    if (params?.skills) search.set('skills', params.skills);
+    if (params?.models) search.set('models', params.models);
+    const qs = search.toString();
+    return request<ApiResponse<PurgeData>>('GET', `${API_BASE}/purge${qs ? `?${qs}` : ''}`);
   },
   savePurge: (data: PurgeSettings): Promise<ApiResponse<PurgeData>> =>
     request<ApiResponse<PurgeData>>('PUT', `${API_BASE}/purge`, data),
@@ -210,6 +217,47 @@ export const endpoints = {
       'POST',
       `${API_BASE}/purge/skills/import`,
       form,
+    );
+  },
+  // 破甲技能骨架（**格式即后端解析器契约**：`name` / `description` / `keywords`
+  // 三项与 `src/purge/skill_doc.rs` 的模板逐字对齐；只生成文本，不写盘）
+  getPurgeSkillSkeleton: (params: {
+    name: string;
+    description?: string;
+    keywords?: string;
+    body?: string;
+  }): Promise<ApiResponse<PurgeSkillSkeleton>> => {
+    const search = new URLSearchParams();
+    search.set('name', params.name);
+    if (params.description) search.set('description', params.description);
+    if (params.keywords) search.set('keywords', params.keywords);
+    if (params.body) search.set('body', params.body);
+    return request<ApiResponse<PurgeSkillSkeleton>>(
+      'GET',
+      `${API_BASE}/purge/skills/skeleton?${search.toString()}`,
+    );
+  },
+  // 破甲纯文本技能写入（新建 / 粘贴正文 / 上传单个 .md；后端用解析器回读校验后落盘）
+  writePurgeSkill: (data: {
+    content: string;
+    dir?: string;
+    overwrite?: boolean;
+  }): Promise<ApiResponse<PurgeSkillWriteResult>> =>
+    request<ApiResponse<PurgeSkillWriteResult>>('POST', `${API_BASE}/purge/skills`, data),
+  // 异源候选推荐（`models: 'fresh'` 跳过视图缓存；`model` 覆盖主模型）
+  suggestPurgeFallback: (params?: {
+    limit?: number;
+    models?: 'fresh';
+    model?: string;
+  }): Promise<ApiResponse<PurgeFallbackSuggestion> & { main_model?: string }> => {
+    const search = new URLSearchParams();
+    if (params?.limit) search.set('limit', String(params.limit));
+    if (params?.models) search.set('models', params.models);
+    if (params?.model) search.set('model', params.model);
+    const qs = search.toString();
+    return request<ApiResponse<PurgeFallbackSuggestion> & { main_model?: string }>(
+      'GET',
+      `${API_BASE}/purge/fallback/suggest${qs ? `?${qs}` : ''}`,
     );
   },
   // ZCode 验证码令牌池（对照 Agent2API「网关 → 验证码令牌池」）

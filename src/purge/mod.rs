@@ -30,10 +30,14 @@ use std::time::{Duration, Instant};
 use crate::bridge::{ChatMessage, Role};
 use crate::storage::FileStore;
 
+/// 异源递进的候选推荐与「填了也不生效」校验。
+pub mod fallback_plan;
 /// 内置预设目录（同步脚本生成，勿手改）。
 pub mod preset_catalog;
 /// 预设检索与应用。
 pub mod presets;
+/// 技能文档（`SKILL.md`）模板 / 关键词归一 / 写盘校验（frontmatter 契约唯一来源）。
+pub mod skill_doc;
 /// 技能包导入（ZIP/TAR/TGZ 安全解压到技能目录）。
 pub mod skill_import;
 
@@ -498,6 +502,15 @@ impl PurgeStore {
             .ok()
             .flatten()
             .unwrap_or_default();
+        // 启动即确保技能目录存在（**只建目录，不建技能**）。
+        //
+        // 放在这里而不是 `main.rs`：`with_store` 就是「进程启动装配」的唯一入口，
+        // 多一条调用点就多一处会漏的接线。失败只记一行 WARN——目录建不出来是
+        // 环境问题（权限 / 父路径被文件占用），不该让服务起不来；配置体检的
+        // `skill_dir_missing` / `skill_dir_unreadable` 会把这件事报到界面上。
+        if let Err(error) = ensure_skill_dir(&cfg.skill_dir) {
+            tracing::warn!("[Purge] 启动时创建技能目录失败（界面体检会报出来）：{error}");
+        }
         Self {
             current: parking_lot::RwLock::new(Arc::new(cfg)),
             store: Some(store),
@@ -1346,33 +1359,102 @@ fn append_to_last_user(messages: &mut [ChatMessage], suffix: &str) -> bool {
     true
 }
 
-// ── 技能扫描（30 秒进程内缓存）───────────────────────────────
+// ── 技能扫描（30 秒进程内缓存 + mtime 增量复核）────────────────
 
 #[derive(Debug, Clone)]
 struct SkillEntry {
     name: String,
     keywords: Vec<String>,
     body: String,
+    /// 该条目来自哪个 `SKILL.md`（缓存复核只 stat 这些文件）
+    path: PathBuf,
+    /// frontmatter 是否带显式 `keywords:` 行（体检「永远不命中」判据）
+    has_keywords_key: bool,
 }
 
 struct SkillCache {
     dir: String,
     loaded_at: Option<Instant>,
     entries: Arc<Vec<SkillEntry>>,
+    /// 上次全量扫描时的「目录 + 文件」指纹。过期只看指纹：没变就续期，
+    /// **不重扫**——打开页面不该触发目录遍历与全文读取（见 `skills_for`）。
+    stamp: Option<SkillStamp>,
+    /// 指纹连续命中而不重扫的起点。到 [`STAMP_RENEW_CAP`] 强制重扫一次，
+    /// 兜住「mtime 粒度 / 时钟回拨导致指纹恒等」这类极端情况。
+    renewed_at: Option<Instant>,
+}
+
+/// 指纹续期上限：连续靠指纹命中最多撑 10 分钟，之后必须全量重扫。
+const STAMP_RENEW_CAP: Duration = Duration::from_secs(600);
+/// 技能目录递归深度上限（与旧实现一致：`<dir>/<name>/SKILL.md` 典型 1 层）。
+const SKILL_SCAN_MAX_DEPTH: usize = 4;
+
+/// 技能目录指纹：**所有已知目录**的 mtime + 每个 `SKILL.md` 的 (mtime, len)。
+///
+/// 为什么连目录都要记：新增一份技能常在 `<root>/<名字>/SKILL.md` 里发生，
+/// 这会改 `<root>/<名字>` 的 mtime，而 `<root>` 自己的 mtime 不变、文件清单里
+/// 也还没有这个文件——只记根目录 + 已扫描文件的话，新技能要等别的写操作撞上
+/// 才算数。把每个目录都记上，增删文件在任何一层都能被发现。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillStamp {
+    dirs: Vec<(PathBuf, Option<(u64, u32)>)>,
+    files: Vec<(PathBuf, Option<(u64, u32)>, u64)>,
+}
+
+/// `(秒, 纳秒)` 的 mtime 快照（不用 `SystemTime` 是为了可比较 / 可存）。
+fn mtime_of(path: &Path) -> Option<(u64, u32)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((since.as_secs(), since.subsec_nanos()))
+}
+
+impl SkillStamp {
+    fn capture(dirs: &[PathBuf], entries: &[SkillEntry]) -> Self {
+        Self {
+            dirs: dirs
+                .iter()
+                .map(|dir| (dir.clone(), mtime_of(dir)))
+                .collect(),
+            files: entries
+                .iter()
+                .map(|entry| {
+                    let len = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
+                    (entry.path.clone(), mtime_of(&entry.path), len)
+                })
+                .collect(),
+        }
+    }
+
+    /// 与当前磁盘状态对比：任一目录或文件的 mtime/长度变了 → 需要重扫。
+    fn still_matches(&self) -> bool {
+        self.dirs.iter().all(|(dir, stamp)| mtime_of(dir) == *stamp)
+            && self.files.iter().all(|(path, stamp, len)| {
+                mtime_of(path) == *stamp
+                    && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) == *len
+            })
+    }
 }
 
 static SKILL_CACHE: OnceLock<parking_lot::RwLock<SkillCache>> = OnceLock::new();
 
-/// 技能目录扫描结果（30 秒进程内缓存）。
+/// 技能目录扫描结果（30 秒进程内缓存 + mtime 增量复核）。
 ///
-/// 命中只做 Arc 克隆（引用计数 +1），不逐请求深拷贝全部技能正文；/// 目录变更或超期时在读锁外重新扫描，再持写锁整体替换。
-/// 并发请求同时看到过期 → 各自扫描一次（最后一次写者胜），正确性无虞。
+/// 命中只做 Arc 克隆（引用计数 +1），不逐请求深拷贝全部技能正文；目录变更或
+/// 超期时在读锁外重新扫描，再持写锁整体替换。
+///
+/// **过期不等于重扫**：超期后先用 [`SkillStamp::still_matches`] 复核指纹
+/// （目录与文件的 stat，不读内容）。指纹没变就续期、直接返回缓存——此前每次
+/// 超期都要 `read_dir` 全树 + 逐个 `read_to_string`，破甲页每 30 秒打一次的全量
+/// 读盘就是这么来的。指纹变了（新增/删除/改内容）才真正重扫，语义不变。
 fn skills_for(dir: &str) -> Arc<Vec<SkillEntry>> {
     let cache = SKILL_CACHE.get_or_init(|| {
         parking_lot::RwLock::new(SkillCache {
             dir: String::new(),
             loaded_at: None,
             entries: Arc::new(Vec::new()),
+            stamp: None,
+            renewed_at: None,
         })
     });
     {
@@ -1385,11 +1467,38 @@ fn skills_for(dir: &str) -> Arc<Vec<SkillEntry>> {
             }
         }
     }
-    let entries = Arc::new(scan_skills(dir));
+    // 超期/换目录：先廉价复核指纹（只 stat，不读内容）
+    {
+        let guard = cache.read();
+        if guard.dir == dir {
+            let renew_ok = guard
+                .renewed_at
+                .is_none_or(|at| at.elapsed() < STAMP_RENEW_CAP);
+            if renew_ok {
+                if let Some(stamp) = &guard.stamp {
+                    if stamp.still_matches() {
+                        let entries = guard.entries.clone();
+                        drop(guard);
+                        let mut write = cache.write();
+                        write.loaded_at = Some(Instant::now());
+                        if write.renewed_at.is_none() {
+                            write.renewed_at = Some(Instant::now());
+                        }
+                        return entries;
+                    }
+                }
+            }
+        }
+    }
+    let (entries, dirs) = scan_skills_full(dir);
+    let entries = Arc::new(entries);
+    let stamp = SkillStamp::capture(&dirs, &entries);
     let mut guard = cache.write();
     guard.dir = dir.to_string();
     guard.loaded_at = Some(Instant::now());
     guard.entries = entries.clone();
+    guard.stamp = Some(stamp);
+    guard.renewed_at = None;
     entries
 }
 
@@ -1405,10 +1514,37 @@ pub(crate) fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn scan_skills(dir: &str) -> Vec<SkillEntry> {
+/// 服务启动时确保技能目录存在（**只建目录，不建任何空技能**）。
+///
+/// 为什么必须有：默认值是 `~/.aigx/skills`，而全新安装时这个目录根本不存在。
+/// 用户在界面上看到「技能注入已开启，但扫不到任何 SKILL.md」，去磁盘找却连
+/// 目录都没有——第一反应是路径配错了。建出目录后，界面的「新建技能 / 上传」
+/// 才有落点，体检的 `skill_dir_missing` 也只在真的建不出来时才报。
+///
+/// 返回值：`Ok(None)` = 已存在（没动）；`Ok(Some(path))` = 本次新建；
+/// `Err` = 建不出来（权限 / 父路径是文件），由调用方记一行 WARN 并让体检报错。
+pub fn ensure_skill_dir(dir: &str) -> Result<Option<PathBuf>, String> {
+    let path = expand_home(dir);
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => return Ok(None),
+        Ok(_) => {
+            return Err(format!(
+                "技能目录路径已被一个非目录文件占用，无法建目录：{}",
+                path.display()
+            ))
+        }
+        Err(_) => {}
+    }
+    std::fs::create_dir_all(&path)
+        .map_err(|error| format!("创建技能目录失败：{}（{error}）", path.display()))?;
+    Ok(Some(path))
+}
+
+fn scan_skills_full(dir: &str) -> (Vec<SkillEntry>, Vec<PathBuf>) {
     let root = expand_home(dir);
     let mut files = Vec::new();
-    collect_skill_files(&root, 0, &mut files);
+    let mut dirs = Vec::new();
+    collect_skill_files(&root, 0, &mut files, &mut dirs);
     let mut entries = Vec::new();
     for file in files {
         let Ok(content) = std::fs::read_to_string(&file) else {
@@ -1420,24 +1556,26 @@ fn scan_skills(dir: &str) -> Vec<SkillEntry> {
             .and_then(|n| n.to_str())
             .unwrap_or("skill")
             .to_string();
-        if let Some(entry) = parse_skill(&content, &fallback) {
+        if let Some(entry) = parse_skill(&content, &fallback, &file) {
             entries.push(entry);
         }
     }
-    entries
+    (entries, dirs)
 }
 
-fn collect_skill_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    if depth > 4 {
+/// 递归收集 `SKILL.md`（`out`）与沿途的每个目录（`dirs`，供缓存指纹用）。
+fn collect_skill_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
+    if depth > SKILL_SCAN_MAX_DEPTH {
         return;
     }
     let Ok(reader) = std::fs::read_dir(dir) else {
         return;
     };
+    dirs.push(dir.to_path_buf());
     for entry in reader.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_skill_files(&path, depth + 1, out);
+            collect_skill_files(&path, depth + 1, out, dirs);
         } else if path
             .file_name()
             .and_then(|n| n.to_str())
@@ -1448,10 +1586,44 @@ fn collect_skill_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn parse_skill(content: &str, fallback_name: &str) -> Option<SkillEntry> {
+/// 解析一份 `SKILL.md`（解析器是**唯一实现**：`skill_doc` 的模板生成与写盘
+/// 校验都回读这里，见 `skill_doc` 模块头）。
+fn parse_skill(content: &str, fallback_name: &str, path: &Path) -> Option<SkillEntry> {
+    let (name, keywords, has_keywords_key, body) = parse_skill_parts(content)?;
+    // frontmatter 没写 name 时回落父目录名（旧行为）；关键词集合随之重算，
+    // 否则「没写 name 的技能」会连一个关键词都没有——永远不命中。
+    let (name, keywords) = if name.trim().is_empty() {
+        let fallback = fallback_name.trim();
+        (
+            fallback.to_string(),
+            skill_doc::keywords_from(fallback, "", &[]),
+        )
+    } else {
+        (name, keywords)
+    };
+    Some(SkillEntry {
+        name,
+        keywords,
+        body,
+        path: path.to_path_buf(),
+        has_keywords_key,
+    })
+}
+
+/// frontmatter 拆解：`(name, keywords, 是否带显式 keywords 行, 正文)`。
+///
+/// `None` = 读不出正文（空文件 / 没有正文 / 只有 frontmatter）——写盘前校验与
+/// 扫描器共用这一份判据，避免「模板生成的能过、扫描器读不出来」这种半死态。
+///
+/// 名字优先级：frontmatter 的 `name:` > 空串（调用方用目录名兜底，
+/// 见 [`scan_skills_full`]）。`keywords:` 是显式键（本轮新增）：旧文件没有它，
+/// 行为不变——关键词仍由 name + description 派生（[`skill_doc::keywords_from`]）。
+pub(crate) fn parse_skill_parts(content: &str) -> Option<(String, Vec<String>, bool, String)> {
     let trimmed = content.trim_start();
-    let mut name = fallback_name.to_string();
+    let mut name = String::new();
     let mut description = String::new();
+    let mut explicit: Vec<String> = Vec::new();
+    let mut has_keywords_key = false;
     let mut body = trimmed.to_string();
 
     if let Some(rest) = trimmed.strip_prefix("---") {
@@ -1462,6 +1634,9 @@ fn parse_skill(content: &str, fallback_name: &str) -> Option<SkillEntry> {
                     name = value.trim().trim_matches('"').to_string();
                 } else if let Some(value) = line.strip_prefix("description:") {
                     description = value.trim().trim_matches('"').to_string();
+                } else if let Some(value) = line.strip_prefix("keywords:") {
+                    has_keywords_key = true;
+                    explicit = skill_doc::parse_keywords_value(value.trim().trim_matches('"'));
                 }
             }
             body = rest[end + 4..].trim_start().to_string();
@@ -1471,28 +1646,8 @@ fn parse_skill(content: &str, fallback_name: &str) -> Option<SkillEntry> {
     if body.trim().is_empty() {
         return None;
     }
-    Some(SkillEntry {
-        keywords: keywords_of(&name, &description),
-        name,
-        body,
-    })
-}
-
-fn keywords_of(name: &str, description: &str) -> Vec<String> {
-    let mut keywords = Vec::new();
-    if !name.trim().is_empty() {
-        keywords.push(name.trim().to_string());
-    }
-    for token in description.split(|c: char| {
-        c.is_whitespace() || matches!(c, ',' | '，' | '、' | ';' | '；' | ':' | '：' | '/')
-    }) {
-        let token = token.trim();
-        if token.chars().count() >= 2 {
-            keywords.push(token.to_string());
-        }
-    }
-    keywords.dedup();
-    keywords
+    let keywords = skill_doc::keywords_from(&name, &description, &explicit);
+    Some((name, keywords, has_keywords_key, body))
 }
 
 fn keyword_matches(prompt: &str, keyword: &str) -> bool {
@@ -1505,11 +1660,33 @@ fn keyword_matches(prompt: &str, keyword: &str) -> bool {
 // ── 配置体检 + 技能快照（管理面 GET 附带返回）────────────────
 
 /// 技能扫描快照（管理面展示用：名称 + 关键词 + 正文字符数，不含正文）。
+///
+/// **形状保持不变**：`agent::registry::purge` 的 `skills_summary` 直接消费这个
+/// 结构体（并有自己的构造夹具），加字段会连带打穿那份测试。需要「有没有
+/// `keywords:` 行 / 文件在哪」的调用方看下面的 [`SkillDocBrief`]。
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillBrief {
     pub name: String,
     pub keywords: Vec<String>,
     pub body_chars: usize,
+}
+
+/// 技能扫描快照的**完整**形态（管理面 `/api/purge` 用）。
+///
+/// 比 [`SkillBrief`] 多两样，都是「写对了没」的判据：
+/// - `has_keywords_key`：frontmatter 是否带显式 `keywords:` 行。没有这一行时
+///   关键词只能从 name/description 派生，绝大部分技能的 description 是一句
+///   自然语言，派生词命中面极窄。界面要能一眼看出「这条技能根本没写 keywords」，
+///   否则用户只会觉得「注入了但没反应」。
+/// - `path`：该 `SKILL.md` 的绝对路径（「去哪里改」）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillDocBrief {
+    pub name: String,
+    pub keywords: Vec<String>,
+    pub body_chars: usize,
+    pub has_keywords_key: bool,
+    /// `SKILL.md` 绝对路径（落盘位置，界面显示与复制用）
+    pub path: String,
 }
 
 /// 当前技能目录的扫描快照（复用数据面同款 30 秒缓存）。
@@ -1556,16 +1733,41 @@ pub fn skill_briefs_with(dir: &str, fresh: bool) -> Vec<SkillBrief> {
         .collect()
 }
 
+/// [`skill_briefs_with`] 的完整形态（含 `has_keywords_key` 与 `path`）。
+///
+/// 与 `SkillBrief` **共用同一次扫描**（同一个 `skills_for` 缓存），所以同时要
+/// 两形的调用方不会扫两遍盘。
+pub fn skill_doc_briefs_with(dir: &str, fresh: bool) -> Vec<SkillDocBrief> {
+    if fresh {
+        invalidate_skill_cache(dir);
+    }
+    skills_for(dir)
+        .iter()
+        .map(|entry| SkillDocBrief {
+            name: entry.name.clone(),
+            keywords: entry.keywords.clone(),
+            body_chars: entry.body.chars().count(),
+            has_keywords_key: entry.has_keywords_key,
+            path: entry.path.to_string_lossy().to_string(),
+        })
+        .collect()
+}
+
 /// 让该目录的缓存立即失效（下一次 `skills_for` 必然重扫）。
 ///
 /// 只清「同目录」的缓存：换目录时 `skills_for` 本来就因 `dir != guard.dir` 重扫，
 /// 这里清掉是为了让**同目录**的强制刷新也生效。
+///
+/// `stamp` / `renewed_at` 一并清空：留着指纹会让「删掉技能后点重新扫描」看起来
+/// 立刻回到旧结果（指纹恰好匹配上一次扫描）。
 fn invalidate_skill_cache(dir: &str) {
     if let Some(cache) = SKILL_CACHE.get() {
         let mut guard = cache.write();
         if guard.dir == dir {
             guard.loaded_at = None;
             guard.entries = Arc::new(Vec::new());
+            guard.stamp = None;
+            guard.renewed_at = None;
         }
     }
 }
@@ -1612,11 +1814,22 @@ pub fn severity_of(code: &str) -> Severity {
         // 开了但一定不生效
         "fallback_empty"
         | "fallback_after_retry"
+        | "fallback_unpriced"
+        | "fallback_same_vendor"
+        | "fallback_no_channel"
+        | "fallback_unknown"
+        | "fallback_not_chat"
+        | "fallback_disabled"
+        | "skill_dir_missing"
+        | "skill_dir_unreadable"
         | "structured_empty"
         | "dead_zone_all_disabled"
         | "synonym_all_disabled" => Severity::Error,
-        // 生效了，但效果可能不符预期 / 有重复开销
-        "chained_rewrite" | "fallback_duplicate" => Severity::Warn,
+        // 生效了，但效果可能不符预期 / 有重复开销 / 会静默截断
+        "chained_rewrite"
+        | "fallback_duplicate"
+        | "skill_body_over_limit"
+        | "skill_no_keywords" => Severity::Warn,
         // 配置脏，当前无害
         "skill_dir_empty" | "preset_missing" | "skill_keyword_short" => Severity::Info,
         // 未登记的新 code：按最保守的 Error 处理（宁严不宽）
@@ -1633,6 +1846,26 @@ pub fn severity_of(code: &str) -> Severity {
 /// - `dead_zone_all_disabled` → 死区词表
 /// - `synonym_all_disabled` → 同义词表
 pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
+    config_warning_items_with(cfg, None, "")
+}
+
+/// 带**模型视图**与**主模型**的体检（管理面 GET 用）。
+///
+/// 静态检查（不依赖运行期数据）仍由 [`config_warning_items`] 承担；这里额外跑
+/// 三类**只有对照模型清单才判得出**的检查——它们的共同点是「写了但一定不生效」：
+/// - `fallback_unpriced`：未定价，数据面 `ensure_model_priced` 直接跳过；
+/// - `fallback_same_vendor`：与主模型同厂商，不是异源（只是换个型号）；
+/// - `fallback_no_channel`：没有启用的渠道/账号声明，解析不出候选；
+/// - `fallback_unknown`：模型根本不在启用清单里（拼错 / 上游已下线）。
+///
+/// `view = None` 时这四条全部跳过（没有模型清单就没有判据，不猜）。
+/// `main_model` 空串时不做「同厂商」判定，并在 `fallback_empty` 的文案里不说
+/// 「异源」——主模型未知时说「异源」是虚的。
+pub fn config_warning_items_with(
+    cfg: &PurgeSettings,
+    view: Option<&crate::model::manage::ManageView>,
+    main_model: &str,
+) -> Vec<ConfigWarning> {
     let mut warnings = Vec::new();
     if !cfg.enabled {
         // 总开关关闭时数据面零行为，其余检查无意义
@@ -1677,39 +1910,20 @@ pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
             });
         }
     }
-    if cfg.skill_inject && skills_for(&cfg.skill_dir).is_empty() {
-        warnings.push(ConfigWarning {
-            code: "skill_dir_empty",
-            message: format!(
-                "技能注入已开启，但技能目录（{}）扫不到任何 SKILL.md：不会注入任何内容。",
-                cfg.skill_dir
-            ),
-        });
-    }
-    // 技能只有单字符关键词（典型：技能 name 是单个汉字，description 又没写
-    // 任何 ≥2 字符词）：`keyword_matches` 是子串匹配，单字关键词意味着
-    // **消息里出现任何一个同字就触发**——命中面过宽，注入会频繁误触发。
-    // 这是真实可达态（keywords 的 name 项不做长度过滤）。只点名，不代改。
-    if cfg.skill_inject {
-        let entries = skills_for(&cfg.skill_dir);
-        let singles: Vec<&str> = entries
-            .iter()
-            .filter(|entry| {
-                !entry.keywords.is_empty()
-                    && entry.keywords.iter().all(|k| k.trim().chars().count() <= 1)
-            })
-            .map(|entry| entry.name.as_str())
-            .collect();
-        if !singles.is_empty() {
-            warnings.push(ConfigWarning {
-                code: "skill_keyword_short",
-                message: format!(
-                    "这些技能只有单字符关键词（子串匹配命中面过宽，消息里出现同字就会误触发）：{}。给对应 SKILL.md 的 description 补上更长的关键词即可收窄。",
-                    singles.iter().take(3).copied().collect::<Vec<_>>().join("、")
-                ),
-            });
+    if cfg.cross_source_fallback {
+        if let Some(view) = view {
+            warnings.extend(fallback_audit_warnings(
+                view,
+                &cfg.fallback_models,
+                main_model,
+            ));
         }
     }
+    if cfg.skill_inject {
+        warnings.extend(skill_dir_warnings(cfg));
+    }
+    // 技能相关的四条（目录不可读 / 扫不到 SKILL.md / 缺 keywords / 单字符关键词 /
+    // 正文超上限）集中在 [`skill_dir_warnings`]，与真正的数据面判据同源。
     if cfg.dead_zone_rewrite && cfg.synonym_enabled {
         // 链式改写：A 表的 to 是 B 表的 from（或同表内互为前后缀）时，
         // 同一段文本会被改两次，最终结果与管理员预期可能不一致。
@@ -1802,6 +2016,224 @@ pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
     warnings
 }
 
+/// 技能侧体检（目录不可读 / 扫不到 SKILL.md / 缺 keywords / 单字符关键词 /
+/// 正文超上限），按「修复动作」聚成至多 5 条。
+///
+/// ── 为什么分成这几条 ─────────────────────────────────────────
+/// 每条对应一个**具体可执行**的动作，而不是一句「技能注入不生效」：
+/// - `skill_dir_missing`：目录不存在 → 「新建技能」会顺手建出来（服务启动时也会建）；
+/// - `skill_dir_unreadable`：存在但读不了 → 权限问题，用户得改权限；
+/// - `skill_dir_empty`：读得到但没有 `SKILL.md` → 放文件 / 用导入；
+/// - `skill_no_keywords`：有文件但 frontmatter 缺 `keywords:` → 只能靠名字命中；
+/// - `skill_keyword_short`：关键词全是单字符 → 命中面过宽；
+/// - `skill_body_over_limit`：正文超过注入上限 → 命中后被截断（不报就永远不知道）。
+fn skill_dir_warnings(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
+    let mut warnings = Vec::new();
+    let root = expand_home(&cfg.skill_dir);
+    match std::fs::metadata(&root) {
+        Err(_) => {
+            warnings.push(ConfigWarning {
+                code: "skill_dir_missing",
+                message: format!(
+                    "技能注入已开启，但技能目录（{}）不存在：不会注入任何内容。点「新建技能」会在该路径建出目录并写入第一份 SKILL.md。",
+                    expanded_skill_dir(&cfg.skill_dir)
+                ),
+            });
+            return warnings;
+        }
+        Ok(meta) if !meta.is_dir() => {
+            warnings.push(ConfigWarning {
+                code: "skill_dir_unreadable",
+                message: format!(
+                    "技能目录路径不是一个目录（{}）：不会注入任何内容。请把 skill_dir 指向目录。",
+                    expanded_skill_dir(&cfg.skill_dir)
+                ),
+            });
+            return warnings;
+        }
+        Ok(_) => {}
+    }
+    // 目录在，但遍历不出来（权限）——`read_dir` 失败与「空目录」必须分开报：
+    // 前者用户要改权限，后者用户要放文件，两件事的修法完全不同。
+    if std::fs::read_dir(&root).is_err() {
+        warnings.push(ConfigWarning {
+            code: "skill_dir_unreadable",
+            message: format!(
+                "技能目录（{}）存在但读不出来（权限不足）：不会注入任何内容。请检查服务进程对该目录的读权限。",
+                expanded_skill_dir(&cfg.skill_dir)
+            ),
+        });
+        return warnings;
+    }
+
+    let entries = skills_for(&cfg.skill_dir);
+    if entries.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "skill_dir_empty",
+            message: format!(
+                "技能注入已开启，但技能目录（{}）扫不到任何 SKILL.md：不会注入任何内容。",
+                cfg.skill_dir
+            ),
+        });
+        return warnings;
+    }
+
+    // 缺显式 keywords：关键词只能从 name/description 派生，绝大多数情况下
+    // 只剩「技能名」一个词能命中——用户会觉得「明明注入了却没反应」。
+    let no_keywords: Vec<&str> = entries
+        .iter()
+        .filter(|entry| !entry.has_keywords_key)
+        .map(|entry| entry.name.as_str())
+        .collect();
+    if !no_keywords.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "skill_no_keywords",
+            message: format!(
+                "这些技能的 frontmatter 缺 `keywords:` 行（只能靠 name/description 派生关键词，命中面很窄）：{}。在 frontmatter 里补一行 `keywords: 词1, 词2` 即可。",
+                no_keywords.iter().take(3).copied().collect::<Vec<_>>().join("、")
+            ),
+        });
+    }
+
+    // 单字符关键词（典型：技能 name 是单个汉字，description 又没写任何 ≥2 字符词）：
+    // `keyword_matches` 是子串匹配，单字关键词意味着**消息里出现任何一个同字就
+    // 触发**——命中面过宽，注入会频繁误触发。只点名，不代改。
+    let singles: Vec<&str> = entries
+        .iter()
+        .filter(|entry| {
+            !entry.keywords.is_empty()
+                && entry.keywords.iter().all(|k| k.trim().chars().count() <= 1)
+        })
+        .map(|entry| entry.name.as_str())
+        .collect();
+    if !singles.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "skill_keyword_short",
+            message: format!(
+                "这些技能只有单字符关键词（子串匹配命中面过宽，消息里出现同字就会误触发）：{}。给对应 SKILL.md 的 description 补上更长的关键词即可收窄。",
+                singles.iter().take(3).copied().collect::<Vec<_>>().join("、")
+            ),
+        });
+    }
+
+    // 正文超上限：`inject_skills` 是**按字符截断**（不是丢弃），命中后正文尾部
+    // 会消失。裁掉哪一段用户无从知晓，所以这里点名文件与字符数。
+    let limit = cfg.skill_inject_limit.max(1);
+    let over: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| {
+            let chars = entry.body.chars().count();
+            (chars > limit).then(|| format!("{}（{chars} > {limit}）", entry.name))
+        })
+        .collect();
+    if !over.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "skill_body_over_limit",
+            message: format!(
+                "这些技能的正文超过注入上限 {limit} 字符，命中后只注入前 {limit} 字符（尾部被截掉）：{}。要么精简正文，要么调大「技能注入上限」。",
+                over.iter().take(3).cloned().collect::<Vec<_>>().join("、")
+            ),
+        });
+        // 一并点名 `skill_inject_limit` 的落点，让用户少找一次
+    }
+
+    warnings
+}
+
+/// 异源模型的逐条审计（未定价 / 同厂商 / 无承载 / 不在清单）。
+///
+/// 四条都为 Error：数据面**确实不会用它**——开关开着、列表非空、体检只报一句
+/// 「没配」，管理员会以为已经在跑。分类见 [`fallback_plan::AuditVerdict`]。
+fn fallback_audit_warnings(
+    view: &crate::model::manage::ManageView,
+    fallback_models: &[String],
+    main_model: &str,
+) -> Vec<ConfigWarning> {
+    use crate::purge::fallback_plan::{self, AuditVerdict};
+    let mut warnings = Vec::new();
+    let verdicts = fallback_plan::audit(view, fallback_models, main_model);
+    let mut unpriced: Vec<&str> = Vec::new();
+    let mut same_vendor: Vec<&str> = Vec::new();
+    let mut no_carrier: Vec<&str> = Vec::new();
+    let mut unknown: Vec<&str> = Vec::new();
+    let mut not_chat: Vec<&str> = Vec::new();
+    let mut disabled: Vec<&str> = Vec::new();
+    for (model, verdict) in &verdicts {
+        match verdict {
+            AuditVerdict::Ok => {}
+            AuditVerdict::Unknown => unknown.push(model),
+            AuditVerdict::Rejected(reason) => match reason {
+                fallback_plan::Exclusion::Unpriced => unpriced.push(model),
+                fallback_plan::Exclusion::SameVendor => same_vendor.push(model),
+                fallback_plan::Exclusion::NoCarrier => no_carrier.push(model),
+                fallback_plan::Exclusion::NotChat => not_chat.push(model),
+                fallback_plan::Exclusion::Disabled => disabled.push(model),
+                fallback_plan::Exclusion::SameModel => {}
+            },
+        }
+    }
+    if !unpriced.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "fallback_unpriced",
+            message: format!(
+                "异源模型列表里这些模型**未定价**，数据面会被「未配置价格」直接跳过（写了也不生效）：{}。去模型管理给它们配价（哪怕配成免费）。",
+                unpriced.iter().take(3).copied().collect::<Vec<_>>().join("、")
+            ),
+        });
+    }
+    if !same_vendor.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "fallback_same_vendor",
+            message: format!(
+                "异源模型列表里这些模型与主模型**同厂商**（换型号不叫异源：同一套内容策略、同一条限流池）：{}。想提高成功率要换一家。",
+                same_vendor.iter().take(3).copied().collect::<Vec<_>>().join("、")
+            ),
+        });
+    }
+    if !no_carrier.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "fallback_no_channel",
+            message: format!(
+                "异源模型列表里这些模型**没有启用中的渠道/账号承载**，解析不出候选（一定会失败）：{}。先在渠道或账号池里给它们开一条可用线路。",
+                no_carrier.iter().take(3).copied().collect::<Vec<_>>().join("、")
+            ),
+        });
+    }
+    if !unknown.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "fallback_unknown",
+            message: format!(
+                "异源模型列表里这些模型在**启用的模型清单里找不到**（拼错，或承载它的渠道已停用）：{}。点「一键填入推荐异源」会用当前可用的模型重填。",
+                unknown.iter().take(3).copied().collect::<Vec<_>>().join("、")
+            ),
+        });
+    }
+    if !not_chat.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "fallback_not_chat",
+            message: format!(
+                "异源模型列表里这些模型不是对话模型（embedding/rerank），接不了 chat 接力：{}。",
+                not_chat
+                    .iter()
+                    .take(3)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ),
+        });
+    }
+    if !disabled.is_empty() {
+        warnings.push(ConfigWarning {
+            code: "fallback_disabled",
+            message: format!(
+                "异源模型列表里这些模型在**模型管理里是关闭状态**：{}。要么打开它们，要么从列表里删掉。",
+                disabled.iter().take(3).copied().collect::<Vec<_>>().join("、")
+            ),
+        });
+    }
+    warnings
+}
+
 /// 编辑距离（字符级，经典 DP 两行滚动）。输入串都会先小写（预选 id 全 ASCII）。
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().flat_map(char::to_lowercase).collect();
@@ -1840,6 +2272,18 @@ fn nearest_preset_id(target: &str) -> Option<&'static str> {
 /// 兼容入口：只取 message 文本（既有单测与旧消费方用）。
 pub fn config_warnings(cfg: &PurgeSettings) -> Vec<String> {
     config_warning_items(cfg)
+        .into_iter()
+        .map(|w| w.message)
+        .collect()
+}
+
+/// [`config_warnings`] 的带视图版（管理面 GET 用，口径与 `config_warning_items_with` 一致）。
+pub fn config_warnings_with(
+    cfg: &PurgeSettings,
+    view: Option<&crate::model::manage::ManageView>,
+    main_model: &str,
+) -> Vec<String> {
+    config_warning_items_with(cfg, view, main_model)
         .into_iter()
         .map(|w| w.message)
         .collect()
@@ -3469,5 +3913,334 @@ mod tests {
         let system = messages[0].content_str();
         assert!(system.ends_with("audit"), "治理作用在宿主提示词上");
         assert!(!system.contains("HACK"));
+    }
+
+    // ── 技能注入落地：目录 / 模板 / 导入 三条腿的判据 ──────────────────
+
+    fn fresh_skill_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aigx-purge-skill-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        dir
+    }
+
+    /// 启动时建目录：**只建目录、不建技能**；已存在不重复动；父路径是文件时报错。
+    ///
+    /// 「不空转建一堆空技能」是这条的要点：建目录是为了让界面有落点，不是为了
+    /// 让 `skill_dir_empty` 告警消失（那是作弊）。所以这里显式断言目录里 0 个
+    /// `SKILL.md`——扫描器仍然扫不到任何技能，告警该报还报。
+    #[test]
+    fn ensure_skill_dir_creates_only_the_directory() {
+        let dir = fresh_skill_root("ensure");
+        assert!(!dir.exists());
+
+        let created = ensure_skill_dir(&dir.to_string_lossy()).expect("应能建出目录");
+        assert_eq!(
+            created.as_deref(),
+            Some(dir.as_path()),
+            "首次应报告「本次新建」"
+        );
+        assert!(dir.is_dir());
+        assert!(
+            scan_skills_full(&dir.to_string_lossy()).0.is_empty(),
+            "只建目录，不建任何技能（告警该报还报）"
+        );
+
+        // 已存在 → 不再报告新建（幂等，不重复打日志）
+        assert!(ensure_skill_dir(&dir.to_string_lossy())
+            .expect("已存在的目录不该报错")
+            .is_none());
+
+        // 父路径被普通文件占用 → 明确的错误，不是静默成功
+        let file = dir.join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        let err = ensure_skill_dir(&file.to_string_lossy()).unwrap_err();
+        assert!(err.contains("非目录文件"), "应说明被文件占用：{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 体检：目录不存在 → `skill_dir_missing`（Error），且**不再**重复报 `skill_dir_empty`。
+    ///
+    /// 两条同时报会让用户以为有两件事要修，而实际只有一个动作（把目录建出来）。
+    #[test]
+    fn warns_skill_dir_missing_distinct_from_empty() {
+        let dir = fresh_skill_root("missing");
+        assert!(!dir.exists());
+        let cfg = enabled_with_skills(&dir);
+
+        let codes = warning_codes(&cfg);
+        assert!(codes.contains(&"skill_dir_missing"), "{codes:?}");
+        assert!(
+            !codes.contains(&"skill_dir_empty"),
+            "目录不存在时不该同时报「扫不到 SKILL.md」：{codes:?}"
+        );
+        assert_eq!(severity_of("skill_dir_missing"), Severity::Error);
+
+        // 建出目录（空）→ 变成 `skill_dir_empty`（Info）
+        ensure_skill_dir(&dir.to_string_lossy()).unwrap();
+        let codes = warning_codes(&cfg);
+        assert!(codes.contains(&"skill_dir_empty"), "{codes:?}");
+        assert!(!codes.contains(&"skill_dir_missing"), "{codes:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 体检：缺 `keywords:` 行 / 正文超注入上限 → 各自一条 Warn，且都点名技能。
+    ///
+    /// 正向对照：补上 keywords 行、调大上限后两条都消失（防止告警恒真）。
+    #[test]
+    fn warns_skill_missing_keywords_and_body_over_limit() {
+        let dir = fresh_skill_root("keywords");
+        std::fs::create_dir_all(dir.join("no-kw")).unwrap();
+        std::fs::write(dir.join("no-kw/SKILL.md"), "---\nname: no-kw\n---\n正文").unwrap();
+        std::fs::create_dir_all(dir.join("long")).unwrap();
+        std::fs::write(
+            dir.join("long/SKILL.md"),
+            format!(
+                "---\nname: long\nkeywords: 长文, 报表\n---\n{}",
+                "字".repeat(64)
+            ),
+        )
+        .unwrap();
+
+        let mut cfg = enabled_with_skills(&dir);
+        cfg.skill_inject_limit = 16;
+        skill_briefs_with(&cfg.skill_dir, true); // 清缓存，保证扫到刚写的文件
+
+        let items = config_warning_items(&cfg);
+        let no_kw = items
+            .iter()
+            .find(|w| w.code == "skill_no_keywords")
+            .expect("缺 keywords 行必须有一条");
+        assert!(no_kw.message.contains("no-kw"), "{no_kw:?}");
+        assert!(
+            !no_kw.message.contains("long"),
+            "写了 keywords 的技能不该被点名：{no_kw:?}"
+        );
+        let over = items
+            .iter()
+            .find(|w| w.code == "skill_body_over_limit")
+            .expect("正文超上限必须有一条");
+        assert!(over.message.contains("long"), "{over:?}");
+        assert!(
+            !over.message.contains("no-kw"),
+            "短正文不该被点名：{over:?}"
+        );
+        assert_eq!(severity_of("skill_no_keywords"), Severity::Warn);
+        assert_eq!(severity_of("skill_body_over_limit"), Severity::Warn);
+
+        // 正向对照：补上 keywords + 调大上限 → 两条都消失
+        std::fs::write(
+            dir.join("no-kw/SKILL.md"),
+            "---\nname: no-kw\nkeywords: 简短, 关键词\n---\n正文",
+        )
+        .unwrap();
+        cfg.skill_inject_limit = 20000;
+        skill_briefs_with(&cfg.skill_dir, true);
+        let codes = warning_codes(&cfg);
+        assert!(!codes.contains(&"skill_no_keywords"), "{codes:?}");
+        assert!(!codes.contains(&"skill_body_over_limit"), "{codes:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 缓存：目录内容没变时**指纹命中、不重扫**；改了文件立刻被指纹抓到。
+    ///
+    /// 这条钉住「打开页面不该扫盘」：`skill_briefs_with(dir, false)` 在 30 秒内
+    /// 必然命中缓存；超期后靠 mtime 指纹判定。断言方式是**外部改文件后靠普通
+    /// 读取（fresh=false）也必须立刻看到**——指纹变才重扫，而不是等 30 秒。
+    ///
+    /// 注意 `SKILL_CACHE` 是全进程共享的，并行用例会把它换目录；所以这里用
+    /// 独立目录 + 首尾 fresh 清场，不假设缓存归属。
+    #[test]
+    fn skill_cache_reuses_until_fingerprint_changes() {
+        let _guard = skill_cache_lock();
+        let dir = fresh_skill_root("cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy().to_string();
+
+        assert!(skill_doc_briefs_with(&root, true).is_empty());
+        std::fs::create_dir_all(dir.join("one")).unwrap();
+        std::fs::write(dir.join("one/SKILL.md"), "---\nname: one\n---\n正文").unwrap();
+
+        // 普通读取（fresh=false）：指纹变了 → 必须立刻看到新文件，不等 30 秒
+        let after_add = skill_doc_briefs_with(&root, false);
+        assert_eq!(after_add.len(), 1, "新增文件必须被指纹抓到");
+        assert_eq!(after_add[0].name, "one");
+        assert!(
+            !after_add[0].has_keywords_key,
+            "这份文件没写 keywords 行，界面要能标出来"
+        );
+        assert!(
+            after_add[0].path.ends_with("SKILL.md"),
+            "路径要透出（「去哪里改」）：{}",
+            after_add[0].path
+        );
+
+        // 再读一次（没变）→ 结果一致（走缓存，不重扫）
+        let again = skill_doc_briefs_with(&root, false);
+        assert_eq!(
+            again.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            vec!["one".to_string()]
+        );
+
+        // 删掉文件 → 同样立刻反映
+        std::fs::remove_file(dir.join("one/SKILL.md")).unwrap();
+        assert!(
+            skill_doc_briefs_with(&root, false).is_empty(),
+            "删除文件也必须被指纹抓到"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 解析器契约：`keywords:` 行被读进关键词集合；缺 name 时回落父目录名并重算关键词。
+    ///
+    /// 正向对照：旧文件（无 keywords 行）的关键词集合必须与改动前一致（只有 name
+    /// 派生词），否则「新增显式关键字」这轮就静默改了旧技能的命中面。
+    #[test]
+    fn parse_skill_reads_explicit_keywords_and_falls_back_to_dir_name() {
+        let (name, keywords, has_key, body) =
+            parse_skill_parts("---\nname: report\nkeywords: 报表, 对账、月结\n---\n正文内容")
+                .expect("应可解析");
+        assert_eq!(name, "report");
+        assert!(has_key);
+        assert_eq!(&keywords[..4], &["report", "报表", "对账", "月结"]);
+        assert_eq!(body, "正文内容");
+
+        // 旧文件：没有 keywords 行 → has_key=false，关键词只有 name
+        let (_, legacy, has_key, _) = parse_skill_parts("---\nname: legacy\n---\n正文").unwrap();
+        assert!(!has_key);
+        assert_eq!(legacy, vec!["legacy".to_string()]);
+
+        // 没有 name：parse_skill 用父目录名兜底，且关键词跟着重算（否则永远不命中）
+        let entry = parse_skill(
+            "---\ndescription: \n---\n正文",
+            "dir-name",
+            Path::new("/x/y/SKILL.md"),
+        )
+        .expect("应可解析");
+        assert_eq!(entry.name, "dir-name");
+        assert_eq!(entry.keywords, vec!["dir-name".to_string()]);
+        assert_eq!(entry.path, PathBuf::from("/x/y/SKILL.md"));
+    }
+
+    /// 审计类体检（未定价 / 同厂商 / 无承载 / 不在清单）：四条各自点名，且
+    /// `view = None` 时一条都不报（没有模型清单就没有判据，不猜）。
+    #[test]
+    fn warns_fallback_audit_only_with_model_view() {
+        use crate::model::manage::{ManageModel, ManageView, ModelSource};
+        use serde_json::Value;
+
+        fn row(provider: &str, id: &str, owned_by: &str, priced: bool) -> ManageModel {
+            ManageModel {
+                provider: provider.to_string(),
+                provider_label: provider.to_string(),
+                id: id.to_string(),
+                source: "builtin".to_string(),
+                enabled: true,
+                default_enabled: true,
+                sources: vec![ModelSource {
+                    kind: "channel".to_string(),
+                    channel_id: format!("ch-{provider}"),
+                    name: provider.to_string(),
+                    account_id: None,
+                }],
+                owned_by: owned_by.to_string(),
+                context_length: None,
+                max_output_tokens: None,
+                capabilities: vec!["chat".to_string()],
+                cap_sources: Value::Null,
+                capability_flags: Value::Null,
+                cap_overrides: Vec::new(),
+                tool_calling_mode: None,
+                visibility: None,
+                price: priced.then(|| crate::pricing::ModelPrice::new(id, 1.0, 2.0)),
+                model_ratio: 1.0,
+                aliases: Vec::new(),
+                alias_entries: Vec::new(),
+            }
+        }
+
+        let mut unpriced = row("openai_compatible", "unpriced-model", "moonshot", false);
+        unpriced.price = None;
+        let mut no_carrier = row("gemini", "carrierless", "google", true);
+        no_carrier.sources.clear();
+        let main = row("anthropic", "main-model", "anthropic", true);
+        let sibling = row("anthropic", "sibling-model", "anthropic", true);
+        let ok = row("openai_compatible", "kimi-k3", "moonshot", true);
+        let view = ManageView {
+            providers: Vec::new(),
+            models: vec![main, sibling, unpriced, no_carrier, ok],
+            mappings: std::collections::HashMap::new(),
+            mapping_entries: Vec::new(),
+            dangling: Vec::new(),
+            capability_store_ready: true,
+            unpriced: 0,
+        };
+
+        let mut cfg = enabled();
+        cfg.cross_source_fallback = true;
+        cfg.fallback_models = vec![
+            "sibling-model".to_string(),
+            "unpriced-model".to_string(),
+            "carrierless".to_string(),
+            "ghost-model".to_string(),
+            "kimi-k3".to_string(),
+        ];
+
+        // 无视图 → 四条审计一条都不报（只有配置面的那几条）
+        let without = config_warning_items(&cfg);
+        for code in [
+            "fallback_unpriced",
+            "fallback_same_vendor",
+            "fallback_no_channel",
+            "fallback_unknown",
+        ] {
+            assert!(
+                without.iter().all(|w| w.code != code),
+                "无视图时不该报 {code}（没有判据不猜）：{without:?}"
+            );
+        }
+
+        let with = config_warning_items_with(&cfg, Some(&view), "main-model");
+        let codes: Vec<&str> = with.iter().map(|w| w.code).collect();
+        assert!(codes.contains(&"fallback_same_vendor"), "{codes:?}");
+        assert!(codes.contains(&"fallback_unpriced"), "{codes:?}");
+        assert!(codes.contains(&"fallback_no_channel"), "{codes:?}");
+        assert!(codes.contains(&"fallback_unknown"), "{codes:?}");
+        // 真异源 + 已定价 + 有承载的那个不该被点名
+        for item in &with {
+            assert!(
+                !item.message.contains("kimi-k3"),
+                "可接力的模型不该出现在告警里：{item:?}"
+            );
+        }
+        // 四条都是 Error（数据面确实不会用它）
+        assert_eq!(severity_of("fallback_unpriced"), Severity::Error);
+        assert_eq!(severity_of("fallback_same_vendor"), Severity::Error);
+        assert_eq!(severity_of("fallback_no_channel"), Severity::Error);
+        assert_eq!(severity_of("fallback_unknown"), Severity::Error);
+    }
+
+    /// 体检构造小工具：总开关 + 只开技能注入（其余治理全关，免得别的告警干扰）。
+    fn enabled_with_skills(dir: &Path) -> PurgeSettings {
+        let mut cfg = enabled();
+        cfg.skill_inject = true;
+        cfg.skill_dir = dir.to_string_lossy().to_string();
+        cfg
+    }
+
+    fn warning_codes(cfg: &PurgeSettings) -> Vec<&'static str> {
+        config_warning_items(cfg)
+            .into_iter()
+            .map(|w| w.code)
+            .collect()
     }
 }
