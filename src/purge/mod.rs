@@ -1509,14 +1509,26 @@ fn skills_for(dir: &str) -> Arc<Vec<SkillEntry>> {
     {
         let guard = cache.read();
         if guard.dir == dir {
+            // 30 秒窗口内的**普通读取**直接返回缓存——但只在指纹**未判出变化**
+            // 时成立。指纹变化（新增/删除文件）必须立刻反映，不能因为「还没到
+            // 30 秒」就返回旧结果 —— 那会让「新建技能后刷新页面看不到它」持续
+            // 到窗口结束，而指纹本已判出变化。
+            //
+            // 先复核指纹：没变才在窗口内直接返回；变了就跳过，走下面的重扫。
             if let Some(loaded) = guard.loaded_at {
                 if loaded.elapsed() < Duration::from_secs(30) {
-                    return guard.entries.clone();
+                    if let Some(stamp) = &guard.stamp {
+                        if stamp.still_matches() {
+                            return guard.entries.clone();
+                        }
+                    } else {
+                        return guard.entries.clone();
+                    }
                 }
             }
         }
     }
-    // 超期/换目录：先廉价复核指纹（只 stat，不读内容）
+    // 超期/换目录/指纹变化：先廉价复核指纹（只 stat，不读内容）
     {
         let guard = cache.read();
         if guard.dir == dir {
@@ -4188,36 +4200,8 @@ mod tests {
         let root = dir.to_string_lossy().to_string();
 
         assert!(skill_doc_briefs_with(&root, true).is_empty());
-        // 诊断：确认捕获时指纹里记了多少目录数，供排查「新增文件抓不到」
-        {
-            let cache = SKILL_CACHE.get().unwrap();
-            let g = cache.read();
-            let s = g.stamp.as_ref().unwrap();
-            eprintln!(
-                "DIAG dir_count={} dirs_len={} first_dir={}",
-                s.dir_count,
-                s.dirs.len(),
-                s.dirs
-                    .first()
-                    .map(|d| d.0.display().to_string())
-                    .unwrap_or_default()
-            );
-        }
         std::fs::create_dir_all(dir.join("one")).unwrap();
         std::fs::write(dir.join("one/SKILL.md"), "---\nname: one\n---\n正文").unwrap();
-        // 诊断：新增 one 后，重新统计目录数，与捕获时的 dir_count 对比
-        eprintln!(
-            "DIAG2 after_add count_dirs_now={}",
-            std::fs::read_dir(&root)
-                .map(|r| count_dirs(r))
-                .unwrap_or(usize::MAX)
-        );
-        // 诊断 DIAG4：直接看 still_matches 的返回值
-        eprintln!("DIAG4 still_matches={}", {
-            let cache = SKILL_CACHE.get().unwrap();
-            let g = cache.read();
-            g.stamp.as_ref().map(|s| s.still_matches()).unwrap_or(false)
-        });
 
         // 普通读取（fresh=false）：指纹变了 → 必须立刻看到新文件，不等 30 秒
         let after_add = skill_doc_briefs_with(&root, false);
@@ -4242,14 +4226,6 @@ mod tests {
 
         // 删掉文件 → 同样立刻反映
         std::fs::remove_file(dir.join("one/SKILL.md")).unwrap();
-        // 诊断：删除后目录数没变（文件删除不改变目录数），需要看文件条目状态
-        eprintln!(
-            "DIAG3 after_delete count_dirs_now={} files_left={}",
-            std::fs::read_dir(&root)
-                .map(|r| count_dirs(r))
-                .unwrap_or(usize::MAX),
-            std::fs::read_dir(dir.join("one")).map(|_| 1).unwrap_or(0)
-        );
         assert!(
             skill_doc_briefs_with(&root, false).is_empty(),
             "删除文件也必须被指纹抓到"
