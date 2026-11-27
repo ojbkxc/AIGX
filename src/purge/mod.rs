@@ -1471,10 +1471,7 @@ impl SkillStamp {
         // 计数失败（目录被删）视为变化，交由下面的 mtime 检查处理。
         // `dirs` 为空（尚未扫到任何目录）时不索引，直接按「无目录」比对。
         let dir_count_now = match self.dirs.first() {
-            Some((root, _)) => std::fs::read_dir(root)
-                .ok()
-                .map(|r| count_dirs(r))
-                .unwrap_or(0),
+            Some((root, _)) => std::fs::read_dir(root).ok().map(count_dirs).unwrap_or(0),
             None => 0,
         };
         if dir_count_now != self.dir_count {

@@ -357,6 +357,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn skeleton_round_trips_through_parser() {
         let keywords = vec!["对账".to_string(), "月结".to_string()];
         let doc = skeleton("pdf-report", "导出 PDF 报表", &keywords, "");
@@ -574,10 +575,15 @@ mod tests {
     }
 
     /// 解析器读不出的内容一律不落盘（连目录都不建）。
+    ///
+    /// 判据是「正文能不能被解析出来」：`parse_skill_parts` 在 body 为空时返回
+    /// `None`。这里必须传**空内容** —— 传 `"无 frontmatter"` 这种非空字符串时
+    /// body 非空，按「裸正文」语义放行（见 `raw_body_without_frontmatter_still_writes`），
+    /// 那条才是必须拒绝的形态。
     #[test]
     fn write_skill_rejects_before_touching_disk() {
         let root = temp_root("reject");
-        assert!(write_skill(&root, "broken", "无 frontmatter", false, 0, "text").is_err());
+        assert!(write_skill(&root, "broken", "", false, 0, "text").is_err());
         assert!(
             std::fs::read_dir(&root).unwrap().next().is_none(),
             "校验失败不该留下任何目录"
