@@ -170,18 +170,12 @@ pub fn validate_with_fallback(
     inject_limit: usize,
     dir_name: &str,
 ) -> Result<Validated, String> {
-    // **前置要求有 frontmatter**：`parse_skill_parts` 对完全没有 `---` 的内容也
-    // 返回 Ok（name/description 都是空串），若只靠它，「无 frontmatter」只要调用方
-    // 给了 dir_name 就会被当成「缺 name 但可兜底」放行，写出一个没有 `name:` 行的
-    // SKILL.md —— 扫描器按 frontmatter 契约识别，这是必须拒绝的。
-    let trimmed_for_check = content.trim_start();
-    if !(trimmed_for_check.starts_with("---") && trimmed_for_check.find("\n---").is_some()) {
-        return Err(
-            "内容没有 frontmatter：SKILL.md 需要用 `---` 包起来的首段（至少包含 `name:`）"
-                .to_string(),
-        );
-    }
-
+    // 判据是「解析器能不能读出正文」，不是「有没有 frontmatter」：
+    // 裸正文（无 frontmatter）按「整份是正文 + 名字回落目录名」处理，是预设库的
+    // 既有形态，必须放行；只有连正文都读不出来（body 为空）才拒。
+    //
+    // （此前误加过「必须有 frontmatter」的前置，结果把裸正文这条主路径挡住了，
+    // 已撤回 —— 见 raw_body_without_frontmatter_still_writes 的注释。）
     let (mut name, mut keywords, has_keywords_key, body) = super::parse_skill_parts(content)
         .ok_or_else(|| {
             "解析器读不出正文：需要 `---` 包起来的 frontmatter，且 `---` 之后要有正文".to_string()
