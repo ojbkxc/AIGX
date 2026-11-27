@@ -407,9 +407,7 @@ pub async fn handle_cache_savings(
     for log in logs.iter().filter(|l| {
         l.cache_hit
             && l.created_at >= from_ts
-            && user_filter
-                .as_deref()
-                .is_none_or(|uid| l.user_id.as_deref() == Some(uid))
+            && user_in_scope(user_filter.as_deref(), l.user_id.as_deref())
     }) {
         hit_count += 1;
         cache_tokens = cache_tokens.saturating_add(log.input_tokens);
@@ -464,6 +462,37 @@ async fn report_scope(
         return Ok((None, true));
     }
     Ok((Some(user.id.clone()), false))
+}
+
+/// 单条日志是否落在当前报表范围内（`user_filter = None` 仅管理员可达 = 全站）。
+///
+/// **唯一判据**：`report_scope` 给出的 `user_filter` 只在这里与日志比对。
+/// 本模块历史上每个 handler 各抄一份 ``l.user_id.as_deref() != Some(uid)``
+/// （九处），漏一处就是「普通用户拿到全站数字」——那种泄露在页面上看起来
+/// 只是「数字偏大」，没有任何报错，只有本函数这种单点才查得动。
+///
+/// 两种行来源共用同一判据：
+/// - 聚合读（`daily.load_user_range`）已在**键前缀**上收敛（`user_day:{uid}:`），
+///   结构上不可能读到别人的行；
+/// - 明细现算回退路径（`requests.all_sorted_asc` 是全量）必须由本函数过滤。
+pub(crate) fn user_in_scope(user_filter: Option<&str>, log_user: Option<&str>) -> bool {
+    match user_filter {
+        None => true,
+        Some(uid) => log_user == Some(uid),
+    }
+}
+
+/// 批量版 [`user_in_scope`]：把日志集合收敛到当前报表范围（收集成 Vec 的路径用）。
+///
+/// 与谓词版**同一判据**：这里不重写比较逻辑，只调 `user_in_scope`，避免两套
+/// 写法漂移（「谓词对、批量错」是同样的泄露，只是更难看出来）。
+pub(crate) fn retain_in_scope(
+    logs: Vec<crate::log::RequestLog>,
+    user_filter: Option<&str>,
+) -> Vec<crate::log::RequestLog> {
+    logs.into_iter()
+        .filter(|l| user_in_scope(user_filter, l.user_id.as_deref()))
+        .collect()
 }
 
 /// 365 天日粒度消费热力图（Agent2API report 365d heatmap）。
@@ -557,10 +586,8 @@ pub async fn handle_report_heatmap(
                     if l.created_at < from_ts || l.created_at > to_ts_end {
                         continue;
                     }
-                    if let Some(uid) = &user_filter {
-                        if l.user_id.as_deref() != Some(uid.as_str()) {
-                            continue;
-                        }
+                    if !user_in_scope(user_filter.as_deref(), l.user_id.as_deref()) {
+                        continue;
                     }
                     let day = daily_agg::date_key(l.created_at);
                     let entry = daily.entry(day.clone()).or_insert((0, 0, 0));
@@ -688,10 +715,8 @@ pub async fn handle_report_top_sources(
                         if l.created_at < from_ts || l.created_at > to_ts_end {
                             continue;
                         }
-                        if let Some(uid) = &user_filter {
-                            if l.user_id.as_deref() != Some(uid.as_str()) {
-                                continue;
-                            }
+                        if !user_in_scope(user_filter.as_deref(), l.user_id.as_deref()) {
+                            continue;
                         }
                         let name = l
                             .channel_name
@@ -798,10 +823,8 @@ pub async fn handle_report_token_trend(
                 if l.created_at < from_ts || l.created_at > to_ts_end {
                     continue;
                 }
-                if let Some(uid) = &user_filter {
-                    if l.user_id.as_deref() != Some(uid.as_str()) {
-                        continue;
-                    }
+                if !user_in_scope(user_filter.as_deref(), l.user_id.as_deref()) {
+                    continue;
                 }
                 let day = daily_agg::date_key(l.created_at);
                 let entry = daily.entry(day).or_insert((0, 0));
@@ -926,10 +949,8 @@ pub async fn handle_report_overview(
                 if l.created_at < from_ts || l.created_at > to_ts_end {
                     continue;
                 }
-                if let Some(uid) = &user_filter {
-                    if l.user_id.as_deref() != Some(uid.as_str()) {
-                        continue;
-                    }
+                if !user_in_scope(user_filter.as_deref(), l.user_id.as_deref()) {
+                    continue;
                 }
                 total += 1;
                 if l.status_code < 400 {
@@ -1112,10 +1133,8 @@ pub async fn handle_report_models(
             if l.created_at < from_ts || l.created_at > to_ts_end {
                 continue;
             }
-            if let Some(uid) = &user_filter {
-                if l.user_id.as_deref() != Some(uid.as_str()) {
-                    continue;
-                }
+            if !user_in_scope(user_filter.as_deref(), l.user_id.as_deref()) {
+                continue;
             }
             // 大小写不敏感：GLM-5.3-Flash 与 glm-5.3-flash 视为同一模型，
             // 保留首次出现的原始大小写作为展示名（与 daily_agg 写/读侧同口径）。
@@ -1191,10 +1210,8 @@ pub async fn handle_report_cache_rates(
                     if l.created_at < win_from {
                         continue;
                     }
-                    if let Some(uid) = &user_filter {
-                        if l.user_id.as_deref() != Some(uid.as_str()) {
-                            continue;
-                        }
+                    if !user_in_scope(user_filter.as_deref(), l.user_id.as_deref()) {
+                        continue;
                     }
                     total += 1;
                     input_tokens = input_tokens.saturating_add(l.input_tokens);
@@ -1247,14 +1264,8 @@ pub async fn handle_report_cache_trend_24h(
                 .requests
                 .list_window(from, now, 20_000)
                 .unwrap_or_default();
-            let filtered: Vec<crate::log::RequestLog> = logs
-                .into_iter()
-                .filter(|l| match (user_filter.clone(), l.user_id.as_deref()) {
-                    (None, _) => true,
-                    (Some(uid), Some(lu)) => lu == uid.as_str(),
-                    (Some(_), None) => false,
-                })
-                .collect();
+            let filtered: Vec<crate::log::RequestLog> =
+                retain_in_scope(logs, user_filter.as_deref());
             json!(bucket_hours(
                 &filtered,
                 now,
@@ -1468,10 +1479,8 @@ pub async fn handle_report_daily_trend(
                     if l.created_at < from_ts || l.created_at > to_ts_end {
                         continue;
                     }
-                    if let Some(uid) = &user_filter {
-                        if l.user_id.as_deref() != Some(uid.as_str()) {
-                            continue;
-                        }
+                    if !user_in_scope(user_filter.as_deref(), l.user_id.as_deref()) {
+                        continue;
                     }
                     let day = daily_agg::date_key(l.created_at);
                     let e = daily.entry(day.clone()).or_insert((0, 0, 0, 0));
@@ -1822,5 +1831,97 @@ mod tests {
 
         // 空渠道集：恒为 0（空分母不产生假计数）
         assert_eq!(count_cooling_channels(std::iter::empty::<&str>(), all), 0);
+    }
+
+    /// **数据隔离的机制钉**：`user_in_scope` 是「普通用户只能读到自己的行」的
+    /// 唯一判据，本模块所有明细现算回退路径都必须经它过滤。
+    ///
+    /// 为什么这条必须有：同一批 handler 曾在**九个地方**各抄一份
+    /// ``if l.user_id.as_deref() != Some(uid) { continue }``。抄漏一处不会报错，
+    /// 只会让普通用户看到「偏大的数字」——那是数据泄露里最难发现的一种：
+    /// 页面完全正常、没有 403、没有日志异常，只是数字里混进了别人的用量。
+    /// 收敛成单点后，判据本身由 [`user_in_scope_admits_only_own_rows`] 钉死，
+    /// 端到端由 [`scope_filter_drops_other_users_rows_end_to_end`] 钉死。
+    #[test]
+    fn user_in_scope_admits_only_own_rows() {
+        // 管理员（None）= 全站：他人行、无主行（user_id 为 None，如管理员级令牌）都放行。
+        assert!(user_in_scope(None, Some("alice")));
+        assert!(user_in_scope(None, Some("bob")));
+        assert!(user_in_scope(None, None), "全站口径必须包含无主行");
+
+        // 普通用户（Some）= 只认自己：他人行一律挡下。
+        assert!(user_in_scope(Some("alice"), Some("alice")));
+        assert!(!user_in_scope(Some("alice"), Some("bob")), "不得读到他人行");
+        // 无主行对普通用户**不可见**：「没有 user_id」不等于「属于我」。
+        assert!(
+            !user_in_scope(Some("alice"), None),
+            "无主行对普通用户必须不可见（否则管理员级令牌的用量会算进用户账上）"
+        );
+
+        // 大小写/前后空白不参与归一：user_id 是 UUID，不做模糊匹配；
+        // 近似匹配会把 `Alice` 与 `alice` 当同一人，是另一种越权。
+        assert!(!user_in_scope(Some("alice"), Some("Alice")));
+        assert!(!user_in_scope(Some("alice"), Some("alice ")));
+    }
+
+    /// 防复发（行为面）：把「明细现算」的过滤做成可执行的一步，
+    /// 用**两个用户的真实日志**钉住「普通用户的行集里没有别人的行」。
+    ///
+    /// 为什么不在源码文本上做断言：手抄过滤写对了行为测不出，写漏了只有真实
+    /// 双用户数据才暴露——两边都得靠行为才钉得住。这里让两条路径都过一遍：
+    /// ①谓词 `user_in_scope`（各 handler 就地 `continue` 用它）；
+    /// ②批量过滤 [`retain_in_scope`]（cache_trend_24h 收集成 Vec 用它）。
+    /// 任一被改坏，下面「bob 的行数 / 金额」断言立刻红。
+    #[test]
+    fn scope_filter_drops_other_users_rows_end_to_end() {
+        let log = |uid: Option<&str>, cost: i64| crate::log::RequestLog {
+            user_id: uid.map(str::to_string),
+            cost,
+            ..Default::default()
+        };
+        // alice 2 条（10 + 5 额度），bob 3 条（100 + 50 + 1），另有无主行 1 条（7）。
+        let logs = vec![
+            log(Some("alice"), 10),
+            log(Some("bob"), 100),
+            log(Some("alice"), 5),
+            log(Some("bob"), 50),
+            log(None, 7),
+            log(Some("bob"), 1),
+        ];
+
+        // ① 谓词口径：alice 只认自己的两条
+        let alice = Some("alice");
+        let own: Vec<i64> = logs
+            .iter()
+            .filter(|l| user_in_scope(alice, l.user_id.as_deref()))
+            .map(|l| l.cost)
+            .collect();
+        assert_eq!(own, vec![10, 5], "alice 的行集混进了他人/无主行");
+
+        // ② 批量口径（cache_trend_24h 用的那条）：同一结论，且行数不含别人的
+        let kept = retain_in_scope(logs.clone(), alice);
+        assert_eq!(kept.len(), 2, "批量过滤后行数应等于本人行数");
+        assert_eq!(
+            kept.iter().map(|l| l.cost).sum::<i64>(),
+            15,
+            "合计必须是本人消费，不得把 bob 的 151 额度算进来"
+        );
+        assert!(
+            kept.iter().all(|l| l.user_id.as_deref() == Some("alice")),
+            "残留了非本人行"
+        );
+
+        // 管理员（None）：全量保留，逐字节等于输入（不漏行、不重排）
+        let all = retain_in_scope(logs.clone(), None);
+        assert_eq!(all.len(), 6);
+        assert_eq!(
+            all.iter().map(|l| l.cost).sum::<i64>(),
+            173,
+            "管理员口径应等于全部行之和"
+        );
+
+        // 反向对照：不存在「谁都能拿到全站」的第三个分支——未知用户得到空集而非全量
+        let ghost = retain_in_scope(logs, Some("carol"));
+        assert!(ghost.is_empty(), "未出现过的用户不得回退成全量");
     }
 }

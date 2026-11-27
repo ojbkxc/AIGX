@@ -24,6 +24,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Button, Card, EmptyState, Loading } from '../components/ui';
 import { isAdmin } from '../lib/utils';
+import ModelPriceTable from './dashboard/ModelPriceTable';
 import type { GatewaySettingsItem, ModelInfo } from '../types';
 // 样式沿用原文档页的 Docs.css（页面已删，CSS 唯一消费者迁到这里）
 import '../pages/Docs.css';
@@ -237,6 +238,13 @@ export default function KeysDocsPanel(): JSX.Element {
             </div>
           </>
         )}
+      </Card>
+
+      {/* 模型价格：用户「充值前想知道单价」的入口（业主原话「登陆后没看每个模型的价格」）。
+          数据源 /api/models/available（登录即读，比 /v1/models 多带 price_*），
+          与上方模型列表**同一个端点**——清单一致，不另开一条路由。 */}
+      <Card title={t('模型价格（每百万 Token）')}>
+        <ModelPriceTable />
       </Card>
 
       {/* 管理员视角：网关监听口径（gateway/settings 为 adminOnly，普通用户不拉） */}
