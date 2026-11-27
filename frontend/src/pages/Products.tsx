@@ -33,7 +33,25 @@ interface PriceSyncConfig {
 function BillingSettings(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
-  const [sub, setSub] = useState<'epay' | 'groups'>('epay');
+
+  /**
+   * 子标签也走深链：`/groups` 这类旧入口会落到 `?tab=billing&sub=groups`。
+   * 只认这两个值，非法值回落 `epay`。
+   */
+  const [sub, setSub] = useState<'epay' | 'groups'>(
+    new URLSearchParams(window.location.search).get('sub') === 'groups'
+      ? 'groups'
+      : 'epay',
+  );
+
+  /** 子标签切换同步写回 query，让 \/groups\ 这类深链能被复制/刷新保持。 */
+  const changeSub = (next: 'epay' | 'groups'): void => {
+    setSub(next);
+    const nextParams = new URLSearchParams(window.location.search);
+    if (next === 'epay') nextParams.delete('sub');
+    else nextParams.set('sub', next);
+    window.history.replaceState({}, '', '?' + nextParams.toString());
+  };
 
   // 按次计费（billing_flat_quota，走通用 limits 端点；只取/存这一个字段）
   const [flatQuota, setFlatQuota] = useState('');
@@ -135,7 +153,7 @@ function BillingSettings(): JSX.Element {
           { key: 'groups', label: t('用户分组') },
         ]}
         active={sub}
-        onChange={setSub}
+        onChange={changeSub}
       />
       <div style={{ marginTop: 16 }}>
         {sub === 'epay' && <Epay />}
@@ -253,6 +271,7 @@ export default function Products(): JSX.Element {
     else nextParams.set('tab', next);
     setParams(nextParams, { replace: true });
   };
+
 
   return (
     <div>

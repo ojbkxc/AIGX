@@ -42,6 +42,11 @@ const Profile = lazyPage(() => import('./pages/Profile'));
 const Logs = lazyPage(() => import('./pages/Logs'));
 const Products = lazyPage(() => import('./pages/Products'));
 const Notify = lazyPage(() => import('./pages/Notify'));
+// 易支付 / 第三方登录（OAuth）配置：组件本身一直存在，但独立路由曾被
+// `<Navigate to="/settings">` 吞掉，只能从系统设置的深层 Tab 进入。
+// 这里恢复独立入口，直链（书签 / 外部链接）可直达。
+const Epay = lazyPage(() => import('./pages/Epay'));
+const OAuthConfigPanel = lazyPage(() => import('./components/OAuthConfigPanel'));
 const Gateways = lazyPage(() => import('./pages/Gateways'));
 const ProxyPool = lazyPage(() => import('./pages/ProxyPool'));
 const Chat = lazyPage(() => import('./pages/Chat'));
@@ -219,9 +224,15 @@ export default function App(): JSX.Element {
           <Route path="/mappings" element={<Navigate to="/channels" replace />} />
           {/* 倍率配置已并入模型管理第三 Tab，旧路由重定向防书签失效 */}
           <Route path="/pricing" element={<Navigate to="/model-manage?tab=ratio" replace />} />
-          <Route path="/groups" element={<Navigate to="/settings" replace />} />
+          {/* 用户分组的旧入口：真实位置在「套餐与兑换码 → 计费设置 → 用户分组」
+        （v1.0.93 从设置页迁出后这里一度重定向到 /settings，而设置页已经没有
+        用户分组了 —— 落地即「查无此项」）。直接落到带 sub 的深链。 */}
+    <Route path="/groups" element={<Navigate to="/products?tab=billing&sub=groups" replace />} />
           <Route path="/orders" element={<Navigate to="/wallet" replace />} />
-          <Route path="/epay" element={<Navigate to="/settings" replace />} />
+          {/* 易支付 / 第三方登录（OAuth）恢复独立入口：二者都是管理员配置页，
+              用与 /notify 同款的 AdminRoute 包裹。 */}
+          <Route path="/epay" element={<AdminRoute><Epay /></AdminRoute>} />
+          <Route path="/oauth" element={<AdminRoute><OAuthConfigPanel /></AdminRoute>} />
           <Route path="/notify" element={<AdminRoute><Notify /></AdminRoute>} />
           <Route path="/security" element={<Navigate to="/settings" replace />} />
           <Route path="/ip-management" element={<Navigate to="/settings" replace />} />
