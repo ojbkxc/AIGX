@@ -850,10 +850,10 @@ export default function Logs(): JSX.Element {
           )}
           {tab === 'requests' && (
             <div className="ui-tabs" role="tablist" aria-label={t('视图切换')}>
-              <button type="button" className={`ui-tab ${view === 'table' ? 'active' : ''}`} onClick={() => setView('table')}>
+              <button type="button" role="tab" aria-selected={view === 'table'} className={`ui-tab ${view === 'table' ? 'active' : ''}`} onClick={() => setView('table')}>
                 {t('表格')}
               </button>
-              <button type="button" className={`ui-tab ${view === 'timeline' ? 'active' : ''}`} onClick={() => setView('timeline')}>
+              <button type="button" role="tab" aria-selected={view === 'timeline'} className={`ui-tab ${view === 'timeline' ? 'active' : ''}`} onClick={() => setView('timeline')}>
                 {t('时间线')}
               </button>
             </div>
