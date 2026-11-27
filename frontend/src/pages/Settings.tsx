@@ -221,8 +221,7 @@ export default function Settings() {
       next.set('tab', 'general');
       setSearchParams(next, { replace: true });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, navigate]);
+  }, [searchParams, navigate, setSearchParams]);
   const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
     const want = searchParams.get('tab');
     return want && VALID_SETTINGS_TABS.has(want) ? (want as SettingsTab) : 'general';
