@@ -1,0 +1,225 @@
+/* 破甲控制台的分组折叠样式。
+   颜色全部走 App.css 的主题令牌（--text-muted / --border-color / --bg-secondary），
+   暗亮两套自动适配，不引入新色。 */
+
+.purge-group {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.purge-group.is-closed {
+  background: transparent;
+}
+
+/* 总开关关闭时被灰掉的组：说明「配了也不生效」，但不禁用（先配好再开总开关是常见流程） */
+.purge-group.is-muted > .purge-group-body {
+  opacity: 0.55;
+}
+
+.purge-group-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+.purge-group.is-closed > .purge-group-head {
+  border-bottom-color: transparent;
+}
+
+/* 折叠头整行可点：键盘一次 Tab 就到，触屏也有 ≥44px 高的触摸目标 */
+.purge-group-toggle {
+  display: flex;
+  flex: 1 1 320px;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.purge-group-toggle:hover {
+  background: color-mix(in srgb, var(--border-color) 40%, transparent);
+}
+.purge-group-toggle:focus-visible {
+  outline: 2px solid var(--primary-color, #2563eb);
+  outline-offset: 2px;
+}
+
+.purge-group-caret {
+  flex: none;
+  width: 1em;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.purge-group-title {
+  flex: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.purge-group-hint {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.purge-group-status {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* 「N 项已启用」计数 > 0 时点亮；0 项也用同一句话（不隐藏，否则折叠头看起来「没配过」） */
+.purge-group-status.is-active {
+  border-color: color-mix(in srgb, var(--success-color, #16a34a) 45%, transparent);
+  color: var(--success-color, #16a34a);
+}
+
+.purge-group-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 组内卡片不再单独画边框/阴影：组本身已是容器，9 个组套 15 张卡会形成
+   「框里套框」的双层边框，视觉上糊成一片、每张卡还各占 18px 外边距。
+   只去掉容器的装饰（边框/阴影/外距），卡片**标题与内容一个字不动**。
+   水平 padding 与 `.card-body` 原值（20px）一致：开关的 44×44 透明触摸区比
+   可视宽度多 4px，收窄内边距就会在 360px 窄屏上横向溢出（实测 `card:306>302`）。 */
+.purge-group-body .card {
+  margin-bottom: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+.purge-group-body .card-header {
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+.purge-group-body .card-body {
+  /* 水平 20px 保持 `.card-body` 原值：开关的 44×44 触摸区比可视宽多 4~5px，
+     这部分溢出**落在内边距里**就不算 scrollWidth 溢出；把内边距收成 0，
+     同一份内容立刻在 360px 窄屏上报 `card:290>286`（实测）。 */
+  padding: 12px 20px 0;
+}
+
+/* 组内不再套一层 card 边框（组本身已经是容器，双层边框在 9 个组上会糊成一团）。
+   注意 `[hidden]` 必须显式 `display: none`：本规则设了 `display: flex`，
+   而 UA 样式表里 `[hidden]` 的 `display: none` 是**作者样式可以覆盖**的——
+   不写这一条，收起只是「aria-expanded=false」，段落照常占满屏（实测过：
+   scrollHeight 一格没变）。 */
+.purge-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* 水平 padding 必须是 20px（= `.card-body` 的原值）：开关的 44×44 透明触摸区
+     比可视尺寸宽 4px，`overflow-x: hidden` 下 `scrollWidth` 会多出这几像素。
+     改版前 `.card-body` 的 20px 正好把它吃掉，我一度收到 12px → 窄屏（360px）
+     横向溢出 4px（实测 `card:306>302`）。**内容一个字没动**，只把间距还回去。 */
+  padding: 12px 20px;
+  min-width: 0;
+}
+.purge-group-body > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.purge-group-body[hidden],
+.purge-group-body:empty {
+  display: none;
+}
+
+/* 折叠工具条：全部展开 / 全部收起（折叠收益必须能一键撤回） */
+.purge-grouptools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.purge-grouptools-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.purge-grouptools-btn:hover {
+  border-color: var(--primary-color, #2563eb);
+  color: var(--primary-color, #2563eb);
+}
+
+/* 基础组顶部的「当前状态」一行：总开关旁必须一眼看出到底在不在治理 */
+.purge-basestatus {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.purge-basestatus-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.purge-basestatus[data-tone='on'] .purge-basestatus-chip {
+  border-color: color-mix(in srgb, var(--success-color, #16a34a) 45%, transparent);
+  color: var(--success-color, #16a34a);
+}
+.purge-basestatus[data-tone='off'] .purge-basestatus-chip {
+  color: var(--text-muted);
+}
+.purge-basestatus[data-tone='partial'] .purge-basestatus-chip {
+  border-color: color-mix(in srgb, var(--warning-color, #d97706) 45%, transparent);
+  color: var(--warning-color, #d97706);
+}
+
+/* 页内导航 + 折叠工具条同一行：窄屏各自换行，不做横向挤压 */
+.purge-navrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.purge-navrow > .purge-pagenav {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+/* 保存条：吸底（页面再长也不用滚到底才能存）。
+   用 sticky 而不是 fixed —— fixed 会盖住最后一张卡的内容，sticky 占位且随内容流动。 */
+.purge-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-color);
+  border-radius: 8px 8px 0 0;
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  backdrop-filter: blur(6px);
+}

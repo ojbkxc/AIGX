@@ -595,12 +595,50 @@
   flex-direction: column;
   gap: 8px;
 }
+
+/* 虚拟滚动容器：固定高度 + 纵向滚动。
+   为什么给固定高度而不是「跟随内容」：虚拟滚动需要一个**已知可视高**才能算窗口；
+   跟内容高会变成「容器永远装得下 → 永远不滚动 → 窗口永远算成全部」。
+   360px ≈ 5.5 行，配合行高 62px（见 purge-presets.ts 的 PRESET_ROW_HEIGHT）。 */
+.purge-preset-scroll {
+  max-height: 360px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+/* 命中率一行：一句话说清「当前模型会不会被套预设」 */
+.purge-preset-coverage {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.purge-preset-coverage.is-on {
+  border-left-color: var(--success-color, #16a34a);
+  color: var(--success-color, #16a34a);
+}
+.purge-preset-coverage.is-warn {
+  border-left-color: var(--warning-color, #d97706);
+  color: var(--warning-color, #d97706);
+}
+.purge-preset-coverage.is-off {
+  color: var(--text-muted);
+}
 .purge-preset-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   width: 100%;
+  /* 固定行高：虚拟滚动按 `PRESET_ROW_HEIGHT` 算窗口与占位高度，
+     行高必须与之一致（判据在 `purge-presets.test.ts` 里读这条规则）。
+     内容超出时靠下面两条兜住：单行省略，不撑高。 */
+  min-height: 62px;
   padding: 10px 12px;
   border: 1px solid var(--border-color);
   border-radius: 8px;

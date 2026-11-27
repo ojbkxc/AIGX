@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import type { TFunction } from 'i18next';
 import { api } from '../api';
 import { API_BASE, authHeaders } from '../api/client';
@@ -8,6 +9,7 @@ import type {
   PurgeAppliedDetail,
   PurgeConfigWarning,
   PurgeData,
+  PurgeFallbackSuggestion,
   PurgePresetBrief,
   PurgePresetDetail,
   PurgePresetList,
@@ -31,8 +33,41 @@ import {
   Textarea,
 } from '../components/ui';
 import { SectionGuard } from '../components/SectionBoundary';
+import { FallbackSuggestPanel } from '../components/purge-fallback-suggest';
+import { SkillComposePanel } from '../components/purge-skill-compose';
+import {
+  PURGE_GROUPS,
+  baseStatus,
+  groupForAnchor,
+  groupItemCount,
+  readCollapsedGroups,
+  writeCollapsedGroups,
+} from '../components/purge-sections';
+import type { PurgeGroupId } from '../components/purge-sections';
+import {
+  PurgeGroupProvider,
+  PurgeGroupToolbar,
+  PurgeGroupWrap,
+  groupStatusText,
+  registerOpenGroupHandler,
+  requestOpenGroup,
+  usePurgeGroups,
+} from '../components/purge-groups-ui';
+import {
+  PurgeHealthPanel,
+  normalizeHealthRows,
+  sortWarningsBySeverity,
+} from '../components/purge-health';
+import { applyHealthFix } from '../components/purge-fixes';
+import type { HealthFixSpec } from '../components/purge-fixes';
+import { coverageLine, presetCoverage, virtualWindow } from '../components/purge-presets';
 import { downloadText, toCsv } from '../lib/format';
 import { copyText } from '../lib/clipboard';
+import {
+  buildPurgeAiPrompt,
+  writePurgeAiHandoff,
+  type PurgeAiStorage,
+} from '../lib/purge-ai-bridge';
 import { useToast } from '../components/Toast';
 import './PurgeConsole.css';
 
@@ -666,37 +701,21 @@ export function batchDropNote(
   return parts.join('；');
 }
 
-/** 严重级 → 徽标文案（i18n key 与中文同形）。 */
-const SEVERITY_LABEL: Record<'error' | 'warn' | 'info', string> = {
-  error: '不生效',
-  warn: '需确认',
-  info: '提示',
-};
+/** 严重级 → 徽标文案（i18n key 与中文同形）。
+ *
+ * **已搬到 `components/purge-health.tsx`**（同一份映射，供体检面板用）：体检面板
+ * 现在是独立组件，徽标文案在组件内部读；页面这份改由 re-export 保持对外口径。
+ */
+export { SEVERITY_LABEL } from '../components/purge-health';
 
 /**
  * 体检告警按严重级排序（Error → Warn → Info，同级保持后端原序）。
  *
- * 为什么在前端排而不在后端排：后端 `config_warning_items` 的顺序是「检查代码
- * 的执行顺序」，对排查有意义（总开关相关的先出现）；分级只是展示优先级，不该
- * 改动后端产出的语义。前端稳定排序两者兼得。
- *
- * 旧后端不返回 `severity` 时按 `error` 处理——与后端「未登记 code 兜底 Error」
- * 同一立场（宁严不宽）。
+ * **实现已搬到 `components/purge-health.tsx`**（同一个函数，同一份判据）：体检面板
+ * 现在是一个独立组件，排序要在组件内部做；页面这份只做 re-export，给单测与既有
+ * 调用点保持导入路径不变（`PurgeConsole.test.ts` 直接 `from './PurgeConsole'`）。
  */
-export function sortWarningsBySeverity<T extends { severity?: string }>(items: T[]): T[] {
-  const rank = (item: T): number => {
-    switch (item.severity) {
-      case 'warn':
-        return 1;
-      case 'info':
-        return 2;
-      default:
-        return 0; // error 或未声明
-    }
-  };
-  // Array.prototype.sort 在现代引擎里稳定，同级保持原序
-  return [...items].sort((a, b) => rank(a) - rank(b));
-}
+export { sortWarningsBySeverity };
 
 /** 词表整理结论（`active` = 原表，`kept` = 整理后）。 */
 export interface RulesTidyResult {
@@ -1529,7 +1548,21 @@ const FIX_TARGETS: Record<string, string> = {
   fallback_empty: 'fallback-models',
   fallback_after_retry: 'fallback-attempts',
   fallback_duplicate: 'fallback-models',
+  // 逐条审计（需要模型清单才判得出）：落点都是异源模型输入框/触发轮次——
+  // 修法都在那一块（换模型 / 配价 / 开渠道），不必再分更多锚点。
+  fallback_unpriced: 'fallback-models',
+  fallback_same_vendor: 'fallback-models',
+  fallback_no_channel: 'fallback-models',
+  fallback_unknown: 'fallback-models',
+  fallback_not_chat: 'fallback-models',
+  fallback_disabled: 'fallback-models',
   skill_dir_empty: 'skill-dir',
+  // 目录不存在/读不了：先去看目录配置（「新建技能」就在下面，会顺手建目录）
+  skill_dir_missing: 'skill-dir',
+  skill_dir_unreadable: 'skill-dir',
+  // 缺 keywords / 正文超上限：落点是技能快照（那里列着每个技能的实际情况）
+  skill_no_keywords: 'skill-snapshot',
+  skill_body_over_limit: 'skill-snapshot',
   skill_keyword_short: 'skill-snapshot',
   chained_rewrite: 'dead-zone-table',
   dead_zone_all_disabled: 'dead-zone-table',
@@ -1538,14 +1571,35 @@ const FIX_TARGETS: Record<string, string> = {
   preset_missing: 'auto-preset-id',
 };
 
-/** 滚动到修复入口并聚焦（输入框 focus；卡片/表格只滚动高亮）。 */
+/**
+ * 滚动到修复入口并聚焦（输入框 focus；卡片/表格只滚动高亮）。
+ *
+ * **页内唯一的跳转实现**：体检告警的「怎么修」、生效项摘要的「跳到这一项」、
+ * 词表行的「试」、技能关键词、页内导航全部走这里。
+ *
+ * 为什么要先展开再滚：目标锚点现在可能落在**折叠起来**的组里。收起状态下元素
+ * 的 `hidden` 还在、`scrollIntoView` 量到的是折叠后的位置，跳完就是「页面抖一下
+ * 什么也没动」。这里先同步摘掉目标组 body 的 `hidden`（同步改 DOM，不等 React
+ * 渲染），隔两帧再滚——`hidden` 摘掉后布局要到下一帧才完成，固定延时在不同机器
+ * 上要么不够（滚过头）要么白等。
+ */
 function focusFixTarget(anchor: string): void {
-  const el = document.querySelector(`[data-purge-fix="${anchor}"]`);
-  if (!el) return;
-  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  el.classList.add('purge-fix-flash');
-  window.setTimeout(() => el.classList.remove('purge-fix-flash'), 1800);
-  if (el instanceof HTMLElement) el.focus({ preventScroll: true });
+  const group = groupForAnchor(anchor);
+  if (group) {
+    // 必须先改**状态**（不是只改 DOM）：跳转通常伴随 setState，React 下一轮会把
+    // `hidden` 按 collapsed 写回去 —— 只改 DOM 会变成「闪一下就收起来」。
+    requestOpenGroup(group);
+  }
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-purge-fix="${anchor}"]`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('purge-fix-flash');
+      window.setTimeout(() => el.classList.remove('purge-fix-flash'), 1800);
+      if (el instanceof HTMLElement) el.focus({ preventScroll: true });
+    });
+  });
 }
 
 /**
@@ -1923,6 +1977,18 @@ export function writePresetFilter(
 /** localStorage 读写器：模块级常量（引用恒定，可安全进 useCallback 依赖）。 */
 const lsSetStable = (k: string, v: string): void => window.localStorage.setItem(k, v);
 const lsRemoveStable = (k: string): void => window.localStorage.removeItem(k);
+
+/** sessionStorage 读写器（破甲 → AI 运维的一次性交接用；同上，引用恒定）。 */
+const ssGetStable = (k: string): string | null => window.sessionStorage.getItem(k);
+const ssSetStable = (k: string, v: string): void => window.sessionStorage.setItem(k, v);
+const ssRemoveStable = (k: string): void => window.sessionStorage.removeItem(k);
+
+/** `writePurgeAiHandoff` 的存储面（sessionStorage 薄壳；禁用时抛错由 store 自己吞）。 */
+const handoffStorage: PurgeAiStorage = {
+  get: ssGetStable,
+  set: ssSetStable,
+  remove: ssRemoveStable,
+};
 
 /** 预览样例历史的导出/导入（团队共享同一批测试用例）。 */
 export const PREVIEW_HISTORY_FILE_VERSION = 1;
@@ -2471,6 +2537,9 @@ const PresetsSection = memo(function PresetsSection({
   onSkillWritten,
   currentTemplates,
   existingSkills,
+  masterEnabled,
+  autoPresetOn,
+  defaultModelHint,
 }: {
   t: TFunction;
   addToast: (message: string, type?: 'success' | 'error' | 'warning') => void;
@@ -2480,6 +2549,19 @@ const PresetsSection = memo(function PresetsSection({
   currentTemplates?: Array<{ name: string; text: string }>;
   /** 技能目录里已有的技能名（写同名 SKILL.md 前先确认，后端是直接覆盖） */
   existingSkills?: Array<{ name: string }>;
+  /** 总开关（命中率那一行要说清「关了所以谁都不套」） */
+  masterEnabled: boolean;
+  /** 「按模型自动套用」开关（同上） */
+  autoPresetOn: boolean;
+  /**
+   * 页面已拿到的生效模型（`GET /api/purge` 的 `main_model`，与体检同一出处）。
+   *
+   * 为什么优先用它而不是再拉一次 `/api/limits`：后端决定「套不套预设」用的就是
+   * 这个值（`preset_for_model(model, …)`），拿它做匹配就是**同一个口径**；
+   * 而 `/api/limits` 的 `defaultModel` 是「客户端兼容」那一栏的值，可能空着。
+   * 首屏只为这一件事多发一条请求，也就没有意义了。
+   */
+  defaultModelHint?: string;
 }): JSX.Element {
   // 筛选条件跨刷新保留（运维常按某厂商反复查；刷新归零等于每次重打）
   const initialFilter = readPresetFilter((k) => window.localStorage.getItem(k));
@@ -2523,20 +2605,37 @@ const PresetsSection = memo(function PresetsSection({
     { id: string; name: string; text: string } | null
   >(null);
   /**
-   * 当前默认模型（后端 settings 的 default_model）：预设列表按它做模型匹配。
-   * 取数口径与「系统设置 → 运维 → 客户端兼容」一致，走 api.getLimits() 的 defaultModel。
+   * 当前生效模型（后端判定「套不套预设」用的那个值）。
+   *
+   * 两条来源，**按信任顺序**取：
+   * 1. `defaultModelHint`（`GET /api/purge` 的 `main_model`）——与后端
+   *    `preset_for_model(model, …)`、体检、异源推荐**同一出处**，进了页面就有了；
+   * 2. 单独拉 `GET /api/limits` 的 `defaultModel`（「客户端兼容」栏）——只在
+   *    `main_model` 缺失（旧后端）时才发这一条，且失败不回退成空串之外的任何猜测。
+   *
+   * 为什么要这条改造：老版本进页面无条件发 `/api/limits`，只为拿一个模型名；
+   * 而 `GET /api/purge` 已经带着同一个值（还更权威）。首屏少一条请求。
    */
-  const [defaultModel, setDefaultModel] = useState('');
-  /** 默认模型取数是否已完成（含失败）：列表首屏就带上 model，而不是先发一次不带的再补发 */
-  const [modelReady, setModelReady] = useState(false);
+  const [defaultModel, setDefaultModel] = useState(() => (defaultModelHint ?? '').trim());
+  /** 生效模型是否已定（列表首屏就带 model，而不是先发一次不带的再补发） */
+  const [modelReady, setModelReady] = useState(() => Boolean((defaultModelHint ?? '').trim()));
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQ(q.trim()), 250);
     return () => window.clearTimeout(timer);
   }, [q]);
 
-  // 默认模型只在进页面时取一次：它归系统设置管，本页只读，不随预设操作变化。
+  // `main_model` 变化（换默认模型 / 保存后刷新）→ 直接对齐，不再打请求
   useEffect(() => {
+    const hint = (defaultModelHint ?? '').trim();
+    if (!hint) return;
+    setDefaultModel(hint);
+    setModelReady(true);
+  }, [defaultModelHint]);
+
+  // 只有缺 `main_model`（旧后端）时才补拉 /api/limits，且只拉一次
+  useEffect(() => {
+    if (modelReady) return;
     let alive = true;
     void (async () => {
       try {
@@ -2553,7 +2652,7 @@ const PresetsSection = memo(function PresetsSection({
     return () => {
       alive = false;
     };
-  }, []);
+  }, [modelReady]);
 
   // 列表：搜索词 / 厂商 / 默认模型变化时重拉（不传 limit，用后端默认 50）
   useEffect(() => {
@@ -2632,7 +2731,57 @@ const PresetsSection = memo(function PresetsSection({
     };
   }, [addToast, selectedId, t]);
 
-  const items: PresetBriefWithMatch[] = list?.items ?? [];
+  const items: PresetBriefWithMatch[] = useMemo(() => list?.items ?? [], [list?.items]);
+
+  /**
+   * 虚拟滚动窗口（53 条起步、上限 500 条时，一次全渲染是 500 × 4 个控件）。
+   *
+   * 尺寸从真实容器量：行高固定（`PRESET_ROW_HEIGHT`），可视高用 clientHeight。
+   * 首帧量不到（列表还没挂）时给 0 → `virtualWindow` 返回全量，
+   * 于是「没有虚拟化」的行为是它的退化形态，不会出现「第一屏空着」。
+   */
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  const [listScrollTop, setListScrollTop] = useState(0);
+  const [listViewport, setListViewport] = useState(0);
+  const onListScroll = useCallback((event: React.UIEvent<HTMLDivElement>): void => {
+    setListScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  useEffect(() => {
+    const el = listScrollRef.current;
+    if (!el) {
+      setListViewport(0);
+      return;
+    }
+    const measure = (): void => setListViewport(el.clientHeight);
+    measure();
+    // 窗口缩放/侧栏折叠都会改可视高：不跟着改，窗口会算少几条（看起来少了行）
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [items.length, loading]);
+
+  // 换筛选/换搜索后回到顶部：否则停在旧滚动位置会「显示中间几条」
+  useEffect(() => {
+    setListScrollTop(0);
+    if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
+  }, [debouncedQ, vendor]);
+
+  const windowed = useMemo(
+    () => virtualWindow(items.length, listScrollTop, listViewport),
+    [items.length, listScrollTop, listViewport],
+  );
+
+  /**
+   * 命中率：写路径结论（后端 `data.auto_preset`）优先；旧后端退回逐条徽标统计。
+   * 刻意**不**在前端重算 `preset_for_model`（厂商族表/短词干切段那套判据在后端
+   * 一处，前端抄一遍必然漂移——「列表说能套、实际不套」正是这次要消灭的）。
+   */
+  const coverageLineResolved = useMemo(() => {
+    if (!modelReady) return null;
+    const coverage = presetCoverage(items, list?.auto_preset ?? null);
+    return coverageLine(coverage, defaultModel, masterEnabled, autoPresetOn);
+  }, [autoPresetOn, defaultModel, items, list?.auto_preset, masterEnabled, modelReady]);
 
   /** 拉全文（供复制用；详情已在时直接用缓存） */
   const fetchBody = useCallback(
@@ -2785,62 +2934,79 @@ const PresetsSection = memo(function PresetsSection({
         ))}
       </div>
 
+      {/* 命中率一行：一句话回答「当前生效模型会不会被套预设」。
+          判据用后端 `data.auto_preset`（写路径 `preset_for_model`，与数据面同链），
+          不拿逐条徽标凑百分比——那会把「12/53 条徽标」说成「命中率 23%」。 */}
+      {modelReady && coverageLineResolved ? (
+        <p
+          className={`purge-preset-coverage is-${coverageLineResolved.tone}`}
+          data-testid="purge-preset-coverage"
+        >
+          {t(coverageLineResolved.key, coverageLineResolved.params)}
+        </p>
+      ) : null}
+
       {loading || !modelReady ? (
         <SkeletonList rows={4} />
       ) : items.length === 0 ? (
         <p className="purge-empty">{t('没有匹配的预设')}</p>
       ) : (
-        <ul className="purge-preset-list">
-          {items.map((item) => {
-            const active = selectedId === item.id;
-            return (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  className={`purge-preset-item${active ? ' is-active' : ''}`}
-                  data-testid="purge-preset-item"
-                  aria-pressed={active}
-                  onClick={() => setSelectedId(active ? null : item.id)}
-                >
-                  <span className="purge-preset-item-main">
-                    <span className="purge-preset-item-title">
-                      <strong>{item.title}</strong>
-                      {item.model_match === 'exact' ? (
-                        <span className="purge-preset-match">{t('默认模型')}</span>
-                      ) : null}
-                      {item.model_match === 'universal' ? (
-                        <span
-                          className="purge-preset-match"
-                          title={t('模型名和厂商都没命中时，套用这一条（通用兜底）')}
-                        >
-                          {t('通用兜底')}
-                        </span>
-                      ) : null}
-                      {item.body_match ? (
-                        <span
-                          className="purge-preset-match is-body"
-                          title={t('标题/厂商/模型/标签里没有这个词，是正文里命中的')}
-                        >
-                          {t('正文命中')}
-                        </span>
-                      ) : null}
-                      {recentIds.includes(item.id) ? (
-                        <span className="purge-preset-match is-recent" title={t('你最近应用过这条预设')}>
-                          {t('最近用过')}
-                        </span>
-                      ) : null}
+        /* 虚拟滚动：53 条起步、最多 500 条（后端上限）时一次全渲染是 500 × 4 个
+           控件；只渲染可视窗口 + 上下占位。行高固定（见 PRESET_ROW_HEIGHT），
+           所以占位高度精确、滚动条不抖。条数少于一屏时 `virtualWindow` 返回全量，
+           行为与不虚拟化逐像素一致。 */
+        <div className="purge-preset-scroll" ref={listScrollRef} onScroll={onListScroll}>
+          <ul className="purge-preset-list" style={{ paddingTop: windowed.padTop, paddingBottom: windowed.padBottom }}>
+            {items.slice(windowed.start, windowed.end).map((item) => {
+              const active = selectedId === item.id;
+              return (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    className={`purge-preset-item${active ? ' is-active' : ''}`}
+                    data-testid="purge-preset-item"
+                    aria-pressed={active}
+                    onClick={() => setSelectedId(active ? null : item.id)}
+                  >
+                    <span className="purge-preset-item-main">
+                      <span className="purge-preset-item-title">
+                        <strong>{item.title}</strong>
+                        {item.model_match === 'exact' ? (
+                          <span className="purge-preset-match">{t('默认模型')}</span>
+                        ) : null}
+                        {item.model_match === 'universal' ? (
+                          <span
+                            className="purge-preset-match"
+                            title={t('模型名和厂商都没命中时，套用这一条（通用兜底）')}
+                          >
+                            {t('通用兜底')}
+                          </span>
+                        ) : null}
+                        {item.body_match ? (
+                          <span
+                            className="purge-preset-match is-body"
+                            title={t('标题/厂商/模型/标签里没有这个词，是正文里命中的')}
+                          >
+                            {t('正文命中')}
+                          </span>
+                        ) : null}
+                        {recentIds.includes(item.id) ? (
+                          <span className="purge-preset-match is-recent" title={t('你最近应用过这条预设')}>
+                            {t('最近用过')}
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="purge-preset-item-meta">
+                        {item.vendor} · {item.model}
+                      </span>
                     </span>
-                    <span className="purge-preset-item-meta">
-                      {item.vendor} · {item.model}
+                    <span className="purge-preset-item-side">
+                      <span>{(item.bytes / 1024).toFixed(1)} KB</span>
+                      <code title={item.sha256}>{item.sha256.slice(0, 8)}</code>
                     </span>
-                  </span>
-                  <span className="purge-preset-item-side">
-                    <span>{(item.bytes / 1024).toFixed(1)} KB</span>
-                    <code title={item.sha256}>{item.sha256.slice(0, 8)}</code>
-                  </span>
-                </button>
-                {active ? (
-                  <div className="purge-preset-detail">
+                  </button>
+                  {active ? (
+                    <div className="purge-preset-detail">
                     <div className="purge-actions">
                       <Button
                         variant="outline"
@@ -2915,7 +3081,8 @@ const PresetsSection = memo(function PresetsSection({
               </li>
             );
           })}
-        </ul>
+          </ul>
+        </div>
       )}
       {/* 加载更多：服务端 total 大于已加载条数时显示（默认每页 50 条） */}
       {modelReady && !loading && items.length > 0 && (list?.total ?? 0) > items.length ? (
@@ -2934,6 +3101,9 @@ const PresetsSection = memo(function PresetsSection({
 export default function PurgeConsole(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
+  // 「问 AI」跳转用。走 router 而不是 window.location：跳转要保留 SPA 状态
+  // （侧栏、Toast 容器），location.assign 会整页重载。
+  const navigate = useNavigate();
   const [data, setData] = useState<PurgeData | null>(null);
   const [draft, setDraft] = useState<PurgeSettings | null>(null);
   const [loading, setLoading] = useState(true);
@@ -3069,6 +3239,24 @@ export default function PurgeConsole(): JSX.Element {
   const [skills, setSkills] = useState<NonNullable<PurgeData['skills']>>([]);
   /** 技能目录展开后的绝对路径（旧后端不返回 → 空串，不渲染那一行） */
   const [skillDirResolved, setSkillDirResolved] = useState('');
+  /** 技能目录是否真实存在（旧后端不返回 → undefined，不提示） */
+  const [skillDirExists, setSkillDirExists] = useState<boolean | undefined>(undefined);
+  /** 当前注入上限（技能快照里正文是否会被截断；旧后端不返回 → undefined） */
+  const [skillInjectLimitSnapshot, setSkillInjectLimitSnapshot] = useState<number | undefined>(
+    undefined,
+  );
+  /**
+   * 异源候选推荐（后端从模型管理视图算出来的「真异源」候选）。
+   *
+   * 旧后端不返回 → undefined（面板显示「手填也能用」，不藏入口也不假装有推荐）。
+   */
+  const [fallbackSuggestion, setFallbackSuggestion] = useState<
+    PurgeFallbackSuggestion | undefined
+  >(undefined);
+  /** 后端用于判定「异源」的主模型（推荐与体检共用同一个值） */
+  const [mainModelSnapshot, setMainModelSnapshot] = useState('');
+  /** 「重算推荐」进行中（防连点） */
+  const [fallbackRefreshing, setFallbackRefreshing] = useState(false);
   /** 管理面 403「必须先改密码」：整页给引导，而不是只说「加载失败」 */
   const [needsPasswordChange, setNeedsPasswordChange] = useState(false);
   /** 加载失败的具体原因（脱敏后展示；空串=没失败或与改密无关时不显示） */
@@ -3112,6 +3300,18 @@ export default function PurgeConsole(): JSX.Element {
   } | null>(null);
   // 统计口径切换（全程/近 1 小时/近 24 小时）；提前返回之前声明（rules-of-hooks）
   const [statsWindow, setStatsWindow] = useState<'all' | '1h' | '24h' | 'last'>('all');
+  /**
+   * 分组折叠状态（存「收起的组」，这样以后新增组默认展开）。
+   *
+   * 为什么只把 collapsed 放 state 而把 `isOpen` 派生：总开关关闭时四组**强制收起**
+   * 是派生规则（`isGroupOpen`），不能写进 localStorage——否则用户重新打开总开关后
+   * 那四组会一直灰着收着，而他并没有收起过它们。
+   */
+  const [collapsedGroups, setCollapsedGroups] = useState<PurgeGroupId[]>(() =>
+    readCollapsedGroups((k) => window.localStorage.getItem(k)),
+  );
+  /** 已点过「怎么修」的告警 code（只用于显示「保存后消失」，不隐藏告警本体） */
+  const [healthFixedCodes, setHealthFixedCodes] = useState<string[]>([]);
   // 导入配置文件选择
   const importInputRef = useRef<HTMLInputElement | null>(null);
   // 词表 CSV 导入（死区词/同义词各一个 input，value 清空允许连续导同名文件）
@@ -3134,6 +3334,49 @@ export default function PurgeConsole(): JSX.Element {
   /** dirty / save 的实时快照：Ctrl+S 监听只挂一次，不能依赖会变的闭包 */
   const dirtyRef = useRef(false);
   const saveRef = useRef<() => Promise<void>>(async () => {});
+
+  /**
+   * 折叠状态落盘：**只存用户手动收起的那些组**。
+   *
+   * 不存的是「总开关关闭时强制收起」的四组——那是派生状态，存进去会在总开关
+   * 重新打开后继续收着（用户从没点过收起）。
+   */
+  useEffect(() => {
+    writeCollapsedGroups(collapsedGroups, lsSetStable, lsRemoveStable);
+  }, [collapsedGroups]);
+
+  const setGroups = useCallback((next: PurgeGroupId[]): void => {
+    setCollapsedGroups(next);
+  }, []);
+
+  /** 折叠状态 + 「跳转前先展开」的唯一实现（见 purge-groups-ui 的头注释） */
+  const { openCount, ctx: groupCtx } = usePurgeGroups({
+    enabled: Boolean(draft?.enabled),
+    collapsed: collapsedGroups,
+    setCollapsed: setGroups,
+  });
+
+  /**
+   * 把 `focusFixTarget`（模块级函数）接到折叠状态上：跳转前展开目标组必须
+   * **同时改状态**，否则 React 下一轮渲染会把 `hidden` 写回去（实测：闪一下即收起）。
+   * 卸载时清空，避免页面切走后还有悬空回调改一个不存在的 state。
+   */
+  useEffect(() => {
+    registerOpenGroupHandler((id: PurgeGroupId) => {
+      setCollapsedGroups((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : prev));
+    });
+    return () => registerOpenGroupHandler(null);
+  }, []);
+
+  /** 「全部展开」：清空收起集合（被强制的组由 `isGroupOpen` 派生，不受影响） */
+  const expandAllGroups = useCallback((): void => {
+    setCollapsedGroups([]);
+  }, []);
+
+  /** 「全部收起」：把当前展开的组全收起来（被强制收起的组不在展开集合里，自然跳过） */
+  const collapseAllGroups = useCallback((): void => {
+    setCollapsedGroups(PURGE_GROUPS.map((group) => group.id));
+  }, []);
   useEffect(() => {
     dataRef.current = data;
     draftRef.current = draft;
@@ -3209,6 +3452,10 @@ export default function PurgeConsole(): JSX.Element {
       setConfigWarningItems(res.data.config_warning_items ?? []);
       setSkills(res.data.skills ?? []);
       setSkillDirResolved(res.data.skill_dir_resolved ?? '');
+      setSkillDirExists(res.data.skill_dir_exists);
+      setSkillInjectLimitSnapshot(res.data.skill_inject_limit);
+      setFallbackSuggestion(res.data.fallback_suggestion);
+      setMainModelSnapshot(res.data.main_model ?? '');
       // 有未保存备份且与服务器配置不同 → 让用户决定是否恢复（不静默套用，
       // 也不静默丢弃：两种都会让「我上次改的东西哪去了」无从回答）
       const backup = readDraftBackup((k) => window.localStorage.getItem(k));
@@ -3630,11 +3877,52 @@ export default function PurgeConsole(): JSX.Element {
       if (res.success && res.data) {
         setSkills(res.data.skills ?? []);
         setSkillDirResolved(res.data.skill_dir_resolved ?? '');
+        setSkillDirExists(res.data.skill_dir_exists);
       }
     } catch {
       // 刷新失败不影响写入结果，静默即可
     }
   }, []);
+
+  /**
+   * 重算异源推荐（`models=fresh` 跳过模型管理视图缓存）。
+   *
+   * 为什么单独一条通道：模型管理页刚改了渠道/定价，回破甲页想立刻看到新推荐，
+   * 不该等 30 秒缓存过期、也不该重拉整页快照（会覆盖未保存的草稿）。
+   */
+  const refreshFallbackSuggestion = useCallback(async (): Promise<void> => {
+    setFallbackRefreshing(true);
+    try {
+      const res = await api.suggestPurgeFallback({ models: 'fresh' });
+      const data = res?.data;
+      if (data) {
+        setFallbackSuggestion(data);
+        if (res.main_model) setMainModelSnapshot(res.main_model);
+      }
+    } catch (error) {
+      addToast((error as Error)?.message || t('重算推荐失败'), 'error');
+    } finally {
+      setFallbackRefreshing(false);
+    }
+  }, [addToast, t]);
+
+  /**
+   * 一键填入推荐异源 → **只改草稿**（用户点保存才落库）。
+   *
+   * 为什么不自动保存：线上可能已有一份管理员自己挑的列表，自动覆盖等于替他做
+   * 决定；与「设为结构化模板」同口径（先改草稿，保存时一起提交）。
+   */
+  const applyFallbackSuggestion = useCallback(
+    (models: string[]): void => {
+      // `patch` 自己会置 dirty
+      patch({ fallback_models: models });
+      addToast(
+        t('已填入 {{n}} 个推荐异源模型（记得点保存生效）', { n: models.length }),
+        'success',
+      );
+    },
+    [addToast, patch, t],
+  );
 
   /** 技能包导入（ZIP/TAR/TGZ → 技能目录）；成功后只刷新技能快照，不动草稿 */
   const handleImportSkill = useCallback(
@@ -3997,6 +4285,59 @@ export default function PurgeConsole(): JSX.Element {
       copied ? 'success' : 'error',
     );
   }, [addToast, configWarningItems, configWarnings, data, t]);
+
+  /**
+   * 「问 AI」：把当前配置摘要带进 AI 运维（`/agent`）的输入框。
+   *
+   * ── 为什么是「带摘要 + 跳页」而不是「直接调工具」 ──────────────────
+   * 破甲页没有对话上下文，也没有审批卡；高危写（`aigx_config_set`）必须走 Agent 面的
+   * 审批矩阵。这里只负责**把上下文搬到那一页**，写仍然由人在审批卡上点。
+   *
+   * ── 为什么要降级到剪贴板 ────────────────────────────────────────
+   * `sessionStorage` 在隐私模式/禁用存储时会抛 `SecurityError`。交接写不进去时
+   * 仍然跳页（用户的意图是「去问 AI」），但把摘要抄进剪贴板，并在 AI 页提示粘贴
+   * ——「按钮点了没反应」比「要手动粘一次」坏得多。
+   *
+   * 用**草稿**而不是已保存快照：用户此刻看到的就是草稿；但提示里写明「尚未保存」
+   * 的那几项，否则 AI 会以为线上已经是这样（`dirty` 的语义就在这句里兑现）。
+   */
+  const askAi = useCallback(async (): Promise<void> => {
+    const current = draftRef.current;
+    if (!current) return;
+    const warnings =
+      configWarningItems.length > 0
+        ? sortWarningsBySeverity(
+            configWarningItems.map((w) => ({
+              message: w.message,
+              severity: w.severity ?? 'error',
+            })),
+          )
+        : configWarnings.map((message) => ({ message, severity: 'error' }));
+    const base = buildPurgeAiPrompt({
+      activeItems: buildActiveSummary(current).map((item) => t(item.key, item.params)),
+      warnings,
+    });
+    // 未保存改动必须显式告知：AI 若按「线上就是这样」去推理，会改错基线。
+    const prompt = dirty
+      ? `${t('注意：以下摘要包含**尚未保存**的改动（页面上还有未保存修改）。')}\n${base}`
+      : base;
+
+    const carried = writePurgeAiHandoff(prompt, handoffStorage);
+    if (!carried) {
+      // 存储不可用：退到剪贴板，并如实告知（复制失败也不算失败——正文随跳转仍在 URL 之外，
+      // 这里只能让用户看到自己没有传过去）。
+      const copied = await copyText(prompt);
+      addToast(
+        copied
+          ? t('当前配置摘要已复制，请在 AI 运维里粘贴后发送')
+          : t('浏览器禁用了站点存储与剪贴板，无法自动带入 —— 请到 AI 运维直接用 aigx_purge_check 体检'),
+        copied ? 'warning' : 'error',
+      );
+    } else {
+      addToast(t('已把当前配置摘要带入 AI 运维'), 'success');
+    }
+    navigate('/agent');
+  }, [addToast, configWarningItems, configWarnings, dirty, navigate, t]);
 
   /** 复制体检结果为纯文本（工单证据：出了什么问题、按级分组） */
   const copyWarningReport = useCallback(async (): Promise<void> => {
@@ -4423,6 +4764,97 @@ export default function PurgeConsole(): JSX.Element {
     ],
   );
 
+  /**
+   * 体检面板用的行（结构化优先、旧版纯文本补后）。
+   *
+   * 与 `copyWarningReport` / `copySnapshot` 里那份三元表达式同一口径——那两处
+   * 是复制出口（要纯文本），这里要带 code 的行。共用 `normalizeHealthRows` 后
+   * 三处不再各写一遍「结构化优先」的判据。
+   */
+  const healthRows = useMemo(
+    () => normalizeHealthRows(configWarningItems, configWarnings),
+    [configWarningItems, configWarnings],
+  );
+
+  /** 「怎么修」：改草稿 / 跳转；做完只标「已按建议修改」，不隐藏告警本体 */
+  const runHealthFix = useCallback(
+    (code: string, spec: HealthFixSpec): void => {
+      const current = draftRef.current;
+      if (!current) return;
+      if (spec.anchor) {
+        focusFixTarget(spec.anchor);
+        return;
+      }
+      // 推荐候选优先用后端给的「真异源」（模型管理视角算过厂商/定价/承载），
+      // 没有就退回空数组——绝不凭空造一个模型名填进去。
+      const recommended = fallbackSuggestion?.models ?? [];
+      const patchResult = applyHealthFix(code, current, {
+        recommendedModels: recommended,
+        defaultModel: mainModelSnapshot,
+      });
+      if (!patchResult || '__jump' in patchResult) {
+        if (patchResult && '__jump' in patchResult) {
+          // 只打开筛选，不替用户改内容（链式改写「是否符合预期」没有客观答案）
+          if (patchResult.__jump === 'dead-zone-issues') {
+            setDeadZoneIssuesOnly(true);
+            setDeadZoneQuery('');
+            focusFixTarget('dead-zone-table');
+          } else {
+            focusFixTarget(patchResult.__jump);
+          }
+        } else {
+          addToast(t('这条没有可自动修的值，已跳到对应字段，请手动调整'), 'warning');
+          if (FIX_TARGETS[code]) focusFixTarget(FIX_TARGETS[code]);
+        }
+        return;
+      }
+      patch(patchResult as Partial<PurgeSettings>);
+      setHealthFixedCodes((prev) => (prev.includes(code) ? prev : [...prev, code]));
+      addToast(t('已按建议修改草稿，点「保存」后告警会重新体检'), 'success');
+    },
+    [addToast, fallbackSuggestion, mainModelSnapshot, patch, t],
+  );
+
+  /** 没有可自动执行动作的 code → 打开说明/选项（当前落在锚点提示） */
+  const openHealthOptions = useCallback(
+    (code: string): void => {
+      const anchor = FIX_TARGETS[code];
+      if (anchor) {
+        focusFixTarget(anchor);
+        addToast(t('已跳到对应字段：这一项需要按业务判断，没有可自动填的值'), 'warning');
+      } else {
+        addToast(t('这一项没有定位入口，请按上面文案里的字段名查找'), 'warning');
+      }
+    },
+    [addToast, t],
+  );
+
+  /**
+   * 告警消失后清掉「已点过修复」标记：`save` 成功会重新体检，修好的 code 不再出现，
+   * 标记留着只会在下次同名告警出现时**错误地**显示「已按建议修改」。
+   */
+  useEffect(() => {
+    if (healthFixedCodes.length === 0) return;
+    const alive = new Set(configWarningItems.map((item) => item.code));
+    setHealthFixedCodes((prev) => {
+      const next = prev.filter((code) => alive.has(code));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [configWarningItems, healthFixedCodes.length]);
+
+  /** 基础组顶部「当前状态」一行（总开关旁必须一眼看出到底在不在治理） */
+  const status = useMemo(() => (draft ? baseStatus(draft) : null), [draft]);
+
+  /** 各组「N 项已启用」（按数据面语义算，不是数填了几项） */
+  const groupCounts = useMemo(() => {
+    const out = new Map<PurgeGroupId, number>();
+    if (!draft) return out;
+    for (const group of PURGE_GROUPS) {
+      out.set(group.id, groupItemCount(group.id, draft, { skills: skills.length }));
+    }
+    return out;
+  }, [draft, skills.length]);
+
   if (loading) {
     return (
       <div className="purge-console">
@@ -4549,6 +4981,18 @@ export default function PurgeConsole(): JSX.Element {
             onClick={() => void copySnapshot()}
           >
             {t('复制现状快照')}
+          </Button>
+          {/* 「问 AI」：把当前配置摘要带进 AI 运维输入框（一次性交接，见 lib/purge-ai-bridge）。
+              放在「复制现状快照」旁边是刻意的：两者的输入都是同一份摘要，一个给人看、
+              一个给 AI 看；用户要「让 AI 帮我改」时不必自己找入口。 */}
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="purge-ask-ai"
+            title={t('把当前破甲配置摘要带进 AI 运维，让 AI 体检并给你改动方案')}
+            onClick={() => void askAi()}
+          >
+            {t('问 AI')}
           </Button>
           {/* Ctrl/Cmd+S 一直可用但界面零提示——能力藏着等于没有。
               放在 header（始终渲染），不要放进「有未保存改动才出现」的警示条 */}
@@ -4736,159 +5180,156 @@ export default function PurgeConsole(): JSX.Element {
         </div>
       )}
 
-      {/* 页内导航：十几个屏的页面，跳转比滚轮快 */}
-      <PageNav t={t} />
-
-      {/* 统计口径切换（旧后端无窗口数据 → 窗口档禁用并提示） */}
-      <div className="purge-window-picker" role="group" aria-label={t('统计时间窗')}>
-        {([
-          { key: 'all', label: t('全程'), unavailable: false },
-          { key: '1h', label: t('近 1 小时'), unavailable: !data.stats_1h },
-          { key: '24h', label: t('近 24 小时'), unavailable: !data.stats_24h },
-          { key: 'last', label: t('上次运行'), unavailable: !data.stats_last_run },
-        ] as const).map((opt) => (
-          <button
-            key={opt.key}
-            type="button"
-            className={`purge-preset-chip${statsWindow === opt.key ? ' is-active' : ''}`}
-            disabled={opt.unavailable}
-            aria-pressed={statsWindow === opt.key}
-            onClick={() => setStatsWindow(opt.key)}
-          >
-            {opt.label}
-          </button>
-        ))}
-        {/* 导出四档统计（宽表 CSV）：与页面同一份数据，直接落盘进报表 */}
-        <Button
-          variant="outline"
-          size="sm"
-          data-testid="purge-stats-export"
-          onClick={() => void exportStatsCsv()}
-        >
-          {t('导出统计 CSV')}
-        </Button>
-        {/* 清零基线：改完配置想看「生效后有没有效果」，旧历史混在累计值里比不出来 */}
-        <Button
-          variant="outline"
-          size="sm"
-          data-testid="purge-stats-reset"
-          disabled={saving}
-          onClick={() => void resetStats()}
-        >
-          {t('清零统计')}
-        </Button>
+      {/* 页内导航 + 折叠工具条同一行：跳转与「全部展开」是同一类动作
+          （都是「我想到别处去」），分开放会让窄屏白占两行 */}
+      <div className="purge-navrow">
+        <PageNav t={t} />
+        <PurgeGroupToolbar
+          openCount={openCount}
+          total={PURGE_GROUPS.length}
+          onExpandAll={expandAllGroups}
+          onCollapseAll={collapseAllGroups}
+          t={t}
+        />
       </div>
 
-      <span data-purge-fix="stats" />
-      {/* 基线时刻：清零后「全程」不再是「进程启动至今」，写准免得误读 */}
-      {data.stats_since ? (
-        <p className="purge-hint" data-testid="purge-stats-since">
-          {t('统计基线：{{time}}', {
-            time: new Date(data.stats_since * 1000).toLocaleString(),
-          })}
-        </p>
-      ) : null}
-      {/* CSV 列说明：文件是发给别人的，列名是机器名，界面不给对照就没人看得懂 */}
-      <details className="purge-csv-help" data-testid="purge-csv-help">
-        <summary>{t('导出 CSV 的列是什么意思？')}</summary>
-        <ul>
-          {STATS_CSV_HELP.map((item) => (
-            <li key={item.column}>
-              <code>{item.column}</code>
-              <span>{t(item.label)}</span>
-            </li>
-          ))}
-        </ul>
-      </details>
-      {/* 「上次运行」档：不说清是哪一次，一排数字等于没意义 */}
-      {statsWindow === 'last' ? (
-        <p className="purge-hint" data-testid="purge-last-run-note">
-          {lastRunNote(data.stats_last_run, (key, params) => t(key, params))}
-        </p>
-      ) : null}
-      <SectionGuard title={t('统计')}>
-        <StatsGrid
-          stats={stats}
-          retryRate={retryRate}
-          suffix={windowLabel}
-          // 只有窗口档（事件环）会带 truncated；「上次运行」是精确快照
-          atLeast={
-            statsWindow === '1h' || statsWindow === '24h'
-              ? (windowed as PurgeWindowedStats | undefined)?.truncated
-              : undefined
-          }
-          t={t}
-        />
-        {/* 失败分类条与统计卡读的是同一个 `stats`：同一个边界内，否则它会在
-            guard 之外解构 null（实测整页崩在这里） */}
-        <FailureBar
-          refusal={stats.failure_refusal}
-          empty={stats.failure_empty}
-          filter={stats.failure_filter}
-          other={stats.failure_other}
-          t={t}
-        />
-      </SectionGuard>
+      {/* 分组上下文：所有 `<PurgeGroupWrap>` 从这里读展开状态与切换函数。
+          放在这里而不是 app 级 provider——折叠状态是本页私有的，
+          全局化会让「另一个页面也显示破甲折叠态」这种怪事成为可能。 */}
+      <PurgeGroupProvider value={groupCtx}>
 
-      {/* 配置体检告警：开了但不生效 / 配置自相矛盾（静态可判定项）。
-          结构化告警带 code → 「去修复」滚动并聚焦对应控件；旧后端纯文本。
-          全部通过时给一行绿字：让运维确认「体检确实跑过且当前无问题」，
-          而不是面对一片空白猜后端到底检查了什么。 */}
-      {configWarningItems.length > 0 || configWarnings.length > 0 ? (
-        <div className="purge-warning-box" role="alert">
-          {(configWarningItems.length > 0
-            ? sortWarningsBySeverity(
-                configWarningItems.map((w) => ({
-                  code: w.code,
-                  message: w.message,
-                  severity: w.severity ?? 'error',
-                })),
-              )
-            : configWarnings.map((message) => ({
-                code: '',
-                message,
-                severity: 'error' as const,
-              }))
-          ).map(({ code, message, severity }, index) => (
-            <p key={index} className={`purge-warning-row is-${severity}`}>
-              <span className="purge-warning-badge">{t(SEVERITY_LABEL[severity])}</span>
-              <span>{message}</span>
-              {code && FIX_TARGETS[code] ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => focusFixTarget(FIX_TARGETS[code])}
-                >
-                  {t('去修复')}
-                </Button>
-              ) : null}
-            </p>
+      {/* 统计口径切换（旧后端无窗口数据 → 窗口档禁用并提示） */}
+      <PurgeGroupWrap
+        id="stats"
+        t={t}
+        status={windowLabel ?? t('全程')}
+        actions={
+          <>
+            {/* 导出四档统计（宽表 CSV）：与页面同一份数据，直接落盘进报表 */}
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-stats-export"
+              onClick={() => void exportStatsCsv()}
+            >
+              {t('导出统计 CSV')}
+            </Button>
+            {/* 清零基线：改完配置想看「生效后有没有效果」，旧历史混在累计值里比不出来 */}
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="purge-stats-reset"
+              disabled={saving}
+              onClick={() => void resetStats()}
+            >
+              {t('清零统计')}
+            </Button>
+          </>
+        }
+      >
+        <div className="purge-window-picker" role="group" aria-label={t('统计时间窗')}>
+          {([
+            { key: 'all', label: t('全程'), unavailable: false },
+            { key: '1h', label: t('近 1 小时'), unavailable: !data.stats_1h },
+            { key: '24h', label: t('近 24 小时'), unavailable: !data.stats_24h },
+            { key: 'last', label: t('上次运行'), unavailable: !data.stats_last_run },
+          ] as const).map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              className={`purge-preset-chip${statsWindow === opt.key ? ' is-active' : ''}`}
+              disabled={opt.unavailable}
+              aria-pressed={statsWindow === opt.key}
+              onClick={() => setStatsWindow(opt.key)}
+            >
+              {opt.label}
+            </button>
           ))}
         </div>
-      ) : draft.enabled ? (
-        <p className="purge-check-ok" role="status">
-          {t('配置体检通过：当前没有「开了但不生效」或自相矛盾的项目。')}
-        </p>
-      ) : null}
-      {/* 体检结果可复制（工单证据）；无告警时也给出「已通过」结论而不是空串 */}
+
+        <span data-purge-fix="stats" />
+        {/* 基线时刻：清零后「全程」不再是「进程启动至今」，写准免得误读 */}
+        {data.stats_since ? (
+          <p className="purge-hint" data-testid="purge-stats-since">
+            {t('统计基线：{{time}}', {
+              time: new Date(data.stats_since * 1000).toLocaleString(),
+            })}
+          </p>
+        ) : null}
+        {/* CSV 列说明：文件是发给别人的，列名是机器名，界面不给对照就没人看得懂 */}
+        <details className="purge-csv-help" data-testid="purge-csv-help">
+          <summary>{t('导出 CSV 的列是什么意思？')}</summary>
+          <ul>
+            {STATS_CSV_HELP.map((item) => (
+              <li key={item.column}>
+                <code>{item.column}</code>
+                <span>{t(item.label)}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+        {/* 「上次运行」档：不说清是哪一次，一排数字等于没意义 */}
+        {statsWindow === 'last' ? (
+          <p className="purge-hint" data-testid="purge-last-run-note">
+            {lastRunNote(data.stats_last_run, (key, params) => t(key, params))}
+          </p>
+        ) : null}
+        <SectionGuard title={t('统计')}>
+          <StatsGrid
+            stats={stats}
+            retryRate={retryRate}
+            suffix={windowLabel}
+            // 只有窗口档（事件环）会带 truncated；「上次运行」是精确快照
+            atLeast={
+              statsWindow === '1h' || statsWindow === '24h'
+                ? (windowed as PurgeWindowedStats | undefined)?.truncated
+                : undefined
+            }
+            t={t}
+          />
+          {/* 失败分类条与统计卡读的是同一个 `stats`：同一个边界内，否则它会在
+              guard 之外解构 null（实测整页崩在这里） */}
+          <FailureBar
+            refusal={stats.failure_refusal}
+            empty={stats.failure_empty}
+            filter={stats.failure_filter}
+            other={stats.failure_other}
+            t={t}
+          />
+        </SectionGuard>
+      </PurgeGroupWrap>
+
+      {/* 配置体检：开了但不生效 / 配置自相矛盾（静态可判定项）。
+          每条告警带一个**能点得动的「怎么修」**（改草稿 / 跳到具体字段）；
+          修完的条目不隐藏，只标「保存后消失」——真正判定在后端，前端藏起来等于谎报。
+          旧后端只有纯文本 `config_warnings` → 仍显示，只是没有结构化修复动作。
+          总开关关闭时不渲染面板：后端在关闭态直接返回空告警（零行为），
+          这里再画一屏「体检通过」只会误导。 */}
       {draft.enabled ? (
-        <div className="purge-actions">
-          <Button
-            variant="outline"
-            size="sm"
-            data-testid="purge-warning-copy"
-            onClick={() => void copyWarningReport()}
-          >
-            {t('复制体检结果')}
-          </Button>
-        </div>
+        <PurgeHealthPanel
+          rows={healthRows}
+          fixedCodes={healthFixedCodes}
+          fixTargets={FIX_TARGETS}
+          busy={saving}
+          onRunFix={runHealthFix}
+          onOpenOptions={openHealthOptions}
+          onCopy={() => void copyWarningReport()}
+          enabled={draft.enabled}
+          t={t}
+        />
       ) : null}
+
+      {/* 配置体检见上方的 <PurgeHealthPanel>：老的三元块整体由它接管
+          （排序 / 严重级徽标 / 「怎么修」/ 复制入口都在面板里）。 */}
 
       {/* 当前生效项：8 开关 + 两张词表 + 模板/预设/技能，配到十几项后没人能一眼
           说出「现在到底哪些在生效」；这里按数据面真实语义汇总（词表只算启用行）。 */}
       <span data-purge-fix="active-summary" />
-      <Card
-        title={t('当前生效项')}
+      <PurgeGroupWrap
+        id="summary"
+        t={t}
+        status={t('{{n}} 项', { n: buildActiveSummary(draft).length })}
+        statusActive={buildActiveSummary(draft).length > 0}
         actions={
           <Button
             variant="outline"
@@ -4900,102 +5341,194 @@ export default function PurgeConsole(): JSX.Element {
           </Button>
         }
       >
-        <ul className="purge-active-list" data-testid="purge-active-summary">
-          {buildActiveSummary(draft).map((item, index) => (
-            <li key={`${item.key}-${index}`}>
-              {item.anchor ? (
-                // 点了跳到对应配置区（复用体检告警的锚点与闪烁提示）
-                <button
-                  type="button"
-                  className="purge-active-jump"
-                  title={t('跳到这一项对应的配置')}
-                  onClick={() => focusFixTarget(item.anchor as string)}
-                >
-                  {t(item.key, item.params)}
-                </button>
-              ) : (
-                t(item.key, item.params)
-              )}
-            </li>
-          ))}
-        </ul>
-        {/* 配了但没启用：一次列全，点一下跳到对应配置区（不必自己一处处找） */}
-        {configuredButOff(draft).length > 0 ? (
-          <div className="purge-configured-off" data-testid="purge-configured-off">
-            <p className="purge-hint">{t('下面这些配置了内容，但对应开关是关的，不会生效：')}</p>
-            <ul className="purge-active-list">
-              {configuredButOff(draft).map((item) => (
-                <li key={item.code}>
+        <Card>
+          <ul className="purge-active-list" data-testid="purge-active-summary">
+            {buildActiveSummary(draft).map((item, index) => (
+              <li key={`${item.key}-${index}`}>
+                {item.anchor ? (
+                  // 点了跳到对应配置区（复用体检告警的锚点与闪烁提示）
                   <button
                     type="button"
                     className="purge-active-jump"
-                    data-testid={`purge-configured-off-${item.code}`}
                     title={t('跳到这一项对应的配置')}
-                    onClick={() => focusFixTarget(item.anchor)}
+                    onClick={() => focusFixTarget(item.anchor as string)}
                   >
-                    {t('{{label}}（{{count}} 项）', { label: t(item.label), count: item.count })}
+                    {t(item.key, item.params)}
                   </button>
-                </li>
-              ))}
-            </ul>
+                ) : (
+                  t(item.key, item.params)
+                )}
+              </li>
+            ))}
+          </ul>
+          {/* 配了但没启用：一次列全，点一下跳到对应配置区（不必自己一处处找） */}
+          {configuredButOff(draft).length > 0 ? (
+            <div className="purge-configured-off" data-testid="purge-configured-off">
+              <p className="purge-hint">{t('下面这些配置了内容，但对应开关是关的，不会生效：')}</p>
+              <ul className="purge-active-list">
+                {configuredButOff(draft).map((item) => (
+                  <li key={item.code}>
+                    <button
+                      type="button"
+                      className="purge-active-jump"
+                      data-testid={`purge-configured-off-${item.code}`}
+                      title={t('跳到这一项对应的配置')}
+                      onClick={() => focusFixTarget(item.anchor)}
+                    >
+                      {t('{{label}}（{{count}} 项）', { label: t(item.label), count: item.count })}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </Card>
+      </PurgeGroupWrap>
+
+      {/* 基础组：总开关 + 一行「当前状态」摘要。
+          摘要就在开关旁边——「关了但以为开着」是本页最贵的误判。 */}
+      <PurgeGroupWrap
+        id="base"
+        t={t}
+        status={groupStatusText(groupCounts.get('base') ?? 0, t)}
+        statusActive={(groupCounts.get('base') ?? 0) > 0}
+      >
+        {status ? (
+          <div className="purge-basestatus" data-tone={status.tone} data-testid="purge-base-status">
+            {status.chips.map((chip, index) => (
+              <span key={`${chip.key}-${index}`} className="purge-basestatus-chip">
+                {t(chip.key, chip.params)}
+              </span>
+            ))}
           </div>
         ) : null}
-      </Card>
+        <Card actions={<span className="purge-hint">{t('点一下立即生效，重启后保留')}</span>}>
+          <span data-purge-fix="switches" />
+          <SwitchRows flags={flags} disabled={saving} onToggle={toggle} t={t} />
+        </Card>
+      </PurgeGroupWrap>
 
-      <Card
-        title={t('开关')}
-        actions={<span className="purge-hint">{t('点一下立即生效，重启后保留')}</span>}
+      {/* 高级组：只读参数（服务端快照）+ 低频治理项（拒绝话术 / 失败关键词 /
+          结构化后缀 / 降档目标 / 前缀剥离）。默认收起——这些配一次就不再动，
+          但**一样也不删**，折叠头写着「N 项已启用」。 */}
+      <PurgeGroupWrap
+        id="advanced"
+        t={t}
+        status={groupStatusText(groupCounts.get('advanced') ?? 0, t)}
+        statusActive={(groupCounts.get('advanced') ?? 0) > 0}
       >
-        <span data-purge-fix="switches" />
-        <SwitchRows flags={flags} disabled={saving} onToggle={toggle} t={t} />
-      </Card>
-      <SectionGuard title={t('只读参数')}>
-      <Card
-        title={t('只读参数')}
-        actions={
-          <>
-            <Button variant="outline" size="sm" onClick={exportConfig}>
-              {t('导出配置')}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => importInputRef.current?.click()}
-            >
-              {t('导入配置')}
-            </Button>
-            <input
-              ref={importInputRef}
-              type="file"
-              accept=".json,application/json"
-              style={{ display: 'none' }}
-              onChange={(event) => {
-                void importConfig(event.target.files?.[0] ?? null);
-                // 允许连续导入同名文件
-                event.target.value = '';
-              }}
+        <SectionGuard title={t('只读参数')}>
+          <Card
+            title={t('只读参数')}
+            actions={
+              <>
+                <Button variant="outline" size="sm" onClick={exportConfig} data-testid="purge-export-config">
+                  {t('导出配置')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="purge-import-config"
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  {t('导入配置')}
+                </Button>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                  onChange={(event) => {
+                    void importConfig(event.target.files?.[0] ?? null);
+                    // 允许连续导入同名文件
+                    event.target.value = '';
+                  }}
+                />
+              </>
+            }
+          >
+            {/* 只读区一律读服务端快照（data.settings），不读草稿——未保存的编辑
+                不应提前出现在「只读」区（与失败分类、在途数等运行时字段同口径）。 */}
+            <ParamGrid
+              retryLimit={savedSettings.retry_limit}
+              failureRefusal={stats.failure_refusal}
+              failureEmpty={stats.failure_empty}
+              failureFilter={stats.failure_filter}
+              failureOther={stats.failure_other}
+              fallbackModels={savedFallbackModels.join(', ')}
+              fallbackTriggerAttempt={savedSettings.fallback_trigger_attempt}
+              skillInjectLimit={savedSettings.skill_inject_limit}
+              inflight={runtime.inflight}
+              upstream={runtime.upstream}
+              t={t}
             />
-          </>
-        }
-      >
-        {/* 只读区一律读服务端快照（data.settings），不读草稿——未保存的编辑
-            不应提前出现在「只读」区（与失败分类、在途数等运行时字段同口径）。 */}
-        <ParamGrid
-          retryLimit={savedSettings.retry_limit}
-          failureRefusal={stats.failure_refusal}
-          failureEmpty={stats.failure_empty}
-          failureFilter={stats.failure_filter}
-          failureOther={stats.failure_other}
-          fallbackModels={savedFallbackModels.join(', ')}
-          fallbackTriggerAttempt={savedSettings.fallback_trigger_attempt}
-          skillInjectLimit={savedSettings.skill_inject_limit}
-          inflight={runtime.inflight}
-          upstream={runtime.upstream}
-          t={t}
-        />
-      </Card>
-      </SectionGuard>
+          </Card>
+        </SectionGuard>
 
+        {/* 低频治理项：从「技能与结构化提示」卡里搬出来的（内容逐字未动）。
+            放在高级组里而不是删掉——拒绝话术 / 失败关键词 / 结构化后缀仍有完整编辑能力。 */}
+        <Card title={t('低频治理项')}>
+          <span data-purge-fix="advanced" />
+          <div className="purge-form-grid">
+            <Input
+              label={t('system 剥离前缀（逗号分隔）')}
+              value={draft.normalize_strip_prefixes.join(', ')}
+              onChange={(event) => patch({ normalize_strip_prefixes: splitList(event.target.value) })}
+              error={capError(draft.normalize_strip_prefixes, LIST_CAP)}
+            />
+            <Select
+              label={t('降档目标（reasoning_floor）')}
+              hint={t('降思考开启后，把 high/medium/xhigh/max 压到该档位')}
+              value={draft.reasoning_floor}
+              onChange={(event) => patch({ reasoning_floor: event.target.value })}
+            >
+              {REASONING_FLOORS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {t(item.label)}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <Textarea
+            label={t('拒绝话术词表（每行一条，空表 = 关闭字面拒绝检测）')}
+            rows={4}
+            value={(draft.refusal_patterns ?? []).join('\n')}
+            onChange={(event) => patch({ refusal_patterns: splitLines(event.target.value) })}
+            error={capError(draft.refusal_patterns, LIST_CAP)}
+          />
+          <div className="purge-form-grid">
+            <Textarea
+              label={t('「内容过滤」类失败关键词（每行一条）')}
+              rows={3}
+              value={(draft.failure_filter_keywords ?? []).join('\n')}
+              onChange={(event) => patch({ failure_filter_keywords: splitLines(event.target.value) })}
+              error={capError(draft.failure_filter_keywords, LIST_CAP)}
+            />
+            <Textarea
+              label={t('「空答」类失败关键词（每行一条）')}
+              rows={3}
+              value={(draft.failure_empty_keywords ?? []).join('\n')}
+              onChange={(event) => patch({ failure_empty_keywords: splitLines(event.target.value) })}
+              error={capError(draft.failure_empty_keywords, LIST_CAP)}
+            />
+          </div>
+          <Textarea
+            label={t('结构化输出后缀')}
+            rows={4}
+            value={draft.structured_suffix}
+            onChange={(event) => patch({ structured_suffix: event.target.value })}
+          />
+        </Card>
+      </PurgeGroupWrap>
+
+      {/* 请求治理组：归一化 / 死区词表 / 同义词表 / 结构化模板。
+          开关本身在「基础」组（总开关那里一次看全 10 个），这一组放的是它们的**数据面**。 */}
+      <PurgeGroupWrap
+        id="governance"
+        t={t}
+        status={groupStatusText(groupCounts.get('governance') ?? 0, t)}
+        statusActive={(groupCounts.get('governance') ?? 0) > 0}
+      >
       <SectionGuard title={t('死区词改写词表')}>
       <Card
         title={t('死区词改写词表')}
@@ -5358,7 +5891,89 @@ export default function PurgeConsole(): JSX.Element {
         )}
       </Card>
       </SectionGuard>
+      </PurgeGroupWrap>
 
+      {/* 容错组：异源递进 + 重试（从「技能与结构化提示」卡里逐字搬来的两段，
+          外加「异源触发轮次」）。放在这里是因为它与统计里的「重试率」成对出现——
+          想调它的人一定是先看了重试率才来的。 */}
+      <PurgeGroupWrap
+        id="resilience"
+        t={t}
+        status={groupStatusText(groupCounts.get('resilience') ?? 0, t)}
+        statusActive={(groupCounts.get('resilience') ?? 0) > 0}
+      >
+        <SectionGuard title={t('容错')}>
+          <Card title={t('异源递进与重试')}>
+            <div className="purge-form-grid">
+              <Input
+                label={t('异源模型（逗号分隔）')}
+                value={draft.fallback_models.join(', ')}
+                onChange={(event) => patch({ fallback_models: splitList(event.target.value) })}
+                // 后端 normalize take(16)：超出的模型保存时被丢弃，必须当场提示
+                error={
+                  draft.fallback_models.length > FALLBACK_MODELS_CAP
+                    ? t('已填 {{n}} 个，上限 {{cap}} 个：保存只保留前 {{cap}} 个', {
+                        n: draft.fallback_models.length,
+                        cap: FALLBACK_MODELS_CAP,
+                      })
+                    : undefined
+                }
+                data-purge-fix="fallback-models"
+              />
+              {/* 一键填入推荐异源：候选来自「模型管理」的启用模型，按真异源（不同厂商）
+                  + 已定价 + 有启用承载挑；只改草稿，不自动保存（见组件头） */}
+              {draft.cross_source_fallback ? (
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <FallbackSuggestPanel
+                    t={t}
+                    suggestion={fallbackSuggestion}
+                    current={draft.fallback_models}
+                    mainModel={mainModelSnapshot}
+                    refreshing={fallbackRefreshing}
+                    onApply={applyFallbackSuggestion}
+                    onRefresh={() => void refreshFallbackSuggestion()}
+                  />
+                </div>
+              ) : null}
+              <Input
+                label={t('异源触发轮次')}
+                type="number"
+                min={1}
+                max={32}
+                value={numRaw.fallback_trigger_attempt}
+                error={numErrors.fallback_trigger_attempt}
+                onChange={(event) => handleNumChange('fallback_trigger_attempt', event.target.value)}
+                onBlur={() => handleNumBlur(NUM_FIELDS[1])}
+                data-purge-fix="fallback-attempts"
+              />
+              <Input
+                label={t('重试上限')}
+                type="number"
+                min={1}
+                max={32}
+                value={numRaw.retry_limit}
+                error={numErrors.retry_limit}
+                onChange={(event) => handleNumChange('retry_limit', event.target.value)}
+                onBlur={() => handleNumBlur(NUM_FIELDS[2])}
+              />
+            </div>
+          </Card>
+        </SectionGuard>
+      </PurgeGroupWrap>
+
+      {/* 技能注入组：技能目录 / 注入上限 / 技能包导入 / 新建技能 / 扫描快照。
+          技能目录与注入上限从原「技能与结构化提示」卡里逐字搬来。 */}
+      <PurgeGroupWrap
+        id="skills"
+        t={t}
+        status={groupStatusText(groupCounts.get('skills') ?? 0, t)}
+        statusActive={(groupCounts.get('skills') ?? 0) > 0}
+        actions={
+          <Button variant="outline" size="sm" onClick={() => void refreshSkills()}>
+            {t('重新扫描')}
+          </Button>
+        }
+      >
       <SectionGuard title={t('技能与结构化提示')}>
       <Card title={t('技能与结构化提示')}>
         <div className="purge-form-grid">
@@ -5370,13 +5985,6 @@ export default function PurgeConsole(): JSX.Element {
             data-purge-fix="skill-dir"
           />
           <Input
-            label={t('固定套用预设 id')}
-            hint={t('留空 = 按模型自动匹配；名字对不上就不套，预设正文原样前插到 system 提示词')}
-            value={draft.auto_preset_id ?? ''}
-            onChange={(event) => patch({ auto_preset_id: event.target.value })}
-            data-purge-fix="auto-preset-id"
-          />
-          <Input
             label={t('技能注入上限（字符）')}
             type="number"
             min={16}
@@ -5386,95 +5994,13 @@ export default function PurgeConsole(): JSX.Element {
             onChange={(event) => handleNumChange('skill_inject_limit', event.target.value)}
             onBlur={() => handleNumBlur(NUM_FIELDS[0])}
           />
-          <Input
-            label={t('异源模型（逗号分隔）')}
-            value={draft.fallback_models.join(', ')}
-            onChange={(event) => patch({ fallback_models: splitList(event.target.value) })}
-            // 后端 normalize take(16)：超出的模型保存时被丢弃，必须当场提示
-            error={
-              draft.fallback_models.length > FALLBACK_MODELS_CAP
-                ? t('已填 {{n}} 个，上限 {{cap}} 个：保存只保留前 {{cap}} 个', {
-                    n: draft.fallback_models.length,
-                    cap: FALLBACK_MODELS_CAP,
-                  })
-                : undefined
-            }
-            data-purge-fix="fallback-models"
-          />
-          <Input
-            label={t('异源触发轮次')}
-            type="number"
-            min={1}
-            max={32}
-            value={numRaw.fallback_trigger_attempt}
-            error={numErrors.fallback_trigger_attempt}
-            onChange={(event) => handleNumChange('fallback_trigger_attempt', event.target.value)}
-            onBlur={() => handleNumBlur(NUM_FIELDS[1])}
-            data-purge-fix="fallback-attempts"
-          />
-          <Input
-            label={t('重试上限')}
-            type="number"
-            min={1}
-            max={32}
-            value={numRaw.retry_limit}
-            error={numErrors.retry_limit}
-            onChange={(event) => handleNumChange('retry_limit', event.target.value)}
-            onBlur={() => handleNumBlur(NUM_FIELDS[2])}
-          />
-          <Input
-            label={t('system 剥离前缀（逗号分隔）')}
-            value={draft.normalize_strip_prefixes.join(', ')}
-            onChange={(event) => patch({ normalize_strip_prefixes: splitList(event.target.value) })}
-            error={capError(draft.normalize_strip_prefixes, LIST_CAP)}
-          />
-          <Select
-            label={t('降档目标（reasoning_floor）')}
-            hint={t('降思考开启后，把 high/medium/xhigh/max 压到该档位')}
-            value={draft.reasoning_floor}
-            onChange={(event) => patch({ reasoning_floor: event.target.value })}
-          >
-            {REASONING_FLOORS.map((item) => (
-              <option key={item.value} value={item.value}>
-                {t(item.label)}
-              </option>
-            ))}
-          </Select>
         </div>
-        <Textarea
-          label={t('拒绝话术词表（每行一条，空表 = 关闭字面拒绝检测）')}
-          rows={4}
-          value={(draft.refusal_patterns ?? []).join('\n')}
-          onChange={(event) => patch({ refusal_patterns: splitLines(event.target.value) })}
-          error={capError(draft.refusal_patterns, LIST_CAP)}
-        />
-        <div className="purge-form-grid">
-          <Textarea
-            label={t('「内容过滤」类失败关键词（每行一条）')}
-            rows={3}
-            value={(draft.failure_filter_keywords ?? []).join('\n')}
-            onChange={(event) => patch({ failure_filter_keywords: splitLines(event.target.value) })}
-            error={capError(draft.failure_filter_keywords, LIST_CAP)}
-          />
-          <Textarea
-            label={t('「空答」类失败关键词（每行一条）')}
-            rows={3}
-            value={(draft.failure_empty_keywords ?? []).join('\n')}
-            onChange={(event) => patch({ failure_empty_keywords: splitLines(event.target.value) })}
-            error={capError(draft.failure_empty_keywords, LIST_CAP)}
-          />
-        </div>
-        <Textarea
-          label={t('结构化输出后缀')}
-          rows={4}
-          value={draft.structured_suffix}
-          onChange={(event) => patch({ structured_suffix: event.target.value })}
-        />
       </Card>
       </SectionGuard>
 
       {/* 技能包导入：ZIP/TAR/TGZ 安全解压到技能目录（包内须含 SKILL.md） */}
-      <Card title={t('导入技能包')}>
+      <Card title={t('导入技能包')} data-purge-fix-hint="skill-import">
+        <span data-purge-fix="skill-import" />
         <p style={{ margin: '0 0 10px', fontSize: 13 }}>
           {t(
             '上传 ZIP / TAR / TGZ 技能包，安全解压到上面的「技能目录」。包内须含 SKILL.md；导入后会立即出现在技能快照。',
@@ -5511,6 +6037,18 @@ export default function PurgeConsole(): JSX.Element {
         </div>
       </Card>
 
+      {/* 新建技能（单文件）：骨架由后端按解析器契约生成，粘贴/上传的文本先经后端
+          解析回读校验，再写盘。这是「技能目录空的」最常用的一条解决路径——
+          只需一个名字，不必知道 frontmatter 的字段拼写。 */}
+      <SkillComposePanel
+        t={t}
+        addToast={addToast}
+        skillDirResolved={skillDirResolved}
+        skillDirExists={skillDirExists}
+        injectLimit={skillInjectLimitSnapshot}
+        onWritten={() => void refreshSkills()}
+      />
+
       {/* 技能扫描快照：让 skill_inject 配置可验证（目录里到底扫到了什么）。
           关键词可点：填进预览样例并滚到预览区——直接验证「这个词会不会命中」。
           **空目录也渲染**：以前 `skills.length > 0` 才显示，用户把 SKILL.md 放进
@@ -5527,11 +6065,14 @@ export default function PurgeConsole(): JSX.Element {
         {skillDirResolved ? (
           <p className="purge-hint" data-testid="purge-skill-dir-resolved">
             {t('实际扫描目录：{{dir}}', { dir: skillDirResolved })}
+            {skillDirExists === false ? ` ${t('（目录不存在）')}` : ''}
           </p>
         ) : null}
         {skills.length === 0 ? (
           <p className="purge-empty" data-purge-fix="skill-snapshot">
-            {t('当前技能目录扫不到任何 SKILL.md（技能注入不会生效）。放好文件后点「重新扫描」。')}
+            {t(
+              '当前技能目录扫不到任何 SKILL.md（技能注入不会生效）。用上面的「新建技能」写一份，或放好文件后点「重新扫描」。',
+            )}
           </p>
         ) : (
           <ul className="purge-skill-list" data-purge-fix="skill-snapshot">
@@ -5544,6 +6085,26 @@ export default function PurgeConsole(): JSX.Element {
                     chars: skill.body_chars,
                   })}
                 </span>
+                {/* 缺显式 keywords / 正文超上限：两条都在这里就地标出来，
+                    否则「注入了但没反应」只能靠猜 */}
+                {skill.has_keywords_key === false ? (
+                  <span
+                    className="purge-skill-meta"
+                    data-testid={`purge-skill-no-keywords-${skill.name}`}
+                    title={skill.path}
+                  >
+                    {t('缺 keywords 行')}
+                  </span>
+                ) : null}
+                {typeof skillInjectLimitSnapshot === 'number' &&
+                skill.body_chars > skillInjectLimitSnapshot ? (
+                  <span
+                    className="purge-skill-meta"
+                    data-testid={`purge-skill-over-limit-${skill.name}`}
+                  >
+                    {t('超注入上限 {{limit}}（会截断）', { limit: skillInjectLimitSnapshot })}
+                  </span>
+                ) : null}
                 <span className="purge-skill-keywords">
                   {skill.keywords.slice(0, 6).map((keyword) => (
                     <button
@@ -5570,6 +6131,27 @@ export default function PurgeConsole(): JSX.Element {
           </ul>
         )}
       </Card>
+      </PurgeGroupWrap>
+
+      {/* 预设库组：「一句话搞定」的核心——按模型自动套用 + 通用兜底 + 固定预设 id。
+          预设库浏览器本身在下面（浏览/应用/预览面板/最近用过 全保留）。 */}
+      <PurgeGroupWrap
+        id="preset"
+        t={t}
+        status={groupStatusText(groupCounts.get('preset') ?? 0, t)}
+        statusActive={(groupCounts.get('preset') ?? 0) > 0}
+      >
+        <Card title={t('按模型自动套用')}>
+          <div className="purge-form-grid">
+            <Input
+              label={t('固定套用预设 id')}
+              hint={t('留空 = 按模型自动匹配；名字对不上就不套，预设正文原样前插到 system 提示词')}
+              value={draft.auto_preset_id ?? ''}
+              onChange={(event) => patch({ auto_preset_id: event.target.value })}
+              data-purge-fix="auto-preset-id"
+            />
+          </div>
+        </Card>
 
       {/* 预设库：内置 prompt 集合浏览 + 一键落盘（放在结构化模板之上，应用后直接在下方看到结果） */}
       <span data-purge-fix="presets" />
@@ -5583,6 +6165,9 @@ export default function PurgeConsole(): JSX.Element {
         currentTemplates={draft?.structured_templates}
         existingSkills={skills}
         onSkillWritten={() => void refreshSkills()}
+        masterEnabled={Boolean(draft?.enabled)}
+        autoPresetOn={Boolean(draft?.auto_preset)}
+        defaultModelHint={mainModelSnapshot || data?.main_model}
         />
       </SectionGuard>
 
@@ -5661,11 +6246,14 @@ export default function PurgeConsole(): JSX.Element {
           </div>
         )}
       </Card>
+      </PurgeGroupWrap>
 
-      <Card
-        title={t('改写预览')}
+      <PurgeGroupWrap
+        id="preview"
+        t={t}
+        status={previewOut !== null ? t('有结果') : t('未试跑')}
+        statusActive={previewOut !== null}
         actions={
-          // 预览在最底部、摘要在最上面：改完词表想确认「现在到底哪些在生效」要滚十几屏
           <>
             {/* 改写结果是用户最想拿走的文本（贴群、对比、写进报告），此前只能手选 */}
             <Button
@@ -5688,6 +6276,7 @@ export default function PurgeConsole(): JSX.Element {
           </>
         }
       >
+      <Card title={t('改写预览')}>
         <span data-purge-fix="preview" />
         {/* 样例历史：点回填；右侧「删除 ×」单条移除，「清空」整表清掉。
             样例可能含敏感正文，历史必须可删（localStorage 会跨会话留存）。 */}
@@ -5877,12 +6466,17 @@ export default function PurgeConsole(): JSX.Element {
           </>
         ) : null}
       </Card>
+      </PurgeGroupWrap>
 
-      <div className="purge-actions">
+      </PurgeGroupProvider>
+
+      {/* 保存条：吸在页面底部（sticky）——页面再长也不用滚到底才能存 */}
+      <div className="purge-actions purge-savebar">
         {/* 保存态播报：按钮文案变化对读屏不可见，用 live region 显式播报 */}
         <span className="sr-only" role="status" aria-live="polite">
           {saving ? t('保存中…') : ''}
         </span>
+        {dirty ? <span className="purge-hint">{t('有未保存的修改')}</span> : null}
         <Button
           variant="primary"
           disabled={saving || !dirty}

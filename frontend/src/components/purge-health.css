@@ -1,0 +1,63 @@
+/* 配置体检面板：每条告警一行，右侧直接放「怎么修」。
+
+   严重级的颜色沿用 PurgeConsole.css 里的 `--warning-color` / `--danger-color`
+   令牌；这里只补「面板容器 + 修复后提示」两处，不重定义徽标色（避免两套口径）。 */
+
+.purge-health {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+}
+
+.purge-health-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* 每条告警：徽标 + 文案（可换行）+ 右侧动作按钮 */
+.purge-health .purge-warning-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 6px 0;
+  border-left-width: 3px;
+  border-left-style: solid;
+  border-left-color: transparent;
+  padding-left: 8px;
+}
+.purge-health .purge-warning-row.is-error {
+  border-left-color: var(--danger-color, #dc2626);
+}
+.purge-health .purge-warning-row.is-warn {
+  border-left-color: var(--warning-color, #d97706);
+}
+.purge-health .purge-warning-row.is-info {
+  border-left-color: var(--border-color);
+}
+
+/* 文案占满剩余宽度，按钮才会被推到右侧而不是挤在文字中间 */
+.purge-health-msg {
+  flex: 1 1 320px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 「已按建议修改」：跟在文案后的小标记（不是把行藏起来——真正判定在后端） */
+.purge-health-fixed {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px dashed var(--border-color);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
