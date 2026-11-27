@@ -197,6 +197,32 @@ export default function Settings() {
   useEffect(() => {
     if (searchParams.get('tab') === 'scheduled') navigate('/maintenance', { replace: true });
   }, [searchParams, navigate]);
+  // 已知历史 tab 值的重定向表：这些分类后来迁去了独立页/别的 tab，旧书签不该静默落到
+  // 「通用」——用户会得到「这个分类搬去哪了」的明确去向，而不是一个对不上的页面。
+  // account 由 App.tsx 的 SettingsRoute 处理（→/profile），这里不再重复。
+  useEffect(() => {
+    const want = searchParams.get('tab');
+    if (!want) return;
+    const legacy: Record<string, string> = {
+      billing: '/products?tab=billing',
+      limit: '/limit',
+      network: '/settings?tab=gateway',
+      'network-layer': '/settings?tab=gateway',
+    };
+    if (legacy[want]) {
+      navigate(legacy[want], { replace: true });
+      return;
+    }
+    // 非法 tab（手改 URL / 已被删除的历史值）：URL 与界面状态要对得上——
+    // 界面落到「通用」，URL 也替换成 ?tab=general，否则刷新/分享这条 URL 的人
+    // 看到的是通用面板、地址栏却还是个无效值。
+    if (!VALID_SETTINGS_TABS.has(want)) {
+      const next = new URLSearchParams(searchParams);
+      next.set('tab', 'general');
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, navigate]);
   const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
     const want = searchParams.get('tab');
     return want && VALID_SETTINGS_TABS.has(want) ? (want as SettingsTab) : 'general';
