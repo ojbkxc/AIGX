@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  Bot, Send, Square, ShieldAlert, Terminal, Eye, Brain,
+import { Link } from 'react-router-dom';
+import { Activity, Bot, Send, Square, ShieldAlert, Terminal, Eye, Brain,
   History, MessageSquarePlus, Trash2, Lock, Settings,
 } from 'lucide-react';
 import ModelPicker from '../components/ModelPicker';
@@ -24,9 +24,9 @@ import {
   toToolCallStates,
   type ToolAgentItem,
 } from '../components/chat/tool-steps';
-import { A2aAgentPanel } from './agent-a2a-panel';
+import { consumePurgeAiHandoff, touchedPurge, type PurgeAiStorage } from '../lib/purge-ai-bridge';
+import AgentOpsPanel from '../components/agent-ops-panel';
 import './Agent.css';
-import './agent-a2a.css';
 
 /** SSE 推的事件（后端 AgentEvent 序列化形状） */
 interface AgentEvent {
@@ -72,6 +72,36 @@ interface SessionItem {
 }
 
 
+/** 破甲 → AI 运维交接用的 sessionStorage 面（模块级常量：引用恒定，可安全进 effect 依赖） */
+const handoffStore: PurgeAiStorage = {
+  get: (k) => window.sessionStorage.getItem(k),
+  set: (k, v) => window.sessionStorage.setItem(k, v),
+  remove: (k) => window.sessionStorage.removeItem(k),
+};
+
+/** 右栏断点（与 Agent.css 的 `.agent-ops` 媒体查询同一数值；改一处必须同改另一处） */
+const OPS_NARROW_MQ = '(max-width: 1100px)';
+
+/**
+ * 窄屏判定：窄屏下右栏「运行信息」不再常驻，改为按钮打开的覆盖层抽屉。
+ * 与 SessionDrawer 的 `useIsNarrow` 同形态（监听断点变化，窗口拖动/旋转即时切换）。
+ */
+function useIsNarrowOps(): boolean {
+  const [narrow, setNarrow] = useState<boolean>(
+    () => typeof window !== 'undefined' && Boolean(window.matchMedia?.(OPS_NARROW_MQ).matches),
+  );
+  useEffect(() => {
+    // `matchMedia` 不是所有环境都有（jsdom 就没有）：缺了按「宽屏」处理——
+    // 宽屏分支只会多渲染一个面板，不会抛错把整页打成错误态。
+    const mq = window.matchMedia?.(OPS_NARROW_MQ);
+    if (!mq) return undefined;
+    const onChange = (): void => setNarrow(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  return narrow;
+}
+
 /**
  * Agent — AI 运维工作台（对齐 /chat 聊天页 + cc-haha 交互模式）。
  *
@@ -101,6 +131,8 @@ export default function Agent(): JSX.Element {
   const sessionIdRef = useRef<string | null>(null);
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
   const abortRef = useRef<AbortController | null>(null);
+  /** 本轮是否碰过破甲工具（流式期间写入 ref，收尾时转成 state 触发「去破甲控制台」入口） */
+  const purgeTouchedRef = useRef(false);
   const msgIdRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   /** 粘贴守卫（共享 hook）：大段内容粘贴瞬间禁用 Enter 发送 */
@@ -113,6 +145,9 @@ export default function Agent(): JSX.Element {
   const [drawerOpen, setDrawerOpen] = useState(false);
   /** 「助手设置」抽屉（迁自「系统设置 → 运维 → AI 助手」的 AgentSettingsPanel） */
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 右栏「运行信息」：桌面常驻，窄屏由输入区按钮打开覆盖层抽屉 */
+  const [opsOpen, setOpsOpen] = useState(false);
+  const opsNarrow = useIsNarrowOps();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   /** 审批卡遮罩误触提示：点遮罩只提示，不自动拒绝（审批必须显式选择） */
@@ -128,6 +163,21 @@ export default function Agent(): JSX.Element {
   const [agentChannel, setAgentChannel] = useState('');
   const [agentChannelName, setAgentChannelName] = useState('');
   const [channelModels, setChannelModels] = useState<string[]>([]);
+  /** 破甲控制台带过来的交接正文（「问 AI」按钮；一次性，读完即清） */
+  const [handoffPrompt, setHandoffPrompt] = useState('');
+  /** 本轮对话是否碰过破甲工具（决定要不要显示「去破甲控制台看结果」） */
+  const [purgeTouched, setPurgeTouched] = useState(false);
+
+  // 破甲 → AI 运维的一次性交接：挂载时取走（`consume` 读完即删，离开再回来不会重复填）。
+  // 放在 effect 里而不是 useState 惰性初值：惰性初值也会在 SSR/重挂时跑，而这里需要
+  // 「只取一次、并且真的把存储清掉」——惰性初值做不到后半句。
+  useEffect(() => {
+    const carried = consumePurgeAiHandoff(handoffStore);
+    if (carried) {
+      setInput(carried);
+      setHandoffPrompt(carried);
+    }
+  }, []);
 
   // 启动时取 Agent 配置：模型选择器初值（显式配置优先，空则用自动发现的生效模型）
   // + 工具标签表（后端 registry 的 label 单一来源）
@@ -332,6 +382,9 @@ export default function Agent(): JSX.Element {
     setBusy(true);
     setError('');
     setStreamPhase('thinking');
+    // 新一轮开始：上一轮「碰过破甲」的结论不能带到这一轮（入口是否显示要跟着本轮走）
+    purgeTouchedRef.current = false;
+    setPurgeTouched(false);
 
     let sid = sessionId;
     if (!sid) {
@@ -401,7 +454,14 @@ export default function Agent(): JSX.Element {
             // （此前是各 push 一行，读起来像流水账，且「这次成没成」要人眼在相邻
             // 两行之间拼）。
             const step = stepFromEvent(ev);
-            if (step) return { ...m, toolItems: appendStep(m.toolItems ?? [], step) };
+            if (step) {
+              // 「碰过破甲吗」只记 ref：流式期间每条事件都 setMessages，再多一次 setState
+              // 就是每事件一轮重渲染；收尾时统一转成 state。
+              if (step.kind === 'call' && touchedPurge([{ name: step.name, args: step.args }])) {
+                purgeTouchedRef.current = true;
+              }
+              return { ...m, toolItems: appendStep(m.toolItems ?? [], step) };
+            }
             return m;
           }),
         );
@@ -424,6 +484,10 @@ export default function Agent(): JSX.Element {
       )));
       setBusy(false);
       abortRef.current = null;
+      // 「本轮碰过破甲吗」：流式期间在事件回调里只置 ref（零重渲染），收尾时读一次
+      // 再落 state。判据在 `touchedPurge`（工具名 + `aigx_config_set` 的 key 参数），
+      // 不靠模型自述（它可能说「已调整破甲」而其实只读了一次）。
+      if (purgeTouchedRef.current) setPurgeTouched(true);
     }
   }, [input, busy, sessionId, model, role, effort, t, loadSessions, describeAgentError]);
 
@@ -456,11 +520,11 @@ export default function Agent(): JSX.Element {
 
   return (
     <div className="agent-page">
-      {/* A2A（Agent2API v3.5.1）Agent 页主体：客户端检测 + 配置管理分区。
-          结构、分区、字段顺序、按钮与文案、空态、交互形态全部照 A2A v3.5.1。 */}
-      <A2aAgentPanel />
-
-      {/* AIGX 独有项（待评审）：AI 运维对话工作台，保留不动 */}
+      {/* 页面只有一个主体：AI 运维对话工作台。
+          此前这里还挂着一整块 A2A 客户端检测面板（检测本机装了哪些 AI 编码客户端、
+          帮它们接入本网关）——那是「给外部客户端配网关」，与「用 AI 运维网关」无关，
+          已整体下架；腾出的右栏改挂 `AgentOpsPanel`（只读运行信息）。
+          布局：左会话抽屉 · 中对话流 · 右运行信息（窄屏右栏降级为抽屉）。 */}
       <div className="agent-shell">
       {/* 会话抽屉（共享 SessionDrawer：桌面侧栏 / 移动端覆盖层，删除带二次确认） */}
       <SessionDrawer
@@ -547,6 +611,60 @@ export default function Agent(): JSX.Element {
 
         {error && <div className="agent-error">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
 
+        {/* 破甲 → AI 运维的交接横幅：告诉用户「输入框里那段是破甲控制台的配置摘要」，
+            并给一条「不想问就清掉」的出口（否则用户会以为是不小心粘进来的东西）。
+            只在本次交接仍是输入框内容的主体时显示：用户改过或清空后自动收起。 */}
+        {handoffPrompt && input === handoffPrompt ? (
+          <div
+            className="agent-handoff-note"
+            role="status"
+            data-testid="agent-purge-handoff"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              maxWidth: '58rem', width: 'calc(100% - 32px)', alignSelf: 'center',
+              margin: '0 16px 8px', padding: '8px 12px',
+              border: '1px solid var(--border-color)', borderRadius: 12, fontSize: 13,
+              background: 'rgba(127, 127, 127, 0.06)',
+            }}
+          >
+            <span>
+              {t('输入框里是「破甲控制台」的当前配置摘要（未保存的改动已标注）。发送后 AI 会先体检再给方案，写操作仍需你在审批卡上确认。')}
+            </span>
+            <button
+              type="button"
+              onClick={() => { setInput(''); setHandoffPrompt(''); }}
+              style={{
+                marginLeft: 'auto', border: 'none', background: 'transparent',
+                color: 'inherit', cursor: 'pointer', fontSize: 13, textDecoration: 'underline',
+              }}
+            >
+              {t('清掉')}
+            </button>
+          </div>
+        ) : null}
+
+        {/* AI → 破甲的回跳入口：本轮 AI 真的动过破甲（工具轨迹判据，不看模型自述），
+            才显示「去破甲控制台看结果」——没动过就显示等于噪音。 */}
+        {purgeTouched ? (
+          <div
+            className="agent-purge-link"
+            role="status"
+            data-testid="agent-purge-link"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              maxWidth: '58rem', width: 'calc(100% - 32px)', alignSelf: 'center',
+              margin: '0 16px 8px', padding: '8px 12px',
+              border: '1px solid var(--border-color)', borderRadius: 12, fontSize: 13,
+              background: 'rgba(127, 127, 127, 0.06)',
+            }}
+          >
+            <span>{t('本轮 AI 动过破甲配置（改完记得去页面核对生效项与体检）')}</span>
+            <Link to="/purge" style={{ marginLeft: 'auto', textDecoration: 'underline', color: 'inherit' }}>
+              {t('去破甲控制台看结果')}
+            </Link>
+          </div>
+        ) : null}
+
         {/* open-webui 式三段式圆角大输入框（对齐聊天页 chat-debugger-input-*） */}
         <div className="agent-input-row">
           <div className="agent-input-shell">
@@ -610,6 +728,18 @@ export default function Agent(): JSX.Element {
                 >
                   <Settings size={15} />
                 </button>
+                {/* 窄屏才有：右栏「运行信息」降级为覆盖层，用这个按钮打开 */}
+                {opsNarrow && (
+                  <button
+                    type="button"
+                    className="agent-icon-btn"
+                    title={t('运行信息')}
+                    aria-label={t('运行信息')}
+                    onClick={() => setOpsOpen(true)}
+                  >
+                    <Activity size={15} />
+                  </button>
+                )}
                 <button
                   type="button"
                   className="agent-icon-btn"
@@ -661,6 +791,22 @@ export default function Agent(): JSX.Element {
           </div>
         </div>
       </div>
+
+      {/* 右栏「运行信息」（只读运维观测面）：桌面常驻；窄屏改由输入区按钮打开覆盖层。
+          内容全部来自已有管理员接口（/api/purge runtime、/api/channels、/api/logs/requests），
+          不新增后端面；取数失败只影响本栏，不牵连对话主流程。 */}
+      {opsNarrow ? (
+        <MobileDrawer
+          open={opsOpen}
+          onClose={() => setOpsOpen(false)}
+          width="min(88vw, 380px)"
+          ariaLabel={t('运行信息')}
+        >
+          <AgentOpsPanel onClose={() => setOpsOpen(false)} />
+        </MobileDrawer>
+      ) : (
+        <AgentOpsPanel />
+      )}
 
       {/* 审批弹卡（cc-haha PermissionDialog 语义：标题/工具/参数/三态选择） */}
       {pending && (

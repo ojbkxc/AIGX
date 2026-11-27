@@ -5,6 +5,21 @@
  * 设计令牌全部走全局 App.css 的变量名（--accent-color/--border-color/
  * --text-main/--text-muted/--hover-bg/--card-bg/--surface-bg），暗色主题自动适配。 */
 
+/* ── 页面外壳 ─────────────────────────────────────────────────────────
+ * 此前这条规则住在已下架的「A2A 客户端配置面」那份样式文件里（`12f0a5b1` 把
+ * 该面板挂到本页时为「不改他人交付面」另开的文件）。面板整体下架、那份 CSS
+ * 随之删除，页面仍需要这个外壳，故迁回本文件 —— 类名与取值逐字保留，避免布局漂移。
+ * 纵向排列由本容器负责；`.agent-shell` 自身的 flex-row 布局不变。 */
+.agent-page {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
 .agent-shell {
   width: 100%;
   height: 100%;
@@ -927,6 +942,317 @@
 
 .agent-approval-once:hover {
   transform: scale(1.02);
+}
+
+/* ── 右栏：运行信息（只读运维观测面，`components/agent-ops-panel.tsx`）──
+ * 与消息流并列的第三列：会话抽屉(260) · 消息流(flex:1) · 运行信息(300)。
+ * 窄屏（≤1100px，与 Agent.tsx 的 OPS_NARROW_MQ 同一数值）本栏不常驻，
+ * 改由输入区的图标按钮打开 MobileDrawer 覆盖层；两层样式共用本组类名。 */
+.agent-ops {
+  flex: 0 0 300px;
+  width: 300px;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-color);
+  background: var(--surface-bg, var(--bg-color));
+  overflow: hidden;
+}
+
+.agent-ops-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.agent-ops-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.agent-ops-bar-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.agent-ops-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.agent-ops-icon-btn:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text-main);
+}
+
+.agent-ops-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 刷新时的旋转：只转图标，不转按钮盒 */
+.agent-ops-icon-btn .is-spinning {
+  animation: agent-ops-spin 0.9s linear infinite;
+}
+
+@keyframes agent-ops-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.agent-ops-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agent-ops-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.agent-ops-sec:first-child {
+  border-top: none;
+  padding-top: 4px;
+}
+
+.agent-ops-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-ops-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+/* 键值对：左标签右值，值超宽截断（不撑破 300px 栏） */
+.agent-ops-kv {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 10px;
+  font-size: 12.5px;
+}
+
+.agent-ops-kv > div {
+  display: contents;
+}
+
+.agent-ops-kv dt {
+  margin: 0;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-ops-kv dd {
+  margin: 0;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* 供应商活跃数：大数字 + 小注释 */
+.agent-ops-count {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.agent-ops-count-main {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.agent-ops-count-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.agent-ops-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-ops-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-bg);
+  min-width: 0;
+}
+
+.agent-ops-row.is-bad {
+  border-color: color-mix(in srgb, var(--danger-color, #d44) 45%, var(--border-color));
+}
+
+.agent-ops-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-ops-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-ops-model {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-ops-code {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--hover-bg);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-ops-row.is-bad .agent-ops-code {
+  color: var(--danger-color, #d44);
+}
+
+.agent-ops-lat {
+  margin-left: auto;
+}
+
+.agent-ops-err {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-ops-empty,
+.agent-ops-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 2px 0;
+}
+
+.agent-ops-empty.ok {
+  color: var(--accent-color, #2f6fed);
+}
+
+.agent-ops-note {
+  padding: 10px 12px 0;
+}
+
+.agent-ops-note.error {
+  color: var(--danger-color, #d44);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-ops-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-color, #2f6fed);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* 窄屏：右栏退场（改由 MobileDrawer 承载同一组件，宽度由抽屉给） */
+@media (max-width: 1100px) {
+  .agent-ops {
+    display: none;
+  }
+
+  /* 抽屉里的面板要撑满抽屉宽度，不能再钉 300px */
+  .mobile-drawer .agent-ops {
+    display: flex;
+    flex: 1 1 auto;
+    width: 100%;
+    height: 100%;
+    border-left: none;
+  }
+}
+
+/* ── 设置面板内的对齐分区（`components/AgentSettingsPanel.tsx` 在用）──
+ * 这两条原本住在已删除的那份 A2A 样式文件的「设置面板内的对齐分区」段。
+ * 面板下架后那份 CSS 删除，但 `AgentSettingsPanel` 仍挂着这两个类名（它不在本次
+ * 删除面内），所以原样迁到这里——取值逐字保留，避免抽屉里的分区框突然消失。 */
+.a2a-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--surface-bg, var(--bg-color));
+}
+
+.a2a-settings-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
 }
 
 /* ── 响应式 ── */
