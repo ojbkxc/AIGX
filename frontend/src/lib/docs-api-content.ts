@@ -1032,36 +1032,49 @@ export AIGX_KEY="sk-xxx"`,
         {
           name: 'GET /api/web-search',
           type: '元数据（免鉴权）',
-          description: '返回该网关支持的工具与版本信息，便于客户端自发现。',
+          description: '返回该网关当前的工具服务开关与端点地址，便于客户端自发现。',
         },
         {
-          name: 'POST /api/web-search/search',
-          type: '批量搜索',
-          description: '按上游协议提交查询；账号型搜索遵守 Key 的提供商白名单。',
+          name: 'POST /api/web-search/search · POST /skill/web-search/search',
+          type: '{ "queries": string[] }',
+          description: '批量搜索：queries 是要搜的查询数组（不是单个 query 字符串）。账号型搜索遵守该 Key 的提供商白名单。',
         },
         {
-          name: 'POST /api/web-search/fetch',
-          type: '批量抓取',
-          description: '抓取给定 URL 的正文；只接受公网地址，本机/内网/重定向到内网一律拒绝。',
+          name: 'POST /api/web-search/fetch · POST /skill/web-search/fetch',
+          type: '{ "urls": string[] }',
+          description: '批量抓取：urls 是目标地址数组。只接受公网地址；本机 / 内网 / 跳到内网的重定向一律拒绝（抓取侧不跟随重定向）。',
         },
         {
           name: 'POST /mcp/web-search · POST /mcp/vision',
-          type: 'MCP（Streamable HTTP）',
-          description: '按 MCP 协议做 JSON-RPC 交互；vision 提供图片理解工具。',
+          type: 'JSON-RPC 2.0（MCP Streamable HTTP）',
+          description: 'MCP 形态：请求体必须是 JSON-RPC 2.0 消息（否则 -32700）；vision 的图片请求单次 ≤16 MiB 且不接受批量提交。',
+        },
+        {
+          name: 'skill_service_disabled / api_service_disabled',
+          type: '错误码',
+          description: '管理员关闭了「工具服务」（Skill 面 / REST 面各自独立开关）时返回；与 Key 无关，先把服务打开。',
         },
       ],
       points: [
         '工具服务与管理面 `/api/tools*` 是两回事：后者要管理员会话，用于配置与连通性测试。',
-        '页面上的「工具服务」开关决定这些端点是否可用；关闭后调它们会被拒。',
+        '页面上的「工具服务」开关决定这些端点是否可用；关闭后调它们会被拒（错误码见上）。',
+        '抓取关闭自动重定向是安全设计：「公网白名单」只校验初始地址，跟随重定向会让 public.example 跳到 127.0.0.1 绕过检查。',
       ],
       examples: [
         ex('读取工具元数据（免鉴权）', `curl "${base}/api/web-search"`),
         ex(
-          '一次搜索调用',
+          '一次批量搜索',
           `curl -X POST "${base}/api/web-search/search" \\
   -H "Authorization: Bearer sk-xxx" \\
   -H "Content-Type: application/json" \\
   -d '{"queries":["AIGX 网关"]}'`,
+        ),
+        ex(
+          '一次批量抓取',
+          `curl -X POST "${base}/api/web-search/fetch" \\
+  -H "Authorization: Bearer sk-xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"urls":["https://example.com/docs"]}'`,
         ),
       ],
     },
