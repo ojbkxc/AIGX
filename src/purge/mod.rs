@@ -2078,19 +2078,28 @@ fn skill_dir_warnings(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
         return warnings;
     }
 
-    // 缺显式 keywords：关键词只能从 name/description 派生，绝大多数情况下
-    // 只剩「技能名」一个词能命中——用户会觉得「明明注入了却没反应」。
-    let no_keywords: Vec<&str> = entries
+    // **有效关键词不足**（判据是「够不够用」，不是「有没有那行」）。
+    //
+    // 旧实现查 `!entry.has_keywords_key`，只回答「frontmatter 里有没有这个键」。
+    // 而骨架现在**永远**输出 `keywords:` 行（为空值），于是 `has_keywords_key`
+    // 恒真 → 这条告警直接失效，用户看到「体检零告警」但消息里说「帮我做报表」
+    // 依然 `skill_hit=false`（关键词只有 name 一个词）。
+    // 「杀了告警、没修功能」比留着告警更坏 —— 它让人以为已经配好了。
+    //
+    // 真判据：解析出来的关键词里，除了 name 那一个词之外还有没有别的。
+    // 与 `skill_keyword_short` 分工：那条查「全是单字符」（命中面过宽），
+    // 这条查「只剩 name」（命中面过窄）。
+    let too_narrow: Vec<&str> = entries
         .iter()
-        .filter(|entry| !entry.has_keywords_key)
+        .filter(|entry| entry.keywords.len() <= 1)
         .map(|entry| entry.name.as_str())
         .collect();
-    if !no_keywords.is_empty() {
+    if !too_narrow.is_empty() {
         warnings.push(ConfigWarning {
             code: "skill_no_keywords",
             message: format!(
-                "这些技能的 frontmatter 缺 `keywords:` 行（只能靠 name/description 派生关键词，命中面很窄）：{}。在 frontmatter 里补一行 `keywords: 词1, 词2` 即可。",
-                no_keywords.iter().take(3).copied().collect::<Vec<_>>().join("、")
+                "这些技能没有可用关键词（只剩技能名一个词，消息里必须逐字出现它才会命中，实际几乎不会触发）：{}。在 frontmatter 的 `keywords:` 行补几个业务词（如 `报表, 对账, 月结`），或写进 description。",
+                too_narrow.iter().take(3).copied().collect::<Vec<_>>().join("、")
             ),
         });
     }
@@ -4046,6 +4055,68 @@ mod tests {
         let codes = warning_codes(&cfg);
         assert!(!codes.contains(&"skill_no_keywords"), "{codes:?}");
         assert!(!codes.contains(&"skill_body_over_limit"), "{codes:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `keywords:` 行**存在但为空**时，仍然要报 `skill_no_keywords`。
+    ///
+    /// 线上实测形态（骨架永远输出 `keywords:` 行之后）：
+    /// ```text
+    /// ---
+    /// name: report-guide
+    /// keywords:
+    /// ---
+    /// ```
+    /// `has_keywords_key == true` → 旧判据（只查「有没有这行」）直接放行 →
+    /// 体检零告警，而消息里说「帮我做份报表，要月结对账口径」时 `skill_hit ==
+    /// false`（关键词只剩 name 一个词）。这就是「杀了告警、没修功能」。
+    ///
+    /// 新判据看「解析出的关键词够不够用」（`len() <= 1` 即只有 name）。
+    #[test]
+    fn warns_skill_with_empty_keywords_line() {
+        let dir = fresh_skill_root("empty-kw");
+        std::fs::create_dir_all(dir.join("empty-kw")).unwrap();
+        std::fs::write(
+            dir.join("empty-kw/SKILL.md"),
+            "---\nname: empty-kw\nkeywords: \n---\n正文内容",
+        )
+        .unwrap();
+
+        let cfg = enabled_with_skills(&dir);
+
+        // 前提：这一行确实**存在**（否则测的成了「缺行」那条用例）
+        let full = skill_doc_briefs_with(&cfg.skill_dir, true);
+        let hit = full
+            .iter()
+            .find(|e| e.name == "empty-kw")
+            .expect("必须扫到该技能");
+        assert!(hit.has_keywords_key, "前提：keywords 行存在（值为空）");
+        assert!(
+            hit.keywords.len() <= 1,
+            "前提：关键词只剩 name 一个词，实际 {:?}",
+            hit.keywords
+        );
+
+        // 判据：空行也必须报（旧判据看 has_keywords_key=true 会放行）
+        let codes = warning_codes(&cfg);
+        assert!(
+            codes.contains(&"skill_no_keywords"),
+            "空 keywords 行必须报 skill_no_keywords（旧判据会漏）：{codes:?}"
+        );
+
+        // 正向对照：填上真关键词 → 立刻不报
+        std::fs::write(
+            dir.join("empty-kw/SKILL.md"),
+            "---\nname: empty-kw\nkeywords: 报表, 对账, 月结\n---\n正文内容",
+        )
+        .unwrap();
+        skill_briefs_with(&cfg.skill_dir, true);
+        let codes2 = warning_codes(&cfg);
+        assert!(
+            !codes2.contains(&"skill_no_keywords"),
+            "填上关键词后不该再报：{codes2:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
