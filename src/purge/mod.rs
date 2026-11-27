@@ -4236,6 +4236,14 @@ mod tests {
 
         // 删掉文件 → 同样立刻反映
         std::fs::remove_file(dir.join("one/SKILL.md")).unwrap();
+        // 诊断：删除后目录数没变（文件删除不改变目录数），需要看文件条目状态
+        eprintln!(
+            "DIAG3 after_delete count_dirs_now={} files_left={}",
+            std::fs::read_dir(&root)
+                .map(|r| count_dirs(r))
+                .unwrap_or(usize::MAX),
+            std::fs::read_dir(dir.join("one")).map(|_| 1).unwrap_or(0)
+        );
         assert!(
             skill_doc_briefs_with(&root, false).is_empty(),
             "删除文件也必须被指纹抓到"
