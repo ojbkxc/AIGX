@@ -181,6 +181,9 @@ pub(super) fn tools() -> Vec<ToolDef> {
                         "route-sticky" => {
                             let body = admin::routing::RouteStickyClearRequest {
                                 id: a.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                                // 与 HTTP 端点同一档位（A2A `{id?, model?, all?}`）：
+                                // Agent 走这条通道时也能按模型清，不必自己数 id。
+                                model: a.get("model").and_then(|v| v.as_str()).map(str::to_string),
                                 all: a.get("all").and_then(|v| v.as_bool()),
                             };
                             out(admin::handle_clear_route_sticky(
@@ -254,7 +257,8 @@ fn traffic_clear_schema() -> Value {
         "properties": {
             "action": { "type": "string", "enum": ["debug-traffic", "route-sticky"],
                 "description": "debug-traffic=清空上游原始报文环形缓冲；route-sticky=解除会话粘滞路由" },
-            "id": { "type": "string", "description": "route-sticky：要解除的粘滞 id（留空 + all=true = 全部解除）" },
+            "id": { "type": "string", "description": "route-sticky：要解除的粘滞 id（与 model/all 三选一）" },
+            "model": { "type": "string", "description": "route-sticky：按模型解除该模型的全部粘滞（与 id/all 三选一）" },
             "all": { "type": "boolean", "description": "route-sticky：是否解除全部（默认 false）" }
         },
         "required": ["action"]

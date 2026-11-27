@@ -2078,22 +2078,36 @@ export interface RoutingPolicyItem {
   };
 }
 
-/** 路由队列预演条目（GET /api/routing/queue；对照 Agent2API「设置 → 路由 → 候选队列」） */
+/**
+ * 路由队列预演条目（GET /api/routing/queue；对照 Agent2API「设置 → 路由 → 候选队列」）。
+ *
+ * 与 A2A `routing-types.ts::RouteEntry` 逐字段对照：`id / name / provider /
+ * providerLabel / state / reason / priority` 齐；A2A 的 `candidateId` /
+ * `memberId` / `model` / `resetAt` 是**账号级**候选才有的字段 —— AIGX 的候选是
+ * 渠道级（账号身份在选号时才确定），故不下发、这里也不声明（不伪造）。
+ */
 export interface RoutingQueueEntryItem {
   id: string;
   name: string;
   provider: string;
+  /** 提供商展示名（A2A 同名；缺省 = 旧后端，界面回落 `provider`） */
+  providerLabel?: string;
   /** 断路器状态：closed / open / halfopen */
   state: string;
-  /** 仅 blocked 条目携带：被挡原因（断路器打开 / 半开试探 / 冷却中或未声明该模型） */
+  /** 被挡原因（断路器打开 / 半开试探 / 冷却中或未声明该模型）；参与候选为「参与候选」 */
   reason?: string;
+  /** 渠道优先级（排序的第一顺位依据，A2A 同名） */
+  priority?: number;
 }
 
 /** 路由队列预演结果（GET /api/routing/queue?model=xxx；只读预演，不推进轮询游标） */
 export interface RoutingQueueItem {
   strategy: RouteStrategy;
   sticky: StickyMode;
-  model: string;
+  /** 点名的模型；`null` = 不限模型的全局队列（A2A 同语义：省略 model 时展开全部） */
+  model: string | null;
+  /** 点名了模型但没有任何渠道声明它（A2A 同名；界面据此提示而不是展示空队列） */
+  modelKnown?: boolean;
   /** 静态排序后的首选渠道 id（round_robin 下实际首挑由游标决定，见界面提示） */
   pickedId: string | null;
   ordered: RoutingQueueEntryItem[];

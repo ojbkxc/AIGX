@@ -453,7 +453,10 @@ fn profile_json(profile: &ResolvedProfile) -> Value {
 ///
 /// 空 id **先短路**：`registry::find("")` 会回落默认 kind（openai），把
 /// 「无归因」错标成 OpenAI（前端会显示出一个不存在的供应商）。
-fn provider_label(id: &str) -> String {
+///
+/// `pub(crate)`：`api/admin/routing.rs` 的队列/预演投影复用它（A2A 同名字段
+/// `providerLabel`），避免同一件「协议域 → 人话」的映射出现第二份实现。
+pub(crate) fn provider_label(id: &str) -> String {
     if id.trim().is_empty() {
         return String::new();
     }

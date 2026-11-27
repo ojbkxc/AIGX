@@ -449,10 +449,14 @@ export const endpoints = {
       'GET',
       `${API_BASE}/routing/sticky${query ? `?query=${encodeURIComponent(query)}` : ''}`,
     ),
-  // 清除口径：id = 列表原样回传的内部编码（session\u{1f}model）；all: true 全清。
-  // 二者至少给一个，否则后端 400。
+  // 清除口径（对齐 A2A `POST /api/routing/sticky/clear` 的三档 `{id?, model?, all?}`）：
+  //   id    = 列表原样回传的内部编码（session\u{1f}model）
+  //   model = 只清该模型的全部粘滞（排障「换一个模型试试」）
+  //   all   = 全清
+  // 三者至少给一个，否则后端 400。
   clearRouteSticky: (body: {
     id?: string;
+    model?: string;
     all?: boolean;
   }): Promise<ApiResponse<{ cleared: number }>> =>
     request<ApiResponse<{ cleared: number }>>('POST', `${API_BASE}/routing/sticky/clear`, body),

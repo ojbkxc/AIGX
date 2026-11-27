@@ -6070,5 +6070,13 @@
   "当前模型会套预设：{{model}} → {{id}}": "Current model gets a preset: {{model}} → {{id}}",
   "命中了预设「{{id}}」但正文为空，不会前插": "Preset \"{{id}}\" matched but its body is empty, so nothing is prepended",
   "当前模型 {{model}} 没有可套的预设": "Current model {{model}} has no preset to apply",
-  "校验": "Check"
+  "校验": "Check",
+  "展开所有组": "Expand all groups",
+  "收起所有组": "Collapse all groups",
+  "「{{model}}」的下一条请求都会重新按策略选路（上游上下文缓存失效）。确认清除？": "[TODO en] 「{{model}}」的下一条请求都会重新按策略选路（上游上下文缓存失效）。确认清除？",
+  "当前只显示 {{model}}": "[TODO en] 当前只显示 {{model}}",
+  "该模型当前没有粘滞会话": "[TODO en] 该模型当前没有粘滞会话",
+  "清除该模型的全部粘滞会话": "[TODO en] 清除该模型的全部粘滞会话",
+  "清除该模型全部": "[TODO en] 清除该模型全部",
+  "粘滞模型": "[TODO en] 粘滞模型"
 }

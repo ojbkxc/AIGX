@@ -138,12 +138,33 @@ function toMillis(v: number | undefined): number | null {
   return v < 1e11 ? v * 1000 : v;
 }
 
+/** 只认有限数字（日志/在途表的字段是 unknown，不做隐式转换） */
+function replayNum(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * 回放行的「账号 / 提供商」格文本（对齐 A2A `traceProvider` 的 `providerLabel` 优先）。
+ *
+ * A2A 显示 `provider · accountName`；AIGX 的请求日志只有渠道维度（`RequestLog`
+ * 无 account_id），所以这一格显示 `channel_name` —— 管理员视角原样下发
+ * （`api/admin/logs.rs` 的 admin 分支不剥离），名字比 `#id` 可读；
+ * 没有名字才回落 `provider` → `#channel_id`。**不编造账号名。**
+ */
+function replayChannelText(row: Record<string, unknown>): string | undefined {
+  if (typeof row.channel_name === 'string' && row.channel_name.trim()) return row.channel_name;
+  if (typeof row.provider === 'string' && row.provider.trim()) return row.provider;
+  return row.channel_id != null ? `#${String(row.channel_id)}` : undefined;
+}
+
 /**
  * 回放左栏的行形状（列集照 A2A routing-request-list 的 ReplayRow 落地）。
  *
  * 数据来自 `/request-logs`：能取到 model / status_code / latency_ms / created_at /
- * channel_id / request_id；**取不到** A2A 的 accountName 与「在途」标记，这两格
- * 先按占位渲染（不伪造数据），缺口在交付清单里点名。
+ * channel_id / channel_name / request_id；「仅在途」档走 `/logs/inflight`
+ * （同一列结构 + `running` 标记）。**取不到** A2A 的 accountId/accountName
+ * （AIGX 的 RequestLog 没有账号维度，只有渠道）—— 该格显示渠道名，
+ * 缺口在交付清单里点名。
  */
 interface ReplayLogRow {
   /** 内部 id（回放明细端点按它查） */
@@ -154,9 +175,9 @@ interface ReplayLogRow {
   latency_ms?: number;
   created_at?: number;
   channel_id?: string;
-  /** A2A 行内的账号/提供商格；AIGX 日志只有 channel_id，据此占位 */
+  /** A2A 行内的账号/提供商格：优先 `channel_name`，回落 `#channel_id` */
   provider?: string;
-  /** A2A 行内的「在途」判据；AIGX 日志无在途标记（见交付清单） */
+  /** 在途标记（`仅在途` 档的行）：A2A 的 `scope=running` 同一语义 */
   running?: boolean;
 }
 
@@ -186,9 +207,33 @@ export default function Routing(): JSX.Element {
   const [replayModel, setReplayModel] = useState('');
   const [replayStatus, setReplayStatus] = useState('');
   const [replayMinutes, setReplayMinutes] = useState<number>(0);
+  /**
+   * 「仅在途」档（对齐 A2A `routing-request-list.tsx` 的 `scope: running`）。
+   *
+   * A2A 的该档查的是 `/routing/flow?scope=running`（进程内在途表）；AIGX 的
+   * 回放左栏走的是自己的请求日志归档（历史），在途不在那份归档里 —— 故这里
+   * 用同一语义的 `/api/logs/inflight`（管理面既有的在途表，日志页「终止」按钮
+   * 的数据源），渲染成同一列结构并标「在途」。
+   *
+   * 为什么不是把数据源整体换成 `/routing/flow`：那份端点只覆盖 5/10/30/60 分钟
+   * 窗口，而本仓日志是**历史归档**（有「全部时间」档），换过去会丢掉长历史；
+   * 差异记在交付清单里，语义（在途 / 已完成、同一列结构）两边一致。
+   */
+  const [replayRunningOnly, setReplayRunningOnly] = useState(false);
   const [replayPage, setReplayPage] = useState(0);
   const [replayMatched, setReplayMatched] = useState(0);
   const [replayLoading, setReplayLoading] = useState(false);
+  /**
+   * 回放静默轮询的节拍（对齐 A2A 的 3s 定时器）：每跳一次让列表 effect 重跑。
+   *
+   * 单独一个 state 而不是在 effect 里 `setInterval` 直接调请求函数：列表
+   * 请求的依赖（筛选/分页）有六个，把定时器塞进同一个 effect 会在每次筛选
+   * 变化时重建定时器，且失败重试的时序会和筛选变化纠缠。这里只让节拍号当
+   * 一个额外依赖 —— 语义仍是「同样的筛选，再读一次」。
+   */
+  const [replayTick, setReplayTick] = useState(0);
+  /** 已被列表 effect 消费的节拍号（判「这次重跑是轮询还是筛选变化」） */
+  const replayTickRef = useRef(0);
   const [replayError, setReplayError] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -277,10 +322,44 @@ export default function Routing(): JSX.Element {
   useEffect(() => {
     if (mode !== 'replay') return undefined;
     let alive = true;
-    setReplayLoading(true);
+    /**
+     * 静默重读：`replayTick` 只在**轮询**触发时变，所以「这次 effect 是不是
+     * 轮询引起的」可由「节拍号是否已被消费」判定 —— 轮询不亮加载态
+     * （A2A 的 3s 定时器同样是静默刷新），否则列表每 3 秒闪一次「读取中…」。
+     */
+    const polled = replayTickRef.current !== replayTick;
+    if (polled) replayTickRef.current = replayTick;
+    if (!polled) setReplayLoading(true);
     setReplayError('');
     void (async () => {
       try {
+        // 「仅在途」档走在途表（A2A 同一档位语义：还没落终态的请求）。
+        // 在途表后端只提供全量列表，筛选在前端做（条数天然很少：进程内正在跑的）。
+        if (replayRunningOnly) {
+          const res = await api.listInflightRequests();
+          if (!alive) return;
+          const inflight = (res?.data ?? []) as unknown as Array<Record<string, unknown>>;
+          const all: ReplayLogRow[] = inflight
+            .map((row) => ({
+              id: String(row.id ?? ''),
+              request_id: typeof row.request_id === 'string' ? row.request_id : undefined,
+              model: typeof row.model === 'string' ? row.model : undefined,
+              // 在途没有终态状态码：0 = 未定论（与日志的 `未记录` 同一口径）
+              status_code: 0,
+              latency_ms: replayNum(row.elapsed_ms),
+              // 在途表的时刻是 unix 秒；列结构同日志行（ms 由 toMillis 适配）
+              created_at: replayNum(row.started_at),
+              channel_id: row.channel_id != null ? String(row.channel_id) : undefined,
+              provider: replayChannelText(row),
+              running: true,
+            }))
+            .filter((x) => x.id)
+            .filter((x) => !replayModel || x.model === replayModel)
+            .filter((x) => !replaySearch.trim() || `${x.model ?? ''} ${x.id} ${x.request_id ?? ''} ${x.provider ?? ''}`.includes(replaySearch.trim()));
+          setReplayRows(all);
+          setReplayMatched(all.length);
+          return;
+        }
         const params: Record<string, string | number> = {
           page: replayPage + 1,
           size: REPLAY_PAGE_SIZE,
@@ -294,20 +373,17 @@ export default function Routing(): JSX.Element {
         const res = await api.listRequestLogs(params);
         if (!alive) return;
         const rows: ReplayLogRow[] = (res?.data ?? [])
-          .map((r) => {
-            const row = r as Record<string, unknown>;
-            const num = (v: unknown): number | undefined =>
-              typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+          .map((raw) => {
+            const row = raw as Record<string, unknown>;
             return {
               id: String(row.id ?? row.request_id ?? ''),
               request_id: typeof row.request_id === 'string' ? row.request_id : undefined,
               model: typeof row.model === 'string' ? row.model : undefined,
-              status_code: num(row.status_code),
-              latency_ms: num(row.latency_ms),
-              created_at: num(row.created_at),
+              status_code: replayNum(row.status_code),
+              latency_ms: replayNum(row.latency_ms),
+              created_at: replayNum(row.created_at),
               channel_id: row.channel_id != null ? String(row.channel_id) : undefined,
-              // A2A 行内还有账号名/提供商名；日志里只有 channel_id，先占位（交付清单）
-              provider: row.channel_id != null ? `#${String(row.channel_id)}` : undefined,
+              provider: replayChannelText(row),
             };
           })
           .filter((x) => x.id);
@@ -320,7 +396,37 @@ export default function Routing(): JSX.Element {
       }
     })();
     return () => { alive = false; };
-  }, [mode, replayPage, replaySearch, replayModel, replayStatus, replayMinutes]);
+  }, [mode, replayPage, replaySearch, replayModel, replayStatus, replayMinutes, replayRunningOnly, replayTick]);
+
+  /**
+   * 进入回放模式后自动选中最新一条（对齐 A2A `routing-request-list.tsx`：
+   * `!selectedKey && entries.length → onOpenRequest(entries[0])`）。
+   *
+   * 为什么要有：右栏在没选中时只显示一句「选择左侧请求查看选路过程」——
+   * 而「打开回放」的人几乎总是先看最近一次，让他在空态里再点一下是白跑的
+   * 一步（A2A 已经把它省掉）。
+   */
+  useEffect(() => {
+    if (mode !== 'replay' || replayId || replayLoading) return;
+    if (!replayRows.length) return;
+    setReplayId(replayRows[0].id);
+  }, [mode, replayId, replayLoading, replayRows]);
+
+  /**
+   * 回放的静默轮询（对齐 A2A 的两个 3s/5s 定时器：列表 3s、模型候选 5s）。
+   *
+   * 只在回放模式、页面可见时打；`replayPage`/筛选不变就原地刷新 —— 这样
+   * 「正在跑的请求」跑完会自己变成终态，而不用手动点刷新。
+   * 依赖里放 `replayRunningOnly` 等筛选：换筛选立刻停旧轮询（effect 重跑）。
+   */
+  useEffect(() => {
+    if (mode !== 'replay') return undefined;
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      setReplayTick((n) => n + 1);
+    }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [mode]);
 
   /** 总开关：PUT /api/routing 是读-改-写，只传 enabled 不碰其他字段 */
   const toggleEnabled = async (next: boolean): Promise<void> => {
@@ -1113,18 +1219,38 @@ export default function Routing(): JSX.Element {
             <input
               type="checkbox"
               checked={replayStatus === 'error'}
+              disabled={replayRunningOnly}
               onChange={(e) => { setReplayStatus(e.target.checked ? 'error' : ''); setReplayPage(0); }}
             />
             <span>{t('仅失败')}</span>
+          </label>
+          {/*
+            「仅在途」（对齐 A2A routing-request-list 的 `Switch「仅在途」`）：
+            在途 = 还没落终态的请求，与「仅失败」互斥（同一行不可能既在途又失败）。
+            开时另一个置灰，避免出现「两个都开 = 空列表」的死组合。
+          */}
+          <label className="rt-replay-only">
+            <input
+              type="checkbox"
+              checked={replayRunningOnly}
+              onChange={(e) => {
+                setReplayRunningOnly(e.target.checked);
+                if (e.target.checked) setReplayStatus('');
+                setReplayPage(0);
+              }}
+            />
+            <span>{t('仅在途')}</span>
           </label>
         </div>
         {replayError ? (
           <div className="rt-replay-empty" role="alert">{t('列表读取失败：{{msg}}', { msg: replayError })}</div>
         ) : replayRows.length === 0 ? (
           <div className="rt-replay-empty">
-            {replayLoading ? t('读取中…') : replaySearch || replayModel || replayStatus || replayMinutes > 0
-              ? t('没有匹配的请求')
-              : t('暂无可回放的请求')}
+            {replayLoading
+              ? t('读取中…')
+              : replaySearch || replayModel || replayStatus || replayMinutes > 0 || replayRunningOnly
+                ? t('没有匹配的请求')
+                : t('暂无可回放的请求')}
           </div>
         ) : (
           replayRows.map((r) => {

@@ -60,10 +60,88 @@ const INITIAL_QUERY: Query = { taskId: '', source: '', status: '', keyword: '', 
 /** 任务名（字面量 t()，i18n 扫描器才登记得到） */
 function taskLabel(t: (s: string) => string, id: string): string {
   if (id === 'credentialMaintenance') return t('凭证维护');
-  if (id === 'modelRefresh') return t('模型刷新');
+  if (id === 'modelRefresh') return t('模型目录更新');
   if (id === 'updateCheck') return t('软件检查更新');
   if (id === 'pluginCatalog') return t('社区插件检查');
   return id;
+}
+
+/**
+ * 任务说明（A2A `maintenance-format.ts::maintenanceDescription` 逐条对齐）。
+ *
+ * 左栏/概览条把它挂在任务名的 title 上 —— 名字只占一行，说明不占版面，
+ * 但「这项到底维护什么」随时可查（A2A 同一取舍）。
+ */
+function taskDescription(t: (s: string) => string, id: string): string {
+  if (id === 'credentialMaintenance') return t('仅维护过期或即将过期的凭证');
+  if (id === 'modelRefresh') return t('逐个提供商更新模型目录，模型基础信息单独列出结果');
+  if (id === 'updateCheck') return t('定期向官网检查软件新版本；与「更新设置」同步');
+  if (id === 'pluginCatalog') return t('刷新社区插件目录并检查更新，支持自动更新已签名的插件');
+  return '';
+}
+
+/** 概览条主按钮文案（A2A `maintenanceActionLabel`：只有模型目录叫「立即更新」）。 */
+function actionLabel(t: (s: string) => string, id: string): string {
+  return id === 'modelRefresh' ? t('立即更新') : t('立即检查');
+}
+
+/** 明细弹窗标题后缀（A2A `maintenance-details.tsx`：`任务名 · 开始时间`）。 */
+function maintenanceHeading(t: (s: string) => string, id: string, startedAt: number): string {
+  return `${taskLabel(t, id)} · ${fmtTime(startedAt)}`;
+}
+
+/** 触发方式全称（A2A `sourceLabel`：passive 叫「客户端触发」）。 */
+function sourceFull(t: (s: string) => string, source: string): string {
+  if (source === 'manual') return t('手动触发');
+  if (source === 'passive') return t('客户端触发');
+  return t('自动触发');
+}
+
+/** 执行状态文案（A2A `statusLabel`：与记录表徽章同一套词）。 */
+function runStatusText(t: (s: string) => string, status: string): string {
+  switch (status) {
+    case 'running': return t('执行中…');
+    case 'completed': return t('已完成');
+    case 'partial': return t('部分失败');
+    case 'failed': return t('失败');
+    case 'skipped': return t('全部跳过');
+    case 'interrupted': return t('执行中断');
+    default: return status;
+  }
+}
+
+/**
+ * 一轮执行的「成功 / 跳过 / 失败」计数（A2A `maintenance-shared.tsx::RunCounts`）。
+ *
+ * 执行中与执行中断没有逐项结果 —— 给破折号并说明原因，不显示 0/0/0 让人
+ * 误以为「跑了但全没成」。
+ */
+function RunCounts({ run, t }: { run: MaintenanceRunView; t: (s: string) => string }): JSX.Element {
+  if (run.status === 'running' || run.status === 'interrupted') {
+    return (
+      <span
+        className="mtp-muted"
+        title={run.status === 'running' ? t('维护正在执行，完成后会显示逐项结果') : t('该次执行未完成，没有完整明细')}
+      >
+        —
+      </span>
+    );
+  }
+  return (
+    <span className="mtp-counts">
+      <span>
+        {t('成功')} <b>{run.refreshed}</b>
+      </span>
+      <span className="mtp-counts-sep">·</span>
+      <span>
+        {t('跳过')} <b>{run.skipped}</b>
+      </span>
+      <span className="mtp-counts-sep">·</span>
+      <span className={run.failed ? 'mtp-fail' : undefined}>
+        {t('失败')} <b>{run.failed}</b>
+      </span>
+    </span>
+  );
 }
 
 /** 明细表「对象」列标题：不同任务的检查对象不同。 */
@@ -139,15 +217,21 @@ function itemChange(
   return changeLabelText(t, label);
 }
 
-/** 执行状态 → 徽章色调 + 文案 */
+/**
+ * 执行状态 → 徽章色调 + 文案。
+ *
+ * 文案与 A2A `statusLabel` 同一套词（已完成 / 部分失败 / 全部跳过 / 执行中断）：
+ * 同一件事在概览条、记录表、明细弹窗三处叫法必须一致，否则「概览说部分失败、
+ * 表格写部分成功」这类不一致会让人以为看的是两条记录。
+ */
 function runStatus(t: (s: string) => string, status: string): { tone: Tone; label: string } {
   switch (status) {
-    case 'running': return { tone: 'info', label: t('执行中') };
-    case 'completed': return { tone: 'success', label: t('完成') };
-    case 'partial': return { tone: 'warning', label: t('部分成功') };
-    case 'failed': return { tone: 'danger', label: t('失败') };
-    case 'skipped': return { tone: 'neutral', label: t('跳过') };
-    case 'interrupted': return { tone: 'warning', label: t('中断') };
+    case 'running': return { tone: 'info', label: runStatusText(t, status) };
+    case 'completed': return { tone: 'success', label: runStatusText(t, status) };
+    case 'partial': return { tone: 'warning', label: runStatusText(t, status) };
+    case 'failed': return { tone: 'danger', label: runStatusText(t, status) };
+    case 'skipped': return { tone: 'neutral', label: runStatusText(t, status) };
+    case 'interrupted': return { tone: 'warning', label: runStatusText(t, status) };
     default: return { tone: 'neutral', label: status };
   }
 }
@@ -161,23 +245,53 @@ function itemStatus(t: (s: string) => string, status: string): { tone: Tone; lab
   }
 }
 
-/** 执行来源 → 文案 */
+/**
+ * 执行来源 → 文案。
+ *
+ * A2A `sourceLabel` 是同一份：`manual` = 手动触发、`passive` = 客户端触发、
+ * 其余 = 自动触发。**`passive` 是 AIGX 独有的一档**（`/v1/models` 列举触发的
+ * 被动刷新），A2A 也有这个取值但过滤下拉只给自动/手动 —— AIGX 保留它并在
+ * 下拉里单列，否则这类记录只能落进「自动」里被含糊掉。
+ */
 function sourceLabel(t: (s: string) => string, source: string): string {
-  switch (source) {
-    case 'automatic': return t('自动');
-    case 'manual': return t('手动');
-    case 'passive': return t('被动');
-    default: return source;
-  }
+  return sourceFull(t, source);
 }
 
-/** 单条结果说明：优先用后端文案，缺失时按状态给出兜底（都是 t() 字面量） */
-function describeItem(t: (s: string) => string, item: MaintenanceItemView): string {
+/**
+ * 单条结果说明：优先用后端文案，缺失时按状态给出兜底（都是 t() 字面量）。
+ *
+ * 对齐 A2A `itemMessage`：同一句 message 在不同任务里含义不同（凭证「已续期」、
+ * 目录「已获取最新清单」、插件「已完成检查」），所以兜底按 taskId 分派而不是
+ * 一律写「已刷新」—— 后者会让明细表看起来像只服务凭证维护。
+ */
+function describeItem(t: (s: string) => string, item: MaintenanceItemView, taskId?: string): string {
+  if (item.fixed) return t('该提供商使用固定模型清单');
   if (item.message) return item.message;
-  if (item.fixed) return t('固定模型清单');
-  if (item.status === 'refreshed') return t('已刷新');
-  if (item.status === 'skipped') return t('本次无需更新');
+  if (item.status === 'refreshed') {
+    if (taskId === 'credentialMaintenance') return t('已续期并确认凭证更新');
+    if (taskId === 'modelRefresh') return t('已获取最新模型目录');
+    if (taskId === 'updateCheck') return t('已完成版本检查');
+    if (taskId === 'pluginCatalog') return t('已完成社区插件检查与更新');
+    return t('已刷新');
+  }
+  if (item.status === 'skipped') return t('本次无需更新，沿用现有状态');
   return t('未返回失败原因');
+}
+
+/** 「最近一次执行」那一行（A2A `maintenance-summary.tsx::lastRun`）。 */
+function lastRunText(
+  t: (s: string, o?: Record<string, string | number>) => string,
+  run: MaintenanceRunView | undefined,
+  fallback: string | null | undefined,
+): string {
+  if (run) {
+    return t('最近一次 · {{t}} · {{s}} · {{d}}', {
+      t: fmtTime(run.startedAt),
+      s: sourceFull(t, run.source),
+      d: fmtDuration(run.durationMs),
+    });
+  }
+  return fallback ? t('此前仅有汇总，尚无逐项记录') : t('尚未执行维护');
 }
 
 /** 一次执行是否含失败（含 models.dev 元信息失败） */
@@ -472,116 +586,144 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
 
       {error && <div className="error-message">{error}</div>}
 
-      {/* 维护任务概览条（凭证维护 / 模型刷新 / 软件检查 / 社区插件检查） */}
+      {/* 维护任务概览条（凭证维护 / 模型目录更新 / 软件检查更新 / 社区插件检查）
+          对齐 A2A maintenance-summary.tsx：每项一行 = 名称(title=说明) · 状态 ·
+          最近一次 · 计数 · 计划(含冷却) · [查看结果 / 立即检查]。 */}
       <div className="mtp-tasks">
         {TASKS.map((taskId) => {
           const state = overview?.tasks?.find((item) => item?.id === taskId) ?? null;
           const latest = latestByTask[taskId];
           const followsSoftware = taskId === 'pluginCatalog' && state?.checkMode === 'follow';
+          const running = Boolean(state?.running) || busy === `run:${taskId}`;
+          const cooldownUntil = state?.enabled && state?.retryAt && state.retryAt > Date.now() ? state.retryAt : null;
           return (
             <div key={taskId} className="mtp-task">
               <div className="mtp-task-main">
-                <div className="mtp-task-name">
+                <div className="mtp-task-name" title={taskDescription(t, taskId)}>
                   {taskLabel(t, taskId)}
-                  {state?.running ? <Badge tone="info">{t('执行中')}</Badge> : null}
-                  {followsSoftware ? <Badge tone="neutral">{t('跟随软件')}</Badge> : null}
+                  {running ? <Badge tone="info">{t('执行中')}</Badge> : null}
+                  {followsSoftware && state?.enabled !== false ? <Badge tone="neutral">{t('跟随软件')}</Badge> : null}
                   {taskId === 'pluginCatalog' && state?.autoUpdate ? (
                     <Badge tone="success">{t('自动更新')}</Badge>
                   ) : null}
-                  {latest ? (
-                    <Badge tone={runStatus(t, latest.status).tone}>{runStatus(t, latest.status).label}</Badge>
-                  ) : null}
+                  {latest || running ? (
+                    <Badge tone={runStatus(t, running ? 'running' : latest!.status).tone}>
+                      {runStatus(t, running ? 'running' : latest!.status).label}
+                    </Badge>
+                  ) : (
+                    <Badge tone="neutral">{t('暂无记录')}</Badge>
+                  )}
                 </div>
-                <div className="mtp-task-meta">
-                  {state
-                    ? t('间隔 {{n}} 分钟 · 下次 {{t}}', {
-                        n: state.interval,
-                        t: fmtTime(state.nextRunAt),
-                      })
-                    : t('没有该任务的状态')}
-                </div>
+                <div className="mtp-task-meta">{lastRunText(t, latest, state?.lastResult)}</div>
                 {latest ? (
                   <div className="mtp-task-meta">
-                    {t('上次执行 {{t}} · 刷新 {{r}} · 跳过 {{s}} · 失败 {{f}} · 耗时 {{d}}', {
-                      t: fmtTime(latest.startedAt),
-                      r: latest.refreshed,
-                      s: latest.skipped,
-                      f: latest.failed,
-                      d: fmtDuration(latest.durationMs),
-                    })}
+                    <RunCounts run={latest} t={t} />
                   </div>
                 ) : null}
+                <div className="mtp-task-meta">
+                  {state ? (
+                    state.enabled ? (
+                      <>
+                        {followsSoftware ? `${t('跟随软件')} · ` : ''}
+                        {t('每 {{n}} 分钟', { n: state.interval })}
+                        {' · '}
+                        {t('下次执行 {{time}}', { time: fmtTime(state.nextRunAt) })}
+                        {cooldownUntil ? (
+                          <span className="mtp-cooldown">{` · ${t('冷却至 {{time}}', { time: fmtTime(cooldownUntil) })}`}</span>
+                        ) : null}
+                      </>
+                    ) : followsSoftware ? (
+                      t('跟随软件（已关闭）')
+                    ) : (
+                      t('自动维护已关闭')
+                    )
+                  ) : (
+                    t('没有该任务的状态')
+                  )}
+                </div>
                 {state?.lastError ? <div className="mtp-task-err">{state.lastError}</div> : null}
               </div>
               <div className="mtp-task-ops">
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={busy !== null || state?.running}
+                  disabled={!latest || detailLoading === latest?.id}
+                  onClick={() => openLatest(taskId)}
+                >
+                  {t('查看结果')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy !== null || Boolean(state?.running)}
                   onClick={() => void execute({ taskId })}
                 >
                   {busy === `run:${taskId}` ? <Loader2 size={12} className="mtp-spin" /> : <RotateCcw size={12} />}
-                  {t('立即执行')}
+                  {running ? t('执行中…') : actionLabel(t, taskId)}
                 </Button>
-                {latest ? (
-                  <Button variant="outline" size="sm" disabled={detailLoading === latest.id} onClick={() => openLatest(taskId)}>
-                    {t('上次明细')}
-                  </Button>
-                ) : null}
               </div>
             </div>
           );
         })}
       </div>
 
-      {/* 筛选条 */}
+      {/* 筛选条（对齐 A2A maintenance-records.tsx 的四件套）：维护类型 / 执行结果 /
+          触发方式 / 关键词。A2A 的「自动」档把 passive 一并纳入（两者都是非人工），
+          AIGX 另给「被动」单列一档（后端 run_matches 支持，否则记录只能被含糊掉）。 */}
       <div className="mtp-filters">
-        <Select value={query.taskId} onChange={(e) => changeQuery({ taskId: e.target.value })} aria-label={t('任务')}>
-          <option value="">{t('全部任务')}</option>
+        <Select value={query.taskId} onChange={(e) => changeQuery({ taskId: e.target.value })} aria-label={t('维护类型')}>
+          <option value="">{t('全部类型')}</option>
           {TASKS.map((taskId) => (
             <option key={taskId} value={taskId}>
               {taskLabel(t, taskId)}
             </option>
           ))}
         </Select>
-        <Select value={query.source} onChange={(e) => changeQuery({ source: e.target.value })} aria-label={t('来源')}>
-          <option value="">{t('全部来源')}</option>
-          <option value="automatic">{t('自动')}</option>
-          <option value="manual">{t('手动')}</option>
-          <option value="passive">{t('被动')}</option>
+        <Select value={query.status} onChange={(e) => changeQuery({ status: e.target.value })} aria-label={t('执行结果')}>
+          <option value="">{t('全部结果')}</option>
+          <option value="failed">{t('有失败项')}</option>
+          <option value="success">{t('无失败项')}</option>
         </Select>
-        <Select value={query.status} onChange={(e) => changeQuery({ status: e.target.value })} aria-label={t('状态')}>
-          <option value="">{t('全部状态')}</option>
-          <option value="success">{t('成功')}</option>
-          <option value="failed">{t('失败')}</option>
+        <Select value={query.source} onChange={(e) => changeQuery({ source: e.target.value })} aria-label={t('触发方式')}>
+          <option value="">{t('全部触发方式')}</option>
+          <option value="automatic">{t('自动触发')}</option>
+          <option value="manual">{t('手动触发')}</option>
+          <option value="passive">{t('客户端触发')}</option>
         </Select>
         <Input
-          placeholder={t('搜索账号 / 提供商 / 错误')}
+          placeholder={t('搜索账号、提供商或插件')}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          aria-label={t('搜索')}
+          aria-label={t('搜索账号、提供商或插件')}
         />
       </div>
 
-      {/* 执行记录表 */}
+      {/* 执行记录表（对齐 A2A maintenance-records.tsx 的七列 + 底栏）：
+          执行时间 / 维护类型(带「失败重试」标) / 触发方式 / 结果 / 执行汇总 / 耗时 / 操作。
+          汇总列用同一枚 RunCounts 零件（执行中与中断给破折号，不显示 0/0/0）。 */}
       {loading && records.length === 0 ? (
         <div className="mtp-loading">
           <Loader2 size={14} className="mtp-spin" />
           {t('正在读取维护记录…')}
         </div>
       ) : records.length === 0 ? (
-        <EmptyState icon="🗂️" message={t('暂无维护执行记录')} />
+        <EmptyState
+          icon="🗂️"
+          message={
+            query.taskId || query.source || query.status || query.keyword
+              ? t('没有符合筛选条件的维护记录')
+              : t('暂无维护记录，首次执行后会自动保存')
+          }
+        />
       ) : (
         <table className="mtp-table">
           <thead>
             <tr>
-              <th>{t('开始时间')}</th>
-              <th>{t('任务')}</th>
-              <th>{t('来源')}</th>
-              <th>{t('状态')}</th>
-              <th>{t('刷新')}</th>
-              <th>{t('跳过')}</th>
-              <th>{t('失败')}</th>
+              <th>{t('执行时间')}</th>
+              <th>{t('维护类型')}</th>
+              <th>{t('触发方式')}</th>
+              <th>{t('结果')}</th>
+              <th>{t('执行汇总')}</th>
               <th>{t('耗时')}</th>
               <th style={{ width: 140 }}>{t('操作')}</th>
             </tr>
@@ -602,14 +744,14 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
                 <td>
                   <Badge tone={runStatus(t, record.status).tone}>{runStatus(t, record.status).label}</Badge>
                 </td>
-                <td className="mtp-num">{record.refreshed}</td>
-                <td className="mtp-num">{record.skipped}</td>
-                <td className={record.failed > 0 ? 'mtp-num mtp-fail' : 'mtp-num'}>{record.failed}</td>
+                <td>
+                  <RunCounts run={record} t={t} />
+                </td>
                 <td className="mtp-time">{fmtDuration(record.durationMs)}</td>
                 <td>
                   <div className="mtp-row-ops">
                     <Button variant="outline" size="sm" disabled={detailLoading === record.id} onClick={() => toggleDetail(record.id)}>
-                      {t('明细')}
+                      {t('查看明细')}
                     </Button>
                     <Button
                       variant="outline"
@@ -639,7 +781,8 @@ export default function MaintenancePanel({ embedded = false }: MaintenancePanelP
 
       {total > LIMIT && (
         <div className="mtp-pager">
-          <span>{t('共 {{n}} 条 · 第 {{p}}/{{pages}} 页', { n: total, p: page, pages: totalPages })}</span>
+          <span>{t('共 {{n}} 次执行', { n: total })}</span>
+          <span className="mtp-muted">{t('第 {{p}}/{{pages}} 页', { p: page, pages: totalPages })}</span>
           <div className="mtp-pager-ops">
             <Button
               variant="outline"
@@ -762,17 +905,13 @@ function MaintenanceDetailDialog({
           <div>
             <h3>
               {t('维护执行明细')}
-              {detail ? ` · ${taskLabel(t, detail.taskId)}` : ''}
+              {detail ? ` ${maintenanceHeading(t, detail.taskId, detail.startedAt)}` : ''}
             </h3>
             {detail ? (
               <p>
-                {fmtTime(detail.startedAt)} · {runStatus(t, detail.status).label} · {fmtDuration(detail.durationMs)} ·{' '}
-                {t('刷新 {{r}} · 跳过 {{s}} · 失败 {{f}}', {
-                  r: detail.refreshed,
-                  s: detail.skipped,
-                  f: detail.failed,
-                })}
-                {!stalled ? ` · ${t('本轮共 {{n}} 项', { n: detail.total })}` : ''}
+                {!stalled ? `${t('本轮共 {{n}} 项', { n: detail.total })} · ` : ''}
+                {sourceFull(t, detail.source)}
+                {detail.durationMs != null ? ` · ${fmtDuration(detail.durationMs)}` : ''}
               </p>
             ) : (
               <p>{t('正在读取维护记录…')}</p>
@@ -859,7 +998,9 @@ function MaintenanceDetailDialog({
                       <th>{scopeColumnTitle(t, detail.taskId)}</th>
                       <th>{t('结果')}</th>
                       <th>{changeColumnTitle(t, detail.taskId)}</th>
-                      <th>{t('说明')}</th>
+                      <th>{t('原因 / 说明')}</th>
+                      {/* AIGX 扩展列：单条耗时（A2A 明细表没有这一列，但这里每条
+                          都有 durationMs，删掉等于丢掉已有信息） */}
                       <th>{t('耗时')}</th>
                       <th style={{ width: 92 }}>{t('操作')}</th>
                     </tr>
@@ -879,7 +1020,7 @@ function MaintenanceDetailDialog({
                             <Badge tone={s.tone}>{s.label}</Badge>
                           </td>
                           <td className="mtp-message">{change}</td>
-                          <td className="mtp-message">{describeItem(t, item)}</td>
+                          <td className="mtp-message">{describeItem(t, item, detail.taskId)}</td>
                           <td className="mtp-time">{fmtDuration(item.durationMs)}</td>
                           <td>
                             <Button
@@ -890,7 +1031,7 @@ function MaintenanceDetailDialog({
                                 setSelected(item);
                               }}
                             >
-                              {t('查看详情')}
+                              {item.status === 'failed' ? t('查看原因') : t('查看详情')}
                             </Button>
                           </td>
                         </tr>
@@ -907,11 +1048,19 @@ function MaintenanceDetailDialog({
                 </table>
                 {detail.metadata ? (
                   <div className="mtp-task-meta" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <span>{detail.metadata.providerLabel || taskLabel(t, detail.taskId)}</span>
+                    <span>
+                      {detail.taskId === 'pluginCatalog'
+                        ? t('官网社区插件目录')
+                        : `${t('模型基础信息')} · models.dev`}
+                    </span>
                     <Badge tone={itemStatus(t, detail.metadata.status).tone}>
                       {itemStatus(t, detail.metadata.status).label}
                     </Badge>
-                    <span>{describeItem(t, detail.metadata)}</span>
+                    <span>
+                      {detail.taskId === 'modelRefresh' && detail.metadata.status === 'refreshed'
+                        ? t('已更新 {{n}} 条', { n: detail.metadata.count ?? 0 })
+                        : describeItem(t, detail.metadata, detail.taskId)}
+                    </span>
                   </div>
                 ) : null}
                 <div className="mtp-detail-foot">
@@ -973,7 +1122,7 @@ function ItemSnapshotDialog({
 
   const facts: Array<[string, string]> = [
     [t('执行时间'), fmtTime(detail.startedAt)],
-    [t('触发方式'), sourceLabel(t, detail.source)],
+    [t('触发方式'), sourceFull(t, detail.source)],
     [scopeLabel, scopeValue],
     [t('耗时'), fmtDuration(item.durationMs)],
   ];
@@ -996,6 +1145,13 @@ function ItemSnapshotDialog({
     if (item.latestVersion) facts.push([t('最新版本'), item.latestVersion]);
   }
   if (item.retryAt) facts.push([t('建议重试时间'), fmtTime(item.retryAt)]);
+
+  /**
+   * 失败项的原始原因（A2A `maintenanceRawDetail`）：后端 `message` 可能带完整
+   * 上游报文，折叠在上方那句人话之下单独一块等宽展示 —— 排查要原文，读界面
+   * 要人话，两者都留。
+   */
+  const rawDetail = item.status === 'failed' ? (item.message ?? '') : '';
 
   // 单条重试只对凭证维护有意义：模型刷新按整轮重跑（后端没有独立明细项）。
   const canRetryItem = credential && item.status === 'failed' && !item.invalid;
@@ -1021,7 +1177,8 @@ function ItemSnapshotDialog({
             <Badge tone={status.tone}>{status.label}</Badge>
             {item.fixed ? <span className="mtp-muted">· {t('固定模型清单')}</span> : null}
           </div>
-          <p className="mtp-snapshot-msg">{describeItem(t, item)}</p>
+          <p className="mtp-snapshot-msg">{describeItem(t, item, detail.taskId)}</p>
+          {rawDetail ? <pre className="mtp-snapshot-raw">{rawDetail}</pre> : null}
           <dl className="mtp-facts">
             {facts.map(([label, value]) => (
               <div key={label} className="mtp-fact">
@@ -1069,9 +1226,17 @@ interface MaintenanceSettingsProps {
  * 维护设置弹窗（对齐上游 `maintenance-settings.tsx`）。
  *
  * 4 个 AIGX 维护任务的开关 + 间隔，保存走 `PATCH /api/scheduled-tasks/{id}`
- * 的 `{enabled?, interval?}`。`pluginCatalog` 的 `checkMode` 后端恒为 `follow`
- * （跟随软件检查计划），只读展示；`autoUpdate` 待 t9 扩展 PATCH 后再启用，
- * 现在按禁用展示，避免「看起来保存了但没落库」的误导。
+ * 的 `{enabled?, interval?}`。`pluginCatalog` 另有 `checkMode`（`follow` / `custom`
+ * 两档，见 `ScheduledSettings.plugin_catalog_follow`）与 `autoUpdate`。
+ * （跟随软件检查计划）；`autoUpdate` 落 `update.auto_apply`（`PATCH` 已支持）。
+ *
+ * 与 A2A `maintenance-settings.tsx` 的细节对齐：
+ *   · 每项下面一行「这项定期做什么」（`settingSummary`），开关旁边不看说明也能懂；
+ *   · `pluginCatalog` 多一个「跟随『软件检查更新』计划」开关：**跟随时隐藏自身
+ *     开关与间隔**（间隔由软件计划决定，露出一个改不动的输入框只会误导）；
+ *   · 跟随态下保存跳过间隔范围校验（间隔不落库，不校验）；
+ *   · 有失败项时提示「部分设置可能已保存，请核对后重试」并刷新，**不关窗**
+ *     —— 让用户看得见哪些没落地。
  */
 function MaintenanceSettingsDialog({ tasks, onClose, onSaved }: MaintenanceSettingsProps): JSX.Element {
   const { t } = useTranslation();
@@ -1081,6 +1246,8 @@ function MaintenanceSettingsDialog({ tasks, onClose, onSaved }: MaintenanceSetti
   );
   const pluginTask = tasks.find((task) => task.id === 'pluginCatalog') ?? null;
   const [autoUpdateDraft, setAutoUpdateDraft] = useState<boolean>(pluginTask?.autoUpdate === true);
+  const [followDraft, setFollowDraft] = useState<boolean>(pluginTask?.checkMode === 'follow');
+  const softwareTask = tasks.find((task) => task.id === 'updateCheck') ?? null;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const saving = useRef(false);
@@ -1091,6 +1258,9 @@ function MaintenanceSettingsDialog({ tasks, onClose, onSaved }: MaintenanceSetti
   const save = async (): Promise<void> => {
     if (saving.current) return;
     for (const task of tasks) {
+      // 跟随态不校验间隔：该任务不落 interval（由软件计划决定），校验它等于
+      // 拦一个不会生效的值。
+      if (task.id === 'pluginCatalog' && followDraft) continue;
       const draft = drafts[task.id];
       const value = Number.parseInt(draft.interval, 10);
       if (!draft.interval || Number.isNaN(value) || value < task.min || value > task.max) {
@@ -1112,12 +1282,29 @@ function MaintenanceSettingsDialog({ tasks, onClose, onSaved }: MaintenanceSetti
       const draft = drafts[task.id];
       const interval = Number.parseInt(draft.interval, 10);
       const body: ScheduledTaskPatch = {};
-      if (draft.enabled !== task.enabled) body.enabled = draft.enabled;
-      if (interval !== task.interval) body.interval = interval;
-      if (task.id === 'pluginCatalog' && autoUpdateDraft !== (task.autoUpdate === true)) {
-        body.autoUpdate = autoUpdateDraft;
+      if (task.id === 'pluginCatalog') {
+        if (followDraft !== (task.checkMode === 'follow')) {
+          body.checkMode = followDraft ? 'follow' : 'custom';
+        }
+        if (autoUpdateDraft !== (task.autoUpdate === true)) body.autoUpdate = autoUpdateDraft;
+        // 跟随态只发「跟随」意图，不发 enabled/interval（后端在 follow 下也会
+        // 忽略 interval，这里少发一次比多存一个死值干净）。
+        if (!followDraft) {
+          if (draft.enabled !== task.enabled) body.enabled = draft.enabled;
+          if (interval !== task.interval) body.interval = interval;
+        }
+      } else {
+        if (draft.enabled !== task.enabled) body.enabled = draft.enabled;
+        if (interval !== task.interval) body.interval = interval;
       }
-      if (body.enabled === undefined && body.interval === undefined && body.autoUpdate === undefined) continue;
+      if (
+        body.enabled === undefined
+        && body.interval === undefined
+        && body.autoUpdate === undefined
+        && body.checkMode === undefined
+      ) {
+        continue;
+      }
       try {
         const res = await api.patchScheduledTask(task.id, body);
         if (!res?.success) failed += 1;
@@ -1165,50 +1352,86 @@ function MaintenanceSettingsDialog({ tasks, onClose, onSaved }: MaintenanceSetti
           {error ? <div className="error-message">{error}</div> : null}
           {tasks.map((task) => {
             const draft = drafts[task.id];
+            const isPlugin = task.id === 'pluginCatalog';
+            const following = isPlugin && followDraft;
             return (
               <div key={task.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--border-color)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <strong>{taskLabel(t, task.id)}</strong>
-                  {task.id === 'pluginCatalog' && task.checkMode === 'follow' ? (
-                    <Badge tone="neutral">{t('跟随软件')}</Badge>
-                  ) : null}
-                  <span style={{ marginLeft: 'auto' }}>
-                    <Switch
-                      checked={draft.enabled}
-                      onChange={(next) => patchDraft(task.id, { enabled: next })}
-                      disabled={busy}
-                      ariaLabel={taskLabel(t, task.id)}
-                    />
-                  </span>
+                  {following ? <Badge tone="neutral">{t('跟随软件')}</Badge> : null}
+                  {following ? null : (
+                    <span style={{ marginLeft: 'auto' }}>
+                      <Switch
+                        checked={draft.enabled}
+                        onChange={(next) => patchDraft(task.id, { enabled: next })}
+                        disabled={busy}
+                        ariaLabel={taskLabel(t, task.id)}
+                      />
+                    </span>
+                  )}
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-                  <span style={{ color: 'var(--text-muted)' }}>{t('执行间隔（分钟）')}</span>
-                  <input
-                    type="number"
-                    className="form-input"
-                    style={{ width: 96 }}
-                    min={task.min}
-                    max={task.max}
-                    value={draft.interval}
-                    disabled={busy || !draft.enabled}
-                    onChange={(e) => patchDraft(task.id, { interval: e.target.value })}
-                    aria-label={t('执行间隔（分钟）')}
-                  />
-                  <span style={{ color: 'var(--text-muted)' }}>
-                    {task.min}–{task.max}
-                  </span>
-                </div>
-                {task.id === 'pluginCatalog' ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-                    <span style={{ color: 'var(--text-muted)' }}>{t('自动更新已启用且已签名的插件')}</span>
-                    <Switch
-                      checked={autoUpdateDraft}
-                      onChange={(next) => setAutoUpdateDraft(next)}
-                      disabled={busy}
-                      ariaLabel={t('自动更新已启用且已签名的插件')}
-                    />
+                {/* 与 A2A `settingSummary` 同一行说明：这一项定期做什么 */}
+                <p className="mtp-muted" style={{ margin: '4px 0 0' }}>
+                  {taskDescription(t, task.id)}
+                </p>
+                {isPlugin ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ color: 'var(--text-muted)' }}>{t('跟随「软件检查更新」计划')}</span>
+                      <Switch
+                        checked={followDraft}
+                        onChange={(next) => {
+                          setFollowDraft(next);
+                          // 从跟随切回自定义：把间隔与开关起点取软件计划现值，
+                          // 与 A2A 同一取舍（切过去不会突然变成 0/禁用）。
+                          if (!next && softwareTask) {
+                            patchDraft(task.id, {
+                              enabled: softwareTask.enabled,
+                              interval: draft.interval || String(softwareTask.interval),
+                            });
+                          }
+                        }}
+                        disabled={busy}
+                        ariaLabel={t('跟随「软件检查更新」计划')}
+                      />
+                    </div>
+                    {following ? (
+                      <p className="mtp-muted" style={{ margin: 0 }}>
+                        {softwareTask?.enabled
+                          ? t('当前跟随软件计划：已开启，每 {{n}} 分钟', { n: softwareTask.interval })
+                          : t('当前跟随软件计划：已关闭')}
+                      </p>
+                    ) : null}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ color: 'var(--text-muted)' }}>{t('自动更新已启用且已签名的插件')}</span>
+                      <Switch
+                        checked={autoUpdateDraft}
+                        onChange={(next) => setAutoUpdateDraft(next)}
+                        disabled={busy}
+                        ariaLabel={t('自动更新已启用且已签名的插件')}
+                      />
+                    </div>
                   </div>
                 ) : null}
+                {following ? null : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{t('执行间隔（分钟）')}</span>
+                    <input
+                      type="number"
+                      className="form-input"
+                      style={{ width: 96 }}
+                      min={task.min}
+                      max={task.max}
+                      value={draft.interval}
+                      disabled={busy || !draft.enabled}
+                      onChange={(e) => patchDraft(task.id, { interval: e.target.value })}
+                      aria-label={t('执行间隔（分钟）')}
+                    />
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      {t('可填 {{min}}–{{max}}', { min: task.min, max: task.max })}
+                    </span>
+                  </div>
+                )}
               </div>
             );
           })}

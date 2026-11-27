@@ -165,12 +165,24 @@ pub fn find(id: &str) -> Option<&'static TaskDef> {
     TASKS.iter().find(|task| task.id == id)
 }
 
+/// 某条任务**生效**的开关与间隔。
+///
+/// `pluginCatalog` 的 `checkMode=follow` 时开关与间隔都取「软件检查更新」计划
+/// （`update_check`）：跟随时用户拨的是软件计划那一份，插件检查跟着走。
+/// 自定义档（`plugin_catalog_follow=false`，AIGX 默认）取自己的
+/// `magpie_plugin_check` —— 存量安装升级后行为逐字节不变。
 fn settings_of(settings: &ScheduledSettings, id: &str) -> IntervalTask {
     match id {
         TASK_CREDENTIAL_MAINTENANCE => settings.credential_maintenance,
         TASK_MODEL_REFRESH => settings.model_refresh,
         TASK_UPDATE_CHECK => settings.update_check,
-        TASK_PLUGIN_CATALOG => settings.magpie_plugin_check,
+        TASK_PLUGIN_CATALOG => {
+            if settings.plugin_catalog_follow {
+                settings.update_check
+            } else {
+                settings.magpie_plugin_check
+            }
+        }
         TASK_LOGS_AUTO_REFRESH => settings.logs_auto_refresh,
         TASK_REQUESTS_AUTO_REFRESH => settings.requests_auto_refresh,
         TASK_REPORT_AUTO_REFRESH => settings.report_auto_refresh,
@@ -237,9 +249,16 @@ fn task_json(
         "canRun": backend,
     });
     if task.id == TASK_PLUGIN_CATALOG {
-        // 插件检查计划与软件更新同源（AIGX 没有独立的插件通道/计划）：
-        // 如实报 follow，自动更新映射自 `update.auto_apply`。
-        item["checkMode"] = json!("follow");
+        // 排期来源（对齐 A2A `task_json` 的 pluginCatalog 分支）：
+        //   follow = 跟随「软件检查更新」计划（开关与间隔都取那一份）
+        //   custom = 自己一份开关与间隔（AIGX 默认，见 `ScheduledSettings`）
+        // autoUpdate 映射自 `update.auto_apply`（AIGX 的「自动应用」比上游的
+        // 「自动下载」激进一档，但落点同一处，如实映射）。
+        item["checkMode"] = json!(if settings.plugin_catalog_follow {
+            "follow"
+        } else {
+            "custom"
+        });
         item["autoUpdate"] = json!(config.update.auto_apply);
     }
     item
@@ -305,10 +324,10 @@ fn apply_patch(settings: &mut ScheduledSettings, id: &str, patch: &IntervalTaskP
 
 /// 校验 `checkMode` / `autoUpdate` 并返回是否 `follow`（纯函数，便于单测）。
 ///
-/// 规则（对齐 docs/AUTO-MAINTENANCE-PARITY.md §10）：
+/// 规则（对齐 A2A `configure_extended` 的 pluginCatalog 分支）：
 /// - 两个字段只对 `pluginCatalog` 有意义（其它任务传入 → 400，避免静默无效）；
-/// - `checkMode` 仅接受 `"follow"`：AIGX 没有独立原生目录通道，插件检查恒跟随
-///   软件更新计划；
+/// - `checkMode` 接受 `"follow"` / `"custom"`：跟随时开关与间隔取软件计划，
+///   不落 `interval`（存一个不会被使用的值只会让人以为它生效）；
 /// - `autoUpdate` 的落点是 `update.auto_apply`，不写 `scheduled_tasks`。
 fn validate_patch(task: &TaskDef, patch: &IntervalTaskPatch) -> Result<bool, String> {
     let touches_plugin_opts = patch.check_mode.is_some() || patch.auto_update.is_some();
@@ -321,9 +340,11 @@ fn validate_patch(task: &TaskDef, patch: &IntervalTaskPatch) -> Result<bool, Str
             let mode = mode.trim();
             if mode.eq_ignore_ascii_case("follow") {
                 Ok(true)
+            } else if mode.eq_ignore_ascii_case("custom") {
+                Ok(false)
             } else {
                 Err(format!(
-                    "「{}」的 checkMode 仅支持 follow（收到 {mode}）",
+                    "「{}」的 checkMode 只支持 follow 或 custom（收到 {mode}）",
                     task.label
                 ))
             }
@@ -393,9 +414,17 @@ pub async fn configure(
     let before = settings_of(&config.scheduled_tasks, id);
     let mut effective = patch.clone();
     if follow {
+        // 跟随态：开关与间隔都取软件计划，**两样都不落**插件检查自己的存档
+        // （写进去也不生效，只会在切回 custom 时冒出一个没人设过的值）。
         effective.interval = None;
+        effective.enabled = None;
     }
     apply_patch(&mut config.scheduled_tasks, id, &effective);
+    // checkMode 的落点是 `plugin_catalog_follow`（生效口径的唯一真相）。
+    // 只在显式传了 checkMode 时改：没传 = 不动（读-改-写语义）。
+    if let Some(mode) = patch.check_mode.as_deref() {
+        config.scheduled_tasks.plugin_catalog_follow = mode.trim().eq_ignore_ascii_case("follow");
+    }
     // autoUpdate 的权威落点是软件更新的自动应用开关（与上游同口径）。
     if let Some(auto_update) = patch.auto_update {
         config.update.auto_apply = auto_update;
@@ -861,10 +890,10 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        state_key, task_interval_ms, TASK_CREDENTIAL_MAINTENANCE, TASK_MODEL_REFRESH,
+        settings_of, state_key, task_interval_ms, TASK_CREDENTIAL_MAINTENANCE, TASK_MODEL_REFRESH,
         TASK_PLUGIN_CATALOG, TASK_UPDATE_CHECK,
     };
-    use crate::scheduled_tasks::types::{IntervalTaskPatch, ScheduledSettings};
+    use crate::scheduled_tasks::types::{IntervalTask, IntervalTaskPatch, ScheduledSettings};
 
     /// 社区插件目录检查读取 `magpiePluginCheck` 配置，默认 360 分钟。
     #[test]
@@ -890,7 +919,8 @@ mod tests {
         assert!(settings.update_check.enabled);
     }
 
-    /// checkMode 仅接受 follow；checkMode/autoUpdate 仅对 pluginCatalog 生效。
+    /// checkMode 接受 follow / custom（对齐 A2A `configure_extended`）；
+    /// checkMode/autoUpdate 仅对 pluginCatalog 生效。
     #[test]
     fn patch_validates_check_mode_and_auto_update() {
         let plugin = super::find(TASK_PLUGIN_CATALOG).unwrap();
@@ -908,6 +938,24 @@ mod tests {
             plugin,
             &IntervalTaskPatch {
                 check_mode: Some("FOLLOW".into()),
+                ..Default::default()
+            }
+        )
+        .unwrap());
+        // custom（AIGX 默认档）接受，并回报 follow=false —— 与 A2A 同两档，
+        // 此前只认 follow 是「漏了一档」而不是有意偏离。
+        assert!(!super::validate_patch(
+            plugin,
+            &IntervalTaskPatch {
+                check_mode: Some("custom".into()),
+                ..Default::default()
+            }
+        )
+        .unwrap());
+        assert!(!super::validate_patch(
+            plugin,
+            &IntervalTaskPatch {
+                check_mode: Some("Custom".into()),
                 ..Default::default()
             }
         )
@@ -939,6 +987,63 @@ mod tests {
             }
         )
         .unwrap());
+    }
+
+    /// `plugin_catalog_follow` 是 pluginCatalog 的生效口径唯一真相：
+    /// follow 时开关与间隔都取 `update_check`；custom 时取自己的存档。
+    ///
+    /// 这是「跟随时拨的是软件计划那一份」的实现侧判据 —— 两侧来回切一次，
+    /// 各自的存档都不被对方改写（切回去原值原样回来）。
+    #[test]
+    fn plugin_catalog_follow_switches_effective_settings() {
+        let mut settings = ScheduledSettings::default();
+        settings.update_check = IntervalTask {
+            enabled: true,
+            interval: 20,
+        };
+        settings.magpie_plugin_check = IntervalTask {
+            enabled: false,
+            interval: 360,
+        };
+
+        // 默认 custom：取自己的存档（存量行为逐字节不变）
+        assert!(!settings.plugin_catalog_follow);
+        assert_eq!(
+            settings_of(&settings, TASK_PLUGIN_CATALOG),
+            IntervalTask {
+                enabled: false,
+                interval: 360
+            }
+        );
+
+        // follow：开关与间隔都跟软件计划
+        settings.plugin_catalog_follow = true;
+        assert_eq!(
+            settings_of(&settings, TASK_PLUGIN_CATALOG),
+            IntervalTask {
+                enabled: true,
+                interval: 20
+            }
+        );
+
+        // 切回 custom：自己的存档没被 follow 那段改写掉
+        settings.plugin_catalog_follow = false;
+        assert_eq!(
+            settings_of(&settings, TASK_PLUGIN_CATALOG),
+            IntervalTask {
+                enabled: false,
+                interval: 360
+            }
+        );
+
+        // 间隔也走同一口径（claim 用 task_interval_ms，与 settings_of 同源）
+        settings.plugin_catalog_follow = true;
+        assert_eq!(task_interval_ms(&settings, TASK_PLUGIN_CATALOG), 20 * 60_000);
+        settings.plugin_catalog_follow = false;
+        assert_eq!(
+            task_interval_ms(&settings, TASK_PLUGIN_CATALOG),
+            360 * 60_000
+        );
     }
 
     /// 维护模块 claim 与调度循环共用同一排期口径。

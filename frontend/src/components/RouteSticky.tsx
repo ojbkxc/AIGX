@@ -77,16 +77,27 @@ export default function RouteSticky(): JSX.Element {
   const [errMsg, setErrMsg] = useState('');
   const [keyword, setKeyword] = useState('');
   const [applied, setApplied] = useState('');
+  /**
+   * 只看某个模型的粘滞（对齐 A2A `RoutingStickyDialog` 的 `model` 入参）：
+   * 有模型上下文时（从回放/模型配置进来）清除退化为「清这个模型的全部」，
+   * 不会误清别的模型 —— A2A 的确认文案与按钮也随 model 变化。
+   */
+  const [modelScope, setModelScope] = useState('');
+  /** 每个模型的粘滞条数（筛选下拉的候选，取自当前快照） */
+  const modelsInScope = Array.from(new Set(entries.map((e) => splitStickyId(e.id).model).filter(Boolean))).sort();
+  const visible = modelScope ? entries.filter((e) => splitStickyId(e.id).model === modelScope) : entries;
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const debounceRef = useRef<number | null>(null);
 
   /**
-   * 活跃绑定数（对齐 A2A 的「{n} 条活跃绑定」）：expires_at 在未来的才计入。
-   * 无 expires_at 的条目（异常形状/旧桩）按活跃计入 —— 列表里既然显示了它，
-   * 就不该在计数上假装它不存在。
+   * 活跃绑定数（对齐 A2A 的「{n} 条活跃绑定」）：`expires_at` 在未来的才计入，
+   * 且**随模型作用域收窄**（A2A 弹窗带 model 时它的 `active` 也是该模型那一份）。
    */
   const nowMs = Date.now();
-  const activeCount = entries.filter((e) => {
+  const activeCount = (modelScope
+    ? entries.filter((e) => splitStickyId(e.id).model === modelScope)
+    : entries
+  ).filter((e) => {
     const exp = toMillis(e.expires_at);
     return exp == null || exp > nowMs;
   }).length;
@@ -164,14 +175,22 @@ export default function RouteSticky(): JSX.Element {
   };
 
   const clearAll = (): void => {
+    // 有模型作用域时退化为「清这个模型的全部」（对齐 A2A：带 model 进弹窗时
+    // 底部按钮是「解除当前模型全部粘滞」，文案也随它变）。不这样会把别的
+    // 模型的粘滞一起清掉 —— 那正是「只想换这个模型试试」时最不想要的副作用。
+    const scoped = modelScope;
     setConfirmState({
-      title: t('清除全部粘滞会话'),
-      message: t('全部会话的下一条请求都会重新按策略选路（上游上下文缓存失效）。确认清除全部？'),
-      confirmText: t('全部清除'),
+      title: scoped ? t('清除该模型的全部粘滞会话') : t('清除全部粘滞会话'),
+      message: scoped
+        ? t('「{{model}}」的下一条请求都会重新按策略选路（上游上下文缓存失效）。确认清除？', {
+            model: scoped,
+          })
+        : t('全部会话的下一条请求都会重新按策略选路（上游上下文缓存失效）。确认清除全部？'),
+      confirmText: scoped ? t('清除该模型全部') : t('全部清除'),
       danger: true,
       onConfirm: async () => {
         try {
-          const res = await api.clearRouteSticky({ all: true });
+          const res = await api.clearRouteSticky(scoped ? { model: scoped } : { all: true });
           addToast(t('已清除 {{n}} 条粘滞会话', { n: res?.data?.cleared ?? 0 }));
           void load(applied);
         } catch (err) {
@@ -201,7 +220,7 @@ export default function RouteSticky(): JSX.Element {
           </span>
         </div>
         <div className="form-group">
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ position: 'relative', flex: 1, maxWidth: 360 }}>
               <Search size={14} style={{ position: 'absolute', left: 10, top: 9, opacity: 0.5 }} />
               <input
@@ -210,8 +229,25 @@ export default function RouteSticky(): JSX.Element {
                 placeholder={t('搜索模型、账号或会话来源')}
                 value={keyword}
                 onChange={(e) => onKeyword(e.target.value)}
+                aria-label={t('搜索模型、账号或会话来源')}
               />
             </div>
+            {/* 模型作用域（对齐 A2A 弹窗的 model 入参）：候选取自当前快照里
+                真的出现过的模型 —— 空清单时整块不渲染，不留一个没得选的空下拉。 */}
+            {modelsInScope.length > 0 ? (
+              <select
+                className="form-input"
+                style={{ maxWidth: 220 }}
+                value={modelScope}
+                aria-label={t('粘滞模型')}
+                onChange={(e) => setModelScope(e.target.value)}
+              >
+                <option value="">{t('全部模型')}</option>
+                {modelsInScope.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            ) : null}
             <button
               className="btn btn-secondary"
               onClick={() => void load(applied)}
@@ -223,9 +259,9 @@ export default function RouteSticky(): JSX.Element {
             <button
               className="btn btn-secondary"
               onClick={clearAll}
-              disabled={loading || degraded || entries.length === 0}
+              disabled={loading || degraded || (modelScope ? (visible.length === 0) : (entries.length === 0))}
             >
-              {t('全部清除')}
+              {modelScope ? t('清除该模型全部') : t('全部清除')}
             </button>
           </div>
         </div>
@@ -238,13 +274,19 @@ export default function RouteSticky(): JSX.Element {
           />
         ) : errMsg ? (
           <div className="error-message">{errMsg}</div>
-        ) : entries.length === 0 ? (
+        ) : visible.length === 0 ? (
           <EmptyState
-            message={applied ? t('没有匹配的粘滞会话') : t('当前没有粘滞会话')}
+            message={
+              modelScope
+                ? t('该模型当前没有粘滞会话')
+                : applied
+                  ? t('没有匹配的粘滞会话')
+                  : t('当前没有粘滞会话')
+            }
           />
         ) : (
           <div className="rs-list">
-            {entries.map((e) => {
+            {visible.map((e) => {
               const exp = toMillis(e.expires_at);
               const { session, model } = splitStickyId(e.id);
               return (
@@ -281,12 +323,14 @@ export default function RouteSticky(): JSX.Element {
           </div>
         )}
 
-        {!loading && !degraded && !errMsg && entries.length > 0 && (
+        {!loading && !degraded && !errMsg && visible.length > 0 && (
           <div className="rs-total" style={{ opacity: 0.7, fontSize: 12, marginTop: 10 }}>
             {/* 后端按 500 条截断（无分页）：超出必须显式告知，否则管理员
-                会把「列出的一页」误当成全部 */}
+                会把「列出的一页」误当成全部。有模型作用域时同时给出筛选口径，
+                否则「总数」与「行数」对不上会被读成丢数据。 */}
             {`${t('总数')} ${total}`}
             {truncated ? ` · ${t('（已截断）')}` : ''}
+            {modelScope ? ` · ${t('当前只显示 {{model}}', { model: modelScope })}` : ''}
           </div>
         )}
       </div>

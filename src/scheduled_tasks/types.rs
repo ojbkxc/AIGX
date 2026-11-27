@@ -83,6 +83,17 @@ pub struct ScheduledSettings {
     pub update_check: IntervalTask,
     /// 社区 / Magpie 插件目录与已装插件检查（后端）。
     pub magpie_plugin_check: IntervalTask,
+    /// 社区插件检查是否**跟随**「软件检查更新」计划（`checkMode=follow`）。
+    ///
+    /// 跟随时开关与间隔都取 `update_check` 的值（`magpie_plugin_check` 的存档保留
+    /// 但不生效，切回 custom 时原值原样回来 —— 与 A2A `pluginCatalogCheck` 的
+    /// `checkMode` 同一语义）。
+    ///
+    /// **默认 false（= custom），与 A2A 默认 follow 有意不同**：AIGX 的插件检查
+    /// 一直有自己独立的 6 小时间隔，默认改成跟随会让存量安装的插件检查频率从
+    /// 6 小时变成软件计划的 20 分钟（一次静默的行为变更）。默认 custom 让升级后
+    /// 行为逐字节不变，而「跟随」变成用户显式选择。
+    pub plugin_catalog_follow: bool,
     /// 日志页自动刷新（前端）。
     pub logs_auto_refresh: IntervalTask,
     /// 请求日志页自动刷新（前端）。
@@ -110,6 +121,7 @@ impl Default for ScheduledSettings {
                 enabled: true,
                 interval: DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES,
             },
+            plugin_catalog_follow: false,
             logs_auto_refresh: IntervalTask {
                 enabled: true,
                 interval: DEFAULT_LOGS_AUTO_REFRESH_SECONDS,

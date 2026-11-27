@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 
 use super::super::openai::AppState;
 use super::common::verify_admin;
+use super::routing_workspace::provider_label;
 use crate::channel::routing_policy::{
     caps, BreakerPolicy, RequestNeeds, RouteStrategy, RoutingGroup, RoutingPolicy, RoutingProfiles,
     StickyMode,
@@ -271,33 +272,34 @@ pub async fn handle_routing_defaults(
 /// 「谁排第一、谁被挡在门外」回显给管理页，保存策略前就能看到效果。
 /// 注意：round_robin 策略下实际首挑由游标决定，预演以静态排序为准；
 /// weighted / ranked 策略下预演与实际首挑一致（页面文案已注明）。
+///
+/// `model` **可省**（对齐 A2A `get_routing_queue`：省略或空 = 「不限模型」的
+/// 全局队列，不收窄到「提供该模型的家」）。A2A 的原话是「面板在没有模型上下文
+/// 时也得有得画」—— 此前这里缺参直接 400，等价于把该场景整个挡掉。
 pub async fn handle_routing_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    let model = q
-        .get("model")
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            super::common::error_response(
-                "缺少 model 查询参数",
-                axum::http::StatusCode::BAD_REQUEST,
-            )
-        })?;
+    let model = q.get("model").map(|s| s.trim()).filter(|s| !s.is_empty());
 
     let policy = state.routing_policy.snapshot();
     // #40 判定统一（契约 §3）：预演与数据面 `resolve_bridges` 走**同一序列**
     // ——resolve_profile → 按生效 strategy 选候选 → plan_route 裁剪。此前预演
     // 自成一套口径，正是 #31「回放投影与真实形状不匹配」那类事故的来源。
-    let profile =
-        crate::channel::routing_policy::resolve_profile(&policy, model, &state.model_mapper, None);
+    // 无模型上下文时用空名 = 只吃全局层（A2A 同一取舍：空 model 不命中模型级）。
+    let scope_name = model.unwrap_or("");
+    let profile = crate::channel::routing_policy::resolve_profile(
+        &policy,
+        scope_name,
+        &state.model_mapper,
+        None,
+    );
     // 通过筛选的有序候选（与数据面 resolve_bridges 同一口径：按当前路由
     // 策略过滤排序——预演的队首才有「首挑预测」价值）
     let ordered = state.channel_store.select_for_model_by_strategy(
-        model,
+        scope_name,
         profile.strategy,
         &state.pricing_store,
     );
@@ -309,6 +311,9 @@ pub async fn handle_routing_queue(
         "strategy": profile.strategy,
         "sticky": profile.sticky,
         "model": model,
+        // A2A 同名字段：点名了模型但没有任何渠道声明它 → false（界面据此提示
+        // 「这个模型还没有可用来源」，而不是展示一张空队列）
+        "modelKnown": model.map(|_| !ordered.is_empty()),
         "pickedId": plan.first().map(|c| c.id.clone()),
         "ordered": ordered_json,
         "blocked": blocked_json,
@@ -322,6 +327,12 @@ pub async fn handle_routing_queue(
 
 /// 预演投影（`/api/routing/queue`、`/api/routing/preview` 与 `/api/routing/workspace`
 /// 共用，**不造第二套**）：plan 的参与候选 + 被挡门外的启用渠道两段 JSON。
+///
+/// 字段对齐 A2A `routing_api.rs::queue_for_accounts` 的 `entry_json`：
+/// `id / name / provider / providerLabel / state / reason / priority`
+/// （A2A 另有 `resetAt` 与 `candidateId/memberId/model` —— 那几项来自它的
+/// 账号级候选，AIGX 的候选是**渠道级**（账号身份在选号时才确定），故不编造，
+/// 差异记入交付清单）。新增字段只增不改：既有 `id/name/provider/state` 语义不变。
 pub(crate) fn queue_projection(
     state: &AppState,
     plan: &crate::channel::routing_policy::RoutePlan<'_>,
@@ -330,14 +341,23 @@ pub(crate) fn queue_projection(
     let ordered_json: Vec<Value> = plan
         .iter()
         .map(|c| {
+            let breaker_status = breaker_map
+                .get(&c.id)
+                .cloned()
+                .unwrap_or_else(|| "closed".to_string());
             json!({
                 "id": c.id,
                 "name": c.name,
                 "provider": c.channel_type.as_str(),
-                "state": breaker_map
-                    .get(&c.id)
-                    .cloned()
-                    .unwrap_or_else(|| "closed".to_string()),
+                // A2A `providerLabel`：界面上显示人话而不是协议字面量
+                "providerLabel": provider_label(c.channel_type.as_str()),
+                "state": breaker_status,
+                // 通过筛选、进入候选序 = 本次判定里它是「可用候选」。
+                // 不给一句编造的差异化原因（AIGX 的 plan 不带逐条 reason，
+                // 编一条「为什么它排这里」等于伪造判定依据）。
+                "reason": "参与候选",
+                // 渠道优先级（排序的第一顺位依据），A2A 同名字段
+                "priority": c.priority,
             })
         })
         .collect();
@@ -365,8 +385,10 @@ pub(crate) fn queue_projection(
                 "id": c.id,
                 "name": c.name,
                 "provider": c.channel_type.as_str(),
+                "providerLabel": provider_label(c.channel_type.as_str()),
                 "state": breaker_status,
                 "reason": reason,
+                "priority": c.priority,
             })
         })
         .collect();
@@ -455,11 +477,16 @@ pub async fn handle_get_route_sticky(
     })))
 }
 
-/// POST /api/routing/sticky/clear 请求体：单条（`id`）与全清（`all`）二选一；
-/// 都传以 `id` 优先；都不给 400。
+/// POST /api/routing/sticky/clear 请求体：三种粒度（对齐 A2A
+/// `routing_workspace::clear_sticky` 的 `{id?, model?, all?}`）：
+///   · `id`  = 单条（`session<U+001F>model` 内部编码，**原样回传 GET 的 id**）
+///   · `model` = 只清该模型的全部粘滞（A2A 同名字段；排障「换一个模型试试」用）
+///   · `all: true` = 全清
+/// 优先级 `id` > `model` > `all`（都传时按最具体的一档执行）；都不给 400。
 #[derive(Debug, Deserialize)]
 pub struct RouteStickyClearRequest {
     pub id: Option<String>,
+    pub model: Option<String>,
     pub all: Option<bool>,
 }
 
@@ -483,11 +510,20 @@ pub async fn handle_clear_route_sticky(
             // 非法 / 过期 id：不 500，回 0 条（幂等清除）
             _ => 0usize,
         }
+    } else if let Some(model) = body.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // 按模型清：取快照里 model 匹配的条目逐条 evict。
+        // 不走「清空再重建」——期间别的请求可能正写入，逐条删不会误伤新条目。
+        let (entries, _) = cache.snapshot(ROUTE_STICKY_MAX_SNAPSHOT);
+        entries
+            .into_iter()
+            .filter(|e| e.model.eq_ignore_ascii_case(model))
+            .filter(|e| cache.evict_session(&e.session_id, &e.model))
+            .count()
     } else if body.all == Some(true) {
         cache.clear_all()
     } else {
         return Err(super::common::error_response(
-            "id 与 all 至少提供一个（单条清除传 GET 返回的 id；全清传 all:true）",
+            "id / model / all 至少提供一个（单条传 GET 返回的 id；按模型清传 model；全清传 all:true）",
             axum::http::StatusCode::BAD_REQUEST,
         ));
     };
