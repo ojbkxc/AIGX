@@ -176,6 +176,11 @@ fn paths_auth() -> Value {
         "/api/auth/google/callback": { "get": op_pub("认证", "Google OAuth 回调") },
         "/api/auth/linuxdo": { "get": op_pub("认证", "LinuxDO OAuth 授权跳转") },
         "/api/auth/linuxdo/callback": { "get": op_pub("认证", "LinuxDO OAuth 回调") },
+        // OAuth 短回调别名（与上面三条长路径同一 handler；GitHub/Google 的 OAuth App
+        // 里登记的回调常见形态是 `https://<host>/oauth/<provider>`）
+        "/oauth/github": { "get": op_pub("认证", "GitHub OAuth 回调（短别名）") },
+        "/oauth/google": { "get": op_pub("认证", "Google OAuth 回调（短别名）") },
+        "/oauth/linuxdo": { "get": op_pub("认证", "LinuxDO OAuth 回调（短别名）") },
         "/api/auth/github/bind/start": {
             "post": op_body("认证", "发起绑定 GitHub（登录态）", "无请求体，返回授权 URL")
         },
@@ -2263,6 +2268,9 @@ mod tests {
         add("/api/auth/google/bind/start", &["post"]);
         add("/api/auth/linuxdo", &["get"]);
         add("/api/auth/linuxdo/callback", &["get"]);
+        add("/oauth/github", &["get"]);
+        add("/oauth/google", &["get"]);
+        add("/oauth/linuxdo", &["get"]);
         add("/api/auth/linuxdo/bind/start", &["post"]);
         add("/api/auth/oauth/unbind", &["post"]);
         add("/api/auth/oauth/consume", &["post"]);
