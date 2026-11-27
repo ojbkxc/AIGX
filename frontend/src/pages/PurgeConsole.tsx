@@ -33,6 +33,7 @@ import {
   Textarea,
 } from '../components/ui';
 import { SectionGuard } from '../components/SectionBoundary';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { FallbackSuggestPanel } from '../components/purge-fallback-suggest';
 import { SkillComposePanel } from '../components/purge-skill-compose';
 import {
@@ -439,10 +440,16 @@ export function disableRulesAt<T extends { enabled?: boolean }>(
   );
 }
 
-/** 覆盖同名技能的确认（抽出来便于单测与复用文案）。 */
+/**
+ * 覆盖同名技能的确认（抽出来便于单测与复用文案）。
+ *
+ * `ask` 必须显式注入：UI 层传 ConfirmDialog 驱动的同步判据「弹窗已打开=true」，
+ * 测试传断言桩。不再默认 `window.confirm`——原生 confirm 在 iframe / Electron
+ * 容器里可能静默失败，统一走组件弹窗（见 ConfirmDialog 注释）。
+ */
 export function confirmSkillOverwrite(
   id: string,
-  ask: (message: string) => boolean = (message) => window.confirm(message),
+  ask: (message: string) => boolean,
   tr: (key: string, params?: Record<string, string>) => string = (key) => key,
 ): boolean {
   return ask(
@@ -2604,6 +2611,8 @@ const PresetsSection = memo(function PresetsSection({
   const [confirmOverwrite, setConfirmOverwrite] = useState<
     { id: string; name: string; text: string } | null
   >(null);
+  /** 技能覆盖确认弹窗（替代原生 window.confirm） */
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   /**
    * 当前生效模型（后端判定「套不套预设」用的那个值）。
    *
@@ -2855,23 +2864,14 @@ const PresetsSection = memo(function PresetsSection({
     [addToast, fetchBody, t],
   );
 
-  const handleApplySkill = useCallback(
+  /**
+   * 真正写入技能目录（confirm 通过后的续跑体，也是无冲突时的直接路径）。
+   *
+   * 抽出来是因为确认从同步 window.confirm 改成了异步 ConfirmDialog：原「confirm
+   * 通过才执行的操作」整体搬进 onConfirm 回调，必须是个可复用的命名函数。
+   */
+  const applySkill = useCallback(
     async (id: string): Promise<void> => {
-      // 并发判据用 ref：`busy` 是 state，确认框之后才 set，两个快速点击会在
-      // **确认框之前**双双通过判据，然后两次 `fs::write` 同时覆盖同一个 SKILL.md。
-      if (busyRef.current !== null) return;
-      // 后端 `apply(skill_file)` 是 `std::fs::write` **直接覆盖** `<skill_dir>/<id>/SKILL.md`。
-      // 技能目录里的文件可能有人手写过——覆盖前必须问一句，否则一次点击就没了。
-      // 判断依据是 `skills` 快照里的同名技能（解析自 SKILL.md 的 name，缺省退父目录名）；
-      // 不保证覆盖「文件名不同但内容手改」的情形，所以文案只说「已存在同名技能」。
-      if (
-        (existingSkills ?? []).some((skill) => skill.name === id) &&
-        !confirmSkillOverwrite(id, (message) => window.confirm(message), (key, params) =>
-          t(key, params),
-        )
-      ) {
-        return;
-      }
       busyRef.current = `skill:${id}`;
       setBusy(`skill:${id}`);
       try {
@@ -2890,7 +2890,40 @@ const PresetsSection = memo(function PresetsSection({
         setBusy(null);
       }
     },
-    [addToast, existingSkills, noteRecent, onSkillWritten, t],
+    [addToast, noteRecent, onSkillWritten, t],
+  );
+
+  const handleApplySkill = useCallback(
+    (id: string): void => {
+      // 并发判据用 ref：`busy` 是 state，确认框之后才 set，两个快速点击会在
+      // **确认框之前**双双通过判据，然后两次 `fs::write` 同时覆盖同一个 SKILL.md。
+      if (busyRef.current !== null) return;
+      // 后端 `apply(skill_file)` 是 `std::fs::write` **直接覆盖** `<skill_dir>/<id>/SKILL.md`。
+      // 技能目录里的文件可能有人手写过——覆盖前必须问一句，否则一次点击就没了。
+      // 判断依据是 `skills` 快照里的同名技能（解析自 SKILL.md 的 name，缺省退父目录名）；
+      // 不保证覆盖「文件名不同但内容手改」的情形，所以文案只说「已存在同名技能」。
+      //
+      // ConfirmDialog 是异步的：这里打开弹窗即返回，confirmSkillOverwrite 拿到的
+      // ask 判据是「弹窗已打开=true」（跳过直接 return 的语义），真正写入在 onConfirm 里续跑。
+      if ((existingSkills ?? []).some((skill) => skill.name === id)) {
+        const shouldAsk = confirmSkillOverwrite(id, () => true, (key, params) =>
+          t(key, params),
+        );
+        if (!shouldAsk) return;
+        setConfirmState({
+          title: t('覆盖同名技能'),
+          message: t('技能目录里已有同名技能「{{id}}」，继续写入会覆盖它的 SKILL.md。继续？', {
+            id,
+          }),
+          confirmText: t('覆盖'),
+          danger: true,
+          onConfirm: () => applySkill(id),
+        });
+        return;
+      }
+      void applySkill(id);
+    },
+    [applySkill, existingSkills, t],
   );
 
   return (
@@ -3094,6 +3127,7 @@ const PresetsSection = memo(function PresetsSection({
           </Button>
         </div>
       ) : null}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </Card>
   );
 });
@@ -3134,6 +3168,8 @@ export default function PurgeConsole(): JSX.Element {
   const [previewSavedOnly, setPreviewSavedOnly] = useState(false);
   /** 预览时套用的模型（非空则一并预演「按模型自动套用」的预设前插） */
   const [previewModel, setPreviewModel] = useState('');
+  /** 通用确认弹窗（替代原生 window.confirm） */
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const savedForDiff = data?.settings;
   /** diff 只看变更行（长样例里上下文占绝大多数，遮住真正的改写点） */
   const [diffChangedOnly, setDiffChangedOnly] = useState(false);
@@ -3159,10 +3195,18 @@ export default function PurgeConsole(): JSX.Element {
       t(key, params),
     );
     if (!prompt) return;
-    if (!window.confirm(prompt)) return;
-    persistPreviewHistory([], lsSetStable, lsRemoveStable);
-    setPreviewHistory([]);
-    addToast(t('已清空 {{n}} 条样例历史', { n: previewHistory.length }), 'success');
+    const n = previewHistory.length;
+    setConfirmState({
+      title: t('清空样例历史'),
+      message: prompt,
+      confirmText: t('清空'),
+      danger: true,
+      onConfirm: () => {
+        persistPreviewHistory([], lsSetStable, lsRemoveStable);
+        setPreviewHistory([]);
+        addToast(t('已清空 {{n}} 条样例历史', { n }), 'success');
+      },
+    });
   }, [addToast, previewHistory.length, t]);
 
   /** 导出历史为 JSON（团队共享同一批测试用例） */
@@ -3507,6 +3551,59 @@ export default function PurgeConsole(): JSX.Element {
     return () => window.clearTimeout(timer);
   }, [draft, dirty]);
 
+  /**
+   * 真正落库的保存体（confirm 通过后的续跑，也是无溢出/空行时的直接路径）。
+   *
+   * 从 save 抽出来：保存前的「超上限/空原文行」确认从同步 window.confirm 改成异步
+   * ConfirmDialog 后，「confirm 通过才执行的操作」必须是个能在 onConfirm 里复用的
+   * 命名函数。它重复做 save 头部的守卫与 clamp（读 ref，不依赖 save 的闭包），
+   * 保证从弹窗续跑时拿到的仍是最新草稿。
+   */
+  const doSave = useCallback(async (): Promise<void> => {
+    const snapshot = dataRef.current;
+    const current = draftRef.current;
+    if (!current || !snapshot || savingRef.current) return;
+    let next = current;
+    const rawNext = { ...numRaw };
+    for (const f of NUM_FIELDS) {
+      const clamped = Math.min(f.max, Math.max(f.min, Math.trunc(Number(numRaw[f.key]))));
+      next = withNum(next, f.key, clamped);
+      rawNext[f.key] = String(clamped);
+    }
+    savingRef.current = true;
+    setSaving(true);
+    setNumRaw(rawNext);
+    try {
+      const res = await api.savePurge(next);
+      if (!res.success || !res.data) throw new Error('save failed');
+      setData(res.data);
+      setDraft(normalizeSettingsArrays(res.data.settings));
+      setNumRaw(numRawOf(res.data.settings));
+      setNumErrors({});
+      setDirty(false);
+      // 保存成功后旧的词表撤销快照就过期了：它指向的是**已落库之前**的状态，
+      // 再点撤销等于把已保存的结果改回去（还不会自动落库），语义上不是「撤销
+      // 我刚才那一下」，而是「悄悄改回去」。宁可让入口消失。
+      setTableUndo(null);
+      // 落库成功 → 草稿备份没有存在意义了（留着反而下次弹「恢复」误导）
+      writeDraftBackup(null, lsSetStable, lsRemoveStable);
+      setSavedAt(Date.now());
+      addToast(t('已保存'), 'success');
+    } catch {
+      addToast(t('保存失败'), 'error');
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }, [addToast, numRaw, t]);
+
+  /**
+   * 保存入口：先做轻量校验（无效数字 / 模板重名直接拦），再决定是直接落库
+   * 还是开「超上限/空原文行」确认弹窗。确认通过后在 onConfirm 里续跑 doSave。
+   *
+   * Ctrl+S（saveRef）与底部「保存」按钮都走这里；确认从同步 window.confirm
+   * 改成异步 ConfirmDialog 后，本函数只负责「问」，真正写库在 doSave。
+   */
   const save = useCallback(async (): Promise<void> => {
     const snapshot = dataRef.current;
     const current = draftRef.current;
@@ -3551,43 +3648,17 @@ export default function PurgeConsole(): JSX.Element {
         overflows.length > 0
           ? t('{{detail}}。保存只保留各字段的上限、并丢弃空原文行，继续？', { detail })
           : t('{{detail}}，保存时这些行会被丢弃。继续？', { detail });
-      if (!window.confirm(question)) {
-        return;
-      }
+      setConfirmState({
+        title: t('确认保存'),
+        message: question,
+        confirmText: t('保存'),
+        danger: true,
+        onConfirm: () => doSave(),
+      });
+      return;
     }
-    let next = current;
-    const rawNext = { ...numRaw };
-    for (const f of NUM_FIELDS) {
-      const clamped = Math.min(f.max, Math.max(f.min, Math.trunc(Number(numRaw[f.key]))));
-      next = withNum(next, f.key, clamped);
-      rawNext[f.key] = String(clamped);
-    }
-    savingRef.current = true;
-    setSaving(true);
-    setNumRaw(rawNext);
-    try {
-      const res = await api.savePurge(next);
-      if (!res.success || !res.data) throw new Error('save failed');
-      setData(res.data);
-      setDraft(normalizeSettingsArrays(res.data.settings));
-      setNumRaw(numRawOf(res.data.settings));
-      setNumErrors({});
-      setDirty(false);
-      // 保存成功后旧的词表撤销快照就过期了：它指向的是**已落库之前**的状态，
-      // 再点撤销等于把已保存的结果改回去（还不会自动落库），语义上不是「撤销
-      // 我刚才那一下」，而是「悄悄改回去」。宁可让入口消失。
-      setTableUndo(null);
-      // 落库成功 → 草稿备份没有存在意义了（留着反而下次弹「恢复」误导）
-      writeDraftBackup(null, lsSetStable, lsRemoveStable);
-      setSavedAt(Date.now());
-      addToast(t('已保存'), 'success');
-    } catch {
-      addToast(t('保存失败'), 'error');
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
-  }, [addToast, dupTemplates.size, numRaw, t]);
+    await doSave();
+  }, [addToast, doSave, dupTemplates.size, numRaw, t]);
 
   /**
    * 重置为默认：拉出厂默认配置填进**草稿**（不直接保存）。
@@ -3596,23 +3667,30 @@ export default function PurgeConsole(): JSX.Element {
    * 子开关默认组合、词表初始内容），前端硬编码会与后端 `PurgeSettings::default()`
    * 漂移；服务端还做了 normalize，与「全新安装首次保存」结果一致。
    */
-  const resetToDefaults = useCallback(async (): Promise<void> => {
-    if (!window.confirm(t('将把出厂默认配置填入草稿（未保存的编辑会丢失）。继续？'))) return;
-    try {
-      const res = await api.getPurgeDefaults();
-      if (!res.success || !res.data) throw new Error('defaults failed');
-      setDraft(normalizeSettingsArrays(res.data.settings));
-      setNumRaw(numRawOf(res.data.settings));
-      setNumErrors({});
-      setDirty(true);
-      setPreviewOut(null);
-      setPreviewBase(null);
-      setPreviewMeta(null);
-      setPreviewDetail(null);
-      addToast(t('已填入出厂默认配置，确认无误后点「保存」生效'), 'success');
-    } catch {
-      addToast(t('读取出厂默认配置失败'), 'error');
-    }
+  const resetToDefaults = useCallback((): void => {
+    setConfirmState({
+      title: t('重置为默认'),
+      message: t('将把出厂默认配置填入草稿（未保存的编辑会丢失）。继续？'),
+      confirmText: t('重置'),
+      danger: true,
+      onConfirm: async () => {
+        try {
+          const res = await api.getPurgeDefaults();
+          if (!res.success || !res.data) throw new Error('defaults failed');
+          setDraft(normalizeSettingsArrays(res.data.settings));
+          setNumRaw(numRawOf(res.data.settings));
+          setNumErrors({});
+          setDirty(true);
+          setPreviewOut(null);
+          setPreviewBase(null);
+          setPreviewMeta(null);
+          setPreviewDetail(null);
+          addToast(t('已填入出厂默认配置，确认无误后点「保存」生效'), 'success');
+        } catch {
+          addToast(t('读取出厂默认配置失败'), 'error');
+        }
+      },
+    });
   }, [addToast, t]);
 
   // 把最新的 dirty / save 交给 Ctrl+S 监听（监听只挂一次，读 ref 拿实时值）
@@ -3706,21 +3784,21 @@ export default function PurgeConsole(): JSX.Element {
     (kind: 'dead_zone' | 'synonym'): void => {
       const issues = kind === 'dead_zone' ? deadZoneIssues : synonymIssues;
       if (issues.size === 0) return;
-      if (
-        !window.confirm(
-          t('将停用 {{n}} 条异常行（不删除，之后可再启用）。继续？', { n: issues.size }),
-        )
-      ) {
-        return;
-      }
-      setDirty(true);
-      setDraft((d) => {
-        if (!d) return d;
-        return kind === 'dead_zone'
-          ? { ...d, rewrite_rules: disableRulesAt(d.rewrite_rules, issues) }
-          : { ...d, synonym_pairs: disableRulesAt(d.synonym_pairs, issues) };
+      setConfirmState({
+        title: t('停用异常行'),
+        message: t('将停用 {{n}} 条异常行（不删除，之后可再启用）。继续？', { n: issues.size }),
+        confirmText: t('停用'),
+        onConfirm: () => {
+          setDirty(true);
+          setDraft((d) => {
+            if (!d) return d;
+            return kind === 'dead_zone'
+              ? { ...d, rewrite_rules: disableRulesAt(d.rewrite_rules, issues) }
+              : { ...d, synonym_pairs: disableRulesAt(d.synonym_pairs, issues) };
+          });
+          addToast(t('已停用 {{n}} 条异常行', { n: issues.size }), 'success');
+        },
       });
-      addToast(t('已停用 {{n}} 条异常行', { n: issues.size }), 'success');
     },
     [addToast, deadZoneIssues, synonymIssues, t],
   );
@@ -4154,36 +4232,37 @@ export default function PurgeConsole(): JSX.Element {
       ]
         .filter(Boolean)
         .join('、');
-      if (
-        !window.confirm(
-          t('将删除 {{n}} 行（{{detail}}），剩余 {{kept}} 行。继续？', {
-            n: summary.removed,
-            detail,
-            kept: result.kept.length,
-          }),
-        )
-      ) {
-        return;
-      }
-      setDirty(true);
-      setTableUndo(undoSnapshot(kind, rules, t('整理词表')));
-      setDraft((d) =>
-        d
-          ? {
-              ...d,
-              rewrite_rules: kind === 'dead_zone' ? result.kept : d.rewrite_rules,
-              synonym_pairs: kind === 'synonym' ? result.kept : d.synonym_pairs,
-            }
-          : d,
-      );
-      addToast(
-        t('已整理：删除 {{n}} 行，剩余 {{kept}} 行（{{detail}}）', {
+      setConfirmState({
+        title: t('整理词表'),
+        message: t('将删除 {{n}} 行（{{detail}}），剩余 {{kept}} 行。继续？', {
           n: summary.removed,
-          kept: result.kept.length,
           detail,
+          kept: result.kept.length,
         }),
-        'success',
-      );
+        confirmText: t('整理'),
+        danger: true,
+        onConfirm: () => {
+          setDirty(true);
+          setTableUndo(undoSnapshot(kind, rules, t('整理词表')));
+          setDraft((d) =>
+            d
+              ? {
+                  ...d,
+                  rewrite_rules: kind === 'dead_zone' ? result.kept : d.rewrite_rules,
+                  synonym_pairs: kind === 'synonym' ? result.kept : d.synonym_pairs,
+                }
+              : d,
+          );
+          addToast(
+            t('已整理：删除 {{n}} 行，剩余 {{kept}} 行（{{detail}}）', {
+              n: summary.removed,
+              kept: result.kept.length,
+              detail,
+            }),
+            'success',
+          );
+        },
+      });
     },
     [addToast, t],
   );
@@ -4393,17 +4472,24 @@ export default function PurgeConsole(): JSX.Element {
    * 为什么需要：累计值是进程级的，改完配置想验证「生效后有没有效果」时，旧历史
    * 混在里面比不出来；等重启清零不现实。只清计数，不动配置、不动「上次运行」快照。
    */
-  const resetStats = useCallback(async (): Promise<void> => {
-    if (!window.confirm(t('清零后累计统计与时间窗计数都会归零（不影响配置）。继续？'))) return;
-    try {
-      const res = await api.resetPurgeStats();
-      if (!res.success) throw new Error('reset failed');
-      addToast(t('统计已清零，之后的数据从零开始累计'), 'success');
-      // 重新拉一次整页快照：stats / stats_1h / stats_24h 都要跟着变
-      await load();
-    } catch {
-      addToast(t('统计清零失败'), 'error');
-    }
+  const resetStats = useCallback((): void => {
+    setConfirmState({
+      title: t('清零统计'),
+      message: t('清零后累计统计与时间窗计数都会归零（不影响配置）。继续？'),
+      confirmText: t('清零'),
+      danger: true,
+      onConfirm: async () => {
+        try {
+          const res = await api.resetPurgeStats();
+          if (!res.success) throw new Error('reset failed');
+          addToast(t('统计已清零，之后的数据从零开始累计'), 'success');
+          // 重新拉一次整页快照：stats / stats_1h / stats_24h 都要跟着变
+          await load();
+        } catch {
+          addToast(t('统计清零失败'), 'error');
+        }
+      },
+    });
   }, [addToast, load, t]);
 
   const exportStatsCsv = useCallback(async (): Promise<void> => {
@@ -4434,6 +4520,45 @@ export default function PurgeConsole(): JSX.Element {
       addToast(t('统计导出失败'), 'error');
     }
   }, [addToast, t]);
+
+  /**
+   * CSV「替换模式」落草稿体（confirm 通过后的续跑，也是空表时的直接路径）。
+   *
+   * 抽出来是因为替换前确认从同步 window.confirm 改成异步 ConfirmDialog：整表替换
+   * 的副作用（置 dirty / 拍撤销快照 / 写草稿 / 提示）必须能在 onConfirm 里复用。
+   */
+  const applyCsvReplace = useCallback(
+    (kind: 'dead_zone' | 'synonym', parsed: Array<{ from: string; to: string }>): void => {
+      const existing = draftRef.current;
+      const currentRules =
+        kind === 'dead_zone' ? existing?.rewrite_rules ?? [] : existing?.synonym_pairs ?? [];
+      setDirty(true);
+      setTableUndo(undoSnapshot(kind, currentRules, t('导入 CSV（替换）')));
+      setDraft((d) =>
+        d
+          ? {
+              ...d,
+              rewrite_rules: kind === 'dead_zone' ? parsed : d.rewrite_rules,
+              synonym_pairs: kind === 'synonym' ? parsed : d.synonym_pairs,
+            }
+          : d,
+      );
+      const replacedBase =
+        kind === 'dead_zone'
+          ? t('已用 {{count}} 条替换死区词表，检查无误后点「保存」生效', {
+              count: parsed.length,
+            })
+          : t('已用 {{count}} 条替换同义词表，检查无误后点「保存」生效', {
+              count: parsed.length,
+            });
+      const overCap =
+        parsed.length > RULE_TABLE_CAP
+          ? ` · ${t('超过上限 {{cap}} 条：保存只保留前 {{cap}} 条', { cap: RULE_TABLE_CAP })}`
+          : '';
+      addToast(replacedBase + overCap, overCap ? 'warning' : 'success');
+    },
+    [addToast, t],
+  );
 
   /**
    * 导入 CSV → 追加进草稿（与「添加规则」同口径：不整表替换，重复项靠行内提示）。
@@ -4468,38 +4593,21 @@ export default function PurgeConsole(): JSX.Element {
         // 与追加模式的判据不同——「全部重复」在这里恰恰是正常情况，不能拒收。
         if (csvReplace) {
           if (currentRules.length > 0) {
-            const ok = window.confirm(
-              t('将用文件里的 {{next}} 条替换当前 {{prev}} 条（含未保存的编辑）。继续？', {
+            setConfirmState({
+              title: t('替换词表'),
+              message: t('将用文件里的 {{next}} 条替换当前 {{prev}} 条（含未保存的编辑）。继续？', {
                 next: parsed.length,
                 prev: currentRules.length,
               }),
-            );
-            if (!ok) return;
+              confirmText: t('替换'),
+              danger: true,
+              onConfirm: () => {
+                applyCsvReplace(kind, parsed);
+              },
+            });
+            return;
           }
-          setDirty(true);
-          setTableUndo(undoSnapshot(kind, currentRules, t('导入 CSV（替换）')));
-          setDraft((d) =>
-            d
-              ? {
-                  ...d,
-                  rewrite_rules: kind === 'dead_zone' ? parsed : d.rewrite_rules,
-                  synonym_pairs: kind === 'synonym' ? parsed : d.synonym_pairs,
-                }
-              : d,
-          );
-          const replacedBase =
-            kind === 'dead_zone'
-              ? t('已用 {{count}} 条替换死区词表，检查无误后点「保存」生效', {
-                  count: parsed.length,
-                })
-              : t('已用 {{count}} 条替换同义词表，检查无误后点「保存」生效', {
-                  count: parsed.length,
-                });
-          const overCap =
-            parsed.length > RULE_TABLE_CAP
-              ? ` · ${t('超过上限 {{cap}} 条：保存只保留前 {{cap}} 条', { cap: RULE_TABLE_CAP })}`
-              : '';
-          addToast(replacedBase + overCap, overCap ? 'warning' : 'success');
+          applyCsvReplace(kind, parsed);
           return;
         }
 
@@ -4546,7 +4654,7 @@ export default function PurgeConsole(): JSX.Element {
         addToast(t('导入失败：无法读取文件'), 'error');
       }
     },
-    [addToast, csvReplace, t],
+    [addToast, applyCsvReplace, csvReplace, t],
   );
 
   /** 导出配置：当前服务端快照 → JSON 文件（含全部词表/模板/开关） */
@@ -4592,6 +4700,30 @@ export default function PurgeConsole(): JSX.Element {
         return;
       }
       const settings = parsed.settings as PurgeSettings;
+      /** 真正填入草稿 + 提示（confirm 通过后的续跑，也是无冲突时的直接路径） */
+      const applyImport = (): void => {
+        setDraft(
+          normalizeSettingsArrays(
+            normalizeBooleanFields(settings as unknown as Record<string, unknown>) as unknown as PurgeSettings,
+          ),
+        );
+        setNumRaw(numRawOf(settings));
+        setNumErrors({});
+        setDirty(true);
+        setPreviewOut(null);
+        setPreviewBase(null);
+        setPreviewMeta(null);
+        setPreviewDetail(null);
+        if (verdict.warnings.length > 0) {
+          // 能渲染但语义可疑：导入照做，把风险一次说全（保存时才 clamp 的话用户看不到）
+          addToast(
+            `${t('配置已导入草稿，但有 {{n}} 处需要确认', { n: verdict.warnings.length })} — ${verdict.warnings.join('；')}`,
+            'warning',
+          );
+        } else {
+          addToast(t('配置已导入草稿，检查无误后点「保存」生效'), 'success');
+        }
+      };
       // 导入会**整份替换**草稿：当前有未保存编辑时先问清楚，否则改了一轮的配置
       // 会悄无声息地消失（toast 还只说「已导入」）。判断抽在 importOverwriteItems
       // 里（可单测），这里只负责问与中止。
@@ -4606,39 +4738,20 @@ export default function PurgeConsole(): JSX.Element {
           .map((item) => t(item.key, item.params))
           .join('、');
         const more = changed.length > 5 ? ` 等 ${changed.length} 项` : '';
-        if (
-          !window.confirm(
-            t('导入会覆盖当前 {{n}} 项未保存的修改（{{preview}}{{more}}）。继续？', {
-              n: changed.length,
-              preview,
-              more,
-            }),
-          )
-        ) {
-          return;
-        }
+        setConfirmState({
+          title: t('覆盖未保存的修改'),
+          message: t('导入会覆盖当前 {{n}} 项未保存的修改（{{preview}}{{more}}）。继续？', {
+            n: changed.length,
+            preview,
+            more,
+          }),
+          confirmText: t('导入'),
+          danger: true,
+          onConfirm: applyImport,
+        });
+        return;
       }
-      setDraft(
-        normalizeSettingsArrays(
-          normalizeBooleanFields(settings as unknown as Record<string, unknown>) as unknown as PurgeSettings,
-        ),
-      );
-      setNumRaw(numRawOf(settings));
-      setNumErrors({});
-      setDirty(true);
-      setPreviewOut(null);
-      setPreviewBase(null);
-      setPreviewMeta(null);
-      setPreviewDetail(null);
-      if (verdict.warnings.length > 0) {
-        // 能渲染但语义可疑：导入照做，把风险一次说全（保存时才 clamp 的话用户看不到）
-        addToast(
-          `${t('配置已导入草稿，但有 {{n}} 处需要确认', { n: verdict.warnings.length })} — ${verdict.warnings.join('；')}`,
-          'warning',
-        );
-      } else {
-        addToast(t('配置已导入草稿，检查无误后点「保存」生效'), 'success');
-      }
+      applyImport();
     } catch {
       addToast(t('导入失败：不是有效的破甲配置文件'), 'error');
     }
@@ -5115,6 +5228,18 @@ export default function PurgeConsole(): JSX.Element {
               const snapshot = dataRef.current;
               const current = draftRef.current;
               if (!snapshot) return;
+              /** 还原体（confirm 通过后的续跑，也是无改动时的直接路径） */
+              const applyDiscard = (): void => {
+                setDraft(normalizeSettingsArrays(snapshot.settings));
+                setNumRaw(numRawOf(snapshot.settings));
+                setNumErrors({});
+                setDirty(false);
+                setTableUndo(null);
+                setPreviewOut(null);
+                setPreviewBase(null);
+                setPreviewMeta(null);
+                setPreviewDetail(null);
+              };
               // 确认里报**具体项数**：只说「要丢弃修改吗」，用户不知道丢多少
               const changed = current ? diffSettings(snapshot.settings, current) : [];
               if (changed.length > 0) {
@@ -5123,27 +5248,20 @@ export default function PurgeConsole(): JSX.Element {
                   .map((item) => t(item.key, item.params))
                   .join('、');
                 const more = changed.length > 5 ? ` 等 ${changed.length} 项` : '';
-                if (
-                  !window.confirm(
-                    t('将丢弃 {{n}} 项未保存的修改（{{preview}}{{more}}），恢复为服务器上的配置。继续？', {
-                      n: changed.length,
-                      preview,
-                      more,
-                    }),
-                  )
-                ) {
-                  return;
-                }
+                setConfirmState({
+                  title: t('放弃修改'),
+                  message: t('将丢弃 {{n}} 项未保存的修改（{{preview}}{{more}}），恢复为服务器上的配置。继续？', {
+                    n: changed.length,
+                    preview,
+                    more,
+                  }),
+                  confirmText: t('放弃'),
+                  danger: true,
+                  onConfirm: applyDiscard,
+                });
+                return;
               }
-              setDraft(normalizeSettingsArrays(snapshot.settings));
-              setNumRaw(numRawOf(snapshot.settings));
-              setNumErrors({});
-              setDirty(false);
-              setTableUndo(null);
-              setPreviewOut(null);
-              setPreviewBase(null);
-              setPreviewMeta(null);
-              setPreviewDetail(null);
+              applyDiscard();
             }}
           >
             {t('放弃修改')}
@@ -6486,6 +6604,7 @@ export default function PurgeConsole(): JSX.Element {
           {saving ? t('保存中…') : t('保存')}
         </Button>
       </div>
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
