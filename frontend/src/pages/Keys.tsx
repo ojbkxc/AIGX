@@ -25,6 +25,7 @@ import { Tooltip } from '../components/ui';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import KeysDocsPanel from '../components/KeysDocsPanel';
+import DocsApiBrowser from '../components/docs-api-browser';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, MultiSelect, Tabs } from '../components/ui';
 import './Keys.css';
 
@@ -51,8 +52,11 @@ const KEYS_COL_DEFS: TableColumnDef[] = [
   { key: 'actions', label: '操作', width: 130, locked: true },
 ];
 
-/** 页面 Tab：密钥管理 / 接入文档（文档 2026-11-07 自独立页并入，07 E.3） */
-type KeysTab = 'keys' | 'docs';
+/** 页面 Tab：密钥管理 / 接入文档（文档 2026-11-07 自独立页并入，07 E.3）
+ *  / 完整接入文档（2026-11-27 自 A2A `docs-page` 移植：7 章正文 + 接口地址表 +
+ *  搜索/分页/一键复制。前两个 Tab 的内容与语义不变，第三个只是新增入口，
+ *  避免把「4 张快速参考卡」替换掉——快速参考与完整正文是两种阅读场景）。 */
+type KeysTab = 'keys' | 'docs' | 'api';
 
 interface TokenItem {
   id: string | number;
@@ -155,10 +159,10 @@ function modelBadgeColor(name: string): string {
 
 export default function Keys(): JSX.Element {
   // Tab 走 URL 参数（?tab=docs），与渠道页/模型管理页的合并 Tab 同构：
-  // 刷新/书签直达、文档 Tab 的链接可分享（/keys?tab=docs）
+  // 刷新/书签直达、文档 Tab 的链接可分享（/keys?tab=docs、/keys?tab=api）
   const [params, setParams] = useSearchParams();
   const tabParam = params.get('tab');
-  const tab: KeysTab = tabParam === 'docs' ? 'docs' : 'keys';
+  const tab: KeysTab = tabParam === 'docs' ? 'docs' : tabParam === 'api' ? 'api' : 'keys';
   const changeTab = (next: KeysTab): void => {
     if (next === tab) return;
     const nextParams = new URLSearchParams(params);
@@ -848,6 +852,7 @@ export default function Keys(): JSX.Element {
         items={[
           { key: 'keys', label: t('密钥管理') },
           { key: 'docs', label: t('接入文档') },
+          { key: 'api', label: t('完整接入文档') },
         ]}
         active={tab}
         onChange={changeTab}
@@ -1202,9 +1207,17 @@ export default function Keys(): JSX.Element {
       </div>
 
       {/* 接入文档 Tab：角色分层见 KeysDocsPanel 头注（全员可见 Base URL/协议/
-          模型清单；网关监听口径仅管理员） */}
+          模型清单；网关监听口径仅管理员）。这 4 张卡是「快速参考」，完整正文
+          在下一个 Tab，两者并存、互不替代。 */}
       <div hidden={tab !== 'docs'}>
         <KeysDocsPanel />
+      </div>
+
+      {/* 完整接入文档 Tab：正文见 lib/docs-api-content.ts（7 章正文 + 接口地址表），
+          浏览器交互（目录 / 搜索高亮 / 上一章下一章 / 一键复制）见
+          components/docs-api-browser.tsx。Base URL 由组件按角色自行解析。 */}
+      <div hidden={tab !== 'api'}>
+        <DocsApiBrowser />
       </div>
 
       {/* 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪） */}

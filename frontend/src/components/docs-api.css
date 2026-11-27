@@ -1,0 +1,561 @@
+/* docs-api.css — 「完整接入文档」浏览器样式（组件：components/docs-api-browser.tsx）
+ *
+ * 只用工程既有 CSS 变量（App.css 根变量），不引入新色值，暗色主题自动跟随。
+ * 布局：左侧目录（sticky）+ 右侧正文；窄屏（≤900px）收起为单列、目录在上。
+ */
+
+.docs-api {
+  --docs-api-side-w: 240px;
+}
+
+/* ── 布局 ───────────────────────────────────────────────────── */
+.docs-api-layout {
+  display: grid;
+  grid-template-columns: var(--docs-api-side-w) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .docs-api-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+}
+
+/* ── 目录 ───────────────────────────────────────────────────── */
+.docs-api-side {
+  position: sticky;
+  top: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  padding: 12px;
+  max-height: calc(100vh - 140px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+@media (max-width: 900px) {
+  .docs-api-side {
+    position: static;
+    max-height: none;
+  }
+}
+
+.docs-api-side-head {
+  flex: 0 0 auto;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.docs-api-side-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.docs-api-side-caption {
+  margin: 2px 0 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* 搜索框 */
+.docs-api-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.docs-api-search-icon {
+  position: absolute;
+  left: 8px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.docs-api-search input {
+  width: 100%;
+  height: var(--control-h-sm);
+  padding: 0 26px 0 28px;
+  font-size: 12.5px;
+  color: var(--text-main);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  outline: none;
+}
+
+.docs-api-search input:focus-visible {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px var(--hover-bg);
+}
+
+.docs-api-search-clear {
+  position: absolute;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.docs-api-search-clear:hover {
+  background: var(--hover-bg);
+  color: var(--text-main);
+}
+
+/* 目录列表 */
+.docs-api-nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 10px;
+  padding-right: 2px;
+}
+
+.docs-api-hit {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 0 0 6px;
+}
+
+.docs-api-nav-group + .docs-api-nav-group {
+  margin-top: 10px;
+}
+
+.docs-api-nav-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  text-transform: none;
+  padding: 4px 6px;
+}
+
+.docs-api-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.docs-api-nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12.5px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.docs-api-nav-item:hover {
+  background: var(--hover-bg);
+}
+
+.docs-api-nav-item-active {
+  background: var(--hover-bg);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent-color);
+}
+
+.docs-api-empty {
+  padding: 10px 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.docs-api-empty-title {
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 4px;
+}
+
+.docs-api-empty-note {
+  margin: 0 0 8px;
+}
+
+/* ── 正文 ───────────────────────────────────────────────────── */
+.docs-api-article {
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  min-width: 0;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+}
+
+@media (max-width: 900px) {
+  .docs-api-article {
+    max-height: none;
+  }
+}
+
+.docs-api-article-inner {
+  padding: 16px 18px 20px;
+}
+
+.docs-api-breadcrumb {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.docs-api-head h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+  outline: none;
+}
+
+.docs-api-summary {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.docs-api-path {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--code-border);
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--code-color);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.docs-api-body {
+  margin-top: 14px;
+}
+
+.docs-api-prose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.docs-api-p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-main);
+}
+
+.docs-api-note {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* 章节内的小标题 */
+.docs-api-h3 {
+  margin: 18px 0 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.docs-api-block + .docs-api-block {
+  margin-top: 6px;
+}
+
+/* 字段表 */
+.docs-api-table-wrap {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.docs-api-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.docs-api-table th,
+.docs-api-table td {
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-color);
+  line-height: 1.6;
+}
+
+.docs-api-table thead th {
+  background: var(--table-header-bg);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.docs-api-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.docs-api-field-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+.docs-api-field-type {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* 注意块 */
+.docs-api-warning {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--warning-color);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: var(--section-item-bg);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.docs-api-warning strong {
+  flex: 0 0 auto;
+  color: var(--warning-text);
+}
+
+/* 要点列表 */
+.docs-api-points {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.docs-api-points li + li {
+  margin-top: 4px;
+}
+
+/* 示例代码块 */
+.docs-api-example {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.docs-api-example-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--section-item-bg);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.docs-api-example-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.docs-api-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text-main);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.docs-api-copy:hover {
+  background: var(--hover-bg);
+}
+
+.docs-api-copy-icon {
+  padding: 2px 4px;
+}
+
+.docs-api-pre {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 440px;
+  overflow: auto;
+  background: var(--code-bg);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.docs-api-pre code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--code-fg);
+  white-space: pre;
+}
+
+/* 接口地址表 */
+.docs-api-endpoints {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.docs-api-ep-group {
+  margin: 14px 0 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.docs-api-ep-group:first-child {
+  margin-top: 0;
+}
+
+.docs-api-ep {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.docs-api-ep:last-child {
+  border-bottom: none;
+}
+
+.docs-api-ep-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.docs-api-ep-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.docs-api-ep-note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.docs-api-ep-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.docs-api-ep-value {
+  padding: 3px 8px;
+  border: 1px solid var(--code-border);
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--code-color);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.docs-api-ep-auth {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* 搜索高亮 */
+.docs-api-mark {
+  background: var(--danger-soft);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* 上一章 / 下一章 */
+.docs-api-pager {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-top: 20px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.docs-api-pager-side {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.docs-api-pager-side-next {
+  display: flex;
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.docs-api-pager-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--card-bg);
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.docs-api-pager-btn:hover {
+  background: var(--hover-bg);
+}
+
+.docs-api-pager-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.docs-api-pager-kicker {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.docs-api-pager-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 读屏专用（复用工程 sr-only 约定；若已有全局类则同名覆盖无害） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
