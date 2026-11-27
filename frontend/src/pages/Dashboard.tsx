@@ -289,6 +289,7 @@ export default function Dashboard(): JSX.Element {
           rangeLabel={rLabel}
           prev={prevOverviewQ.data ?? null}
           series={reqSeries}
+          personal={!admin}
         />
       )}
     </div>

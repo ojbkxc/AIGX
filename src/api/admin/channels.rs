@@ -492,10 +492,16 @@ pub async fn handle_list_channels(
 /// [`crate::api::openai::collect_available_models`]，所以「客户端调得通的模型，
 /// 下拉里一定选得到」以及反过来都成立。
 ///
-/// 本端点在此之上只多做两件事：
+/// 本端点在此之上只多做三件事：
 /// 1. 按用户分组 `allowed_models` 白名单收窄（None/空 = 不限）；
-/// 2. 附加价格字段（`price_input` / `price_output` / `price_type`），
-///    供控制台展示 —— 客户端清单不含价格。
+/// 2. 附加价格字段（`price_input` / `price_output` / `price_cache` /
+///    `price_type`），供控制台展示 —— 客户端清单不含价格；
+/// 3. 附加换算口径（`price_unit` / `fx_usd_cny`），供用户端价格页把
+///    「美元/1K token」换算成「¥/百万 Token」，换算函数只在前端维护一份。
+///
+/// 价格单位：`price_*` 一律是模型定价目录的原始单位「USD / 1K token」，
+/// `cache` 未配置时为 `null`（不是 0——0 是「免费」的语义，两者不可混）。
+/// 人民币金额 = `price_* × fx_usd_cny`；折合每百万 = 每 1K × 1000。
 ///
 /// 与 `/v1/models` 一样剔除未定价模型：下拉能选到的模型必须调得通。
 /// 管理员要给未定价模型配价，走模型管理页的全量视图（不走本端点）。
@@ -535,11 +541,21 @@ pub async fn handle_available_models(
                 "capabilities": meta.capabilities,
                 "price_input": price.as_ref().map(|p| p.input_price).unwrap_or(0.0),
                 "price_output": price.as_ref().map(|p| p.output_price).unwrap_or(0.0),
+                // `Option<f64>` 直接进 json!：未配置缓存价时序列化为 null，
+                // 与「缓存价 = 0（免费）」区分开。
+                "price_cache": price.as_ref().and_then(|p| p.cache_price),
                 "price_type": price.as_ref().map(|p| p.price_type.as_str()).unwrap_or("token"),
             })
         })
         .collect();
-    Ok(Json(json!({ "success": true, "data": data })))
+    // 价格单位与汇率口径随清单一起下发：用户端价格页据此换算，
+    // 不必再单独调一次管理面的 `/api/pricing/exchange-rates`（那需要管理员权限）。
+    Ok(Json(json!({
+        "success": true,
+        "data": data,
+        "price_unit": "usd_per_1k",
+        "fx_usd_cny": crate::pricing::exchange_rate::usd_to_cny_rate(),
+    })))
 }
 
 /// 添加新渠道

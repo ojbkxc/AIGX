@@ -1,4 +1,9 @@
-// 概览统计卡（区间概览六格：总请求/成功请求/总 Token/总成本/活跃天数/连续天数）。
+// 概览统计卡（区间概览六格：总请求/成功请求/总 Token/金额/活跃天数/连续天数）。
+// 金额一格的口径按视角分名：管理员「总成本」、普通用户「总消费」——后端只有
+// 一个金额量（报表 overview 的 total_cost = 按定价从用户配额扣掉的额度），
+// 站在用户视角它花掉的是自己的钱（消费），管家视角才是收入/成本口径；
+// 真正上游成本另存 request_log.channel_cost（利润 = cost - channel_cost），
+// 那条读数只在日志详情里露出，报表 overview 不带，故这里不涉及换字段。
 // 三张重复卡已删：Top 模型（ModelPanels 已有）、缓存节省估算（CachePanels 已有）、
 // 渠道（供应商健康面板已有）——见规格 §12.2。
 // 成功率 0 请求时给「—」而不是 0%（A2A 空数据口径）；连续天数含今天往前数。
@@ -17,6 +22,8 @@ interface Props {
   prev?: OverviewData | null;
   /** 迷你趋势序列（如每日请求数；缺省不显示 sparkline） */
   series?: number[];
+  /** 个人视图（普通用户）：金额格叫「总消费」，管理员视图叫「总成本」 */
+  personal?: boolean;
 }
 
 /** 环比：返回「▲/▼ x.x%」；基期为 0/缺省或差值 <0.05% 时不显示 */
@@ -84,7 +91,7 @@ function TrendCard({
   );
 }
 
-export default function StatCards({ overview, lang, rangeLabel, prev, series }: Props): JSX.Element {
+export default function StatCards({ overview, lang, rangeLabel, prev, series, personal = false }: Props): JSX.Element {
   const { t } = useTranslation();
   const o = overview ?? {};
   const total = o.total_requests ?? 0;
@@ -116,7 +123,7 @@ export default function StatCards({ overview, lang, rangeLabel, prev, series }: 
     />,
     <TrendCard
       key="cost"
-      title={t('总成本')}
+      title={t(personal ? '总消费' : '总成本')}
       value={fmtCost(o.total_cost, lang)}
       delta={deltaPct(o.total_cost ?? 0, p.total_cost)}
       desc={t('配额口径，与日志页可对账')}

@@ -290,7 +290,10 @@ fn paths_channels() -> Value {
             "post": op_body("渠道", "渠道对话测试（真实上游调用）", "channel_id/model/prompt: string")
         },
         "/api/models/available": {
-            "get": op("渠道", "用户侧可用模型聚合（启用渠道 models 并集）")
+            "get": op(
+                "渠道",
+                "用户侧可用模型聚合（启用渠道 models 并集；含定价 price_input/price_output/price_cache/price_type 与换算口径 price_unit=usd_per_1k + fx_usd_cny）"
+            )
         },
         "/api/models/meta": { "get": op("渠道", "模型元信息覆盖列表") },
         "/api/models/meta/{model}": {

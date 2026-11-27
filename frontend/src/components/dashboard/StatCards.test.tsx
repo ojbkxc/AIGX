@@ -53,4 +53,18 @@ describe('StatCards — 趋势 delta + sparkline（#11）', () => {
     const { container } = render(<StatCards overview={ov} prev={{ ...ov, streak: 99 }} />);
     expect(container.textContent).not.toContain('▼ 96.0%');
   });
+
+  it('金额格按视角分名：默认（管理员）「总成本」，personal（普通用户）「总消费」', () => {
+    // 后端只有一个金额量（overview 的 total_cost／额度）：个人视图只改用词，不改读数。
+    const admin = render(<StatCards overview={ov} />);
+    expect(admin.container.textContent).toContain('总成本');
+    expect(admin.container.textContent).not.toContain('总消费');
+    const personal = render(<StatCards overview={ov} personal />);
+    expect(personal.container.textContent).toContain('总消费');
+    expect(personal.container.textContent).not.toContain('总成本');
+    // 读数同源：两视图的金额字符串逐字一致（只换标签，不换数）
+    const strip = (root: HTMLElement): string[] =>
+      [...root.querySelectorAll('.stat-value')].map((v) => v.textContent ?? '');
+    expect(strip(personal.container)).toEqual(strip(admin.container));
+  });
 });
