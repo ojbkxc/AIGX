@@ -26,14 +26,15 @@ test.describe('系统设置分类（A2A v3.5.1 十二分类）', () => {
 
   test('左栏渲染终态分类，默认落在通用', async ({ page, pageErrors }) => {
     await expect(nav(page)).toBeVisible();
-    // 12 个分类全在，且导航项总数恰为 12（多一个少一个都要红）
+    // 12 个分类全在，且导航项总数恰为 13（多一个少一个都要红）
+    // 第 13 个是本轮新增的「OAuth 登录」（GitHub/Google/LinuxDO 对接参数）
     for (const label of [
       '账户', '通知', '通用', '显示', '网关', '提供商', '超时',
-      '安全', '数据', '反馈与需求', '版本信息', '更新',
+      '安全', 'OAuth 登录', '数据', '反馈与需求', '版本信息', '更新',
     ]) {
       await expect(nav(page).locator('.settings-nav-item', { hasText: label })).toHaveCount(1);
     }
-    await expect(nav(page).locator('.settings-nav-item')).toHaveCount(12);
+    await expect(nav(page).locator('.settings-nav-item')).toHaveCount(13);
     // 仍然迁走的分类不出现在设置左栏
     for (const gone of ['AI 助手', '聊天', '报表', '重试', '限流与缓存', '计费', '系统信息']) {
       await expect(nav(page).locator('.settings-nav-item', { hasText: gone })).toHaveCount(0);

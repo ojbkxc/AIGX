@@ -22,8 +22,10 @@ test.describe('设置迁移 · 顶级页冒烟', () => {
     await page.goto('/');
     await expect(page.locator('.main-content')).toBeVisible();
 
-    // 侧栏出现「通知」菜单项（adminOnly）；mobile 侧栏收在抽屉里，默认不可见，故仅桌面断言
+    // 侧栏出现「通知」菜单项（adminOnly）；mobile 侧栏收在抽屉里，默认不可见，故仅桌面断言。
+    // 「管理」组默认折叠（sidebar-ia-cleanup 的折叠口径），先展开再断言。
     if (test.info().project.name !== 'mobile') {
+      await page.getByRole('button', { name: /展开「管理」分组/ }).click();
       await expect(page.getByRole('link', { name: '通知', exact: true })).toBeVisible();
     }
 

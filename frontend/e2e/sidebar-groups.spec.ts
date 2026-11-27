@@ -135,9 +135,12 @@ test.describe('侧栏布局隐藏', () => {
     await openSidebar(page);
 
     const side = page.locator('.sidebar-aside').filter({ visible: true }).first();
-    // ghost 不进渲染、也不计入隐藏数
+    // ghost 不进渲染、也不计入隐藏数。
+    // 注意：本用例只存了「通用」组，缺其它内置组 → groupOrderIsCustomized 会判
+    // 为已定制，侧栏会出现「恢复默认分组」按钮。这与本用例要验证的（ghost 被
+    // 丢弃）无关，所以只限定隐藏恢复条（已隐藏 N 项），不断言全局计数。
     await expect(side.locator('.nav-item[href="/ghost-menu"]')).toHaveCount(0);
-    await expect(side.locator('.sidebar-restore-groups')).toHaveCount(0);
+    await expect(side.locator('.sidebar-restore-groups:not(.sidebar-reset-order)')).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
