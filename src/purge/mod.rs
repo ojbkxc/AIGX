@@ -4205,6 +4205,13 @@ mod tests {
         }
         std::fs::create_dir_all(dir.join("one")).unwrap();
         std::fs::write(dir.join("one/SKILL.md"), "---\nname: one\n---\n正文").unwrap();
+        // 诊断：新增 one 后，重新统计目录数，与捕获时的 dir_count 对比
+        eprintln!(
+            "DIAG2 after_add count_dirs_now={}",
+            std::fs::read_dir(&root)
+                .map(|r| count_dirs(r))
+                .unwrap_or(usize::MAX)
+        );
 
         // 普通读取（fresh=false）：指纹变了 → 必须立刻看到新文件，不等 30 秒
         let after_add = skill_doc_briefs_with(&root, false);
