@@ -203,6 +203,9 @@ export default function Settings() {
   useEffect(() => {
     const want = searchParams.get('tab');
     if (!want) return;
+    // scheduled 由上面那个 effect 处理（→/maintenance）：这里不能再把它当「非法值」
+    // replace 成 ?tab=general，否则同一 tick 内后生效的 replace 会覆盖掉 /maintenance 迁移。
+    if (want === 'scheduled') return;
     const legacy: Record<string, string> = {
       billing: '/products?tab=billing',
       limit: '/limit',
