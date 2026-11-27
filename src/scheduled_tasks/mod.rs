@@ -996,14 +996,16 @@ mod tests {
     /// 各自的存档都不被对方改写（切回去原值原样回来）。
     #[test]
     fn plugin_catalog_follow_switches_effective_settings() {
-        let mut settings = ScheduledSettings::default();
-        settings.update_check = IntervalTask {
-            enabled: true,
-            interval: 20,
-        };
-        settings.magpie_plugin_check = IntervalTask {
-            enabled: false,
-            interval: 360,
+        let mut settings = ScheduledSettings {
+            update_check: IntervalTask {
+                enabled: true,
+                interval: 20,
+            },
+            magpie_plugin_check: IntervalTask {
+                enabled: false,
+                interval: 360,
+            },
+            ..Default::default()
         };
 
         // 默认 custom：取自己的存档（存量行为逐字节不变）

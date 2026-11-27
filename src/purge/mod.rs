@@ -1409,6 +1409,12 @@ type SkillStampFile = (PathBuf, Mtime, u64);
 struct SkillStamp {
     dirs: Vec<SkillStampDir>,
     files: Vec<SkillStampFile>,
+    /// **扫描时的目录总数**。
+    ///
+    /// 单独记录是必要的：新增文件/新增目录不会改变任何已记录条目的 mtime，
+    /// 只比对 mtime 的指纹会认为「没变」，于是新技能永远扫不到。比对时重新
+    /// 计数，数量不一致即视为指纹变化。
+    dir_count: usize,
 }
 
 /// `(秒, 纳秒)` 的 mtime 快照（不用 `SystemTime` 是为了可比较 / 可存）。
@@ -1417,6 +1423,22 @@ fn mtime_of(path: &Path) -> Option<(u64, u32)> {
     let modified = meta.modified().ok()?;
     let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
     Some((since.as_secs(), since.subsec_nanos()))
+}
+
+/// 递归统计目录树下的目录总数（只 stat，不读文件内容）。
+///
+/// 用于技能缓存指纹：新增技能目录会让总数变化，而它不会改变任何旧条目的 mtime。
+fn count_dirs(root: &Path, reader: std::fs::ReadDir) -> usize {
+    let mut count = 1usize;
+    for entry in reader.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Ok(sub) = std::fs::read_dir(&path) {
+                count += count_dirs(&path, sub);
+            }
+        }
+    }
+    count
 }
 
 impl SkillStamp {
@@ -1433,11 +1455,31 @@ impl SkillStamp {
                     (entry.path.clone(), mtime_of(&entry.path), len)
                 })
                 .collect(),
+            // 捕获时目录总数由 `dirs` 长度给出（`collect_skill_files` 每个目录
+            // 恰好 push 一次）。
+            dir_count: dirs.len(),
         }
     }
 
-    /// 与当前磁盘状态对比：任一目录或文件的 mtime/长度变了 → 需要重扫。
+    /// 与当前磁盘状态对比：任一目录或文件的 mtime/长度变了，**或目录总数变了**
+    /// → 需要重扫。
+    ///
+    /// 目录总数这一项专门用来捕获「新增文件/新增目录」：只比对已记录条目的 mtime
+    /// 时，新增内容不会改变任何旧条目的 mtime，指纹会误判为「没变」。
     fn still_matches(&self) -> bool {
+        // 目录总数：重新遍历计数（只 stat 不读内容，与既有 mtime 复核同量级）。
+        // 计数失败（目录被删）视为变化，交由下面的 mtime 检查处理。
+        // `dirs` 为空（尚未扫到任何目录）时不索引，直接按「无目录」比对。
+        let dir_count_now = match self.dirs.first() {
+            Some((root, _)) => std::fs::read_dir(root)
+                .ok()
+                .map(|r| count_dirs(root, r))
+                .unwrap_or(0),
+            None => 0,
+        };
+        if dir_count_now != self.dir_count {
+            return false;
+        }
         self.dirs.iter().all(|(dir, stamp)| mtime_of(dir) == *stamp)
             && self.files.iter().all(|(path, stamp, len)| {
                 mtime_of(path) == *stamp

@@ -309,6 +309,18 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "/api/purge/skills/import",
             "破甲技能包导入：UI 侧把 ZIP/TAR/TGZ 安全解压进技能目录，有落盘副作用（可覆盖同名目录），不向 AI 面开放",
         ),
+        (
+            "/api/purge/skills",
+            "破甲技能写入：把一份 SKILL.md 落盘进技能目录，有文件系统副作用；AI 面已有 aigx_purge_check（只读体检），写侧不向 AI 面开放",
+        ),
+        (
+            "/api/purge/skills/skeleton",
+            "破甲技能骨架生成：UI 侧建目录与落盘的便捷入口，AI 面无需自行拼 frontmatter",
+        ),
+        (
+            "/api/purge/fallback/suggest",
+            "破甲异源推荐：读侧诊断接口，AI 面已有 aigx_purge_check 一并覆盖体检与命中率，不另开工具",
+        ),
         ("/api/oauth", "上游 OAuth 跳转，必须浏览器在场"),
         ("/api/mcp", "MCP 服务自身端点（是 Agent 入口，不是被管对象）"),
         (

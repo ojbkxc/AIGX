@@ -145,11 +145,43 @@ pub fn validate(content: &str, inject_limit: usize) -> Result<Validated, String>
 }
 
 /// [`validate`] 的带目录名兜底版：frontmatter 没写 `name` 时用 `dir_name`。
+/// 从 SKILL.md 的 frontmatter 首段里取 `description:` 的值（无则空串）。
+///
+/// 口径与 `mod::parse_skill_parts` 一致：只看 `---` 包起来的首段，忽略引号。
+fn extract_description_line(content: &str) -> String {
+    let trimmed = content.trim_start();
+    let Some(rest) = trimmed.strip_prefix("---") else {
+        return String::new();
+    };
+    let Some(end) = rest.find("\n---") else {
+        return String::new();
+    };
+    for line in rest[..end].lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("description:") {
+            return value.trim().trim_matches('"').to_string();
+        }
+    }
+    String::new()
+}
+
 pub fn validate_with_fallback(
     content: &str,
     inject_limit: usize,
     dir_name: &str,
 ) -> Result<Validated, String> {
+    // **前置要求有 frontmatter**：`parse_skill_parts` 对完全没有 `---` 的内容也
+    // 返回 Ok（name/description 都是空串），若只靠它，「无 frontmatter」只要调用方
+    // 给了 dir_name 就会被当成「缺 name 但可兜底」放行，写出一个没有 `name:` 行的
+    // SKILL.md —— 扫描器按 frontmatter 契约识别，这是必须拒绝的。
+    let trimmed_for_check = content.trim_start();
+    if !(trimmed_for_check.starts_with("---") && trimmed_for_check.find("\n---").is_some()) {
+        return Err(
+            "内容没有 frontmatter：SKILL.md 需要用 `---` 包起来的首段（至少包含 `name:`）"
+                .to_string(),
+        );
+    }
+
     let (mut name, mut keywords, has_keywords_key, body) = super::parse_skill_parts(content)
         .ok_or_else(|| {
             "解析器读不出正文：需要 `---` 包起来的 frontmatter，且 `---` 之后要有正文".to_string()
@@ -163,8 +195,13 @@ pub fn validate_with_fallback(
         }
         // 与 `mod::parse_skill` 同口径：名字取目录名，关键词随之重算——
         // 否则「没写 name 的技能」连一个关键词都没有，永远不命中。
+        //
+        // description 一并重算：只传目录名会把 frontmatter 里 description 派生的
+        // 词一起丢掉，等于「名字有了、词没了」。description 从原始内容里再取一次
+        // （`parse_skill_parts` 的返回元组不带它）。
         name = fallback.to_string();
-        keywords = keywords_from(fallback, "", &[]);
+        let description = extract_description_line(&content);
+        keywords = keywords_from(fallback, &description, &[]);
     }
     let body_chars = body.chars().count();
     let mut warnings = Vec::new();
@@ -321,7 +358,7 @@ mod tests {
         // 空值解析成空表：语义不变，只让键可见
         assert_eq!(validated.name, "plain-skill");
         assert!(
-            validated.keywords.iter().all(|k| k != ""),
+            validated.keywords.iter().all(|k| !k.is_empty()),
             "空表里不该有空串关键词：{validated:?}"
         );
     }

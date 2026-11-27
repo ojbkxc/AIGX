@@ -68,7 +68,7 @@ pub(super) fn tools() -> Vec<ToolDef> {
          networkConfig.enabled=false 会**停全站数据面**。两处都会在工具结果里回显 effect 段。\
          **purge（破甲控制台，改它会改变所有经过的请求）**：PUT 是**整份替换 + 缺字段回落出厂默认**——\
          只传 `{\"enabled\":true}` 会把两张改写词表、拒绝话术词表、失败关键词表、结构化模板全部重置为默认值。\
-         改之前**必须**先 `aigx_config_view{key:\"purge\"}` 读整份、在本地改一个字段、把整份对象写回；\
+         写回前必须先 `aigx_config_view{key:\"purge\"}` 读整份、在本地改一个字段、把整份对象写回；\
          体检与命中率用 `aigx_purge_check`，单模型命中判定用 `aigx_purge_preset_probe`（两者只读）。\
          purge 关键字段：`enabled`=总开关（关掉即数据面零治理，**不要为「先试试」关它**）、\
          `system_normalize`/`dead_zone_rewrite`/`synonym_enabled`=三类文本治理、\
