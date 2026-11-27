@@ -30,7 +30,7 @@ import {
 } from '../api/endpoints/oauth';
 import { copyText } from '../lib/clipboard';
 import { useToast } from './Toast';
-import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
+import ConfirmDialog from './ConfirmDialog';
 import type {
   OauthConfig,
   OauthProviderConfig,
@@ -333,7 +333,7 @@ export default function OAuthConfigPanel(): JSX.Element {
       <ConfirmDialog
         state={
           clearConfirm
-            ? ({
+            ? {
                 title: t('清除已保存的密钥'),
                 message: t(
                   '确定清除 {{provider}} 的 client_secret 吗？保存后对应登录入口会立即失效，且不可撤销。',
@@ -348,7 +348,7 @@ export default function OAuthConfigPanel(): JSX.Element {
                   toggleSet(setClearSecret, k);
                   setDraft(k, { client_secret: '' });
                 },
-              } as ConfirmState)
+              }
             : null
         }
         onClose={() => setClearConfirm(null)}
