@@ -2327,7 +2327,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               ) : (
                 <Input
                   label="Base URL"
-                  placeholder="https://cf-ai-gw.pages.dev 或 https://api.Workspace_2B8939.com/v1"
+                  placeholder="https://cf-ai-gw.pages.dev 或 https://api.deepseek.com/v1"
                   value={form.base_url}
                   onChange={(e) => setForm({ ...form, base_url: e.target.value })}
                   hint={t('未带 /v1 时会自动补齐')}

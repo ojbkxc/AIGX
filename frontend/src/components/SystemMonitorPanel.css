@@ -125,7 +125,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  Workspace_223994: pointer;
+  cursor: pointer;
   transition: background-color 0.2s ease, color 0.2s ease;
   color: var(--text-muted);
 }
@@ -136,7 +136,7 @@
 }
 
 .refresh-button:disabled {
-  Workspace_223994: not-allowed;
+  cursor: not-allowed;
   opacity: 0.5;
 }
 

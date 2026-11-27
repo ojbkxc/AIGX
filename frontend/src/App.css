@@ -2047,7 +2047,7 @@ code {
   background: transparent;
   border: none;
   border-radius: 6px;
-  Workspace_223994: pointer;
+  cursor: pointer;
   transition: all 0.2s ease;
 }
 
@@ -2064,7 +2064,7 @@ code {
 
 .ui-tab:disabled {
   opacity: 0.5;
-  Workspace_223994: not-allowed;
+  cursor: not-allowed;
 }
 
 /* ── 分页（Pagination 组件，统一 Logs / Channels 等页面） ── */
