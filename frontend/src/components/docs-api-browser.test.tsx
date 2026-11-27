@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import DocsApiBrowser from './docs-api-browser';
 import { DOCS_ENDPOINTS, docsApiChapters } from '../lib/docs-api-content';
-import '../i18n';
+import i18n from '../i18n';
 
 /** 收集所有章节的「文本 + 示例代码」，用于内容级断言 */
 function allChapterText(): string {
@@ -165,8 +165,20 @@ describe('DocsApiBrowser 交互', () => {
     expect(copied.startsWith('http://gw.local:9527')).toBe(true);
   });
 
-  it('章节导航用「上一章 / 下一章」标签与标题', () => {
+  it('章节导航用「上一章 / 下一章」标签，且首章省略「上一章」', () => {
     render(<DocsApiBrowser origin="http://gw.local:9527" />);
-    expect(screen.getAllByText('下一章').length).toBeGreaterThan(0);
+    // 用 i18n 实例取期望文案，不把中文写死 —— 组件走的是 t('下一章')，
+    // 测试跑在 en 下时渲染的是 "Next"，断言 '下一章' 会假红。
+    const nextLabel = i18n.t('下一章');
+    const prevLabel = i18n.t('上一章');
+
+    // 默认落在首章（接口地址）：**只有下一章**，没有上一章。
+    // 组件注释写明「首末章自动省略一侧」，这里钉住这个规则。
+    expect(screen.queryAllByText(prevLabel).length).toBe(0);
+    expect(screen.getAllByText(nextLabel).length).toBeGreaterThan(0);
+
+    // 切到下一章之后，两侧都应该有。
+    fireEvent.click(screen.getAllByText(nextLabel)[0]);
+    expect(screen.getAllByText(prevLabel).length).toBeGreaterThan(0);
   });
 });

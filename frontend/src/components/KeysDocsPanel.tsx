@@ -256,7 +256,7 @@ export default function KeysDocsPanel(): JSX.Element {
         <code className="docs-code">{'Authorization: Bearer <key>'}</code>
         {t(' 或 ')}
         <code className="docs-code">{'x-api-key: <key>'}</code>
-        {t('。一把启用的 Key 都没有时不鉴权（默认网关只监听 127.0.0.1；在设置页开启「局域网访问」后监听所有网卡，鉴权与安全闸门随之启用）。')}
+        {t('。数据面一律需要 Key：缺 Key 或 Key 无效都会返回 401（错误码 auth_error），没有「未配置 Key 时放行」的例外。')}
       </p>
     </div>
   );
