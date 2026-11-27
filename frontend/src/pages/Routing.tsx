@@ -202,6 +202,9 @@ export default function Routing(): JSX.Element {
    */
   const [replayRows, setReplayRows] = useState<ReplayLogRow[]>([]);
   const [replayId, setReplayId] = useState<string | null>(null);
+  /** 进入回放模式后是否已自动选过首条。清空后置回 false 会再次自动选中，
+     *  用户就永远回不到「粘贴请求 ID」的面板，所以清空时要置 true。 */
+  const [replayAutoSelectDone, setReplayAutoSelectDone] = useState(false);
   /** 回放左栏筛选（对齐 A2A RoutingRequestList：搜索 + 请求模型 + 时间范围 + 仅失败 + 翻页） */
   const [replaySearch, setReplaySearch] = useState('');
   const [replayModel, setReplayModel] = useState('');
@@ -407,10 +410,14 @@ export default function Routing(): JSX.Element {
    * 一步（A2A 已经把它省掉）。
    */
   useEffect(() => {
+    // 「重新选择请求」清空选中后，不再自动选回首条——否则用户永远回不到
+    // 「粘贴请求 ID」的面板，自定义 ID 的输入框不可达。
     if (mode !== 'replay' || replayId || replayLoading) return;
+    if (replayAutoSelectDone) return;
     if (!replayRows.length) return;
     setReplayId(replayRows[0].id);
-  }, [mode, replayId, replayLoading, replayRows]);
+    setReplayAutoSelectDone(true);
+  }, [mode, replayId, replayLoading, replayRows, replayAutoSelectDone]);
 
   /**
    * 回放的静默轮询（对齐 A2A 的两个 3s/5s 定时器：列表 3s、模型候选 5s）。
@@ -1316,7 +1323,7 @@ export default function Routing(): JSX.Element {
       </aside>
       <section className="rt-replay-main">
         {replayId ? (
-          <RouteReplayView requestId={replayId} />
+          <RouteReplayView requestId={replayId} onReset={() => { setReplayId(null); setReplayAutoSelectDone(true); }} />
         ) : (
           <RouteReplayPanel />
         )}

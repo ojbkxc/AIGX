@@ -98,6 +98,11 @@ async function openReplayPanel(page: import('@playwright/test').Page, requestId:
   // v1.0.65 起路由页 rail 用 button.rt-nav-item（不再是 role=tab）
   // v1.0.66 起「请求回放」提到顶部模式分段（.rt-mode-btn），不再是 rail 项
   await page.locator('.rt-mode-btn', { hasText: '请求回放' }).click();
+  // 进入回放模式会**自动选中首条请求**（Routing.tsx 的 useEffect，对齐 A2A：
+  // 打开回放的人几乎总是先看最近一次），且点击已选中项不会取消选中。
+  // 用回放视图头部的「重新选择请求」按钮清空选中，回到回放面板再验证。
+  await expect(page.locator('.rr-exec-reset')).toBeVisible({ timeout: 10_000 });
+  await page.locator('.rr-exec-reset').click();
   await expect(page.locator('.rr-panel h2', { hasText: '路由回放' })).toBeVisible();
   await page.getByPlaceholder('粘贴请求日志里的请求 ID').fill(requestId);
   // rail 也有一个「回放」按钮，限定到回放面板内避免 strict mode 歧义

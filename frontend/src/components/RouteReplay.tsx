@@ -127,7 +127,14 @@ function AttemptStep({ a, t }: { a: RouteReplayAttemptItem; t: (k: string, opts?
 }
 
 /** 单请求回放视图：懒挂载 + 单次拉取（调用方控制挂载时机即可实现按需加载） */
-export function RouteReplayView({ requestId }: { requestId: string | number }): JSX.Element {
+export function RouteReplayView({
+  requestId,
+  onReset,
+}: {
+  requestId: string | number;
+  /** 清空当前选中，回到「粘贴请求 ID」的回放面板（默认无入口，由页面传入）。 */
+  onReset?: () => void;
+}): JSX.Element {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [errStatus, setErrStatus] = useState<number | null>(null);
@@ -176,20 +183,43 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
     return { candidates, filtered, selected, skipsGroups, details };
   }, [snap]);
 
-  if (loading) return <div className="rr-loading"><Loading text={t('加载路由回放')} /></div>;
+  if (loading) {
+    return (
+      <div className="rr-loading">
+        <Loading text={t('加载路由回放')} />
+        {onReset ? (
+          <button type="button" className="rr-exec-reset" onClick={onReset}>
+            {t('重新选择请求')}
+          </button>
+        ) : null}
+      </div>
+    );
+  }
 
   // 端点 404：后端快照能力尚未就绪，空态降级不报错
   if (errStatus === 404) {
     return (
-      <EmptyState
-        message={t('路由回放快照端点尚未就绪（后端建设中）。就绪后这里会显示该请求当时的候选顺序、跳过原因与执行时间线。')}
-      />
+      <div>
+        <EmptyState
+          message={t('路由回放快照端点尚未就绪（后端建设中）。就绪后这里会显示该请求当时的候选顺序、跳过原因与执行时间线。')}
+        />
+        {onReset ? (
+          <button type="button" className="rr-exec-reset" onClick={onReset} style={{ marginTop: 8 }}>
+            {t('重新选择请求')}
+          </button>
+        ) : null}
+      </div>
     );
   }
   if (errMsg) {
     return (
       <div className="rr-degraded">
         <p>{t('路由回放加载失败：{{msg}}', { msg: errMsg })}</p>
+        {onReset ? (
+          <button type="button" className="rr-exec-reset" onClick={onReset} style={{ marginTop: 8 }}>
+            {t('重新选择请求')}
+          </button>
+        ) : null}
       </div>
     );
   }
@@ -202,6 +232,11 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
     return (
       <div className="rr-degraded">
         <p>{t('该请求没有保存选路快照（旧记录或快照未启用），下方为日志基础字段。')}</p>
+        {onReset ? (
+          <button type="button" className="rr-exec-reset" onClick={onReset} style={{ marginTop: 8 }}>
+            {t('重新选择请求')}
+          </button>
+        ) : null}
       </div>
     );
   }
@@ -280,6 +315,11 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
             ) : null}
           </div>
         </div>
+        {onReset ? (
+          <button type="button" className="rr-exec-reset" onClick={onReset}>
+            {t('重新选择请求')}
+          </button>
+        ) : null}
       </header>
 
       {/* ② 模型改写（A2A routing-exec-rewrite）：客户端模型 → 实际使用；无改写不渲染 */}
