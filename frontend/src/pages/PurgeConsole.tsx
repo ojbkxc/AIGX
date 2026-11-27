@@ -452,9 +452,16 @@ export function confirmSkillOverwrite(
   ask: (message: string) => boolean,
   tr: (key: string, params?: Record<string, string>) => string = (key) => key,
 ): boolean {
-  return ask(
-    tr('技能目录里已有同名技能「{{id}}」，继续写入会覆盖它的 SKILL.md。继续？', { id }),
-  );
+  return ask(skillOverwriteMessage(id, tr));
+}
+
+/** 「覆盖同名技能」的确认文案（唯一来源）。confirmSkillOverwrite 与调用方共用，
+ * 避免「弹窗文案在这里写一遍、函数里又写一遍」的双份漂移。 */
+export function skillOverwriteMessage(
+  id: string,
+  tr: (key: string, params?: Record<string, string>) => string = (key) => key,
+): string {
+  return tr('技能目录里已有同名技能「{{id}}」，继续写入会覆盖它的 SKILL.md。继续？', { id });
 }
 
 /**
@@ -2903,18 +2910,12 @@ const PresetsSection = memo(function PresetsSection({
       // 判断依据是 `skills` 快照里的同名技能（解析自 SKILL.md 的 name，缺省退父目录名）；
       // 不保证覆盖「文件名不同但内容手改」的情形，所以文案只说「已存在同名技能」。
       //
-      // ConfirmDialog 是异步的：这里打开弹窗即返回，confirmSkillOverwrite 拿到的
-      // ask 判据是「弹窗已打开=true」（跳过直接 return 的语义），真正写入在 onConfirm 里续跑。
+      // ConfirmDialog 是异步的：这里打开弹窗即返回，真正写入在 onConfirm 里续跑。
+      // 文案取自唯一来源 skillOverwriteMessage（与 confirmSkillOverwrite 同源，不重复写）。
       if ((existingSkills ?? []).some((skill) => skill.name === id)) {
-        const shouldAsk = confirmSkillOverwrite(id, () => true, (key, params) =>
-          t(key, params),
-        );
-        if (!shouldAsk) return;
         setConfirmState({
           title: t('覆盖同名技能'),
-          message: t('技能目录里已有同名技能「{{id}}」，继续写入会覆盖它的 SKILL.md。继续？', {
-            id,
-          }),
+          message: skillOverwriteMessage(id, (key, params) => t(key, params)),
           confirmText: t('覆盖'),
           danger: true,
           onConfirm: () => applySkill(id),
