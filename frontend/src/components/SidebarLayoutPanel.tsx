@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import { useTranslation } from 'react-i18next';
 import { useToast } from './Toast';
 import { Switch } from './ui';
+import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
 import { useSidebarLayout } from '../hooks/useSidebarLayout';
 import {
   addGroup,
@@ -56,6 +57,7 @@ export default function SidebarLayoutPanel(): JSX.Element {
   const [adding, setAdding] = useState(false);
   const [addDraft, setAddDraft] = useState('');
   const [dragId, setDragId] = useState<string | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const layoutRef = useRef<SidebarLayout>(layout);
   useEffect(() => {
@@ -124,16 +126,27 @@ export default function SidebarLayoutPanel(): JSX.Element {
           name: groupTitle(group), n: group.items.length, target: first ? groupTitle(first) : '',
         })
       : t('删除空分组「{{name}}」？', { name: groupTitle(group) });
-    if (!window.confirm(message)) return;
-    if (apply(removeGroup(layout, group.id))) {
-      addToast(t('已删除分组「{{name}}」', { name: groupTitle(group) }));
-    }
+    setConfirmState({
+      message,
+      danger: true,
+      confirmText: t('删除'),
+      onConfirm: () => {
+        if (apply(removeGroup(layout, group.id))) {
+          addToast(t('已删除分组「{{name}}」', { name: groupTitle(group) }));
+        }
+      },
+    });
   };
 
   const resetAll = (): void => {
-    if (!window.confirm(t('会恢复默认的分组、顺序与显隐设置。你自建的分组会被删除（组内菜单不会丢）。'))) return;
-    apply(defaultLayout());
-    addToast(t('已恢复默认侧边栏'));
+    setConfirmState({
+      message: t('会恢复默认的分组、顺序与显隐设置。你自建的分组会被删除（组内菜单不会丢）。'),
+      confirmText: t('恢复默认'),
+      onConfirm: () => {
+        apply(defaultLayout());
+        addToast(t('已恢复默认侧边栏'));
+      },
+    });
   };
 
   const moveIntoGroup = (group: LayoutGroup, key: string): void => {
@@ -444,6 +457,7 @@ export default function SidebarLayoutPanel(): JSX.Element {
           {hiddenGroups ? t('（{{n}} 个整组隐藏）', { n: hiddenGroups }) : ''}
         </div>
       </div>
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

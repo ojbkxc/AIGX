@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from './Toast';
+import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
 
 interface RuleForm {
   id?: string;
@@ -45,6 +46,7 @@ export default function ClientIdPanel(): JSX.Element {
   const [previewUa, setPreviewUa] = useState('');
   const [previewResult, setPreviewResult] = useState<Record<string, unknown> | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -111,20 +113,26 @@ export default function ClientIdPanel(): JSX.Element {
     }
   };
 
-  const remove = async (id: string): Promise<void> => {
-    if (!window.confirm(t('删除该识别规则？'))) return;
-    setError('');
-    try {
-      const res = await api.deleteClientRule(id);
-      if (res?.success) {
-        setRules(Array.isArray(res.data?.rules) ? res.data.rules as Array<Record<string, unknown>> : []);
-        addToast(t('规则已删除'));
-      } else {
-        setError(res?.error?.message ?? t('删除失败'));
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
+  const remove = (id: string): void => {
+    setConfirmState({
+      message: t('删除该识别规则？'),
+      danger: true,
+      confirmText: t('删除'),
+      onConfirm: async () => {
+        setError('');
+        try {
+          const res = await api.deleteClientRule(id);
+          if (res?.success) {
+            setRules(Array.isArray(res.data?.rules) ? res.data.rules as Array<Record<string, unknown>> : []);
+            addToast(t('规则已删除'));
+          } else {
+            throw new Error(res?.error?.message ?? t('删除失败'));
+          }
+        } catch (err) {
+          throw err instanceof Error ? err : new Error(String(err));
+        }
+      },
+    });
   };
 
   const preview = async (): Promise<void> => {
@@ -334,6 +342,7 @@ export default function ClientIdPanel(): JSX.Element {
           </>
         )}
       </div>
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

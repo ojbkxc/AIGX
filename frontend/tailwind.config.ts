@@ -1,7 +1,10 @@
 import type { Config } from 'tailwindcss';
 
 export default {
-  darkMode: 'class',
+  // 与 lib/theme.ts 的实际机制对齐：主题通过 <html data-theme="dark"> 切换，
+  // 而不是 .dark 类。'selector' 是 Tailwind 3.4+ 的推荐写法（等价旧 'class'，
+  // 但允许自定义选择器）。
+  darkMode: ['selector', '[data-theme="dark"]'],
   content: ['./index.html', './src/**/*.{js,jsx,ts,tsx}'],
   theme: {
     extend: {

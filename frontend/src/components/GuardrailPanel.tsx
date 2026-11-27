@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from './Toast';
+import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
 
 interface RuleSpec {
   pattern: string;
@@ -72,6 +73,7 @@ export default function GuardrailPanel(): JSX.Element {
   const [settings, setSettings] = useState<GuardrailView>(EMPTY_SETTINGS);
   const [degrade, setDegrade] = useState<DegradeView>({});
   const [clearing, setClearing] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -140,23 +142,29 @@ export default function GuardrailPanel(): JSX.Element {
     }
   };
 
-  const clearDegrade = async (): Promise<void> => {
-    if (!window.confirm(t('确认解除降级？解除后客户端提示词立即恢复'))) return;
-    setClearing(true);
-    try {
-      const res = await api.clearGuardrailDegrade();
-      if (res?.success) {
-        const data = res.data ?? {};
-        setDegrade((data.degrade as DegradeView) ?? {});
-        addToast(t('已解除降级'));
-      } else {
-        setError(res?.error?.message ?? t('操作失败'));
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setClearing(false);
-    }
+  const clearDegrade = (): void => {
+    setConfirmState({
+      message: t('确认解除降级？解除后客户端提示词立即恢复'),
+      danger: true,
+      confirmText: t('解除降级'),
+      onConfirm: async () => {
+        setClearing(true);
+        try {
+          const res = await api.clearGuardrailDegrade();
+          if (res?.success) {
+            const data = res.data ?? {};
+            setDegrade((data.degrade as DegradeView) ?? {});
+            addToast(t('已解除降级'));
+          } else {
+            throw new Error(res?.error?.message ?? t('操作失败'));
+          }
+        } catch (err) {
+          throw err instanceof Error ? err : new Error(String(err));
+        } finally {
+          setClearing(false);
+        }
+      },
+    });
   };
 
   /** 单个词表编辑区：pattern + kind 行编辑 + 增删。 */
@@ -247,7 +255,7 @@ export default function GuardrailPanel(): JSX.Element {
                 </div>
                 {degrade.active && (
                   <div className="form-group">
-                    <button className="btn btn-outline btn-sm" onClick={() => void clearDegrade()} disabled={clearing}>
+                    <button className="btn btn-outline btn-sm" onClick={clearDegrade} disabled={clearing}>
                       {clearing ? t('操作中...') : t('手动解除降级')}
                     </button>
                   </div>
@@ -319,6 +327,7 @@ export default function GuardrailPanel(): JSX.Element {
           </>
         )}
       </div>
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

@@ -1,14 +1,13 @@
 import i18n, { type InitOptions } from 'i18next';
 import { initReactI18next } from 'react-i18next';
 
-export type AppLanguage = 'zh' | 'en' | 'zh-Hant';
+export type AppLanguage = 'zh' | 'en';
 
 /** 支持的语言清单（侧边栏/设置页切换器用）
  *
- * 业主 2026-11-27 裁定：**只做中文与英文**。ja / ko / pt-BR 不提供（不再保留
- * 空占位包——选了会静默 fallback 回中文，属「看起来能切但没生效」的缺陷；
- * 也不收未复核的机翻）。zh-Hant 是中文繁体，已补齐 5876 键，但暂留在切换器
- * 外等质量确认后再上架。 */
+ * 业主 2026-11-27 裁定：**只做中文与英文**。ja / ko / pt-BR / zh-Hant 均不提供
+ * （不再保留空占位包——选了会静默 fallback 回中文，属「看起来能切但没生效」的缺陷；
+ * 也不收未复核的机翻）。zh-Hant.json 保留在仓库备用，但不进切换器。 */
 export const SUPPORTED_LANGS: Array<{ code: AppLanguage; label: string }> = [
   { code: 'zh', label: '简体中文' },
   { code: 'en', label: 'English' },
@@ -22,8 +21,7 @@ function detectLanguage(): AppLanguage {
   }
   const nav = (navigator.language || '').toLowerCase();
   if (nav.startsWith('en')) return 'en';
-  if (nav.startsWith('zh-hant') || nav.startsWith('zh-tw') || nav.startsWith('zh-hk')) return 'zh-Hant';
-  // 其余语言（ja/ko/pt-BR 等）业主裁定不提供 → 回落中文
+  // 其余语言（zh-TW/zh-HK/ja/ko/pt-BR 等）业主裁定不提供 → 回落中文
   return 'zh';
 }
 
@@ -33,8 +31,9 @@ function detectLanguage(): AppLanguage {
 // 中文用户启动时按需加载 zh，繁体中文同理。
 const loadedLangs = new Set<AppLanguage>();
 
-/** 各语言包的动态 import 映射（含 zh，与 en 同款加载模式） */
-const bundleImports: Record<AppLanguage, () => Promise<unknown>> = {
+/** 各语言包的动态 import 映射（含 zh，与 en 同款加载模式）。
+ * zh-Hant 保留映射供将来启用，但不进 SUPPORTED_LANGS（业主裁定只 zh/en）。 */
+const bundleImports: Record<string, () => Promise<unknown>> = {
   zh: () => import('./zh.json'),
   en: () => import('./en.json'),
   'zh-Hant': () => import('./zh-Hant.json'),

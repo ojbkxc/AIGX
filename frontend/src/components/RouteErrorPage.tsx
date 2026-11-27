@@ -1,5 +1,6 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { AlertTriangle, Compass, Lock } from 'lucide-react';
 
 /**
  * RouteErrorPage — 路由层兜底错误页（errorElement）。
@@ -25,7 +26,11 @@ export default function RouteErrorPage({ status: statusProp }: RouteErrorPagePro
   const message = t('发生未知错误');
 
   const is404 = status === 404;
-  const icon = is404 ? '🧭' : status === 403 ? '🔒' : '⚠️';
+  const icon = is404
+    ? <Compass size={48} strokeWidth={1.4} />
+    : status === 403
+      ? <Lock size={48} strokeWidth={1.4} />
+      : <AlertTriangle size={48} strokeWidth={1.4} />;
 
   return (
     <div className="route-error-page">

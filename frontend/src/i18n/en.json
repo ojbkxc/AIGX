@@ -6218,5 +6218,6 @@
   "v1.0.123 新增的别名，与长路径完全等价": "An alias added in v1.0.123, fully equivalent to the long path",
   "确定清除 {{provider}} 的 client_secret 吗？保存后对应登录入口会立即失效，且不可撤销。": "Clear the saved client_secret for {{provider}}? The corresponding sign-in entry will stop working immediately after saving, and this cannot be undone.",
   "搜索页面与配置项": "Search pages & settings",
-  "搜索页面与配置项（{{shortcut}}）": "Search pages & settings ({{shortcut}})"
+  "搜索页面与配置项（{{shortcut}}）": "Search pages & settings ({{shortcut}})",
+  "解除降级": "Lift downgrade"
 }
