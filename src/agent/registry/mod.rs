@@ -445,6 +445,7 @@ mod checkin;
 mod diagnostics;
 mod models;
 mod observe;
+mod purge;
 mod queries;
 mod report;
 mod update_ops;
@@ -475,6 +476,10 @@ fn build_tools() -> Vec<ToolDef> {
     v.extend(account_sessions::tools());
     v.extend(update_ops::tools());
     v.extend(models::tools());
+    // 破甲控制台只读诊断（体检 / 单模型预设命中判定）：跟在 observe 之后，
+    // 与 `aigx_config_view{key:"purge"}` / `aigx_config_set{key:"purge"}` 构成
+    // 「先读体检 → 再读整份 → 写回 → 复检」的完整链路。
+    v.extend(purge::tools());
     v.extend(checkin::tools());
     v.extend(report::tools());
     v.extend(account_pool::tools());

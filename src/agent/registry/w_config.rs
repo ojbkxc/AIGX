@@ -65,7 +65,18 @@ pub(super) fn tools() -> Vec<ToolDef> {
          **安全控制面禁令**：ipFilter / routing 等安全控制面**不得用于解除自身访问限制**（禁止关闭 IP 过滤/黑白名单、\
          禁止改路由以绕过已配置的访问约束）；这类配置会改变服务自身可达性与外部约束，只能用于落实运维意图。\
          **破坏性语义（必读）**：settings.replace_all=true 会**先清空全部自定义模型映射**；\
-         networkConfig.enabled=false 会**停全站数据面**。两处都会在工具结果里回显 effect 段。",
+         networkConfig.enabled=false 会**停全站数据面**。两处都会在工具结果里回显 effect 段。\
+         **purge（破甲控制台，改它会改变所有经过的请求）**：PUT 是**整份替换 + 缺字段回落出厂默认**——\
+         只传 `{\"enabled\":true}` 会把两张改写词表、拒绝话术词表、失败关键词表、结构化模板全部重置为默认值。\
+         改之前**必须**先 `aigx_config_view{key:\"purge\"}` 读整份、在本地改一个字段、把整份对象写回；\
+         体检与命中率用 `aigx_purge_check`，单模型命中判定用 `aigx_purge_preset_probe`（两者只读）。\
+         purge 关键字段：`enabled`=总开关（关掉即数据面零治理，**不要为「先试试」关它**）、\
+         `system_normalize`/`dead_zone_rewrite`/`synonym_enabled`=三类文本治理、\
+         `cross_source_fallback`+`fallback_models`+`fallback_trigger_attempt`=异源递进（开关开而列表空＝永不触发）、\
+         `skill_inject`+`skill_dir`+`skill_inject_limit`=技能注入（目录空＝永不命中）、\
+         `structured_prompt`+`structured_suffix`/`active_template`=结构化后缀（默认空串＝零改动）、\
+         `auto_preset`+`auto_preset_id`+`universal_fallback`=按模型前插预设正文（正文会进每次请求的 system）、\
+         `retry_limit`/`reasoning_floor`=重试与降档。写回后**再调一次 `aigx_purge_check` 复检**。",
         HighRisk,
         "key",
         &[
@@ -395,7 +406,13 @@ fn config_set_schema() -> Value {
     settings.replace_all=true 会**先清空全部自定义模型映射**再写入本次 mappings（**缺 mappings 即等于清空**），\
     只想增改单条就**不要**传 replace_all（默认 false = 逐条 upsert）；\
     networkConfig 的 config_id **必填但当前被 handler 忽略**（该端点只有单份持久化配置，\
-    路由上的 {config_id} 是装饰性参数），enabled **必填**，且 **enabled=false 会停全站数据面**"
+    路由上的 {config_id} 是装饰性参数），enabled **必填**，且 **enabled=false 会停全站数据面**；\
+    purge 是**整份替换**（未传字段回落 `PurgeSettings::default()`，不是保持原值）：\
+    只传 `enabled` 会把 rewrite_rules / synonym_pairs / refusal_patterns / failure_*_keywords / \
+    structured_templates 全部重置为出厂默认——**必须先 `aigx_config_view{key:\"purge\"}` 读整份再写回整份**；\
+    purge 的 `normalize_strip_prefixes` 传空数组是**合法语义**（= 不做前缀剥离，也是出厂默认），\
+    但传空 `fallback_models` 而 `cross_source_fallback=true`、或传空 `refusal_patterns`，都会**静默关掉**对应检测\
+    （空表分别等于「异源永不触发」「字面拒绝检测关闭」）；写回后调 `aigx_purge_check` 复检 warnings 与命中率。"
             }
         },
         "required": ["key", "value"]
@@ -515,6 +532,41 @@ mod tests {
             assert!(
                 view_src.contains(&format!("\"{k}\"")),
                 "写侧 key `{k}` 在读侧 aigx_config_view enum 中不存在（裁定③：能读才能写）"
+            );
+        }
+        // purge 是**整份替换**：这条语义不在 handler 里、也不在 UI 上，只能靠工具描述
+        // 告诉模型 —— 漏了就等于让模型用「只传一个字段」的方式把两张词表清零。
+        for needle in [
+            ["purge（破甲控制台，", "改它会改变所有经过的请求）"].concat(),
+            ["整份替换", " + 缺字段回落出厂默认"].concat(),
+            ["必须先 ", "`aigx_config_view"].concat(),
+            ["aigx_purge_check", "` 复检"].concat(),
+        ] {
+            assert!(
+                t.description.contains(&needle),
+                "purge 的整份替换语义必须写进工具描述: {needle}"
+            );
+        }
+        // 字段语义摘要：AI 要能「看描述就知道改哪个字段」，而不是逐个猜。
+        for field in [
+            "enabled=",
+            "system_normalize",
+            "dead_zone_rewrite",
+            "synonym_enabled",
+            "cross_source_fallback",
+            "fallback_models",
+            "skill_inject",
+            "skill_dir",
+            "structured_prompt",
+            "structured_suffix",
+            "auto_preset_id",
+            "universal_fallback",
+            "retry_limit",
+            "reasoning_floor",
+        ] {
+            assert!(
+                t.description.contains(field),
+                "purge 字段语义摘要缺 `{field}`（模型无法据此决定改哪个字段）"
             );
         }
         assert!(!view.covers.is_empty());
