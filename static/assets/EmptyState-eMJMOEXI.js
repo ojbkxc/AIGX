@@ -1,1 +1,0 @@
-import{j as t}from"./vendor-react-CSYvmxEK.js";import{ae as i}from"./index-DtiPX1YV.js";function c({message:s,icon:e="📭",action:a,className:r}){return t.jsxs("div",{className:i("empty-state",r),children:[t.jsx("div",{className:"empty-state-icon",children:e}),t.jsx("p",{children:s}),a]})}export{c as E};
