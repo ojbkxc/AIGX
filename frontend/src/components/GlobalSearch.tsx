@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Search, CornerDownLeft, Satellite, Users, KeyRound, FileText, Boxes, X } from 'lucide-react';
+import { Search, CornerDownLeft, Satellite, Users, KeyRound, FileText, Boxes, X, SlidersHorizontal } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
+import { matchConfigEntries } from '../lib/config-index';
 
 export interface SearchNavItem {
   path: string;
@@ -77,6 +78,17 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
     return q ? items.filter((n) => t(n.labelKey).toLowerCase().includes(q)) : items;
   }, [q, navItems, t]);
 
+  // 配置项命中（管理员）：查询词不落在任何**页名**上时，仍要能找到折在
+  // 二级/三级 Tab 里的配置。典型场景：用户搜「易支付」「github」「linuxdo」——
+  // 这三个词在侧栏一级菜单里根本不存在（那一层只有「套餐与兑换码」），
+  // 在改之前只能搜出「无匹配结果」，于是结论是「这个配置线上没有」。
+  // 空查询不铺配置项：Ctrl+K 刚打开时列全部导航页已经够看，再叠十几条配置会淹掉
+  // 用户真正要的那一行。只有开始输入词才把配置面接进来。
+  const configHits = useMemo(() => {
+    if (!isAdmin() || !q) return [];
+    return matchConfigEntries(q, t, true);
+  }, [q, t]);
+
   // 实体命中（管理员：渠道/用户/令牌；普通用户：仅本人令牌；模型任何登录用户可见）
   const hits = useMemo(() => {
     if (!q) return { channel: [], user: [], token: [], model: [] };
@@ -91,16 +103,18 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
   type EntityKind = 'channel' | 'user' | 'token' | 'model';
   type Row =
     | { kind: 'page'; path: string; title: string; sub: string }
+    | { kind: 'config'; path: string; title: string; sub: string }
     | { kind: 'entity'; entity: EntityKind; path: string; title: string; sub: string };
   const rows: Row[] = useMemo(() => {
     const out: Row[] = [];
     for (const p of pageHits) out.push({ kind: 'page', path: p.path, title: t(p.labelKey), sub: t('页面') });
+    for (const c of configHits) out.push({ kind: 'config', path: c.path, title: t(c.label), sub: t(c.hint) });
     for (const c of hits.channel.slice(0, 8)) out.push({ kind: 'entity', entity: 'channel', path: '/channels', title: c.name || '—', sub: c.base_url || '供应商' });
     for (const u of hits.user.slice(0, 8)) out.push({ kind: 'entity', entity: 'user', path: '/users', title: u.email || u.username || '—', sub: u.role || '用户' });
     for (const m of hits.model.slice(0, 8)) out.push({ kind: 'entity', entity: 'model', path: '/model-manage', title: m.id || '—', sub: m.owned_by || '模型' });
     for (const k of hits.token.slice(0, 8)) out.push({ kind: 'entity', entity: 'token', path: '/keys', title: k.name || '—', sub: k.group || '令牌' });
     return out;
-  }, [pageHits, hits, t]);
+  }, [pageHits, configHits, hits, t]);
 
   useEffect(() => { setActive(0); }, [q]);
 
@@ -124,12 +138,19 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
   if (!open) return null;
 
   const groupLabel = (i: number): string | null => {
-    if (i === 0 && pageHits.length > 0) return t('页面');
-    const pEnd = pageHits.length;
-    const cStart = pEnd;
+    // 分组标题挂在每组**第一行**上。空查询时 pageHits 是全部页面、其后没有任何
+    // 实体行；此时若仍按「页面有命中」判第一条，配置组标题就再也不会出现。
+    // 判据统一成「该组非空且 i 正好落在该组首行」，与各组长度无关地成立。
+    const pStart = 0;
+    const pEnd = pStart + pageHits.length;
+    const cfgStart = pEnd;
+    const cfgEnd = cfgStart + configHits.length;
+    const cStart = cfgEnd;
     const cEnd = cStart + hits.channel.length;
     const uEnd = cEnd + hits.user.length;
     const mEnd = uEnd + hits.model.length;
+    if (i === pStart && pageHits.length > 0) return t('页面');
+    if (i === cfgStart && configHits.length > 0) return t('配置项');
     if (i === cStart && hits.channel.length > 0) return t('供应商');
     if (i === cEnd && hits.user.length > 0) return t('用户');
     if (i === uEnd && hits.model.length > 0) return t('模型');
@@ -147,7 +168,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={t('搜索页面、供应商、模型、用户、令牌…')}
+            placeholder={t('搜索页面、配置项、供应商、模型、用户、令牌…')}
             aria-label={t('全局搜索')}
           />
           <button type="button" className="global-search-close" onClick={onClose} aria-label={t('关闭')}>
@@ -170,6 +191,8 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
                 >
                   {row.kind === 'page' ? (
                     <FileText size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                  ) : row.kind === 'config' ? (
+                    <SlidersHorizontal size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                   ) : row.entity === 'channel' ? (
                     <Satellite size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                   ) : row.entity === 'user' ? (

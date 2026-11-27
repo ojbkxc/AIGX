@@ -1,0 +1,129 @@
+/* 配置总览：搜索框 + 分组表。样式刻意贴住 .settings-pane 里已有的 card 节奏。 */
+
+.config-overview-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--input-bg, var(--card-bg));
+  color: var(--text-muted);
+}
+
+.config-overview-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13.5px;
+  color: var(--text-main);
+}
+
+.config-overview-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.config-overview-group {
+  margin-top: 16px;
+}
+
+.config-overview-group:first-of-type {
+  margin-top: 0;
+}
+
+.config-overview-group h3 {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.config-overview-group ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 整行可点：名字在左、位置在右，箭头是操作提示而不是单独按钮 */
+.config-overview-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.config-overview-row:hover {
+  background: var(--btn-secondary-hover);
+}
+
+.config-overview-name {
+  flex-shrink: 0;
+  min-width: 132px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.config-overview-where {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-overview-go {
+  flex-shrink: 0;
+  align-self: center;
+  opacity: 0;
+  color: var(--accent-color);
+  transition: opacity 0.15s ease;
+}
+
+.config-overview-row:hover .config-overview-go,
+.config-overview-row:focus-visible .config-overview-go {
+  opacity: 1;
+}
+
+.config-overview-empty {
+  padding: 20px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* 窄屏：位置说明换行到名字下面，避免两列挤成省略号 */
+@media (max-width: 720px) {
+  .config-overview-row {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .config-overview-name {
+    min-width: 0;
+  }
+
+  .config-overview-where {
+    flex-basis: 100%;
+    white-space: normal;
+  }
+}
