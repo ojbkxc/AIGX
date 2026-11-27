@@ -99,9 +99,16 @@ pub fn skeleton(name: &str, description: &str, keywords: &[String], body: &str) 
     if !description.is_empty() {
         out.push_str(&format!("description: {description}\n"));
     }
-    if !keywords.is_empty() {
-        out.push_str(&format!("keywords: {}\n", keywords.join(", ")));
-    }
+    // `keywords:` **永远输出**（即使为空）。
+    //
+    // 旧实现「没给关键词就不写这行」有个后果：前端「生成骨架 → 填正文 → 写入」
+    // 是设计好的主路径，而它产出的 SKILL.md 必然缺 `keywords:` 键 → 体检立刻报
+    // `skill_no_keywords`（「只能靠 name/description 派生关键词，命中面很窄」）。
+    // 生成器产出自己告警的东西，用户照着做还是有一条告警消不掉。
+    //
+    // 空值 `keywords:` 解析出来是空表（`parse_keywords` 对空串返回空），语义不变，
+    // 但键**可见**了，用户知道有这个字段。行内不加 `#` 注释，避免污染解析。
+    out.push_str(&format!("keywords: {}\n", keywords.join(", ")));
     out.push_str("---\n\n");
     out.push_str(body);
     out.push('\n');
@@ -295,6 +302,31 @@ mod tests {
     /// 两份实现漂移时，界面新建出来的技能会「看起来正常、永远不命中」。
     #[test]
     fn skeleton_round_trips_through_parser() {
+        /// 不传关键词时，骨架**仍然**要带 `keywords:` 行。
+        ///
+        /// 旧实现只在 keywords 非空时才写这行，于是「生成骨架 → 填正文 → 写入」
+        /// 这条主路径产出的 SKILL.md 必然缺该键 → 体检报 `skill_no_keywords`。
+        /// 生成器产出自己告警的东西，用户照做还是消不掉。
+        #[test]
+        fn skeleton_always_emits_keywords_line() {
+            let doc = skeleton("plain-skill", "", &[], "");
+            assert!(
+                doc.contains("keywords:"),
+                "骨架必须带 keywords 行（哪怕为空）：{doc}"
+            );
+            let validated = validate(&doc, 1500).expect("空关键词的骨架也必须可解析");
+            assert!(
+                validated.has_keywords_key,
+                "解析器必须能看见这个键：{validated:?}"
+            );
+            // 空值解析成空表：语义不变，只让键可见
+            assert_eq!(validated.name, "plain-skill");
+            assert!(
+                validated.keywords.iter().all(|k| k != ""),
+                "空表里不该有空串关键词：{validated:?}"
+            );
+        }
+
         let keywords = vec!["对账".to_string(), "月结".to_string()];
         let doc = skeleton("pdf-report", "导出 PDF 报表", &keywords, "");
         let validated = validate(&doc, 1500).expect("模板必须是可解析的");
