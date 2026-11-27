@@ -4189,17 +4189,20 @@ mod tests {
 
         assert!(skill_doc_briefs_with(&root, true).is_empty());
         // 诊断：确认捕获时指纹里记了多少目录数，供排查「新增文件抓不到」
-        let _diag = {
+        {
             let cache = SKILL_CACHE.get().unwrap();
             let g = cache.read();
-            g.stamp.as_ref().map(|s| {
-                (
-                    s.dir_count,
-                    s.dirs.len(),
-                    s.dirs.first().map(|d| d.0.display().to_string()),
-                )
-            })
-        };
+            let s = g.stamp.as_ref().unwrap();
+            eprintln!(
+                "DIAG dir_count={} dirs_len={} first_dir={}",
+                s.dir_count,
+                s.dirs.len(),
+                s.dirs
+                    .first()
+                    .map(|d| d.0.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
         std::fs::create_dir_all(dir.join("one")).unwrap();
         std::fs::write(dir.join("one/SKILL.md"), "---\nname: one\n---\n正文").unwrap();
 
