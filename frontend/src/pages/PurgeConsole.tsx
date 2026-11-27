@@ -5961,6 +5961,121 @@ export default function PurgeConsole(): JSX.Element {
         </SectionGuard>
       </PurgeGroupWrap>
 
+
+      {/* 预设库组：「一句话搞定」的核心——按模型自动套用 + 通用兜底 + 固定预设 id。
+          预设库浏览器本身在下面（浏览/应用/预览面板/最近用过 全保留）。 */}
+      <PurgeGroupWrap
+        id="preset"
+        t={t}
+        status={groupStatusText(groupCounts.get('preset') ?? 0, t)}
+        statusActive={(groupCounts.get('preset') ?? 0) > 0}
+      >
+        <Card title={t('按模型自动套用')}>
+          <div className="purge-form-grid">
+            <Input
+              label={t('固定套用预设 id')}
+              hint={t('留空 = 按模型自动匹配；名字对不上就不套，预设正文原样前插到 system 提示词')}
+              value={draft.auto_preset_id ?? ''}
+              onChange={(event) => patch({ auto_preset_id: event.target.value })}
+              data-purge-fix="auto-preset-id"
+            />
+          </div>
+        </Card>
+
+      {/* 预设库：内置 prompt 集合浏览 + 一键落盘（放在结构化模板之上，应用后直接在下方看到结果） */}
+      <span data-purge-fix="presets" />
+      {/* 区块级隔离：预设库解析的是「内置目录 + 后端匹配」两套数据，出错不该拖垮
+          开关和保存（用户可能正急着落库） */}
+      <SectionGuard title={t('破甲预设库')}>
+        <PresetsSection
+        t={t}
+        addToast={addToast}
+        onApplyTemplate={applyPresetTemplate}
+        currentTemplates={draft?.structured_templates}
+        existingSkills={skills}
+        onSkillWritten={() => void refreshSkills()}
+        masterEnabled={Boolean(draft?.enabled)}
+        autoPresetOn={Boolean(draft?.auto_preset)}
+        defaultModelHint={mainModelSnapshot || data?.main_model}
+        />
+      </SectionGuard>
+
+      <Card
+        title={t('结构化模板')}
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={addTemplate}>
+              {t('添加模板')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => templateJsonRef.current?.click()}>
+              {t('导入 JSON')}
+            </Button>
+            <input
+              ref={templateJsonRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                void importTemplateJson(event.target.files?.[0] ?? null);
+                event.target.value = '';
+              }}
+            />
+          </>
+        }
+      >
+        {capError(draft.structured_templates, TEMPLATES_CAP) ? (
+          <p className="purge-cap-hint" role="alert">
+            {capError(draft.structured_templates, TEMPLATES_CAP)}
+          </p>
+        ) : null}
+        <Select
+          label={t('当前启用模板')}
+          hint={t('结构化提示开启时，命中模板则用其文本替代默认后缀；选「使用默认后缀」即回退')}
+          value={draft.active_template ?? ''}
+          onChange={(event) => patch({ active_template: event.target.value })}
+        >
+          <option value="">{t('（使用默认后缀）')}</option>
+          {(draft.structured_templates ?? []).map((tpl, index) => (
+            <option key={`tpl-${index}`} value={tpl.name} disabled={!tpl.name.trim()}>
+              {tpl.name.trim() || t('（未命名）')}
+            </option>
+          ))}
+        </Select>
+        {(draft.structured_templates ?? []).length === 0 ? (
+          <p className="purge-empty" data-purge-fix="templates">{t('暂无模板，点击右上角「添加模板」新建一条')}</p>
+        ) : (
+          <div className="purge-rules" data-purge-fix="templates">
+            {(draft.structured_templates ?? []).map((tpl, index) => (
+              <div className="purge-rule-row" key={`tpl-${index}`}>
+                <div>
+                  <Input
+                    placeholder={t('模板名称')}
+                    aria-label={t('模板名称')}
+                    value={tpl.name}
+                    error={
+                      dupTemplates.get(tpl.name.trim().toLowerCase())
+                        ? t('模板名称重复，保存前请先修改')
+                        : undefined
+                    }
+                    onChange={(event) => patchTemplate(index, { name: event.target.value })}
+                  />
+                </div>
+                <Textarea
+                  rows={3}
+                  placeholder={t('模板文本')}
+                  aria-label={t('模板文本')}
+                  value={tpl.text}
+                  onChange={(event) => patchTemplate(index, { text: event.target.value })}
+                />
+                <Button variant="outline" size="sm" onClick={() => removeTemplate(index)}>
+                  {t('删除')}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+      </PurgeGroupWrap>
       {/* 技能注入组：技能目录 / 注入上限 / 技能包导入 / 新建技能 / 扫描快照。
           技能目录与注入上限从原「技能与结构化提示」卡里逐字搬来。 */}
       <PurgeGroupWrap
@@ -6129,121 +6244,6 @@ export default function PurgeConsole(): JSX.Element {
               </li>
             ))}
           </ul>
-        )}
-      </Card>
-      </PurgeGroupWrap>
-
-      {/* 预设库组：「一句话搞定」的核心——按模型自动套用 + 通用兜底 + 固定预设 id。
-          预设库浏览器本身在下面（浏览/应用/预览面板/最近用过 全保留）。 */}
-      <PurgeGroupWrap
-        id="preset"
-        t={t}
-        status={groupStatusText(groupCounts.get('preset') ?? 0, t)}
-        statusActive={(groupCounts.get('preset') ?? 0) > 0}
-      >
-        <Card title={t('按模型自动套用')}>
-          <div className="purge-form-grid">
-            <Input
-              label={t('固定套用预设 id')}
-              hint={t('留空 = 按模型自动匹配；名字对不上就不套，预设正文原样前插到 system 提示词')}
-              value={draft.auto_preset_id ?? ''}
-              onChange={(event) => patch({ auto_preset_id: event.target.value })}
-              data-purge-fix="auto-preset-id"
-            />
-          </div>
-        </Card>
-
-      {/* 预设库：内置 prompt 集合浏览 + 一键落盘（放在结构化模板之上，应用后直接在下方看到结果） */}
-      <span data-purge-fix="presets" />
-      {/* 区块级隔离：预设库解析的是「内置目录 + 后端匹配」两套数据，出错不该拖垮
-          开关和保存（用户可能正急着落库） */}
-      <SectionGuard title={t('破甲预设库')}>
-        <PresetsSection
-        t={t}
-        addToast={addToast}
-        onApplyTemplate={applyPresetTemplate}
-        currentTemplates={draft?.structured_templates}
-        existingSkills={skills}
-        onSkillWritten={() => void refreshSkills()}
-        masterEnabled={Boolean(draft?.enabled)}
-        autoPresetOn={Boolean(draft?.auto_preset)}
-        defaultModelHint={mainModelSnapshot || data?.main_model}
-        />
-      </SectionGuard>
-
-      <Card
-        title={t('结构化模板')}
-        actions={
-          <>
-            <Button variant="outline" size="sm" onClick={addTemplate}>
-              {t('添加模板')}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => templateJsonRef.current?.click()}>
-              {t('导入 JSON')}
-            </Button>
-            <input
-              ref={templateJsonRef}
-              type="file"
-              accept=".json,application/json"
-              style={{ display: 'none' }}
-              onChange={(event) => {
-                void importTemplateJson(event.target.files?.[0] ?? null);
-                event.target.value = '';
-              }}
-            />
-          </>
-        }
-      >
-        {capError(draft.structured_templates, TEMPLATES_CAP) ? (
-          <p className="purge-cap-hint" role="alert">
-            {capError(draft.structured_templates, TEMPLATES_CAP)}
-          </p>
-        ) : null}
-        <Select
-          label={t('当前启用模板')}
-          hint={t('结构化提示开启时，命中模板则用其文本替代默认后缀；选「使用默认后缀」即回退')}
-          value={draft.active_template ?? ''}
-          onChange={(event) => patch({ active_template: event.target.value })}
-        >
-          <option value="">{t('（使用默认后缀）')}</option>
-          {(draft.structured_templates ?? []).map((tpl, index) => (
-            <option key={`tpl-${index}`} value={tpl.name} disabled={!tpl.name.trim()}>
-              {tpl.name.trim() || t('（未命名）')}
-            </option>
-          ))}
-        </Select>
-        {(draft.structured_templates ?? []).length === 0 ? (
-          <p className="purge-empty" data-purge-fix="templates">{t('暂无模板，点击右上角「添加模板」新建一条')}</p>
-        ) : (
-          <div className="purge-rules" data-purge-fix="templates">
-            {(draft.structured_templates ?? []).map((tpl, index) => (
-              <div className="purge-rule-row" key={`tpl-${index}`}>
-                <div>
-                  <Input
-                    placeholder={t('模板名称')}
-                    aria-label={t('模板名称')}
-                    value={tpl.name}
-                    error={
-                      dupTemplates.get(tpl.name.trim().toLowerCase())
-                        ? t('模板名称重复，保存前请先修改')
-                        : undefined
-                    }
-                    onChange={(event) => patchTemplate(index, { name: event.target.value })}
-                  />
-                </div>
-                <Textarea
-                  rows={3}
-                  placeholder={t('模板文本')}
-                  aria-label={t('模板文本')}
-                  value={tpl.text}
-                  onChange={(event) => patchTemplate(index, { text: event.target.value })}
-                />
-                <Button variant="outline" size="sm" onClick={() => removeTemplate(index)}>
-                  {t('删除')}
-                </Button>
-              </div>
-            ))}
-          </div>
         )}
       </Card>
       </PurgeGroupWrap>
