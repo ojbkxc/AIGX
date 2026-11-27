@@ -393,6 +393,57 @@ mod tests {
         );
     }
 
+    /// 内置预设的「裸正文」也能导入：**没有 frontmatter 也必须能落盘**。
+    ///
+    /// 这不是边角情况：`presets::apply(SkillFile)` 写进 `SKILL.md` 的就是预设正文
+    /// 原文（实测 52 份预设里 **0 份**带 frontmatter），而扫描器 `parse_skill` 对
+    /// 无 frontmatter 的文件按「整份是正文 + 名字回落父目录名」处理。写盘路径必须
+    /// 同口径，否则「先从预设库落一份技能、再想改一个字」这条最自然的路径会被
+    /// 我们自己的校验挡住——而那份技能明明是能生效的。
+    #[test]
+    fn raw_body_without_frontmatter_still_writes() {
+        let root = temp_root("raw");
+        let body = "### REGISTER\n\nYou are VANTA. 正文没有 frontmatter。";
+        let report = write_skill(&root, "0x8d-jailbreaks-gpt-new", body, false, 1500, "text")
+            .expect("裸正文必须能落盘（预设库的既有形态）");
+        assert_eq!(report.dir, "0x8d-jailbreaks-gpt-new");
+        assert!(
+            report.name.starts_with("0x8d"),
+            "没写 name 时取目录名：{}",
+            report.name
+        );
+        assert!(!report.has_keywords_key, "裸正文没有 keywords 行");
+        assert_eq!(report.body_chars, body.chars().count(), "整份都是正文");
+        assert!(
+            report.warnings.iter().any(|w| w.contains("keywords")),
+            "应提示缺 keywords（用户能据此补）：{:?}",
+            report.warnings
+        );
+        let file = root.join("0x8d-jailbreaks-gpt-new").join(SKILL_FILE_NAME);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            body,
+            "正文逐字落盘"
+        );
+        // 落盘后**扫描器的完整路径**读得回来：名字回落父目录名、关键词随之重算
+        // （`parse_skill_parts` 只拆 frontmatter，名字兜底在 `mod::parse_skill`）。
+        let (raw_name, _, has_key, read_back) =
+            super::super::parse_skill_parts(body).expect("裸正文应可解析");
+        assert_eq!(raw_name, "", "没有 frontmatter 姓名");
+        assert!(!has_key);
+        assert_eq!(read_back, body);
+        let entry = super::super::parse_skill(body, "0x8d-jailbreaks-gpt-new", &file)
+            .expect("扫描器应读得出这份技能");
+        assert_eq!(entry.name, "0x8d-jailbreaks-gpt-new", "名字回落父目录名");
+        assert_eq!(
+            entry.keywords,
+            vec!["0x8d-jailbreaks-gpt-new".to_string()],
+            "关键词只有名字（所以体检会提示缺 keywords）：{:?}",
+            entry.keywords
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 正文超过注入上限 → 提示会截断（不是错误，写盘照做）。
     #[test]
     fn validate_warns_on_body_over_limit() {
