@@ -1111,6 +1111,23 @@ fn paths_settings_ops() -> Value {
         "/api/purge/skills/import": {
             "post": op("网关", "导入技能包（ZIP/TAR/TGZ）到破甲技能目录（multipart 表单：file / name / overwrite）")
         },
+        "/api/purge/skills/skeleton": {
+            "get": op_params("破甲", "生成 SKILL.md 骨架（含 keywords 行；前端不拼 frontmatter，格式由后端解析器保证）", &[
+                query_param("name", "string", "技能名（必填）；同时是默认关键词与目录名来源"),
+                query_param("description", "string", "一句话说明；其 ≥2 字符的词会派生成关键词"),
+                query_param("keywords", "string", "显式关键词，逗号分隔"),
+                query_param("body", "string", "正文占位（可选）"),
+            ])
+        },
+        "/api/purge/skills": {
+            "post": op("破甲", "写入一份纯文本 SKILL.md（新建/粘贴/上传 .md）；先校验后落盘，解析器读不出正文即拒")
+        },
+        "/api/purge/fallback/suggest": {
+            "get": op_params("破甲", "按主模型推荐「真异源」候选（按 owned_by 判厂商，不是 provider）；带逐条排除原因", &[
+                query_param("model", "string", "主模型名（可选；缺省用配置里的 main_model）"),
+                query_param("fresh", "string", "传 1 强制重算模型视图（默认走 30s 缓存）"),
+            ])
+        },
         "/api/purge/presets": {
             "get": op_params("网关", "检索内置破甲预设库（不带正文，只带预览）", &[
                 query_param("q", "string", "关键词：匹配 id / vendor / model / title / tags"),
@@ -2390,6 +2407,9 @@ mod tests {
         add("/api/purge/presets/{id}", &["get"]);
         add("/api/purge/presets/{id}/apply", &["post"]);
         add("/api/purge/skills/import", &["post"]);
+        add("/api/purge/skills/skeleton", &["get"]);
+        add("/api/purge/skills", &["post"]);
+        add("/api/purge/fallback/suggest", &["get"]);
         add("/api/purge/defaults", &["get"]);
         add("/api/purge/stats.csv", &["get"]);
         add("/api/purge/stats/reset", &["post"]);
