@@ -1395,10 +1395,20 @@ const SKILL_SCAN_MAX_DEPTH: usize = 4;
 /// 这会改 `<root>/<名字>` 的 mtime，而 `<root>` 自己的 mtime 不变、文件清单里
 /// 也还没有这个文件——只记根目录 + 已扫描文件的话，新技能要等别的写操作撞上
 /// 才算数。把每个目录都记上，增删文件在任何一层都能被发现。
+/// 一个 mtime 快照：`(秒, 纳秒)`。抽成别名是因为它出现在两处嵌套元组里，
+/// 内联写会让 `SkillStamp` 的字段类型长到 clippy 报 `type_complexity`。
+type Mtime = Option<(u64, u32)>;
+
+/// 目录条目：路径 + 自身 mtime。
+type SkillStampDir = (PathBuf, Mtime);
+
+/// 文件条目：路径 + mtime + 字节数。
+type SkillStampFile = (PathBuf, Mtime, u64);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SkillStamp {
-    dirs: Vec<(PathBuf, Option<(u64, u32)>)>,
-    files: Vec<(PathBuf, Option<(u64, u32)>, u64)>,
+    dirs: Vec<SkillStampDir>,
+    files: Vec<SkillStampFile>,
 }
 
 /// `(秒, 纳秒)` 的 mtime 快照（不用 `SystemTime` 是为了可比较 / 可存）。
@@ -1845,6 +1855,7 @@ pub fn severity_of(code: &str) -> Severity {
 /// - `preset_missing` → 固定套用预设 id 输入框
 /// - `dead_zone_all_disabled` → 死区词表
 /// - `synonym_all_disabled` → 同义词表
+#[cfg(test)]
 pub fn config_warning_items(cfg: &PurgeSettings) -> Vec<ConfigWarning> {
     config_warning_items_with(cfg, None, "")
 }
@@ -2279,6 +2290,7 @@ fn nearest_preset_id(target: &str) -> Option<&'static str> {
 }
 
 /// 兼容入口：只取 message 文本（既有单测与旧消费方用）。
+#[cfg(test)]
 pub fn config_warnings(cfg: &PurgeSettings) -> Vec<String> {
     config_warning_items(cfg)
         .into_iter()

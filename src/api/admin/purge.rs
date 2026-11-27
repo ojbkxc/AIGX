@@ -675,9 +675,8 @@ pub async fn handle_write_skill(
     })?
     .map_err(|message| {
         // 目录已存在且未要求覆盖是**冲突**（409），其余是内容/环境问题
-        let status = if message.contains("已存在") {
-            StatusCode::CONFLICT
-        } else if message.contains("非普通目录") {
+        // 两个分支都返回 CONFLICT，合成一个条件（clippy `if_same_then_else`）。
+        let status = if message.contains("已存在") || message.contains("非普通目录") {
             StatusCode::CONFLICT
         } else if message.contains("失败") {
             StatusCode::INTERNAL_SERVER_ERROR

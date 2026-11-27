@@ -301,32 +301,32 @@ mod tests {
     /// 用后端解析器本身回读，而不是自己再写一遍 frontmatter 正则——
     /// 两份实现漂移时，界面新建出来的技能会「看起来正常、永远不命中」。
     #[test]
-    fn skeleton_round_trips_through_parser() {
-        /// 不传关键词时，骨架**仍然**要带 `keywords:` 行。
-        ///
-        /// 旧实现只在 keywords 非空时才写这行，于是「生成骨架 → 填正文 → 写入」
-        /// 这条主路径产出的 SKILL.md 必然缺该键 → 体检报 `skill_no_keywords`。
-        /// 生成器产出自己告警的东西，用户照做还是消不掉。
-        #[test]
-        fn skeleton_always_emits_keywords_line() {
-            let doc = skeleton("plain-skill", "", &[], "");
-            assert!(
-                doc.contains("keywords:"),
-                "骨架必须带 keywords 行（哪怕为空）：{doc}"
-            );
-            let validated = validate(&doc, 1500).expect("空关键词的骨架也必须可解析");
-            assert!(
-                validated.has_keywords_key,
-                "解析器必须能看见这个键：{validated:?}"
-            );
-            // 空值解析成空表：语义不变，只让键可见
-            assert_eq!(validated.name, "plain-skill");
-            assert!(
-                validated.keywords.iter().all(|k| k != ""),
-                "空表里不该有空串关键词：{validated:?}"
-            );
-        }
+    /// 不传关键词时，骨架**仍然**要带 `keywords:` 行。
+    ///
+    /// 旧实现只在 keywords 非空时才写这行，于是「生成骨架 → 填正文 → 写入」
+    /// 这条主路径产出的 SKILL.md 必然缺该键 → 体检报 `skill_no_keywords`。
+    /// 生成器产出自己告警的东西，用户照做还是消不掉。
+    #[test]
+    fn skeleton_always_emits_keywords_line() {
+        let doc = skeleton("plain-skill", "", &[], "");
+        assert!(
+            doc.contains("keywords:"),
+            "骨架必须带 keywords 行（哪怕为空）：{doc}"
+        );
+        let validated = validate(&doc, 1500).expect("空关键词的骨架也必须可解析");
+        assert!(
+            validated.has_keywords_key,
+            "解析器必须能看见这个键：{validated:?}"
+        );
+        // 空值解析成空表：语义不变，只让键可见
+        assert_eq!(validated.name, "plain-skill");
+        assert!(
+            validated.keywords.iter().all(|k| k != ""),
+            "空表里不该有空串关键词：{validated:?}"
+        );
+    }
 
+    fn skeleton_round_trips_through_parser() {
         let keywords = vec!["对账".to_string(), "月结".to_string()];
         let doc = skeleton("pdf-report", "导出 PDF 报表", &keywords, "");
         let validated = validate(&doc, 1500).expect("模板必须是可解析的");
