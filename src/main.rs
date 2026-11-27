@@ -1883,6 +1883,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/auth/github/callback",
             get(api::admin::handle_github_oauth_callback),
         )
+        // OAuth 短回调别名：GitHub / Google / LinuxDO 的 OAuth App 里登记的回调
+        // 常见形态是 `https://<host>/oauth/<provider>`（不带 `/api/auth` 前缀）。
+        // 与上面的长路径指向**同一个 handler**，语义完全一致 —— 两套路径都保留，
+        // 因为已经登记过长路径的部署、以及正在授权流程里的用户都还在用它。
+        .route(
+            "/oauth/github",
+            get(api::admin::handle_github_oauth_callback),
+        )
         // 阶段1：忘记密码 / 重置密码（参照 burncloud auth.rs）
         .route(
             "/api/auth/forgot-password",
@@ -1912,6 +1920,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/auth/google/callback",
             get(api::admin::handle_google_oauth_callback),
         )
+        .route(
+            "/oauth/google",
+            get(api::admin::handle_google_oauth_callback),
+        )
         // LinuxDO OAuth
         .route(
             "/api/auth/linuxdo",
@@ -1919,6 +1931,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         .route(
             "/api/auth/linuxdo/callback",
+            get(api::admin::handle_linuxdo_oauth_callback),
+        )
+        .route(
+            "/oauth/linuxdo",
             get(api::admin::handle_linuxdo_oauth_callback),
         )
         // OAuth 个人中心绑定：start 需登录态（verify_user），返回授权 URL 供前端整页跳；
