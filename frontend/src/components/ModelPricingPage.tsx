@@ -79,6 +79,9 @@ interface AvailableModelEntry {
   id?: string;
   price_input?: number;
   price_output?: number;
+  // 后端 `handle_available_models` 已返回 `price_cache`（每 1K，未配置=null）；
+  // 回落路径此前漏读它，导致缓存价列恒显示「—」。
+  price_cache?: number | null;
   price_type?: string;
 }
 
@@ -94,7 +97,7 @@ function toRow(entry: UserModelEntry | AvailableModelEntry): PriceRow | null {
     model: String(name),
     input_price: num((entry as UserModelEntry).input_price ?? (entry as AvailableModelEntry).price_input),
     output_price: num((entry as UserModelEntry).output_price ?? (entry as AvailableModelEntry).price_output),
-    cache_price: num((entry as UserModelEntry).cache_price),
+    cache_price: num((entry as UserModelEntry).cache_price ?? (entry as AvailableModelEntry).price_cache),
     price_type: String((entry as UserModelEntry).price_type ?? (entry as AvailableModelEntry).price_type ?? 'token'),
   };
 }

@@ -129,7 +129,9 @@ export default function StatCards({ overview, lang, rangeLabel, prev, series, pe
       title={t(personal ? '总消费' : '总消费（配额）')}
       value={fmtCost(o.total_cost, lang)}
       delta={deltaPct(o.total_cost ?? 0, p.total_cost)}
-      desc={t('按定价从配额扣减，≠ 上游成本；与日志页可对账')}
+      // 副文案分视角：用户视角完全不出现「成本」字样（用户只关心消费，给他看
+      // 「成本」会误导成「付给上游的钱」）；管理员才需要对账说明（澄清消费≠成本）。
+      desc={personal ? t('按定价从配额扣减，与日志页可对账') : t('按定价从配额扣减，≠ 上游成本；与日志页可对账')}
     />,
     <TrendCard
       key="activeDays"
