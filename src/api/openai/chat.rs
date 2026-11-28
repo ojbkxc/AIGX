@@ -676,6 +676,7 @@ pub(crate) async fn handle_chat_completions(
                                 }
                                 if let Some(capture) = route_capture.as_mut() {
                                     capture.push_attempt(crate::log::AttemptDetail {
+                                        response_at: None,
                                         index: attempt_index,
                                         channel_id: cid.clone().unwrap_or_default(),
                                         channel_name: ch_ref
@@ -726,6 +727,7 @@ pub(crate) async fn handle_chat_completions(
                                 crate::purge::record_refusal();
                                 if let Some(capture) = route_capture.as_mut() {
                                     capture.push_attempt(crate::log::AttemptDetail {
+                                        response_at: None,
                                         index: attempt_index,
                                         channel_id: cid.clone().unwrap_or_default(),
                                         channel_name: ch_ref
@@ -771,6 +773,7 @@ pub(crate) async fn handle_chat_completions(
                     // 记「建流成功」结论；phase 由终态字段承载）
                     if let Some(capture) = route_capture.as_mut() {
                         capture.push_attempt(crate::log::AttemptDetail {
+                            response_at: None,
                             index: attempt_index,
                             channel_id: cid.clone().unwrap_or_default(),
                             channel_name: ch_ref
@@ -837,6 +840,7 @@ pub(crate) async fn handle_chat_completions(
                     // #32 路由回放：失败轮明细（含不可重试的终态轮）
                     if let Some(capture) = route_capture.as_mut() {
                         capture.push_attempt(crate::log::AttemptDetail {
+                            response_at: None,
                             index: attempt_index,
                             channel_id: cid.clone().unwrap_or_default(),
                             channel_name: ch_ref
@@ -1636,6 +1640,7 @@ pub(crate) async fn handle_chat_completions(
                             }
                             if let Some(capture) = route_capture.as_mut() {
                                 capture.push_attempt(crate::log::AttemptDetail {
+                                    response_at: None,
                                     index: attempt_index,
                                     channel_id: cid.clone().unwrap_or_default(),
                                     channel_name: ch_ref
@@ -1697,6 +1702,7 @@ pub(crate) async fn handle_chat_completions(
                         }
                         if let Some(capture) = route_capture.as_mut() {
                             capture.push_attempt(crate::log::AttemptDetail {
+                                response_at: None,
                                 index: attempt_index,
                                 channel_id: cid.clone().unwrap_or_default(),
                                 channel_name: ch_ref
@@ -1745,6 +1751,7 @@ pub(crate) async fn handle_chat_completions(
                     // #32 路由回放：非流式成功轮明细
                     if let Some(capture) = route_capture.as_mut() {
                         capture.push_attempt(crate::log::AttemptDetail {
+                            response_at: None,
                             index: attempt_index,
                             channel_id: cid.clone().unwrap_or_default(),
                             channel_name: ch_ref
@@ -1796,6 +1803,7 @@ pub(crate) async fn handle_chat_completions(
                     // #32 路由回放：失败轮明细（含不可重试的终态轮）
                     if let Some(capture) = route_capture.as_mut() {
                         capture.push_attempt(crate::log::AttemptDetail {
+                            response_at: None,
                             index: attempt_index,
                             channel_id: cid.clone().unwrap_or_default(),
                             channel_name: ch_ref

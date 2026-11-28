@@ -1106,6 +1106,9 @@ pub async fn handle_get_route_replay(
             "candidate_channels": log.candidate_channels,
             "filtered_channels": log.filtered_channels,
             "selected_channel": log.selected_channel,
+            "special_route": log.special_route,
+            "first_response_ms": log.first_response_ms,
+            "output_tokens": log.output_tokens,
             "route_config": log.route_config,
             "route_truncated": log.route_truncated,
             "attempt_details": log.attempt_details,
@@ -1180,6 +1183,7 @@ mod tests {
         log.attempts = 2;
         log.attempt_details = vec![
             crate::log::AttemptDetail {
+                response_at: None,
                 index: 1,
                 channel_id: "ch-9".into(),
                 channel_name: "讯飞星辰".into(),
@@ -1194,6 +1198,7 @@ mod tests {
                 notice: None,
             },
             crate::log::AttemptDetail {
+                response_at: None,
                 index: 2,
                 channel_id: "ch-10".into(),
                 channel_name: "天翼云服务器_Agent2API".into(),
@@ -1309,6 +1314,7 @@ mod tests {
         log.channel_name = Some("讯飞星辰".into());
         log.provider = Some("trae".into());
         log.attempt_details = vec![crate::log::AttemptDetail {
+            response_at: None,
             index: 1,
             channel_id: "ch-9".into(),
             channel_name: "讯飞星辰".into(),

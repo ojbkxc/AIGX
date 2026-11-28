@@ -372,9 +372,27 @@ pub(crate) fn resolve_bridges_needs(
     let profile =
         crate::channel::routing_policy::resolve_profile(&policy, model, &state.model_mapper, None);
     if let Some(c) = capture.as_mut() {
+        // 成员模型快照：生效路由组的 members 原样投影（A2A configSnapshot.members
+        // 对齐位）。resolve_profile 内部已经按「组 id 生效 + 组匹配本模型」筛过，
+        // 这里只读策略快照的配置形态，不碰账号目录（账号数取成员自带名单长度）。
+        let members = profile.default_group.as_deref().and_then(|gid| {
+            policy.profiles.find_group(gid, model).map(|g| {
+                g.members
+                    .iter()
+                    .map(|m| crate::log::RouteMemberSnapshot {
+                        id: format!("{}:{}", m.provider, m.model),
+                        model: m.model.clone(),
+                        provider: m.provider.clone(),
+                        included: m.included,
+                        account_count: m.accounts.len(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
         c.config = Some(crate::log::RouteConfigSnapshot {
             strategy: profile.strategy.as_str().to_string(),
             sticky_enabled: policy.sticky.sticky_enabled(),
+            members,
         });
     }
     // #40 §1：本次请求的能力需求 → 能力位掩码。走**唯一映射链**

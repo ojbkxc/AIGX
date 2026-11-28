@@ -1779,6 +1779,7 @@ mod tests {
 
     fn attempt(sticky: bool) -> crate::log::AttemptDetail {
         crate::log::AttemptDetail {
+            response_at: None,
             index: 1,
             channel_id: "ch1".to_string(),
             channel_name: "主力".to_string(),

@@ -572,6 +572,32 @@ pub struct RouteConfigSnapshot {
     pub strategy: String,
     /// 会话粘滞是否启用
     pub sticky_enabled: bool,
+    /// 当时的路由组成员模型快照（对齐上游 `configSnapshot.members`）。
+    ///
+    /// 写入侧（[`crate::api::openai::resolve`]）从生效路由组直接取 `members`
+    /// 投影——成员名单是策略配置的一部分，选路时刻手里就有，不依赖账号
+    /// 目录二次查询。无路由组生效（自由选路）时为 `None` 且不序列化；
+    /// 存量日志无此键 → `serde(default)` 读成 `None`（零迁移）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<RouteMemberSnapshot>>,
+}
+
+/// 路由组成员快照行（对齐上游 `configSnapshot.members` 的元素形状：
+/// `{id, model, provider, included, accountCount}`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteMemberSnapshot {
+    /// 成员 ID。上游成员结构自带 `id`；AIGX 的 [`crate::channel::routing_policy::RoutingMember`]
+    /// 没有 id 字段，这里按 `provider:model` 合成稳定标识（前端仅用作渲染 key）。
+    pub id: String,
+    /// 成员模型名（路由组里配的名字，映射前）
+    pub model: String,
+    /// 成员供应商
+    pub provider: String,
+    /// 是否参与本次路由
+    pub included: bool,
+    /// 该成员名下账号数（当时快照）
+    pub account_count: usize,
 }
 
 /// 账号级跳过明细行（Phase1-B/#26 路由回放）：账号型渠道选号时逐账号的
@@ -680,6 +706,15 @@ pub struct AttemptDetail {
     pub error: Option<String>,
     /// 提示（v1 恒 None，契约位）
     pub notice: Option<String>,
+    /// 本轮尝试的首帧时刻（unix 毫秒；对齐上游 `AttemptDetail.responseAt`）。
+    ///
+    /// TODO(#回放三段色条)：AIGX 的 TTFT 采集是**请求级**一把共享句柄
+    ///（`BridgeContext.first_response_ms`），落在最后一次成功尝试上，逐次
+    /// 尝试的首帧时刻写入侧没有独立数据源——本字段现为契约位，构造点全部
+    /// 填 `None`（`serde(default)` 存量零迁移）。前端三段色条拆解需先在
+    /// bridge 侧为每次尝试挂独立 TTFT 句柄后再接线，不要硬造值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_at: Option<i64>,
 }
 
 /// 共享缓冲的总字节兜底（#26：防单条日志记录失控）。
@@ -4274,6 +4309,7 @@ mod tests {
         log.provider = Some("trae".to_string());
         log.attempts = 1;
         log.attempt_details = vec![AttemptDetail {
+            response_at: None,
             index: 1,
             channel_id: "ch-9".to_string(),
             channel_name: "讯飞星辰".to_string(),
@@ -4388,6 +4424,7 @@ mod attempt_detail_tests {
 
     fn detail(index: u32) -> AttemptDetail {
         AttemptDetail {
+            response_at: None,
             index,
             channel_id: format!("ch-{}", index % 3),
             channel_name: format!("渠道 {}", index % 3),
@@ -4539,6 +4576,7 @@ mod provider_tests {
         ));
         // 尝试明细（failover 循环里用同一函数）
         let detail = AttemptDetail {
+            response_at: None,
             index: 1,
             channel_id: "ch-pool".to_string(),
             channel_name: "池".to_string(),

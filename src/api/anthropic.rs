@@ -962,6 +962,7 @@ pub async fn handle_messages(
                                 }
                                 if let Some(capture) = route_capture.as_mut() {
                                     capture.push_attempt(crate::log::AttemptDetail {
+                                        response_at: None,
                                         index: attempt_index,
                                         channel_id: cid.clone().unwrap_or_default(),
                                         channel_name: ch_ref
@@ -1009,6 +1010,7 @@ pub async fn handle_messages(
                                 crate::purge::record_refusal();
                                 if let Some(capture) = route_capture.as_mut() {
                                     capture.push_attempt(crate::log::AttemptDetail {
+                                        response_at: None,
                                         index: attempt_index,
                                         channel_id: cid.clone().unwrap_or_default(),
                                         channel_name: ch_ref
@@ -1063,6 +1065,7 @@ pub async fn handle_messages(
                     // #32 路由回放：建流成功轮明细（流式终态在计费守卫）
                     if let Some(capture) = route_capture.as_mut() {
                         capture.push_attempt(crate::log::AttemptDetail {
+                            response_at: None,
                             index: attempt_index,
                             channel_id: cid.clone().unwrap_or_default(),
                             channel_name: ch_ref
@@ -1115,6 +1118,7 @@ pub async fn handle_messages(
                     // #32 路由回放：失败轮明细
                     if let Some(capture) = route_capture.as_mut() {
                         capture.push_attempt(crate::log::AttemptDetail {
+                            response_at: None,
                             index: attempt_index,
                             channel_id: cid.clone().unwrap_or_default(),
                             channel_name: ch_ref
@@ -1965,6 +1969,7 @@ pub async fn handle_messages(
                             }
                             if let Some(capture) = route_capture.as_mut() {
                                 capture.push_attempt(crate::log::AttemptDetail {
+                                    response_at: None,
                                     index: attempt_index,
                                     channel_id: cid.clone().unwrap_or_default(),
                                     channel_name: ch_ref
@@ -2024,6 +2029,7 @@ pub async fn handle_messages(
                         }
                         if let Some(capture) = route_capture.as_mut() {
                             capture.push_attempt(crate::log::AttemptDetail {
+                                response_at: None,
                                 index: attempt_index,
                                 channel_id: cid.clone().unwrap_or_default(),
                                 channel_name: ch_ref
@@ -2071,6 +2077,7 @@ pub async fn handle_messages(
                     // #32 路由回放：非流式成功轮明细
                     if let Some(capture) = route_capture.as_mut() {
                         capture.push_attempt(crate::log::AttemptDetail {
+                            response_at: None,
                             index: attempt_index,
                             channel_id: cid.clone().unwrap_or_default(),
                             channel_name: ch_ref
@@ -2123,6 +2130,7 @@ pub async fn handle_messages(
                     // #32 路由回放：失败轮明细
                     if let Some(capture) = route_capture.as_mut() {
                         capture.push_attempt(crate::log::AttemptDetail {
+                            response_at: None,
                             index: attempt_index,
                             channel_id: cid.clone().unwrap_or_default(),
                             channel_name: ch_ref

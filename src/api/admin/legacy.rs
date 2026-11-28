@@ -3515,6 +3515,7 @@ impl ChatTestAttemptContext {
         finished_at: Option<i64>,
     ) -> crate::log::AttemptDetail {
         crate::log::AttemptDetail {
+            response_at: None,
             index: self.index,
             channel_id: channel.id.clone(),
             channel_name: channel.name.clone(),
