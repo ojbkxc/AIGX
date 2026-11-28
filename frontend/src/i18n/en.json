@@ -6230,5 +6230,7 @@
   "按定价从配额扣减，≠ 上游成本；与日志页可对账": "Deducted from quota at pricing, ≠ upstream cost; reconciles with the logs page",
   "总消费（配额）": "Total spend (quota)",
   "重新选择请求": "Reselect request",
-  "按定价从配额扣减，与日志页可对账": "Deducted from quota by pricing; reconciles with the Logs page"
+  "按定价从配额扣减，与日志页可对账": "Deducted from quota by pricing; reconciles with the Logs page",
+  "查看配置详情": "View config details",
+  "{{n}} 个": "{{n}}"
 }
