@@ -1474,6 +1474,57 @@ function handle(req, res, p, bodyText) {
       return sendJson(res, { success: true, data: { cleared } });
     }
 
+    // 错误处理策略（GET/PUT /api/routing/errors）—— 路由页「错误处理」ErrorsCard 读写。
+    // 形状对齐 ErrorPolicyView（RoutingErrorsPanel.tsx:20-29）。缺桩会兜底 EMPTY_LIST
+    // （data=[]），ErrorsCard adopt 取 [].settings=undefined → draft undefined →
+    // 渲染访问 draft[f.key] 崩，拖垮整张卡（含 RetryTimeoutCard）→ e2e 字段全找不到。
+    if (p === '/api/routing/errors' && (req.method === 'GET' || req.method === 'PUT')) {
+      // rules 必须非空：simulateError（RoutingErrorsFeatures.tsx:283）在 rules 空时
+      // tier3=settings.rules[0]=undefined → rule=undefined → 读 rule.action 崩。
+      // 真实后端恒返回完整默认规则集，桩照此造全套 9 kind。
+      const errRule = (kind, statuses, code, action, cooldown, scope = 'auto', fallbackSeconds = 60) => ({
+        id: kind, name: kind, kind, statuses, code, provider: '*', model: '',
+        enabled: true, action, cooldown, fallbackSeconds, exponential: false,
+        fallbackCapSeconds: 600, scope,
+      });
+      const errorRules = [
+        errRule('rate_limit', [429], 'rate_limit_error', 'switch_account', 'upstream'),
+        errRule('quota', [429], 'usage_limit_reached', 'switch_account', 'upstream', 'account'),
+        errRule('auth', [401], 'token_expired', 'refresh_then_switch', 'fixed', 'account', 0),
+        errRule('balance', [402], 'insufficient_balance', 'switch_account', 'fixed', 'account', 0),
+        errRule('transient', [500, 502, 503, 504], 'service_unavailable', 'retry_then_switch', 'protection'),
+        errRule('unsupported', [501], 'unsupported', 'switch_provider', 'fixed', 'provider', 0),
+        errRule('bad_request', [400, 413], '', 'return_error', 'none'),
+        errRule('content', [400], 'content_policy_violation', 'return_error', 'none'),
+        errRule('unknown', [418], 'unknown_upstream_error', 'switch_account', 'fixed'),
+      ];
+      const errorSettings = {
+        resends: 1, switches: 3, intervalSeconds: 0, waitBudgetSeconds: 30,
+        cooldownFloorSeconds: 5, backoff: true, backoffSeconds: 30, backoffCapSeconds: 300,
+        sink: true, sinkSeconds: 60, breaker: true, breakerFailures: 3, breakerSeconds: 120,
+        breakerSuccesses: 2, rules: errorRules, overrides: [],
+      };
+      return sendJson(res, {
+        success: true,
+        data: {
+          settings: errorSettings, defaults: { ...errorSettings }, revision: '1',
+          configured: true, legacy: false,
+          providers: [{ id: '*', label: '全部提供商' }], providerRules: [],
+        },
+      });
+    }
+    // 重试 / 超时（GET/PUT /api/limits）—— 路由页「错误处理」RetryTimeoutCard 读写。
+    if (p === '/api/limits' && (req.method === 'GET' || req.method === 'PUT')) {
+      return sendJson(res, {
+        success: true,
+        data: {
+          max_retries: 2, retry_self_count: 1, retry_interval_ms: 0, retry_on_status: [402],
+          api_timeout_secs: 300, connect_timeout_secs: 10, headers_timeout_secs: 60,
+          stream_idle_secs: 30, body_timeout_secs: 300,
+        },
+      });
+    }
+
     // 网络代理池（进程内数组，E2E 可驱动 CRUD）
     if (p === '/api/proxy-pool' && req.method === 'GET') {
       return sendJson(res, { success: true, items: proxyPool, total: proxyPool.length });

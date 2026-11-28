@@ -62,7 +62,6 @@ let state: DirectoryState = {
   error: '',
 };
 const listeners = new Set<() => void>();
-let subscribers = 0;
 let loadingPromise: Promise<void> | null = null;
 
 function setState(next: Partial<DirectoryState>): void {
@@ -210,9 +209,7 @@ export interface RoutingAccountDirectory extends DirectoryState {
 export function useRoutingAccountDirectory(): RoutingAccountDirectory {
   const snapshot = useSyncExternalStore(subscribe, getSnapshot);
   useEffect(() => {
-    subscribers += 1;
     if (!state.accounts.length && !state.error) void loadDirectory();
-    return () => { subscribers -= 1; };
   }, []);
   const catalog = useMemo<RouteModelChoice[]>(() => {
     const seen = new Set<string>();

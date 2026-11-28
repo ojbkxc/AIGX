@@ -314,7 +314,9 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
     try {
       const res = await api.getRoutingErrors();
       const data = (res?.data ?? null) as unknown as ErrorPolicyView | null;
-      if (!data) return;
+      // settings 必须是对象：否则 adopt 里 structuredClone(undefined) 会把 draft 变
+      // undefined，随后渲染访问 draft[f.key] 直接抛错、拖垮整张卡（含 RetryTimeoutCard）。
+      if (!data || typeof data.settings !== 'object' || data.settings === null) return;
       adopt(data);
       setNotReady(false);
       setError('');
