@@ -6228,5 +6228,6 @@
   "显示商户密钥": "Show merchant secret",
   "隐藏商户密钥": "Hide merchant secret",
   "按定价从配额扣减，≠ 上游成本；与日志页可对账": "Deducted from quota at pricing, ≠ upstream cost; reconciles with the logs page",
-  "总消费（配额）": "Total spend (quota)"
+  "总消费（配额）": "Total spend (quota)",
+  "重新选择请求": "Reselect request"
 }
