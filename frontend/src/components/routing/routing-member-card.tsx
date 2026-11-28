@@ -16,13 +16,14 @@
  *   对应能力，不渲染；只保留消耗顺序行里的说明与（可选）入口。
  */
 import { useTranslation } from 'react-i18next';
-import { ArrowDown, ArrowUp, Users } from 'lucide-react';
+import { ArrowDown, ArrowUp, Settings2, Users } from 'lucide-react';
 import type { RoutingMember } from '../../types/routing-profile';
 import type { useRoutingDrag } from './routing-drag';
 import { RoutingAccountRow, type RoutingAccountRef } from './routing-account-row';
 import { RoutingConsumptionOrder } from './routing-account-order';
 import { DragHandle, RoutingActions, RoutingProviderMark, routingOrderKey } from './routing-actions';
 import { routeModelKey } from './routing-group-form';
+import type { AccountSortRule, AccountSortSettings } from '../../types';
 
 export function RoutingMemberCard({
   member,
@@ -36,6 +37,10 @@ export function RoutingMemberCard({
   query,
   drag,
   accounts,
+  sorting,
+  balanceSortStates,
+  onSaveSorting,
+  onAccount,
   onOpen,
   onJoin,
   onMove,
@@ -57,8 +62,14 @@ export function RoutingMemberCard({
   /** 搜索关键字（小写）：命中时卡片常开，且禁止排序（A2A 同口径） */
   query: string;
   drag: ReturnType<typeof useRoutingDrag>;
-  /** 该商家的账号目录（AIGX 暂缺 → 传空数组） */
+  /** 该商家的账号目录（来自 routing-account-directory；空 = 目录缺失） */
   accounts: RoutingAccountRef[];
+  /** 消耗规则（A5：与提供商卡同一数据源） */
+  sorting?: AccountSortSettings | null;
+  balanceSortStates?: Record<string, string>;
+  onSaveSorting?(provider: string, rules: AccountSortRule[]): Promise<void>;
+  /** 单账号设置入口（A7） */
+  onAccount?(id: string): void;
   onOpen(open: boolean): void;
   onJoin(on: boolean): void;
   onMove(direction: number): void;
@@ -117,6 +128,17 @@ export function RoutingMemberCard({
             onChange={(event) => onJoin(event.currentTarget.checked)}
           />
         </label>
+        {onSort ? (
+          <button
+            type="button"
+            className="rt-link-btn rt-group-settings"
+            title={t('分组设置')}
+            aria-label={t('{{name}} · 分组设置', { name: label })}
+            onClick={onSort}
+          >
+            <Settings2 size={14} aria-hidden="true" />
+          </button>
+        ) : null}
         <RoutingActions
           label={t('路由成员操作')}
           actions={[
@@ -141,7 +163,15 @@ export function RoutingMemberCard({
           ]}
         />
       </header>
-      <RoutingConsumptionOrder independent={Boolean(query) || locked} disabled={locked} onSettings={onSort} />
+      <RoutingConsumptionOrder
+        provider={member.provider}
+        sorting={sorting}
+        balanceSortStates={balanceSortStates}
+        independent={Boolean(query) || locked}
+        disabled={locked}
+        onSettings={onSort}
+        onSaveSorting={onSaveSorting}
+      />
       {open ? (
         <div className="rt-config-accounts">
           <div className="rt-member-summary">
@@ -156,14 +186,19 @@ export function RoutingMemberCard({
           </div>
           {member.accounts.length ? (
             <div data-route-list>
-              {visibleAccounts.map((id) => (
+              {visibleAccounts.map((id) => {
+                const info = accounts.find((account) => account.id === id);
+                return (
                 <RoutingAccountRow
                   key={id}
                   id={id}
-                  account={{ id }}
+                  account={info ?? { id }}
                   rank={member.accounts.indexOf(id) + 1}
                   joined
-                  note={t('参与本路由')}
+                  state={info ? (info.enabled === false ? 'disabled' : 'enabled') : undefined}
+                  note={info?.inFlight != null
+                    ? t('在途 {{n}} / {{limit}}', { n: info.inFlight, limit: info.maxConcurrency || '∞' })
+                    : t('参与本路由')}
                   locked={locked || !member.included}
                   orderLocked={orderLocked || !member.included}
                   first={member.accounts.indexOf(id) === 0}
@@ -173,12 +208,14 @@ export function RoutingMemberCard({
                   onDrag={(event) => drag.start(event, 'account', key, id)}
                   onMove={(direction) => onMoveAccount(id, direction)}
                   onToggle={() => onToggleAccount(id)}
+                  onAccount={onAccount ? () => onAccount(id) : undefined}
                 />
-              ))}
+                );
+              })}
             </div>
           ) : (
             <p className="rt-config-note">
-              {t('未点名账号 = 该槽位使用此提供商下的全部账号（账号明细需账号目录，本期未接入）。')}
+              {t('未点名账号 = 该槽位使用此提供商下的全部账号；点「选择账号」可逐个加入 / 移出。')}
             </p>
           )}
         </div>

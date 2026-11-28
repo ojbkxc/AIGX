@@ -1,24 +1,31 @@
 /**
  * 账号行（对齐 Agent2API v3.5.1 `RoutingAccountRow`，见 canvas-controls.tsx）。
  *
- * 一行 = 把手 + 序号 + 首字母头像 + 名字/说明 + 状态 + 参与勾选 + 更多（上下移）。
- * A2A 行尾还有「账号设置」按钮（打开该账号的提供商路由设置弹窗）与
- * 「全局账号启停」开关；AIGX 的路由页没有账号设置入口（账号在账号页维护），
- * 故这两项不渲染 —— 结构位保留在 `RoutingAccountRowProps` 的注释里，接入时补。
+ * 一行 = 把手 + 序号 + 首字母头像 + 名字/说明 + 状态 + 参与勾选 + 更多（上下移）
+ * + 「账号设置」入口（A2A 行尾的 settings 按钮：从路由页跳到该账号的设置）。
  *
- * 数据缺口：AIGX 没有账号目录（名字/启用态/在途/积分到期都取不到），
- * 传进来只有 id —— 名字位置直接显示 id，状态位在没有 `state` 时**不渲染**
- * （渲染「未就绪」等于编造一个后端没给的状态）。
+ * 数据来自 `routing-account-directory.ts`（/api/account-sessions 投影）：
+ * 有目录时名字位显示账号名、状态位显示启用/禁用；没有目录数据时名字位显示 id，
+ * 状态位在没有 `state` 时**不渲染**（渲染「未就绪」等于编造后端没给的状态）。
  */
 import type React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDown, ArrowUp } from 'lucide-react';
+import { ArrowDown, ArrowUp, Settings2 } from 'lucide-react';
 import { RoutingActions, routingOrderKey } from './routing-actions';
 import { RoutingStateText } from './routing-state-text';
 
 export interface RoutingAccountRef {
   id: string;
+  /** 展示名（缺省 = id） */
+  name?: string;
+  provider?: string;
+  providerLabel?: string;
   enabled?: boolean;
+  /** 在途连接数 / 并发上限（有值才进 note，缺省不编造） */
+  inFlight?: number;
+  maxConcurrency?: number;
+  /** 账号声明的模型（空/缺 = 未声明，模型筛选不因此隐藏） */
+  models?: string[];
 }
 
 export interface RoutingAccountRowProps {
@@ -40,6 +47,8 @@ export interface RoutingAccountRowProps {
   onDrag?(event: React.PointerEvent): void;
   onMove(direction: number): void;
   onToggle(): void;
+  /** 单账号设置入口（A2A 行尾 settings 按钮）；缺省 = 不渲染 */
+  onAccount?(): void;
 }
 
 export function RoutingAccountRow({
@@ -60,9 +69,10 @@ export function RoutingAccountRow({
   onDrag,
   onToggle,
   onMove,
+  onAccount,
 }: RoutingAccountRowProps): JSX.Element {
   const { t } = useTranslation();
-  const name = account ? account.id : id;
+  const name = account?.name || account?.id || id;
   return (
     <div
       data-route-sort={joined ? id : undefined}
@@ -101,6 +111,17 @@ export function RoutingAccountRow({
           onChange={onToggle}
         />
       </label>
+      {onAccount ? (
+        <button
+          type="button"
+          className="rt-link-btn rt-account-settings"
+          title={t('账号设置')}
+          aria-label={t('{{name}} · 账号设置', { name })}
+          onClick={onAccount}
+        >
+          <Settings2 size={14} aria-hidden="true" />
+        </button>
+      ) : null}
       <RoutingActions
         label={t('账号操作')}
         actions={[

@@ -36,6 +36,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  ScrollText,
   SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
@@ -1346,8 +1347,8 @@ export default function Routing(): JSX.Element {
 
       {/*
         顶部工具条（对齐 A2A routing-page-bar）：模式分段 + 一行策略摘要 + 右侧动作。
-        A2A 的「请求日志」出口在 AIGX 没有独立请求日志页跳转需求（回放左栏即列表），
-        故只保留「会话粘滞」与「刷新 / 重新读取」两枚动作。
+        F1：对齐 A2A 页头在「请求回放」模式提供「请求日志」出口——AIGX 有独立的
+        /logs 请求日志页，回放左栏是窗口内快照，跳完整日志页能查长历史/审计。
       */}
       <div className="rt-pagebar">
         <div className="rt-modebar" role="tablist" aria-label={t('路由模式')}>
@@ -1377,6 +1378,13 @@ export default function Routing(): JSX.Element {
         <span className="rt-pagebar-policy">{policyLine}</span>
 
         <div className="rt-pagebar-actions">
+          {/* F1：仅回放模式提供「请求日志」出口（对齐 A2A：mode==='replay' 才出该按钮），
+              跳转到独立的 /logs 请求日志页（可查长历史 + 审计，回放左栏仅窗口快照）。 */}
+          {mode === 'replay' ? (
+            <Button variant="outline" size="sm" onClick={() => { window.location.href = '/logs'; }}>
+              <ScrollText size={13} /> {t('请求日志')}
+            </Button>
+          ) : null}
           <Button variant="outline" size="sm" onClick={scrollToSticky}>
             {t('会话粘滞')}
           </Button>

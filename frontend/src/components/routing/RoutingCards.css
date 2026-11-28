@@ -603,6 +603,34 @@
   line-height: 1.5;
 }
 
+.rt-consumption-warn {
+  color: var(--warning, #b45309);
+}
+
+/* 消耗顺序行内的下拉（A2A routing-credit-sort）：紧凑、不撑满整行 */
+.rt-credit-sort {
+  width: auto;
+  min-width: 108px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+/* 卡头的分组设置 / 账号行的单账号设置入口（A2A settings 按钮位） */
+.rt-group-settings,
+.rt-account-settings {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+}
+
+/* 账号行内「未参与本路由」分节标题（A2A routing-account-section） */
+.rt-account-section {
+  margin: 6px 12px 4px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
 /* ── 状态点 + 文案（A2A RoutingStateText） ──────────────── */
 .rt-state-text {
   display: inline-flex;

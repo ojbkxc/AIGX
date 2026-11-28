@@ -45,6 +45,39 @@ function splitStickyId(id: string): { session: string; model: string } {
 }
 
 /**
+ * 剩余时长人话化（对齐上游 routing-ui `formatDuration` 的口径）：
+ * 秒 → `x 秒` / `x 分 y 秒` / `x 时 y 分`。用于「后过期」那一格。
+ */
+function formatDuration(ms: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+  return `${Math.floor(s / 3600)} 时 ${Math.floor((s % 3600) / 60)} 分`;
+}
+
+/**
+ * 时间戳 → 本地可读串（对齐上游 `timeText`）。缺值返回空串（调用处再回落占位）。
+ * 秒/毫秒自适应：`ts < 1e11` 视为 unix 秒。
+ */
+function timeText(ts: number | undefined | null): string {
+  if (ts == null || !Number.isFinite(ts)) return '';
+  return new Date(ts < 1e11 ? ts * 1000 : ts).toLocaleString();
+}
+
+/**
+ * 会话来源人话标签（对齐上游 routing-sticky 行）。
+ * 上游有 `content-hash` 这一档；AIGX 以 `session_id` 为粘性键、后端当前
+ * **不返回 `source` 字段**（结构性缺口，需后端补来源维度），故无值时显式标
+ * 「后端未记录」，绝不按 session 形状臆测成「内容哈希」。
+ */
+function stickySourceLabel(source: string | undefined): string {
+  if (source === 'content-hash') return '内容哈希';
+  if (source) return source;
+  return '会话来源：后端未记录';
+}
+
+/**
  * entries 状态用 useReducer 而非 useState（CI e2e 崩溃防御）。
  *
  * 现象：/settings 路由 Tab 曾 100% 崩 `Object.entries(null) ← basicStateReducer
@@ -289,6 +322,16 @@ export default function RouteSticky(): JSX.Element {
             {visible.map((e) => {
               const exp = toMillis(e.expires_at);
               const { session, model } = splitStickyId(e.id);
+              // G1「最近使用」：上游用 entry.lastSeen；AIGX 后端未单列 last_seen 时
+              // 回落 updated_at（粘滞条目在最后成功请求时写入，updated_at≈最近使用）。
+              const lastUsed = timeText(e.last_seen ?? e.updated_at);
+              // 剩余时长：优先后端 hard_remaining_secs，否则用 expires_at - now 推算。
+              const remainMs =
+                e.hard_remaining_secs != null
+                  ? e.hard_remaining_secs * 1000
+                  : exp != null
+                    ? exp - nowMs
+                    : null;
               return (
                 <div key={e.id} className="rs-item">
                   {/* title 必须存**原样内部编码 id**（与清除时 POST body 数据同源）：
@@ -305,11 +348,37 @@ export default function RouteSticky(): JSX.Element {
                   <span className="rs-chan">
                     {e.channel_name || (e.channel_id ? `#${e.channel_id}` : '—')}
                   </span>
+                  {/* ── G1：会话来源 / 键预览 / 命中次数（对齐上游 sticky 行字段集） ──
+                      后端当前不返回 source/key_preview/hits，故命中这些分支会落到
+                      「后端未记录」标注，不编造数值。后端补齐后这些分支自动生效。 */}
+                  <Badge tone="neutral">{stickySourceLabel(e.source)}</Badge>
+                  {e.key_preview ? (
+                    <code className="rs-key" title={e.key_preview}>
+                      {e.key_preview}
+                    </code>
+                  ) : null}
+                  {typeof e.hits === 'number' ? (
+                    <span className="rs-hits">{t('命中 {{n}} 次', { n: e.hits })}</span>
+                  ) : (
+                    <span className="rs-hints" title={t('后端待补：命中次数维度')}>
+                      {t('命中次数：后端未记录')}
+                    </span>
+                  )}
+                  {lastUsed ? (
+                    <span className="rs-lastused">
+                      {t('最近使用：{{time}}', { time: lastUsed })}
+                    </span>
+                  ) : null}
                   {exp != null && (
                     <span className="rs-exp">
                       {t('到期 {{time}}', { time: new Date(exp).toLocaleTimeString() })}
                     </span>
                   )}
+                  {remainMs != null ? (
+                    <span className="rs-remain" title={t('距硬过期剩余')}>
+                      {formatDuration(remainMs)}
+                    </span>
+                  ) : null}
                   <button
                     type="button"
                     className="btn btn-secondary btn-sm rs-clear"

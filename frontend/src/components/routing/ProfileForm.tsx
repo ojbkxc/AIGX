@@ -20,12 +20,18 @@
  * （本仓 #31 的教训：界面不许自己再算一遍）。这里的 `inherited` 仅用于
  * 「不表态时会得到什么」的输入提示。
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus } from 'lucide-react';
+import { Plus, Shield, Users } from 'lucide-react';
 import TriStateField from './TriStateField';
-import { RoutingProviderList } from './routing-provider-card';
+import { RoutingProviderList, providerItemOf } from './routing-provider-card';
 import { RoutingModelFilter } from './routing-model-filter';
+import { RoutingActions } from './routing-actions';
+import { useRoutingAccountDirectory } from './routing-account-directory';
+import { reorderRoute } from './routing-drag';
+import { useToast } from '../Toast';
+import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
+import AccountSortDialog from '../AccountSortDialog';
 import {
   EMPTY_NEEDS,
   EMPTY_SCOPE,
@@ -45,6 +51,7 @@ import {
   type SortOn,
 } from '../../types/routing-profile';
 import type { RouteStrategy, StickyMode } from '../../types';
+import { api } from '../../api';
 
 const STRATEGY_LABELS: Record<RouteStrategy, string> = {
   weighted: '加权随机',
@@ -127,22 +134,49 @@ function ItemLines({
   );
 }
 
-/** 提供商卡片区：搜索 + 参与/排除两段 + 「添加提供商」 */
+/** 提供商卡片区：账号组头（计数 / 展开全部 / 批量启停 / 全部移出）+ 搜索 + 参与/排除两段 + 「添加提供商」 */
 function ProviderScopeCards({
   scope,
   disabled,
+  filterModel = '',
   onChange,
 }: {
   scope: RoutingScope;
   disabled: boolean;
+  /** 模型筛选（A3）：只筛展示，不改配置 */
+  filterModel?: string;
   onChange(next: Partial<RoutingScope>): void;
 }): JSX.Element {
   const { t } = useTranslation();
+  const addToast = useToast();
+  const directory = useRoutingAccountDirectory();
   const [search, setSearch] = useState('');
   const [input, setInput] = useState('');
   const [opened, setOpened] = useState<Record<string, boolean>>({});
+  const [sortProvider, setSortProvider] = useState('');
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const included = scope.providers;
   const excluded = scope.disabled_providers;
+  const accounts = directory.accounts;
+  const query = search.trim().toLowerCase();
+  const allProviders = [...new Set([...included, ...excluded, ...accounts.map((account) => account.provider)])];
+  const displayedAccounts = accounts.filter((account) => {
+    if (filterModel && account.models?.length
+      && !account.models.some((model) => model.toLowerCase() === filterModel.toLowerCase())) return false;
+    if (!query) return true;
+    return account.provider.toLowerCase().includes(query)
+      || (account.providerLabel || '').toLowerCase().includes(query)
+      || (account.name || account.id).toLowerCase().includes(query);
+  });
+  const add = (): void => {
+    const id = input.trim();
+    if (!id) return;
+    setInput('');
+    onChange({
+      providers: included.includes(id) ? included : [...included, id],
+      disabled_providers: excluded.filter((value) => value !== id),
+    });
+  };
   const join = (id: string, on: boolean): void => {
     if (on) {
       onChange({
@@ -165,35 +199,143 @@ function ProviderScopeCards({
     next[to] = id;
     onChange({ providers: next });
   };
-  const add = (): void => {
-    const id = input.trim();
-    if (!id) return;
-    setInput('');
+  /** 账号级参与勾选：只改本层草稿 excluded_accounts（A2A 非全局分支同语义） */
+  const toggleAccount = (id: string): void => {
     onChange({
-      providers: included.includes(id) ? included : [...included, id],
-      disabled_providers: excluded.filter((value) => value !== id),
+      excluded_accounts: scope.excluded_accounts.includes(id)
+        ? scope.excluded_accounts.filter((value) => value !== id)
+        : [...scope.excluded_accounts, id],
     });
   };
+  /** 账号上下移：先把该提供商账号并入 account_order，再在同参与态的相邻账号间重排（A2A moveAccount） */
+  const moveAccount = (provider: string, id: string, direction: number): void => {
+    const providerAccounts = accounts.filter((account) => account.provider === provider).map((account) => account.id);
+    const order = [...new Set([...scope.account_order, ...providerAccounts])];
+    const peers = order.filter((key) => providerAccounts.includes(key)
+      && scope.excluded_accounts.includes(key) === scope.excluded_accounts.includes(id));
+    const target = peers[peers.indexOf(id) + direction];
+    if (!target) return;
+    reorderRoute(order, id, target, direction > 0);
+    onChange({ account_order: order });
+  };
+  /** 全局账号启停（A6）：立即保存，与档案草稿互不干扰 */
+  const setEnabled = async (ids: string[], enabled: boolean): Promise<void> => {
+    if (!ids.length) return;
+    const result = await directory.setEnabled(ids, enabled);
+    if (result.failed.length) {
+      addToast(t('账号启停部分完成：成功 {{ok}} 个，失败 {{fail}} 个。{{details}}', {
+        ok: result.ok,
+        fail: result.failed.length,
+        details: result.failed.map((item) => `${item.id}: ${item.error}`).join('；'),
+      }), 'error');
+    } else if (result.ok) {
+      addToast(enabled ? t('已启用 {{n}} 个账号', { n: result.ok }) : t('已禁用 {{n}} 个账号', { n: result.ok }));
+    }
+  };
+  /** 全部移出本路由（A11）：只改本层草稿，账号状态与其他路由不变 */
+  const removeAll = (): void => {
+    setConfirmState({
+      title: t('全部移出本路由'),
+      message: t('只移出本路由，账号状态和其他路由不变；保存后此入口将没有可用路由。'),
+      confirmText: t('全部移出'),
+      danger: true,
+      onConfirm: () => onChange({
+        provider_scope: 'listed',
+        providers: allProviders,
+        disabled_providers: allProviders,
+      }),
+    });
+  };
+  /** 单账号设置入口（A7）：跳账号页并带上 account 定位参数（账号页接入后可直接定位到该账号） */
+  const openAccount = (id: string): void => {
+    window.location.href = `/account-sessions?account=${encodeURIComponent(id)}`;
+  };
+  const expandable = allProviders.filter((id) => included.includes(id) || excluded.includes(id));
+  const allOpen = expandable.length > 0 && expandable.every((id) => opened[id]);
   return (
     <div className="rt-provider-scope">
+      <div className="rt-column-head">
+        <Users size={14} aria-hidden="true" />
+        <b>{t('账号组')}</b>
+        <span>{t('{{n}} 项参与', { n: included.length })}</span>
+        <div className="right">
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={!expandable.length || Boolean(query)}
+            onClick={() => setOpened(Object.fromEntries(expandable.map((id) => [id, !allOpen])))}
+          >
+            {allOpen ? t('折叠全部') : t('展开全部')}
+          </button>
+          <RoutingActions
+            label={t('账号启停操作')}
+            actions={[
+              {
+                label: t('启用当前列表账号'),
+                disabled: disabled || !displayedAccounts.some((account) => !account.enabled),
+                onClick: () => void setEnabled(displayedAccounts.map((account) => account.id), true),
+              },
+              {
+                label: t('禁用当前列表账号'),
+                disabled: disabled || !displayedAccounts.some((account) => account.enabled),
+                onClick: () => setConfirmState({
+                  title: t('批量禁用账号'),
+                  message: t('将禁用当前所选的 {{n}} 个账号，所有路由都不能再选用它们。此操作立即保存，不会删除账号。', {
+                    n: displayedAccounts.filter((account) => account.enabled).length,
+                  }),
+                  confirmText: t('禁用账号'),
+                  danger: true,
+                  onConfirm: () => void setEnabled(displayedAccounts.map((account) => account.id), false),
+                }),
+              },
+              {
+                label: t('全部移出'),
+                disabled: disabled || !included.length,
+                onClick: removeAll,
+              },
+            ]}
+          />
+        </div>
+      </div>
       <div className="rt-subfield">
         <input
           className="form-input"
           value={search}
-          placeholder={t('搜索提供商')}
-          aria-label={t('搜索提供商')}
+          placeholder={t('搜索提供商或账号')}
+          aria-label={t('搜索提供商或账号')}
           onChange={(event) => setSearch(event.currentTarget.value)}
         />
       </div>
+      {directory.error ? (
+        <p className="rt-config-note" role="alert">
+          {t('账号目录读取失败：{{error}}（账号行与批量启停不可用，仍可按 id 维护名单）', { error: directory.error })}
+        </p>
+      ) : null}
       <RoutingProviderList
         included={included}
         excluded={excluded}
         locked={disabled}
-        query={search.trim().toLowerCase()}
+        query={query}
         opened={opened}
+        accounts={accounts}
+        accountOrder={scope.account_order}
+        excludedAccounts={scope.excluded_accounts}
+        sorting={directory.sorting}
+        balanceSortStates={directory.balanceSortStates}
+        onSaveSorting={directory.saveSorting}
         onOpen={(id, open) => setOpened((current) => ({ ...current, [id]: open }))}
         onJoin={join}
         onMove={move}
+        onToggleAccount={toggleAccount}
+        onMoveAccount={moveAccount}
+        onAccount={openAccount}
+        onSort={(id) => setSortProvider(id)}
+        onEnableGroup={(id, enabled) => void setEnabled(
+          accounts.filter((account) => account.provider === id).map((account) => account.id),
+          enabled,
+        )}
+        controlBusy={directory.loading}
+        filterModel={filterModel}
       />
       <div className="rt-account-add">
         <input
@@ -219,6 +361,19 @@ function ProviderScopeCards({
           <Plus size={13} /> {t('添加提供商')}
         </button>
       </div>
+      {sortProvider ? (
+        <AccountSortDialog
+          open
+          providers={directory.providers.length
+            ? directory.providers
+            : [providerItemOf(sortProvider, accounts.find((account) => account.provider === sortProvider)?.providerLabel)]}
+          onClose={() => {
+            setSortProvider('');
+            void directory.refresh();
+          }}
+        />
+      ) : null}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
@@ -262,6 +417,36 @@ export default function ProfileForm({
   protection,
 }: ProfileFormProps): JSX.Element {
   const { t } = useTranslation();
+
+  /* A3 模型筛选：页面没传 models 时用账号目录里的声明模型（只筛展示，不改配置） */
+  const directory = useRoutingAccountDirectory();
+  const [localModelFilter, setLocalModelFilter] = useState('');
+  const filterModels = models ?? directory.models;
+  const filterValue = onModelChange ? modelFilter ?? '' : localModelFilter;
+  const handleModelChange = onModelChange ?? setLocalModelFilter;
+
+  /* A1 全局保护设置摘要：页面没传 protection 时自读 /api/routing 的 breaker 配置。
+   * AIGX 后端目前只有「熔断保护」这一项（失败退避 / 限流垫底需后端字段，见交付清单）。 */
+  const [autoProtection, setAutoProtection] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (protection) return undefined;
+    let alive = true;
+    api.getRoutingPolicy()
+      .then((res) => {
+        if (!alive) return;
+        setAutoProtection(res?.data?.breaker?.enabled ? ['熔断保护'] : []);
+      })
+      .catch(() => { if (alive) setAutoProtection(null); });
+    return () => { alive = false; };
+  }, [protection]);
+  const protectionLabels = protection ? protection.labels : autoProtection;
+  const openProtection = (): void => {
+    // 跳到本页「基础策略」卡（断路器 / 限流参数的维护位）
+    const heads = Array.from(document.querySelectorAll<HTMLElement>('.card-header h2'));
+    const target = heads.find((h) => h.textContent === t('基础策略'));
+    target?.closest('.card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  const protectionOnOpen = protection ? protection.onOpen : openProtection;
 
   const setField = (field: ProfileField, state: ReturnType<typeof fieldState>): void => {
     onChange(setFieldState(value, field, state, inherited));
@@ -371,7 +556,7 @@ export default function ProfileForm({
                   {t('已选「仅列出的提供商」但列表为空 —— 该模型将没有任何候选供应商。槽位名请填供应商的「提供商」值（如 openai / anthropic）。')}
                 </div>
               ) : null}
-              <ProviderScopeCards scope={s} disabled={false} onChange={setScope} />
+              <ProviderScopeCards scope={s} disabled={false} filterModel={filterValue} onChange={setScope} />
               <div className="rt-grid2" style={{ marginTop: 10 }}>
                 <ItemLines
                   label={t('账号优先顺序')}
@@ -539,27 +724,26 @@ export default function ProfileForm({
         </div>
       </TriStateField>
 
-      {/* A2A 配置面板：模型筛选（只影响展示） */}
-      {models && onModelChange ? (
-        <div className="rt-config-filter">
-          <RoutingModelFilter
-            value={modelFilter ?? ''}
-            models={models}
-            lastUsed={modelLastUsed}
-            onChange={onModelChange}
-          />
-        </div>
-      ) : null}
+      {/* A2A 配置面板：模型筛选（只影响展示；页面未传 models 时用账号目录的声明模型） */}
+      <div className="rt-config-filter">
+        <RoutingModelFilter
+          value={filterValue}
+          models={filterModels}
+          lastUsed={modelLastUsed}
+          onChange={handleModelChange}
+        />
+      </div>
 
-      {/* A2A 配置面板：全局保护设置摘要 */}
-      {protection ? (
+      {/* A2A 配置面板：全局保护设置摘要（页面未传 protection 时自读 breaker 配置） */}
+      {protectionLabels ? (
         <div className="rt-protection-summary">
+          <Shield size={14} aria-hidden="true" />
           <span>{t('全局保护设置')}</span>
           <span className="rt-protection-badge">
-            {protection.labels.length ? protection.labels.join(' · ') : t('关闭')}
+            {protectionLabels.length ? protectionLabels.map((label) => t(label)).join(' · ') : t('关闭')}
           </span>
-          {protection.onOpen ? (
-            <button type="button" className="rt-link-btn" onClick={protection.onOpen}>
+          {protectionOnOpen ? (
+            <button type="button" className="rt-link-btn" onClick={protectionOnOpen}>
               {t('设置')}
             </button>
           ) : null}

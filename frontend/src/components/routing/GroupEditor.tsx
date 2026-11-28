@@ -19,7 +19,7 @@
  * 路由策略 + 会话粘滞 → 参与模型列（搜索 / 折叠全部 / 添加模型 / 全部移出 /
  * 成员卡 / 未参与折叠区 / 空态）。
  */
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronsDownUp, ChevronsUpDown, Copy, Plus } from 'lucide-react';
 import Button from '../ui/Button';
@@ -31,6 +31,8 @@ import {
   type RoutingMember,
 } from '../../types/routing-profile';
 import type { RouteStrategy, StickyMode } from '../../types';
+import type { ManagedModel } from '../../types';
+import { api } from '../../api';
 import { RoutingGroupDialog, RoutingMemberAccounts, RoutingMemberDialog } from './routing-group-dialogs';
 import { RoutingGroupCreateDialog } from './routing-create-dialog';
 import type { RouteModelChoice } from './routing-model-picker';
@@ -39,6 +41,9 @@ import { RoutingSelect } from './routing-select';
 import { routeModelKey } from './routing-group-form';
 import { RoutingDragOverlay, reorderRoute, useRoutingDrag, type RoutingDrop } from './routing-drag';
 import { RoutingActions } from './routing-actions';
+import { useRoutingAccountDirectory } from './routing-account-directory';
+import { providerItemOf } from './routing-provider-card';
+import AccountSortDialog from '../AccountSortDialog';
 import './RoutingCards.css';
 
 const STRATEGY_LABELS: Record<RouteStrategy, string> = {
@@ -68,8 +73,8 @@ export default function GroupEditor({
   groups,
   onChange,
   focusId = null,
-  /** 模型目录候选（provider + model）；缺省 = 目录未接入，选择器展示空态 */
-  catalog = [],
+  /** 模型目录候选（provider + model）；缺省 = 用账号目录（账号声明的模型） */
+  catalog,
 }: {
   groups: RoutingGroup[];
   onChange: (next: RoutingGroup[]) => void;
@@ -83,6 +88,37 @@ export default function GroupEditor({
 }): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
+  /** 账号目录（A7/A6/B2）：账号行、参与账号弹窗与模型选择器共用这份数据 */
+  const directory = useRoutingAccountDirectory();
+
+  // ── 模型目录（B2/B3）：弹窗打开时从 /api/models/manage 拉全部已管理模型，
+  //    比 directory.catalog（账号声明模型展开）更权威 —— 建组/加成员应能选到
+  //    任何已配置的模型，不限于账号当前声明的。拉取失败回落 directory.catalog。
+  const [fetchedCatalog, setFetchedCatalog] = useState<RouteModelChoice[]>([]);
+  const loadModels = useCallback(async (): Promise<void> => {
+    try {
+      const res = await api.listManageModels();
+      const view = res?.data;
+      if (view?.models) {
+        setFetchedCatalog(view.models
+          .filter((m: ManagedModel) => m.enabled !== false)
+          .map((m: ManagedModel) => ({
+            provider: m.provider,
+            providerLabel: m.provider_label || m.provider,
+            model: m.id,
+            name: m.id,
+          })));
+      }
+    } catch { /* 目录不可用时回落 directory.catalog */ }
+  }, []);
+  const choices = catalog?.length ? catalog : (fetchedCatalog.length ? fetchedCatalog : directory.catalog);
+
+  const accountsOf = (provider: string) => directory.accounts.filter((account) => account.provider === provider);
+  const [sortProvider, setSortProvider] = useState('');
+  /** 单账号设置入口：跳账号页（带 account 定位参数） */
+  const openAccount = (id: string): void => {
+    window.location.href = `/account-sessions?account=${encodeURIComponent(id)}`;
+  };
   /** 用户手动展开的非聚焦组（focusId 只决定「默认展开谁」，不是只读过滤） */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   /** 搜索（对齐 A2A「搜索提供商或模型」）：只筛显示，不改数据 */
@@ -93,6 +129,11 @@ export default function GroupEditor({
   const [dialog, setDialog] = useState<{ kind: 'group' | 'add' | 'example' | 'create'; group: string } | null>(null);
   const [accountTarget, setAccountTarget] = useState<{ group: string; member: string } | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+
+  /** 弹窗首次打开时拉取模型目录 */
+  useEffect(() => {
+    if (dialog || accountTarget) void loadModels();
+  }, [dialog, accountTarget, loadModels]);
 
   const keyword = search.trim().toLowerCase();
   const locked = false;
@@ -410,7 +451,12 @@ export default function GroupEditor({
                         locked={locked}
                         query={keyword}
                         drag={drag}
-                        accounts={[]}
+                        accounts={accountsOf(member.provider)}
+                        sorting={directory.sorting}
+                        balanceSortStates={directory.balanceSortStates}
+                        onSaveSorting={directory.saveSorting}
+                        onSort={() => setSortProvider(member.provider)}
+                        onAccount={openAccount}
                         onOpen={(next) => setOpened((current) => ({ ...current, [openKey]: next }))}
                         onJoin={(on) => patchMember(groupIndex, memberKey, (item) => { item.included = on; })}
                         onMove={(direction) => moveMember(groupIndex, memberKey, direction)}
@@ -456,7 +502,12 @@ export default function GroupEditor({
                             locked={locked}
                             query={keyword}
                             drag={drag}
-                            accounts={[]}
+                            accounts={accountsOf(member.provider)}
+                            sorting={directory.sorting}
+                            balanceSortStates={directory.balanceSortStates}
+                            onSaveSorting={directory.saveSorting}
+                            onSort={() => setSortProvider(member.provider)}
+                            onAccount={openAccount}
                             onOpen={(next) => setOpened((current) => ({ ...current, [openKey]: next }))}
                             onJoin={(on) => patchMember(groupIndex, memberKey, (item) => { item.included = on; })}
                             onMove={() => undefined}
@@ -513,7 +564,7 @@ export default function GroupEditor({
       {dialog?.kind === 'create' ? (
         <RoutingGroupCreateDialog
           existingIds={groups.map((group) => group.id)}
-          catalog={catalog}
+          catalog={choices}
           defaultId={nextGroupId(groups)}
           onSave={(created) => onChange([...groups, created])}
           onClose={() => setDialog(null)}
@@ -522,7 +573,7 @@ export default function GroupEditor({
 
       {dialog?.kind === 'group' && dialogGroup ? (
         <RoutingGroupDialog
-          fields={{ id: dialogGroup.id, name: dialogGroup.name, model: dialogGroup.model }}
+          fields={{ id: dialogGroup.id, name: dialogGroup.name, model: dialogGroup.model, description: (dialogGroup as unknown as Record<string, unknown>).description as string ?? '' }}
           otherIds={groups.filter((group) => group.id !== dialogGroup.id).map((group) => group.id)}
           onSave={(fields) => patchGroup(findGroupIndex(dialogGroup.id), fields)}
           onClose={() => setDialog(null)}
@@ -530,7 +581,7 @@ export default function GroupEditor({
       ) : null}
       {dialog?.kind === 'add' && dialogGroup ? (
         <RoutingMemberDialog
-          choices={catalog.filter(
+          choices={choices.filter(
             (choice) => !dialogGroup.members.some(
               (member) => member.provider === choice.provider && member.model.toLowerCase() === choice.model.toLowerCase(),
             ),
@@ -573,8 +624,22 @@ export default function GroupEditor({
       {accountMember && accountGroupIndex >= 0 ? (
         <RoutingMemberAccounts
           member={accountMember}
+          accounts={accountsOf(accountMember.provider)}
+          onAccount={openAccount}
           onSave={(ids) => patchMember(accountGroupIndex, routeModelKey(accountMember), (item) => { item.accounts = ids; })}
           onClose={() => setAccountTarget(null)}
+        />
+      ) : null}
+      {sortProvider ? (
+        <AccountSortDialog
+          open
+          providers={directory.providers.length
+            ? directory.providers
+            : [providerItemOf(sortProvider, accountsOf(sortProvider)[0]?.providerLabel)]}
+          onClose={() => {
+            setSortProvider('');
+            void directory.refresh();
+          }}
         />
       ) : null}
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />

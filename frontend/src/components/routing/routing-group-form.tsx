@@ -1,10 +1,13 @@
 /**
  * 建组 / 改组表单（对齐 Agent2API v3.5.1 `routing-group-form.tsx`）。
  *
- * 字段与顺序照 A2A：**组名 → 对外模型 ID**。A2A 的组 id 是内部 uuid（界面上
- * 不出现），AIGX 的组 id 是**语义键**（档案「默认路由组」与请求头都用它引用，
- * 见 `types/routing-profile.ts`）—— 所以这里多一格「组 id」，并在 hint 里
- * 写明改 id 会让已有引用失效。这是本仓独有项，不是 A2A 的字段。
+ * 字段与顺序照 A2A：**组名 → 对外模型 ID → 描述 → 组 id**。
+ * A2A 的组 id 是内部 uuid（界面上不出现），AIGX 的组 id 是**语义键**
+ * （档案「默认路由组」与请求头都用它引用，见 `types/routing-profile.ts`）
+ * —— 所以这里多一格「组 id」，并在 hint 里写明改 id 会让已有引用失效。
+ *
+ * `description` 是 A2A 的标准字段（`RoutingGroupFields` 含 `description`），
+ * 用于备注组的用途说明。
  *
  * ⚠ 语义差异（不合并成一句话糊过去）：A2A 的「对外模型 ID」是**必填**的
  * 入口名（`findGroup` 按它路由）；AIGX 的 `model` 是**限定/留空即不限**
@@ -15,7 +18,7 @@ import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ROUTING_CAPS, type RoutingGroup, type RoutingMember } from '../../types/routing-profile';
 
-export type RoutingGroupFields = Pick<RoutingGroup, 'id' | 'name' | 'model'>;
+export type RoutingGroupFields = Pick<RoutingGroup, 'id' | 'name' | 'model'> & { description: string };
 
 /** 成员上限与组上限（与后端 `routing_policy::caps` 同源，不另写一份数字） */
 export const ROUTING_MEMBER_LIMIT = ROUTING_CAPS.MAX_MEMBERS;
@@ -92,6 +95,18 @@ export function RoutingGroupForm({ value, onChange, disabled = false }: {
           onChange={(event) => onChange({ ...value, model: event.currentTarget.value })}
         />
         <span className="form-hint">{t('留空 = 任何模型都能用此组；填了之后只有请求名等于它的请求能命中。')}</span>
+      </div>
+      <div className="rt-subfield">
+        <label htmlFor={`${id}-description`}>{t('描述')}</label>
+        <input
+          id={`${id}-description`}
+          className="form-input"
+          maxLength={512}
+          disabled={disabled}
+          value={value.description}
+          placeholder={t('选填，备注这个组的用途')}
+          onChange={(event) => onChange({ ...value, description: event.currentTarget.value })}
+        />
       </div>
       <div className="rt-subfield">
         <label htmlFor={`${id}-id`}>{t('组 id')}</label>

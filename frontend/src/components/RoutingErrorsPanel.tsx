@@ -12,49 +12,10 @@ import { useTranslation } from 'react-i18next';
 import { Loader2, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import { Badge, Button, Card, Input, Select } from '../components/ui';
+import { Button, Card, Input } from '../components/ui';
+import { ErrorPreviewPanel, ErrorRules, mergeProviderRules } from './RoutingErrorsFeatures';
+import type { ErrorKind, ErrorPreviewInput, ErrorSettings, PluginErrorRule } from './RoutingErrorsFeatures';
 import '../components/routing/trace-exec.css';
-
-type ErrorKind = 'rate_limit' | 'quota' | 'auth' | 'balance' | 'transient' | 'unsupported' | 'bad_request' | 'content' | 'unknown';
-type ErrorAction = 'switch_account' | 'retry_then_switch' | 'refresh_then_switch' | 'switch_provider' | 'return_error';
-type CooldownMode = 'upstream' | 'fixed' | 'protection' | 'none';
-type CooldownScope = 'auto' | 'model' | 'account' | 'provider';
-
-interface ErrorRule {
-  id: string;
-  name: string;
-  kind: ErrorKind;
-  statuses: number[];
-  code: string;
-  provider: string;
-  model: string;
-  enabled: boolean;
-  action: ErrorAction;
-  cooldown: CooldownMode;
-  fallbackSeconds: number;
-  exponential: boolean;
-  fallbackCapSeconds: number;
-  scope: CooldownScope;
-}
-
-interface ErrorSettings {
-  resends: number;
-  switches: number;
-  intervalSeconds: number;
-  waitBudgetSeconds: number;
-  cooldownFloorSeconds: number;
-  backoff: boolean;
-  backoffSeconds: number;
-  backoffCapSeconds: number;
-  sink: boolean;
-  sinkSeconds: number;
-  breaker: boolean;
-  breakerFailures: number;
-  breakerSeconds: number;
-  breakerSuccesses: number;
-  rules: ErrorRule[];
-  overrides: ErrorRule[];
-}
 
 interface ErrorPolicyView {
   settings: ErrorSettings;
@@ -63,35 +24,9 @@ interface ErrorPolicyView {
   configured: boolean;
   legacy: boolean;
   providers: Array<{ id: string; label: string }>;
-  /** beta.8：已启动插件在握手里申报的默认错误规则（只读展示 + 三层解析参考） */
+  /** 已启动插件在握手里申报的默认错误规则（可被提供商规则覆盖） */
   providerRules?: PluginErrorRule[];
 }
-
-/** 插件申报规则（camelCase；对齐后端 `PluginErrorRule` 序列化） */
-interface PluginErrorRule extends ErrorRule {
-  pluginRuleId: string;
-  reason?: string;
-}
-
-const KIND_LABEL: Record<ErrorKind, string> = {
-  rate_limit: '请求限流',
-  quota: '额度耗尽',
-  auth: '登录失效',
-  balance: '余额不足',
-  transient: '连接或服务异常',
-  unsupported: '能力不支持',
-  bad_request: '请求有误',
-  content: '内容被拒绝',
-  unknown: '其他错误',
-};
-
-const ACTION_LABEL: Record<ErrorAction, string> = {
-  switch_account: '直接换账号',
-  retry_then_switch: '先重发，再换账号',
-  refresh_then_switch: '续期一次，失败再换号',
-  switch_provider: '跳过提供商',
-  return_error: '直接返回错误',
-};
 
 const LIMIT_FIELDS: Array<{ key: keyof ErrorSettings; label: string; min: number; max: number }> = [
   { key: 'resends', label: '原账号重发（次）', min: 0, max: 10 },
@@ -340,6 +275,9 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
   const [error, setError] = useState('');
   /** 分类（对齐 A2A RoutingErrorsPanel：处理规则 / 失败保护 / 安全边界） */
   const [tab, setTab] = useState<'rules' | 'protection' | 'boundaries'>('rules');
+  const [ruleScope, setRuleScope] = useState<'global' | 'provider'>('global');
+  const [previewInput, setPreviewInput] = useState<ErrorPreviewInput>({ scenario: 'rate', provider: '', model: '', started: false, uncertain: false, pinned: false, switchesUsed: 0, resendsUsed: 0, strikes: 1, customStatus: '', customCode: '' });
+  const dirtyRef = useRef(false);
   const edited = useRef(false);
 
   /**
@@ -348,15 +286,27 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
    * 由路由页左栏给「错误处理」挂黄点（与 A2A 的 errorsDirty 同口径）。
    */
   const dirty = draft && view ? JSON.stringify(draft) !== JSON.stringify(view.settings) : false;
+  dirtyRef.current = dirty;
   useEffect(() => {
     onDirty?.(dirty);
   }, [dirty, onDirty]);
+  useEffect(() => {
+    const protectDraft = (event: BeforeUnloadEvent) => {
+      if (dirtyRef.current) {
+        event.preventDefault();
+        event.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', protectDraft);
+    return () => window.removeEventListener('beforeunload', protectDraft);
+  }, []);
   // 卸载即丢草稿（草稿是组件内 state），黄点必须跟着消失，不能留下对不存在的草稿的提示
   useEffect(() => () => onDirty?.(false), [onDirty]);
 
   const adopt = (next: ErrorPolicyView): void => {
     setView(next);
     setDraft(structuredClone(next.settings));
+    setPreviewInput(current => ({ ...current, provider: current.provider || next.providers[0]?.id || '*' }));
     edited.current = false;
   };
 
@@ -388,9 +338,9 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
     edited.current = true;
   };
 
-  const patchRule = (index: number, next: Partial<ErrorRule>): void => {
-    if (!draft) return;
-    patch({ rules: draft.rules.map((r, i) => (i === index ? { ...r, ...next } : r)) });
+  const inspect = (kind: ErrorKind): void => {
+    const map: Record<ErrorKind, string> = { rate_limit: 'rate', quota: 'quota', auth: 'auth', balance: 'balance', transient: 'transient', unsupported: 'unsupported', bad_request: 'input', content: 'content', unknown: 'unknown' };
+    setPreviewInput(current => ({ ...current, scenario: map[kind], started: false, uncertain: false }));
   };
 
   const save = async (): Promise<void> => {
@@ -523,6 +473,8 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
           <span className="form-hint">{t('已保留原重试与失败休息参数，错误处理已统一；429 也计入换号上限。')}</span>
         ) : null}
 
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 340px)', gap: 16, alignItems: 'start' }}>
+          <div style={{ minWidth: 0 }}>
         {tab === 'protection' ? (
           <>
         {/* 失败保护（对齐 A2A `ErrorProtection` 的四张卡：失败退避 / 限流后降低优先级 /
@@ -664,121 +616,16 @@ function ErrorsCard({ onDirty }: { onDirty?: (dirty: boolean) => void } = {}): J
         </div>
         ) : (
         <>
-        {/* 按错误类型的处理规则（对齐 A2A `ErrorRules` 的表格：错误类型 / 处理方式 / 冷却 / 编辑）。
-            A2A 的「编辑」是弹窗编辑器；AIGX 把启用与动作直接摊在行内 —— 一屏能扫完九类错误，
-            改一个下拉即可生效，比逐个开弹窗更省事。 */}
-        <div className="form-group">
-          <label>{t('按错误类型的处理规则')}</label>
-          <span className="form-hint" style={{ marginBottom: 8 }}>
-            {t('每种错误类型的默认动作与冷却方式；规则由后端编译执行，启用/停用与动作调整即时生效。')}
-          </span>
-          <div className="rt-table-wrap">
-            <table className="rt-table rt-error-rules">
-              <thead>
-                <tr>
-                  <th>{t('错误类型')}</th>
-                  <th>{t('处理方式')}</th>
-                  <th>{t('冷却')}</th>
-                  <th>{t('编辑')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {draft.rules.map((rule, index) => (
-                  <tr key={rule.id}>
-                    <td>
-                      <div className="rt-error-rule-name">
-                        <Badge tone={rule.enabled ? 'info' : 'neutral'}>
-                          {t(KIND_LABEL[rule.kind] || rule.name)}
-                        </Badge>
-                        <span className="form-hint">{rule.name}</span>
-                      </div>
-                    </td>
-                    <td>
-                      <Select
-                        style={{ maxWidth: 180 }}
-                        value={rule.action}
-                        disabled={busy}
-                        aria-label={t('处理动作')}
-                        onChange={(e) => patchRule(index, { action: e.target.value as ErrorAction })}
-                      >
-                        {(Object.keys(ACTION_LABEL) as ErrorAction[]).map((a) => (
-                          <option key={a} value={a}>{t(ACTION_LABEL[a])}</option>
-                        ))}
-                      </Select>
-                    </td>
-                    <td>
-                      {rule.cooldown === 'none' ? (
-                        <span className="rt-muted">{t('不冷却')}</span>
-                      ) : (
-                        <Input
-                          type="number"
-                          style={{ width: 100 }}
-                          min={1}
-                          max={3600}
-                          value={rule.fallbackSeconds}
-                          disabled={busy}
-                          aria-label={t('冷却秒数')}
-                          onChange={(e) => patchRule(index, { fallbackSeconds: Number(e.target.value) })}
-                        />
-                      )}
-                    </td>
-                    <td>
-                      <label className="rt-special-check">
-                        <input
-                          type="checkbox"
-                          checked={rule.enabled}
-                          disabled={busy}
-                          onChange={(e) => patchRule(index, { enabled: e.target.checked })}
-                        />
-                        <span>{t('启用')}</span>
-                      </label>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="rt-seg" role="tablist" aria-label="处理规则范围" style={{ marginBottom: 12 }}>
+            <button type="button" role="tab" aria-selected={ruleScope === 'global'} className={`rt-seg-btn${ruleScope === 'global' ? ' is-on' : ''}`} onClick={() => setRuleScope('global')}>全局处理规则</button>
+            <button type="button" role="tab" aria-selected={ruleScope === 'provider'} className={`rt-seg-btn${ruleScope === 'provider' ? ' is-on' : ''}`} onClick={() => setRuleScope('provider')}>提供商处理规则（{mergeProviderRules(draft, view.providerRules ?? []).length}）</button>
           </div>
-          <span className="form-hint">
-            {t('501 来自网关缺少能力时直接返回；账号模型权限不足只跳过对应账号与模型。')}
-          </span>
-        </div>
-
-        {/* beta.8：插件申报的默认错误规则（只读）。解析顺序：我的例外 > 插件默认 > 全局 */}
-        {(view.providerRules ?? []).length > 0 ? (
-          <div className="form-group">
-            <label>{t('插件申报的默认规则（只读）')}</label>
-            <span className="form-hint" style={{ marginBottom: 8 }}>
-              {t('已启动插件在握手时申报的默认错误处理；解析顺序为「我的例外 → 插件默认 → 全局规则」。如需改写某条，在例外中按相同规则标识配置即可覆盖。')}
-            </span>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {(view.providerRules ?? []).map((pr) => {
-                const overridden = draft.overrides.some((o) => o.id === pr.id || o.id === pr.pluginRuleId);
-                return (
-                  <div
-                    key={pr.id}
-                    style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', border: '1px dashed var(--border-color)', borderRadius: 8, padding: '8px 10px', opacity: overridden ? 0.6 : 1 }}
-                    title={pr.reason || undefined}
-                  >
-                    <Badge tone={overridden ? 'neutral' : 'info'}>{t(KIND_LABEL[pr.kind] || pr.name)}</Badge>
-                    <span className="form-hint">
-                      {pr.name}
-                      {pr.reason ? ` — ${pr.reason}` : ''}
-                    </span>
-                    {/* rule.provider 即申报插件的 provider id */}
-                    <span className="form-hint" style={{ marginLeft: 'auto' }}>{pr.provider}</span>
-                    <span className="form-hint">{t(ACTION_LABEL[pr.action] || pr.action)}</span>
-                    {overridden ? (
-                      <Badge tone="success">{t('已被我的例外覆盖')}</Badge>
-                    ) : (
-                      <Badge tone="info">{t('插件默认')}</Badge>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ) : null}
+          <ErrorRules settings={draft} providers={view.providers} providerRules={view.providerRules ?? []} scope={ruleScope} onChange={next => { setDraft(next); edited.current = true; }} onPreview={inspect} />
         </>)}
+
+          </div>
+          <ErrorPreviewPanel settings={draft} providers={view.providers} providerRules={view.providerRules ?? []} input={previewInput} onChange={setPreviewInput} />
+        </div>
 
         {error ? <div className="error-message">{error}</div> : null}
 

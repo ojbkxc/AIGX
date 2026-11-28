@@ -2,18 +2,19 @@
  * 组的增删改弹窗（对齐 Agent2API v3.5.1 `routing-group-dialogs.tsx`）。
  *
  * 三个弹窗：
- * 1. `RoutingGroupDialog` —— 编辑路由组字段（组名 / 对外模型 ID / 组 id）。
+ * 1. `RoutingGroupDialog` —— 编辑路由组字段（组名 / 对外模型 ID / 描述 / 组 id）。
  *    底部按钮 A2A 是「取消 / 应用到草稿」：本仓同样只改草稿，真正落盘由
  *    页面底部的「保存档案」负责（A2A 也是这一步才 save）。
  * 2. `RoutingMemberDialog` —— 添加参与模型：模型选择器 + 「添加 · N」。
- * 3. `RoutingMemberAccounts` —— 参与账号：A2A 列该商家的账号目录并逐个加入/移出；
- *    AIGX 没有账号目录，落成「按账号 id 手动增删 + 上下移」，并写明这一差异。
+ * 3. `RoutingMemberAccounts` —— 参与账号：列出该提供商账号目录逐个加入/移出 +
+ *    上下移 + 单账号设置入口 + 手输 id 兜底（目录不可用时）+ 全部移出。
  */
 import type React from 'react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDown, ArrowUp, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Settings2, Trash2 } from 'lucide-react';
 import type { RoutingMember } from '../../types/routing-profile';
+import type { RoutingAccountRef } from './routing-account-row';
 import { RoutingModelPicker } from './routing-model-picker';
 import type { RouteModelChoice } from './routing-model-picker';
 import {
@@ -73,7 +74,7 @@ export function RoutingGroupDialog({ fields, otherIds, onSave, onClose }: {
       setError(t(message));
       return;
     }
-    onSave({ id: draft.id.trim(), name: draft.name.trim(), model: draft.model.trim().toLowerCase() });
+    onSave({ id: draft.id.trim(), name: draft.name.trim(), model: draft.model.trim().toLowerCase(), description: draft.description?.trim() ?? '' });
     onClose();
   };
   return (
@@ -141,14 +142,20 @@ export function RoutingMemberDialog({ choices, members, onAdd, onClose }: {
   );
 }
 
-export function RoutingMemberAccounts({ member, onSave, onClose }: {
+export function RoutingMemberAccounts({ member, accounts = [], onAccount, onSave, onClose }: {
   member: RoutingMember;
+  /** 该提供商的账号目录（A2A `accounts`）；有目录时逐个账号加入/移出，无需手输 id */
+  accounts?: RoutingAccountRef[];
+  /** 单账号设置入口（A7） */
+  onAccount?(id: string): void;
   onSave(ids: string[]): void;
   onClose(): void;
 }): JSX.Element {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<string[]>(member.accounts);
   const [input, setInput] = useState('');
+  /** A2A：已选在前（保持顺序），目录里其余账号补后 */
+  const order = [...new Set([...selected, ...accounts.map((account) => account.id)])];
   const move = (id: string, direction: number): void => setSelected((current) => {
     const next = [...current];
     const index = next.indexOf(id);
@@ -184,7 +191,9 @@ export function RoutingMemberAccounts({ member, onSave, onClose }: {
         {t('只影响这个路由成员，不改变账号启用状态，也不影响其他模型。新增账号需要手动加入。')}
       </p>
       <p className="rt-config-note">
-        {t('账号目录未接入：这里按账号 id 手动维护参与名单与顺序（留空 = 该槽位用此提供商下的全部账号）。')}
+        {accounts.length
+          ? t('列出该提供商的全部账号：勾选加入 / 移出本路由，上下移调整顺序（留空 = 该槽位用此提供商下的全部账号）。')
+          : t('账号目录未接入：这里按账号 id 手动维护参与名单与顺序（留空 = 该槽位用此提供商下的全部账号）。')}
       </p>
       <div className="rt-account-add">
         <input
@@ -205,40 +214,59 @@ export function RoutingMemberAccounts({ member, onSave, onClose }: {
         </button>
       </div>
       <div className="rt-picker-list">
-        {selected.map((id, index) => (
-          <div className="rt-picker-row" key={id}>
-            <div className="rt-picker-row-main">
-              <b>{id}</b>
-              <small>{t('参与本路由')}</small>
+        {order.map((id) => {
+          const account = accounts.find((item) => item.id === id);
+          const on = selected.includes(id);
+          const index = selected.indexOf(id);
+          return (
+            <div className="rt-picker-row" key={id}>
+              <div className="rt-picker-row-main">
+                <b>{account ? account.name || account.id : id}</b>
+                <small>
+                  {!account && on ? t('账号已移除') : account?.enabled === false ? t('账号已禁用') : on ? t('参与本路由') : t('未参与本路由')}
+                </small>
+              </div>
+              {onAccount ? (
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  title={t('账号设置')}
+                  aria-label={t('{{name}} · 账号设置', { name: account?.name || id })}
+                  onClick={() => onAccount(id)}
+                >
+                  <Settings2 size={13} />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={!on || index === 0}
+                aria-label={t('提高优先级')}
+                onClick={() => move(id, -1)}
+              >
+                <ArrowUp size={13} />
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={!on || index === selected.length - 1}
+                aria-label={t('降低优先级')}
+                onClick={() => move(id, 1)}
+              >
+                <ArrowDown size={13} />
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={!account && !on}
+                onClick={() => setSelected((current) => on ? current.filter((value) => value !== id) : [...current, id])}
+              >
+                {on ? t('移出本路由') : t('加入路由')}
+              </button>
             </div>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              disabled={index === 0}
-              aria-label={t('提高优先级')}
-              onClick={() => move(id, -1)}
-            >
-              <ArrowUp size={13} />
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              disabled={index === selected.length - 1}
-              aria-label={t('降低优先级')}
-              onClick={() => move(id, 1)}
-            >
-              <ArrowDown size={13} />
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              onClick={() => setSelected((current) => current.filter((value) => value !== id))}
-            >
-              {t('移出本路由')}
-            </button>
-          </div>
-        ))}
-        {!selected.length ? (
+          );
+        })}
+        {!order.length ? (
           <p className="rt-config-note">{t('没有点名账号：该槽位使用此提供商下的全部账号。')}</p>
         ) : null}
       </div>

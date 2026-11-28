@@ -61,6 +61,20 @@ export interface RouteStickyEntry {
   sticky_remaining_secs?: number;
   /** 距硬过期（被物理清除）的剩余秒数 */
   hard_remaining_secs?: number;
+  /**
+   * G1 对齐上游 routing-sticky 行的扩展位。后端 `affinity.rs::StickySnapshotEntry`
+   * 当前只投影 id/channel/expires/updated/remaining，**以下四项后端暂不返回**，
+   * 缺失时 UI 显式标注「后端未记录」（不编造）：
+   * - `hits`：命中次数（上游 `entry.hits`）——需后端在 CacheEntry 增计数维度
+   * - `source`：会话来源（上游 `'content-hash'` 等）——AIGX 以 session_id 为键，
+   *   无内容哈希来源维度，需后端补
+   * - `key_preview`：键预览（上游 `entry.keyPreview`）
+   * - `last_seen`：最近使用时刻（unix 秒）——可由 `updated_at` 回落（最后成功写入≈最后使用）
+   */
+  hits?: number;
+  source?: string;
+  key_preview?: string;
+  last_seen?: number;
 }
 
 /** 粘滞列表响应体（GET /api/routing/sticky 的 data）。

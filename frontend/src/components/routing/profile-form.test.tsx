@@ -67,9 +67,11 @@ describe('档案字段面（对齐 A2A routing-config-panel）', () => {
     expect(next.scope?.providers).toEqual(['anthropic']);
   });
 
-  it('模型筛选 / 保护摘要：成对才渲染，labels 空即「关闭」', () => {
+  it('模型筛选 / 保护摘要：筛选常开（无目录时给空态说明），保护摘要 labels 空即「关闭」', () => {
     const { container, unmount } = renderForm(profile());
-    expect(container.querySelector('.rt-model-filter')).toBeNull();
+    // A3：模型筛选不再依赖页面传 props —— 缺账号目录时渲染空态说明而不是消失
+    expect(container.querySelector('.rt-model-filter')).toBeTruthy();
+    // A1：protection 未传时自读 /api/routing，读取期间不渲染摘要（不编造开关态）
     expect(container.querySelector('.rt-protection-summary')).toBeNull();
     unmount();
 

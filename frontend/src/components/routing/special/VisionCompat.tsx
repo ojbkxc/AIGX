@@ -109,9 +109,16 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
       );
     }
     const primary = rule.targets[0] ?? null;
-    // AIGX 在选路前裁决，`preferCurrentRoute` 恒为 false：接管一律用显式 targets
-    const taker = refLabel(models, primary) || t('还没选视觉模型');
-    const backups = rule.targets.length > 1 ? t('· {{n}} 个备选', { n: rule.targets.length - 1 }) : '';
+    // 对齐上游 detail()：preferCurrentRoute 为真时接管方是「当前路由内的视觉模型」。
+    // AIGX 后端当前恒回 false（选路前裁决），故此分支暂不触发；后端补齐后即生效，
+    // 无需再改本组件 —— 保留为真分支而非写死 targets，是为「一比一搬运」的口径。
+    const taker = rule.preferCurrentRoute
+      ? t('当前路由内的视觉模型')
+      : refLabel(models, primary) || t('还没选视觉模型');
+    const backups =
+      !rule.preferCurrentRoute && rule.targets.length > 1
+        ? t('· {{n}} 个备选', { n: rule.targets.length - 1 })
+        : '';
     return (
       <>
         <span>{t('整次请求改交')}</span>
@@ -132,7 +139,7 @@ export default function VisionCompat({ active }: { active: boolean }): JSX.Eleme
         <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
           <li>{t('修订号非强制：仅在提交 revision 时校验，未提供则放行；AIGX 无配置版本 CAS。')}</li>
           <li>{t('旧版扁平配置不做模型目录展开（legacyExpanded 仅标记读到的是旧形状）。')}</li>
-          <li>{t('不支持「沿用当前路由内的视觉模型」（prefer current route）：视觉裁决在选路前，保存该项会被拒，界面不提供该开关。')}</li>
+          <li>{t('不支持「沿用当前路由内的视觉模型」（prefer current route）：视觉裁决在选路前，保存该项会被拒；界面已按上游补上该开关但暂置为禁用（后端待补），开启后才会生效。')}</li>
         </ul>
       </div>
 
@@ -464,6 +471,31 @@ function RuleEditor({
         <>
           <div className="rt-notice rt-notice-info">
             {t('AIGX 的视觉兼容在选路前裁决，拿不到「当前路由内的视觉模型」——整体接管必须指定接管模型（按顺序尝试）。')}
+          </div>
+
+          {/* H1 对齐上游 routing-special-panels.tsx:351-357 的 preferCurrentRoute 开关。
+              字段在后端已存在（`VisionRuleItem.prefer_current_route`），但 AIGX 是结构性缺口：
+              视觉裁决在选路前，后端 `vision::validate` 拒绝保存 true、GET 恒回 false
+              （`src/api/admin/vision_compat.rs:155-158`）。故此处补上开关的 UI 槽位与之一比一，
+              但**禁用**并标「后端待补」——开一个存了也不生效的开关比不提供更糟。
+              后端若改为选路后裁决并放行 true，去掉 disabled 即可生效，无需改本组件其余逻辑。 */}
+          <div className="rt-subfield">
+            <label>{t('优先使用当前路由内的视觉模型')}</label>
+            <label className="rt-special-check" style={{ height: 36, alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={draft.preferCurrentRoute}
+                disabled
+                aria-label={t('优先使用当前路由内的视觉模型')}
+                onChange={(e) => patch({ preferCurrentRoute: e.target.checked })}
+              />
+              <span>
+                {t('先尝试当前路由内的视觉模型，不可用时再按顺序尝试指定模型；指定模型可跨路由池。')}
+              </span>
+            </label>
+            <span className="form-hint" style={{ color: 'var(--rt-warn, inherit)' }}>
+              {t('（后端待补：AIGX 视觉裁决在选路前，无「当前路由内的视觉模型」概念，保存该项会被拒，故本开关暂禁用。）')}
+            </span>
           </div>
 
           <div className="rt-grid2">
