@@ -27,6 +27,7 @@ import { api } from '../api';
 
 import { useToast } from '../components/Toast';
 import { Button, Loading, EmptyState, Switch, Tabs, Combobox, Tooltip } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ModelTestDialog from '../components/ModelTestDialog';
 import ModelCapabilityDialog from '../components/ModelCapabilityDialog';
@@ -2186,30 +2187,30 @@ export default function ModelManage(): JSX.Element {
   // ── 渲染 ──
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('模型管理')}</h1>
-          <p>{t('供应商与账号池的模型统一在此管理：测试、启停、定价、映射。')}</p>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Tooltip label={t('从上游目录 / models.dev 重新拉取模型清单（不影响已保存的映射与定价）')}>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void refreshCatalog()}
-              disabled={refreshingModels || loading}
-              style={{ gap: 6 }}
-            >
-              {refreshingModels ? <Loader2 size={13} className="spin" /> : <DownloadCloud size={13} />}
-              {t('刷新模型目录')}
+      <PageHeader
+        title={t('模型管理')}
+        subtitle={t('供应商与账号池的模型统一在此管理：测试、启停、定价、映射。')}
+        actions={(
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Tooltip label={t('从上游目录 / models.dev 重新拉取模型清单（不影响已保存的映射与定价）')}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void refreshCatalog()}
+                disabled={refreshingModels || loading}
+                style={{ gap: 6 }}
+              >
+                {refreshingModels ? <Loader2 size={13} className="spin" /> : <DownloadCloud size={13} />}
+                {t('刷新模型目录')}
+              </Button>
+            </Tooltip>
+            <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
+              <RefreshCw size={13} />
+              {loading ? t('加载中...') : t('刷新')}
             </Button>
-          </Tooltip>
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
-            <RefreshCw size={13} />
-            {loading ? t('加载中...') : t('刷新')}
-          </Button>
-        </div>
-      </div>
+          </div>
+        )}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

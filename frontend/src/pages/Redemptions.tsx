@@ -18,6 +18,7 @@ import {
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
 import { TablePaginationFooter, useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import PageHeader from '../components/PageHeader';
 
 const LS_PSZ = 'aigx-tbl-pagesize.redemptions';
 const LS_TCOLS = 'aigx-tbl-cols.redemptions';
@@ -235,12 +236,11 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
 
   return (
     <div>
-      {!embedded && (
-        <div className="page-header">
-          <h1>{t('兑换码管理')}</h1>
-          <p>{t('批量生成、管理与兑换充值码')}</p>
-        </div>
-      )}
+      <PageHeader
+        hidden={embedded}
+        title={t('兑换码管理')}
+        subtitle={t('批量生成、管理与兑换充值码')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

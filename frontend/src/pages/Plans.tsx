@@ -5,6 +5,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import { fmtQuota } from '../lib/utils';
 import './Plans.css';
 
@@ -354,12 +355,11 @@ export default function Plans({ embedded = false }: { embedded?: boolean } = {})
 
   return (
     <div>
-      {!embedded && (
-        <div className="page-header">
-          <h1>{t('套餐管理')}</h1>
-          <p>{t('定义按量套餐模板：买家付款后按套餐发放带额度与有效期的 API 密钥')}</p>
-        </div>
-      )}
+      <PageHeader
+        hidden={embedded}
+        title={t('套餐管理')}
+        subtitle={t('定义按量套餐模板：买家付款后按套餐发放带额度与有效期的 API 密钥')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

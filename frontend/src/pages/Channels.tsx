@@ -35,6 +35,7 @@ import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
 import { usePageSize, TablePaginationFooter } from '../components/ui/TableShell';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import './Channels.css';
 
 interface ChannelItem {
@@ -1880,12 +1881,11 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   return (
     <div>
       {/* PageIntro 标题区（内嵌到「供应商」页时由宿主提供） */}
-      {!embedded && (
-        <div className="page-header">
-          <h1>{t('供应商列表')}</h1>
-          <p>{t('管理上游 AI 供应商（API Key 型 + 账号池型；支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
-        </div>
-      )}
+      <PageHeader
+        hidden={embedded}
+        title={t('供应商列表')}
+        subtitle={t('管理上游 AI 供应商（API Key 型 + 账号池型；支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

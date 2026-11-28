@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Tabs, SkeletonList } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import Channels from './Channels';
 import GatewayRuntimePanel from '../components/GatewayRuntimePanel';
 import './Gateways.css';
@@ -88,14 +89,13 @@ export default function Gateways(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header gw-header">
-        <h1>{t('供应商')}</h1>
-        <p>
-          {t(
-            'API Key 型供应商保存 Key / 模型映射 / 成本价；账号池型供应商管理登录态账号的多凭证轮换。账号池 Tab 查看各供应商的账号明细，健康页承接体检、测活与熔断器快照，签到页为账号池账号领取每日额度。'
-          )}
-        </p>
-      </div>
+      <PageHeader
+        className="gw-header"
+        title={t('供应商')}
+        subtitle={t(
+          'API Key 型供应商保存 Key / 模型映射 / 成本价；账号池型供应商管理登录态账号的多凭证轮换。账号池 Tab 查看各供应商的账号明细，健康页承接体检、测活与熔断器快照，签到页为账号池账号领取每日额度。'
+        )}
+      />
 
       <Tabs<GatewayTab>
         className="gw-tabs"

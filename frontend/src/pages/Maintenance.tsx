@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import PageHeader from '../components/PageHeader';
 import MaintenancePanel from '../components/MaintenancePanel';
 
 /**
@@ -12,12 +13,11 @@ export default function Maintenance(): JSX.Element {
   const { t } = useTranslation();
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('自动维护')}</h1>
-          <p>{t('查看凭证、模型目录、软件与插件更新的每次维护结果，失败和跳过都有原因')}</p>
-        </div>
-      </div>
+      <PageHeader
+        forceLeftWrapper
+        title={t('自动维护')}
+        subtitle={t('查看凭证、模型目录、软件与插件更新的每次维护结果，失败和跳过都有原因')}
+      />
       <MaintenancePanel />
     </div>
   );

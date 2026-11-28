@@ -18,6 +18,7 @@ import { useColumnResize } from '../components/ui/useColumnResize';
 import { TablePaginationFooter, useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 import { Tooltip } from '../components/ui';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import { fmtQuota } from '../lib/utils';
 import './Users.css';
 
@@ -390,10 +391,10 @@ export default function Users(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('用户管理')}</h1>
-        <p>{t('管理系统用户、角色与配额')}</p>
-      </div>
+      <PageHeader
+        title={t('用户管理')}
+        subtitle={t('管理系统用户、角色与配额')}
+      />
 
       <>
 

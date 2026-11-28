@@ -26,6 +26,7 @@ import PluginIcon from './PluginIcon';
 import { useToast } from '../Toast';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
 import { Badge, Button, Card, EmptyState, Loading, Switch, Tooltip } from '../ui';
+import PageHeader from '../PageHeader';
 import type {
   PluginOperation,
   PluginPackSummary,
@@ -1036,23 +1037,23 @@ export default function PluginManagerPage(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('插件管理')}</h1>
-          <p>{t('按需安装插件扩展提供商能力；启停、状态与来源统一管理。')}</p>
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <Button
-            variant={batchMode ? 'primary' : 'outline'}
-            size="sm"
-            disabled={batchRunning}
-            onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}
-          >
-            {batchMode ? t('退出批量管理') : t('批量管理')}
-          </Button>
-          <MoreMenu label={t('更多操作')} actions={moreActions} />
-        </div>
-      </div>
+      <PageHeader
+        title={t('插件管理')}
+        subtitle={t('按需安装插件扩展提供商能力；启停、状态与来源统一管理。')}
+        actions={(
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Button
+              variant={batchMode ? 'primary' : 'outline'}
+              size="sm"
+              disabled={batchRunning}
+              onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}
+            >
+              {batchMode ? t('退出批量管理') : t('批量管理')}
+            </Button>
+            <MoreMenu label={t('更多操作')} actions={moreActions} />
+          </div>
+        )}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

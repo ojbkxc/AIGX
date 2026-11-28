@@ -18,6 +18,7 @@ import {
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
 import { TablePaginationFooter, useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import PageHeader from '../components/PageHeader';
 
 const LS_PSZ = 'aigx-tbl-pagesize.tickets';
 const LS_TCOLS = 'aigx-tbl-cols.tickets';
@@ -341,10 +342,10 @@ export default function Tickets(): JSX.Element {
   // ── 列表视图 ──────────────────────────────────────────
   return (
     <div>
-      <div className="page-header">
-        <h1>{admin ? t('全部工单') : t('我的工单')}</h1>
-        <p>{t('提交工单，联系客服解决问题')}</p>
-      </div>
+      <PageHeader
+        title={admin ? t('全部工单') : t('我的工单')}
+        subtitle={t('提交工单，联系客服解决问题')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

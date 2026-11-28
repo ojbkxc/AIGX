@@ -4,6 +4,7 @@ import { Copy } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Card, Input } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import { fmtQuota } from '../lib/utils';
 import QRCode from 'react-qr-code';
 
@@ -241,10 +242,10 @@ export default function Profile(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('个人中心')}</h1>
-        <p>{t('查看账户信息与安全设置')}</p>
-      </div>
+      <PageHeader
+        title={t('个人中心')}
+        subtitle={t('查看账户信息与安全设置')}
+      />
 
       <Card title={t('账户信息')}>
         {loading ? (

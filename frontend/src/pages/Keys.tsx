@@ -28,6 +28,7 @@ import KeysDocsPanel from '../components/KeysDocsPanel';
 import DocsApiBrowser from '../components/docs-api-browser';
 import ModelPricingPage from '../components/ModelPricingPage';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, MultiSelect, Tabs } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import './Keys.css';
 
 const LS_PSZ = 'aigx-tbl-pagesize.keys';
@@ -842,10 +843,10 @@ export default function Keys(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('API 密钥')}</h1>
-        <p>{t('创建与管理 API 密钥，以及接入文档（网关地址、协议端点与可用模型）')}</p>
-      </div>
+      <PageHeader
+        title={t('API 密钥')}
+        subtitle={t('创建与管理 API 密钥，以及接入文档（网关地址、协议端点与可用模型）')}
+      />
 
       {/* 密钥 / 接入文档双 Tab（文档 2026-11-07 自独立页并入，07 E.3）：
           密钥与文档是同一件事的两半——拿 key → 怎么填，合并后少一个顶级菜单。

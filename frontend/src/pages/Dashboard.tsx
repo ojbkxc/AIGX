@@ -12,6 +12,7 @@ import { useIsFetching, useQueryClient } from '@tanstack/react-query';
 import { isAdmin } from '../lib/utils';
 import type { ReportWindow } from '../api';
 import { SkeletonCards, Tabs } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import ReportSettingsPanel from '../components/ReportSettingsPanel';
 import { fmtTokens, nameColorMap, toCsv, downloadText } from '../lib/format';
 import PanelWrap from '../components/dashboard/PanelWrap';
@@ -194,39 +195,39 @@ export default function Dashboard(): JSX.Element {
   };
 
   const header = (
-    <div className="page-header">
-      <div>
-        <h1>{t('仪表盘')}</h1>
-        <p>{admin ? t('AI 网关使用概览') : t('我的用量概览')}</p>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        {/* 时间窗口径说明（对齐 A2A report-page 的 `.report-date-caption` + TIP_RANGE 问号）：
-            窗口本身（RangeSwitcher）不在本波改动面，但「这段数字到底覆盖哪几天」这层口径
-            必须写在页面上 —— A2A 的原话：「近 N 天」含今天在内往前数，不是「不含今天的 N 天」。 */}
-        <span
-          className="report-date-caption"
-          title={t('时间范围。「今天」是本地自然日今天 0 点到现在；「近 7 日 / 近 30 日」含今天在内往前数，不是「不含今天的 7 / 30 天」。')}
-          style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
-        >
-          {win.start && win.end ? `${win.start} — ${win.end}` : t(rLabel)}
-        </span>
-        <RangeSwitcher range={range} custom={custom} onChange={setRange} onCustomChange={setCustom} />
-        {/* 页面自动刷新（beta.7）：报表任务，就地读写 scheduled-tasks */}
-        <PageAutoRefreshControl taskId="reportAutoRefresh" />
-        <button className="btn btn-outline btn-sm" onClick={exportCsv} disabled={daily.length === 0} style={{ gap: 6 }}>
-          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="7 10 12 15 17 10" />
-            <line x1="12" y1="15" x2="12" y2="3" />
-          </svg>
-          {t('导出 CSV')}
-        </button>
-        <button className="btn btn-outline btn-sm" onClick={refresh} style={{ gap: 6 }}>
-          <RefreshIcon spinning={fetching > 0} />
-          {t('刷新')}
-        </button>
-      </div>
-    </div>
+    <PageHeader
+      title={t('仪表盘')}
+      subtitle={admin ? t('AI 网关使用概览') : t('我的用量概览')}
+      actions={(
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          {/* 时间窗口径说明（对齐 A2A report-page 的 `.report-date-caption` + TIP_RANGE 问号）：
+              窗口本身（RangeSwitcher）不在本波改动面，但「这段数字到底覆盖哪几天」这层口径
+              必须写在页面上 —— A2A 的原话：「近 N 天」含今天在内往前数，不是「不含今天的 N 天」。 */}
+          <span
+            className="report-date-caption"
+            title={t('时间范围。「今天」是本地自然日今天 0 点到现在；「近 7 日 / 近 30 日」含今天在内往前数，不是「不含今天的 7 / 30 天」。')}
+            style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
+          >
+            {win.start && win.end ? `${win.start} — ${win.end}` : t(rLabel)}
+          </span>
+          <RangeSwitcher range={range} custom={custom} onChange={setRange} onCustomChange={setCustom} />
+          {/* 页面自动刷新（beta.7）：报表任务，就地读写 scheduled-tasks */}
+          <PageAutoRefreshControl taskId="reportAutoRefresh" />
+          <button className="btn btn-outline btn-sm" onClick={exportCsv} disabled={daily.length === 0} style={{ gap: 6 }}>
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            {t('导出 CSV')}
+          </button>
+          <button className="btn btn-outline btn-sm" onClick={refresh} style={{ gap: 6 }}>
+            <RefreshIcon spinning={fetching > 0} />
+            {t('刷新')}
+          </button>
+        </div>
+      )}
+    />
   );
 
   // 「报表面板 / 报表设置」切换（报表设置迁自「系统设置 → 报表」，仅管理员）。
@@ -246,12 +247,11 @@ export default function Dashboard(): JSX.Element {
   if (admin && view === 'settings') {
     return (
       <div>
-        <div className="page-header">
-          <div>
-            <h1>{t('仪表盘')}</h1>
-            <p>{t('报表设置')}</p>
-          </div>
-        </div>
+        <PageHeader
+          forceLeftWrapper
+          title={t('仪表盘')}
+          subtitle={t('报表设置')}
+        />
         {viewTabs}
         <div style={{ marginTop: 16 }}>
           <ReportSettingsPanel />

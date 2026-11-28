@@ -17,6 +17,7 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Badge, Button, Card, EmptyState, Switch, Tabs, Tooltip } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import ToolDetail from '../components/tools/ToolDetail';
 import ToolInstallDialog from '../components/tools/ToolInstallDialog';
 import {
@@ -136,12 +137,11 @@ export default function ToolsPage(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('MCP & Skills')}</h1>
-          <p>{t('将搜索、视觉等能力通过 MCP 或 Skills 接入客户端。')}</p>
-        </div>
-      </div>
+      <PageHeader
+        forceLeftWrapper
+        title={t('MCP & Skills')}
+        subtitle={t('将搜索、视觉等能力通过 MCP 或 Skills 接入客户端。')}
+      />
 
       {notReady ? (
         <EmptyState

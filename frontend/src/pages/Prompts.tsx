@@ -5,6 +5,7 @@ import { Search, Plus, Copy, Trash2, Pencil, Upload, Download, BookOpen, Globe, 
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, Textarea, Badge, EmptyState } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import { api, translatePrompts } from '../api';
 import { newId } from '../lib/ids';
 import type { PromptSource } from '../types';
@@ -427,51 +428,50 @@ export default function Prompts(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('提示词库')}</h1>
-          <p>{t('管理常用提示词，供聊天快速调用')}</p>
-        </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/json"
-            style={{ display: 'none' }}
-            onChange={handleImportFile}
-          />
-          <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} disabled={importing} style={{ gap: 6 }}>
-            <Upload size={13} />
-            {importing ? t('导入中...') : t('导入 JSON')}
-          </Button>
-          <Button variant="outline" size="sm" onClick={handleExport} disabled={prompts.length === 0} style={{ gap: 6 }}>
-            <Download size={13} />
-            {t('导出 JSON')}
-          </Button>
-          <Button variant="outline" size="sm" onClick={openSources} style={{ gap: 6 }}>
-            <Globe size={13} />
-            {t('拉取公开源')}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void (async () => {
-                setTranslating(true);
-                try {
-                  if (!translateEnabled || translateTarget === 'English') {
-                    addToast(t('请先开启自动翻译并选择非英文目标语言'));
-                    return;
-                  }
-                  const list = prompts.filter((p) => looksEnglish(p.content));
-                  if (list.length === 0) {
-                    addToast(t('没有需要翻译的英文提示词'));
-                    return;
-                  }
-                  setTranslateProgress({ done: 0, total: list.length });
-                  const { translated, budgetExhausted } = await translateItems(
-                    list.map((it) => ({ content: it.content })),
-                    (done, total) => setTranslateProgress({ done, total }),
+      <PageHeader
+        title={t('提示词库')}
+        subtitle={t('管理常用提示词，供聊天快速调用')}
+        actions={(
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json"
+              style={{ display: 'none' }}
+              onChange={handleImportFile}
+            />
+            <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} disabled={importing} style={{ gap: 6 }}>
+              <Upload size={13} />
+              {importing ? t('导入中...') : t('导入 JSON')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={handleExport} disabled={prompts.length === 0} style={{ gap: 6 }}>
+              <Download size={13} />
+              {t('导出 JSON')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={openSources} style={{ gap: 6 }}>
+              <Globe size={13} />
+              {t('拉取公开源')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void (async () => {
+                  setTranslating(true);
+                  try {
+                    if (!translateEnabled || translateTarget === 'English') {
+                      addToast(t('请先开启自动翻译并选择非英文目标语言'));
+                      return;
+                    }
+                    const list = prompts.filter((p) => looksEnglish(p.content));
+                    if (list.length === 0) {
+                      addToast(t('没有需要翻译的英文提示词'));
+                      return;
+                    }
+                    setTranslateProgress({ done: 0, total: list.length });
+                    const { translated, budgetExhausted } = await translateItems(
+                      list.map((it) => ({ content: it.content })),
+                      (done, total) => setTranslateProgress({ done, total }),
                   );
                   // 先算好 id → 译文映射，再以纯函数更新 state（避免在 updater 里改外部变量）
                   const newContentById = new Map<string, string>();
@@ -523,8 +523,9 @@ export default function Prompts(): JSX.Element {
             <Plus size={13} />
             {t('新建提示词')}
           </Button>
-        </div>
-      </div>
+          </div>
+        )}
+      />
 
       {/* 汇总行 */}
       <div className="prompts-stats">

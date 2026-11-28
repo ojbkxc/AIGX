@@ -11,6 +11,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { SkeletonList, Switch } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import { getThemeMode, applyTheme, type ThemeMode } from '../lib/theme';
 import { getZoom, applyZoom, ZOOM_LEVELS } from '../lib/zoom';
 import Security from './Security';
@@ -485,10 +486,10 @@ export default function Settings() {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('系统设置')}</h1>
-        <p>{t('settingsPageSubtitle')}</p>
-      </div>
+      <PageHeader
+        title={t('系统设置')}
+        subtitle={t('settingsPageSubtitle')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

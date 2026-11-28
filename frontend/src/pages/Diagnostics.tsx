@@ -4,6 +4,7 @@ import { Activity, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Badge, Button, Card, EmptyState, Loading } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import { isAdmin } from '../lib/utils';
 import type {
   DiagnosticsBreaker,
@@ -137,12 +138,11 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
   return (
     <div>
       {/* 独立路由已下线，仅 embedded=false（直接渲染兜底）时带标题区 */}
-      {!embedded && (
-        <div className="page-header">
-          <div>
-            <h1>{t('系统诊断')}</h1>
-            <p>{t('供应商健康、用量概况与熔断器状态的一站式体检（与 Agent 运维共用同一套探测口径）')}</p>
-          </div>
+      <PageHeader
+        hidden={embedded}
+        title={t('系统诊断')}
+        subtitle={t('供应商健康、用量概况与熔断器状态的一站式体检（与 Agent 运维共用同一套探测口径）')}
+        actions={(
           <button
             className="btn btn-outline btn-sm"
             onClick={() => void loadSummary()}
@@ -151,8 +151,8 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
           >
             <RefreshCw size={13} /> {t('刷新')}
           </button>
-        </div>
-      )}
+        )}
+      />
       {embedded && (
         <div className="dx-embedded-actions">
           <button

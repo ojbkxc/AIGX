@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { SkeletonList } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import RuntimeCapacityPanel from '../components/RuntimeCapacityPanel';
 
 /**
@@ -164,12 +165,11 @@ export default function LimitPage(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('限流')}</h1>
-          <p>{t('配置多维度 RPM / TPM 限流与缓存，并查看运行容量预算')}</p>
-        </div>
-      </div>
+      <PageHeader
+        forceLeftWrapper
+        title={t('限流')}
+        subtitle={t('配置多维度 RPM / TPM 限流与缓存，并查看运行容量预算')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

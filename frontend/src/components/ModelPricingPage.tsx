@@ -35,6 +35,7 @@ import { Search, RefreshCw, Info } from 'lucide-react';
 import { api } from '../api';
 import { API_BASE, request } from '../api/client';
 import { Button, Card, EmptyState, Loading, Select } from '../components/ui';
+import PageHeader from './PageHeader';
 import { TablePaginationFooter, usePageSize, CLIENT_PAGE_SIZES } from '../components/ui/TableShell';
 import { isAdmin } from '../lib/utils';
 import {
@@ -252,10 +253,10 @@ export default function ModelPricingPage(): JSX.Element {
 
   return (
     <div className="mpp">
-      <div className="page-header">
-        <h1>{t('模型价格')}</h1>
-        <p>{t('全部单位：元 / 百万 Token（后端按每 1K token 计费，这里已换算成百万口径，便于与官方价直接对比）')}</p>
-      </div>
+      <PageHeader
+        title={t('模型价格')}
+        subtitle={t('全部单位：元 / 百万 Token（后端按每 1K token 计费，这里已换算成百万口径，便于与官方价直接对比）')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

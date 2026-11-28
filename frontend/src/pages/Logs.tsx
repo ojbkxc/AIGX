@@ -25,6 +25,7 @@ import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { RequestLogDetail, AuditLogDetail } from '../components/LogDetailDialogs';
 import { Button, Card, Loading, EmptyState, Tooltip } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import './Logs.css';
 
 export type LogTab = 'requests' | 'audits';
@@ -809,10 +810,10 @@ export default function Logs(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('日志与审计')}</h1>
-        <p>{t('请求日志检索与管理员操作审计')}</p>
-      </div>
+      <PageHeader
+        title={t('日志与审计')}
+        subtitle={t('请求日志检索与管理员操作审计')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

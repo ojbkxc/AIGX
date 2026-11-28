@@ -43,6 +43,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Badge, Button, Card, EmptyState, Loading, Switch } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import RouteReplayPanel, { RouteReplayView } from '../components/RouteReplay';
 import RouteSticky from '../components/RouteSticky';
 import RoutingPanel from '../components/RoutingPanel';
@@ -1333,16 +1334,13 @@ export default function Routing(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('路由')}</h1>
-          <p>
-            {t('供应商选路的策略、分层档案（全局 / 按模型 / 路由组）与预演；压缩 / 标题 / 视觉兼容等特殊路由；保存即热生效，无需重启。')}
-          </p>
-        </div>
-        {/* 刷新/重新读取收在下方工具条（与 A2A routing-page-bar 的动作位一致），
-            这里不再重复一枚同义按钮 */}
-      </div>
+      <PageHeader
+        forceLeftWrapper
+        title={t('路由')}
+        subtitle={t('供应商选路的策略、分层档案（全局 / 按模型 / 路由组）与预演；压缩 / 标题 / 视觉兼容等特殊路由；保存即热生效，无需重启。')}
+      />
+      {/* 刷新/重新读取收在下方工具条（与 A2A routing-page-bar 的动作位一致），
+          这里不再重复一枚同义按钮 */}
 
       {error && <div className="error-message">{error}</div>}
 

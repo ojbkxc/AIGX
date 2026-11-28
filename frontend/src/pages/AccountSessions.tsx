@@ -34,6 +34,7 @@ import {
   type TableColumnState,
 } from '../lib/tableColumns';
 import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Switch, Tabs, Textarea, Tooltip } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import type {
   AccountBalance,
   AccountLimiterRule,
@@ -3872,16 +3873,13 @@ export default function AccountSessions({ embedded = false, initialChannelFilter
 
   return (
     <div>
-      {!embedded && (
-        <div className="page-header">
-          <h1>{t('账号池管理')}</h1>
-          <p>
-            {t(
-              '为账号池型供应商管理多把上游凭证：账号级优先级/权重/并发上限与按上游模型的冷却，失败自动轮换'
-            )}
-          </p>
-        </div>
-      )}
+      <PageHeader
+        hidden={embedded}
+        title={t('账号池管理')}
+        subtitle={t(
+          '为账号池型供应商管理多把上游凭证：账号级优先级/权重/并发上限与按上游模型的冷却，失败自动轮换'
+        )}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

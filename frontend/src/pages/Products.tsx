@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Tabs } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import Plans from './Plans';
@@ -275,14 +276,12 @@ export default function Products(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('套餐与兑换码')}</h1>
-        <p>
-          {t(
-            '套餐定义带额度与有效期的商品模板；兑换码是同一份额度的一次性发放凭证，兑换后生成对应额度的密钥。'
-          )}
-        </p>
-      </div>
+      <PageHeader
+        title={t('套餐与兑换码')}
+        subtitle={t(
+          '套餐定义带额度与有效期的商品模板；兑换码是同一份额度的一次性发放凭证，兑换后生成对应额度的密钥。'
+        )}
+      />
 
       <Tabs<ProductTab>
         className="pd-tabs"

@@ -27,6 +27,7 @@ import { CalendarCheck, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Badge, Card, EmptyState, Loading } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import BenefitsPanel from '../components/BenefitsPanel';
 import CheckinCampaignCard from '../components/CheckinCampaignCard';
@@ -676,14 +677,11 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
 
   return (
     <div>
-      {!embedded && (
-        <div className="page-header">
-          <div>
-            <h1>{t('签到中心')}</h1>
-            <p>
-              {t('替账号池里的上游账号每日领取它们自带的额度。与钱包里的「用户签到」是两套。')}
-            </p>
-          </div>
+      <PageHeader
+        hidden={embedded}
+        title={t('签到中心')}
+        subtitle={t('替账号池里的上游账号每日领取它们自带的额度。与钱包里的「用户签到」是两套。')}
+        actions={(
           <button
             className="btn btn-outline btn-sm"
             onClick={() => void load()}
@@ -692,8 +690,8 @@ export default function CheckinCenter({ embedded = false }: CheckinCenterProps =
           >
             <RefreshCw size={13} /> {t('刷新')}
           </button>
-        </div>
-      )}
+        )}
+      />
 
       {error && <div className="error-message">{error}</div>}
 

@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, SkeletonCards, SkeletonTable } from '../components/ui';
+import PageHeader from '../components/PageHeader';
 import {
   applyTableColumns,
   readTableColumns,
@@ -445,10 +446,10 @@ export default function Wallet(): JSX.Element {
   if (loading) {
     return (
       <div>
-        <div className="page-header">
-          <h1>{t('钱包充值')}</h1>
-          <p>{t('通过易支付为账户充值额度')}</p>
-        </div>
+        <PageHeader
+          title={t('钱包充值')}
+          subtitle={t('通过易支付为账户充值额度')}
+        />
         <SkeletonCards count={3} />
         <SkeletonTable columns={6} rows={6} />
       </div>
@@ -500,10 +501,10 @@ export default function Wallet(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('钱包充值')}</h1>
-        <p>{t('通过易支付为账户充值额度')}</p>
-      </div>
+      <PageHeader
+        title={t('钱包充值')}
+        subtitle={t('通过易支付为账户充值额度')}
+      />
 
       {error && <div className="error-message">{error}</div>}
 
