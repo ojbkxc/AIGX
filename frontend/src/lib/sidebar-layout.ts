@@ -40,6 +40,7 @@ import {
   LayoutDashboard, Satellite, KeyRound, Users, Wallet, ScrollText, Package,
   Settings, MessageSquare, Boxes, BookOpen, Bot, Headphones, Globe, UserRound,
   Puzzle, Route as RouteIcon, Flame, Wrench, CalendarClock, Bell, Gauge,
+  CreditCard, LogIn,
   type LucideIcon,
 } from 'lucide-react';
 import { endpoints as sidebarLayoutEndpoints } from '../api/endpoints/sidebarLayout';
@@ -117,6 +118,8 @@ export const SIDEBAR_MENUS: SidebarMenu[] = [
   { key: '/proxy-pool', labelKey: '网络代理', icon: Globe, adminOnly: true },
   { key: '/plugins', labelKey: '插件管理', icon: Puzzle, adminOnly: true },
   { key: '/tools', labelKey: 'MCP & Skills', icon: Wrench, adminOnly: true },
+  { key: '/oauth', labelKey: 'OAuth 登录', icon: LogIn, adminOnly: true },
+  { key: '/epay', labelKey: '易支付', icon: CreditCard, adminOnly: true },
 ];
 
 const MENU_BY_KEY = new Map(SIDEBAR_MENUS.map((m) => [m.key, m]));
@@ -192,8 +195,8 @@ export function defaultLayout(): SidebarLayout {
         hidden: false,
         items: [
           '/purge', '/model-manage', '/channels', '/proxy-pool', '/users', '/products',
-          '/routing', '/plugins', '/tools', '/maintenance', '/limit', '/notify',
-          '/settings', '/agent',
+          '/routing', '/plugins', '/tools', '/oauth', '/epay', '/maintenance', '/limit',
+          '/notify', '/settings', '/agent',
         ],
       },
       {

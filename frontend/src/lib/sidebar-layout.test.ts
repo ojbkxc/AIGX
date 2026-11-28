@@ -249,7 +249,18 @@ describe('存盘迁移：老布局（无 collapsed / 无 label）无损升上来
     const migrated = normalizeLayout(old);
     expect(migrated.groups.map((g) => g.id)).toEqual(['g-general', 'g-admin', 'g-personal']);
     expect(migrated.groups.map((g) => g.label)).toEqual(['通用', '管理', '个人']);
-    expect(migrated.groups.map((g) => g.items)).toEqual(old.groups.map((g) => g.items));
+    // 老存盘没有的新菜单（/oauth、/epay）会被 normalize 按默认位置补进 g-admin，
+    // 老菜单的相对顺序保持不变 —— 这正是「新增功能不凭空消失」的迁移契约。
+    const oldAdmin = old.groups[1].items;
+    const newAdmin = migrated.groups[1].items;
+    // 老 14 项一个不少、相对顺序不变（filter 后逐项相等）
+    expect(newAdmin.filter((k) => oldAdmin.includes(k))).toEqual(oldAdmin);
+    // 新增的两项已补进来
+    expect(newAdmin).toContain('/oauth');
+    expect(newAdmin).toContain('/epay');
+    // 其余两组无新增，逐项一致
+    expect(migrated.groups[0].items).toEqual(old.groups[0].items);
+    expect(migrated.groups[2].items).toEqual(old.groups[2].items);
     expect(migrated.hidden).toEqual(['/logs']);
     // 迁移只「加」三态里的未表态，不替用户做折叠决定
     expect(migrated.groups.every((g) => !('collapsed' in g))).toBe(true);
