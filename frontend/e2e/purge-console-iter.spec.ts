@@ -158,6 +158,16 @@ async function gotoPurge(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { name: '破甲控制台' })).toBeVisible();
 }
 
+/**
+ * ConfirmDialog（DOM 弹窗，非原生 dialog）的确认入口：按 confirmText 点确认按钮。
+ * 确认按钮 class 在 btn-danger / btn-primary 间切换，用文案定位最稳。
+ */
+async function clickConfirm(page: Page, name: string | RegExp): Promise<void> {
+  const dialog = page.locator('.modal-overlay');
+  await dialog.waitFor();
+  await dialog.getByRole('button', { name }).click();
+}
+
 test('1 · 生效项摘要按数据面语义汇总（词表只算启用行、异源带参数）', async ({ page }) => {
   await mockPurge(page);
   await gotoPurge(page);
@@ -198,9 +208,10 @@ test('4 · 词表「整理」删空改写与重复行，并如实回报条数', 
   await gotoPurge(page);
 
   // 3 行 → 删 1 行空改写 + 1 行重复 = 剩 1 行
-  page.on('dialog', (d) => void d.accept());
   // 两张表各有一个「整理」按钮：只用死区词那张（first）
   await page.getByRole('button', { name: '整理' }).first().click();
+  // ConfirmDialog 确认（confirmText=「整理」）
+  await clickConfirm(page, '整理');
   // Toast 的 DOM 是 `.toast`（components/Toast.tsx），不是 role=status
   await expect(page.locator('.toast').first()).toContainText(/已整理：删除 2 行，剩余 1 行/);
 });
@@ -263,7 +274,6 @@ test('10 · 应用预设后该条打「最近用过」徽标', async ({ page }) 
 test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ page }) => {
   // 根因修复前这条跑不通：`fallback_models` 被按「元素必须是对象」校验 → 导出的
   // 配置判 fatal → 在 confirm 之前就 return 了（所以 dialogs=0）。
-  page.on('dialog', (d) => void d.dismiss());
   await mockPurge(page);
   await gotoPurge(page);
 
@@ -278,7 +288,10 @@ test('48 · 导入配置前确认：取消则保留未保存编辑', async ({ pa
       JSON.stringify({ version: 1, settings: { ...PURGE_DATA.settings, retry_limit: 11 } }),
     ),
   });
-  await page.waitForTimeout(900);
+  // 取消导入：ConfirmDialog 出现后点取消
+  const dialog = page.locator('.modal-overlay');
+  await dialog.waitFor();
+  await dialog.locator('[data-confirm-cancel]').click();
 
   // 取消 → 草稿保持 9
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
@@ -485,12 +498,10 @@ test('55 · 连点「写入技能目录」只发一次 apply（确认框之前�
   await gotoPurge(page);
   await page.getByText('Skill preset').first().click();
 
-  // 同一 tick 内连点两次，**两次都 accept**：
-  // 第一次通过判据 → 置 busyRef → 发请求（mock 悬停 500ms 制造并发窗口）
-  // 第二次必须被 busyRef 挡在 confirm 之前 → 最终只有 1 次 apply
-  // （第一版两次都 dismiss，全部在 confirm 处返回、busyRef 从未置位，并发路径根本
-  // 没被走到，属于假绿。）
-  page.on('dialog', (d) => void d.accept());
+  // 同一 tick 内连点两次：第一次通过判据 → 打开 ConfirmDialog；第二次点击时
+  // busyRef 仍为空（busyRef 在 onConfirm 里才置位）→ 同样走到「已存在同名技能」分支，
+  // 但此时弹窗已开，只是重复 setConfirmState，不会发请求。
+  // 弹窗里点一次「覆盖」→ 唯一一次 apply 发出（mock 悬停 500ms 制造并发窗口）。
   await page.evaluate(() => {
     const btn = Array.from(document.querySelectorAll('button')).find((el) =>
       /写入技能目录/.test(el.textContent ?? ''),
@@ -499,6 +510,7 @@ test('55 · 连点「写入技能目录」只发一次 apply（确认框之前�
     btn.click();
     btn.click();
   });
+  await clickConfirm(page, '覆盖');
   await page.waitForTimeout(1800);
   expect(applyCalls).toBe(1);
 });
@@ -623,7 +635,6 @@ test('50 · 有未保存修改时导出的是「已保存」配置，并明说',
 });
 
 test('49 · 导入配置前确认：确认则用导入值替换', async ({ page }) => {
-  page.on('dialog', (d) => void d.accept());
   await mockPurge(page);
   await gotoPurge(page);
 
@@ -638,7 +649,8 @@ test('49 · 导入配置前确认：确认则用导入值替换', async ({ page 
       JSON.stringify({ version: 1, settings: { ...PURGE_DATA.settings, retry_limit: 11 } }),
     ),
   });
-  await page.waitForTimeout(900);
+  // ConfirmDialog 确认导入（confirmText=「导入」）
+  await clickConfirm(page, '导入');
 
   await expect(page.getByLabel('重试上限')).toHaveValue('11');
 });
@@ -684,14 +696,16 @@ test('47 · 写同名 SKILL.md 前先确认（后端是直接覆盖）', async (
   await page.getByText('Skill preset').first().click();
 
   // 取消 → 不发 apply 请求
-  page.once('dialog', (d) => void d.dismiss());
   await page.getByRole('button', { name: /写入技能目录/ }).first().click();
+  const skillDialog = page.locator('.modal-overlay');
+  await skillDialog.waitFor();
+  await skillDialog.locator('[data-confirm-cancel]').click();
   await page.waitForTimeout(800);
   expect(applyCalls).toBe(0);
 
-  // 确认 → 发 apply
-  page.once('dialog', (d) => void d.accept());
+  // 确认 → 发 apply（confirmText=「覆盖」）
   await page.getByRole('button', { name: /写入技能目录/ }).first().click();
+  await clickConfirm(page, '覆盖');
   await expect.poll(() => applyCalls).toBe(1);
 });
 
@@ -822,8 +836,9 @@ test('42 · 「批量停用异常行」只停用不删除（可回填后再启�
   const rows = table.locator('.purge-rule-row');
   await expect(rows).toHaveCount(4);
 
-  page.once('dialog', (d) => void d.accept());
   await page.getByTestId('purge-dead-zone-disable-issues').click();
+  // ConfirmDialog 确认（confirmText=「停用」）
+  await clickConfirm(page, '停用');
 
   // 行数不变（不删除），但异常行的启用勾选被去掉
   await expect(rows).toHaveCount(4);
@@ -1134,14 +1149,16 @@ test('32 · 空原文行保存前告知会被丢弃', async ({ page }) => {
   await page.getByLabel('重试上限').fill('6');
 
   // 取消 → 不保存
-  page.once('dialog', (d) => void d.dismiss());
   await page.getByRole('button', { name: '保存' }).click();
+  const saveDialog = page.locator('.modal-overlay');
+  await saveDialog.waitFor();
+  await saveDialog.locator('[data-confirm-cancel]').click();
   await page.waitForTimeout(600);
   expect(puts).toBe(0);
 
-  // 确认 → 保存
-  page.once('dialog', (d) => void d.accept());
+  // 确认 → 保存（confirmText=「保存」）
   await page.getByRole('button', { name: '保存' }).click();
+  await clickConfirm(page, '保存');
   await expect.poll(() => puts).toBe(1);
 });
 
@@ -1165,13 +1182,17 @@ test('31 · 异源模型超上限也走保存前确认（不只词表）', async
   await gotoPurge(page);
 
   await page.getByLabel('重试上限').fill('6');
-  page.once('dialog', (d) => void d.dismiss());
+  // 取消 → 不发 PUT
   await page.getByRole('button', { name: '保存' }).click();
+  const capDialog = page.locator('.modal-overlay');
+  await capDialog.waitFor();
+  await capDialog.locator('[data-confirm-cancel]').click();
   await page.waitForTimeout(600);
   expect(puts).toBe(0);
 
-  page.once('dialog', (d) => void d.accept());
+  // 确认 → 发 PUT（confirmText=「保存」）
   await page.getByRole('button', { name: '保存' }).click();
+  await clickConfirm(page, '保存');
   await expect.poll(() => puts).toBe(1);
 });
 
@@ -1198,14 +1219,16 @@ test('30 · 词表超上限时保存前确认，取消则不保存', async ({ pa
   await page.getByLabel('重试上限').fill('6');
 
   // ① 取消 → 不发 PUT
-  page.once('dialog', (d) => void d.dismiss());
   await page.getByRole('button', { name: '保存' }).click();
+  const overCapDialog = page.locator('.modal-overlay');
+  await overCapDialog.waitFor();
+  await overCapDialog.locator('[data-confirm-cancel]').click();
   await page.waitForTimeout(600);
   expect(puts).toBe(0);
 
-  // ② 确认 → 发 PUT
-  page.once('dialog', (d) => void d.accept());
+  // ② 确认 → 发 PUT（confirmText=「保存」）
   await page.getByRole('button', { name: '保存' }).click();
+  await clickConfirm(page, '保存');
   await expect.poll(() => puts).toBe(1);
 });
 
@@ -1217,14 +1240,16 @@ test('29 · 「放弃修改」先确认，取消则改动保留', async ({ page 
   await expect(page.getByTestId('purge-dirty-changes')).toBeVisible();
 
   // ① 取消 → 草稿不变、仍是未保存状态
-  page.once('dialog', (d) => void d.dismiss());
   await page.getByRole('button', { name: '放弃修改' }).click();
+  const discardDialog = page.locator('.modal-overlay');
+  await discardDialog.waitFor();
+  await discardDialog.locator('[data-confirm-cancel]').click();
   await expect(page.getByLabel('重试上限')).toHaveValue('9');
   await expect(page.locator('.purge-dirty-bar')).toBeVisible();
 
-  // ② 确认 → 回服务器值、未保存提示消失
-  page.once('dialog', (d) => void d.accept());
+  // ② 确认 → 回服务器值、未保存提示消失（confirmText=「放弃」）
   await page.getByRole('button', { name: '放弃修改' }).click();
+  await clickConfirm(page, '放弃');
   await expect(page.getByLabel('重试上限')).toHaveValue('8');
   await expect(page.locator('.purge-dirty-bar')).toHaveCount(0);
 });
@@ -1556,8 +1581,9 @@ test('14 · 「清零统计」只清计数、不动配置', async ({ page }) => 
   });
   await gotoPurge(page);
 
-  page.on('dialog', (d) => void d.accept());
   await page.getByTestId('purge-stats-reset').click();
+  // ConfirmDialog 确认（confirmText=「清零」）
+  await clickConfirm(page, '清零');
   await expect(page.locator('.toast').first()).toContainText(/统计已清零/);
   expect(resetCalls).toBe(1);
   // 清零不等于保存配置：不该有任何 PUT
@@ -1729,10 +1755,11 @@ test('7 · 「重置为默认」先确认再填草稿（不直接保存）', asy
     await r.fulfill({ json: { success: true, data: PURGE_DATA } });
   });
 
-  page.on('dialog', (d) => void d.accept());
   // 未保存警示条里才有这个按钮：先制造一次编辑
   await page.getByLabel('重试上限').fill('9');
   await page.getByRole('button', { name: '重置为默认' }).click();
+  // ConfirmDialog 确认（confirmText=「重置」）：填草稿而不直接保存
+  await clickConfirm(page, '重置');
   await expect(page.locator('.purge-dirty-bar')).toBeVisible();
   expect(saved).toBe(0);
 });

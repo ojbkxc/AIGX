@@ -162,24 +162,27 @@ test.describe('全站冒烟', () => {
     await page.goto('/');
     await expect(page.locator('.main-content')).toBeVisible();
 
-    // 移动端侧栏在抽屉里，先唤出再点
-    if ((page.viewportSize()?.width ?? 1440) <= 768) {
+    const isMobile = (page.viewportSize()?.width ?? 1440) <= 768;
+    if (isMobile) {
+      // 移动端侧栏在抽屉里：先唤出。MobileDrawer 打开时会把焦点移进抽屉
+      // （首个可聚焦元素），焦点转移会触发一次重渲染——必须等抽屉稳定后再点，
+      // 否则「展开分组」按钮在点击途中被 detach，actionability 永远等不到。
       await page.locator('.mobile-menu-btn').click();
+      await expect(page.locator('.mobile-drawer .sidebar-aside')).toBeVisible();
     }
-    // 移动端下「管理」组默认折叠（sidebar-ia-cleanup），先展开。
-    // 折叠按钮默认 opacity:0（仅悬停/聚焦/已折叠时可见），移动端无悬停、
-    // 且抽屉内布局可能遮挡——直接用 evaluate 触发 click，绕过可见性检查。
-    await page.evaluate(() => {
-      const btn = document.querySelector('.sidebar-group-fold[aria-expanded="false"]');
-      if (btn) btn.click();
+    // 「管理」组默认折叠（sidebar-ia-cleanup），先展开再点「供应商」。
+    // 移动端限定到抽屉内的那份侧栏，桌面端用可见的那份。
+    const sidebar = isMobile
+      ? page.locator('.mobile-drawer .sidebar-aside')
+      : page.locator('.sidebar-aside').filter({ visible: true }).first();
+    // 按组容器定位再取折叠按钮：这组按钮只有 aria-label 没有可见文本，
+    // 触控端（mobile project）`getByRole(name)` 算出的可访问名是空、匹配不到，
+    // 换成「组 label 文本 → 容器 → .sidebar-group-fold」这条不依赖 ARIA 计算的路径。
+    const adminGroup = sidebar.locator('.sidebar-group', {
+      has: page.locator('.sidebar-group-label', { hasText: '管理' }),
     });
-    // 点开后直接点「供应商」链接
-    await page
-      .locator('.sidebar-aside')
-      .filter({ visible: true })
-      .first()
-      .getByText('供应商', { exact: false })
-      .click();
+    await adminGroup.locator('button.sidebar-group-fold').click();
+    await sidebar.getByText('供应商', { exact: false }).click();
     await expect(page).toHaveURL(/\/channels$/);
     await expectRendered(page);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);

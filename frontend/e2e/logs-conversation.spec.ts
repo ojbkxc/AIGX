@@ -158,8 +158,9 @@ test.describe('安全边界（前端侧）', () => {
     await modal.getByRole('button', { name: '自定义供应商（跳过预置）' }).click();
 
     await modal.locator('input[placeholder="例如：OpenAI 官方"]').fill('内网测试供应商');
-    await modal.locator('input[placeholder="https://cf-ai-gw.pages.dev 或 https://api.Workspace_2B8939.com/v1"]')
-      .fill('http://127.0.0.1:8080/v1');
+    // Base URL 输入框按 label 定位（Channels.tsx 的 <Input label="Base URL" />），
+    // 不写死 placeholder —— 占位符文案改版（如 deepseek 换成别的示例域）不该炸这条用例。
+    await modal.getByLabel('Base URL').fill('http://127.0.0.1:8080/v1');
     // 创建路径的提交键文案是「添加」（编辑才是「更新」）
     const posted: string[] = [];
     page.on('request', (r) => {
