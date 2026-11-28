@@ -29,7 +29,28 @@ import type {
   RouteReplayFilteredItem,
   RouteReplaySnapshot,
 } from '../types/routing-replay';
+import { RouteReplaySnapshotDialog, SnapshotMembers, type RouteConfigExt } from './RouteReplaySnapshotDialog';
 import './RouteReplay.css';
+
+/* ── 上游对齐扩展字段（本地形状，不落 types/routing-replay.ts——主控统一收口） ──
+ * 以下字段后端 RequestLog 已落库，但 handle_get_route_replay 投影暂未带出；
+ * 前端按「缺省 = 对应块不渲染」守卫，后端补投影后即自动出现。
+ *   special_route     → src/log/mod.rs SpecialRouteTrace（compact/title/vision 改写留痕）
+ *   first_response_ms → RequestLog.first_response_ms（首帧 TTFB）
+ *   output_tokens     → RequestLog.output_tokens（输出 tokens）
+ *   route_config.members → 上游 configSnapshot.members（当时的成员模型快照，AIGX 未落库）
+ */
+export interface SpecialRouteTrace {
+  kind?: string;
+  from?: string | null;
+  to?: string | null;
+  mode?: string | null;
+}
+export interface RouteReplaySnapshotExt extends RouteReplaySnapshot {
+  special_route?: SpecialRouteTrace | null;
+  first_response_ms?: number | null;
+  output_tokens?: number | null;
+}
 
 /** 秒/毫秒自适应（对齐账号页 expiryMillis 口径：<1e11 视为秒） */
 function toMillis(v: number | undefined): number | null {
@@ -59,6 +80,26 @@ function strategyLabel(s: string | undefined, t: (k: string) => string): string 
     case 'ranked': return t('多因子调度');
     default: return s ? s : t('未记录');
   }
+}
+
+/** 改写类型徽标（上游 routing-exec-rewrite：compact/title/vision 三态）。
+ *  数据 = RequestLog.special_route（后端已落库，回放投影带出后即显示）；
+ *  缺省 = 不渲染徽标，只保留改写前后模型对照。 */
+function rewriteBadge(special: SpecialRouteTrace | null | undefined): { label: string; tone: 'brand' | 'warn' | 'mute' } | null {
+  if (!special?.kind) return null;
+  switch (special.kind) {
+    case 'compact': return { label: '压缩上下文', tone: 'brand' };
+    case 'title': return { label: '标题生成', tone: 'mute' };
+    case 'vision': return { label: '图片兼容', tone: 'warn' };
+    default: return { label: special.kind, tone: 'mute' };
+  }
+}
+
+/** vision 改写的说明行（上游：辅助识图 vs 整次接管；mode 仅 vision 有值） */
+function rewriteDetail(special: SpecialRouteTrace | null | undefined): string | null {
+  if (!special || special.kind !== 'vision') return null;
+  const assist = special.mode === 'assist_call' || special.mode === 'assist';
+  return assist ? '辅助识图，读图结果交回原模型继续回答' : '整次请求交给视觉模型';
 }
 
 /** 逐账号跳过分组（可折叠；形状守卫：groups 缺省/空 = 整节不渲染） */
@@ -95,13 +136,34 @@ function AccountSkipGroups({ groups, t }: {
   );
 }
 
-/** 执行时间线的单次尝试（#32 AttemptDetail：渠道/状态/耗时/错误/粘滞命中） */
-function AttemptStep({ a, t }: { a: RouteReplayAttemptItem; t: (k: string, opts?: Record<string, unknown>) => string }): JSX.Element {
+/** 执行时间线的单次尝试（#32 AttemptDetail：渠道/状态/耗时/错误/粘滞命中）。
+ *
+ *  segment 色条（上游 routing-exec-sections:34-37 对齐位）：在**全体尝试共享
+ *  的时间尺**上定位本次起止——多次尝试时一眼看出谁先谁后、谁占了多长时间。
+ *  AIGX AttemptDetail 只有 startedAt/finishedAt（无 responseAt / 首帧读数），
+ *  所以色条是单段（成功=主色 / 失败=红）；上游的「等待响应→等待首帧→输出」
+ *  三段拆解需后端补 AttemptDetail.responseAt + 逐次 firstFrame。 */
+function AttemptStep({ a, t, scale, origin }: {
+  a: RouteReplayAttemptItem;
+  t: (k: string, opts?: Record<string, unknown>) => string;
+  /** 共享时间尺（ms，全体尝试里最晚结束 - 最早开始）；0 = 不画色条 */
+  scale: number;
+  /** 时间尺原点（unix 秒，全体尝试里最早开始） */
+  origin: number;
+}): JSX.Element {
   const failed = a.error != null;
   const durMs = a.startedAt > 0 && a.finishedAt != null && a.finishedAt >= a.startedAt
     ? (a.finishedAt - a.startedAt) * 1000
     : undefined;
-  const barPct = durMs != null ? Math.max(4, Math.min(100, Math.round((durMs / 30_000) * 100))) : null;
+  const seg = ((): { left: number; width: number } | null => {
+    if (!scale || !(a.startedAt > 0) || a.finishedAt == null || a.finishedAt < a.startedAt) return null;
+    const start = (a.startedAt - origin) * 1000;
+    const end = (a.finishedAt - origin) * 1000;
+    if (end < 0 || start > scale) return null;
+    const left = Math.max(0, Math.min(100, (start / scale) * 100));
+    const right = Math.max(0, Math.min(100, (end / scale) * 100));
+    return { left, width: Math.max(1.5, right - left) };
+  })();
   return (
     <li className={`rr-step ${failed ? 'rr-step-failed' : ''}`}>
       <span className="rr-step-mark" aria-hidden="true" />
@@ -116,8 +178,23 @@ function AttemptStep({ a, t }: { a: RouteReplayAttemptItem; t: (k: string, opts?
           {durMs != null && <span className="rr-step-dur">{fmtDuration(durMs)}</span>}
         </div>
         {a.model && <p className="rr-step-model">{t('上游模型 {{m}}', { m: a.model })}</p>}
-        {barPct != null && (
-          <div className="rr-step-bar"><i style={{ width: `${barPct}%` }} /></div>
+        {seg != null && (
+          <div
+            className="rr-step-segtrack"
+            role="img"
+            aria-label={`${t('本次用时')} ${fmtDuration(durMs)}`}
+            style={{ position: 'relative', marginTop: 5, height: 4, borderRadius: 2, background: 'var(--border, #ececec)', maxWidth: 280, overflow: 'hidden' }}
+          >
+            <i
+              title={`${a.channel_name || a.channel_id} · ${fmtDuration(durMs)}`}
+              style={{
+                position: 'absolute', top: 0, bottom: 0,
+                left: `${seg.left}%`, width: `${seg.width}%`,
+                borderRadius: 2,
+                background: failed ? 'var(--danger-color, #dc2626)' : 'var(--primary, #2563eb)',
+              }}
+            />
+          </div>
         )}
         {a.error && <p className="rr-step-err">{a.error}</p>}
         {!a.error && a.notice && <p className="rr-step-note">{a.notice}</p>}
@@ -139,7 +216,10 @@ export function RouteReplayView({
   const [loading, setLoading] = useState(true);
   const [errStatus, setErrStatus] = useState<number | null>(null);
   const [errMsg, setErrMsg] = useState('');
-  const [snap, setSnap] = useState<RouteReplaySnapshot | null>(null);
+  const [snap, setSnap] = useState<RouteReplaySnapshotExt | null>(null);
+  const [cfgDialogOpen, setCfgDialogOpen] = useState(false);
+  // 换一条请求时收起对比弹窗（上游 RoutingExecSnapshot 同口径：row.id/ts 变即复位）
+  useEffect(() => { setCfgDialogOpen(false); }, [requestId]);
 
   useEffect(() => {
     let alive = true;
@@ -241,7 +321,7 @@ export function RouteReplayView({
     );
   }
 
-  const rc = snap?.route_config;
+  const rc = snap?.route_config as RouteConfigExt | null | undefined;
   const captured = toMillis(snap?.created_at);
   const { candidates, filtered, selected, skipsGroups, details } = view;
   const attemptsTruncated = snap?.attempt_details_truncated ?? 0;
@@ -266,6 +346,25 @@ export function RouteReplayView({
       return (last.finishedAt - last.startedAt) * 1000;
     }
     return undefined;
+  })();
+
+  /** 首帧（TTFB）：后端 RequestLog.first_response_ms 已落库，回放投影带出后即显示 */
+  const firstFrameMs = typeof snap?.first_response_ms === 'number' && Number.isFinite(snap.first_response_ms)
+    ? snap.first_response_ms : undefined;
+  /** 输出 tokens：后端 RequestLog.output_tokens 已落库，回放投影带出后即显示 */
+  const outputTokens = typeof snap?.output_tokens === 'number' && Number.isFinite(snap.output_tokens)
+    ? snap.output_tokens : undefined;
+
+  /** segment 色条的共享时间尺：全体尝试的 [最早开始, 最晚结束]（unix 秒 → ms 跨度）。
+   *  只有 1 次尝试时尺子退化为本次时长（条占满），多次才体现先后错位。 */
+  const segScale = ((): { origin: number; scale: number } => {
+    const spans = details
+      .filter((a) => a.startedAt > 0 && a.finishedAt != null && a.finishedAt >= a.startedAt)
+      .map((a) => ({ s: a.startedAt, e: a.finishedAt as number }));
+    if (!spans.length) return { origin: 0, scale: 0 };
+    const origin = Math.min(...spans.map((p) => p.s));
+    const end = Math.max(...spans.map((p) => p.e));
+    return { origin, scale: Math.max(1, (end - origin) * 1000) };
   })();
 
   /** 选路情况表：候选（已尝试/待尝试）+ 被跳过（未参与），一行一个账号/渠道 */
@@ -322,26 +421,42 @@ export function RouteReplayView({
         ) : null}
       </header>
 
-      {/* ② 模型改写（A2A routing-exec-rewrite）：客户端模型 → 实际使用；无改写不渲染 */}
+      {/* ② 模型改写（A2A routing-exec-rewrite）：客户端模型 → 实际使用；无改写不渲染。
+          类型徽标 = special_route.kind（压缩/标题/图片兼容），回放投影带出后即显示。 */}
       {snap?.origin_model && snap?.model && snap.origin_model !== snap.model ? (
         <section className="rr-section rr-exec-rewrite">
-          <header className="rr-exec-rewrite-head">
+          <header className="rr-exec-rewrite-head" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <b>{t('模型改写')}</b>
+            {(() => {
+              const badge = rewriteBadge(snap.special_route);
+              if (!badge) return null;
+              return (
+                <span className={`rr-badge ${badge.tone === 'brand' ? 'rr-badge-brand' : badge.tone === 'warn' ? 'rr-badge-bad' : 'rr-badge-mute'}`}>
+                  {t(badge.label)}
+                </span>
+              );
+            })()}
+            {(() => {
+              const detail = rewriteDetail(snap.special_route);
+              return detail ? <span className="rr-note" style={{ margin: 0 }}>{t(detail)}</span> : null;
+            })()}
           </header>
           <div className="rr-exec-rewrite-flow">
             <div className="rr-exec-node">
               <span>{t('客户端模型')}</span>
-              <b>{snap.origin_model}</b>
+              <b>{snap.special_route?.kind === 'vision' && snap.special_route.from ? snap.special_route.from : snap.origin_model}</b>
             </div>
             <span className="rr-exec-arrow" aria-hidden="true">→</span>
             <div className="rr-exec-node is-accent">
               <span>{t('实际使用')}</span>
-              <b>{snap.model}</b>
+              <b>{snap.special_route?.to || snap.model}</b>
             </div>
           </div>
-          <p className="rr-note">
-            {t('改写类型（压缩上下文 / 标题生成 / 图片兼容）由特殊请求路由记录，本页快照未带该字段，故只显示改写前后模型。')}
-          </p>
+          {!snap.special_route?.kind ? (
+            <p className="rr-note">
+              {t('改写类型（压缩上下文 / 标题生成 / 图片兼容）由特殊请求路由记录，本页快照未带该字段，故只显示改写前后模型。')}
+            </p>
+          ) : null}
         </section>
       ) : null}
 
@@ -352,12 +467,17 @@ export function RouteReplayView({
         {carrierReason ? <p className="rr-exec-carrier-reason">{carrierReason}</p> : null}
       </section>
 
-      {/* ④ 执行耗时（A2A routing-exec-duration） */}
+      {/* ④ 执行耗时（A2A routing-exec-duration）：总耗时 / 首帧 / 输出 + 逐次 segment 色条。
+          首帧 = RequestLog.first_response_ms、输出 = output_tokens（均已落库，回放投影带出即显示） */}
       <section className="rr-section">
         <div className="rr-exec-section-head">
           <h4>{t('执行耗时')}</h4>
           <span className="rr-exec-section-note">
-            {[`${t('总耗时')} ${fmtDuration(totalMs)}`, `${t('首帧')} —`, `${t('输出')} —`].join(' · ')}
+            {[
+              `${t('总耗时')} ${fmtDuration(totalMs)}`,
+              `${t('首帧')} ${fmtDuration(firstFrameMs)}`,
+              `${t('输出')} ${outputTokens != null ? `${outputTokens} tokens` : '—'}`,
+            ].join(' · ')}
           </span>
         </div>
         {details.length ? (
@@ -373,7 +493,9 @@ export function RouteReplayView({
                 </p>
               </div>
             </li>
-            {details.map((a, i) => <AttemptStep key={`${a.index}-${i}`} a={a} t={t} />)}
+            {details.map((a, i) => (
+              <AttemptStep key={`${a.index}-${i}`} a={a} t={t} scale={segScale.scale} origin={segScale.origin} />
+            ))}
           </ol>
         ) : (
           <p className="rr-exec-note">{t('没有保存调用明细')}</p>
@@ -438,10 +560,20 @@ export function RouteReplayView({
         ) : null}
       </section>
 
-      {/* ⑥ 当时配置（A2A routing-exec-snapshot）：配置范围 / 选路方式 / 会话粘滞 / 上游模型 */}
+      {/* ⑥ 当时配置（A2A routing-exec-snapshot）：配置范围 / 选路方式 / 会话粘滞 / 上游模型
+          + 「查看配置详情」对比弹窗（当时快照 vs 当前配置，D1）
+          + 成员模型快照展开（上游 SnapshotMembers，D5；members 缺省 = 不渲染） */}
       <section className="rr-section">
         <div className="rr-exec-section-head">
           <h4>{t('当时配置')}</h4>
+          <button
+            type="button"
+            className="rr-exec-reset"
+            style={{ marginLeft: 0, alignSelf: 'auto' }}
+            onClick={() => setCfgDialogOpen(true)}
+          >
+            {t('查看配置详情')}
+          </button>
         </div>
         <dl className="rr-exec-definitions">
           <div>
@@ -461,10 +593,31 @@ export function RouteReplayView({
             <dd className="rr-mono">{snap?.model || '—'}</dd>
           </div>
         </dl>
+        {(() => {
+          const members = (rc as RouteConfigExt | undefined)?.members;
+          return Array.isArray(members) && members.length ? (
+            <details className="rr-askip-group" style={{ marginTop: 8 }}>
+              <summary>
+                <span>{t('成员模型')}</span>
+                <span className="rr-badge rr-badge-mute">{t('{{n}} 个', { n: members.length })}</span>
+              </summary>
+              <SnapshotMembers members={members} />
+            </details>
+          ) : null;
+        })()}
         {captured != null ? (
           <p className="rr-note">{t('请求时间 {{time}}', { time: new Date(captured).toLocaleString() })}</p>
         ) : null}
       </section>
+      {cfgDialogOpen ? (
+        <RouteReplaySnapshotDialog
+          model={snap?.origin_model || snap?.model || ''}
+          strategy={rc?.strategy}
+          stickyEnabled={rc?.sticky_enabled}
+          capturedAt={captured}
+          onClose={() => setCfgDialogOpen(false)}
+        />
+      ) : null}
 
       {/* AIGX 独有：逐账号跳过明细（A2A 把它并进「选路情况」的原因列） */}
       <AccountSkipGroups groups={skipsGroups} t={t} />
