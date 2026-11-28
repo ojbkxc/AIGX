@@ -904,13 +904,19 @@ test('40 · 预览区的「回看当前生效项」能跳回摘要区', async ({
   expect(summaryTopBefore).toBeLessThan(0);
 
   await jump.click();
-  await expect
-    .poll(async () =>
-      page.locator('[data-purge-fix="active-summary"]').evaluate((el) => el.getBoundingClientRect().top),
-    )
-    .toBeGreaterThan(-50);
-  // 复用同一套闪烁提示：落点会被标出来
-  await expect(page.locator('[data-purge-fix="active-summary"].purge-fix-flash')).toHaveCount(1);
+  // scroll 与 flash 由同一对 rAF 同时设置，但 flash 只驻留 1.8s（见 focusFixTarget
+  // 的 setTimeout 移除）。mobile 下先串行 await scroll poll 会消耗掉 flash 寿命，
+  // 等到断 flash 时已过期 → 闪烁偶发红。改为并行观察：两者都从 t=0 起等，
+  // flash 必落在 1.8s 窗口内被看到。
+  await Promise.all([
+    expect
+      .poll(async () =>
+        page.locator('[data-purge-fix="active-summary"]').evaluate((el) => el.getBoundingClientRect().top),
+      )
+      .toBeGreaterThan(-50),
+    // 复用同一套闪烁提示：落点会被标出来
+    expect(page.locator('[data-purge-fix="active-summary"].purge-fix-flash')).toHaveCount(1),
+  ]);
 });
 
 test('39 · 「只看异常」的行会说明异常原因（不是只筛出来不解释）', async ({ page }) => {
