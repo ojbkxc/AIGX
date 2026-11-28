@@ -114,6 +114,8 @@ try {
 
   // 7. 模型管理（原 /model-presets 目录页已并入 /model-manage，App.tsx 里
   //    /model-presets 是重定向路由——导航锚点用 a[href="/model-manage"]）
+  //    侧栏「管理」组默认折叠（sidebar-ia-cleanup），先展开再点锚点。
+  await page.getByRole('button', { name: /展开「管理」分组/ }).click();
   await page.locator('a[href="/model-manage"]').first().click();
   await page.waitForTimeout(1500);
   await page.screenshot({ path: 'tests/e2e/screenshots/09-models.png' });
