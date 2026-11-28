@@ -166,8 +166,14 @@ test.describe('全站冒烟', () => {
     if ((page.viewportSize()?.width ?? 1440) <= 768) {
       await page.locator('.mobile-menu-btn').click();
     }
-    // 「管理」组默认折叠（sidebar-ia-cleanup），先展开再点「供应商」
-    await page.getByRole('button', { name: /展开「管理」分组/ }).click();
+    // 移动端下「管理」组默认折叠（sidebar-ia-cleanup），先展开。
+    // 折叠按钮默认 opacity:0（仅悬停/聚焦/已折叠时可见），移动端无悬停、
+    // 且抽屉内布局可能遮挡——直接用 evaluate 触发 click，绕过可见性检查。
+    await page.evaluate(() => {
+      const btn = document.querySelector('.sidebar-group-fold[aria-expanded="false"]');
+      if (btn) btn.click();
+    });
+    // 点开后直接点「供应商」链接
     await page
       .locator('.sidebar-aside')
       .filter({ visible: true })
